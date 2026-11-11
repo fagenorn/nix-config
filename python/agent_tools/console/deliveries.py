@@ -52,14 +52,35 @@ chunking (folding a list in pieces equals folding it whole), and `RunFold.issues
   `OPEN` (held) or `CLOSED` and did not report its notes unposted. Any other result leaves the
   issue as the label left it.
 - `DONE` is final. A `QUEUED` step changes only an issue that is new or still `QUEUED`.
+
+Delivery events (the log's rows for the run journals): `delivery.seen` (`DELIVERY_SEEN`) carries
+`seen_payload(state)`, `{"session_id", "run_id", "moved_ms", "issues": [{"issue", "stage", "task",
+"tasks"}, ...]}` with `None` as null, and `delivery.gone` (`DELIVERY_GONE`) carries
+`{"session_id", "run_id"}`. `delivery_states(events, states=None)` folds them onto a `DeliveryState`
+per `(session_id, run_id)`: a `seen` whose `session_id` and `run_id` are str, `moved_ms` an int (not
+a bool) and `issues` a list of dicts each with an int (not bool) `issue`, a `stage` in `STAGES` and
+`task`/`tasks` an int or null replaces any earlier state; a `seen` of any other shape is ignored
+whole; a `gone` with str `session_id` and `run_id` removes the key; other kinds are ignored, and
+folding onto earlier states equals folding all events. `delivery_changes(states, readings, scanned,
+project_of)` lists what to append: a `seen` for each reading (in key order) that differs from the
+known state, then a `gone` for each known state (in key order) of a scanned session that has no
+reading; a state of a session not scanned yields nothing.
+
+Moved text: `moved_text(elapsed_ms)` turns the time since a journal's last movement into
+`(quiet, text)`. Below 0 counts as 0; under a minute reads `"moved just now"`; under
+`QUIET_AFTER_MS` (15 minutes) `"moved <n> min ago"`; from then on it is quiet, `"quiet for <n> min"`.
+A journal that has not moved carries no sign of why, so the console never calls a run stalled.
 """
+
 
 import json
 import os
 import re
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import BinaryIO, Callable, Iterable
+from typing import BinaryIO, Callable, Iterable, Mapping
+
+from agent_tools.console.event_log import Event
 
 JOURNAL_NAME = "journal.jsonl"
 
@@ -353,3 +374,108 @@ class RunFold:
 
     def _done(self, issue: int) -> None:
         self._update(issue, stage=DONE)
+
+
+QUIET_AFTER_MS = 15 * 60 * 1000
+DELIVERY_SEEN = "delivery.seen"
+DELIVERY_GONE = "delivery.gone"
+
+
+def moved_text(elapsed_ms: int) -> tuple[bool, str]:
+    """`(quiet, text)` for the time since a journal last moved."""
+    elapsed_ms = max(elapsed_ms, 0)
+    minutes = elapsed_ms // 60_000
+    if elapsed_ms < 60_000:
+        return False, "moved just now"
+    if elapsed_ms < QUIET_AFTER_MS:
+        return False, f"moved {minutes} min ago"
+    return True, f"quiet for {minutes} min"
+
+
+@dataclass(frozen=True)
+class DeliveryState:
+    """One run of one session: when its journal last moved and each issue's stage."""
+
+    session_id: str
+    run_id: str
+    moved_ms: int
+    issues: tuple[IssueStage, ...]
+
+
+def seen_payload(state: DeliveryState) -> dict:
+    return {
+        "session_id": state.session_id,
+        "run_id": state.run_id,
+        "moved_ms": state.moved_ms,
+        "issues": [
+            {"issue": i.issue, "stage": i.stage, "task": i.task, "tasks": i.tasks}
+            for i in state.issues
+        ],
+    }
+
+
+def _integer(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _count(value: object) -> bool:
+    return value is None or _integer(value)
+
+
+def _issue_stage(row: object) -> IssueStage | None:
+    if not isinstance(row, dict):
+        return None
+    issue, stage, task, tasks = (row.get(k) for k in ("issue", "stage", "task", "tasks"))
+    if not _integer(issue) or stage not in STAGES or not _count(task) or not _count(tasks):
+        return None
+    return IssueStage(issue, stage, task, tasks)
+
+
+def _seen_state(payload: dict) -> DeliveryState | None:
+    session_id, run_id = payload.get("session_id"), payload.get("run_id")
+    moved, rows = payload.get("moved_ms"), payload.get("issues")
+    if not isinstance(session_id, str) or not isinstance(run_id, str):
+        return None
+    if not _integer(moved) or not isinstance(rows, list):
+        return None
+    issues = tuple(_issue_stage(row) for row in rows)
+    if any(issue is None for issue in issues):
+        return None
+    return DeliveryState(session_id, run_id, moved, issues)
+
+
+def delivery_states(
+    events: Iterable[Event],
+    states: Mapping[tuple[str, str], DeliveryState] | None = None,
+) -> dict[tuple[str, str], DeliveryState]:
+    result = dict(states or {})
+    for event in events:
+        payload = event.payload
+        if not isinstance(payload, dict):
+            continue
+        if event.kind == DELIVERY_SEEN:
+            state = _seen_state(payload)
+            if state is not None:
+                result[(state.session_id, state.run_id)] = state
+        elif event.kind == DELIVERY_GONE:
+            session_id, run_id = payload.get("session_id"), payload.get("run_id")
+            if isinstance(session_id, str) and isinstance(run_id, str):
+                result.pop((session_id, run_id), None)
+    return result
+
+
+def delivery_changes(
+    states: Mapping[tuple[str, str], DeliveryState],
+    readings: Mapping[tuple[str, str], DeliveryState],
+    scanned: Iterable[str],
+    project_of: Callable[[str], str | None],
+) -> list[tuple[str, str | None, dict]]:
+    scanned = frozenset(scanned)
+    changes: list[tuple[str, str | None, dict]] = []
+    for key in sorted(readings):
+        if states.get(key) != readings[key]:
+            changes.append((DELIVERY_SEEN, project_of(key[0]), seen_payload(readings[key])))
+    for key in sorted(states):
+        if key[0] in scanned and key not in readings:
+            changes.append((DELIVERY_GONE, project_of(key[0]), {"session_id": key[0], "run_id": key[1]}))
+    return changes
