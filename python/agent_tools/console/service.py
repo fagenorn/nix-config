@@ -50,12 +50,29 @@ registry replaced between the two differs from the recorded signature and is
 read again on the next poll.
 The watcher only calls `os.stat`, so an idle service does no other I/O.
 
+Tracker (#859): when the service is given a `tracker`, a thread, `TRACKER_THREAD`, started by
+`start()`, calls `poll_tracker()` at once and then every `tracker_seconds` (`TRACKER_SECONDS`,
+two minutes). One poll reads the tracker, through `tracker(project_id, slug, cancelled=...)`, for
+each registered project that is active (`inbox.is_active`: a log event or a git write within a
+day) and has a GitHub checkout (`slug_of`), one project after another and never inside the ingest
+lock; a project costs at most `inbox.MAX_CALLS` calls. The stop flag is checked between projects
+and, through `cancelled`, before every page, so `close()` waits for at most the one `gh` call
+already running and a read cancelled or finished after the stop appends and publishes nothing.
+What a read finds is appended as the four inbox events (`inbox.seen`, `inbox.changed`,
+`inbox.gone`, `inbox.health`; see `view.py`) and the view is published. A failed read is one
+stderr line `console: tracker_failed <project_id> <Type>: <message>`; the project's items stay,
+now marked stale, and only a change of read health is appended (`inbox.health`), so a failed read
+stays stale across a restart. A read that ends after its project was unregistered appends
+nothing. An exception escaping a poll is one stderr line
+`console: tracker_poll_failed <Type>: <message>` and the loop goes on. Without a tracker no
+thread starts and nothing is read.
+
 Construction order: bind the server (an `OSError` propagates and nothing else is
-opened); open the event log; fold it onto the project states; publish the view;
+opened); open the event log; fold it onto the project states, the inbox and the read health; publish the view;
 sample the registry's signature; `refresh()`. On any failure after the bind, what was opened is closed and the
 exception re-raised. `start()` serves on a daemon thread named `console-http`;
-`close()` sets `closing`, wakes every waiter, stops the watcher and tears the
-rest down; it is idempotent.
+`close()` sets the stop flag, then `closing`, wakes every waiter, joins the watcher and the
+tracker thread and tears the rest down; it is idempotent.
 """
 
 import http.server
@@ -64,11 +81,18 @@ import socketserver
 import sys
 import os
 import threading
+import time
+from collections.abc import Callable
 from pathlib import Path
 
-from agent_tools.console.event_log import Event, EventLog
-from agent_tools.console.view import derive_view, encode_view, project_states, registry_changes
+from agent_tools.claims import owner_actions
+from agent_tools.console import inbox
+from agent_tools.console.event_log import Event, EventLog, utc_now
+from agent_tools.console.view import (
+    ReadState, derive_view, encode_view, health_change, inbox_changes, inbox_records, project_states,
+    read_states, registry_changes)
 from agent_tools.project_contract import agent_platform
+from agent_tools.system.forge_api import ForgeError
 
 HOST = "127.0.0.1"
 DEFAULT_PORT = 27184
@@ -80,6 +104,8 @@ BACKLOG = 16
 POLL_SECONDS = 0.25
 KEEPALIVE_SECONDS = 15.0
 WATCH_THREAD = "console-registry-watch"
+TRACKER_SECONDS = 120.0
+TRACKER_THREAD = "console-tracker-poll"
 
 
 def default_store() -> Path:
@@ -204,9 +230,20 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
 
 class ConsoleService:
     def __init__(self, store: Path, registry: Path, *, port: int = DEFAULT_PORT,
-                 poll_seconds: float = POLL_SECONDS):
+                 poll_seconds: float = POLL_SECONDS,
+                 tracker: Callable[..., list[dict]] | None = None,
+                 tracker_seconds: float = TRACKER_SECONDS,
+                 slug_of: Callable[[str], str | None] = owner_actions.checkout_slug,
+                 activity: Callable[[str], float | None] = inbox.local_activity,
+                 clock: Callable[[], float] = time.time):
         self.registry = Path(registry)
         self._poll_seconds = poll_seconds
+        self._tracker = tracker
+        self._tracker_seconds = tracker_seconds
+        self._slug_of = slug_of
+        self._activity = activity
+        self._clock = clock
+        self._tracker_thread: threading.Thread | None = None
         self._closing = False
         self._stop = threading.Event()
         self._watcher: threading.Thread | None = None
@@ -221,7 +258,10 @@ class ConsoleService:
         self._server = ConsoleServer(port, self)
         try:
             self.log = EventLog(store)
-            self._states = project_states(self.log.events())
+            events = self.log.events()
+            self._states = project_states(events)
+            self._inbox = inbox_records(events)
+            self._health = read_states(events)
             self._publish()
             self._signature = signature(self.registry)
             self.refresh()
@@ -256,7 +296,7 @@ class ConsoleService:
             return self._version, self._view
 
     def _publish(self) -> None:
-        view = encode_view(derive_view(self._states.values()))
+        view = encode_view(derive_view(self._states.values(), self._inbox, self._health))
         with self._published:
             if view != self._view:
                 self._view = view
@@ -271,9 +311,72 @@ class ConsoleService:
                 return []
             appended = self.log.append(registry_changes(self._states, entries))
             if appended:
-                self._states = project_states(appended, self._states)
+                self._fold(appended)
                 self._publish()
             return appended
+
+    def _fold(self, appended: list[Event]) -> None:
+        self._states = project_states(appended, self._states)
+        self._inbox = inbox_records(appended, self._inbox)
+        self._health = read_states(appended, self._health)
+
+    def poll_tracker(self) -> None:
+        """One refresh of the inbox of every active project; see the module docstring."""
+        if self._tracker is None:
+            return
+        now = self._clock()
+        for project_id, state in sorted(dict(self._states).items()):
+            if self._stop.is_set():
+                return
+            if not inbox.is_active(state.last_at, self._activity(state.root), now):
+                continue
+            slug = self._slug_of(state.root)
+            if slug is None:
+                continue
+            try:
+                items = self._tracker(project_id, slug, cancelled=self._stop.is_set)
+            except ForgeError as error:
+                if error.code == "cancelled" or self._stop.is_set():
+                    return
+                self._read_failed(project_id, error)
+            except Exception as error:
+                if self._stop.is_set():
+                    return
+                self._read_failed(project_id, error)
+            else:
+                if self._stop.is_set():
+                    return
+                self._read_succeeded(project_id, items)
+
+    def _read_failed(self, project_id: str, error: Exception) -> None:
+        print(f"console: tracker_failed {project_id} {type(error).__name__}: {error}", file=sys.stderr)
+        with self._ingest:
+            if project_id not in self._states:
+                return
+            previous = self._health.get(project_id)
+            appended = self.log.append(health_change(
+                self._health, project_id, False, previous.read_at if previous else None))
+            self._fold(appended)
+            self._publish()
+
+    def _read_succeeded(self, project_id: str, items: list[dict]) -> None:
+        with self._ingest:
+            if project_id not in self._states:
+                return
+            appended = self.log.append([*inbox_changes(self._inbox, project_id, items),
+                                        *health_change(self._health, project_id, True)])
+            self._fold(appended)
+            self._health[project_id] = ReadState(True, utc_now())
+            self._publish()
+
+    def _track(self) -> None:
+        while True:
+            try:
+                self.poll_tracker()
+            except Exception as error:
+                print(f"console: tracker_poll_failed {type(error).__name__}: {error}", file=sys.stderr)
+            if self._stop.wait(self._tracker_seconds):
+                return
 
     def _watch(self) -> None:
         while not self._stop.wait(self._poll_seconds):
@@ -290,6 +393,10 @@ class ConsoleService:
     def start(self) -> None:
         self._watcher = threading.Thread(target=self._watch, name=WATCH_THREAD, daemon=True)
         self._watcher.start()
+        if self._tracker is not None:
+            self._tracker_thread = threading.Thread(
+                target=self._track, name=TRACKER_THREAD, daemon=True)
+            self._tracker_thread.start()
         self._thread = threading.Thread(
             target=self._server.serve_forever, name="console-http", daemon=True)
         self._thread.start()
@@ -298,12 +405,14 @@ class ConsoleService:
         if self._closed:
             return
         self._closed = True
+        self._stop.set()
         with self._published:
             self._closing = True
             self._published.notify_all()
-        self._stop.set()
         if self._watcher is not None:
             self._watcher.join()
+        if self._tracker_thread is not None:
+            self._tracker_thread.join()
         if self._thread is not None:
             self._server.shutdown()
         self._server.server_close()

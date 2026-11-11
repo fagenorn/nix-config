@@ -24,7 +24,7 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
         "agent_tools.project_contract.agent_platform",  # service
         "agent_tools.claims.forge_markers",  # inbox
         "agent_tools.claims.forge_owner_action",  # inbox
-        "agent_tools.claims.owner_actions",  # inbox
+        "agent_tools.claims.owner_actions",  # inbox, service
     }),
     "delivery": frozenset({
         "agent_tools.project_contract.resolve_project",  # lane_triage, issue_branch
