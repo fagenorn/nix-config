@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 
@@ -70,6 +71,26 @@ def with_criteria(*extra, **top):
 def tasks(count, risk="standard"):
     return [{"n": n, "title": f"t{n}", "file": f"/g/task-{n}.md", "risk": risk}
             for n in range(1, count + 1)]
+
+
+AMEND_EDIT = {"file": "task-2.md", "find": "old rule", "replace": "new rule"}
+AMEND_CONT = {"setup": {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x", "plan_dir": "/g"},
+              "lane": "standard", "plan": dict(PLAN, tasks=tasks(2)), "plan_reviewed": True,
+              "done": [{"n": 1, "commit": "c1"}], "partial": 2}
+PLAN_AMEND = (sys.executable, "-m", "agent_tools.delivery.plan_amend")
+
+
+def amend_input(calls):
+    found = re.search(r"^Input: (\{.*\})$", prompt(calls, "amend"), re.M)
+    return json.loads(found.group(1))
+
+
+def plan_dir_cont(directory: Path, **extra):
+    cont = dict(AMEND_CONT, setup=dict(AMEND_CONT["setup"], plan_dir=str(directory)),
+                plan=dict(PLAN, plan_root=str(directory / "plan.md"),
+                          tasks=[dict(t, file=str(directory / f"task-{t['n']}.md")) for t in tasks(2)]))
+    cont.update(extra)
+    return cont
 
 
 PROGRAM_AGENT_TYPES = {"clerk", "planner", "implementer", "reviewer", "reviewer-lite"}
@@ -3799,7 +3820,7 @@ class SourceTest(unittest.TestCase):
     def test_meta_names_the_new_args(self):
         text = PROGRAM.read_text(encoding="utf-8")
         meta = text[:text.index("\n}\n")]
-        for arg in ("session_id", "batch_id", "mode?", "lane?", "review_sizing?", "clerk_model?"):
+        for arg in ("session_id", "batch_id", "mode?", "lane?", "review_sizing?", "clerk_model?", "amend?"):
             self.assertIn(arg, meta)
 
 
@@ -4117,7 +4138,7 @@ class DeclaredBranchTest(unittest.TestCase):
 CLERK, PLANNER, IMPL, REV, LITE = "clerk", "planner", "implementer", "reviewer", "reviewer-lite"
 EITHER = frozenset({REV, LITE})
 EXPECTED = {stem: frozenset({kind}) if isinstance(kind, str) else kind for kind, stems in (
-    (CLERK, ("setup", "acquire", "worktree", "renew-", "owner-answer", "plan-codex", "direct-codex", "final-codex", "diff-size",
+    (CLERK, ("setup", "acquire", "worktree", "renew-", "owner-answer", "plan-codex", "direct-codex", "final-codex", "diff-size", "amend",
              "verify", "verify-", "ws-check-", "land-unlock", "land-push-", "pr", "checks-", "merge",
              "hold", "close-out")),
     (PLANNER, ("plan", "plan-revise", "plan-rules-revise")),
@@ -4141,6 +4162,7 @@ NARROWING = {"verdict": "findings",
 SCENARIOS = (
     {},
     {"args": dict(ARGS, cont=RESUME_FOR_ANSWER), "replies": {"owner-answer": ANSWER}},
+    {"args": dict(ARGS, cont=AMEND_CONT, amend=[AMEND_EDIT])},
     {"replies": {"plan": with_criteria(PlanRulesTest.ROWS[0][1]), "plan-revise": with_criteria(PlanRulesTest.ROWS[0][1]),
                  "plan-rules-revise": with_criteria(PlanRulesTest.ROWS[0][1])}},
     {"replies": {"plan-review": FINDING}},
@@ -4797,6 +4819,201 @@ class FoldedMovedRoundTest(unittest.TestCase):
         self.assertIn(f"--sha {FIX}\n", prompt(calls, "checks-2"))
         self.assertNotIn(f"--sha {FIX[:9]}\n", prompt(calls, "checks-2"))
         self.assertIn(self.REL(FIX) + "\n", prompt(calls, "hold"))
+
+
+class AmendTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.d = self.tmp / "deliver-standard"
+        self.d.mkdir()
+        (self.d / "plan.md").write_text("# Plan\n\nD5 says old.\n", encoding="utf-8")
+        (self.d / "task-2.md").write_text("Step 3: old rule here.\n", encoding="utf-8")
+
+    def run_plan_amend(self, request):
+        source = self.tmp / "input.json"
+        source.write_text(json.dumps(request), encoding="utf-8")
+        done = subprocess.run([*PLAN_AMEND, "apply", "--input", str(source)],
+                              capture_output=True, text=True, check=False)
+        return done.returncode, done.stdout
+
+    def snapshot(self):
+        return {f.name: f.read_bytes() for f in sorted(self.d.iterdir())}
+
+    def test_a_valid_amend_edits_the_plan_file_and_adds_an_amendments_line_before_the_task(self):
+        cont = plan_dir_cont(self.d)
+        args = dict(ARGS, cont=cont, amend=[AMEND_EDIT])
+        _, calls = run(args=args)
+        code, out = self.run_plan_amend(amend_input(calls))
+        result, calls2 = run(args=args, replies={"amend": json.loads(out)})
+        self.assertEqual(code, 0)
+        self.assertEqual((self.d / "task-2.md").read_bytes(), b"Step 3: new rule here.\n")
+        self.assertEqual((self.d / "plan.md").read_bytes(),
+                         b'# Plan\n\nD5 says old.\n\n## Amendments\n\n- Amendment answering the stop at task 2: '
+                         b'in task-2.md, replaced "old rule" with "new rule".\n')
+        self.assertEqual(result["stage"], "done")
+        self.assertLess(labels(calls2).index("amend"), labels(calls2).index("impl-2"))
+
+    def test_a_valid_amend_renews_then_runs_one_clerk_before_the_next_task(self):
+        result, calls = run(args=dict(ARGS, cont=AMEND_CONT, amend=[AMEND_EDIT]))
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(labels(calls)[:4], ["setup", "renew-amend", "amend", "impl-2"])
+        call = next(c for c in calls if c["label"] == "amend")
+        self.assertEqual((call["agentType"], call["model"], call["effort"]), ("clerk", "sonnet", "low"))
+        self.assertIn("plan-amend apply --input", call["prompt"])
+        self.assertEqual(amend_input(calls), {
+            "plan_dir": "/g", "plan_root": "/g/plan.md", "stop": "the stop at task 2",
+            "edits": [{"file": "/g/task-2.md", "find": "old rule", "replace": "new rule"}]})
+
+    def test_a_file_under_plan_dir_resolves_to_its_absolute_path(self):
+        slash = dict(AMEND_CONT, setup=dict(AMEND_CONT["setup"], plan_dir="/g/"))
+        for name, cont, file, want in (("absolute", AMEND_CONT, "/g/task-2.md", "/g/task-2.md"),
+                                       ("nested", AMEND_CONT, "sub/x.md", "/g/sub/x.md"),
+                                       ("trailing slash", slash, "task-2.md", "/g/task-2.md")):
+            with self.subTest(name):
+                _, calls = run(args=dict(ARGS, cont=cont, amend=[dict(AMEND_EDIT, file=file)]))
+                got = amend_input(calls)
+                self.assertEqual(got["plan_dir"], "/g")
+                self.assertEqual(got["edits"][0]["file"], want)
+
+    def test_a_file_outside_plan_dir_stops_at_amend_before_any_agent(self):
+        cases = [(AMEND_CONT, dict(AMEND_EDIT, file=f), f) for f in (
+            "/etc/passwd", "../plan.md", "sub/../task-2.md", "./task-2.md", "/g/../task-2.md",
+            "/gx/task-2.md", "/g", "/G/task-2.md", "task 2.md")]
+        elsewhere = dict(AMEND_CONT, plan=dict(PLAN, plan_root="/elsewhere/plan.md", tasks=tasks(2)))
+        cases.append((elsewhere, AMEND_EDIT, "/elsewhere/plan.md"))
+        for cont, edit, outside in cases:
+            with self.subTest(outside):
+                result, calls = run(args=dict(ARGS, cont=cont, amend=[edit]))
+                self.assertEqual(result["stage"], "amend")
+                self.assertEqual(result["cont"], cont)
+                self.assertEqual(calls, [])
+                self.assertIn({"file": outside, "reason": "outside plan_dir"}, result["refused"])
+
+    def test_a_missing_or_repeated_find_stops_at_amend_with_files_and_cont_unchanged(self):
+        for name, text, edit in (("repeated", "old rule, old rule\n", AMEND_EDIT),
+                                 ("absent", None, dict(AMEND_EDIT, find="absent")),
+                                 ("missing file", None, dict(AMEND_EDIT, file="task-9.md"))):
+            with self.subTest(name):
+                if text is not None:
+                    (self.d / "task-2.md").write_text(text, encoding="utf-8")
+                before = self.snapshot()
+                cont = plan_dir_cont(self.d)
+                args = dict(ARGS, cont=cont, amend=[edit])
+                _, calls = run(args=args)
+                code, out = self.run_plan_amend(amend_input(calls))
+                result, calls2 = run(args=args, replies={"amend": json.loads(out)})
+                self.assertEqual(code, 1)
+                self.assertEqual(self.snapshot(), before)
+                self.assertEqual(result["stage"], "amend")
+                self.assertEqual(result["cont"], cont)
+                self.assertNotIn("impl-2", labels(calls2))
+
+    def test_a_reply_that_does_not_apply_every_edit_in_order_stops(self):
+        second = {"file": "plan.md", "find": "D5", "replace": "D5 (amended)"}
+
+        def G(f, **kw):
+            return dict({"file": f, "exists": True, "occurrences": 1, "already": False}, **kw)
+        both = [G("/g/task-2.md"), G("/g/plan.md")]
+        for name, reply in (
+                ("refused", {"status": "refused", "edits": both, "refused": []}),
+                ("short", {"status": "applied", "edits": both[:1], "refused": []}),
+                ("reversed", {"status": "applied", "edits": both[::-1], "refused": []}),
+                ("repeated find", {"status": "applied", "edits": [both[0], G("/g/plan.md", occurrences=2)], "refused": []}),
+                ("error", {"status": "error", "edits": [], "refused": [], "detail": "x"}),
+                ("lost", None)):
+            with self.subTest(name):
+                result, calls = run(args=dict(ARGS, cont=AMEND_CONT, amend=[AMEND_EDIT, second]),
+                                    replies={"amend": reply})
+                self.assertEqual(result["stage"], "amend")
+                self.assertEqual(result["cont"], AMEND_CONT)
+                self.assertNotIn("impl-2", labels(calls))
+                if reply is None:
+                    self.assertEqual(result["dead_agents"], ["amend"])
+        with self.subTest("already recorded"):
+            reply = {"status": "applied", "refused": [],
+                     "edits": [G("/g/task-2.md", already=True, occurrences=0), G("/g/plan.md")]}
+            result, _ = run(args=dict(ARGS, cont=AMEND_CONT, amend=[AMEND_EDIT, second]), replies={"amend": reply})
+            self.assertEqual(result["stage"], "done")
+
+    def test_the_stop_text_names_the_stop(self):
+        no_partial = {k: v for k, v in AMEND_CONT.items() if k != "partial"}
+        for want, cont in (("the stop before task 2", no_partial),
+                           ("the stop after the last task",
+                            dict(no_partial, done=[{"n": 1, "commit": "c1"}, {"n": 2, "commit": "c2"}]))):
+            with self.subTest(want):
+                _, calls = run(args=dict(ARGS, cont=cont, amend=[AMEND_EDIT]))
+                self.assertEqual(amend_input(calls)["stop"], want)
+
+    def test_a_malformed_amend_stops_at_amend_with_the_cont_before_any_agent(self):
+        cases = [(AMEND_CONT, a) for a in (
+            [], "x", [["task-2.md"]], [{"file": "task-2.md", "find": "", "replace": "y"}],
+            [{"file": "task-2.md", "find": "x"}], [{"file": "", "find": "x", "replace": "y"}],
+            [{"file": "task-2.md", "find": "x", "replace": 1}], [None])]
+        no_dir = dict(AMEND_CONT, setup={k: v for k, v in AMEND_CONT["setup"].items() if k != "plan_dir"})
+        for cont in (dict(AMEND_CONT, plan=None),
+                     dict(AMEND_CONT, lane="direct", plan=dict(PLAN, plan_root=None, tasks=tasks(2))),
+                     dict(AMEND_CONT, lane="direct"),
+                     dict(AMEND_CONT, plan=dict(PLAN, plan_root=5, tasks=tasks(2))),
+                     dict(AMEND_CONT, setup=None), no_dir):
+            cases.append((cont, [AMEND_EDIT]))
+        for i, (cont, amend) in enumerate(cases):
+            with self.subTest(i):
+                result, calls = run(args=dict(ARGS, cont=cont, amend=amend))
+                self.assertEqual(result["stage"], "amend")
+                self.assertIn("error", result)
+                self.assertEqual(result["cont"], cont)
+                self.assertEqual(calls, [])
+
+    def test_amend_without_a_cont_stops_at_args(self):
+        result, calls = run(args=dict(ARGS, amend=[AMEND_EDIT]))
+        self.assertEqual(result["stage"], "args")
+        self.assertNotIn("cont", result)
+        self.assertEqual(calls, [])
+
+    def test_a_kept_plan_planned_again_refuses_amend(self):
+        F = {"severity": "important", "summary": "interface mismatch"}
+        cont = {k: v for k, v in AMEND_CONT.items() if k != "partial"}
+        cont.update(plan_reviewed=False, done=[], plan_findings={"rules": [F], "findings": [F], "rounds": 0})
+        result, calls = run(args=dict(ARGS, cont=cont, amend=[AMEND_EDIT]))
+        self.assertEqual(result["stage"], "amend")
+        self.assertEqual(result["cont"], cont)
+        self.assertEqual(labels(calls), ["setup", "owner-answer"])
+
+    def test_a_lost_claim_stops_before_the_clerk(self):
+        for name, reply in (("not_held", {"verdict": "not_held"}),
+                            ("error", {"verdict": "error", "detail": "x"}), ("lost", None)):
+            with self.subTest(name):
+                result, calls = run(args=dict(ARGS, cont=AMEND_CONT, amend=[AMEND_EDIT]),
+                                    replies={"renew-amend": reply})
+                self.assertEqual(result["stage"], "claim-lost")
+                self.assertEqual(result["at"], "amend")
+                self.assertEqual(labels(calls), ["setup", "renew-amend"])
+                if name == "not_held":
+                    self.assertNotIn("cont", result)
+
+    def test_an_unreviewed_plan_renews_once_then_amends_before_its_review(self):
+        cont = dict({k: v for k, v in AMEND_CONT.items() if k != "partial"}, plan_reviewed=False, done=[])
+        _, calls = run(args=dict(ARGS, cont=cont, amend=[AMEND_EDIT]))
+        names = labels(calls)
+        self.assertEqual(names[:3], ["setup", "renew-plan", "amend"])
+        self.assertNotIn("renew-amend", names)
+        self.assertLess(names.index("amend"), names.index("plan-review"))
+
+    def test_a_resume_without_amend_is_unchanged(self):
+        result, calls = run(args=dict(ARGS, cont=AMEND_CONT))
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(labels(calls)[:3], ["setup", "impl-2", "review-2"])
+        self.assertNotIn("amend", labels(calls))
+        self.assertNotIn("renew-amend", labels(calls))
+        self.assertFalse(any("plan-amend" in c["prompt"] for c in calls))
+
+    def test_amend_is_never_kept_in_cont(self):
+        result, calls = run(args=dict(ARGS, cont=AMEND_CONT, amend=[AMEND_EDIT]), replies={"verify": None})
+        self.assertEqual(result["stage"], "verify")
+        self.assertIn("amend", labels(calls))
+        self.assertNotIn("amend", result["cont"])
+        self.assertNotIn("Amendment", json.dumps(result["cont"]))
 
 
 if __name__ == "__main__":

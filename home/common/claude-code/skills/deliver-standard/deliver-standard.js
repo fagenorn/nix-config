@@ -1,7 +1,7 @@
 export const meta = {
   name: 'deliver-standard',
   description: 'Deliver one standard-lane tracker issue: plan, implement and review each task, final review, verify once, ship',
-  whenToUse: 'A standard-lane issue the user asked to deliver with this program; args {repo_root, issue, session_id|batch_id, mode?, lane?, decisions?, spec?, review_sizing?, clerk_model?, cont?}; mode plan stops after plan review, ready after verify with no PR, ship (the default) merges; lane direct has no plan: one implementer following deliver-direct, one fresh reviewer, at most one fix round; review_sizing true (default off) narrows the Claude plan review to rules, conventions and consistency when the Codex plan review runs, and chunks the final review only above 1500 changed lines; clerk_model sonnet (the default) or haiku sets the model of every clerk step (a trial, #803)',
+  whenToUse: 'A standard-lane issue the user asked to deliver with this program; args {repo_root, issue, session_id|batch_id, mode?, lane?, decisions?, spec?, review_sizing?, clerk_model?, cont?, amend?}; mode plan stops after plan review, ready after verify with no PR, ship (the default) merges; lane direct has no plan: one implementer following deliver-direct, one fresh reviewer, at most one fix round; review_sizing true (default off) narrows the Claude plan review to rules, conventions and consistency when the Codex plan review runs, and chunks the final review only above 1500 changed lines; clerk_model sonnet (the default) or haiku sets the model of every clerk step (a trial, #803); amend (a resume of a standard-lane cont with a plan) lists {file, find, replace} edits of files in cont.setup.plan_dir, applied by plan-amend before the next task and recorded under an Amendments heading in plan.md; a file outside plan_dir, or a find text that does not occur exactly once, stops at stage amend with the cont unchanged',
   phases: [
     { title: 'Setup', detail: 'resolve contract, pre-flight, claim, worktree' },
     { title: 'Plan', detail: 'plan outside the tree, then review' },
@@ -21,7 +21,7 @@ export const meta = {
 // the head is unchanged and the tree clean), lane (standard, the default, or direct: no planner, one
 // implementer following the deliver-direct skill, one fresh reviewer and at most one fix round; a cont keeps
 // its lane and no direct plan mode exists), cont (the `cont` object of an earlier stop, passed
-// back unchanged to resume; see RESUME below), review_sizing (boolean, default off, #747: sized Claude reviews; an argument only, never kept in cont, so a resume passes it again), clerk_model (sonnet, the default, or haiku, #803: the model of every clerk call; an argument only, never kept in cont, so a resume passes it again).
+// back unchanged to resume; see RESUME below), review_sizing (boolean, default off, #747: sized Claude reviews; an argument only, never kept in cont, so a resume passes it again), clerk_model (sonnet, the default, or haiku, #803: the model of every clerk call; an argument only, never kept in cont, so a resume passes it again), amend (#811: on a resume of a standard-lane cont with a plan, a non-empty list of {file, find, replace} edits of files in cont.setup.plan_dir, file relative to it or absolute under it; a clerk applies them all or none with plan-amend before the next task and records each under Amendments in plan.md; an argument only, never kept in cont, and an applied edit sent again is skipped).
 // Every policy value comes from the project contract that setup resolves; this
 // file carries no project literal and defaults no policy value.
 //
@@ -261,6 +261,39 @@ const branchProblems = (p, w = W, int = INT) => {
   }
   return out
 }
+
+// ---------------- Amend (#811) ----------------
+// An owner's amendment of the plan on a resume, checked before any agent runs; every refusal returns the cont unchanged.
+const AMEND = args.amend === undefined ? null : args.amend
+if (AMEND && !CONT) return { stage: 'args', error: 'amend needs a cont: it amends the plan of a resumed delivery' }
+if (AMEND && !(Array.isArray(AMEND) && AMEND.length > 0 && AMEND.every(e => isEntry(e) && typeof e.file === 'string' && e.file !== '' && typeof e.find === 'string' && e.find !== '' && typeof e.replace === 'string'))) {
+  return { stage: 'amend', error: 'amend must be a non-empty list of {file, find, replace}: file and find non-empty strings, replace a string', cont: CONT }
+}
+if (AMEND && (LANE !== 'standard' || !isEntry(CONT.plan) || typeof CONT.plan.plan_root !== 'string' || CONT.plan.plan_root === '' || !isEntry(CONT.setup) || typeof CONT.setup.plan_dir !== 'string' || CONT.setup.plan_dir === '')) {
+  return { stage: 'amend', error: 'amend needs a standard-lane cont whose plan has a plan_root and whose setup has a plan_dir', cont: CONT }
+}
+const AMEND_DIR = AMEND ? CONT.setup.plan_dir.replace(/\/+$/, '') : null
+// The absolute path of an amend file when it is spelled under plan_dir, else null (Task 1's command checks the resolved paths).
+const amendTarget = f => {
+  if (!canonPath(AMEND_DIR)) return null
+  if (f.startsWith('/')) return canonPath(f) && f.startsWith(`${AMEND_DIR}/`) ? f : null
+  const parts = f.split('/')
+  return parts.every(c => /^[A-Za-z0-9._-]+$/.test(c) && c !== '.' && c !== '..') ? `${AMEND_DIR}/${f}` : null
+}
+if (AMEND) {
+  const refused = AMEND.filter(e => amendTarget(e.file) === null).map(e => ({ file: e.file, reason: 'outside plan_dir' }))
+  const root = CONT.plan.plan_root
+  if (!root.startsWith('/') || amendTarget(root) === null) refused.push({ file: root, reason: 'outside plan_dir' })
+  if (refused.length) return { stage: 'amend', refused, details: 'an amend file or the plan root is outside cont.setup.plan_dir; nothing was applied', cont: CONT }
+}
+const AMEND_STOP = !AMEND ? null
+  : Number.isInteger(CONT.partial) ? `the stop at task ${CONT.partial}`
+  : (() => {
+    const next = Array.isArray(CONT.plan.tasks) ? CONT.plan.tasks.find(t => isEntry(t) && !(Array.isArray(CONT.done) && CONT.done.some(d => isEntry(d) && d.n === t.n))) : null
+    return next ? `the stop before task ${next.n}` : 'the stop after the last task'
+  })()
+const AMEND_INPUT = AMEND ? { plan_dir: AMEND_DIR, plan_root: CONT.plan.plan_root, stop: AMEND_STOP, edits: AMEND.map(e => ({ file: amendTarget(e.file), find: e.find, replace: e.replace })) } : null
+const AMEND_SCHEMA = { type: 'object', properties: { status: { type: 'string', enum: ['applied', 'refused', 'error'] }, edits: { type: 'array', items: { type: 'object', properties: { file: { type: 'string' }, exists: { type: 'boolean' }, occurrences: { type: 'integer', minimum: 0 }, already: { type: 'boolean' } }, required: ['file', 'exists', 'occurrences', 'already'] } }, refused: { type: 'array', items: { type: 'object', properties: { file: { type: 'string' }, reason: { type: 'string' } }, required: ['file', 'reason'] } }, detail: { type: 'string' } }, required: ['status', 'edits', 'refused'] }
 
 // ---------------- Setup ----------------
 phase('Setup')
@@ -875,6 +908,23 @@ if (ANSWER_NEEDED) {
   if (stopped) return stopped
 }
 if (RESUME_KEPT && !RESUME_RULES) { plan = null; planFindingsKept = null }
+if (AMEND) {
+  if (!plan) return { stage: 'amend', error: 'this resume plans the kept plan again, which would overwrite the amendment; resume without amend, then amend the new plan after its stop', ...deadOf(), cont: CONT }
+  // A plan not yet reviewed was renewed above; a reviewed plan's renew would ride in the first implementer call, which runs after this step.
+  if (planReviewed) {
+    const lost = await renew('amend', 'Plan')
+    if (lost) return lost
+  }
+  const am = await call(`${CTX}
+Apply the owner's amendment to the plan at ${AMEND_INPUT.plan_root} with one plan-amend run and nothing else. (1) Make a fresh directory with mktemp -d and write the JSON of the Input line below, byte for byte, to a file in it. (2) Run alone and exactly: plan-amend apply --input <that file>. It prints one JSON line; return its status, edits, refused and detail exactly as printed. On a non-zero exit with no JSON line, return status error, empty edits and refused, and its stderr as detail. Edit no file yourself and commit nothing.
+Input: ${JSON.stringify(AMEND_INPUT)}
+${RULES}`, { label: 'amend', phase: 'Plan', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: AMEND_SCHEMA })
+  if (!am) return { stage: 'amend', result: null, ...deadOf(), cont: CONT }
+  const graded = am.status === 'applied' && Array.isArray(am.edits) && am.edits.length === AMEND_INPUT.edits.length &&
+    am.edits.every((g, i) => isEntry(g) && g.file === AMEND_INPUT.edits[i].file && (g.already === true || (g.exists === true && g.occurrences === 1)))
+  if (!graded) return { stage: 'amend', amend: am, details: 'plan-amend did not apply every edit; a refused or error status wrote nothing', ...deadOf(), cont: CONT }
+  log(`amend: applied ${AMEND_INPUT.edits.length} edit(s) to the plan`)
+}
 if (!plan) {
   const halted = takePlan(await call(planPrompt(), { label: 'plan', phase: 'Plan', agentType: 'planner', schema: PLAN_SCHEMA }), 'plan')
   if (halted) return halted
