@@ -21,7 +21,7 @@ export const meta = {
 // the head is unchanged and the tree clean), lane (standard, the default, or direct: no planner, one
 // implementer following the deliver-direct skill, one fresh reviewer and at most one fix round; a cont keeps
 // its lane and no direct plan mode exists), cont (the `cont` object of an earlier stop, passed
-// back unchanged to resume; see RESUME below), review_sizing (boolean, default off, #747: sized Claude reviews; an argument only, never kept in cont, so a resume passes it again), clerk_model (sonnet, the default, or haiku, #803: the model of every clerk call except the setup steps (setup, worktree) and the steps that emit a lifecycle verb (land-push, pr, merge, land-unlock, hold), which stay on sonnet, #813; an argument only, never kept in cont, so a resume passes it again), amend (#811: on a resume of a standard-lane cont with a plan, a non-empty list of {file, find, replace} edits of files in cont.setup.plan_dir, file relative to it or absolute under it; a clerk applies them all or none with plan-amend before the next task and records each under Amendments in plan.md; an argument only, never kept in cont, and an applied edit sent again is skipped).
+// back unchanged to resume; see RESUME below), review_sizing (boolean, default off, #747: sized Claude reviews; an argument only, never kept in cont, so a resume passes it again), clerk_model (sonnet, the default, or haiku, #803: the model of every clerk call except the setup steps (setup, worktree) and the steps that emit a lifecycle verb (land-push, pr, land-lock, merge, land-unlock, hold), which stay on sonnet, #813; an argument only, never kept in cont, so a resume passes it again), amend (#811: on a resume of a standard-lane cont with a plan, a non-empty list of {file, find, replace} edits of files in cont.setup.plan_dir, file relative to it or absolute under it; a clerk applies them all or none with plan-amend before the next task and records each under Amendments in plan.md; an argument only, never kept in cont, and an applied edit sent again is skipped).
 // Every policy value comes from the project contract that setup resolves; this
 // file carries no project literal and defaults no policy value.
 //
@@ -36,7 +36,7 @@ export const meta = {
 // { setup, lane, plan (declared branches, when any, as [{name, worktree, base, head, current, toplevel, common_dir, clean}]), plan_reviewed, plan_findings?, decisions?, done, pr? (a batch-built close-out cont: the PR the batch merged), fix_waves, checks_fixes?, sync_fixes?, verified?, final_reviewed?, partial?, claim_incomplete? }. Passing it back as args.cont
 // re-adopts the claimed worktree (setup re-checks it and refuses a dirty tree
 // unless cont.partial names the task that left the edits), reuses cont.plan
-// (reviewing it first unless plan_reviewed; a plan-review stop keeps the revised plan with plan_findings { rules, findings, rounds }, and the resume reads the owner's answer and, when only rule findings were left and none came from Codex, runs one rules-only revise of it, dropping the plan once rounds reach two; any other finding left has spent the plan's one full revise, so the resume plans again), skips the tasks in cont.done, then
+// (reviewing it first unless plan_reviewed; a plan-review stop keeps the revised plan with plan_findings { rules, findings, rounds }, and the resume reads the owner's answer and, when every finding left names a rule and none has source codex, runs one rules-only revise of it whatever triggered the full revise (#823), dropping the plan once rounds reach two; any other finding left has spent the plan's one full revise, so the resume plans again), skips the tasks in cont.done, then
 // runs final review, verify and ship again (ship reuses an open PR). Every resume re-reads the facts of each branch cont.plan declares (a missing or wrong one stops setup with branch_heads.<name> missing, but only for a plan whose declarations are valid: an invalid one is dropped by the Plan section first); cont.verified and cont.final_reviewed carry branches { <name>: <head> }, and a resume reuses either only when every declared head the setup re-read is unchanged. When the PR
 // is already merged, the re-adopt goes straight to close-out; that PR is the delivery's own only when it is cont.pr or carries a commit of cont.done (#752). A resume skips the final review when cont.final_reviewed names the head it
 // passed at and the head is unchanged or only gained integration-branch merges with no unreviewed conflict resolution; a stop between a
@@ -425,13 +425,14 @@ for (const k of ['code', 'plan']) {
   else if (st === 'available' && !(setup.review && present(setup.review[k]))) missing.push(`review.${k}`)
 }
 const RULE_IDS = PLAN_REVIEW.properties.findings.items.properties.rule.enum
-// A rules-only revise may settle the findings that triggered it only when none came from Codex: the rules re-reviewer does not
-// preserve source or finding identity, so a Codex finding it re-reports under any rule id needs a Codex review, not a Claude one.
-const rulesOnly = (rules, triggered) => rules.length > 0 && rules.every(f => RULE_IDS.includes(f.rule) && f.source !== 'codex') && !triggered.some(f => f.source === 'codex')
+// A rules-only revise may settle the findings left when each names a rule and none has source codex, whatever triggered the full
+// revise. #823 dropped the PR 718 clause (b7a7a921) that also refused it to every Codex-triggered plan: Codex raises a finding on
+// nearly every plan, so the revise never ran, while the findings left were the rules re-reviewer's own.
+const rulesOnly = rules => rules.length > 0 && rules.every(f => RULE_IDS.includes(f.rule) && f.source !== 'codex')
 // The Plan section below drops a kept plan with an invalid declaration, and one a plan-review stop kept with findings no rules-only
 // revise may settle; no fact of such a plan is demanded here, or a vanished worktree would stop every resume before the replan.
 const keptDropped = !!(CONT && CONT.plan && !CONT.plan_reviewed && CONT.plan_findings && Array.isArray(CONT.plan_findings.rules)
-  && !rulesOnly(CONT.plan_findings.rules, Array.isArray(CONT.plan_findings.findings) ? CONT.plan_findings.findings : []))
+  && !rulesOnly(CONT.plan_findings.rules))
 if (CONT && CONT.plan && !keptDropped && !setup.merged_pr && !missing.length && !branchProblems(CONT.plan, CONT.setup && (CONT.setup.worktree || CONT.setup.worktree_path), setup.integration_branch).length) {
   for (const b of declared(CONT.plan)) if (typeof b.name === 'string' && factProblem(b, factOf(setup.branch_heads, b.name))) missing.push(`branch_heads.${b.name}`)
 }
@@ -908,9 +909,9 @@ Then read the owner's answer to the decision prompt of issue #${ISSUE}: run alon
   if (lost) return lost
   return takeAnswer(answer)
 }
-// Only findings the rules-only revise may touch resume as one. A kept plan with any other finding left has spent its one full
-// revise, so it is dropped and planned again with the owner's answer; the kept state stays in the cont until that answer is read.
-const RESUME_RULES = RESUME_KEPT && rulesOnly(planFindingsKept.rules, planFindingsKept.findings)
+// Only findings the rules-only revise may touch resume as one, a Codex-triggered plan's included (#823). A kept plan with any other
+// finding left has spent its one full revise, so it is dropped and planned again with the owner's answer; the kept state stays in the cont until that answer is read.
+const RESUME_RULES = RESUME_KEPT && rulesOnly(planFindingsKept.rules)
 if (ANSWER_NEEDED) {
   // A fresh run's setup already read the answer, and renewed after an already_held acquire; a resume or a transient fold reads it again.
   const stopped = !CONT && !ACQ_RECALL && !RENEW_RECALL ? takeAnswer(FOLD_ANSWER) : await readAnswer()
@@ -1014,7 +1015,7 @@ Review the implementation plan at ${plan.plan_root} (and its task files) against
     const rr = sameRules ? { findings: [] } : await rulesReview(planFindings)
     if (!rr) return reviewStop(planFindings, planFindings, 0, SILENT)
     let rules = still.concat(findingsOf(rr)), rounds = 0
-    if (rulesOnly(rules, planFindings)) {
+    if (rulesOnly(rules)) {
       rounds++
       const r = await rulesRevise(rules)
       if (r.halted) return { ...r.halted, findings: planFindings }
@@ -1274,6 +1275,8 @@ let head = expected
 let syncs = 0
 let round = 0
 const PENDING_WAITS = 3
+// #818: the extra waits a landing spends on the land lock after its first acquire --wait answered land-contended at the CLI's own bound.
+const LAND_WAIT_RETRIES = 3
 let pendingWaits = 0
 let mg = null
 let mergeRefusals = 0
@@ -1310,10 +1313,12 @@ ${lockMaybe && !sameSha(lockMaybe, lockSha) ? RELEASE_AGAIN(lockMaybe) : ''}${RU
 // The repair must start from the head the caller accepted (start_head), or the reviewer would see only its own diff and miss an unreviewed commit beneath it.
 // Returns { fix, ok: false } when the fix failed, started elsewhere, or added no commit (unless rebuttal allows an answer with evidence and no commit),
 // else { fix, review, moved } for the caller to grade; moved is false for an accepted rebuttal, and the head stays expected.
-const shipFix = async ({ label, reviewLabel, fixPrompt, reviewPrompt, rebuttal = false }) => {
+// With rerun (the CI fix alone, #818), done at the unchanged head is a rerun of jobs that failed for no cause in the code: { fix, ok: true, rerun: true }, with no review.
+const shipFix = async ({ label, reviewLabel, fixPrompt, reviewPrompt, rebuttal = false, rerun = false }) => {
   const fix = await call(fixPrompt, { label, phase: 'Ship', agentType: 'implementer', model: 'sonnet', schema: IMPL })
   if (!implDone(fix) || !sameSha(fix.start_head, expected)) return { fix, ok: false }
   const moved = !sameSha(fix.commit, expected)
+  if (!moved && rerun) return { fix, ok: true, rerun: true, moved }
   if (!moved && !(rebuttal && present(fix.notes))) return { fix, ok: false }
   const review = await call(reviewPrompt(fix, moved), { label: reviewLabel, phase: 'Ship', agentType: 'reviewer', schema: FINDINGS })
   return { fix, review, moved, ok: true }
@@ -1331,9 +1336,9 @@ ${RULES}`, { label: 'pr', phase: 'Ship', agentType: 'clerk', model: DEFAULT_CLER
   if (!prR) return stop('pr', { result: null })
   // A renew that ended, or a refused lock, means the prompt ran no lock command that holds anything.
   if (prR.renew && prR.renew.verdict !== 'renewed') lockHeld = false
-  const v = prR.lock ? prR.lock.verdict : null
-  const refused = v === 'land-contended' || v === 'held_by' || v === 'lost_to'
-  if (refused) lockHeld = false
+  let v = prR.lock ? prR.lock.verdict : null
+  const refusal = x => x === 'land-contended' || x === 'held_by' || x === 'lost_to'
+  if (refusal(v)) lockHeld = false
   const lostClaim = renewed(prR.renew, 'ship')
   if (lostClaim) return lostClaim
   if (!complete(prR, PR_SCHEMA)) return stop('pr', { result: prR })
@@ -1342,7 +1347,26 @@ ${RULES}`, { label: 'pr', phase: 'Ship', agentType: 'clerk', model: DEFAULT_CLER
   if (!sameSha(prR.head, verify.head)) return stop('head-moved', { pr: PR, expected: verify.head, head: prR.head })
   expected = fuller(verify.head, prR.head)
   head = expected
-  if (!HOLDING.includes(v)) return stop(refused ? 'land-contended' : 'land-lock', { pr: PR, lock: v })
+  // #818: land-contended is the wait running out at the CLI's bound behind other landings, so the claim is renewed and the same acquire
+  // waits again, LAND_WAIT_RETRIES times at most. Each call is marked as possibly holding the lock first, as the pr call is.
+  let waited = false
+  for (let k = 1; v === 'land-contended' && k <= LAND_WAIT_RETRIES; k++) {
+    waited = true
+    lockHeld = true
+    const lk = await recall(() => call(`${CTX}
+${RENEW_FIRST}
+Then take the cross-host landing lock of the branch ${INT} for PR #${PR} at the verified head ${expected}; an earlier wait for it ran out behind other landings. Run alone and exactly: ${LAND_ACQUIRE(expected, true)}
+${LOCK_RETURN} Return it as lock. Run nothing else.
+${RULES}`, { label: `land-lock-${k}`, phase: 'Ship', agentType: 'clerk', model: DEFAULT_CLERK_MODEL, effort: 'low', schema: withRenew({ type: 'object', properties: {} }, { lock: NULLABLE(LOCK_SCHEMA) }) }), r => r.renew)
+    if (!lk) return stop('land-lock', { pr: PR, lock: null })
+    // As for the pr call: a renew that ended ran no lock command, and a refused lock holds nothing.
+    if (lk.renew && lk.renew.verdict !== 'renewed') lockHeld = false
+    v = lk.lock ? lk.lock.verdict : null
+    if (refusal(v)) lockHeld = false
+    const lost = renewed(lk.renew, `land-lock-${k}`)
+    if (lost) return lost
+  }
+  if (!HOLDING.includes(v)) return stop(refusal(v) ? 'land-contended' : 'land-lock', { pr: PR, lock: v })
   for (;;) {
     round++
     // A sync merge, sync fix or CI fix moved the head: the push call renews and pushes it, then the checks call moves the lock to it before it waits (#801).
@@ -1359,8 +1383,9 @@ ${RULES}`, { label: `land-push-${round}`, phase: 'Ship', agentType: 'clerk', mod
       expected = fuller(expected, pu.head)
       lockMaybe = expected
     }
-    // Round 1 reads the poll the pr call carried (its renew covered the claim); a moved round moves the lock then polls, one call; every later unmoved round polls on its own with a renew.
-    const folded = round === 1 && !moved
+    // Round 1 reads the poll the pr call carried (its renew covered the claim), unless a retried wait took the lock, which polled no checks;
+    // a moved round moves the lock then polls, one call; every other unmoved round polls on its own with a renew.
+    const folded = round === 1 && !moved && !waited
     let ck
     if (folded) ck = prR.checks || null
     else {
@@ -1397,10 +1422,14 @@ ${RULES}`, { label: `checks-${round}`, phase: 'Ship', agentType: 'clerk', model:
       const failing = JSON.stringify(failingNames)
       const w = await shipFix({
         label: 'fix-ci', reviewLabel: 'fix-ci-review',
-        fixPrompt: `${CTX}\n${PLAN_REF} The checks of PR #${PR} failed at ${expected}: ${failing}. Log tail: ${ck.details || 'none given'}. Find the cause in this branch's changes (git -C ${W} diff ${RANGE}), fix it with the smallest change and a regression test that fails without it, then commit. Do not push: the next checks step pushes. Never weaken, skip or delete a test or check to make it pass. ${FIX_TESTS} ${IMPL_RETURN}\n${RULES}`,
+        rerun: true,
+        fixPrompt: `${CTX}\n${PLAN_REF} The checks of PR #${PR} failed at ${expected}: ${failing}. Log tail: ${ck.details || 'none given'}. Find the cause in this branch's changes (git -C ${W} diff ${RANGE}), fix it with the smallest change and a regression test that fails without it, then commit. Do not push: the next checks step pushes. Never weaken, skip or delete a test or check to make it pass. ${FIX_TESTS} ${IMPL_RETURN}
+When the failure has no cause in the code (an infrastructure, cache or network error in a setup step), change and commit nothing: rerun the failed jobs once, with ${UNSET}gh run rerun <run-id> --repo ${SLUG} --failed for each failed run (its id is in the failing check's link), do not wait for them, and return status done with the head unchanged (commit equal to start_head, ${expected}) and the error you saw in notes; the program then polls the checks itself.\n${RULES}`,
         reviewPrompt: fix => `${CTX}\nReview this fix for failing checks: ${span(fix)}; the failure it answers: ${failing} (${ck.details || 'no log'}); notes: ${fix.notes}. Report Important or Critical defects only, above all a weakened, skipped or deleted test or check, or a fix with no regression test. Do not edit anything.`,
       })
       if (!w.ok) return stop('checks-fix', { pr: PR, checks: ck, fix: w.fix })
+      // #818: the failed jobs were rerun at the unchanged head. The loop polls again; checksFixes still ends a second red poll at the checks stop.
+      if (w.rerun) continue
       if (!w.review || findingsOf(w.review).length) return stop('checks-fix-review', { pr: PR, checks: ck, review: w.review })
       expected = w.fix.commit
       continue

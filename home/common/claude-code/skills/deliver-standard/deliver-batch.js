@@ -16,7 +16,7 @@ export const meta = {
 // (positive integers, distinct) or label (every open issue carrying it; exactly one of the two),
 // decisions ({"<issue>": owner answer}), conts ({"<issue>": a previous run's forwarded child
 // continuation}, only for listed issues, D9), unattended (boolean, default false: true only for a run
-// no session watches, D12), review_sizing (boolean, default off: passed to every child and kept in the relaunch, #747), clerk_model (sonnet, the default, or haiku: the model of every clerk call except the setup step and the steps that emit a lifecycle verb (land-pr, land-merge, land-unlock), which stay on sonnet, #813;
+// no session watches, D12), review_sizing (boolean, default off: passed to every child and kept in the relaunch, #747), clerk_model (sonnet, the default, or haiku: the model of every clerk call except the setup step and the steps that emit a lifecycle verb (land-pr, land-lock, land-merge, land-unlock), which stay on sonnet, #813;
 // passed to every child and kept in the relaunch when haiku, #803), amend ({"<issue>": a non-empty list of {file, find, replace} edits of
 // that issue's plan files}, only for an issue in conts, #811: sent with its cont to the first child call of the run, kept in the relaunch with that cont).
 // train (boolean, default false, #822: true lands up to TRAIN_MAX ready issues waiting behind a busy land queue through one car pull request, see Train landing below;
@@ -682,7 +682,7 @@ ${RULES}`, `close-out-${n}`, { ...lifecycleClerk, schema: folding ? { ...CLOSE_S
   const body = async () => {
     if (unknownKinds.length) return out('stopped', { stage: 'plan', detail: 'a ready criterion has a kind that is not code, evidence, human or note', bad_kinds: unknownKinds })
     // The order (#677): the PR opens at the ready head, the land lock is taken waiting (the CLI waits
-    // within its bound, so the acquire is sent once) and the first checks are waited for in the same call
+    // within its bound; an answer of land-contended is waited for again in a land-lock step, LAND_WAIT_RETRIES times at most, #818) and the first checks are waited for in the same call
     // (#801), so no check or merge happens outside the lock. A resync runs only on a behind answer or a
     // retaken lock; one that changes the head pushes it and advance() moves the lock; lockSha changes only on a holding verdict, so the release below always
     // names the last sha the lock was held at, even when a move fails.
