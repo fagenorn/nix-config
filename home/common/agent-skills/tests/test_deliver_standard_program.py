@@ -5031,7 +5031,9 @@ class AmendTest(unittest.TestCase):
                 self.assertIn("verify", labels(calls))
                 self.assertIn("final-1", labels(calls))
 
-    def test_an_edit_already_recorded_keeps_the_cached_review(self):
+    def test_an_edit_already_recorded_still_invalidates_the_cached_review(self):
+        # A relaunch after a run that died between the clerk and any stop finds every edit recorded already, and its only
+        # cont is the one from before the amend: the amended plan must still be reviewed and verified.
         ready, _ = run(args=dict(ARGS, mode="ready"))
         done = {"status": "applied", "refused": [],
                 "edits": [{"file": ready["cont"]["setup"]["plan_dir"] + "/task-2.md", "exists": True,
@@ -5039,7 +5041,8 @@ class AmendTest(unittest.TestCase):
         result, calls = run(args=dict(ARGS, cont=ready["cont"], amend=[AMEND_EDIT]),
                             replies={"amend": done}, patch={"setup": {"head": SHA}})
         self.assertEqual(result["stage"], "done")
-        self.assertNotIn("final-1", labels(calls))
+        self.assertIn("final-1", labels(calls))
+        self.assertIn("verify", labels(calls))
 
     def test_an_amend_that_stops_after_the_clerk_ran_drops_the_cached_review_and_verify(self):
         ready, _ = run(args=dict(ARGS, mode="ready"))
@@ -5049,7 +5052,7 @@ class AmendTest(unittest.TestCase):
             recorded = {"status": "applied", "refused": [],
                         "edits": [{"file": cont["setup"]["plan_dir"] + "/task-2.md", "exists": True,
                                    "occurrences": 0, "already": True}]}
-            for lost, reply in (("lost reply", None), ("refused reply", {"status": "refused", "edits": [], "refused": []})):
+            for lost, reply in (("lost reply", None), ("error reply", {"status": "error", "edits": [], "refused": [], "detail": "x"})):
                 with self.subTest(name, lost=lost):
                     first, _ = run(args=dict(ARGS, cont=cont, amend=[AMEND_EDIT]), replies={"amend": reply},
                                    patch={"setup": {"head": head}})
@@ -5061,6 +5064,19 @@ class AmendTest(unittest.TestCase):
                     self.assertEqual(result["stage"], "done")
                     self.assertIn("final-1", labels(calls))
                     self.assertIn("verify", labels(calls))
+
+    def test_a_confirmed_refusal_returns_the_cont_unchanged(self):
+        ready, _ = run(args=dict(ARGS, mode="ready"))
+        stopped, _ = run(replies={"verify": None}, patch={"impl-1": {"commit": TIP}})
+        for name, cont, head in (("verified", ready["cont"], SHA), ("final reviewed", stopped["cont"], TIP)):
+            self.assertTrue("verified" in cont or "final_reviewed" in cont)
+            refused = {"status": "refused", "edits": [],
+                       "refused": [{"file": cont["setup"]["plan_dir"] + "/task-2.md", "reason": "find occurs 2 times"}]}
+            with self.subTest(name):
+                result, _ = run(args=dict(ARGS, cont=cont, amend=[AMEND_EDIT]), replies={"amend": refused},
+                                patch={"setup": {"head": head}})
+                self.assertEqual(result["stage"], "amend")
+                self.assertEqual(result["cont"], cont)
 
     def test_a_resume_without_amend_is_unchanged(self):
         result, calls = run(args=dict(ARGS, cont=AMEND_CONT))

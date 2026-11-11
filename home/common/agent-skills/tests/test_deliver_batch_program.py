@@ -72,6 +72,11 @@ def reviewed(n):
             "plan_reviewed": True, "done": [{"n": 1, "commit": "c1"}], "fix_waves": 0}
 
 
+def verified_cont(n):
+    """A reviewed continuation that records a passed verification: no review or verify is owed on it."""
+    return dict(reviewed(n), verified={"head": "a" * 40, "results": [], "contract": "{}"})
+
+
 def kept(n):
     """A continuation that still plans ahead: its plan is unreviewed and nothing is done."""
     return dict(reviewed(n), plan_reviewed=False, done=[])
@@ -2528,6 +2533,19 @@ class AmendTest(unittest.TestCase):
             _, calls, _ = run(args=dict(ARGS, conts={"1": reviewed(1)}), patch=facts)
             self.assertNotIn("child-1", labels(calls))
 
+    def test_an_amend_applied_before_the_review_finished_is_kept_for_the_relaunch(self):
+        # The child applied the amend, then stopped before the final review and verify of the amended plan.
+        facts = {"facts-1": {"open_pr": OPEN_PR, "claim": {"verdict": "held_by", "by": HOLDER}}}
+        stopped = reviewed(1)
+        first, _, _ = run(args=dict(ARGS, conts={"1": reviewed(1)}, amend={"1": [AMEND_EDIT]}),
+                          children={"1": {"stage": "codex-unavailable", "amended": True, "details": "limit", "cont": stopped}})
+        self.assertEqual(first["relaunch"]["conts"], {"1": stopped})
+        self.assertEqual(first["relaunch"]["amend"], {"1": [AMEND_EDIT]})
+        # The accepted PR head is unchanged, yet the relaunch must go through the child, never land as it stands.
+        second, calls, _ = run(args=dict(ARGS, conts=first["relaunch"]["conts"], amend=first["relaunch"]["amend"]), patch=facts)
+        self.assertEqual(child(calls, 1)["args"]["amend"], [AMEND_EDIT])
+        self.assertLess(labels(calls).index("readopt-1"), labels(calls).index("child-1"))
+
     def test_a_run_without_amend_sends_none(self):
         result, calls, _ = run(args=dict(ARGS, conts={"1": reviewed(1)}),
                                children={"1": {"stage": "task", "task": {"n": 2}, "cont": reviewed(1)}})
@@ -2550,14 +2568,14 @@ class AmendTest(unittest.TestCase):
     def test_an_amend_applied_by_the_plan_child_is_not_kept_when_the_ready_child_stops(self):
         plan_stop = {"stage": "planned", "plan": {"tasks": [{"n": 1}]}, "amended": True, "cont": reviewed(1)}
         result, calls, _ = run(args=dict(ARGS, conts={"1": kept(1)}, amend={"1": [AMEND_EDIT]}),
-                               children={"1": [plan_stop, {"stage": "task", "task": {"n": 2}, "cont": reviewed(1)}]})
-        self.assertEqual(result["relaunch"]["conts"], {"1": reviewed(1)})
+                               children={"1": [plan_stop, {"stage": "task", "task": {"n": 2}, "cont": verified_cont(1)}]})
+        self.assertEqual(result["relaunch"]["conts"], {"1": verified_cont(1)})
         self.assertNotIn("amend", result["relaunch"])
 
     def test_one_issues_applied_amend_leaves_anothers_unapplied_amend_in_the_relaunch(self):
         result, _, _ = run(args=dict(ARGS, issues=[1, 2], conts={"1": reviewed(1), "2": reviewed(2)},
                                      amend={"1": [AMEND_EDIT], "2": [AMEND_EDIT]}),
-                           children={"1": {"stage": "task", "task": {"n": 2}, "amended": True, "cont": reviewed(1)},
+                           children={"1": {"stage": "task", "task": {"n": 2}, "amended": True, "cont": verified_cont(1)},
                                      "2": {"stage": "setup", "cont": reviewed(2)}})
         self.assertEqual(result["relaunch"]["amend"], {"2": [AMEND_EDIT]})
         self.assertEqual(set(result["relaunch"]["conts"]), {"1", "2"})

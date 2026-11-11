@@ -378,8 +378,11 @@ const PLAN = semaphore(MAX)
 
 // The owner's answer the batch itself carries: the relaunch's decisions only. A ticked decision prompt is read by the child.
 const answerOf = n => (DECISIONS && DECISIONS[String(n)]) || null
-// D12: a null child, or a stop that names dead agents, ends admission; a null field alone is an ordinary stop.
+// An applied amend leaves the relaunch once the cont it ends with records what the amended plan owes. A reviewed plan with no passed verification
+// still owes its final review and verify, which only a child resumed with the amend is sure to run: an accepted PR would land as it stands otherwise.
+const reviewOwed = c => isObj(c) && c.plan_reviewed === true && !c.verified
 const amended = (n, r) => { if (isObj(r) && r.amended === true) AMEND_APPLIED.add(String(n)); return r }
+// D12: a null child, or a stop that names dead agents, ends admission; a null field alone is an ordinary stop.
 const terminalChild = r => r === null || r === undefined ||
   (!['done', 'ready', 'planned'].includes(r.stage) && Array.isArray(r.dead_agents) && r.dead_agents.length > 0)
 // A stop the child raised after the merge (a re-adopted landing) still has close-out work its cont finishes; it is never settled (#714).
@@ -1010,7 +1013,7 @@ const relaunchArgs = () => {
   for (const n of open) if (CONTS[n]) conts[n] = CONTS[n]
   if (Object.keys(conts).length) a.conts = conts
   const amend = {}
-  for (const n of open) if (conts[n] && AMEND[String(n)] && !AMEND_APPLIED.has(String(n))) amend[n] = AMEND[String(n)]
+  for (const n of open) if (conts[n] && AMEND[String(n)] && !(AMEND_APPLIED.has(String(n)) && !reviewOwed(conts[n]))) amend[n] = AMEND[String(n)]
   if (Object.keys(amend).length) a.amend = amend
   if (UNATTENDED) a.unattended = true
   if (REVIEW_SIZING) a.review_sizing = true
