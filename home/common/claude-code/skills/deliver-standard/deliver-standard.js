@@ -36,7 +36,7 @@ export const meta = {
 // { setup, lane, plan (declared branches, when any, as [{name, worktree, base, head, current, toplevel, common_dir, clean}]), plan_reviewed, plan_findings?, decisions?, done, pr? (a batch-built close-out cont: the PR the batch merged), fix_waves, checks_fixes?, sync_fixes?, verified?, final_reviewed?, partial?, claim_incomplete? }. Passing it back as args.cont
 // re-adopts the claimed worktree (setup re-checks it and refuses a dirty tree
 // unless cont.partial names the task that left the edits), reuses cont.plan
-// (reviewing it first unless plan_reviewed; a plan-review stop keeps the revised plan with plan_findings { rules, findings, rounds }, and the resume reads the owner's answer and, when only rule findings were left and none came from Codex, runs one rules-only revise of it, dropping the plan once rounds reach two; any other finding left has spent the plan's one full revise, so the resume plans again), skips the tasks in cont.done, then
+// (reviewing it first unless plan_reviewed; a plan-review stop keeps the revised plan with plan_findings { rules, findings, rounds }, and the resume reads the owner's answer and, when every finding left names a rule and none has source codex, runs one rules-only revise of it whatever triggered the full revise (#823), dropping the plan once rounds reach two; any other finding left has spent the plan's one full revise, so the resume plans again), skips the tasks in cont.done, then
 // runs final review, verify and ship again (ship reuses an open PR). Every resume re-reads the facts of each branch cont.plan declares (a missing or wrong one stops setup with branch_heads.<name> missing, but only for a plan whose declarations are valid: an invalid one is dropped by the Plan section first); cont.verified and cont.final_reviewed carry branches { <name>: <head> }, and a resume reuses either only when every declared head the setup re-read is unchanged. When the PR
 // is already merged, the re-adopt goes straight to close-out; that PR is the delivery's own only when it is cont.pr or carries a commit of cont.done (#752). A resume skips the final review when cont.final_reviewed names the head it
 // passed at and the head is unchanged or only gained integration-branch merges with no unreviewed conflict resolution; a stop between a
@@ -425,13 +425,14 @@ for (const k of ['code', 'plan']) {
   else if (st === 'available' && !(setup.review && present(setup.review[k]))) missing.push(`review.${k}`)
 }
 const RULE_IDS = PLAN_REVIEW.properties.findings.items.properties.rule.enum
-// A rules-only revise may settle the findings that triggered it only when none came from Codex: the rules re-reviewer does not
-// preserve source or finding identity, so a Codex finding it re-reports under any rule id needs a Codex review, not a Claude one.
-const rulesOnly = (rules, triggered) => rules.length > 0 && rules.every(f => RULE_IDS.includes(f.rule) && f.source !== 'codex') && !triggered.some(f => f.source === 'codex')
+// A rules-only revise may settle the findings left when each names a rule and none has source codex, whatever triggered the full
+// revise. #823 dropped the PR 718 clause (b7a7a921) that also refused it to every Codex-triggered plan: Codex raises a finding on
+// nearly every plan, so the revise never ran, while the findings left were the rules re-reviewer's own.
+const rulesOnly = rules => rules.length > 0 && rules.every(f => RULE_IDS.includes(f.rule) && f.source !== 'codex')
 // The Plan section below drops a kept plan with an invalid declaration, and one a plan-review stop kept with findings no rules-only
 // revise may settle; no fact of such a plan is demanded here, or a vanished worktree would stop every resume before the replan.
 const keptDropped = !!(CONT && CONT.plan && !CONT.plan_reviewed && CONT.plan_findings && Array.isArray(CONT.plan_findings.rules)
-  && !rulesOnly(CONT.plan_findings.rules, Array.isArray(CONT.plan_findings.findings) ? CONT.plan_findings.findings : []))
+  && !rulesOnly(CONT.plan_findings.rules))
 if (CONT && CONT.plan && !keptDropped && !setup.merged_pr && !missing.length && !branchProblems(CONT.plan, CONT.setup && (CONT.setup.worktree || CONT.setup.worktree_path), setup.integration_branch).length) {
   for (const b of declared(CONT.plan)) if (typeof b.name === 'string' && factProblem(b, factOf(setup.branch_heads, b.name))) missing.push(`branch_heads.${b.name}`)
 }
@@ -908,9 +909,9 @@ Then read the owner's answer to the decision prompt of issue #${ISSUE}: run alon
   if (lost) return lost
   return takeAnswer(answer)
 }
-// Only findings the rules-only revise may touch resume as one. A kept plan with any other finding left has spent its one full
-// revise, so it is dropped and planned again with the owner's answer; the kept state stays in the cont until that answer is read.
-const RESUME_RULES = RESUME_KEPT && rulesOnly(planFindingsKept.rules, planFindingsKept.findings)
+// Only findings the rules-only revise may touch resume as one, a Codex-triggered plan's included (#823). A kept plan with any other
+// finding left has spent its one full revise, so it is dropped and planned again with the owner's answer; the kept state stays in the cont until that answer is read.
+const RESUME_RULES = RESUME_KEPT && rulesOnly(planFindingsKept.rules)
 if (ANSWER_NEEDED) {
   // A fresh run's setup already read the answer, and renewed after an already_held acquire; a resume or a transient fold reads it again.
   const stopped = !CONT && !ACQ_RECALL && !RENEW_RECALL ? takeAnswer(FOLD_ANSWER) : await readAnswer()
@@ -1014,7 +1015,7 @@ Review the implementation plan at ${plan.plan_root} (and its task files) against
     const rr = sameRules ? { findings: [] } : await rulesReview(planFindings)
     if (!rr) return reviewStop(planFindings, planFindings, 0, SILENT)
     let rules = still.concat(findingsOf(rr)), rounds = 0
-    if (rulesOnly(rules, planFindings)) {
+    if (rulesOnly(rules)) {
       rounds++
       const r = await rulesRevise(rules)
       if (r.halted) return { ...r.halted, findings: planFindings }
