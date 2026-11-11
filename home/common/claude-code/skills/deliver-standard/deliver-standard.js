@@ -266,15 +266,57 @@ const branchProblems = (p, w = W, int = INT) => {
   return out
 }
 
+// ---------------- Stop reason (#869) ----------------
+// One line saying why a stop stopped: its stage, then the detail the stop already carries, capped. Every stop from the claim on carries it as reason
+// (planned and ready are not stops); a setup stop and an ended claim do not, and deliver-batch, which shows the reason in the stopped issue's row, reads those stops' own fields.
+const REASON_MAX = 300
+const implDone = i => !!(i && i.status === 'done' && present(i.commit) && present(i.start_head))
+const stopReason = (stage, x) => {
+  const parts = []
+  const say = v => { if (typeof v === 'string' && v.trim()) parts.push(v) }
+  const names = (k, what) => { if (Array.isArray(x[k]) && x[k].length) say(`${what} ${x[k].map(v => (isEntry(v) ? v.id || v.ac || v.file : v)).join(', ')}`) }
+  const task = isEntry(x.task) ? `task ${x.task.n} ` : ''
+  say(x.details)
+  say(x.error)
+  if (Array.isArray(x.branch_problems)) say(`branch problems: ${x.branch_problems.join('; ')}`)
+  else if (own(x, 'invalid')) say(`the ${x.step} reply is not a well-formed plan`)
+  if (Array.isArray(x.needs_user)) say(`${x.needs_user.length} question(s) for the owner`)
+  for (const k of ['impl', 'fix', 'fw']) {
+    if (own(x, k) && !implDone(x[k])) say(isEntry(x[k]) ? `${task}${[x[k].status, x[k].notes].filter(present).join(': ') || 'the implementer gave no status'}` : `${task}the implementer returned nothing`)
+  }
+  const reviews = ['review', 'rv'].filter(k => own(x, k)).map(k => x[k])
+  const found = Array.isArray(x.rules) && x.rules.length ? x.rules : Array.isArray(x.findings) ? x.findings : reviews.flatMap(r => (isEntry(r) && Array.isArray(r.findings) ? findingsOf(r) : []))
+  if (found.length) say(`${task}${found.length} finding(s)${isEntry(found[0]) && present(found[0].summary) ? `: ${found[0].summary}` : ''}`)
+  else if (reviews.some(r => !r)) say(`${task}the reviewer returned nothing`)
+  if (Array.isArray(x.problems)) say(x.problems.filter(isEntry).map(q => [q.id, q.summary].filter(present).join(': ')).join('; '))
+  names('failing', 'failing checks')
+  names('pending', 'pending checks')
+  names('code_unmet', 'code criteria unmet:')
+  names('bad_kinds', 'criteria:')
+  names('refused', 'refused:')
+  if (present(x.expected)) say(`expected ${x.expected}, head ${present(x.head) ? x.head : 'unread'}`)
+  if (own(x, 'lock')) say(`lock ${(isEntry(x.lock) ? x.lock.verdict : x.lock) || 'gave no verdict'}`)
+  if (own(x, 'renew')) say(`renew${present(x.at) ? ` at ${x.at}` : ''}: ${isEntry(x.renew) ? x.renew.detail || x.renew.verdict || 'no verdict' : 'no reply'}`)
+  if (stage === 'review-blocked') say(`the ${x.review} review is blocked`)
+  for (const k of ['result', 'amend', 'merge', 'sync', 'checks', 'close_out', 'hold']) {
+    if (!own(x, k) || parts.length) continue
+    const v = x[k]
+    say(isEntry(v) ? [v.reason, v.verdict, v.status, v.details, v.detail, v.notes].filter(present).join(', ') : `the ${k} step returned nothing`)
+  }
+  const text = [stage, parts.join('; ')].filter(present).join(': ').replace(/\s+/g, ' ').trim()
+  return text.length > REASON_MAX ? `${text.slice(0, REASON_MAX - 3)}...` : text
+}
+const why = r => ({ ...r, reason: stopReason(r.stage, r) })
+
 // ---------------- Amend (#811) ----------------
 // An owner's amendment of the plan on a resume, checked before any agent runs; every refusal returns the cont unchanged.
 const AMEND = args.amend === undefined ? null : args.amend
 if (AMEND !== null && !CONT) return { stage: 'args', error: 'amend needs a cont: it amends the plan of a resumed delivery' }
 if (AMEND !== null && !(Array.isArray(AMEND) && AMEND.length > 0 && AMEND.every(e => isEntry(e) && typeof e.file === 'string' && e.file !== '' && typeof e.find === 'string' && e.find !== '' && typeof e.replace === 'string'))) {
-  return { stage: 'amend', error: 'amend must be a non-empty list of {file, find, replace}: file and find non-empty strings, replace a string', cont: CONT }
+  return why({ stage: 'amend', error: 'amend must be a non-empty list of {file, find, replace}: file and find non-empty strings, replace a string', cont: CONT })
 }
 if (AMEND !== null && (LANE !== 'standard' || !isEntry(CONT.plan) || typeof CONT.plan.plan_root !== 'string' || CONT.plan.plan_root === '' || !isEntry(CONT.setup) || typeof CONT.setup.plan_dir !== 'string' || CONT.setup.plan_dir === '')) {
-  return { stage: 'amend', error: 'amend needs a standard-lane cont whose plan has a plan_root and whose setup has a plan_dir', cont: CONT }
+  return why({ stage: 'amend', error: 'amend needs a standard-lane cont whose plan has a plan_root and whose setup has a plan_dir', cont: CONT })
 }
 const AMEND_DIR = AMEND !== null ? CONT.setup.plan_dir.replace(/\/+$/, '') : null
 // The absolute path of an amend file when it is spelled under plan_dir, else null (Task 1's command checks the resolved paths).
@@ -288,7 +330,7 @@ if (AMEND !== null) {
   const refused = AMEND.filter(e => amendTarget(e.file) === null).map(e => ({ file: e.file, reason: 'outside plan_dir' }))
   const root = CONT.plan.plan_root
   if (!root.startsWith('/') || amendTarget(root) === null) refused.push({ file: root, reason: 'outside plan_dir' })
-  if (refused.length) return { stage: 'amend', refused, details: 'an amend file or the plan root is outside cont.setup.plan_dir; nothing was applied', cont: CONT }
+  if (refused.length) return why({ stage: 'amend', refused, details: 'an amend file or the plan root is outside cont.setup.plan_dir; nothing was applied', cont: CONT })
 }
 const AMEND_STOP = AMEND === null ? null
   : Number.isInteger(CONT.partial) ? `the stop at task ${CONT.partial}`
@@ -484,7 +526,7 @@ addDecision(args.decisions)
 let amendApplied = false
 const stop = (stage, extra) => {
   const fr = SYNC_WINDOW.includes(stage) ? (finalReviewed = null) : finalReviewed
-  return { stage, ...extra, ...(amendApplied ? { amended: true } : {}), ...deadOf(), cont: { setup, lane: LANE, plan, plan_reviewed: planReviewed, ...(plan && !planReviewed && planFindingsKept ? { plan_findings: planFindingsKept } : {}), ...(decisions.length ? { decisions } : {}), done: taskLog, ...(OWN_PR !== null ? { pr: OWN_PR } : {}), fix_waves: fixWaves, ...(checksFixes ? { checks_fixes: checksFixes } : {}), ...(syncFixes ? { sync_fixes: syncFixes } : {}), ...(verified ? { verified } : {}), ...(fr ? { final_reviewed: fr } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}) } }
+  return { stage, ...extra, ...(stage === 'planned' || stage === 'ready' ? {} : { reason: stopReason(stage, extra || {}) }), ...(amendApplied ? { amended: true } : {}), ...deadOf(), cont: { setup, lane: LANE, plan, plan_reviewed: planReviewed, ...(plan && !planReviewed && planFindingsKept ? { plan_findings: planFindingsKept } : {}), ...(decisions.length ? { decisions } : {}), done: taskLog, ...(OWN_PR !== null ? { pr: OWN_PR } : {}), fix_waves: fixWaves, ...(checksFixes ? { checks_fixes: checksFixes } : {}), ...(syncFixes ? { sync_fixes: syncFixes } : {}), ...(verified ? { verified } : {}), ...(fr ? { final_reviewed: fr } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}) } }
 }
 
 const haltTask = (n, stage, extra) => { const s = stop(stage, extra); return { ...s, cont: { ...s.cont, partial: n } } }
@@ -614,7 +656,7 @@ if (CONT && setup.merged_pr) {
 const RS = setup.review_state || {}
 for (const k of ['plan', 'code']) {
   // Before any claim nothing is held, so the stop carries no cont: fix the capability and start again.
-  if (RS[k] === 'blocked') return CONT || CLAIM_TAKEN ? stop('review-blocked', { review: k }) : { stage: 'review-blocked', review: k }
+  if (RS[k] === 'blocked') return CONT || CLAIM_TAKEN ? stop('review-blocked', { review: k }) : why({ stage: 'review-blocked', review: k })
 }
 const REVIEW_CODE = RS.code === 'available' && setup.review && setup.review.code ? setup.review.code : null
 const REVIEW_PLAN = RS.plan === 'available' && setup.review && setup.review.plan ? setup.review.plan : null
@@ -682,7 +724,6 @@ const CTX = `Issue #${ISSUE} of ${SLUG}. Worktree: ${W} (branch ${setup.branch},
 const K = setup.knowledge || {}
 const list = a => (a && a.length ? a.join(', ') : 'none')
 const KNOW = `Ground the review in: ~/.agents/standards/the-bar.md and its stacks/ shards matching the changed file types (when present); the project's standards (${list(K.standards)}), only shards whose globs intersect the change; review hints (${list(K.hints)}); recorded rejections (${list(K.rejections)}): never raise a finding a rejection already settles.`
-const implDone = i => !!(i && i.status === 'done' && present(i.commit) && present(i.start_head))
 const spanIn = (wt, i) => `git -C ${wt} diff ${i.start_head}..${i.commit}`
 const span = i => spanIn(W, i)
 log(`claimed #${ISSUE}, worktree ${W}; review code=${REVIEW_CODE || RS.code || 'none'} plan=${REVIEW_PLAN || RS.plan || 'none'}`)
@@ -760,7 +801,14 @@ ${TEST_CASES}
 Plan this issue. Read the issue (gh issue view ${ISSUE} --repo ${SLUG} --json title,body,comments) and the code it touches.${SPEC}${FACTS} Use the writing-plans skill for the plan's form only: its file location, size checks and reports do not apply here. Write the plan to ${setup.plan_dir}/plan.md and one task file per task beside it (${setup.plan_dir}/task-<n>.md); never commit them and never write under the project's artifact directories. Also write the code map ${CODE_MAP} for the agents after you, who read it before the code: per area the plan touches, list the files and symbols with line ranges, their tests and fixtures, the callers that matter and the facts you confirmed (for example a library's behaviour, with its source), each with a pointer (a path:line or a URL). Like the plan, it is never committed. On a revision, read it first and keep it true to the plan and the code. Do not build, prototype or run the change; confirming each task's failing test later is the implementers' job. If the issue needs a decision only the user can make (a preference, an irreversible or scope choice not settled by the issue, the spec, the repo's docs or ADRs), return status needs_user, never for an action that R8 of ~/.agents/standards/acceptance-planning.md says the delivery does itself, with questions, each {question, options}: every option one full sentence naming a real choice, a single option for a yes or no, and stop. Otherwise return status planned with plan_root ${setup.plan_dir}/plan.md, the issue's acceptance criteria (${KIND_GUIDE}) and the task list in execution order with each task's file and a risk: security for authentication, permission or command guards, secrets, CI/CD or deploy config, data migrations; mechanical or low for small contained edits; else standard. When a task commits to a branch other than ${setup.branch}, declare it in branches as {name, worktree, base, head, current, toplevel, common_dir, clean}: only a branch already checked out in its own existing worktree other than ${W}, never ${INT} or ${setup.default_branch}; worktree as git -C <it> rev-parse --show-toplevel prints it, base the ref its changes are measured from, and ${BRANCH_FACTS}, and clean: true only when git -C <its worktree> status --porcelain prints nothing (a worktree with any staged, unstaged or untracked change is not declared); give each task that commits there branch: <name>. Classify and write every acceptance criterion by ~/.agents/standards/acceptance-planning.md (read it); set metric true on a cost, timing or rate threshold of a code, evidence or human criterion, never on a note (R9): an owner-designated observation stays a note even when it reads a cost, a time or a rate. Give every evidence or human criterion a verify member: one check of the verify block grammar with ac its id and kind its kind, writing any sha that will name the merge commit as the base sha ${setup.base_sha} (ship substitutes the merge commit); an unattended evidence command run must be one of ${JSON.stringify(VERIFY_IDS)}, else use a script or a probe. Lint each member alone: write {"v": 1, "merge": "${setup.base_sha}", "checks": [<that member>]} to a file in ${setup.plan_dir} and run verify-pending lint --input <that file> --repo-root ${W} --pr-branch ${setup.branch} plus one --pr-workflow <name> for each CI workflow that runs on this repository's pull requests; return the verdict as that criterion's lint. List in scripts each script path a verify run names that a task of this plan commits. Before you return, check the plan against the review it will get: ${PLAN_RUBRIC}; and every rule ${RULE_IDS[0]}-${RULE_IDS[RULE_IDS.length - 1]} of ~/.agents/standards/acceptance-planning.md (read it). ${PLAN_SELF_CHECK}${decisions.length ? `\nThe owner has answered the open decisions for this issue; they are binding: ${decisions.join('\n')} Do not ask them again; record them as decisions in the plan.` : ''}${extra || ''}
 ${RULES}`
 // A planner reply is either questions (the plan is dropped so a resume plans again with decisions) or a well-formed plan.
-const takePlan = (p, label) => {
+// #869: a well-formed plan refused only for its declared branches gets one revise in place first, so a naming fault does not cost the whole plan.
+const takePlan = async (p, label) => {
+  if (wellFormed(p) && branchProblems(p).length) {
+    const faults = branchProblems(p)
+    log(`${label}: ${faults.length} branch problems, revising once`)
+    label = 'plan-branch-revise'
+    p = await call(planPrompt(`\nYour plan at ${p.plan_root} declares its branches wrongly; fix only these problems in place, change nothing else, and return the full result again: ${JSON.stringify(faults)}`), { label: 'plan-branch-revise', phase: 'Plan', agentType: 'planner', schema: PLAN_SCHEMA })
+  }
   if (p && p.status === 'needs_user') { plan = null; planReviewed = false; return stop('plan', { needs_user: p.questions }) }
   // A failed revision may have half-edited the files on disk, so the plan is dropped and a resume plans again.
   if (!wellFormed(p)) { plan = null; planReviewed = false; return stop('plan', { step: label, invalid: p }) }
@@ -935,7 +983,7 @@ if (ANSWER_NEEDED) {
 }
 if (RESUME_KEPT && !RESUME_RULES) { plan = null; planFindingsKept = null }
 if (AMEND !== null) {
-  if (!plan) return { stage: 'amend', error: 'this resume plans the kept plan again, which would overwrite the amendment; resume without amend, then amend the new plan after its stop', ...deadOf(), cont: CONT }
+  if (!plan) return why({ stage: 'amend', error: 'this resume plans the kept plan again, which would overwrite the amendment; resume without amend, then amend the new plan after its stop', ...deadOf(), cont: CONT })
   // A plan not yet reviewed was renewed above; a reviewed plan's renew would ride in the first implementer call, which runs after this step.
   if (planReviewed) {
     const lost = await renew('amend', 'Plan')
@@ -949,10 +997,10 @@ ${RULES}`, { label: 'amend', phase: 'Plan', agentType: 'clerk', model: CLERK_MOD
   // the amend: a relaunch would find every edit already recorded and skip the review and verify of the amended plan. Only a refusal the helper
   // reported itself is known to have written nothing, and it keeps the cont as it came.
   const STALE = (({ verified: _v, final_reviewed: _f, ...rest }) => rest)(CONT)
-  if (!am) return { stage: 'amend', result: null, ...deadOf(), cont: STALE }
+  if (!am) return why({ stage: 'amend', result: null, ...deadOf(), cont: STALE })
   const graded = am.status === 'applied' && Array.isArray(am.edits) && am.edits.length === AMEND_INPUT.edits.length &&
     am.edits.every((g, i) => isEntry(g) && g.file === AMEND_INPUT.edits[i].file && (g.already === true || (g.exists === true && g.occurrences === 1)))
-  if (!graded) return { stage: 'amend', amend: am, details: 'plan-amend did not apply every edit; a refused or error status wrote nothing', ...deadOf(), cont: am.status === 'refused' ? CONT : STALE }
+  if (!graded) return why({ stage: 'amend', amend: am, details: 'plan-amend did not apply every edit; a refused or error status wrote nothing', ...deadOf(), cont: am.status === 'refused' ? CONT : STALE })
   log(`amend: applied ${AMEND_INPUT.edits.length} edit(s) to the plan`)
   amendApplied = true
   // An applied amend makes every cached result stale, even when every edit was recorded already: an earlier run may have died after the clerk
@@ -964,7 +1012,7 @@ ${RULES}`, { label: 'amend', phase: 'Plan', agentType: 'clerk', model: CLERK_MOD
   finalReviewed = null
 }
 if (!plan) {
-  const halted = takePlan(await call(planPrompt(), { label: 'plan', phase: 'Plan', agentType: 'planner', schema: PLAN_SCHEMA }), 'plan')
+  const halted = await takePlan(await call(planPrompt(), { label: 'plan', phase: 'Plan', agentType: 'planner', schema: PLAN_SCHEMA }), 'plan')
   if (halted) return halted
 }
 const rulesReview = async triggered => {
@@ -977,7 +1025,7 @@ const ruleFacts = p => canon(p.acceptance.map(a => [a.id, a.text === undefined ?
 // Its findings all carry a rule, so its re-review always runs.
 const rulesRevise = async findings => {
   const root = plan.plan_root
-  const halted = takePlan(await call(planPrompt(`\nFix only these rule findings in your plan at ${root} in place, change nothing else, and return the full result again: ${JSON.stringify(findings)}`), { label: 'plan-rules-revise', phase: 'Plan', agentType: 'planner', schema: PLAN_SCHEMA }), 'plan-rules-revise')
+  const halted = await takePlan(await call(planPrompt(`\nFix only these rule findings in your plan at ${root} in place, change nothing else, and return the full result again: ${JSON.stringify(findings)}`), { label: 'plan-rules-revise', phase: 'Plan', agentType: 'planner', schema: PLAN_SCHEMA }), 'plan-rules-revise')
   if (halted) return { halted }
   const still = planRules(plan)
   const rr = await rulesReview(findings)
@@ -1022,7 +1070,7 @@ Review the implementation plan at ${plan.plan_root} (and its task files) against
     log(`plan review: ${planFindings.length} blocking findings, revising once`)
     const reviewedFacts = ruleFacts(plan)
     const revised = await call(planPrompt(`\n${MAP_FIRST} A reviewer found these defects in your plan at ${plan.plan_root}; fix them in place and return the full result again: ${JSON.stringify(planFindings)}`), { label: 'plan-revise', phase: 'Plan', agentType: 'planner', schema: PLAN_SCHEMA })
-    const halted = takePlan(revised, 'plan-revise')
+    const halted = await takePlan(revised, 'plan-revise')
     if (halted) return { ...halted, findings: planFindings }
     const still = planRules(plan)
     // #819: no trigger named a rule, the program's rule check is clean and no criterion's id, text, kind, metric or verify changed.
