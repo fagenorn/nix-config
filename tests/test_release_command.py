@@ -368,6 +368,21 @@ class TwoBranchCommandTest(ReleaseCommandCase):
         self.assertIsNone(document["verification"])
         self.assertFalse((self.root / ".git/agent-release").exists())
 
+    def test_a_run_without_the_land_lock_prints_the_refusal_and_creates_nothing(self):
+        """Issue 875: the lock was free, so `run` took it and refuses instead of merging."""
+        self.world.merge_observation_ready()
+        self.world.land_lock_ready(lock=None)
+        candidate = ["--commit", CANONICAL["commit"], "--version", CANONICAL["tag"],
+                     "--title", CANONICAL["title"], "--notes-file", str(self.notes)]
+        code, document, err = self.run_release("transaction", "preview", *candidate)
+        self.assertEqual(code, 0, err)
+        confirms = [part for entry in document["confirmations"] for part in ("--confirm", entry["token"])]
+        code, result, err = self.run_release("transaction", "run", *candidate, *confirms, cwd=self.root)
+        self.assertEqual((code, result["error"]["code"], result["error"]["repair_id"]),
+                         (3, "land_lock_lost", None), err)
+        self.assertIn("preview again", result["error"]["detail"])
+        self.assertFalse((self.root / ".git/agent-release").exists())
+
     def test_a_finished_release_prints_its_sync_and_a_rerun_prints_it_again(self):
         """Issue 845: `run` reports the sync, and a bare `run` on the finished release re-reads it."""
         self.world.canonical()
@@ -376,6 +391,7 @@ class TwoBranchCommandTest(ReleaseCommandCase):
         self.world.verification_ready(integration="dev")
         self.world.merge_observation_ready()
         self.world.sync_ready(branch_tip=CANONICAL["merge_commit"], prs=[forge_world.sync_pull()])
+        self.world.land_lock_ready()
         candidate = ["--commit", CANONICAL["commit"], "--version", CANONICAL["tag"],
                      "--title", CANONICAL["title"], "--notes-file", str(self.notes)]
         code, document, err = self.run_release("transaction", "preview", *candidate)
@@ -386,9 +402,10 @@ class TwoBranchCommandTest(ReleaseCommandCase):
         sync = {"status": "done", "branch": forge_world.SYNC["branch"], "pr": forge_world.SYNC["pr"],
                 "url": forge_world.SYNC_URL, "reason": None, "manual": []}
         self.assertEqual(result["sync"], sync)
+        self.assertEqual(result["lock"], {"verdict": "released", "lock_sha": None, "detail": None})
         code, rerun, err = self.run_release("transaction", "run", cwd=self.root)
-        self.assertEqual((code, rerun["state"], rerun["next"], rerun["sync"]),
-                         (0, "succeeded", "done", sync), err)
+        self.assertEqual((code, rerun["state"], rerun["next"], rerun["sync"], rerun["lock"]),
+                         (0, "succeeded", "done", sync, None), err)
         self.assertEqual(rerun["transaction_id"], result["transaction_id"])
         self.assertFalse(any(c["argv"][:2] in (["pr", "create"], ["push", "origin"])
                              for c in self.world.calls()))

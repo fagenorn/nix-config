@@ -49,6 +49,7 @@ class SyncCase(unittest.TestCase):
         self.forge = rs.StatefulForge(self.world)
         self.world.merge_ready()
         self.world.sync_ready()
+        self.world.land_lock_ready()
 
     def driver(self, forge=None, **project):
         project = rs.project(self, **{"profiles": {"two-branch": support.merge_profile()},

@@ -39,7 +39,8 @@ REASON_LIMIT = 400
 
 
 def binding(compiled: Mapping[str, Any], project: Any) -> dict[str, Any] | None:
-    """`{alias, target, integration}` of the profile's sync, or None when it has none."""
+    """`{alias, action, target, integration}` of the profile's sync, or None when it has none;
+    `action` is the id of the node that merges."""
     if project.integration_branch == project.default_branch:
         return None
     targets = {unit["name"]: unit["parameters"]["target"]
@@ -47,7 +48,8 @@ def binding(compiled: Mapping[str, Any], project: Any) -> dict[str, Any] | None:
     for node in compiled["publication"]:
         if (release_profile.MERGE_MEMBER in compiled["candidate_members"][node["id"]]
                 and compiled["adapters"][node["adapter"]]["adapter"] == ADAPTER):
-            return {"alias": node["adapter"], "target": release_profile.thaw(targets[node["id"]]),
+            return {"alias": node["adapter"], "action": node["id"],
+                    "target": release_profile.thaw(targets[node["id"]]),
                     "integration": project.integration_branch}
     return None
 

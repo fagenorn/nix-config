@@ -38,7 +38,7 @@ One running Claude Code process on this host, shown under the project of its wor
 _Avoid_: agent, terminal
 
 **Outside sprints**:
-The one quiet line of a project that counts its sessions working and waiting; opening it lists them. It raises no inbox item.
+The one quiet line of a project that counts its sessions working and waiting; opening it lists each session with its delivery runs in flight. It raises no inbox item.
 _Avoid_: ad-hoc work, side work
 
 **Not yet managed**:
@@ -52,3 +52,7 @@ _Avoid_: last seen, last visit
 **Digest**:
 "Since you last looked": what changed since the last look in plain sentences, newest first, five shown and the rest under "Earlier"; a first visit covers the last eight hours.
 _Avoid_: activity feed, changelog
+
+**Delivery run**:
+One Workflow run of a delivery program started by a session, shown under that session in its project's Outside sprints line while it has no final record: each issue it carries with its stage in plain words (queued, planning, plan review, building task n of m, final review, verifying, landing, done; working for a step the console does not know), and how long since it last moved, quiet for N min after fifteen minutes (ADR-console-005).
+_Avoid_: sprint, job

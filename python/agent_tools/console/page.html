@@ -89,6 +89,10 @@ ul { list-style: none; }
 .outside summary b { font-weight: 600; color: var(--sub0); }
 .outside ul { margin-top: 2px; padding: 0 0 0 16px; }
 .outside li { display: flex; flex-wrap: wrap; gap: 0 10px; color: var(--sub0); }
+.outside .runs { flex: 1 0 100%; margin-top: 0; padding: 0 0 0 16px; }
+.run { display: flex; flex-wrap: wrap; gap: 0 10px; }
+.run .stage { color: var(--sub0); }
+.run .moved { color: var(--ov2); }
 .s-working { color: var(--green); }
 .s-waiting_answer, .s-waiting_permission { color: var(--yellow); }
 .s-limit { color: var(--red); }
@@ -144,6 +148,20 @@ function outsideFold(outside, key) {
     const row = el("li");
     row.appendChild(el("span", "", session.name));
     row.appendChild(el("span", "s-" + session.state, session.state_text));
+    const runs = session.deliveries || [];
+    if (runs.length) {
+      const runList = el("ul", "runs");
+      for (const run of runs) {
+        const item = el("li", "run");
+        for (const issue of run.issues) {
+          item.appendChild(el("span", "issue", "#" + issue.issue));
+          item.appendChild(el("span", "stage", issue.stage_text));
+        }
+        item.appendChild(el("span", run.quiet ? "moved quiet" : "moved", run.moved_text));
+        runList.appendChild(item);
+      }
+      row.appendChild(runList);
+    }
     list.appendChild(row);
   }
   fold.appendChild(list);
