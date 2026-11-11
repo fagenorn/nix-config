@@ -5,11 +5,12 @@ parameter names a host. `Host` must be `127.0.0.1:<port>` or `localhost:<port>`
 for the port actually bound, else the answer is `403` `text/plain`
 `loopback only`.
 
-Routes (every response carries `Cache-Control: no-store`,
-`X-Content-Type-Options: nosniff` and `Content-Length`):
+Routes (every response carries `Cache-Control: no-store` and
+`X-Content-Type-Options: nosniff`, and every one but the stream `Content-Length`):
 
     GET /           200 text/html; charset=utf-8, the page, with `Content-Security-Policy: CSP`
     GET /api/state  200 application/json, the encoded view (see `view.py`)
+    GET /api/stream 200 text/event-stream; charset=utf-8, the update stream (below)
     anything else   404
     other methods   405 with `Allow: GET`
 
@@ -19,6 +20,16 @@ subprocess. The view is rebuilt only by `refresh()`, which reads the fleet
 registry, appends the difference to the event log and publishes the new view;
 the page itself is read once, at import.
 
+The stream carries `Connection: close` and no `Content-Length`. Its first frame is
+the current view; one frame follows each later change of the view; a
+`: keepalive` comment follows `KEEPALIVE_SECONDS` without one. A frame is
+
+    event: view\\n
+    data: <the bytes of /api/state>\\n
+    \\n
+
+A write error, or the service closing, ends the stream.
+
 The registry is read, never written. An absent registry, or one that is not a
 valid registry (unreadable, not UTF-8 or JSON, or a violation of
 `agent_platform.validate_registry`), is not a reading: `refresh()` appends
@@ -26,17 +37,28 @@ nothing, so a registry that vanishes or is damaged never unregisters a project.
 An unreadable one, as opposed to an absent one, writes one stderr line
 `console: registry_unreadable <reason>`.
 
+Registry changes are found by a watcher thread, `WATCH_THREAD`, started by
+`start()`: every `poll_seconds` it takes the registry's `(st_mtime_ns, st_size,
+st_ino)` (`None` when it cannot be read) and, when that differs from the last
+one, records it and calls `refresh()`. A failing `refresh()` is one stderr line
+`console: refresh_failed <Type>: <message>`; the loop goes on. A signature is
+sampled before the read it vouches for, so a registry replaced between the
+two differs from the recorded signature and is read again on the next poll.
+The watcher only calls `os.stat`, so an idle service does no other I/O.
+
 Construction order: bind the server (an `OSError` propagates and nothing else is
 opened); open the event log; fold it onto the project states; publish the view;
-`refresh()`. On any failure after the bind, what was opened is closed and the
+sample the registry's signature; `refresh()`. On any failure after the bind, what was opened is closed and the
 exception re-raised. `start()` serves on a daemon thread named `console-http`;
-`close()` is idempotent.
+`close()` sets `closing`, wakes every waiter, stops the watcher and tears the
+rest down; it is idempotent.
 """
 
 import http.server
 import json
 import socketserver
 import sys
+import os
 import threading
 from pathlib import Path
 
@@ -51,6 +73,9 @@ CSP = ("default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline
        "frame-ancestors 'none'")
 PAGE: bytes = Path(__file__).with_name("page.html").read_bytes()
 BACKLOG = 16
+POLL_SECONDS = 0.25
+KEEPALIVE_SECONDS = 15.0
+WATCH_THREAD = "console-registry-watch"
 
 
 def default_store() -> Path:
@@ -59,6 +84,15 @@ def default_store() -> Path:
 
 def default_registry() -> Path:
     return agent_platform.registry_path()
+
+
+def signature(path: Path) -> tuple[int, int, int] | None:
+    """What the registry file looks like now; None when it cannot be statted."""
+    try:
+        stat = os.stat(path)
+    except OSError:
+        return None
+    return stat.st_mtime_ns, stat.st_size, stat.st_ino
 
 
 def read_fleet(path: Path) -> list[dict] | None:
@@ -126,8 +160,33 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
                        ("Content-Security-Policy", CSP))
         elif route == "/api/state":
             self._send(200, "application/json", self.server.console.view_bytes)
+        elif route == "/api/stream":
+            self._stream()
         else:
             self._send(404, "text/plain", b"not found\n")
+
+    def _stream(self):
+        console = self.server.console
+        self.close_connection = True
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        seen = -1
+        try:
+            while not console.closing:
+                change = console.wait_for_change(seen, KEEPALIVE_SECONDS)
+                if change is None:
+                    if console.closing:
+                        return
+                    self.wfile.write(b": keepalive\n\n")
+                    continue
+                seen, view = change
+                self.wfile.write(b"event: view\ndata: " + view + b"\n\n")
+        except OSError:
+            return
 
     def _refuse_method(self):
         if not self._loopback():
@@ -140,8 +199,14 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
 
 
 class ConsoleService:
-    def __init__(self, store: Path, registry: Path, *, port: int = DEFAULT_PORT):
+    def __init__(self, store: Path, registry: Path, *, port: int = DEFAULT_PORT,
+                 poll_seconds: float = POLL_SECONDS):
         self.registry = Path(registry)
+        self._poll_seconds = poll_seconds
+        self._closing = False
+        self._stop = threading.Event()
+        self._watcher: threading.Thread | None = None
+        self._signature = None
         self.log: EventLog | None = None
         self._ingest = threading.Lock()
         self._published = threading.Condition()
@@ -154,6 +219,7 @@ class ConsoleService:
             self.log = EventLog(store)
             self._states = project_states(self.log.events())
             self._publish()
+            self._signature = signature(self.registry)
             self.refresh()
         except BaseException:
             if self.log is not None:
@@ -172,6 +238,18 @@ class ConsoleService:
     @property
     def version(self) -> int:
         return self._version
+
+    @property
+    def closing(self) -> bool:
+        return self._closing
+
+    def wait_for_change(self, seen: int, timeout: float) -> tuple[int, bytes] | None:
+        """The newest (version, view) once its version exceeds `seen`; None on timeout or close."""
+        with self._published:
+            self._published.wait_for(lambda: self._version > seen or self._closing, timeout)
+            if self._closing or self._version <= seen:
+                return None
+            return self._version, self._view
 
     def _publish(self) -> None:
         view = encode_view(derive_view(self._states.values()))
@@ -193,7 +271,20 @@ class ConsoleService:
                 self._publish()
             return appended
 
+    def _watch(self) -> None:
+        while not self._stop.wait(self._poll_seconds):
+            current = signature(self.registry)
+            if current == self._signature:
+                continue
+            self._signature = current
+            try:
+                self.refresh()
+            except Exception as error:
+                print(f"console: refresh_failed {type(error).__name__}: {error}", file=sys.stderr)
+
     def start(self) -> None:
+        self._watcher = threading.Thread(target=self._watch, name=WATCH_THREAD, daemon=True)
+        self._watcher.start()
         self._thread = threading.Thread(
             target=self._server.serve_forever, name="console-http", daemon=True)
         self._thread.start()
@@ -202,6 +293,12 @@ class ConsoleService:
         if self._closed:
             return
         self._closed = True
+        with self._published:
+            self._closing = True
+            self._published.notify_all()
+        self._stop.set()
+        if self._watcher is not None:
+            self._watcher.join()
         if self._thread is not None:
             self._server.shutdown()
         self._server.server_close()
