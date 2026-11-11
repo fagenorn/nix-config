@@ -1,7 +1,8 @@
 """`cache-proxy`: a loopback pass-through from Claude Code to the Anthropic API (#422).
 
-`cache-proxy --port N [--upstream URL] [--keepalive] [--reorder]` binds 127.0.0.1 only and
-serves until killed. Without `--keepalive` or `--reorder` it forwards each request's method, path,
+`cache-proxy --port N [--upstream URL] [--keepalive] [--reorder] [--sense-limits] [--console URL]`
+binds 127.0.0.1 only and serves until killed. Without `--keepalive`, `--reorder` or
+`--sense-limits` it forwards each request's method, path,
 query and body bytes and each response's status, headers and body unchanged: only `Host` is
 rewritten and hop-by-hop headers are dropped, and nothing is added, decoded or retried. Without
 `--keepalive` the client's `Accept-Encoding` is forwarded verbatim and bodies are never decoded.
@@ -23,7 +24,22 @@ client reset on an idle connection) is one `handler_error` line with `error`, ne
 With `--keepalive` it also replays idle subagent conversations' last requests with
 `max_tokens=1` (`agent_tools.hosts.cache_keepalive`, #423); with `--reorder` it reorders each
 subagent's first user message (`agent_tools.hosts.subagent_prefix`, #429) before the keepalive sees the
-request. Its forwarding changes only as those modules describe. The launchd agent or systemd
+request. Its forwarding changes only as those modules describe.
+
+With `--sense-limits` it reads each upstream reply's unified rate-limit headers and the request's
+account (`agent_tools.hosts.rate_limits`, #860) and reports them to the console: after the upstream
+answered and before the body is relayed it hands the reading to a queue, and a worker thread POSTs
+each as compact JSON (`Content-Type: application/json`) to `--console` (default
+`http://127.0.0.1:27184`, `http` on `127.0.0.1` or `localhost` only) at `/api/readings`. The document
+is `rate_limits.report_document`'s reading plus `account` and `session_id` (each `null` when the
+request names none). A reply without the headers reports nothing, a full queue (256) drops the
+document, and the reply the client gets, its request log line and the `listening` line's flags
+(plus `sense_limits: true`) are otherwise unchanged. Two further events exist: `limit_error`
+(sensing raised; its only field is `error`, the exception's type name) and `limit_report_failed`
+(a post failed; its only field is `error`, a type name or `status <n>`, written once per failing
+streak and again after the next success). No header value, sign-in or `device_id` is ever logged or
+reported. With `--keepalive` as well, each keepalive ping's reply is sensed the same way, so a
+refusal that only a ping met still reaches the console. The launchd agent or systemd
 user unit that runs it and the `claude` launcher that routes through it are in
 `home/common/claude-code/README.md`.
 
@@ -38,13 +54,17 @@ import functools
 import http.client
 import http.server
 import json
+import queue
 import select
 import socketserver
 import ssl
 import sys
 import threading
 import time
+from collections.abc import Callable
 from urllib.parse import urlsplit
+
+from agent_tools.hosts import rate_limits
 
 HOST = "127.0.0.1"
 DEFAULT_UPSTREAM = "https://api.anthropic.com"
@@ -57,6 +77,9 @@ READ_SIZE = 65536
 ERROR_BODY_LIMIT = 4096
 HOP_BY_HOP = frozenset({"connection", "keep-alive", "te", "trailer", "transfer-encoding", "upgrade"})
 DEFAULT_PORTS = {"http": 80, "https": 443}
+DEFAULT_CONSOLE = "http://127.0.0.1:27184"
+READINGS_PATH = "/api/readings"
+CONSOLE_HOSTS = ("127.0.0.1", "localhost")
 UPSTREAM_FAILURES = (OSError, http.client.HTTPException, ValueError)
 
 
@@ -96,6 +119,15 @@ def parse_upstream(url: str) -> Upstream:
     shown = host_text if port in (None, default_port) else f"{host_text}:{port}"
     return Upstream(url.removesuffix("/"), parts.scheme, parts.hostname,
                     default_port if port is None else port, shown)
+
+
+def parse_console(url: str) -> Upstream:
+    """The console origin: `parse_upstream`'s shape, restricted to http on a loopback host."""
+    console = parse_upstream(url)
+    if console.scheme != "http" or console.host not in CONSOLE_HOSTS:
+        raise argparse.ArgumentTypeError(
+            f"{url!r} is not an http origin on 127.0.0.1 or localhost")
+    return console
 
 
 def upstream_tls(upstream: Upstream) -> ssl.SSLContext | None:
@@ -144,6 +176,68 @@ class LineLog:
             self.stream.flush()
 
 
+class LimitSensor:
+    """Hands the limit reading of each reply to `report`, once, when the reply carries one."""
+
+    def __init__(self, report: Callable[[dict], None]):
+        self.report = report
+
+    def sense(self, body: bytes, status: int, headers: list[tuple[str, str]]) -> None:
+        document = rate_limits.report_document(status, headers, body)
+        if document is not None:
+            self.report(document)
+
+
+class ConsoleReporter:
+    """Posts reports to the console from a worker thread, so no request ever waits on it."""
+
+    def __init__(self, console: Upstream, log: LineLog, *, timeout: float = 2.0,
+                 capacity: int = 256):
+        self.console = console
+        self.log = log
+        self.timeout = timeout
+        self.documents: queue.Queue[dict] = queue.Queue(capacity)
+        self.failing = False
+
+    def report(self, document: dict) -> None:
+        """Queue `document` at once; a full queue drops it."""
+        try:
+            self.documents.put_nowait(document)
+        except queue.Full:
+            pass
+
+    def run(self, stop: threading.Event) -> None:
+        """Post queued documents until `stop` is set and the queue is empty."""
+        while True:
+            try:
+                document = self.documents.get(timeout=0.2)
+            except queue.Empty:
+                if stop.is_set():
+                    return
+                continue
+            self._post(document)
+
+    def _post(self, document: dict) -> None:
+        body = json.dumps(document, separators=(",", ":")).encode()
+        connection = http.client.HTTPConnection(self.console.host, self.console.port,
+                                                timeout=self.timeout)
+        try:
+            connection.request("POST", READINGS_PATH, body=body,
+                               headers={"Content-Type": "application/json"})
+            response = connection.getresponse()
+            response.read()
+            error = None if 200 <= response.status < 300 else f"status {response.status}"
+        except UPSTREAM_FAILURES as caught:
+            error = type(caught).__name__
+        finally:
+            connection.close()
+        if error is None:
+            self.failing = False
+        elif not self.failing:
+            self.failing = True
+            self.log.write("limit_report_failed", error=error)
+
+
 @dataclass
 class Relay:
     """How one response body travelled: the outcome, bytes written to the client and any error."""
@@ -160,11 +254,13 @@ class ProxyServer(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     request_queue_size = BACKLOG
 
-    def __init__(self, port: int, upstream: Upstream, log: LineLog, keepalive=None, reorder=None):
+    def __init__(self, port: int, upstream: Upstream, log: LineLog, keepalive=None, reorder=None,
+                 limits=None):
         self.upstream = upstream
         self.log = log
         self.keepalive = keepalive
         self.reorder = reorder
+        self.limits = limits
         self.tls = upstream_tls(upstream)
         super().__init__((HOST, port), ProxyHandler)
 
@@ -338,6 +434,15 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
             headers.insert(0, ("Host", self.server.upstream.host_header))
         return headers
 
+    def _sense(self, body, response):
+        """Report the reply's limit reading; whatever it raises stays here as one line."""
+        if self.server.limits is None:
+            return
+        try:
+            self.server.limits.sense(body, response.status, response.getheaders())
+        except Exception as error:
+            self.server.log.write("limit_error", error=type(error).__name__)
+
     def _send_request(self, headers, body):
         conn = self._upstream_conn
         conn.putrequest(self.command, self.path, skip_host=True, skip_accept_encoding=True)
@@ -380,6 +485,7 @@ class ProxyHandler(http.server.BaseHTTPRequestHandler):
                               Relay("upstream_error", detail, written=written))
             return
         ttfb_ms = elapsed_ms(started)
+        self._sense(body, response)
         self._track_call("started", response.status, response.getheader("Content-Type"),
                          response.getheader("Content-Encoding"))
         relay = self._relay(response)
@@ -468,37 +574,49 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--reorder", action="store_true",
                         help="reorder each Claude Code subagent's first user message so sibling "
                              "subagents share a cached start-up prefix (#429)")
+    parser.add_argument("--sense-limits", action="store_true",
+                        help="report each reply's unified rate-limit headers and the request's "
+                             "account to the console (#860)")
+    parser.add_argument("--console", type=parse_console, default=DEFAULT_CONSOLE,
+                        help="console origin for --sense-limits readings (default: %(default)s)")
     return parser
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     log = LineLog(sys.stderr)
+    limits = reporter = None
+    if args.sense_limits:
+        reporter = ConsoleReporter(args.console, log)
+        limits = LimitSensor(reporter.report)
     keepalive = None
     if args.keepalive:
         # Imported here because cache_keepalive imports this module's transport constants (D24).
         from agent_tools.hosts import cache_keepalive
         keepalive = cache_keepalive.Keepalive(
             log, functools.partial(open_upstream, args.upstream, upstream_tls(args.upstream)),
-            time.monotonic)
+            time.monotonic, limits=limits)
     reorder = None
     if args.reorder:
         # Imported here because subagent_prefix imports cache_keepalive, which imports this module.
         from agent_tools.hosts import subagent_prefix
         reorder = subagent_prefix.SubagentPrefix()
     try:
-        server = ProxyServer(args.port, args.upstream, log, keepalive, reorder)
+        server = ProxyServer(args.port, args.upstream, log, keepalive, reorder, limits)
     except OSError as error:
         log.write("bind_failed", host=HOST, port=args.port, error=f"{type(error).__name__}: {error}")
         return 1
     with server:
-        flags = {name: True for name, part in (("keepalive", keepalive), ("reorder", reorder))
+        flags = {name: True for name, part in (("keepalive", keepalive), ("reorder", reorder),
+                                    ("sense_limits", limits))
                  if part is not None}
         log.write("listening", host=HOST, port=server.server_address[1],
                   upstream=args.upstream.url, **flags)
         stop = threading.Event()
         if keepalive is not None:
             threading.Thread(target=keepalive.run, args=(stop,), daemon=True).start()
+        if reporter is not None:
+            threading.Thread(target=reporter.run, args=(stop,), daemon=True).start()
         try:
             server.serve_forever()
         except KeyboardInterrupt:

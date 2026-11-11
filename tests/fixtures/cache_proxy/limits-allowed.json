@@ -1,0 +1,53 @@
+{
+  "status": 200,
+  "headers": [
+    [
+      "content-type",
+      "application/json"
+    ],
+    [
+      "request-id",
+      "req_fixture_allowed"
+    ],
+    [
+      "anthropic-organization-id",
+      "00000000-0000-0000-0000-000000000000"
+    ],
+    [
+      "anthropic-ratelimit-unified-status",
+      "allowed"
+    ],
+    [
+      "anthropic-ratelimit-unified-7d-status",
+      "allowed"
+    ],
+    [
+      "anthropic-ratelimit-unified-7d-utilization",
+      "0.42"
+    ],
+    [
+      "anthropic-ratelimit-unified-7d-reset",
+      "1794816000"
+    ],
+    [
+      "anthropic-ratelimit-unified-reset",
+      "1794816000"
+    ],
+    [
+      "anthropic-ratelimit-unified-representative-claim",
+      "seven_day"
+    ],
+    [
+      "anthropic-ratelimit-unified-fallback-percentage",
+      "0.5"
+    ],
+    [
+      "anthropic-ratelimit-unified-overage-status",
+      "rejected"
+    ],
+    [
+      "anthropic-ratelimit-unified-overage-disabled-reason",
+      "org_level_disabled"
+    ]
+  ]
+}
