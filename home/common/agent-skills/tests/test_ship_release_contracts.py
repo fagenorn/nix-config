@@ -160,6 +160,43 @@ class ShipReleaseContractsTest(unittest.TestCase):
                       '--title "<title>" --body "<version>"`', phase3)
         self.assertIn("bindings.tracker.repo_slug", phase3)
 
+    def test_a_two_branch_release_holds_the_land_lock_from_before_the_first_preview(self):
+        """Issue 875, ADR-release-011: Phase 3 acquires with a wait before the first preview and
+        after the release PR is opened, keeps the lock across the confirmation stop and
+        releases it on every other stop; Phase 4 acquires again on a lock refusal. Both forms
+        parse against the live `forge-claim` parser."""
+        from agent_tools.claims import forge_claim
+        phase3 = self.skill.split("## Phase 3", 1)[1].split("\n## ", 1)[0]
+        acquire = ("`forge-claim land acquire --repo <slug> --branch <integration> --sha <commit> "
+                   "--release --wait`")
+        release = "`forge-claim land release --repo <slug> --branch <integration> --sha <commit>`"
+        at = 0
+        for form in ("Two-branch project: before the first preview, and again after opening the "
+                     "release PR, run alone (60-minute timeout) " + acquire,
+                     "in resume form, `<commit>` the release's `commit`",
+                     "`no_open_pr` goes on to the preview",
+                     "Waiting for the confirmation keeps the lock and the run releases it; every "
+                     "other stop, a declined confirmation included, first runs " + release,
+                     "`release_pr_missing`"):
+            with self.subTest(form=form):
+                found = phase3.find(form, at)
+                self.assertGreaterEqual(found, 0, f"{form} missing or out of order")
+                at = found + len(form)
+        phase4 = self.skill.split("## Phase 4", 1)[1].split("\n## ", 1)[0]
+        self.assertIn("A `confirmation_stale`, `confirmation_required` or, after acquiring again, "
+                      "`land_lock_*` refusal is likewise a re-preview.", phase4)
+        self.assertIn("land lock, preview", self.skill.split("## Authorization", 1)[1])
+        self.assertIn("the run's `sync` and `lock`", self.skill.split("## Phase 5", 1)[1])
+        for form in (acquire, release):
+            argv = [("octo/widgets" if part == "<slug>" else "dev" if part == "<integration>"
+                     else "a" * 40 if part == "<commit>" else part)
+                    for part in shlex.split(form.strip("`"))[1:]]
+            args = forge_claim.build_parser().parse_args(argv)
+            self.assertEqual((args.command, args.branch), ("land", "dev"))
+        self.assertTrue(forge_claim.build_parser().parse_args(
+            ["land", "acquire", "--repo", "o/r", "--branch", "dev", "--sha", "a" * 40,
+             "--release", "--wait"]).release)
+
     def test_release_examples_parse_and_cover_every_subcommand(self):
         from agent_tools.release import release
         lines = [line for line in self.skill.splitlines()

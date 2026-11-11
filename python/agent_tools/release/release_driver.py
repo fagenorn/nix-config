@@ -3,7 +3,7 @@ and preview (#128 spec §1, §2, §4, §7; D1, D4, D6, D13, D18, D19, D25, D26).
 
 `Driver` compiles one release profile of a project and reads the release store under the
 main checkout's git common dir. `preview` and `status` create nothing: no directory, no
-transaction, no lock, and no adapter call. `preview` makes the three read-only GitHub reads
+transaction, no lock (store or land lock), and no adapter call. `preview` makes the three read-only GitHub reads
 of `release_verification` and no other call, plus, for a profile that consumes `merge`, the
 three `observe_merge` reads before them (issue 554 D3). A problem the caller must repair is a
 `Refusal`; a problem that only makes a new release unrunnable is reported in the preview
@@ -106,8 +106,8 @@ past it parks `<name>: <status> past <deadline> ms: <reference>`; `diverged` par
 diverged: <reference>`, `<reference>` being the latest inspection's reason and references (an
 `absent` one names no run).
 
-The result is `{schema_version, transaction_id, state, next, actions, receipt_digest, legacy}`,
-`actions` being `{name, status, attempts}`, with `next` one of `done` (terminal `succeeded`),
+The result is `{schema_version, transaction_id, state, next, actions, receipt_digest, legacy}`
+(plus `lock` and `sync` for a profile that has a sync), `actions` being `{name, status, attempts}`, with `next` one of `done` (terminal `succeeded`),
 `confirm` (an irreversible action has no valid grant), `wait` (an action is `in_progress` or
 `unknown`, or a watch is pending inside its deadline, or the proof cohort is still open) or
 `attention` (parked). Exit is 0 for any recorded progress. Custody is released on every normal
@@ -126,6 +126,28 @@ no confirmation, `run` on such a profile whose last release is `succeeded` or `f
 publication satisfied prints that release's result again (`next` is `done` for `succeeded`, else
 `attention`) with a freshly read `sync`, so a rerun finishes a sync left half done; a
 confirmation there refuses `confirmation_stale`.
+
+Land lock (issue 875, ADR-release-011, ADR-claims-009). A profile with a sync releases the
+integration branch through a pull request headed by that branch, so its caller holds the land
+lock of the integration branch at the candidate commit from before the first preview. `run`
+never acquires it for the caller and never waits: it makes one one-shot check through
+`release_lock` and proceeds only on `already_held`. A new release is checked after the
+confirmation checks and before the store or the transaction is created; a resumed one is
+checked right before its merge action is invoked, and gives custody up before it refuses.
+`acquired` or `moved` refuses `land_lock_lost` (the lock was lost and is now taken again, so a
+landing may have moved the head), `held_by` or `lost_to` refuses `land_lock_held`, and `error`
+refuses `land_lock_unavailable`; each detail names the verdict and the repair: wait for the
+checks on the current head under the lock and preview again. A refusal releases nothing. The
+result of `run` on such a profile carries `lock`, `{verdict, lock_sha, detail}` or null. A run
+that began after the merge was satisfied makes no lock call and reports null. One that began
+before it keeps the lock while the release can still merge (`next` is `confirm` or `wait` and
+the merge is not satisfied) and reports its own check, null when it made none; on every other
+ending (`done`, or `attention` with or without the merge) it releases the lock at the candidate
+commit, before the sync, and reports `released`, `not_held` (the lock is at another sha, left
+alone) or `error`. `abandon` releases it the same way and adds `lock` to its document. A lock
+call never raises and never changes the release; a raised effect releases nothing, and the lock
+then falls to the land lock's staleness rules. No other profile makes a lock call or has a
+`lock` member.
 
 Abandon (D14). `abandon` acquires custody and advances the current nonterminal release to
 `abandoned` with external state `known`, printing `{schema_version, transaction_id, state}`.
@@ -149,8 +171,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from agent_tools.release import (release_adapter, release_cutover, release_profile,
-                                 release_sync, release_verification)
+from agent_tools.release import (release_adapter, release_cutover, release_lock,
+                                 release_profile, release_sync, release_verification)
 from agent_tools.canonical import telemetry_digest
 from agent_tools.release.transaction_core import (
     CreationConflict, GrantInvalid, InvocationRefused, LeaseUnavailable, ProofRefused,
@@ -545,8 +567,39 @@ class Driver:
                           + ", ".join(dict.fromkeys(confirmations)))
         transaction = current[1]
         ending = "done" if transaction.state == "succeeded" else "attention"
-        return {**self._result(transaction, ending), "legacy": None,
+        return {**self._result(transaction, ending), "legacy": None, "lock": None,
                 "sync": self._synced(transaction, self._router())}
+
+    def _merged(self, transaction: Transaction | None) -> bool:
+        """The release pull request of a profile with a sync is merged (issue 875)."""
+        view = _view(transaction, self.sync["action"])
+        return view is not None and view["status"] == "satisfied"
+
+    def _lock(self, router: "_Router", action: str, sha: str) -> dict[str, Any]:
+        return router.lock(action, self.sync["target"]["repository"],
+                           self.sync["integration"], sha)
+
+    def _hold(self, router: "_Router", sha: str) -> dict[str, Any]:
+        """Re-check the land lock before the release merges: only a lock already at `sha`
+        passes, and every other verdict refuses (issue 875, ADR-claims-009)."""
+        lock = self._lock(router, "acquire", sha)
+        verdict = lock["verdict"]
+        if verdict == release_lock.HELD:
+            return lock
+        branch = self.sync["integration"]
+        repair = (f"wait for the checks on the current head of {branch} under the lock, then "
+                  "preview again")
+        if verdict in ("acquired", "moved"):
+            raise Refusal("land_lock_lost", f"the land lock of {branch} was not at {sha} and "
+                          f"is now ({verdict}), so a landing may have moved the release head: "
+                          + repair)
+        if verdict == "error":
+            raise Refusal("land_lock_unavailable", f"the land lock of {branch} could not be "
+                          f"checked at {sha} ({lock['detail']}): acquire it with a wait, then "
+                          + repair)
+        raise Refusal("land_lock_held", f"the land lock of {branch} is {verdict} "
+                      f"{lock['lock_sha']} ({lock['detail']}): acquire it with a wait, then "
+                      + repair)
 
     def run(self, candidate: Mapping[str, str] | None,
             confirmations: Sequence[str]) -> dict[str, Any]:
@@ -567,6 +620,9 @@ class Driver:
         if missing:
             raise Refusal("confirmation_required", "confirm: " + ", ".join(missing))
         router = self._router()
+        lock = None
+        if self.sync is not None and plan.transaction is None:
+            lock = self._hold(router, plan.candidate["commit"])
         legacy = None
         if plan.transaction is None:
             store = self.store(create=True)
@@ -578,7 +634,7 @@ class Driver:
             store, transaction = self.store(), plan.transaction
         custody, transaction = self._acquire(store, transaction)
         acquisition = _openings(transaction)
-        drive = _Drive(self, plan, store, router, custody, acquisition, transaction)
+        drive = _Drive(self, plan, store, router, custody, acquisition, transaction, lock)
         return {**drive.run(supplied), "legacy": legacy}
 
     def _create(self, store: TransactionStore, plan: _Plan) -> Transaction:
@@ -613,8 +669,12 @@ class Driver:
         except TransactionError as error:
             store.release(custody)
             raise Refusal("abandon_refused", str(error)[:REFUSAL_DETAIL_LIMIT]) from error
-        return {"schema_version": SCHEMA_VERSION, "transaction_id": abandoned.transaction_id,
-                "state": abandoned.state}
+        result = {"schema_version": SCHEMA_VERSION, "transaction_id": abandoned.transaction_id,
+                  "state": abandoned.state}
+        if self.sync is not None:
+            result["lock"] = self._lock(self._router(), "release",
+                                        abandoned.subject["candidate"]["commit"])
+        return result
 
     def status(self) -> dict[str, Any]:
         shape = self.shape_refusal()
@@ -718,6 +778,11 @@ class _Router:
         with self._credentials_excluded():
             return release_sync.run(self._modules[alias], parameters)
 
+    def lock(self, action: str, repository: str, branch: str, sha: str) -> dict[str, Any]:
+        """One land lock call of `release_lock`, outside the core like the sync (issue 875)."""
+        with self._credentials_excluded():
+            return release_lock.call(action, repository, branch, sha)
+
 
 class _Drive:
     """One `run`'s pass over the transaction, under the one custody it acquired (§5).
@@ -728,7 +793,8 @@ class _Drive:
     """
 
     def __init__(self, driver: Driver, plan: _Plan, store: TransactionStore, router: _Router,
-                 custody: Custody, acquisition: int, transaction: Transaction) -> None:
+                 custody: Custody, acquisition: int, transaction: Transaction,
+                 lock: dict[str, Any] | None = None) -> None:
         self.driver = driver
         self.plan = plan
         self.store = store
@@ -736,6 +802,8 @@ class _Drive:
         self.custody = custody
         self.acquisition = acquisition
         self.transaction = transaction
+        self.lock = lock
+        self.unmerged = driver.sync is not None and not driver._merged(transaction)
         self.nodes = {node["id"]: node for node in driver._nodes()}
 
     def run(self, tokens: Sequence[str]) -> dict[str, Any]:
@@ -774,8 +842,32 @@ class _Drive:
             self.transaction = self.store.release(self.custody)
         result = self.driver._result(self.transaction, ending)
         if self.driver.sync is not None:
+            result["lock"] = self.unlock(ending)
             result["sync"] = self.driver._synced(self.transaction, self.router)
         return result
+
+    def unlock(self, ending: str) -> dict[str, Any] | None:
+        """The `lock` member (issue 875). A run that began after the merge makes no lock call
+        and reports None. One that began before it keeps the lock while the release can still
+        merge (`confirm` or `wait` with the merge not satisfied) and reports its own check,
+        None when it made none; on every other ending it releases the lock at the candidate
+        commit and reports that answer."""
+        if not self.unmerged:
+            return None
+        if ending in ("confirm", "wait") and not self.driver._merged(self.transaction):
+            return self.lock
+        return self.driver._lock(self.router, "release",
+                                 self.transaction.subject["candidate"]["commit"])
+
+    def hold(self) -> None:
+        """Check the land lock before a resumed release invokes its merge; a refusal gives
+        custody up first (issue 875)."""
+        try:
+            self.lock = self.driver._hold(self.router,
+                                          self.transaction.subject["candidate"]["commit"])
+        except Refusal:
+            self.transaction = self.store.release(self.custody)
+            raise
 
     def begin(self) -> str | None:
         if self.transaction.state == "created":
@@ -870,6 +962,8 @@ class _Drive:
                     self.plan.plan_digest, name, attempt, self.acquisition))
             except GrantInvalid:
                 return "confirm"
+        if self.lock is None and self.unmerged and name == self.driver.sync["action"]:
+            self.hold()
         try:
             self.transaction = self.store.invoke_action(
                 self.custody, name=name, parameters=parameters, effect=self.router)
