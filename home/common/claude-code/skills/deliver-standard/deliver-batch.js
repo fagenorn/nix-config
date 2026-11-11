@@ -1,7 +1,7 @@
 export const meta = {
   name: 'deliver-batch',
   description: 'Deliver a batch of tracker issues in one repository: intake, just-in-time claims, deliver-standard children (a standard-lane issue planned ahead in plan mode, then resumed in ready mode), a serial land queue under the cross-host land lock, one table',
-  whenToUse: 'A batch of issues of one repository the user asked to deliver together; args {repo_root, batch_id (<host>-<yyyymmdd-hhmm>), child_script (the absolute path of deliver-standard.js), issues (numbers) or label (every open issue carrying it), decisions? (owner answers by issue), conts? (a previous run forwarded child continuations), unattended? (true only for a run no session watches: its questions are then posted as box prompts), review_sizing? (true passes review_sizing to every deliver-standard child: sized Claude plan and final reviews), clerk_model? (sonnet, the default, or haiku: the model of every clerk step, here and in every deliver-standard child)}; returns one table and, when any issue is unfinished, the relaunch args for a new run',
+  whenToUse: 'A batch of issues of one repository the user asked to deliver together; args {repo_root, batch_id (<host>-<yyyymmdd-hhmm>), child_script (the absolute path of deliver-standard.js), issues (numbers) or label (every open issue carrying it), decisions? (owner answers by issue), conts? (a previous run forwarded child continuations), amend? ({"<issue>": a list of {file, find, replace} edits of that issue\'s plan files, only for an issue in conts: sent with its cont to the first child call of the run, and kept in the relaunch with that cont}), unattended? (true only for a run no session watches: its questions are then posted as box prompts), review_sizing? (true passes review_sizing to every deliver-standard child: sized Claude plan and final reviews), clerk_model? (sonnet, the default, or haiku: the model of every clerk step, here and in every deliver-standard child)}; returns one table and, when any issue is unfinished, the relaunch args for a new run',
   phases: [
     { title: 'Setup', detail: 'resolve the project contract once' },
     { title: 'Intake', detail: 'read every issue\'s facts and lane behind one barrier, decide eligibility in code' },
@@ -17,7 +17,8 @@ export const meta = {
 // decisions ({"<issue>": owner answer}), conts ({"<issue>": a previous run's forwarded child
 // continuation}, only for listed issues, D9), unattended (boolean, default false: true only for a run
 // no session watches, D12), review_sizing (boolean, default off: passed to every child and kept in the relaunch, #747), clerk_model (sonnet, the default, or haiku: the model of every clerk call;
-// passed to every child and kept in the relaunch when haiku, #803).
+// passed to every child and kept in the relaunch when haiku, #803), amend ({"<issue>": a non-empty list of {file, find, replace} edits of
+// that issue's plan files}, only for an issue in conts, #811: sent with its cont to the first child call of the run, kept in the relaunch with that cont).
 // Result: { stage: args|setup|done|breaker, batch_id, table, questions, owner_actions, relaunch }.
 // An already-fixed row is final and reported in owner_actions with its commit; the batch closes nothing.
 // A closed issue whose claim this batch holds is released (at intake, or by the settle step after a stop with a cont
@@ -77,11 +78,25 @@ if (args.conts !== undefined) {
     if (!args.issues.some(i => String(i) === k)) return bad(`conts.${k} is not one of issues`)
   }
 }
+if (args.amend !== undefined) {
+  if (!isObj(args.amend)) return bad('amend must be an object')
+  if (!args.conts) return bad('amend requires conts')
+  const nonEmpty = v => typeof v === 'string' && v.length > 0
+  for (const [k, v] of Object.entries(args.amend)) {
+    if (!Object.prototype.hasOwnProperty.call(args.conts, k)) return bad(`amend.${k} has no cont in conts`)
+    if (!Array.isArray(v) || !v.length || !v.every(e => isObj(e) && nonEmpty(e.file) && nonEmpty(e.find) && typeof e.replace === 'string')) {
+      return bad(`amend.${k} must be a non-empty list of {file, find, replace}: file and find non-empty strings, replace a string`)
+    }
+  }
+}
 const DECISIONS = args.decisions
 const UNATTENDED = args.unattended === true
 const REVIEW_SIZING = args.review_sizing === true
 const CLERK_MODEL = args.clerk_model === undefined ? 'sonnet' : args.clerk_model
 const CONTS = args.conts || {}
+const AMEND = args.amend || {}
+const AMEND_APPLIED = new Set() // #811: issues whose child reported the amend applied (`amended`): it needs no relaunch
+const AMEND_SENT = new Set() // #811: an issue's amend reaches at most one child call of a run
 
 const BASE_RULES = `
 Hard rules for this step (they override anything else you remember):
@@ -363,6 +378,10 @@ const PLAN = semaphore(MAX)
 
 // The owner's answer the batch itself carries: the relaunch's decisions only. A ticked decision prompt is read by the child.
 const answerOf = n => (DECISIONS && DECISIONS[String(n)]) || null
+// An applied amend leaves the relaunch once the cont it ends with records what the amended plan owes. A reviewed plan with no passed verification
+// still owes its final review and verify, which only a child resumed with the amend is sure to run: an accepted PR would land as it stands otherwise.
+const reviewOwed = c => isObj(c) && c.plan_reviewed === true && !c.verified
+const amended = (n, r) => { if (isObj(r) && r.amended === true) AMEND_APPLIED.add(String(n)); return r }
 // D12: a null child, or a stop that names dead agents, ends admission; a null field alone is an ordinary stop.
 const terminalChild = r => r === null || r === undefined ||
   (!['done', 'ready', 'planned'].includes(r.stage) && Array.isArray(r.dead_agents) && r.dead_agents.length > 0)
@@ -378,6 +397,10 @@ const childArgs = (n, lane, mode) => {
   const a = { repo_root: REPO, issue: n, batch_id: BATCH, mode }
   if (CONTS[n]) a.cont = CONTS[n]
   else a.lane = lane
+  if (CONTS[n] && AMEND[String(n)] && !AMEND_SENT.has(String(n))) {
+    a.amend = AMEND[String(n)]
+    AMEND_SENT.add(String(n))
+  }
   const answer = answerOf(n)
   if (answer !== null) a.decisions = answer
   if (REVIEW_SIZING) a.review_sizing = true
@@ -845,7 +868,9 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
       // The plan was settled before the PR existed: an owner answer does not apply on this path.
       const ro = await ask(agent(readoptPrompt(n), { label: `readopt-${n}`, phase: 'Deliver', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: READOPT_SCHEMA }), `readopt-${n}`)
       if (ro === null || ro === undefined) { rows[n] = { issue: n, outcome: 'stopped', stage: 'readopt', detail: `readopt-${n} returned nothing` }; return }
-      if (ro.ok === true) {
+      // #811: an accepted PR still goes through the child when an amend is pending for it: landing as it stands would drop the amend.
+      const amendPending = !!(CONTS[n] && AMEND[String(n)] && !AMEND_SENT.has(String(n)))
+      if (ro.ok === true && !amendPending) {
         if (!ro.head || !ro.branch || !ro.worktree || !Array.isArray(ro.acceptance) || !ro.acceptance.length) {
           rows[n] = { issue: n, outcome: 'stopped', stage: 'readopt', detail: 'readopt reply lacks head, branch, worktree or acceptance' }
           return
@@ -856,7 +881,7 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
         rows[n] = await enqueue(INT, () => land(n, READY[n]))
         return
       }
-      if (ro.reason !== 'unaccepted') {
+      if (ro.ok !== true && ro.reason !== 'unaccepted') {
         rows[n] = { issue: n, outcome: 'stopped', stage: 'readopt', detail: ro.reason || 'other', ...(ro.detail ? { note: ro.detail } : {}) }
         return
       }
@@ -870,7 +895,7 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
     let r = null
     try {
       if (ahead) {
-        try { r = await workflow({ scriptPath: CHILD }, childArgs(n, laneName, 'plan')) } catch (e) { r = null }
+        try { r = amended(n, await workflow({ scriptPath: CHILD }, childArgs(n, laneName, 'plan'))) } catch (e) { r = null }
         if (r && r.stage === 'planned' && isObj(r.cont) && !terminalChild(r)) {
           CONTS[n] = r.cont
           if (breaker) { rows[n] = { issue: n, outcome: 'not-admitted', stage: 'planned' }; return }
@@ -878,18 +903,18 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
           PLAN.leave()
           held = RUN
           if (breaker) { rows[n] = { issue: n, outcome: 'not-admitted', stage: 'planned' }; return }
-          try { r = await workflow({ scriptPath: CHILD }, childArgs(n, laneName, 'ready')) } catch (e) { r = null }
+          try { r = amended(n, await workflow({ scriptPath: CHILD }, childArgs(n, laneName, 'ready'))) } catch (e) { r = null }
         }
         // D9: a live stop with no cont makes the forwarded or planned cont obsolete (terminalChild(null) is true: a dead child keeps it).
         if (!terminalChild(r) && !r.cont) delete CONTS[n]
       } else {
-        try { r = await workflow({ scriptPath: CHILD }, childArgs(n, laneName, 'ready')) } catch (e) { r = null }
+        try { r = amended(n, await workflow({ scriptPath: CHILD }, childArgs(n, laneName, 'ready'))) } catch (e) { r = null }
         if (r && r.stage === 'ineligible' && !terminalChild(r)) {
           // The direct lane rejected the issue: its cont would repeat the rejected attempt, so drop it and rerun once in the standard lane (setup re-adopts the worktree and the claim).
           delete CONTS[n]
           laneName = 'standard'
           rows[n] = { issue: n, outcome: 'eligible', lane: laneName }
-          try { r = await workflow({ scriptPath: CHILD }, childArgs(n, laneName, 'ready')) } catch (e) { r = null }
+          try { r = amended(n, await workflow({ scriptPath: CHILD }, childArgs(n, laneName, 'ready'))) } catch (e) { r = null }
         }
       }
       if (terminalChild(r)) trip(`child-${n}`)
@@ -987,6 +1012,9 @@ const relaunchArgs = () => {
   const conts = {}
   for (const n of open) if (CONTS[n]) conts[n] = CONTS[n]
   if (Object.keys(conts).length) a.conts = conts
+  const amend = {}
+  for (const n of open) if (conts[n] && AMEND[String(n)] && !(AMEND_APPLIED.has(String(n)) && !reviewOwed(conts[n]))) amend[n] = AMEND[String(n)]
+  if (Object.keys(amend).length) a.amend = amend
   if (UNATTENDED) a.unattended = true
   if (REVIEW_SIZING) a.review_sizing = true
   if (CLERK_MODEL !== 'sonnet') a.clerk_model = CLERK_MODEL
