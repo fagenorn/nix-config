@@ -4,7 +4,7 @@
 // A label with no reply gets the default for its kind (DEFAULTS below); a patch
 // is merged over that default; a reply "throw" throws, and a program throw prints { result: null, error, calls }. A folded label (NESTED) given an explicit object reply with no own key for a nested step
 // gets that step's default; a key present with null stays null. The fresh setup prompt (it names `--holder <host>/<id> `)
-// also gets the folded claim: holder (built from the merged host, unless the patch sets it), acquire, claim, answer (the owner's answer) and renew (the already_held claim renew); a resume setup gets none. Prints { result, calls: [{label, agentType, model, effort, schema, prompt}] }.
+// also gets the folded claim: holder (built from the merged host, unless the patch sets it), acquire, claim, answer (the owner's answer) and renew (the already_held claim renew); a resume setup gets none. Prints { result, calls: [{label, agentType, model, effort, schema, prompt}], logs: [each log() line] }.
 import { readFileSync } from 'node:fs'
 
 const program = readFileSync(process.argv[2], 'utf8')
@@ -115,6 +115,8 @@ const pipeline = () => { throw new Error('pipeline is not stubbed') }
 const workflow = () => { throw new Error('workflow is not stubbed') }
 const budget = { total: null, spent: () => 0, remaining: () => Infinity }
 const noop = () => {}
+const logs = []
+const log = line => { logs.push(String(line)) }
 
 const body = program.replace(/^export const meta\b/m, 'const meta')
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
@@ -123,8 +125,8 @@ const run = new AsyncFunction('agent', 'parallel', 'pipeline', 'phase', 'log', '
 let result = null
 let error = null
 try {
-  result = await run(agent, parallel, pipeline, noop, noop, scenario.args, budget, workflow)
+  result = await run(agent, parallel, pipeline, noop, log, scenario.args, budget, workflow)
 } catch (e) {
   error = String((e && e.message) || e)
 }
-process.stdout.write(JSON.stringify(error === null ? { result, calls } : { result: null, error, calls }))
+process.stdout.write(JSON.stringify(error === null ? { result, calls, logs } : { result: null, error, calls, logs }))
