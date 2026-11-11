@@ -1,0 +1,5 @@
+#!/bin/sh
+# Verify check for issue 810: a fresh login zsh puts the Nix profiles before /usr/bin and finds
+# python3 3.13 or later, also when it inherits a path_helper-ordered PATH.
+# Run it from the repository root, e.g. after a switch.
+PYTHONPATH=python exec python3 -m agent_tools.verification.verify_checks darwin-shell-path "$@"
