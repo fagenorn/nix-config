@@ -95,6 +95,7 @@ const REVIEW_SIZING = args.review_sizing === true
 const CLERK_MODEL = args.clerk_model === undefined ? 'sonnet' : args.clerk_model
 const CONTS = args.conts || {}
 const AMEND = args.amend || {}
+const AMEND_APPLIED = new Set() // #811: issues whose child reported the amend applied (`amended`): it needs no relaunch
 const AMEND_SENT = new Set() // #811: an issue's amend reaches at most one child call of a run
 
 const BASE_RULES = `
@@ -378,6 +379,7 @@ const PLAN = semaphore(MAX)
 // The owner's answer the batch itself carries: the relaunch's decisions only. A ticked decision prompt is read by the child.
 const answerOf = n => (DECISIONS && DECISIONS[String(n)]) || null
 // D12: a null child, or a stop that names dead agents, ends admission; a null field alone is an ordinary stop.
+const amended = (n, r) => { if (isObj(r) && r.amended === true) AMEND_APPLIED.add(String(n)); return r }
 const terminalChild = r => r === null || r === undefined ||
   (!['done', 'ready', 'planned'].includes(r.stage) && Array.isArray(r.dead_agents) && r.dead_agents.length > 0)
 // A stop the child raised after the merge (a re-adopted landing) still has close-out work its cont finishes; it is never settled (#714).
@@ -888,7 +890,7 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
     let r = null
     try {
       if (ahead) {
-        try { r = await workflow({ scriptPath: CHILD }, childArgs(n, laneName, 'plan')) } catch (e) { r = null }
+        try { r = amended(n, await workflow({ scriptPath: CHILD }, childArgs(n, laneName, 'plan'))) } catch (e) { r = null }
         if (r && r.stage === 'planned' && isObj(r.cont) && !terminalChild(r)) {
           CONTS[n] = r.cont
           if (breaker) { rows[n] = { issue: n, outcome: 'not-admitted', stage: 'planned' }; return }
@@ -896,18 +898,18 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
           PLAN.leave()
           held = RUN
           if (breaker) { rows[n] = { issue: n, outcome: 'not-admitted', stage: 'planned' }; return }
-          try { r = await workflow({ scriptPath: CHILD }, childArgs(n, laneName, 'ready')) } catch (e) { r = null }
+          try { r = amended(n, await workflow({ scriptPath: CHILD }, childArgs(n, laneName, 'ready'))) } catch (e) { r = null }
         }
         // D9: a live stop with no cont makes the forwarded or planned cont obsolete (terminalChild(null) is true: a dead child keeps it).
         if (!terminalChild(r) && !r.cont) delete CONTS[n]
       } else {
-        try { r = await workflow({ scriptPath: CHILD }, childArgs(n, laneName, 'ready')) } catch (e) { r = null }
+        try { r = amended(n, await workflow({ scriptPath: CHILD }, childArgs(n, laneName, 'ready'))) } catch (e) { r = null }
         if (r && r.stage === 'ineligible' && !terminalChild(r)) {
           // The direct lane rejected the issue: its cont would repeat the rejected attempt, so drop it and rerun once in the standard lane (setup re-adopts the worktree and the claim).
           delete CONTS[n]
           laneName = 'standard'
           rows[n] = { issue: n, outcome: 'eligible', lane: laneName }
-          try { r = await workflow({ scriptPath: CHILD }, childArgs(n, laneName, 'ready')) } catch (e) { r = null }
+          try { r = amended(n, await workflow({ scriptPath: CHILD }, childArgs(n, laneName, 'ready'))) } catch (e) { r = null }
         }
       }
       if (terminalChild(r)) trip(`child-${n}`)
@@ -1006,7 +1008,7 @@ const relaunchArgs = () => {
   for (const n of open) if (CONTS[n]) conts[n] = CONTS[n]
   if (Object.keys(conts).length) a.conts = conts
   const amend = {}
-  for (const n of open) if (conts[n] && AMEND[String(n)]) amend[n] = AMEND[String(n)]
+  for (const n of open) if (conts[n] && AMEND[String(n)] && !AMEND_APPLIED.has(String(n))) amend[n] = AMEND[String(n)]
   if (Object.keys(amend).length) a.amend = amend
   if (UNATTENDED) a.unattended = true
   if (REVIEW_SIZING) a.review_sizing = true

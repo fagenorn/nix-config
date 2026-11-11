@@ -5027,6 +5027,21 @@ class AmendTest(unittest.TestCase):
         self.assertNotIn("amend", result["cont"])
         self.assertNotIn("Amendment", json.dumps(result["cont"]))
 
+    def test_a_stop_after_the_amend_applied_says_so_and_a_refusal_does_not(self):
+        result, calls = run(args=dict(ARGS, cont=AMEND_CONT, amend=[AMEND_EDIT]), replies={"verify": None})
+        self.assertEqual(result["stage"], "verify")
+        self.assertIs(result["amended"], True)
+        F = {"severity": "important", "summary": "interface mismatch"}
+        kept = {k: v for k, v in AMEND_CONT.items() if k != "partial"}
+        kept.update(plan_reviewed=False, done=[], plan_findings={"rules": [F], "findings": [F], "rounds": 0})
+        for name, args, replies in (
+                ("plan planned again", dict(ARGS, cont=kept, amend=[AMEND_EDIT]), {}),
+                ("not applied", dict(ARGS, cont=AMEND_CONT, amend=[AMEND_EDIT]), {"amend": {"status": "refused", "edits": [], "refused": []}}),
+                ("lost claim", dict(ARGS, cont=AMEND_CONT, amend=[AMEND_EDIT]), {"renew-amend": {"verdict": "error", "detail": "x"}})):
+            with self.subTest(name):
+                result, _ = run(args=args, replies=replies)
+                self.assertNotIn("amended", result)
+
 
 if __name__ == "__main__":
     unittest.main()

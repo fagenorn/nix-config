@@ -2523,6 +2523,34 @@ class AmendTest(unittest.TestCase):
         self.assertNotIn("amend", child(calls, 1)["args"])
         self.assertNotIn("amend", result["relaunch"])
 
+    def test_an_applied_amend_is_not_kept_in_the_relaunch(self):
+        F = {"severity": "important", "summary": "design gap"}
+        stopped = dict(kept(1), plan_findings={"rules": [F], "findings": [F], "rounds": 0})
+        result, calls, _ = run(args=dict(ARGS, conts={"1": kept(1)}, amend={"1": [AMEND_EDIT]}),
+                               children={"1": {"stage": "plan-review", "amended": True, "cont": stopped}})
+        self.assertEqual(result["relaunch"]["conts"], {"1": stopped})
+        self.assertNotIn("amend", result["relaunch"])
+        # The relaunched child plans the kept plan again instead of refusing: it carries no amend.
+        retry = dict(child(calls, 1)["args"], cont=result["relaunch"]["conts"]["1"])
+        retry.pop("amend", None)
+        child_result, _ = run_child(retry)
+        self.assertNotEqual(child_result["stage"], "amend")
+
+    def test_an_amend_applied_by_the_plan_child_is_not_kept_when_the_ready_child_stops(self):
+        plan_stop = {"stage": "planned", "plan": {"tasks": [{"n": 1}]}, "amended": True, "cont": reviewed(1)}
+        result, calls, _ = run(args=dict(ARGS, conts={"1": kept(1)}, amend={"1": [AMEND_EDIT]}),
+                               children={"1": [plan_stop, {"stage": "task", "task": {"n": 2}, "cont": reviewed(1)}]})
+        self.assertEqual(result["relaunch"]["conts"], {"1": reviewed(1)})
+        self.assertNotIn("amend", result["relaunch"])
+
+    def test_one_issues_applied_amend_leaves_anothers_unapplied_amend_in_the_relaunch(self):
+        result, _, _ = run(args=dict(ARGS, issues=[1, 2], conts={"1": reviewed(1), "2": reviewed(2)},
+                                     amend={"1": [AMEND_EDIT], "2": [AMEND_EDIT]}),
+                           children={"1": {"stage": "task", "task": {"n": 2}, "amended": True, "cont": reviewed(1)},
+                                     "2": {"stage": "setup", "cont": reviewed(2)}})
+        self.assertEqual(result["relaunch"]["amend"], {"2": [AMEND_EDIT]})
+        self.assertEqual(set(result["relaunch"]["conts"]), {"1", "2"})
+
 
 if __name__ == "__main__":
     unittest.main()
