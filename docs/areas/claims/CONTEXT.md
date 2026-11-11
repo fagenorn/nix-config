@@ -21,7 +21,7 @@ _Avoid_: lock, reservation
 An owner-action marker that carries questions a batch needs the owner to answer, each with tick boxes. A fully ticked prompt waits for a run to read it.
 
 **Land lock**:
-The single claim-like lease a delivery must hold to merge into the integration branch, so that two deliveries do not land at once. It is acquired with a wait and released after the merge.
+The single claim-like lease a delivery must hold to merge into the integration branch, so that two deliveries do not land at once. It is acquired with a wait and released after the merge. A release holds it too, from its fixed head until it has merged into the default branch, so that no delivery lands meanwhile.
 _Avoid_: merge lock
 
 **Marker**:
