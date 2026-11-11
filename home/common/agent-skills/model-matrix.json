@@ -166,7 +166,7 @@
       "id": "ship-release-owner",
       "path": "home/common/agent-skills/skills/ship-release/SKILL.md",
       "marker": "<!-- agent-dispatch: id=ship-release-owner role=ship-owner model=opus effort=high -->",
-      "call": "Agent(subagent_type=\"general-purpose\", model=\"opus\", effort=\"high\") owns the release through final reporting.",
+      "call": "Agent(subagent_type=\"general-purpose\", model=\"opus\", effort=\"high\") owns the release through the preview.",
       "role": "ship-owner",
       "model": "opus",
       "effort": "high",

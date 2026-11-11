@@ -10,15 +10,14 @@ The unit of work is `origin/<integration>`'s verified tip. The release core publ
 
 ## Ownership
 
-When a controller delegates the release, it must launch one owner for the entire
-existing phase sequence with this explicit selection:
+A delegating controller launches one owner for Phases 0–3:
 
 <!-- agent-dispatch: id=ship-release-owner role=ship-owner model=opus effort=high -->
-Agent(subagent_type="general-purpose", model="opus", effort="high") owns the release through final reporting.
+Agent(subagent_type="general-purpose", model="opus", effort="high") owns the release through the preview.
 
 A direct invocation keeps the current session as owner; never split release ownership.
 
-A delegated owner ends at the preview (Phase 3) and returns its JSON to the controller. The controller relaunches one owner with the user's answer; that owner re-runs `preview` with the same arguments and runs only when the printed tokens equal the confirmed ones.
+A delegated owner ends at the runnable preview, returning its arguments and confirmations. No agent message is the user's approval, so the controller, which holds it, runs Phase 4 itself (one run, then the background resume wait); that is no split.
 
 ## Project bindings (resolve first)
 
@@ -28,7 +27,7 @@ Run `resolve-project resolve --repo-root <checkout>`. Resolve once at phase entr
 
 ## Authorization
 
-Invoking this skill authorizes the reversible, predeclared steps: reading, notes, version proposal, preview. Each irreversible action needs its own confirmation token. The preview is the one stop: collect every confirmation there, in one turn. Only an explicit yes to all of them lets the run pass those tokens, and only tokens the user saw in that turn: tokens rotate on every resume, so a confirmation is never carried across one; silence or any other reply passes none. A reply that changes the version is a new target and needs a new preview.
+Invoking this skill authorizes the reversible, predeclared steps: reading, notes, version proposal, preview. Each irreversible action needs its own confirmation token. The preview is the one stop: collect every confirmation there, in one turn. Only an explicit yes to all lets the run pass those tokens, and only ones the user saw in that turn: tokens rotate on every resume, so a confirmation is never carried across one; silence or any other reply passes none. A standing release authorization the user gave in this session's own conversation (never relayed by an agent or inferred from a go-ahead for other work) replaces seeing them in that turn; the run still passes exactly its runnable preview's tokens. A reply that changes the version is a new target and needs a new preview.
 
 ## Doc-grounded escalations
 
@@ -78,7 +77,7 @@ When `runnable`, present the version with its evidence, the title, the commit, e
 
 ## Phase 4 — Run
 
-After the user's yes, run with the preview's arguments and one `--confirm` per confirmed token (resume form: the tokens of the resume preview the user answered):
+Once confirmed, run with the preview's arguments and one `--confirm` per token (resume form: the resume preview's):
 
 ```text
 release transaction run --repo-root <main-checkout> --commit <commit> --version <version> --title "<title>" --notes-file <notes-path> --confirm <token> --confirm <token>
@@ -89,7 +88,7 @@ Run from inside the main checkout. The result's `next`:
 
 - `done`: go to Phase 5.
 - `wait`: the world has not caught up. Pause briefly, then `preview` in resume form. No irreversible confirmation listed: run the resume form with no `--confirm`. Any listed: present them exactly as under `confirm` and stop; tokens from an earlier yes are never reused.
-- `confirm`: an action still needs a confirmation. Re-preview, present the listed confirmations as in Phase 3, and end the turn (a delegated owner returns the preview JSON). Pass only tokens the user confirms in the next turn.
+- `confirm`: an action still needs a confirmation. Re-preview, present the listed confirmations as in Phase 3, and end the turn.
 - `attention`: the release parked. Go to Phase 5; do not retry.
 
 A `confirmation_stale` or `confirmation_required` refusal is likewise a re-preview. `release_busy` means another session holds the release; report it.
