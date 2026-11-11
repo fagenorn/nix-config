@@ -41,11 +41,21 @@ class LinuxUnit(unittest.TestCase):
 
     def test_the_service_runs_the_console_command_and_restarts_it_on_exit(self):
         # home-manager 25.11 normalizes ExecStart and Environment to lists.
-        self.assertEqual(self.got["service"]["Service"], {
+        service = {k: v for k, v in self.got["service"]["Service"].items() if k != "RestartSec"}
+        self.assertEqual(service, {
             "ExecStart": [self.got["command"]],
             "Environment": [f"PATH={self.got['path']}"],
             "Restart": "always",
         })
+
+    def test_the_service_retries_a_busy_port_without_limit(self):
+        # Without these, five failed starts inside the default interval leave the unit failed for good.
+        unit = self.got["service"]
+        delay = unit["Service"]["RestartSec"]
+        self.assertRegex(str(delay), r"^\d+$")
+        self.assertGreaterEqual(int(delay), 2)
+        self.assertEqual(unit["Service"]["Restart"], "always")
+        self.assertEqual(str(unit["Unit"]["StartLimitIntervalSec"]), "0")
 
     def test_the_service_starts_with_the_users_session(self):
         self.assertEqual(self.got["service"]["Install"]["WantedBy"], ["default.target"])

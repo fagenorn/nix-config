@@ -3,7 +3,12 @@
 #
 # On NixOS it is the systemd user unit `agent-console` (`Restart=always`,
 # `WantedBy=default.target`); its log is in the journal
-# (`journalctl --user -u agent-console`). On darwin it is the nix-darwin agent in
+# (`journalctl --user -u agent-console`). The unit retries without limit: a console
+# that cannot bind its port (a hand-started one still holds it at activation) fails
+# at once, and with systemd's default start limit five such failures inside ten
+# seconds leave the unit failed until the next activation, so `RestartSec` spaces the
+# retries and `StartLimitIntervalSec = 0` removes the limit, and the unit serves
+# within one interval of the port being freed. On darwin it is the nix-darwin agent in
 # `hosts/common/darwin-console.nix`, which reads `agentConsole.command` and
 # `agentConsole.path` from here so both hosts run one command.
 #
@@ -45,11 +50,16 @@ in
     }
     (lib.mkIf pkgs.stdenv.isLinux {
       systemd.user.services.agent-console = {
-        Unit.Description = "agent console: the loopback status page (issue 856)";
+        Unit = {
+          Description = "agent console: the loopback status page (issue 856)";
+          # Never give up on a busy port (issue 884); see the module comment.
+          StartLimitIntervalSec = 0;
+        };
         Service = {
           ExecStart = config.agentConsole.command;
           Environment = [ "PATH=${config.agentConsole.path}" ];
           Restart = "always";
+          RestartSec = 3;
         };
         Install.WantedBy = [ "default.target" ];
       };
