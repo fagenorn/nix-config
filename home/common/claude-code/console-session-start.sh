@@ -1,5 +1,5 @@
 #!/bin/sh
-# The console's SessionStart hook (issue 857, ADR-console-003). SessionStart takes
+# The console's SessionStart hook (issue 857, ADR-console-004). SessionStart takes
 # no HTTP hook, so this command posts the hook input from stdin to the console.
 # The build swaps in dash and a store curl. -q (first) skips any curlrc and
 # --noproxy keeps a proxy off loopback; the answer and any error are discarded,

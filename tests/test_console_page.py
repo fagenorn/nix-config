@@ -5,6 +5,7 @@ import json
 import re
 import shutil
 import subprocess
+import tempfile
 import tomllib
 import unittest
 from datetime import datetime, timedelta, timezone
@@ -14,6 +15,89 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PAGE = REPO_ROOT / "python/agent_tools/console/page.html"
 PYPROJECT = REPO_ROOT / "python/pyproject.toml"
 HARNESS = REPO_ROOT / "tests/fixtures/console/page-harness.js"
+
+INBOX_HARNESS = r"""
+const ids = new Set(JSON.parse(process.argv[3]));
+class Node {
+  constructor(tag) {
+    this.tagName = tag; this.className = ""; this.id = ""; this.href = "";
+    this.rel = ""; this.open = false; this.children = [];
+  }
+  appendChild(child) { this.children.push(child); return child; }
+  replaceChildren(...nodes) { this.children = nodes; }
+  set textContent(text) { this.children = [{text: String(text)}]; }
+  get textContent() {
+    return this.children.map((c) => c.text !== undefined ? c.text : c.textContent).join("");
+  }
+}
+const ELEMENTS = {};
+const document = {
+  createElement: (tag) => new Node(tag),
+  getElementById(id) {
+    if (!ids.has(id)) return null;
+    if (id === "quiet-icon") {
+      return {content: {firstElementChild: {cloneNode: () => new Node("svg")}}};
+    }
+    if (!(id in ELEMENTS)) ELEMENTS[id] = new Node("div");
+    return ELEMENTS[id];
+  },
+  querySelector: () => null,
+  querySelectorAll: () => [],
+};
+const kept = {};
+class EventSource {
+  addEventListener(name, fn) { kept[name] = fn; }
+}
+"""
+TAIL = r"""
+const tree = (n) => n === null ? null : {
+  tag: n.tagName, cls: n.className, text: n.textContent, href: n.href, rel: n.rel,
+  children: n.children.filter((c) => c.tagName !== undefined).map(tree),
+};
+kept.view({data: JSON.stringify(JSON.parse(process.argv[4]))});
+console.log(JSON.stringify({
+  statement: tree(ELEMENTS.statement || null),
+  inbox: tree(ELEMENTS.inbox || null),
+}));
+"""
+
+
+def render_page(view: dict) -> dict:
+    """The `#statement` and `#inbox` trees the page draws for `view`, run under node."""
+    node = shutil.which("node")
+    if node is None:
+        raise AssertionError("node is not on PATH; the page render tests need it")
+    html = PAGE.read_text(encoding="utf-8")
+    script = re.search(r"(?s)<script>(.*?)</script>", html).group(1)
+    ids = re.findall(r'id="([^"]+)"', html)
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "render.js"
+        path.write_text(INBOX_HARNESS + script + TAIL, encoding="utf-8")
+        done = subprocess.run(
+            [node, str(path), "-", json.dumps(ids), json.dumps(view)],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+    if done.returncode != 0:
+        raise AssertionError(f"the page failed under node: {done.stderr}")
+    return json.loads(done.stdout)
+
+
+def walk(tree: dict):
+    yield tree
+    for child in tree["children"]:
+        yield from walk(child)
+
+
+def item(key: str, **fields) -> dict:
+    base = {
+        "type": "inbox_item", "key": key, "project_id": "owner/p00", "issue": 7,
+        "url": "/" + key.lower(), "reason": "decision", "question": f"Question {key}?",
+        "questions": [], "items": [], "answered": False, "held_work": 1,
+        "waiting_since": "2026-11-10T08:00:00+00:00", "stale": False,
+        "read_at": "2026-11-10T08:30:00+00:00",
+    }
+    base.update(fields)
+    return base
 
 
 class PageTest(unittest.TestCase):
@@ -104,6 +188,101 @@ class PageTest(unittest.TestCase):
         self.assertNotIn("onmessage", self.text)
         self.assertIn('<section id="projects"', self.text)
 
+    def test_the_page_renders_the_inbox(self) -> None:
+        view = {
+            "project_count": 0, "entries": [], "unmanaged": [],
+            "statement": {"inbox_items": 2, "headline": "2 things need you",
+                          "sentence": "s", "stale": True},
+            "inbox": {
+                "open": [
+                    item("X", held_work=3, questions=[
+                        {"question": "Which database?", "options": ["sqlite", "postgres"],
+                         "chosen": "postgres"},
+                        {"question": "Which port?", "options": ["80", "8080"],
+                         "chosen": None},
+                    ]),
+                    item("Y", reason="conflict", question="The branch conflicts",
+                         items=["Merge conflict in flake.lock"], held_work=1, stale=True,
+                         read_at="2026-11-10T09:00:00+00:00"),
+                ],
+                "answered": [item("Z", answered=True, question="Already answered?")],
+            },
+        }
+        result = render_page(view)
+        self.assertIsNotNone(result["inbox"])
+        h1 = next(n for n in walk(result["statement"]) if n["tag"] == "h1")
+        self.assertEqual((h1["text"], h1["cls"]), ("2 things need you", "needs"))
+        text = result["inbox"]["text"]
+        for expected in ("Question X?", "Which database?", "Which port?",
+                         "chosen: postgres", "holds 3 issues", "waiting since ",
+                         "The branch conflicts", "Merge conflict in flake.lock",
+                         "Answered, waiting for the agent"):
+            self.assertIn(expected, text)
+        self.assertEqual(text.count("read at "), 1)
+        links = [(n["text"], n["href"], n["rel"])
+                 for n in walk(result["inbox"]) if n["tag"] == "a"]
+        self.assertEqual(links, [("Answer on the tracker", f"/{k}", "noreferrer")
+                                 for k in "xyz"])
+
+    def test_later_rows_keep_their_questions_and_issue(self) -> None:
+        view = {
+            "project_count": 0, "entries": [], "unmanaged": [],
+            "statement": {"inbox_items": 3, "headline": "3 things need you",
+                          "sentence": "s", "stale": False},
+            "inbox": {
+                "open": [
+                    item("A", issue=11, question="Decisions are needed."),
+                    item("B", issue=22, question="Decisions are needed.", questions=[
+                        {"question": "Which cache?", "options": ["redis", "memcached"],
+                         "chosen": "redis"}]),
+                    item("C", issue=33, question="Decisions are needed.", questions=[
+                        {"question": "Which queue?", "options": ["sqs", "nats"],
+                         "chosen": None}]),
+                ],
+                "answered": [],
+            },
+        }
+        rows = next(n for n in walk(render_page(view)["inbox"]) if n["cls"] == "rest")
+        first, second = rows["children"]
+        self.assertIn("owner/p00 #22", first["text"])
+        self.assertIn("Which cache?", first["text"])
+        self.assertIn("chosen: redis", first["text"])
+        self.assertIn("owner/p00 #33", second["text"])
+        self.assertIn("Which queue?", second["text"])
+        self.assertIn("nats", second["text"])
+
+    def test_an_answered_stale_item_shows_when_it_was_last_read(self) -> None:
+        view = {
+            "project_count": 0, "entries": [], "unmanaged": [],
+            "statement": {"inbox_items": 0, "headline": "h", "sentence": "s", "stale": True},
+            "inbox": {"open": [], "answered": [
+                item("Z", answered=True, stale=True, read_at="2026-11-10T09:15:00+00:00"),
+                item("W", answered=True),
+            ]},
+        }
+        done = next(n for n in walk(render_page(view)["inbox"]) if n["cls"] == "done")
+        stale, fresh = done["children"]
+        self.assertIn("read at ", stale["text"])
+        self.assertNotIn("read at ", fresh["text"])
+
+    def test_an_empty_inbox_renders_no_item(self) -> None:
+        view = {
+            "project_count": 0, "entries": [], "unmanaged": [],
+            "statement": {"inbox_items": 0, "headline": "Nothing needs you",
+                          "sentence": "s", "stale": False},
+            "inbox": {"open": [], "answered": []},
+        }
+        result = render_page(view)
+        self.assertIsNotNone(result["inbox"])
+        self.assertEqual([n for n in walk(result["inbox"]) if n["tag"] == "a"], [])
+        self.assertNotIn("Answered, waiting for the agent", result["inbox"]["text"])
+        h1 = next(n for n in walk(result["statement"]) if n["tag"] == "h1")
+        self.assertEqual(h1["cls"], "")
+
+    def test_the_tracker_link_is_the_only_href(self) -> None:
+        self.assertEqual(len(re.findall(r"\.href\s*=", self.text)), 1)
+        self.assertIsNotNone(re.search(r"\.href = item\.url;", self.text))
+
 
 def render(steps: list) -> list:
     node = shutil.which("node")
@@ -170,7 +349,9 @@ def project(number: int, sessions: list, quiet: bool = False, ago=None) -> dict:
 
 def view(entries: list, unmanaged: list | None = None, count: int | None = None) -> dict:
     return {
-        "statement": {"inbox_items": 0, "headline": "Nothing needs you", "sentence": "ok"},
+        "statement": {"inbox_items": 0, "headline": "Nothing needs you", "sentence": "ok",
+                      "stale": False},
+        "inbox": {"open": [], "answered": []},
         "project_count": len(entries) if count is None else count,
         "entries": entries,
         "unmanaged": unmanaged or [],

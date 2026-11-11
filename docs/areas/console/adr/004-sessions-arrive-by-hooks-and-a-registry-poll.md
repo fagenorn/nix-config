@@ -1,4 +1,4 @@
-# ADR-console-003 — Sessions arrive by hooks and a five-second registry poll
+# ADR-console-004 — Sessions arrive by hooks and a five-second registry poll
 
 - **Status:** accepted
 - **Decided in:** #829, #837, #838, #857

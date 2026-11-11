@@ -222,6 +222,17 @@ def answered(marker: fm.Marker) -> bool:
     return bool(questions) and all(q["chosen"] is not None for q in questions)
 
 
+def marker_sentence(marker: fm.Marker) -> str:
+    """Line 2 of the marker body (the sentence `fm.render` writes) with whitespace collapsed, or `""`."""
+    lines = marker.body.splitlines()
+    return " ".join(lines[1].split()) if len(lines) > 1 else ""
+
+
+def marker_items(marker: fm.Marker) -> list[str]:
+    """The bullet lines after the sentence: the items of a `conflict` or `needs-label` marker."""
+    return [line[2:] for line in marker.body.splitlines()[2:] if line.startswith("- ")]
+
+
 def wanted_labels(markers: list[fm.Marker]) -> tuple[bool, bool, set[str]]:
     """`(owner_action, owner_answered, clears)` the live owner-action markers of a trusted listing want.
 
@@ -408,8 +419,7 @@ def _status(args: Any) -> tuple[int, dict[str, Any]]:
     if not live:
         return 0, result(args, "none", items=[])
     marker = live[0]
-    items = [line[2:] for line in marker.body.splitlines()[2:] if line.startswith("- ")]
-    return 0, result(args, "open", marker.comment_id, items=items)
+    return 0, result(args, "open", marker.comment_id, items=marker_items(marker))
 
 
 def run(args: Any) -> tuple[int, dict[str, Any]]:

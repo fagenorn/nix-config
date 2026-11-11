@@ -279,7 +279,7 @@ let
     fi
   '';
 
-  # Console hooks (#857, ADR-console-003): the console at 127.0.0.1:27184 hears five events
+  # Console hooks (#857, ADR-console-004): the console at 127.0.0.1:27184 hears five events
   # over HTTP hooks. SessionStart takes no HTTP hook (#829), so it runs a dash-and-curl
   # relay: a Python process alone costs more than the 10 ms budget. The template's
   # shebang and curl are swapped for store paths.
