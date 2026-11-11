@@ -77,7 +77,7 @@ that listing is never undone.
 
 The `land` subcommand (`land acquire|release|status`, issue 629) is the cross-host land lock
 of `agent_tools.claims.forge_land_lock`: `main` routes it there and reports its usage errors in its
-own one-line shape.
+own one-line shape. `land acquire --release` (issue 875) acquires it for a release pull request.
 
 The `owner-action` subcommand (`owner-action post|end|status`, issue 636, D6) is
 `agent_tools.claims.forge_owner_action`: the decision, conflict and needs-label markers a batch posts
@@ -183,6 +183,7 @@ def build_parser() -> argparse.ArgumentParser:
         sub.add_argument("--sha", required=True, type=SHA)
         if name == "acquire":
             sub.add_argument("--wait", action="store_true")
+            sub.add_argument("--release", action="store_true")
     return parser
 
 

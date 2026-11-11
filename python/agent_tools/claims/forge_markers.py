@@ -19,7 +19,7 @@ when it is not itself an `end` marker, carries no `released` field and no `end` 
 same listing names it, so a delayed edit that rewrites an older body can drop a field but can
 never bring an ended marker back.
 
-Ref primitives (issue 629): `read_ref`, `create_ref`, `repo_node_id` and `cas_ref`, a
+Ref primitives (issue 629): `read_ref`, `create_ref`, `repo_node_id`, `default_branch` and `cas_ref`, a
 compare-and-swap through the GraphQL `updateRefs` mutation with `force: true` (the oid pair is
 the guard; an `after` of `ZERO_OID` deletes). Any CAS error, timeout or lie is "not done": the
 caller re-reads the ref to learn what happened and keeps the returned `ForgeError` (its code and
@@ -80,6 +80,7 @@ class Pull:
     base_ref: str
     head_ref: str
     head_sha: str
+    same_repo: bool = False  # the head branch lives in the base repository, not in a fork
 
 
 def render(kind: str, fields: Mapping[str, str], sentence: str, extra: str = "") -> str:
@@ -290,6 +291,14 @@ def repo_node_id(slug: str) -> str:
     return node_id
 
 
+def default_branch(slug: str) -> str:
+    _, out = forge_api.run_gh(["api", f"repos/{slug}", "--jq", ".default_branch"])
+    branch = out.strip()
+    if not branch or branch == "null":
+        raise ForgeError("payload_invalid", "repository default branch")
+    return branch
+
+
 def cas_ref(slug: str, repository_id: str, ref: str, before: str, after: str) -> ForgeError | None:
     """Move `ref` from `before` to `after` (`ZERO_OID` deletes) through `updateRefs`.
 
@@ -324,7 +333,10 @@ def _pull(item: Any) -> Pull:
             or item.get("state") not in ("open", "closed")
             or not all(isinstance(r, str) for r in refs)):
         raise ForgeError("payload_invalid", "pull entry")
-    return Pull(number, item["state"], item.get("merged_at") is not None, *refs)
+    names = [side.get("repo").get("full_name") if isinstance(side.get("repo"), dict) else None
+             for side in (base, head)]
+    return Pull(number, item["state"], item.get("merged_at") is not None, *refs,
+                same_repo=isinstance(names[0], str) and names[0] == names[1])
 
 
 def commit_pulls(slug: str, sha: str) -> list[Pull]:
@@ -359,6 +371,21 @@ def closed_pulls_headed(slug: str, branch: str, sha: str) -> list[Pull]:
         if len(payload) < 100:
             break
     return found
+
+
+def closed_pulls_from(slug: str, branch: str, sha: str) -> list[Pull]:
+    """The closed pull requests whose head is `branch` of this repository at `sha`, whatever their base.
+
+    One page: the 100 most recently updated closed pull requests headed by `branch`. The `head`
+    filter names the owner, and `same_repo` drops a same-owner fork's branch of that name.
+    """
+    owner = slug.split("/", 1)[0]
+    payload = forge_api.gh_json(["api", f"repos/{slug}/pulls?state=closed&head={quote(owner, safe='')}:"
+                                 f"{quote(branch, safe='/')}&sort=updated&direction=desc&per_page=100"])
+    if not isinstance(payload, list):
+        raise ForgeError("payload_invalid", "closed pulls are not an array")
+    return [pull for pull in map(_pull, payload)
+            if pull.head_sha == sha and pull.head_ref == branch and pull.same_repo]
 
 
 def closing_issues(slug: str, pr: int) -> list[int]:
