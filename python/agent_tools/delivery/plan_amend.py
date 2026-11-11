@@ -112,6 +112,15 @@ def amendment_line(stop: str, rel: str, find: str, replace: str) -> str:
             f"{json.dumps(replace, ensure_ascii=False)}.")
 
 
+def _split_lines(text: str) -> list[str]:
+    """`text` as lines with their terminators; only CRLF, LF and CR end a line.
+
+    Unlike `str.splitlines`, U+2028, U+2029 and U+0085 (which the recorded line may
+    hold, `json.dumps` leaving them unescaped) do not split a line.
+    """
+    return re.findall(r"[^\r\n]*(?:\r\n|\n|\r)|[^\r\n]+", text)
+
+
 def _section(lines: list[str]) -> tuple[int, int] | None:
     """(heading index, end index) of the Amendments section, or None."""
     for start, line in enumerate(lines):
@@ -125,7 +134,7 @@ def _section(lines: list[str]) -> tuple[int, int] | None:
 
 def insert_amendments(text: str, lines: list[str]) -> str:
     """`text` with `lines` added to its Amendments section (created when absent)."""
-    parts = text.splitlines(keepends=True)
+    parts = _split_lines(text)
     section = _section(parts)
     if section is None:
         if not text.endswith("\n"):
@@ -143,7 +152,7 @@ def insert_amendments(text: str, lines: list[str]) -> str:
 
 
 def _recorded(text: str) -> list[str]:
-    parts = text.splitlines(keepends=True)
+    parts = _split_lines(text)
     section = _section(parts)
     if section is None:
         return []

@@ -199,6 +199,26 @@ class PlanAmendTest(unittest.TestCase):
                 (self.dir / "task-2.md").write_bytes(b"Step 3: old rule here.\n")
                 (self.dir / "plan.md").write_bytes(b"# Plan\n\nD5 says old.\n")
 
+    def test_a_recorded_line_with_unicode_line_separators_is_still_skipped(self):
+        # str.splitlines also breaks on U+2028, U+2029 and U+0085; the section is
+        # line-structured by CR and LF only, so such a character never splits a line.
+        for mark in ("\u2028", "\u2029", "\u0085"):
+            for name, replace in {"in find and replace": f"a{mark}b, amended",
+                                  "only in replace": f"c{mark}d"}.items():
+                with self.subTest(mark=repr(mark), case=name):
+                    (self.dir / "task-2.md").write_bytes(
+                        f"Step: a{mark}b here.\n".encode("utf-8"))
+                    (self.dir / "plan.md").write_bytes(b"# Plan\n")
+                    request = self.request([self.E("task-2.md", f"a{mark}b", replace)])
+                    code, _ = self.apply(request)
+                    self.assertEqual(code, 0)
+                    after_first = self.snapshot()
+                    code, out = self.apply(request)
+                    self.assertEqual(code, 0)
+                    self.assertEqual(out["status"], "applied")
+                    self.assertIs(out["edits"][0]["already"], True)
+                    self.assertEqual(self.snapshot(), after_first)
+
     def test_bad_input_exits_2_and_writes_nothing(self):
         good = self.request([self.E("task-2.md", "old rule", "new rule")])
 
