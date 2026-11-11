@@ -13,6 +13,7 @@ P1: a checkout's `origin` is read by decoding `.git/config` in-process with git'
 (quoting, comments, continuations, case rules), because a regular expression over the text
 accepts what git would reject and rejects what git would accept.
 P2: identity never starts a process, so the statusline can ask it on every render at no cost.
+`git_common_dir` names a checkout's common git dir, for the console's activity reading.
 P3: one cache file per repository, `<state>/owner-actions/<owner>/<name>.json`, written atomically
 as bytes through `agent_platform.write_atomically` as `{"schema_version": 2, "repo", "count",
 "oldest", "answered"}`; its mtime is the age of the data, an entry that does not parse to exactly
@@ -261,6 +262,15 @@ def checkout_slug(path: str | os.PathLike) -> str | None:
         url = _origin_url(_config_path(git_dir))
         slug = None if url is None else github_slug(url)
         return slug if slug is not None and SLUG_PATTERN.fullmatch(slug) else None
+    except (OSError, UnicodeDecodeError, ValueError):
+        return None
+
+
+def git_common_dir(path: str | os.PathLike) -> Path | None:
+    """The common git dir of the checkout containing `path` (the main `.git` for a linked worktree), or None."""
+    try:
+        git_dir = _git_dir(Path(path))
+        return None if git_dir is None else _config_path(git_dir).parent
     except (OSError, UnicodeDecodeError, ValueError):
         return None
 

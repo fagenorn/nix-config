@@ -191,6 +191,19 @@ class StatusTest(Base):
         self.assertEqual(run(*action("status"))[1]["verdict"], "open")
         self.assertEqual(run(*action("status", "conflict"))[1]["verdict"], "none")
 
+    def test_marker_items_are_the_bullet_lines_after_the_sentence(self):
+        marker = fm.parse(comment(30, marker_body("conflict", items=("Merge conflict in flake.lock", "second"))))
+        self.assertEqual(foa.marker_items(marker), ["Merge conflict in flake.lock", "second"])
+        self.store(comment(30, marker_body("conflict", items=("Merge conflict in flake.lock", "second"))))
+        self.assertEqual(run(*action("status", "conflict"))[1]["items"], ["Merge conflict in flake.lock", "second"])
+
+    def test_marker_sentence_is_the_second_line(self):
+        marker = fm.parse(comment(30, marker_body("conflict", items=("Merge conflict in flake.lock", "second"))))
+        self.assertEqual(foa.marker_sentence(marker), foa.SENTENCES["conflict"])
+        spaced = fm.parse(comment(31, fm.render("owner-action", {"issue": str(ISSUE), "reason": "conflict",
+                                                                 "holder": ME}, "  Two   spaces  ")))
+        self.assertEqual(foa.marker_sentence(spaced), "Two spaces")
+
 
 class DecisionBoxTest(Base):
     def post_q(self, value=QUESTIONS, *extra):

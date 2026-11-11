@@ -23,6 +23,7 @@
 | Activation unit | Release |
 | Adapter | Release |
 | Adoption | Project contract |
+| Answered item | Console |
 | Base policy | Guard |
 | Blocking edge | Claims |
 | Cache proxy | Hosts |
@@ -40,6 +41,7 @@
 | Detaching word | Guard |
 | Fleet registry | Project contract |
 | Held issue | Verification |
+| Held work | Console |
 | Inbox item | Console |
 | Keepalive ping | Hosts |
 | Land lock | Claims |
@@ -72,6 +74,7 @@
 | Verification pass | Verification |
 | Verified tree | Verification |
 | Verify block | Verification |
+| Waiting since | Console |
 
 ## Relationships
 
@@ -83,3 +86,4 @@
 - **Hosts → Verification**: every host runs **Verification passes** on a schedule.
 - **Project contract → every area**: each command reads the **ResolvedProject**.
 - **Console → Project contract**: the console's projects are the **Fleet registry**'s entries.
+- **Console → Claims**: an **Inbox item** from the tracker is a live **Owner-action marker**, read by the claims area's marker reader.

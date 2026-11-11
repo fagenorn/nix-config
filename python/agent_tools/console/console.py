@@ -4,7 +4,8 @@
 the desk page, `GET /api/state` and the `GET /api/stream` update stream
 (`agent_tools.console.service` holds the routes and the stream's frame). The event log is
 `~/.agents/state/console/events.sqlite3`; the fleet registry it follows, and never writes, is
-`~/.agents/state/fleet/registry.json`.
+`~/.agents/state/fleet/registry.json`. Every two minutes it also reads the owner-action items of
+each active project from the tracker into the log (`agent_tools.console.service` holds the rules).
 
 Once serving it prints exactly one stdout line, `console: serving http://127.0.0.1:<port>/`.
 SIGTERM or SIGINT closes the service and exits 0. A port that cannot be bound is stderr
@@ -21,7 +22,7 @@ import sqlite3
 import sys
 import threading
 
-from agent_tools.console import service
+from agent_tools.console import inbox, service
 from agent_tools.console.event_log import EventLogError
 
 
@@ -46,7 +47,8 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
         console = service.ConsoleService(
-            service.default_store(), service.default_registry(), port=args.port)
+            service.default_store(), service.default_registry(), port=args.port,
+            tracker=inbox.read_items)
     except (EventLogError, sqlite3.Error) as error:
         print(f"console: event log unusable: {error}", file=sys.stderr)
         return 1
