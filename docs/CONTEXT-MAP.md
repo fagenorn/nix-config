@@ -11,7 +11,7 @@
 | Project contract | [CONTEXT](./areas/project-contract/CONTEXT.md) | The authored project contract, its resolution, adoption and platform manifest | `python/agent_tools/project_contract/**`, `home/common/agent-skills/platform-manifest.json`, `.agents/project.json` |
 | Guard | [CONTEXT](./areas/guard/CONTEXT.md) | The lifecycle guard that adjudicates pushes, PRs, merges and releases | `home/common/claude-code/lifecycle_guard.py`, `python/agent_tools/guard/**` |
 | Hosts | [CONTEXT](./areas/hosts/CONTEXT.md) | Per-host agent runtime: Claude Code install, accounts, cache proxy, launchers | `home/common/claude-code/default.nix`, `home/common/claude-code/accounts/**`, `python/agent_tools/hosts/**`, `lib/agent-tools.nix`, `lib/agent-plugins.nix`, `home/common/agent-tools/**`, `patches/agent-plugins/**`, `home/linux/claude-local/**` |
-| Console | [CONTEXT](./areas/console/CONTEXT.md) | The local page and service saying whether the owner is needed | `python/agent_tools/console/**`, `home/common/console/**`, `hosts/common/darwin-console.nix` |
+| Console | [CONTEXT](./areas/console/CONTEXT.md) | The local page and service saying whether the owner is needed | `python/agent_tools/console/**`, `home/common/console/**`, `hosts/common/darwin-console.nix`, `home/common/claude-code/console-session-start.sh` |
 | System | [CONTEXT](./areas/system/CONTEXT.md) | Decisions spanning areas | `*` |
 
 ## Terms
@@ -51,6 +51,8 @@
 | Light lane | Delivery |
 | Marker | Claims |
 | Migration | Project contract |
+| Not yet managed | Console |
+| Outside sprints | Console |
 | Owner prompt | Verification |
 | Owner-action marker | Claims |
 | Plan-gated floor | Guard |
@@ -67,6 +69,7 @@
 | Removal | Project contract |
 | ResolvedProject | Project contract |
 | Row check | Guard |
+| Session | Console |
 | Stale claim | Claims |
 | Suite member | Delivery |
 | Transaction | Release |

@@ -9,8 +9,11 @@ working directory in a temporary directory and the calling session's account
 variables removed.
 """
 
+import fnmatch
 import json
 import os
+import re
+import socket
 import subprocess
 import sys
 import tempfile
@@ -147,6 +150,66 @@ class ClaudeLaunchersInstalledTest(unittest.TestCase):
     def test_only_the_two_launchers_are_installed(self):
         names = {"claude", "claude-account", "claude-" "orchestrate"}
         self.assertEqual({p.name for p in self.bin.iterdir()} & names, {"claude", "claude-account"})
+
+
+class ConsoleHooksInstalledTest(unittest.TestCase):
+    """Issue 857: the session hooks post to the console, SessionStart through the relay script."""
+
+    URL = "http://127.0.0.1:27184/api/hooks"
+    EVENTS = ("Stop", "StopFailure", "PermissionRequest", "Notification", "SessionEnd")
+
+    @classmethod
+    def setUpClass(cls):
+        path = os.environ.get(SETTINGS_ENV)
+        if path is None:
+            raise unittest.SkipTest(
+                f"{SETTINGS_ENV} is unset; run `{INSTALLED_RECIPE}` to check "
+                "the settings the Nix build generates"
+            )
+        cls.settings = json.loads(Path(path).read_text(encoding="utf-8"))
+
+    def test_the_session_hooks_post_to_the_console(self):
+        for event in self.EVENTS:
+            with self.subTest(event=event):
+                self.assertEqual(self.settings["hooks"][event],
+                                 [{"hooks": [{"type": "http", "url": self.URL, "timeout": 2}]}])
+
+    def test_session_start_runs_the_console_script(self):
+        entries = self.settings["hooks"]["SessionStart"]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(len(entries[0]["hooks"]), 1)
+        hook = entries[0]["hooks"][0]
+        self.assertEqual(hook["type"], "command")
+        self.assertEqual(hook["timeout"], 5)
+        command = hook["command"]
+        self.assertIsNotNone(re.fullmatch(r"/nix/store/[0-9a-z]{32}-console-session-start", command))
+        text = Path(command).read_text(encoding="utf-8")
+        self.assertIsNotNone(
+            re.fullmatch(r"#!/nix/store/[0-9a-z]{32}-dash-[^/]+/bin/dash", text.splitlines()[0]))
+        self.assertNotIn("@curl@", text)
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        done = subprocess.run([command, str(port)], input=b"{}", capture_output=True, timeout=30)
+        self.assertEqual(done.returncode, 0)
+        self.assertEqual(done.stdout, b"")
+        self.assertEqual(done.stderr, b"")
+
+    def test_the_console_is_on_the_http_hook_allow_list(self):
+        self.assertEqual(self.settings["allowedHttpHookUrls"], ["http://127.0.0.1:27184/*"])
+        self.assertTrue(fnmatch.fnmatchcase(self.URL, "http://127.0.0.1:27184/*"))
+
+    def test_the_guard_hook_is_unchanged(self):
+        self.assertEqual(set(self.settings["hooks"]), {"PreToolUse", "SessionStart", *self.EVENTS})
+        entries = self.settings["hooks"]["PreToolUse"]
+        self.assertEqual(len(entries), 1)
+        self.assertEqual(entries[0]["matcher"], "Bash")
+        self.assertEqual(len(entries[0]["hooks"]), 1)
+        hook = entries[0]["hooks"][0]
+        self.assertEqual(set(hook), {"type", "command", "timeout"})
+        self.assertEqual(hook["type"], "command")
+        self.assertTrue(hook["command"].endswith("/bin/claude-bash-lifecycle-guard"))
+        self.assertEqual(hook["timeout"], 30)
 
 
 class LauncherSourceTest(unittest.TestCase):

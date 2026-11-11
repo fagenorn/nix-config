@@ -357,7 +357,7 @@ class IntakeLaneTest(unittest.TestCase):
             with self.subTest(case=case):
                 result, calls, _ = run(**case)
                 self.assertEqual(result["stage"], "done")
-                self.assertEqual(row(result, 1), {"issue": 1, "outcome": "stopped", "detail": NO_LANE})
+                self.assertEqual(row(result, 1), {"issue": 1, "outcome": "stopped", "reason": NO_LANE})
                 self.assertNotIn("acquire-1", labels(calls))
                 self.assertNotIn("child-1", labels(calls))
                 self.assertEqual(result["relaunch"]["issues"], [1])
@@ -366,7 +366,7 @@ class IntakeLaneTest(unittest.TestCase):
         result, calls, _ = run(patch={"facts-1": {"open_pr": OPEN_PR, "lane": None}},
                                replies={"readopt-1": UNACCEPTED})
         self.assertEqual(result["stage"], "done")
-        self.assertEqual(row(result, 1), {"issue": 1, "outcome": "stopped", "detail": NO_LANE})
+        self.assertEqual(row(result, 1), {"issue": 1, "outcome": "stopped", "reason": NO_LANE})
         ls = labels(calls)
         self.assertLess(ls.index("acquire-1"), ls.index("readopt-1"))
         self.assertNotIn("child-1", ls)
@@ -426,7 +426,7 @@ class AlreadyFixedTest(unittest.TestCase):
 
     def test_a_failed_claim_lookup_is_never_already_fixed(self):
         result, calls, _ = run(patch={"facts-1": {"already_fixed": FIXED, "claim": {"verdict": "error", "by": None}}})
-        self.assertEqual(row(result, 1), {"issue": 1, "outcome": "stopped", "detail": "claim status"})
+        self.assertEqual(row(result, 1), {"issue": 1, "outcome": "stopped", "reason": "claim status"})
         self.assertEqual(result["relaunch"]["issues"], [1])
         self.assertEqual(result["owner_actions"], [])
         self.assertNotIn("acquire-1", labels(calls))
@@ -525,7 +525,7 @@ class ClosedClaimTest(unittest.TestCase):
                               (None, "release-1 returned nothing")):
             with self.subTest(reply=reply):
                 result, _, _ = run(patch={"facts-1": held}, replies={"release-1": reply})
-                self.assertEqual(row(result, 1), {"issue": 1, "outcome": "stopped", "stage": "release", "detail": detail})
+                self.assertEqual(row(result, 1), {"issue": 1, "outcome": "stopped", "stage": "release", "reason": f"release: {detail}"})
                 self.assertEqual(result["relaunch"]["issues"], [1])
         result, _, _ = run(patch={"facts-1": held}, replies={"release-1": {"verdict": "not_held"}})
         self.assertEqual(row(result, 1), {"issue": 1, "outcome": "closed", "released": False})
@@ -540,7 +540,7 @@ class ClosedClaimTest(unittest.TestCase):
         self.assertEqual(labels(calls), ["setup", "facts-1", "release-1"])
         self.assertIn(CLOSED_RELEASE, prompt(calls, "release-1"))
         result, _, _ = run(patch={"facts-1": free}, replies={"release-1": {"verdict": "error", "detail": "HTTP 502"}})
-        self.assertEqual(row(result, 1), {"issue": 1, "outcome": "stopped", "stage": "release", "detail": "HTTP 502"})
+        self.assertEqual(row(result, 1), {"issue": 1, "outcome": "stopped", "stage": "release", "reason": "release: HTTP 502"})
         self.assertEqual(result["relaunch"]["issues"], [1])
         result, _, _ = run(patch={"facts-1": free}, replies={"release-1": {"verdict": "not_held"}})
         self.assertEqual(row(result, 1), {"issue": 1, "outcome": "closed", "released": False})
@@ -550,7 +550,7 @@ class ClosedClaimTest(unittest.TestCase):
         # A failed lookup proves nothing about ownership: the closed row must not be final, or a claim this batch holds is never released.
         err = {"state": "CLOSED", "claim": {"verdict": "error", "by": None}}
         result, calls, _ = run(patch={"facts-1": err})
-        self.assertEqual(row(result, 1), {"issue": 1, "outcome": "stopped", "detail": "claim status"})
+        self.assertEqual(row(result, 1), {"issue": 1, "outcome": "stopped", "reason": "claim status"})
         self.assertEqual(result["relaunch"]["issues"], [1])
         self.assertNotIn("release-1", labels(calls))
         self.assertNotIn("acquire-1", labels(calls))
@@ -689,7 +689,7 @@ class BreakerTest(unittest.TestCase):
         self.assertNotIn("acquire-3", labels(calls))
         self.assertEqual(row(result, 1)["outcome"], "stopped")
         self.assertEqual([row(result, n)["outcome"] for n in (2, 3)], ["not-admitted", "not-admitted"])
-        self.assertEqual(result["relaunch"], dict(ARGS, issues=[1, 2, 3]))
+        self.assertEqual(without(result["relaunch"], "reasons"), dict(ARGS, issues=[1, 2, 3]))
 
     def test_every_dead_child_shape_trips_the_breaker(self):
         cont = {"setup": {}, "lane": "standard", "partial": 1}
@@ -734,7 +734,7 @@ class ContTest(unittest.TestCase):
         dead = {"stage": "task-review", "task": {"n": 1}, "review": None, "dead_agents": ["review-1"], "cont": cont}
         first, _, _ = run(children={"1": dead})
         self.assertEqual(first["stage"], "breaker")
-        self.assertEqual(first["relaunch"], dict(ARGS, conts={"1": cont}))
+        self.assertEqual(without(first["relaunch"], "reasons"), dict(ARGS, conts={"1": cont}))
         # The relaunch: a new run on the returned args; the tracker still shows the batch's own claim.
         result, calls, _ = run(args=first["relaunch"],
                                patch={"facts-1": {"claim": {"verdict": "held_by", "by": HOLDER}}})
@@ -1353,8 +1353,8 @@ class LandTest(unittest.TestCase):
                               (None, "land-pr-1 returned no renew")):
             with self.subTest(renew=renew):
                 result, calls, _ = run(patch={"land-pr-1": {"renew": renew}})
-                self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"], row(result, 1)["detail"]),
-                                 ("stopped", "renew", detail))
+                self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"], row(result, 1)["reason"]),
+                                 ("stopped", "renew", f"renew: {detail}"))
                 self.assertNotIn("land-sync-1-1", labels(calls))
                 # An error verdict means the prompt ran nothing after it; a missing renew proves nothing, so the lock is released.
                 self.assertEqual("land-unlock-1" in labels(calls), renew is None)
@@ -1376,6 +1376,80 @@ class LandTest(unittest.TestCase):
         self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "merge"))
         self.assertIn("land-unlock-1", labels(calls))
         self.assertNotIn("close-out-1", labels(calls))
+
+    # 870: a merge refused because the integration branch moved outside the land lock.
+    REFUSED = {"merged": False, "behind": True, "notes": "the head branch is not up to date with the base branch"}
+    MERGED = {"merged": True, "merge_commit": SHA, "notes": "merged"}
+
+    def test_a_merge_refused_as_not_up_to_date_resyncs_and_merges_again(self):
+        c = "c" * 40
+        result, calls, _ = run(patch=BEHIND, replies={
+            "land-sync-1-1": {"status": "done", "conflicted": False, "head": B, "notes": "ok"},
+            "land-sync-1-2": {"status": "done", "conflicted": False, "head": c, "notes": "ok"},
+            "land-merge-1": [self.REFUSED, self.MERGED]})
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+        ls = of(calls, 1)
+        self.assertEqual(ls[ls.index("land-merge-1"):], ["land-merge-1", "land-sync-1-2", "land-record-1-2", "land-merge-1", "close-out-1"])
+        # The lock moved to the new head, and its checks were waited for, before the second merge names it.
+        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {c}\n", prompt(calls, "land-record-1-2"))
+        merges = [call["prompt"] for call in calls if call["label"] == "land-merge-1"]
+        self.assertIn(f"--match-head-commit {B}", merges[0])
+        self.assertIn(f"--match-head-commit {c}", merges[1])
+        self.assertIn("behind true only when the refusal says the head branch is not up to date with the base branch, "
+                      "or the guard says the PR is behind its base, else false.", merges[0])
+        self.assertIn("behind", schema_of(calls, "land-merge-1")["properties"])
+
+    def test_the_refusal_budget_is_independent_of_the_resyncs_already_run(self):
+        c, d = "c" * 40, "d" * 40
+        spent = {
+            "land-sync-1-1": {"status": "done", "conflicted": False, "head": B, "notes": "ok"},
+            "land-record-1-1": {"ok": True, "head": B, "checks": {"state": "behind", "head": B}},
+            "land-sync-1-2": {"status": "done", "conflicted": False, "head": c, "notes": "ok"},
+            "land-sync-1-3": {"status": "done", "conflicted": False, "head": d, "notes": "ok"},
+            "land-merge-1": [self.REFUSED, self.MERGED]}
+        result, calls, _ = run(patch=BEHIND, replies=spent)
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+        ls = of(calls, 1)
+        self.assertEqual(ls[ls.index("land-merge-1"):], ["land-merge-1", "land-sync-1-3", "land-record-1-3", "land-merge-1", "close-out-1"])
+        # A behind answer after the refusal's resync is still counted against MAX_SYNCS alone, which is spent here.
+        behind_again = dict(spent, **{"land-record-1-3": {"ok": True, "head": d, "checks": {"state": "behind", "head": d}}})
+        result, calls, _ = run(patch=BEHIND, replies=behind_again)
+        self.assertEqual(row(result, 1)["outcome"], "land-contended")
+        self.assertEqual(labels(calls).count("land-merge-1"), 1)
+        self.assertNotIn("land-sync-1-4", labels(calls))
+
+    def test_a_refusal_resync_leaves_the_behind_budget_whole(self):
+        # The first poll passes, so no resync ran before the refusal: its resync must not count against MAX_SYNCS.
+        c, d = "c" * 40, "d" * 40
+        result, calls, _ = run(replies={
+            "land-merge-1": [self.REFUSED, self.MERGED],
+            "land-sync-1-1": {"status": "done", "conflicted": False, "head": B, "notes": "ok"},
+            "land-record-1-1": {"ok": True, "head": B, "checks": {"state": "behind", "head": B}},
+            "land-sync-1-2": {"status": "done", "conflicted": False, "head": c, "notes": "ok"},
+            "land-record-1-2": {"ok": True, "head": c, "checks": {"state": "behind", "head": c}},
+            "land-sync-1-3": {"status": "done", "conflicted": False, "head": d, "notes": "ok"}})
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+        ls = of(calls, 1)
+        self.assertEqual(ls[ls.index("land-merge-1"):],
+                         ["land-merge-1", "land-sync-1-1", "land-record-1-1", "land-sync-1-2", "land-record-1-2",
+                          "land-sync-1-3", "land-record-1-3", "land-merge-1", "close-out-1"])
+
+    def test_a_merge_refused_as_not_up_to_date_past_its_budget_stops(self):
+        result, calls, _ = run(replies={"land-merge-1": self.REFUSED})
+        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "merge"))
+        ls = of(calls, 1)
+        self.assertEqual(ls.count("land-merge-1"), 3)
+        self.assertEqual([label for label in ls if label.startswith("land-sync-")], ["land-sync-1-1", "land-sync-1-2"])
+        self.assertIn("land-unlock-1", ls)
+        self.assertNotIn("close-out-1", ls)
+
+    def test_a_refusal_that_is_not_behind_stops_at_the_merge_without_a_resync(self):
+        for refusal in (dict(self.REFUSED, behind=False), {"merged": False, "notes": "head mismatch"}):
+            with self.subTest(refusal=refusal):
+                result, calls, _ = run(replies={"land-merge-1": [refusal, self.MERGED]})
+                self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "merge"))
+                self.assertEqual(labels(calls).count("land-merge-1"), 1)
+                self.assertNotIn("land-sync-1-1", labels(calls))
 
     def test_non_code_criteria_hold_the_issue_open(self):
         acceptance = [{"id": "AC1", "text": "works", "kind": "code"}, {"id": "AC2", "text": "live", "kind": "evidence"}]
@@ -1487,8 +1561,8 @@ class RerunAndContendedRetryTest(unittest.TestCase):
         for fix in (None, {"status": "blocked", "commit": SHA, "notes": "stuck"}, {"status": "done", "notes": "no sha"}):
             with self.subTest(fix=fix):
                 result, calls, _ = run(patch=folded(CI_RED), replies={"land-fix-1": fix})
-                self.assertEqual((row(result, 1)["outcome"], row(result, 1)["detail"]),
-                                 ("ci-failed", "the fix round did not finish"))
+                self.assertEqual((row(result, 1)["outcome"], row(result, 1)["reason"]),
+                                 ("ci-failed", "the fix round did not finish; failing checks ci"))
                 self.assertNotIn("land-checks-1-2", labels(calls))
                 self.assertNotIn("land-merge-1", labels(calls))
 
@@ -1948,7 +2022,7 @@ class DependencyTest(unittest.TestCase):
         result, calls, _ = run(args=dict(ARGS, issues=[1, 2, 3]),
                                patch={"facts-1": blocked_by(2), "facts-2": blocked_by(1)})
         for n in (1, 2):
-            self.assertEqual((row(result, n)["outcome"], row(result, n)["detail"]), ("blocked", "cycle"))
+            self.assertEqual((row(result, n)["outcome"], row(result, n)["reason"]), ("blocked", "cycle"))
         self.assertEqual(row(result, 3)["outcome"], "landed")
 
     def test_a_cycle_is_an_owner_action_and_never_a_relaunch(self):
@@ -2092,7 +2166,7 @@ class IssueBranchFactsTest(unittest.TestCase):
         reply = {"branch": None, "branch_error": "issue-branch exited 1: forge_failed"}
         result, calls, _ = run(patch={"facts-1": reply})
         self.assertEqual(row(result, 1), {"issue": 1, "outcome": "stopped", "stage": "branch",
-                                          "detail": "issue-branch exited 1: forge_failed"})
+                                          "reason": "branch: issue-branch exited 1: forge_failed"})
         self.assertEqual(result["relaunch"]["issues"], [1])
         self.assertNotIn("acquire-1", labels(calls))
         self.assertNotIn("child-1", labels(calls))
@@ -2271,7 +2345,7 @@ class PlanAheadTest(unittest.TestCase):
                                children={"1": NOT_RESUMABLE})
         self.assertEqual([c["args"]["mode"] for c in calls if c["kind"] == "workflow"], ["plan"])
         self.assertIn("release-1", labels(calls))
-        self.assertEqual(result["relaunch"], ARGS)
+        self.assertEqual(without(result["relaunch"], "reasons"), ARGS)
 
     def test_a_reviewed_plan_or_a_merged_pr_goes_straight_to_a_delivery_slot(self):
         # Regression guard for D3: it passes before and after the change.
@@ -2318,7 +2392,7 @@ class ReadyPathTest(unittest.TestCase):
         self.assertEqual((row(first, 1)["outcome"], row(first, 1)["stage"]), ("stopped", "setup"))
         self.assertIn(f"forge-claim release --repo owner/repo --issue 1 --holder {HOLDER} --reason skipped",
                       prompt(calls, "release-1"))
-        self.assertEqual(first["relaunch"], ARGS)  # D9: the obsolete plan cont is not forwarded
+        self.assertEqual(without(first["relaunch"], "reasons"), ARGS)  # D9: the obsolete plan cont is not forwarded
         _, calls, _ = run(args=first["relaunch"])
         self.assertEqual([c["args"] for c in calls if c["kind"] == "workflow"][0],
                          {"repo_root": "/r", "issue": 1, "batch_id": "b1", "mode": "plan", "lane": "standard"})
@@ -2335,7 +2409,7 @@ class ReadyPathTest(unittest.TestCase):
         result, calls, _ = run(children={"1": [planned(1), CLAIMED]})
         self.assertEqual((row(result, 1)["outcome"], row(result, 1)["by"]), ("claim-lost", "h2/b9"))
         self.assertEqual(len(self.ready_args(calls, 1)), 1)
-        self.assertEqual(result["relaunch"], ARGS)
+        self.assertEqual(result["relaunch"], dict(ARGS, reasons={"1": "claimed by h2/b9"}))
 
     def test_a_ready_child_stop_on_a_closed_issue_settles(self):
         for release in ("released", "not_held"):
@@ -2638,7 +2712,7 @@ class CodexUnavailableDetailTest(unittest.TestCase):
             with self.subTest(cont="cont" in c):
                 result, _, _ = run(children={"1": c})
                 self.assertEqual(row(result, 1), {"issue": 1, "outcome": "stopped",
-                                                  "stage": "codex-unavailable", "detail": self.REASON})
+                                                  "stage": "codex-unavailable", "reason": f"codex-unavailable: {self.REASON}"})
 
     def test_a_codex_unavailable_dead_agent_stop_shows_its_reason_and_trips_the_breaker(self):
         nothing = "the Codex review step returned nothing"
@@ -2650,7 +2724,7 @@ class CodexUnavailableDetailTest(unittest.TestCase):
         self.assertNotIn("child-2", labels(calls))
         self.assertEqual(result["relaunch"]["issues"], [1, 2])
         self.assertEqual(row(result, 1), {"issue": 1, "outcome": "stopped", "stage": "codex-unavailable",
-                                          "dead_agents": ["final-codex"], "detail": nothing})
+                                          "dead_agents": ["final-codex"], "reason": f"codex-unavailable: {nothing}"})
 
     def test_other_stops_keep_their_row(self):
         for c in ({"stage": "task", "details": "x", "cont": {"setup": {}}},
@@ -2660,6 +2734,154 @@ class CodexUnavailableDetailTest(unittest.TestCase):
             with self.subTest(stage=c["stage"]):
                 result, _, _ = run(children={"1": c})
                 self.assertNotIn("detail", row(result, 1))
+
+
+class StopReasonTest(unittest.TestCase):
+    """#869: a stopped row says why, the table text shows it and a relaunch keeps it until the issue moves on."""
+
+    CHILD_ARGS = {"repo_root": "/r", "issue": 1, "batch_id": "b1", "lane": "standard"}
+    BLOCKED = "Task 1 cannot be finished as written because it depends on Task 2"
+    WAITS = {"facts-1": {"blockers": [{"issue": 50, "state": "OPEN"}]}}
+
+    def child_stop(self, mode, replies, stage):
+        result, _ = run_child(dict(self.CHILD_ARGS, mode=mode), replies=replies)
+        self.assertEqual(result["stage"], stage, result)
+        return result
+
+    def refused_plan(self):
+        bad = {"status": "planned", "plan_root": "/g/plan.md", "acceptance": [{"id": "AC1", "text": "works", "kind": "code"}],
+               "tasks": [{"n": 1, "title": "one", "file": "/g/task-1.md", "risk": "standard", "branch": "other"}]}
+        return self.child_stop("plan", {"plan": bad, "plan-branch-revise": bad}, "plan")
+
+    def blocked_task(self):
+        return self.child_stop("ready", {"impl-1": {"status": "blocked", "notes": self.BLOCKED}}, "task")
+
+    def test_a_refused_plan_and_a_blocked_task_reach_the_row_and_the_table_text(self):
+        cases = ((self.refused_plan(), "plan", 'plan: branch problems: task 1: branch "other" is not declared'),
+                 (self.blocked_task(), "task", f"task: task 1 blocked: {self.BLOCKED}"))
+        for stop, stage, reason in cases:
+            with self.subTest(stage=stage):
+                out = run_full(children={"1": stop})
+                result = out["result"]
+                self.assertEqual(row(result, 1), {"issue": 1, "outcome": "stopped", "stage": stage, "reason": reason})
+                self.assertIn(f"#1: stopped ({reason})", out["logs"])
+                self.assertEqual(result["relaunch"]["reasons"], {"1": reason})
+
+    def test_every_stopped_row_has_a_bounded_one_line_reason(self):
+        long = {"stage": "task", "reason": "task: " + "x\n" * 400, "cont": {"setup": {}}}
+        rows = (
+            ({"children": {"1": long}}, None),
+            ({"children": {"1": {"stage": "verify", "cont": {"setup": {}}}}}, "verify"),
+            ({"children": {"1": {"stage": "args", "error": "mode must be plan, ready or ship"}}}, "args: mode must be plan, ready or ship"),
+            ({"children": {"1": None}}, "child-1 returned nothing"),
+            ({"children": {"1": {"stage": "setup", "result": {"ok": True}, "missing": ["worktree_path", "branch"],
+                                 "cont": {"claim_incomplete": True}}}}, "setup: setup reply lacks worktree_path, branch"),
+            ({"children": {"1": {"stage": "setup", "result": {"ok": False, "reason": "not-resumable", "details": "the worktree\nis gone"}}}},
+             "setup: not-resumable; the worktree is gone"),
+            ({"children": {"1": {"stage": "setup", "result": None}}}, "setup: the step returned nothing"),
+            ({"children": {"1": {"stage": "setup", "result": {"ok": True}, "invalid": "holder", "holder": "x"}}}, "setup: invalid holder"),
+            ({"patch": {"facts-1": {"claim": {"verdict": "error", "by": None}}}}, "claim status"),
+            ({"replies": {"land-merge-1": None}}, "merge: land-merge-1 returned nothing"),
+        )
+        for scenario, reason in rows:
+            with self.subTest(reason=reason):
+                result, _, _ = run(**scenario)
+                got = row(result, 1)
+                self.assertEqual(got["outcome"], "stopped")
+                self.assertLessEqual(len(got["reason"]), 300)
+                self.assertNotIn("\n", got["reason"])
+                if reason is not None:
+                    self.assertEqual(got["reason"], reason)
+        landed, _, _ = run()
+        self.assertNotIn("reason", row(landed, 1))
+
+    def test_the_reason_survives_a_relaunch_until_the_issue_moves_on(self):
+        stop = self.blocked_task()
+        reason = f"task: task 1 blocked: {self.BLOCKED}"
+        first, _, _ = run(children={"1": stop})
+        # The relaunch does not get to the issue: its row still says why it stopped, and the next relaunch keeps saying so.
+        waiting = run_full(args=first["relaunch"], patch=self.WAITS)
+        second = waiting["result"]
+        self.assertEqual(row(second, 1), {"issue": 1, "outcome": "blocked", "blocker": 50, "reason": f"waits for #50; previous run: {reason}"})
+        self.assertIn(f"#1: blocked (waits for #50; previous run: {reason})", waiting["logs"])
+        self.assertEqual(second["relaunch"]["reasons"], {"1": reason})
+        third, _, _ = run(args=second["relaunch"], patch=self.WAITS)
+        self.assertEqual(third["relaunch"], second["relaunch"])
+        # A new stop replaces it, and an issue that lands drops it.
+        again, _, _ = run(args=first["relaunch"], children={"1": {"stage": "verify", "reason": "verify: build: 2 tests failed", "cont": stop["cont"]}})
+        self.assertEqual(row(again, 1)["reason"], "verify: build: 2 tests failed")
+        self.assertEqual(again["relaunch"]["reasons"], {"1": "verify: build: 2 tests failed"})
+        landed, _, _ = run(args=first["relaunch"])
+        self.assertEqual(row(landed, 1), {"issue": 1, "outcome": "landed", "pr": 41})
+        self.assertIsNone(landed["relaunch"])
+
+    def test_the_relaunch_grows_by_at_most_the_bounded_reason(self):
+        stop = dict(self.blocked_task(), reason="task: " + "y" * 900)
+        result, _, _ = run(children={"1": stop})
+        relaunch = result["relaunch"]
+        self.assertEqual(len(relaunch["reasons"]["1"]), 300)
+        self.assertLessEqual(size(relaunch) - size(without(relaunch, "reasons")), 300 + len(',"reasons":{"1":""}'))
+        capped, _, _ = run(args=dict(ARGS, reasons={"1": "z" * 900}), patch=self.WAITS)
+        self.assertEqual(len(capped["relaunch"]["reasons"]["1"]), 300)
+
+    def test_a_flapping_stop_with_an_unchanged_cont_repeats_the_relaunch_reasons_aside(self):
+        """The lead stops relaunching once a relaunch, reasons aside, equals the args it ran with; the relaunch carries the latest reason."""
+        stop = self.blocked_task()
+        relaunch, _, _ = run(children={"1": stop})
+        relaunch = relaunch["relaunch"]
+        for flap in ("verify: build: 2 tests failed", "task: task 1 blocked: Task 2 has to come first", "verify: build: 1 test failed"):
+            with self.subTest(flap=flap):
+                result, _, _ = run(args=relaunch, children={"1": dict(stop, stage=flap.split(":")[0], reason=flap)})
+                self.assertEqual(row(result, 1)["reason"], flap)
+                self.assertEqual(result["relaunch"]["reasons"], {"1": flap})
+                self.assertEqual(without(result["relaunch"], "reasons"), without(relaunch, "reasons"))
+                relaunch = result["relaunch"]
+
+    def test_every_open_row_fills_the_reason_column(self):
+        """A row that is not final says why in reason, whatever member held it; a final row has none."""
+        red = {"state": "failed", "head": SHA, "failing": ["ci"], "details": "FAIL test_cache"}
+        rejected = {"land-sync-1-1": {"status": "done", "conflicted": True, "head": "b" * 40, "merge_commit": "b" * 40, "notes": "ok"},
+                    "land-sync-review-1-1": {"verdict": "findings", "findings": [{"severity": "important", "summary": "dropped a change"}]}}
+        rows = (
+            ("ci-failed", {"patch": {"land-pr-1": {"checks": red}}, "replies": {"land-fix-1": None}},
+             "the fix round did not finish; failing checks ci"),
+            ("land-contended", {"patch": {"land-pr-1": {"lock": {"verdict": "held_by", "by": "h2/b9"}}}},
+             "the land lock is held by another landing (held_by)"),
+            ("blocked", {"patch": self.WAITS}, "waits for #50"),
+            ("claim-lost", {"children": {"1": {"stage": "claimed", "verdict": "held_by", "by": "h2/b9"}}}, "claimed by h2/b9"),
+        )
+        for outcome, scenario, reason in rows:
+            with self.subTest(outcome=outcome):
+                result, _, _ = run(**scenario)
+                got = row(result, 1)
+                self.assertEqual((got["outcome"], got["reason"]), (outcome, reason))
+                self.assertNotIn("detail", got)
+        cycle = {"facts-1": {"blockers": [{"issue": 2, "state": "OPEN"}]}, "facts-2": {"blockers": [{"issue": 1, "state": "OPEN"}]}}
+        result, _, _ = run(args=dict(ARGS, issues=[1, 2]), patch=cycle)
+        self.assertEqual([(row(result, n)["outcome"], row(result, n)["reason"]) for n in (1, 2)],
+                         [("blocked", "cycle"), ("blocked", "cycle")])
+        result, _, _ = run(patch=BEHIND, replies=rejected)
+        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["reason"]), ("conflict", "review finding: dropped a change"))
+        waiting, _, _ = run(patch={"facts-1": {"decision": {"verdict": "open", "comment_id": 5, "questions": ["Which?"]}}})
+        self.assertEqual(row(waiting, 1)["outcome"], "questions")
+        self.assertNotIn("reason", row(waiting, 1))
+
+    def test_a_real_setup_stop_of_the_child_reaches_the_row(self):
+        refused, _ = run_child(dict(self.CHILD_ARGS, mode="ready"),
+                               replies={"setup": {"ok": False, "reason": "closed", "details": "the issue is closed"}})
+        self.assertEqual((refused["stage"], "reason" in refused), ("setup", False))
+        result, _, _ = run(children={"1": refused})
+        self.assertEqual(row(result, 1)["reason"], "setup: closed; the issue is closed")
+        lacking, _ = run_child(dict(self.CHILD_ARGS, mode="ready"), patch={"setup": {"merge_strategy": None}})
+        self.assertEqual(lacking["stage"], "setup")
+        result, _, _ = run(children={"1": lacking})
+        self.assertEqual(row(result, 1)["reason"], "setup: setup reply lacks merge_strategy")
+
+    def test_reasons_must_be_strings(self):
+        for bad in ([], "x", {"1": 5}, {"1": None}):
+            with self.subTest(bad=bad):
+                result, calls, _ = run(args=dict(ARGS, reasons=bad))
+                self.assertEqual((result["stage"], calls), ("args", []))
 
 
 class FoldedCloseOutReleaseTest(unittest.TestCase):
@@ -2768,7 +2990,7 @@ class FoldedFirstLandChecksTest(unittest.TestCase):
                 if stage:
                     self.assertEqual(row(result, 1)["stage"], stage)
                 if folded is None:
-                    self.assertEqual(row(result, 1)["detail"], "land-pr-1 returned no checks")
+                    self.assertEqual(row(result, 1)["reason"], "checks: land-pr-1 returned no checks")
                 if conts is None:
                     self.assertIsNone(result["relaunch"])
                 else:
@@ -2828,7 +3050,7 @@ class FoldedRecordChecksTest(unittest.TestCase):
                 if stage:
                     self.assertEqual(row(result, 1)["stage"], stage)
                 if outcome == "stopped" and stage == "checks":
-                    self.assertEqual(row(result, 1)["detail"], "land-record-1-1 returned no checks")
+                    self.assertEqual(row(result, 1)["reason"], "checks: land-record-1-1 returned no checks")
                 if stage == "head-moved":
                     self.assertEqual(row(result, 1)["head"], "d" * 40)
                 self.assertEqual(result["relaunch"]["issues"], [1])
@@ -3283,9 +3505,9 @@ class TrainTest(unittest.TestCase):
     def test_a_train_pr_that_fails_shrinks_the_train_before_any_car(self):
         lost = {"renew": {"verdict": "not_held", "by": "h2/b9"}}
         for name, reply, expected in (
-                ("claim lost", lost, {"issue": 2, "outcome": "claim-lost", "by": "h2/b9"}),
-                ("head moved", {"pr": 42, "head": B}, {"issue": 2, "outcome": "stopped", "pr": 42, "stage": "head-moved", "expected": SHA, "head": B}),
-                ("dead", None, {"issue": 2, "outcome": "stopped", "stage": "pr", "detail": "train-pr-2 returned nothing"})):
+                ("claim lost", lost, {"issue": 2, "outcome": "claim-lost", "by": "h2/b9", "reason": "claimed by h2/b9"}),
+                ("head moved", {"pr": 42, "head": B}, {"issue": 2, "outcome": "stopped", "pr": 42, "stage": "head-moved", "expected": SHA, "head": B, "reason": f"head-moved: expected {SHA}, head {B}"}),
+                ("dead", None, {"issue": 2, "outcome": "stopped", "stage": "pr", "reason": "pr: train-pr-2 returned nothing"})):
             with self.subTest(name=name):
                 result, calls, _ = train_run(replies={"train-pr-2": reply})
                 self.assertNotIn("train-build-1", labels(calls))
@@ -3309,7 +3531,7 @@ class TrainTest(unittest.TestCase):
                                    {"issue": 2, "renew": {"verdict": "not_held", "by": "h2/b9"}, "head": SHA, "state": "OPEN"}]}
         result, calls, _ = train_run(replies={"train-ready-1": ready_reply})
         self.assertIn(f"gh pr merge 91 --repo owner/repo --merge --match-head-commit {X1}", prompt(calls, "train-merge-1"))
-        self.assertEqual(row(result, 2), {"issue": 2, "outcome": "claim-lost", "pr": 42, "by": "h2/b9"})
+        self.assertEqual(row(result, 2), {"issue": 2, "outcome": "claim-lost", "pr": 42, "by": "h2/b9", "reason": "claimed by h2/b9"})
         self.assertEqual(row(result, 1), {"issue": 1, "outcome": "landed", "pr": 41, "train": 1, "car_pr": 91})
         for label in ("close-out-2", "land-pr-2"):
             self.assertNotIn(label, labels(calls))
@@ -3321,20 +3543,20 @@ class TrainTest(unittest.TestCase):
                                    {"issue": 2, "renew": {"verdict": "renewed"}, "head": B, "state": "OPEN"}]}
         result, calls, _ = train_run(replies={"train-ready-1": ready_reply})
         self.assertIn("gh pr merge 91 ", prompt(calls, "train-merge-1"))
-        self.assertEqual(row(result, 2), {"issue": 2, "outcome": "stopped", "pr": 42, "stage": "head-moved", "expected": SHA, "head": B})
+        self.assertEqual(without(row(result, 2), "reason"), {"issue": 2, "outcome": "stopped", "pr": 42, "stage": "head-moved", "expected": SHA, "head": B})
         self.assertNotIn("close-out-2", labels(calls))
         self.assertEqual(lock_releases(calls), ["close-out-1"])
 
     def test_the_first_issue_failing_the_ready_step_ends_the_train_without_a_merge(self):
         for name, member, expected in (
                 ("claim lost", {"issue": 1, "renew": {"verdict": "not_held", "by": "h2/b9"}, "head": SHA, "state": "OPEN"},
-                 {"issue": 1, "outcome": "claim-lost", "pr": 41, "by": "h2/b9"}),
+                 {"issue": 1, "outcome": "claim-lost", "pr": 41, "by": "h2/b9", "reason": "claimed by h2/b9"}),
                 ("head moved", {"issue": 1, "renew": {"verdict": "renewed"}, "head": B, "state": "OPEN"},
-                 {"issue": 1, "outcome": "stopped", "pr": 41, "stage": "head-moved", "expected": SHA, "head": B}),
+                 {"issue": 1, "outcome": "stopped", "pr": 41, "stage": "head-moved", "expected": SHA, "head": B, "reason": f"head-moved: expected {SHA}, head {B}"}),
                 ("renew error", {"issue": 1, "renew": {"verdict": "error", "detail": "boom"}, "head": SHA, "state": "OPEN"},
-                 {"issue": 1, "outcome": "stopped", "pr": 41, "stage": "renew", "detail": "boom"}),
+                 {"issue": 1, "outcome": "stopped", "pr": 41, "stage": "renew", "reason": "renew: boom"}),
                 ("closed", {"issue": 1, "renew": {"verdict": "renewed"}, "head": SHA, "state": "CLOSED"},
-                 {"issue": 1, "outcome": "stopped", "pr": 41, "stage": "train-ready", "detail": "PR #41 reads CLOSED"})):
+                 {"issue": 1, "outcome": "stopped", "pr": 41, "stage": "train-ready", "reason": "train-ready: PR #41 reads CLOSED"})):
             with self.subTest(name=name):
                 second = {"issue": 2, "renew": {"verdict": "renewed"}, "head": SHA, "state": "OPEN"}
                 result, calls, _ = train_run(replies={"train-ready-1": {"members": [member, second]}})
@@ -3361,7 +3583,7 @@ class TrainTest(unittest.TestCase):
                 self.assertEqual(order[order.index("train-merge-1") + 1:], ["land-unlock-1", "train-sweep-2"])
                 for n, pr in ((1, 41), (2, 42)):
                     self.assertEqual(row(result, n), {"issue": n, "outcome": "land-contended", "pr": pr,
-                                                      "detail": f"the land lock was not held before the train merge ({verdict})"})
+                                                      "reason": f"the land lock was not held before the train merge ({verdict})"})
                 self.assertEqual(lock_releases(calls), ["land-unlock-1"])
                 self.assertEqual(result["relaunch"]["issues"], [1, 2])
                 self.assertNotIn("pr", result["relaunch"]["conts"]["1"])
@@ -3380,7 +3602,7 @@ class TrainTest(unittest.TestCase):
                 order = land_labels(calls)
                 self.assertEqual(order[order.index("train-merge-1") + 1:], flipped + ["land-unlock-1", "train-sweep-2"])
                 for n, pr in ((1, 41), (2, 42)):
-                    self.assertEqual(row(result, n), {"issue": n, "outcome": "stopped", "pr": pr, "stage": "train-merge", "detail": detail})
+                    self.assertEqual(row(result, n), {"issue": n, "outcome": "stopped", "pr": pr, "stage": "train-merge", "reason": f"train-merge: {detail}"})
                 self.assertEqual(lock_releases(calls), ["land-unlock-1"])
                 self.assertNotIn("pr", result["relaunch"]["conts"]["1"])
 
@@ -3425,7 +3647,7 @@ class TrainTest(unittest.TestCase):
 
     def test_a_member_pr_still_open_after_the_car_merge_is_stopped_without_a_close_out(self):
         result, calls, _ = train_run(replies={"train-merge-1": merge_reply({41: "MERGED", 42: "OPEN"}), **flips("OPEN", [42])})
-        self.assertEqual(row(result, 2), {"issue": 2, "outcome": "stopped", "pr": 42, "stage": "train-merged-open", "train": 1, "car_pr": 92})
+        self.assertEqual(without(row(result, 2), "reason"), {"issue": 2, "outcome": "stopped", "pr": 42, "stage": "train-merged-open", "train": 1, "car_pr": 92})
         # The program, not a sleeping step, waits: one read-only flip step per round, up to the bound, each for the open PR alone.
         self.assertEqual(flip_labels(calls), [f"train-flip-1-{k}" for k in range(1, FLIP_CALLS + 1)])
         for label in flip_labels(calls):
@@ -3444,7 +3666,7 @@ class TrainTest(unittest.TestCase):
             with self.subTest(name=name):
                 result, calls, _ = train_run(replies={"train-merge-1": merge_reply(states), **flips("OPEN", [41])})
                 self.assertEqual(len(flip_labels(calls)), FLIP_CALLS)
-                self.assertEqual(row(result, 1), {"issue": 1, "outcome": "stopped", "pr": 41, "stage": "train-merged-open", "train": 1, "car_pr": 92})
+                self.assertEqual(without(row(result, 1), "reason"), {"issue": 1, "outcome": "stopped", "pr": 41, "stage": "train-merged-open", "train": 1, "car_pr": 92})
                 self.assertNotIn("close-out-1", labels(calls))
                 self.assertEqual(lock_releases(calls), ["land-unlock-1"])
                 self.assertEqual(row(result, 2), {"issue": 2, "outcome": "landed", "pr": 42, "train": 1, "car_pr": 92})

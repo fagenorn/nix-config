@@ -196,6 +196,9 @@ agent-workflow-tests *args:
     tests/test_console_page.py \
     tests/test_console_service.py \
     tests/test_console_stream.py \
+    tests/test_console_sessions.py \
+    tests/test_console_session_start.py \
+    tests/test_console_hook_cost.py \
     tests/test_console_inbox.py \
     tests/test_console_tracker.py \
     tests/test_console_units.py \

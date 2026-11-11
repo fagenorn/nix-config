@@ -557,6 +557,21 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
         self.assertIn("home/common/agent-skills/skills/grill-with-docs/SKILL.md", found)
         self.assertIn("home/common/agent-skills/skills/grill-with-docs/CONTEXT-FORMAT.md", found)
 
+    def test_grill_defers_to_a_repository_owned_context_map_lint(self):
+        grill = REPO_ROOT / "home/common/agent-skills/skills/grill-with-docs"
+        skill = (grill / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("Read `bindings.paths.context`, `bindings.commands` and `capabilities.knowledge.*`.", skill)
+        self.assertIn(
+            "When the retained snapshot's `bindings.commands` has a `context-map-lint` entry, append "
+            "`--repo-lint-cwd <its cwd> --repo-lint` then each word of its `argv` as a separate argument; "
+            "with no entry, no flag.", skill)
+        self.assertNotRegex(skill, r"\b(150|200) lines")
+        context_format = (grill / "CONTEXT-FORMAT.md").read_text(encoding="utf-8")
+        self.assertIn("`--repo-lint`, per [SKILL.md](./SKILL.md), swaps in the repository's lint and budgets",
+                      context_format)
+        self.assertIn("150 lines unless [SKILL.md](./SKILL.md)'s `--repo-lint` applies", context_format)
+        self.assertNotIn("≤150", context_format)
+
 
 def corpus_documents():
     """Every skill document in both skill trees, as (path, text) pairs."""
@@ -2032,7 +2047,7 @@ class BatchRoutingTest(unittest.TestCase):
 
     def test_the_lead_stops_a_relaunch_that_repeats_the_last_one(self):
         text = (REPO_ROOT / "home/common/claude-code/skills/deliver-batch/SKILL.md").read_text(encoding="utf-8")
-        self.assertRegex(text, r"(?s)non-null `relaunch`.*?unless its args equal the previous run.*?stop, reporting")
+        self.assertRegex(text, r"(?s)non-null `relaunch`.*?unless its args, `reasons` aside, equal the previous run.*?stop, reporting")
 
 
 class CodexEntryRetirementTest(unittest.TestCase):
