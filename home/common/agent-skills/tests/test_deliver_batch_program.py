@@ -3463,6 +3463,8 @@ class TrainTest(unittest.TestCase):
                 ("declared", {"state": "passed", "head": X2, "required": ["ci"], "passed": ["ci"]}, declared)):
             with self.subTest(name=name):
                 replies = {"train-checks-1-2": reply}
+                if name == "pending":
+                    replies["train-checks-1-2-more"] = reply
                 if patch:
                     replies["train-checks-1-1"] = {"state": "passed", "head": X1, "required": ["gate"], "passed": ["gate"]}
                 result, calls, _ = train_run(replies=replies, patch=patch)
@@ -3575,6 +3577,93 @@ class TrainTest(unittest.TestCase):
         self.assertEqual(labels(calls).count("train-ready-1"), 2)
         self.assertEqual([row(result, n)["outcome"] for n in (1, 2)], ["landed", "landed"])
 
+    def test_a_car_pending_with_no_failed_check_at_the_cap_gets_one_further_wait(self):
+        late = {"state": "pending", "head": X1, "passed": ["ci"], "pending": ["e2e"]}
+        result, calls, _ = train_run(replies={"train-checks-1-1": late})
+        order = land_labels(calls)
+        # Only the late car is waited for again; the green car keeps its answer.
+        self.assertEqual(order[order.index("train-build-1") + 1:order.index("train-merge-1")],
+                         ["train-checks-1-1", "train-checks-1-2", "train-checks-1-1-more", "train-ready-1"])
+        first, more = step_text(calls, "train-checks-1-1"), step_text(calls, "train-checks-1-1-more")
+        self.assertIn("12 minutes at most and stop waiting 12 minutes after this step began", more)
+        self.assertEqual(more, first.replace("25 minutes", "12 minutes"))
+        self.assertIn("gh pr merge 92 ", prompt(calls, "train-merge-1"))
+        for n, pr in ((1, 41), (2, 42)):
+            self.assertEqual(row(result, n), {"issue": n, "outcome": "landed", "pr": pr, "train": 1, "car_pr": 92})
+
+    def test_every_late_car_shares_the_one_further_wait(self):
+        late = {f"train-checks-1-{i}": {"state": "pending", "head": head, "pending": ["e2e"]} for i, head in ((1, X1), (2, X2))}
+        result, calls, _ = train_run(replies=late)
+        self.assertEqual([l for l in labels(calls) if l.startswith("train-checks-")],
+                         ["train-checks-1-1", "train-checks-1-2", "train-checks-1-1-more", "train-checks-1-2-more"])
+        self.assertEqual([row(result, n).get("car_pr") for n in (1, 2)], [92, 92])
+
+    def test_a_car_still_pending_after_the_further_wait_falls_back_as_a_late_car_did(self):
+        late = {"state": "pending", "head": X1, "pending": ["e2e"]}
+        result, calls, _ = train_run(replies={"train-checks-1-1": late, "train-checks-1-1-more": late})
+        order = land_labels(calls)
+        self.assertEqual([l for l in order if l.startswith("train-checks-")], ["train-checks-1-1", "train-checks-1-2", "train-checks-1-1-more"])
+        self.assertNotIn("train-merge-1", order)
+        tail = ["train-checks-1-1-more", "train-sweep-2", "land-sync-1-1", "land-checks-1-2", "land-merge-1", "close-out-1",
+                "land-pr-2", "land-merge-2", "close-out-2"]
+        self.assertEqual(order[-len(tail):], tail)
+        self.assertEqual(lock_releases(calls), ["close-out-1"])
+        self.assertEqual(row(result, 1), {"issue": 1, "outcome": "landed", "pr": 41})
+        self.assertEqual(row(result, 2), {"issue": 2, "outcome": "landed", "pr": 42})
+
+    def test_a_failed_check_at_the_cap_gets_no_further_wait(self):
+        for name, reply in (
+                ("failed", {"state": "failed", "head": X1, "failing": ["ci"], "pending": ["e2e"]}),
+                ("pending with a failed check", {"state": "pending", "head": X1, "failing": ["ci"], "pending": ["e2e"]}),
+                ("pending at another head", {"state": "pending", "head": X2, "pending": ["e2e"]}),
+                ("dead", None)):
+            with self.subTest(name=name):
+                result, calls, _ = train_run(replies={"train-checks-1-1": reply})
+                order = land_labels(calls)
+                self.assertEqual([l for l in order if l.startswith("train-checks-")], ["train-checks-1-1", "train-checks-1-2"])
+                self.assertNotIn("train-merge-1", order)
+                self.assertEqual([row(result, n) for n in (1, 2)], [{"issue": n, "outcome": "landed", "pr": 40 + n} for n in (1, 2)])
+        # A late car behind a red one is not waited for: it could not join the green prefix.
+        _, calls, _ = train_run(issues=(1, 2, 3), replies={"train-checks-1-2": {"state": "failed", "head": X2, "failing": ["ci"]},
+                                                           "train-checks-1-3": {"state": "pending", "head": X3, "pending": ["e2e"]}})
+        self.assertEqual([l for l in labels(calls) if l.endswith("-more")], [])
+
+    def test_a_train_merge_refused_as_behind_sweeps_and_lands_its_members_serially(self):
+        c = "c" * 40
+        refused = dict(merge_reply({}, merged=False), behind=True, notes="the head branch is not up to date with the base branch")
+        result, calls, _ = train_run(replies={"train-merge-1": refused,
+                                              "land-sync-1-1": {"status": "done", "conflicted": False, "head": c, "notes": "ok"}})
+        order = land_labels(calls)
+        self.assertEqual(order[order.index("train-merge-1") + 1:], [
+            "train-sweep-2", "land-sync-1-1", "land-record-1-1", "land-merge-1", "close-out-1", "land-pr-2", "land-merge-2", "close-out-2"])
+        # The first landing kept the lock at its ready head through the train, moves it to the resynced head and releases it there, once.
+        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {c}\n", prompt(calls, "land-record-1-1"))
+        self.assertIn(f"--match-head-commit {c}", prompt(calls, "land-merge-1"))
+        self.assertEqual(lock_releases(calls), ["close-out-1"])
+        self.assertIn(LAND_RELEASE + c, prompt(calls, "close-out-1"))
+        self.assertNotIn("land-unlock-1", order)
+        self.assertEqual(row(result, 1), {"issue": 1, "outcome": "landed", "pr": 41})
+        self.assertEqual(row(result, 2), {"issue": 2, "outcome": "landed", "pr": 42})
+        self.assertIsNone(result["relaunch"])
+
+    def test_the_train_merge_asks_for_behind_in_the_serial_merge_words(self):
+        _, calls, _ = train_run(issues=(1, 2, 3), replies={"train-checks-1-2": {"state": "failed", "head": X2, "failing": ["ci"]}})
+        sentence = ("Never retry with another form; on a guard refusal or a head mismatch return merged false with the exact message in notes, "
+                    "and behind true only when the refusal says the head branch is not up to date with the base branch, "
+                    "or the guard says the PR is behind its base, else false.")
+        for label in ("train-merge-1", "land-merge-2"):
+            self.assertEqual(step_text(calls, label).count(sentence), 1)
+            self.assertEqual(schema_of(calls, label)["properties"]["behind"], {"type": "boolean"})
+        self.assertEqual(PROGRAM.read_text().count(sentence), 1)
+
+    def test_a_refused_train_merge_that_stays_behind_ends_in_the_serial_landings_own_rows(self):
+        refused = dict(merge_reply({}, merged=False), behind=True)
+        behind = {"state": "behind", "head": SHA}
+        result, calls, _ = train_run(replies={"train-merge-1": refused, "land-checks-1-2": behind, "land-checks-1-3": behind})
+        self.assertEqual(row(result, 1)["outcome"], "land-contended")
+        self.assertEqual(lock_releases(calls), ["land-unlock-1"])
+        self.assertEqual(row(result, 2), {"issue": 2, "outcome": "landed", "pr": 42})
+
     def test_a_lock_not_already_held_before_the_merge_sweeps_and_every_row_is_land_contended(self):
         for verdict in ("lost_to", "held_by", "acquired", "land-contended", "error"):
             with self.subTest(verdict=verdict):
@@ -3592,6 +3681,7 @@ class TrainTest(unittest.TestCase):
         open_car = {"train-flip-1-1": {"car": "OPEN", "prs": []}}
         for name, replies, detail, flipped in (
                 ("unmerged", {"train-merge-1": merge_reply({}, merged=False)}, "n", []),
+                ("refused, not behind", {"train-merge-1": dict(merge_reply({}, merged=False), behind=False)}, "n", []),
                 ("dead", {"train-merge-1": None, **open_car}, "train-merge-1 returned nothing", ["train-flip-1-1"]),
                 ("threw", {"train-merge-1": "throw", **open_car}, "stub agent train-merge-1 threw", ["train-flip-1-1"]),
                 ("no verdict", {"train-merge-1": {"lock": None, "merged": False}, **open_car}, "train-merge-1 returned no lock verdict", ["train-flip-1-1"]),

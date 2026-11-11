@@ -540,6 +540,8 @@ Return pr (number) and head (the full sha of the pushed head).`
 const CHECKS_TAIL = (prRef, wait) => `3. Otherwise wait in this turn until every check on head has completed, required or not. List every check with gh pr checks ${prRef} --repo ${SLUG} --json name,bucket,link (never --required) and wait with gh pr checks ${prRef} --repo ${SLUG} --watch ${wait}. It can return early and a list can be partial: never treat a partial list as green, and read the list again before answering. Bucket pass has passed; fail or cancel has failed; pending is still running; skipping never started and is ignored. The required set is the checks the project declares, as JSON: ${JSON.stringify(DECLARED)} (an empty list declares none), plus the checks the forge requires: take those from gh api repos/${SLUG}/rules/branches/${INT} (its required_status_checks rules) or else classic branch protection. A declared check with no run or status at head yet is pending: keep waiting, never treat it as absent or green.
 4. Answer passed only when no check on head is pending, failing or cancelled, with required (the required names you used) and passed (the names passing at head). Answer failed with failing (every failing or cancelled name, required or not) and details when any check failed. Answer needs_label with label and failing when a check failed only because the PR lacks a label that only a human may apply (do not apply it yourself). Answer pending with pending (the names still running) only when the wait ran out and no check failed.`
 // The one merge form of a landing, at an exact head; a train merges its car with the same form (#822).
+// What a refused merge answers, in land-merge and train-merge alike (#870, #822).
+const MERGE_REFUSED = 'Never retry with another form; on a guard refusal or a head mismatch return merged false with the exact message in notes, and behind true only when the refusal says the head branch is not up to date with the base branch, or the guard says the PR is behind its base, else false.'
 const MERGE_CMD = (pr, sha) => `${UNSET}gh pr merge ${pr} --repo ${SLUG} --${SETUP.merge_strategy} --match-head-commit ${sha}${SETUP.delete_branch ? ' --delete-branch' : ''}`
 // A merged landing must leave a cont naming its PR, or a re-adopted PR (which has none) could not be closed out.
 const markMerged = (n, ready, pr) => {
@@ -847,7 +849,7 @@ ${LOCK_RETURN} Return it as lock.
 Only when lock's verdict is already_held or moved, merge PR #${pr} of issue #${n} of ${SLUG} into ${INT}; a re-run must not merge twice.
 1. Read ${UNSET}gh pr view ${pr} --repo ${SLUG} --json state,mergeCommit. When state is already MERGED, skip step 2.
 2. Otherwise run, alone and exactly: ${MERGE_CMD(pr, expected)}
-3. Read the PR state again: merged is true only when the state reads MERGED. Never retry with another form; on a guard refusal or a head mismatch return merged false with the exact message in notes, and behind true only when the refusal says the head branch is not up to date with the base branch, or the guard says the PR is behind its base, else false.
+3. Read the PR state again: merged is true only when the state reads MERGED. ${MERGE_REFUSED}
 Return merged, behind, merge_commit and notes. On any other lock verdict run nothing else and return merged false with the verdict in notes.
 ${RULES}`, `land-merge-${n}`, { ...lifecycleClerk, schema: withRenew(LAND_MERGE_SCHEMA, { lock: NULLABLE(LOCK_SCHEMA) }) }), r => r.renew)
       if (!mg) return out('stopped', { stage: 'merge', detail: `land-merge-${n} returned nothing` })
@@ -900,7 +902,9 @@ ${RULES}`, `land-merge-${n}`, { ...lifecycleClerk, schema: withRenew(LAND_MERGE_
 // Otherwise the first issue's land() takes the lock at its ready head H1 and hands over to the train (via.train), which:
 //   train-pr-<n>      opens the PR of every later member at its ready head (renew first; no lock, no checks);
 //   train-build-<t>   builds car i = integration branch + heads 1..i on scratch branches land-train/<batch>-<t>-<i>, one car PR each;
-//   train-checks-<t>-<i>  waits for every car's checks, in parallel and bounded; g is the longest green prefix;
+//   train-checks-<t>-<i>  waits for every car's checks, in parallel and bounded; g is the longest green prefix. When the car after that
+//                     prefix is still pending with no failed check, the pending cars get one further, shorter wait
+//                     (train-checks-<t>-<i>-more), once per train, and g is read again;
 //   train-ready-<t>   renews the claims of members 1..g and reads their PR heads; a member that fails shrinks the train to those before it;
 //   train-merge-<t>   re-checks the lock at H1 (already_held only), merges car g at its exact head and reads the member PRs once;
 //   train-flip-<t>-<k>  reads the states again while a member PR still reads OPEN (the forge marks them merged itself, since the car's
@@ -912,12 +916,19 @@ ${RULES}`, `land-merge-${n}`, { ...lifecycleClerk, schema: withRenew(LAND_MERGE_
 // wrapper on any other exit). Nothing merges unless every car up to g is green at its exact head. A train never writes to an issue branch and
 // never reads a merge commit. Each issue joins at most one train per run: an issue a train did not land goes to land() in the same drain, never
 // back to WAITING. Any surprise before the merge step (a dead, thrown or malformed step, a conflict, a red or late car) sweeps and falls back to
-// land(); a surprise in the merge step stops its members, because the car may be merged.
+// land(), and so does a merge the forge or the guard refused as behind (the refusal proves the car unmerged; the first landing then resyncs
+// and moves the lock as any behind landing does); any other surprise in the merge step stops its members, because the car may be merged.
 const TRAIN_MAX = 3
 // forge_land_lock.py lets another host take over a lock it watched unchanged for IDLE_AFTER, 45 minutes, and a train's lock never changes.
-// The one long wait of a train, its car checks, is therefore bounded well below that: the other train steps have the remaining 20 minutes.
+// The one long wait of a train, its car checks, is therefore bounded below that: TRAIN_CHECKS_WAIT_MIN, plus TRAIN_CHECKS_MORE_MIN once
+// per train when a car is still pending with no failed check at the first cap (#822: a late car is nearly finished CI). The lock cannot be
+// re-asserted (only a changed sha restarts a waiter's watch), so the two waits leave the other train steps (train-pr, train-build,
+// train-ready, train-merge: about five minutes in the first real train) 8 minutes of the 45. Past that bound nothing unsafe happens: a
+// waiter that took the lock over makes train-merge's acquire answer something other than already_held, so nothing merges, and a fallen-back
+// first landing's lock move is refused; the rows end land-contended.
 const LOCK_IDLE_MIN = 45
 const TRAIN_CHECKS_WAIT_MIN = 25
+const TRAIN_CHECKS_MORE_MIN = 12
 // The forge marks the member PRs merged by itself after the car merge, and that can lag. No step sleeps: the program asks a read-only
 // train-flip step again while a member still reads OPEN, this many times at most, and each call's own duration is the wait.
 const TRAIN_FLIP_CALLS = 8
@@ -945,7 +956,7 @@ const TRAIN_FLIP_SCHEMA = { type: 'object', properties: { car: { type: 'string' 
 const TRAIN_MERGE_SCHEMA = {
   type: 'object',
   properties: {
-    lock: NULLABLE(LOCK_SCHEMA), merged: { type: 'boolean' }, notes: { type: 'string' },
+    lock: NULLABLE(LOCK_SCHEMA), merged: { type: 'boolean' }, behind: { type: 'boolean' }, notes: { type: 'string' },
     prs: PR_STATES,
   },
   required: ['merged'],
@@ -1017,7 +1028,7 @@ const runTrain = async cands => {
       for (const m of members.slice(1)) settled[m.e.n] = rowOf(m.e, outcome, m.pr, extra)
       return { row: { outcome, extra } }
     }
-    // Before the merge step nothing is merged: clear the cars and let the first landing go on; the other candidates land serially after it.
+    // Nothing is merged (before the merge step, or a merge refused as behind): clear the cars and let the first landing go on; the other candidates land serially after it.
     const fallBack = async why => {
       log(`train ${t}: ${why}; its issues land serially`)
       if (carsMaybe) await trainSweep()
@@ -1056,13 +1067,25 @@ ${RULES_FOR('<the scratch worktree>', '<car>')}`, `train-build-${t}`, { agentTyp
       if (!cars.length) return await fallBack(bd ? `no car was built (${bd.notes || bd.status})` : `train-build-${t} returned nothing`)
 
       // 4. Every car's checks, in parallel, each bounded below the lock's idle takeover and read-only (gh alone: no fetch, no git). 5. The longest green prefix.
-      const cks = await parallel(cars.map((c, i) => () => trainCall(`Wait for every check of the pull request #${c.pr} of ${SLUG} (the git repository at ${REPO}), car ${i + 1} of a landing train into ${INT}, at the car head ${c.head}, required or not. Change nothing.
+      const checks = (i, min, label) => () => { const c = cars[i]; return trainCall(`Wait for every check of the pull request #${c.pr} of ${SLUG} (the git repository at ${REPO}), car ${i + 1} of a landing train into ${INT}, at the car head ${c.head}, required or not. Change nothing.
 1. Read ${UNSET}gh pr view ${c.pr} --repo ${SLUG} --json headRefOid,state. head is its headRefOid. When head is not ${c.head} or the state is not OPEN, answer state failed at once with head and what you read in details.
 2. Run no git command in this step: the cars' checks are read side by side, and a fetch in the shared checkout would collide with theirs. Whether the car is behind ${INT} is not read here; the merge itself refuses a car that is. When a read of this step fails (a gh error, not a failing check), read once more; when it fails again answer state pending with head ${c.head} and the error in details, never failed.
-${CHECKS_TAIL(c.pr, `(give the watch a Bash timeout of ${TRAIN_CHECKS_WAIT_MIN} minutes at most and stop waiting ${TRAIN_CHECKS_WAIT_MIN} minutes after this step began, whatever is still pending then: the train holds the land lock, which another host takes over after ${LOCK_IDLE_MIN} idle minutes)`)}
-${RULES_FOR(REPO, carName(i + 1))}`, `train-checks-${t}-${i + 1}`, { ...TRAIN_LIFECYCLE, schema: LAND_CHECKS_SCHEMA })))
-      let g = 0
-      while (g < cars.length && green(cks[g], cars[g])) g++
+${CHECKS_TAIL(c.pr, `(give the watch a Bash timeout of ${min} minutes at most and stop waiting ${min} minutes after this step began, whatever is still pending then: the train holds the land lock, which another host takes over after ${LOCK_IDLE_MIN} idle minutes)`)}
+${RULES_FOR(REPO, carName(i + 1))}`, label, { ...TRAIN_LIFECYCLE, schema: LAND_CHECKS_SCHEMA }) }
+      const cks = await parallel(cars.map((c, i) => checks(i, TRAIN_CHECKS_WAIT_MIN, `train-checks-${t}-${i + 1}`)))
+      const prefix = () => { let k = 0; while (k < cars.length && green(cks[k], cars[k])) k++; return k }
+      // Still running at the cap with no failed check: not red, only late.
+      const late = i => !!cks[i] && cks[i].head === cars[i].head && cks[i].state === 'pending' && !(cks[i].failing || []).length
+      let g = prefix()
+      if (g < cars.length && late(g)) {
+        // One further wait, once per train: the late cars from g up to the first car that is neither green nor late.
+        const again = []
+        for (let i = g; i < cars.length && (late(i) || green(cks[i], cars[i])); i++) if (late(i)) again.push(i)
+        log(`train ${t}: ${again.length === 1 ? `car ${again[0] + 1} is` : `cars ${again.map(i => i + 1).join(', ')} are`} still pending with no failed check; waiting ${TRAIN_CHECKS_MORE_MIN} more minutes, once`)
+        const more = await parallel(again.map(i => checks(i, TRAIN_CHECKS_MORE_MIN, `train-checks-${t}-${i + 1}-more`)))
+        again.forEach((i, k) => { cks[i] = more[k] })
+        g = prefix()
+      }
       if (g === 0) return await fallBack('the first car is not green')
       if (g < members.length) log(`train ${t}: cars 1 to ${g} of ${members.length} are green; the other issues land serially`)
       members = members.slice(0, g)
@@ -1119,9 +1142,9 @@ ${LOCK_RETURN} Return it as lock.
 Only when lock's verdict is already_held, merge the car; a re-run must not merge twice.
 1. Read ${UNSET}gh pr view ${last.pr} --repo ${SLUG} --json state. When state is already MERGED, skip step 2.
 2. Otherwise run, alone and exactly, in its own Bash call from the repository checkout ${REPO} (the directory this session runs in; never from another directory and never chained after cd): ${MERGE_CMD(last.pr, last.head)}
-3. Read the car's state again: merged is true only when it reads MERGED. Never retry with another form; on a guard refusal or a head mismatch return merged false with the exact message in notes.
+3. Read the car's state again: merged is true only when it reads MERGED. ${MERGE_REFUSED}
 4. Only when merged is true, read the state of each member pull request once with ${UNSET}gh pr view <number> --repo ${SLUG} --json state (never read or return its merge commit). The forge marks a member merged by itself once the car is in ${INT}, and that can lag: do not wait for it and do not read twice, the program reads again by itself. Never merge, close or edit a member pull request yourself.
-Return merged, notes and prs: one {pr, state} per member pull request as read (an empty list when merged is false). On any other lock verdict run nothing else and return merged false with the verdict in notes.
+Return merged, behind, notes and prs: one {pr, state} per member pull request as read (an empty list when merged is false). On any other lock verdict run nothing else and return merged false with the verdict in notes.
 ${RULES_FOR(REPO, carName(members.length))}`, `train-merge-${t}`, { ...TRAIN_LIFECYCLE, effort: 'high', schema: TRAIN_MERGE_SCHEMA })
       } catch (e) { lost = String((e && e.message) || e) }
       if (!mg || !mg.lock) {
@@ -1132,7 +1155,10 @@ ${RULES_FOR(REPO, carName(members.length))}`, `train-merge-${t}`, { ...TRAIN_LIF
       } else {
         const v = mg.lock.verdict
         if (v !== 'already_held') return endAll('land-contended', { detail: `the land lock was not held before the train merge (${v})` })
-        // An unmerged car is not retried and not landed serially at once: the reply cannot prove the car stayed unmerged, and a relaunch re-reads the forge.
+        // A car refused as not up to date (the integration branch moved outside the land lock) is unmerged by the refusal itself: the train
+        // falls back, and the first landing, still holding the lock at H1 with its behind poll, resyncs and lands as #870 does.
+        if (mg.merged === false && mg.behind === true) return await fallBack(`the train merge was refused as behind (${mg.notes || 'no notes'})`)
+        // Any other unmerged car is not retried and not landed serially at once: the reply cannot prove the car stayed unmerged, and a relaunch re-reads the forge.
         if (mg.merged !== true) return endAll('stopped', { stage: 'train-merge', detail: mg.notes })
         note(mg.prs)
       }
