@@ -2141,7 +2141,9 @@ class AgentTypeTest(unittest.TestCase):
 
 
 class ClerkModelTest(unittest.TestCase):
-    """#803: clerk_model is checked, sets the model of every clerk call, and is passed to every child and the relaunch only when haiku."""
+    """#803, #813: clerk_model is checked, sets the model of every clerk call except the setup and lifecycle steps, which stay on the default, and is passed to every child and the relaunch only when haiku."""
+
+    ON_DEFAULT = {"setup", "land-unlock-", "land-pr-", "land-merge-"}
 
     def test_clerk_model_must_be_sonnet_or_haiku(self):
         for bad in ("opus", "Haiku", "", 1, None, True):
@@ -2179,6 +2181,7 @@ class ClerkModelTest(unittest.TestCase):
     def test_every_clerk_call_takes_the_clerk_model(self):
         clerk_stems = {stem for stem, kinds in EXPECTED.items() if kinds == frozenset({CLERK})}
         reached = set()
+        pinned = set()
         for index, scenario in enumerate(SCENARIOS):
             with self.subTest(i=index):
                 base = [c for c in run(**scenario)[1] if c.get("kind", "agent") == "agent"]
@@ -2189,19 +2192,33 @@ class ClerkModelTest(unittest.TestCase):
                     self.assertEqual(t["agentType"], b["agentType"], t["label"])
                     self.assertEqual(t["effort"], b["effort"], t["label"])
                     if b["agentType"] == CLERK:
+                        stem = AgentTypeTest.stem_of(t["label"])
                         self.assertEqual(b["model"], "sonnet", b["label"])
-                        self.assertEqual(t["model"], "haiku", t["label"])
-                        reached.add(AgentTypeTest.stem_of(t["label"]))
+                        if stem in self.ON_DEFAULT:
+                            self.assertEqual(t["model"], "sonnet", t["label"])
+                            pinned.add(stem)
+                        else:
+                            self.assertEqual(t["model"], "haiku", t["label"])
+                            reached.add(stem)
                     else:
                         self.assertEqual(t["model"], b["model"], t["label"])
-        self.assertEqual(reached, clerk_stems)
+        self.assertEqual(pinned, self.ON_DEFAULT)
+        self.assertEqual(reached, clerk_stems - self.ON_DEFAULT)
 
     def test_every_clerk_site_names_the_clerk_model(self):
         text = PROGRAM.read_text(encoding="utf-8")
         sites = re.findall(r"agentType: 'clerk', model: ([^,]+),", text)
         self.assertEqual(len(sites), text.count("agentType: 'clerk'"))
         self.assertGreater(len(sites), 0)
-        self.assertEqual(set(sites), {"CLERK_MODEL"})
+        self.assertLessEqual(set(sites), {"CLERK_MODEL", "DEFAULT_CLERK_MODEL"})
+
+    def test_meta_names_the_steps_clerk_model_covers(self):
+        meta = PROGRAM.read_text(encoding="utf-8")
+        meta = meta[:meta.index("\n}\n")]
+        covers = meta[meta.index("clerk_model?"):meta.index("; returns one table")]
+        for needle in ("the status clerk steps", "setup", "lifecycle verb", "stay on sonnet"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, covers)
 
 
 WHOLE_RUN = ("run in full every test file among or covering", "never a single test class",
