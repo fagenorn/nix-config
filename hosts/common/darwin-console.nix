@@ -1,7 +1,7 @@
 # Issue 856: the console's darwin user agent (the page and service of home/common/console).
 #
-# Declared with `command`, never `serviceConfig.ProgramArguments`, so launchd waits for
-# the Nix volume before starting it (the rule in CLAUDE.md). `RunAtLoad` starts it at
+# Declared with `command`, not with program arguments, so launchd waits for the Nix
+# volume before starting it (the rule in CLAUDE.md). `RunAtLoad` starts it at
 # login in gui/<uid> and `KeepAlive` restarts it whenever it exits.
 #
 # launchd gives a user agent no login-shell environment, so `PATH` carries gh's bin (the
