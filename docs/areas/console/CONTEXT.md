@@ -14,9 +14,21 @@ The per-host loopback service and its one page that say whether the owner is nee
 _Avoid_: dashboard, lead console
 
 **Inbox item**:
-Anything waiting on the owner, whatever its source. The console's statement counts them; with none it reads "Nothing needs you".
+Anything waiting on the owner that the console asks them to act on, whatever its source. The console's statement counts them; with none it reads "Nothing needs you". A session waiting in its terminal is not one: it is answered there (ADR-console-003).
 _Avoid_: ask, notification
 
 **Quiet project**:
-A registered project with no open work. It renders as one line, and more than three of them fold into one group, "N quiet projects".
+A registered project with no open work and no live session. It renders as one line, and more than three of them fold into one group, "N quiet projects".
 _Avoid_: dormant project, idle project
+
+**Session**:
+One running Claude Code process on this host, shown under the project of its working directory's main checkout, with one state: working, waiting for an answer, waiting for a permission, idle, or stopped on a usage limit (ADR-console-003).
+_Avoid_: agent, terminal
+
+**Outside sprints**:
+The one quiet line of a project that counts its sessions working and waiting; opening it lists them. It raises no inbox item.
+_Avoid_: ad-hoc work, side work
+
+**Not yet managed**:
+A repository with a live session that is not in the fleet registry; it is listed with its sessions and counts as no project. A session outside any repository is not listed.
+_Avoid_: unregistered project, orphan

@@ -370,11 +370,25 @@ class DocsTreeTest(unittest.TestCase):
         self.assertEqual(len(areas), 1)
         self.assertIn("(./areas/console/CONTEXT.md)", areas[0][1])
         self.assertIn("`python/agent_tools/console/**`", areas[0][3])
-        for term in ("Console", "Inbox item", "Quiet project"):
+        for term in ("Console", "Inbox item", "Quiet project", "Session", "Outside sprints", "Not yet managed"):
             self.assertIn([term, "Console"], cells)
 
     def doc(self, path):
         return " ".join((REPO_ROOT / path).read_text().split())
+
+    def test_the_console_session_decision_is_recorded(self):
+        path = "docs/areas/console/adr/003-sessions-arrive-by-hooks-and-a-registry-poll.md"
+        first = (REPO_ROOT / path).read_text().splitlines()[0]
+        self.assertEqual(first, "# ADR-console-003 — Sessions arrive by hooks and a five-second registry poll")
+        adr = self.doc(path)
+        for needle in ("POST /api/hooks", "ADR-console-001", "procStart", "#837"):
+            self.assertIn(needle, adr)
+        context = self.doc("docs/areas/console/CONTEXT.md")
+        for needle in (
+            "A registered project with no open work and no live session",
+            "A session waiting in its terminal is not one",
+        ):
+            self.assertIn(needle, context)
 
     def test_the_build_provenance_limitation_is_in_a_release_adr_and_the_map(self):
         adrs = [
