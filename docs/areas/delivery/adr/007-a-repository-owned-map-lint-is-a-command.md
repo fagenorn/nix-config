@@ -9,7 +9,7 @@
 
 ## Decision
 
-A repository that owns its context-map lint declares it in its project contract as the `commands` entry with the id `context-map-lint`. The caller that resolved the contract passes that entry's argv to the global tool after `--repo-lint`; the tool then runs none of its own checks, runs that command in the repository root and exits with its status. The skill names the default budget only as a default. A repository without the entry is linted exactly as before.
+A repository that owns its context-map lint declares it in its project contract as the `commands` entry with the id `context-map-lint`. The caller that resolved the contract passes that entry's argv to the global tool after `--repo-lint` and its resolved `cwd` as `--repo-lint-cwd`; the tool then runs none of its own checks, runs that command in that directory and exits with its status. The skill names the default budget only as a default. A repository without the entry is linted exactly as before.
 
 ## Considered options
 
@@ -19,4 +19,6 @@ A repository that owns its context-map lint declares it in its project contract 
 ## Consequences
 
 - The id `context-map-lint` is an agreed name, not a schema member: the resolver validates the entry as it does any command and gives the id no meaning of its own.
-- The command runs in the repository root, whatever `cwd` its entry declares, and receives no map argument: it selects its own map.
+- `--repo-lint` drops the global layout, ADR-id, citation and docs-root checks along with the budgets, so the repository's lint must cover whichever of them it needs.
+- The command runs in its entry's `cwd`, which must lie inside the repository root, and receives no map argument: it selects its own map.
+- The command's exit status is passed through, so a 2 may be the repository lint's own rather than misuse of the tool.

@@ -14,14 +14,19 @@ have no docs/areas/, so none of that applies to them.
 A repository that owns its context-map lint, with its own rules and budgets,
 declares it as the `context-map-lint` entry of its project contract's
 `commands`. The caller that resolved the contract passes that entry's argv
-after `--repo-lint`; this tool then runs none of its own checks: it runs that
-command in the repository root and exits with its status, so a map the
-repository's lint accepts is never failed here against this tool's budgets.
-This tool reads no project policy itself. Without `--repo-lint` nothing changes.
+after `--repo-lint`, which takes every remaining argument, and the entry's
+resolved `cwd` as `--repo-lint-cwd`: an absolute directory inside the root,
+the root itself when omitted. This tool then runs none of its own checks, the
+budgets, layout, ADR ids, citations and docs root included: it runs that
+command in that directory and exits with its status, so a map the repository's
+lint accepts is never failed here against this tool's budgets. This tool reads
+no project policy itself. Without `--repo-lint` nothing changes.
 
-Usage: context-map-lint --repo-root <absolute-root> --context-map <absolute-map> [--repo-lint <command> [<arg>...]]
-Exits 0 when clean, 1 on findings, 2 on misuse; with --repo-lint, the command's
-own exit status (2 when it cannot be started, 1 when a signal ended it).
+Usage: context-map-lint --repo-root <absolute-root> --context-map <absolute-map> [[--repo-lint-cwd <absolute-dir>] --repo-lint <command> [<arg>...]]
+Exits 0 when clean, 1 on findings, 2 on misuse. With --repo-lint the command's
+own exit status is passed through unchanged, a 2 of its own included, so there
+a 2 is either this tool's misuse or the repository lint's own; a command that
+cannot be started exits 2 and one ended by a signal exits 1.
 """
 
 from __future__ import annotations
@@ -291,10 +296,10 @@ def check(root: Path, map_path: Path) -> list[str]:
     return errors
 
 
-def run_repo_lint(command: list[str], root: Path) -> int:
+def run_repo_lint(command: list[str], cwd: Path) -> int:
     """Defer to the repository's own lint: its exit status is this tool's."""
     try:
-        status = subprocess.run(command, cwd=root).returncode
+        status = subprocess.run(command, cwd=cwd).returncode
     except OSError as error:
         print(f"context-map-lint: cannot run the repository's lint {command[0]}: {error}", file=sys.stderr)
         return 2
@@ -302,6 +307,10 @@ def run_repo_lint(command: list[str], root: Path) -> int:
 
 
 def main(argv: list[str]) -> int:
+    supplied_cwd = None
+    if argv[5:6] == ["--repo-lint-cwd"] and argv[7:8] == ["--repo-lint"]:
+        supplied_cwd = Path(argv[6])
+        argv = argv[:5] + argv[7:]
     repo_lint = argv[6:] if argv[5:6] == ["--repo-lint"] else None
     if repo_lint is not None:
         argv = argv[:5]
@@ -325,7 +334,16 @@ def main(argv: list[str]) -> int:
         return 2
 
     if repo_lint is not None:
-        return run_repo_lint(repo_lint, root)
+        if supplied_cwd is None:
+            return run_repo_lint(repo_lint, root)
+        if not supplied_cwd.is_absolute():
+            print("context-map-lint: --repo-lint-cwd must be absolute", file=sys.stderr)
+            return 2
+        lint_cwd = supplied_cwd.resolve()
+        if not lint_cwd.is_dir() or not lint_cwd.is_relative_to(root):
+            print(f"context-map-lint: --repo-lint-cwd is not a directory inside the repository root: {lint_cwd}", file=sys.stderr)
+            return 2
+        return run_repo_lint(repo_lint, lint_cwd)
 
     errors = check(root, map_path)
     if not errors:

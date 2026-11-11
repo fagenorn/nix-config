@@ -88,6 +88,41 @@ class ContextMapLintTest(unittest.TestCase):
             self.assertEqual(result.returncode, 1)
             self.assertEqual(result.stderr, "map over the repo budget\n")
 
+    def test_the_repo_lint_runs_in_its_entry_cwd(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            context_map = self.over_budget_map(root)
+            scripts = root / "scripts"
+            scripts.mkdir()
+            lint = scripts / "lint.py"
+            lint.write_text(f"#!{sys.executable}\nimport os\nprint('repo lint in', os.getcwd())\n")
+            lint.chmod(0o755)
+            result = self.run_lint(root, context_map, "--repo-lint-cwd", str(scripts), "--repo-lint", "./lint.py")
+            self.assertEqual((result.returncode, result.stdout, result.stderr), (0, f"repo lint in {scripts}\n", ""))
+            in_root = self.run_lint(root, context_map, "--repo-lint", "./lint.py")
+            self.assertEqual(in_root.returncode, 2)
+
+    def test_the_repo_lint_exit_2_is_passed_through(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            context_map = self.over_budget_map(root)
+            command = self.repo_lint(root, "import sys\nsys.exit(2)\n")
+            result = self.run_lint(root, context_map, "--repo-lint", *command)
+            self.assertEqual((result.returncode, result.stderr), (2, ""))
+
+    def test_repo_lint_cwd_misuse(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            context_map = self.over_budget_map(root)
+            for cwd in ("scripts", str(root / "absent"), str(root.parent), str(context_map)):
+                with self.subTest(cwd=cwd):
+                    result = self.run_lint(root, context_map, "--repo-lint-cwd", cwd, "--repo-lint", "true")
+                    self.assertEqual(result.returncode, 2)
+                    self.assertIn("--repo-lint-cwd", result.stderr)
+            alone = self.run_lint(root, context_map, "--repo-lint-cwd", str(root))
+            self.assertEqual(alone.returncode, 2)
+            self.assertIn("Usage: context-map-lint --repo-root ", alone.stderr)
+
     def test_repo_lint_misuse(self):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)

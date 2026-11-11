@@ -560,11 +560,16 @@ class ProjectPolicySurfaceTest(unittest.TestCase):
     def test_grill_defers_to_a_repository_owned_context_map_lint(self):
         grill = REPO_ROOT / "home/common/agent-skills/skills/grill-with-docs"
         skill = (grill / "SKILL.md").read_text(encoding="utf-8")
-        self.assertIn("a resolved `context-map-lint` command's argv follows `--repo-lint`", skill)
+        self.assertIn("Read `bindings.paths.context`, `bindings.commands` and `capabilities.knowledge.*`.", skill)
+        self.assertIn(
+            "When the retained snapshot's `bindings.commands` has a `context-map-lint` entry, append "
+            "`--repo-lint-cwd <its cwd> --repo-lint` then each word of its `argv` as a separate argument; "
+            "with no entry, no flag.", skill)
         self.assertNotRegex(skill, r"\b(150|200) lines")
         context_format = (grill / "CONTEXT-FORMAT.md").read_text(encoding="utf-8")
-        self.assertIn("`--repo-lint` swaps in the repository's lint and budgets", context_format)
-        self.assertIn("150 lines by default", context_format)
+        self.assertIn("`--repo-lint`, per [SKILL.md](./SKILL.md), swaps in the repository's lint and budgets",
+                      context_format)
+        self.assertIn("150 lines unless [SKILL.md](./SKILL.md)'s `--repo-lint` applies", context_format)
         self.assertNotIn("≤150", context_format)
 
 

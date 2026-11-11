@@ -4,7 +4,7 @@ Domain knowledge lives as a **map plus area glossaries**. The map is an index, n
 
 ## Contents
 
-- Illustrative layout (below)
+- Illustrative layout
 - The map
 - Area glossary
 - Repos without a map yet
@@ -21,7 +21,7 @@ docs/
 │   │   ├── CONTEXT.md   ←   a stub; its map row carries governs `*`
 │   │   └── adr/
 │   └── <slug>/
-│       ├── CONTEXT.md   ← budgeted glossary for this area only
+│       ├── CONTEXT.md   ← this area's budgeted glossary
 │       └── adr/
 │           └── NNN-kebab-title.md
 ├── standards/           ← Layer-2 project deltas + ≤40-line README index
@@ -32,11 +32,11 @@ docs/
 
 The reserved directories are created only when needed. Every directory under `areas/` is an area with a row in the map's Areas table, and every row points into `areas/`. An extra docs-root directory needs a row in `docs/README.md`'s routing table. `areas/system/` holds decisions spanning areas: its map row has gist "decisions spanning areas" and glob `*`, and its `CONTEXT.md` stays a stub because every grounding pass loads it. There is no central `docs/adr/`. Specs, plans, handoffs and notes are not documentation: they go to their retained `bindings.paths.artifacts` locations.
 
-The Order / Invoice / Customer names below are illustrative.
+Order, Invoice and Customer below are illustrative.
 
 ## The map: `<selected-context-map>`
 
-**Hard budget: 150 lines by default.** Three tables and nothing else.
+**Hard budget: 150 lines unless [SKILL.md](./SKILL.md)'s `--repo-lint` applies.** Three tables, nothing else.
 
 ```md
 # Context Map
@@ -63,10 +63,10 @@ The Order / Invoice / Customer names below are illustrative.
 - **Ordering ↔ Billing**: shared `CustomerId` and `Money` types.
 ```
 
-- A gist is one line of twelve words or fewer.
-- `governs:` globs are the load trigger: each matches at least one real path from the repo root, and they live only here, never restated in the area file.
+- A gist is one line of at most twelve words.
+- `governs:` globs are the load trigger: each matches at least one real path from the repo root, and they live only here, never in the area file.
 - Context-file links are map-relative: `./areas/<area-slug>/CONTEXT.md`.
-- Every term an area defines appears exactly once in Terms, sorted, with its owning area and no definition. A term with two homes is a modelling bug to resolve.
+- Every term an area defines appears exactly once in Terms, sorted, with its owning area and no definition. A term with two homes is a modelling bug.
 - `## Relationships` carries cross-area edges only.
 
 ## Area glossary: `CONTEXT.md`
@@ -95,11 +95,11 @@ _Avoid_: Client, buyer, account
 - Glossary only: nothing that goes stale when the code changes (no implementation, spec, notes or decision log).
 - Each definition is one or two sentences on what the term *is*.
 - `_Avoid_:` is mandatory whenever rival names circulate.
-- Only concepts unique to this domain; general programming concepts (timeouts, retries, error types) stay out.
+- Only concepts unique to this domain; general programming ones (timeouts, retries, error types) stay out.
 - Group under `###` subheadings when clusters emerge.
 - At most one example dialogue per area, at most ten lines, only when two terms resist definition.
 
-Mark an open ambiguity inline on the disputed term and delete the marker in the commit that settles it; there is no "flagged ambiguities" log:
+Mark an open ambiguity inline on the disputed term and delete the marker in the commit that settles it; keep no ambiguity log:
 
 ```md
 **Account**:
@@ -114,4 +114,4 @@ Start with a single `docs/CONTEXT.md` (or a legacy root `CONTEXT.md`) in the are
 
 ## Linting
 
-`~/.agents/bin/context-map-lint --repo-root <absolute checkout root> --context-map <selected map path>` checks term resolution, budgets, globs, links and, once `docs/areas/` exists, the layout and ADR ids above. `--repo-lint` swaps in the repository's lint and budgets. Fix what it reports, and wire it into CI.
+`~/.agents/bin/context-map-lint --repo-root <absolute checkout root> --context-map <selected map path>` checks term resolution, budgets, globs, links and, once `docs/areas/` exists, the layout and ADR ids above. `--repo-lint`, per [SKILL.md](./SKILL.md), swaps in the repository's lint and budgets. Fix what it reports; wire it into CI.
