@@ -460,6 +460,8 @@ const LAND_MERGE_SCHEMA = { type: 'object', properties: { merged: { type: 'boole
 const CLOSE_SCHEMA = { type: 'object', properties: { issue_state: { type: 'string' }, branch_deleted: { type: 'boolean' }, released: { type: 'boolean' }, decision_ended: { type: 'boolean' }, notes_posted: { type: 'boolean' }, notes: { type: 'string' } }, required: ['issue_state'] }
 // Resyncs a landing runs on a behind answer or a retaken lock. With no unconditional first resync, the third behind answer is still contention (#801).
 const MAX_SYNCS = 2
+// #818: the extra waits a landing spends on the land lock after its first acquire --wait answered land-contended at the CLI's own bound.
+const LAND_WAIT_RETRIES = 3
 // A folded reply carries its nested steps; a nested object may be absent, so its schema is nullable (#716).
 const NULLABLE = s => ({ anyOf: [s, { type: 'null' }] })
 const withRenew = (s, extra = {}) => ({ ...s, properties: { ...s.properties, renew: RENEW_SCHEMA, ...extra }, required: ['renew'] })
@@ -657,20 +659,39 @@ ${RULES}`, `land-pr-${n}`, { agentType: 'clerk', model: DEFAULT_CLERK_MODEL, eff
     if (!prR) return out('stopped', { stage: 'pr', detail: `land-pr-${n} returned nothing` })
     // A renew that ended ran nothing after it; a refused lock holds nothing (P5). Otherwise the lock stays marked held at expected (O2).
     if (prR.renew && prR.renew.verdict !== 'renewed') lockHeld = false
-    const v1 = prR.lock ? prR.lock.verdict : null
-    const refused = v1 === 'land-contended' || v1 === 'held_by' || v1 === 'lost_to'
-    if (refused) lockHeld = false
+    let v1 = prR.lock ? prR.lock.verdict : null
+    const refusal = v => v === 'land-contended' || v === 'held_by' || v === 'lost_to'
+    if (refusal(v1)) lockHeld = false
     const lostA = renewed(prR.renew, `land-pr-${n}`)
     if (lostA) return lostA
     if (!complete(prR, LAND_PR_SCHEMA)) return out('stopped', { stage: 'pr', detail: `land-pr-${n} returned nothing` })
     pr = prR.pr
     if (prR.head !== expected) return out('stopped', { stage: 'head-moved', expected, head: prR.head })
+    // #818: land-contended is the wait running out at the CLI's bound behind other landings, so the claim is renewed and the same acquire
+    // waits again, LAND_WAIT_RETRIES times at most. Each call is marked as possibly holding the lock first, as land-pr is (P5).
+    let lockStep = `land-pr-${n}`
+    for (let k = 1; v1 === 'land-contended' && k <= LAND_WAIT_RETRIES; k++) {
+      const label = `land-lock-${n}-${k}`
+      lockStep = label
+      lockHeld = true
+      const lk = await recall(() => call(`${RENEW_FIRST}
+Then take the cross-host landing lock of the branch ${INT} for PR #${pr} of issue #${n} of ${SLUG} at the head ${expected}; an earlier wait for it ran out behind other landings. Run alone and exactly: ${LAND_ACQUIRE(expected, true)}
+${LOCK_RETURN} Return it as lock. Run nothing else.
+${RULES}`, label, { ...lifecycleClerk, schema: withRenew({ type: 'object', properties: {} }, { lock: NULLABLE(LOCK_SCHEMA) }) }), r => r.renew)
+      if (!lk) return out('stopped', { stage: 'land-lock', detail: `${label} returned nothing` })
+      if (lk.renew && lk.renew.verdict !== 'renewed') lockHeld = false
+      v1 = lk.lock ? lk.lock.verdict : null
+      if (refusal(v1)) lockHeld = false
+      const lost = renewed(lk.renew, label)
+      if (lost) return lost
+    }
     if (!HOLDING(v1)) {
-      if (refused) return out('land-contended', { detail: `the land lock is held by another landing (${v1})` })
-      return out('stopped', { stage: 'land-lock', detail: v1 === null ? `land-pr-${n} returned no lock verdict` : v1 })
+      if (refusal(v1)) return out('land-contended', { detail: `the land lock is held by another landing (${v1})` })
+      return out('stopped', { stage: 'land-lock', detail: v1 === null ? `${lockStep} returned no lock verdict` : v1 })
     }
 
-    carried = { label: `land-pr-${n}`, reply: prR.checks || null }
+    // A retried wait polled no checks: the loop polls them itself.
+    carried = lockStep === `land-pr-${n}` ? { label: lockStep, reply: prR.checks || null } : null
 
     for (;;) {
       c.checks++
@@ -699,8 +720,11 @@ ${RULES}`, label, { ...lifecycleClerk, schema: LAND_CHECKS_SCHEMA })
         if (c.ciFails >= 2) return out('ci-failed', { failing: failingNames, details: ck.details })
         const fix = await call(`Issue #${n} of ${SLUG}: the checks of PR #${pr} failed at ${expected}: ${JSON.stringify(failingNames)}. Details: ${ck.details || 'none given'}.
 Work in the worktree ${W} on branch ${B}. Find the cause in this branch's changes, fix the failing checks with the smallest change and a regression test, commit, and push (git -C ${W} push origin ${B}); before pushing, ${WHOLE('the files you changed')}. Never weaken, skip or delete a test or check to make it pass. ${IMPL_RETURN}
+When the failure has no cause in the code (an infrastructure, cache or network error in a setup step), change and commit nothing: rerun the failed jobs once, with ${UNSET}gh run rerun <run-id> --repo ${SLUG} --failed for each failed run (its id is in the failing check's link), do not wait for them, and return status done with the head unchanged (commit equal to start_head, ${expected}) and the error you saw in notes; the program then polls the checks itself.
 ${RULES}`, `land-fix-${n}`, { agentType: 'implementer', model: 'sonnet', schema: IMPL })
-        if (!fix || fix.status !== 'done' || !fix.commit || fix.commit === expected) return out('ci-failed', { failing: failingNames, detail: 'the fix round did not finish' })
+        if (!fix || fix.status !== 'done' || !fix.commit) return out('ci-failed', { failing: failingNames, detail: 'the fix round did not finish' })
+        // #818: done at the unchanged head is a rerun of jobs that failed for no cause in the code. The loop polls again; ciFails still ends a second red poll as ci-failed.
+        if (sameSha(fix.commit, expected)) continue
         const rv = await call(`Issue #${n} of ${SLUG}, worktree ${W}, branch ${B}.
 Review this fix for failing checks: git -C ${W} diff ${fix.start_head || expected}..${fix.commit}; the failure it answers: ${JSON.stringify(failingNames)}; the notes: ${fix.notes}. Report Important or Critical defects only, above all a weakened, skipped or deleted test or check. Do not edit anything.
 ${RULES}`, `land-fix-review-${n}`, { agentType: 'reviewer', schema: FINDINGS })
