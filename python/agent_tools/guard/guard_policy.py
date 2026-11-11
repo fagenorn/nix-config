@@ -55,7 +55,10 @@ Every child of the identity steps, the two `git remote get-url` reads and the
 `/dev/null`, `GIT_TERMINAL_PROMPT=0`, `GH_PROMPT_DISABLED=1`, a 30-second timeout
 and `GITHUB_TOKEN` and `GH_TOKEN` removed, so `gh` answers with the keyring
 credential (issue 126 D7); the fetch and the listing are bounded at the same 30
-seconds. A timeout or a missing executable is a failed read. A failed read puts
+seconds. A timeout or a missing executable is a failed read. A failed `gh api`
+read is repeated once inside its own 30 seconds, when at least
+`PROVIDER_RETRY_FLOOR_SECONDS` of them are left, and the second answer stands
+(issue 844); no other read is repeated. A failed read puts
 its reason in the refusal's detail (`timed out`, the executable error, or `exit
 <n>` with the child's stderr), and a `gh` answer other than the slug puts the
 name it gave.
@@ -187,6 +190,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from agent_tools import canonical
@@ -212,6 +216,8 @@ REASON_CODES = (
 )
 CAUSES = ("base_invalid", "registry_invalid", "platform_unavailable", "output_unwritable",
           "internal")
+# The least time left of the provider read's bound that still buys its one retry.
+PROVIDER_RETRY_FLOOR_SECONDS = 5
 
 BRANCH_UNRESOLVED_REPAIRS = ("adopt.registration.remote_default_unknown",
                              "adopt.registration.integration_branch_unresolved")
@@ -292,11 +298,13 @@ def read_base(path: Path) -> dict:
 # --------------------------------------------------------------------------
 
 
-def _identity_read(argv: list[str], root: Path) -> tuple[str | None, str]:
+def _identity_read(argv: list[str], root: Path, *,
+                   timeout: float = forge_adapter.CHILD_TIMEOUT_SECONDS,
+                   ) -> tuple[str | None, str]:
     """`(stdout, "")` of `argv` run by name in `root`, or `(None, why)` when the read failed.
 
     The child never sees a token variable, is never prompted for credentials,
-    reads nothing from stdin and is killed after `CHILD_TIMEOUT_SECONDS`; a
+    reads nothing from stdin and is killed after `timeout` seconds; a
     timeout or a missing executable is a failed read like a non-zero exit. `why`
     is `timed out`, the `OSError` text, or `exit <n>` with the child's stderr, so a
     refusal says which of them it was.
@@ -306,7 +314,7 @@ def _identity_read(argv: list[str], root: Path) -> tuple[str | None, str]:
     env.update(GIT_TERMINAL_PROMPT="0", GH_PROMPT_DISABLED="1")
     try:
         done = subprocess.run(argv, capture_output=True, text=True, errors="replace",
-                              timeout=forge_adapter.CHILD_TIMEOUT_SECONDS, env=env, cwd=root,
+                              timeout=timeout, env=env, cwd=root,
                               stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
         return None, "timed out"
@@ -316,6 +324,28 @@ def _identity_read(argv: list[str], root: Path) -> tuple[str | None, str]:
         return done.stdout, ""
     stderr = done.stderr.strip()[:forge_adapter.DETAIL_LIMIT]
     return None, f"exit {done.returncode}: {stderr}" if stderr else f"exit {done.returncode}"
+
+
+def _provider_read(slug: str, root: Path) -> tuple[str | None, str]:
+    """Step 10's read, `gh api repos/<slug> --jq .full_name`, as `_identity_read` answers it.
+
+    A failed read is repeated once (issue 844: the host's route to the provider
+    drops for a moment), and the second answer stands, its `why` included. Both
+    attempts share the one read's `CHILD_TIMEOUT_SECONDS`: the second is bounded
+    by what the first left, and is not made when that is under
+    `PROVIDER_RETRY_FLOOR_SECONDS`. An answer, the wrong name included, is never
+    repeated.
+    """
+    argv = ["gh", "api", f"repos/{slug}", "--jq", ".full_name"]
+    limit = forge_adapter.CHILD_TIMEOUT_SECONDS
+    started = time.monotonic()
+    answer, why = _identity_read(argv, root, timeout=limit)
+    if answer is not None:
+        return answer, why
+    left = limit - (time.monotonic() - started)
+    if left < PROVIDER_RETRY_FLOOR_SECONDS:
+        return answer, why
+    return _identity_read(argv, root, timeout=left)
 
 
 def origin_slug(root: Path) -> str:
@@ -405,7 +435,7 @@ def _proof(root: Path, entry: dict, slug: str, source: adopt_verify.Verification
             "branch_mismatch", f"the contract names {vcs['default_branch']} and "
             f"{vcs['integration_branch']}; origin's default is {source.remote_default} and "
             f"the branch read is {source.branch}")
-    answer, why = _identity_read(["gh", "api", f"repos/{slug}", "--jq", ".full_name"], root)
+    answer, why = _provider_read(slug, root)
     if answer is None:
         raise ProjectRefused("provider_unproven", f"gh api repos/{slug} failed: {why}")
     if answer.strip() != slug:
