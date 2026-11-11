@@ -424,7 +424,7 @@ class HookTest(Case):
 
     def test_a_worktree_session_is_listed_under_the_main_checkout(self):
         main, wt = self.root / "main", self.root / "wt"
-        git("-c", "init.defaultBranch=main", "init", "-q", str(main))
+        git("init", "-q", "-b", "main", str(main))
         git("-C", str(main), "-c", "user.name=t", "-c", "user.email=t@t",
             "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "x")
         git("-C", str(main), "worktree", "add", "-q", str(wt), "-b", "wt")

@@ -192,7 +192,7 @@ class WorktreeTest(unittest.TestCase):
     def test_a_worktree_session_belongs_to_its_main_checkout(self):
         with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw)
-            git("-c", "init.defaultBranch=main", "init", "-q", str(tmp / "main"))
+            git("init", "-q", "-b", "main", str(tmp / "main"))
             git("-C", str(tmp / "main"), "-c", "user.name=t", "-c", "user.email=t@t",
                 "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "x")
             git("-C", str(tmp / "main"), "worktree", "add", "-q", str(tmp / "wt"), "-b", "wt")
