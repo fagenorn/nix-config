@@ -102,7 +102,8 @@ def untyped(calls):
             if c.get("kind", "agent") == "agent" and c["agentType"] not in PROGRAM_AGENT_TYPES]
 
 
-def run(args=None, replies=None, patch=None):
+def run_out(args=None, replies=None, patch=None):
+    """The harness's whole output: result, calls and the program's log lines."""
     node = shutil.which("node")
     if node is None:
         raise AssertionError("node is not on PATH; the deliver-standard scenarios need it")
@@ -115,6 +116,11 @@ def run(args=None, replies=None, patch=None):
     bad = untyped(out["calls"])
     if bad:
         raise AssertionError(f"agent calls without a program agentType: {bad}")
+    return out
+
+
+def run(args=None, replies=None, patch=None):
+    out = run_out(args, replies, patch)
     return out["result"], out["calls"]
 
 
@@ -1611,7 +1617,9 @@ class PlanRulesTest(unittest.TestCase):
         codex = {"verdict": "findings", "findings": [{"severity": "important", "rule": "R2", "summary": "s", "source": "codex"}]}
         for kept in (interface, codex):
             with self.subTest(kept=kept["findings"][0]["summary"]):
-                first, _ = run(replies={"plan": plan, "plan-revise": plan, "plan-review": kept, "plan-rules-review": None})
+                # The revise changes the acceptance, so the ruleless trigger still gets its rules re-review (#819).
+                first, _ = run(replies={"plan": plan, "plan-revise": with_criteria(HUMAN, EVIDENCE), "plan-review": kept,
+                                        "plan-rules-review": None})
                 self.assertEqual(first["stage"], "plan-review")
                 self.assertIsNotNone(first["cont"]["plan_findings"])
                 result, calls = run(args=dict(ARGS, cont=first["cont"]))
@@ -1645,7 +1653,10 @@ class PlanRulesTest(unittest.TestCase):
     def test_a_kept_finding_survives_an_unread_owner_answer(self):
         plan = with_criteria(HUMAN)
         interface = {"verdict": "findings", "findings": [{"severity": "important", "summary": "interface mismatch"}]}
-        first, _ = run(replies={"plan": plan, "plan-revise": plan, "plan-review": interface, "plan-rules-review": None})
+        # The revise changes the acceptance, so the ruleless trigger still gets its rules re-review (#819).
+        plan = with_criteria(HUMAN, EVIDENCE)
+        first, _ = run(replies={"plan": with_criteria(HUMAN), "plan-revise": plan, "plan-review": interface,
+                                "plan-rules-review": None})
         kept = first["cont"]["plan_findings"]
         self.assertIsNotNone(kept)
         for answer in (None, {"verdict": "answered", "comment_id": 1, "questions": [], "decisions": " "}):
@@ -1671,7 +1682,8 @@ class PlanRulesTest(unittest.TestCase):
                                       ("ruleless", report(), report(rule="R2")),
                                       ("other-rule", report(rule="R2"), report(rule="R6"))):
             with self.subTest(codex=name):
-                replies = {"plan": plan, "plan-revise": plan, "plan-codex": {"available": True, **codex},
+                # The revise changes the acceptance, so a ruleless trigger still gets its rules re-review (#819).
+                replies = {"plan": plan, "plan-revise": with_criteria(HUMAN, EVIDENCE), "plan-codex": {"available": True, **codex},
                            "plan-rules-review": [rereview, {"verdict": "pass", "findings": []}]}
                 result, calls = run(replies=replies)
                 self.assertEqual(result["stage"], "plan-review")
@@ -1740,6 +1752,143 @@ class PlanRulesTest(unittest.TestCase):
         for line in RULES_FILE.read_text(encoding="utf-8").splitlines():
             if line.startswith("- **R"):
                 self.assertNotIn(line.split("** ", 1)[1][:40], source)
+
+
+class PlanTurnStructureTest(unittest.TestCase):
+    """#819: the planner writes its files in one message, revises with Edit, and self-checks three finding classes."""
+
+    PLANNERS = ("plan", "plan-revise", "plan-rules-revise")
+    WRITE_ONCE = ("write the code map, plan.md and every task file as parallel Write calls in one message",
+                  "a second message only if the output limit forces it", "then run any checks in one message")
+    REVISE = ("load plan.md, every task file and the code map with one command",
+              "fix the findings with Edit in place", "rewrite a whole file only when most of it changes")
+    SELF_CHECK = ("run every grep or deny gate a task prescribes against the text this plan requires and confirm it does not reject that text",
+                  "name for each test case the one code mutation that makes it fail",
+                  "list for each new test or doc the CI workflow test list, the generated index and the project gate that must also change")
+
+    def calls(self):
+        # The scenario of PlanRulesTest.keep_stop: plan, plan-revise and plan-rules-revise all run.
+        plan = with_criteria(HUMAN)
+        _, calls = run(replies={"plan": plan, "plan-revise": plan, "plan-rules-revise": PlanRulesTest.REVISED,
+                                "plan-review": PlanRulesTest.RULE_FINDING, "plan-rules-review": PlanRulesTest.RULE_FINDING})
+        return calls
+
+    def test_the_first_plan_writes_every_file_in_one_message(self):
+        text = prompt(self.calls(), "plan")
+        for needle in self.WRITE_ONCE:
+            self.assertIn(needle, text)
+            self.assertLess(text.index(needle), text.index("Plan this issue."))
+        for needle in self.REVISE:
+            self.assertNotIn(needle, text)
+
+    def test_both_revises_load_once_and_edit_in_place(self):
+        calls = self.calls()
+        for label in ("plan-revise", "plan-rules-revise"):
+            text = prompt(calls, label)
+            for needle in self.REVISE:
+                self.assertIn(needle, text, label)
+                self.assertLess(text.index(needle), text.index("Plan this issue."), label)
+            self.assertNotIn("parallel Write calls", text, label)
+
+    def test_only_the_planner_gets_the_self_check_and_the_reviewer_rubric_is_untouched(self):
+        calls = self.calls()
+        for label in self.PLANNERS:
+            text = prompt(calls, label)
+            for needle in self.SELF_CHECK:
+                self.assertIn(needle, text, label)
+                self.assertGreater(text.index(needle), text.index("check the plan against the review it will get"), label)
+        for call in all_calls() + calls:
+            if call["label"] not in self.PLANNERS:
+                for needle in self.SELF_CHECK + self.WRITE_ONCE + self.REVISE:
+                    self.assertNotIn(needle, call["prompt"], call["label"])
+        source = PROGRAM.read_text(encoding="utf-8")
+        rubric = re.search(r"const PLAN_RUBRIC = `([^`]*)`", source).group(1)
+        self.assertEqual(rubric, "an acceptance criterion with no task, a task whose test cannot fail, wrong or missing interfaces, "
+                                 "a design choice that breaks the project's documented conventions, or a project-specific literal "
+                                 "written into global skills or agents")
+
+
+class RulesRereviewSkipTest(unittest.TestCase):
+    """#819 AC2: a revise no rule triggered, clean by planRules and with unchanged acceptance, gets no rules re-review."""
+
+    BARE = {"verdict": "findings", "findings": [{"severity": "important", "summary": "interface mismatch"}]}
+    LEFT = {"verdict": "findings", "findings": [{"severity": "important", "summary": "AC2 breaks a rule"}]}
+    SKIPPED = "plan rules re-review skipped"
+    OPEN = {"close-out": {"issue_state": "OPEN"}}
+
+    def go(self, plan, revised, review=None, **more):
+        # A rules re-review that would block, were it run (ruleless, so no rules-only revise follows it).
+        replies = {"plan": plan, "plan-revise": revised, "plan-review": review or self.BARE,
+                   "plan-rules-review": self.LEFT, **more}
+        out = run_out(replies=replies, patch=self.OPEN)
+        return out["result"], labels(out["calls"]), [line for line in out["logs"] if self.SKIPPED in line]
+
+    def test_a_ruleless_trigger_with_unchanged_acceptance_skips_the_rules_rereview_and_proceeds(self):
+        plan = with_criteria(EVIDENCE, HUMAN)
+        # Other members of a criterion and the tasks may change, and verify's key order is not a change.
+        reordered = criterion(EVIDENCE, text="deployed and live")
+        reordered["verify"] = dict(reversed(list(reordered["verify"].items())))
+        revised = with_criteria(reordered, HUMAN, tasks=tasks(2))
+        result, names, skipped = self.go(plan, revised)
+        self.assertEqual(names.count("plan-revise"), 1)
+        self.assertNotIn("plan-rules-review", names)
+        self.assertNotIn("plan-rules-revise", names)
+        self.assertIn("impl-2", names)
+        self.assertNotEqual(result["stage"], "plan-review")
+        self.assertEqual(len(skipped), 1)
+
+    def test_a_codex_ruleless_trigger_skips_too(self):
+        plan = with_criteria(HUMAN)
+        _, names, skipped = self.go(plan, plan, review={"verdict": "pass", "findings": []},
+                                    **{"plan-codex": {"available": True, **self.BARE}})
+        self.assertNotIn("plan-rules-review", names)
+        self.assertIn("impl-1", names)
+        self.assertEqual(len(skipped), 1)
+
+    def test_a_trigger_carrying_a_rule_still_runs_the_rules_rereview(self):
+        plan = with_criteria(HUMAN)
+        mixed = {"verdict": "findings", "findings": self.BARE["findings"] + PlanRulesTest.RULE_FINDING["findings"]}
+        codex = {"plan-codex": {"available": True, **PlanRulesTest.RULE_FINDING}}
+        for name, review, more in (("claude", mixed, {}), ("codex", self.BARE, codex)):
+            with self.subTest(source=name):
+                result, names, skipped = self.go(plan, plan, review=review, **more)
+                self.assertEqual(names.count("plan-rules-review"), 1)
+                self.assertEqual(result["stage"], "plan-review")
+                self.assertNotIn("impl-1", names)
+                self.assertEqual(skipped, [])
+
+    def test_a_changed_criterion_still_runs_the_rules_rereview(self):
+        plan = with_criteria(EVIDENCE)
+        code = PLAN["acceptance"][0]
+        changes = (
+            ("kind", [code, criterion(HUMAN, id="AC2", verify_ac="AC2")]),
+            ("verify", [code, criterion(EVIDENCE, verify_host="h2")]),
+            ("metric", [code, criterion(EVIDENCE, metric=True, verify_mode="observe")]),
+            ("id", [code, criterion(EVIDENCE, id="AC7", verify_ac="AC7")]),
+            ("order", [EVIDENCE, code]),
+            ("added", [code, EVIDENCE, HUMAN]),
+            ("removed", [code]),
+        )
+        for name, acceptance in changes:
+            with self.subTest(changed=name):
+                result, names, skipped = self.go(plan, dict(PLAN, acceptance=acceptance))
+                self.assertEqual(names.count("plan-rules-review"), 1)
+                self.assertEqual(result["stage"], "plan-review")
+                self.assertNotIn("impl-1", names)
+                self.assertEqual(skipped, [])
+
+    def test_a_revision_that_planrules_refuses_still_runs_the_rules_rereview(self):
+        # No trigger has a rule and the revise changes no id, kind, metric or verify, but it drops a lint: planRules hits R4.
+        result, names, skipped = self.go(with_criteria(EVIDENCE), with_criteria(criterion(EVIDENCE, lint=None)))
+        self.assertEqual(names.count("plan-rules-review"), 1)
+        self.assertEqual(skipped, [])
+        self.assertEqual(result["stage"], "plan-review")
+
+    def test_a_rules_only_revise_always_runs_its_rules_rereview(self):
+        # A rules revise is triggered by rule findings, so its re-review is never skipped.
+        result, calls = PlanRulesTest().keep_stop()
+        self.assertEqual(labels(calls).count("plan-rules-review"), 2)
+        self.assertEqual(result["stage"], "plan-review")
 
 
 class PlanTestCaseFormTest(unittest.TestCase):
@@ -4365,31 +4514,49 @@ class CodeMapTest(unittest.TestCase):
 
 
 class PlannerReadsTest(unittest.TestCase):
-    """#737: only the plan step may batch-read through Explore agents; every other step keeps the no-subagent rule."""
+    """#737, #819: the plan step batches its lookups itself; no step is granted a subagent, the Agent tool not existing here."""
 
     PLANNERS = ("plan", "plan-revise", "plan-rules-revise")
     NO_SUBAGENTS = "- Do not dispatch subagents unless this step says so."
     HARD_RULES = "Hard rules for this step"
-    GRANT = "up to 3 read-only Explore agents"
-    BATCH = "issue independent reads together in one message"
+    BATCH = "put every open question's Bash or Read call in the same message as the others"
+    PROCEDURE = (BATCH, "several tool calls per message, never one small lookup per turn",
+                 "at most 12 exploration rounds before you write",
+                 "No subagent can be dispatched: the Agent tool does not exist in this step.")
 
-    def test_only_planner_prompts_grant_explore_and_every_ruled_prompt_keeps_the_rule(self):
-        granted, ruled = set(), set()
+    def test_no_prompt_grants_explore_and_every_ruled_prompt_keeps_the_rule(self):
+        planners, ruled = set(), set()
         for call in all_calls():
             text, label = call["prompt"], call["label"]
+            for gone in ("Explore", "subagent_type", "you may dispatch"):
+                self.assertNotIn(gone, text, label)
             if self.HARD_RULES in text:
                 self.assertIn(self.NO_SUBAGENTS, text, label)
                 ruled.add(label)
             if label in self.PLANNERS:
-                for needle in (self.GRANT, self.BATCH, "Do not build, prototype or run the change", self.NO_SUBAGENTS):
+                for needle in ("Do not build, prototype or run the change", self.NO_SUBAGENTS):
                     self.assertIn(needle, text, label)
-                self.assertLess(text.index(self.GRANT), text.index(self.HARD_RULES), label)
-                self.assertLess(text.index(self.BATCH), text.index(self.HARD_RULES), label)
-                granted.add(label)
-            else:
-                self.assertNotIn("Explore", text, label)
-        self.assertEqual(granted, set(self.PLANNERS))
+                planners.add(label)
+        self.assertEqual(planners, set(self.PLANNERS))
         self.assertLessEqual({"setup", "impl-1", "pr", "merge"}, ruled)
+        self.assertNotIn("Explore", PROGRAM.read_text(encoding="utf-8"))
+
+    def test_every_planner_prompt_opens_with_the_lookup_procedure(self):
+        seen = set()
+        for call in all_calls():
+            text, label = call["prompt"], call["label"]
+            if label not in self.PLANNERS:
+                self.assertNotIn("exploration rounds", text, label)
+                self.assertNotIn(self.BATCH, text, label)
+                continue
+            self.assertTrue(text.startswith("Procedure for this step."), label)
+            for needle in self.PROCEDURE:
+                self.assertIn(needle, text, label)
+                # Before the task description, not after it.
+                self.assertLess(text.index(needle), text.index("Plan this issue."), label)
+                self.assertLess(text.index(needle), text.index("Issue #9 of "), label)
+            seen.add(label)
+        self.assertEqual(seen, set(self.PLANNERS))
 
     def test_the_shared_rules_keep_the_no_subagent_line_and_name_no_grant(self):
         source = PROGRAM.read_text(encoding="utf-8")
