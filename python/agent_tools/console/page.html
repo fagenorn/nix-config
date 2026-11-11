@@ -40,6 +40,19 @@ ul { list-style: none; }
 .statement .sub { margin-top: 16px; font-size: 1.125rem; line-height: 1.5; color: var(--sub1); max-width: 44rem; text-wrap: pretty; }
 .statement h1.needs { color: var(--peach); }
 
+#inbox { margin-top: 40px; max-width: 44rem; }
+.card { padding: 0 0 18px; }
+.card h2 { font: 600 .9375rem/1.4 var(--ui); display: flex; align-items: baseline; gap: 10px; }
+.card h2 span { font-weight: 400; font-size: .8125rem; color: var(--ov2); }
+.card .ask { margin-top: 6px; font-size: 1.0625rem; color: var(--text); }
+.card .opts { margin-top: 6px; padding-left: 18px; list-style: disc; color: var(--sub0); font-size: .84375rem; }
+.card .opts .picked { color: var(--lav); }
+.card .meta { margin-top: 8px; font-size: .8125rem; color: var(--ov2); }
+.rest, .done { margin-top: 10px; }
+.rest li, .done li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; padding: 5px 0; font-size: .875rem; color: var(--ov2); }
+.rest b, .done b { font-weight: 600; color: var(--sub0); }
+.done-head { margin-top: 24px; font: 600 .875rem/1.4 var(--ui); color: var(--ov2); }
+.answer { color: var(--lav); text-underline-offset: 3px; }
 .side { margin-top: 12px; }
 .side h2 { font: 600 .9375rem/1.4 var(--ui); display: flex; align-items: baseline; gap: 10px; }
 .side h2 span { font-weight: 400; font-size: .8125rem; color: var(--ov2); }
@@ -71,7 +84,10 @@ ul { list-style: none; }
 <body>
 <header class="top"><div class="top-in"><span class="brand">Console</span><span class="conn" id="conn" role="status">Reconnecting…</span></div></header>
 <div class="desk-grid">
-<main class="statement" id="statement"></main>
+<main>
+<div class="statement" id="statement"></div>
+<section id="inbox" aria-label="Inbox"></section>
+</main>
 <aside class="side" aria-label="Projects">
 <section id="projects"></section>
 </aside>
@@ -104,6 +120,76 @@ function renderStatement(view) {
   const box = document.getElementById("statement");
   const h1 = el("h1", view.statement.inbox_items > 0 ? "needs" : "", view.statement.headline);
   box.replaceChildren(h1, el("p", "sub", view.statement.sentence));
+}
+function when(stamp) {
+  return new Date(stamp).toLocaleString();
+}
+function holds(item) {
+  return item.held_work === 1 ? "holds 1 issue" : "holds " + item.held_work + " issues";
+}
+function answerLink(item) {
+  const a = el("a", "answer", "Answer on the tracker");
+  a.href = item.url;
+  a.rel = "noreferrer";
+  return a;
+}
+function metaLine(item) {
+  let text = "waiting since " + when(item.waiting_since) + " \u00b7 " + holds(item);
+  if (item.stale) text += " \u00b7 read at " + when(item.read_at);
+  return text;
+}
+function leadItem(item) {
+  const card = el("article", "card");
+  card.appendChild(el("h2", "", item.project_id + " #" + item.issue));
+  card.appendChild(el("p", "ask", item.question));
+  if (item.questions.length > 0) {
+    for (const q of item.questions) {
+      card.appendChild(el("p", "meta", q.question));
+      const list = el("ul", "opts");
+      for (const option of q.options) {
+        const chosen = option === q.chosen;
+        list.appendChild(el("li", chosen ? "picked" : "", chosen ? "chosen: " + option : option));
+      }
+      card.appendChild(list);
+    }
+  } else if (item.items.length > 0) {
+    const list = el("ul", "opts");
+    for (const entry of item.items) list.appendChild(el("li", "", entry));
+    card.appendChild(list);
+  }
+  card.appendChild(el("p", "meta", metaLine(item)));
+  const links = el("p", "meta");
+  links.appendChild(answerLink(item));
+  card.appendChild(links);
+  return card;
+}
+function itemLine(item, withMeta) {
+  const line = el("li");
+  line.appendChild(el("b", "", item.project_id));
+  line.appendChild(el("span", "", item.question));
+  if (item.items.length > 0) line.appendChild(el("span", "", item.items.join("; ")));
+  if (withMeta) line.appendChild(el("span", "", metaLine(item)));
+  else line.appendChild(el("span", "", "waiting since " + when(item.waiting_since)));
+  line.appendChild(answerLink(item));
+  return line;
+}
+function renderInbox(view) {
+  const section = document.getElementById("inbox");
+  section.replaceChildren();
+  const open = view.inbox.open;
+  if (open.length > 0) section.appendChild(leadItem(open[0]));
+  if (open.length > 1) {
+    const rest = el("ul", "rest");
+    for (const item of open.slice(1)) rest.appendChild(itemLine(item, true));
+    section.appendChild(rest);
+  }
+  const answered = view.inbox.answered;
+  if (answered.length > 0) {
+    section.appendChild(el("h2", "done-head", "Answered, waiting for the agent"));
+    const done = el("ul", "done");
+    for (const item of answered) done.appendChild(itemLine(item, false));
+    section.appendChild(done);
+  }
 }
 function renderProjects(view) {
   const section = document.getElementById("projects");
@@ -139,6 +225,7 @@ function render(view) {
   const open = document.querySelector("#projects details");
   const wasOpen = open !== null && open.open;
   renderStatement(view);
+  renderInbox(view);
   renderProjects(view);
   const fold = document.querySelector("#projects details");
   if (wasOpen && fold !== null) fold.open = true;

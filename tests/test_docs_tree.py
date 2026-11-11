@@ -370,8 +370,10 @@ class DocsTreeTest(unittest.TestCase):
         self.assertEqual(len(areas), 1)
         self.assertIn("(./areas/console/CONTEXT.md)", areas[0][1])
         self.assertIn("`python/agent_tools/console/**`", areas[0][3])
-        for term in ("Console", "Inbox item", "Quiet project"):
+        for term in ("Console", "Inbox item", "Quiet project", "Answered item",
+                     "Held work", "Waiting since"):
             self.assertIn([term, "Console"], cells)
+        self.assertIn("- **Console → Claims**:", text)
 
     def doc(self, path):
         return " ".join((REPO_ROOT / path).read_text().split())
