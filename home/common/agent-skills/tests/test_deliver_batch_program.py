@@ -2248,8 +2248,9 @@ class SourceTest(unittest.TestCase):
 CLERK, IMPL, REV = "clerk", "implementer", "reviewer"
 EXPECTED = {stem: frozenset({kind}) for kind, stems in (
     (CLERK, ("setup", "facts-", "release-", "acquire-", "readopt-", "recover-end-", "ask-", "settle-",
-             "land-unlock-", "land-ask-", "land-lock-", "land-record-", "land-status-", "land-pr-", "land-checks-", "land-merge-", "close-out-")),
-    (IMPL, ("land-sync-", "land-fix-")),
+             "land-unlock-", "land-ask-", "land-lock-", "land-record-", "land-status-", "land-pr-", "land-checks-", "land-merge-", "close-out-",
+             "train-sweep-", "train-pr-", "train-checks-", "train-ready-", "train-merge-")),
+    (IMPL, ("land-sync-", "land-fix-", "train-build-")),
     (REV, ("land-sync-review-", "land-fix-review-")),
 ) for stem in stems}
 STEM_PATTERNS = (
@@ -2283,6 +2284,8 @@ SCENARIOS = (
      "children": {"1": {"stage": "done", "pr": 41, "merged": True,
                         "acceptance": [{"id": "AC1", "text": "works", "kind": "code"}],
                         "close_out": {"issue_state": "CLOSED", "released": True}}}},
+    # #822: a train of two ready issues reaches every train step.
+    {"args": dict(ARGS, issues=[1, 2], train=True), "patch": BEHIND},
 )
 
 
@@ -2325,7 +2328,8 @@ class AgentTypeTest(unittest.TestCase):
 class ClerkModelTest(unittest.TestCase):
     """#803, #813: clerk_model is checked, sets the model of every clerk call except the setup and lifecycle steps, which stay on the default, and is passed to every child and the relaunch only when haiku."""
 
-    ON_DEFAULT = {"setup", "land-unlock-", "land-lock-", "land-pr-", "land-merge-", "land-record-", "land-checks-", "close-out-"}
+    ON_DEFAULT = {"setup", "land-unlock-", "land-lock-", "land-pr-", "land-merge-", "land-record-", "land-checks-", "close-out-",
+                  "train-sweep-", "train-pr-", "train-checks-", "train-merge-"}
 
     def test_clerk_model_must_be_sonnet_or_haiku(self):
         for bad in ("opus", "Haiku", "", 1, None, True):
@@ -2782,3 +2786,415 @@ class AmendTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+X1, X2, X3 = "1" * 40, "2" * 40, "3" * 40
+TRAIN_STEMS = ("train-pr-", "train-build-", "train-checks-", "train-ready-", "train-merge-")
+LAND_RELEASE = "forge-claim land release --repo owner/repo --branch dev --sha "
+FORBIDDEN = ("'", '"', "$", "`", "\\")
+
+
+def train_run(issues=(1, 2), replies=None, patch=None, args=None, children=None):
+    """A train-enabled batch whose issues all become ready together and whose first landing is behind."""
+    issues = list(issues)
+    merged = {"setup": {"max_parallel": len(issues)}, **BEHIND, **(patch or {})}
+    return run(args=dict(ARGS, issues=issues, train=True, **(args or {})), replies=replies, patch=merged, children=children)
+
+
+def land_labels(calls):
+    return [c["label"] for c in calls if c["label"].startswith(("land-", "train-", "close-out-"))]
+
+
+def train_labels(calls):
+    return [label for label in labels(calls) if label.startswith(TRAIN_STEMS)]
+
+
+def lock_releases(calls, n=1):
+    """The calls of issue n's landing that release the land lock: its close-out (folded) or its standalone unlock."""
+    return [c["label"] for c in calls if c["label"] in (f"close-out-{n}", f"land-unlock-{n}") and LAND_RELEASE in c["prompt"]]
+
+
+def members_of(calls, label):
+    text = prompt(calls, label)
+    lead = "The members, in order, as JSON: "
+    return json.loads(text[text.index(lead) + len(lead):].split("\n")[0])
+
+
+def merge_reply(states, lock="already_held", merged=True):
+    return {"lock": {"verdict": lock, "lock_sha": SHA}, "merged": merged, "notes": "n",
+            "prs": [{"pr": pr, "state": state} for pr, state in states.items()]}
+
+
+class TrainArgsTest(unittest.TestCase):
+    """#822: train is opt-in, checked like the other boolean args, and kept in the relaunch only when true."""
+
+    def test_train_must_be_a_boolean(self):
+        for bad in ("yes", 1, None, []):
+            with self.subTest(bad=bad):
+                result, calls, _ = run(args=dict(ARGS, train=bad))
+                self.assertEqual(result, {"stage": "args", "error": "train must be a boolean"})
+                self.assertEqual(calls, [])
+
+    def test_meta_and_the_args_comment_name_train(self):
+        text = PROGRAM.read_text(encoding="utf-8")
+        meta = text[:text.index("\n}\n")]
+        self.assertIn("train?", meta)
+        header = text[text.index("\n// Args:"):text.index("\nconst ID_RE")]
+        self.assertIn("train (boolean, default false", header)
+
+    def test_the_relaunch_keeps_train_only_when_true(self):
+        result, _, _ = run(args=dict(ARGS, train=True), children={"1": ReviewSizingTest.STOP})
+        self.assertIs(result["relaunch"]["train"], True)
+        for args in (ARGS, dict(ARGS, train=False)):
+            with self.subTest(args=args):
+                result, _, _ = run(args=args, children={"1": ReviewSizingTest.STOP})
+                self.assertNotIn("train", result["relaunch"])
+
+    def test_train_never_reaches_a_child(self):
+        _, calls, _ = train_run()
+        for c in calls:
+            if c["kind"] == "workflow":
+                self.assertNotIn("train", c["args"])
+
+    def test_without_train_two_ready_issues_emit_no_train_label_and_the_same_calls(self):
+        base = run(args=dict(ARGS, issues=[1, 2]), patch=BEHIND)[1]
+        _, calls, _ = run(args=dict(ARGS, issues=[1, 2], train=False), patch=BEHIND)
+        for found in (base, calls):
+            self.assertEqual([l for l in labels(found) if l.startswith("train-")], [])
+        self.assertEqual([(c["label"], c.get("prompt")) for c in calls], [(c["label"], c.get("prompt")) for c in base])
+        self.assertIn("land-pr-2", labels(base))
+
+
+class TrainTest(unittest.TestCase):
+    """#822: up to three ready issues land through one car merge under one land lock; any surprise falls back to land()."""
+
+    def test_two_ready_issues_land_through_one_car_merge(self):
+        result, calls, _ = train_run()
+        self.assertEqual(land_labels(calls), [
+            "train-sweep-1", "land-pr-1", "train-pr-2", "train-build-1", "train-checks-1-1", "train-checks-1-2",
+            "train-ready-1", "train-merge-1", "close-out-1", "train-sweep-2", "close-out-2"])
+        merge = prompt(calls, "train-merge-1")
+        self.assertIn(f"gh pr merge 92 --repo owner/repo --merge --match-head-commit {X2} --delete-branch", merge)
+        self.assertEqual(len(re.findall(r"gh pr merge \d+ ", merge)), 1)
+        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {SHA}\n", merge)
+        self.assertEqual(lock_releases(calls), ["close-out-1"])
+        self.assertIn(LAND_RELEASE + SHA, prompt(calls, "close-out-1"))
+        self.assertNotIn("forge-claim land release", prompt(calls, "close-out-2"))
+        self.assertEqual(len([c for c in calls if "forge-claim land release" in c.get("prompt", "")]), 1)
+        self.assertEqual(row(result, 1), {"issue": 1, "outcome": "landed", "pr": 41, "train": 1, "car_pr": 92})
+        self.assertEqual(row(result, 2), {"issue": 2, "outcome": "landed", "pr": 42, "train": 1, "car_pr": 92})
+        self.assertIsNone(result["relaunch"])
+
+    def test_the_train_steps_carry_the_guard_forms(self):
+        _, calls, _ = train_run()
+        build = prompt(calls, "train-build-1")
+        self.assertEqual(members_of(calls, "train-build-1"), [
+            {"issue": 1, "head": SHA, "car": "land-train/b1-1-1"}, {"issue": 2, "head": SHA, "car": "land-train/b1-1-2"}])
+        for needle in ("push -u origin <car>", "one branch per call",
+                       "gh pr create --repo owner/repo --base dev --head <car>",
+                       "from the repository checkout /r", "never from another directory", "never chained after cd",
+                       "merge --no-ff", "merge --abort", "Never write to a member's own branch"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, build)
+        merge = prompt(calls, "train-merge-1")
+        for needle in ("from the repository checkout /r", "never from another directory", "never chained after cd",
+                       "at most 10 rounds", "15 seconds", "never read or return its merge commit"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, merge)
+        self.assertNotIn("mergeCommit", merge)
+        self.assertNotIn("merge_commit", json.dumps(schema_of(calls, "train-merge-1")))
+        sweep = prompt(calls, "train-sweep-2")
+        self.assertIn("git -C /r push origin --delete refs/heads/<branch>", sweep)
+        self.assertIn("land-train/b1-", sweep)
+        for branch in ("issue-1-x", "issue-2-x"):
+            self.assertIn(branch, sweep)
+        self.assertNotIn("issue-1-x", prompt(calls, "train-sweep-1"))
+        checks = prompt(calls, "train-checks-1-2")
+        self.assertIn(f"at the car head {X2}", checks)
+        self.assertIn("25 minutes", checks)
+        self.assertNotIn("60 minutes", checks)
+
+    def test_the_train_renews_every_member_claim_before_the_merge(self):
+        _, calls, _ = train_run()
+        self.assertIn(f"forge-claim renew --repo owner/repo --issue 2 --holder {HOLDER} --branch issue-2-x", prompt(calls, "train-pr-2"))
+        ready_step = prompt(calls, "train-ready-1")
+        self.assertIn(f"forge-claim renew --repo owner/repo --issue <issue> --holder {HOLDER} --branch <branch>", ready_step)
+        self.assertEqual(members_of(calls, "train-ready-1"), [
+            {"issue": 1, "branch": "issue-1-x", "pr": 41, "head": SHA}, {"issue": 2, "branch": "issue-2-x", "pr": 42, "head": SHA}])
+
+    def test_the_train_pr_step_opens_the_pr_as_land_pr_does_without_lock_or_checks(self):
+        _, calls, _ = train_run()
+        land_pr, train_pr = prompt(calls, "land-pr-1"), prompt(calls, "train-pr-2")
+        start, end = "Then open the pull request of issue", "Return pr (number) and head (the full sha of the pushed head)."
+        section = land_pr[land_pr.index(start):land_pr.index(end) + len(end)]
+        self.assertIn(section.replace("#1", "#2").replace("issue-1-x", "issue-2-x"), train_pr)
+        self.assertNotIn("forge-claim land", train_pr)
+        self.assertNotIn("gh pr checks", train_pr)
+
+    def test_the_car_title_and_body_carry_no_issue_reference(self):
+        _, calls, _ = train_run()
+        build = prompt(calls, "train-build-1")
+        title = re.search(r"--title '([^']*)'", build).group(1)
+        body = re.search(r"--body '([^']*)'", build).group(1)
+        for text in (title, body):
+            with self.subTest(text=text):
+                self.assertNotIn("#", text)
+                self.assertNotIn("issue", text.lower())
+                self.assertIsNone(re.search(r"\b(Closes|Fixes|Resolves|Refs)\b", text))
+                for char in FORBIDDEN:
+                    self.assertNotIn(char, text)
+        self.assertIn("no issue number", build)
+
+    def test_a_single_ready_issue_runs_no_train_step(self):
+        result, calls, _ = run(args=dict(ARGS, train=True), patch=BEHIND)
+        self.assertEqual(train_labels(calls), [])
+        # The one train label is the drain-start sweep of cars a dead earlier run may have left open.
+        self.assertEqual([l for l in labels(calls) if l.startswith("train-")], ["train-sweep-1"])
+        self.assertEqual(land_labels(calls)[1:], ["land-pr-1", "land-sync-1-1", "land-checks-1-2", "land-merge-1", "close-out-1"])
+        self.assertEqual(row(result, 1), {"issue": 1, "outcome": "landed", "pr": 41})
+
+    def test_a_first_landing_that_is_not_behind_lands_the_whole_drain_serially(self):
+        result, calls, _ = train_run(patch={"land-pr-1": {}})
+        self.assertEqual(train_labels(calls), [])
+        self.assertEqual(land_labels(calls), ["train-sweep-1", "land-pr-1", "land-merge-1", "close-out-1",
+                                              "land-pr-2", "land-merge-2", "close-out-2"])
+        self.assertEqual([row(result, n)["outcome"] for n in (1, 2)], ["landed", "landed"])
+
+    def test_a_merge_strategy_other_than_merge_never_trains(self):
+        result, calls, _ = train_run(patch={"setup": {"max_parallel": 2, "merge_strategy": "squash"}})
+        self.assertEqual(train_labels(calls), [])
+        self.assertEqual([row(result, n)["outcome"] for n in (1, 2)], ["landed", "landed"])
+
+    def test_a_red_car_two_among_three_merges_car_one_and_lands_the_rest_serially(self):
+        result, calls, _ = train_run(issues=(1, 2, 3), replies={"train-checks-1-2": {"state": "failed", "head": X2, "failing": ["ci"]}},
+                                     patch={"land-pr-2": {"checks": {"state": "behind", "head": SHA}}})
+        order = land_labels(calls)
+        self.assertEqual(order[:order.index("train-merge-1")], [
+            "train-sweep-1", "land-pr-1", "train-pr-2", "train-pr-3", "train-build-1",
+            "train-checks-1-1", "train-checks-1-2", "train-checks-1-3", "train-ready-1"])
+        self.assertIn(f"gh pr merge 91 --repo owner/repo --merge --match-head-commit {X1} --delete-branch", prompt(calls, "train-merge-1"))
+        self.assertEqual(order[order.index("train-merge-1") + 1:], [
+            "close-out-1", "train-sweep-2", "land-pr-2", "land-sync-2-1", "land-checks-2-2", "land-merge-2", "close-out-2",
+            "land-pr-3", "land-merge-3", "close-out-3"])
+        self.assertEqual([m["issue"] for m in members_of(calls, "train-ready-1")], [1])
+        self.assertEqual(row(result, 1), {"issue": 1, "outcome": "landed", "pr": 41, "train": 1, "car_pr": 91})
+        self.assertEqual(row(result, 2), {"issue": 2, "outcome": "landed", "pr": 42})
+        self.assertEqual(row(result, 3), {"issue": 3, "outcome": "landed", "pr": 43})
+        self.assertEqual(lock_releases(calls), ["close-out-1"])
+
+    def test_a_pending_or_wrong_head_or_undeclared_car_is_not_green(self):
+        declared = {"setup": {"max_parallel": 2, "required_checks": ["gate"]}}
+        for name, reply, patch in (
+                ("pending", {"state": "pending", "head": X2, "pending": ["e2e"]}, None),
+                ("head", {"state": "passed", "head": X1, "required": ["ci"], "passed": ["ci"]}, None),
+                ("failing list", {"state": "passed", "head": X2, "passed": ["ci"], "failing": ["lint"]}, None),
+                ("dead", None, None),
+                ("declared", {"state": "passed", "head": X2, "required": ["ci"], "passed": ["ci"]}, declared)):
+            with self.subTest(name=name):
+                replies = {"train-checks-1-2": reply}
+                if patch:
+                    replies["train-checks-1-1"] = {"state": "passed", "head": X1, "required": ["gate"], "passed": ["gate"]}
+                result, calls, _ = train_run(replies=replies, patch=patch)
+                self.assertIn("gh pr merge 91 ", prompt(calls, "train-merge-1"))
+                self.assertNotIn("train", row(result, 2))
+
+    def test_a_build_conflict_at_car_two_trains_only_car_one(self):
+        result, calls, _ = train_run(replies={"train-build-1": {"status": "blocked", "conflicted": True, "notes": "conflict",
+                                                                 "cars": [{"issue": 1, "head": X1, "pr": 91}]}})
+        self.assertNotIn("train-checks-1-2", labels(calls))
+        self.assertIn(f"--match-head-commit {X1}", prompt(calls, "train-merge-1"))
+        order = land_labels(calls)
+        self.assertEqual(order[order.index("train-merge-1") + 1:], ["close-out-1", "train-sweep-2", "land-pr-2", "land-merge-2", "close-out-2"])
+        self.assertEqual(row(result, 1)["car_pr"], 91)
+        self.assertEqual(row(result, 2), {"issue": 2, "outcome": "landed", "pr": 42})
+        self.assertEqual(lock_releases(calls), ["close-out-1"])
+
+    def test_no_green_car_sweeps_and_the_first_issue_goes_on_inside_its_landing_with_the_lock_held_once(self):
+        for name, replies in (
+                ("conflict at car one", {"train-build-1": {"status": "blocked", "conflicted": True, "cars": []}}),
+                ("car one red", {"train-checks-1-1": {"state": "failed", "head": X1, "failing": ["ci"]}}),
+                ("build died", {"train-build-1": None}),
+                ("build threw", {"train-build-1": "throw"}),
+                ("cars misnamed", {"train-build-1": {"status": "done", "cars": [{"issue": 2, "head": X1, "pr": 91}]}}),
+                ("short car sha", {"train-build-1": {"status": "done", "cars": [{"issue": 1, "head": "abc1234", "pr": 91}]}}),
+                ("ready died", {"train-ready-1": None})):
+            with self.subTest(name=name):
+                result, calls, _ = train_run(replies=replies)
+                order = land_labels(calls)
+                self.assertNotIn("train-merge-1", order)
+                self.assertEqual(order.count("land-pr-1"), 1)
+                tail = ["train-sweep-2", "land-sync-1-1", "land-checks-1-2", "land-merge-1", "close-out-1",
+                        "land-pr-2", "land-merge-2", "close-out-2"]
+                self.assertEqual(order[-len(tail):], tail)
+                self.assertEqual(lock_releases(calls), ["close-out-1"])
+                self.assertEqual(row(result, 1), {"issue": 1, "outcome": "landed", "pr": 41})
+                self.assertEqual(row(result, 2), {"issue": 2, "outcome": "landed", "pr": 42})
+
+    def test_a_train_pr_that_fails_shrinks_the_train_before_any_car(self):
+        lost = {"renew": {"verdict": "not_held", "by": "h2/b9"}}
+        for name, reply, expected in (
+                ("claim lost", lost, {"issue": 2, "outcome": "claim-lost", "by": "h2/b9"}),
+                ("head moved", {"pr": 42, "head": B}, {"issue": 2, "outcome": "stopped", "pr": 42, "stage": "head-moved", "expected": SHA, "head": B}),
+                ("dead", None, {"issue": 2, "outcome": "stopped", "stage": "pr", "detail": "train-pr-2 returned nothing"})):
+            with self.subTest(name=name):
+                result, calls, _ = train_run(replies={"train-pr-2": reply})
+                self.assertNotIn("train-build-1", labels(calls))
+                self.assertNotIn("land-pr-2", labels(calls))
+                self.assertEqual(row(result, 2), expected)
+                self.assertEqual(row(result, 1), {"issue": 1, "outcome": "landed", "pr": 41})
+                self.assertEqual(lock_releases(calls), ["close-out-1"])
+
+    def test_a_failed_train_pr_among_three_keeps_the_issues_before_it_and_lands_those_after_it_serially(self):
+        result, calls, _ = train_run(issues=(1, 2, 3), replies={"train-pr-3": {"renew": {"verdict": "not_held", "by": "h2/b9"}}})
+        self.assertEqual([m["issue"] for m in members_of(calls, "train-build-1")], [1, 2])
+        self.assertEqual(row(result, 3)["outcome"], "claim-lost")
+        result, calls, _ = train_run(issues=(1, 2, 3), replies={"train-pr-2": {"renew": {"verdict": "not_held", "by": "h2/b9"}}})
+        self.assertNotIn("train-build-1", labels(calls))
+        self.assertEqual(row(result, 2)["outcome"], "claim-lost")
+        self.assertEqual(row(result, 3), {"issue": 3, "outcome": "landed", "pr": 43})
+        self.assertIn("land-pr-3", labels(calls))
+
+    def test_a_claim_lost_at_the_merge_shrinks_the_train_to_the_issues_before_it(self):
+        ready_reply = {"members": [{"issue": 1, "renew": {"verdict": "renewed"}, "head": SHA, "state": "OPEN"},
+                                   {"issue": 2, "renew": {"verdict": "not_held", "by": "h2/b9"}, "head": SHA, "state": "OPEN"}]}
+        result, calls, _ = train_run(replies={"train-ready-1": ready_reply})
+        self.assertIn(f"gh pr merge 91 --repo owner/repo --merge --match-head-commit {X1}", prompt(calls, "train-merge-1"))
+        self.assertEqual(row(result, 2), {"issue": 2, "outcome": "claim-lost", "pr": 42, "by": "h2/b9"})
+        self.assertEqual(row(result, 1), {"issue": 1, "outcome": "landed", "pr": 41, "train": 1, "car_pr": 91})
+        for label in ("close-out-2", "land-pr-2"):
+            self.assertNotIn(label, labels(calls))
+        self.assertEqual(lock_releases(calls), ["close-out-1"])
+        self.assertEqual(result["relaunch"]["issues"], [2])
+
+    def test_a_head_that_moved_before_the_merge_shrinks_the_train(self):
+        ready_reply = {"members": [{"issue": 1, "renew": {"verdict": "renewed"}, "head": SHA, "state": "OPEN"},
+                                   {"issue": 2, "renew": {"verdict": "renewed"}, "head": B, "state": "OPEN"}]}
+        result, calls, _ = train_run(replies={"train-ready-1": ready_reply})
+        self.assertIn("gh pr merge 91 ", prompt(calls, "train-merge-1"))
+        self.assertEqual(row(result, 2), {"issue": 2, "outcome": "stopped", "pr": 42, "stage": "head-moved", "expected": SHA, "head": B})
+        self.assertNotIn("close-out-2", labels(calls))
+        self.assertEqual(lock_releases(calls), ["close-out-1"])
+
+    def test_the_first_issue_failing_the_ready_step_ends_the_train_without_a_merge(self):
+        for name, member, expected in (
+                ("claim lost", {"issue": 1, "renew": {"verdict": "not_held", "by": "h2/b9"}, "head": SHA, "state": "OPEN"},
+                 {"issue": 1, "outcome": "claim-lost", "pr": 41, "by": "h2/b9"}),
+                ("head moved", {"issue": 1, "renew": {"verdict": "renewed"}, "head": B, "state": "OPEN"},
+                 {"issue": 1, "outcome": "stopped", "pr": 41, "stage": "head-moved", "expected": SHA, "head": B}),
+                ("renew error", {"issue": 1, "renew": {"verdict": "error", "detail": "boom"}, "head": SHA, "state": "OPEN"},
+                 {"issue": 1, "outcome": "stopped", "pr": 41, "stage": "renew", "detail": "boom"}),
+                ("closed", {"issue": 1, "renew": {"verdict": "renewed"}, "head": SHA, "state": "CLOSED"},
+                 {"issue": 1, "outcome": "stopped", "pr": 41, "stage": "train-ready", "detail": "PR #41 reads CLOSED"})):
+            with self.subTest(name=name):
+                second = {"issue": 2, "renew": {"verdict": "renewed"}, "head": SHA, "state": "OPEN"}
+                result, calls, _ = train_run(replies={"train-ready-1": {"members": [member, second]}})
+                order = land_labels(calls)
+                self.assertNotIn("train-merge-1", order)
+                self.assertEqual(row(result, 1), expected)
+                self.assertEqual(lock_releases(calls), ["land-unlock-1"])
+                self.assertEqual(order[order.index("land-unlock-1"):], ["land-unlock-1", "train-sweep-2", "land-pr-2", "land-merge-2", "close-out-2"])
+                self.assertEqual(row(result, 2), {"issue": 2, "outcome": "landed", "pr": 42})
+
+    def test_a_transient_renew_recalls_the_ready_step_once(self):
+        transient = {"members": [{"issue": 1, "renew": TRANSIENT, "head": SHA, "state": "OPEN"},
+                                 {"issue": 2, "renew": {"verdict": "renewed"}, "head": SHA, "state": "OPEN"}]}
+        fine = {"members": [{"issue": n, "renew": {"verdict": "renewed"}, "head": SHA, "state": "OPEN"} for n in (1, 2)]}
+        result, calls, _ = train_run(replies={"train-ready-1": [transient, fine]})
+        self.assertEqual(labels(calls).count("train-ready-1"), 2)
+        self.assertEqual([row(result, n)["outcome"] for n in (1, 2)], ["landed", "landed"])
+
+    def test_a_lock_not_already_held_before_the_merge_sweeps_and_every_row_is_land_contended(self):
+        for verdict in ("lost_to", "held_by", "acquired", "land-contended", "error"):
+            with self.subTest(verdict=verdict):
+                result, calls, _ = train_run(replies={"train-merge-1": merge_reply({}, lock=verdict, merged=False)})
+                order = land_labels(calls)
+                self.assertEqual(order[order.index("train-merge-1") + 1:], ["land-unlock-1", "train-sweep-2"])
+                for n, pr in ((1, 41), (2, 42)):
+                    self.assertEqual(row(result, n), {"issue": n, "outcome": "land-contended", "pr": pr,
+                                                      "detail": f"the land lock was not held before the train merge ({verdict})"})
+                self.assertEqual(lock_releases(calls), ["land-unlock-1"])
+                self.assertEqual(result["relaunch"]["issues"], [1, 2])
+                self.assertNotIn("pr", result["relaunch"]["conts"]["1"])
+
+    def test_a_car_that_did_not_merge_or_a_dead_merge_step_stops_every_member_and_sweeps(self):
+        for name, reply, detail in (("unmerged", merge_reply({}, merged=False), "n"),
+                                    ("dead", None, "train-merge-1 returned nothing"),
+                                    ("threw", "throw", "stub agent train-merge-1 threw")):
+            with self.subTest(name=name):
+                result, calls, _ = train_run(replies={"train-merge-1": reply})
+                order = land_labels(calls)
+                self.assertEqual(order[order.index("train-merge-1") + 1:], ["land-unlock-1", "train-sweep-2"])
+                for n, pr in ((1, 41), (2, 42)):
+                    self.assertEqual(row(result, n), {"issue": n, "outcome": "stopped", "pr": pr, "stage": "train-merge", "detail": detail})
+                self.assertEqual(lock_releases(calls), ["land-unlock-1"])
+
+    def test_a_member_pr_still_open_after_the_car_merge_is_stopped_without_a_close_out(self):
+        result, calls, _ = train_run(replies={"train-merge-1": merge_reply({41: "MERGED", 42: "OPEN"})})
+        self.assertEqual(row(result, 2), {"issue": 2, "outcome": "stopped", "pr": 42, "stage": "train-merged-open", "train": 1, "car_pr": 92})
+        self.assertNotIn("close-out-2", labels(calls))
+        self.assertEqual(row(result, 1), {"issue": 1, "outcome": "landed", "pr": 41, "train": 1, "car_pr": 92})
+        self.assertEqual(lock_releases(calls), ["close-out-1"])
+        # The car is merged, so the relaunch keeps the member's PR in its cont; its remote branch is not deleted under an open PR.
+        self.assertEqual(result["relaunch"]["conts"]["2"]["pr"], 42)
+        sweep = prompt(calls, "train-sweep-2")
+        self.assertIn("issue-1-x", sweep)
+        self.assertNotIn("issue-2-x", sweep)
+
+    def test_a_first_pr_still_open_after_the_car_merge_releases_the_lock_once_without_its_close_out(self):
+        for name, states in (("open", {41: "OPEN", 42: "MERGED"}), ("unread", {42: "MERGED"})):
+            with self.subTest(name=name):
+                result, calls, _ = train_run(replies={"train-merge-1": merge_reply(states)})
+                self.assertEqual(row(result, 1), {"issue": 1, "outcome": "stopped", "pr": 41, "stage": "train-merged-open", "train": 1, "car_pr": 92})
+                self.assertNotIn("close-out-1", labels(calls))
+                self.assertEqual(lock_releases(calls), ["land-unlock-1"])
+                self.assertEqual(row(result, 2), {"issue": 2, "outcome": "landed", "pr": 42, "train": 1, "car_pr": 92})
+                self.assertNotIn("forge-claim land release", prompt(calls, "close-out-2"))
+                self.assertEqual(result["relaunch"]["conts"]["1"]["pr"], 41)
+
+    def test_the_sweep_runs_at_the_drain_start_and_after_a_thrown_step(self):
+        _, calls, _ = train_run(replies={"train-build-1": "throw"})
+        order = land_labels(calls)
+        self.assertEqual(order[:3], ["train-sweep-1", "land-pr-1", "train-pr-2"])
+        self.assertEqual(order[order.index("train-build-1") + 1], "train-sweep-2")
+        self.assertLess(order.index("train-sweep-2"), order.index("land-sync-1-1"))
+
+    def test_a_clean_drain_start_sweep_is_not_repeated_and_a_failed_one_is(self):
+        _, calls, _ = train_run(issues=(1, 2, 3, 4))
+        self.assertEqual([l for l in labels(calls) if l.startswith("train-sweep-")], ["train-sweep-1", "train-sweep-2"])
+        _, calls, _ = train_run(issues=(1, 2, 3, 4), replies={"train-sweep-2": {"ok": False, "detail": "a car is still open"}})
+        self.assertEqual([l for l in labels(calls) if l.startswith("train-sweep-")], ["train-sweep-1", "train-sweep-2", "train-sweep-3"])
+
+    def test_a_fourth_waiting_issue_lands_in_the_next_drain(self):
+        result, calls, _ = train_run(issues=(1, 2, 3, 4))
+        self.assertEqual([m["issue"] for m in members_of(calls, "train-build-1")], [1, 2, 3])
+        self.assertEqual(labels(calls).count("train-build-1"), 1)
+        self.assertNotIn("train-pr-4", labels(calls))
+        order = land_labels(calls)
+        self.assertLess(order.index("close-out-3"), order.index("land-pr-4"))
+        self.assertIn(f"gh pr merge 93 --repo owner/repo --merge --match-head-commit {X3}", prompt(calls, "train-merge-1"))
+        self.assertEqual([row(result, n)["outcome"] for n in (1, 2, 3, 4)], ["landed"] * 4)
+        self.assertEqual(row(result, 4), {"issue": 4, "outcome": "landed", "pr": 44})
+
+    def test_an_issue_with_an_unknown_criterion_kind_never_joins_a_train(self):
+        odd = ready(2, acceptance=[{"id": "AC1", "text": "works", "kind": "vibes"}])
+        result, calls, _ = train_run(children={"1": ready(1), "2": odd})
+        self.assertEqual(train_labels(calls), [])
+        self.assertEqual((row(result, 2)["outcome"], row(result, 2)["stage"]), ("stopped", "plan"))
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+
+    def test_a_trained_issue_with_open_criteria_is_held_by_its_close_out(self):
+        held = ready(2, acceptance=[{"id": "AC1", "text": "live", "kind": "evidence"}])
+        result, calls, _ = train_run(children={"1": ready(1), "2": held}, replies={"close-out-2": {"issue_state": "OPEN", "released": True, "decision_ended": True}})
+        self.assertEqual(row(result, 2), {"issue": 2, "outcome": "landed-held", "pr": 42, "train": 1, "car_pr": 92})
+        self.assertIn("needs-verification", prompt(calls, "close-out-2"))
+
+    def test_a_trained_close_out_that_stops_keeps_its_cont_with_the_pr(self):
+        result, calls, _ = train_run(replies={"close-out-2": {"issue_state": "OPEN", "released": False, "decision_ended": True}})
+        self.assertEqual((row(result, 2)["outcome"], row(result, 2)["stage"]), ("stopped", "close-out"))
+        self.assertEqual(result["relaunch"]["conts"]["2"]["pr"], 42)
+        self.assertIs(result["relaunch"]["train"], True)
+
+    def test_the_remote_issue_branches_are_swept_only_when_the_contract_deletes_branches(self):
+        _, calls, _ = train_run(patch={"setup": {"max_parallel": 2, "delete_branch": False}})
+        self.assertNotIn("issue-1-x", prompt(calls, "train-sweep-2"))
+        self.assertNotIn("--delete-branch", prompt(calls, "train-merge-1"))
