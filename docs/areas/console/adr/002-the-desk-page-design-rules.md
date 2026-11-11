@@ -1,0 +1,23 @@
+# ADR-console-002 — The desk page's design rules
+
+- **Status:** accepted
+- **Decided in:** #833, #855
+
+## Context
+
+The owner chose the desk layout from a throwaway prototype that is never merged. Its rules are recorded here so later slices build the page without it.
+
+## Decision
+
+- **Structure.** A sticky top bar with the name, then a desk grid: at most 1360px wide, a main column `minmax(0, 1fr)` and a 460px side column with an 88px gap (400px and 56px under 1180px; one column under 900px). The statement leads the main column; the projects sit in the side column.
+- **Statement.** One large line says whether the owner is needed: "Nothing needs you", or the number of inbox items in peach followed by "thing needs you" or "things need you". One plain sentence sits beneath it. Headline 650 weight, 3.5rem/1.04, display stack, -0.028em tracking (2.375rem, -0.022em under 900px); sentence 1.125rem/1.5 in Subtext 1, at most 44rem wide (1rem under 900px).
+- **Palette (Catppuccin Macchiato roles).** Base `#24273a` page; Mantle `#1e2030` sunken fields; Surface 0 `#363a4f` the one raised card; Surface 1 `#494d64` and Surface 2 `#5b6078` borders; Text `#cad3f5`; Subtext 1 `#b8c0e0` the sentence; Subtext 0 `#a5adcb` secondary text; Overlay 2 `#939ab7` quiet lines and times; Lavender `#b7bdf8` the focus ring and the owner's own words; Peach `#f5a97f` means "needs you" and nothing else; Green `#a6da95`, Yellow `#eed49f` and Red `#ed8796` mark moving, waiting and stopped work. Hairlines are `rgba(202, 211, 245, .09)`.
+- **Type scale.** The system UI stack, never a web font. Body .9375rem/1.5 with tabular numerals; section headings 600 .9375rem/1.4; secondary text .84375rem; small text .8125rem; quiet lines .875rem.
+- **Quiet projects.** A quiet project is one line: its name in 600 Subtext 0, then its words in Overlay 2. Three or fewer stay lines; more than three fold into one closed group titled "N quiet projects". Projects with open work come first, then quiet ones, each by most recent activity. The view decides order and folding; the page only renders them.
+- **State is never colour alone.** Every state carries a word, and every icon sits beside one.
+- **Empty fleet.** With no registered project the projects section says "No project is registered yet."
+
+## Consequences
+
+- The prototype worktree can be dropped once this page ships.
+- A new colour role or a second use of peach is a change to this record.

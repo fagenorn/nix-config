@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<link rel="icon" href="data:,">
+<title>Console</title>
+<style>
+:root {
+  --base: #24273a; --mantle: #1e2030;
+  --s1: #494d64; --s2: #5b6078;
+  --text: #cad3f5; --sub1: #b8c0e0; --sub0: #a5adcb; --ov2: #939ab7;
+  --peach: #f5a97f; --lav: #b7bdf8;
+  --hair: rgba(202, 211, 245, .09);
+  --ui: "Segoe UI Variable Text", "Segoe UI", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter Variable", "Inter", system-ui, "Noto Sans", "Helvetica Neue", Arial, sans-serif;
+  --display: "Segoe UI Variable Display", "Segoe UI", -apple-system, BlinkMacSystemFont, "SF Pro Display", "Inter Display", "Inter Variable", "Inter", system-ui, "Noto Sans", "Helvetica Neue", Arial, sans-serif;
+  color-scheme: dark;
+}
+*, *::before, *::after { box-sizing: border-box; }
+html { background: var(--base); scrollbar-color: var(--s1) transparent; scrollbar-width: thin; -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--base); color: var(--text);
+  font: 400 .9375rem/1.5 var(--ui); font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+}
+h1, h2, p, ul { margin: 0; padding: 0; }
+ul { list-style: none; }
+:focus-visible { outline: 2px solid var(--lav); outline-offset: 2px; border-radius: 6px; }
+.ic { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; align-self: center; }
+
+.top { position: sticky; top: 0; z-index: 10; background: var(--base); border-bottom: 1px solid var(--hair); }
+.top-in { max-width: 1360px; margin: 0 auto; padding: 8px 48px; display: flex; align-items: center; gap: 28px; min-height: 56px; }
+.brand { font-weight: 600; color: var(--sub1); white-space: nowrap; letter-spacing: -.005em; }
+.conn { color: var(--ov2); font-size: .8125rem; }
+
+.desk-grid { max-width: 1360px; margin: 0 auto; padding: 30px 48px 72px; display: grid; grid-template-columns: minmax(0, 1fr) 460px; column-gap: 88px; align-items: start; }
+
+.statement h1 { font: 650 3.5rem/1.04 var(--display); letter-spacing: -.028em; text-wrap: balance; }
+.statement .sub { margin-top: 16px; font-size: 1.125rem; line-height: 1.5; color: var(--sub1); max-width: 44rem; text-wrap: pretty; }
+.statement h1.needs { color: var(--peach); }
+
+.side { margin-top: 12px; }
+.side h2 { font: 600 .9375rem/1.4 var(--ui); display: flex; align-items: baseline; gap: 10px; }
+.side h2 span { font-weight: 400; font-size: .8125rem; color: var(--ov2); }
+.empty { margin-top: 12px; color: var(--sub0); font-size: .84375rem; }
+#list { margin-top: 12px; }
+.line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; padding: 5px 0; font-size: .875rem; color: var(--ov2); }
+.line b { font-weight: 600; color: var(--sub0); }
+.line .root { overflow-wrap: anywhere; }
+.line .qw { display: inline-flex; align-items: baseline; gap: 6px; }
+.quietfold { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--hair); }
+.quietfold summary { display: flex; align-items: baseline; gap: 8px; cursor: pointer; list-style: none; padding: 4px 12px; margin: 0 -12px; border-radius: 10px; font-size: .875rem; color: var(--ov2); transition: background-color .16s; }
+.quietfold summary::-webkit-details-marker { display: none; }
+.quietfold summary:hover { background: rgba(202, 211, 245, .05); }
+.quietfold summary b { font-weight: 600; color: var(--sub0); }
+.quietfold ul { margin-top: 4px; padding: 0 0 0 22px; }
+
+@media (max-width: 1180px) {
+  .desk-grid { grid-template-columns: minmax(0, 1fr) 400px; column-gap: 56px; }
+}
+@media (max-width: 900px) {
+  .desk-grid { grid-template-columns: minmax(0, 1fr); padding: 32px 16px 56px; }
+  .top-in { padding: 10px 16px; gap: 10px 16px; }
+  .side { margin-top: 48px; }
+  .statement h1 { font-size: 2.375rem; letter-spacing: -.022em; }
+  .statement .sub { font-size: 1rem; }
+}
+</style>
+</head>
+<body>
+<header class="top"><div class="top-in"><span class="brand">Console</span><span class="conn" id="conn" role="status">Reconnecting…</span></div></header>
+<div class="desk-grid">
+<main class="statement" id="statement"></main>
+<aside class="side" aria-label="Projects">
+<section id="projects"></section>
+</aside>
+</div>
+<template id="quiet-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M12.5 9.5A5 5 0 0 1 6.5 3.5a5 5 0 1 0 6 6z"/></svg></template>
+<script>
+"use strict";
+function el(tag, cls, text) {
+  const node = document.createElement(tag);
+  if (cls) node.className = cls;
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+function quietIcon() {
+  return document.getElementById("quiet-icon").content.firstElementChild.cloneNode(true);
+}
+function projectLine(entry) {
+  const line = el("li", "line");
+  line.appendChild(el("b", "", entry.project_id));
+  if (entry.quiet) {
+    const quiet = el("span", "qw");
+    quiet.appendChild(quietIcon());
+    quiet.appendChild(el("span", "", "quiet"));
+    line.appendChild(quiet);
+  }
+  line.appendChild(el("span", "root", entry.root));
+  return line;
+}
+function renderStatement(view) {
+  const box = document.getElementById("statement");
+  const h1 = el("h1", view.statement.inbox_items > 0 ? "needs" : "", view.statement.headline);
+  box.replaceChildren(h1, el("p", "sub", view.statement.sentence));
+}
+function renderProjects(view) {
+  const section = document.getElementById("projects");
+  const heading = el("h2", "", "Projects ");
+  heading.appendChild(el("span", "", String(view.project_count)));
+  section.replaceChildren(heading);
+  if (view.project_count === 0) {
+    section.appendChild(el("p", "empty", "No project is registered yet."));
+    return;
+  }
+  const list = el("ul");
+  list.id = "list";
+  for (const entry of view.entries) {
+    if (entry.type === "quiet_group") {
+      const fold = el("details", "quietfold");
+      const summary = el("summary");
+      summary.appendChild(quietIcon());
+      summary.appendChild(el("b", "", entry.label));
+      fold.appendChild(summary);
+      const inner = el("ul");
+      for (const project of entry.projects) inner.appendChild(projectLine(project));
+      fold.appendChild(inner);
+      const item = el("li");
+      item.appendChild(fold);
+      list.appendChild(item);
+    } else {
+      list.appendChild(projectLine(entry));
+    }
+  }
+  section.appendChild(list);
+}
+function render(view) {
+  const open = document.querySelector("#projects details");
+  const wasOpen = open !== null && open.open;
+  renderStatement(view);
+  renderProjects(view);
+  const fold = document.querySelector("#projects details");
+  if (wasOpen && fold !== null) fold.open = true;
+}
+const conn = document.getElementById("conn");
+fetch("/api/state")
+  .then((response) => response.json())
+  .then(render)
+  .catch(() => {});
+const source = new EventSource("/api/stream");
+source.addEventListener("view", (event) => render(JSON.parse(event.data)));
+source.onopen = () => { conn.textContent = ""; };
+source.onerror = () => { conn.textContent = "Reconnecting…"; };
+</script>
+</body>
+</html>

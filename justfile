@@ -193,6 +193,7 @@ agent-workflow-tests *args:
     tests/test_suite_runner.py \
     tests/test_console_event_log.py \
     tests/test_console_view.py \
+    tests/test_console_page.py \
     home/common/agent-skills/tests/test_deliver_standard_program.py \
     home/common/agent-skills/tests/test_deliver_batch_program.py \
     home/common/agent-skills/evals/tests/test-run-eval-tree.sh
