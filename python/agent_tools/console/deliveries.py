@@ -78,6 +78,7 @@ import os
 import re
 from dataclasses import dataclass, replace
 from pathlib import Path
+from stat import S_ISREG
 from typing import BinaryIO, Callable, Iterable, Mapping
 
 from agent_tools.console.event_log import Event
@@ -150,6 +151,61 @@ class JournalReader:
         self._known[path] = (stat.st_ino, offset + len(data), pending)
         records = tuple(record for record in map(_parse, lines) if record is not None)
         return Chunk(records, moved_ms, from_start)
+
+
+_ABSENT = (FileNotFoundError, NotADirectoryError)
+
+
+def _children(directory: Path) -> list[os.DirEntry] | None:
+    """The entries of a directory; None when it is absent. Any other `OSError` propagates."""
+    try:
+        with os.scandir(directory) as entries:
+            return sorted(entries, key=lambda entry: entry.name)
+    except _ABSENT:
+        return None
+
+
+def run_journals(projects_dirs: Iterable[Path], session_id: str) -> list[Path] | Unreadable:
+    """The `journal.jsonl` files of a session's runs, under every `projects` directory, sorted.
+
+    The tree is `<projects>/<slug>/<session_id>/subagents/workflows/<run_id>/journal.jsonl`, walked
+    with `os.scandir` per level and `os.stat` on each journal. A branch that is absent
+    (`FileNotFoundError`, `NotADirectoryError`) contributes nothing; any other `OSError` makes the
+    whole answer `Unreadable`, because a listing that failed cannot confirm what is absent. Never
+    raises.
+    """
+    found: list[Path] = []
+    try:
+        for projects in projects_dirs:
+            for slug in _children(Path(projects)) or ():
+                workflows = Path(slug.path) / session_id / "subagents" / "workflows"
+                for run in _children(workflows) or ():
+                    journal = Path(run.path) / JOURNAL_NAME
+                    try:
+                        regular = S_ISREG(os.stat(journal).st_mode)
+                    except _ABSENT:
+                        continue
+                    if regular:
+                        found.append(journal)
+    except OSError as error:
+        return Unreadable(_reason(error))
+    return sorted(found)
+
+
+def final_record(journal: Path) -> Path:
+    """`<session dir>/workflows/<run_id>.json`, which exists only once the run has ended."""
+    return journal.parents[3] / "workflows" / f"{journal.parent.name}.json"
+
+
+def has_final_record(journal: Path) -> bool | Unreadable:
+    """Whether the run has ended; `Unreadable` (not False) when that cannot be told. Never raises."""
+    try:
+        os.stat(final_record(journal))
+    except _ABSENT:
+        return False
+    except OSError as error:
+        return Unreadable(_reason(error))
+    return True
 
 
 QUEUED = "queued"

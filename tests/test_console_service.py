@@ -19,7 +19,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import service, sessions
+from agent_tools.console import deliveries, service, sessions
 from agent_tools.console.view import derive_view, encode_view, project_states
 
 from . import console_test_support as support
@@ -620,6 +620,162 @@ class BindTest(Case):
             with self.assertRaises(OSError):
                 service.ConsoleService(self.store, self.registry, port=held.getsockname()[1])
         self.assertFalse(self.store.exists())
+
+
+class DeliveryTest(Case):
+    SINGLE = Path(__file__).parent / "fixtures/console/journals/single.jsonl"
+
+    def setUp(self):
+        super().setUp()
+        self.now = 1_800_000_000.0
+        self.lines = self.SINGLE.read_text().splitlines(keepends=True)
+        self.svc = self.start([{"project_id": "owner/p00", "root": "/srv/p00"}],
+                              session_poll_seconds=3600, clock=lambda: self.now)
+        body = support.hook_body("session start", cwd="/srv/p00")
+        self.sid = json.loads(body)["session_id"]
+        self.svc.ingest_hook(body)
+        self.J = (self.root / "projects/-srv-p00" / self.sid
+                  / "subagents/workflows/wf_t1/journal.jsonl")
+
+    def write(self, n, start=0, mode="w"):
+        self.J.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.J, mode) as handle:
+            handle.write("".join(self.lines[start:n]))
+        self.touch()
+
+    def touch(self, path=None):
+        os.utime(path or self.J, ns=(int(self.now * 1e9),) * 2)
+
+    def runs(self, svc=None):
+        view = json.loads((svc or self.svc).view_bytes)
+        for entry in view["entries"]:
+            for project in entry.get("projects", [entry]):
+                if project["project_id"] == "owner/p00":
+                    for s in project["outside_sprints"]["sessions"]:
+                        if s["session_id"] == self.sid:
+                            return s["deliveries"]
+        raise AssertionError("session not listed")
+
+    def rows(self, kind):
+        return [row for row in support.log_rows(self.store) if row[2] == kind]
+
+    def test_a_run_with_a_final_record_leaves_the_in_flight_list(self):
+        self.write(10)
+        self.svc.poll_deliveries()
+        self.assertEqual(self.runs(), [{
+            "run_id": "wf_t1", "quiet": False, "moved_text": "moved just now",
+            "issues": [{"issue": 858, "stage": "building",
+                        "stage_text": "building task 1 of 3"}]}])
+        seen = self.rows("delivery.seen")
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0][3], "owner/p00")
+        record = self.root / "projects/-srv-p00" / self.sid / "workflows/wf_t1.json"
+        record.parent.mkdir(parents=True)
+        record.write_text("{}")
+        self.svc.poll_deliveries()
+        self.assertEqual(self.runs(), [])
+        gone = self.rows("delivery.gone")
+        self.assertEqual(len(gone), 1)
+        self.assertEqual(json.loads(gone[0][4]), {"run_id": "wf_t1", "session_id": self.sid})
+
+    def test_an_unchanged_journal_appends_nothing(self):
+        self.write(10)
+        for _ in range(3):
+            self.svc.poll_deliveries()
+        self.assertEqual(len(self.rows("delivery.seen")), 1)
+        self.write(14, 10, "a")
+        self.svc.poll_deliveries()
+        self.assertEqual(len(self.rows("delivery.seen")), 2)
+        self.assertEqual(self.runs()[0]["issues"][0]["stage_text"], "building task 2 of 3")
+
+    def test_a_quiet_run_reads_quiet_as_the_clock_moves(self):
+        self.write(10)
+        self.svc.poll_deliveries()
+        self.now += 16 * 60
+        self.svc.poll_deliveries()
+        self.assertIs(self.runs()[0]["quiet"], True)
+        self.assertEqual(self.runs()[0]["moved_text"], "quiet for 16 min")
+        self.assertEqual(len(self.rows("delivery.seen")), 1)
+
+    def test_a_run_naming_no_issue_is_not_listed(self):
+        self.write(2)
+        self.svc.poll_deliveries()
+        self.assertEqual(self.runs(), [])
+        self.assertEqual(self.rows("delivery.seen"), [])
+
+    def test_a_restart_over_an_unchanged_journal_appends_nothing(self):
+        self.write(10)
+        self.svc.poll_deliveries()
+        self.svc.close()
+        second = self.start(session_poll_seconds=3600, clock=lambda: self.now)
+        self.assertEqual(self.runs(second)[0]["issues"][0]["stage_text"], "building task 1 of 3")
+        self.assertEqual(len(self.rows("delivery.seen")), 1)
+
+    def test_a_failing_delivery_poll_does_not_stop_the_session_poll(self):
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            svc = self.start(session_poll_seconds=0.05)
+            with mock.patch.object(svc, "poll_deliveries", side_effect=RuntimeError("boom")):
+                deadline = time.monotonic() + 2
+                line = "console: delivery_poll_failed RuntimeError: boom"
+                while time.monotonic() < deadline and errors.getvalue().count(line) < 2:
+                    time.sleep(0.02)
+        self.assertGreaterEqual(errors.getvalue().count(line), 2)
+
+    def test_a_truncated_journal_is_folded_again_from_its_start(self):
+        self.write(14)
+        self.svc.poll_deliveries()
+        self.assertEqual(self.runs()[0]["issues"][0]["stage_text"], "building task 2 of 3")
+        self.write(3)
+        self.svc.poll_deliveries()
+        self.assertEqual(self.runs()[0]["issues"],
+                         [{"issue": 858, "stage": "planning", "stage_text": "planning"}])
+
+    def test_a_replaced_journal_is_folded_again_from_its_start(self):
+        self.write(14)
+        self.svc.poll_deliveries()
+        sibling = self.J.with_name("journal.next")
+        sibling.write_text("".join(self.lines[:3]) + self.lines[0] * 200)
+        self.assertGreater(sibling.stat().st_size, self.J.stat().st_size)
+        os.replace(sibling, self.J)
+        self.touch()
+        self.svc.poll_deliveries()
+        self.assertEqual(self.runs()[0]["issues"][0]["stage_text"], "planning")
+
+    def test_an_unreadable_journal_keeps_its_run_until_it_reads_again(self):
+        self.write(10)
+        self.svc.poll_deliveries()
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors), mock.patch.object(
+                self.svc._reader, "read",
+                return_value=deliveries.Unreadable("PermissionError: denied")):
+            self.svc.poll_deliveries()
+            self.svc.poll_deliveries()
+        self.assertEqual(self.runs()[0]["issues"][0]["stage_text"], "building task 1 of 3")
+        self.assertEqual(self.rows("delivery.gone"), [])
+        lines = [l for l in errors.getvalue().splitlines()
+                 if l.startswith("console: journal_unreadable")]
+        self.assertEqual(len(lines), 1)
+        self.assertIn(str(self.J), lines[0])
+        self.assertIn("PermissionError: denied", lines[0])
+        self.write(14, 10, "a")
+        self.svc.poll_deliveries()
+        self.assertEqual(self.runs()[0]["issues"][0]["stage_text"], "building task 2 of 3")
+        self.assertEqual(self.rows("delivery.gone"), [])
+
+    def test_an_unreadable_listing_keeps_the_sessions_runs(self):
+        self.write(10)
+        self.svc.poll_deliveries()
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors), mock.patch(
+                "agent_tools.console.deliveries.run_journals",
+                return_value=deliveries.Unreadable("PermissionError: denied")):
+            self.svc.poll_deliveries()
+        self.assertEqual(self.runs()[0]["issues"][0]["stage_text"], "building task 1 of 3")
+        self.assertEqual(self.rows("delivery.gone"), [])
+        lines = [l for l in errors.getvalue().splitlines()
+                 if l.startswith("console: journals_unreadable")]
+        self.assertEqual(len(lines), 1)
 
 
 if __name__ == "__main__":

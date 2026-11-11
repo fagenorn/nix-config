@@ -403,5 +403,51 @@ class RunFoldTest(unittest.TestCase):
                     self.assertEqual(step.issue, 4242 if names_issue else None)
 
 
+class RunJournalsTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        a = self.root / "a/projects"
+        self.journals = {}
+        for name, slug, session, run in (
+            ("w2", "-srv-p00", "s1", "wf_2"), ("w1", "-srv-p00", "s1", "wf_1"),
+            ("w0", "-srv-p01", "s1", "wf_0"), ("w9", "-srv-p00", "s2", "wf_9"),
+        ):
+            journal = a / slug / session / "subagents/workflows" / run / "journal.jsonl"
+            journal.parent.mkdir(parents=True)
+            journal.write_text("")
+            self.journals[name] = journal
+        (a / "-srv-p00/s1/subagents/workflows/wf_3").mkdir()
+        (a / "-srv-p00/s1/subagents/workflows/wf_4/journal.jsonl").mkdir(parents=True)
+        self.dirs = [a, self.root / "b/projects"]
+
+    def test_run_journals_lists_only_the_sessions_journals(self):
+        j = self.journals
+        self.assertEqual(deliveries.run_journals(self.dirs, "s1"),
+                         sorted([j["w2"], j["w1"], j["w0"]]))
+        self.assertEqual(deliveries.run_journals(self.dirs, "nobody"), [])
+        record = deliveries.final_record(j["w1"])
+        self.assertEqual(record, self.root / "a/projects/-srv-p00/s1/workflows/wf_1.json")
+        self.assertIs(deliveries.has_final_record(j["w1"]), False)
+        record.parent.mkdir(parents=True)
+        record.write_text("{}")
+        self.assertIs(deliveries.has_final_record(j["w1"]), True)
+
+    def test_a_listing_failure_is_unreadable_not_empty(self):
+        with mock.patch("agent_tools.console.deliveries.os.scandir",
+                        side_effect=PermissionError("denied")):
+            result = deliveries.run_journals(self.dirs, "s1")
+        self.assertIsInstance(result, deliveries.Unreadable)
+        self.assertTrue(result.reason.startswith("PermissionError"))
+        with mock.patch("agent_tools.console.deliveries.os.scandir",
+                        side_effect=FileNotFoundError()):
+            self.assertEqual(deliveries.run_journals(self.dirs, "s1"), [])
+        with mock.patch("agent_tools.console.deliveries.os.stat",
+                        side_effect=PermissionError("denied")):
+            self.assertIsInstance(deliveries.has_final_record(self.journals["w1"]),
+                                  deliveries.Unreadable)
+
+
 if __name__ == "__main__":
     unittest.main()
