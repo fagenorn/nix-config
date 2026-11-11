@@ -651,26 +651,26 @@ ${RULES}`, `land-sync-review-${n}-${c.syncReview}`, { agentType: 'reviewer', sch
 
   // The close-out of a merged PR: the tail of a landing, and the whole of a train member's whose PR the train's car merged (#822).
   const finish = async () => {
-  // The merge is done: a failure from here on must leave a cont, or a re-adopted PR (which has none) could not be closed out.
-  markMerged(n, ready, pr)
+    // The merge is done: a failure from here on must leave a cont, or a re-adopted PR (which has none) could not be closed out.
+    markMerged(n, ready, pr)
 
-  const openCriteria = ready.acceptance.filter(isOpen)
-  const notes = ready.acceptance.filter(a => a && a.kind === 'note')
-  // The lock release rides first in the close-out call (#801); the wrapper releases only what that call did not confirm.
-  const folding = lockHeld
-  const co = await call(`Issue #${n} of ${SLUG}: PR #${pr} is merged into ${INT}. Close out; skip any step an earlier attempt already finished. Each command in its own Bash call:
+    const openCriteria = ready.acceptance.filter(isOpen)
+    const notes = ready.acceptance.filter(a => a && a.kind === 'note')
+    // The lock release rides first in the close-out call (#801); the wrapper releases only what that call did not confirm.
+    const folding = lockHeld
+    const co = await call(`Issue #${n} of ${SLUG}: PR #${pr} is merged into ${INT}. Close out; skip any step an earlier attempt already finished. Each command in its own Bash call:
 ${folding ? RELEASE_FIRST(lockSha, lockMaybe && lockMaybe !== lockSha ? lockMaybe : null) : ''}1. Invoke the deliver-direct skill with the Skill tool and run its step 7 (Close out) for this checkout ${REPO}, worktree ${W}, branch ${B} and integration branch ${INT}: it is the single source for removing the worktree, fast-forwarding the checkout and deleting the local branch.
 2. Release the claim: run alone and exactly forge-claim release --repo ${SLUG} --issue ${n} --holder ${HOLDER} --reason done. released is true only for verdict released. ${FORGE_TIMEOUT}
 3. End the owner-action markers, each alone and exactly: forge-claim owner-action end --repo ${SLUG} --issue ${n} --reason conflict, then forge-claim owner-action end --repo ${SLUG} --issue ${n} --reason needs-label, then forge-claim owner-action end --repo ${SLUG} --issue ${n} --reason decision. The merge proves the conflict and the label resolved and the decision settled; a verdict none is fine. decision_ended is true only when the decision end exited 0 (verdict ended or none).
 ${notes.length ? `4. Unless a comment starting Orchestrator notes for PR ${pr} already exists on #${n} (an earlier attempt), write to a file outside any work tree a comment whose first line is Orchestrator notes for PR ${pr} (observations the orchestrator records itself; not graded, not held): and then one line <id>: <text> per note of ${JSON.stringify(notes.map(a => ({ id: a.id, text: a.text })))}, and post it with ${UNSET}gh issue comment ${n} --repo ${SLUG} --body-file <file>. Return notes_posted true once that comment exists.\n` : ''}${notes.length ? 5 : 4}. ${noHold
-    ? `Every criterion is of kind code or note. Read ${UNSET}gh issue view ${n} --repo ${SLUG} --json state; if it is still open (${INT === SETUP.default_branch ? 'the closing keyword did not fire' : `${INT} is not the default branch, so no closing keyword fires`}), run ${UNSET}gh issue close ${n} --repo ${SLUG} --comment 'Delivered by PR ${pr} into ${INT}.'`
-    : `Keep the issue open. Add the needs-verification label (create it if missing) and comment which criteria remain and how to check each: ${JSON.stringify(openCriteria)}.`}
+      ? `Every criterion is of kind code or note. Read ${UNSET}gh issue view ${n} --repo ${SLUG} --json state; if it is still open (${INT === SETUP.default_branch ? 'the closing keyword did not fire' : `${INT} is not the default branch, so no closing keyword fires`}), run ${UNSET}gh issue close ${n} --repo ${SLUG} --comment 'Delivered by PR ${pr} into ${INT}.'`
+      : `Keep the issue open. Add the needs-verification label (create it if missing) and comment which criteria remain and how to check each: ${JSON.stringify(openCriteria)}.`}
 Return issue_state (OPEN or CLOSED, read back from the tracker), branch_deleted, released, decision_ended${notes.length ? ', notes_posted' : ''} and notes.
 ${RULES}`, `close-out-${n}`, { ...lifecycleClerk, schema: folding ? { ...CLOSE_SCHEMA, properties: { ...CLOSE_SCHEMA.properties, release: NULLABLE(RELEASE_SCHEMA) } } : CLOSE_SCHEMA })
-  if (folding && co && co.release && (co.release.verdict === 'released' || co.release.verdict === 'not_held')) lockHeld = false
-  const want = noHold ? 'CLOSED' : 'OPEN'
-  if (!co || co.issue_state !== want || co.released !== true || co.decision_ended !== true || (notes.length && co.notes_posted !== true)) return out('stopped', { stage: 'close-out', close_out: co, expected_issue_state: want })
-  return out(noHold ? 'landed' : 'landed-held')
+    if (folding && co && co.release && (co.release.verdict === 'released' || co.release.verdict === 'not_held')) lockHeld = false
+    const want = noHold ? 'CLOSED' : 'OPEN'
+    if (!co || co.issue_state !== want || co.released !== true || co.decision_ended !== true || (notes.length && co.notes_posted !== true)) return out('stopped', { stage: 'close-out', close_out: co, expected_issue_state: want })
+    return out(noHold ? 'landed' : 'landed-held')
   }
 
   // The behind handling shared by a checks reply and a lock that was lost and retaken.
@@ -859,6 +859,7 @@ ${RULES}`, `land-merge-${n}`, { ...lifecycleClerk, schema: withRenew(LAND_MERGE_
 //                     marks them merged (the car's history contains their heads);
 //   close-out-<n>     per merged member, the landing's own close-out; the lock release rides in the first member's, as in a serial landing;
 //   train-sweep-<s>   closes the open cars and deletes the car branches, the scratch worktree and the merged members' remote branches.
+// Rows stay per issue, with the issue's own PR; the row of an issue whose commits the car merged also carries train and car_pr.
 // Invariants. The lock is the first landing's: taken once at H1, never moved by the train, released once by that landing (its close-out, or its
 // wrapper on any other exit). Nothing merges unless every car up to g is green at its exact head. A train never writes to an issue branch and
 // never reads a merge commit. Each issue joins at most one train per run: an issue a train did not land goes to land() in the same drain, never

@@ -3022,6 +3022,7 @@ class TrainTest(unittest.TestCase):
                 result, calls, _ = train_run(replies=replies)
                 order = land_labels(calls)
                 self.assertNotIn("train-merge-1", order)
+                self.assertEqual("train-checks-1-1" in order, name in ("car one red", "ready died"))
                 self.assertEqual(order.count("land-pr-1"), 1)
                 tail = ["train-sweep-2", "land-sync-1-1", "land-checks-1-2", "land-merge-1", "close-out-1",
                         "land-pr-2", "land-merge-2", "close-out-2"]
@@ -3157,6 +3158,14 @@ class TrainTest(unittest.TestCase):
         self.assertEqual(order[:3], ["train-sweep-1", "land-pr-1", "train-pr-2"])
         self.assertEqual(order[order.index("train-build-1") + 1], "train-sweep-2")
         self.assertLess(order.index("train-sweep-2"), order.index("land-sync-1-1"))
+
+    def test_a_dead_or_thrown_sweep_never_stops_a_landing(self):
+        for reply in (None, "throw"):
+            with self.subTest(reply=reply):
+                result, calls, _ = train_run(replies={"train-sweep-1": reply, "train-sweep-2": reply})
+                self.assertEqual([row(result, n)["outcome"] for n in (1, 2)], ["landed", "landed"])
+                self.assertEqual(lock_releases(calls), ["close-out-1"])
+                self.assertEqual([l for l in labels(calls) if l.startswith("train-sweep-")], ["train-sweep-1", "train-sweep-2"])
 
     def test_a_clean_drain_start_sweep_is_not_repeated_and_a_failed_one_is(self):
         _, calls, _ = train_run(issues=(1, 2, 3, 4))
