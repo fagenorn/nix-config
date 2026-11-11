@@ -1323,6 +1323,16 @@ class RerunAndContendedRetryTest(unittest.TestCase):
                 self.assertNotIn("land-checks-1-2", labels(calls))
                 self.assertNotIn("land-merge-1", labels(calls))
 
+    def test_the_fix_prompt_carries_the_commit_scope_once_before_its_push(self):
+        """A fix agent stages by path only what its fix changed: one committed a lock file a tool had generated."""
+        scope = ("Before committing, read git status in the worktree you commit in and stage by path only the files the fix "
+                 "itself changed or created; never run git add -A, git commit -a or git add on a directory (the dot included); "
+                 "a lock file, a generated file or an untracked file the fix did not need is left unstaged and named in notes.")
+        _, calls, _ = run(patch=folded(CI_RED), replies={"land-fix-1": self.RERAN})
+        text = prompt(calls, "land-fix-1")
+        self.assertEqual(text.count(scope), 1)
+        self.assertLess(text.index(scope), text.index("When the failure has no cause in the code"))
+
     def test_the_fix_prompt_names_the_rerun_of_a_failure_with_no_code_cause(self):
         _, calls, _ = run(patch=dict({"setup": {"unset_env": ["GITHUB_TOKEN"]}}, **folded(CI_RED)),
                           replies={"land-fix-1": self.RERAN})
