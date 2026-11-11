@@ -29,6 +29,13 @@ def executable(path, body):
     return path
 
 
+# Like the real relay: delivers stdin to the port and always exits 0.
+POSTING = (f"{sys.executable} -c 'import sys, urllib.request as r; "
+           "r.urlopen(r.Request(\"http://127.0.0.1:\" + sys.argv[1] + \"/api/hooks\", "
+           "sys.stdin.buffer.read(), {\"Content-Type\": \"application/json\"}))' \"$1\" "
+           "2>/dev/null; exit 0")
+
+
 def http_hook(url):
     return {"type": "http", "url": url, "timeout": 2}
 
@@ -99,7 +106,7 @@ class HookCostTest(unittest.TestCase):
         self.assertEqual([(h["event"], h["kind"]) for h in console_hooks(settings)], SELECTED)
 
     def test_a_deployed_settings_is_measured_in_both_modes(self):
-        listener, settings = self.deployed("cat >/dev/null; exit 0")
+        listener, settings = self.deployed(POSTING)
         done = self.run_check("--settings", str(settings), "--calls", "3", "--budget-ms", "1000")
         self.assertEqual(done.returncode, 0, done.stderr)
         report = json.loads(done.stdout)
@@ -119,7 +126,7 @@ class HookCostTest(unittest.TestCase):
             listener.accept()
 
     def test_a_slow_session_start_script_is_not_met_even_when_http_is_fast(self):
-        _, settings = self.deployed("cat >/dev/null; sleep 0.2; exit 0")
+        _, settings = self.deployed(f"sleep 0.2; {POSTING}")
         done = self.run_check("--settings", str(settings), "--calls", "3", "--budget-ms", "100")
         self.assertEqual(done.returncode, 1, done.stderr)
         report = json.loads(done.stdout)
@@ -131,10 +138,36 @@ class HookCostTest(unittest.TestCase):
                 self.assertLess(hook["stopped"]["median"], 100)
 
     def test_a_miss_is_not_met(self):
-        _, settings = self.deployed("cat >/dev/null; exit 0")
+        _, settings = self.deployed(POSTING)
         done = self.run_check("--settings", str(settings), "--calls", "3", "--budget-ms", "0")
         self.assertEqual(done.returncode, 1, done.stderr)
         self.assertEqual(json.loads(done.stdout)["status"], "not_met")
+
+    def assert_failed(self, settings, command_failures):
+        done = self.run_check("--settings", str(settings), "--calls", "2", "--budget-ms", "1000")
+        self.assertEqual(done.returncode, 1, done.stderr)
+        report = json.loads(done.stdout)
+        self.assertEqual(report["status"], "failed")
+        for hook in report["hooks"]:
+            if hook["kind"] == "command":
+                self.assertEqual(hook["failures"], command_failures)
+            else:
+                self.assertEqual(hook["failures"], {"running": 0, "stopped": 0})
+
+    def test_a_relay_that_cannot_run_is_failed_not_met(self):
+        _, settings = self.deployed(POSTING)
+        (self.tmp / "bin" / "0000-console-session-start").unlink()
+        self.assert_failed(settings, {"running": 2, "stopped": 2})
+        executable(self.tmp / "bin" / "0000-console-session-start", POSTING).chmod(0o644)
+        self.assert_failed(settings, {"running": 2, "stopped": 2})
+
+    def test_a_relay_that_exits_non_zero_is_failed(self):
+        _, settings = self.deployed("cat >/dev/null; exit 3")
+        self.assert_failed(settings, {"running": 2, "stopped": 2})
+
+    def test_a_relay_that_delivers_nothing_is_failed_in_running_mode(self):
+        _, settings = self.deployed("cat >/dev/null; exit 0")
+        self.assert_failed(settings, {"running": 2, "stopped": 0})
 
     def test_the_check_wrapper_runs_the_module(self):
         path = ROOT / WRAPPER

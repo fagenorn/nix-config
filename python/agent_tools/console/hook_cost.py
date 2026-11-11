@@ -18,16 +18,25 @@ console's port. Running mode targets a scratch console (a temporary store and re
 no session directories) that is closed and deleted afterwards. An HTTP hook POSTs a recorded
 `PermissionRequest` payload, a command hook gets a recorded `SessionStart` payload on stdin and
 the port as its argument; both carry the temporary directory as `cwd`. Errors are swallowed and the
-call is still timed.
+call is still timed, but counted as failures (below).
+
+Failures: a command hook fails a call when it cannot be run (missing, not executable) or exits
+non-zero, in either mode. In running mode a call also fails when it is not delivered: an HTTP hook
+whose request errors or is answered with a status of 300 or more, and, when no call failed
+otherwise, any hook whose calls the scratch console's event log does not record within
+`DELIVERY_WAIT` seconds (the relay discards its own errors, so only the log proves delivery). An
+HTTP hook's errors in stopped mode are the point of that mode and are not failures. A near-zero
+time from a hook that never ran is therefore never accepted as a measurement.
 
 Output is one stdout line of JSON with sorted keys. Settings that are absent, unreadable, not JSON
 or that select no console HTTP hook are `{"status": "not_deployed"}` and exit 75; nothing is run or
-contacted. Otherwise `{"budget_ms", "calls", "hooks": [{"event", "kind", "running": {"max",
-"median"}, "stopped": {"max", "median"}}], "status"}`, one member per selected hook, in
-`(event, kind)` order, times in milliseconds. `status` is `met` (exit 0) exactly when every selected
-hook's stopped-mode median is at most `budget_ms` (default 10.0), else `not_met` (exit 1); running
-figures are reported and never gate. A bad argument is exit 2. Nothing is written outside the
-temporary directory.
+contacted. Otherwise `{"budget_ms", "calls", "hooks": [{"event", "failures": {"running",
+"stopped"}, "kind", "running": {"max", "median"}, "stopped": {"max", "median"}}], "status"}`, one
+member per selected hook, in `(event, kind)` order, times in milliseconds, failures counts of
+failed calls. `status` is `failed` (exit 1) when any hook has a failure; otherwise `met` (exit 0)
+exactly when every selected hook's stopped-mode median is at most `budget_ms` (default 10.0), else
+`not_met` (exit 1); running figures are reported and never gate. A bad argument is exit 2. Nothing
+is written outside the temporary directory.
 """
 
 from __future__ import annotations
@@ -47,13 +56,14 @@ from collections.abc import Mapping
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from agent_tools.console import service
+from agent_tools.console import service, sessions
 
 SCRIPT_SUFFIX = "-console-session-start"
 LOOPBACK = ("127.0.0.1", "localhost")
 DEFAULT_CALLS = 10
 DEFAULT_BUDGET_MS = 10.0
 DEFAULT_TIMEOUT = 2.0
+DELIVERY_WAIT = 2.0
 COMMAND_TIMEOUT = 10.0
 NOT_YET = 75
 
@@ -114,36 +124,43 @@ def console_hooks(settings: Mapping) -> list[dict]:
     return sorted(found, key=lambda hook: (hook["event"], hook["kind"]))
 
 
-def time_http(path: str, port: int, timeout: float, body: bytes, calls: int) -> list[float]:
-    """Milliseconds of `calls` POSTs of `body` to 127.0.0.1:`port`; errors are swallowed and timed."""
+def time_http(path: str, port: int, timeout: float, body: bytes,
+              calls: int) -> tuple[list[float], int]:
+    """Milliseconds of `calls` POSTs of `body` to 127.0.0.1:`port` and how many failed."""
     times = []
+    failures = 0
     for _ in range(calls):
         started = time.perf_counter()
         connection = http.client.HTTPConnection(service.HOST, port, timeout=timeout)
         try:
             connection.request("POST", path, body=body,
                                headers={"Content-Type": "application/json"})
-            connection.getresponse().read()
+            response = connection.getresponse()
+            response.read()
+            failures += response.status >= 300
         except (OSError, http.client.HTTPException):
-            pass
+            failures += 1
         finally:
             connection.close()
         times.append((time.perf_counter() - started) * 1000)
-    return times
+    return times, failures
 
 
-def time_command(command: str, port: int, body: bytes, calls: int) -> list[float]:
-    """Milliseconds of `calls` runs of `command PORT` with `body` on stdin; errors are swallowed."""
+def time_command(command: str, port: int, body: bytes, calls: int) -> tuple[list[float], int]:
+    """Milliseconds of `calls` runs of `command PORT` with `body` on stdin and how many failed."""
     times = []
+    failures = 0
     for _ in range(calls):
         started = time.perf_counter()
         try:
-            subprocess.run([command, str(port)], input=body, stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL, timeout=COMMAND_TIMEOUT, check=False)
+            done = subprocess.run([command, str(port)], input=body, stdout=subprocess.DEVNULL,
+                                  stderr=subprocess.DEVNULL, timeout=COMMAND_TIMEOUT,
+                                  check=False)
+            failures += done.returncode != 0
         except (OSError, subprocess.SubprocessError):
-            pass
+            failures += 1
         times.append((time.perf_counter() - started) * 1000)
-    return times
+    return times, failures
 
 
 def _free_port() -> int:
@@ -156,10 +173,37 @@ def _figures(times: list[float]) -> dict:
     return {"max": float(max(times)), "median": float(statistics.median(times))}
 
 
-def _measure(hook: dict, port: int, bodies: dict, calls: int) -> dict:
+def _measure(hook: dict, port: int, bodies: dict, calls: int) -> tuple[dict, int]:
+    """The figures of `calls` timed calls of `hook` and the failures that count for them."""
     if hook["kind"] == "http":
-        return _figures(time_http(hook["path"], port, hook["timeout"], bodies["http"], calls))
-    return _figures(time_command(hook["command"], port, bodies["command"], calls))
+        times, failures = time_http(hook["path"], port, hook["timeout"], bodies["http"], calls)
+        return _figures(times), failures
+    times, failures = time_command(hook["command"], port, bodies["command"], calls)
+    return _figures(times), failures
+
+
+def _recorded(scratch: service.ConsoleService, at_least: int) -> int:
+    """Hook events in the scratch console's log, waiting up to DELIVERY_WAIT for `at_least`."""
+    deadline = time.monotonic() + DELIVERY_WAIT
+    while True:
+        count = sum(1 for event in scratch.log.events() if event.kind == sessions.HOOK)
+        if count >= at_least or time.monotonic() >= deadline:
+            return count
+        time.sleep(0.01)
+
+
+def _report(hook: dict, scratch: service.ConsoleService, stopped_port: int, bodies: dict,
+            calls: int) -> dict:
+    before = _recorded(scratch, 0)
+    running, running_failures = _measure(hook, scratch.address[1], bodies, calls)
+    undelivered = 0
+    if running_failures == 0:
+        undelivered = max(0, calls - (_recorded(scratch, before + calls) - before))
+    stopped, stopped_failures = _measure(hook, stopped_port, bodies, calls)
+    return {"event": hook["event"], "kind": hook["kind"], "running": running,
+            "stopped": stopped,
+            "failures": {"running": max(running_failures, undelivered),
+                         "stopped": stopped_failures if hook["kind"] == "command" else 0}}
 
 
 def _load(path: Path) -> Mapping | None:
@@ -204,19 +248,18 @@ def main(argv: list[str] | None = None) -> int:
             session_dirs=lambda: [])
         try:
             scratch.start()
-            running_port = scratch.address[1]
-            report = [{"event": hook["event"], "kind": hook["kind"],
-                       "running": _measure(hook, running_port, bodies, args.calls),
-                       "stopped": _measure(hook, stopped_port, bodies, args.calls)}
+            report = [_report(hook, scratch, stopped_port, bodies, args.calls)
                       for hook in hooks]
         finally:
             scratch.close()
     finally:
         shutil.rmtree(directory, ignore_errors=True)
+    failed = any(any(entry["failures"].values()) for entry in report)
     met = all(entry["stopped"]["median"] <= args.budget_ms for entry in report)
+    status = "failed" if failed else "met" if met else "not_met"
     print(json.dumps({"budget_ms": float(args.budget_ms), "calls": args.calls, "hooks": report,
-                      "status": "met" if met else "not_met"}, sort_keys=True))
-    return 0 if met else 1
+                      "status": status}, sort_keys=True))
+    return 0 if status == "met" else 1
 
 
 if __name__ == "__main__":

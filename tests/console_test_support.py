@@ -8,6 +8,7 @@ import time
 from pathlib import Path
 
 from agent_tools.console import service as console_service
+from agent_tools.console import sessions as console_sessions
 
 
 def entries(n):
@@ -66,6 +67,10 @@ def write_session(directory, *, pid, session_id, cwd, status, waiting_for=None, 
     directory.mkdir(parents=True, exist_ok=True)
     document = {"pid": pid, "sessionId": session_id, "cwd": cwd, "status": status,
                 "updatedAt": int(time.time() * 1000) if updated_at is None else updated_at}
+    stat = Path("/proc") / str(pid) / "stat"
+    if stat.exists():
+        document["procStart"] = stat.read_text().rsplit(")", 1)[1].split()[19]
+        document["pidDomain"] = console_sessions.own_pid_domain()
     if waiting_for is not None:
         document["waitingFor"] = waiting_for
     if name is not None:

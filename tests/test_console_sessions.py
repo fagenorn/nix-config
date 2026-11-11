@@ -256,7 +256,13 @@ class RegistryTest(unittest.TestCase):
             self.assertIs(process_matches(2164, "37198", here, **kw), False)
             self.assertIs(process_matches(2164, "976", here, **kw), True)
             self.assertIs(process_matches(2164, "976", other, **kw), False)
-            self.assertIs(process_matches(2164, None, None, **kw), True)
+            for start, domain in ((None, None), (None, here), ("976", None),
+                                  (976, here), ("976", 4026532224), ("", here)):
+                with self.subTest(start=start, domain=domain):
+                    self.assertIs(process_matches(2164, start, domain, **kw), False)
+            (tmp / "noid").write_text("\n")
+            self.assertIs(process_matches(
+                2164, "976", here, proc=tmp / "proc", machine_id=tmp / "noid"), False)
             self.assertIs(process_matches(2165, None, None, **kw), False)
             self.assertIs(process_matches(0, None, None, **kw), False)
             self.assertIs(process_matches(-1, None, None, **kw), False)
@@ -277,8 +283,13 @@ class RegistryTest(unittest.TestCase):
         if not Path("/proc/self/stat").exists():
             self.skipTest("no procfs")
         own = Path("/proc/self/stat").read_text().rsplit(")", 1)[1].split()[19]
-        self.assertIs(process_matches(os.getpid(), own, None), True)
-        self.assertIs(process_matches(os.getpid(), own + "1", None), False)
+        domain = own_pid_domain()
+        if domain is None:
+            self.skipTest("no machine id")
+        self.assertIs(process_matches(os.getpid(), own, domain), True)
+        self.assertIs(process_matches(os.getpid(), own, None), False)
+        self.assertIs(process_matches(os.getpid(), None, domain), False)
+        self.assertIs(process_matches(os.getpid(), own + "1", domain), False)
         self.assertIs(process_matches(child.pid, None, None), False)
 
 
@@ -293,6 +304,43 @@ class PollTest(unittest.TestCase):
             ([seen("s1", "idle")], frozenset()))
         self.assertEqual(self.poll(states, {"s1": observation("s1", "busy")}),
                          ([], frozenset()))
+
+    def test_a_changed_directory_or_name_is_seen_and_the_repository_resolved_again(self):
+        states = {"s1": sstate("s1", "idle")}
+
+        def moved(status, **fields):
+            return Observation("s1", fields.get("cwd", "/srv/p00"), 10, status, None,
+                               fields.get("name", "n"), 5000)
+
+        def payload(state, cwd, repo, name):
+            return {"session_id": "s1", "cwd": cwd, "repo": repo, "state": state, "name": name}
+
+        def elsewhere(cwd):
+            return "/srv/p00" if cwd.startswith("/srv/p00") else "/srv/p01"
+
+        self.assertEqual(
+            self.poll(states, {"s1": moved("idle", cwd="/srv/p01")}, repo=elsewhere),
+            ([(SEEN, None, payload("idle", "/srv/p01", "/srv/p01", "n"))], frozenset()))
+        self.assertEqual(
+            self.poll(states, {"s1": moved("busy", cwd="/srv/p01")}, repo=elsewhere),
+            ([(SEEN, None, payload("working", "/srv/p01", "/srv/p01", "n"))], frozenset()))
+        self.assertEqual(
+            self.poll(states, {"s1": moved("idle", cwd="/srv/p00/sub")}, repo=elsewhere),
+            ([(SEEN, "owner/p00", payload("idle", "/srv/p00/sub", "/srv/p00", "n"))],
+             frozenset()))
+        self.assertEqual(
+            self.poll(states, {"s1": moved("idle", name="renamed")}),
+            ([(SEEN, "owner/p00", payload("idle", "/srv/p00", "/srv/p00", "renamed"))],
+             frozenset()))
+        self.assertEqual(
+            self.poll(states, {"s1": moved("shell", cwd="/srv/p01")}, repo=elsewhere),
+            ([(SEEN, None, payload("idle", "/srv/p01", "/srv/p01", "n"))], frozenset()))
+        self.assertEqual(self.poll(states, {"s1": moved("idle")}), ([], frozenset()))
+        limit = {"s1": sstate("s1", "limit")}
+        self.assertEqual(
+            self.poll(limit, {"s1": moved("idle", name="renamed")}),
+            ([(SEEN, "owner/p00", payload("limit", "/srv/p00", "/srv/p00", "renamed"))],
+             frozenset()))
 
     def test_a_usage_limit_is_not_cleared_by_an_idle_registry(self):
         states = {"s1": sstate("s1", "limit")}

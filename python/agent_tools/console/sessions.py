@@ -44,6 +44,9 @@ reading cannot bring it back) and, tombstone or not, when two consecutive polls
 do not find it in the registry. `poll_changes` returns the absent set to pass
 to the next poll.
 
+A reading whose `cwd` or `name` differs from the folded state is written as well,
+with the repository resolved again when the directory moved.
+
 Hooks win over older readings: when the session's newest hook has a time
 (`hook_ms`), a registry reading whose `updatedAt` is missing or not newer
 changes nothing.
@@ -57,8 +60,9 @@ nowhere.
 Liveness (`process_matches`): a registry file names a live session only while
 its pid runs the process it recorded. With procfs, the file's `pidDomain` must
 equal this console's own (`linux:<machine-id>:pid:[<pid namespace inode>]`) and
-its `procStart` must equal field 22 (`starttime`) of `/proc/<pid>/stat`;
-without procfs only the pid's existence is checked.
+its `procStart` must equal field 22 (`starttime`) of `/proc/<pid>/stat`; a
+missing, malformed or unverifiable value of either is a mismatch, so a record
+without them is never live. Without procfs only the pid's existence is checked.
 """
 
 import json
@@ -219,10 +223,9 @@ def process_matches(pid: int, proc_start: str | None, pid_domain: str | None, *,
         except (OSError, OverflowError):
             return False
         return True
-    if isinstance(pid_domain, str):
-        own = own_pid_domain(proc, machine_id)
-        if own is not None and own != pid_domain:
-            return False
+    own = own_pid_domain(proc, machine_id)
+    if own is None or not isinstance(pid_domain, str) or pid_domain != own:
+        return False
     try:
         line = (proc / str(pid) / "stat").read_text()
     except (OSError, ValueError):
@@ -230,7 +233,7 @@ def process_matches(pid: int, proc_start: str | None, pid_domain: str | None, *,
     fields = line.rsplit(")", 1)[1].split() if ")" in line else []
     if len(fields) < 20:
         return False
-    return not (isinstance(proc_start, str) and proc_start != fields[19])
+    return isinstance(proc_start, str) and proc_start == fields[19]
 
 
 def _observation(document: object,
@@ -367,9 +370,15 @@ def poll_changes(
             continue
         elif known.state == ENDED:
             seen(obs, reading or IDLE, repo_of(obs.cwd), known)
-        elif reading is not None and reading != known.state \
-                and not (reading == IDLE and known.state == LIMIT):
-            seen(obs, reading, known.repo, known)
+        else:
+            state = known.state
+            if reading is not None and reading != state \
+                    and not (reading == IDLE and state == LIMIT):
+                state = reading
+            moved = obs.cwd != known.cwd
+            renamed = isinstance(obs.name, str) and obs.name != known.name
+            if state != known.state or moved or renamed:
+                seen(obs, state, repo_of(obs.cwd) if moved else known.repo, known)
     missing = {sid for sid in states if sid not in observations}
     for session_id in sorted(missing & absent):
         changes.append((GONE, project_of(states[session_id].repo), {"session_id": session_id}))
