@@ -556,6 +556,26 @@ class ContractTest(unittest.TestCase):
         self.assertIn("On any refusal set transient true only when the failed command's stderr JSON has transient true anywhere in it.",
                       prompt(calls, "setup"))
 
+    def test_a_setup_reply_without_its_claim_fields_is_asked_again_once(self):
+        # 870: the clerk claimed and set up the worktree but left holder, acquire, renew and claim out of its reply.
+        # An explicit reply that is ok gets the fold from the harness, so the bare reply is the default with each field patched to null.
+        bare = {"holder": None, "acquire": None, "claim": None, "renew": None}
+        result, calls = run(replies={"setup": [dict(SETUP_OK, **bare), SETUP_OK]})
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(labels(calls).count("setup"), 2)
+        result, calls = run(patch={"setup": bare})
+        self.assertEqual((result["stage"], result["invalid"]), ("setup", "holder"))
+        self.assertEqual(labels(calls), ["setup", "setup"])
+        schema = schema_of(calls, "setup")
+        self.assertEqual(schema["required"], ["ok", "holder", "acquire", "claim"])
+        self.assertIn({"type": "null"}, schema["properties"]["holder"]["anyOf"])
+        self.assertIn("A refusal before step 5 returns holder, acquire and claim null. Once the claim step ran", prompt(calls, "setup"))
+        # A resumed setup carries no fold: its schema requires only ok, and it is never asked again for one.
+        cont = run(patch={"setup": {"merge_strategy": None}})[0]["cont"]
+        _, resumed = run(args=dict(ARGS, cont=cont))
+        self.assertEqual(schema_of(resumed, "setup")["required"], ["ok"])
+        self.assertEqual(labels(resumed).count("setup"), 1)
+
     def test_a_setup_reply_naming_the_worktree_only_in_its_claim_proceeds(self):
         # 870: the reply carried the path as claim.worktree alone and was reported missing.
         result, calls = run(patch={"setup": {"worktree_path": None}})
