@@ -40,6 +40,7 @@
 | Deprecation | Project contract |
 | Derived row | Guard |
 | Detaching word | Guard |
+| Digest | Console |
 | Fleet registry | Project contract |
 | Held issue | Verification |
 | Held work | Console |
@@ -47,6 +48,7 @@
 | Keepalive ping | Hosts |
 | Land lock | Claims |
 | Lane | Delivery |
+| Last looked | Console |
 | Launcher | Hosts |
 | Lifecycle verb | Guard |
 | Light lane | Delivery |
