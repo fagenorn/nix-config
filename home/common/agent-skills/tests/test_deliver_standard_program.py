@@ -2004,6 +2004,25 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(len(result["reason"]), 300)
         result, _ = run(replies={"impl-1": None})
         self.assertEqual(result["reason"], "task: task 1 the implementer returned nothing")
+        result, _ = run(replies={"impl-1": {"status": "blocked"}})
+        self.assertEqual(result["reason"], "task: task 1 blocked")
+        for replies in ({"impl-1": {}}, {"review-1": {"verdict": "findings", "findings": [{"severity": "critical"}]},
+                                         "rereview-1-1": {"verdict": "findings", "findings": [{"severity": "critical"}]},
+                                         "rereview-1-2": {"verdict": "findings", "findings": [{"severity": "critical"}]}},
+                        {"renew-final-review": {}}, {"merge": {"lock": None}}):
+            with self.subTest(replies=replies):
+                result, _ = run(replies=replies)
+                self.assertNotIn("undefined", result["reason"])
+                self.assertNotIn("null", result["reason"])
+
+    def test_a_blocked_review_names_the_review_before_and_after_the_claim(self):
+        blocked = {"setup": {"review_state": {"code": "blocked", "plan": "available"}}}
+        fresh, _ = run(patch=blocked)
+        self.assertEqual((fresh["stage"], fresh["reason"]), ("review-blocked", "review-blocked: the code review is blocked"))
+        cont = {"setup": {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x", "plan_dir": "/g"},
+                "plan": PLAN, "plan_reviewed": True, "done": []}
+        resumed, _ = run(args=dict(ARGS, cont=cont), patch=blocked)
+        self.assertEqual((resumed["stage"], resumed["reason"]), ("review-blocked", "review-blocked: the code review is blocked"))
 
     def test_every_stop_carries_a_reason_and_a_pause_none(self):
         """#869: plan-review, task-review, verify, land and claim stops each name their stage and detail; planned and ready are not stops."""
@@ -4382,7 +4401,7 @@ class DeclaredBranchTest(unittest.TestCase):
         for name, reply in bad.items():
             with self.subTest(name=name):
                 result, calls = run(replies={"plan": reply, "plan-branch-revise": reply})
-                self.assertEqual((result["stage"], result["step"]), ("plan", "plan"))
+                self.assertEqual((result["stage"], result["step"]), ("plan", "plan-branch-revise"))
                 self.assertTrue(result["branch_problems"])
                 self.assertIsNone(result["cont"]["plan"])
                 self.assertEqual(labels(calls).count("plan-branch-revise"), 1)
@@ -4392,7 +4411,7 @@ class DeclaredBranchTest(unittest.TestCase):
         self.assertEqual(ok["stage"], "done")
         dev = bplan([dict(BR, name="dev", current="dev")], task_branch="dev")
         result, calls = run(replies={"plan-review": TASK_FINDING, "plan-revise": dev, "plan-branch-revise": dev})
-        self.assertEqual((result["stage"], result["step"]), ("plan", "plan-revise"))
+        self.assertEqual((result["stage"], result["step"]), ("plan", "plan-branch-revise"))
         self.assertTrue(result["branch_problems"])
         cont = {"setup": {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x", "plan_dir": "/g"},
                 "plan": bplan([dict(BR, name="dev", current="dev")], task_branch="dev"), "plan_reviewed": True, "done": []}
@@ -4430,6 +4449,8 @@ class DeclaredBranchTest(unittest.TestCase):
         self.assertNotIn("\n", result["reason"])
         result, _ = run(replies={"plan": {"status": "planned"}})
         self.assertEqual(result["reason"], "plan: the plan reply is not a well-formed plan")
+        result, _ = run(replies={"plan": bad, "plan-branch-revise": {"status": "planned"}})
+        self.assertEqual((result["step"], result["reason"]), ("plan-branch-revise", "plan: the plan-branch-revise reply is not a well-formed plan"))
 
     def test_a_task_naming_the_delivery_branch_is_a_plain_task(self):
         """#864: a planner that tags a task with the delivery's own branch declared no extra branch."""
@@ -4454,7 +4475,7 @@ class DeclaredBranchTest(unittest.TestCase):
                             "declared": bplan([dict(BR, name="issue-9-x", current="issue-9-x")], task_branch="issue-9-x")}.items():
             with self.subTest(name=name):
                 refused, calls = run(replies={"plan": reply, "plan-branch-revise": reply})
-                self.assertEqual((refused["stage"], refused["step"]), ("plan", "plan"))
+                self.assertEqual((refused["stage"], refused["step"]), ("plan", "plan-branch-revise"))
                 self.assertTrue(refused["branch_problems"])
                 self.assertNotIn("impl-1", labels(calls))
 
@@ -4778,7 +4799,7 @@ class ClerkModelTest(unittest.TestCase):
 class PromptCommandFormTest(unittest.TestCase):
     """#738: a command ends at a line break, and a prompt that reads the issue body asks for it."""
 
-    BODY_READERS = ("plan", "plan-revise", "plan-rules-revise", "plan-review")
+    BODY_READERS = ("plan", "plan-revise", "plan-rules-revise", "plan-branch-revise", "plan-review")
 
     def test_no_command_is_followed_by_a_lone_dot_argument(self):
         for call in all_calls():
@@ -4801,7 +4822,7 @@ class PromptCommandFormTest(unittest.TestCase):
 
 MAP_PATH = "/r/.git/worktrees/w/deliver-standard/context.md"
 MAP_TASK_FINDING = {"verdict": "findings", "findings": [{"severity": "important", "summary": "gap"}]}
-MAP_READERS = re.compile(r"plan|plan-review|plan-codex|plan-revise|plan-rules-revise|impl-\d+|fix-\d+-\d+")
+MAP_READERS = re.compile(r"plan|plan-review|plan-codex|plan-revise|plan-rules-revise|plan-branch-revise|impl-\d+|fix-\d+-\d+")
 
 
 def map_carriers(calls):

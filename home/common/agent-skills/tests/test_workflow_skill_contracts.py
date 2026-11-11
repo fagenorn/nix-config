@@ -2032,7 +2032,7 @@ class BatchRoutingTest(unittest.TestCase):
 
     def test_the_lead_stops_a_relaunch_that_repeats_the_last_one(self):
         text = (REPO_ROOT / "home/common/claude-code/skills/deliver-batch/SKILL.md").read_text(encoding="utf-8")
-        self.assertRegex(text, r"(?s)non-null `relaunch`.*?unless its args equal the previous run.*?stop, reporting")
+        self.assertRegex(text, r"(?s)non-null `relaunch`.*?unless its args, `reasons` aside, equal the previous run.*?stop, reporting")
 
 
 class CodexEntryRetirementTest(unittest.TestCase):

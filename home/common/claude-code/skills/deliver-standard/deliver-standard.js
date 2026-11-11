@@ -281,21 +281,22 @@ const stopReason = (stage, x) => {
   else if (own(x, 'invalid')) say(`the ${x.step} reply is not a well-formed plan`)
   if (Array.isArray(x.needs_user)) say(`${x.needs_user.length} question(s) for the owner`)
   for (const k of ['impl', 'fix', 'fw']) {
-    if (own(x, k) && !implDone(x[k])) say(isEntry(x[k]) ? `${task}${x[k].status}: ${x[k].notes}` : `${task}the implementer returned nothing`)
+    if (own(x, k) && !implDone(x[k])) say(isEntry(x[k]) ? `${task}${[x[k].status, x[k].notes].filter(present).join(': ') || 'the implementer gave no status'}` : `${task}the implementer returned nothing`)
   }
   const reviews = ['review', 'rv'].filter(k => own(x, k)).map(k => x[k])
   const found = Array.isArray(x.rules) && x.rules.length ? x.rules : Array.isArray(x.findings) ? x.findings : reviews.flatMap(r => (isEntry(r) && Array.isArray(r.findings) ? findingsOf(r) : []))
-  if (found.length) say(`${task}${found.length} finding(s): ${found[0] && found[0].summary}`)
+  if (found.length) say(`${task}${found.length} finding(s)${isEntry(found[0]) && present(found[0].summary) ? `: ${found[0].summary}` : ''}`)
   else if (reviews.some(r => !r)) say(`${task}the reviewer returned nothing`)
-  if (Array.isArray(x.problems)) say(x.problems.map(q => `${q.id}: ${q.summary}`).join('; '))
+  if (Array.isArray(x.problems)) say(x.problems.filter(isEntry).map(q => [q.id, q.summary].filter(present).join(': ')).join('; '))
   names('failing', 'failing checks')
   names('pending', 'pending checks')
   names('code_unmet', 'code criteria unmet:')
   names('bad_kinds', 'criteria:')
   names('refused', 'refused:')
-  if (present(x.expected)) say(`expected ${x.expected}, head ${x.head}`)
-  if (own(x, 'lock')) say(`lock ${isEntry(x.lock) ? x.lock.verdict : x.lock}`)
-  if (own(x, 'renew')) say(`renew at ${x.at}: ${isEntry(x.renew) ? x.renew.detail || x.renew.verdict : 'no reply'}`)
+  if (present(x.expected)) say(`expected ${x.expected}, head ${present(x.head) ? x.head : 'unread'}`)
+  if (own(x, 'lock')) say(`lock ${(isEntry(x.lock) ? x.lock.verdict : x.lock) || 'gave no verdict'}`)
+  if (own(x, 'renew')) say(`renew${present(x.at) ? ` at ${x.at}` : ''}: ${isEntry(x.renew) ? x.renew.detail || x.renew.verdict || 'no verdict' : 'no reply'}`)
+  if (stage === 'review-blocked') say(`the ${x.review} review is blocked`)
   for (const k of ['result', 'amend', 'merge', 'sync', 'checks', 'close_out', 'hold']) {
     if (!own(x, k) || parts.length) continue
     const v = x[k]
@@ -644,7 +645,7 @@ if (CONT && setup.merged_pr) {
 const RS = setup.review_state || {}
 for (const k of ['plan', 'code']) {
   // Before any claim nothing is held, so the stop carries no cont: fix the capability and start again.
-  if (RS[k] === 'blocked') return CONT || CLAIM_TAKEN ? stop('review-blocked', { review: k }) : { stage: 'review-blocked', review: k }
+  if (RS[k] === 'blocked') return CONT || CLAIM_TAKEN ? stop('review-blocked', { review: k }) : why({ stage: 'review-blocked', review: k })
 }
 const REVIEW_CODE = RS.code === 'available' && setup.review && setup.review.code ? setup.review.code : null
 const REVIEW_PLAN = RS.plan === 'available' && setup.review && setup.review.plan ? setup.review.plan : null
@@ -794,6 +795,7 @@ const takePlan = async (p, label) => {
   if (wellFormed(p) && branchProblems(p).length) {
     const faults = branchProblems(p)
     log(`${label}: ${faults.length} branch problems, revising once`)
+    label = 'plan-branch-revise'
     p = await call(planPrompt(`\nYour plan at ${p.plan_root} declares its branches wrongly; fix only these problems in place, change nothing else, and return the full result again: ${JSON.stringify(faults)}`), { label: 'plan-branch-revise', phase: 'Plan', agentType: 'planner', schema: PLAN_SCHEMA })
   }
   if (p && p.status === 'needs_user') { plan = null; planReviewed = false; return stop('plan', { needs_user: p.questions }) }
