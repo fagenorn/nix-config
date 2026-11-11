@@ -173,6 +173,23 @@ class PageTest(unittest.TestCase):
                     f"no rule colours {selector} with {colour}",
                 )
 
+    def test_runs_are_never_peach_or_red_and_never_stalled(self) -> None:
+        rules = []
+        for body in re.findall(r"(?s)<style>(.*?)</style>", self.text):
+            css = re.sub(r"(?s)/\*.*?\*/", "", body)
+            rules += re.findall(r"([^{}]+)\{([^{}]*)\}", css)
+        runs = [
+            (sel, rule)
+            for sel, rule in rules
+            if any(word in sel for word in (".run", ".runs", ".moved", ".quiet"))
+        ]
+        self.assertTrue(any(".run" in sel for sel, _ in runs))
+        for sel, rule in runs:
+            with self.subTest(selector=sel.strip()):
+                self.assertNotIn("var(--peach)", rule)
+                self.assertNotIn("var(--red)", rule)
+        self.assertNotIn("stalled", self.text.lower())
+
     def test_the_page_never_parses_view_text_as_html(self) -> None:
         for name in ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write"):
             with self.subTest(name=name):
@@ -315,14 +332,19 @@ def stamp(ago: timedelta) -> str:
     return (datetime.now(timezone.utc) - ago).isoformat(timespec="microseconds")
 
 
-def session(session_id: str, state: str, state_text: str) -> dict:
-    return {
+def session(
+    session_id: str, state: str, state_text: str, deliveries: list | None = None
+) -> dict:
+    entry = {
         "session_id": session_id,
         "name": session_id,
         "state": state,
         "state_text": state_text,
         "cwd": "/srv/p00",
     }
+    if deliveries is not None:
+        entry["deliveries"] = deliveries
+    return entry
 
 
 def line(sessions: list, summary: str = "No sessions") -> dict:
@@ -368,6 +390,15 @@ def unmanaged_entry(sessions: list) -> dict:
 
 
 WAITING = "waiting for an answer in its terminal"
+RUN = {
+    "run_id": "wf_a",
+    "quiet": False,
+    "moved_text": "moved 3 min ago",
+    "issues": [
+        {"issue": 856, "stage": "building", "stage_text": "building task 3 of 5"},
+        {"issue": 857, "stage": "plan review", "stage_text": "plan review"},
+    ],
+}
 
 
 class PageRenderTest(unittest.TestCase):
@@ -385,6 +416,43 @@ class PageRenderTest(unittest.TestCase):
         elsewhere = text(snap["unmanaged"])
         for wanted in ("/srv/elsewhere", "Not yet managed", "idle"):
             self.assertIn(wanted, elsewhere)
+
+    def test_a_sessions_deliveries_render_their_stage_in_plain_words(self) -> None:
+        entry = project(0, [session("s1", "working", "working", deliveries=[RUN])])
+        (snap,) = render([{"frame": view([entry])}, {"snapshot": True}])
+        (runs,) = [n for n in nodes(snap["projects"]) if "runs" in n["cls"].split()]
+        (run,) = [n for n in nodes(snap["projects"]) if "run" in n["cls"].split()]
+        self.assertEqual(
+            [c["text"] for c in run["children"]],
+            ["#856", "building task 3 of 5", "#857", "plan review", "moved 3 min ago"],
+        )
+        (moved,) = [n for n in nodes(run) if "moved" in n["cls"].split()]
+        self.assertNotIn("quiet", moved["cls"].split())
+        self.assertEqual([c["cls"] for c in run["children"]][:2], ["issue", "stage"])
+        self.assertEqual([c["children"] for c in runs["children"]][0], run["children"])
+
+    def test_a_quiet_run_says_quiet_and_never_stalled(self) -> None:
+        quiet = dict(RUN, quiet=True, moved_text="quiet for 22 min")
+        entry = project(0, [session("s1", "working", "working", deliveries=[quiet])])
+        (snap,) = render([{"frame": view([entry])}, {"snapshot": True}])
+        (moved,) = [
+            n
+            for n in nodes(snap["projects"])
+            if {"moved", "quiet"} <= set(n["cls"].split())
+        ]
+        self.assertEqual(moved["text"], "quiet for 22 min")
+        self.assertNotIn("stalled", text(snap["projects"]).lower())
+
+    def test_a_session_without_deliveries_renders_no_runs(self) -> None:
+        entry = project(0, [session("e1", "idle", "idle", deliveries=[]),
+                            session("m1", "working", "working")])
+        (snap,) = render([{"frame": view([entry])}, {"snapshot": True}])
+        self.assertEqual(
+            [n for n in nodes(snap["projects"]) if "runs" in n["cls"].split()], []
+        )
+        shown = text(snap["projects"])
+        for wanted in ("e1", "idle", "m1", "working"):
+            self.assertIn(wanted, shown)
 
     def test_a_project_without_sessions_has_no_fold(self) -> None:
         (snap,) = render([{"frame": view([project(0, [])])}, {"snapshot": True}])
