@@ -9,13 +9,15 @@ optionally `--clears <label>`) for `decision`.
 
 1. A marker's first line is `<!-- agent:owner-action v1 issue=<n> reason=<reason> holder=<holder> -->`
    (a decision prompt adds `round=<k>`, `opts=<digest of its question and option text, never of
-   the ticks>` and optionally `clears=<label>`), line 2 is the sentence of its reason. A `conflict`
+   the ticks>`, optionally `rec=<n1>.<n2>...` and optionally `clears=<label>`), line 2 is the sentence of its reason. A `conflict`
    or `needs-label` marker follows with one line `- <item>` per item with its whitespace
    collapsed (D1). A `decision` prompt is a box prompt: line 2 is `Delivery waits for the owner's
    choice: tick exactly one box under each question.`, and per question an empty line,
    `**Q<i>.** <question>` and one line `- [ ] <option>` per option (one option is the approve box
    of a yes or no); the owner ticks exactly one box under each question (D11). `reason` is
-   `decision`, `conflict` or `needs-label`.
+   `decision`, `conflict` or `needs-label`. `rec` names the recommended option of every question,
+   its 1-based number or `0` for none; it lies outside the `opts` digest, and the page preselects
+   the recommended option (ADR-console-010).
 2. The marker carries no `claim` field (D6): claim retirement (`forge_claim.retire_obsolete`,
    `retire_owner_actions`) ends only owner-action markers that name a claim, so `forge-claim
    status`, `renew` and `release` never end one of these.
@@ -46,7 +48,8 @@ optionally `--clears <label>`) for `decision`.
 6. `--items-file` holds a JSON array of 1 to `MAX_ITEMS` (20) strings, each non-empty once its
    whitespace is collapsed; `--questions-file` holds a JSON array of 1 to `MAX_ITEMS` objects with
    exactly the keys `question` (string) and `options` (1 to `MAX_OPTIONS` (8) distinct strings),
-   likewise collapsed and non-empty; `--clears` names a label (recorded as `clears=<label>`) that
+   likewise collapsed and non-empty, and optionally `recommended` (a string equal, collapsed, to
+   one of its question's options; any other value is a usage error); `--clears` names a label (recorded as `clears=<label>`) that
    fits the marker value grammar. Anything else, a missing or unreadable file, `--items-file` with
    `decision`, or `--questions-file` or `--clears` with another reason, is a usage error before
    any `gh` call.
@@ -65,7 +68,7 @@ Whole-verb transport retry (issue 740) wraps `status` only; `post` and `end` run
 import hashlib
 import json
 import re
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -79,6 +82,7 @@ TRUSTED = ("OWNER", "MEMBER", "COLLABORATOR")
 MAX_ITEMS = 20
 MAX_OPTIONS = 8
 ANSWERED_LABEL = ("owner-answered", "0E8A16")
+REC_FIELD = "rec"
 QUESTION_LINE = re.compile(r"\*\*Q(\d+)\.\*\* (.+)")
 BOX_LINE = re.compile(r"\s*[-*] \[( |x|X)\] (.+?)\s*")
 ACTIONS = ("post", "end", "status")
@@ -155,7 +159,8 @@ def _read_question_file(path: str) -> list[dict[str, Any]]:
     questions = []
     for raw in value:
         options = raw.get("options")
-        if (set(raw) != {"question", "options"} or not isinstance(raw["question"], str)
+        if (set(raw) not in ({"question", "options"}, {"question", "options", "recommended"})
+                or not isinstance(raw["question"], str)
                 or not isinstance(options, list) or not all(isinstance(o, str) for o in options)):
             raise _ItemsError("a question needs exactly a string `question` and an array of string `options`")
         if not 1 <= len(options) <= MAX_OPTIONS:
@@ -166,7 +171,12 @@ def _read_question_file(path: str) -> list[dict[str, Any]]:
             raise _ItemsError("a question or an option is empty")
         if len(set(collapsed)) != len(collapsed):
             raise _ItemsError("the options of a question must be distinct")
-        questions.append({"question": question, "options": collapsed})
+        recommended = raw.get("recommended")
+        if "recommended" in raw:
+            if not isinstance(recommended, str) or " ".join(recommended.split()) not in collapsed:
+                raise _ItemsError("a recommended option must be one of its question's options")
+            recommended = " ".join(recommended.split())
+        questions.append({"question": question, "options": collapsed, "recommended": recommended})
     return questions
 
 
@@ -204,6 +214,50 @@ def read_questions(body: str) -> list[dict]:
     for question, ticks in zip(questions, ticked):
         question["chosen"] = ticks[0] if len(ticks) == 1 else None
     return questions
+
+
+def tick_body(body: str, choices: Sequence[int]) -> str:
+    """`body` with exactly the box of option `choices[i]` ticked under question `i` and every other
+    box of a question empty; only the bracket character of those lines changes (line endings kept).
+    ValueError, and no result, when `choices` does not fit the questions."""
+    lines = body.splitlines(keepends=True)
+    counts: list[int] = []
+    for index, raw in enumerate(lines):
+        text = raw.rstrip("\r\n")
+        if index < 2:
+            continue
+        if QUESTION_LINE.fullmatch(text):
+            counts.append(0)
+        elif BOX_LINE.fullmatch(text) and counts:
+            counts[-1] += 1
+    if len(choices) != len(counts):
+        raise ValueError(f"{len(choices)} choices for {len(counts)} questions")
+    for choice, count in zip(choices, counts):
+        if isinstance(choice, bool) or not isinstance(choice, int) or not 0 <= choice < count:
+            raise ValueError(f"choice {choice!r} is not one of {count} options")
+    out: list[str] = []
+    question = -1
+    option = 0
+    for index, raw in enumerate(lines):
+        text = raw.rstrip("\r\n")
+        if index >= 2 and QUESTION_LINE.fullmatch(text):
+            question, option = question + 1, 0
+        elif index >= 2 and question >= 0 and BOX_LINE.fullmatch(text):
+            at = raw.index("[") + 1
+            raw = raw[:at] + ("x" if option == choices[question] else " ") + raw[at + 1:]
+            option += 1
+        out.append(raw)
+    return "".join(out)
+
+
+def recommended(marker: fm.Marker) -> list[str | None]:
+    """One entry per verified question: the option the `rec` field names for it, else None."""
+    questions = verified_questions(marker)
+    parts = marker.fields.get(REC_FIELD, "").split(".")
+    numbers = ([int(p) for p in parts] if len(parts) == len(questions)
+               and all(p.isascii() and p.isdecimal() for p in parts) else [])
+    return [q["options"][n - 1] if 1 <= n <= len(q["options"]) else None
+            for q, n in zip(questions, numbers or [0] * len(questions))]
 
 
 def verified_questions(marker: fm.Marker) -> list[dict]:
@@ -371,8 +425,11 @@ def _post_decision(args: Any, questions: list[dict]) -> tuple[int, dict[str, Any
         every = [m for m in markers if m.kind == KIND and m.fields.get("reason") == "decision"]
         round_no = 1 + max((_round(m) for m in every), default=0)
         match = {**_match(args), "round": str(round_no)}
-        fields = {**_match(args), "holder": args.holder, "round": str(round_no),
-                  "opts": digest, **({"clears": args.clears} if args.clears else {})}
+        recs = [str(q["options"].index(q["recommended"]) + 1) if q.get("recommended") else "0"
+                for q in questions]
+        fields = {**_match(args), "holder": args.holder, "round": str(round_no), "opts": digest,
+                  **({REC_FIELD: ".".join(recs)} if any(r != "0" for r in recs) else {}),
+                  **({"clears": args.clears} if args.clears else {})}
         written = fm.write(args.repo, args.issue, KIND, fields, SENTENCES["decision"], match,
                            render_questions(questions), associations=TRUSTED)
         if written.won:
