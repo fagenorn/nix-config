@@ -5,7 +5,7 @@ description: Stress-tests a spec against the domain docs, updating the glossary 
 
 # Grill With Docs
 
-Run `resolve-project resolve --repo-root <checkout>`. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. On refusal, preserve and report the resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never translate it into a partial snapshot or fallback. Read `bindings.paths.context` and `capabilities.knowledge.*`.
+Run `resolve-project resolve --repo-root <checkout>`. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. On refusal, preserve and report the resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never translate it into a partial snapshot or fallback. Read `bindings.paths.context`, `bindings.commands` and `capabilities.knowledge.*`.
 
 Select the context map only from the retained `bindings.paths.context` list, in authored order: entries whose basename is exactly `CONTEXT-MAP.md`. None means no map and no linter run; one selects that absolute path; several is an invalid caller contract that stops before any invocation. Never probe the filesystem, sort the list, take a first match, or infer a location.
 
@@ -34,18 +34,18 @@ During the session:
 - **Cross-reference the code**: surface any contradiction between what the user states and what the code does.
 - **Update the glossary inline**: when a term resolves, write it into the owning area's glossary and add its row to the map's Terms table, in CONTEXT-FORMAT.md's format. Only terms meaningful to a domain expert.
 
-Two same-commit obligations keep the glossary sustainable: **delete on resolve** (an ambiguity marker goes the moment the ambiguity closes; the resolution lives in the winning definition and its `_Avoid_:` line, or in an ADR) and **net-neutral writes** (a file pushed past its budget, 150 lines for the map or the front-matter `budget:` for an area, is consolidated or split before you finish: consolidate first, tightening entries past two sentences and merging near-duplicate terms; split only when the area covers two things).
+Two same-commit obligations: **delete on resolve** (an ambiguity marker goes when the ambiguity closes; the resolution lives in the winning definition and its `_Avoid_:` line, or in an ADR) and **net-neutral writes** (a file the lint reports over budget is consolidated or split: consolidate first, tightening entries past two sentences and merging near-duplicate terms; split only when the area covers two things).
 
 **Splitting an area** is four edits in one commit:
 
-1. Create the new area file with front-matter (`area:`, `budget: 200 lines`), a one- or two-sentence purpose, and the moving terms copied verbatim.
+1. Create the new area file with front-matter (`area:`, `budget:`), a short purpose, and the moving terms copied verbatim.
 2. Delete those terms from the old file.
 3. Add a row to the map's `## Areas` table (name, link, one-line gist, `governs:` globs) and narrow the old area's globs.
 4. Repoint the moved terms' rows in `## Terms` and add any new cross-area edge to `## Relationships`.
 
-Then run `~/.agents/bin/context-map-lint --repo-root <absolute checkout root> --context-map <selected map path>` (no selected map, no run) and fix what it reports.
+Then run `~/.agents/bin/context-map-lint --repo-root <absolute checkout root> --context-map <selected map path>` and fix what it reports. When the retained snapshot's `bindings.commands` has a `context-map-lint` entry, append `--repo-lint-cwd <its cwd> --repo-lint` then each word of its `argv` as a separate argument; with no entry, no flag.
 
-Offer an ADR only when the decision is hard to reverse, surprising without context, and the result of a real trade-off; write it per [ADR-FORMAT.md](./ADR-FORMAT.md).
+Offer an ADR only when it passes the gate in [ADR-FORMAT.md](./ADR-FORMAT.md); write it per that file.
 
 ## Final spec measurement
 

@@ -47,7 +47,7 @@ const DEFAULTS = [
   [/^acquire$/, { verdict: 'acquired', comment_id: 7 }],
   [/^setup$/, prompt => (HOLDER_ID(prompt) ? { ...SETUP, ...holderOf(SETUP.host, prompt), ...FOLDED_SETUP } : SETUP)],
   [/^worktree$/, { ok: true, worktree: '/r/.wt/w-issue-9-x', base_sha: SHA, plan_dir: '/r/.git/worktrees/w/deliver-standard' }],
-  [/^plan(-revise|-rules-revise)?$/, PLAN],
+  [/^plan(-revise|-rules-revise|-branch-revise)?$/, PLAN],
   [/^direct-impl$/, { ...DONE, acceptance: [{ id: 'AC1', text: 'works', kind: 'code' }], sensitive: false, ineligible: false, renew: { verdict: 'renewed' } }],
   [/^direct-fix$/, DONE],
   [/-codex$/, { available: true, ...PASS }],

@@ -1,0 +1,4 @@
+#!/bin/sh
+# Verify check for issue 856: the console's state endpoint answers on loopback. verify-pending
+# runs it from the repository root at the commit the block names.
+PYTHONPATH=python exec python3 -m agent_tools.verification.verify_checks console-state "$@"

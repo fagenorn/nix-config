@@ -1,11 +1,16 @@
 """`agent_tools.verification.verify_checks`: the committed verify checks of issue 638."""
+import contextlib
+import http.server
+import io
 import json
 import os
 import pwd
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from datetime import datetime, timezone
@@ -17,6 +22,7 @@ from agent_tools.verification import verify_checks
 from agent_tools.system import forge_api
 from agent_tools.verification.verify_checks import required_checks, self_hosted_runner
 
+from . import console_test_support as support
 from .guard_policy_world import GuardPolicyWorld
 from .pre_push_world import PrePushWorld
 from .test_agent_gate_bundle import IDENTITY, context, flat, stratum  # the emitted-bundle builders
@@ -1586,3 +1592,83 @@ class DarwinShellPathWrapperTest(unittest.TestCase):
         result = self.run_script()
         self.assertEqual(result.returncode, 2)
         self.assertIn("verify-pending", result.stderr)
+
+
+class ConsoleStateTest(unittest.TestCase):
+    """`console-state` (issue 856): the console's state endpoint answers 200 on loopback."""
+
+    def setUp(self):
+        handle = tempfile.TemporaryDirectory()
+        self.addCleanup(handle.cleanup)
+        self.tmp = Path(handle.name)
+
+    def console(self):
+        support.write_registry(self.tmp / "registry.json", [])
+        svc = support.service(self, self.tmp / "events.sqlite3", self.tmp / "registry.json")
+        return svc.address[1]
+
+    def stub(self, routes):
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(routes.get(self.path.split("?", 1)[0], 404))
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return server.server_address[1]
+
+    def closed_port(self):
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            return sock.getsockname()[1]
+
+    def test_a_running_console_is_met(self):
+        port = self.console()
+        self.assertEqual(verify_checks.console_state(port), (0, {"port": port, "status": 200}))
+
+    def test_another_status_on_the_state_endpoint_is_not_met(self):
+        port = self.stub({"/": 200, "/api/state": 503})
+        self.assertEqual(verify_checks.console_state(port), (1, {"port": port, "status": 503}))
+
+    def test_no_answer_is_not_met_with_the_error(self):
+        port = self.closed_port()
+        code, report = verify_checks.console_state(port)
+        self.assertEqual(code, 1)
+        self.assertIsNone(report["status"])
+        self.assertTrue(report["error"].startswith("ConnectionRefusedError: "), report["error"])
+        self.assertEqual(report["port"], port)
+
+    def test_the_command_prints_one_json_line(self):
+        port = self.console()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = verify_checks.main(["console-state", "--port", str(port)])
+        self.assertEqual(code, 0)
+        self.assertEqual(out.getvalue(), json.dumps({"port": port, "status": 200}, sort_keys=True) + "\n")
+
+    def test_a_missing_or_bad_port_is_a_usage_error(self):
+        for argv in (["console-state"], ["console-state", "--port", "0"]):
+            with self.subTest(argv=argv):
+                with contextlib.redirect_stderr(io.StringIO()):
+                    with self.assertRaises(SystemExit) as raised:
+                        verify_checks.main(argv)
+                self.assertEqual(raised.exception.code, 2)
+
+    def test_the_wrapper_runs_the_check(self):
+        port = self.console()
+        result = run_from_root([str(ROOT / CHECKS / "console-state"), "--port", str(port)])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {"port": port, "status": 200})
+
+    def test_wrapper_is_committed_executable(self):
+        self.assertEqual(committed_mode(f"{CHECKS}/console-state"), "100755")
+
+    def test_the_docstring_documents_the_check(self):
+        for needle in ("console-state --port N", "verify_checks.console_state"):
+            self.assertIn(needle, verify_checks.__doc__)
