@@ -1377,6 +1377,63 @@ class LandTest(unittest.TestCase):
         self.assertIn("land-unlock-1", labels(calls))
         self.assertNotIn("close-out-1", labels(calls))
 
+    # 870: a merge refused because the integration branch moved outside the land lock.
+    REFUSED = {"merged": False, "behind": True, "notes": "the head branch is not up to date with the base branch"}
+    MERGED = {"merged": True, "merge_commit": SHA, "notes": "merged"}
+
+    def test_a_merge_refused_as_not_up_to_date_resyncs_and_merges_again(self):
+        c = "c" * 40
+        result, calls, _ = run(patch=BEHIND, replies={
+            "land-sync-1-1": {"status": "done", "conflicted": False, "head": B, "notes": "ok"},
+            "land-sync-1-2": {"status": "done", "conflicted": False, "head": c, "notes": "ok"},
+            "land-merge-1": [self.REFUSED, self.MERGED]})
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+        ls = of(calls, 1)
+        self.assertEqual(ls[ls.index("land-merge-1"):], ["land-merge-1", "land-sync-1-2", "land-record-1-2", "land-merge-1", "close-out-1"])
+        # The lock moved to the new head, and its checks were waited for, before the second merge names it.
+        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {c}\n", prompt(calls, "land-record-1-2"))
+        merges = [call["prompt"] for call in calls if call["label"] == "land-merge-1"]
+        self.assertIn(f"--match-head-commit {B}", merges[0])
+        self.assertIn(f"--match-head-commit {c}", merges[1])
+        self.assertIn("behind true only when the refusal says the head branch is not up to date with the base branch", merges[0])
+        self.assertIn("behind", schema_of(calls, "land-merge-1")["properties"])
+
+    def test_the_refusal_budget_is_independent_of_the_resyncs_already_run(self):
+        c, d = "c" * 40, "d" * 40
+        spent = {
+            "land-sync-1-1": {"status": "done", "conflicted": False, "head": B, "notes": "ok"},
+            "land-record-1-1": {"ok": True, "head": B, "checks": {"state": "behind", "head": B}},
+            "land-sync-1-2": {"status": "done", "conflicted": False, "head": c, "notes": "ok"},
+            "land-sync-1-3": {"status": "done", "conflicted": False, "head": d, "notes": "ok"},
+            "land-merge-1": [self.REFUSED, self.MERGED]}
+        result, calls, _ = run(patch=BEHIND, replies=spent)
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+        ls = of(calls, 1)
+        self.assertEqual(ls[ls.index("land-merge-1"):], ["land-merge-1", "land-sync-1-3", "land-record-1-3", "land-merge-1", "close-out-1"])
+        # A behind answer after the refusal's resync is still counted against MAX_SYNCS alone, which is spent here.
+        behind_again = dict(spent, **{"land-record-1-3": {"ok": True, "head": d, "checks": {"state": "behind", "head": d}}})
+        result, calls, _ = run(patch=BEHIND, replies=behind_again)
+        self.assertEqual(row(result, 1)["outcome"], "land-contended")
+        self.assertEqual(labels(calls).count("land-merge-1"), 1)
+        self.assertNotIn("land-sync-1-4", labels(calls))
+
+    def test_a_merge_refused_as_not_up_to_date_past_its_budget_stops(self):
+        result, calls, _ = run(replies={"land-merge-1": self.REFUSED})
+        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "merge"))
+        ls = of(calls, 1)
+        self.assertEqual(ls.count("land-merge-1"), 3)
+        self.assertEqual([label for label in ls if label.startswith("land-sync-")], ["land-sync-1-1", "land-sync-1-2"])
+        self.assertIn("land-unlock-1", ls)
+        self.assertNotIn("close-out-1", ls)
+
+    def test_a_refusal_that_is_not_behind_stops_at_the_merge_without_a_resync(self):
+        for refusal in (dict(self.REFUSED, behind=False), {"merged": False, "notes": "head mismatch"}):
+            with self.subTest(refusal=refusal):
+                result, calls, _ = run(replies={"land-merge-1": [refusal, self.MERGED]})
+                self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "merge"))
+                self.assertEqual(labels(calls).count("land-merge-1"), 1)
+                self.assertNotIn("land-sync-1-1", labels(calls))
+
     def test_non_code_criteria_hold_the_issue_open(self):
         acceptance = [{"id": "AC1", "text": "works", "kind": "code"}, {"id": "AC2", "text": "live", "kind": "evidence"}]
         result, calls, _ = run(children={"1": ready(1, acceptance)},

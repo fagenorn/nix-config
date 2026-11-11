@@ -462,10 +462,13 @@ const LAND_SYNC_SCHEMA = {
   properties: { status: { type: 'string', enum: ['current', 'done', 'blocked'] }, conflicted: { type: 'boolean' }, head: { type: 'string' }, merge_commit: { type: 'string' }, resolved_files: STRS, tests: STRS, notes: { type: 'string' } },
   required: ['status'],
 }
-const LAND_MERGE_SCHEMA = { type: 'object', properties: { merged: { type: 'boolean' }, merge_commit: { type: 'string' }, notes: { type: 'string' } }, required: ['merged'] }
+const LAND_MERGE_SCHEMA = { type: 'object', properties: { merged: { type: 'boolean' }, behind: { type: 'boolean' }, merge_commit: { type: 'string' }, notes: { type: 'string' } }, required: ['merged'] }
 const CLOSE_SCHEMA = { type: 'object', properties: { issue_state: { type: 'string' }, branch_deleted: { type: 'boolean' }, released: { type: 'boolean' }, decision_ended: { type: 'boolean' }, notes_posted: { type: 'boolean' }, notes: { type: 'string' } }, required: ['issue_state'] }
 // Resyncs a landing runs on a behind answer or a retaken lock. With no unconditional first resync, the third behind answer is still contention (#801).
 const MAX_SYNCS = 2
+// #870: the resyncs a landing runs because its merge was refused as not up to date (the integration branch moved outside the land lock).
+// Its own budget: MAX_SYNCS may already be spent before the first merge attempt.
+const MERGE_REFUSAL_RETRIES = 2
 // #818: the extra waits a landing spends on the land lock after its first acquire --wait answered land-contended at the CLI's own bound.
 const LAND_WAIT_RETRIES = 3
 // A folded reply carries its nested steps; a nested object may be absent, so its schema is nullable (#716).
@@ -522,7 +525,7 @@ const land = async (n, ready, via = {}) => {
   // The poll a previous call carried for the next round: { label, reply } or null (#801).
   let carried = null
   const PENDING_WAITS = 3
-  const c = { sync: 0, syncReview: 0, checks: 0, record: 0, conflicts: 0, ciFails: 0, pending: 0 }
+  const c = { sync: 0, syncReview: 0, checks: 0, record: 0, conflicts: 0, ciFails: 0, pending: 0, refused: 0 }
   const out = (outcome, extra) => ({ issue: n, outcome, ...(pr ? { pr } : {}), ...(extra || {}) })
   const call = (prompt, label, opts) => ask(agent(prompt, { label, phase: 'Land', ...opts }), label)
   const clerk = { agentType: 'clerk', model: CLERK_MODEL, effort: 'low' }
@@ -677,7 +680,7 @@ ${RULES}`, `close-out-${n}`, { ...lifecycleClerk, schema: folding ? { ...CLOSE_S
 
   // The behind handling shared by a checks reply and a lock that was lost and retaken.
   const behind = async () => {
-    if (c.sync >= MAX_SYNCS) return out('land-contended', { detail: `behind ${INT} after ${c.sync} resyncs` })
+    if (c.sync - c.refused >= MAX_SYNCS) return out('land-contended', { detail: `behind ${INT} after ${c.sync} resyncs` })
     return await resync()
   }
 
@@ -810,8 +813,8 @@ ${LOCK_RETURN} Return it as lock.
 Only when lock's verdict is already_held or moved, merge PR #${pr} of issue #${n} of ${SLUG} into ${INT}; a re-run must not merge twice.
 1. Read ${UNSET}gh pr view ${pr} --repo ${SLUG} --json state,mergeCommit. When state is already MERGED, skip step 2.
 2. Otherwise run, alone and exactly: ${MERGE_CMD(pr, expected)}
-3. Read the PR state again: merged is true only when the state reads MERGED. Never retry with another form; on a guard refusal or a head mismatch return merged false with the exact message in notes.
-Return merged, merge_commit and notes. On any other lock verdict run nothing else and return merged false with the verdict in notes.
+3. Read the PR state again: merged is true only when the state reads MERGED. Never retry with another form; on a guard refusal or a head mismatch return merged false with the exact message in notes, and behind true only when the refusal says the head branch is not up to date with the base branch, else false.
+Return merged, behind, merge_commit and notes. On any other lock verdict run nothing else and return merged false with the verdict in notes.
 ${RULES}`, `land-merge-${n}`, { ...lifecycleClerk, schema: withRenew(LAND_MERGE_SCHEMA, { lock: NULLABLE(LOCK_SCHEMA) }) }), r => r.renew)
       if (!mg) return out('stopped', { stage: 'merge', detail: `land-merge-${n} returned nothing` })
       const v2 = mg.lock ? mg.lock.verdict : null
@@ -828,6 +831,14 @@ ${RULES}`, `land-merge-${n}`, { ...lifecycleClerk, schema: withRenew(LAND_MERGE_
         continue
       }
       if (v2 !== 'already_held' && v2 !== 'moved') return out('land-contended', { detail: `the land lock was not held before the merge (${v2})` })
+      // #870: refused as not up to date, the lock still held at expected: resync on the refusal budget (a changed head moves the lock and
+      // waits for its checks in advance(), an unchanged one is polled again), then merge again; any other refusal stops.
+      if (mg.merged === false && mg.behind === true && c.refused < MERGE_REFUSAL_RETRIES) {
+        c.refused++
+        const r = await resync()
+        if (r) return r
+        continue
+      }
       if (!complete(mg, LAND_MERGE_SCHEMA) || mg.merged !== true) return out('stopped', { stage: 'merge', detail: mg.notes })
       break
     }

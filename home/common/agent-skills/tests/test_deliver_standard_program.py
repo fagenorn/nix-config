@@ -31,6 +31,14 @@ PLAN = {
 }
 
 
+# A whole fresh setup reply, as the harness defaults it; the harness adds the folded claim to an explicit ok reply.
+SETUP_OK = {
+    "ok": True, "host": "h1", "slug": "owner/repo", "integration_branch": "dev", "default_branch": "main",
+    "branch": "issue-9-x", "worktree_path": "/r/.wt/w-issue-9-x", "dirty": False, "unset_env": [], "merge_strategy": "merge",
+    "delete_branch": True, "review": {"code": "cr", "plan": "pr"}, "review_state": {"code": "available", "plan": "available"},
+    "knowledge": {"standards": ["/r/docs/standards"], "hints": ["/r/.hints"], "rejections": ["/r/.rej"]},
+    "verification": [{"id": "build", "argv": ["make", "build"], "cwd": "."}],
+}
 OK_LINT = {"ok": True, "errors": []}
 EVIDENCE = {"id": "AC2", "text": "deployed", "kind": "evidence",
             "verify": {"ac": "AC2", "kind": "evidence", "host": "h1",
@@ -231,7 +239,8 @@ class FoldTest(unittest.TestCase):
             "ok-false": ({"ok": False, "reason": "worktree add failed"}, "setup", False),
             "missing": ({"merge_strategy": None}, "setup", False),
             "missing-branch": ({"branch": None}, "setup", True),
-            "missing-worktree-path": ({"worktree_path": None}, "setup", True),
+            # 870: the claim's worktree stands in for a missing worktree_path, so the gate needs both absent.
+            "missing-worktree-path": ({"worktree_path": None, "claim": {"ok": False, "reason": "worktree add failed"}}, "setup", True),
             "holder": ({"holder": "h2/session-s1"}, "setup", False),
             "review-blocked": ({"review_state": {"code": "blocked", "plan": "available"}}, "review-blocked", False),
         }
@@ -524,6 +533,36 @@ class ContractTest(unittest.TestCase):
         result, calls = run(replies={"setup": {"ok": False, "reason": "already-merged"}})
         self.assertEqual(result["stage"], "setup")
         self.assertEqual(labels(calls), ["setup"])
+
+    def test_a_transient_setup_refusal_before_the_claim_is_retried_once(self):
+        # 870: a forge or network failure before the claim is asked once more; a second one, or any other refusal, stops.
+        transient = {"ok": False, "reason": "branch", "details": "network is unreachable", "transient": True}
+        cases = {
+            "recovers": ([transient, SETUP_OK], 2, "done"),
+            "transient-twice": ([transient, transient, SETUP_OK], 2, "setup"),
+            "not-transient": ([dict(transient, transient=False), SETUP_OK], 1, "setup"),
+            "unmarked": ([{"ok": False, "reason": "closed"}, SETUP_OK], 1, "setup"),
+            "claimed": ([dict(transient, acquire={"verdict": "acquired", "comment_id": 7}), SETUP_OK], 1, "setup"),
+        }
+        for name, (replies, setups, stage) in cases.items():
+            with self.subTest(case=name):
+                result, calls = run(replies={"setup": replies})
+                self.assertEqual(result["stage"], stage)
+                self.assertEqual(labels(calls).count("setup"), setups)
+                if stage == "setup":
+                    self.assertEqual(labels(calls), ["setup"] * setups)
+        _, calls = run()
+        self.assertIn("transient", schema_of(calls, "setup")["properties"])
+        self.assertIn("On any refusal set transient true only when the failed command's stderr JSON has transient true.",
+                      prompt(calls, "setup"))
+
+    def test_a_setup_reply_naming_the_worktree_only_in_its_claim_proceeds(self):
+        # 870: the reply carried the path as claim.worktree alone and was reported missing.
+        result, calls = run(patch={"setup": {"worktree_path": None}})
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("worktree", labels(calls))
+        self.assertIn("/r/.wt/w-issue-9-x", prompt(calls, "plan"))
+        self.assertIn("Return ok=true with branch, worktree_path and every other field above, holder,", prompt(calls, "setup"))
 
     def test_setup_preflight_names_merged_pr_existing_branch_and_applicability(self):
         _, calls = run()
