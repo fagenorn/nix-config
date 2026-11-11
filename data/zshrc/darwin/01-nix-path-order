@@ -1,0 +1,20 @@
+# Issue 810: macOS path_helper (a stock /etc/zprofile restored by a macOS update) puts /usr/bin
+# and /bin ahead of the Nix profiles, and a child shell inherits that PATH with nix-darwin's
+# __NIX_DARWIN_SET_ENVIRONMENT_DONE set, so nothing else reorders it. This runs from ~/.zshrc,
+# which Claude Code's shell snapshot also sources: move the Nix profile dirs that sit after the
+# first base system dir to just before it. No dir is added and every other element keeps its order.
+() {
+  emulate -L zsh
+  local -a profiles=(
+    "$HOME/.nix-profile/bin"
+    "/etc/profiles/per-user/$USER/bin"
+    /run/current-system/sw/bin
+    /nix/var/nix/profiles/default/bin
+  )
+  local -i anchor=${path[(i)(/usr/bin|/bin|/usr/sbin|/sbin)]}
+  (( anchor > $#path )) && return 0
+  local -a tail=( "${(@)path[anchor,-1]}" )
+  local -a late=( "${(@)profiles:*tail}" )
+  (( $#late )) || return 0
+  path=( "${(@)path[1,anchor-1]}" "${(@)late}" "${(@)tail:|late}" )
+}
