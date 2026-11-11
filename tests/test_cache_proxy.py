@@ -23,6 +23,7 @@ import unittest
 from pathlib import Path
 
 from agent_tools.hosts import cache_proxy
+from agent_tools.hosts import rate_limits
 from agent_tools.hosts import subagent_prefix
 
 TIMEOUT = 10
@@ -879,6 +880,93 @@ class SubagentPrefixTest(unittest.TestCase):
                 headers = agent(agent_id, len(body))
                 self.assert_unchanged(body, headers, subagent_prefix.SubagentPrefix().transform(
                     method, path, headers, body), "not_subagent")
+
+
+class LimitHeadersTest(unittest.TestCase):
+    """`rate_limits.reading` and `identity` read the unified limit headers and the request's account (#860)."""
+
+    ALLOWED_READING = {
+        "http_status": 200, "status": "allowed", "reset": 1794816000, "binding": "7d", "claim": "seven_day",
+        "windows": {"7d": {"status": "allowed", "utilization": 0.42, "reset": 1794816000}},
+    }
+    REFUSED_READING = {
+        "http_status": 429, "status": "rejected", "reset": 1794816000, "binding": "7d", "claim": "seven_day",
+        "windows": {"7d": {"status": "rejected", "utilization": 1.0, "reset": 1794816000},
+                    "5h": {"status": "allowed", "utilization": 0.0, "reset": 1794430800}},
+    }
+
+    def allowed_with(self, name, value):
+        """The allowed fixture's reading with header `name` set to `value` (removed when `value` is None)."""
+        document = fixture("limits-allowed.json")
+        headers = [h for h in document["headers"] if h[0] != rate_limits.PREFIX + name]
+        if value is not None:
+            headers.append([rate_limits.PREFIX + name, value])
+        return rate_limits.reading(document["status"], headers)
+
+    def test_header_fixtures_give_their_reading_window_and_reset(self):
+        for name, expected in (("limits-allowed.json", self.ALLOWED_READING),
+                               ("limits-refused.json", self.REFUSED_READING)):
+            with self.subTest(name):
+                document = fixture(name)
+                self.assertEqual(rate_limits.reading(document["status"], document["headers"]), expected)
+
+    def test_malformed_or_missing_values_degrade_field_by_field(self):
+        def window(**changes):
+            reading = copy.deepcopy(self.ALLOWED_READING)
+            reading["windows"]["7d"].update(changes)
+            return reading
+
+        def top(**changes):
+            return {**copy.deepcopy(self.ALLOWED_READING), **changes}
+
+        rows = (
+            ("status", None, None),
+            ("status", "ALLOWED!", None),
+            ("7d-utilization", "0.4x", window(utilization=None)),
+            ("7d-reset", "soon", window(reset=None)),
+            ("7d-reset", "0", window(reset=None)),
+            ("7d-reset", "1", window(reset=1)),
+            ("7d-reset", "99999999999", window(reset=99999999999)),
+            ("7d-reset", "100000000000", window(reset=None)),
+            ("reset", "0", top(reset=None)),
+            ("7d-utilization", "10", window(utilization=10.0)),
+            ("7d-utilization", "10.5", window(utilization=None)),
+            ("7d-utilization", "9" * 400, window(utilization=None)),
+            ("representative-claim", "five_hour", top(binding="5h", claim="five_hour")),
+            ("representative-claim", "seven_day_opus", top(binding="7d", claim="seven_day_opus")),
+            ("representative-claim", "overage", top(binding=None, claim="overage")),
+        )
+        for name, value, expected in rows:
+            with self.subTest(name=name, value=value):
+                self.assertEqual(self.allowed_with(name, value), expected)
+
+    def test_no_other_header_value_enters_the_reading(self):
+        document = fixture("limits-allowed.json")
+        result = json.dumps(rate_limits.reading(document["status"], document["headers"]))
+        for leaked in ("00000000-0000-0000-0000-000000000000", "req_fixture_allowed", "org_level_disabled", "0.5"):
+            with self.subTest(leaked):
+                self.assertNotIn(leaked, result)
+
+    def test_identity_reads_the_account_and_session_and_nothing_else(self):
+        def body(user_id):
+            return json.dumps({"metadata": {"user_id": user_id}}).encode()
+
+        long_id = "a" * 65
+        modern = json.dumps({"device_id": "dev-secret", "account_uuid": "acc-1", "session_id": "ses-1"})
+        rows = (
+            (body(modern), ("acc-1", "ses-1")),
+            (body("user_abc123_account_0a1b-2c_session_9f8e"), ("0a1b-2c", "9f8e")),
+            (body("user_abc123_account__session_9f8e"), (None, "9f8e")),
+            (b"not json", (None, None)),
+            (b"[]", (None, None)),
+            (json.dumps({"model": "m"}).encode(), (None, None)),
+            (body(json.dumps({"account_uuid": long_id, "session_id": "ses-1"})), (None, "ses-1")),
+        )
+        for raw, expected in rows:
+            with self.subTest(raw=raw):
+                result = rate_limits.identity(raw)
+                self.assertEqual(result, expected)
+                self.assertNotIn("dev-secret", repr(result))
 
 
 class CommandTest(unittest.TestCase):
