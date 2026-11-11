@@ -68,6 +68,17 @@ class EventLogTest(unittest.TestCase):
             connection.execute("DELETE FROM events")
         self.assertEqual(len(rows(self.store)), 1)
 
+    def test_a_replacing_insert_is_refused(self):
+        self.open().append([("k", "o/a", {})])
+        before = rows(self.store)
+        connection = sqlite3.connect(self.store)
+        self.addCleanup(connection.close)
+        with self.assertRaises(sqlite3.IntegrityError):
+            connection.execute(
+                "INSERT OR REPLACE INTO events (seq, at, kind, project, payload) "
+                "VALUES (1, 'x', 'x', 'x', '{}')")
+        self.assertEqual(rows(self.store), before)
+
     def test_reopening_keeps_every_row(self):
         log = EventLog(self.store, clock=clock)
         log.append([("k", "o/a", {"n": 1}), ("k", None, {"n": 2})])

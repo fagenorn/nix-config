@@ -21,8 +21,10 @@ registry, appends the difference to the event log and publishes the new view;
 the page itself is read once, at import.
 
 The stream carries `Connection: close` and no `Content-Length`. Its first frame is
-the current view; one frame follows each later change of the view; a
-`: keepalive` comment follows `KEEPALIVE_SECONDS` without one. A frame is
+the current view (the page takes its view from the stream alone, never from a
+separate `/api/state` request that could answer after a newer frame); one frame
+follows each later change of the view; a `: keepalive` comment follows
+`KEEPALIVE_SECONDS` without one. A frame is
 
     event: view\\n
     data: <the bytes of /api/state>\\n
@@ -40,10 +42,12 @@ An unreadable one, as opposed to an absent one, writes one stderr line
 Registry changes are found by a watcher thread, `WATCH_THREAD`, started by
 `start()`: every `poll_seconds` it takes the registry's `(st_mtime_ns, st_size,
 st_ino)` (`None` when it cannot be read) and, when that differs from the last
-one, records it and calls `refresh()`. A failing `refresh()` is one stderr line
-`console: refresh_failed <Type>: <message>`; the loop goes on. A signature is
-sampled before the read it vouches for, so a registry replaced between the
-two differs from the recorded signature and is read again on the next poll.
+one, calls `refresh()` and records it once that returns. A failing `refresh()` is
+one stderr line `console: refresh_failed <Type>: <message>`; the loop goes on and
+the signature is not recorded, so each later poll tries again (one line per
+failed poll) until a refresh succeeds. A signature is sampled before the read it vouches for, so a
+registry replaced between the two differs from the recorded signature and is
+read again on the next poll.
 The watcher only calls `os.stat`, so an idle service does no other I/O.
 
 Construction order: bind the server (an `OSError` propagates and nothing else is
@@ -276,11 +280,12 @@ class ConsoleService:
             current = signature(self.registry)
             if current == self._signature:
                 continue
-            self._signature = current
             try:
                 self.refresh()
             except Exception as error:
                 print(f"console: refresh_failed {type(error).__name__}: {error}", file=sys.stderr)
+            else:
+                self._signature = current
 
     def start(self) -> None:
         self._watcher = threading.Thread(target=self._watch, name=WATCH_THREAD, daemon=True)

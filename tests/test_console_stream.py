@@ -3,10 +3,12 @@
 Run: just agent-workflow-tests
 """
 import http.client
+import io
 import json
 import os
 import re
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -130,6 +132,34 @@ class StreamTest(unittest.TestCase):
             got = svc.wait_for_change(seen, timeout=0.5)
             if got is not None:
                 seen = got[0]
+        self.assertIn(b"owner/p02", svc.view_bytes)
+
+    def test_a_failed_refresh_is_retried_until_it_succeeds(self):
+        svc = self.start(2)
+        real = svc.log.append
+        failing = [True]
+
+        def append(entries):
+            if failing[0]:
+                raise sqlite3.OperationalError("database is locked")
+            return real(entries)
+
+        stderr = io.StringIO()
+        with mock.patch.object(svc.log, "append", side_effect=append), \
+                mock.patch.object(sys, "stderr", stderr):
+            support.write_registry(self.registry, support.entries(3))
+            deadline = time.monotonic() + 3
+            while "refresh_failed" not in stderr.getvalue() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertIn("console: refresh_failed OperationalError", stderr.getvalue())
+            self.assertNotIn(b"owner/p02", svc.view_bytes)
+            failing[0] = False
+            seen = svc.version
+            deadline = time.monotonic() + 3
+            while b"owner/p02" not in svc.view_bytes and time.monotonic() < deadline:
+                got = svc.wait_for_change(seen, timeout=0.5)
+                if got is not None:
+                    seen = got[0]
         self.assertIn(b"owner/p02", svc.view_bytes)
 
     def test_streaming_and_watching_keep_earlier_rows(self):

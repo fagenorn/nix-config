@@ -2,10 +2,12 @@
 
 The store is one SQLite file. Its table is `events(seq INTEGER PRIMARY KEY
 AUTOINCREMENT, at TEXT NOT NULL, kind TEXT NOT NULL, project TEXT, payload TEXT
-NOT NULL)`, and two triggers, `events_no_update` and `events_no_delete`, abort
-every `UPDATE` and `DELETE` with "the console event log is append-only", so a
-raw connection cannot rewrite history either. This module never issues
-`UPDATE`, `DELETE`, `REPLACE` or `INSERT OR ...`.
+NOT NULL)`, and three triggers, `events_no_update`, `events_no_delete` and
+`events_no_replace`, abort every `UPDATE`, every `DELETE` and every `INSERT`
+that names an existing `seq` (which `INSERT OR REPLACE` would otherwise carry
+out without firing a delete trigger) with "the console event log is
+append-only", so a raw connection cannot rewrite history either. This module
+never issues `UPDATE`, `DELETE`, `REPLACE` or `INSERT OR ...`.
 
 `EventLog.append` writes all its entries in one transaction under one `at`
 taken from the clock: a failure writes no row, rolls back the earlier entries of
@@ -42,6 +44,9 @@ _SCHEMA = (
     f"""CREATE TRIGGER IF NOT EXISTS events_no_update BEFORE UPDATE ON events
         BEGIN SELECT RAISE(ABORT, '{_APPEND_ONLY}'); END""",
     f"""CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events
+        BEGIN SELECT RAISE(ABORT, '{_APPEND_ONLY}'); END""",
+    f"""CREATE TRIGGER IF NOT EXISTS events_no_replace BEFORE INSERT ON events
+        WHEN EXISTS (SELECT 1 FROM events WHERE seq = NEW.seq)
         BEGIN SELECT RAISE(ABORT, '{_APPEND_ONLY}'); END""",
 )
 

@@ -144,10 +144,6 @@ function render(view) {
   if (wasOpen && fold !== null) fold.open = true;
 }
 const conn = document.getElementById("conn");
-fetch("/api/state")
-  .then((response) => response.json())
-  .then(render)
-  .catch(() => {});
 const source = new EventSource("/api/stream");
 source.addEventListener("view", (event) => render(JSON.parse(event.data)));
 source.onopen = () => { conn.textContent = ""; };

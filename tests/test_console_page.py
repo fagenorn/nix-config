@@ -36,10 +36,16 @@ class PageTest(unittest.TestCase):
         literals = re.findall(
             r"\b(?:fetch|EventSource)\(\s*([\"'])([^\"']*)\1", self.text
         )
-        self.assertEqual({p for _, p in literals}, {"/api/state", "/api/stream"})
+        self.assertEqual({p for _, p in literals}, {"/api/stream"})
         self.assertEqual(
             len(re.findall(r"\b(?:fetch|EventSource)\(", self.text)), len(literals)
         )
+
+    def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
+        # A separate snapshot request can answer after a newer streamed frame
+        # and render over it; the stream's first frame is already the snapshot.
+        self.assertIsNone(re.search(r"\bfetch\(", self.text))
+        self.assertEqual(self.text.count("render(JSON.parse("), 1)
 
     def test_peach_marks_only_needs_you(self) -> None:
         found = 0
