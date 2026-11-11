@@ -921,10 +921,13 @@ if (AMEND !== null) {
 Apply the owner's amendment to the plan at ${AMEND_INPUT.plan_root} with one plan-amend run and nothing else. (1) Make a fresh directory with mktemp -d and write the JSON of the Input line below, byte for byte, to a file in it. (2) Run alone and exactly: plan-amend apply --input <that file>. It prints one JSON line; return its status, edits, refused and detail exactly as printed. On a non-zero exit with no JSON line, return status error, empty edits and refused, and its stderr as detail. Edit no file yourself and commit nothing.
 Input: ${JSON.stringify(AMEND_INPUT)}
 ${RULES}`, { label: 'amend', phase: 'Plan', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: AMEND_SCHEMA })
-  if (!am) return { stage: 'amend', result: null, ...deadOf(), cont: CONT }
+  // The clerk may have written the plan before its reply was lost or refused, so a stop here cannot hand back results cached before the amend:
+  // a relaunch would find every edit already recorded and skip the review and verify of the amended plan.
+  const STALE = (({ verified: _v, final_reviewed: _f, ...rest }) => rest)(CONT)
+  if (!am) return { stage: 'amend', result: null, ...deadOf(), cont: STALE }
   const graded = am.status === 'applied' && Array.isArray(am.edits) && am.edits.length === AMEND_INPUT.edits.length &&
     am.edits.every((g, i) => isEntry(g) && g.file === AMEND_INPUT.edits[i].file && (g.already === true || (g.exists === true && g.occurrences === 1)))
-  if (!graded) return { stage: 'amend', amend: am, details: 'plan-amend did not apply every edit; a refused or error status wrote nothing', ...deadOf(), cont: CONT }
+  if (!graded) return { stage: 'amend', amend: am, details: 'plan-amend did not apply every edit; a refused or error status wrote nothing', ...deadOf(), cont: STALE }
   log(`amend: applied ${AMEND_INPUT.edits.length} edit(s) to the plan`)
   amendApplied = true
   // An edit that changed the plan makes every cached result stale: the final review and verify run again against the amended plan.
