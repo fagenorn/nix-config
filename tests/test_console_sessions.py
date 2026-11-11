@@ -17,6 +17,7 @@ from agent_tools.console.sessions import (
     HOOK,
     HOOK_EVENTS,
     IDLE,
+    PROFILE,
     SEEN,
     Observation,
     SessionState,
@@ -25,10 +26,14 @@ from agent_tools.console.sessions import (
     own_pid_domain,
     poll_changes,
     process_matches,
+    profile_name,
+    profile_of,
     read_session_registry,
     registry_state,
     session_states,
 )
+
+from . import console_test_support as support
 
 FIXTURE = json.loads(
     (Path(__file__).parent / "fixtures" / "console" / "hook-payloads.json").read_text()
@@ -247,7 +252,8 @@ class RegistryTest(unittest.TestCase):
             result = read_session_registry([tmp / "a", tmp / "missing", tmp / "b"], alive=record)
         self.assertEqual(set(result), {"s-busy", "s-shell", "s-wait"})
         self.assertEqual(result["s-busy"], Observation(
-            "s-busy", "/srv/p00", 10, "busy", None, "p00-aa", 1794418246662))
+            "s-busy", "/srv/p00", 10, "busy", None, "p00-aa", 1794418246662,
+            profile="default"))
         self.assertIsNone(result["s-shell"].updated_ms)
         self.assertNotIn("s-nul", result)
         self.assertIn((12, "37198", "linux:m:pid:[1]"), calls)
@@ -415,6 +421,73 @@ class PollTest(unittest.TestCase):
         _, absent = self.poll(states, {})
         self.assertEqual(self.poll(states, {}, absent),
                          ([(GONE, "owner/p00", {"session_id": "s1"})], frozenset()))
+
+
+class ProfileTest(unittest.TestCase):
+    def test_a_profile_is_the_registry_directory_it_was_read_from(self):
+        for config, name in (("/h/.claude-accounts/profiles/work", "work"),
+                             ("/h/.claude", "default")):
+            with self.subTest(config=config):
+                self.assertEqual(profile_name(Path(config)), name)
+        for directory, name in (("/h/.claude-accounts/profiles/work/sessions", "work"),
+                                ("/h/.claude/sessions", "default"),
+                                ("/tmp/x/sessions", "default")):
+            with self.subTest(directory=directory):
+                self.assertEqual(profile_of(Path(directory)), name)
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw)
+            work = tmp / "accounts" / "profiles" / "work" / "sessions"
+            home = tmp / "home" / ".claude" / "sessions"
+            support.write_session(work, pid=os.getpid(), session_id="s-work",
+                                  cwd="/srv/p00", status="busy")
+            support.write_session(home, pid=os.getpid(), session_id="s-home",
+                                  cwd="/srv/p00", status="busy")
+            result = read_session_registry([work, home])
+        self.assertEqual(result["s-work"].profile, "work")
+        self.assertEqual(result["s-home"].profile, "default")
+
+    def test_a_new_session_is_seen_with_its_profile(self):
+        obs = Observation("s1", "/srv/p00", 10, "busy", None, None, 5, "work")
+        changes, _ = poll_changes({}, {"s1": obs}, frozenset(), repo_of, project_of)
+        self.assertEqual([kind for kind, _, _ in changes], [SEEN])
+        self.assertEqual(changes[0][2]["profile"], "work")
+        events = [Event(1, "t1", kind, project, payload) for kind, project, payload in changes]
+        self.assertEqual(session_states(events)["s1"].profile, "work")
+
+    def test_a_profile_change_is_recorded_even_when_a_newer_hook_wins(self):
+        known = SessionState("s1", "/srv/p00", "/srv/p00", "working", "n", 1, "t1", 9000,
+                             "work")
+        obs = Observation("s1", "/srv/p00", 10, "idle", None, "n", 1000, "home")
+        changes, _ = poll_changes({"s1": known}, {"s1": obs}, frozenset(), repo_of, project_of)
+        self.assertEqual(changes, [(PROFILE, None, {"session_id": "s1", "profile": "home"})])
+        folded = session_states([Event(2, "t2", PROFILE, None, changes[0][2])],
+                                {"s1": known})["s1"]
+        self.assertEqual(folded.profile, "home")
+        self.assertEqual((folded.state, folded.hook_ms, folded.last_seq, folded.last_at),
+                         ("working", 9000, 1, "t1"))
+
+    def test_profile_events_fold_incrementally(self):
+        events = [
+            Event(1, "t1", SEEN, None, {"session_id": "s1", "cwd": "/srv/p00",
+                                        "repo": "/srv/p00", "state": "working",
+                                        "profile": "a"}),
+            Event(2, "t2", HOOK, None, {"event": "Stop", "session_id": "s1",
+                                        "cwd": "/srv/p00", "repo": "/srv/p00"}),
+            Event(3, "t3", PROFILE, None, {"session_id": "s1", "profile": "b"}),
+        ]
+        whole = session_states(events)
+        self.assertEqual(session_states(events[1:], session_states(events[:1])), whole)
+        self.assertEqual(session_states(events[2:], session_states(events[:2])), whole)
+        self.assertEqual(whole["s1"].profile, "b")
+        self.assertEqual(whole["s1"].last_seq, 2)
+        self.assertEqual(session_states(events[:2])["s1"].profile, "a")
+
+    def test_an_unchanged_profile_appends_nothing(self):
+        known = SessionState("s1", "/srv/p00", "/srv/p00", "working", "n", 1, "t1", None,
+                             "work")
+        obs = Observation("s1", "/srv/p00", 10, "busy", None, "n", 5000, "work")
+        self.assertEqual(poll_changes({"s1": known}, {"s1": obs}, frozenset(), repo_of,
+                                      project_of), ([], frozenset()))
 
 
 if __name__ == "__main__":
