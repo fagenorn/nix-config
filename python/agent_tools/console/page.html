@@ -12,6 +12,7 @@
   --s1: #494d64; --s2: #5b6078;
   --text: #cad3f5; --sub1: #b8c0e0; --sub0: #a5adcb; --ov2: #939ab7;
   --peach: #f5a97f; --lav: #b7bdf8;
+  --green: #a6da95; --yellow: #eed49f; --red: #ed8796;
   --hair: rgba(202, 211, 245, .09);
   --ui: "Segoe UI Variable Text", "Segoe UI", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter Variable", "Inter", system-ui, "Noto Sans", "Helvetica Neue", Arial, sans-serif;
   --display: "Segoe UI Variable Display", "Segoe UI", -apple-system, BlinkMacSystemFont, "SF Pro Display", "Inter Display", "Inter Variable", "Inter", system-ui, "Noto Sans", "Helvetica Neue", Arial, sans-serif;
@@ -55,6 +56,17 @@ ul { list-style: none; }
 .quietfold summary:hover { background: rgba(202, 211, 245, .05); }
 .quietfold summary b { font-weight: 600; color: var(--sub0); }
 .quietfold ul { margin-top: 4px; padding: 0 0 0 22px; }
+.line .untouched { font-size: .8125rem; }
+.outside { flex: 1 0 100%; font-size: .8125rem; }
+.outside summary { cursor: pointer; color: var(--ov2); }
+.outside summary b { font-weight: 600; color: var(--sub0); }
+.outside ul { margin-top: 2px; padding: 0 0 0 16px; }
+.outside li { display: flex; flex-wrap: wrap; gap: 0 10px; color: var(--sub0); }
+.s-working { color: var(--green); }
+.s-waiting_answer, .s-waiting_permission { color: var(--yellow); }
+.s-limit { color: var(--red); }
+.s-idle { color: var(--ov2); }
+#unmanaged { margin-top: 24px; }
 
 @media (max-width: 1180px) {
   .desk-grid { grid-template-columns: minmax(0, 1fr) 400px; column-gap: 56px; }
@@ -74,6 +86,7 @@ ul { list-style: none; }
 <main class="statement" id="statement"></main>
 <aside class="side" aria-label="Projects">
 <section id="projects"></section>
+<section id="unmanaged"></section>
 </aside>
 </div>
 <template id="quiet-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M12.5 9.5A5 5 0 0 1 6.5 3.5a5 5 0 1 0 6 6z"/></svg></template>
@@ -88,6 +101,27 @@ function el(tag, cls, text) {
 function quietIcon() {
   return document.getElementById("quiet-icon").content.firstElementChild.cloneNode(true);
 }
+function outsideFold(outside, key) {
+  const fold = el("details", "outside");
+  fold.dataset.key = key;
+  const summary = el("summary");
+  summary.appendChild(el("b", "", outside.label));
+  summary.appendChild(el("span", "", " " + outside.summary));
+  fold.appendChild(summary);
+  const list = el("ul");
+  for (const session of outside.sessions) {
+    const row = el("li");
+    row.appendChild(el("span", "", session.name));
+    row.appendChild(el("span", "s-" + session.state, session.state_text));
+    list.appendChild(row);
+  }
+  fold.appendChild(list);
+  return fold;
+}
+function untouchedDays(lastActivity) {
+  const days = Math.floor((Date.now() - Date.parse(lastActivity)) / 86400000);
+  return Number.isFinite(days) && days >= 1 ? days : 0;
+}
 function projectLine(entry) {
   const line = el("li", "line");
   line.appendChild(el("b", "", entry.project_id));
@@ -98,6 +132,13 @@ function projectLine(entry) {
     line.appendChild(quiet);
   }
   line.appendChild(el("span", "root", entry.root));
+  if (entry.quiet) {
+    const days = untouchedDays(entry.last_activity);
+    if (days > 0) line.appendChild(el("span", "untouched", "untouched for " + days + (days === 1 ? " day" : " days")));
+  }
+  if (entry.outside_sprints.sessions.length > 0) {
+    line.appendChild(outsideFold(entry.outside_sprints, "outside:" + entry.project_id));
+  }
   return line;
 }
 function renderStatement(view) {
@@ -119,6 +160,7 @@ function renderProjects(view) {
   for (const entry of view.entries) {
     if (entry.type === "quiet_group") {
       const fold = el("details", "quietfold");
+      fold.dataset.key = "quiet";
       const summary = el("summary");
       summary.appendChild(quietIcon());
       summary.appendChild(el("b", "", entry.label));
@@ -135,13 +177,31 @@ function renderProjects(view) {
   }
   section.appendChild(list);
 }
+function renderUnmanaged(view) {
+  const section = document.getElementById("unmanaged");
+  section.replaceChildren();
+  if (view.unmanaged.length === 0) return;
+  const list = el("ul");
+  for (const entry of view.unmanaged) {
+    const line = el("li", "line");
+    line.appendChild(el("b", "root", entry.root));
+    line.appendChild(el("span", "", entry.label));
+    if (entry.outside_sprints.sessions.length > 0) {
+      line.appendChild(outsideFold(entry.outside_sprints, "outside:" + entry.root));
+    }
+    list.appendChild(line);
+  }
+  section.appendChild(list);
+}
 function render(view) {
-  const open = document.querySelector("#projects details");
-  const wasOpen = open !== null && open.open;
+  const wasOpen = new Set();
+  for (const fold of document.querySelectorAll("details[open]")) wasOpen.add(fold.dataset.key);
   renderStatement(view);
   renderProjects(view);
-  const fold = document.querySelector("#projects details");
-  if (wasOpen && fold !== null) fold.open = true;
+  renderUnmanaged(view);
+  for (const fold of document.querySelectorAll("details")) {
+    if (wasOpen.has(fold.dataset.key)) fold.open = true;
+  }
 }
 const conn = document.getElementById("conn");
 const source = new EventSource("/api/stream");
