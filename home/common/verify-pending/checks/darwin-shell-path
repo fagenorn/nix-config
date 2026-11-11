@@ -1,0 +1,14 @@
+#!/bin/sh
+# Verify check for issue 810: a fresh login zsh puts the Nix profiles before /usr/bin and finds
+# python3 3.13 or later, also when it inherits a path_helper-ordered PATH.
+# Run it from the repository root, e.g. after a switch. The wrapper itself starts under the managed
+# interpreter its installed ~/.agents/bin/verify-pending launcher names, never the parent shell's
+# python3: under the PATH this check diagnoses that is Xcode's 3.9, which cannot import the
+# package. Each probed shell still resolves python3 through its own PATH.
+launcher="$HOME/.agents/bin/verify-pending"
+python=$(sed -n 's|^exec \(/[^ ]*python3\) -I .*|\1|p' "$launcher" 2>/dev/null | head -n 1)
+if [ -z "$python" ] || [ ! -x "$python" ]; then
+  echo "darwin-shell-path: no managed interpreter in $launcher" >&2
+  exit 2
+fi
+PYTHONPATH=python exec "$python" -m agent_tools.verification.verify_checks darwin-shell-path "$@"

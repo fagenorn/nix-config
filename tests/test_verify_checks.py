@@ -1,6 +1,7 @@
 """`agent_tools.verification.verify_checks`: the committed verify checks of issue 638."""
 import json
 import os
+import pwd
 import shutil
 import subprocess
 import sys
@@ -1390,3 +1391,198 @@ class RegistryAgreementTest(unittest.TestCase):
         with mock.patch("sys.stderr"):
             self.assertEqual(verify_checks.main(
                 ["registry-agreement", "--registry", f"mbp={bad}", f"x={bad}"]), 2)
+
+
+GOOD = "/etc/profiles/per-user/tester/bin:/run/current-system/sw/bin:/usr/bin:/bin"
+BAD = "/usr/local/bin:/usr/bin:/bin:/etc/profiles/per-user/tester/bin"
+PY313 = "Python 3.13.12"
+PY39 = "Python 3.9.6"
+UNREADABLE = {"readable": False, "path": None, "profile_before_usr_bin": False,
+              "python": None, "python_ok": False, "met": False}
+
+
+def lines(path, py):
+    return ["__VERIFY_PATH__=" + path, "__VERIFY_PYTHON__=" + py]
+
+
+def fake_zsh(directory, clean_lines, inherited_lines):
+    """An executable stand-in for zsh that records each run and prints baked sentinel lines."""
+    directory = Path(directory)
+    calls = directory / "calls"
+    script = directory / "zsh"
+
+    def printing(baked):
+        return "printf '%s\\n' " + " ".join(f"'{line}'" for line in baked)
+
+    script.write_text(
+        "#!/bin/sh\n"
+        f'echo "$*|$PATH|${{__NIX_DARWIN_SET_ENVIRONMENT_DONE-unset}}|$HOME|$USER|$TERM" >> {calls}\n'
+        'if [ -n "${__NIX_DARWIN_SET_ENVIRONMENT_DONE+x}" ]; then\n'
+        f"{printing(inherited_lines)}\nelse\n{printing(clean_lines)}\nfi\n", encoding="utf-8")
+    script.chmod(0o755)
+    return script, calls
+
+
+class ShellPathVerdictTest(unittest.TestCase):
+    def test_profile_first_and_python_313_is_met(self):
+        self.assertEqual(verify_checks.shell_path_verdict(GOOD, PY313, "tester"),
+                         {"readable": True, "path": GOOD, "profile_before_usr_bin": True,
+                          "python": "3.13.12", "python_ok": True, "met": True})
+
+    def test_usr_bin_first_is_not_met(self):
+        verdict = verify_checks.shell_path_verdict(BAD, PY313, "tester")
+        self.assertFalse(verdict["profile_before_usr_bin"])
+        self.assertFalse(verdict["met"])
+
+    def test_python_39_is_not_met(self):
+        verdict = verify_checks.shell_path_verdict(GOOD, PY39, "tester")
+        self.assertEqual(verdict["python"], "3.9.6")
+        self.assertFalse(verdict["python_ok"])
+        self.assertFalse(verdict["met"])
+
+    def test_python_314_is_met(self):
+        self.assertTrue(verify_checks.shell_path_verdict(GOOD, "Python 3.14.0", "tester")["met"])
+
+    def test_missing_python_is_not_met(self):
+        verdict = verify_checks.shell_path_verdict(
+            GOOD, "zsh:1: command not found: python3", "tester")
+        self.assertIsNone(verdict["python"])
+        self.assertFalse(verdict["python_ok"])
+
+    def test_another_users_profile_does_not_count(self):
+        self.assertFalse(
+            verify_checks.shell_path_verdict(GOOD, PY313, "someone")["profile_before_usr_bin"])
+
+    def test_missing_usr_bin_is_not_met(self):
+        verdict = verify_checks.shell_path_verdict(
+            "/etc/profiles/per-user/tester/bin:/bin", PY313, "tester")
+        self.assertFalse(verdict["profile_before_usr_bin"])
+
+
+class DarwinShellPathTest(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name)
+
+    def run_check(self, clean, inherited):
+        script, calls = fake_zsh(self.tmp, clean, inherited)
+        code, report = verify_checks.darwin_shell_path(
+            user="tester", home=str(self.tmp), zsh_bin=str(script))
+        return code, report, calls
+
+    def test_both_probes_met_exits_0_and_runs_fresh_login_interactive_shells(self):
+        code, report, calls = self.run_check(lines(GOOD, PY313), lines(GOOD, PY313))
+        self.assertEqual(code, 0)
+        self.assertTrue(report["met"])
+        self.assertTrue(report["probes"]["clean"]["met"])
+        self.assertTrue(report["probes"]["inherited"]["met"])
+        recorded = calls.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(recorded), 2)
+        rows = [line.rsplit("|", 5) for line in recorded]
+        for argv, *_ in rows:
+            self.assertTrue(argv.startswith('-l -i -c print -r -- "__VERIFY_PATH__=$PATH"'), argv)
+        _, path, flag, home, user, term = rows[0]
+        self.assertEqual((path, flag, term), ("/usr/bin:/bin:/usr/sbin:/sbin", "unset", "dumb"))
+        _, path, flag, home2, user2, _ = rows[1]
+        self.assertEqual((path, flag), (verify_checks.INHERITED_PATH.format(user="tester"), "1"))
+        self.assertEqual((home, user, home2, user2), (str(self.tmp), "tester") * 2)
+
+    def test_inherited_usr_bin_first_exits_1(self):
+        code, report, _ = self.run_check(lines(GOOD, PY313), lines(BAD, PY39))
+        self.assertEqual(code, 1)
+        self.assertTrue(report["probes"]["clean"]["met"])
+        self.assertFalse(report["probes"]["inherited"]["met"])
+        self.assertEqual(report["probes"]["inherited"]["path"], BAD)
+
+    def test_banner_noise_around_the_sentinels_is_ignored(self):
+        clean = ["Que?", "__VERIFY_PATH__=/usr/bin", *lines(GOOD, PY313), "bye"]
+        code, _, _ = self.run_check(clean, lines(GOOD, PY313))
+        self.assertEqual(code, 0)
+
+    def test_a_shell_without_sentinels_is_unreadable_and_exits_2(self):
+        code, report, _ = self.run_check(lines(GOOD, PY313), ["nothing here"])
+        self.assertEqual(code, 2)
+        self.assertEqual(report["probes"]["inherited"], UNREADABLE)
+
+    def test_a_missing_shell_is_unreadable_and_exits_2(self):
+        code, report = verify_checks.darwin_shell_path(
+            user="tester", home=str(self.tmp), zsh_bin=str(self.tmp / "absent"))
+        self.assertEqual(code, 2)
+        self.assertFalse(report["probes"]["clean"]["readable"])
+        self.assertFalse(report["probes"]["inherited"]["readable"])
+
+
+class DarwinShellPathCommandTest(unittest.TestCase):
+    def test_the_command_prints_one_json_line_and_exits_with_the_verdict(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        me = pwd.getpwuid(os.getuid()).pw_name
+        good = lines(f"/etc/profiles/per-user/{me}/bin:/usr/bin", PY313)
+        script, _ = fake_zsh(tmp.name, good, good)
+        result = run_from_root([sys.executable, "-m", "agent_tools.verification.verify_checks",
+                                "darwin-shell-path", "--zsh", str(script)])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(json.loads(result.stdout)["met"])
+
+    def test_the_docstring_documents_the_check(self):
+        for needle in ("darwin-shell-path [--zsh PATH]", "verify_checks.darwin_shell_path",
+                       "__NIX_DARWIN_SET_ENVIRONMENT_DONE", "issue 810"):
+            self.assertIn(needle, verify_checks.__doc__)
+
+    def test_the_check_script_is_committed_executable(self):
+        self.assertEqual(committed_mode(f"{CHECKS}/darwin-shell-path"), "100755")
+
+
+class DarwinShellPathWrapperTest(unittest.TestCase):
+    """The committed check script, run as verify-pending or a user runs it, under the PATH it diagnoses."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name)
+        self.me = pwd.getpwuid(os.getuid()).pw_name
+        self.home = self.tmp / "home"
+        (self.home / ".agents" / "bin").mkdir(parents=True)
+        self.stubs = self.tmp / "stubs"
+        self.stubs.mkdir()
+        good = lines(f"/etc/profiles/per-user/{self.me}/bin:/usr/bin", PY313)
+        self.zsh, _ = fake_zsh(self.tmp, good, good)
+
+    def launcher(self, interpreter):
+        """A managed launcher in the shape lib/agent-tools.nix writes, naming `interpreter`."""
+        path = self.home / ".agents" / "bin" / "verify-pending"
+        path.write_text("#!/bin/sh\nunset NIX_PYTHONPATH NIX_PYTHONPREFIX NIX_PYTHONEXECUTABLE\n"
+                        f'exec {interpreter} -I -m agent_tools.verification.verify_pending "$@"\n',
+                        encoding="utf-8")
+
+    def old_python3(self):
+        """A python3 first on PATH that cannot run the package, as Xcode's 3.9 cannot."""
+        stub = self.stubs / "python3"
+        stub.write_text("#!/bin/sh\necho 'old python3 cannot import agent_tools' >&2\nexit 1\n",
+                        encoding="utf-8")
+        stub.chmod(0o755)
+
+    def run_script(self):
+        env = {"HOME": str(self.home), "PATH": f"{self.stubs}:/usr/bin:/bin"}
+        return subprocess.run(["/bin/sh", str(ROOT / CHECKS / "darwin-shell-path"),
+                               "--zsh", str(self.zsh)], cwd=ROOT, env=env,
+                              capture_output=True, text=True, timeout=60)
+
+    def test_it_starts_with_the_managed_interpreter_when_python3_on_path_cannot_run_the_package(self):
+        self.old_python3()
+        self.launcher(sys.executable)
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(json.loads(result.stdout)["met"])
+
+    def test_it_exits_2_when_there_is_no_managed_launcher(self):
+        result = self.run_script()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("verify-pending", result.stderr)
+
+    def test_it_exits_2_when_the_launcher_names_no_runnable_interpreter(self):
+        self.launcher(self.tmp / "absent" / "python3")
+        result = self.run_script()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("verify-pending", result.stderr)

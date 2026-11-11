@@ -113,6 +113,16 @@ keyed on the resolved `project.id`). With `--watch-adapter A` a fifth reading is
 `release.targets[]` entry names A and red unless that release capability is `available`. It exits 0 when every root is
 green, 1 when one is red, 75 when none is red and one is pending, and 2 on a tool error. Under
 `--red-pending` any root that is not green exits 75.
+
+`darwin-shell-path [--zsh PATH]` (`verify_checks.darwin_shell_path`, issue 810) reads two fresh login
+interactive zsh shells (`PATH` defaults to `/bin/zsh`) of the current user, each run as
+`zsh -l -i -c` with `HOME`, `USER`, `LOGNAME`, `SHELL` and `TERM=dumb` and nothing else inherited: a `clean`
+probe whose `PATH` is launchd's `/usr/bin:/bin:/usr/sbin:/sbin`, and an `inherited` probe that also sets
+`__NIX_DARWIN_SET_ENVIRONMENT_DONE=1` with a path_helper-ordered `PATH` that lists the Nix profile directories last,
+the state a child of an already polluted terminal starts in. A probe is met when `/etc/profiles/per-user/<user>/bin` is
+a `PATH` entry ahead of `/usr/bin` and `python3` reports version 3.13 or later; the check is met only
+when both probes are. It exits 0 when met, 1 when not and 2 when a probe is unreadable (no sentinel lines in
+its output, a timeout or a shell that cannot be run). It never writes a file.
 """
 from __future__ import annotations
 
@@ -120,6 +130,7 @@ import argparse
 import io
 import json
 import os
+import pwd
 import re
 import shutil
 import subprocess
@@ -992,6 +1003,64 @@ def registry_agreement(registries: Mapping[str, Sequence[Mapping]],
     return (1 if red else 0), {"verdict": "red" if red else "green", "rows": rows}
 
 
+SHELL_PROBE = ('print -r -- "__VERIFY_PATH__=$PATH"; '
+               'print -r -- "__VERIFY_PYTHON__=$(python3 --version 2>&1)"')
+BASE_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+INHERITED_PATH = ("/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:"
+                  "/etc/profiles/per-user/{user}/bin:/run/current-system/sw/bin")
+_UNREADABLE_PROBE = {"readable": False, "path": None, "profile_before_usr_bin": False,
+                     "python": None, "python_ok": False, "met": False}
+
+
+def shell_path_verdict(path_value: str, python_version: str, user: str) -> dict:
+    """One probe's reading: the user's profile dir ahead of /usr/bin, and python3 3.13 or later."""
+    entries = path_value.split(":")
+    profile = f"/etc/profiles/per-user/{user}/bin"
+    profile_first = (profile in entries and "/usr/bin" in entries
+                     and entries.index(profile) < entries.index("/usr/bin"))
+    found = re.search(r"Python (\d+)\.(\d+)(?:\.(\d+))?", python_version)
+    python = ".".join(part for part in found.groups() if part is not None) if found else None
+    python_ok = found is not None and (int(found.group(1)), int(found.group(2))) >= (3, 13)
+    return {"readable": True, "path": path_value, "profile_before_usr_bin": profile_first,
+            "python": python, "python_ok": python_ok, "met": profile_first and python_ok}
+
+
+def _sentinel(stdout: str, prefix: str) -> str | None:
+    value = None
+    for line in stdout.splitlines():
+        if line.startswith(prefix):
+            value = line[len(prefix):]
+    return value
+
+
+def _shell_probe(zsh_bin: str, env: Mapping[str, str], user: str, timeout: int) -> dict:
+    try:
+        done = subprocess.run([zsh_bin, "-l", "-i", "-c", SHELL_PROBE], env=dict(env),
+                              stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                              timeout=timeout)
+    except (subprocess.TimeoutExpired, OSError):
+        return dict(_UNREADABLE_PROBE)
+    path_value = _sentinel(done.stdout, "__VERIFY_PATH__=")
+    python_version = _sentinel(done.stdout, "__VERIFY_PYTHON__=")
+    if path_value is None or python_version is None:
+        return dict(_UNREADABLE_PROBE)
+    return shell_path_verdict(path_value, python_version, user)
+
+
+def darwin_shell_path(*, user: str, home: str, zsh_bin: str = "/bin/zsh",
+                      timeout: int = 60) -> tuple[int, dict]:
+    """Issue 810: a fresh login zsh puts the Nix profiles before /usr/bin, also from an inherited PATH."""
+    clean = {"HOME": home, "USER": user, "LOGNAME": user, "SHELL": zsh_bin, "TERM": "dumb",
+             "PATH": BASE_PATH}
+    inherited = {**clean, "__NIX_DARWIN_SET_ENVIRONMENT_DONE": "1",
+                 "PATH": INHERITED_PATH.format(user=user)}
+    probes = {"clean": _shell_probe(zsh_bin, clean, user, timeout),
+              "inherited": _shell_probe(zsh_bin, inherited, user, timeout)}
+    met = all(probe["met"] for probe in probes.values())
+    unreadable = not all(probe["readable"] for probe in probes.values())
+    return (2 if unreadable else 0 if met else 1), {"met": met, "probes": probes}
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="verify-checks")
     checks = parser.add_subparsers(dest="check", required=True)
@@ -1036,7 +1105,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="issue 765 C13.b: registries agree on branch_override per project across hosts")
     agreement.add_argument("--registry", nargs="+", required=True, metavar="HOST=FILE")
     agreement.add_argument("--intentional", action="append", default=[], metavar="PROJECT_ID")
+    shell = checks.add_parser(
+        "darwin-shell-path",
+        help="issue 810: a fresh login zsh puts the Nix profiles before /usr/bin")
+    shell.add_argument("--zsh", default="/bin/zsh")
     args = parser.parse_args(argv)
+    if args.check == "darwin-shell-path":
+        entry = pwd.getpwuid(os.getuid())
+        code, report = darwin_shell_path(user=entry.pw_name, home=entry.pw_dir, zsh_bin=args.zsh)
+        print(json.dumps(report, sort_keys=True))
+        return code
     if args.check == "registry-agreement":
         registries: dict[str, list[dict]] = {}
         for spec in args.registry:
