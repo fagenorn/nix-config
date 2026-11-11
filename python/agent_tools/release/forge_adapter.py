@@ -124,8 +124,8 @@ the pull request.
 `tests/fixtures/forge-adapter-spellings.json` is the one list of provider spellings:
 `tests/forge_world.py` builds its fake `gh`, `git` and `claude-bash-lifecycle-guard` from it,
 and `tests/test_forge_adapter.py` pins the adapter to it, so the world and the adapter cannot
-disagree about a spelling (D12, D22). Its `sync` member holds the sync rows, which the guard
-suite's table does not read.
+disagree about a spelling (D12, D22). Its `sync` member holds the sync rows; the guard suite
+runs both sync mutations against the real guard, per repository class.
 """
 
 import json

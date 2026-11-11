@@ -14,6 +14,6 @@ The sync is two forge requests, `sync_branch` and `sync_pr`, that no profile nod
 ## Consequences
 
 - A failed sync is reported with its reason and the commands that finish it by hand, and changes no state, action, token or receipt of the release.
-- The two mutations run under no grant, custody or recorded intent of the core: they are reversible, pass the guard and the same-repository check, and are settled by inspection alone. They are not core admissions in the sense of ADR-guard-008, and their spellings are pinned by the forge suite's fixture, not by the guard suite's table.
+- The two mutations run under no grant, custody or recorded intent of the core: they are reversible, pass the guard and the same-repository check, and are settled by inspection alone. They are not core admissions in the sense of ADR-guard-008. Their spellings are rows of the one spelling fixture, which the forge suite renders and the guard suite runs against the real guard: both are admitted where the integration branch is distinct, and the pull request is refused where it is not.
 - The local sync branch stays in the main checkout until the owner's `gh pr merge --delete-branch` removes it.
 - `release_pr_behind` names the open sync pull requests by the branch name alone, so a hand-made branch of the same name is named too.

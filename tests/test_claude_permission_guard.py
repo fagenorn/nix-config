@@ -2430,6 +2430,26 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                         expect_allowed = authorized or row["kind"] == "read"
                     self.assertEqual(0 if expect_allowed else 2, result.returncode, result.stderr)
 
+    def test_the_adapter_sync_spellings_are_judged_per_repository_class(self):
+        """Issue 845, #124 D12/D22: the fixture's sync rows, which the forge suite renders, meet
+        the real guard here. The sync branch push is a feature push, admitted in every
+        authorized class; the pull request into `dev` is admitted only where `dev` is the
+        declared integration branch, which is the one class a release syncs in."""
+        for name, slug, authorized, env in self.REPOSITORY_CLASSES:
+            repo = self.tagged_repo(slug)
+            for row in self.SPELLINGS["sync"]["rows"]:
+                raw = row["raw"].replace(self.CANONICAL_SLUG, slug)
+                with self.subTest(repository=name, row=row["id"]):
+                    result = self.run_guard(raw, cwd=repo, env=env)
+                    if row["id"] == "sync_pr.create":
+                        expect_allowed = name == "distinct-integration"
+                    else:
+                        expect_allowed = authorized or row["kind"] == "read"
+                    self.assertEqual(0 if expect_allowed else 2, result.returncode, result.stderr)
+        self.assertEqual(
+            sorted(row["id"] for row in self.SPELLINGS["sync"]["rows"] if row["kind"] == "mutation"),
+            ["sync_branch.push", "sync_pr.create"])
+
     def test_the_adapter_merge_spelling_refuses_its_near_misses(self):
         """Issue 554 D5: only the exact rendered spelling passes the release arm."""
         commit = self.SPELLINGS["canonical"]["commit"]

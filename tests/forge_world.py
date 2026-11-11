@@ -32,7 +32,9 @@ agrees with `merge_ready` on the same `base_tip`.
 the containment compare of the merge commit against the integration branch, the sync branch's
 ref and compare, the sync pull request listing, the local branch lookup and creation, the
 branch push and the `gh pr create`. It needs `invoke_ready()` for the shared invoke steps and a
-merged release pull request. `sync_pull(**overrides)` is one entry of that listing.
+merged release pull request. `sync_pull(**overrides)` is one entry of that listing. The fake
+guard admits whatever it is registered to; the real guard's verdict on the two sync mutation rows
+is asserted per repository class by the guard suite, which reads the same rows.
 
 `comment_store(slug, issue, comments, ...)` makes the fake `gh` serve one issue's comments from
 shared state (issue 623): list, POST, PATCH and DELETE of that issue's comments act on one
