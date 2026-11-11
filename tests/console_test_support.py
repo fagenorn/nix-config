@@ -61,6 +61,19 @@ def post_hook(address, body, headers=None, host=None):
         connection.close()
 
 
+def post_reading(address, body, headers=None, host=None):
+    headers = {"Content-Type": "application/json"} if headers is None else dict(headers)
+    if host is not None:
+        headers["Host"] = host
+    connection = http.client.HTTPConnection(*address, timeout=5)
+    try:
+        connection.request("POST", "/api/readings", body=body, headers=headers)
+        response = connection.getresponse()
+        return response.status, dict(response.getheaders()), response.read()
+    finally:
+        connection.close()
+
+
 def write_session(directory, *, pid, session_id, cwd, status, waiting_for=None, name=None,
                   updated_at=None):
     directory = Path(directory)
@@ -97,10 +110,11 @@ def hook_body(name, **overrides):
     raise KeyError(name)
 
 
-def service(test, store, registry, session_dirs=(), repo_of=lambda cwd: cwd, **kwargs):
+def service(test, store, registry, session_dirs=(), repo_of=lambda cwd: cwd, profile_dirs=(),
+            **kwargs):
     svc = console_service.ConsoleService(
         store, registry, port=0, session_dirs=lambda: list(session_dirs),
-        repo_of=repo_of, **kwargs)
+        profile_dirs=lambda: list(profile_dirs), repo_of=repo_of, **kwargs)
     svc.start()
     test.addCleanup(svc.close)
     return svc

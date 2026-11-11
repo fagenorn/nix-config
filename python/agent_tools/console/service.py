@@ -12,11 +12,13 @@ Routes (every response carries `Cache-Control: no-store` and
     GET /api/state  200 application/json, the encoded view (see `view.py`)
     GET /api/stream 200 text/event-stream; charset=utf-8, the update stream (below)
     POST /api/hooks 204, no body, a Claude Code hook's input (below)
+    POST /api/readings 204, no body, the cache proxy's limit reading (below)
     anything else   404
-    other methods   405 with `Allow: GET` (`Allow: POST` on `/api/hooks`)
+    other methods   405 with `Allow: GET` (`Allow: POST` on `/api/hooks` and `/api/readings`)
 
-Only `POST /api/hooks` writes, and it appends session observations only. Its
-checks run in this order, each refusal closing the connection: a loopback
+Only `POST /api/hooks` and `POST /api/readings` write: the first appends session observations,
+the second the capacity kinds `capacity.reading` and `capacity.stop` (see `capacity.py`).
+The hook route's checks run in this order, each refusal closing the connection: a loopback
 `Host` (else 403 as above); no `Origin` header (a browser page sends one: 403
 `text/plain` `origin refused`); a `Content-Type` whose media type is
 `application/json` (else 415 `json only`); a `Content-Length` that is a
@@ -30,6 +32,21 @@ is one stderr line `console: hook_unreadable <message>`; any other failure is
 `console: hook_failed <Type>: <message>`; the handler never raises. An
 ignored payload (an unknown event, a missing member) appends nothing. The
 route carries no token: it records observations and answers nothing.
+
+`POST /api/readings` runs the same checks in the same order (loopback `Host`, no `Origin`,
+`application/json`, a length, at most `MAX_READING_BYTES`), answers `204` and flushes, and only
+then ingests (`ingest_reading`): `capacity.parse_report` keeps the whitelisted members of the body
+(a body that is not UTF-8 JSON or not a report is one stderr line `console: reading_unreadable
+<message>`; any other failure `console: reading_failed <Type>: <message>`; the handler never
+raises). The reading's profile is the `profile` of the session the report names when the registry
+placed that session under a profile, else the profile its account was last attributed to (the folded
+`(account, profile)` pairs of earlier readings), else the reading is dropped with one stderr line
+`console: reading_unattributed` and no identifier. No credential file is opened and no subprocess
+started to learn a profile. The attributed reading is appended with its `capacity.stop` when it was
+a refusal, and published. Every poll of the session registry also lists the profile directories
+(`profile_dirs()`, `default_profile_dirs()`: `$HOME/.claude` and each directory of `profiles/` under
+`$CLAUDE_ACCOUNTS_DIR`, else `$HOME/.claude-accounts`; only `is_dir` touches one) so a profile never
+used reads `unknown`, and ends by publishing, so a reset that has passed shows within one poll.
 
 A state request reads only `view_bytes`, which is memory: no log access, no
 registry read, no derivation, no file, no filesystem metadata call, no
@@ -120,7 +137,7 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 
 from agent_tools.claims import owner_actions
-from agent_tools.console import inbox, sessions
+from agent_tools.console import capacity, inbox, sessions
 from agent_tools.console.event_log import Event, EventLog, utc_now
 from agent_tools.console.view import (
     ReadState, derive_view, encode_view, health_change, inbox_changes, inbox_records, project_for,
@@ -140,6 +157,9 @@ KEEPALIVE_SECONDS = 15.0
 WATCH_THREAD = "console-registry-watch"
 HOOK_PATH = "/api/hooks"
 MAX_HOOK_BYTES = 8 * 1024 * 1024
+READINGS_PATH = "/api/readings"
+MAX_READING_BYTES = 64 * 1024
+POST_LIMITS = {HOOK_PATH: MAX_HOOK_BYTES, READINGS_PATH: MAX_READING_BYTES}
 SESSION_POLL_SECONDS = 5.0
 SESSION_THREAD = "console-session-poll"
 TRACKER_SECONDS = 120.0
@@ -160,6 +180,14 @@ def default_session_dirs() -> list[Path]:
     accounts = os.environ.get("CLAUDE_ACCOUNTS_DIR") or str(home / ".claude-accounts")
     return [home / ".claude" / "sessions",
             *sorted(Path(accounts).glob("profiles/*/sessions"))]
+
+
+def default_profile_dirs() -> list[Path]:
+    """Every account's config directory, as `claude-account list` names them: the base and each profile."""
+    home = Path.home()
+    accounts = os.environ.get("CLAUDE_ACCOUNTS_DIR") or str(home / ".claude-accounts")
+    return [home / ".claude",
+            *sorted(p for p in Path(accounts).glob("profiles/*") if p.is_dir())]
 
 
 def signature(path: Path) -> tuple[int, int, int] | None:
@@ -231,25 +259,37 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         self.close_connection = True
         self._send(status, "text/plain", text.encode() + b"\n", ("Connection", "close"))
 
+    def _checked_length(self, limit: int) -> int | None:
+        """The body length of a write that passed the shared checks, else None (already refused)."""
+        if self.headers.get("Origin") is not None:
+            self._refuse(403, "origin refused")
+            return None
+        media = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        if media != "application/json":
+            self._refuse(415, "json only")
+            return None
+        length = self.headers.get("Content-Length", "")
+        if not (length.isascii() and length.isdigit()):
+            self._refuse(411, "length required")
+            return None
+        if int(length) > limit:
+            self._refuse(413, "too large")
+            return None
+        return int(length)
+
     def do_POST(self):
         if not self._loopback():
             return
-        if self.path.split("?", 1)[0] != HOOK_PATH:
+        route = self.path.split("?", 1)[0]
+        if route not in POST_LIMITS:
             return self._refuse_method()
-        if self.headers.get("Origin") is not None:
-            return self._refuse(403, "origin refused")
-        media = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
-        if media != "application/json":
-            return self._refuse(415, "json only")
-        length = self.headers.get("Content-Length", "")
-        if not (length.isascii() and length.isdigit()):
-            return self._refuse(411, "length required")
-        if int(length) > MAX_HOOK_BYTES:
-            return self._refuse(413, "too large")
+        length = self._checked_length(POST_LIMITS[route])
+        if length is None:
+            return
         console = self.server.console
         self.close_connection = True
         try:
-            body = self.rfile.read(int(length))
+            body = self.rfile.read(length)
             received = console.received_ms()
             self.send_response(204)
             self.send_header("Cache-Control", "no-store")
@@ -259,12 +299,16 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             self.wfile.flush()
         except OSError:
             return
+        name = "hook" if route == HOOK_PATH else "reading"
         try:
-            console.ingest_hook(body, received)
+            if route == HOOK_PATH:
+                console.ingest_hook(body, received)
+            else:
+                console.ingest_reading(body)
         except ValueError as error:
-            print(f"console: hook_unreadable {error}", file=sys.stderr)
+            print(f"console: {name}_unreadable {error}", file=sys.stderr)
         except Exception as error:
-            print(f"console: hook_failed {type(error).__name__}: {error}", file=sys.stderr)
+            print(f"console: {name}_failed {type(error).__name__}: {error}", file=sys.stderr)
 
     def do_GET(self):
         if not self._loopback():
@@ -277,7 +321,7 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             self._send(200, "application/json", self.server.console.view_bytes)
         elif route == "/api/stream":
             self._stream()
-        elif route == HOOK_PATH:
+        elif route in POST_LIMITS:
             self._refuse_method()
         else:
             self._send(404, "text/plain", b"not found\n")
@@ -309,7 +353,7 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         if not self._loopback():
             return
         self.close_connection = True
-        allow = "POST" if self.path.split("?", 1)[0] == HOOK_PATH else "GET"
+        allow = "POST" if self.path.split("?", 1)[0] in POST_LIMITS else "GET"
         self._send(405, "text/plain", b"method not allowed\n",
                    ("Allow", allow), ("Connection", "close"))
 
@@ -320,6 +364,7 @@ class ConsoleService:
     def __init__(self, store: Path, registry: Path, *, port: int = DEFAULT_PORT,
                  poll_seconds: float = POLL_SECONDS,
                  session_dirs: Callable[[], Iterable[Path]] = default_session_dirs,
+                 profile_dirs: Callable[[], Iterable[Path]] = default_profile_dirs,
                  session_poll_seconds: float = SESSION_POLL_SECONDS,
                  repo_of: Callable[[str], str | None] = sessions.main_checkout,
                  tracker: Callable[..., list[dict]] | None = None,
@@ -330,6 +375,9 @@ class ConsoleService:
         self.registry = Path(registry)
         self._poll_seconds = poll_seconds
         self._session_dirs = session_dirs
+        self._profile_dirs = profile_dirs
+        self._profiles: frozenset[str] = frozenset()
+        self._capacity = capacity.CapacityState({}, {})
         self._session_poll_seconds = session_poll_seconds
         self._repo_of = repo_of
         self._sessions: dict[str, sessions.SessionState] = {}
@@ -360,6 +408,7 @@ class ConsoleService:
             self._sessions = sessions.session_states(events)
             self._inbox = inbox_records(events)
             self._health = read_states(events)
+            self._capacity = capacity.capacity_state(events)
             self._publish()
             self._signature = signature(self.registry)
             self.refresh()
@@ -377,6 +426,11 @@ class ConsoleService:
     @property
     def view_bytes(self) -> bytes:
         return self._view
+
+    @property
+    def profiles(self) -> frozenset[str]:
+        """The profile directories that existed at the last poll."""
+        return self._profiles
 
     @property
     def version(self) -> int:
@@ -397,7 +451,8 @@ class ConsoleService:
     def _publish(self) -> None:
         view = encode_view(derive_view(
             self._states.values(), self._inbox, self._health,
-            sessions=self._sessions.values()))
+            sessions=self._sessions.values(),
+            capacity=capacity.capacity_view(self._profiles, self._capacity, self._clock())))
         with self._published:
             if view != self._view:
                 self._view = view
@@ -440,6 +495,21 @@ class ConsoleService:
             self._apply(appended)
             return appended
 
+    def ingest_reading(self, body: bytes) -> list[Event]:
+        """Append the capacity rows a limit report describes; ValueError if it is not one."""
+        report = capacity.parse_report(json.loads(body.decode("utf-8")))
+        with self._ingest:
+            known = self._sessions.get(report["session_id"])
+            profile = known.profile if known is not None else None
+            if profile is None:
+                profile = self._capacity.accounts.get(report["account"])
+            if profile is None:
+                print("console: reading_unattributed", file=sys.stderr)
+                return []
+            appended = self.log.append(capacity.report_entries(report, profile))
+            self._apply(appended)
+            return appended
+
     def poll_sessions(self) -> list[Event]:
         """Append what the session registry shows that the folded sessions do not, and publish."""
         with self._ingest:
@@ -452,8 +522,11 @@ class ConsoleService:
                 self._sessions, observations, self._absent, self._repo_of, project_of)
             appended = self.log.append(changes)
             self._absent = absent
+            self._profiles = frozenset(
+                sessions.profile_name(d) for d in self._profile_dirs() if d.is_dir())
             if appended:
-                self._apply(appended)
+                self._fold(appended)
+            self._publish()
             return appended
 
     def _poll_loop(self) -> None:
@@ -469,6 +542,7 @@ class ConsoleService:
         self._sessions = sessions.session_states(appended, self._sessions)
         self._inbox = inbox_records(appended, self._inbox)
         self._health = read_states(appended, self._health)
+        self._capacity = capacity.capacity_state(appended, self._capacity)
 
     def poll_tracker(self) -> None:
         """One refresh of the inbox of every active project; see the module docstring."""

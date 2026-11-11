@@ -20,6 +20,7 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools.console import service, sessions
+from agent_tools.console import view
 from agent_tools.console.view import derive_view, encode_view, project_states
 
 from . import console_test_support as support
@@ -585,6 +586,192 @@ class HookTest(Case):
         svc.poll_sessions()
         gone = [row for row in support.log_rows(self.store) if row[2] == "session.gone"]
         self.assertEqual(len(gone), 1)
+
+
+CREDENTIAL_NAMES = {".credentials.json", ".claude.json"}
+CREDENTIAL_ARMED = threading.Event()
+CREDENTIAL_HITS: list[tuple[str, str]] = []
+
+
+def _credential_audit(event, args):
+    if not CREDENTIAL_ARMED.is_set():
+        return
+    if event == "subprocess.Popen":
+        CREDENTIAL_HITS.append((event, ""))
+    elif event == "open" and isinstance(args[0], (str, bytes, os.PathLike)):
+        name = os.path.basename(os.fsdecode(args[0]))
+        if name in CREDENTIAL_NAMES:
+            CREDENTIAL_HITS.append((event, name))
+
+
+sys.addaudithook(_credential_audit)
+
+NOW = 1794000000
+RESET = 1794816000
+ALLOWED = {"http_status": 200, "status": "allowed", "reset": RESET, "binding": "7d",
+           "claim": "seven_day",
+           "windows": {"7d": {"status": "allowed", "utilization": 0.42, "reset": RESET}}}
+REFUSED = {"http_status": 429, "status": "rejected", "reset": RESET, "binding": "7d",
+           "claim": "seven_day",
+           "windows": {"7d": {"status": "rejected", "utilization": 1.0, "reset": RESET},
+                       "5h": {"status": "allowed", "utilization": 0.0, "reset": 1794430800}}}
+
+
+def reading_body(report, account="acc-1", session_id="ses-1"):
+    return json.dumps({**report, "account": account, "session_id": session_id}).encode()
+
+
+class ReadingsRouteTest(Case):
+    """`POST /api/readings` takes the proxy's limit readings and attributes them to a profile (#860)."""
+
+    def setUp(self):
+        super().setUp()
+        self.accounts = self.root / "accounts"
+        self.work = self.accounts / "profiles/work"
+        self.spare = self.accounts / "profiles/spare"
+        self.now = [NOW]
+
+    def arrange(self, *, spare=False):
+        support.write_session(self.work / "sessions", pid=os.getpid(), session_id="ses-1",
+                              cwd=str(self.root), status="busy")
+        for name in CREDENTIAL_NAMES:
+            (self.work / name).write_text("cred-secret")
+        if spare:
+            self.spare.mkdir(parents=True)
+            (self.spare / ".credentials.json").write_text("cred-secret")
+
+    def begin(self, profiles=None):
+        profiles = [self.work] if profiles is None else profiles
+        return support.service(
+            self, self.store, self.registry, session_dirs=[self.work / "sessions"],
+            profile_dirs=profiles, clock=lambda: self.now[0], session_poll_seconds=3600)
+
+    def capacity(self, svc):
+        return json.loads(svc.view_bytes)["capacity"]
+
+    def entry(self, svc, name):
+        return next(e for e in self.capacity(svc)["profiles"] if e["profile"] == name)
+
+    def test_an_account_maps_to_its_profile_through_a_session_without_a_credential_read(self):
+        self.arrange()
+        CREDENTIAL_HITS.clear()
+        CREDENTIAL_ARMED.set()
+        self.addCleanup(CREDENTIAL_ARMED.clear)
+        svc = self.begin()
+        self.assertEqual(support.post_reading(svc.address, reading_body(ALLOWED))[0], 204)
+        wait_rows(self.store, "capacity.reading", 1)
+        status, _, _ = support.post_reading(
+            svc.address, reading_body(ALLOWED, session_id="ses-unknown"))
+        self.assertEqual(status, 204)
+        rows = wait_rows(self.store, "capacity.reading", 2)
+        self.assertEqual([json.loads(row[4])["profile"] for row in rows], ["work", "work"])
+        support.post_reading(svc.address, reading_body(ALLOWED, "acc-9", "ses-unknown"))
+        support.post_reading(svc.address, reading_body(ALLOWED))
+        rows = wait_rows(self.store, "capacity.reading", 3)
+        time.sleep(0.2)
+        self.assertEqual(len(wait_rows(self.store, "capacity.reading", 3)), 3)
+        self.assertEqual(self.entry(svc, "work")["week_left"], 58)
+        CREDENTIAL_ARMED.clear()
+        self.assertEqual(CREDENTIAL_HITS, [])
+
+    def test_a_reading_survives_a_restart_and_reads_reset_after_its_reset(self):
+        self.arrange()
+        svc = self.begin()
+        report = {**ALLOWED, "reset": NOW + 3600,
+                  "windows": {"7d": {"status": "allowed", "utilization": 0.4,
+                                     "reset": NOW + 3600}}}
+        support.post_reading(svc.address, reading_body(report))
+        wait_rows(self.store, "capacity.reading", 1)
+        svc.close()
+        self.now[0] = NOW + 10
+        svc = self.begin()
+        work = self.entry(svc, "work")
+        self.assertEqual((work["state"], work["week_left"]), ("ok", 60))
+        rows = support.log_rows(self.store)
+        self.now[0] = NOW + 3601
+        svc.poll_sessions()
+        work = self.entry(svc, "work")
+        self.assertEqual((work["state"], work["week_left"]), ("reset", 100))
+        self.assertEqual(support.log_rows(self.store), rows)
+        svc.close()
+        svc = self.begin()
+        work = self.entry(svc, "work")
+        self.assertEqual((work["state"], work["week_left"]), ("reset", 100))
+
+    def test_an_unused_profile_is_unknown_and_blocks_all_out(self):
+        self.arrange(spare=True)
+        CREDENTIAL_HITS.clear()
+        CREDENTIAL_ARMED.set()
+        self.addCleanup(CREDENTIAL_ARMED.clear)
+        svc = self.begin([self.spare, self.work])
+        support.post_reading(svc.address, reading_body(REFUSED))
+        wait_rows(self.store, "capacity.reading", 1)
+        capacity = self.capacity(svc)
+        self.assertEqual({e["profile"]: e["state"] for e in capacity["profiles"]},
+                         {"spare": "unknown", "work": "out"})
+        self.assertIs(capacity["all_out"], False)
+        self.assertNotEqual(json.loads(svc.view_bytes)["statement"]["sentence"],
+                            view.ALL_OUT_SENTENCE)
+        CREDENTIAL_ARMED.clear()
+        self.assertEqual(CREDENTIAL_HITS, [])
+        svc.close()
+        svc = self.begin([self.work])
+        self.assertIs(self.capacity(svc)["all_out"], True)
+
+    def test_the_default_profile_dirs_are_the_base_and_every_profile(self):
+        with tempfile.TemporaryDirectory() as raw:
+            home, accounts = Path(raw) / "home", Path(raw) / "accounts"
+            (accounts / "profiles/b").mkdir(parents=True)
+            (accounts / "profiles/a/sessions").mkdir(parents=True)
+            (accounts / "profiles/notes.txt").write_text("x")
+            with mock.patch.dict(os.environ, {"HOME": str(home),
+                                              "CLAUDE_ACCOUNTS_DIR": str(accounts)}):
+                self.assertEqual(
+                    service.default_profile_dirs(),
+                    [home / ".claude", accounts / "profiles/a", accounts / "profiles/b"])
+            fallback = home / ".claude-accounts"
+            (fallback / "profiles/c").mkdir(parents=True)
+            environment = {k: v for k, v in os.environ.items() if k != "CLAUDE_ACCOUNTS_DIR"}
+            environment["HOME"] = str(home)
+            with mock.patch.dict(os.environ, environment, clear=True):
+                self.assertEqual(service.default_profile_dirs(),
+                                 [home / ".claude", fallback / "profiles/c"])
+
+    def test_a_refused_reading_appends_a_limit_stop(self):
+        self.arrange()
+        svc = self.begin()
+        support.post_reading(svc.address, reading_body(REFUSED))
+        [row] = wait_rows(self.store, "capacity.stop", 1)
+        self.assertEqual(json.loads(row[4]), {"profile": "work", "window": "7d", "reset": RESET})
+        self.assertEqual(self.entry(svc, "work")["state"], "out")
+
+    def test_the_readings_route_refuses_what_the_hook_route_refuses(self):
+        self.arrange()
+        svc = self.begin()
+        rows = support.log_rows(self.store)
+        body = reading_body(ALLOWED)
+        json_type = {"Content-Type": "application/json"}
+        self.assertEqual(support.post_reading(
+            svc.address, body, {**json_type, "Origin": "http://example.test"})[0], 403)
+        self.assertEqual(support.post_reading(
+            svc.address, body, {"Content-Type": "text/plain"})[0], 415)
+        self.assertEqual(support.post_reading(svc.address, body, host="evil.test")[0], 403)
+        for headers, expected in (
+                ({"Content-Length": str(service.MAX_READING_BYTES + 1)}, 413), ({}, 411)):
+            connection = http.client.HTTPConnection(*svc.address, timeout=5)
+            try:
+                connection.putrequest("POST", service.READINGS_PATH)
+                connection.putheader("Content-Type", "application/json")
+                for name, value in headers.items():
+                    connection.putheader(name, value)
+                connection.endheaders(b"x" if headers else None)
+                self.assertEqual(connection.getresponse().status, expected)
+            finally:
+                connection.close()
+        status, response, _ = support.request(svc.address, "GET", service.READINGS_PATH)
+        self.assertEqual((status, response["Allow"]), (405, "POST"))
+        time.sleep(0.2)
+        self.assertEqual(support.log_rows(self.store), rows)
 
 
 class ReadFleetTest(Case):

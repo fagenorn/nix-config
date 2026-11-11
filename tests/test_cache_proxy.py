@@ -13,6 +13,7 @@ import http.server
 import io
 import json
 import contextlib
+import os
 import re
 import select
 import socket
@@ -22,13 +23,17 @@ import subprocess
 import sys
 import threading
 import time
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
 
+from agent_tools.console import service as console_service
 from agent_tools.hosts import cache_proxy
 from agent_tools.hosts import rate_limits
 from agent_tools.hosts import subagent_prefix
+
+from . import console_test_support as console_support
 
 TIMEOUT = 10
 SSE_HEAD = (b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n"
@@ -1134,6 +1139,68 @@ class LimitSensingTest(ProxyCase):
                                           for document in documents])
         self.assertEqual(console.content_types, ["application/json"] * 3)
         self.assertEqual(len(stream.lines), 1)
+
+
+class SignInTest(ProxyCase):
+    """No sign-in value reaches the proxy's log, its report or the console's store (#860)."""
+
+    SECRETS = ("test-token-1", "test-key-1", "drop-me", "dev-secret-1")
+
+    def test_no_sign_in_reaches_the_log_the_report_or_the_store(self):
+        body = json.dumps({"metadata": {"user_id": json.dumps(
+            {"device_id": "dev-secret-1", "account_uuid": "acc-1", "session_id": "ses-1"})}}).encode()
+        reports = []
+        upstream = self.upstream(replay("limits-allowed.json"))
+        stream = RecordingStream()
+        server = cache_proxy.ProxyServer(
+            0, cache_proxy.parse_upstream(upstream.url), cache_proxy.LineLog(stream),
+            limits=cache_proxy.LimitSensor(reports.append))
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        port = server.server_address[1]
+        request = (b"POST /v1/messages?beta=true HTTP/1.1\r\n"
+                   b"Host: 127.0.0.1:%d\r\n"
+                   b"authorization: Bearer test-token-1\r\n"
+                   b"anthropic-beta: first\r\n"
+                   b"x-api-key: test-key-1\r\n"
+                   b"anthropic-beta: second\r\n"
+                   b"Accept-Encoding: gzip, br\r\n"
+                   b"Connection: keep-alive, X-Hop\r\n"
+                   b"X-Hop: drop-me\r\n"
+                   b"Keep-Alive: timeout=5\r\n"
+                   b"Proxy-Authorization: Basic drop-me\r\n"
+                   b"Content-Type: application/json\r\n"
+                   b"Content-Length: %d\r\n\r\n" % (port, len(body))) + body
+        with socket.create_connection(("127.0.0.1", port), timeout=TIMEOUT) as sock:
+            sock.sendall(request)
+            reply = http.client.HTTPResponse(sock)
+            reply.begin()
+            self.assertEqual((reply.status, reply.read()), (200, b"{}"))
+        stream.records(1)
+        self.assertEqual(len(reports), 1)
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            store = root / "events.sqlite3"
+            registry = root / "profiles/work/sessions"
+            console_support.write_session(registry, pid=os.getpid(), session_id="ses-1",
+                                          cwd=str(root), status="busy")
+            svc = console_service.ConsoleService(
+                store, root / "registry.json", port=0, session_dirs=lambda: [registry],
+                profile_dirs=lambda: [root / "profiles/work"], repo_of=lambda cwd: cwd)
+            try:
+                for report in reports:
+                    svc.ingest_reading(json.dumps(report).encode())
+            finally:
+                svc.close()
+            stored = store.read_bytes()
+            kinds = [row[2] for row in console_support.log_rows(store)]
+        self.assertEqual(kinds.count("capacity.reading"), 1)
+        for secret in self.SECRETS:
+            with self.subTest(secret):
+                self.assertFalse(any(secret in line for line in stream.lines))
+                self.assertNotIn(secret, json.dumps(reports))
+                self.assertNotIn(secret.encode(), stored)
 
 
 class LimitFlagTest(unittest.TestCase):
