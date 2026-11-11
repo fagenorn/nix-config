@@ -279,6 +279,28 @@ let
     fi
   '';
 
+  # Console hooks (#857, ADR-console-003): the console at 127.0.0.1:27184 hears five events
+  # over HTTP hooks. SessionStart takes no HTTP hook (#829), so it runs a dash-and-curl
+  # relay: a Python process alone costs more than the 10 ms budget. The template's
+  # shebang and curl are swapped for store paths.
+  consoleHookUrl = "http://127.0.0.1:27184/api/hooks";
+  consoleHttpHook = [
+    {
+      hooks = [
+        {
+          type = "http";
+          url = consoleHookUrl;
+          timeout = 2;
+        }
+      ];
+    }
+  ];
+  consoleSessionStart = pkgs.writeScript "console-session-start" (
+    builtins.replaceStrings [ "#!/bin/sh" "@curl@" ] [ "#!${pkgs.dash}/bin/dash" "${pkgs.curl}/bin/curl" ] (
+      builtins.readFile ./console-session-start.sh
+    )
+  );
+
   # Durable, user-authored Claude Code settings (ported from the existing ~/.claude/settings.json).
   # Runtime-mutable noise — the accumulated project-specific permissions.allow list, OAuth,
   # project history, statsig caches — is intentionally NOT frozen here.
@@ -335,6 +357,26 @@ let
         ];
       }
     ];
+
+    # Only the console may receive an HTTP hook (#857); any other URL is blocked.
+    allowedHttpHookUrls = [ "http://127.0.0.1:27184/*" ];
+
+    hooks.SessionStart = [
+      {
+        hooks = [
+          {
+            type = "command";
+            command = "${consoleSessionStart}";
+            timeout = 5;
+          }
+        ];
+      }
+    ];
+    hooks.Stop = consoleHttpHook;
+    hooks.StopFailure = consoleHttpHook;
+    hooks.PermissionRequest = consoleHttpHook;
+    hooks.Notification = consoleHttpHook;
+    hooks.SessionEnd = consoleHttpHook;
 
     # The broad push, PR-create, branch-delete and PR-merge entries are usable only
     # through the lifecycle guard above, which adjudicates every one of them at the
