@@ -4368,6 +4368,33 @@ class DeclaredBranchTest(unittest.TestCase):
         self.assertTrue(result["branch_problems"])
         self.assertNotIn("impl-1", labels(calls))
 
+    def test_a_task_naming_the_delivery_branch_is_a_plain_task(self):
+        """#864: a planner that tags a task with the delivery's own branch declared no extra branch."""
+        own = dict(PLAN, branches=[], tasks=[dict(PLAN["tasks"][0], branch="issue-9-x")])
+        result, calls = run(replies={"plan": own})
+        self.assertEqual(result["stage"], "done")
+        self.assertIn("plan-review", labels(calls))
+        self.assertNotIn("commits to the declared branch", prompt(calls, "impl-1"))
+        self.assertIn("git -C /r/.wt/w-issue-9-x diff", prompt(calls, "review-1"))
+        self.assertNotIn("branch", result["tasks"][0])
+        revised, calls = run(replies={"plan-review": TASK_FINDING, "plan-revise": own})
+        self.assertEqual(revised["stage"], "done")
+        self.assertEqual(labels(calls).count("plan-revise"), 1)
+        cont = {"setup": {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x", "plan_dir": "/g"},
+                "plan": own, "plan_reviewed": True, "done": []}
+        resumed, calls = run(args=dict(ARGS, cont=cont))
+        self.assertEqual(resumed["stage"], "done")
+        self.assertIn("impl-1", labels(calls))
+        # Any other undeclared name is still refused, and so is declaring the delivery branch itself.
+        for name, reply in {"other": dict(own, tasks=[dict(PLAN["tasks"][0], branch="other")]),
+                            "case alias": dict(own, tasks=[dict(PLAN["tasks"][0], branch="ISSUE-9-X")]),
+                            "declared": bplan([dict(BR, name="issue-9-x", current="issue-9-x")], task_branch="issue-9-x")}.items():
+            with self.subTest(name=name):
+                refused, calls = run(replies={"plan": reply})
+                self.assertEqual((refused["stage"], refused["step"]), ("plan", "plan"))
+                self.assertTrue(refused["branch_problems"])
+                self.assertNotIn("impl-1", labels(calls))
+
     def test_a_kept_plan_with_an_invalid_declaration_is_dropped_on_resume_whatever_the_facts_read(self):
         """The plan check comes before the branch-fact check: honest facts of an invalid declaration must not stop setup."""
         cont_of = lambda plan: {"setup": {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x", "plan_dir": "/g"},

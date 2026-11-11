@@ -257,7 +257,8 @@ const branchProblems = (p, w = W, int = INT) => {
   }
   if (Array.isArray(p.tasks)) {
     for (const t of p.tasks) {
-      if (!isEntry(t) || t.branch === undefined) continue
+      // #864: the delivery's own branch is where an undeclared task commits anyway, so naming it declares nothing.
+      if (!isEntry(t) || t.branch === undefined || t.branch === setup.branch) continue
       if (typeof t.branch !== 'string' || !good.some(g => g.name === t.branch)) out.push(`task ${show(t.n)}: branch ${show(t.branch)} is not declared`)
     }
   }
