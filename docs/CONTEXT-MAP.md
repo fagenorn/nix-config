@@ -36,6 +36,7 @@
 | Console | Console |
 | Decision prompt | Claims |
 | Delivery | Delivery |
+| Delivery run | Console |
 | Deprecation | Project contract |
 | Derived row | Guard |
 | Detaching word | Guard |

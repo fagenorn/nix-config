@@ -63,7 +63,10 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
 
     <line> = {"label": "Outside sprints", "working": <int>, "waiting": <int>,
               "summary": "<text>", "sessions": [<session entry>, ...]}
-    <session entry> = {"session_id", "name", "state", "state_text", "cwd"}
+    <session entry> = {"session_id", "name", "state", "state_text", "cwd",
+                       "deliveries": [<delivery entry>, ...]}
+    <delivery entry> = {"run_id", "quiet": <bool>, "moved_text": "<text>",
+                        "issues": [{"issue": <int>, "stage", "stage_text"}, ...]}
     <unmanaged entry> = {"type": "unmanaged", "root": "<repo>",
                          "label": "Not yet managed", "outside_sprints": <line>}
 
@@ -74,6 +77,14 @@ that order, and is "No sessions" with none. Sessions are ordered by state rank
 (waiting_answer, waiting_permission, working, limit, idle), then newest
 `last_seq`, then `session_id`; `name` is the session's name, else the first 8
 characters of its id.
+
+`deliveries` (always present, possibly empty) are the in-flight workflow runs of that listed
+session, from the delivery states `derive_view` is given: the states whose `session_id` equals the
+session's id, newest `moved_ms` first, then `run_id`; each run's issues are ordered by number.
+`quiet` and `moved_text` come from `moved_text(now_ms - moved_ms)`; `now_ms` is injected by the
+caller (this module still reads no clock) and `None` counts as no time elapsed. The runs of an
+ended or unlisted session appear nowhere, and they change no count, summary, order or the
+statement. The word "stalled" is never written: a quiet run is only quiet.
 `encode_view` writes sorted keys, compact separators, non-ASCII kept, NaN
 refused, no newline.
 """
@@ -82,6 +93,7 @@ import json
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 
+from agent_tools.console.deliveries import DeliveryState, moved_text, stage_text
 from agent_tools.console.event_log import Event
 from agent_tools.console.sessions import (
     ENDED,
@@ -269,17 +281,37 @@ def project_for(repo: str, states: Mapping[str, ProjectState]) -> str | None:
     return min(matches) if matches else None
 
 
-def _session_entry(session: SessionState) -> dict:
+def _delivery_entry(state: DeliveryState, now_ms: int | None) -> dict:
+    quiet, text = moved_text(0 if now_ms is None else now_ms - state.moved_ms)
+    return {
+        "run_id": state.run_id,
+        "quiet": quiet,
+        "moved_text": text,
+        "issues": [
+            {"issue": i.issue, "stage": i.stage, "stage_text": stage_text(i)}
+            for i in sorted(state.issues, key=lambda i: i.issue)
+        ],
+    }
+
+
+def _session_entry(session: SessionState,
+                   deliveries: Mapping[str, Sequence[DeliveryState]],
+                   now_ms: int | None) -> dict:
+    runs = sorted(deliveries.get(session.session_id, ()),
+                  key=lambda d: (-d.moved_ms, d.run_id))
     return {
         "session_id": session.session_id,
         "name": session.name or session.session_id[:8],
         "state": session.state,
         "state_text": STATE_TEXT[session.state],
         "cwd": session.cwd,
+        "deliveries": [_delivery_entry(d, now_ms) for d in runs],
     }
 
 
-def _line(sessions: Iterable[SessionState]) -> dict:
+def _line(sessions: Iterable[SessionState],
+          deliveries: Mapping[str, Sequence[DeliveryState]],
+          now_ms: int | None) -> dict:
     ordered = sorted(sessions, key=lambda s: (
         _RANK[s.state], -s.last_seq, s.session_id))
     summary = ", ".join(
@@ -290,12 +322,13 @@ def _line(sessions: Iterable[SessionState]) -> dict:
         "working": sum(s.state == WORKING for s in ordered),
         "waiting": sum(s.state in _WAITING for s in ordered),
         "summary": summary or "No sessions",
-        "sessions": [_session_entry(s) for s in ordered],
+        "sessions": [_session_entry(s, deliveries, now_ms) for s in ordered],
     }
 
 
 def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
-                   ) -> dict:
+                   deliveries: Mapping[str, Sequence[DeliveryState]],
+                   now_ms: int | None) -> dict:
     return {
         "type": "project",
         "project_id": state.project_id,
@@ -303,7 +336,7 @@ def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
         "quiet": state.open_work == 0 and not sessions,
         "open_work": state.open_work,
         "last_activity": state.last_at,
-        "outside_sprints": _line(sessions),
+        "outside_sprints": _line(sessions, deliveries, now_ms),
     }
 
 
@@ -338,6 +371,8 @@ def derive_view(
     records: Mapping[tuple[str, str], InboxRecord] | None = None,
     health: Mapping[str, ReadState] | None = None,
     sessions: Iterable[SessionState] = (),
+    deliveries: Mapping[tuple[str, str], DeliveryState] | None = None,
+    now_ms: int | None = None,
 ) -> dict:
     states = list(states)
     registered = {s.project_id for s in states}
@@ -360,6 +395,9 @@ def derive_view(
     else:
         sentence = _sentence(len(states))
     by_id = {state.project_id: state for state in states}
+    runs: dict[str, list[DeliveryState]] = {}
+    for delivery in (deliveries or {}).values():
+        runs.setdefault(delivery.session_id, []).append(delivery)
     owned: dict[str, list[SessionState]] = {}
     unmanaged: dict[str, list[SessionState]] = {}
     for session in sessions:
@@ -376,8 +414,9 @@ def derive_view(
 
     active = _order(s for s in states if is_active(s))
     quiet = _order(s for s in states if not is_active(s))
-    entries = [_project_entry(s, owned.get(s.project_id, ())) for s in active]
-    quiet_entries = [_project_entry(s, ()) for s in quiet]
+    entries = [_project_entry(s, owned.get(s.project_id, ()), runs, now_ms)
+               for s in active]
+    quiet_entries = [_project_entry(s, (), runs, now_ms) for s in quiet]
     if len(quiet_entries) <= FOLD_AFTER:
         entries.extend(quiet_entries)
     else:
@@ -398,7 +437,7 @@ def derive_view(
         "entries": entries,
         "unmanaged": [
             {"type": "unmanaged", "root": root, "label": UNMANAGED_LABEL,
-             "outside_sprints": _line(unmanaged[root])}
+             "outside_sprints": _line(unmanaged[root], runs, now_ms)}
             for root in sorted(unmanaged)],
     }
 

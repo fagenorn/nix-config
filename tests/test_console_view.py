@@ -2,6 +2,15 @@
 
 import unittest
 
+from agent_tools.console.deliveries import (
+    DELIVERY_GONE,
+    DELIVERY_SEEN,
+    DeliveryState,
+    IssueStage,
+    delivery_changes,
+    delivery_states,
+    seen_payload,
+)
 from agent_tools.console.event_log import Event
 from agent_tools.console.sessions import ENDED, SessionState
 from agent_tools.console.view import (
@@ -187,17 +196,20 @@ class SessionViewTest(unittest.TestCase):
             "sessions": [
                 {"session_id": "s2", "name": "n2", "state": "waiting_answer",
                  "state_text": "waiting for an answer in its terminal",
-                 "cwd": "/srv/p00"},
+                 "cwd": "/srv/p00", "deliveries": []},
                 {"session_id": "s3", "name": "s3",
                  "state": "waiting_permission",
                  "state_text": "waiting for a permission in its terminal",
-                 "cwd": "/srv/p00"},
+                 "cwd": "/srv/p00", "deliveries": []},
                 {"session_id": "s1", "name": "s1", "state": "working",
-                 "state_text": "working", "cwd": "/srv/p00"},
+                 "state_text": "working", "cwd": "/srv/p00",
+                 "deliveries": []},
                 {"session_id": "s5", "name": "s5", "state": "limit",
-                 "state_text": "stopped on a usage limit", "cwd": "/srv/p00"},
+                 "state_text": "stopped on a usage limit", "cwd": "/srv/p00",
+                 "deliveries": []},
                 {"session_id": "s4", "name": "s4", "state": "idle",
-                 "state_text": "idle", "cwd": "/srv/p00"},
+                 "state_text": "idle", "cwd": "/srv/p00",
+                 "deliveries": []},
             ],
         })
 
@@ -235,7 +247,7 @@ class SessionViewTest(unittest.TestCase):
                     "session_id": "s9", "name": "s9",
                     "state": "waiting_answer",
                     "state_text": "waiting for an answer in its terminal",
-                    "cwd": "/srv/elsewhere"}]}}])
+                    "cwd": "/srv/elsewhere", "deliveries": []}]}}])
         self.assertEqual(view["statement"], self.NO_SESSION_STATEMENT)
         self.assertEqual(view["project_count"], 1)
         self.assertEqual(view["entries"][0]["outside_sprints"]["sessions"], [])
@@ -295,6 +307,131 @@ class SessionViewTest(unittest.TestCase):
         self.assertEqual(entry["outside_sprints"]["summary"], "No sessions")
         self.assertIs(entry["quiet"], True)
         self.assertEqual(view["unmanaged"], [])
+
+
+def run(sid, run_id, moved_ms, *issues):
+    return {(sid, run_id): DeliveryState(sid, run_id, moved_ms, tuple(issues))}
+
+
+def seen(seq, sid, run_id, moved_ms, issues):
+    return event(seq, DELIVERY_SEEN, None, {
+        "session_id": sid, "run_id": run_id, "moved_ms": moved_ms, "issues": issues})
+
+
+def gone(seq, sid, run_id):
+    return event(seq, DELIVERY_GONE, None, {"session_id": sid, "run_id": run_id})
+
+
+def issue_row(issue, stage, task=None, tasks=None):
+    return {"issue": issue, "stage": stage, "task": task, "tasks": tasks}
+
+
+def session_entries(view):
+    lines = [entry["outside_sprints"] for entry in view["entries"]
+             if entry["type"] == "project"]
+    lines += [entry["outside_sprints"] for entry in view["unmanaged"]]
+    return [s for line in lines for s in line["sessions"]]
+
+
+class DeliveryViewTest(unittest.TestCase):
+    def test_a_journal_unchanged_for_fifteen_minutes_reads_quiet_and_never_stalled(self):
+        moved = 1_000_000_000_000
+        table = [
+            (-5_000, False, "moved just now"),
+            (0, False, "moved just now"),
+            (59_999, False, "moved just now"),
+            (60_000, False, "moved 1 min ago"),
+            (899_999, False, "moved 14 min ago"),
+            (900_000, True, "quiet for 15 min"),
+            (1_320_000, True, "quiet for 22 min"),
+            (259_200_000, True, "quiet for 4320 min"),
+        ]
+        deliveries = run("s1", "wf_1", moved, IssueStage(858, "building", 2, 3))
+        for elapsed, quiet, text in table:
+            with self.subTest(elapsed=elapsed):
+                view = derive_view([state("p00", 1)], sessions=[session("s1", "working")],
+                                   deliveries=deliveries, now_ms=moved + elapsed)
+                entry = session_entries(view)[0]["deliveries"][0]
+                self.assertEqual((entry["quiet"], entry["moved_text"]), (quiet, text))
+                self.assertNotIn(b"stalled", encode_view(view).lower())
+
+    def test_a_sessions_runs_list_each_issues_stage(self):
+        deliveries = {
+            **run("s1", "wf_a", 1000, IssueStage(857, "plan review"),
+                  IssueStage(856, "building", 3, 5)),
+            **run("s1", "wf_b", 2000, IssueStage(860, "queued")),
+            **run("s2", "wf_c", 1500, IssueStage(861, "done")),
+        }
+        sessions = [session("s1", "working"), session("s2", "idle", seq=2)]
+        view = derive_view([state("p00", 1)], sessions=sessions,
+                           deliveries=deliveries, now_ms=2000)
+        by_id = {s["session_id"]: s for s in session_entries(view)}
+        self.assertEqual(by_id["s1"]["deliveries"], [
+            {"run_id": "wf_b", "quiet": False, "moved_text": "moved just now",
+             "issues": [{"issue": 860, "stage": "queued", "stage_text": "queued"}]},
+            {"run_id": "wf_a", "quiet": False, "moved_text": "moved just now",
+             "issues": [
+                 {"issue": 856, "stage": "building", "stage_text": "building task 3 of 5"},
+                 {"issue": 857, "stage": "plan review", "stage_text": "plan review"}]},
+        ])
+        self.assertEqual([d["run_id"] for d in by_id["s2"]["deliveries"]], ["wf_c"])
+        plain = derive_view([state("p00", 1)], sessions=sessions)
+        self.assertEqual(view["entries"][0]["outside_sprints"]["summary"],
+                         plain["entries"][0]["outside_sprints"]["summary"])
+
+    def test_runs_of_an_ended_or_unlisted_session_are_not_shown(self):
+        deliveries = {**run("s3", "wf_1", 1, IssueStage(1, "building")),
+                      **run("ghost", "wf_2", 1, IssueStage(2, "building"))}
+        view = derive_view([state("p00", 1)], sessions=[session("s3", ENDED)],
+                           deliveries=deliveries, now_ms=1)
+        self.assertEqual(session_entries(view), [])
+        self.assertNotIn(b"wf_", encode_view(view))
+
+    def test_delivery_events_fold_into_runs(self):
+        first = [
+            seen(1, "s1", "wf_1", 10, [issue_row(858, "planning")]),
+            seen(2, "s1", "wf_1", 20, [issue_row(858, "building", 1, 3)]),
+            seen(3, "s1", "wf_1", True, [issue_row(858, "planning")]),
+        ]
+        rest = [
+            seen(4, "s1", "wf_1", 30, [issue_row("858", "planning")]),
+            seen(5, "s1", "wf_1", 30, [issue_row(858, "stalled")]),
+            gone(6, "s2", "wf_9"),
+        ]
+        expected = run("s1", "wf_1", 20, IssueStage(858, "building", 1, 3))
+        folded = delivery_states(first + rest)
+        self.assertEqual(folded, expected)
+        self.assertEqual(delivery_states(rest, delivery_states(first)), folded)
+        self.assertEqual(delivery_states([gone(7, "s1", "wf_1")], folded), {})
+
+    def test_delivery_changes_append_only_differences(self):
+        a = DeliveryState("s1", "wf_1", 10, (IssueStage(858, "building", 1, 3),))
+        b = DeliveryState("s2", "wf_2", 10, ())
+        states = {("s1", "wf_1"): a, ("s2", "wf_2"): b}
+        owner = lambda sid: "owner/p00"
+        self.assertEqual(delivery_changes(states, {("s1", "wf_1"): a}, {"s1"}, owner), [])
+        moved = DeliveryState("s1", "wf_1", 11, a.issues)
+        self.assertEqual(
+            delivery_changes(states, {("s1", "wf_1"): moved}, {"s1"}, owner),
+            [(DELIVERY_SEEN, "owner/p00", seen_payload(moved))])
+        self.assertEqual(
+            delivery_changes(states, {}, {"s1"}, owner),
+            [(DELIVERY_GONE, "owner/p00", {"session_id": "s1", "run_id": "wf_1"})])
+        self.assertEqual(
+            delivery_changes(states, {}, {"s1", "s2"}, owner),
+            [(DELIVERY_GONE, "owner/p00", {"session_id": "s1", "run_id": "wf_1"}),
+             (DELIVERY_GONE, "owner/p00", {"session_id": "s2", "run_id": "wf_2"})])
+        self.assertEqual(seen_payload(a), {
+            "session_id": "s1", "run_id": "wf_1", "moved_ms": 10,
+            "issues": [{"issue": 858, "stage": "building", "task": 1, "tasks": 3}]})
+
+    def test_a_gone_run_leaves_the_session(self):
+        folded = delivery_states([
+            seen(1, "s1", "wf_1", 10, [issue_row(858, "building")]),
+            gone(2, "s1", "wf_1")])
+        view = derive_view([state("p00", 1)], sessions=[session("s1", "working")],
+                           deliveries=folded, now_ms=0)
+        self.assertEqual(session_entries(view)[0]["deliveries"], [])
 
 
 class EncodeTest(unittest.TestCase):
