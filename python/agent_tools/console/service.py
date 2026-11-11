@@ -114,8 +114,9 @@ thread starts and nothing is read.
 Retention (ADR-console-009): construction runs one retention pass (`EventLog.retain`) after
 opening the log and before reading its events, and `RETENTION_THREAD`, started by `start()`, calls
 `retain()` every `retention_seconds` (`RETENTION_SECONDS`, one day). A pass that removed rows
-re-derives the last look and the moments from the log under the ingest lock, with the construction
-code, and publishes, so the running digest equals the one a restart would publish. A failing pass
+re-folds the sessions and the inbox records and re-derives the last look and the moments from the
+log under the ingest lock, with the construction code, and publishes, so the running digest equals
+the one a restart would publish, and a later change is judged against what the log still holds. A failing pass
 is one stderr line `console: retention_failed <Type>: <message>` and the loop goes on.
 
 Digest: the view carries `digest.digest(moments, last look, now)` (see `digest.py`). The last look
@@ -584,11 +585,18 @@ class ConsoleService:
                                     digest.window_start(self._looked, self._now()))
 
     def retain(self) -> int:
-        """One retention pass; when it removed rows, re-derive the digest state and publish."""
+        """One retention pass; when it removed rows, re-fold the digest's baselines and publish.
+
+        The folded sessions and inbox records are rebuilt from the retained log, as a
+        restart would, so a later change is judged against what the log still holds.
+        """
         with self._ingest:
             removed = self.log.retain()
             if removed:
-                self._derive_digest(self.log.events())
+                events = self.log.events()
+                self._sessions = sessions.session_states(events)
+                self._inbox = inbox_records(events)
+                self._derive_digest(events)
                 self._publish()
             return removed
 

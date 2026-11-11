@@ -756,6 +756,31 @@ class RetentionServiceTest(Case):
         self.assertIsNone(running["since"])
         self.assertIs(running["first_visit"], True)
 
+    def test_a_pass_that_removes_an_unanswered_item_matches_a_restart_once_it_is_answered(self):
+        now = [T0]
+        unanswered = {"key": "octo/p00#7/1", "project_id": "owner/p00", "repo": "octo/p00",
+                      "issue": 7, "comment_id": 1, "url": "https://example.test/7",
+                      "reason": "conflict", "question": "Which base?", "questions": [],
+                      "items": [], "answered": False, "held_work": 1}
+        current = [unanswered]
+        svc = self.start(support.entries(1), retention_seconds=86400,
+                         tracker=lambda project_id, slug, *, cancelled: [current[0]],
+                         slug_of=lambda root: "octo/p00", activity=lambda root: now[0],
+                         **clocks(now))
+        svc.poll_tracker()
+        self.assertEqual([m["kind"] for m in digest_of(svc)["recent"]], ["inbox_appeared"])
+        now[0] = T0 + 91 * 86400
+        self.assertGreaterEqual(svc.retain(), 1)
+        svc.poll_tracker()
+        current[0] = {**unanswered, "answered": True}
+        svc.poll_tracker()
+        running = digest_of(svc)
+        svc.close()
+        second = support.service(self, self.store, self.registry, **clocks(now))
+        self.assertEqual(running, digest_of(second))
+        self.assertEqual([m["kind"] for m in running["recent"]],
+                         ["inbox_answered", "inbox_appeared"])
+
     def test_close_joins_the_background_threads(self):
         svc = self.start()
         names = {t.name for t in threading.enumerate()}
