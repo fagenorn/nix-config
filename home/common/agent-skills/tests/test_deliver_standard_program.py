@@ -4113,6 +4113,42 @@ class FixCommitScopeTest(unittest.TestCase):
         self.assertEqual([c["label"] for c in calls if self.SCOPE in c["prompt"]], [])
 
 
+class IndirectMergeHoldTest(unittest.TestCase):
+    """A PR merged through another PR's merge is MERGED with a null mergeCommit: the hold derives the commit."""
+
+    INDIRECT = (" When that mergeCommit is null, read gh pr view 42 --repo owner/repo --json state: only when it is MERGED "
+                "(the PR was merged indirectly: its head reached dev through another PR's merge), confirm "
+                "git -C /r merge-base --is-ancestor <headRefOid> origin/dev succeeds, then run "
+                "git -C /r rev-list --first-parent <headRefOid>..origin/dev (the first-parent line of origin/dev, newest "
+                "first) and git -C /r rev-list --ancestry-path <headRefOid>..origin/dev (the commits that contain the head): "
+                "the merge commit is the last commit of the first list that is also in the second (the first commit on the "
+                "first-parent line that contains the head); when the first list is empty, the tip of origin/dev is "
+                "the head itself and the merge commit is <headRefOid>. When the state is not MERGED or the head is not an "
+                "ancestor, return merge_commit_local false and stop here.")
+
+    def test_a_hold_without_a_merge_commit_derives_it_from_the_head(self):
+        cont = {"setup": {"holder": HOLDER, "branch": "issue-9-x", "worktree": "/r/.wt/w-issue-9-x",
+                          "worktree_path": "/r/.wt/w-issue-9-x"},
+                "lane": "standard", "plan": {"acceptance": PLAN["acceptance"]}, "pr": 42}
+        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"merged_heads": [{"number": 42, "commits": []}]}})
+        self.assertEqual(result["stage"], "done")
+        hold = prompt(calls, "hold")
+        self.assertIn("Merge commit: read from gh pr view 42 --repo owner/repo --json mergeCommit,headRefOid (and read "
+                      f"headRefOid, the PR head).{self.INDIRECT} Confirm git -C /r cat-file -e <merge commit>^{{commit}} "
+                      "succeeds and return the result as merge_commit_local; if it fails, stop here.", hold)
+
+    def test_a_hold_given_the_merge_commit_is_unchanged(self):
+        result, calls = run()
+        self.assertEqual(result["stage"], "done")
+        hold = prompt(calls, "hold")
+        merge_commit = result["merge_commit"]
+        self.assertIn(f"1. Run git -C /r fetch origin. Merge commit: {merge_commit}. Confirm git -C /r cat-file -e "
+                      "<merge commit>^{commit} succeeds and return the result as merge_commit_local; if it fails, stop here.",
+                      hold)
+        for absent in ("mergeCommit is null", "merge-base --is-ancestor", "--ancestry-path", "--first-parent", "--json state"):
+            self.assertNotIn(absent, hold)
+
+
 class SourceTest(unittest.TestCase):
     def test_land_lock_calls_are_the_batch_calls(self):
         """#677 P1: deliver-standard reuses deliver-batch's land-lock calls verbatim."""
