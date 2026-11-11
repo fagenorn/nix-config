@@ -855,8 +855,9 @@ ${RULES}`, `land-merge-${n}`, { ...lifecycleClerk, schema: withRenew(LAND_MERGE_
 //   train-build-<t>   builds car i = integration branch + heads 1..i on scratch branches land-train/<batch>-<t>-<i>, one car PR each;
 //   train-checks-<t>-<i>  waits for every car's checks, in parallel and bounded; g is the longest green prefix;
 //   train-ready-<t>   renews the claims of members 1..g and reads their PR heads; a member that fails shrinks the train to those before it;
-//   train-merge-<t>   re-checks the lock at H1 (already_held only), merges car g at its exact head and polls the member PRs until the forge
-//                     marks them merged (the car's history contains their heads);
+//   train-merge-<t>   re-checks the lock at H1 (already_held only), merges car g at its exact head and reads the member PRs once;
+//   train-flip-<t>-<k>  reads the states again while a member PR still reads OPEN (the forge marks them merged itself, since the car's
+//                     history contains their heads), TRAIN_FLIP_CALLS times at most; it also reads the car once when the merge reply was lost;
 //   close-out-<n>     per merged member, the landing's own close-out; the lock release rides in the first member's, as in a serial landing;
 //   train-sweep-<s>   closes the open cars and deletes the car branches, the scratch worktree and the merged members' remote branches.
 // Rows stay per issue, with the issue's own PR; the row of an issue whose commits the car merged also carries train and car_pr.
@@ -870,16 +871,18 @@ const TRAIN_MAX = 3
 // The one long wait of a train, its car checks, is therefore bounded well below that: the other train steps have the remaining 20 minutes.
 const LOCK_IDLE_MIN = 45
 const TRAIN_CHECKS_WAIT_MIN = 25
-// How long train-merge waits for the forge to mark the member PRs merged after the car merge: this many rounds of reads, this far apart.
-const TRAIN_FLIP_POLLS = 10
-const TRAIN_FLIP_WAIT_S = 15
+// The forge marks the member PRs merged by itself after the car merge, and that can lag. No step sleeps: the program asks a read-only
+// train-flip step again while a member still reads OPEN, this many times at most, and each call's own duration is the wait.
+const TRAIN_FLIP_CALLS = 8
 const CAR_PREFIX = `land-train/${BATCH}-`
 const FULL_SHA = /^[0-9a-f]{40}$/
 const WAITING = []
 let trainNo = 0
 let sweepNo = 0
 // Cars of this batch may be open: an earlier run that died mid-train, or a train of this run not yet swept clean. An open car contains the
-// lock's sha, and forge-claim refuses to move a lock contained in a PR that is not the caller's, so they are swept before any landing.
+// lock's sha, and forge-claim refuses to move a lock contained in a PR that is not the caller's. So a drain asks for a sweep before it lands
+// anything, and a train's exits sweep too. A sweep that fails or dies stops nothing: carsMaybe stays set, the drain lands anyway (a lock move
+// may then answer land-contended, as any refused move does) and the next drain asks again.
 let carsMaybe = true
 const TRAIN_LIFECYCLE = { agentType: 'clerk', model: DEFAULT_CLERK_MODEL, effort: 'low' }
 const trainCall = (prompt, label, opts) => ask(agent(prompt, { label, phase: 'Land', ...opts }), label)
@@ -890,11 +893,13 @@ const TRAIN_READY_SCHEMA = {
   properties: { members: { type: 'array', items: { type: 'object', properties: { issue: { type: 'integer' }, renew: RENEW_SCHEMA, head: { type: 'string' }, state: { type: 'string' } }, required: ['issue', 'renew'] } } },
   required: ['members'],
 }
+const PR_STATES = { type: 'array', items: { type: 'object', properties: { pr: { type: 'integer' }, state: { type: 'string' } }, required: ['pr', 'state'] } }
+const TRAIN_FLIP_SCHEMA = { type: 'object', properties: { car: { type: 'string' }, prs: PR_STATES }, required: ['prs'] }
 const TRAIN_MERGE_SCHEMA = {
   type: 'object',
   properties: {
     lock: NULLABLE(LOCK_SCHEMA), merged: { type: 'boolean' }, notes: { type: 'string' },
-    prs: { type: 'array', items: { type: 'object', properties: { pr: { type: 'integer' }, state: { type: 'string' } }, required: ['pr', 'state'] } },
+    prs: PR_STATES,
   },
   required: ['merged'],
 }
@@ -990,9 +995,9 @@ ${RULES_FOR(e.ready.worktree, e.ready.branch)}`, `train-pr-${e.n}`, { agentType:
       const plan = members.map((m, i) => ({ issue: m.e.n, head: m.e.ready.head, car: carName(i + 1) }))
       const bd = await trainCall(`A landing train of ${SLUG} (the git repository at ${REPO}) lands ${members.length} ready branches into ${INT} with one merge. Build its cars: car i is ${INT} plus the heads of the members 1 to i, each car on its own scratch branch with its own pull request into ${INT}. Never write to a member's own branch, and never resolve a conflict.
 The members, in order, as JSON: ${JSON.stringify(plan)}
-1. Run git -C ${REPO} fetch origin. Make a fresh directory with mktemp -d and add the scratch worktree at <that directory>/land-train-${BATCH}, on the first car: git -C ${REPO} worktree add -B <the first car> <that path> origin/${INT}
-2. For each member in order: for every car after the first, start it where the previous car ends: git -C <the scratch worktree> checkout -B <car>. Merge the member head with a merge commit: git -C <the scratch worktree> merge --no-ff -m 'Land train car <i>' <head>. When the merge conflicts, run git -C <the scratch worktree> merge --abort and stop there: build no further car. Otherwise push the car, alone in its own Bash call, one branch per call: git -C <the scratch worktree> push -u origin <car>. Then open its pull request, alone in its own Bash call run from the repository checkout ${REPO} (the directory this session runs in; never from another directory and never chained after cd): ${UNSET}gh pr create --repo ${SLUG} --base ${INT} --head <car> --title 'Land train ${BATCH} ${t} car <i>' --body 'Car <i> of landing train ${t} of the batch ${BATCH}: the integration branch plus the first <i> ready branches of the train. The batch merges or closes it. Do not merge it by hand.' Use exactly that title and body with only <i> filled in: no issue number, no branch name and no closing keyword. When an open pull request with that head already exists, reuse it.
-3. Run git -C <the scratch worktree> checkout --detach, so that no car branch stays checked out.
+1. Run git -C ${REPO} fetch origin, once: it is the train's only fetch, and the first car starts at the origin/${INT} it brings. Make a fresh directory with mktemp -d and add the scratch worktree at <that directory>/land-train-${BATCH}, on the first car: git -C ${REPO} worktree add -B <the first car> <that path> origin/${INT}
+2. For each member in order: for every car after the first, start it where the previous car ends, never at origin/${INT} again: git -C <the scratch worktree> checkout -B <car>. Merge the member head with a merge commit: git -C <the scratch worktree> merge --no-ff -m 'Land train car <i>' <head>. When the merge conflicts, run git -C <the scratch worktree> merge --abort and stop there: build no further car. Otherwise push the car, alone in its own Bash call, one branch per call: git -C <the scratch worktree> push -u origin <car>. Then open its pull request, alone in its own Bash call run from the repository checkout ${REPO} (the directory this session runs in; never from another directory and never chained after cd): ${UNSET}gh pr create --repo ${SLUG} --base ${INT} --head <car> --title 'Land train ${BATCH} ${t} car <i>' --body 'Car <i> of landing train ${t} of the batch ${BATCH}: the integration branch plus the first <i> ready branches of the train. The batch merges or closes it. Do not merge it by hand.' Use exactly that title and body with only <i> filled in: no issue number, no branch name and no closing keyword. When an open pull request with that head already exists, reuse it.
+3. Run git -C <the scratch worktree> checkout --detach, so that no car branch stays checked out: the merge of a car deletes its branch.
 Return status done when every car was built, pushed and opened, else blocked; conflicted (true only when a merge conflicted); cars: one {issue, head (the full sha of the car's pushed head: git -C <the scratch worktree> rev-parse <car>), pr (the number of its pull request)} per car that was built, pushed and opened, in order, and none from the first that was not; and notes.
 ${RULES_FOR('<the scratch worktree>', '<car>')}`, `train-build-${t}`, { agentType: 'implementer', model: 'sonnet', schema: { ...LAND_SYNC_SCHEMA, properties: { ...LAND_SYNC_SCHEMA.properties, cars: CARS_SCHEMA } } })
       const cars = []
@@ -1003,10 +1008,10 @@ ${RULES_FOR('<the scratch worktree>', '<car>')}`, `train-build-${t}`, { agentTyp
       }
       if (!cars.length) return await fallBack(bd ? `no car was built (${bd.notes || bd.status})` : `train-build-${t} returned nothing`)
 
-      // 4. Every car's checks, in parallel, each bounded below the lock's idle takeover. 5. The longest green prefix.
+      // 4. Every car's checks, in parallel, each bounded below the lock's idle takeover and read-only (gh alone: no fetch, no git). 5. The longest green prefix.
       const cks = await parallel(cars.map((c, i) => () => trainCall(`Wait for every check of the pull request #${c.pr} of ${SLUG} (the git repository at ${REPO}), car ${i + 1} of a landing train into ${INT}, at the car head ${c.head}, required or not. Change nothing.
 1. Read ${UNSET}gh pr view ${c.pr} --repo ${SLUG} --json headRefOid,state. head is its headRefOid. When head is not ${c.head} or the state is not OPEN, answer state failed at once with head and what you read in details.
-2. Run git -C ${REPO} fetch origin. If origin/${INT} is not an ancestor of head (git -C ${REPO} merge-base --is-ancestor origin/${INT} ${c.head} fails), answer state behind at once with head.
+2. Run no git command in this step: the cars' checks are read side by side, and a fetch in the shared checkout would collide with theirs. Whether the car is behind ${INT} is not read here; the merge itself refuses a car that is. When a read of this step fails (a gh error, not a failing check), read once more; when it fails again answer state pending with head ${c.head} and the error in details, never failed.
 ${CHECKS_TAIL(c.pr, `(give the watch a Bash timeout of ${TRAIN_CHECKS_WAIT_MIN} minutes at most and stop waiting ${TRAIN_CHECKS_WAIT_MIN} minutes after this step began, whatever is still pending then: the train holds the land lock, which another host takes over after ${LOCK_IDLE_MIN} idle minutes)`)}
 ${RULES_FOR(REPO, carName(i + 1))}`, `train-checks-${t}-${i + 1}`, { ...TRAIN_LIFECYCLE, schema: LAND_CHECKS_SCHEMA })))
       let g = 0
@@ -1038,8 +1043,29 @@ ${RULES_FOR(REPO, '<branch>')}`, `train-ready-${t}`, { agentType: 'clerk', model
       // The one-shot pre-merge acquire at H1 must answer already_held: the lock never moved, and acquired means it was lost and retaken.
       const last = cars[members.length - 1]
       const memberPrs = members.map(m => m.pr)
+      const states = {} // the last state read of each member PR
+      const note = prs => { for (const p of (Array.isArray(prs) ? prs : [])) if (isObj(p) && memberPrs.includes(p.pr)) states[p.pr] = p.state }
+      let flips = 0
+      // One read-only look at the forge: the car's state and the states of `prs`. A dead or thrown read answers null and still counts.
+      const flip = async prs => {
+        flips++
+        let fl = null
+        try {
+          fl = await trainCall(`Landing train ${t} of ${SLUG} (the git repository at ${REPO}) merged, or may have merged, its car, the pull request #${last.pr}, into ${INT}. Read pull request states; change nothing.
+The pull requests to read, as JSON: ${JSON.stringify(prs)}
+1. Read ${UNSET}gh pr view ${last.pr} --repo ${SLUG} --json state and return its state as car.
+2. Read each listed pull request once with ${UNSET}gh pr view <number> --repo ${SLUG} --json state (never read or return its merge commit).
+Return car and prs: one {pr, state} per listed pull request. The forge marks a listed pull request merged by itself once the car is in ${INT}, and that can lag: do not wait and do not read twice, the program asks again. Never merge, close or edit any pull request.
+${RULES_FOR(REPO, '<branch>')}`, `train-flip-${t}-${flips}`, { agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: TRAIN_FLIP_SCHEMA })
+        } catch (e) { fl = null }
+        if (fl) note((Array.isArray(fl.prs) ? fl.prs : []).filter(x => isObj(x) && prs.includes(x.pr)))
+        return fl
+      }
       mergeSent = true
-      const mg = await trainCall(`Landing train ${t} of ${SLUG} (the git repository at ${REPO}) merges its car, the pull request #${last.pr}, into ${INT}. The car contains the heads of the train's member pull requests, so its merge lands them.
+      let mg = null
+      let lost = null
+      try {
+        mg = await trainCall(`Landing train ${t} of ${SLUG} (the git repository at ${REPO}) merges its car, the pull request #${last.pr}, into ${INT}. The car contains the heads of the train's member pull requests, so its merge lands them.
 The member pull requests, as JSON: ${JSON.stringify(memberPrs)}
 First re-check the cross-host landing lock of the branch ${INT}: run alone and exactly: ${LAND_ACQUIRE(H1, false)}
 ${LOCK_RETURN} Return it as lock.
@@ -1047,25 +1073,34 @@ Only when lock's verdict is already_held, merge the car; a re-run must not merge
 1. Read ${UNSET}gh pr view ${last.pr} --repo ${SLUG} --json state. When state is already MERGED, skip step 2.
 2. Otherwise run, alone and exactly, in its own Bash call from the repository checkout ${REPO} (the directory this session runs in; never from another directory and never chained after cd): ${MERGE_CMD(last.pr, last.head)}
 3. Read the car's state again: merged is true only when it reads MERGED. Never retry with another form; on a guard refusal or a head mismatch return merged false with the exact message in notes.
-4. Only when merged is true, read the state of each member pull request with ${UNSET}gh pr view <number> --repo ${SLUG} --json state (never read or return its merge commit). The forge marks a member merged by itself once the car is in ${INT}, and that can lag: while any member still reads OPEN, wait ${TRAIN_FLIP_WAIT_S} seconds and read again, at most ${TRAIN_FLIP_POLLS} rounds of reads in all. That wait is the one exception to the rule against sleeping below: run it in the foreground as its own Bash call. Never merge, close or edit a member pull request yourself.
-Return merged, notes and prs: one {pr, state} per member pull request as last read (an empty list when merged is false). On any other lock verdict run nothing else and return merged false with the verdict in notes.
+4. Only when merged is true, read the state of each member pull request once with ${UNSET}gh pr view <number> --repo ${SLUG} --json state (never read or return its merge commit). The forge marks a member merged by itself once the car is in ${INT}, and that can lag: do not wait for it and do not read twice, the program reads again by itself. Never merge, close or edit a member pull request yourself.
+Return merged, notes and prs: one {pr, state} per member pull request as read (an empty list when merged is false). On any other lock verdict run nothing else and return merged false with the verdict in notes.
 ${RULES_FOR(REPO, carName(members.length))}`, `train-merge-${t}`, { ...TRAIN_LIFECYCLE, effort: 'high', schema: TRAIN_MERGE_SCHEMA })
-      if (!mg) return endAll('stopped', { stage: 'train-merge', detail: `train-merge-${t} returned nothing` })
-      const v = mg.lock ? mg.lock.verdict : null
-      if (v !== 'already_held') return endAll('land-contended', { detail: `the land lock was not held before the train merge (${v})` })
-      // An unmerged car is not retried and not landed serially at once: the reply cannot prove the car stayed unmerged, and a relaunch re-reads the forge.
-      if (mg.merged !== true) return endAll('stopped', { stage: 'train-merge', detail: mg.notes })
+      } catch (e) { lost = String((e && e.message) || e) }
+      if (!mg || !mg.lock) {
+        // The reply is lost or names no lock verdict, so the car may be merged: one read of the forge decides, before every member stops on it.
+        const fl = await flip(memberPrs)
+        if (!fl || fl.car !== 'MERGED') return endAll('stopped', { stage: 'train-merge', detail: lost || `train-merge-${t} returned ${mg ? 'no lock verdict' : 'nothing'}` })
+        log(`train ${t}: the merge reply was lost and the car reads MERGED; closing out`)
+      } else {
+        const v = mg.lock.verdict
+        if (v !== 'already_held') return endAll('land-contended', { detail: `the land lock was not held before the train merge (${v})` })
+        // An unmerged car is not retried and not landed serially at once: the reply cannot prove the car stayed unmerged, and a relaunch re-reads the forge.
+        if (mg.merged !== true) return endAll('stopped', { stage: 'train-merge', detail: mg.notes })
+        note(mg.prs)
+      }
 
       // The car is merged, so every member's commits are in the integration branch: each keeps a cont naming its PR, as a merged landing does.
       car = last
       for (const m of members) markMerged(m.e.n, m.e.ready, m.pr)
-      const stateOf = pr => { const p = (Array.isArray(mg.prs) ? mg.prs : []).find(x => isObj(x) && x.pr === pr); return p ? p.state : null }
+      const unmerged = () => memberPrs.filter(pr => states[pr] !== 'MERGED')
+      while (unmerged().length && flips < TRAIN_FLIP_CALLS) await flip(unmerged())
       // A member PR the forge has not marked merged within the bound is stopped without a close-out: nothing here closes or merges it by hand.
       for (const m of members.slice(1)) {
-        if (stateOf(m.pr) === 'MERGED') closeOuts.push(m)
+        if (states[m.pr] === 'MERGED') closeOuts.push(m)
         else settled[m.e.n] = rowOf(m.e, 'stopped', m.pr, { stage: 'train-merged-open', train: t, car_pr: car.pr })
       }
-      if (stateOf(pr1) !== 'MERGED') return { row: { outcome: 'stopped', extra: { stage: 'train-merged-open' } } }
+      if (states[pr1] !== 'MERGED') return { row: { outcome: 'stopped', extra: { stage: 'train-merged-open' } } }
       firstMerged = true
       return { merged: true }
     } catch (err) {

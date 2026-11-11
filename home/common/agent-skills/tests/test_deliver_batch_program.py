@@ -2249,7 +2249,7 @@ CLERK, IMPL, REV = "clerk", "implementer", "reviewer"
 EXPECTED = {stem: frozenset({kind}) for kind, stems in (
     (CLERK, ("setup", "facts-", "release-", "acquire-", "readopt-", "recover-end-", "ask-", "settle-",
              "land-unlock-", "land-ask-", "land-lock-", "land-record-", "land-status-", "land-pr-", "land-checks-", "land-merge-", "close-out-",
-             "train-sweep-", "train-pr-", "train-checks-", "train-ready-", "train-merge-")),
+             "train-sweep-", "train-pr-", "train-checks-", "train-ready-", "train-merge-", "train-flip-")),
     (IMPL, ("land-sync-", "land-fix-", "train-build-")),
     (REV, ("land-sync-review-", "land-fix-review-")),
 ) for stem in stems}
@@ -2286,6 +2286,9 @@ SCENARIOS = (
                         "close_out": {"issue_state": "CLOSED", "released": True}}}},
     # #822: a train of two ready issues reaches every train step.
     {"args": dict(ARGS, issues=[1, 2], train=True), "patch": BEHIND},
+    # A member PR the merge step still read OPEN is read again by a train-flip step.
+    {"args": dict(ARGS, issues=[1, 2], train=True), "patch": BEHIND,
+     "replies": {"train-merge-1": {"merged": True, "prs": [{"pr": 41, "state": "MERGED"}, {"pr": 42, "state": "OPEN"}]}}},
 )
 
 
@@ -2789,7 +2792,8 @@ if __name__ == "__main__":
 
 
 X1, X2, X3 = "1" * 40, "2" * 40, "3" * 40
-TRAIN_STEMS = ("train-pr-", "train-build-", "train-checks-", "train-ready-", "train-merge-")
+TRAIN_STEMS = ("train-pr-", "train-build-", "train-checks-", "train-ready-", "train-merge-", "train-flip-")
+FLIP_CALLS = 8
 LAND_RELEASE = "forge-claim land release --repo owner/repo --branch dev --sha "
 FORBIDDEN = ("'", '"', "$", "`", "\\")
 
@@ -2823,6 +2827,20 @@ def members_of(calls, label):
 def merge_reply(states, lock="already_held", merged=True):
     return {"lock": {"verdict": lock, "lock_sha": SHA}, "merged": merged, "notes": "n",
             "prs": [{"pr": pr, "state": state} for pr, state in states.items()]}
+
+
+def flips(state, prs, car="MERGED"):
+    """Replies that answer every train-flip read of train 1 with `state` for each of `prs`."""
+    return {f"train-flip-1-{k}": {"car": car, "prs": [{"pr": pr, "state": state} for pr in prs]} for k in range(1, FLIP_CALLS + 1)}
+
+
+def flip_labels(calls):
+    return [label for label in labels(calls) if label.startswith("train-flip-")]
+
+
+def step_text(calls, label):
+    """A step's own text, without the shared rules that follow it."""
+    return prompt(calls, label).split("\nHard rules for this step")[0]
 
 
 class TrainArgsTest(unittest.TestCase):
@@ -2898,9 +2916,14 @@ class TrainTest(unittest.TestCase):
                 self.assertIn(needle, build)
         merge = prompt(calls, "train-merge-1")
         for needle in ("from the repository checkout /r", "never from another directory", "never chained after cd",
-                       "at most 10 rounds", "15 seconds", "never read or return its merge commit"):
+                       "do not wait for it", "never read or return its merge commit"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, merge)
+        for step in ("train-merge-1", "train-checks-1-1", "train-ready-1", "train-build-1", "train-sweep-2", "train-pr-2"):
+            with self.subTest(step=step):
+                own = step_text(calls, step)
+                self.assertNotIn("sleep", own)
+                self.assertNotIn("exception", own)
         self.assertNotIn("mergeCommit", merge)
         self.assertNotIn("merge_commit", json.dumps(schema_of(calls, "train-merge-1")))
         sweep = prompt(calls, "train-sweep-2")
@@ -2913,6 +2936,53 @@ class TrainTest(unittest.TestCase):
         self.assertIn(f"at the car head {X2}", checks)
         self.assertIn("25 minutes", checks)
         self.assertNotIn("60 minutes", checks)
+        for label in ("train-checks-1-1", "train-checks-1-2"):
+            own = step_text(calls, label)
+            # Read-only and side by side: gh alone, no fetch and no git in the shared checkout; a failed read is pending, never failed.
+            self.assertNotIn("fetch origin", own)
+            self.assertNotIn("git -C", own)
+            self.assertNotIn("merge-base", own)
+            self.assertIn("Run no git command in this step", own)
+            self.assertIn("when it fails again answer state pending", own)
+        self.assertEqual(sum("fetch origin" in step_text(calls, l) for l in labels(calls) if l.startswith("train-") and "sweep" not in l), 1)
+
+    def test_the_build_step_builds_each_car_on_the_one_before_it(self):
+        _, calls, _ = train_run(children={"1": ready(1), "2": ready(2, head=B)})
+        self.assertEqual([(m["issue"], m["head"]) for m in members_of(calls, "train-build-1")], [(1, SHA), (2, B)])
+        build = step_text(calls, "train-build-1")
+        steps = ["git -C /r fetch origin, once",
+                 "git -C /r worktree add -B <the first car> <that path> origin/dev",
+                 "never at origin/dev again: git -C <the scratch worktree> checkout -B <car>.",
+                 "git -C <the scratch worktree> merge --no-ff -m 'Land train car <i>' <head>.",
+                 "git -C <the scratch worktree> merge --abort and stop there",
+                 "git -C <the scratch worktree> push -u origin <car>.",
+                 "gh pr create --repo owner/repo --base dev --head <car>",
+                 "git -C <the scratch worktree> checkout --detach"]
+        found = [build.find(step) for step in steps]
+        self.assertNotIn(-1, found)
+        self.assertEqual(found, sorted(found))
+        # Only the first car starts at the integration tip, and no merge can fast-forward.
+        self.assertEqual((build.count("worktree add -B"), build.count("checkout -B"), build.count(" -B ")), (1, 1, 2))
+        self.assertIsNone(re.search(r"checkout -B <car>\s+\S*origin", build))
+        self.assertEqual(build.count(" merge --no-ff "), 1)
+        self.assertNotIn("merge --ff", build)
+        # The scratch worktree leaves the last car before the merge step deletes that car's branch.
+        order = labels(calls)
+        self.assertLess(order.index("train-build-1"), order.index("train-merge-1"))
+        self.assertIn("--delete-branch", step_text(calls, "train-merge-1"))
+        self.assertNotIn("worktree", step_text(calls, "train-merge-1"))
+
+    def test_the_sweep_deletes_the_local_car_branch_before_the_remote_one(self):
+        _, calls, _ = train_run()
+        for label in ("train-sweep-1", "train-sweep-2"):
+            with self.subTest(label=label):
+                sweep = step_text(calls, label)
+                steps = ["gh pr close <number> --repo owner/repo", "git -C /r worktree remove --force <path>",
+                         "git -C /r branch -d <branch>", "git -C /r push origin --delete refs/heads/<branch>"]
+                found = [sweep.find(step) for step in steps]
+                self.assertNotIn(-1, found)
+                self.assertEqual(found, sorted(found))
+                self.assertNotIn("branch -D <", sweep)
 
     def test_the_train_renews_every_member_claim_before_the_merge(self):
         _, calls, _ = train_run()
@@ -3117,21 +3187,70 @@ class TrainTest(unittest.TestCase):
                 self.assertEqual(result["relaunch"]["issues"], [1, 2])
                 self.assertNotIn("pr", result["relaunch"]["conts"]["1"])
 
-    def test_a_car_that_did_not_merge_or_a_dead_merge_step_stops_every_member_and_sweeps(self):
-        for name, reply, detail in (("unmerged", merge_reply({}, merged=False), "n"),
-                                    ("dead", None, "train-merge-1 returned nothing"),
-                                    ("threw", "throw", "stub agent train-merge-1 threw")):
+    def test_a_car_that_did_not_merge_stops_every_member_and_sweeps(self):
+        open_car = {"train-flip-1-1": {"car": "OPEN", "prs": []}}
+        for name, replies, detail, flipped in (
+                ("unmerged", {"train-merge-1": merge_reply({}, merged=False)}, "n", []),
+                ("dead", {"train-merge-1": None, **open_car}, "train-merge-1 returned nothing", ["train-flip-1-1"]),
+                ("threw", {"train-merge-1": "throw", **open_car}, "stub agent train-merge-1 threw", ["train-flip-1-1"]),
+                ("no verdict", {"train-merge-1": {"lock": None, "merged": False}, **open_car}, "train-merge-1 returned no lock verdict", ["train-flip-1-1"]),
+                ("dead and unread", {"train-merge-1": None, "train-flip-1-1": None}, "train-merge-1 returned nothing", ["train-flip-1-1"]),
+                ("dead and the read threw", {"train-merge-1": None, "train-flip-1-1": "throw"}, "train-merge-1 returned nothing", ["train-flip-1-1"])):
             with self.subTest(name=name):
-                result, calls, _ = train_run(replies={"train-merge-1": reply})
+                result, calls, _ = train_run(replies=replies)
                 order = land_labels(calls)
-                self.assertEqual(order[order.index("train-merge-1") + 1:], ["land-unlock-1", "train-sweep-2"])
+                self.assertEqual(order[order.index("train-merge-1") + 1:], flipped + ["land-unlock-1", "train-sweep-2"])
                 for n, pr in ((1, 41), (2, 42)):
                     self.assertEqual(row(result, n), {"issue": n, "outcome": "stopped", "pr": pr, "stage": "train-merge", "detail": detail})
                 self.assertEqual(lock_releases(calls), ["land-unlock-1"])
+                self.assertNotIn("pr", result["relaunch"]["conts"]["1"])
+
+    def test_a_lost_merge_reply_reads_the_forge_once_and_closes_out_a_merged_car(self):
+        for name, reply in (("dead", None), ("threw", "throw"), ("no verdict", {"lock": None, "merged": False})):
+            with self.subTest(name=name):
+                result, calls, _ = train_run(replies={"train-merge-1": reply})
+                self.assertEqual(flip_labels(calls), ["train-flip-1-1"])
+                flip = step_text(calls, "train-flip-1-1")
+                self.assertIn("gh pr view 92 --repo owner/repo --json state and return its state as car", flip)
+                self.assertIn("The pull requests to read, as JSON: [41,42]", flip)
+                order = land_labels(calls)
+                self.assertEqual(order[order.index("train-flip-1-1") + 1:], ["close-out-1", "train-sweep-2", "close-out-2"])
+                for n, pr in ((1, 41), (2, 42)):
+                    self.assertEqual(row(result, n), {"issue": n, "outcome": "landed", "pr": pr, "train": 1, "car_pr": 92})
+                self.assertEqual(lock_releases(calls), ["close-out-1"])
+
+    def test_a_flip_step_reads_states_and_changes_nothing(self):
+        _, calls, _ = train_run(replies={"train-merge-1": merge_reply({41: "MERGED", 42: "OPEN"})})
+        flip = step_text(calls, "train-flip-1-1")
+        self.assertIn("The pull requests to read, as JSON: [42]", flip)
+        for needle in ("change nothing", "do not wait and do not read twice", "Never merge, close or edit any pull request",
+                       "never read or return its merge commit"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, flip)
+        for banned in ("gh pr merge", "forge-claim", "git -C", "mergeCommit"):
+            with self.subTest(banned=banned):
+                self.assertNotIn(banned, flip)
+
+    def test_a_member_the_merge_step_read_open_is_read_again_until_it_flips(self):
+        late = {"train-merge-1": merge_reply({41: "MERGED", 42: "OPEN"}),
+                "train-flip-1-1": {"car": "MERGED", "prs": [{"pr": 42, "state": "OPEN"}]},
+                "train-flip-1-2": None,
+                # A read that names a PR it was not asked for never unmerges that PR.
+                "train-flip-1-3": {"car": "MERGED", "prs": [{"pr": 42, "state": "MERGED"}, {"pr": 41, "state": "OPEN"}]}}
+        result, calls, _ = train_run(replies=late)
+        self.assertEqual(flip_labels(calls), ["train-flip-1-1", "train-flip-1-2", "train-flip-1-3"])
+        for n, pr in ((1, 41), (2, 42)):
+            self.assertEqual(row(result, n), {"issue": n, "outcome": "landed", "pr": pr, "train": 1, "car_pr": 92})
+        result, calls, _ = train_run()
+        self.assertEqual(flip_labels(calls), [])
 
     def test_a_member_pr_still_open_after_the_car_merge_is_stopped_without_a_close_out(self):
-        result, calls, _ = train_run(replies={"train-merge-1": merge_reply({41: "MERGED", 42: "OPEN"})})
+        result, calls, _ = train_run(replies={"train-merge-1": merge_reply({41: "MERGED", 42: "OPEN"}), **flips("OPEN", [42])})
         self.assertEqual(row(result, 2), {"issue": 2, "outcome": "stopped", "pr": 42, "stage": "train-merged-open", "train": 1, "car_pr": 92})
+        # The program, not a sleeping step, waits: one read-only flip step per round, up to the bound, each for the open PR alone.
+        self.assertEqual(flip_labels(calls), [f"train-flip-1-{k}" for k in range(1, FLIP_CALLS + 1)])
+        for label in flip_labels(calls):
+            self.assertIn("The pull requests to read, as JSON: [42]", prompt(calls, label))
         self.assertNotIn("close-out-2", labels(calls))
         self.assertEqual(row(result, 1), {"issue": 1, "outcome": "landed", "pr": 41, "train": 1, "car_pr": 92})
         self.assertEqual(lock_releases(calls), ["close-out-1"])
@@ -3144,7 +3263,8 @@ class TrainTest(unittest.TestCase):
     def test_a_first_pr_still_open_after_the_car_merge_releases_the_lock_once_without_its_close_out(self):
         for name, states in (("open", {41: "OPEN", 42: "MERGED"}), ("unread", {42: "MERGED"})):
             with self.subTest(name=name):
-                result, calls, _ = train_run(replies={"train-merge-1": merge_reply(states)})
+                result, calls, _ = train_run(replies={"train-merge-1": merge_reply(states), **flips("OPEN", [41])})
+                self.assertEqual(len(flip_labels(calls)), FLIP_CALLS)
                 self.assertEqual(row(result, 1), {"issue": 1, "outcome": "stopped", "pr": 41, "stage": "train-merged-open", "train": 1, "car_pr": 92})
                 self.assertNotIn("close-out-1", labels(calls))
                 self.assertEqual(lock_releases(calls), ["land-unlock-1"])
@@ -3207,3 +3327,52 @@ class TrainTest(unittest.TestCase):
         _, calls, _ = train_run(patch={"setup": {"max_parallel": 2, "delete_branch": False}})
         self.assertNotIn("issue-1-x", prompt(calls, "train-sweep-2"))
         self.assertNotIn("--delete-branch", prompt(calls, "train-merge-1"))
+
+
+class TrainRelaunchTest(unittest.TestCase):
+    """#822, the failure table's last row: a run that stopped or died after the car merge is relaunched, and its issue PRs read MERGED."""
+
+    DONE = [{"n": 1, "commit": "c1"}]
+
+    @staticmethod
+    def done_child(pr):
+        return {"stage": "done", "pr": pr, "merged": True, "acceptance": [{"id": "AC1", "text": "works", "kind": "code"}],
+                "close_out": {"issue_state": "CLOSED", "released": True}}
+
+    def merged_facts(self, pr):
+        # dev is not the default branch, so the merged PR only says Refs; it is the cont's own landing by its commit.
+        return dict(HELD, merged_refs=[{"number": pr, "closes": False}], landed=[{"number": pr, "commits": ["c1"]}])
+
+    def test_a_relaunch_after_the_car_merge_closes_the_issues_out_and_lands_nothing_again(self):
+        children = {str(n): dict(ready(n), cont=dict(ready(n)["cont"], done=self.DONE)) for n in (1, 2)}
+        # The merge reply and the one read after it are both lost: the run cannot know the car is merged.
+        first, _, _ = train_run(children=children, replies={"train-merge-1": None, "train-flip-1-1": None})
+        relaunch = first["relaunch"]
+        self.assertEqual((relaunch["issues"], relaunch["train"]), ([1, 2], True))
+        for n in ("1", "2"):
+            self.assertNotIn("pr", relaunch["conts"][n])
+        second, calls, _ = run(args=relaunch, patch={"facts-1": self.merged_facts(41), "facts-2": self.merged_facts(42)},
+                               children={"1": self.done_child(41), "2": self.done_child(42)})
+        self.assertEqual([l for l in labels(calls) if l.startswith(("land-", "train-", "close-out-"))], [])
+        for c in calls:
+            if c["kind"] == "agent":
+                self.assertNotIn("gh pr merge 4", c["prompt"])
+                self.assertNotIn("gh pr merge 9", c["prompt"])
+        for n, pr in ((1, 41), (2, 42)):
+            self.assertEqual(row(second, n), {"issue": n, "outcome": "landed", "pr": pr})
+            self.assertEqual(child(calls, n)["args"]["mode"], "ready")
+            self.assertEqual(child(calls, n)["args"]["cont"], relaunch["conts"][str(n)])
+            self.assertEqual(len([c for c in calls if c["label"] == f"child-{n}"]), 1)
+            self.assertIn(f"recover-end-{n}", labels(calls))
+        self.assertIsNone(second["relaunch"])
+
+    def test_a_relaunch_of_a_member_stopped_open_closes_it_out_once_the_forge_marks_it_merged(self):
+        first, _, _ = train_run(replies={"train-merge-1": merge_reply({41: "MERGED", 42: "OPEN"}), **flips("OPEN", [42])})
+        relaunch = first["relaunch"]
+        self.assertEqual(relaunch["issues"], [2])
+        self.assertEqual(relaunch["conts"]["2"]["pr"], 42)
+        facts = dict(HELD, merged_refs=[{"number": 42, "closes": False}], landed=[{"number": 42, "commits": []}])
+        second, calls, _ = run(args=relaunch, patch={"facts-2": facts}, children={"2": self.done_child(42)})
+        self.assertEqual([l for l in labels(calls) if l.startswith(("land-", "train-", "close-out-"))], [])
+        self.assertEqual(row(second, 2), {"issue": 2, "outcome": "landed", "pr": 42})
+        self.assertIsNone(second["relaunch"])
