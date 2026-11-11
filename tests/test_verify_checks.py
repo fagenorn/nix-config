@@ -1532,3 +1532,57 @@ class DarwinShellPathCommandTest(unittest.TestCase):
 
     def test_the_check_script_is_committed_executable(self):
         self.assertEqual(committed_mode(f"{CHECKS}/darwin-shell-path"), "100755")
+
+
+class DarwinShellPathWrapperTest(unittest.TestCase):
+    """The committed check script, run as verify-pending or a user runs it, under the PATH it diagnoses."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name)
+        self.me = pwd.getpwuid(os.getuid()).pw_name
+        self.home = self.tmp / "home"
+        (self.home / ".agents" / "bin").mkdir(parents=True)
+        self.stubs = self.tmp / "stubs"
+        self.stubs.mkdir()
+        good = lines(f"/etc/profiles/per-user/{self.me}/bin:/usr/bin", PY313)
+        self.zsh, _ = fake_zsh(self.tmp, good, good)
+
+    def launcher(self, interpreter):
+        """A managed launcher in the shape lib/agent-tools.nix writes, naming `interpreter`."""
+        path = self.home / ".agents" / "bin" / "verify-pending"
+        path.write_text("#!/bin/sh\nunset NIX_PYTHONPATH NIX_PYTHONPREFIX NIX_PYTHONEXECUTABLE\n"
+                        f'exec {interpreter} -I -m agent_tools.verification.verify_pending "$@"\n',
+                        encoding="utf-8")
+
+    def old_python3(self):
+        """A python3 first on PATH that cannot run the package, as Xcode's 3.9 cannot."""
+        stub = self.stubs / "python3"
+        stub.write_text("#!/bin/sh\necho 'old python3 cannot import agent_tools' >&2\nexit 1\n",
+                        encoding="utf-8")
+        stub.chmod(0o755)
+
+    def run_script(self):
+        env = {"HOME": str(self.home), "PATH": f"{self.stubs}:/usr/bin:/bin"}
+        return subprocess.run(["/bin/sh", str(ROOT / CHECKS / "darwin-shell-path"),
+                               "--zsh", str(self.zsh)], cwd=ROOT, env=env,
+                              capture_output=True, text=True, timeout=60)
+
+    def test_it_starts_with_the_managed_interpreter_when_python3_on_path_cannot_run_the_package(self):
+        self.old_python3()
+        self.launcher(sys.executable)
+        result = self.run_script()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(json.loads(result.stdout)["met"])
+
+    def test_it_exits_2_when_there_is_no_managed_launcher(self):
+        result = self.run_script()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("verify-pending", result.stderr)
+
+    def test_it_exits_2_when_the_launcher_names_no_runnable_interpreter(self):
+        self.launcher(self.tmp / "absent" / "python3")
+        result = self.run_script()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("verify-pending", result.stderr)
