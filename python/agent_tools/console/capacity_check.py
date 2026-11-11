@@ -1,0 +1,140 @@
+"""`capacity_check`: the verify check that the console shows a capacity reading for an account in use (#860).
+
+`python -m agent_tools.console.capacity_check [--url URL] [--max-age SECONDS]` reads the console's
+`/api/state` view (default `http://127.0.0.1:27184/api/state`; the URL must be `http` on a loopback
+host, `127.0.0.1` or `localhost`, else exit 2) and looks at `capacity.profiles[].read_at`.
+`--max-age` is a positive integer number of seconds (default 600).
+
+Output is one stdout line of JSON with sorted keys:
+
+- the URL does not answer (connection refused, timeout of 5 s, any status but 200):
+  `{"status": "not_running"}`, exit 75;
+- the body is not JSON or has no `capacity` object: `{"status": "not_deployed"}`, exit 75;
+- some profile's `read_at` parses as an ISO 8601 time and is at most `--max-age` seconds before now:
+  `{"status": "met", "profile": <name>, "age_seconds": <int>}` for the freshest such profile,
+  exit 0;
+- otherwise `{"status": "not_met", "profiles": [<names>]}`, exit 1.
+
+A console that is down or predates this change is "not yet", never "not met", and only a reading
+newer than `--max-age` meets the check. A bad argument is exit 2. The check only reads: it sends one
+GET, follows no redirect and writes nothing.
+"""
+
+from __future__ import annotations
+
+import argparse
+import http.client
+import json
+import sys
+from datetime import datetime, timezone
+from urllib.parse import urlsplit
+
+DEFAULT_URL = "http://127.0.0.1:27184/api/state"
+DEFAULT_MAX_AGE = 600
+LOOPBACK = ("127.0.0.1", "localhost")
+TIMEOUT = 5.0
+NOT_YET = 75
+
+
+def _loopback_url(text: str) -> str:
+    try:
+        parts = urlsplit(text)
+        parts.port  # noqa: B018  raises ValueError on a bad port
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a URL: {text}") from None
+    if parts.scheme != "http" or parts.hostname not in LOOPBACK:
+        raise argparse.ArgumentTypeError("the URL must be http on 127.0.0.1 or localhost")
+    return text
+
+
+def _positive(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not an integer: {text}") from None
+    if value < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return value
+
+
+def fetch(url: str) -> bytes | None:
+    """The body of a 200 answer to a GET of `url`, else None."""
+    parts = urlsplit(url)
+    path = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
+    connection = http.client.HTTPConnection(parts.hostname, parts.port, timeout=TIMEOUT)
+    try:
+        connection.request("GET", path)
+        response = connection.getresponse()
+        body = response.read()
+        return body if response.status == 200 else None
+    except (OSError, http.client.HTTPException):
+        return None
+    finally:
+        connection.close()
+
+
+def readings(body: bytes) -> list[tuple[str, object]] | None:
+    """The `(profile, read_at)` rows of a console view, None when it has no capacity object."""
+    try:
+        document = json.loads(body)
+    except ValueError:
+        return None
+    capacity = document.get("capacity") if isinstance(document, dict) else None
+    if not isinstance(capacity, dict):
+        return None
+    profiles = capacity.get("profiles")
+    rows = []
+    for row in profiles if isinstance(profiles, list) else []:
+        if isinstance(row, dict) and isinstance(row.get("profile"), str):
+            rows.append((row["profile"], row.get("read_at")))
+    return rows
+
+
+def age_seconds(read_at: object, now: datetime) -> int | None:
+    """Whole seconds from `read_at` to `now` (0 for a time ahead of it), None when unreadable."""
+    if not isinstance(read_at, str):
+        return None
+    try:
+        moment = datetime.fromisoformat(read_at)
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        return None
+    return max(0, int((now - moment).total_seconds()))
+
+
+def verdict(rows: list[tuple[str, object]], max_age: int, now: datetime) -> tuple[int, dict]:
+    ages = [(age, name) for name, read_at in rows
+            if (age := age_seconds(read_at, now)) is not None]
+    if ages and min(ages)[0] <= max_age:
+        age, name = min(ages)
+        return 0, {"status": "met", "profile": name, "age_seconds": age}
+    return 1, {"status": "not_met", "profiles": [name for name, _ in rows]}
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="capacity_check", description=__doc__.splitlines()[0])
+    parser.add_argument("--url", type=_loopback_url, default=DEFAULT_URL,
+                        help="the console state view to read (default: %(default)s)")
+    parser.add_argument("--max-age", type=_positive, default=DEFAULT_MAX_AGE,
+                        help="newest reading allowed, in seconds (default: %(default)s)")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    body = fetch(args.url)
+    if body is None:
+        print(json.dumps({"status": "not_running"}, sort_keys=True))
+        return NOT_YET
+    rows = readings(body)
+    if rows is None:
+        print(json.dumps({"status": "not_deployed"}, sort_keys=True))
+        return NOT_YET
+    code, result = verdict(rows, args.max_age, datetime.now(timezone.utc))
+    print(json.dumps(result, sort_keys=True))
+    return code
+
+
+if __name__ == "__main__":
+    sys.exit(main())
