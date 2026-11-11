@@ -1,7 +1,7 @@
 export const meta = {
   name: 'deliver-batch',
   description: 'Deliver a batch of tracker issues in one repository: intake, just-in-time claims, deliver-standard children (a standard-lane issue planned ahead in plan mode, then resumed in ready mode), a serial land queue under the cross-host land lock, one table',
-  whenToUse: 'A batch of issues of one repository the user asked to deliver together; args {repo_root, batch_id (<host>-<yyyymmdd-hhmm>), child_script (the absolute path of deliver-standard.js), issues (numbers) or label (every open issue carrying it), decisions? (owner answers by issue), conts? (a previous run forwarded child continuations), amend? ({"<issue>": a list of {file, find, replace} edits of that issue\'s plan files, only for an issue in conts: sent with its cont to the first child call of the run, and kept in the relaunch with that cont}), unattended? (true only for a run no session watches: its questions are then posted as box prompts), review_sizing? (true passes review_sizing to every deliver-standard child: sized Claude plan and final reviews), clerk_model? (sonnet, the default, or haiku: the model of the status clerk steps, here and in every deliver-standard child; the setup steps and every step that emits a lifecycle verb stay on sonnet)}; returns one table and, when any issue is unfinished, the relaunch args for a new run',
+  whenToUse: 'A batch of issues of one repository the user asked to deliver together; args {repo_root, batch_id (<host>-<yyyymmdd-hhmm>), child_script (the absolute path of deliver-standard.js), issues (numbers) or label (every open issue carrying it), decisions? (owner answers by issue), conts? (a previous run forwarded child continuations), amend? ({"<issue>": a list of {file, find, replace} edits of that issue\'s plan files, only for an issue in conts: sent with its cont to the first child call of the run, and kept in the relaunch with that cont}), unattended? (true only for a run no session watches: its questions are then posted as box prompts), review_sizing? (true passes review_sizing to every deliver-standard child: sized Claude plan and final reviews), train? (true lands up to three ready issues that wait behind a busy land queue through one cumulative car pull request, a landing train; false or absent lands every issue serially), clerk_model? (sonnet, the default, or haiku: the model of the status clerk steps, here and in every deliver-standard child; the setup steps and every step that emits a lifecycle verb stay on sonnet)}; returns one table and, when any issue is unfinished, the relaunch args for a new run',
   phases: [
     { title: 'Setup', detail: 'resolve the project contract once' },
     { title: 'Intake', detail: 'read every issue\'s facts and lane behind one barrier, decide eligibility in code' },
@@ -19,6 +19,8 @@ export const meta = {
 // no session watches, D12), review_sizing (boolean, default off: passed to every child and kept in the relaunch, #747), clerk_model (sonnet, the default, or haiku: the model of every clerk call except the setup step and the steps that emit a lifecycle verb (land-pr, land-merge, land-unlock), which stay on sonnet, #813;
 // passed to every child and kept in the relaunch when haiku, #803), amend ({"<issue>": a non-empty list of {file, find, replace} edits of
 // that issue's plan files}, only for an issue in conts, #811: sent with its cont to the first child call of the run, kept in the relaunch with that cont).
+// train (boolean, default false, #822: true lands up to TRAIN_MAX ready issues waiting behind a busy land queue through one car pull request, see Train landing below;
+// false or absent, every step and label is the serial landing's; kept in the relaunch when true, never passed to a child).
 // Result: { stage: args|setup|done|breaker, batch_id, table, questions, owner_actions, relaunch }.
 // An already-fixed row is final and reported in owner_actions with its commit; the batch closes nothing.
 // A closed issue whose claim this batch holds is released (at intake, or by the settle step after a stop with a cont
@@ -69,6 +71,7 @@ if (args.decisions !== undefined) {
 }
 if (args.unattended !== undefined && typeof args.unattended !== 'boolean') return bad('unattended must be a boolean')
 if (args.review_sizing !== undefined && typeof args.review_sizing !== 'boolean') return bad('review_sizing must be a boolean')
+if (args.train !== undefined && typeof args.train !== 'boolean') return bad('train must be a boolean')
 if (args.clerk_model !== undefined && !['sonnet', 'haiku'].includes(args.clerk_model)) return bad('clerk_model must be sonnet or haiku')
 if (args.conts !== undefined) {
   if (!isObj(args.conts)) return bad('conts must be an object')
@@ -92,6 +95,7 @@ if (args.amend !== undefined) {
 const DECISIONS = args.decisions
 const UNATTENDED = args.unattended === true
 const REVIEW_SIZING = args.review_sizing === true
+const TRAIN = args.train === true
 const CLERK_MODEL = args.clerk_model === undefined ? 'sonnet' : args.clerk_model
 // #813: a setup step or one that emits a lifecycle verb must reproduce a wide schema or a guard-exact command, so it never takes the trial model.
 const DEFAULT_CLERK_MODEL = 'sonnet'
@@ -482,13 +486,31 @@ const HOLDING = v => v === 'acquired' || v === 'already_held' || v === 'moved'
 const ACCEPT_KINDS = ['code', 'evidence', 'human', 'note']
 const OPEN_KINDS = ['evidence', 'human']
 const isOpen = a => !!(a && OPEN_KINDS.includes(a.kind))
+const RENEW_FIRST_OF = (n, B) => `First renew the claim of issue #${n}: run alone and exactly forge-claim renew --repo ${SLUG} --issue ${n} --holder ${HOLDER} --branch ${B} and return its verdict (renewed, not_held, or error on any other exit), by, detail and transient (true only when its JSON line has transient true) as renew. When renew's verdict is not renewed, stop there: run nothing else and return only renew. ${FORGE_TIMEOUT}`
+// The PR step of a landing: push the branch and open or re-adopt its PR with the body at the accepted head. land-pr and a train's train-pr (#822) share it.
+const PR_OPEN = (n, ready, expected) => {
+  const ACS = JSON.stringify(ready.acceptance)
+  const closesLine = !ready.acceptance.some(isOpen) && INT === SETUP.default_branch ? `Closes #${n}` : `Refs #${n}`
+  return `Then open the pull request of issue #${n} of ${SLUG} (the git repository at ${REPO}) from the branch ${ready.branch} (worktree ${ready.worktree}) into ${INT}, or re-adopt the open one, so that its body is exactly the text below.
+1. Push the branch: git -C ${ready.worktree} push origin ${ready.branch}.
+2. If an open PR with head ${ready.branch} exists (a re-run), reuse it: write the body to a file under a fresh directory made with mktemp -d and run ${UNSET}gh pr edit <pr> --repo ${SLUG} --body-file <that file>. Never reuse or edit a PR whose head is another branch, even when it references this issue; leave it untouched. Otherwise open one with the create form above. Title: a short summary of the issue.
+Body, plain prose, no single or double quotes, dollar signs, backticks or backslashes: sections Why, What changes, Acceptance (a table with one row per criterion: id, criterion, kind, and the test or command that shows it; criteria ${ACS}), Evidence (verification ${JSON.stringify(ready.verify || [])}; ${(ready.tasks || []).length} tasks reviewed; the last line of the Evidence section is exactly: Accepted head: ${expected}), Merge danger; then the line ${closesLine} as the last line of the body, with no attribution or generated-by line. Never attach or link the plan or the spec.
+Return pr (number) and head (the full sha of the pushed head).`
+}
+// The wait and the grading of a checks poll (its steps 3 and 4), shared by a landing's poll and a train car's (#822); `wait` is the bound of the watch.
+const CHECKS_TAIL = (prRef, wait) => `3. Otherwise wait in this turn until every check on head has completed, required or not. List every check with gh pr checks ${prRef} --repo ${SLUG} --json name,bucket,link (never --required) and wait with gh pr checks ${prRef} --repo ${SLUG} --watch ${wait}. It can return early and a list can be partial: never treat a partial list as green, and read the list again before answering. Bucket pass has passed; fail or cancel has failed; pending is still running; skipping never started and is ignored. The required set is the checks the project declares, as JSON: ${JSON.stringify(DECLARED)} (an empty list declares none), plus the checks the forge requires: take those from gh api repos/${SLUG}/rules/branches/${INT} (its required_status_checks rules) or else classic branch protection. A declared check with no run or status at head yet is pending: keep waiting, never treat it as absent or green.
+4. Answer passed only when no check on head is pending, failing or cancelled, with required (the required names you used) and passed (the names passing at head). Answer failed with failing (every failing or cancelled name, required or not) and details when any check failed. Answer needs_label with label and failing when a check failed only because the PR lacks a label that only a human may apply (do not apply it yourself). Answer pending with pending (the names still running) only when the wait ran out and no check failed.`
+// The one merge form of a landing, at an exact head; a train merges its car with the same form (#822).
+const MERGE_CMD = (pr, sha) => `${UNSET}gh pr merge ${pr} --repo ${SLUG} --${SETUP.merge_strategy} --match-head-commit ${sha}${SETUP.delete_branch ? ' --delete-branch' : ''}`
+// A merged landing must leave a cont naming its PR, or a re-adopted PR (which has none) could not be closed out.
+const markMerged = (n, ready, pr) => {
+  CONTS[n] = { ...(CONTS[n] || { setup: { holder: HOLDER, branch: ready.branch, worktree: ready.worktree, worktree_path: ready.worktree }, lane: 'standard', plan: { acceptance: ready.acceptance } }), pr }
+}
 const land = async (n, ready) => {
   const W = ready.worktree, B = ready.branch
   const RULES = RULES_FOR(W, B)
-  const ACS = JSON.stringify(ready.acceptance)
   const noHold = !ready.acceptance.some(isOpen)
   const unknownKinds = ready.acceptance.filter(a => !(a && ACCEPT_KINDS.includes(a.kind))).map(a => (a && a.id) || null)
-  const closesLine = noHold && INT === SETUP.default_branch ? `Closes #${n}` : `Refs #${n}`
   let expected = ready.head
   let pr = null
   let lockHeld = false
@@ -506,10 +528,9 @@ const land = async (n, ready) => {
   // The checks poll steps, shared by the standalone poll and the poll land-pr carries (#801).
   const CHECKS_STEPS = prRef => `1. git -C ${W} fetch origin; if the local branch is ahead of origin/${B}, push it. head is git -C ${W} rev-parse HEAD (the full sha).
 2. If origin/${INT} is not an ancestor of HEAD (git -C ${W} merge-base --is-ancestor origin/${INT} HEAD fails), answer state behind at once with head.
-3. Otherwise wait in this turn until every check on head has completed, required or not. List every check with gh pr checks ${prRef} --repo ${SLUG} --json name,bucket,link (never --required) and wait with gh pr checks ${prRef} --repo ${SLUG} --watch (Bash timeout up to 60 minutes; rerun while any is pending). It can return early and a list can be partial: never treat a partial list as green, and read the list again before answering. Bucket pass has passed; fail or cancel has failed; pending is still running; skipping never started and is ignored. The required set is the checks the project declares, as JSON: ${JSON.stringify(DECLARED)} (an empty list declares none), plus the checks the forge requires: take those from gh api repos/${SLUG}/rules/branches/${INT} (its required_status_checks rules) or else classic branch protection. A declared check with no run or status at head yet is pending: keep waiting, never treat it as absent or green.
-4. Answer passed only when no check on head is pending, failing or cancelled, with required (the required names you used) and passed (the names passing at head). Answer failed with failing (every failing or cancelled name, required or not) and details when any check failed. Answer needs_label with label and failing when a check failed only because the PR lacks a label that only a human may apply (do not apply it yourself). Answer pending with pending (the names still running) only when the wait ran out and no check failed.`
+${CHECKS_TAIL(prRef, '(Bash timeout up to 60 minutes; rerun while any is pending)')}`
 
-  const RENEW_FIRST = `First renew the claim of issue #${n}: run alone and exactly forge-claim renew --repo ${SLUG} --issue ${n} --holder ${HOLDER} --branch ${B} and return its verdict (renewed, not_held, or error on any other exit), by, detail and transient (true only when its JSON line has transient true) as renew. When renew's verdict is not renewed, stop there: run nothing else and return only renew. ${FORGE_TIMEOUT}`
+  const RENEW_FIRST = RENEW_FIRST_OF(n, B)
   // The nested renew of a folded reply: a row ends the landing, null continues.
   const renewed = (r, label) => {
     if (!r) return out('stopped', { stage: 'renew', detail: `${label} returned no renew` })
@@ -645,11 +666,7 @@ ${RULES}`, `land-sync-review-${n}-${c.syncReview}`, { agentType: 'reviewer', sch
     lockHeld = true
     lockSha = expected
     const prR = await recall(() => call(`${RENEW_FIRST}
-Then open the pull request of issue #${n} of ${SLUG} (the git repository at ${REPO}) from the branch ${B} (worktree ${W}) into ${INT}, or re-adopt the open one, so that its body is exactly the text below.
-1. Push the branch: git -C ${W} push origin ${B}.
-2. If an open PR with head ${B} exists (a re-run), reuse it: write the body to a file under a fresh directory made with mktemp -d and run ${UNSET}gh pr edit <pr> --repo ${SLUG} --body-file <that file>. Never reuse or edit a PR whose head is another branch, even when it references this issue; leave it untouched. Otherwise open one with the create form above. Title: a short summary of the issue.
-Body, plain prose, no single or double quotes, dollar signs, backticks or backslashes: sections Why, What changes, Acceptance (a table with one row per criterion: id, criterion, kind, and the test or command that shows it; criteria ${ACS}), Evidence (verification ${JSON.stringify(ready.verify || [])}; ${(ready.tasks || []).length} tasks reviewed; the last line of the Evidence section is exactly: Accepted head: ${expected}), Merge danger; then the line ${closesLine} as the last line of the body, with no attribution or generated-by line. Never attach or link the plan or the spec.
-Return pr (number) and head (the full sha of the pushed head).
+${PR_OPEN(n, ready, expected)}
 Take the cross-host landing lock of the branch ${INT} for that PR at the head ${expected}: run alone and exactly: ${LAND_ACQUIRE(expected, true)}
 ${LOCK_RETURN} Return it as lock; when no PR was opened or reused, run no lock command and return lock null.
 Then, only when lock's verdict is acquired, already_held or moved and the pushed head is ${expected}, wait for every check of that PR at the head, required or not:
@@ -756,7 +773,7 @@ Then re-check the cross-host landing lock of the branch ${INT} for PR #${pr}: ru
 ${LOCK_RETURN} Return it as lock.
 Only when lock's verdict is already_held or moved, merge PR #${pr} of issue #${n} of ${SLUG} into ${INT}; a re-run must not merge twice.
 1. Read ${UNSET}gh pr view ${pr} --repo ${SLUG} --json state,mergeCommit. When state is already MERGED, skip step 2.
-2. Otherwise run, alone and exactly: ${UNSET}gh pr merge ${pr} --repo ${SLUG} --${SETUP.merge_strategy} --match-head-commit ${expected}${SETUP.delete_branch ? ' --delete-branch' : ''}
+2. Otherwise run, alone and exactly: ${MERGE_CMD(pr, expected)}
 3. Read the PR state again: merged is true only when the state reads MERGED. Never retry with another form; on a guard refusal or a head mismatch return merged false with the exact message in notes.
 Return merged, merge_commit and notes. On any other lock verdict run nothing else and return merged false with the verdict in notes.
 ${RULES}`, `land-merge-${n}`, { ...lifecycleClerk, schema: withRenew(LAND_MERGE_SCHEMA, { lock: NULLABLE(LOCK_SCHEMA) }) }), r => r.renew)
@@ -779,7 +796,7 @@ ${RULES}`, `land-merge-${n}`, { ...lifecycleClerk, schema: withRenew(LAND_MERGE_
       break
     }
     // The merge is done: a failure from here on must leave a cont, or a re-adopted PR (which has none) could not be closed out.
-    CONTS[n] = { ...(CONTS[n] || { setup: { holder: HOLDER, branch: B, worktree: W, worktree_path: W }, lane: 'standard', plan: { acceptance: ready.acceptance } }), pr }
+    markMerged(n, ready, pr)
 
     const openCriteria = ready.acceptance.filter(isOpen)
     const notes = ready.acceptance.filter(a => a && a.kind === 'note')
@@ -1057,6 +1074,7 @@ const relaunchArgs = () => {
   if (Object.keys(amend).length) a.amend = amend
   if (UNATTENDED) a.unattended = true
   if (REVIEW_SIZING) a.review_sizing = true
+  if (TRAIN) a.train = true
   if (CLERK_MODEL !== 'sonnet') a.clerk_model = CLERK_MODEL
   return a
 }
