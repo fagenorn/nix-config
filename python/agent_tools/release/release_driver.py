@@ -106,7 +106,7 @@ past it parks `<name>: <status> past <deadline> ms: <reference>`; `diverged` par
 diverged: <reference>`, `<reference>` being the latest inspection's reason and references (an
 `absent` one names no run).
 
-The result is `{schema_version, transaction_id, state, next, actions, receipt_digest}`,
+The result is `{schema_version, transaction_id, state, next, actions, receipt_digest, legacy}`,
 `actions` being `{name, status, attempts}`, with `next` one of `done` (terminal `succeeded`),
 `confirm` (an irreversible action has no valid grant), `wait` (an action is `in_progress` or
 `unknown`, or a watch is pending inside its deadline, or the proof cohort is still open) or
@@ -114,6 +114,18 @@ The result is `{schema_version, transaction_id, state, next, actions, receipt_di
 return of `run` that does not end terminal and never in a `finally`, so a raised effect leaves
 it to lapse at its TTL (D21). Every adapter is reached through one router over per-alias
 `core_binding`s, so tests enter fixture adapters only as `registry` entries.
+
+Post-release sync (issue 845, ADR-release-010). A profile has a sync when
+`release_sync.binding` finds one: the integration branch differs from the default branch and a
+forge node consumes `merge`. The result of `run` then carries a `sync` member, and no other
+profile's result has one. It is null until every publication action is `satisfied`; from then on
+each `run` calls `release_sync.run` after it has given custody up, and reports its `{status,
+branch, pr, url, reason, manual}`. The sync is outside the transaction: it changes no state,
+action, token or receipt, and a `failed` one leaves the release as it is. With no candidate and
+no confirmation, `run` on such a profile whose last release is `succeeded` or `failed` with its
+publication satisfied prints that release's result again (`next` is `done` for `succeeded`, else
+`attention`) with a freshly read `sync`, so a rerun finishes a sync left half done; a
+confirmation there refuses `confirmation_stale`.
 
 Abandon (D14). `abandon` acquires custody and advances the current nonterminal release to
 `abandoned` with external state `known`, printing `{schema_version, transaction_id, state}`.
@@ -138,7 +150,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_tools.release import (release_adapter, release_cutover, release_profile,
-                                 release_verification)
+                                 release_sync, release_verification)
 from agent_tools.canonical import telemetry_digest
 from agent_tools.release.transaction_core import (
     CreationConflict, GrantInvalid, InvocationRefused, LeaseUnavailable, ProofRefused,
@@ -288,6 +300,7 @@ class Driver:
                 project.contract, descriptors)
         except (ValueError, release_profile.ProfileInadmissible) as error:
             raise Refusal("profile_inadmissible", str(error)) from error
+        self.sync = release_sync.binding(self.compiled, project)
 
     def shape_refusal(self) -> Refusal | None:
         """The first reason this project's shape cannot be released by the driver (§1)."""
@@ -491,8 +504,56 @@ class Driver:
         return _Plan("new", document, refusal, plan_digest, candidate, len(existing) + 1, None,
                      receipt)
 
+    def _router(self) -> "_Router":
+        return _Router(self.compiled, self.registry, self.project.contract["bindings"][
+            "tracker"]["credential_env"]["unset_before_invocation"])
+
+    def _result(self, transaction: Transaction, ending: str) -> dict[str, Any]:
+        """The `run` document for `transaction` (D7), without `legacy` and `sync`."""
+        terminal = transaction.terminal
+        actions = [{"name": action["name"], "status": action["status"],
+                    "attempts": 0 if (view := _view(transaction, action["name"])) is None
+                    else view["attempts"]}
+                   for action in self._actions(transaction)]
+        return {"schema_version": SCHEMA_VERSION, "transaction_id": transaction.transaction_id,
+                "state": transaction.state, "next": ending, "actions": actions,
+                "receipt_digest": None if terminal is None else terminal["receipt_digest"]}
+
+    def _published(self, transaction: Transaction) -> bool:
+        return all(action["status"] == "satisfied" for action in self._actions(transaction)
+                   if action["phase"] == "publication")
+
+    def _synced(self, transaction: Transaction, router: "_Router") -> dict[str, Any] | None:
+        """The sync outcome of a published release, or None before publication is satisfied
+        (issue 845). It reads and writes the forge only, never the store."""
+        if not self._published(transaction):
+            return None
+        stored = transaction.subject["candidate"]
+        return router.sync(self.sync["alias"], {
+            "target": self.sync["target"], "integration": self.sync["integration"],
+            "candidate": release_profile.thaw(stored)})
+
+    def _finished(self, confirmations: Sequence[str]) -> dict[str, Any] | None:
+        """The result of a finished release with its sync read again, for a `run` with no
+        candidate; None when there is no such release or the profile has no sync (issue 845)."""
+        current = self.current() if self.sync is not None else None
+        if (current is None or current[1].state not in ("succeeded", "failed")
+                or not self._published(current[1])):
+            return None
+        if confirmations:
+            raise Refusal("confirmation_stale", "not confirmations of this release: "
+                          + ", ".join(dict.fromkeys(confirmations)))
+        transaction = current[1]
+        ending = "done" if transaction.state == "succeeded" else "attention"
+        return {**self._result(transaction, ending), "legacy": None,
+                "sync": self._synced(transaction, self._router())}
+
     def run(self, candidate: Mapping[str, str] | None,
             confirmations: Sequence[str]) -> dict[str, Any]:
+        if candidate is None:
+            finished = self._finished(confirmations)
+            if finished is not None:
+                return finished
         plan = self._plan(candidate)
         if plan.refusal is not None:
             raise plan.refusal
@@ -505,8 +566,7 @@ class Driver:
         missing = [action for given, action in listed.items() if given not in supplied]
         if missing:
             raise Refusal("confirmation_required", "confirm: " + ", ".join(missing))
-        router = _Router(self.compiled, self.registry, self.project.contract["bindings"][
-            "tracker"]["credential_env"]["unset_before_invocation"])
+        router = self._router()
         legacy = None
         if plan.transaction is None:
             store = self.store(create=True)
@@ -619,9 +679,10 @@ class _Router:
     def __init__(self, compiled: Mapping[str, Any], registry: Mapping[str, Any],
                  unset: Sequence[str] = ()) -> None:
         self._unset = tuple(unset)
-        self._bindings = {
-            alias: release_adapter.core_binding(registry[identity["adapter"]], compiled, alias)
-            for alias, identity in compiled["adapters"].items()}
+        self._modules = {alias: registry[identity["adapter"]]
+                         for alias, identity in compiled["adapters"].items()}
+        self._bindings = {alias: release_adapter.core_binding(module, compiled, alias)
+                          for alias, module in self._modules.items()}
         self._alias = {node["id"]: node["adapter"]
                        for node in (*compiled["publication"], *compiled["activation"])}
 
@@ -650,6 +711,12 @@ class _Router:
     def observe(self, request: Mapping[str, Any]) -> dict[str, str]:
         with self._credentials_excluded():
             return self._bindings[request["collector"]].observe(request)
+
+    def sync(self, alias: str, parameters: Mapping[str, Any]) -> dict[str, Any]:
+        """The post-release sync through the adapter of `alias`, outside the core: its two
+        operations are no node of the profile, so no `core_binding` carries them (issue 845)."""
+        with self._credentials_excluded():
+            return release_sync.run(self._modules[alias], parameters)
 
 
 class _Drive:
@@ -705,15 +772,10 @@ class _Drive:
     def finish(self, ending: str) -> dict[str, Any]:
         if self.transaction.state not in TERMINALS:
             self.transaction = self.store.release(self.custody)
-        terminal = self.transaction.terminal
-        actions = [{"name": action["name"], "status": action["status"],
-                    "attempts": 0 if (view := _view(self.transaction, action["name"])) is None
-                    else view["attempts"]}
-                   for action in self.driver._actions(self.transaction)]
-        return {"schema_version": SCHEMA_VERSION,
-                "transaction_id": self.transaction.transaction_id,
-                "state": self.transaction.state, "next": ending, "actions": actions,
-                "receipt_digest": None if terminal is None else terminal["receipt_digest"]}
+        result = self.driver._result(self.transaction, ending)
+        if self.driver.sync is not None:
+            result["sync"] = self.driver._synced(self.transaction, self.router)
+        return result
 
     def begin(self) -> str | None:
         if self.transaction.state == "created":

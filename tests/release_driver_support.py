@@ -7,7 +7,7 @@ from pathlib import Path
 from agent_tools.release import (actions_health_adapter, forge_adapter, railway_deploy_adapter,
                                  release_driver, release_profile)
 from . import release_test_support as support
-from .forge_world import CANONICAL, ROWS
+from .forge_world import CANONICAL, ROWS, SYNC_ROWS, sync_pull
 
 PROJECT_ID = "fagenorn/nix-config"
 KEY = "release/fagenorn/nix-config"
@@ -110,6 +110,11 @@ class StatefulForge:
         elif operation == "release":
             self.world.respond_json("gh", ROWS["release.view"]["argv"][1:],
                                     {"tag_name": CANONICAL["tag"], "draft": False, "html_url": URL})
+        elif operation == "sync_branch":
+            self.world.respond_json("gh", SYNC_ROWS["sync_branch.ref"]["argv"][1:], {
+                "object": {"sha": CANONICAL["merge_commit"], "type": "commit"}})
+        elif operation == "sync_pr":
+            self.world.respond_json("gh", SYNC_ROWS["sync_pr.list"]["argv"][1:], [sync_pull()])
 
 
 class LandedDespiteExit(StatefulForge):
