@@ -21,7 +21,11 @@ export const meta = {
 // that issue's plan files}, only for an issue in conts, #811: sent with its cont to the first child call of the run, kept in the relaunch with that cont).
 // train (boolean, default false, #822: true lands up to TRAIN_MAX ready issues waiting behind a busy land queue through one car pull request, see Train landing below;
 // false or absent, every step and label is the serial landing's; kept in the relaunch when true, never passed to a child).
+// reasons ({"<issue>": the reason of its stopped row in the previous run}, #869: the relaunch writes it; a row this run leaves not-admitted, blocked or waiting shows it as "previous run: ...", and the relaunch carries the latest reason of each open issue).
+// The lead compares a relaunch with the args it ran with reasons aside.
 // Result: { stage: args|setup|done|breaker, batch_id, table, questions, owner_actions, relaunch }.
+// Every row that is not final and has something to say carries reason (#869): one line of at most REASON_MAX characters, the child's own stop reason
+// (its stage and the detail of its stop), else this program's stage and what the row carries. A detail the reason repeats is left out of the row.
 // An already-fixed row is final and reported in owner_actions with its commit; the batch closes nothing.
 // A closed issue whose claim this batch holds is released (at intake, or by the settle step after a stop with a cont
 // that is not post-merge) and its row is final with released; a release that failed leaves the row stopped for a relaunch.
@@ -92,7 +96,9 @@ if (args.amend !== undefined) {
     }
   }
 }
+if (args.reasons !== undefined && (!isObj(args.reasons) || !Object.values(args.reasons).every(v => typeof v === 'string'))) return bad('every reasons value must be a string')
 const DECISIONS = args.decisions
+const REASONS = args.reasons || {}
 const UNATTENDED = args.unattended === true
 const REVIEW_SIZING = args.review_sizing === true
 const TRAIN = args.train === true
@@ -393,7 +399,35 @@ const terminalChild = r => r === null || r === undefined ||
   (!['done', 'ready', 'planned'].includes(r.stage) && Array.isArray(r.dead_agents) && r.dead_agents.length > 0)
 // A stop the child raised after the merge (a re-adopted landing) still has close-out work its cont finishes; it is never settled (#714).
 // #790: a codex-unavailable child stop shows the Codex reviewer's reason in its row.
-const stopDetail = r => (r.stage === 'codex-unavailable' && typeof r.details === 'string' && r.details ? { detail: r.details } : {})
+// #869: and every child stop its reason: the child's own, else, for a stop that carries none (a setup or args stop), what its fields say.
+const childReason = r => {
+  if (nonEmpty(r.reason)) return r.reason
+  const said = [r.details, r.error,
+    Array.isArray(r.missing) && r.missing.length ? `setup reply lacks ${r.missing.join(', ')}` : '',
+    nonEmpty(r.invalid) ? `invalid ${r.invalid}` : '',
+    r.duplicate ? `merged PR #${r.duplicate} already closes the issue` : '',
+    isObj(r.renew) ? `renew ${r.renew.detail || r.renew.verdict || 'gave no verdict'}` : ''].filter(nonEmpty)
+  if (!said.length && isObj(r.result)) said.push(...[r.result.reason, r.result.details].filter(nonEmpty))
+  if (!said.length && r.result === null) said.push('the step returned nothing')
+  return said.length ? `${r.stage}: ${said.join('; ')}` : ''
+}
+const stopDetail = r => ({ ...(r.stage === 'codex-unavailable' && typeof r.details === 'string' && r.details ? { detail: r.details } : {}), ...(childReason(r) ? { reason: childReason(r) } : {}) })
+// #869: why an open row is open, in one bounded line: the child's reason when it gave one, else the row's own stage and what it carries; '' when it carries nothing.
+const REASON_MAX = 300
+const oneLine = s => { const t = String(s).replace(/\s+/g, ' ').trim(); return t.length > REASON_MAX ? `${t.slice(0, REASON_MAX - 3)}...` : t }
+const rowReason = r => {
+  if (nonEmpty(r.reason)) return oneLine(r.reason)
+  const listed = (k, what) => (Array.isArray(r[k]) && r[k].length ? `${what} ${r[k].join(', ')}` : '')
+  const finding = isObj(r.review) && Array.isArray(r.review.findings) && isObj(r.review.findings[0]) ? r.review.findings[0].summary : ''
+  const said = [r.detail, r.details, r.note, r.expected ? `expected ${r.expected}, head ${r.head || 'unread'}` : '',
+    listed('failing', 'failing checks'), listed('pending', 'pending checks'), listed('missing', 'missing checks'),
+    nonEmpty(r.label) ? `needs the label ${r.label}` : '', r.blocker ? `waits for #${r.blocker}` : '', nonEmpty(r.by) ? `claimed by ${r.by}` : '',
+    nonEmpty(finding) ? `review finding: ${finding}` : ''].filter(nonEmpty)
+  if (!said.length && r.outcome !== 'stopped') return ''
+  return oneLine([r.stage, said.join('; ')].filter(nonEmpty).join(': ') || 'no detail')
+}
+// An issue this run never got to deliver: its row keeps the previous run's reason beside its own.
+const UNTRIED = ['not-admitted', 'blocked', 'waits-verification']
 const POST_MERGE = ['hold', 'close-out', 'code-unmet']
 const postMerge = r => !!r.pr || POST_MERGE.includes(r.stage)
 const READY = {}
@@ -1387,7 +1421,21 @@ await parallel(toDeliver.map(n => async () => {
 }))
 
 // --- Result: one table, in ISSUES order ---
-const table = ISSUES.map(n => rows[n] || { issue: n, outcome: 'stopped', detail: 'no result' })
+const reasons = {}
+const table = ISSUES.map(n => {
+  const r = rows[n] || { issue: n, outcome: 'stopped', detail: 'no result' }
+  if (FINAL.includes(r.outcome)) return r
+  const untried = UNTRIED.includes(r.outcome)
+  const mine = rowReason(r)
+  const prev = untried && nonEmpty(REASONS[n]) ? oneLine(REASONS[n]) : ''
+  const reason = oneLine([mine, prev ? `previous run: ${prev}` : ''].filter(Boolean).join('; '))
+  if (!reason) return r
+  // The relaunch carries the latest reason of an issue a run got to; a row that only waits says so afresh each run.
+  if (prev || !untried) reasons[n] = prev || mine
+  // The reason says what detail said: the row keeps one of them.
+  const { detail, ...rest } = r
+  return { ...(nonEmpty(detail) && !reason.includes(oneLine(detail)) ? r : rest), reason }
+})
 // A cycle only the owner can break: relaunching it returns the same blocked rows, so it is an owner action, not an open issue.
 const open = table.filter(r => !FINAL.includes(r.outcome) && !cycle.includes(r.issue)).map(r => r.issue)
 const rowOf = n => table.find(r => r.issue === n)
@@ -1415,13 +1463,17 @@ const relaunchArgs = () => {
   const amend = {}
   for (const n of open) if (conts[n] && AMEND[String(n)] && !(AMEND_APPLIED.has(String(n)) && !reviewOwed(conts[n]))) amend[n] = AMEND[String(n)]
   if (Object.keys(amend).length) a.amend = amend
+  // The lead compares a relaunch with the args it ran with reasons aside: a reason's wording changes from run to run.
+  const kept = {}
+  for (const n of open) if (reasons[n]) kept[n] = reasons[n]
+  if (Object.keys(kept).length) a.reasons = kept
   if (UNATTENDED) a.unattended = true
   if (REVIEW_SIZING) a.review_sizing = true
   if (TRAIN) a.train = true
   if (CLERK_MODEL !== 'sonnet') a.clerk_model = CLERK_MODEL
   return a
 }
-for (const r of table) log(`#${r.issue}: ${r.outcome}${r.detail ? ` (${r.detail})` : ''}`)
+for (const r of table) log(`#${r.issue}: ${r.outcome}${r.reason || r.detail ? ` (${r.reason || r.detail})` : ''}`)
 return {
   stage: breaker ? 'breaker' : 'done', batch_id: BATCH, table,
   questions: table.filter(r => r.outcome === 'questions').map(r => ({ issue: r.issue, questions: r.questions, marker: r.marker })),
