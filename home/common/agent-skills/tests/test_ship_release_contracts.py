@@ -197,6 +197,9 @@ class ShipReleaseContractsTest(unittest.TestCase):
         self.assertIn("A `confirmation_stale`, `confirmation_required` or, after acquiring again, "
                       "`land_lock_*` refusal is likewise a re-preview.", phase4)
         self.assertIn("land lock, preview", self.skill.split("## Authorization", 1)[1])
+        # Both refusals of the release command, a Phase 4 one such as profile_drift included.
+        self.assertIn('(`{"error":{"code","repair_id","detail"}}`, exit 3) as printed. '
+                      "Never work around either.", self.skill)
         self.assertIn("A shell variable does not survive between calls; never expand one.",
                       self.skill.split("## Phase 0", 1)[1].split("\n## ", 1)[0])
         self.assertIn("the run's `sync` and `lock`", self.skill.split("## Phase 5", 1)[1])

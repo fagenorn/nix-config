@@ -23,7 +23,7 @@ A delegated owner ends at the runnable preview, returning its arguments and conf
 
 Run `resolve-project resolve --repo-root <checkout>`. Resolve once at phase entry, retain the returned `ResolvedProject` in memory, and treat every resolver error as fatal before mutation or external effects. On refusal, preserve and report the resolver's `error.code`, `repair_id`, and ordered `violations` exactly; never translate it into a partial snapshot or fallback.
 
-`<integration>` and `<default>` are `bindings.vcs.integration_branch` and `bindings.vcs.default_branch`. Any `gh` call unsets the names in `bindings.tracker.credential_env.unset_before_invocation` first. The release command resolves the project itself; a resolver refusal from it is reported the same way (exit 2), and a driver refusal (`{"error":{"code","repair_id","detail"}}`, exit 3) as printed.
+`<integration>` and `<default>` are `bindings.vcs.integration_branch` and `bindings.vcs.default_branch`. Any `gh` call unsets the names in `bindings.tracker.credential_env.unset_before_invocation` first. The release command resolves the project itself; a resolver refusal from it is reported the same way (exit 2), and a driver refusal (`{"error":{"code","repair_id","detail"}}`, exit 3) as printed. Never work around either.
 
 ## Authorization
 
@@ -36,7 +36,7 @@ Before forming any user-facing question, invoke `doc-grounded-questions`, using 
 ## Phase 0 — Pre-flight
 
 1. Main checkout, not a worktree: `git rev-parse --git-common-dir` ends in `.git`; otherwise switch to it or surface.
-2. Clean tree: `git status --porcelain` is empty. Surface changes; do not stash.
+2. Clean tree: `git status --porcelain` is empty. Surface changes; never stash.
 3. `git fetch origin --prune --tags`, then local `<integration>` in sync with `origin/<integration>`: equal or absent continues; behind offers `git checkout <integration>` and, only if that succeeded, `git merge --ff-only origin/<integration>`; ahead or diverged is surfaced, never resolved.
 4. Read the core's state:
 
@@ -64,7 +64,7 @@ Its output is `<prev-tag>`; no output is the bootstrap case: surface the existin
 
 ## Phase 3 — Preview
 
-New release, or the resume form for a nonterminal one:
+New release, or the resume form:
 
 ```text
 release transaction preview --repo-root <main-checkout> --commit <commit> --version <version> --title "<title>" --notes-file <notes-path>
