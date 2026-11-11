@@ -107,9 +107,13 @@ poll publishes, so the minutes since a run moved advance; an unchanged view bump
 journal is read incrementally; one that was truncated or replaced is folded again from its start.
 A run leaves only when its final record exists or its journal is confirmed absent (its listing
 succeeded without it); a journal or a listing that cannot be read keeps the run's last
-observation. A run that names no issue is not listed. A state request reads memory only. Stderr
-lines: `console: delivery_poll_failed <Type>: <message>` (a poll that raised, once per failed
-poll), `console: journal_unreadable <path> <reason>` (a journal or its final record turned
+observation. A run that names no issue is not listed. A branch names its issue through the
+project's configured branch pattern, `branch_pattern_of(repo)` (default
+`deliveries.configured_branch_pattern`, kept once resolved); while it is None no run of that
+repository names an issue, and a run read under another pattern is folded again from its start.
+A state request reads memory only. Stderr lines: `console: delivery_poll_failed <Type>: <message>`
+(a poll that raised, once per failed poll), `console: branch_pattern_unresolved <repo>` (a
+repository's pattern did not resolve, again only after it resolved in between), `console: journal_unreadable <path> <reason>` (a journal or its final record turned
 unreadable, again only after it read successfully in between) and `console: journals_unreadable
 <session_id> <reason>` (a session's journal listing turned unreadable, likewise).
 
@@ -340,6 +344,7 @@ class ConsoleService:
                  tracker: Callable[..., list[dict]] | None = None,
                  tracker_seconds: float = TRACKER_SECONDS,
                  slug_of: Callable[[str], str | None] = owner_actions.checkout_slug,
+                 branch_pattern_of: Callable[[str], str | None] = deliveries.configured_branch_pattern,
                  activity: Callable[[str], float | None] = inbox.local_activity,
                  clock: Callable[[], float] = time.time):
         self.registry = Path(registry)
@@ -357,6 +362,8 @@ class ConsoleService:
         self._tracker = tracker
         self._tracker_seconds = tracker_seconds
         self._slug_of = slug_of
+        self._branch_pattern_of = branch_pattern_of
+        self._patterns: dict[str, str] = {}
         self._activity = activity
         self._clock = clock
         self._tracker_thread: threading.Thread | None = None
@@ -484,6 +491,18 @@ class ConsoleService:
             self._unreadable.add(key)
             print(line, file=sys.stderr)
 
+    def _branch_pattern(self, repo: str) -> str | None:
+        """The repository's branch pattern, kept once resolved; None (one stderr line) while it does not resolve."""
+        pattern = self._patterns.get(repo)
+        if pattern is None:
+            pattern = self._branch_pattern_of(repo)
+            if pattern is None:
+                self._warn_once(f"pattern {repo}", f"console: branch_pattern_unresolved {repo}")
+                return None
+            self._patterns[repo] = pattern
+        self._unreadable.discard(f"pattern {repo}")
+        return pattern
+
     def poll_deliveries(self) -> list[Event]:
         """Append what the run journals of the live sessions show that the log does not, and publish."""
         folded = self._deliveries
@@ -505,6 +524,7 @@ class ConsoleService:
                                 f"console: journals_unreadable {sid} {listing.reason}")
                 continue
             self._unreadable.discard(f"listing {sid}")
+            pattern = self._branch_pattern(scanned[sid].repo)
             for journal in listing:
                 key = (sid, journal.parent.name)
                 path = str(journal)
@@ -513,6 +533,9 @@ class ConsoleService:
                     self._reader.forget(journal)
                     self._unreadable.discard(path)
                     continue
+                known = self._runs.get(journal)
+                if known is not None and known.branch_pattern != pattern:
+                    self._reader.forget(journal)
                 chunk = final if isinstance(final, deliveries.Unreadable) else self._reader.read(journal)
                 if isinstance(chunk, deliveries.Unreadable):
                     if key in folded:
@@ -525,8 +548,8 @@ class ConsoleService:
                 if chunk is None:
                     continue
                 fold = self._runs.get(journal)
-                if fold is None or chunk.from_start:
-                    fold = deliveries.RunFold()
+                if fold is None or chunk.from_start or fold.branch_pattern != pattern:
+                    fold = deliveries.RunFold(pattern)
                 fold.apply(chunk.records)
                 runs[journal] = fold
                 issues = fold.issues()

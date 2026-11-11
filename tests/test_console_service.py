@@ -777,6 +777,33 @@ class DeliveryTest(Case):
                  if l.startswith("console: journals_unreadable")]
         self.assertEqual(len(lines), 1)
 
+    def test_a_session_id_with_a_nul_neither_blocks_the_polls_nor_the_start(self):
+        self.write(10)
+        bad = json.loads(support.hook_body("session start", cwd="/srv/p00"))
+        bad["session_id"] = "a\x00b"
+        self.svc.ingest_hook(json.dumps(bad).encode())
+        self.assertIn("a\x00b", {s.session_id for s in self.svc._sessions.values()})
+        self.svc.poll_deliveries()
+        self.write(14, 10, "a")
+        self.svc.poll_deliveries()
+        self.assertEqual(self.runs()[0]["issues"][0]["stage_text"], "building task 2 of 3")
+        self.assertEqual(len(self.rows("delivery.seen")), 2)
+        self.svc.close()
+        second = self.start(session_poll_seconds=3600, clock=lambda: self.now)
+        self.assertEqual(self.runs(second)[0]["issues"][0]["stage_text"], "building task 2 of 3")
+
+    def test_the_branch_pattern_of_a_session_repo_names_its_issues(self):
+        patterns = {"/srv/p00": None}
+        self.svc.close()
+        svc = self.start(session_poll_seconds=3600, clock=lambda: self.now,
+                         branch_pattern_of=lambda repo: patterns[repo])
+        self.write(10)
+        svc.poll_deliveries()
+        self.assertEqual(self.runs(svc), [])
+        patterns["/srv/p00"] = "issue-<num>-<slug>"
+        svc.poll_deliveries()
+        self.assertEqual(self.runs(svc)[0]["issues"][0]["stage_text"], "building task 1 of 3")
+
 
 if __name__ == "__main__":
     unittest.main()

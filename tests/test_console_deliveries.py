@@ -186,8 +186,11 @@ def R(agent, result):
     return {"type": "result", "agentId": agent, "result": result}
 
 
-def fold(records):
-    run = deliveries.RunFold()
+PATTERN = "issue-<num>-<slug>"
+
+
+def fold(records, pattern=PATTERN):
+    run = deliveries.RunFold(pattern)
     run.apply(records)
     return run
 
@@ -284,7 +287,7 @@ class RunFoldTest(unittest.TestCase):
             whole = fold(lines).issues()
             for k in range(len(lines) + 1):
                 with self.subTest(fixture=name, k=k):
-                    run = deliveries.RunFold()
+                    run = deliveries.RunFold(PATTERN)
                     run.apply(lines[:k])
                     run.apply(lines[k:])
                     self.assertEqual(run.issues(), whole)
@@ -316,7 +319,8 @@ class RunFoldTest(unittest.TestCase):
             ({**full, "decision_ended": False}, "landing"),
             ({**full, "notes_posted": False}, "landing"),
             ({**full, "issue_state": "MERGED"}, "landing"),
-            (held, "done"),
+            (held, "landing"),
+            (full, "done"),
         ]
         single = journal("single")[:30]
         for result, expected in rows:
@@ -326,6 +330,84 @@ class RunFoldTest(unittest.TestCase):
         self.assertEqual(shown(batch), {856: "landing", 857: "plan review", 860: "queued"})
         again = batch + [S("b9b", "close-out-856", "Land"), R("b9b", CLOSED_OUT)]
         self.assertEqual(shown(again)[856], "done")
+
+    def test_a_close_out_is_graded_against_the_plans_acceptance(self):
+        def planned(kinds, owner="a2"):
+            acceptance = [{"id": f"AC{i}", "kind": kind} for i, kind in enumerate(kinds)]
+            return R(owner, {"status": "planned", "tasks": [{"n": 1}], "acceptance": acceptance})
+
+        def single(kinds, result):
+            records = journal("single")[:4] + [planned(kinds)] + journal("single")[5:30]
+            return shown(records + [R("a15", result)])[858]
+
+        closed, held = CLOSED_OUT, {**CLOSED_OUT, "issue_state": "OPEN"}
+        with_notes = {**CLOSED_OUT, "notes_posted": True}
+        self.assertEqual(single(["code"], held), "landing")
+        self.assertEqual(single(["code"], closed), "done")
+        self.assertEqual(single(["code", "note"], closed), "landing")
+        self.assertEqual(single(["code", "note"], with_notes), "done")
+        self.assertEqual(single(["code", "human"], held), "done")
+        self.assertEqual(single(["code", "evidence"], {**held, "issue_state": "CLOSED"}), "done")
+
+        base = journal("batch")[:42]
+        open_result = {**CLOSED_OUT, "issue_state": "OPEN", "released": True, "decision_ended": True}
+        records = base + [R("b9", open_result)]
+        self.assertEqual(shown(records)[856], "landing")
+        held_batch = [dict(r) for r in base]
+        for record in held_batch:
+            if record.get("agentId") == "c3" and record.get("type") == "result":
+                record["result"] = {**record["result"], "acceptance": [{"id": "AC1", "kind": "human"}]}
+        self.assertEqual(shown(held_batch + [R("b9", open_result)])[856], "done")
+        self.assertEqual(shown(held_batch + [R("b9", CLOSED_OUT)])[856], "landing")
+
+    def test_a_close_out_waits_for_the_childs_issue_and_its_acceptance(self):
+        records = journal("batch")[:11] + [
+            S("d1", "setup", CHILD),
+            S("d2", "plan", CHILD),
+            R("d2", {"status": "planned", "tasks": [{"n": 1}], "acceptance": [{"id": "A", "kind": "code"}]}),
+            S("d3", "close-out", CHILD),
+            R("d3", {**CLOSED_OUT, "issue_state": "OPEN"}),
+            R("d1", {"ok": True, "branch": "issue-856-x"}),
+        ]
+        self.assertEqual(shown(records)[856], "landing")
+        records[-2] = R("d3", CLOSED_OUT)
+        self.assertEqual(shown(records)[856], "done")
+
+    def test_a_branch_names_its_issue_through_the_configured_pattern(self):
+        rows = [
+            ("issue-<num>-<slug>", "issue-858-in-flight", 858),
+            ("issue-<num>-<slug>", "issue-858", None),
+            ("issue-<num>-<slug>", "console-stage-858", None),
+            ("<slug>-<num>", "console-stage-858", 858),
+            ("<slug>-<num>", "issue-858", 858),
+            ("<slug>-<num>", "feature-x", None),
+            ("feat/<num>-<slug>", "feat/12-a-b", 12),
+            ("feat/<num>-<slug>", "feat-12-a-b", None),
+            ("issue-<num>", "issue-7", 7),
+            ("<num><slug>", "12abc", None),
+            ("<slug><num>", "abc12", None),
+            ("no-number", "no-number", None),
+            (None, "issue-858-x", None),
+        ]
+        for pattern, branch, expected in rows:
+            with self.subTest(pattern=pattern, branch=branch):
+                self.assertEqual(deliveries.branch_issue(pattern, branch), expected)
+
+    def test_a_valid_branch_pattern_other_than_issue_first_still_names_the_issue(self):
+        records = [
+            S("a1", "setup", "Setup"), R("a1", {"ok": True, "branch": "console-stage-858"}),
+            S("a2", "impl-1", "Tasks"),
+        ]
+        self.assertEqual(shown(records), {})
+        self.assertEqual({i.issue: deliveries.stage_text(i)
+                          for i in fold(records, "<slug>-<num>").issues()}, {858: "building task 1"})
+        child = [
+            S("b1", "facts-858", "Intake"),
+            S("c1", "setup", CHILD), R("c1", {"ok": True, "branch": "console-stage-858"}),
+            S("c2", "impl-2", CHILD),
+        ]
+        self.assertEqual({i.issue: deliveries.stage_text(i)
+                          for i in fold(child, "<slug>-<num>").issues()}, {858: "building task 2"})
 
     def test_train_counters_name_no_issue(self):
         base = journal("batch")[:9]
@@ -403,6 +485,23 @@ class RunFoldTest(unittest.TestCase):
                     self.assertEqual(step.issue, 4242 if names_issue else None)
 
 
+class ConfiguredBranchPatternTest(unittest.TestCase):
+    def test_the_pattern_is_the_contracts_vcs_branch_pattern(self):
+        snapshot = {"bindings": {"vcs": {"branch_pattern": "<slug>-<num>"}}}
+        with mock.patch("agent_tools.console.deliveries.resolve_project.resolve",
+                        return_value=snapshot) as resolve:
+            self.assertEqual(deliveries.configured_branch_pattern("/srv/p"), "<slug>-<num>")
+        resolve.assert_called_once_with("/srv/p")
+
+    def test_an_unresolved_contract_gives_none(self):
+        refusal = deliveries.resolve_project.ContractError("not_onboarded", "r", [])
+        for outcome in ({"side_effect": refusal}, {"side_effect": OSError("gone")},
+                        {"return_value": {}}, {"return_value": {"bindings": {"vcs": {"branch_pattern": 3}}}}):
+            with self.subTest(outcome=outcome), mock.patch(
+                    "agent_tools.console.deliveries.resolve_project.resolve", **outcome):
+                self.assertIsNone(deliveries.configured_branch_pattern("/srv/p"))
+
+
 class RunJournalsTest(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -433,6 +532,12 @@ class RunJournalsTest(unittest.TestCase):
         record.parent.mkdir(parents=True)
         record.write_text("{}")
         self.assertIs(deliveries.has_final_record(j["w1"]), True)
+
+    def test_a_session_id_with_a_nul_is_absent_not_a_failure(self):
+        self.assertEqual(deliveries.run_journals(self.dirs, "a\x00b"), [])
+        journal = self.root / "a/projects/-srv-p00/a\x00b/subagents/workflows/wf_1/journal.jsonl"
+        self.assertIs(deliveries.has_final_record(journal), False)
+        self.assertIsNone(deliveries.JournalReader().read(journal))
 
     def test_a_listing_failure_is_unreadable_not_empty(self):
         with mock.patch("agent_tools.console.deliveries.os.scandir",

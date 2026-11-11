@@ -9,8 +9,9 @@ last movement is the journal's modification time.
 whole file again. It keeps, per path, the inode, the byte offset and the bytes of a trailing line
 that has no newline yet:
 
-- `None` only when the journal is confirmed absent (`FileNotFoundError` or `NotADirectoryError` from
-  `os.stat`); the reader then forgets the path.
+- `None` only when the journal is confirmed absent (`FileNotFoundError`, `NotADirectoryError` or, for
+  a path that holds a NUL and so cannot exist, `ValueError` from `os.stat`); the reader then forgets
+  the path.
 - `Unreadable(reason)`, `"<Type>: <message>"` of the `OSError` that stopped the read, for any other
   failure to stat, open or read. It is not absence: the journal may still be there, and the kept
   state is left unchanged, so the next successful read continues where the last one ended.
@@ -40,18 +41,29 @@ chunking (folding a list in pieces equals folding it whole), and `RunFold.issues
   (group 1); any other number there counts trains, sweeps or rounds and is never an issue, so an
   unknown batch label, or one with no issue, touches no issue. An owner label not in its table
   reads `WORKING`, never an error; a step with no stage moves nothing.
-- A child's issue is named by its `setup` result's `branch` (`issue-<n>`, then `-` or the end); a
-  non-batch run's own `setup` result names the run's issue likewise. The issue is created at
+- `RunFold(branch_pattern)` takes the project's configured branch pattern (`<num>` and `<slug>`
+  placeholders, as `issue-branch` renders it) or None. A child's issue is the number its `setup`
+  result's `branch` carries under that pattern (`branch_issue`; a branch that does not fit it, a
+  pattern with no `<num>`, or None names no issue); a non-batch run's own `setup` result names the
+  run's issue likewise. The issue is created at
   `PLANNING` if not yet known, and everything its owner did before then (stages, plan counts,
   close-outs) is applied at that moment, in order. Until then a child touches no issue.
 - A `plan`, `plan-revise` or `plan-rules-revise` result with `status` `"planned"` and a non-empty
   `tasks` list sets its issue's task total (latest wins; the count is per issue, so a later child
   of the same issue inherits it). A `BUILDING` label with a task sets the issue's task.
+- A `plan`, `plan-revise` or `plan-rules-revise` result's non-empty `acceptance` list also grades its
+  issue (`Grading`; latest wins): held when a criterion has kind `evidence` or `human`, with notes
+  when one has kind `note`.
 - A `close-out` result (owner) or `close-out-<n>` result (batch) makes its issue `DONE` only when
-  `closed_out(result)`: the close-out released the claim, ended the decision, left the issue in
-  `OPEN` (held) or `CLOSED` and did not report its notes unposted. Any other result leaves the
-  issue as the label left it.
+  `closed_out(result, grading, batch)`: the close-out released the claim, ended the decision, and
+  left the issue in the state the programs require (`CLOSED` when nothing is held; `OPEN` when held
+  in a batch; either when held in a single run, whose hold step the console does not read, or when
+  no plan graded the issue), with `notes_posted` true when the plan has notes and not false
+  otherwise. Any other result leaves the issue as the label left it.
 - `DONE` is final. A `QUEUED` step changes only an issue that is new or still `QUEUED`.
+
+`configured_branch_pattern(repo)` is the service's default source of that pattern: the project
+contract's `vcs.branch_pattern` through `resolve_project.resolve`, or None when it does not resolve.
 
 Delivery events (the log's rows for the run journals): `delivery.seen` (`DELIVERY_SEEN`) carries
 `seen_payload(state)`, `{"session_id", "run_id", "moved_ms", "issues": [{"issue", "stage", "task",
@@ -73,6 +85,7 @@ A journal that has not moved carries no sign of why, so the console never calls 
 """
 
 
+import functools
 import json
 import os
 import re
@@ -82,6 +95,7 @@ from stat import S_ISREG
 from typing import BinaryIO, Callable, Iterable, Mapping
 
 from agent_tools.console.event_log import Event
+from agent_tools.project_contract import resolve_project
 
 JOURNAL_NAME = "journal.jsonl"
 
@@ -104,6 +118,10 @@ class Unreadable:
 
 def _open_binary(path: Path) -> BinaryIO:
     return open(path, "rb")
+
+
+# A path that holds a NUL raises ValueError from the os calls: it cannot exist, so it is absent.
+_ABSENT = (FileNotFoundError, NotADirectoryError, ValueError)
 
 
 def _reason(error: OSError) -> str:
@@ -129,7 +147,7 @@ class JournalReader:
     def read(self, path: Path) -> Chunk | Unreadable | None:
         try:
             stat = os.stat(path)
-        except (FileNotFoundError, NotADirectoryError):
+        except _ABSENT:
             self.forget(path)
             return None
         except OSError as error:
@@ -153,9 +171,6 @@ class JournalReader:
         return Chunk(records, moved_ms, from_start)
 
 
-_ABSENT = (FileNotFoundError, NotADirectoryError)
-
-
 def _children(directory: Path) -> list[os.DirEntry] | None:
     """The entries of a directory; None when it is absent. Any other `OSError` propagates."""
     try:
@@ -170,7 +185,8 @@ def run_journals(projects_dirs: Iterable[Path], session_id: str) -> list[Path] |
 
     The tree is `<projects>/<slug>/<session_id>/subagents/workflows/<run_id>/journal.jsonl`, walked
     with `os.scandir` per level and `os.stat` on each journal. A branch that is absent
-    (`FileNotFoundError`, `NotADirectoryError`) contributes nothing; any other `OSError` makes the
+    (`FileNotFoundError`, `NotADirectoryError`, or `ValueError` for a session id holding a NUL, which
+    names no path) contributes nothing; any other `OSError` makes the
     whole answer `Unreadable`, because a listing that failed cannot confirm what is absent. Never
     raises.
     """
@@ -306,18 +322,70 @@ def classify(label: str, *, batch: bool) -> Step | None:
     return None
 
 
-def closed_out(result: object) -> bool:
-    """True for a close-out result showing the close-out finished (the programs' own test, less what the console cannot know)."""
-    return (
-        isinstance(result, dict)
-        and result.get("released") is True
-        and result.get("decision_ended") is True
-        and result.get("issue_state") in ("OPEN", "CLOSED")
-        and result.get("notes_posted") is not False
-    )
+@dataclass(frozen=True)
+class Grading:
+    """What a plan's acceptance criteria require of the close-out: `held` (an evidence or human criterion) and `notes`."""
+
+    held: bool
+    notes: bool
 
 
-_BRANCH_ISSUE = re.compile(r"issue-(\d+)(-|$)")
+def grading_of(acceptance: object) -> Grading | None:
+    """The grading of a plan's non-empty `acceptance` list; None for anything else."""
+    if not isinstance(acceptance, list) or not acceptance:
+        return None
+    kinds = [item.get("kind") for item in acceptance if isinstance(item, dict)]
+    return Grading(any(k in ("evidence", "human") for k in kinds), "note" in kinds)
+
+
+def closed_out(result: object, grading: Grading | None = None, batch: bool = False) -> bool:
+    """True for a close-out result showing the close-out finished and left the issue as the programs require."""
+    if not isinstance(result, dict) or result.get("released") is not True or result.get("decision_ended") is not True:
+        return False
+    if grading is None or (grading.held and not batch):
+        states = ("OPEN", "CLOSED")
+    else:
+        states = ("OPEN",) if grading.held else ("CLOSED",)
+    posted = result.get("notes_posted")
+    notes_ok = posted is True if grading is not None and grading.notes else posted is not False
+    return result.get("issue_state") in states and notes_ok
+
+
+_SLUG_CLASS = "[a-z0-9][a-z0-9-]*"
+_PLACEHOLDERS = re.compile(r"(<num>|<slug>)")
+
+
+@functools.lru_cache(maxsize=64)
+def _branch_matcher(pattern: str) -> re.Pattern[str] | None:
+    if "<num>" not in pattern or "<num><slug>" in pattern or "<slug><num>" in pattern:
+        return None
+    seen = False
+    parts = []
+    for part in _PLACEHOLDERS.split(pattern):
+        if part == "<num>":
+            parts.append("(?P=n)" if seen else "(?P<n>\\d+)")
+            seen = True
+        else:
+            parts.append(_SLUG_CLASS if part == "<slug>" else re.escape(part))
+    return re.compile("".join(parts))
+
+
+def branch_issue(pattern: str | None, branch: str) -> int | None:
+    """The issue number `branch` carries under the project's branch `pattern`; None when it does not fit."""
+    matcher = None if pattern is None else _branch_matcher(pattern)
+    match = None if matcher is None else matcher.fullmatch(branch)
+    return None if match is None else int(match.group("n"))
+
+
+def configured_branch_pattern(repo: str) -> str | None:
+    """The `vcs.branch_pattern` the project contract of the repository at `repo` resolves to; None if it does not."""
+    try:
+        pattern = resolve_project.resolve(repo)["bindings"]["vcs"]["branch_pattern"]
+    except Exception:
+        return None
+    return pattern if isinstance(pattern, str) else None
+
+
 _PLAN_LABELS = ("plan", "plan-revise", "plan-rules-revise")
 _BATCH_CLOSE_OUT = re.compile(r"close-out-(\d+)")
 
@@ -331,7 +399,9 @@ class _Owner:
 
 
 class RunFold:
-    def __init__(self) -> None:
+    def __init__(self, branch_pattern: str | None = None) -> None:
+        self.branch_pattern = branch_pattern
+        self._gradings: dict[int, Grading] = {}
         self._issues: dict[int, IssueStage] = {}
         self._owners: dict[str | None, _Owner] = {}
         self._agents: dict[str, tuple[str, str | None]] = {}
@@ -374,22 +444,27 @@ class RunFold:
     def _result(self, label: str, key: str | None, result: object) -> None:
         if key is None and self._batch:
             match = _BATCH_CLOSE_OUT.fullmatch(label)
-            if match is not None and closed_out(result):
-                self._done(int(match.group(1)))
+            if match is not None:
+                issue = int(match.group(1))
+                if closed_out(result, self._gradings.get(issue), True):
+                    self._done(issue)
             return
         owner = self._owner(key)
         if label == "setup":
             branch = result.get("branch") if isinstance(result, dict) else None
-            match = _BRANCH_ISSUE.match(branch) if isinstance(branch, str) else None
-            if match is not None:
-                self._name(owner, int(match.group(1)))
+            issue = branch_issue(self.branch_pattern, branch) if isinstance(branch, str) else None
+            if issue is not None:
+                self._name(owner, issue)
         elif label in _PLAN_LABELS:
             if isinstance(result, dict) and result.get("status") == "planned":
                 tasks = result.get("tasks")
                 if isinstance(tasks, list) and tasks:
                     self._effect(owner, "tasks", len(tasks))
-        elif label == "close-out" and closed_out(result):
-            self._effect(owner, "done", None)
+                grading = grading_of(result.get("acceptance"))
+                if grading is not None:
+                    self._effect(owner, "grading", grading)
+        elif label == "close-out":
+            self._effect(owner, "close-out", result)
 
     def _name(self, owner: _Owner, issue: int) -> None:
         owner.issue = issue
@@ -406,7 +481,9 @@ class RunFold:
             self._step(owner.issue, value)
         elif kind == "tasks":
             self._update(owner.issue, tasks=value)
-        else:
+        elif kind == "grading":
+            self._gradings[owner.issue] = value
+        elif closed_out(value, self._gradings.get(owner.issue)):
             self._done(owner.issue)
 
     def _update(self, issue: int, **fields) -> None:
