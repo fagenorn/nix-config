@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 import tempfile
+import time
 from pathlib import Path
 
 from agent_tools.console import service as console_service
@@ -46,8 +47,55 @@ def request(address, method, path, host=None):
         connection.close()
 
 
-def service(test, store, registry):
-    svc = console_service.ConsoleService(store, registry, port=0)
+def post_hook(address, body, headers=None, host=None):
+    headers = {"Content-Type": "application/json"} if headers is None else dict(headers)
+    if host is not None:
+        headers["Host"] = host
+    connection = http.client.HTTPConnection(*address, timeout=5)
+    try:
+        connection.request("POST", "/api/hooks", body=body, headers=headers)
+        response = connection.getresponse()
+        return response.status, dict(response.getheaders()), response.read()
+    finally:
+        connection.close()
+
+
+def write_session(directory, *, pid, session_id, cwd, status, waiting_for=None, name=None,
+                  updated_at=None):
+    directory = Path(directory)
+    directory.mkdir(parents=True, exist_ok=True)
+    document = {"pid": pid, "sessionId": session_id, "cwd": cwd, "status": status,
+                "updatedAt": int(time.time() * 1000) if updated_at is None else updated_at}
+    if waiting_for is not None:
+        document["waitingFor"] = waiting_for
+    if name is not None:
+        document["name"] = name
+    handle, temporary = tempfile.mkstemp(dir=directory)
+    with os.fdopen(handle, "w") as stream:
+        json.dump(document, stream)
+    os.replace(temporary, directory / f"{pid}.json")
+
+
+HOOK_FIXTURE = Path(__file__).parent / "fixtures" / "console" / "hook-payloads.json"
+
+
+def hook_cases():
+    document = json.loads(HOOK_FIXTURE.read_text())
+    return [(case["name"], {**document["common"], **case["payload"]}, case["expect"])
+            for case in document["cases"]]
+
+
+def hook_body(name, **overrides):
+    for case_name, payload, _ in hook_cases():
+        if case_name == name:
+            return json.dumps({**payload, **overrides}).encode("utf-8")
+    raise KeyError(name)
+
+
+def service(test, store, registry, session_dirs=(), repo_of=lambda cwd: cwd, **kwargs):
+    svc = console_service.ConsoleService(
+        store, registry, port=0, session_dirs=lambda: list(session_dirs),
+        repo_of=repo_of, **kwargs)
     svc.start()
     test.addCleanup(svc.close)
     return svc

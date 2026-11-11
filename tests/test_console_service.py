@@ -3,20 +3,23 @@
 Run: just agent-workflow-tests
 """
 import contextlib
+import http.client
 import inspect
 import io
 import json
 import os
 import socket
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import service
+from agent_tools.console import service, sessions
 from agent_tools.console.view import derive_view, encode_view, project_states
 
 from . import console_test_support as support
@@ -86,18 +89,45 @@ def state_under_tripwires(svc):
     return status, body, tripwire.touched, mocks
 
 
+SID = support.hook_cases()[0][1]["session_id"]
+
+
+def wait_rows(store, kind, count):
+    deadline = time.monotonic() + 2
+    while time.monotonic() < deadline:
+        rows = [row for row in support.log_rows(store) if row[2] == kind]
+        if len(rows) >= count:
+            return rows
+        time.sleep(0.02)
+    raise AssertionError(f"fewer than {count} {kind} rows")
+
+
+def listed(svc):
+    """The state of every session the served view lists, by session id."""
+    view = json.loads(svc.view_bytes)
+    lines = []
+    for entry in view["entries"]:
+        for project in entry.get("projects", [entry]):
+            lines.append(project["outside_sprints"])
+    lines.extend(entry["outside_sprints"] for entry in view["unmanaged"])
+    return {s["session_id"]: s["state"] for line in lines for s in line["sessions"]}
+
+
 class Case(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
+        self.root = root
         self.store = root / "state/console/events.sqlite3"
         self.registry = root / "state/fleet/registry.json"
+        self.sessions = root / "sessions"
 
-    def start(self, items=None):
+    def start(self, items=None, **kwargs):
         if items is not None:
             support.write_registry(self.registry, items)
-        return support.service(self, self.store, self.registry)
+        return support.service(
+            self, self.store, self.registry, session_dirs=[self.sessions], **kwargs)
 
 
 class StateTest(Case):
@@ -139,6 +169,21 @@ class RestartTest(Case):
         rows = support.log_rows(self.store)
         self.start().close()
         self.assertEqual(support.log_rows(self.store), rows)
+
+
+    def test_a_restart_keeps_sessions_until_two_polls_miss_them(self):
+        first = self.start([{"project_id": "owner/p00", "root": "/srv/p00"}])
+        status, _, _ = support.post_hook(first.address, support.hook_body("session start"))
+        self.assertEqual(status, 204)
+        wait_rows(self.store, "session.hook", 1)
+        first.close()
+        second = support.service(
+            self, self.store, self.registry, session_dirs=[self.sessions],
+            session_poll_seconds=3600)
+        self.assertEqual(listed(second), {SID: "idle"})
+        appended = second.poll_sessions()
+        self.assertEqual([e.kind for e in appended], ["session.gone"])
+        self.assertEqual(listed(second), {})
 
 
 class AppendOnlyTest(Case):
@@ -264,7 +309,7 @@ class PageRouteTest(Case):
 
 
 class MethodTest(Case):
-    def test_no_endpoint_changes_anything(self):
+    def test_only_the_hook_route_takes_a_write(self):
         svc = self.start(support.entries(1))
         rows = support.log_rows(self.store)
         for method in ("POST", "PUT", "DELETE", "PATCH"):
@@ -272,7 +317,232 @@ class MethodTest(Case):
                 status, headers, _ = support.request(svc.address, method, path)
                 self.assertEqual((method, path, status), (method, path, 405))
                 self.assertEqual(headers["Allow"], "GET")
+        for method in ("GET", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"):
+            status, headers, _ = support.request(svc.address, method, "/api/hooks")
+            self.assertEqual((method, status), (method, 405))
+            self.assertEqual(headers["Allow"], "POST")
         self.assertEqual(support.log_rows(self.store), rows)
+
+
+def git(*args):
+    subprocess.run(["git", *args], check=True, capture_output=True)
+
+
+class HookTest(Case):
+    ITEMS = [{"project_id": "owner/p00", "root": "/srv/p00"}]
+
+    def test_each_hook_is_answered_204_with_no_body_and_recorded(self):
+        svc = self.start(self.ITEMS)
+        for name, payload, _ in support.hook_cases():
+            status, headers, body = support.post_hook(svc.address, json.dumps(payload).encode())
+            self.assertEqual((name, status, body), (name, 204, b""))
+            self.assertEqual(headers["Cache-Control"], "no-store")
+            self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
+        rows = wait_rows(self.store, "session.hook", 12)
+        self.assertEqual({row[3] for row in rows}, {"owner/p00"})
+
+    def test_the_answer_does_not_wait_for_the_log(self):
+        svc = self.start(self.ITEMS)
+        gate = threading.Event()
+        real = svc.log.append
+
+        def append(entries):
+            gate.wait(5)
+            return real(entries)
+
+        with mock.patch.object(svc.log, "append", side_effect=append):
+            t0 = time.monotonic()
+            status, _, body = support.post_hook(svc.address, support.hook_body("finished turn"))
+            elapsed = time.monotonic() - t0
+            self.assertEqual((status, body), (204, b""))
+            self.assertLess(elapsed, 1.0)
+            gate.set()
+            wait_rows(self.store, "session.hook", 1)
+
+    def test_unknown_events_and_fields_are_accepted_and_ignored(self):
+        svc = self.start(self.ITEMS)
+        common = support.hook_cases()[0][1]
+        status, _, _ = support.post_hook(
+            svc.address, json.dumps({**common, "hook_event_name": "PreCompact"}).encode())
+        self.assertEqual(status, 204)
+        buffer = io.StringIO()
+        with mock.patch.object(service.sys, "stderr", buffer):
+            status, _, _ = support.post_hook(svc.address, b"{not json")
+            self.assertEqual(status, 204)
+            deadline = time.monotonic() + 1
+            while "console: hook_unreadable" not in buffer.getvalue() \
+                    and time.monotonic() < deadline:
+                time.sleep(0.02)
+        self.assertTrue(buffer.getvalue().startswith("console: hook_unreadable"),
+                        buffer.getvalue())
+        body = json.loads(support.hook_body("finished turn"))
+        body["future_field"] = {"a": 1}
+        status, _, _ = support.post_hook(svc.address, json.dumps(body).encode())
+        self.assertEqual(status, 204)
+        wait_rows(self.store, "session.hook", 1)
+        time.sleep(0.2)
+        rows = [row for row in support.log_rows(self.store) if row[2] == "session.hook"]
+        self.assertEqual(len(rows), 1)
+        self.assertNotIn("future_field", json.loads(rows[0][4]))
+
+    def test_a_browser_request_is_refused(self):
+        svc = self.start(self.ITEMS)
+        body = support.hook_body("finished turn")
+        status, _, _ = support.post_hook(
+            svc.address, body,
+            {"Content-Type": "application/json", "Origin": "http://example.test"})
+        self.assertEqual(status, 403)
+        status, _, _ = support.post_hook(svc.address, body, {"Content-Type": "text/plain"})
+        self.assertEqual(status, 415)
+        status, _, _ = support.post_hook(svc.address, body, host="evil.test")
+        self.assertEqual(status, 403)
+        status, _, _ = support.post_hook(
+            svc.address, body, {"Content-Type": "Application/JSON; charset=utf-8"})
+        self.assertEqual(status, 204)
+        connection = http.client.HTTPConnection(*svc.address, timeout=5)
+        try:
+            connection.putrequest("POST", "/api/hooks")
+            connection.putheader("Content-Type", "application/json")
+            connection.putheader("Content-Length", str(service.MAX_HOOK_BYTES + 1))
+            connection.endheaders(b"x")
+            self.assertEqual(connection.getresponse().status, 413)
+        finally:
+            connection.close()
+        connection = http.client.HTTPConnection(*svc.address, timeout=5)
+        try:
+            connection.putrequest("POST", "/api/hooks")
+            connection.putheader("Content-Type", "application/json")
+            connection.endheaders()
+            self.assertEqual(connection.getresponse().status, 411)
+        finally:
+            connection.close()
+        wait_rows(self.store, "session.hook", 1)
+        time.sleep(0.2)
+        kinds = [row[2] for row in support.log_rows(self.store)]
+        self.assertEqual(kinds.count("session.hook"), 1)
+        self.assertEqual(kinds.count("project.registered"), 1)
+
+    def test_a_worktree_session_is_listed_under_the_main_checkout(self):
+        main, wt = self.root / "main", self.root / "wt"
+        git("-c", "init.defaultBranch=main", "init", "-q", str(main))
+        git("-C", str(main), "-c", "user.name=t", "-c", "user.email=t@t",
+            "-c", "commit.gpgsign=false", "commit", "-q", "--allow-empty", "-m", "x")
+        git("-C", str(main), "worktree", "add", "-q", str(wt), "-b", "wt")
+        (wt / "sub").mkdir()
+        svc = self.start([{"project_id": "owner/main", "root": os.path.realpath(main)}],
+                         repo_of=sessions.main_checkout)
+        status, _, _ = support.post_hook(
+            svc.address, support.hook_body("session start", cwd=str(wt / "sub")))
+        self.assertEqual(status, 204)
+        deadline = time.monotonic() + 2
+        seen, view, found = -1, None, []
+        while not found and time.monotonic() < deadline:
+            change = svc.wait_for_change(seen, 0.2)
+            if change is not None:
+                seen, raw = change
+                view = json.loads(raw)
+                found = [s for e in view["entries"] if e["project_id"] == "owner/main"
+                         for s in e["outside_sprints"]["sessions"]]
+        self.assertEqual([(s["cwd"], s["state"]) for s in found], [(str(wt / "sub"), "idle")])
+        self.assertEqual(view["unmanaged"], [])
+
+    def test_a_session_outside_any_repository_is_not_listed(self):
+        plain = self.root / "plain"
+        plain.mkdir()
+        svc = self.start(self.ITEMS, repo_of=sessions.main_checkout)
+        status, _, _ = support.post_hook(
+            svc.address, support.hook_body("session start", cwd=str(plain)))
+        self.assertEqual(status, 204)
+        row = wait_rows(self.store, "session.hook", 1)[0]
+        self.assertIsNone(json.loads(row[4])["repo"])
+        self.assertIsNone(row[3])
+        self.assertEqual(listed(svc), {})
+        self.assertEqual(json.loads(svc.view_bytes)["unmanaged"], [])
+
+    def test_a_hook_moves_the_projects_activity(self):
+        svc = self.start(self.ITEMS)
+        support.post_hook(svc.address, support.hook_body("finished turn"))
+        row = wait_rows(self.store, "session.hook", 1)[0]
+        entry = json.loads(svc.view_bytes)["entries"][0]
+        self.assertEqual(entry["last_activity"], row[1])
+        self.assertFalse(entry["quiet"])
+
+    def test_the_default_session_directories_cover_every_profile(self):
+        with tempfile.TemporaryDirectory() as raw:
+            home, accounts = Path(raw) / "home", Path(raw) / "accounts"
+            (accounts / "profiles/b/sessions").mkdir(parents=True)
+            (accounts / "profiles/a/sessions").mkdir(parents=True)
+            with mock.patch.dict(os.environ, {"HOME": str(home),
+                                              "CLAUDE_ACCOUNTS_DIR": str(accounts)}):
+                self.assertEqual(
+                    service.default_session_dirs(),
+                    [home / ".claude/sessions", accounts / "profiles/a/sessions",
+                     accounts / "profiles/b/sessions"])
+            fallback = home / ".claude-accounts"
+            (fallback / "profiles/c/sessions").mkdir(parents=True)
+            environment = {k: v for k, v in os.environ.items() if k != "CLAUDE_ACCOUNTS_DIR"}
+            environment["HOME"] = str(home)
+            with mock.patch.dict(os.environ, environment, clear=True):
+                self.assertEqual(
+                    service.default_session_dirs(),
+                    [home / ".claude/sessions", fallback / "profiles/c/sessions"])
+
+    def test_an_unchanged_registry_appends_nothing(self):
+        support.write_session(self.sessions, pid=os.getpid(), session_id="s1",
+                              cwd="/srv/p00", status="busy")
+        svc = self.start(self.ITEMS)
+        self.assertEqual(svc.poll_sessions(), [])
+        rows = [row for row in support.log_rows(self.store) if row[2] == "session.seen"]
+        self.assertEqual(len(rows), 1)
+
+    def interleave(self, svc, hook):
+        """Run one poll whose reading is followed, before its application, by a hook."""
+        real = sessions.read_session_registry
+        state = {}
+
+        def reading(directories, *args, **kwargs):
+            result = real(directories, *args, **kwargs)
+            thread = threading.Thread(
+                target=svc.ingest_hook, args=(support.hook_body(hook),))
+            thread.start()
+            thread.join(0.3)
+            state["blocked"] = thread.is_alive()
+            state["thread"] = thread
+            return result
+
+        with mock.patch.object(service.sessions, "read_session_registry", reading):
+            svc.poll_sessions()
+        state["thread"].join(2)
+        self.assertFalse(state["thread"].is_alive())
+        return state["blocked"]
+
+    def stale_busy_session(self):
+        support.write_session(
+            self.sessions, pid=os.getpid(), session_id=SID, cwd="/srv/p00", status="busy",
+            updated_at=int(time.time() * 1000) - 10000)
+        svc = self.start(self.ITEMS, session_poll_seconds=3600)
+        self.assertEqual(listed(svc), {SID: "working"})
+        return svc
+
+    def test_a_poll_reading_from_before_a_hook_does_not_overwrite_it(self):
+        svc = self.stale_busy_session()
+        self.assertTrue(self.interleave(svc, "permission prompt"))
+        self.assertEqual(listed(svc), {SID: "waiting_permission"})
+        self.assertEqual(len(wait_rows(self.store, "session.seen", 1)), 1)
+        self.assertEqual(svc.poll_sessions(), [])
+        self.assertEqual(listed(svc), {SID: "waiting_permission"})
+
+    def test_a_poll_reading_from_before_a_session_end_does_not_bring_it_back(self):
+        svc = self.stale_busy_session()
+        self.assertTrue(self.interleave(svc, "session end"))
+        self.assertEqual(listed(svc), {})
+        self.assertEqual(svc.poll_sessions(), [])
+        self.assertEqual(listed(svc), {})
+        (self.sessions / f"{os.getpid()}.json").unlink()
+        svc.poll_sessions()
+        svc.poll_sessions()
+        gone = [row for row in support.log_rows(self.store) if row[2] == "session.gone"]
+        self.assertEqual(len(gone), 1)
 
 
 class ReadFleetTest(Case):
