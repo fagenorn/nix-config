@@ -82,6 +82,15 @@ def kept(n):
     return dict(reviewed(n), plan_reviewed=False, done=[])
 
 
+# The members of a cont's setup the relaunch keeps: what a resumed child reads from cont.setup, and the fresh setup's facts.
+SETUP_KEPT = ("holder", "branch", "worktree", "worktree_path", "base_sha", "plan_dir", "details")
+
+
+def slim(cont):
+    """The cont as a relaunch forwards it: its setup holds only the kept members, every other member is as it came."""
+    return dict(cont, setup={k: v for k, v in cont["setup"].items() if k in SETUP_KEPT})
+
+
 def closing(pr):
     """Facts naming a merged PR that closes the issue."""
     return {"merged_refs": [{"number": pr, "closes": True}]}
@@ -806,11 +815,11 @@ def object_branch(schema):
     return schema
 
 
-def run_child(args):
+def run_child(args, replies=None, patch=None):
     node = shutil.which("node")
     if node is None:
         raise AssertionError("node is not on PATH; the deliver-standard scenarios need it")
-    scenario = {"args": args, "replies": {}, "patch": {}}
+    scenario = {"args": args, "replies": replies or {}, "patch": patch or {}}
     done = subprocess.run([node, str(CHILD_HARNESS), str(CHILD_PROGRAM)], input=json.dumps(scenario),
                           capture_output=True, text=True, timeout=60, check=False)
     if done.returncode != 0:
@@ -829,6 +838,166 @@ class BookkeepingCountTest(unittest.TestCase):
         child_book = [l for l in labels(child_calls) if BOOKKEEPING.match(l)]
         batch_book = [l for l in of(calls, 1) if BOOKKEEPING.match(l)]
         self.assertLessEqual(len(child_book) + len(batch_book), BOOKKEEPING_BASELINE * 0.6, (child_book, batch_book))
+
+
+def size(value):
+    return len(json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode())
+
+
+class RelaunchContSizeTest(unittest.TestCase):
+    """The lead copies the relaunch into the next run's args: a forwarded cont keeps of its setup only what a resume reads."""
+
+    CHILD_ARGS = {"repo_root": "/r", "issue": 1, "batch_id": "b1"}
+    DETAILS = "Still applies: the handler in src/a.py drops the second call; nothing of it exists yet."
+    RULE = {"verdict": "findings", "findings": [{"severity": "important", "rule": "R2", "summary": "AC1 asks for approval"}]}
+    # Every kind of stop a batch forwards: (the child's mode, its replies, the stage it stops at, the first call only that resume makes).
+    STOPS = (
+        ("ready", {}, "ready", "renew-final-review"),
+        ("plan", {}, "planned", "impl-1"),
+        ("ready", {"plan": {"status": "needs_user", "questions": [{"question": "Which host?", "options": ["One.", "Two."]}]}},
+         "plan", "plan"),
+        ("ready", {"plan-review": RULE, "plan-rules-review": RULE}, "plan-review", "plan-rules-revise"),
+        ("ready", {"impl-1": {"status": "blocked", "notes": "the fixture is missing"}}, "task", "impl-1"),
+        ("ready", {"verify": None}, "verify", "verify"),
+    )
+    # A resume's setup reply reads the contract afresh; a dirty tree, a moved head and a merged PR take the other resume paths.
+    RESUME_SETUPS = ({}, {"dirty": True}, {"head": "b" * 40})
+
+    def stop(self, mode, replies, stage):
+        result, _ = run_child(dict(self.CHILD_ARGS, mode=mode, lane="standard"), replies=replies,
+                              patch={"setup": {"details": self.DETAILS}})
+        self.assertEqual(result["stage"], stage, result)
+        return result
+
+    def forwarded(self, stop):
+        """The cont a batch's relaunch carries for a child that stopped with `stop`; a ready or planned child's when its issue then waits."""
+        if stop["stage"] in ("ready", "planned"):
+            result, _, _ = run(args=dict(ARGS, conts={"1": stop["cont"]}), patch={"facts-1": {"blockers": [{"issue": 50, "state": "OPEN"}]}})
+        else:
+            result, _, _ = run(children={"1": stop})
+        return result["relaunch"]["conts"]["1"]
+
+    def test_the_relaunch_keeps_only_the_setup_members_a_resume_reads(self):
+        full = self.stop("ready", {"verify": None}, "verify")["cont"]
+        dropped = set(full["setup"]) - set(SETUP_KEPT)
+        for name in ("verification", "knowledge", "review", "review_state", "unset_env", "slug", "integration_branch",
+                     "merge_strategy", "host"):
+            self.assertIn(name, dropped)
+        sent = self.forwarded({"stage": "verify", "cont": full})
+        self.assertEqual(sent, slim(full))
+        self.assertEqual(set(sent["setup"]), set(full["setup"]) & set(SETUP_KEPT))
+        for name in ("holder", "branch", "worktree", "worktree_path", "base_sha", "plan_dir", "details"):
+            self.assertEqual(sent["setup"][name], full["setup"][name])
+        self.assertEqual({k: v for k, v in sent.items() if k != "setup"}, {k: v for k, v in full.items() if k != "setup"})
+
+    def test_a_given_cont_is_slimmed_the_same_way_and_slimming_twice_changes_nothing(self):
+        full = self.stop("ready", {"verify": None}, "verify")["cont"]
+        blocked = {"facts-1": {"blockers": [{"issue": 50, "state": "OPEN"}]}}
+        first, _, _ = run(args=dict(ARGS, conts={"1": full}), patch=blocked)
+        self.assertEqual(first["relaunch"]["conts"], {"1": slim(full)})
+        second, _, _ = run(args=first["relaunch"], patch=blocked)
+        self.assertEqual(second["relaunch"]["conts"], first["relaunch"]["conts"])
+
+    def test_a_cont_with_no_setup_object_is_forwarded_as_it_came(self):
+        for cont in ({"lane": "standard"}, {"setup": None, "lane": "standard"}, {"setup": "x"}):
+            with self.subTest(cont=cont):
+                result, _, _ = run(children={"1": {"stage": "task", "cont": cont}})
+                self.assertEqual(result["relaunch"]["conts"], {"1": cont})
+
+    def test_a_resume_of_the_slimmed_cont_runs_the_steps_of_the_full_cont(self):
+        """stop -> relaunch args -> resume: every prompt but the setup's, every step and the result are those of the full cont."""
+        # A planned child is resumed in mode ready, as the batch resumes it once a delivery slot is free.
+        stops = [("ready", self.stop(mode, replies, stage), step) for mode, replies, stage, step in self.STOPS]
+        # A kept plan whose findings no rules-only revise may settle: its resume drops the plan and plans again.
+        kept = next(s for _, s, _ in stops if s["stage"] == "plan-review")
+        findings = dict(kept["cont"]["plan_findings"], rules=[dict(kept["cont"]["plan_findings"]["rules"][0], source="codex")])
+        stops.append(("ready", dict(kept, cont=dict(kept["cont"], plan_findings=findings)), "plan"))
+        for mode, stop, step in stops:
+            full = stop["cont"]
+            sent = self.forwarded(stop)
+            self.assertEqual(sent, slim(full))
+            self.assertLess(size(sent), size(full))
+            for setup in self.RESUME_SETUPS:
+                with self.subTest(stage=stop["stage"], step=step, setup=setup):
+                    runs = [run_child(dict(self.CHILD_ARGS, mode=mode, cont=cont), patch={"setup": setup}) for cont in (full, sent)]
+                    (want, want_calls), (got, got_calls) = runs
+                    self.assertEqual(labels(got_calls), labels(want_calls))
+                    if not setup.get("dirty"):
+                        self.assertIn(step, labels(want_calls))
+                    self.assertEqual(got, want)
+                    for a, b in zip(got_calls, want_calls):
+                        if a["label"] == "setup":
+                            earlier = "Earlier setup: "
+                            self.assertEqual(a["prompt"].replace(earlier + json.dumps(sent["setup"], separators=(",", ":")), earlier),
+                                             b["prompt"].replace(earlier + json.dumps(full["setup"], separators=(",", ":")), earlier))
+                            self.assertNotEqual(a["prompt"], b["prompt"])
+                        else:
+                            self.assertEqual(a, b)
+
+    def test_a_merged_landing_closes_out_from_the_slimmed_cont_as_from_the_full_one(self):
+        stop = self.stop("ready", {}, "ready")
+        full = dict(stop["cont"], pr=41)
+        sent = self.forwarded({"stage": "hold", "pr": 41, "cont": full})
+        self.assertEqual(sent, slim(full))
+        merged = {"setup": {"merged_pr": 41, "merged_heads": [{"number": 41, "commits": []}]}}
+        (want, want_calls), (got, got_calls) = [run_child(dict(self.CHILD_ARGS, cont=cont), patch=merged) for cont in (full, sent)]
+        self.assertEqual(labels(got_calls), labels(want_calls))
+        self.assertIn("hold", labels(want_calls))
+        self.assertEqual(got, want)
+        self.assertEqual([c for c in got_calls if c["label"] != "setup"], [c for c in want_calls if c["label"] != "setup"])
+
+    def test_every_setup_member_the_child_reads_from_a_cont_is_kept(self):
+        """A new read of cont.setup in the child must be added to the batch's kept list, or a relaunch would drop it."""
+        batch = PROGRAM.read_text(encoding="utf-8")
+        kept = json.loads(re.search(r"^const CONT_SETUP_KEPT = (\[.*\])$", batch, re.M).group(1).replace("'", '"'))
+        self.assertEqual(tuple(kept), SETUP_KEPT)
+        child_text = CHILD_PROGRAM.read_text(encoding="utf-8")
+        read = set(re.findall(r"\bCONT\.setup\.([A-Za-z_]+)", child_text))
+        self.assertEqual(read, {"holder", "branch", "worktree", "worktree_path", "base_sha", "plan_dir"})
+        self.assertLessEqual(read, set(kept))
+        # The only other use of cont.setup is the resume prompt's "Earlier setup", and the child never spreads or iterates it.
+        whole = re.findall(r"CONT\.setup(?![.\w])(?! &&)(?!\))", child_text)
+        self.assertEqual(len(whole), 0, whole)
+        self.assertEqual(child_text.count("JSON.stringify(CONT.setup)"), 1)
+        self.assertEqual(len(re.findall(r"\.\.\.\s*CONT\.setup|Object\.(keys|entries|values|assign)\(CONT\.setup", child_text)), 0)
+
+    def test_a_representative_relaunch_shrinks_by_the_setup_it_no_longer_carries(self):
+        """A cont shaped like a recorded one (a reviewed plan of five tasks, verified): the setup falls to a third, the cont by a tenth."""
+        setup = {
+            "ok": True, "host": "host-1", "slug": "owner/repo", "unset_env": [], "integration_branch": "dev", "default_branch": "main",
+            "merge_strategy": "merge", "delete_branch": True, "review": {"code": "review-code", "plan": "review-plan"},
+            "review_state": {"code": "available", "plan": "available"},
+            "knowledge": {"standards": ["/home/u/Projects/repo/docs/standards/README.md"], "hints": ["/home/u/Projects/repo/.claude/hints"],
+                          "rejections": ["/home/u/Projects/repo/.agents/knowledge/rejections"]},
+            "verification": [{"id": "lint", "argv": ["devenv", "tasks", "run", "ci:lint"], "cwd": "."},
+                             {"id": "test", "argv": ["devenv", "tasks", "run", "ci:test"], "cwd": "."}],
+            "branch": "issue-1-a-browser-run-loses-its-own", "head": SHA, "dirty": False, "since_reviewed": "same",
+            "worktree_path": "/home/u/Projects/repo/.worktrees/worktree-issue-1-a-browser-run-loses-its-own",
+            "holder": "host-1/host-1-20261111-1415",
+            "worktree": "/home/u/Projects/repo/.worktrees/worktree-issue-1-a-browser-run-loses-its-own",
+            "base_sha": "3" * 40,
+            "plan_dir": "/home/u/Projects/repo/.git/worktrees/worktree-issue-1-a-browser-run-loses-its-own/deliver-standard",
+        }
+        plan_dir = setup["plan_dir"]
+        cont = {
+            "setup": setup, "lane": "standard",
+            "plan": {"status": "planned", "plan_root": f"{plan_dir}/plan.md",
+                     "acceptance": [{"id": f"AC{i}", "kind": "code", "text": "A test with a fake tool that never answers: " + "x" * 330}
+                                    for i in range(1, 5)],
+                     "tasks": [{"n": i, "title": "Bound each heartbeat call so a hang is a failed beat " + "y" * 40,
+                                "file": f"{plan_dir}/task-{i}.md", "risk": "standard"} for i in range(1, 6)]},
+            "plan_reviewed": True, "decisions": ["Approved as filed. " + "z" * 300],
+            "done": [{"n": i, "commit": "c" * 40, "review_rounds": 0, "reviewer": "reviewer"} for i in range(1, 6)],
+            "fix_waves": 0, "final_reviewed": {"head": SHA},
+            "verified": {"head": SHA, "results": [{"id": "lint", "status": "pass", "summary": "ok"}, {"id": "test", "status": "pass", "summary": "ok"}],
+                         "contract": json.dumps(setup["verification"], separators=(",", ":"))},
+        }
+        result, _, _ = run(args=dict(ARGS, conts={"1": cont}), patch={"facts-1": {"blockers": [{"issue": 50, "state": "OPEN"}]}})
+        sent = result["relaunch"]["conts"]["1"]
+        self.assertLessEqual(size(sent["setup"]), size(setup) * 0.5)
+        self.assertLessEqual(size(sent), size(cont) * 0.9)
+        # The plan, the decisions, the task log and the verification are read by the resume from the cont, so they stay whole.
+        self.assertGreaterEqual(size(sent), size(cont) * 0.8)
 
 
 RENEW_READ = {"verdict", "by", "detail", "transient"}
@@ -1322,6 +1491,16 @@ class RerunAndContendedRetryTest(unittest.TestCase):
                                  ("ci-failed", "the fix round did not finish"))
                 self.assertNotIn("land-checks-1-2", labels(calls))
                 self.assertNotIn("land-merge-1", labels(calls))
+
+    def test_the_fix_prompt_carries_the_commit_scope_once_before_its_push(self):
+        """A fix agent stages by path only what its fix changed: one committed a lock file a tool had generated."""
+        scope = ("Before committing, read git status in the worktree you commit in and stage by path only the files the fix "
+                 "itself changed or created; never run git add -A, git commit -a or git add on a directory (the dot included); "
+                 "a lock file, a generated file or an untracked file the fix did not need is left unstaged and named in notes.")
+        _, calls, _ = run(patch=folded(CI_RED), replies={"land-fix-1": self.RERAN})
+        text = prompt(calls, "land-fix-1")
+        self.assertEqual(text.count(scope), 1)
+        self.assertLess(text.index(scope), text.index("When the failure has no cause in the code"))
 
     def test_the_fix_prompt_names_the_rerun_of_a_failure_with_no_code_cause(self):
         _, calls, _ = run(patch=dict({"setup": {"unset_env": ["GITHUB_TOKEN"]}}, **folded(CI_RED)),
@@ -2711,7 +2890,7 @@ class AmendTest(unittest.TestCase):
             args=dict(ARGS, conts={"1": kept(1)}, amend={"1": [AMEND_EDIT]}),
             children={"1": {"stage": "amend", "error": "amend must be a non-empty list", "cont": kept(1)}})
         self.assertEqual(len([c for c in calls if c["label"] == "child-1"]), 1)
-        self.assertEqual(result["relaunch"]["conts"], {"1": kept(1)})
+        self.assertEqual(result["relaunch"]["conts"], {"1": slim(kept(1))})
         self.assertEqual(result["relaunch"]["amend"], {"1": [AMEND_EDIT]})
 
     def test_the_relaunch_carries_the_amend_of_every_issue_whose_cont_it_carries(self):
@@ -2745,7 +2924,7 @@ class AmendTest(unittest.TestCase):
         stopped = reviewed(1)
         first, _, _ = run(args=dict(ARGS, conts={"1": reviewed(1)}, amend={"1": [AMEND_EDIT]}),
                           children={"1": {"stage": "codex-unavailable", "amended": True, "details": "limit", "cont": stopped}})
-        self.assertEqual(first["relaunch"]["conts"], {"1": stopped})
+        self.assertEqual(first["relaunch"]["conts"], {"1": slim(stopped)})
         self.assertEqual(first["relaunch"]["amend"], {"1": [AMEND_EDIT]})
         # The accepted PR head is unchanged, yet the relaunch must go through the child, never land as it stands.
         second, calls, _ = run(args=dict(ARGS, conts=first["relaunch"]["conts"], amend=first["relaunch"]["amend"]), patch=facts)
@@ -2763,7 +2942,7 @@ class AmendTest(unittest.TestCase):
         stopped = dict(kept(1), plan_findings={"rules": [F], "findings": [F], "rounds": 0})
         result, calls, _ = run(args=dict(ARGS, conts={"1": kept(1)}, amend={"1": [AMEND_EDIT]}),
                                children={"1": {"stage": "plan-review", "amended": True, "cont": stopped}})
-        self.assertEqual(result["relaunch"]["conts"], {"1": stopped})
+        self.assertEqual(result["relaunch"]["conts"], {"1": slim(stopped)})
         self.assertNotIn("amend", result["relaunch"])
         # The relaunched child plans the kept plan again instead of refusing: it carries no amend.
         retry = dict(child(calls, 1)["args"], cont=result["relaunch"]["conts"]["1"])
@@ -2775,7 +2954,7 @@ class AmendTest(unittest.TestCase):
         plan_stop = {"stage": "planned", "plan": {"tasks": [{"n": 1}]}, "amended": True, "cont": reviewed(1)}
         result, calls, _ = run(args=dict(ARGS, conts={"1": kept(1)}, amend={"1": [AMEND_EDIT]}),
                                children={"1": [plan_stop, {"stage": "task", "task": {"n": 2}, "cont": verified_cont(1)}]})
-        self.assertEqual(result["relaunch"]["conts"], {"1": verified_cont(1)})
+        self.assertEqual(result["relaunch"]["conts"], {"1": slim(verified_cont(1))})
         self.assertNotIn("amend", result["relaunch"])
 
     def test_one_issues_applied_amend_leaves_anothers_unapplied_amend_in_the_relaunch(self):

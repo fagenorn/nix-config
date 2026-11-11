@@ -4175,6 +4175,8 @@ class SourceTest(unittest.TestCase):
         for name in ("LAND_ACQUIRE", "LOCK_RETURN", "RELEASE_AGAIN"):
             with self.subTest(name=name):
                 self.assertEqual(bare(line(mine, name)), bare(line(batch, name)))
+        # The fix-commit scope is one sentence in both programs: deliver-batch's land-fix step commits too.
+        self.assertEqual(line(mine, "COMMIT_SCOPE"), line(batch, "COMMIT_SCOPE"))
         for needle in (
             "Run alone and exactly: forge-claim land release --repo ${SLUG} --branch ${INT} --sha ${lockSha}",
             "released and not_held are both fine. ${FORGE_TIMEOUT} Return its verdict and any detail. Run nothing else.",
