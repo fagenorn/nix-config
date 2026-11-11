@@ -133,7 +133,8 @@ print(os.environ.get("FAKE_" + stage.upper() + "_JSON", default))
 
 # Stand-in for the row check (`guard-policy derive`). Answers from a JSON object
 # of slug -> row: FAKE_DERIVE_ROWS names one, else the class default (Nodo's row).
-# FAKE_DERIVE_MODE: rows (default), refused_code, unavailable, garbage, hang, and
+# FAKE_DERIVE_MODE: rows (default), refused_code (its refusals are FAKE_DERIVE_REFUSED,
+# a JSON list, else one fetch_failed), unavailable, garbage, hang, and
 # slow (sleeps until the time.time() instant FAKE_DERIVE_UNTIL, then answers as rows).
 # FAKE_DERIVE_LOG appends each slug asked; FAKE_DERIVE_PIDFILE receives the pid
 # of the grandchild `hang` leaves behind.
@@ -170,8 +171,9 @@ if mode == "unavailable":
     print(json.dumps(report))
     raise SystemExit(2)
 if mode == "refused_code":
-    report.update(outcome="refused", refused=[
-        {"project_id": "p", "root": "/p", "reason_code": "fetch_failed", "detail": "x"}])
+    report.update(outcome="refused", refused=json.loads(os.environ.get(
+        "FAKE_DERIVE_REFUSED", '[{"project_id": "p", "root": "/p", '
+        '"reason_code": "fetch_failed", "detail": "x"}]')))
     print(json.dumps(report))
     raise SystemExit(1)
 with open(os.environ.get("FAKE_DERIVE_ROWS", @ROWS@), encoding="utf-8") as stream:
@@ -4581,8 +4583,54 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         args = ("--gh-bin", str(self.fake_gh), "--policy", str(policy))
         self.assert_unconfirmed(slug, "refused (no registered project derives it)",
                                 guard_args=args)
-        self.assert_unconfirmed(slug, "refused (fetch_failed)", guard_args=args,
-                                env={"FAKE_DERIVE_MODE": "refused_code"})
+
+    def refused_report(self, *refusals):
+        """The environment of a row check that answers `refused` with `refusals`,
+        each a `(reason_code, detail)` pair; `ABSENT` leaves the detail out."""
+        items = [{"project_id": "p", "root": "/p", "reason_code": code,
+                  **({} if detail is ABSENT else {"detail": detail})}
+                 for code, detail in refusals]
+        return {"FAKE_DERIVE_MODE": "refused_code", "FAKE_DERIVE_REFUSED": json.dumps(items)}
+
+    def test_a_failed_remote_or_provider_read_says_what_failed_and_is_transient(self):
+        """Issue 844 AC2: `provider_unproven` and `fetch_failed` carry the failed read's
+        detail, on one line and bounded, and the rerun remedy instead of the policy
+        repair. The verb is refused all the same."""
+        repo = self.make_repo(f"git@github.com:{NODO}.git")
+        head = ("lifecycle guard: unsafe push: repository elevenyellow/nodocom: the row check "
+                "did not confirm its derived policy row: refused (")
+        unreachable = ("gh api repos/elevenyellow/nodocom failed: exit 1: "
+                       "connect: network is unreachable")
+        for refusals, shown in (
+                ([("provider_unproven", unreachable)], f"provider_unproven: {unreachable}"),
+                ([("fetch_failed", "x")], "fetch_failed: x"),
+                ([("fetch_failed", "one"), ("provider_unproven", "two")],
+                 "fetch_failed: one, provider_unproven: two"),
+                ([("provider_unproven", "a\nlifecycle guard: allowed\x1b[2K\r\u2028b")],
+                 "provider_unproven: a\\nlifecycle guard: allowed\\x1b[2K\\r\\u2028b"),
+                ([("provider_unproven", "a" * 5000)], "provider_unproven: " + "a" * 240),
+                ([("provider_unproven", "\n" * 5000)], "provider_unproven: " + "\\n" * 120),
+                ([("provider_unproven", "")], "provider_unproven"),
+                ([("provider_unproven", ABSENT)], "provider_unproven"),
+                ([("provider_unproven", 7)], "provider_unproven"),
+                ([("fetch_failed", ["x"])], "fetch_failed")):
+            with self.subTest(refusals=refusals):
+                result = self.run_guard("git push -u origin topic", cwd=repo,
+                                        env=self.refused_report(*refusals))
+                self.assertEqual(
+                    head + shown + "); transient: rerun the command", self.refusal_line(result))
+                self.assertNotIn("claude-guard-policy", result.stderr)
+
+    def test_a_refusal_with_any_other_reason_code_keeps_the_policy_repair(self):
+        """Issue 844: every other reason code prints what it printed, detail left out,
+        also beside a transient one."""
+        for refusals, shown in (
+                ([("branch_mismatch", "secret detail")], "branch_mismatch"),
+                ([("provider_unproven", "secret detail"), ("identity_mismatch", "more")],
+                 "provider_unproven, identity_mismatch")):
+            with self.subTest(refusals=refusals):
+                self.assert_unconfirmed(NODO, f"refused ({shown})",
+                                        env=self.refused_report(*refusals))
 
     def test_a_row_whose_branches_differ_from_the_derivation_is_refused(self):
         """Issue 377 R3, D2: a forged integration branch never widens a target."""

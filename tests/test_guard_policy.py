@@ -505,6 +505,45 @@ class ProjectRefusalTest(WorldCase):
         self.assertIn("exit 64: fake gh: unregistered call",
                       self.refused("provider_unproven")["detail"])
 
+    def test_a_failed_provider_read_is_retried_once(self):
+        """Issue 844 AC1: one failure then the slug derives the row; two failures refuse
+        with the last failure's detail; a read that answers is never repeated."""
+        self.world.project("fixture/one", "fagenorn/one")
+        self.world.provider("fagenorn/one", failures=2)
+        self.assertIn("exit 1: fake gh: transient failure",
+                      self.refused("provider_unproven")["detail"])
+        self.assertEqual(self.world.provider_reads("fagenorn/one"), 2)
+        self.world.provider("fagenorn/one", "fagenorn/renamed")  # an answer, not a failure
+        self.refused("provider_unproven")
+        self.assertEqual(self.world.provider_reads("fagenorn/one"), 1)
+        self.world.provider("fagenorn/one", failures=1)
+        code, report, _ = self.world.compile()
+        self.assertEqual((code, report["derived"]), (0, ["fagenorn/one"]), report)
+        self.assertEqual(self.world.provider_reads("fagenorn/one"), 2)
+        self.world.provider("fagenorn/one")
+        self.assertEqual(self.world.compile()[0], 0)
+        self.assertEqual(self.world.provider_reads("fagenorn/one"), 1)
+
+    def test_the_provider_retry_stays_inside_the_one_read_bound(self):
+        """Issue 844: both attempts share the single read's bound; the retry gets only
+        what the first left, and is not made when that is under the floor."""
+        root, limit = Path("/nowhere"), guard_policy.forge_adapter.CHILD_TIMEOUT_SECONDS
+        floor = guard_policy.PROVIDER_RETRY_FLOOR_SECONDS
+        for spent, retried in ((1.0, True), (limit - floor, True), (limit - floor + 0.5, False),
+                               (limit + 1.0, False)):
+            with self.subTest(spent=spent):
+                clock = iter([100.0, 100.0 + spent])
+                answers = iter([(None, "first"), (None, "second")])
+                with mock.patch.object(guard_policy.time, "monotonic", lambda: next(clock)), \
+                        mock.patch.object(guard_policy, "_identity_read",
+                                          side_effect=lambda *a, **k: next(answers)) as read:
+                    answer = guard_policy._provider_read("o/r", root)
+                self.assertEqual(answer, (None, "second" if retried else "first"))
+                self.assertEqual(read.call_count, 2 if retried else 1)
+                self.assertEqual(read.call_args_list[0].kwargs, {"timeout": limit})
+                if retried:
+                    self.assertEqual(read.call_args_list[1].kwargs, {"timeout": limit - spent})
+
     def test_origin_unproven_says_which_read_failed(self):
         root = self.world.project("fixture/one", "fagenorn/one")
         self.world.git(root, "remote", "remove", "origin")

@@ -9,9 +9,11 @@ The `git` shim answers only `remote get-url origin` and `remote get-url --push -
 from `identities.json` keyed by its working directory, and hands every other call to the real
 `git`; with no entry for the directory it hands those two over as well. The `gh` shim answers
 `api repos/<slug> --jq .full_name` from `providers.json`, exits 64 for any other call and 65
-when a token variable reaches it. `row_check()` writes the executable the guard runs as its row
-check: it runs `guard-policy derive` under this world's environment. Nothing contacts a network
-remote or reads the host registry.
+when a token variable reaches it; it appends each registered call to `gh-calls.log`, and an
+answer's `failures` is how many of those calls exit 1 before the answer is given.
+`row_check()` writes the executable the guard runs as its row check: it runs `guard-policy
+derive` under this world's environment. Nothing contacts a network remote or reads the host
+registry.
 """
 import json
 import os
@@ -52,6 +54,13 @@ answers = json.loads(open({state!r} + "/providers.json", encoding="utf-8").read(
 if len(argv) == 4 and argv[0] == "api" and argv[2:] == ["--jq", ".full_name"] \\
         and argv[1] in answers:
     answer = answers[argv[1]]
+    with open({state!r} + "/gh-calls.log", "a+", encoding="utf-8") as log:
+        log.seek(0)
+        earlier = log.read().splitlines().count(argv[1])
+        log.write(argv[1] + "\\n")
+    if earlier < answer.get("failures", 0):
+        sys.stderr.write("fake gh: transient failure\\n")
+        sys.exit(1)
     sys.stdout.write(answer["stdout"])
     sys.exit(answer["exit"])
 sys.stderr.write("fake gh: unregistered call\\n")
@@ -212,9 +221,20 @@ class GuardPolicyWorld:
                                     "pushes": [origin] if pushes is None else pushes}
         self._save()
 
-    def provider(self, slug: str, full_name: str | None = None, exit: int = 0) -> None:
-        self.providers[f"repos/{slug}"] = {"stdout": (full_name or slug) + "\n", "exit": exit}
+    def provider(self, slug: str, full_name: str | None = None, exit: int = 0,
+                 failures: int = 0) -> None:
+        """`failures` is how many provider reads of `slug` exit 1 before this answer."""
+        self.providers[f"repos/{slug}"] = {"stdout": (full_name or slug) + "\n", "exit": exit,
+                                           "failures": failures}
+        (self.state / "gh-calls.log").unlink(missing_ok=True)
         self._save()
+
+    def provider_reads(self, slug: str) -> int:
+        """How many provider reads of `slug` ran since an answer was last set."""
+        log = self.state / "gh-calls.log"
+        if not log.exists():
+            return 0
+        return log.read_text("utf-8").splitlines().count(f"repos/{slug}")
 
     def register(self, *entries: dict) -> None:
         self.entries.extend(entries)

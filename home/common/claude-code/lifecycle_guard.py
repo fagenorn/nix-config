@@ -714,9 +714,12 @@ the differing branches, or `it derives required checks <derived>, the row names
 <compiled>` with each list as compact JSON) and `claude-guard-policy` as the
 repair, except that a row check that timed out at step 3 ends `timed out;
 transient: rerun the command` instead, because a plain rerun clears it and
-recompiling the policy cannot speed it up (issue 476); step 2's names the live
-and recorded branch. The check runs once per repository context, when that
-context is built (a command whose pushes name several `git -C` directories
+recompiling the policy cannot speed it up (issue 476), and that a row check
+refused only for `fetch_failed` or `provider_unproven` names each reason code
+with the failed read's detail (as a message shows a value, cut to 240
+characters) and ends the same way, because the read failed and the policy did
+not (issue 844); step 2's names the live and recorded branch. The check runs
+once per repository context, when that context is built (a command whose pushes name several `git -C` directories
 builds one context per distinct `git -C` directory and one per named
 repository, all under the one invocation deadline), and only for a repository
 that has a row: a repository with no row is judged by the base policy with no
@@ -849,6 +852,11 @@ DEADLINE_REFUSAL = (
     "little time for the next check, so it was not started"
 )
 ROW_CHECK_EXIT_STATUSES = {"derived": 0, "refused": 1, "unavailable": 2}
+# The row check's reason codes for a failed read of `origin` or the provider: a
+# rerun clears a dropped route, and recompiling the policy cannot (issue 844).
+ROW_CHECK_TRANSIENT_REASONS = frozenset({"fetch_failed", "provider_unproven"})
+ROW_CHECK_TRANSIENT_REMEDY = "transient: rerun the command"
+ROW_CHECK_DETAIL_LIMIT = 240
 # The gh keyring credential is the authority for these lookups. gh prefers an
 # ambient GITHUB_TOKEN/GH_TOKEN over it, and such a token, when one is present
 # (CI, a one-off export, another tool), may be narrower: it may not see every
@@ -3528,20 +3536,35 @@ class Context:
         )
 
 
-def _report_mismatch(report, status, repository, row):
-    """Why `report` (the row check's parsed stdout) does not confirm `row`, or None.
+def _refusal_with_detail(item):
+    """A refusal as its message shows it: the reason code, then its detail when it
+    is a non-empty string, as `shown_value` shows it (one line, no control
+    character) and cut to `ROW_CHECK_DETAIL_LIMIT` characters."""
+    detail = item.get("detail")
+    if not isinstance(detail, str) or not detail:
+        return item["reason_code"]
+    shown = shown_value(detail[:ROW_CHECK_DETAIL_LIMIT])[:ROW_CHECK_DETAIL_LIMIT]
+    return f"{item['reason_code']}: {shown}"
 
-    A shape failure, a `row.required_checks` that is not a list of strings
+
+def _report_mismatch(report, status, repository, row):
+    """`(why, transient)`: why `report` (the row check's parsed stdout) does not
+    confirm `row`, or None, and whether a plain rerun is the remedy.
+
+    `transient` is true only for a refusal whose every reason code is one of
+    `ROW_CHECK_TRANSIENT_REASONS`, and only then does `why` show each refusal's
+    detail (`_refusal_with_detail`); any other refusal shows its reason codes
+    alone. A shape failure, a `row.required_checks` that is not a list of strings
     included, is an unreadable report. The branches are compared first, then the
     required checks as lists, order included (issue 552 D5); `evidence` is never
     compared.
     """
     unreadable = f"unreadable report (exit {status})"
     if not isinstance(report, dict) or report.get("repository") != repository:
-        return unreadable
+        return unreadable, False
     outcome = report.get("outcome")
     if not isinstance(outcome, str) or ROW_CHECK_EXIT_STATUSES.get(outcome) != status:
-        return unreadable
+        return unreadable, False
     if outcome == "derived":
         derived = report.get("row")
         branches = ("default_branch", "integration_branch")
@@ -3551,35 +3574,41 @@ def _report_mismatch(report, status, repository, row):
             or not isinstance(derived.get("required_checks"), list)
             or not all(isinstance(check, str) for check in derived["required_checks"])
         ):
-            return unreadable
+            return unreadable, False
         if any(derived[key] != row[key] for key in branches):
             return (
                 f"it derives {derived['default_branch']} and {derived['integration_branch']}, "
                 f"the row names {row['default_branch']} and {row['integration_branch']}"
-            )
+            ), False
         if derived["required_checks"] != row["required_checks"]:
             derives, names = (
                 json.dumps(checks, separators=(",", ":"))
                 for checks in (derived["required_checks"], row["required_checks"])
             )
-            return f"it derives required checks {derives}, the row names {names}"
-        return None
+            return f"it derives required checks {derives}, the row names {names}", False
+        return None, False
     if outcome == "refused":
         refused = report.get("refused")
         if not isinstance(refused, list):
-            return unreadable
+            return unreadable, False
         if not refused:
-            return "refused (no registered project derives it)"
+            return "refused (no registered project derives it)", False
         if not all(
             isinstance(item, dict) and isinstance(item.get("reason_code"), str)
             for item in refused
         ):
-            return unreadable
-        return "refused (" + ", ".join(item["reason_code"] for item in refused) + ")"
+            return unreadable, False
+        # Issue 844: a failed read of `origin` or the provider says what failed.
+        transient = all(item["reason_code"] in ROW_CHECK_TRANSIENT_REASONS for item in refused)
+        shown = (
+            _refusal_with_detail(item) if transient else item["reason_code"]
+            for item in refused
+        )
+        return "refused (" + ", ".join(shown) + ")", transient
     cause = report.get("cause")
     if not isinstance(cause, dict) or not isinstance(cause.get("reason_code"), str):
-        return unreadable
-    return f"unavailable ({cause['reason_code']})"
+        return unreadable, False
+    return f"unavailable ({cause['reason_code']})", False
 
 
 def row_check_env(dropped=()):
@@ -3608,8 +3637,10 @@ def row_check_problem(derive_bin, repository, row, timeout, dropped_env=()):
     it. The pipes are not read again after the kill; only the direct child is
     reaped.
 
-    A timeout's refusal ends in the transient marker, every other refusal in the
-    claude-guard-policy repair (issue 476 D6).
+    A timeout's refusal ends in the transient marker (issue 476 D6), and so does
+    a refusal made only of `ROW_CHECK_TRANSIENT_REASONS`, which also carries each
+    failed read's detail (issue 844); every other refusal ends in the
+    claude-guard-policy repair.
     """
     why = None
     remedy = "repair: run claude-guard-policy"
@@ -3637,13 +3668,15 @@ def row_check_problem(derive_bin, repository, row, timeout, dropped_env=()):
             why = "timed out"
             # Issue 476 D6: a slow check clears on a plain rerun, and recompiling
             # the policy cannot speed it up.
-            remedy = "transient: rerun the command"
+            remedy = ROW_CHECK_TRANSIENT_REMEDY
         else:
             try:
                 report = json.loads(stdout)
             except ValueError:
                 report = None
-            why = _report_mismatch(report, child.returncode, repository, row)
+            why, transient = _report_mismatch(report, child.returncode, repository, row)
+            if transient:
+                remedy = ROW_CHECK_TRANSIENT_REMEDY
     if why is None:
         return None
     return (
