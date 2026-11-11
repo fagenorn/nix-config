@@ -25,13 +25,41 @@ A journal whose size equals the kept offset is not opened. An opened journal is 
 exactly the bytes between the offset and the size `os.stat` reported; growth after the stat is
 picked up by the next call. Pending bytes are never read from the file again. Nothing here reads a
 clock.
+
+The fold: `RunFold.apply(records)` reads journal records in file order, any number of times in any
+chunking (folding a list in pieces equals folding it whole), and `RunFold.issues()` answers an
+`IssueStage` per known issue, ascending by number. `stage_text` is the plain-words stage.
+
+- Records: a `started` record needs a str `agentId`, `label` and `phase`; a `result` record needs a
+  str `agentId` of an earlier `started`. Anything else (`launched`, a non-dict) is ignored.
+- Owner: a `started` whose phase begins with `"▸ "` belongs to the child workflow that phase names;
+  any other is top-level. A run becomes a batch once a top-level `facts-<n>` label has started.
+- Labels are data: `OWNER_LABELS` (a single run's own labels and every child's) and `BATCH_LABELS`
+  (the labels a batch program starts itself), one `(stage, pattern)` row per label template matched
+  with `re.fullmatch`. In the batch table only the listed issue-bearing templates carry an issue
+  (group 1); any other number there counts trains, sweeps or rounds and is never an issue, so an
+  unknown batch label, or one with no issue, touches no issue. An owner label not in its table
+  reads `WORKING`, never an error; a step with no stage moves nothing.
+- A child's issue is named by its `setup` result's `branch` (`issue-<n>`, then `-` or the end); a
+  non-batch run's own `setup` result names the run's issue likewise. The issue is created at
+  `PLANNING` if not yet known, and everything its owner did before then (stages, plan counts,
+  close-outs) is applied at that moment, in order. Until then a child touches no issue.
+- A `plan`, `plan-revise` or `plan-rules-revise` result with `status` `"planned"` and a non-empty
+  `tasks` list sets its issue's task total (latest wins; the count is per issue, so a later child
+  of the same issue inherits it). A `BUILDING` label with a task sets the issue's task.
+- A `close-out` result (owner) or `close-out-<n>` result (batch) makes its issue `DONE` only when
+  `closed_out(result)`: the close-out released the claim, ended the decision, left the issue in
+  `OPEN` (held) or `CLOSED` and did not report its notes unposted. Any other result leaves the
+  issue as the label left it.
+- `DONE` is final. A `QUEUED` step changes only an issue that is new or still `QUEUED`.
 """
 
 import json
 import os
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import BinaryIO, Callable
+from typing import BinaryIO, Callable, Iterable
 
 JOURNAL_NAME = "journal.jsonl"
 
@@ -101,3 +129,227 @@ class JournalReader:
         self._known[path] = (stat.st_ino, offset + len(data), pending)
         records = tuple(record for record in map(_parse, lines) if record is not None)
         return Chunk(records, moved_ms, from_start)
+
+
+QUEUED = "queued"
+PLANNING = "planning"
+PLAN_REVIEW = "plan review"
+BUILDING = "building"
+FINAL_REVIEW = "final review"
+VERIFYING = "verifying"
+LANDING = "landing"
+DONE = "done"
+WORKING = "working"
+STAGES = (QUEUED, PLANNING, PLAN_REVIEW, BUILDING, FINAL_REVIEW, VERIFYING, LANDING, DONE, WORKING)
+
+CHILD_PHASE_PREFIX = "\u25b8 "
+
+
+@dataclass(frozen=True)
+class IssueStage:
+    """One issue's stage, with the task being built and the plan's task total when known."""
+
+    issue: int
+    stage: str
+    task: int | None = None
+    tasks: int | None = None
+
+
+def stage_text(stage: IssueStage) -> str:
+    if stage.stage != BUILDING or stage.task is None:
+        return stage.stage
+    if stage.tasks is None:
+        return f"building task {stage.task}"
+    return f"building task {stage.task} of {stage.tasks}"
+
+
+@dataclass(frozen=True)
+class Step:
+    """What one label means: `stage` None moves no stage; `issue` only from a batch label naming one."""
+
+    stage: str | None
+    task: int | None = None
+    issue: int | None = None
+
+
+# One (stage, pattern) row per label template. Owner rows: group 1, where present, is the task.
+OWNER_LABELS: tuple[tuple[str | None, str], ...] = (
+    (None, r"setup|acquire|worktree"),
+    (PLANNING, r"owner-answer|amend|renew-plan|renew-amend|plan|plan-revise|plan-rules-revise"),
+    (PLAN_REVIEW, r"plan-review|plan-codex|plan-rules-review"),
+    (BUILDING, r"impl-(\d+)"),
+    (BUILDING, r"review-(\d+)"),
+    (BUILDING, r"fix-(\d+)-\d+"),
+    (BUILDING, r"rereview-(\d+)-\d+"),
+    (BUILDING, r"direct-impl"),
+    (
+        FINAL_REVIEW,
+        r"renew-final-review|diff-size|final-codex|final-\d+|final-integration|fix-wave|fix-wave-\d+"
+        r"|fix-wave-review|fix-wave-review-\d+|direct-codex|direct-review|direct-review-full|direct-fix"
+        r"|direct-rereview",
+    ),
+    (VERIFYING, r"verify|verify-\d+|verify-fix-\d+|verify-fix-review-\d+|ws-check-\d+"),
+    (
+        LANDING,
+        r"pr|hold|merge|close-out|land-unlock|fix-ci|fix-ci-review|land-lock-\d+|land-push-\d+|checks-\d+"
+        r"|sync-\d+|sync-review-\d+|fix-sync-\d+|fix-sync-review-\d+",
+    ),
+)
+
+# Batch rows: group 1, where present, is the issue number. The counters of trains, sweeps and rounds
+# carry no group, so they can never be read as an issue.
+BATCH_LABELS: tuple[tuple[str | None, str], ...] = (
+    (
+        None,
+        r"setup|train-build-\d+|train-ready-\d+|train-merge-\d+|train-sweep-\d+|train-checks-\d+-\d+"
+        r"|train-flip-\d+-\d+",
+    ),
+    (QUEUED, r"facts-(\d+)"),
+    (PLANNING, r"acquire-(\d+)|readopt-(\d+)"),
+    (WORKING, r"release-(\d+)|recover-end-(\d+)|ask-(\d+)|settle-(\d+)"),
+    (LANDING, r"close-out-(\d+)|train-pr-(\d+)|land-[a-z]+(?:-[a-z]+)*-(\d+)(?:-\d+)?"),
+)
+
+
+def _group(match: re.Match) -> int | None:
+    found = next((g for g in match.groups() if g is not None), None)
+    return None if found is None else int(found)
+
+
+def classify(label: str, *, batch: bool) -> Step | None:
+    """The step a label stands for in the owner table or, with `batch`, the batch table; None if unknown."""
+    for stage, pattern in BATCH_LABELS if batch else OWNER_LABELS:
+        match = re.fullmatch(pattern, label)
+        if match is None:
+            continue
+        number = _group(match)
+        if batch:
+            return Step(stage, issue=number)
+        return Step(stage, task=number)
+    return None
+
+
+def closed_out(result: object) -> bool:
+    """True for a close-out result showing the close-out finished (the programs' own test, less what the console cannot know)."""
+    return (
+        isinstance(result, dict)
+        and result.get("released") is True
+        and result.get("decision_ended") is True
+        and result.get("issue_state") in ("OPEN", "CLOSED")
+        and result.get("notes_posted") is not False
+    )
+
+
+_BRANCH_ISSUE = re.compile(r"issue-(\d+)(-|$)")
+_PLAN_LABELS = ("plan", "plan-revise", "plan-rules-revise")
+_BATCH_CLOSE_OUT = re.compile(r"close-out-(\d+)")
+
+
+class _Owner:
+    """A run's own labels, or one child's: its issue once its setup result names it, and what waits for that."""
+
+    def __init__(self) -> None:
+        self.issue: int | None = None
+        self.waiting: list[tuple[str, object]] = []
+
+
+class RunFold:
+    def __init__(self) -> None:
+        self._issues: dict[int, IssueStage] = {}
+        self._owners: dict[str | None, _Owner] = {}
+        self._agents: dict[str, tuple[str, str | None]] = {}
+        self._batch = False
+
+    def issues(self) -> tuple[IssueStage, ...]:
+        return tuple(self._issues[number] for number in sorted(self._issues))
+
+    def apply(self, records: Iterable[object]) -> None:
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            agent, kind = record.get("agentId"), record.get("type")
+            if not isinstance(agent, str):
+                continue
+            if kind == "started":
+                label, phase = record.get("label"), record.get("phase")
+                if isinstance(label, str) and isinstance(phase, str):
+                    self._started(agent, label, phase)
+            elif kind == "result" and agent in self._agents:
+                self._result(*self._agents[agent], record.get("result"))
+
+    def _owner(self, key: str | None) -> _Owner:
+        return self._owners.setdefault(key, _Owner())
+
+    def _started(self, agent: str, label: str, phase: str) -> None:
+        key = phase if phase.startswith(CHILD_PHASE_PREFIX) else None
+        self._agents[agent] = (label, key)
+        if key is None:
+            step = classify(label, batch=True)
+            if step is not None and step.stage == QUEUED and step.issue is not None:
+                self._batch = True
+            if self._batch:
+                if step is not None and step.issue is not None:
+                    self._step(step.issue, step)
+                return
+        step = classify(label, batch=False) or Step(WORKING)
+        self._effect(self._owner(key), "step", step)
+
+    def _result(self, label: str, key: str | None, result: object) -> None:
+        if key is None and self._batch:
+            match = _BATCH_CLOSE_OUT.fullmatch(label)
+            if match is not None and closed_out(result):
+                self._done(int(match.group(1)))
+            return
+        owner = self._owner(key)
+        if label == "setup":
+            branch = result.get("branch") if isinstance(result, dict) else None
+            match = _BRANCH_ISSUE.match(branch) if isinstance(branch, str) else None
+            if match is not None:
+                self._name(owner, int(match.group(1)))
+        elif label in _PLAN_LABELS:
+            if isinstance(result, dict) and result.get("status") == "planned":
+                tasks = result.get("tasks")
+                if isinstance(tasks, list) and tasks:
+                    self._effect(owner, "tasks", len(tasks))
+        elif label == "close-out" and closed_out(result):
+            self._effect(owner, "done", None)
+
+    def _name(self, owner: _Owner, issue: int) -> None:
+        owner.issue = issue
+        if issue not in self._issues:
+            self._issues[issue] = IssueStage(issue, PLANNING)
+        waiting, owner.waiting = owner.waiting, []
+        for kind, value in waiting:
+            self._effect(owner, kind, value)
+
+    def _effect(self, owner: _Owner, kind: str, value: object) -> None:
+        if owner.issue is None:
+            owner.waiting.append((kind, value))
+        elif kind == "step":
+            self._step(owner.issue, value)
+        elif kind == "tasks":
+            self._update(owner.issue, tasks=value)
+        else:
+            self._done(owner.issue)
+
+    def _update(self, issue: int, **fields) -> None:
+        current = self._issues.get(issue)
+        if current is None:
+            current = IssueStage(issue, fields.pop("stage", PLANNING))
+        if current.stage != DONE:
+            self._issues[issue] = replace(current, **fields)
+
+    def _step(self, issue: int, step: Step) -> None:
+        if step.stage is None:
+            return
+        current = self._issues.get(issue)
+        if step.stage == QUEUED and current is not None and current.stage != QUEUED:
+            return
+        if current is None:
+            self._issues[issue] = IssueStage(issue, step.stage, step.task)
+        elif current.stage != DONE:
+            task = step.task if step.task is not None else current.task
+            self._issues[issue] = replace(current, stage=step.stage, task=task)
+
+    def _done(self, issue: int) -> None:
+        self._update(issue, stage=DONE)
