@@ -12,6 +12,6 @@ Run the Workflow tool with `scriptPath` `deliver-batch.js` in the sibling `deliv
 Render what it returns by `stage`:
 - `args`: report `error` and stop.
 - `setup`: report `result` (the contract refusal, or null when setup returned nothing) with any `missing`, `invalid`, `holder`, and stop.
-- `done` or `breaker`: on `breaker`, report it first. Render `table` as one Markdown table (issue, outcome, PR, detail), then `questions` by issue and the `owner_actions`.
+- `done` or `breaker`: on `breaker`, report it first. Render `table` as one Markdown table (issue, outcome, PR, reason), then `questions` by issue and the `owner_actions`.
 
 Run a non-null `relaunch` as a new run, adding the user's answers as `decisions` `{"<issue>": answer}`, unless its args equal the previous run's: then stop, reporting the open rows as awaiting the owner. Only a run cut off before returning resumes with `resumeFromRunId` and its original `args`.
