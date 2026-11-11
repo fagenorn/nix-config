@@ -192,6 +192,52 @@ class AcquireTest(Base):
         code, out = run(*land("acquire", A))
         self.assertEqual((code, out["verdict"]), (0, "acquired"))
 
+    def stale_after_cas(self, *stale_reads):
+        """A read_ref that answers each of `stale_reads` after the swap applied, then the truth."""
+        real, pending = fm.read_ref, list(stale_reads)
+
+        def read(*args):
+            truth = real(*args)
+            if truth == A and pending:
+                return pending.pop(0)  # read-after-write lag: the swap applied, the read shows the old sha
+            return truth
+        return mock.patch.object(fm, "read_ref", read)
+
+    def test_a_successful_cas_with_a_stale_read_back_answers_moved(self):
+        self.lock(B)
+        self.pulls(A, pull(11, sha=A))
+        self.pulls(B, pull(11, sha=A))
+        with mock.patch.object(land_lock, "sleep", self.slept.append), self.stale_after_cas(B, B):
+            code, out = run(*land("acquire", A))
+        self.assertEqual((code, out["verdict"], out["lock_sha"]), (0, "moved", A))
+        self.assertEqual(self.world.refs(), {REF: A})
+        self.assertEqual(len(self.cas_calls()), 1)
+
+    def test_a_read_back_that_stays_stale_past_the_retries_is_lost_to(self):
+        self.lock(B)
+        self.pulls(A, pull(11, sha=A))
+        self.pulls(B, pull(11, sha=A))
+        with mock.patch.object(land_lock, "sleep", self.slept.append), self.stale_after_cas(*[B] * 20):
+            code, out = run(*land("acquire", A))
+        self.assertEqual((code, out["verdict"], out["lock_sha"]), (3, "lost_to", B))
+        self.assertLessEqual(len(self.slept), land_lock.READBACK_RETRIES)
+
+    def test_a_read_back_naming_a_third_sha_is_lost_to_without_a_retry(self):
+        self.lock(B)
+        self.pulls(A, pull(11, sha=A))
+        self.pulls(B, pull(11, sha=A))
+        self.pulls(C, pull(12, sha=C))
+        real = fm.cas_ref
+
+        def racing_cas(*args):
+            failure = real(*args)
+            self.world.set_ref(REF, C)  # another host took the lock after our swap
+            return failure
+        with mock.patch.object(land_lock, "sleep", self.slept.append), mock.patch.object(fm, "cas_ref", racing_cas):
+            code, out = run(*land("acquire", A))
+        self.assertEqual((code, out["verdict"], out["lock_sha"]), (3, "lost_to", C))
+        self.assertEqual(self.slept, [])
+
     def test_a_failed_cas_on_an_unchanged_lock_is_a_forge_error(self):
         for failure in ("gh_failed", "gh_timeout"):
             with self.subTest(failure=failure):
