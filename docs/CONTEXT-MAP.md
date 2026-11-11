@@ -35,6 +35,7 @@
 | Command table | Hosts |
 | Compiled policy | Guard |
 | Console | Console |
+| Console service | Console |
 | Decision prompt | Claims |
 | Delivery | Delivery |
 | Delivery run | Console |
