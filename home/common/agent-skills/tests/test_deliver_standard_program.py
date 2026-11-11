@@ -1825,8 +1825,8 @@ class RulesRereviewSkipTest(unittest.TestCase):
 
     def test_a_ruleless_trigger_with_unchanged_acceptance_skips_the_rules_rereview_and_proceeds(self):
         plan = with_criteria(EVIDENCE, HUMAN)
-        # Other members of a criterion and the tasks may change, and verify's key order is not a change.
-        reordered = criterion(EVIDENCE, text="deployed and live")
+        # The tasks may change, and verify's key order is not a change.
+        reordered = criterion(EVIDENCE)
         reordered["verify"] = dict(reversed(list(reordered["verify"].items())))
         revised = with_criteria(reordered, HUMAN, tasks=tasks(2))
         result, names, skipped = self.go(plan, revised)
@@ -1861,6 +1861,8 @@ class RulesRereviewSkipTest(unittest.TestCase):
         plan = with_criteria(EVIDENCE)
         code = PLAN["acceptance"][0]
         changes = (
+            # The rules judge the wording: a code criterion reworded into a post-deploy threshold keeps every other member.
+            ("text", [dict(code, text="p95 latency stays under 200 ms for a week after the deploy"), EVIDENCE]),
             ("kind", [code, criterion(HUMAN, id="AC2", verify_ac="AC2")]),
             ("verify", [code, criterion(EVIDENCE, verify_host="h2")]),
             ("metric", [code, criterion(EVIDENCE, metric=True, verify_mode="observe")]),

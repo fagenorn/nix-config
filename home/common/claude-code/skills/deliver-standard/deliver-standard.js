@@ -954,8 +954,8 @@ const rulesReview = async triggered => {
   return call(`${CTX}
 Re-check only the acceptance criteria of the revised plan at ${plan.plan_root} against every rule of ~/.agents/standards/acceptance-planning.md (read it). The findings that triggered the revision were ${JSON.stringify(triggered)}. Report each criterion that still or newly breaks a rule, with the broken rule's id in the finding's rule. Do not edit anything.`, { label: 'plan-rules-review', phase: 'Plan', agentType: 'reviewer', schema: PLAN_REVIEW })
 }
-// #819: a criterion's rule-bearing members, key order aside; a revise that leaves them as reviewed needs no rules re-review.
-const ruleFacts = p => canon(p.acceptance.map(a => [a.id, a.kind, a.metric === true, a.verify === undefined ? null : a.verify]))
+// #819: the members of a criterion the rules judge (its wording among them), key order aside; a revise that leaves them as reviewed needs no rules re-review.
+const ruleFacts = p => canon(p.acceptance.map(a => [a.id, a.text === undefined ? null : a.text, a.kind, a.metric === true, a.verify === undefined ? null : a.verify]))
 // One targeted planner call fixing only the given findings, then the program's rule check and the rules re-review (D4-D6).
 // Its findings all carry a rule, so its re-review always runs.
 const rulesRevise = async findings => {
@@ -1008,7 +1008,7 @@ Review the implementation plan at ${plan.plan_root} (and its task files) against
     const halted = takePlan(revised, 'plan-revise')
     if (halted) return { ...halted, findings: planFindings }
     const still = planRules(plan)
-    // #819: no trigger named a rule, the program's rule check is clean and no criterion's id, kind, metric or verify changed.
+    // #819: no trigger named a rule, the program's rule check is clean and no criterion's id, text, kind, metric or verify changed.
     const sameRules = !planFindings.some(f => present(f.rule)) && !still.length && ruleFacts(plan) === reviewedFacts
     if (sameRules) log('plan rules re-review skipped: no finding named a rule and the acceptance criteria are unchanged')
     const rr = sameRules ? { findings: [] } : await rulesReview(planFindings)
