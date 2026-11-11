@@ -201,6 +201,7 @@ agent-workflow-tests *args:
     tests/test_console_hook_cost.py \
     tests/test_console_inbox.py \
     tests/test_console_tracker.py \
+    tests/test_console_deliveries.py \
     home/common/agent-skills/tests/test_deliver_standard_program.py \
     home/common/agent-skills/tests/test_deliver_batch_program.py \
     home/common/agent-skills/evals/tests/test-run-eval-tree.sh
