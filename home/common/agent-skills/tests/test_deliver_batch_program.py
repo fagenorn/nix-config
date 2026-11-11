@@ -7,6 +7,7 @@ Run: just agent-workflow-tests
 
 from __future__ import annotations
 
+import itertools
 import json
 from pathlib import Path
 import re
@@ -3235,6 +3236,10 @@ def flips(state, prs, car="MERGED"):
     return {f"train-flip-1-{k}": {"car": car, "prs": [{"pr": pr, "state": state} for pr in prs]} for k in range(1, FLIP_CALLS + 1)}
 
 
+# The forge read that answers a still open car.
+OPEN_CAR = {"train-flip-1-1": {"car": "OPEN", "prs": []}}
+
+
 def flip_labels(calls):
     return [label for label in labels(calls) if label.startswith("train-flip-")]
 
@@ -3585,8 +3590,8 @@ class TrainTest(unittest.TestCase):
         self.assertEqual(order[order.index("train-build-1") + 1:order.index("train-merge-1")],
                          ["train-checks-1-1", "train-checks-1-2", "train-checks-1-1-more", "train-ready-1"])
         first, more = step_text(calls, "train-checks-1-1"), step_text(calls, "train-checks-1-1-more")
-        self.assertIn("10 minutes at most and stop waiting 10 minutes after this step began", more)
-        self.assertEqual(more, first.replace("25 minutes", "10 minutes"))
+        self.assertIn("6 minutes at most and stop waiting 6 minutes after this step began", more)
+        self.assertEqual(more, first.replace("25 minutes", "6 minutes"))
         self.assertIn("gh pr merge 92 ", prompt(calls, "train-merge-1"))
         for n, pr in ((1, 41), (2, 42)):
             self.assertEqual(row(result, n), {"issue": n, "outcome": "landed", "pr": pr, "train": 1, "car_pr": 92})
@@ -3631,11 +3636,13 @@ class TrainTest(unittest.TestCase):
     def test_a_train_merge_refused_as_behind_sweeps_and_lands_its_members_serially(self):
         c = "c" * 40
         refused = dict(merge_reply({}, merged=False), behind=True, notes="the head branch is not up to date with the base branch")
-        result, calls, _ = train_run(replies={"train-merge-1": refused,
+        result, calls, _ = train_run(replies={"train-merge-1": refused, **OPEN_CAR,
                                               "land-sync-1-1": {"status": "done", "conflicted": False, "head": c, "notes": "ok"}})
         order = land_labels(calls)
+        # One read of the forge confirms the car is still open before anything lands serially.
+        self.assertIn("gh pr view 92 --repo owner/repo --json state and return its state as car", step_text(calls, "train-flip-1-1"))
         self.assertEqual(order[order.index("train-merge-1") + 1:], [
-            "train-sweep-2", "land-sync-1-1", "land-record-1-1", "land-merge-1", "close-out-1", "land-pr-2", "land-merge-2", "close-out-2"])
+            "train-flip-1-1", "train-sweep-2", "land-sync-1-1", "land-record-1-1", "land-merge-1", "close-out-1", "land-pr-2", "land-merge-2", "close-out-2"])
         # The first landing kept the lock at its ready head through the train, moves it to the resynced head and releases it there, once.
         self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {c}\n", prompt(calls, "land-record-1-1"))
         self.assertIn(f"--match-head-commit {c}", prompt(calls, "land-merge-1"))
@@ -3656,18 +3663,39 @@ class TrainTest(unittest.TestCase):
             self.assertEqual(schema_of(calls, label)["properties"]["behind"], {"type": "boolean"})
         self.assertEqual(PROGRAM.read_text().count(sentence), 1)
 
+    def test_a_behind_refusal_whose_car_reads_merged_is_closed_out(self):
+        refused = dict(merge_reply({}, merged=False), behind=True)
+        result, calls, _ = train_run(replies={"train-merge-1": refused})
+        order = land_labels(calls)
+        self.assertEqual(order[order.index("train-merge-1") + 1:], ["train-flip-1-1", "close-out-1", "train-sweep-2", "close-out-2"])
+        for n, pr in ((1, 41), (2, 42)):
+            self.assertEqual(row(result, n), {"issue": n, "outcome": "landed", "pr": pr, "train": 1, "car_pr": 92})
+        self.assertEqual(lock_releases(calls), ["close-out-1"])
+
+    def test_a_behind_refusal_whose_car_is_not_read_open_stops_every_member(self):
+        refused = dict(merge_reply({}, merged=False), behind=True)
+        for name, read in (("closed", {"car": "CLOSED", "prs": []}), ("dead", None), ("threw", "throw")):
+            with self.subTest(name=name):
+                result, calls, _ = train_run(replies={"train-merge-1": refused, "train-flip-1-1": read})
+                order = land_labels(calls)
+                self.assertEqual(order[order.index("train-merge-1") + 1:], ["train-flip-1-1", "land-unlock-1", "train-sweep-2"])
+                for n, pr in ((1, 41), (2, 42)):
+                    self.assertEqual(row(result, n), {"issue": n, "outcome": "stopped", "pr": pr, "stage": "train-merge", "reason": "train-merge: n"})
+
     def test_a_refused_train_merge_that_stays_behind_ends_in_the_serial_landings_own_rows(self):
         refused = dict(merge_reply({}, merged=False), behind=True)
         behind = {"state": "behind", "head": SHA}
-        result, calls, _ = train_run(replies={"train-merge-1": refused, "land-checks-1-2": behind, "land-checks-1-3": behind})
+        result, calls, _ = train_run(replies={"train-merge-1": refused, **OPEN_CAR, "land-checks-1-2": behind, "land-checks-1-3": behind})
         self.assertEqual(row(result, 1)["outcome"], "land-contended")
         self.assertEqual(lock_releases(calls), ["land-unlock-1"])
         self.assertEqual(row(result, 2), {"issue": 2, "outcome": "landed", "pr": 42})
 
     def test_a_lock_not_already_held_before_the_merge_sweeps_and_every_row_is_land_contended(self):
-        for verdict in ("lost_to", "held_by", "acquired", "land-contended", "error"):
-            with self.subTest(verdict=verdict):
-                result, calls, _ = train_run(replies={"train-merge-1": merge_reply({}, lock=verdict, merged=False)})
+        # A behind answer changes nothing without the lock: it is read only under already_held (the car, read, would be open).
+        for verdict, behind in itertools.product(("lost_to", "held_by", "acquired", "moved", "land-contended", "error"), (False, True)):
+            with self.subTest(verdict=verdict, behind=behind):
+                reply = dict(merge_reply({}, lock=verdict, merged=False), behind=behind)
+                result, calls, _ = train_run(replies={"train-merge-1": reply, **OPEN_CAR})
                 order = land_labels(calls)
                 self.assertEqual(order[order.index("train-merge-1") + 1:], ["land-unlock-1", "train-sweep-2"])
                 for n, pr in ((1, 41), (2, 42)):
@@ -3685,6 +3713,8 @@ class TrainTest(unittest.TestCase):
                 ("dead", {"train-merge-1": None, **open_car}, "train-merge-1 returned nothing", ["train-flip-1-1"]),
                 ("threw", {"train-merge-1": "throw", **open_car}, "stub agent train-merge-1 threw", ["train-flip-1-1"]),
                 ("no verdict", {"train-merge-1": {"lock": None, "merged": False}, **open_car}, "train-merge-1 returned no lock verdict", ["train-flip-1-1"]),
+                ("no verdict, behind", {"train-merge-1": {"lock": None, "merged": False, "behind": True}, **open_car},
+                 "train-merge-1 returned no lock verdict", ["train-flip-1-1"]),
                 ("dead and unread", {"train-merge-1": None, "train-flip-1-1": None}, "train-merge-1 returned nothing", ["train-flip-1-1"]),
                 ("dead and the read threw", {"train-merge-1": None, "train-flip-1-1": "throw"}, "train-merge-1 returned nothing", ["train-flip-1-1"])):
             with self.subTest(name=name):

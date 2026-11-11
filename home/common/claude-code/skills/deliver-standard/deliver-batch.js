@@ -539,9 +539,9 @@ Return pr (number) and head (the full sha of the pushed head).`
 // The wait and the grading of a checks poll (its steps 3 and 4), shared by a landing's poll and a train car's (#822); `wait` is the bound of the watch.
 const CHECKS_TAIL = (prRef, wait) => `3. Otherwise wait in this turn until every check on head has completed, required or not. List every check with gh pr checks ${prRef} --repo ${SLUG} --json name,bucket,link (never --required) and wait with gh pr checks ${prRef} --repo ${SLUG} --watch ${wait}. It can return early and a list can be partial: never treat a partial list as green, and read the list again before answering. Bucket pass has passed; fail or cancel has failed; pending is still running; skipping never started and is ignored. The required set is the checks the project declares, as JSON: ${JSON.stringify(DECLARED)} (an empty list declares none), plus the checks the forge requires: take those from gh api repos/${SLUG}/rules/branches/${INT} (its required_status_checks rules) or else classic branch protection. A declared check with no run or status at head yet is pending: keep waiting, never treat it as absent or green.
 4. Answer passed only when no check on head is pending, failing or cancelled, with required (the required names you used) and passed (the names passing at head). Answer failed with failing (every failing or cancelled name, required or not) and details when any check failed. Answer needs_label with label and failing when a check failed only because the PR lacks a label that only a human may apply (do not apply it yourself). Answer pending with pending (the names still running) only when the wait ran out and no check failed.`
-// The one merge form of a landing, at an exact head; a train merges its car with the same form (#822).
 // What a refused merge answers, in land-merge and train-merge alike (#870, #822).
 const MERGE_REFUSED = 'Never retry with another form; on a guard refusal or a head mismatch return merged false with the exact message in notes, and behind true only when the refusal says the head branch is not up to date with the base branch, or the guard says the PR is behind its base, else false.'
+// The one merge form of a landing, at an exact head; a train merges its car with the same form (#822).
 const MERGE_CMD = (pr, sha) => `${UNSET}gh pr merge ${pr} --repo ${SLUG} --${SETUP.merge_strategy} --match-head-commit ${sha}${SETUP.delete_branch ? ' --delete-branch' : ''}`
 // A merged landing must leave a cont naming its PR, or a re-adopted PR (which has none) could not be closed out.
 const markMerged = (n, ready, pr) => {
@@ -908,7 +908,8 @@ ${RULES}`, `land-merge-${n}`, { ...lifecycleClerk, schema: withRenew(LAND_MERGE_
 //   train-ready-<t>   renews the claims of members 1..g and reads their PR heads; a member that fails shrinks the train to those before it;
 //   train-merge-<t>   re-checks the lock at H1 (already_held only), merges car g at its exact head and reads the member PRs once;
 //   train-flip-<t>-<k>  reads the states again while a member PR still reads OPEN (the forge marks them merged itself, since the car's
-//                     history contains their heads), TRAIN_FLIP_CALLS times at most; it also reads the car once when the merge reply was lost;
+//                     history contains their heads), TRAIN_FLIP_CALLS times at most; it also reads the car once when the merge reply was lost
+//                     or the merge was refused as behind;
 //   close-out-<n>     per merged member, the landing's own close-out; the lock release rides in the first member's, as in a serial landing;
 //   train-sweep-<s>   closes the open cars and deletes the car branches, the scratch worktree and the merged members' remote branches.
 // Rows stay per issue, with the issue's own PR; the row of an issue whose commits the car merged also carries train and car_pr.
@@ -916,19 +917,21 @@ ${RULES}`, `land-merge-${n}`, { ...lifecycleClerk, schema: withRenew(LAND_MERGE_
 // wrapper on any other exit). Nothing merges unless every car up to g is green at its exact head. A train never writes to an issue branch and
 // never reads a merge commit. Each issue joins at most one train per run: an issue a train did not land goes to land() in the same drain, never
 // back to WAITING. Any surprise before the merge step (a dead, thrown or malformed step, a conflict, a red or late car) sweeps and falls back to
-// land(), and so does a merge the forge or the guard refused as behind (the refusal proves the car unmerged; the first landing then resyncs
+// land(), and so does a merge the forge or the guard refused as behind once a read shows the car still open (the first landing then resyncs
 // and moves the lock as any behind landing does); any other surprise in the merge step stops its members, because the car may be merged.
 const TRAIN_MAX = 3
 // forge_land_lock.py lets another host take over a lock it watched unchanged for IDLE_AFTER, 45 minutes, and a train's lock never changes.
 // The one long wait of a train, its car checks, is therefore bounded below that: TRAIN_CHECKS_WAIT_MIN, plus TRAIN_CHECKS_MORE_MIN once
 // per train when a car is still pending with no failed check at the first cap (#822: a late car is nearly finished CI). The lock cannot be
-// re-asserted (only a changed sha restarts a waiter's watch), so the two waits leave the other train steps (train-pr, train-build,
-// train-ready, train-merge: about five minutes in the first real train) 10 minutes of the 45. Past that bound nothing unsafe happens: a
-// waiter that took the lock over makes train-merge's acquire answer something other than already_held, so nothing merges, and a fallen-back
-// first landing's lock move is refused; the rows end land-contended.
+// re-asserted (only a changed sha restarts a waiter's watch), so the two waits, 31 minutes, leave 14 of the 45 for everything else that
+// runs before the lock changes: train-pr, train-build, train-ready and train-merge (about five minutes in the first real train) and, when
+// the train falls back (late cars, or a merge refused as behind), the sweep, the forge read and the first landing's resync, since the lock
+// first moves only when that resync pushes a new head. Past that bound nothing unsafe happens, but the train is wasted: a waiter that took
+// the lock over makes train-merge's acquire answer something other than already_held, so nothing merges, and a fallen-back first landing's
+// lock move is refused; the rows end land-contended.
 const LOCK_IDLE_MIN = 45
 const TRAIN_CHECKS_WAIT_MIN = 25
-const TRAIN_CHECKS_MORE_MIN = 10
+const TRAIN_CHECKS_MORE_MIN = 6
 // The forge marks the member PRs merged by itself after the car merge, and that can lag. No step sleeps: the program asks a read-only
 // train-flip step again while a member still reads OPEN, this many times at most, and each call's own duration is the wait.
 const TRAIN_FLIP_CALLS = 8
@@ -1155,12 +1158,19 @@ ${RULES_FOR(REPO, carName(members.length))}`, `train-merge-${t}`, { ...TRAIN_LIF
       } else {
         const v = mg.lock.verdict
         if (v !== 'already_held') return endAll('land-contended', { detail: `the land lock was not held before the train merge (${v})` })
-        // A car refused as not up to date (the integration branch moved outside the land lock) is unmerged by the refusal itself: the train
-        // falls back, and the first landing, still holding the lock at H1 with its behind poll, resyncs and lands as #870 does.
-        if (mg.merged === false && mg.behind === true) return await fallBack(`the train merge was refused as behind (${mg.notes || 'no notes'})`)
-        // Any other unmerged car is not retried and not landed serially at once: the reply cannot prove the car stayed unmerged, and a relaunch re-reads the forge.
-        if (mg.merged !== true) return endAll('stopped', { stage: 'train-merge', detail: mg.notes })
-        note(mg.prs)
+        if (mg.merged === false && mg.behind === true) {
+          // Refused as not up to date (the integration branch moved outside the land lock). One read of the forge confirms the reply: a car
+          // that reads OPEN is unmerged, so the train falls back and the first landing, still holding the lock at H1 with its behind poll,
+          // resyncs and lands as #870 does; one that reads MERGED is closed out; any other answer stops the members.
+          const fl = await flip(memberPrs)
+          if (fl && fl.car === 'OPEN') return await fallBack(`the train merge was refused as behind (${mg.notes || 'no notes'})`)
+          if (!fl || fl.car !== 'MERGED') return endAll('stopped', { stage: 'train-merge', detail: mg.notes })
+          log(`train ${t}: the merge was reported refused as behind and the car reads MERGED; closing out`)
+        } else {
+          // Any other unmerged car is not retried and not landed serially at once: the reply cannot prove the car stayed unmerged, and a relaunch re-reads the forge.
+          if (mg.merged !== true) return endAll('stopped', { stage: 'train-merge', detail: mg.notes })
+          note(mg.prs)
+        }
       }
 
       // The car is merged, so every member's commits are in the integration branch: each keeps a cont naming its PR, as a merged landing does.
