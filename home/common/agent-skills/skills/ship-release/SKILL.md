@@ -74,7 +74,7 @@ release transaction preview --repo-root <main-checkout>
 
 The document names `candidate`, `verification`, `actions`, `confirmations`, `runnable` and `refusal`; exit 3 with `runnable: false` still prints it. Report `legacy_release_in_flight` with its detail; the user decides about the old file; the driver never removes it. On `release_pr_missing`, open the release PR once with `gh pr create --repo <slug> --base <default> --head <integration> --title "<title>" --body "<version>"`, where `<slug>` is `bindings.tracker.repo_slug`. On `verification_pending`, wait once for CI on `<commit>`: `gh run watch <id> --exit-status` from `gh run list --commit <commit>`, one foreground call of at most 5 minutes. After either, re-run the same preview. Still pending, or `verification_failed`, `version_reserved`, `release_in_flight`: report the refusal and stop.
 
-When `runnable`, present the version with its evidence, the title, the commit, each action and every confirmation, and ask for one explicit yes to all. Then end the turn. Tokens stay equal while inputs are unchanged; edit nothing in the notes file between preview and run.
+When `runnable`, present the version with its evidence, the title, the commit, each action and every confirmation, and ask for one explicit yes to all. Then end the turn. Once runnable, tokens are stable if CI and the `<default>` tip are unchanged; never edit the notes.
 
 ## Phase 4 — Run
 

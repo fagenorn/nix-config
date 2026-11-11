@@ -7,7 +7,7 @@ transaction, no lock, and no adapter call. `preview` makes the three read-only G
 of `release_verification` and no other call, plus, for a profile that consumes `merge`, the
 three `observe_merge` reads before them (issue 554 D3). A problem the caller must repair is a
 `Refusal`; a problem that only makes a new release unrunnable is reported in the preview
-document, which still names the confirmations the operator would give (D18).
+document (D18), which then lists no confirmations (issue 845).
 
 The store root is `<common dir>/agent-release/store`; only `store(create=True)` makes it.
 A transaction's creation key is `release/v1:<project id>:<profile id>:<n>` with `n` from 1,
@@ -75,7 +75,10 @@ per-context conclusions and the ordered actions in mode `new`, and of the transa
 the proof plan digest in mode `resume`. One confirmation is listed per `irreversible` action
 not last seen `satisfied`, with token `<action>:<first 12 hex of telemetry_digest([plan_digest,
 action, next attempt, next acquisition ordinal])>`, so a retry, a re-acquisition or a changed
-input yields a new token and an unchanged one prints the same.
+input yields a new token and an unchanged one prints the same. The digest covers fetched state
+(the default tip in `merge`, each check's conclusion), which moves while CI runs, so a preview
+that is not `runnable` lists no confirmations: a printed token is one `run` would accept while
+that state holds (issue 845).
 
 Run (D6, D7, D14, D20, D21). `run` re-derives the plan as `preview` does and writes nothing
 until it passes: a refused plan raises its refusal, a token outside the recomputed set refuses
@@ -376,7 +379,8 @@ class Driver:
                 "candidate": {**{key: candidate[key] for key in ("version", "commit", "title")},
                               "merge": candidate.get("merge")},
                 "verification": verification, "actions": self._actions(transaction),
-                "confirmations": self._confirmations(plan_digest, candidate, transaction),
+                "confirmations": ([] if refusal is not None else
+                                  self._confirmations(plan_digest, candidate, transaction)),
                 "runnable": refusal is None,
                 "refusal": None if refusal is None else refusal.as_object()}
 

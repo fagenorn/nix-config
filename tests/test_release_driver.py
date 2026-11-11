@@ -107,7 +107,18 @@ class PreviewTest(DriverCase):
         self.assertNotEqual(retitled["plan_digest"], first["plan_digest"])
         self.assertNotEqual(retitled["confirmations"][0]["token"], first["confirmations"][0]["token"])
 
-    def test_unready_ci_is_not_runnable_but_still_names_the_confirmations(self):
+    def test_two_runnable_previews_of_the_same_fetched_state_print_the_same_tokens(self):
+        """Issue 845: a token is stable once the preview is runnable and nothing fetched moved."""
+        self.world.verification_ready()
+        first, again = self.driver().preview(rs.candidate()), self.driver().preview(rs.candidate())
+        self.assertEqual((first["runnable"], again["runnable"]), (True, True))
+        self.assertEqual(len(first["confirmations"]), 2)
+        self.assertEqual([c["token"] for c in first["confirmations"]],
+                         [c["token"] for c in again["confirmations"]])
+
+    def test_unready_ci_is_not_runnable_and_carries_no_confirmations(self):
+        """Issue 845: the plan digest covers fetched state, so a token printed while CI still
+        runs would change under the operator; a preview that cannot run prints none."""
         cases = (("verification_pending", {"runs": []}),
                  ("candidate_stale", {"tip": "9" * 40}))
         for code, kwargs in cases:
@@ -116,7 +127,8 @@ class PreviewTest(DriverCase):
                 self.world.verification_ready(**kwargs)
                 document = self.driver().preview(rs.candidate())
                 self.assertEqual((document["runnable"], document["refusal"]["code"]), (False, code))
-                self.assertEqual(len(document["confirmations"]), 2)
+                self.assertEqual(document["confirmations"], [])
+                self.assertEqual(len(document["actions"]), 2)
 
     def test_new_mode_needs_a_valid_candidate(self):
         self.assertRefusal("candidate_required", self.driver().preview, None)
@@ -600,10 +612,9 @@ class MergePreviewTest(DriverCase):
                 self.assertEqual((document["runnable"], document["refusal"]["code"],
                                   document["refusal"]["repair_id"], document["verification"],
                                   document["candidate"]["merge"]), (False, code, None, None, None))
-                self.assertEqual(len(document["confirmations"]), 3)
+                self.assertEqual(document["confirmations"], [])
                 self.assertFalse(any("check-runs" in c["argv"][-1] for c in self.world.calls()))
-                self.assertRefusal(code, driver.run, rs.candidate(),
-                                   [c["token"] for c in document["confirmations"]])
+                self.assertRefusal(code, driver.run, rs.candidate(), [])
                 self.assertFalse((driver.project.common_dir / "agent-release").exists())
 
     def test_a_moved_base_between_preview_and_run_is_stale(self):
