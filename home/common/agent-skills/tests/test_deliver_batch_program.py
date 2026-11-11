@@ -1395,7 +1395,8 @@ class LandTest(unittest.TestCase):
         merges = [call["prompt"] for call in calls if call["label"] == "land-merge-1"]
         self.assertIn(f"--match-head-commit {B}", merges[0])
         self.assertIn(f"--match-head-commit {c}", merges[1])
-        self.assertIn("behind true only when the refusal says the head branch is not up to date with the base branch", merges[0])
+        self.assertIn("behind true only when the refusal says the head branch is not up to date with the base branch, "
+                      "or the guard says the PR is behind its base, else false.", merges[0])
         self.assertIn("behind", schema_of(calls, "land-merge-1")["properties"])
 
     def test_the_refusal_budget_is_independent_of_the_resyncs_already_run(self):
@@ -1416,6 +1417,22 @@ class LandTest(unittest.TestCase):
         self.assertEqual(row(result, 1)["outcome"], "land-contended")
         self.assertEqual(labels(calls).count("land-merge-1"), 1)
         self.assertNotIn("land-sync-1-4", labels(calls))
+
+    def test_a_refusal_resync_leaves_the_behind_budget_whole(self):
+        # The first poll passes, so no resync ran before the refusal: its resync must not count against MAX_SYNCS.
+        c, d = "c" * 40, "d" * 40
+        result, calls, _ = run(replies={
+            "land-merge-1": [self.REFUSED, self.MERGED],
+            "land-sync-1-1": {"status": "done", "conflicted": False, "head": B, "notes": "ok"},
+            "land-record-1-1": {"ok": True, "head": B, "checks": {"state": "behind", "head": B}},
+            "land-sync-1-2": {"status": "done", "conflicted": False, "head": c, "notes": "ok"},
+            "land-record-1-2": {"ok": True, "head": c, "checks": {"state": "behind", "head": c}},
+            "land-sync-1-3": {"status": "done", "conflicted": False, "head": d, "notes": "ok"}})
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+        ls = of(calls, 1)
+        self.assertEqual(ls[ls.index("land-merge-1"):],
+                         ["land-merge-1", "land-sync-1-1", "land-record-1-1", "land-sync-1-2", "land-record-1-2",
+                          "land-sync-1-3", "land-record-1-3", "land-merge-1", "close-out-1"])
 
     def test_a_merge_refused_as_not_up_to_date_past_its_budget_stops(self):
         result, calls, _ = run(replies={"land-merge-1": self.REFUSED})

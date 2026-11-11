@@ -240,7 +240,7 @@ class FoldTest(unittest.TestCase):
             "missing": ({"merge_strategy": None}, "setup", False),
             "missing-branch": ({"branch": None}, "setup", True),
             # 870: the claim's worktree stands in for a missing worktree_path, so the gate needs both absent.
-            "missing-worktree-path": ({"worktree_path": None, "claim": {"ok": False, "reason": "worktree add failed"}}, "setup", True),
+            "missing-worktree-path": ({"worktree_path": None, "claim": {"ok": True, "worktree": None, "base_sha": SHA, "plan_dir": "/g"}}, "setup", True),
             "holder": ({"holder": "h2/session-s1"}, "setup", False),
             "review-blocked": ({"review_state": {"code": "blocked", "plan": "available"}}, "review-blocked", False),
         }
@@ -535,7 +535,7 @@ class ContractTest(unittest.TestCase):
         self.assertEqual(labels(calls), ["setup"])
 
     def test_a_transient_setup_refusal_before_the_claim_is_retried_once(self):
-        # 870: a forge or network failure before the claim is asked once more; a second one, or any other refusal, stops.
+        # 870: a forge or network failure in a reply that took no claim is asked once more; a second one, or any other refusal, stops.
         transient = {"ok": False, "reason": "branch", "details": "network is unreachable", "transient": True}
         cases = {
             "recovers": ([transient, SETUP_OK], 2, "done"),
@@ -553,7 +553,7 @@ class ContractTest(unittest.TestCase):
                     self.assertEqual(labels(calls), ["setup"] * setups)
         _, calls = run()
         self.assertIn("transient", schema_of(calls, "setup")["properties"])
-        self.assertIn("On any refusal set transient true only when the failed command's stderr JSON has transient true.",
+        self.assertIn("On any refusal set transient true only when the failed command's stderr JSON has transient true anywhere in it.",
                       prompt(calls, "setup"))
 
     def test_a_setup_reply_naming_the_worktree_only_in_its_claim_proceeds(self):
@@ -563,6 +563,16 @@ class ContractTest(unittest.TestCase):
         self.assertNotIn("worktree", labels(calls))
         self.assertIn("/r/.wt/w-issue-9-x", prompt(calls, "plan"))
         self.assertIn("Return ok=true with branch, worktree_path and every other field above, holder,", prompt(calls, "setup"))
+        # A failed claim, or a claim never taken, names no location: the stop's cont carries no worktree_path.
+        path = "/r/.wt/w-issue-9-x"
+        for name, patch in (("failed", {"claim": {"ok": False, "worktree": path, "reason": "worktree add failed"}}),
+                            ("untaken", {"acquire": {"verdict": "error", "detail": "x"}})):
+            with self.subTest(claim=name):
+                result, calls = run(patch={"setup": dict(patch, worktree_path=None)})
+                self.assertEqual((result["stage"], result["missing"]), ("setup", ["worktree_path"]))
+                self.assertFalse(result.get("cont", {}).get("setup", {}).get("worktree_path"))
+        merge = prompt(run()[1], "merge")
+        self.assertIn("is not up to date with the base branch, or the guard says the PR is behind its base (the integration", merge)
 
     def test_setup_preflight_names_merged_pr_existing_branch_and_applicability(self):
         _, calls = run()

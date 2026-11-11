@@ -680,7 +680,7 @@ ${RULES}`, `close-out-${n}`, { ...lifecycleClerk, schema: folding ? { ...CLOSE_S
 
   // The behind handling shared by a checks reply and a lock that was lost and retaken.
   const behind = async () => {
-    if (c.sync - c.refused >= MAX_SYNCS) return out('land-contended', { detail: `behind ${INT} after ${c.sync} resyncs` })
+    if (c.sync - c.refused >= MAX_SYNCS) return out('land-contended', { detail: `behind ${INT} after ${c.sync} resyncs in all` })
     return await resync()
   }
 
@@ -813,7 +813,7 @@ ${LOCK_RETURN} Return it as lock.
 Only when lock's verdict is already_held or moved, merge PR #${pr} of issue #${n} of ${SLUG} into ${INT}; a re-run must not merge twice.
 1. Read ${UNSET}gh pr view ${pr} --repo ${SLUG} --json state,mergeCommit. When state is already MERGED, skip step 2.
 2. Otherwise run, alone and exactly: ${MERGE_CMD(pr, expected)}
-3. Read the PR state again: merged is true only when the state reads MERGED. Never retry with another form; on a guard refusal or a head mismatch return merged false with the exact message in notes, and behind true only when the refusal says the head branch is not up to date with the base branch, else false.
+3. Read the PR state again: merged is true only when the state reads MERGED. Never retry with another form; on a guard refusal or a head mismatch return merged false with the exact message in notes, and behind true only when the refusal says the head branch is not up to date with the base branch, or the guard says the PR is behind its base, else false.
 Return merged, behind, merge_commit and notes. On any other lock verdict run nothing else and return merged false with the verdict in notes.
 ${RULES}`, `land-merge-${n}`, { ...lifecycleClerk, schema: withRenew(LAND_MERGE_SCHEMA, { lock: NULLABLE(LOCK_SCHEMA) }) }), r => r.renew)
       if (!mg) return out('stopped', { stage: 'merge', detail: `land-merge-${n} returned nothing` })

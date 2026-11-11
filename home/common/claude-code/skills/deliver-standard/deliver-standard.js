@@ -324,7 +324,7 @@ const call = async (prompt, opts, optional) => {
 const deadOf = () => (DEAD.length ? { dead_agents: DEAD.slice() } : {})
 
 // Shared by the fresh setup and the re-deriving resume of a claim_incomplete cont that lacks its location.
-const DERIVE_LOCATION = `Run alone and exactly issue-branch --repo-root ${REPO} --issue ${ISSUE}: it prints one JSON line, and branch and worktree_path are its branch and worktree_path. On a non-zero exit refuse (ok=false) with reason branch and the line it wrote to stderr in details. On any refusal set transient true only when the failed command's stderr JSON has transient true.`
+const DERIVE_LOCATION = `Run alone and exactly issue-branch --repo-root ${REPO} --issue ${ISSUE}: it prints one JSON line, and branch and worktree_path are its branch and worktree_path. On a non-zero exit refuse (ok=false) with reason branch and the line it wrote to stderr in details. On any refusal set transient true only when the failed command's stderr JSON has transient true anywhere in it.`
 // Only a new child's early cont (a stop after the folded claim, whatever fields are missing) can lack its location; an old cont has both.
 const REDERIVE = !!(CONT && CONT.claim_incomplete && !(CONT.setup && present(CONT.setup.branch) && present(CONT.setup.worktree_path)))
 const RES_BRANCH = REDERIVE ? '<branch>' : CONT && CONT.setup && CONT.setup.branch
@@ -376,7 +376,7 @@ ${LANE === 'standard' ? FRESH_READS : RENEW_STEP}${WT_STEP}. Set up the worktree
 ${WT_STEP + 1}. Return ok=true with branch, worktree_path and every other field above, ${LANE === 'standard' ? 'holder, acquire, renew, answer' : 'holder, acquire, renew'}, and claim: ok, worktree (<worktree_path>), base_sha and plan_dir. Once the claim step ran, keep ok true: report a worktree failure only as claim with ok=false, the reason and what you already did.
 ${BASE_RULES}`, { label: 'setup', phase: 'Setup', agentType: 'clerk', model: DEFAULT_CLERK_MODEL, effort: 'low', schema: CONT ? SETUP_SCHEMA : SETUP_FOLDED })
 let setup = await setupCall()
-// #870: a refusal marked transient (a forge or network failure) before the claim was taken is asked once more; the second answer stands.
+// #870: a refusal marked transient (a forge or network failure) whose reply took no claim is asked once more; the second answer stands.
 const claimed = r => !!r.acquire && (r.acquire.verdict === 'acquired' || r.acquire.verdict === 'already_held')
 if (setup && setup.ok === false && setup.transient === true && !claimed(setup)) setup = await setupCall()
 // A lost reply carries no cont, fresh or resumed: a fresh reply that never showed the refusal checks pass must not resume past them,
@@ -391,12 +391,12 @@ const FOLD_HOLDER = !CONT ? setup.holder : undefined
 const FOLD_ANSWER = !CONT && setup.answer ? setup.answer : null
 const FOLD_RENEW = !CONT && setup.renew ? setup.renew : null
 if (!CONT) { delete setup.holder; delete setup.acquire; delete setup.claim; delete setup.answer; delete setup.renew }
-// #870: a reply that names the worktree only in its folded claim still has its location.
-if (FOLD_CLAIM && !present(setup.worktree_path) && present(FOLD_CLAIM.worktree)) setup.worktree_path = FOLD_CLAIM.worktree
 const ACQ_RECALL = !CONT && transientError(FOLD_ACQ)
 const SETUP_HELD = !!(FOLD_ACQ && FOLD_ACQ.verdict === 'already_held')
 const RENEW_RECALL = SETUP_HELD && transientError(FOLD_RENEW)
 const CLAIM_TAKEN = !!(FOLD_ACQ && (FOLD_ACQ.verdict === 'acquired' || FOLD_ACQ.verdict === 'already_held'))
+// #870: a reply that names the worktree only in its folded claim still has its location; a failed claim, or one never taken, names none.
+if (CLAIM_TAKEN && FOLD_CLAIM && FOLD_CLAIM.ok === true && !present(setup.worktree_path) && present(FOLD_CLAIM.worktree)) setup.worktree_path = FOLD_CLAIM.worktree
 const BUILT = present(setup.host) ? `${setup.host}/${HOLDER_ID}` : null
 // Every stop after the folded claim was taken keeps a cont that finishes it on resume, whatever fields are missing (stop() is not defined yet).
 const earlyCont = () => (CLAIM_TAKEN ? { cont: { setup: { ...setup, ...(BUILT && HOLDER_RE.test(BUILT) ? { holder: BUILT } : {}) }, lane: LANE, plan: null, plan_reviewed: false, done: [], fix_waves: 0, claim_incomplete: true } } : {})
@@ -1452,7 +1452,7 @@ ${RENEW_FIRST}
 Then re-check the cross-host landing lock of the branch ${INT} for PR #${PR}: run alone and exactly: ${LAND_ACQUIRE(expected, false)}
 ${LOCK_RETURN} Return it as lock.
 Only when lock's verdict is already_held or moved, merge PR #${PR}: run, alone and exactly: ${UNSET}gh pr merge ${PR} --repo ${SLUG} --${STRATEGY} --match-head-commit ${head}${setup.delete_branch ? ' --delete-branch' : ''}
-Then read gh pr view ${PR} --repo ${SLUG} --json state,mergeCommit: merged is true only when state is MERGED. Never retry with another form; on a guard refusal or a head mismatch return merged false with the exact message, and behind true only when the refusal says the head branch is not up to date with the base branch (the integration branch moved), else false. On any other lock verdict run nothing else and return merged false with the verdict in notes.
+Then read gh pr view ${PR} --repo ${SLUG} --json state,mergeCommit: merged is true only when state is MERGED. Never retry with another form; on a guard refusal or a head mismatch return merged false with the exact message, and behind true only when the refusal says the head branch is not up to date with the base branch, or the guard says the PR is behind its base (the integration branch moved), else false. On any other lock verdict run nothing else and return merged false with the verdict in notes.
 ${RULES}`, { label: 'merge', phase: 'Ship', agentType: 'clerk', model: DEFAULT_CLERK_MODEL, effort: 'low', schema: withRenew(MERGE_SCHEMA, { lock: NULLABLE(LOCK_SCHEMA) }) }), r => r.renew)
       if (!mg) return stop('merge', { pr: PR, merge: null })
       const pre = mg.lock ? mg.lock.verdict : null
