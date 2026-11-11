@@ -556,7 +556,7 @@ ${LOCK_RETURN} Return it as lock; otherwise return lock null.
 Then, only when ok is true and lock's verdict is acquired, already_held or moved, wait for every check of PR #${pr} at the head, required or not:
 ${CHECKS_STEPS(pr)}
 Return those fields as checks; otherwise return checks null.
-${RULES}`, label, { ...clerk, schema: { ...RECORD_SCHEMA, properties: { ...RECORD_SCHEMA.properties, lock: NULLABLE(LOCK_SCHEMA), checks: NULLABLE(LAND_CHECKS_SCHEMA) } } })
+${RULES}`, label, { ...lifecycleClerk, schema: { ...RECORD_SCHEMA, properties: { ...RECORD_SCHEMA.properties, lock: NULLABLE(LOCK_SCHEMA), checks: NULLABLE(LAND_CHECKS_SCHEMA) } } })
     const lv = rec && rec.lock ? rec.lock.verdict : null
     if (HOLDING(lv)) {
       lockHeld = true
@@ -666,7 +666,7 @@ ${RULES}`, `land-pr-${n}`, { agentType: 'clerk', model: DEFAULT_CLERK_MODEL, eff
       carried = null
       const ck = fold ? fold.reply : await call(`Wait for every check of PR #${pr} of issue #${n} of ${SLUG} (worktree ${W}, branch ${B}) at the head, required or not.
 ${CHECKS_STEPS(pr)}
-${RULES}`, label, { ...clerk, schema: LAND_CHECKS_SCHEMA })
+${RULES}`, label, { ...lifecycleClerk, schema: LAND_CHECKS_SCHEMA })
       if (!ck) return out('stopped', { stage: 'checks', detail: fold ? `${fold.label} returned no checks` : `${label} returned nothing` })
       if (ck.head !== expected) return out('stopped', { stage: 'head-moved', expected, head: ck.head })
 
@@ -756,7 +756,7 @@ ${notes.length ? `4. Unless a comment starting Orchestrator notes for PR ${pr} a
       ? `Every criterion is of kind code or note. Read ${UNSET}gh issue view ${n} --repo ${SLUG} --json state; if it is still open (${INT === SETUP.default_branch ? 'the closing keyword did not fire' : `${INT} is not the default branch, so no closing keyword fires`}), run ${UNSET}gh issue close ${n} --repo ${SLUG} --comment 'Delivered by PR ${pr} into ${INT}.'`
       : `Keep the issue open. Add the needs-verification label (create it if missing) and comment which criteria remain and how to check each: ${JSON.stringify(openCriteria)}.`}
 Return issue_state (OPEN or CLOSED, read back from the tracker), branch_deleted, released, decision_ended${notes.length ? ', notes_posted' : ''} and notes.
-${RULES}`, `close-out-${n}`, { ...clerk, schema: folding ? { ...CLOSE_SCHEMA, properties: { ...CLOSE_SCHEMA.properties, release: NULLABLE(RELEASE_SCHEMA) } } : CLOSE_SCHEMA })
+${RULES}`, `close-out-${n}`, { ...lifecycleClerk, schema: folding ? { ...CLOSE_SCHEMA, properties: { ...CLOSE_SCHEMA.properties, release: NULLABLE(RELEASE_SCHEMA) } } : CLOSE_SCHEMA })
     if (folding && co && co.release && (co.release.verdict === 'released' || co.release.verdict === 'not_held')) lockHeld = false
     const want = noHold ? 'CLOSED' : 'OPEN'
     if (!co || co.issue_state !== want || co.released !== true || co.decision_ended !== true || (notes.length && co.notes_posted !== true)) return out('stopped', { stage: 'close-out', close_out: co, expected_issue_state: want })

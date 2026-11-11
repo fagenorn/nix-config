@@ -4227,7 +4227,7 @@ class AgentTypeTest(unittest.TestCase):
 class ClerkModelTest(unittest.TestCase):
     """#803, #813: clerk_model (sonnet, the default, or haiku) is checked before any agent and sets the model of every clerk call except the lifecycle and setup steps, which stay on the default."""
 
-    ON_DEFAULT = {"setup", "worktree", "land-unlock", "land-push-", "pr", "merge", "hold"}
+    ON_DEFAULT = {"setup", "worktree", "land-unlock", "land-push-", "pr", "merge", "hold", "close-out"}
 
     def test_clerk_model_must_be_sonnet_or_haiku(self):
         for bad in ("opus", "Haiku", "", 1, None, True):
