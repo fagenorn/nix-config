@@ -4965,6 +4965,18 @@ class AmendTest(unittest.TestCase):
                 self.assertEqual(result["cont"], cont)
                 self.assertEqual(calls, [])
 
+    def test_a_falsy_malformed_amend_is_refused_not_ignored(self):
+        for amend in ("", 0, False):
+            with self.subTest(amend=amend, cont=True):
+                result, calls = run(args=dict(ARGS, cont=AMEND_CONT, amend=amend))
+                self.assertEqual(result["stage"], "amend")
+                self.assertEqual(result["cont"], AMEND_CONT)
+                self.assertEqual(calls, [])
+            with self.subTest(amend=amend, cont=False):
+                result, calls = run(args=dict(ARGS, amend=amend))
+                self.assertEqual(result["stage"], "args")
+                self.assertEqual(calls, [])
+
     def test_amend_without_a_cont_stops_at_args(self):
         result, calls = run(args=dict(ARGS, amend=[AMEND_EDIT]))
         self.assertEqual(result["stage"], "args")

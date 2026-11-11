@@ -265,14 +265,14 @@ const branchProblems = (p, w = W, int = INT) => {
 // ---------------- Amend (#811) ----------------
 // An owner's amendment of the plan on a resume, checked before any agent runs; every refusal returns the cont unchanged.
 const AMEND = args.amend === undefined ? null : args.amend
-if (AMEND && !CONT) return { stage: 'args', error: 'amend needs a cont: it amends the plan of a resumed delivery' }
-if (AMEND && !(Array.isArray(AMEND) && AMEND.length > 0 && AMEND.every(e => isEntry(e) && typeof e.file === 'string' && e.file !== '' && typeof e.find === 'string' && e.find !== '' && typeof e.replace === 'string'))) {
+if (AMEND !== null && !CONT) return { stage: 'args', error: 'amend needs a cont: it amends the plan of a resumed delivery' }
+if (AMEND !== null && !(Array.isArray(AMEND) && AMEND.length > 0 && AMEND.every(e => isEntry(e) && typeof e.file === 'string' && e.file !== '' && typeof e.find === 'string' && e.find !== '' && typeof e.replace === 'string'))) {
   return { stage: 'amend', error: 'amend must be a non-empty list of {file, find, replace}: file and find non-empty strings, replace a string', cont: CONT }
 }
-if (AMEND && (LANE !== 'standard' || !isEntry(CONT.plan) || typeof CONT.plan.plan_root !== 'string' || CONT.plan.plan_root === '' || !isEntry(CONT.setup) || typeof CONT.setup.plan_dir !== 'string' || CONT.setup.plan_dir === '')) {
+if (AMEND !== null && (LANE !== 'standard' || !isEntry(CONT.plan) || typeof CONT.plan.plan_root !== 'string' || CONT.plan.plan_root === '' || !isEntry(CONT.setup) || typeof CONT.setup.plan_dir !== 'string' || CONT.setup.plan_dir === '')) {
   return { stage: 'amend', error: 'amend needs a standard-lane cont whose plan has a plan_root and whose setup has a plan_dir', cont: CONT }
 }
-const AMEND_DIR = AMEND ? CONT.setup.plan_dir.replace(/\/+$/, '') : null
+const AMEND_DIR = AMEND !== null ? CONT.setup.plan_dir.replace(/\/+$/, '') : null
 // The absolute path of an amend file when it is spelled under plan_dir, else null (Task 1's command checks the resolved paths).
 const amendTarget = f => {
   if (!canonPath(AMEND_DIR)) return null
@@ -280,19 +280,19 @@ const amendTarget = f => {
   const parts = f.split('/')
   return parts.every(c => /^[A-Za-z0-9._-]+$/.test(c) && c !== '.' && c !== '..') ? `${AMEND_DIR}/${f}` : null
 }
-if (AMEND) {
+if (AMEND !== null) {
   const refused = AMEND.filter(e => amendTarget(e.file) === null).map(e => ({ file: e.file, reason: 'outside plan_dir' }))
   const root = CONT.plan.plan_root
   if (!root.startsWith('/') || amendTarget(root) === null) refused.push({ file: root, reason: 'outside plan_dir' })
   if (refused.length) return { stage: 'amend', refused, details: 'an amend file or the plan root is outside cont.setup.plan_dir; nothing was applied', cont: CONT }
 }
-const AMEND_STOP = !AMEND ? null
+const AMEND_STOP = AMEND === null ? null
   : Number.isInteger(CONT.partial) ? `the stop at task ${CONT.partial}`
   : (() => {
     const next = Array.isArray(CONT.plan.tasks) ? CONT.plan.tasks.find(t => isEntry(t) && !(Array.isArray(CONT.done) && CONT.done.some(d => isEntry(d) && d.n === t.n))) : null
     return next ? `the stop before task ${next.n}` : 'the stop after the last task'
   })()
-const AMEND_INPUT = AMEND ? { plan_dir: AMEND_DIR, plan_root: CONT.plan.plan_root, stop: AMEND_STOP, edits: AMEND.map(e => ({ file: amendTarget(e.file), find: e.find, replace: e.replace })) } : null
+const AMEND_INPUT = AMEND !== null ? { plan_dir: AMEND_DIR, plan_root: CONT.plan.plan_root, stop: AMEND_STOP, edits: AMEND.map(e => ({ file: amendTarget(e.file), find: e.find, replace: e.replace })) } : null
 const AMEND_SCHEMA = { type: 'object', properties: { status: { type: 'string', enum: ['applied', 'refused', 'error'] }, edits: { type: 'array', items: { type: 'object', properties: { file: { type: 'string' }, exists: { type: 'boolean' }, occurrences: { type: 'integer', minimum: 0 }, already: { type: 'boolean' } }, required: ['file', 'exists', 'occurrences', 'already'] } }, refused: { type: 'array', items: { type: 'object', properties: { file: { type: 'string' }, reason: { type: 'string' } }, required: ['file', 'reason'] } }, detail: { type: 'string' } }, required: ['status', 'edits', 'refused'] }
 
 // ---------------- Setup ----------------
@@ -908,7 +908,7 @@ if (ANSWER_NEEDED) {
   if (stopped) return stopped
 }
 if (RESUME_KEPT && !RESUME_RULES) { plan = null; planFindingsKept = null }
-if (AMEND) {
+if (AMEND !== null) {
   if (!plan) return { stage: 'amend', error: 'this resume plans the kept plan again, which would overwrite the amendment; resume without amend, then amend the new plan after its stop', ...deadOf(), cont: CONT }
   // A plan not yet reviewed was renewed above; a reviewed plan's renew would ride in the first implementer call, which runs after this step.
   if (planReviewed) {
