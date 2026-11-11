@@ -1797,9 +1797,10 @@ class PlanTurnStructureTest(unittest.TestCase):
     WRITE_ONCE = ("write the code map, plan.md and every task file as parallel Write calls in one message",
                   "a second message only if the output limit forces it", "then run any checks in one message")
     REVISE = ("load plan.md, every task file and the code map with one command",
-              "fix the findings with Edit in place", "rewrite a whole file only when most of it changes")
+              "fix the findings with Edit in place", "rewrite a whole file only when most of it changes",
+              "leave each acceptance criterion's text unchanged unless a finding names it")
     SELF_CHECK = ("run every grep or deny gate a task prescribes against the text this plan requires and confirm it does not reject that text",
-                  "name for each test case the one code mutation that makes it fail",
+                  "for each invariant, threshold and decision a task states, name the test case that fails when that one rule is removed; one with no such case needs a test",
                   "list for each new test or doc the CI workflow test list, the generated index and the project gate that must also change")
 
     def calls(self):
@@ -4770,7 +4771,7 @@ class PlannerReadsTest(unittest.TestCase):
     HARD_RULES = "Hard rules for this step"
     BATCH = "put every open question's Bash or Read call in the same message as the others"
     PROCEDURE = (BATCH, "several tool calls per message, never one small lookup per turn",
-                 "at most 12 exploration rounds before you write",
+                 "send at least four lookups in each exploration message and start writing by your twelfth message",
                  "No subagent can be dispatched: the Agent tool does not exist in this step.")
 
     def test_no_prompt_grants_explore_and_every_ruled_prompt_keeps_the_rule(self):
@@ -4795,7 +4796,7 @@ class PlannerReadsTest(unittest.TestCase):
         for call in all_calls():
             text, label = call["prompt"], call["label"]
             if label not in self.PLANNERS:
-                self.assertNotIn("exploration rounds", text, label)
+                self.assertNotIn("exploration message", text, label)
                 self.assertNotIn(self.BATCH, text, label)
                 continue
             self.assertTrue(text.startswith("Procedure for this step."), label)
