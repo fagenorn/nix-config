@@ -1,0 +1,49 @@
+{"type":"launched"}
+{"type":"started","key":"k-b1","agentId":"b1","label":"setup","phase":"Setup"}
+{"type":"result","key":"k-b1","agentId":"b1","result":{"ok":true},"toolsUsed":["Bash"]}
+{"type":"started","key":"k-b2","agentId":"b2","label":"facts-856","phase":"Intake"}
+{"type":"started","key":"k-b3","agentId":"b3","label":"facts-857","phase":"Intake"}
+{"type":"started","key":"k-b4","agentId":"b4","label":"facts-860","phase":"Intake"}
+{"type":"result","key":"k-b2","agentId":"b2","result":{},"toolsUsed":["Bash"]}
+{"type":"result","key":"k-b3","agentId":"b3","result":{},"toolsUsed":["Bash"]}
+{"type":"result","key":"k-b4","agentId":"b4","result":{},"toolsUsed":["Bash"]}
+{"type":"started","key":"k-b5","agentId":"b5","label":"acquire-856","phase":"Deliver"}
+{"type":"result","key":"k-b5","agentId":"b5","result":{"verdict":"acquired"},"toolsUsed":["Bash"]}
+{"type":"started","key":"k-c1","agentId":"c1","label":"setup","phase":"▸ deliver-standard"}
+{"type":"started","key":"k-b6","agentId":"b6","label":"acquire-857","phase":"Deliver"}
+{"type":"result","key":"k-c1","agentId":"c1","result":{"ok":true,"branch":"issue-856-the-console-runs-as-a-user"},"toolsUsed":["Bash"]}
+{"type":"result","key":"k-b6","agentId":"b6","result":{"verdict":"acquired"},"toolsUsed":["Bash"]}
+{"type":"started","key":"k-c2","agentId":"c2","label":"setup","phase":"▸ deliver-standard #2"}
+{"type":"started","key":"k-c3","agentId":"c3","label":"plan","phase":"▸ deliver-standard"}
+{"type":"result","key":"k-c2","agentId":"c2","result":{"ok":true,"branch":"issue-857-live-sessions-appear-under-their-project"},"toolsUsed":["Bash"]}
+{"type":"result","key":"k-c3","agentId":"c3","result":{"status":"planned","plan_root":"/plans/856.md","acceptance":[{"id":"AC1"}],"tasks":[{"n":1},{"n":2},{"n":3},{"n":4},{"n":5}]},"toolsUsed":["Bash"]}
+{"type":"started","key":"k-c4","agentId":"c4","label":"plan","phase":"▸ deliver-standard #2"}
+{"type":"started","key":"k-c5","agentId":"c5","label":"plan-review","phase":"▸ deliver-standard"}
+{"type":"result","key":"k-c4","agentId":"c4","result":{"status":"planned","plan_root":"/plans/857.md","acceptance":[{"id":"AC1"}],"tasks":[{"n":1},{"n":2}]},"toolsUsed":["Bash"]}
+{"type":"result","key":"k-c5","agentId":"c5","result":{"verdict":"pass","findings":[]},"toolsUsed":["Bash"]}
+{"type":"started","key":"k-c6","agentId":"c6","label":"setup","phase":"▸ deliver-standard #3"}
+{"type":"result","key":"k-c6","agentId":"c6","result":{"ok":true,"branch":"issue-856-the-console-runs-as-a-user"},"toolsUsed":["Bash"]}
+{"type":"started","key":"k-c7","agentId":"c7","label":"impl-1","phase":"▸ deliver-standard #3"}
+{"type":"result","key":"k-c7","agentId":"c7","result":{},"toolsUsed":["Bash"]}
+{"type":"started","key":"k-c8","agentId":"c8","label":"review-1","phase":"▸ deliver-standard #3"}
+{"type":"started","key":"k-c9","agentId":"c9","label":"plan-codex","phase":"▸ deliver-standard #2"}
+{"type":"result","key":"k-c8","agentId":"c8","result":{"verdict":"pass","findings":[]},"toolsUsed":["Bash"]}
+{"type":"started","key":"k-c10","agentId":"c10","label":"impl-2","phase":"▸ deliver-standard #3"}
+{"type":"result","key":"k-c9","agentId":"c9","result":{},"toolsUsed":["Bash"]}
+{"type":"result","key":"k-c10","agentId":"c10","result":{},"toolsUsed":["Bash"]}
+{"type":"started","key":"k-c11","agentId":"c11","label":"final-1","phase":"▸ deliver-standard #3"}
+{"type":"result","key":"k-c11","agentId":"c11","result":{"verdict":"pass","findings":[]},"toolsUsed":["Bash"]}
+{"type":"started","key":"k-c12","agentId":"c12","label":"verify","phase":"▸ deliver-standard #3"}
+{"type":"result","key":"k-c12","agentId":"c12","result":{},"toolsUsed":["Bash"]}
+{"type":"started","key":"k-b7","agentId":"b7","label":"land-pr-856","phase":"Land"}
+{"type":"result","key":"k-b7","agentId":"b7","result":{},"toolsUsed":["Bash"]}
+{"type":"started","key":"k-b8","agentId":"b8","label":"land-merge-856","phase":"Land"}
+{"type":"result","key":"k-b8","agentId":"b8","result":{},"toolsUsed":["Bash"]}
+{"type":"started","key":"k-b9","agentId":"b9","label":"close-out-856","phase":"Land"}
+{"type":"result","key":"k-b9","agentId":"b9","result":{"issue_state":"CLOSED","branch_deleted":true,"released":true,"decision_ended":true,"notes":"ok"},"toolsUsed":["Bash"]}
+{"type":"started","key":"k-b10","agentId":"b10","label":"land-unlock-856","phase":"Land"}
+{"type":"result","key":"k-b10","agentId":"b10","result":{},"toolsUsed":["Bash"]}
+{"type":"started","key":"k-b11","agentId":"b11","label":"train-build-1","phase":"Land"}
+{"type":"result","key":"k-b11","agentId":"b11","result":{},"toolsUsed":["Bash"]}
+{"type":"started","key":"k-b12","agentId":"b12","label":"train-checks-1-2","phase":"Land"}
+{"type":"started","key":"k-b13","agentId":"b13","label":"train-sweep-1","phase":"Land"}
