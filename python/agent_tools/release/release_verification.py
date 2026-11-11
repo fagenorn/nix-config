@@ -39,7 +39,8 @@ It returns `{pr, base_tip}`. Every failed read is `verification_unavailable`, as
 
 A `release_pr_behind` refusal makes one more read, `repos/<repository>/pulls?state=open
 &base=<integration_branch>&per_page=100`, and names every open pull request whose head is a sync
-branch of this branch pair (`forge_adapter.SYNC_BRANCH`), so the refusal says what to merge
+branch of this branch pair (`forge_adapter.SYNC_BRANCH`) in this repository itself
+(`head.repo.full_name`), never a fork's branch of that name, so the refusal says what to merge
 (issue 845). With none, or when that read fails, it says to merge the default branch into the
 integration branch, as before.
 """
@@ -222,8 +223,10 @@ def _behind_repair(repository: str, integration_branch: str, default_branch: str
     for entry in payload if isinstance(payload, list) else []:
         head = entry.get("head") if isinstance(entry, dict) else None
         ref = head.get("ref") if isinstance(head, dict) else None
+        source = head.get("repo") if isinstance(head, dict) else None
+        own = isinstance(source, dict) and source.get("full_name") == repository
         number = entry.get("number") if isinstance(entry, dict) else None
-        if (isinstance(ref, str) and ref.startswith(prefix)
+        if (own and isinstance(ref, str) and ref.startswith(prefix)
                 and forge_adapter.BRANCH.fullmatch(ref) is not None
                 and isinstance(number, int) and not isinstance(number, bool)):
             found.append(f"{number} ({ref})")

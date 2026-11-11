@@ -166,10 +166,16 @@ class MergeObservationTest(unittest.TestCase):
         """Issue 845: the refusal says which pull request to merge when a sync is open."""
         head = "sync-main-into-dev-after-v1.2.2"
         listing = ["api", f"repos/{CANONICAL['slug']}/pulls?state=open&base=dev&per_page=100"]
-        other = {"number": 12, "head": {"ref": "issue-12-topic"}}
-        cases = (([other, {"number": 337, "head": {"ref": head}}],
+        own = {"full_name": CANONICAL["slug"]}
+        other = {"number": 12, "head": {"ref": "issue-12-topic", "repo": own}}
+        manual = "merge main into dev, push, wait for CI and preview again"
+        cases = (([other, {"number": 337, "head": {"ref": head, "repo": own}}],
                   f"merge the open sync pull request 337 ({head}) into dev, wait for CI and preview again"),
-                 ([other], "merge main into dev, push, wait for CI and preview again"),
+                 ([other], manual),
+                 # a fork's branch of the same name is not the release's sync
+                 ([{"number": 340, "head": {"ref": head, "repo": {"full_name": "stranger/nix-config"}}}], manual),
+                 ([{"number": 341, "head": {"ref": head, "repo": None}}], manual),
+                 ([{"number": 342, "head": {"ref": head}}], manual),
                  ({"message": "not a list"}, "merge main into dev, push, wait for CI and preview again"))
         for payload, repair in cases:
             with self.subTest(payload=payload):
