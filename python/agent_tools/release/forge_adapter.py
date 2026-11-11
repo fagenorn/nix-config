@@ -92,10 +92,40 @@ merge commit, whose parents must be exactly `[base_tip, commit]`, else `tag_targ
 `tag` invoke refuses `release PR not merged as bound`, then checks that merge commit's
 containment, fetches `refs/heads/<branch>` and tags it (issue 554 D8, D17).
 
+Post-release sync (issue 845, ADR-release-010). `sync_branch` and `sync_pr` bring the release
+merge commit back to the integration branch of a two-branch release. They are requests of
+`inspect` and `invoke` that no profile node can bind: `describe()` does not list them, so its
+digest, which pins every profile, is what it was, and `release_sync` is their one caller. Both
+take `{target, candidate, integration}`, `candidate` carrying `merge` and `integration` a
+branch other than `target.branch`. The sync branch is `SYNC_BRANCH`,
+`sync-<default>-into-<integration>-after-<version>`.
+
+Both inspections first resolve the released commit as `tag` does (`release_not_merged`,
+`diverged`, when the release PR has not merged as bound) and read `repos/<slug>/compare/<merge
+commit>...<integration>`: `identical` or `ahead` is `satisfied` with `already_contained`, the
+no-op, and nothing else is read. Otherwise `sync_branch` reads the sync branch's ref: 404 is
+`absent` (`branch_absent`), a tip at the merge commit or one whose compare against it is
+`identical` or `ahead` is `satisfied`, any other is `diverged` (`branch_elsewhere`). `sync_pr`
+reads `repos/<slug>/pulls?state=all&base=<integration>&head=<owner>:<branch>&per_page=100`:
+exactly one pull request that is open or merged is `satisfied`, with its number as
+`observed_subject.pr` and its URL as the first reference; none is `absent` (`pr_absent`) and more
+than one `diverged` (`pr_ambiguous`). Every sync observation carries `facts.commands`, the
+commands that would finish the sync from that operation on, as plain text for a report.
+
+`sync_branch` invoke resolves the released commit, fetches `refs/heads/<default>`, reuses a local
+sync branch at that commit, creates it with `git branch --no-track` when absent and refuses any
+other, then pushes it with `git push origin <sync branch>`. `sync_pr` invoke refuses
+`sync_branch_absent` unless the remote sync branch exists, then runs `gh pr create --repo <slug>
+--base <integration> --head <sync branch> --title "chore: merge <default> into <integration>
+after <version>" --body "<version>"`; its accepted reference is the URL `gh` printed. Both
+mutations pass the guard like every other, a failed one is `unknown`, and nothing here merges
+the pull request.
+
 `tests/fixtures/forge-adapter-spellings.json` is the one list of provider spellings:
 `tests/forge_world.py` builds its fake `gh`, `git` and `claude-bash-lifecycle-guard` from it,
 and `tests/test_forge_adapter.py` pins the adapter to it, so the world and the adapter cannot
-disagree about a spelling (D12, D22).
+disagree about a spelling (D12, D22). Its `sync` member holds the sync rows, which the guard
+suite's table does not read.
 """
 
 import json
@@ -121,9 +151,14 @@ SHA = re.compile(r"[0-9a-f]{40}")
 TAG_CHAIN_LIMIT = 8
 TARGET_MEMBERS = frozenset(("kind", "repository", "branch", "handle"))
 TOLERATED = frozenset(("action", "operation", "config"))
+SYNC_OPERATIONS = ("sync_branch", "sync_pr")
+SYNC_BRANCH = "sync-{default}-into-{integration}-after-{version}"
+SYNC_TITLE = "chore: merge {default} into {integration} after {version}"
 REQUIRED = {"tag": ("target", "candidate"),
             "release": ("target", "candidate", "title", "notes"),
-            "pr_merge": ("target", "candidate")}
+            "pr_merge": ("target", "candidate"),
+            "sync_branch": ("target", "candidate", "integration"),
+            "sync_pr": ("target", "candidate", "integration")}
 IDENTITY_MEMBERS = frozenset(("version", "commit"))
 MERGE_MEMBERS = frozenset(("pr", "base_tip"))
 PR_FIELDS = "state,baseRefName,headRefName,headRefOid,mergeCommit,url,statusCheckRollup"
@@ -447,6 +482,98 @@ def _inspect_pr_merge(parameters: dict[str, Any], deadline: float) -> dict[str, 
     return _observation(outcome, reason, subject, references, facts)
 
 
+def _sync_names(parameters: dict[str, Any]) -> dict[str, str]:
+    """The names one sync works with: the slug, both branches, the version and the sync branch."""
+    names = {"slug": parameters["target"]["repository"], "default": parameters["target"]["branch"],
+             "integration": parameters["integration"], "version": parameters["candidate"]["version"]}
+    return {**names, "branch": SYNC_BRANCH.format(**names), "title": SYNC_TITLE.format(**names)}
+
+
+def _sync_create(names: dict[str, str]) -> tuple[list[str], str]:
+    """The argv and the raw text of the one `gh pr create` that opens the sync pull request."""
+    argv = ["gh", "pr", "create", "--repo", names["slug"], "--base", names["integration"],
+            "--head", names["branch"], "--title", names["title"], "--body", names["version"]]
+    raw = (f'gh pr create --repo {names["slug"]} --base {names["integration"]} '
+           f'--head {names["branch"]} --title "{names["title"]}" --body "{names["version"]}"')
+    return argv, raw
+
+
+def _sync_commands(operation: str, names: dict[str, str], released: str | None) -> list[str]:
+    """The commands that finish the sync from `operation` on, as text for a report."""
+    branch = names["branch"]
+    commands = [f"git branch --no-track {branch} {released or '<release merge commit>'}",
+                f"git push origin {branch}", _sync_create(names)[1]]
+    return commands if operation == "sync_branch" else commands[2:]
+
+
+def _contains(slug: str, commit: str, branch: str, deadline: float) -> tuple[bool, str]:
+    """Whether `branch` holds `commit`, and the compare path that says so."""
+    path = f"repos/{slug}/compare/{commit}...{branch}"
+    _, compare = _read(["api", path], deadline)
+    return _field(compare, "status") in ("identical", "ahead"), path
+
+
+def _sync_branch_state(names: dict[str, str], released: str, deadline: float
+                       ) -> tuple[str, str, list[str]]:
+    path = f"repos/{names['slug']}/git/ref/heads/{names['branch']}"
+    status, ref = _read(["api", path], deadline, allow=(404,))
+    if status == 404:
+        return "absent", "branch_absent", [path]
+    if _sha(_field(ref, "object", "sha"), "sync branch ref") == released:
+        return "satisfied", "observed", [path]
+    held, compare_path = _contains(names["slug"], released, names["branch"], deadline)
+    return ("satisfied", "observed", [path, compare_path]) if held else (
+        "diverged", "branch_elsewhere", [path, compare_path])
+
+
+def _sync_pr_state(names: dict[str, str], deadline: float
+                   ) -> tuple[str, str, list[str], int | None]:
+    owner = names["slug"].split("/")[0]
+    path = (f"repos/{names['slug']}/pulls?state=all&base={names['integration']}"
+            f"&head={owner}:{names['branch']}&per_page=100")
+    _, listed = _read(["api", path], deadline)
+    if not isinstance(listed, list):
+        raise _Unknown("payload_invalid", "the pull request listing is not a list")
+    live = [entry for entry in listed if isinstance(entry, dict)
+            and (entry.get("state") == "open" or entry.get("merged_at"))]
+    if not live:
+        return "absent", "pr_absent", [path], None
+    if len(live) > 1:
+        return "diverged", "pr_ambiguous", [path], None
+    number = _field(live[0], "number", kind=int)
+    url = live[0].get("html_url")
+    return "satisfied", "observed", ([url, path] if isinstance(url, str) else [path]), number
+
+
+def _inspect_sync(operation: str, parameters: dict[str, Any], deadline: float) -> dict[str, Any]:
+    """The observation of `sync_branch` or `sync_pr` (issue 845)."""
+    names = _sync_names(parameters)
+    subject: dict[str, Any] = ({"branch": names["branch"], "commit": None}
+                               if operation == "sync_branch" else {"pr": None})
+    released = None
+
+    def facts() -> dict[str, Any]:
+        return {"commands": _sync_commands(operation, names, released)}
+
+    try:
+        released = _inspect_released(parameters, deadline)()
+        if released is None:
+            return _observation("diverged", "release_not_merged", subject, [], facts())
+        if "commit" in subject:
+            subject["commit"] = released
+        held, path = _contains(names["slug"], released, names["integration"], deadline)
+        if held:
+            return _observation("satisfied", "already_contained", subject, [path], facts())
+        if operation == "sync_branch":
+            outcome, reason, references = _sync_branch_state(names, released, deadline)
+        else:
+            outcome, reason, references, subject["pr"] = _sync_pr_state(names, deadline)
+    except _Unknown as error:
+        return _observation("unknown", error.reason, subject, [],
+                            {**facts(), **({"detail": error.detail} if error.detail else {})})
+    return _observation(outcome, reason, subject, references, facts())
+
+
 def _target_problem(target: Any) -> str | None:
     if not isinstance(target, dict) or not set(target) <= TARGET_MEMBERS:
         return "target is not a github_repository object"
@@ -473,16 +600,17 @@ def _merge_problem(merge: Any) -> str | None:
 def _candidate_problem(operation: str, candidate: Any) -> str | None:
     """Why `candidate` is not the shape `operation` takes (issue 554 D2, D4), or None.
 
-    `pr_merge` takes `{version, commit, merge}`; `tag` and `release` take `{version, commit}`,
-    or the same with `merge` when their profile binds it.
+    `pr_merge` and the sync operations take `{version, commit, merge}`; `tag` and `release`
+    take `{version, commit}`, or the same with `merge` when their profile binds it.
     """
     with_merge = IDENTITY_MEMBERS | {"merge"}
-    shapes = (with_merge,) if operation == "pr_merge" else (IDENTITY_MEMBERS, with_merge)
+    needs_merge = operation == "pr_merge" or operation in SYNC_OPERATIONS
+    shapes = (with_merge,) if needs_merge else (IDENTITY_MEMBERS, with_merge)
     if not (isinstance(candidate, dict) and set(candidate) in shapes
             and isinstance(candidate["version"], str) and VERSION.fullmatch(candidate["version"])
             and isinstance(candidate["commit"], str) and SHA.fullmatch(candidate["commit"])):
         return ("candidate is not {version vMAJOR.MINOR.PATCH, commit 40-hex, merge}"
-                if operation == "pr_merge"
+                if needs_merge
                 else "candidate is not {version vMAJOR.MINOR.PATCH, commit 40-hex[, merge]}")
     return _merge_problem(candidate["merge"]) if "merge" in candidate else None
 
@@ -507,6 +635,11 @@ def _parameters_problem(operation: str, parameters: Any) -> str | None:
     if operation == "release" and not (isinstance(parameters["title"], str)
                                        and isinstance(parameters["notes"], str)):
         return "title and notes are not strings"
+    if operation in SYNC_OPERATIONS:
+        integration = parameters["integration"]
+        if (not isinstance(integration, str) or BRANCH.fullmatch(integration) is None
+                or ".." in integration or integration == parameters["target"]["branch"]):
+            return "integration is not a branch name other than the target branch"
     return None
 
 
@@ -516,6 +649,8 @@ def _effect(operation: str, parameters: Any, deadline: float) -> dict[str, Any]:
     problem = _parameters_problem(operation, parameters)
     if problem is not None:
         return _unknown("parameters_invalid", problem)
+    if operation in SYNC_OPERATIONS:
+        return _inspect_sync(operation, parameters, deadline)
     reader = {"tag": _inspect_tag, "release": _inspect_release, "pr_merge": _inspect_pr_merge}
     return reader[operation](parameters, deadline)
 
@@ -609,6 +744,8 @@ def _invoke_shape(request: Any) -> tuple[str, dict[str, Any]]:
         raise _Refusal("rejected", "invalid_input", "request is not a closed effect request")
     operation, parameters = request["operation"], request["parameters"]
     entry = describe()["operations"].get(operation)
+    if operation in SYNC_OPERATIONS:
+        entry = {"support": "supported"}
     if entry is None or entry["support"] != "supported":
         reason = "unknown_operation" if entry is None else entry["reason"]
         raise _Refusal("rejected", "unsupported_operation", f"{operation}: {reason}")
@@ -687,7 +824,7 @@ def _mutate(argv: list[str], raw: str, checkout: str, operation: str, reference:
             ) -> dict[str, Any]:
     """The guarded one mutation: `reference` names what an accepted call made.
 
-    A `release` prefers the URL its `gh` printed. Only `tag` and `release` read their refusal
+    A `release` or `sync_pr` prefers the URL its `gh` printed. Only `tag` and `release` read their refusal
     text (`already exists`, `HTTP 422`): a failed `pr_merge` is `unknown` whatever it says,
     and the core inspects the pull request (issue 554 D6).
     """
@@ -703,7 +840,7 @@ def _mutate(argv: list[str], raw: str, checkout: str, operation: str, reference:
                 "reference": f"{name}: {detail}"[:DETAIL_LIMIT]}
     if done.returncode == 0:
         url = done.stdout.strip().splitlines()[:1]
-        if operation == "release" and url and url[0].startswith("http"):
+        if operation in ("release", "sync_pr") and url and url[0].startswith("http"):
             reference = url[0].strip()
         return {"result": "accepted", "error_class": None, "reference": reference}
     marker = {"tag": "already exists", "release": "HTTP 422"}.get(operation)
@@ -812,6 +949,44 @@ def _invoke_tag(parameters: dict[str, Any], checkout: str) -> dict[str, Any]:
     return _mutate(argv, raw, checkout, "tag", f"refs/tags/{tag}")
 
 
+def _local_branch(branch: str, commit: str, checkout: str) -> None:
+    """Reuse a local `branch` at `commit`, create it when absent, else refuse (issue 845)."""
+    found = _precondition_read(
+        ["git", "for-each-ref", "--format=%(objectname)", f"refs/heads/{branch}"], checkout).strip()
+    if not found:
+        _precondition_read(["git", "branch", "--no-track", branch, commit], checkout)
+    elif found != commit:
+        raise _Refusal("rejected", "precondition_failed",
+                       f"local branch {branch} is not at {commit}")
+
+
+def _invoke_sync_branch(parameters: dict[str, Any], checkout: str) -> dict[str, Any]:
+    """Push the sync branch at the release merge commit (issue 845)."""
+    names = _sync_names(parameters)
+    released = _released_for_invoke(parameters, checkout)
+    _precondition_read(["git", "fetch", "--no-tags", "origin", f"refs/heads/{names['default']}"],
+                       checkout)
+    _local_branch(names["branch"], released, checkout)
+    argv = ["git", "push", "origin", names["branch"]]
+    return _mutate(argv, " ".join(argv), checkout, "sync_branch", f"refs/heads/{names['branch']}")
+
+
+def _invoke_sync_pr(parameters: dict[str, Any], checkout: str) -> dict[str, Any]:
+    """Open the sync pull request from the pushed sync branch (issue 845)."""
+    names = _sync_names(parameters)
+    status, _, detail = _gh(["api", f"repos/{names['slug']}/git/ref/heads/{names['branch']}"],
+                            time.monotonic() + CHILD_TIMEOUT_SECONDS)
+    if status == 404:
+        raise _Refusal("rejected", "precondition_failed", "sync_branch_absent")
+    if status != "ok":
+        raise _Refusal("rejected", "transient_transport" if status == "lookup_timeout"
+                       else "provider_unavailable", f"sync branch read: {status}: {detail}")
+    argv, raw = _sync_create(names)
+    if shlex.split(raw) != argv:
+        raise _Refusal("rejected", "invalid_input", "rendered command does not match its argv")
+    return _mutate(argv, raw, checkout, "sync_pr", f"pr:{names['branch']}")
+
+
 def _invoke(operation: str, parameters: dict[str, Any]) -> dict[str, Any]:
     slug, tag = parameters["target"]["repository"], parameters["candidate"]["version"]
     toplevel = _precondition_read(["git", "rev-parse", "--show-toplevel"], None).strip()
@@ -822,6 +997,9 @@ def _invoke(operation: str, parameters: dict[str, Any]) -> dict[str, Any]:
         return _invoke_pr_merge(parameters, toplevel)
     if operation == "tag":
         return _invoke_tag(parameters, toplevel)
+    if operation in SYNC_OPERATIONS:
+        sync = _invoke_sync_branch if operation == "sync_branch" else _invoke_sync_pr
+        return sync(parameters, toplevel)
     descriptor, path = tempfile.mkstemp(prefix="forge-release-notes-", suffix=".md")
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:

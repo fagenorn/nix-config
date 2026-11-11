@@ -28,6 +28,12 @@ reads are read-only paths the guard never adjudicates.
 tip against the candidate. The tip read spells the fixture's `pr_merge.base_ref` row, so it
 agrees with `merge_ready` on the same `base_tip`.
 
+`sync_ready(...)` registers the post-release sync path (issue 845) on the fixture's `sync` rows:
+the containment compare of the merge commit against the integration branch, the sync branch's
+ref and compare, the sync pull request listing, the local branch lookup and creation, the
+branch push and the `gh pr create`. It needs `invoke_ready()` for the shared invoke steps and a
+merged release pull request. `sync_pull(**overrides)` is one entry of that listing.
+
 `comment_store(slug, issue, comments, ...)` makes the fake `gh` serve one issue's comments from
 shared state (issue 623): list, POST, PATCH and DELETE of that issue's comments act on one
 `store.json` under an exclusive `flock`, and every other argv falls through to the registered
@@ -76,6 +82,9 @@ FIXTURE = json.loads(
     (Path(__file__).parent / "fixtures/forge-adapter-spellings.json").read_text("utf-8"))
 CANONICAL = FIXTURE["canonical"]
 ROWS = {row["id"]: row for row in FIXTURE["rows"]}
+SYNC = FIXTURE["sync"]["canonical"]
+SYNC_ROWS = {row["id"]: row for row in FIXTURE["sync"]["rows"]}
+SYNC_URL = f"https://github.com/{CANONICAL['slug']}/pull/{SYNC['pr']}"
 TOOLS = ("gh", "git", "claude-bash-lifecycle-guard")
 CLASS_BRANCHES = {"elevenyellow/nodocom": "dev"}
 FLOOR_PROTECTION = {
@@ -686,6 +695,38 @@ class ForgeWorld:
                   for part in ROWS["release.create"]["argv"][1:]]
         self.respond("gh", create, exit=create_exit, stdout=create_stdout, stderr=create_stderr)
 
+    def sync_ready(self, *, contained="behind", branch_tip=None, branch_compare="ahead", prs=(),
+                   local_branch=None, branch_exit=0, push_exit=0, push_stderr="",
+                   create_exit=0, create_stdout=SYNC_URL + "\n", create_stderr="") -> None:
+        """Register the post-release sync path on the fixture's `sync` rows (issue 845).
+
+        `contained` answers the compare of the merge commit against the integration branch
+        (`identical` or `ahead` is the no-op). `branch_tip` is the remote sync branch's tip, None
+        for no such branch, and `branch_compare` the compare of the merge commit against it.
+        `prs` is the sync pull request listing and `local_branch` the commit of an existing local
+        sync branch. The push, the local branch creation and the `gh pr create` answer with their
+        own keywords.
+        """
+        def row(row_id: str) -> list[str]:
+            return SYNC_ROWS[row_id]["argv"][1:]
+
+        branch = SYNC["branch"]
+        self.respond_json("gh", row("sync.contained"), {"status": contained})
+        if branch_tip is None:
+            self.not_found("gh", row("sync_branch.ref"))
+        else:
+            self.respond_json("gh", row("sync_branch.ref"),
+                              {"object": {"sha": branch_tip, "type": "commit"}})
+        self.respond_json("gh", row("sync_branch.compare"), {"status": branch_compare})
+        self.respond_json("gh", row("sync_pr.list"), list(prs))
+        self.respond("git", ["for-each-ref", "--format=%(objectname)", f"refs/heads/{branch}"],
+                     stdout=f"{local_branch}\n" if local_branch else "")
+        self.respond("git", ["branch", "--no-track", branch, CANONICAL["merge_commit"]],
+                     exit=branch_exit)
+        self.respond("git", row("sync_branch.push"), exit=push_exit, stderr=push_stderr)
+        self.respond("gh", row("sync_pr.create"), exit=create_exit, stdout=create_stdout,
+                     stderr=create_stderr)
+
     def verification_ready(self, *, tip=CANONICAL["commit"], commit=CANONICAL["commit"],
                            checks=None, runs=None, total_count=None, protection_exit=0,
                            slug=CANONICAL["slug"], integration=CANONICAL["branch"],
@@ -726,6 +767,12 @@ class ForgeWorld:
                           {"object": {"sha": base_tip, "type": "commit"}})
         self.respond_json("gh", ["api", f"repos/{slug}/compare/{base_tip}...{commit}"],
                           {"status": compare})
+
+
+def sync_pull(**overrides) -> dict:
+    """One entry of the sync pull request listing: open, from the sync branch at the merge commit."""
+    return {"number": SYNC["pr"], "state": "open", "merged_at": None, "html_url": SYNC_URL,
+            "head": {"ref": SYNC["branch"], "sha": CANONICAL["merge_commit"]}, **overrides}
 
 
 @contextlib.contextmanager

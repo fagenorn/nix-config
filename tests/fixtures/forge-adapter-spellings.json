@@ -194,5 +194,92 @@
         "1111111111111111111111111111111111111111"
       ]
     }
-  ]
+  ],
+  "sync": {
+    "canonical": {
+      "integration": "dev",
+      "branch": "sync-main-into-dev-after-v1.2.3",
+      "pr": 337,
+      "title": "chore: merge main into dev after v1.2.3"
+    },
+    "rows": [
+      {
+        "id": "sync.contained",
+        "operation": "shared",
+        "kind": "read",
+        "raw": "gh api repos/fagenorn/nix-config/compare/3333333333333333333333333333333333333333...dev",
+        "argv": [
+          "gh",
+          "api",
+          "repos/fagenorn/nix-config/compare/3333333333333333333333333333333333333333...dev"
+        ]
+      },
+      {
+        "id": "sync_branch.ref",
+        "operation": "sync_branch",
+        "kind": "read",
+        "raw": "gh api repos/fagenorn/nix-config/git/ref/heads/sync-main-into-dev-after-v1.2.3",
+        "argv": [
+          "gh",
+          "api",
+          "repos/fagenorn/nix-config/git/ref/heads/sync-main-into-dev-after-v1.2.3"
+        ]
+      },
+      {
+        "id": "sync_branch.compare",
+        "operation": "sync_branch",
+        "kind": "read",
+        "raw": "gh api repos/fagenorn/nix-config/compare/3333333333333333333333333333333333333333...sync-main-into-dev-after-v1.2.3",
+        "argv": [
+          "gh",
+          "api",
+          "repos/fagenorn/nix-config/compare/3333333333333333333333333333333333333333...sync-main-into-dev-after-v1.2.3"
+        ]
+      },
+      {
+        "id": "sync_pr.list",
+        "operation": "sync_pr",
+        "kind": "read",
+        "raw": "gh api 'repos/fagenorn/nix-config/pulls?state=all&base=dev&head=fagenorn:sync-main-into-dev-after-v1.2.3&per_page=100'",
+        "argv": [
+          "gh",
+          "api",
+          "repos/fagenorn/nix-config/pulls?state=all&base=dev&head=fagenorn:sync-main-into-dev-after-v1.2.3&per_page=100"
+        ]
+      },
+      {
+        "id": "sync_branch.push",
+        "operation": "sync_branch",
+        "kind": "mutation",
+        "raw": "git push origin sync-main-into-dev-after-v1.2.3",
+        "argv": [
+          "git",
+          "push",
+          "origin",
+          "sync-main-into-dev-after-v1.2.3"
+        ]
+      },
+      {
+        "id": "sync_pr.create",
+        "operation": "sync_pr",
+        "kind": "mutation",
+        "raw": "gh pr create --repo fagenorn/nix-config --base dev --head sync-main-into-dev-after-v1.2.3 --title \"chore: merge main into dev after v1.2.3\" --body \"v1.2.3\"",
+        "argv": [
+          "gh",
+          "pr",
+          "create",
+          "--repo",
+          "fagenorn/nix-config",
+          "--base",
+          "dev",
+          "--head",
+          "sync-main-into-dev-after-v1.2.3",
+          "--title",
+          "chore: merge main into dev after v1.2.3",
+          "--body",
+          "v1.2.3"
+        ]
+      }
+    ]
+  }
 }
