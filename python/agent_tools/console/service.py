@@ -129,6 +129,22 @@ nothing. An exception escaping a poll is one stderr line
 `console: tracker_poll_failed <Type>: <message>` and the loop goes on. Without a tracker no
 thread starts and nothing is read.
 
+Answers (#862, ADR-console-010): `answer(project_id, key, choices)` ticks one option under each
+question of a decision item on the tracker, through `tick` (default `answer.tick_on_tracker`;
+`tick(slug, issue, comment_id, questions, choices)`), and marks the item answered at once. It
+raises `answer.Refused` with `NOT_OPEN` when the project is not registered, no record
+`(project_id, key)` exists, or the item is answered, is not a decision, or has no questions; with
+`CHOOSE` unless `choices` is a list of one `int` (not `bool`) per question within its options; with
+`SENDING` while another answer to the same item runs. A `ForgeError` of the tick propagates. The
+tick runs outside the ingest lock, so a hook or a poll never waits for `gh`. On success, under the
+lock, when the record still exists, is unanswered and holds the same `(question, options)`, one
+`inbox.changed` event with the item answered (its `chosen` set) is appended and published, so the
+count leaves the headline at once; otherwise, and once the service is stopping, nothing is appended.
+On failure nothing is appended. The appended item is what the reader makes of the ticked comment, so
+the next read appends nothing. A tracker read that began before an answer finished never turns that
+item back to unanswered (each answer takes a generation; a read keeps the answered item when its
+own generation is older), and a read that began after it is authoritative.
+
 Retention (ADR-console-009): construction runs one retention pass (`EventLog.retain`) after
 opening the log and before reading its events, and `RETENTION_THREAD`, started by `start()`, calls
 `retain()` every `retention_seconds` (`RETENTION_SECONDS`, one day). A pass that removed rows
@@ -188,13 +204,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from agent_tools.claims import owner_actions
-from agent_tools.console import capacity, deliveries, digest, inbox, sessions, write_guard
+from agent_tools.console import answer, capacity, deliveries, digest, inbox, sessions, write_guard
 from agent_tools.console.event_log import Event, EventLog, utc_now
 from agent_tools.console.view import (
-    ReadState, derive_view, encode_view, health_change, inbox_changes, inbox_records, project_for,
-    project_states, read_states, registry_changes)
+    INBOX_CHANGED, ReadState, derive_view, encode_view, health_change, inbox_changes, inbox_records,
+    project_for, project_states, read_states, registry_changes)
 from agent_tools.project_contract import agent_platform
 from agent_tools.system.forge_api import ForgeError
+
+def _reduced(questions: list[dict]) -> list[tuple[str, list[str]]]:
+    return [(q["question"], list(q["options"])) for q in questions]
+
 
 HOST = "127.0.0.1"
 DEFAULT_PORT = 27184
@@ -462,8 +482,13 @@ class ConsoleService:
                  retention_seconds: float = RETENTION_SECONDS,
                  digest_seconds: float = DIGEST_SECONDS,
                  log_clock: Callable[[], str] = utc_now,
-                 token_path: Path | None = None):
+                 token_path: Path | None = None,
+                 tick: Callable[[str, int, int, list[dict], list[int]], None] = answer.tick_on_tracker):
         self.registry = Path(registry)
+        self._tick = tick
+        self._sending: set[tuple[str, str]] = set()
+        self._answered: dict[tuple[str, str], int] = {}
+        self._answer_generation = 0
         self._poll_seconds = poll_seconds
         self._session_dirs = session_dirs
         self._profile_dirs = profile_dirs
@@ -648,6 +673,45 @@ class ConsoleService:
             self._apply(appended)
             return appended
 
+    def answer(self, project_id: str, key: str, choices: list[int]) -> None:
+        """Tick `choices` on the tracker and mark the item answered; see the module docstring."""
+        slot = (project_id, key)
+        with self._ingest:
+            record = self._inbox.get(slot) if project_id in self._states else None
+            item = record.item if record is not None else None
+            if (item is None or item["answered"] or item["reason"] != "decision"
+                    or not item["questions"]):
+                raise answer.Refused(answer.NOT_OPEN)
+            questions = item["questions"]
+            if (not isinstance(choices, list) or len(choices) != len(questions)
+                    or any(isinstance(c, bool) or not isinstance(c, int) or not 0 <= c < len(q["options"])
+                           for c, q in zip(choices, questions))):
+                raise answer.Refused(answer.CHOOSE)
+            if slot in self._sending:
+                raise answer.Refused(answer.SENDING)
+            self._sending.add(slot)
+        sent = False
+        try:
+            self._tick(item["repo"], item["issue"], item["comment_id"], questions, choices)
+            sent = True
+        finally:
+            with self._ingest:
+                self._sending.discard(slot)
+                if sent and not self._stop.is_set():
+                    self._answer_generation += 1
+                    self._mark_answered(slot, questions, choices)
+
+    def _mark_answered(self, slot: tuple[str, str], questions: list[dict], choices: list[int]) -> None:
+        record = self._inbox.get(slot)
+        if record is None or record.item["answered"] or _reduced(record.item["questions"]) != _reduced(questions):
+            return
+        item = {**record.item, "answered": True,
+                "questions": [{**q, "chosen": q["options"][c]} for q, c in zip(record.item["questions"], choices)]}
+        appended = self.log.append([(INBOX_CHANGED, slot[0], item)])
+        self._fold(appended)
+        self._answered[slot] = self._answer_generation
+        self._publish()
+
     def poll_sessions(self) -> list[Event]:
         """Append what the session registry shows that the folded sessions do not, and publish."""
         with self._ingest:
@@ -830,6 +894,7 @@ class ConsoleService:
             slug = self._slug_of(state.root)
             if slug is None:
                 continue
+            generation = self._answer_generation
             try:
                 items = self._tracker(project_id, slug, cancelled=self._stop.is_set)
             except ForgeError as error:
@@ -843,7 +908,7 @@ class ConsoleService:
             else:
                 if self._stop.is_set():
                     return
-                self._read_succeeded(project_id, items)
+                self._read_succeeded(project_id, items, generation)
 
     def _read_failed(self, project_id: str, error: Exception) -> None:
         print(f"console: tracker_failed {project_id} {type(error).__name__}: {error}", file=sys.stderr)
@@ -856,15 +921,25 @@ class ConsoleService:
             self._fold(appended)
             self._publish()
 
-    def _read_succeeded(self, project_id: str, items: list[dict]) -> None:
+    def _read_succeeded(self, project_id: str, items: list[dict], generation: int) -> None:
         with self._ingest:
             if project_id not in self._states:
                 return
+            items = [self._kept_answered(project_id, i, generation) for i in items]
+            self._answered = {k: g for k, g in self._answered.items()
+                              if k[0] != project_id or g > generation}
             appended = self.log.append([*inbox_changes(self._inbox, project_id, items),
                                         *health_change(self._health, project_id, True)])
             self._fold(appended)
             self._health[project_id] = ReadState(True, utc_now())
             self._publish()
+
+    def _kept_answered(self, project_id: str, item: dict, generation: int) -> dict:
+        """A read that began before the item's answer finished does not undo the answer."""
+        if item["answered"] or self._answered.get((project_id, item["key"]), 0) <= generation:
+            return item
+        record = self._inbox.get((project_id, item["key"]))
+        return record.item if record is not None and record.item["answered"] else item
 
     def _track(self) -> None:
         while True:

@@ -23,8 +23,8 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
     "console": frozenset({
         "agent_tools.project_contract.agent_platform",  # service
         "agent_tools.project_contract.resolve_project",  # deliveries
-        "agent_tools.claims.forge_markers",  # inbox
-        "agent_tools.claims.forge_owner_action",  # inbox
+        "agent_tools.claims.forge_markers",  # answer, inbox
+        "agent_tools.claims.forge_owner_action",  # answer, inbox
         "agent_tools.claims.owner_actions",  # inbox, service
     }),
     "delivery": frozenset({
