@@ -63,6 +63,9 @@ class Case(unittest.TestCase):
         support.write_registry(self.registry, support.entries(n))
         kwargs.setdefault("activity", lambda root: time.time())
         kwargs.setdefault("slug_of", SLUGS.get)
+        # No session poll of the host: these tests assert on the log's rows, and a live session would add some.
+        kwargs.setdefault("session_dirs", lambda: [])
+        kwargs.setdefault("repo_of", lambda cwd: cwd)
         svc = service.ConsoleService(self.store, self.registry, port=0, tracker=tracker, **kwargs)
         self.addCleanup(svc.close)
         return svc
