@@ -737,6 +737,8 @@ const PLAN_SCHEMA = {
     plan_root: { type: 'string' },
     acceptance: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, text: { type: 'string' }, kind: { type: 'string', enum: ['code', 'evidence', 'human', 'note'] }, verify: { type: 'object' }, lint: { type: 'object', properties: { ok: { type: 'boolean' }, errors: { type: 'array', items: { type: 'object', properties: { field: { type: 'string' }, code: { type: 'string' }, message: { type: 'string' } } } } } }, metric: { type: 'boolean' } }, required: ['id', 'text', 'kind'] } },
     scripts: STRS,
+    // #819: on a revise, the ids of the criteria whose text the planner changed in the plan file.
+    criteria_edited: STRS,
     tasks: { type: 'array', items: { type: 'object', properties: { n: { type: 'integer' }, title: { type: 'string' }, file: { type: 'string' }, risk: { type: 'string', enum: ['mechanical', 'low', 'standard', 'security'] }, branch: { type: 'string' } }, required: ['n', 'title', 'file', 'risk'] } },
     branches: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, worktree: { type: 'string' }, base: { type: 'string' }, head: FULL_SHA, current: { type: 'string' }, toplevel: { type: 'string' }, common_dir: { type: 'string' }, clean: { type: 'boolean' } }, required: ['name', 'worktree', 'base', 'head', 'current', 'toplevel', 'common_dir', 'clean'] } },
   },
@@ -1024,11 +1026,12 @@ const ruleFacts = p => canon(p.acceptance.map(a => [a.id, a.text === undefined ?
 // #819: a finding names a criterion by its ac member, or by the id standing as a whole word (AC1 is not in AC10) in its summary, failing_input or file.
 const wholeWord = id => new RegExp('(^|[^A-Za-z0-9_])' + id.replace(/[^A-Za-z0-9_]/g, c => '\\' + c) + '($|[^A-Za-z0-9_])', 'i')
 const namesCriterion = (f, id) => !!f && (f.ac === id || [f.summary, f.failing_input, f.file].some(t => typeof t === 'string' && wholeWord(id).test(t)))
-// #819: a planner retypes every criterion in its reply though the plan file is unedited, so a criterion that existed before and that no
-// finding names keeps its earlier text; a named, new or removed one, and every other member, stays as the reply gave it.
-const keepUnnamedText = (before, after, findings) => after.map(a => {
+// #819: a planner retypes every criterion in its reply though the plan file is unedited, so a criterion that existed before, that no
+// finding names and that the reply does not list in criteria_edited (absent: none) keeps its earlier text; a named, listed, new or
+// removed one, and every other member, stays as the reply gave it.
+const keepUnnamedText = (before, after, findings, edited) => after.map(a => {
   const was = a && typeof a.id === 'string' && a.id ? before.find(b => b && b.id === a.id) : null
-  if (!was || typeof was.text !== 'string' || was.text === a.text || findings.some(f => namesCriterion(f, a.id))) return a
+  if (!was || typeof was.text !== 'string' || was.text === a.text || edited.includes(a.id) || findings.some(f => namesCriterion(f, a.id))) return a
   return { ...a, text: was.text }
 })
 // One targeted planner call fixing only the given findings, then the program's rule check and the rules re-review (D4-D6).
@@ -1079,10 +1082,13 @@ Review the implementation plan at ${plan.plan_root} (and its task files) against
   if (planFindings.length) {
     log(`plan review: ${planFindings.length} blocking findings, revising once`)
     const reviewedFacts = ruleFacts(plan), reviewedCriteria = plan.acceptance
-    const revised = await call(planPrompt(`\n${MAP_FIRST} A reviewer found these defects in your plan at ${plan.plan_root}; fix them in place and return the full result again: ${JSON.stringify(planFindings)}`), { label: 'plan-revise', phase: 'Plan', agentType: 'planner', schema: PLAN_SCHEMA })
+    const revised = await call(planPrompt(`\n${MAP_FIRST} A reviewer found these defects in your plan at ${plan.plan_root}; fix them in place and return the full result again, with criteria_edited: the ids of the criteria whose text you changed in the plan file: ${JSON.stringify(planFindings)}`), { label: 'plan-revise', phase: 'Plan', agentType: 'planner', schema: PLAN_SCHEMA })
     const halted = await takePlan(revised, 'plan-revise')
     if (halted) return { ...halted, findings: planFindings }
-    plan = { ...plan, acceptance: keepUnnamedText(reviewedCriteria, plan.acceptance, planFindings) }
+    const kept = keepUnnamedText(reviewedCriteria, plan.acceptance, planFindings, Array.isArray(plan.criteria_edited) ? plan.criteria_edited : [])
+    const restored = kept.filter((a, i) => a !== plan.acceptance[i]).length
+    if (restored) log(`plan-revise: kept the earlier text of ${restored} criteria no finding names and the reply does not list as edited`)
+    plan = { ...plan, acceptance: kept }
     const still = planRules(plan)
     // #819: no trigger named a rule, the program's rule check is clean and no criterion's id, text, kind, metric or verify changed.
     const sameRules = !planFindings.some(f => present(f.rule)) && !still.length && ruleFacts(plan) === reviewedFacts

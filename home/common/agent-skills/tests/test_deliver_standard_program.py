@@ -2000,6 +2000,7 @@ class RulesRereviewSkipTest(unittest.TestCase):
                 names = labels(out["calls"])
                 self.assertNotIn("plan-rules-review", names)
                 self.assertEqual(len([line for line in out["logs"] if self.SKIPPED in line]), 1)
+                self.assertEqual(len([line for line in out["logs"] if "kept the earlier text of 3 criteria" in line]), 1)
                 self.assertIn("impl-1", names)
                 self.assertEqual(out["result"]["acceptance"], plan["acceptance"])
                 later = prompt(out["calls"], "final-1") + prompt(out["calls"], "close-out")
@@ -2020,6 +2021,32 @@ class RulesRereviewSkipTest(unittest.TestCase):
                 self.assertEqual(result["stage"], "plan-review")
                 # AC2, named, takes the reply's text; AC1, unnamed, keeps the earlier one.
                 self.assertEqual([a["text"] for a in result["cont"]["plan"]["acceptance"]], ["works", "deployed, retyped"])
+
+    def test_a_criterion_the_reply_lists_as_edited_takes_the_new_text_and_the_rules_rereview_runs(self):
+        # The finding names no id (the second criterion), but the planner declares that it reworded AC2 in the plan file.
+        plan = with_criteria(EVIDENCE)
+        retyped = dict(PLAN, acceptance=[dict(a, text=a["text"] + ", retyped") for a in plan["acceptance"]])
+        result, names, skipped = self.go(plan, dict(retyped, criteria_edited=["AC2"]),
+                                         review=self.naming("the second criterion names no deploy"))
+        self.assertEqual(names.count("plan-rules-review"), 1)
+        self.assertEqual(skipped, [])
+        self.assertEqual([a["text"] for a in result["cont"]["plan"]["acceptance"]], ["works", "deployed, retyped"])
+
+    def test_an_empty_or_absent_edited_list_restores_and_skips(self):
+        plan = with_criteria(EVIDENCE)
+        retyped = dict(PLAN, acceptance=[dict(a, text=a["text"] + ", retyped") for a in plan["acceptance"]])
+        for name, reply in (("absent", retyped), ("empty", dict(retyped, criteria_edited=[]))):
+            with self.subTest(criteria_edited=name):
+                result, names, skipped = self.go(plan, reply)
+                self.assertNotIn("plan-rules-review", names)
+                self.assertEqual(len(skipped), 1)
+                self.assertEqual(result["acceptance"], plan["acceptance"])
+
+    def test_the_revise_asks_which_criteria_it_edited(self):
+        out = run_out(replies={"plan": PLAN, "plan-revise": PLAN, "plan-review": self.BARE}, patch=self.OPEN)
+        self.assertIn("criteria_edited: the ids of the criteria whose text you changed in the plan file", prompt(out["calls"], "plan-revise"))
+        self.assertNotIn("criteria_edited", prompt(out["calls"], "plan"))
+        self.assertEqual(schema_of(out["calls"], "plan-revise")["properties"]["criteria_edited"]["items"]["type"], "string")
 
     def test_a_changed_verify_on_an_unnamed_criterion_still_runs_the_rules_rereview(self):
         plan = with_criteria(EVIDENCE)
