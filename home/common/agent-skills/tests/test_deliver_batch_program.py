@@ -57,6 +57,31 @@ def run(args=None, replies=None, patch=None, children=None, turns=None):
     return out["result"], out["calls"], out["max_active"]
 
 
+AMEND_EDIT = {"file": "task-2.md", "find": "old rule", "replace": "new rule"}
+
+
+def reviewed(n):
+    """A valid deliver-standard continuation whose plan is reviewed and whose first task is done."""
+    return {"setup": {"ok": True, "holder": "h1/b1", "branch": f"issue-{n}-x", "worktree": f"/r/.wt/w-issue-{n}-x",
+                      "worktree_path": f"/r/.wt/w-issue-{n}-x", "plan_dir": "/g"},
+            "lane": "standard",
+            "plan": {"status": "planned", "plan_root": "/g/plan.md",
+                     "acceptance": [{"id": "AC1", "text": "works", "kind": "code"}],
+                     "tasks": [{"n": 1, "title": "t1", "file": "/g/task-1.md", "risk": "standard"},
+                               {"n": 2, "title": "t2", "file": "/g/task-2.md", "risk": "standard"}]},
+            "plan_reviewed": True, "done": [{"n": 1, "commit": "c1"}], "fix_waves": 0}
+
+
+def verified_cont(n):
+    """A reviewed continuation that records a passed verification: no review or verify is owed on it."""
+    return dict(reviewed(n), verified={"head": "a" * 40, "results": [], "contract": "{}"})
+
+
+def kept(n):
+    """A continuation that still plans ahead: its plan is unreviewed and nothing is done."""
+    return dict(reviewed(n), plan_reviewed=False, done=[])
+
+
 def closing(pr):
     """Facts naming a merged PR that closes the issue."""
     return {"merged_refs": [{"number": pr, "closes": True}]}
@@ -2015,7 +2040,7 @@ class SourceTest(unittest.TestCase):
         text = PROGRAM.read_text(encoding="utf-8")
         meta = text[:text.index("\n}\n")]
         for arg in ("repo_root", "batch_id", "child_script", "issues", "label", "decisions", "review_sizing",
-                    "clerk_model"):
+                    "clerk_model", "amend"):
             self.assertIn(arg, meta)
 
     def test_deliver_batch_skill_is_small_and_names_the_program_and_its_args(self):
@@ -2439,6 +2464,121 @@ class FoldedRecordChecksTest(unittest.TestCase):
         self.assertIsNone(result["relaunch"])
         self.assertIn("land-checks-1-2", of(calls, 1))
         self.assertNotIn("land-record-1-1", of(calls, 1))
+
+
+class AmendTest(unittest.TestCase):
+    def test_amend_args_are_checked_before_any_agent(self):
+        r = reviewed(1)
+        bad = [dict(ARGS, amend="x"), dict(ARGS, conts={"1": r}, amend=[]), dict(ARGS, amend={"1": [AMEND_EDIT]}),
+               dict(ARGS, conts={"1": r}, amend={"2": [AMEND_EDIT]})]
+        for value in ([], ["x"], AMEND_EDIT, [{}], [{"file": "task-2.md", "find": "x"}],
+                      [{"file": "", "find": "x", "replace": "y"}], [{"file": "task-2.md", "find": "", "replace": "y"}],
+                      [{"file": "task-2.md", "find": "x", "replace": 1}]):
+            bad.append(dict(ARGS, conts={"1": r}, amend={"1": value}))
+        for args in bad:
+            with self.subTest(args=args):
+                result, calls, _ = run(args=args)
+                self.assertEqual(result["stage"], "args")
+                self.assertEqual(calls, [])
+
+    def test_a_reviewed_cont_forwards_its_amend_to_its_one_child(self):
+        result, calls, _ = run(args=dict(ARGS, conts={"1": reviewed(1)}, amend={"1": [AMEND_EDIT]}))
+        self.assertEqual(len([c for c in calls if c["label"] == "child-1"]), 1)
+        self.assertEqual(child(calls, 1)["args"]["amend"], [AMEND_EDIT])
+        self.assertEqual(child(calls, 1)["args"]["cont"], reviewed(1))
+
+    def test_the_forwarded_amend_reaches_the_child_program(self):
+        _, calls, _ = run(args=dict(ARGS, conts={"1": reviewed(1)}, amend={"1": [AMEND_EDIT]}))
+        child_result, child_calls = run_child(child(calls, 1)["args"])
+        self.assertEqual(labels(child_calls)[:3], ["setup", "renew-amend", "amend"])
+        self.assertEqual(child_result["stage"], "ready")
+
+    def test_a_planning_ahead_cont_forwards_amend_to_the_plan_child_only(self):
+        _, calls, _ = run(args=dict(ARGS, conts={"1": kept(1)}, amend={"1": [AMEND_EDIT]}))
+        children = [c for c in calls if c["label"] == "child-1"]
+        self.assertEqual([c["args"]["mode"] for c in children], ["plan", "ready"])
+        self.assertEqual(children[0]["args"]["amend"], [AMEND_EDIT])
+        self.assertNotIn("amend", children[1]["args"])
+
+    def test_a_refused_amend_keeps_the_cont_and_the_amend_for_the_relaunch(self):
+        result, calls, _ = run(
+            args=dict(ARGS, conts={"1": kept(1)}, amend={"1": [AMEND_EDIT]}),
+            children={"1": {"stage": "amend", "error": "amend must be a non-empty list", "cont": kept(1)}})
+        self.assertEqual(len([c for c in calls if c["label"] == "child-1"]), 1)
+        self.assertEqual(result["relaunch"]["conts"], {"1": kept(1)})
+        self.assertEqual(result["relaunch"]["amend"], {"1": [AMEND_EDIT]})
+
+    def test_the_relaunch_carries_the_amend_of_every_issue_whose_cont_it_carries(self):
+        result, _, _ = run(
+            args=dict(ARGS, issues=[1, 2], conts={"1": reviewed(1), "2": reviewed(2)},
+                      amend={"1": [AMEND_EDIT], "2": [AMEND_EDIT]}),
+            patch={"facts-2": {"blockers": [{"issue": 50, "state": "OPEN"}]}},
+            children={"1": {"stage": "task", "task": {"n": 2}, "cont": reviewed(1)}})
+        self.assertEqual(result["relaunch"]["amend"], {"1": [AMEND_EDIT], "2": [AMEND_EDIT]})
+        self.assertEqual(set(result["relaunch"]["conts"]), {"1", "2"})
+        with self.subTest("a dropped cont drops its amend"):
+            result, _, _ = run(args=dict(ARGS, conts={"1": kept(1)}, amend={"1": [AMEND_EDIT]}),
+                               children={"1": {"stage": "plan", "details": "x"}})
+            self.assertNotIn("conts", result["relaunch"])
+            self.assertNotIn("amend", result["relaunch"])
+
+    def test_an_accepted_open_pr_with_a_pending_amend_goes_through_the_child_before_landing(self):
+        facts = {"facts-1": {"open_pr": OPEN_PR, "claim": {"verdict": "held_by", "by": HOLDER}}}
+        result, calls, _ = run(args=dict(ARGS, conts={"1": reviewed(1)}, amend={"1": [AMEND_EDIT]}), patch=facts)
+        ls = labels(calls)
+        self.assertEqual(child(calls, 1)["args"]["amend"], [AMEND_EDIT])
+        self.assertLess(ls.index("readopt-1"), ls.index("child-1"))
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+        with self.subTest("an amend already applied is not sent again, so the PR lands as it stands"):
+            _, calls, _ = run(args=dict(ARGS, conts={"1": reviewed(1)}), patch=facts)
+            self.assertNotIn("child-1", labels(calls))
+
+    def test_an_amend_applied_before_the_review_finished_is_kept_for_the_relaunch(self):
+        # The child applied the amend, then stopped before the final review and verify of the amended plan.
+        facts = {"facts-1": {"open_pr": OPEN_PR, "claim": {"verdict": "held_by", "by": HOLDER}}}
+        stopped = reviewed(1)
+        first, _, _ = run(args=dict(ARGS, conts={"1": reviewed(1)}, amend={"1": [AMEND_EDIT]}),
+                          children={"1": {"stage": "codex-unavailable", "amended": True, "details": "limit", "cont": stopped}})
+        self.assertEqual(first["relaunch"]["conts"], {"1": stopped})
+        self.assertEqual(first["relaunch"]["amend"], {"1": [AMEND_EDIT]})
+        # The accepted PR head is unchanged, yet the relaunch must go through the child, never land as it stands.
+        second, calls, _ = run(args=dict(ARGS, conts=first["relaunch"]["conts"], amend=first["relaunch"]["amend"]), patch=facts)
+        self.assertEqual(child(calls, 1)["args"]["amend"], [AMEND_EDIT])
+        self.assertLess(labels(calls).index("readopt-1"), labels(calls).index("child-1"))
+
+    def test_a_run_without_amend_sends_none(self):
+        result, calls, _ = run(args=dict(ARGS, conts={"1": reviewed(1)}),
+                               children={"1": {"stage": "task", "task": {"n": 2}, "cont": reviewed(1)}})
+        self.assertNotIn("amend", child(calls, 1)["args"])
+        self.assertNotIn("amend", result["relaunch"])
+
+    def test_an_applied_amend_is_not_kept_in_the_relaunch(self):
+        F = {"severity": "important", "summary": "design gap"}
+        stopped = dict(kept(1), plan_findings={"rules": [F], "findings": [F], "rounds": 0})
+        result, calls, _ = run(args=dict(ARGS, conts={"1": kept(1)}, amend={"1": [AMEND_EDIT]}),
+                               children={"1": {"stage": "plan-review", "amended": True, "cont": stopped}})
+        self.assertEqual(result["relaunch"]["conts"], {"1": stopped})
+        self.assertNotIn("amend", result["relaunch"])
+        # The relaunched child plans the kept plan again instead of refusing: it carries no amend.
+        retry = dict(child(calls, 1)["args"], cont=result["relaunch"]["conts"]["1"])
+        retry.pop("amend", None)
+        child_result, _ = run_child(retry)
+        self.assertNotEqual(child_result["stage"], "amend")
+
+    def test_an_amend_applied_by_the_plan_child_is_not_kept_when_the_ready_child_stops(self):
+        plan_stop = {"stage": "planned", "plan": {"tasks": [{"n": 1}]}, "amended": True, "cont": reviewed(1)}
+        result, calls, _ = run(args=dict(ARGS, conts={"1": kept(1)}, amend={"1": [AMEND_EDIT]}),
+                               children={"1": [plan_stop, {"stage": "task", "task": {"n": 2}, "cont": verified_cont(1)}]})
+        self.assertEqual(result["relaunch"]["conts"], {"1": verified_cont(1)})
+        self.assertNotIn("amend", result["relaunch"])
+
+    def test_one_issues_applied_amend_leaves_anothers_unapplied_amend_in_the_relaunch(self):
+        result, _, _ = run(args=dict(ARGS, issues=[1, 2], conts={"1": reviewed(1), "2": reviewed(2)},
+                                     amend={"1": [AMEND_EDIT], "2": [AMEND_EDIT]}),
+                           children={"1": {"stage": "task", "task": {"n": 2}, "amended": True, "cont": verified_cont(1)},
+                                     "2": {"stage": "setup", "cont": reviewed(2)}})
+        self.assertEqual(result["relaunch"]["amend"], {"2": [AMEND_EDIT]})
+        self.assertEqual(set(result["relaunch"]["conts"]), {"1", "2"})
 
 
 if __name__ == "__main__":

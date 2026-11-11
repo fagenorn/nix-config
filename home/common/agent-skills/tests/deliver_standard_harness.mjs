@@ -52,6 +52,11 @@ const DEFAULTS = [
   [/-codex$/, { available: true, ...PASS }],
   [/^diff-size$/, { measured: true, changed_lines: 10 }],
   [/^owner-answer$/, { verdict: 'none', comment_id: null, questions: [], decisions: '', renew: { verdict: 'renewed' } }],
+  [/^amend$/, prompt => {
+    const m = /^Input: (\{.*\})$/m.exec(prompt)
+    const input = m ? JSON.parse(m[1]) : { edits: [] }
+    return { status: 'applied', edits: input.edits.map(e => ({ file: e.file, exists: true, occurrences: 1, already: false })), refused: [] }
+  }],
   [/^direct-review/, { ...PASS, acceptance: [{ id: 'AC1', met: true, evidence: 'test_a.py:10 test_works' }] }],
   [/review|^final-/, PASS],
   [/^sync-/, { status: 'done', conflicted: false, merge_commit: SHA, notes: 'clean' }],

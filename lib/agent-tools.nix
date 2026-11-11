@@ -53,6 +53,7 @@ let
     "issue-branch" = "delivery.issue_branch";
     "lane-triage" = "delivery.lane_triage";
     "owner-actions" = "claims.owner_actions";
+    "plan-amend" = "delivery.plan_amend";
     "promotion" = "delivery.promotion";
     "release" = "release.release";
     "resolve-project" = "project_contract.resolve_project";
