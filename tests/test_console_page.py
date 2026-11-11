@@ -58,12 +58,14 @@ kept.view({data: JSON.stringify(JSON.parse(process.argv[4]))});
 console.log(JSON.stringify({
   statement: tree(ELEMENTS.statement || null),
   inbox: tree(ELEMENTS.inbox || null),
+  capacity: tree(ELEMENTS.capacity || null),
+  promoted: tree(ELEMENTS.promoted || null),
 }));
 """
 
 
 def render_page(view: dict) -> dict:
-    """The `#statement` and `#inbox` trees the page draws for `view`, run under node."""
+    """The `#statement`, `#inbox`, `#capacity` and `#promoted` trees the page draws for `view`, run under node."""
     node = shutil.which("node")
     if node is None:
         raise AssertionError("node is not on PATH; the page render tests need it")
@@ -442,6 +444,79 @@ class PageRenderTest(unittest.TestCase):
         self.assertIn("untouched for 1 day", by_project["owner/p01"])
         self.assertNotIn("1 days", by_project["owner/p01"])
         self.assertNotIn("untouched", by_project["owner/p02"])
+
+
+def profile(name: str, state: str, **fields) -> dict:
+    base = {"profile": name, "state": state, "week_left": None, "five_hour_left": None,
+            "next_reset": None, "out_until": None, "read_at": "2026-11-10T08:30:00+00:00"}
+    base.update(fields)
+    return base
+
+
+def capacity(profiles: list, **fields) -> dict:
+    base = {"tight": False, "all_out": False, "resumes_at": None, "profiles": profiles}
+    base.update(fields)
+    return base
+
+
+class CapacityPageTest(unittest.TestCase):
+    def strip_view(self, **fields) -> dict:
+        profiles = [
+            profile("a", "ok", week_left=62, five_hour_left=40,
+                    next_reset="2026-11-12T09:00:00+00:00"),
+            profile("b", "unknown"),
+            profile("c", "reset"),
+        ]
+        return {**view([]), "capacity": capacity(profiles, **fields)}
+
+    def test_the_strip_shows_each_profile(self) -> None:
+        result = render_page(self.strip_view())
+        text = result["capacity"]["text"]
+        for expected in ("a", "62% of the week left", "40% of 5 hours", "resets ", "b",
+                         "no reading yet", "c", "reset, not yet used"):
+            self.assertIn(expected, text)
+        self.assertNotIn("tight", text)
+
+    def test_tight_is_shown_only_when_the_view_says_so(self) -> None:
+        result = render_page(self.strip_view(tight=True))
+        self.assertTrue(result["capacity"]["text"].endswith("tight"))
+
+    def test_every_profile_out_is_promoted_above_the_inbox(self) -> None:
+        out = [profile("a", "out", out_until="2026-11-12T09:00:00+00:00"),
+               profile("b", "out", out_until="2026-11-12T10:00:00+00:00")]
+        full = {**view([]), "capacity": capacity(
+            out, all_out=True, resumes_at="2026-11-12T09:00:00+00:00")}
+        result = render_page(full)
+        self.assertIn("Capacity", result["promoted"]["text"])
+        self.assertEqual(result["promoted"]["text"].count("out until"), 2)
+        self.assertIn("Resumes at", result["statement"]["text"])
+        html = PAGE.read_text(encoding="utf-8")
+        self.assertLess(html.index('id="promoted"'), html.index('id="inbox"'))
+        partial = {**view([]), "capacity": capacity(
+            out, all_out=False, resumes_at="2026-11-12T09:00:00+00:00")}
+        shown = render_page(partial)
+        self.assertEqual(shown["promoted"]["children"], [])
+        self.assertNotIn("Resumes at", shown["statement"]["text"])
+
+    def test_unknown_values_read_as_words_not_null_or_1970(self) -> None:
+        profiles = [profile("a", "ok", five_hour_left=40), profile("b", "out")]
+        text = render_page({**view([]), "capacity": capacity(profiles)})["capacity"]["text"]
+        for expected in ("week unknown", "40% of 5 hours", "out, reset unknown"):
+            self.assertIn(expected, text)
+        for banned in ("null", "1970", "resets "):
+            self.assertNotIn(banned, text)
+        out = [profile("a", "out"), profile("b", "out")]
+        result = render_page({**view([]), "capacity": capacity(out, all_out=True)})
+        promoted = result["promoted"]["text"]
+        self.assertEqual(promoted.count("out, reset unknown"), 2)
+        for banned in ("null", "1970"):
+            self.assertNotIn(banned, promoted)
+        self.assertNotIn("Resumes at", result["statement"]["text"])
+
+    def test_a_view_without_capacity_still_renders(self) -> None:
+        result = render_page(view([]))
+        self.assertEqual(result["capacity"]["children"], [])
+        self.assertEqual(result["promoted"]["children"], [])
 
 
 if __name__ == "__main__":

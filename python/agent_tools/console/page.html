@@ -34,6 +34,11 @@ ul { list-style: none; }
 .top-in { max-width: 1360px; margin: 0 auto; padding: 8px 48px; display: flex; align-items: center; gap: 28px; min-height: 56px; }
 .brand { font-weight: 600; color: var(--sub1); white-space: nowrap; letter-spacing: -.005em; }
 .conn { color: var(--ov2); font-size: .8125rem; }
+.cap { display: flex; flex-wrap: wrap; gap: 2px 20px; margin-left: auto; font-size: .8125rem; color: var(--sub0); }
+.cap-p { display: inline-flex; gap: 6px; }
+.cap-p b { font-weight: 600; }
+.cap-out { color: var(--red); }
+.cap-tight { color: var(--yellow); }
 
 .desk-grid { max-width: 1360px; margin: 0 auto; padding: 30px 48px 72px; display: grid; grid-template-columns: minmax(0, 1fr) 460px; column-gap: 88px; align-items: start; }
 
@@ -96,10 +101,11 @@ ul { list-style: none; }
 </style>
 </head>
 <body>
-<header class="top"><div class="top-in"><span class="brand">Console</span><span class="conn" id="conn" role="status">Reconnecting…</span></div></header>
+<header class="top"><div class="top-in"><span class="brand">Console</span><span class="cap" id="capacity"></span><span class="conn" id="conn" role="status">Reconnecting…</span></div></header>
 <div class="desk-grid">
 <main>
 <div class="statement" id="statement"></div>
+<section id="promoted" aria-label="Capacity"></section>
 <section id="inbox" aria-label="Inbox"></section>
 </main>
 <aside class="side" aria-label="Projects">
@@ -162,10 +168,49 @@ function projectLine(entry) {
 function renderStatement(view) {
   const box = document.getElementById("statement");
   const h1 = el("h1", view.statement.inbox_items > 0 ? "needs" : "", view.statement.headline);
-  box.replaceChildren(h1, el("p", "sub", view.statement.sentence));
+  const nodes = [h1, el("p", "sub", view.statement.sentence)];
+  const cap = view.capacity;
+  if (cap && cap.all_out && cap.resumes_at) nodes.push(el("p", "sub", "Resumes at " + when(cap.resumes_at)));
+  box.replaceChildren(...nodes);
 }
 function when(stamp) {
   return new Date(stamp).toLocaleString();
+}
+function outWords(p) {
+  return p.out_until === null || p.out_until === undefined ? "out, reset unknown" : "out until " + when(p.out_until);
+}
+function capacityWords(p) {
+  if (p.state === "unknown") return "no reading yet";
+  if (p.state === "out") return outWords(p);
+  if (p.state === "reset") return "reset, not yet used";
+  const has = (v) => v !== null && v !== undefined;
+  let words = has(p.week_left) ? p.week_left + "% of the week left" : "week unknown";
+  if (has(p.five_hour_left)) words += " \u00b7 " + p.five_hour_left + "% of 5 hours";
+  if (has(p.next_reset)) words += " \u00b7 resets " + when(p.next_reset);
+  return words;
+}
+function renderCapacity(view) {
+  const box = document.getElementById("capacity");
+  const cap = view.capacity || {profiles: []};
+  const nodes = [];
+  for (const p of cap.profiles) {
+    const span = el("span", "cap-p");
+    span.appendChild(el("b", "", p.profile));
+    span.appendChild(el("span", p.state === "out" ? "cap-out" : "", capacityWords(p)));
+    nodes.push(span);
+  }
+  if (cap.tight) nodes.push(el("span", "cap-tight", "tight"));
+  box.replaceChildren(...nodes);
+}
+function renderPromoted(view) {
+  const box = document.getElementById("promoted");
+  const cap = view.capacity || {profiles: []};
+  box.replaceChildren();
+  if (!cap.all_out) return;
+  const list = el("ul");
+  for (const p of cap.profiles) list.appendChild(el("li", "cap-out", p.profile + " " + outWords(p)));
+  box.appendChild(el("h2", "", "Capacity"));
+  box.appendChild(list);
 }
 function holds(item) {
   return item.held_work === 1 ? "holds 1 issue" : "holds " + item.held_work + " issues";
@@ -287,6 +332,8 @@ function render(view) {
   const wasOpen = new Set();
   for (const fold of document.querySelectorAll("details[open]")) wasOpen.add(fold.dataset.key);
   renderStatement(view);
+  renderCapacity(view);
+  renderPromoted(view);
   renderInbox(view);
   renderProjects(view);
   renderUnmanaged(view);
