@@ -1085,7 +1085,9 @@ Review the implementation plan at ${plan.plan_root} (and its task files) against
     const revised = await call(planPrompt(`\n${MAP_FIRST} A reviewer found these defects in your plan at ${plan.plan_root}; fix them in place and return the full result again, with criteria_edited: the ids of the criteria whose text you changed in the plan file: ${JSON.stringify(planFindings)}`), { label: 'plan-revise', phase: 'Plan', agentType: 'planner', schema: PLAN_SCHEMA })
     const halted = await takePlan(revised, 'plan-revise')
     if (halted) return { ...halted, findings: planFindings }
-    const kept = keepUnnamedText(reviewedCriteria, plan.acceptance, planFindings, Array.isArray(plan.criteria_edited) ? plan.criteria_edited : [])
+    // The plan-revise reply's list survives a branch revise that takePlan ran after it: the union of both replies' lists.
+    const edited = [revised, plan].flatMap(p => (p && Array.isArray(p.criteria_edited) ? p.criteria_edited : []))
+    const kept = keepUnnamedText(reviewedCriteria, plan.acceptance, planFindings, edited)
     const restored = kept.filter((a, i) => a !== plan.acceptance[i]).length
     if (restored) log(`plan-revise: kept the earlier text of ${restored} criteria no finding names and the reply does not list as edited`)
     plan = { ...plan, acceptance: kept }

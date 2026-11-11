@@ -2032,6 +2032,22 @@ class RulesRereviewSkipTest(unittest.TestCase):
         self.assertEqual(skipped, [])
         self.assertEqual([a["text"] for a in result["cont"]["plan"]["acceptance"]], ["works", "deployed, retyped"])
 
+    def test_the_edited_list_survives_a_branch_revise_after_the_revise(self):
+        # The plan-revise reply declares AC2 edited but names its branch wrongly; the branch revise's reply replaces it.
+        acceptance = with_criteria(EVIDENCE)["acceptance"]
+        retyped = [dict(a, text=a["text"] + ", retyped") for a in acceptance]
+        revised = bplan(task_branch="other", acceptance=retyped, criteria_edited=["AC2"])
+        rows = (("absent", bplan(acceptance=retyped), ["works", "deployed, retyped"]),
+                ("empty", bplan(acceptance=retyped, criteria_edited=[]), ["works", "deployed, retyped"]),
+                ("another id", bplan(acceptance=retyped, criteria_edited=["AC1"]), ["works, retyped", "deployed, retyped"]))
+        for name, fixed, texts in rows:
+            with self.subTest(branch_revise_list=name):
+                result, names, skipped = self.go(bplan(acceptance=acceptance), revised, **{"plan-branch-revise": fixed})
+                self.assertLess(names.index("plan-revise"), names.index("plan-branch-revise"))
+                self.assertEqual(names.count("plan-rules-review"), 1)
+                self.assertEqual(skipped, [])
+                self.assertEqual([a["text"] for a in result["cont"]["plan"]["acceptance"]], texts)
+
     def test_an_empty_or_absent_edited_list_restores_and_skips(self):
         plan = with_criteria(EVIDENCE)
         retyped = dict(PLAN, acceptance=[dict(a, text=a["text"] + ", retyped") for a in plan["acceptance"]])
