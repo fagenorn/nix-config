@@ -44,3 +44,15 @@ _Avoid_: ad-hoc work, side work
 **Not yet managed**:
 A repository with a live session that is not in the fleet registry; it is listed with its sessions and counts as no project. A session outside any repository is not listed.
 _Avoid_: unregistered project, orphan
+
+**Limit reading**:
+The last unified rate-limit state the cache proxy saw for one account profile: status, weekly and 5-hour use, and resets (ADR-console-005).
+_Avoid_: usage
+
+**Limit stop**:
+A refusal because a window is used up, recorded with its window and reset (ADR-console-005).
+_Avoid_: rate limit error
+
+**Capacity strip**:
+The top-bar line of each profile's share left and next reset. It reads "tight" when one profile has room among two or more, and is promoted into the statement when every profile is out (ADR-console-005).
+_Avoid_: quota bar

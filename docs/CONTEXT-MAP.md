@@ -28,6 +28,7 @@
 | Blocking edge | Claims |
 | Cache proxy | Hosts |
 | Candidate | Release |
+| Capacity strip | Console |
 | Check | Verification |
 | Claim | Claims |
 | Code map | Delivery |
@@ -49,6 +50,9 @@
 | Launcher | Hosts |
 | Lifecycle verb | Guard |
 | Light lane | Delivery |
+| Limit reading | Console |
+| Limit sensing | Hosts |
+| Limit stop | Console |
 | Marker | Claims |
 | Migration | Project contract |
 | Not yet managed | Console |
@@ -88,5 +92,6 @@
 - **Guard → Project contract**: a **Derived row** comes from a resolved **Project contract** and the **Fleet registry**.
 - **Hosts → Verification**: every host runs **Verification passes** on a schedule.
 - **Project contract → every area**: each command reads the **ResolvedProject**.
+- **Hosts → Console**: the **Cache proxy** reports each **Limit reading** to the console.
 - **Console → Project contract**: the console's projects are the **Fleet registry**'s entries.
 - **Console → Claims**: an **Inbox item** from the tracker is a live **Owner-action marker**, read by the claims area's marker reader.
