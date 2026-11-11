@@ -62,8 +62,8 @@ class Case(unittest.TestCase):
     def open(self, tracker, n=1, **kwargs):
         support.write_registry(self.registry, support.entries(n))
         kwargs.setdefault("activity", lambda root: time.time())
-        svc = service.ConsoleService(self.store, self.registry, port=0, tracker=tracker,
-                                     slug_of=SLUGS.get, **kwargs)
+        kwargs.setdefault("slug_of", SLUGS.get)
+        svc = service.ConsoleService(self.store, self.registry, port=0, tracker=tracker, **kwargs)
         self.addCleanup(svc.close)
         return svc
 
@@ -124,6 +124,23 @@ class RestartTest(Case):
                     second.poll_tracker()
                 self.assertEqual(tracker.calls, [])
                 second.close()
+
+
+class SharedSlugTest(Case):
+    def test_two_projects_on_one_repository_each_keep_their_own_item(self):
+        def tracker(project_id, slug, *, cancelled):
+            return [item(project=project_id, slug="octo/same")]
+
+        svc = self.open(tracker, n=2, slug_of=lambda root: "octo/same", activity=lambda root: None)
+        svc.poll_tracker()
+        rows = support.log_rows(self.store)
+        self.assertEqual(self.kinds().count("inbox.seen"), 2)
+        for _ in range(2):
+            svc.poll_tracker()
+            self.assertEqual(support.log_rows(self.store), rows)
+        shown = view_of(svc)["inbox"]["open"]
+        self.assertEqual(sorted(i["project_id"] for i in shown), ["owner/p00", "owner/p01"])
+        self.assertEqual(view_of(svc)["statement"]["headline"], "2 things need you")
 
 
 class StaleTest(Case):

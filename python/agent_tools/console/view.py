@@ -118,19 +118,22 @@ class ReadState:
 
 def inbox_records(
     events: Iterable[Event],
-    records: Mapping[str, InboxRecord] | None = None,
-) -> dict[str, InboxRecord]:
+    records: Mapping[tuple[str, str], InboxRecord] | None = None,
+) -> dict[tuple[str, str], InboxRecord]:
+    """Records keyed by (owning project, item key): item keys are global to a repository,
+    and two registered projects can resolve to the same one."""
     result = dict(records or {})
     for event in events:
         if event.kind == UNREGISTERED:
-            result = {key: record for key, record in result.items()
-                      if record.item.get("project_id") != event.project}
+            result = {k: record for k, record in result.items()
+                      if k[0] != event.project}
             continue
         if event.kind not in (INBOX_SEEN, INBOX_CHANGED, INBOX_GONE):
             continue
-        key = event.payload.get("key")
-        if not isinstance(key, str):
+        name = event.payload.get("key")
+        if not isinstance(name, str) or event.project is None:
             continue
+        key = (event.project, name)
         if event.kind == INBOX_GONE:
             result.pop(key, None)
         elif event.kind == INBOX_CHANGED and key in result:
@@ -142,7 +145,7 @@ def inbox_records(
 
 
 def inbox_changes(
-    records: Mapping[str, InboxRecord],
+    records: Mapping[tuple[str, str], InboxRecord],
     project_id: str,
     items: Sequence[dict],
 ) -> list[tuple[str, str, dict]]:
@@ -150,15 +153,15 @@ def inbox_changes(
     named = set()
     for item in sorted(items, key=lambda i: i["key"]):
         named.add(item["key"])
-        record = records.get(item["key"])
+        record = records.get((project_id, item["key"]))
         if record is None:
             changes.append((INBOX_SEEN, project_id, item))
         elif record.item != item:
             changes.append((INBOX_CHANGED, project_id, item))
     changes.extend(
         (INBOX_GONE, project_id, {"key": key})
-        for key, record in sorted(records.items())
-        if record.item.get("project_id") == project_id and key not in named)
+        for (owner, key) in sorted(records)
+        if owner == project_id and key not in named)
     return changes
 
 
@@ -253,7 +256,7 @@ def _headline(open_count: int, stale: bool) -> str:
 
 def derive_view(
     states: Iterable[ProjectState],
-    records: Mapping[str, InboxRecord] | None = None,
+    records: Mapping[tuple[str, str], InboxRecord] | None = None,
     health: Mapping[str, ReadState] | None = None,
 ) -> dict:
     states = list(states)
@@ -263,10 +266,11 @@ def derive_view(
              if r.item.get("project_id") in registered]
     open_items = sorted(
         (r for r in shown if not r.item["answered"]),
-        key=lambda r: (-r.item["held_work"], r.waiting_since, r.item["key"]))
+        key=lambda r: (-r.item["held_work"], r.waiting_since, r.item["key"],
+                       r.item["project_id"]))
     answered = sorted(
         (r for r in shown if r.item["answered"]),
-        key=lambda r: (r.waiting_since, r.item["key"]))
+        key=lambda r: (r.waiting_since, r.item["key"], r.item["project_id"]))
     stale_projects = sorted(
         p for p in registered if p in health and not health[p].ok)
     if stale_projects:

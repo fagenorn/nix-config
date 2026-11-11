@@ -194,6 +194,47 @@ class PageTest(unittest.TestCase):
         self.assertEqual(links, [("Answer on the tracker", f"/{k}", "noreferrer")
                                  for k in "xyz"])
 
+    def test_later_rows_keep_their_questions_and_issue(self) -> None:
+        view = {
+            "project_count": 0, "entries": [],
+            "statement": {"inbox_items": 3, "headline": "3 things need you",
+                          "sentence": "s", "stale": False},
+            "inbox": {
+                "open": [
+                    item("A", issue=11, question="Decisions are needed."),
+                    item("B", issue=22, question="Decisions are needed.", questions=[
+                        {"question": "Which cache?", "options": ["redis", "memcached"],
+                         "chosen": "redis"}]),
+                    item("C", issue=33, question="Decisions are needed.", questions=[
+                        {"question": "Which queue?", "options": ["sqs", "nats"],
+                         "chosen": None}]),
+                ],
+                "answered": [],
+            },
+        }
+        rows = next(n for n in walk(render_page(view)["inbox"]) if n["cls"] == "rest")
+        first, second = rows["children"]
+        self.assertIn("owner/p00 #22", first["text"])
+        self.assertIn("Which cache?", first["text"])
+        self.assertIn("chosen: redis", first["text"])
+        self.assertIn("owner/p00 #33", second["text"])
+        self.assertIn("Which queue?", second["text"])
+        self.assertIn("nats", second["text"])
+
+    def test_an_answered_stale_item_shows_when_it_was_last_read(self) -> None:
+        view = {
+            "project_count": 0, "entries": [],
+            "statement": {"inbox_items": 0, "headline": "h", "sentence": "s", "stale": True},
+            "inbox": {"open": [], "answered": [
+                item("Z", answered=True, stale=True, read_at="2026-11-10T09:15:00+00:00"),
+                item("W", answered=True),
+            ]},
+        }
+        done = next(n for n in walk(render_page(view)["inbox"]) if n["cls"] == "done")
+        stale, fresh = done["children"]
+        self.assertIn("read at ", stale["text"])
+        self.assertNotIn("read at ", fresh["text"])
+
     def test_an_empty_inbox_renders_no_item(self) -> None:
         view = {
             "project_count": 0, "entries": [],

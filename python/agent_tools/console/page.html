@@ -46,7 +46,9 @@ ul { list-style: none; }
 .card h2 span { font-weight: 400; font-size: .8125rem; color: var(--ov2); }
 .card .ask { margin-top: 6px; font-size: 1.0625rem; color: var(--text); }
 .card .opts { margin-top: 6px; padding-left: 18px; list-style: disc; color: var(--sub0); font-size: .84375rem; }
-.card .opts .picked { color: var(--lav); }
+.rest .opts, .done .opts { flex-basis: 100%; margin: 0; padding-left: 18px; list-style: disc; color: var(--sub0); font-size: .84375rem; }
+.rest .meta, .done .meta { flex-basis: 100%; margin: 0; font-size: .8125rem; color: var(--ov2); }
+.card .opts .picked, .rest .opts .picked, .done .opts .picked { color: var(--lav); }
 .card .meta { margin-top: 8px; font-size: .8125rem; color: var(--ov2); }
 .rest, .done { margin-top: 10px; }
 .rest li, .done li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; padding: 5px 0; font-size: .875rem; color: var(--ov2); }
@@ -138,38 +140,40 @@ function metaLine(item) {
   if (item.stale) text += " \u00b7 read at " + when(item.read_at);
   return text;
 }
-function leadItem(item) {
-  const card = el("article", "card");
-  card.appendChild(el("h2", "", item.project_id + " #" + item.issue));
-  card.appendChild(el("p", "ask", item.question));
+function appendDetail(node, item) {
   if (item.questions.length > 0) {
     for (const q of item.questions) {
-      card.appendChild(el("p", "meta", q.question));
+      node.appendChild(el("p", "meta", q.question));
       const list = el("ul", "opts");
       for (const option of q.options) {
         const chosen = option === q.chosen;
         list.appendChild(el("li", chosen ? "picked" : "", chosen ? "chosen: " + option : option));
       }
-      card.appendChild(list);
+      node.appendChild(list);
     }
   } else if (item.items.length > 0) {
     const list = el("ul", "opts");
     for (const entry of item.items) list.appendChild(el("li", "", entry));
-    card.appendChild(list);
+    node.appendChild(list);
   }
+}
+function leadItem(item) {
+  const card = el("article", "card");
+  card.appendChild(el("h2", "", item.project_id + " #" + item.issue));
+  card.appendChild(el("p", "ask", item.question));
+  appendDetail(card, item);
   card.appendChild(el("p", "meta", metaLine(item)));
   const links = el("p", "meta");
   links.appendChild(answerLink(item));
   card.appendChild(links);
   return card;
 }
-function itemLine(item, withMeta) {
+function itemLine(item) {
   const line = el("li");
-  line.appendChild(el("b", "", item.project_id));
+  line.appendChild(el("b", "", item.project_id + " #" + item.issue));
   line.appendChild(el("span", "", item.question));
-  if (item.items.length > 0) line.appendChild(el("span", "", item.items.join("; ")));
-  if (withMeta) line.appendChild(el("span", "", metaLine(item)));
-  else line.appendChild(el("span", "", "waiting since " + when(item.waiting_since)));
+  appendDetail(line, item);
+  line.appendChild(el("span", "", metaLine(item)));
   line.appendChild(answerLink(item));
   return line;
 }
@@ -180,14 +184,14 @@ function renderInbox(view) {
   if (open.length > 0) section.appendChild(leadItem(open[0]));
   if (open.length > 1) {
     const rest = el("ul", "rest");
-    for (const item of open.slice(1)) rest.appendChild(itemLine(item, true));
+    for (const item of open.slice(1)) rest.appendChild(itemLine(item));
     section.appendChild(rest);
   }
   const answered = view.inbox.answered;
   if (answered.length > 0) {
     section.appendChild(el("h2", "done-head", "Answered, waiting for the agent"));
     const done = el("ul", "done");
-    for (const item of answered) done.appendChild(itemLine(item, false));
+    for (const item of answered) done.appendChild(itemLine(item));
     section.appendChild(done);
   }
 }

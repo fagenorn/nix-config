@@ -175,7 +175,7 @@ class InboxFoldTest(unittest.TestCase):
             Event(1, "t1", INBOX_SEEN, "p", first),
             Event(2, "t2", INBOX_CHANGED, "p", dict(first, answered=True)),
         ]
-        record = inbox_records(events)["k1"]
+        record = inbox_records(events)[("p", "k1")]
         self.assertEqual(record.waiting_since, "t1")
         self.assertEqual(record.updated_at, "t2")
         self.assertIs(record.item["answered"], True)
@@ -196,7 +196,8 @@ class InboxChangesTest(unittest.TestCase):
         a, b, d, e = (item("p", k) for k in ("ka", "kb", "kd", "ke"))
         c = item("q", "kc")
         b2 = dict(b, answered=True)
-        records = {x["key"]: InboxRecord(x, "t1", "t1") for x in (a, b, e, c)}
+        records = {(x["project_id"], x["key"]): InboxRecord(x, "t1", "t1")
+                   for x in (a, b, e, c)}
         self.assertEqual(
             inbox_changes(records, "p", [d, b2, a]),
             [(INBOX_CHANGED, "p", b2), (INBOX_SEEN, "p", d),
@@ -204,10 +205,27 @@ class InboxChangesTest(unittest.TestCase):
         self.assertEqual(inbox_changes(records, "p", [a, b, e]), [])
 
 
+class SharedKeyTest(unittest.TestCase):
+    def test_a_key_two_projects_share_is_kept_once_per_project(self):
+        a, b = item("p", "k"), item("q", "k")
+        events = [Event(1, "t1", INBOX_SEEN, "p", a), Event(2, "t2", INBOX_SEEN, "q", b)]
+        records = inbox_records(events)
+        self.assertEqual(sorted(records), [("p", "k"), ("q", "k")])
+        self.assertEqual(inbox_changes(records, "p", [a]), [])
+        self.assertEqual(inbox_changes(records, "q", [b]), [])
+        self.assertEqual(inbox_changes(records, "p", []), [(INBOX_GONE, "p", {"key": "k"})])
+        result = derive_view([state("p", 1), state("q", 2)], records)
+        self.assertEqual([e["project_id"] for e in result["inbox"]["open"]], ["p", "q"])
+        gone = inbox_records([Event(3, "t3", INBOX_GONE, "p", {"key": "k"})], records)
+        self.assertEqual(sorted(gone), [("q", "k")])
+        left = inbox_records([Event(3, "t3", UNREGISTERED, "p", {})], records)
+        self.assertEqual(sorted(left), [("q", "k")])
+
+
 class InboxStatementTest(unittest.TestCase):
     def records(self, *items, waiting=None):
         waiting = waiting or {}
-        return {i["key"]: InboxRecord(i, waiting.get(i["key"], "t1"), "u1")
+        return {(i["project_id"], i["key"]): InboxRecord(i, waiting.get(i["key"], "t1"), "u1")
                 for i in items}
 
     def test_an_answered_item_is_shown_and_not_counted(self):
