@@ -17,8 +17,14 @@ Event kinds (stored in the event log, payloads are JSON objects):
   log's own time standing in for a payload without one. `hook_entry` builds it
   from a hook's input document and drops every other field.
 - `session.seen` (`SEEN`): `{"session_id", "cwd", "repo", "state"}` plus `name`
-  when known; the registry poll writes it when its reading differs from the
-  folded state.
+  and `profile` when known; the registry poll writes it when its reading
+  differs from the folded state.
+- `session.profile` (`PROFILE`): `{"session_id", "profile"}`, written with no
+  project when a known session's registry reading names another account
+  profile. The fold replaces the profile of a known session and leaves its
+  state, `last_seq`, `last_at` and `hook_ms` as they are; an unknown session or
+  a non-string profile is ignored. `session.hook` keeps the known profile, a
+  `session.seen` without `profile` keeps it and one with `profile` sets it.
 - `session.gone` (`GONE`): `{"session_id"}`; the poll writes it when two
   consecutive polls do not find the session.
 
@@ -47,6 +53,14 @@ Leaving: a session leaves on SessionEnd (a tombstone, so an older registry
 reading cannot bring it back) and, tombstone or not, when two consecutive polls
 do not find it in the registry. `poll_changes` returns the absent set to pass
 to the next poll.
+
+Profiles: a session's profile is the account it runs under, named by the
+registry directory its record was read from (`profile_of`): a directory
+`<accounts>/profiles/<name>/sessions` gives `<name>`, any other directory
+(`~/.claude/sessions` included) gives `default` (`DEFAULT_PROFILE`). Nothing
+beyond the registry files already read is opened to learn it. `poll_changes`
+records a changed profile before the hooks-win rule, so a newer hook never hides
+it.
 
 A registry record whose `cwd` holds a NUL character is not a session and is
 skipped like any other malformed record.
@@ -100,6 +114,8 @@ STATE_TEXT = {
 HOOK = "session.hook"
 SEEN = "session.seen"
 GONE = "session.gone"
+PROFILE = "session.profile"
+DEFAULT_PROFILE = "default"
 
 HOOK_EVENTS = ("SessionStart", "Stop", "StopFailure", "PermissionRequest",
                "Notification", "SessionEnd")
@@ -124,6 +140,7 @@ class Observation:
     waiting_for: str | None
     name: str | None
     updated_ms: int | None
+    profile: str | None = None
 
 
 @dataclass(frozen=True)
@@ -136,6 +153,7 @@ class SessionState:
     last_seq: int
     last_at: str
     hook_ms: int | None
+    profile: str | None = None
 
 
 def _text(value: object) -> bool:
@@ -245,8 +263,19 @@ def process_matches(pid: int, proc_start: str | None, pid_domain: str | None, *,
     return isinstance(proc_start, str) and proc_start == fields[19]
 
 
+def profile_name(config_dir: Path) -> str:
+    if config_dir.parent.name == "profiles":
+        return config_dir.name
+    return DEFAULT_PROFILE
+
+
+def profile_of(directory: Path) -> str:
+    return profile_name(directory.parent)
+
+
 def _observation(document: object,
-                 alive: Callable[[int, str | None, str | None], bool]) -> Observation | None:
+                 alive: Callable[[int, str | None, str | None], bool],
+                 profile: str | None = None) -> Observation | None:
     if not isinstance(document, dict):
         return None
     session_id, cwd, pid = document.get("sessionId"), document.get("cwd"), document.get("pid")
@@ -268,7 +297,7 @@ def _observation(document: object,
         return value if isinstance(value, str) else None
 
     return Observation(session_id, cwd, pid, optional("status"), optional("waitingFor"),
-                       optional("name"), updated if _integer(updated) else None)
+                       optional("name"), updated if _integer(updated) else None, profile)
 
 
 def read_session_registry(
@@ -277,6 +306,7 @@ def read_session_registry(
 ) -> dict[str, Observation]:
     result: dict[str, Observation] = {}
     for directory in directories:
+        profile = profile_of(Path(directory))
         try:
             names = sorted(Path(directory).glob("*.json"))
         except OSError:
@@ -286,7 +316,7 @@ def read_session_registry(
                 document = json.loads(path.read_text())
             except (OSError, ValueError):
                 continue
-            found = _observation(document, alive)
+            found = _observation(document, alive, profile)
             if found is not None and found.session_id not in result:
                 result[found.session_id] = found
     return result
@@ -347,7 +377,8 @@ def session_states(
                 hook_ms = known.hook_ms
             result[session_id] = SessionState(
                 session_id, payload["repo"], cwd, hook_transition(kind, payload, previous),
-                known.name if known else None, event.seq, event.at, hook_ms)
+                known.name if known else None, event.seq, event.at, hook_ms,
+                known.profile if known else None)
         elif event.kind == SEEN:
             cwd, state = payload.get("cwd"), payload.get("state")
             if not isinstance(cwd, str) or not _repo_member(payload) or state not in STATES:
@@ -355,9 +386,16 @@ def session_states(
             name = payload.get("name")
             if not isinstance(name, str):
                 name = known.name if known else None
+            profile = payload.get("profile")
+            if not isinstance(profile, str):
+                profile = known.profile if known else None
             result[session_id] = SessionState(
                 session_id, payload["repo"], cwd, state, name, event.seq, event.at,
-                known.hook_ms if known else None)
+                known.hook_ms if known else None, profile)
+        elif event.kind == PROFILE:
+            profile = payload.get("profile")
+            if known is not None and isinstance(profile, str):
+                result[session_id] = replace(known, profile=profile)
     return result
 
 
@@ -376,12 +414,16 @@ def poll_changes(
         name = obs.name if isinstance(obs.name, str) else known.name if known else None
         if isinstance(name, str):
             payload["name"] = name
+        if isinstance(obs.profile, str):
+            payload["profile"] = obs.profile
         changes.append((SEEN, project_of(repo), payload))
 
     for session_id in sorted(observations):
         obs = observations[session_id]
         known = states.get(session_id)
         reading = registry_state(obs)
+        if known is not None and isinstance(obs.profile, str) and obs.profile != known.profile:
+            changes.append((PROFILE, None, {"session_id": session_id, "profile": obs.profile}))
         if known is None:
             seen(obs, reading or IDLE, repo_of(obs.cwd), None)
         elif known.hook_ms is not None and (obs.updated_ms is None

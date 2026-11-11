@@ -1,6 +1,6 @@
 # ADR-hosts-001 — The cache proxy forwards bytes unchanged on loopback
 
-- **Status:** accepted
+- **Status:** accepted; amended by ADR-hosts-007
 - **Decided in:** #422
 
 ## Context

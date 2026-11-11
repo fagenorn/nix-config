@@ -18,7 +18,7 @@ A directory used as the Claude config directory for one account. The login is th
 _Avoid_: account
 
 **Cache proxy**:
-A loopback pass-through from Claude Code to the Anthropic API. It forwards requests unchanged and can keep idle conversations' caches warm or reorder a subagent's prefix.
+A loopback pass-through from Claude Code to the Anthropic API. It forwards requests unchanged and can keep idle conversations' caches warm, reorder a subagent's prefix or report limit readings to the console (ADR-hosts-007).
 _Avoid_: gateway, relay
 
 **Command table**:
@@ -31,6 +31,10 @@ _Avoid_: heartbeat
 **Launcher**:
 A small store-built executable on the path that runs one agent-tools command in the pinned Python environment.
 _Avoid_: wrapper
+
+**Limit sensing**:
+The cache proxy's off-by-default reading of each response's unified rate-limit headers and each request's account and session, reported to the console as a limit reading (ADR-hosts-007).
+_Avoid_: quota polling
 
 **Prefix reorder**:
 The cache proxy's rewrite of a subagent's first user message so that sibling subagents share one cacheable prefix. Every other request passes through untouched.

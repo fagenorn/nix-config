@@ -39,6 +39,8 @@ Wire format, one object:
 
     {"statement": {"inbox_items": <open items>, "headline": "<headline>",
                    "sentence": "<sentence>", "stale": <bool>},
+     "capacity": {"tight": <bool>, "all_out": <bool>, "resumes_at": <ISO time> | null,
+                  "profiles": [<profile capacity>, ...]},
      "inbox": {"open": [<inbox item>, ...], "answered": [<inbox item>, ...]},
      "project_count": <int>,
      "entries": [<project entry> | <group entry>, ...],
@@ -51,9 +53,13 @@ Wire format, one object:
 null when `derive_view` is given none.
 
 The headline is "1 thing needs you" or "<n> things need you" for open items, else
-`STALE_HEADLINE` when a registered project's tracker cannot be read, else "Nothing needs
-you". The sentence is `STALE_SENTENCE` naming those projects when any is stale, else
-`NEEDS_SENTENCE` when something is open, else the registered-project count. `stale` is true
+`ALL_OUT_HEADLINE` when every profile is out of usage, else `STALE_HEADLINE` when a registered
+project's tracker cannot be read, else "Nothing needs you". The sentence is `ALL_OUT_SENTENCE`
+when every profile is out of usage, else `STALE_SENTENCE` naming those projects when any is
+stale, else `NEEDS_SENTENCE` when something is open, else the registered-project count. The
+all-out promotion never changes `inbox_items`, and the statement keeps exactly its four keys.
+`capacity` is the `capacity_view` the caller passes (`capacity.py` defines its members), else the
+empty capacity, the same bytes as `capacity_view` over no profile. `stale` is true
 when any registered project's last read failed. An inbox item is the stored item plus
 `{"type": "inbox_item", "waiting_since", "stale", "read_at"}`: `stale` is that project's
 failed read, `read_at` the time of its last good read (the item's last update when the read
@@ -99,6 +105,7 @@ import json
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 
+from agent_tools.console.capacity import EMPTY
 from agent_tools.console.deliveries import DeliveryState, moved_text, stage_text
 from agent_tools.console.event_log import Event
 from agent_tools.console.sessions import (
@@ -129,6 +136,8 @@ _SUMMARY_PARTS = (
     ("idle", (IDLE,)),
 )
 STALE_HEADLINE = "The tracker cannot be read"
+ALL_OUT_HEADLINE = "Every profile is out of usage"
+ALL_OUT_SENTENCE = "Everything resumes at the earliest reset; nothing is asked of you."
 NEEDS_SENTENCE = "Each one links to the tracker, where it is answered."
 STALE_SENTENCE = ("The tracker could not be read for {projects}; "
                   "each item shows when it was last read.")
@@ -364,11 +373,13 @@ def _inbox_entry(record: InboxRecord,
             "stale": stale, "read_at": read_at}
 
 
-def _headline(open_count: int, stale: bool) -> str:
+def _headline(open_count: int, stale: bool, all_out: bool) -> str:
     if open_count == 1:
         return "1 thing needs you"
     if open_count > 1:
         return f"{open_count} things need you"
+    if all_out:
+        return ALL_OUT_HEADLINE
     return STALE_HEADLINE if stale else HEADLINE
 
 
@@ -377,11 +388,13 @@ def derive_view(
     records: Mapping[tuple[str, str], InboxRecord] | None = None,
     health: Mapping[str, ReadState] | None = None,
     sessions: Iterable[SessionState] = (),
+    capacity: Mapping | None = None,
     digest: Mapping | None = None,
     deliveries: Mapping[tuple[str, str], DeliveryState] | None = None,
     now_ms: int | None = None,
 ) -> dict:
     states = list(states)
+    capacity = EMPTY if capacity is None else capacity
     registered = {s.project_id for s in states}
     health = health or {}
     shown = [r for r in (records or {}).values()
@@ -395,7 +408,10 @@ def derive_view(
         key=lambda r: (r.waiting_since, r.item["key"], r.item["project_id"]))
     stale_projects = sorted(
         p for p in registered if p in health and not health[p].ok)
-    if stale_projects:
+    all_out = bool(capacity["all_out"])
+    if all_out:
+        sentence = ALL_OUT_SENTENCE
+    elif stale_projects:
         sentence = STALE_SENTENCE.format(projects=", ".join(stale_projects))
     elif open_items:
         sentence = NEEDS_SENTENCE
@@ -436,8 +452,9 @@ def derive_view(
     return {
         "statement": {"inbox_items": len(open_items),
                       "headline": _headline(len(open_items),
-                                            bool(stale_projects)),
+                                            bool(stale_projects), all_out),
                       "sentence": sentence, "stale": bool(stale_projects)},
+        "capacity": capacity,
         "inbox": {"open": [_inbox_entry(r, health) for r in open_items],
                   "answered": [_inbox_entry(r, health) for r in answered]},
         "project_count": len(states),
