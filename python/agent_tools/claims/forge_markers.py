@@ -373,17 +373,19 @@ def closed_pulls_headed(slug: str, branch: str, sha: str) -> list[Pull]:
     return found
 
 
-def closed_pulls_from(slug: str, branch: str, sha: str) -> list[Pull]:
-    """The closed pull requests whose head is `branch` of this repository at `sha`, whatever their base.
+def pulls_from(slug: str, branch: str, sha: str) -> list[Pull]:
+    """The pull requests, open or closed, whose head is `branch` of this repository at `sha`,
+    whatever their base.
 
-    One page: the 100 most recently updated closed pull requests headed by `branch`. The `head`
-    filter names the owner, and `same_repo` drops a same-owner fork's branch of that name.
+    One page: the 100 most recently updated pull requests headed by `branch`. Open ones are
+    included because the commit lookup can leave an open pull request out. The `head` filter
+    names the owner, and `same_repo` drops a same-owner fork's branch of that name.
     """
     owner = slug.split("/", 1)[0]
-    payload = forge_api.gh_json(["api", f"repos/{slug}/pulls?state=closed&head={quote(owner, safe='')}:"
+    payload = forge_api.gh_json(["api", f"repos/{slug}/pulls?state=all&head={quote(owner, safe='')}:"
                                  f"{quote(branch, safe='/')}&sort=updated&direction=desc&per_page=100"])
     if not isinstance(payload, list):
-        raise ForgeError("payload_invalid", "closed pulls are not an array")
+        raise ForgeError("payload_invalid", "branch pulls are not an array")
     return [pull for pull in map(_pull, payload)
             if pull.head_sha == sha and pull.head_ref == branch and pull.same_repo]
 

@@ -382,19 +382,20 @@ class RefTest(unittest.TestCase):
             self.world.respond_json("gh", ["api", f"repos/{SLUG}/commits/{OID_A}/pulls?per_page=100"], [entry])
             self.assertEqual([p.same_repo for p in fm.commit_pulls(SLUG, OID_A)], [expected])
 
-    def test_closed_pulls_from_keeps_this_repositorys_branch_at_the_sha(self):
+    def test_pulls_from_keeps_this_repositorys_branch_at_the_sha(self):
         owner = SLUG.split("/")[0]
 
-        def item(number, sha, ref="dev", repo=SLUG):
-            return {"number": number, "state": "closed", "merged_at": None,
+        def item(number, sha, ref="dev", repo=SLUG, state="closed"):
+            return {"number": number, "state": state, "merged_at": None,
                     "base": {"ref": "main", "repo": {"full_name": SLUG}},
                     "head": {"ref": ref, "sha": sha, "repo": {"full_name": repo}}}
-        self.world.respond_json("gh", ["api", f"repos/{SLUG}/pulls?state=closed&head={owner}:dev&sort=updated"
+        self.world.respond_json("gh", ["api", f"repos/{SLUG}/pulls?state=all&head={owner}:dev&sort=updated"
                                        "&direction=desc&per_page=100"],
                                 [item(20, OID_A), item(21, OID_B), item(22, OID_A, repo=f"{owner}/fork"),
-                                 item(23, OID_A, ref="devel")])
-        self.assertEqual(fm.closed_pulls_from(SLUG, "dev", OID_A),
-                         [fm.Pull(20, "closed", False, "main", "dev", OID_A, True)])
+                                 item(23, OID_A, ref="devel"), item(24, OID_A, state="open")])
+        self.assertEqual(fm.pulls_from(SLUG, "dev", OID_A),
+                         [fm.Pull(20, "closed", False, "main", "dev", OID_A, True),
+                          fm.Pull(24, "open", False, "main", "dev", OID_A, True)])
 
     def test_default_branch(self):
         argv = ["api", f"repos/{SLUG}", "--jq", ".default_branch"]

@@ -22,7 +22,7 @@ A, B, C, D = "a" * 40, "b" * 40, "c" * 40, "d" * 40
 OTHER = "eleven-m5/session-b"
 T0 = "2026-11-06T10:00:00Z"
 DEFAULT = "stable"  # the repository's default branch; BRANCH is the locked integration branch
-CLOSED_FROM = ["api", f"repos/{SLUG}/pulls?state=closed&head={OWNER}:{BRANCH}&sort=updated&direction=desc&per_page=100"]
+FROM_BRANCH = ["api", f"repos/{SLUG}/pulls?state=all&head={OWNER}:{BRANCH}&sort=updated&direction=desc&per_page=100"]
 DEFAULT_READ = ["api", f"repos/{SLUG}", "--jq", ".default_branch"]
 
 
@@ -73,14 +73,14 @@ class Base(unittest.TestCase):
 
     def lock(self, sha=None, **kwargs):
         self.world.ref_store(SLUG, {REF: sha} if sha else {}, **kwargs)
-        self.closed = []
+        self.closed, self.from_branch = [], {}
         self.respond_closed()
 
     def respond_closed(self):
         self.world.respond_json("gh", [
             "api", f"repos/{SLUG}/pulls?state=closed&base={BRANCH}&sort=updated&direction=desc&per_page=100&page=1"],
-            [p for p in self.closed if p["head"]["ref"] != BRANCH])
-        self.world.respond_json("gh", CLOSED_FROM, [p for p in self.closed if p["head"]["ref"] == BRANCH])
+            [p for p in self.closed if p["head"]["ref"] != BRANCH])  # no lander is headed by BRANCH
+        self.world.respond_json("gh", FROM_BRANCH, list(self.from_branch.values()))
 
     def pulls(self, sha, *prs, by_commit=False):
         """Register the forge's answers for `sha` the way GitHub gives them: the commit lookup lists
@@ -89,6 +89,8 @@ class Base(unittest.TestCase):
         self.world.respond_json("gh", ["api", f"repos/{SLUG}/commits/{sha}/pulls?per_page=100"],
                                 [p for p in prs if by_commit or p["state"] == "open"])
         self.closed = [p for p in self.closed if p not in prs] + [p for p in prs if p["state"] != "open"]
+        self.from_branch.update({p["number"]: p for p in prs if p["head"]["ref"] == BRANCH
+                                 and (p["head"].get("repo") or {}).get("full_name") == SLUG})
         self.respond_closed()
         for p in prs:
             self.closing(p["number"])
@@ -611,7 +613,8 @@ class DocstringTest(unittest.TestCase):
                        "A release pull request (issue 875) is one whose head is the locked branch itself",
                        "A fork's branch of the same name is never counted",
                        "A published (merged) or closed release pull request is stale the same way",
-                       "The lock of a release pull request never moves",
+                       "one the lookup left out, open or closed, is found in",
+                       "whatever its head, never answers `moved`",
                        "with the repository's default branch as its base"):
             self.assertIn(phrase, doc)
 
@@ -713,7 +716,48 @@ class ReleaseHolderTest(Base):
         code, out = run(*land("acquire", B))
         self.assertEqual((code, out["verdict"], out["took_over"]), (0, "acquired", "closed"))
 
-    def test_a_release_whose_head_moved_never_moves_the_lock(self):
+    def test_a_live_release_the_commit_lookup_leaves_out_still_holds(self):
+        """A is the merge commit of merged lander 9, which the lookup lists; it misses release 20."""
+        self.lock(A)
+        self.pulls(B, pull(11, sha=B))
+        self.pulls(A, pull(9, state="closed", merged=True, sha=D), by_commit=True)
+        self.from_branch[20] = release_pull(20)
+        self.respond_closed()
+        self.closing(20)
+        code, out = run(*land("status", B))
+        self.assertEqual((code, out["verdict"], out["pr"]), (0, "held_by", 20))
+        code, out = run(*land("acquire", B))
+        self.assertEqual((code, out["verdict"], out["pr"]), (3, "held_by", 20))
+        self.assertEqual(self.cas_calls(), [])
+        self.assertEqual(self.world.refs(), {REF: A})
+
+    def test_a_lander_never_moves_a_lock_the_release_moved_past(self):
+        """Lock A, release 20 now at C, lander 11 the only open lander containing A: never `moved`,
+        which would let 11 merge without a resync although the branch moved."""
+        self.lock(A)
+        self.pulls(B, pull(11, sha=B))
+        self.pulls(A, release_pull(20, sha=C), pull(11, sha=B))
+        code, out = run(*land("acquire", B))
+        self.assertEqual((code, out["verdict"], out["lock_sha"]), (3, "held_by", A))
+        self.assertEqual(self.cas_calls(), [])
+        self.world.reset()
+        self.lock(A)
+        self.pulls(B, pull(11, sha=B))
+        self.pulls(A, release_pull(20, state="closed", merged=True, sha=C), pull(11, sha=B), by_commit=True)
+        code, out = run(*land("acquire", B))
+        self.assertEqual((code, out["verdict"], out["took_over"]), (0, "acquired", "closed"))
+        self.assertEqual(self.world.refs(), {REF: B})
+
+    def test_a_release_alone_past_its_lock_takes_it_again_as_acquired(self):
+        self.lock(A)
+        self.default_branch()
+        self.pulls(B, release_pull(20, sha=B))
+        self.pulls(A, release_pull(20, sha=B))
+        code, out = run(*land("acquire", B, "--release"))
+        self.assertEqual((code, out["verdict"], out["took_over"], out["pr"]), (0, "acquired", "closed", 20))
+        self.assertEqual(self.world.refs(), {REF: B})
+
+    def test_a_release_whose_head_moved_does_not_move_a_lock_a_lander_contains(self):
         """The branch advanced from A to B under the release: its lock stays at A until it releases."""
         self.lock(A)
         self.default_branch()
@@ -750,13 +794,13 @@ class ReleaseHolderTest(Base):
         self.pulls(A, pull(11, sha=A))
         self.pulls(B, pull(12, state="closed", merged=True, sha=B))
         run(*land("acquire", A))
-        self.assertEqual(self.reads(CLOSED_FROM), [])
+        self.assertEqual(self.reads(FROM_BRANCH), [])
         self.world.reset()
         self.lock(B)
         self.pulls(A, pull(11, sha=A))
         self.pulls(B)
         run(*land("acquire", A))
-        self.assertEqual(len(self.reads(CLOSED_FROM)), 1)
+        self.assertEqual(len(self.reads(FROM_BRANCH)), 1)
 
     def test_classification_of_a_release_lock(self):
         release = lambda state="open", sha=A, same=True: fm.Pull(20, state, state == "closed", DEFAULT, BRANCH, sha, same)
@@ -766,7 +810,9 @@ class ReleaseHolderTest(Base):
                 ([release("closed"), lander], (), ("closed", 20)),
                 ([release("closed", same=False), lander], {11}, ("move", 11)),
                 ([lander], {11}, ("move", 11)),
-                ([release()], {20}, ("move", 20)))
+                ([release(sha=C), lander], {11}, ("held", 11)),
+                ([release("closed", sha=C), lander], {11}, ("closed", 20)),
+                ([release(sha=C)], {20}, ("closed", 20)))
         for theirs, mine, expected in rows:
             with self.subTest(theirs=theirs, mine=mine):
                 self.assertEqual(land_lock._kind(A, theirs, mine, BRANCH), expected)

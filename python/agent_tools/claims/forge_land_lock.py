@@ -22,9 +22,10 @@ that merely contains the lock's sha (a branch stacked on the holder) never holds
 A release pull request (issue 875) is one whose head is the locked branch itself, in the same
 repository, at the lock: `_on_branch` counts it whatever its base, so every caller derives it as
 the holder with no flag. The commit lookup lists it while it is open; when neither listing above
-has a pull request headed at the lock, a closed one is found in `GET
-pulls?state=closed&head=<owner>:<branch>&sort=updated` (one page of 100). A fork's branch of the
-same name is never counted.
+has a pull request headed at the lock, one the lookup left out, open or closed, is found in `GET
+pulls?state=all&head=<owner>:<branch>&sort=updated` (one page of 100), so a live release lock is
+never judged by the merged pull requests that contain it. A fork's branch of the same name is
+never counted.
 
 D3, staleness follows the owner's option-B decision on issue 629
 (https://github.com/fagenorn/nix-config/issues/629#issuecomment-6693579241): no wall clock and no
@@ -43,10 +44,12 @@ the holder resyncs first.
 
 D5, a lock moves to the caller's new head (verdict `moved`: the lock sat at an earlier head of the
 same pull request) only when every open pull request containing it is the caller's; a branch
-merely stacked on the holder's head never moves it. The lock of a release pull request never
-moves: an open one is `held`, a merged or closed one is `closed` even when the caller's pull
-request is the only open one containing it, and a release whose head moved releases its old lock
-and acquires again.
+merely stacked on the holder's head never moves it. A lock that a pull request headed by the
+locked branch contains, in the same repository and whatever its head, never answers `moved`: the
+branch itself has reached that sha, so where this rule would move the lock it is taken over as
+`closed` instead and the caller, answered `acquired`, resyncs. That covers a published release
+whose lock the caller's pull request alone still contains, and a release whose head moved past
+its lock, which releases the old lock and acquires again.
 
 D6, `acquire` needs an open pull request whose head is the caller's sha with the branch as its
 base before any ref write, and otherwise answers `error` with `no_open_pr` (exit 2). `--wait`
@@ -170,29 +173,35 @@ def _releases(pull: fm.Pull, branch: str, sha: str) -> bool:
     return pull.same_repo and pull.head_ref == branch and pull.head_sha == sha
 
 
+def _from_branch(pull: fm.Pull, branch: str) -> bool:
+    """`pull` is headed by `branch` itself, in the same repository, whatever its head sha."""
+    return pull.same_repo and pull.head_ref == branch
+
+
 def _on_branch(slug: str, sha: str, branch: str) -> list[fm.Pull]:
-    """The pull requests on `branch` that contain `sha`, the release pull requests of `branch`
-    headed at it (D2), plus the closed ones headed at it.
+    """The pull requests that contain `sha` and are on `branch` or headed by `branch` (D2, D5),
+    plus the ones headed at it that the commit lookup did not list.
 
     The forge's commit lookup returns only open pull requests for a commit outside the default
     branch, so a squash-merged, rebase-merged or closed holder is found by its head sha instead,
     and only when no pull request already has that head: first among the closed pull requests on
-    `branch`, then, when none is found there, among the closed release pull requests.
+    `branch`, then, when none is found there, among the pull requests headed by `branch`, open
+    ones included, because the lookup can leave an open release pull request out.
     """
-    pulls = [p for p in fm.commit_pulls(slug, sha) if p.base_ref == branch or _releases(p, branch, sha)]
+    pulls = [p for p in fm.commit_pulls(slug, sha) if p.base_ref == branch or _from_branch(p, branch)]
     if not any(p.head_sha == sha for p in pulls):
         known = {p.number for p in pulls}
         closed = [p for p in fm.closed_pulls_headed(slug, branch, sha) if p.number not in known]
-        pulls += closed or [p for p in fm.closed_pulls_from(slug, branch, sha) if p.number not in known]
+        pulls += closed or [p for p in fm.pulls_from(slug, branch, sha) if p.number not in known]
     return pulls
 
 
 def _kind(lock: str, theirs: list[fm.Pull], mine: Collection[int], branch: str) -> tuple[str, int | None]:
-    """`classify`, except that the lock of a release pull request never moves (D5)."""
+    """`classify`, except that a lock contained in a pull request headed by `branch` never moves (D5)."""
     kind, pr = classify(lock, theirs, mine)
-    released = [p.number for p in theirs if _releases(p, branch, lock) and p.number not in mine]
-    if kind == "move" and released:
-        return "closed", max(released)
+    reached = [p.number for p in theirs if _from_branch(p, branch)]
+    if kind == "move" and reached:
+        return "closed", max(reached)
     return kind, pr
 
 
