@@ -163,7 +163,8 @@ class ShipReleaseContractsTest(unittest.TestCase):
     def test_a_two_branch_release_holds_the_land_lock_from_before_the_first_preview(self):
         """Issue 875, ADR-release-011: Phase 3 acquires with a wait before the first preview and
         after the release PR is opened, keeps the lock across the confirmation stop and
-        releases it on every other stop; Phase 4 acquires again on a lock refusal. Both forms
+        releases it on every other stop; under the lock the one CI wait is bounded at 30
+        minutes instead of 5; Phase 4 acquires again on a lock refusal. Both forms
         parse against the live `forge-claim` parser."""
         from agent_tools.claims import forge_claim
         phase3 = self.skill.split("## Phase 3", 1)[1].split("\n## ", 1)[0]
@@ -175,9 +176,11 @@ class ShipReleaseContractsTest(unittest.TestCase):
                      "release PR, run alone (60-minute timeout) " + acquire,
                      "in resume form, `<commit>` the release's `commit`",
                      "`no_open_pr` goes on to the preview",
-                     "Waiting for the confirmation keeps the lock and the run releases it; every "
-                     "other stop, a declined confirmation included, first runs " + release,
-                     "`release_pr_missing`"):
+                     "The confirmation stop keeps the lock and the run releases it; every "
+                     "other stop, a declined confirmation too, first runs " + release,
+                     "`release_pr_missing`",
+                     "one foreground call of at most 5 minutes, 30 under the lock.",
+                     "Still pending, or another refusal: report it and stop."):
             with self.subTest(form=form):
                 found = phase3.find(form, at)
                 self.assertGreaterEqual(found, 0, f"{form} missing or out of order")

@@ -615,7 +615,8 @@ class DocstringTest(unittest.TestCase):
                        "A published (merged) or closed release pull request is stale the same way",
                        "one the lookup left out, open or closed, is found in",
                        "whatever its head, never answers `moved`",
-                       "with the repository's default branch as its base"):
+                       "with the repository's default branch as its base",
+                       "A release holder merges only on `already_held` (ADR-claims-009)"):
             self.assertIn(phrase, doc)
 
 
