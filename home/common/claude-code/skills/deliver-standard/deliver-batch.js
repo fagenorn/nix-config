@@ -1,7 +1,7 @@
 export const meta = {
   name: 'deliver-batch',
   description: 'Deliver a batch of tracker issues in one repository: intake, just-in-time claims, deliver-standard children (a standard-lane issue planned ahead in plan mode, then resumed in ready mode), a serial land queue under the cross-host land lock, one table',
-  whenToUse: 'A batch of issues of one repository the user asked to deliver together; args {repo_root, batch_id (<host>-<yyyymmdd-hhmm>), child_script (the absolute path of deliver-standard.js), issues (numbers) or label (every open issue carrying it), decisions? (owner answers by issue), conts? (a previous run forwarded child continuations), unattended? (true only for a run no session watches: its questions are then posted as box prompts), review_sizing? (true passes review_sizing to every deliver-standard child: sized Claude plan and final reviews), clerk_model? (sonnet, the default, or haiku: the model of every clerk step, here and in every deliver-standard child)}; returns one table and, when any issue is unfinished, the relaunch args for a new run',
+  whenToUse: 'A batch of issues of one repository the user asked to deliver together; args {repo_root, batch_id (<host>-<yyyymmdd-hhmm>), child_script (the absolute path of deliver-standard.js), issues (numbers) or label (every open issue carrying it), decisions? (owner answers by issue), conts? (a previous run forwarded child continuations), amend? ({"<issue>": a list of {file, find, replace} edits of that issue\'s plan files, only for an issue in conts: sent with its cont to the first child call of the run, and kept in the relaunch with that cont}), unattended? (true only for a run no session watches: its questions are then posted as box prompts), review_sizing? (true passes review_sizing to every deliver-standard child: sized Claude plan and final reviews), clerk_model? (sonnet, the default, or haiku: the model of every clerk step, here and in every deliver-standard child)}; returns one table and, when any issue is unfinished, the relaunch args for a new run',
   phases: [
     { title: 'Setup', detail: 'resolve the project contract once' },
     { title: 'Intake', detail: 'read every issue\'s facts and lane behind one barrier, decide eligibility in code' },
@@ -17,7 +17,8 @@ export const meta = {
 // decisions ({"<issue>": owner answer}), conts ({"<issue>": a previous run's forwarded child
 // continuation}, only for listed issues, D9), unattended (boolean, default false: true only for a run
 // no session watches, D12), review_sizing (boolean, default off: passed to every child and kept in the relaunch, #747), clerk_model (sonnet, the default, or haiku: the model of every clerk call;
-// passed to every child and kept in the relaunch when haiku, #803).
+// passed to every child and kept in the relaunch when haiku, #803), amend ({"<issue>": a non-empty list of {file, find, replace} edits of
+// that issue's plan files}, only for an issue in conts, #811: sent with its cont to the first child call of the run, kept in the relaunch with that cont).
 // Result: { stage: args|setup|done|breaker, batch_id, table, questions, owner_actions, relaunch }.
 // An already-fixed row is final and reported in owner_actions with its commit; the batch closes nothing.
 // A closed issue whose claim this batch holds is released (at intake, or by the settle step after a stop with a cont
@@ -77,11 +78,24 @@ if (args.conts !== undefined) {
     if (!args.issues.some(i => String(i) === k)) return bad(`conts.${k} is not one of issues`)
   }
 }
+if (args.amend !== undefined) {
+  if (!isObj(args.amend)) return bad('amend must be an object')
+  if (!args.conts) return bad('amend requires conts')
+  const nonEmpty = v => typeof v === 'string' && v.length > 0
+  for (const [k, v] of Object.entries(args.amend)) {
+    if (!Object.prototype.hasOwnProperty.call(args.conts, k)) return bad(`amend.${k} has no cont in conts`)
+    if (!Array.isArray(v) || !v.length || !v.every(e => isObj(e) && nonEmpty(e.file) && nonEmpty(e.find) && typeof e.replace === 'string')) {
+      return bad(`amend.${k} must be a non-empty list of {file, find, replace}: file and find non-empty strings, replace a string`)
+    }
+  }
+}
 const DECISIONS = args.decisions
 const UNATTENDED = args.unattended === true
 const REVIEW_SIZING = args.review_sizing === true
 const CLERK_MODEL = args.clerk_model === undefined ? 'sonnet' : args.clerk_model
 const CONTS = args.conts || {}
+const AMEND = args.amend || {}
+const AMEND_SENT = new Set() // #811: an issue's amend reaches at most one child call of a run
 
 const BASE_RULES = `
 Hard rules for this step (they override anything else you remember):
@@ -378,6 +392,10 @@ const childArgs = (n, lane, mode) => {
   const a = { repo_root: REPO, issue: n, batch_id: BATCH, mode }
   if (CONTS[n]) a.cont = CONTS[n]
   else a.lane = lane
+  if (CONTS[n] && AMEND[String(n)] && !AMEND_SENT.has(String(n))) {
+    a.amend = AMEND[String(n)]
+    AMEND_SENT.add(String(n))
+  }
   const answer = answerOf(n)
   if (answer !== null) a.decisions = answer
   if (REVIEW_SIZING) a.review_sizing = true
@@ -987,6 +1005,9 @@ const relaunchArgs = () => {
   const conts = {}
   for (const n of open) if (CONTS[n]) conts[n] = CONTS[n]
   if (Object.keys(conts).length) a.conts = conts
+  const amend = {}
+  for (const n of open) if (conts[n] && AMEND[String(n)]) amend[n] = AMEND[String(n)]
+  if (Object.keys(amend).length) a.amend = amend
   if (UNATTENDED) a.unattended = true
   if (REVIEW_SIZING) a.review_sizing = true
   if (CLERK_MODEL !== 'sonnet') a.clerk_model = CLERK_MODEL
