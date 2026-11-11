@@ -339,7 +339,7 @@ class ResultValidatorTest(unittest.TestCase):
 
 class SpellingFixtureTest(unittest.TestCase):
     def test_rows_are_closed_and_tokenize_to_their_argv(self):
-        for row in FIXTURE["rows"]:
+        for row in FIXTURE["rows"] + FIXTURE["sync"]["rows"]:
             with self.subTest(row=row["id"]):
                 self.assertEqual(sorted(row), ["argv", "id", "kind", "operation", "raw"])
                 self.assertEqual(shlex.split(row["raw"]), row["argv"])
@@ -778,6 +778,194 @@ class MergedTagTest(InvokeCase):
         result = self.invoke("tag", candidate=MERGE_CANDIDATE)
         self.assertEqual((result["result"], result["error_class"]), ("rejected", "provider_unavailable"))
         self.assertEqual(self.mutations(), [])
+
+
+SYNC = FIXTURE["sync"]["canonical"]
+SYNC_ROWS = forge_world.SYNC_ROWS
+SYNC_PARAMETERS = {"target": TARGET, "candidate": MERGE_CANDIDATE, "integration": SYNC["integration"]}
+
+
+class SyncCase(InvokeCase):
+    """Issue 845: the two post-release sync operations, over a merged release pull request."""
+
+    def setUp(self):
+        super().setUp()
+        self.ready()
+
+    def ready(self, state="MERGED", **sync):
+        self.world.reset()
+        self.world.invoke_ready()
+        MergedTagTest.landed(self, state)
+        self.world.sync_ready(**sync)
+
+    def observe(self, operation, **parameters):
+        return self.inspect({"kind": "effect", "operation": operation,
+                             "parameters": {**SYNC_PARAMETERS, **parameters}})
+
+    def sync(self, operation, **parameters):
+        result = forge_adapter.invoke({"kind": "effect", "operation": operation,
+                                       "parameters": {**SYNC_PARAMETERS, **parameters}})
+        self.assertEqual(release_adapter.invoke_result_problems(result), [])
+        return result
+
+    def git(self):
+        return [c["argv"] for c in self.world.calls() if c["tool"] == "git"]
+
+    def guards(self):
+        return [json.loads(c["stdin"])["tool_input"]["command"] for c in self.world.calls()
+                if c["tool"] == "claude-bash-lifecycle-guard"]
+
+    def creates(self):
+        return [c["argv"] for c in self.world.calls() if c["tool"] == "gh" and c["argv"][:2] == ["pr", "create"]]
+
+
+class SyncInspectTest(SyncCase):
+    def test_no_profile_can_bind_a_sync_operation(self):
+        """The descriptor, whose digest pins every profile, is unchanged by the sync."""
+        self.assertEqual(sorted(forge_adapter.describe()["operations"]), ["pr_merge", "release", "tag"])
+
+    def test_the_branch_is_absent_satisfied_or_elsewhere(self):
+        observation = self.observe("sync_branch")
+        self.assertEqual((observation["outcome"], observation["reason"]), ("absent", "branch_absent"))
+        self.assertEqual(self.world.argvs("gh"), [ROWS["pr_merge.view"]["argv"][1:],
+                                                  ROWS["pr_merge.merge_commit"]["argv"][1:],
+                                                  SYNC_ROWS["sync.contained"]["argv"][1:],
+                                                  SYNC_ROWS["sync_branch.ref"]["argv"][1:]])
+        self.ready(branch_tip=C["merge_commit"])
+        observation = self.observe("sync_branch")
+        self.assertEqual((observation["outcome"], observation["reason"], observation["observed_subject"]),
+                         ("satisfied", "observed", {"branch": SYNC["branch"], "commit": C["merge_commit"]}))
+        self.assertNotIn(SYNC_ROWS["sync_branch.compare"]["argv"][1:], self.world.argvs("gh"))
+        for compare, outcome, reason in (("ahead", "satisfied", "observed"),
+                                         ("diverged", "diverged", "branch_elsewhere"),
+                                         ("behind", "diverged", "branch_elsewhere")):
+            with self.subTest(compare=compare):
+                self.ready(branch_tip="7" * 40, branch_compare=compare)
+                observation = self.observe("sync_branch")
+                self.assertEqual((observation["outcome"], observation["reason"]), (outcome, reason))
+
+    def test_an_integration_branch_that_holds_the_merge_commit_is_a_no_op_for_both(self):
+        for contained in ("identical", "ahead"):
+            for operation in ("sync_branch", "sync_pr"):
+                with self.subTest(contained=contained, operation=operation):
+                    self.ready(contained=contained)
+                    observation = self.observe(operation)
+                    self.assertEqual((observation["outcome"], observation["reason"]),
+                                     ("satisfied", "already_contained"))
+                    self.assertEqual(self.world.argvs("gh")[-1], SYNC_ROWS["sync.contained"]["argv"][1:])
+
+    def test_one_open_or_merged_pull_request_satisfies(self):
+        pull = forge_world.sync_pull
+        merged = pull(state="closed", merged_at="2026-11-11T10:00:00Z")
+        closed = pull(number=300, state="closed")
+        for prs, outcome, reason, number in (
+                ([], "absent", "pr_absent", None), ([closed], "absent", "pr_absent", None),
+                ([pull()], "satisfied", "observed", SYNC["pr"]),
+                ([closed, merged], "satisfied", "observed", SYNC["pr"]),
+                ([pull(), pull(number=338)], "diverged", "pr_ambiguous", None)):
+            with self.subTest(prs=prs):
+                self.ready(branch_tip=C["merge_commit"], prs=prs)
+                observation = self.observe("sync_pr")
+                self.assertEqual((observation["outcome"], observation["reason"],
+                                  observation["observed_subject"]["pr"]), (outcome, reason, number))
+        self.ready(prs=[pull()])
+        self.assertEqual(self.observe("sync_pr")["references"],
+                         [forge_world.SYNC_URL, SYNC_ROWS["sync_pr.list"]["argv"][2]])
+
+    def test_a_release_pr_not_merged_as_bound_never_satisfies(self):
+        self.ready("OPEN", contained="identical")
+        for operation in ("sync_branch", "sync_pr"):
+            observation = self.observe(operation)
+            self.assertEqual((observation["outcome"], observation["reason"]),
+                             ("diverged", "release_not_merged"))
+
+    def test_an_unreadable_world_is_unknown_and_bad_parameters_make_no_call(self):
+        self.world.reset()
+        MergedTagTest.landed(self)
+        self.assertEqual(self.observe("sync_branch")["outcome"], "unknown")
+        self.assertEqual(self.observe("sync_pr")["outcome"], "unknown")
+        self.world.reset()
+        for parameters in ({"integration": C["branch"]}, {"integration": "a..b"}, {"integration": 7},
+                           {"candidate": CANDIDATE}):
+            for operation in ("sync_branch", "sync_pr"):
+                with self.subTest(parameters=parameters, operation=operation):
+                    observation = self.observe(operation, **parameters)
+                    self.assertEqual((observation["outcome"], observation["reason"]),
+                                     ("unknown", "parameters_invalid"))
+                    result = self.sync(operation, **parameters)
+                    self.assertEqual((result["result"], result["error_class"]), ("rejected", "invalid_input"))
+        missing = forge_adapter.inspect({"kind": "effect", "operation": "sync_pr",
+                                         "parameters": {"target": TARGET, "candidate": MERGE_CANDIDATE}})
+        self.assertEqual(missing["reason"], "parameters_invalid")
+        self.assertEqual(self.world.calls(), [])
+
+
+class SyncInvokeTest(SyncCase):
+    BRANCH = ["branch", "--no-track", SYNC["branch"], C["merge_commit"]]
+
+    def test_the_branch_is_created_at_the_merge_commit_and_pushed_through_the_guard(self):
+        self.assertEqual(self.sync("sync_branch"), {"result": "accepted", "error_class": None,
+                                                    "reference": f"refs/heads/{SYNC['branch']}"})
+        git = self.git()
+        fetch = ["fetch", "--no-tags", "origin", "refs/heads/main"]
+        push = SYNC_ROWS["sync_branch.push"]["argv"][1:]
+        self.assertLess(git.index(fetch), git.index(self.BRANCH))
+        self.assertLess(git.index(self.BRANCH), git.index(push))
+        self.assertEqual(self.guards(), [SYNC_ROWS["sync_branch.push"]["raw"]])
+        self.assertEqual(self.world.calls()[-1]["argv"], push)
+        self.assertFalse(any(c["token_visible"] for c in self.world.calls()))
+
+    def test_a_local_branch_left_by_an_earlier_attempt_is_reused_or_refused(self):
+        self.ready(local_branch=C["merge_commit"])
+        self.assertEqual(self.sync("sync_branch")["result"], "accepted")
+        self.assertNotIn(self.BRANCH, self.git())
+        self.assertEqual(len(self.mutations()), 1)
+        self.ready(local_branch="7" * 40)
+        self.assertEqual(self.sync("sync_branch"), {
+            "result": "rejected", "error_class": "precondition_failed",
+            "reference": f"local branch {SYNC['branch']} is not at {C['merge_commit']}"})
+        self.assertEqual((self.guards(), self.mutations()), ([], []))
+
+    def test_each_branch_refusal_stops_before_the_push(self):
+        for state, ready, error_class in (("OPEN", {}, "precondition_failed"),
+                                          ("MERGED", dict(branch_exit=1), "provider_unavailable")):
+            with self.subTest(state=state, ready=ready):
+                self.ready(state, **ready)
+                result = self.sync("sync_branch")
+                self.assertEqual((result["result"], result["error_class"]), ("rejected", error_class))
+                self.assertEqual((self.guards(), self.mutations()), ([], []))
+        self.world.reset()
+        self.world.invoke_ready(guard_exit=1)
+        MergedTagTest.landed(self)
+        self.world.sync_ready()
+        result = self.sync("sync_branch")
+        self.assertEqual((result["result"], result["error_class"]), ("rejected", "authorization_denied"))
+        self.assertEqual(self.mutations(), [])
+
+    def test_a_failed_push_or_create_is_unknown(self):
+        self.ready(push_exit=1, push_stderr="! [rejected] (non-fast-forward)")
+        result = self.sync("sync_branch")
+        self.assertEqual((result["result"], result["error_class"]), ("unknown", "transient_transport"))
+        self.ready(branch_tip=C["merge_commit"], create_exit=1, create_stdout="",
+                   create_stderr="a pull request for branch already exists")
+        result = self.sync("sync_pr")
+        self.assertEqual((result["result"], result["error_class"]), ("unknown", "transient_transport"))
+
+    def test_the_pull_request_is_opened_into_the_integration_branch_through_the_guard(self):
+        self.ready(branch_tip=C["merge_commit"])
+        self.assertEqual(self.sync("sync_pr"), {"result": "accepted", "error_class": None,
+                                                "reference": forge_world.SYNC_URL})
+        self.assertEqual(self.creates(), [SYNC_ROWS["sync_pr.create"]["argv"][1:]])
+        self.assertEqual(self.guards(), [SYNC_ROWS["sync_pr.create"]["raw"]])
+        self.assertEqual(self.mutations(), [])
+        self.assertFalse(any(argv[:2] == ["pr", "merge"] for argv in self.world.argvs("gh")))
+
+    def test_no_pull_request_is_opened_without_the_pushed_branch(self):
+        result = self.sync("sync_pr")
+        self.assertEqual(result, {"result": "rejected", "error_class": "precondition_failed",
+                                  "reference": "sync_branch_absent"})
+        self.assertEqual((self.guards(), self.creates()), ([], []))
+
 
 if __name__ == "__main__":
     unittest.main()

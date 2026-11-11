@@ -101,4 +101,4 @@ release transaction abandon --repo-root <main-checkout>
 
 ## Phase 5 — Report
 
-Render the report only from `release transaction status`, not memory or run output: `release.state`, `version`, `commit`, each action's `phase`, `status` and `reference`, and `receipt`. `succeeded` is released. A parked release (`attention_required`) is never reported released: give its `reason`, offer resume (Phase 3 resume form); offer `abandon` when no action took effect. Tags are never deleted; fix a bad release forward with a new version.
+Report only from `release transaction status` and the run's `sync`, not memory: `release.state`, `version`, `commit`, each action's `phase`, `status` and `reference`, and `receipt`. `succeeded` is released. A parked release (`attention_required`) is never reported released: give its `reason`, offer resume (Phase 3 resume form); offer `abandon` when no action took effect. Tags are never deleted; fix a bad release forward with a new version.

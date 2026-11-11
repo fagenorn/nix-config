@@ -143,9 +143,9 @@ class MergeObservationTest(unittest.TestCase):
                  (dict(prs=[{**entry, "head": {"sha": "9" * 40}}]), "release_pr_stale", 1),
                  (dict(prs=[{**entry, "number": True}]), "verification_unavailable", 1),
                  (dict(base_tip="5" * 39), "verification_unavailable", 2),
-                 (dict(compare="behind"), "release_pr_behind", 3),
-                 (dict(compare="diverged"), "release_pr_behind", 3),
-                 (dict(compare="identical"), "release_pr_behind", 3))
+                 (dict(compare="behind"), "release_pr_behind", 4),
+                 (dict(compare="diverged"), "release_pr_behind", 4),
+                 (dict(compare="identical"), "release_pr_behind", 4))
         for ready, code, reads in cases:
             with self.subTest(ready=ready):
                 self.world.reset()
@@ -161,3 +161,30 @@ class MergeObservationTest(unittest.TestCase):
         self.assertEqual(caught.exception.detail,
                          f"dev is diverged relative to main at {CANONICAL['base_tip']}: merge main "
                          "into dev, push, wait for CI and preview again")
+
+    def test_behind_names_the_open_sync_pull_request(self):
+        """Issue 845: the refusal says which pull request to merge when a sync is open."""
+        head = "sync-main-into-dev-after-v1.2.2"
+        listing = ["api", f"repos/{CANONICAL['slug']}/pulls?state=open&base=dev&per_page=100"]
+        own = {"full_name": CANONICAL["slug"]}
+        other = {"number": 12, "head": {"ref": "issue-12-topic", "repo": own}}
+        manual = "merge main into dev, push, wait for CI and preview again"
+        cases = (([other, {"number": 337, "head": {"ref": head, "repo": own}}],
+                  f"merge the open sync pull request 337 ({head}) into dev, wait for CI and preview again"),
+                 ([other], manual),
+                 # a fork's branch of the same name is not the release's sync
+                 ([{"number": 340, "head": {"ref": head, "repo": {"full_name": "stranger/nix-config"}}}], manual),
+                 ([{"number": 341, "head": {"ref": head, "repo": None}}], manual),
+                 ([{"number": 342, "head": {"ref": head}}], manual),
+                 ({"message": "not a list"}, "merge main into dev, push, wait for CI and preview again"))
+        for payload, repair in cases:
+            with self.subTest(payload=payload):
+                self.world.reset()
+                self.world.merge_observation_ready(compare="diverged")
+                self.world.respond_json("gh", listing, payload)
+                with self.assertRaises(verification.VerificationRefused) as caught:
+                    observe_merge()
+                self.assertEqual((caught.exception.code, caught.exception.detail), (
+                    "release_pr_behind",
+                    f"dev is diverged relative to main at {CANONICAL['base_tip']}: {repair}"))
+                self.assertEqual(self.world.calls()[-1]["argv"], listing)

@@ -36,6 +36,13 @@ merge step consumes the candidate's `merge`. It makes three reads under a deadli
    `release_pr_behind`, since the default branch has moved past what the pull request merges.
 
 It returns `{pr, base_tip}`. Every failed read is `verification_unavailable`, as for `observe`.
+
+A `release_pr_behind` refusal makes one more read, `repos/<repository>/pulls?state=open
+&base=<integration_branch>&per_page=100`, and names every open pull request whose head is a sync
+branch of this branch pair (`forge_adapter.SYNC_BRANCH`) in this repository itself
+(`head.repo.full_name`), never a fork's branch of that name, so the refusal says what to merge
+(issue 845). With none, or when that read fails, it says to merge the default branch into the
+integration branch, as before.
 """
 
 import json
@@ -47,6 +54,7 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from agent_tools.canonical import telemetry_digest
+from agent_tools.release import forge_adapter
 from agent_tools.release.transaction_history import format_at
 
 SCHEMA = "release-verification/v1"
@@ -200,6 +208,35 @@ def _release_pr(payload: Any, path: str, *, owner: str, integration_branch: str,
     return number
 
 
+def _behind_repair(repository: str, integration_branch: str, default_branch: str,
+                   deadline: float) -> str:
+    """What to do about a release PR that is behind: merge the open sync pull requests of this
+    branch pair when there are any, else merge the default branch by hand (issue 845)."""
+    prefix = forge_adapter.SYNC_BRANCH.format(default=default_branch,
+                                              integration=integration_branch, version="")
+    path = f"repos/{repository}/pulls?state=open&base={integration_branch}&per_page={PAGE_SIZE}"
+    try:
+        payload = _read(path, deadline)
+    except VerificationRefused:
+        payload = None
+    found = []
+    for entry in payload if isinstance(payload, list) else []:
+        head = entry.get("head") if isinstance(entry, dict) else None
+        ref = head.get("ref") if isinstance(head, dict) else None
+        source = head.get("repo") if isinstance(head, dict) else None
+        own = isinstance(source, dict) and source.get("full_name") == repository
+        number = entry.get("number") if isinstance(entry, dict) else None
+        if (own and isinstance(ref, str) and ref.startswith(prefix)
+                and forge_adapter.BRANCH.fullmatch(ref) is not None
+                and isinstance(number, int) and not isinstance(number, bool)):
+            found.append(f"{number} ({ref})")
+    if not found:
+        return (f"merge {default_branch} into {integration_branch}, push, wait for CI and "
+                "preview again")
+    return (f"merge the open sync pull request{'s' if len(found) > 1 else ''} "
+            f"{', '.join(found)} into {integration_branch}, wait for CI and preview again")
+
+
 def observe_merge(*, repository: str, integration_branch: str, default_branch: str,
                   commit: str) -> dict[str, Any]:
     """The open release pull request and the default tip it will merge onto, as
@@ -221,10 +258,10 @@ def observe_merge(*, repository: str, integration_branch: str, default_branch: s
     if not isinstance(status, str):
         raise _unavailable(compare_path, "the answer carries no status")
     if status != "ahead":
+        repair = _behind_repair(repository, integration_branch, default_branch, deadline)
         raise VerificationRefused(
             "release_pr_behind",
-            f"{integration_branch} is {status} relative to {default_branch} at {base_tip}: merge "
-            f"{default_branch} into {integration_branch}, push, wait for CI and preview again")
+            f"{integration_branch} is {status} relative to {default_branch} at {base_tip}: {repair}")
     return {"pr": pr, "base_tip": base_tip}
 
 
