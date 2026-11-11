@@ -15,7 +15,7 @@ export const meta = {
 // (the absolute path of deliver-standard.js: this program has no filesystem access, D8), issues
 // (positive integers, distinct) or label (every open issue carrying it; exactly one of the two),
 // decisions ({"<issue>": owner answer}), conts ({"<issue>": a previous run's forwarded child
-// continuation}, only for listed issues, D9), unattended (boolean, default false: true only for a run
+// continuation}, only for listed issues, D9; the relaunch keeps of each cont's setup only what a resume reads, see slimCont), unattended (boolean, default false: true only for a run
 // no session watches, D12), review_sizing (boolean, default off: passed to every child and kept in the relaunch, #747), clerk_model (sonnet, the default, or haiku: the model of every clerk call except the setup step and the steps that emit a lifecycle verb (land-pr, land-lock, land-merge, land-unlock), which stay on sonnet, #813;
 // passed to every child and kept in the relaunch when haiku, #803), amend ({"<issue>": a non-empty list of {file, find, replace} edits of
 // that issue's plan files}, only for an issue in conts, #811: sent with its cont to the first child call of the run, kept in the relaunch with that cont).
@@ -1380,6 +1380,18 @@ const table = ISSUES.map(n => rows[n] || { issue: n, outcome: 'stopped', detail:
 // A cycle only the owner can break: relaunching it returns the same blocked rows, so it is an owner action, not an open issue.
 const open = table.filter(r => !FINAL.includes(r.outcome) && !cycle.includes(r.issue)).map(r => r.issue)
 const rowOf = n => table.find(r => r.issue === n)
+// The lead copies the relaunch into the next run's args, so a forwarded cont carries only what a resume reads from it. A resumed child's setup
+// step reads every contract field fresh and takes from cont.setup only the members below (the claim holder, the delivery's location and
+// base, the plan directory, and details, the fresh setup's facts a resume that plans again still shows its planner); the rest of a setup
+// (verification, knowledge, review, review_state, unset_env and the other contract fields, the read facts) is dropped here. Every other
+// member of a cont is read by the child and stays as it came. A cont from before this rule is accepted whole, and slimming one twice changes nothing.
+const CONT_SETUP_KEPT = ['holder', 'branch', 'worktree', 'worktree_path', 'base_sha', 'plan_dir', 'details']
+const slimCont = c => {
+  if (!isObj(c) || !isObj(c.setup)) return c
+  const setup = {}
+  for (const k of Object.keys(c.setup)) if (CONT_SETUP_KEPT.includes(k)) setup[k] = c.setup[k]
+  return { ...c, setup }
+}
 const relaunchArgs = () => {
   const a = { repo_root: REPO, batch_id: BATCH, child_script: CHILD, issues: open }
   // An issue whose child asked again carries no answer at all: the old one answered the earlier questions, and the new prompt's own ticks are read by the child.
@@ -1387,7 +1399,7 @@ const relaunchArgs = () => {
   for (const n of open) if (rowOf(n).outcome === 'questions') delete decisions[String(n)]
   if (DECISIONS !== undefined || Object.keys(decisions).length) a.decisions = decisions
   const conts = {}
-  for (const n of open) if (CONTS[n]) conts[n] = CONTS[n]
+  for (const n of open) if (CONTS[n]) conts[n] = slimCont(CONTS[n])
   if (Object.keys(conts).length) a.conts = conts
   const amend = {}
   for (const n of open) if (conts[n] && AMEND[String(n)] && !(AMEND_APPLIED.has(String(n)) && !reviewOwed(conts[n]))) amend[n] = AMEND[String(n)]
