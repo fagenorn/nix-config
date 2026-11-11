@@ -16,10 +16,12 @@ import tempfile
 import threading
 import time
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import service, sessions
+from agent_tools.console import digest, service, sessions
+from agent_tools.console.event_log import EventLog
 from agent_tools.console.view import derive_view, encode_view, project_states
 
 from . import console_test_support as support
@@ -133,7 +135,7 @@ class Case(unittest.TestCase):
 class StateTest(Case):
     def test_the_state_endpoint_returns_the_registered_projects(self):
         items = support.entries(3)
-        svc = self.start(items)
+        svc = self.start(items, clock=lambda: 1_800_000_000.0)
         status, headers, body = support.request(svc.address, "GET", "/api/state")
         self.assertEqual(status, 200)
         self.assertEqual(headers["Content-Type"], "application/json")
@@ -142,7 +144,9 @@ class StateTest(Case):
             sorted(e["project_id"] for e in view["entries"] if e["type"] == "project"),
             sorted(e["project_id"] for e in items))
         self.assertEqual(
-            body, encode_view(derive_view(project_states(svc.log.events()).values())))
+            body, encode_view(derive_view(
+                project_states(svc.log.events()).values(),
+                digest=digest.digest([], None, datetime.fromtimestamp(1_800_000_000.0, timezone.utc)))))
         rows = support.log_rows(self.store)
         self.assertEqual([row[2] for row in rows], ["project.registered"] * 3)
 
@@ -612,6 +616,154 @@ class ReadFleetTest(Case):
         items = support.entries(2)
         support.write_registry(self.registry, items)
         self.assertEqual(self.read(), (items, ""))
+
+
+T0 = 1_767_225_600.0
+LONG_AGO = "2026-01-01T00:00:00.000000+00:00"
+
+
+def clocks(now):
+    """The service clock and the log clock, both reading the one-element list `now`."""
+    return {"clock": lambda: now[0],
+            "log_clock": lambda: datetime.fromtimestamp(now[0], timezone.utc).isoformat(
+                timespec="microseconds")}
+
+
+def look(svc):
+    return support.post_page(svc.address, "/api/looked", {
+        "Origin": f"http://127.0.0.1:{svc.address[1]}", "X-Console-Token": svc.page_token})
+
+
+def digest_of(svc):
+    return json.loads(svc.view_bytes)["digest"]
+
+
+def wait_until(condition):
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        if condition():
+            return True
+        time.sleep(0.02)
+    return condition()
+
+
+def append_old(store, kind):
+    log = EventLog(store, clock=lambda: LONG_AGO)
+    try:
+        log.append([(kind, None, {})])
+    finally:
+        log.close()
+
+
+class LastLookedTest(Case):
+    def test_the_last_look_is_returned_to_a_second_client(self):
+        svc = self.start(support.entries(1))
+        self.assertEqual(look(svc)[0], 204)
+        at = [row[1] for row in support.log_rows(self.store) if row[2] == "page.looked"][0]
+        _, _, body = support.request(svc.address, "GET", "/api/state")
+        self.assertEqual(json.loads(body)["digest"]["since"], at)
+        self.assertIs(json.loads(body)["digest"]["first_visit"], False)
+        svc.close()
+        second = support.service(self, self.store, self.registry)
+        self.assertEqual(digest_of(second)["since"], at)
+
+    def test_a_first_visit_shows_an_empty_eight_hour_digest(self):
+        svc = self.start(support.entries(1))
+        _, _, body = support.request(svc.address, "GET", "/api/state")
+        self.assertEqual(json.loads(body)["digest"], {
+            "since": None, "first_visit": True, "recent": [], "earlier": [], "omitted": 0})
+
+    def test_a_limit_stop_after_the_look_is_in_the_digest(self):
+        svc = self.start(support.entries(1), repo_of=lambda cwd: "/srv/p00")
+        self.assertEqual(look(svc)[0], 204)
+        svc.ingest_hook(support.hook_body("failed turn on a usage limit"))
+        recent = digest_of(svc)["recent"]
+        self.assertEqual([m["kind"] for m in recent], ["limit_stop"])
+        self.assertTrue(recent[0]["sentence"].endswith("stopped on a usage limit in owner/p00."),
+                        recent[0]["sentence"])
+
+    def test_the_clock_alone_keeps_the_view_bytes(self):
+        now = [T0]
+        svc = self.start(support.entries(1), digest_seconds=3600, **clocks(now))
+        view, version = svc.view_bytes, svc.version
+        now[0] = T0 + 3600
+        svc._publish()
+        self.assertEqual((svc.view_bytes, svc.version), (view, version))
+        svc.expire_digest()
+        self.assertEqual((svc.view_bytes, svc.version), (view, version))
+
+
+class DigestExpiryTest(Case):
+    def start_at(self, now, **kwargs):
+        return self.start(support.entries(1), repo_of=lambda cwd: "/srv/p00",
+                          **clocks(now), **kwargs)
+
+    def test_a_first_visit_moment_leaves_after_eight_hours_without_events(self):
+        now = [T0]
+        svc = self.start_at(now, digest_seconds=3600)
+        svc.ingest_hook(support.hook_body("failed turn on a usage limit"))
+        self.assertEqual([m["kind"] for m in digest_of(svc)["recent"]], ["limit_stop"])
+        version = svc.version
+        now[0] = T0 + 8 * 3600 + 1
+        svc.expire_digest()
+        self.assertEqual(digest_of(svc)["recent"], [])
+        self.assertIs(digest_of(svc)["first_visit"], True)
+        self.assertEqual(svc.version, version + 1)
+        _, _, body = support.request(svc.address, "GET", "/api/state")
+        self.assertEqual(body, svc.view_bytes)
+
+    def test_the_digest_thread_expires_moments(self):
+        now = [T0]
+        svc = self.start_at(now, digest_seconds=0.05)
+        svc.ingest_hook(support.hook_body("failed turn on a usage limit"))
+        self.assertEqual(len(digest_of(svc)["recent"]), 1)
+        now[0] = T0 + 8 * 3600 + 1
+
+        def emptied():
+            _, _, body = support.request(svc.address, "GET", "/api/state")
+            return json.loads(body)["digest"]["recent"] == []
+
+        self.assertTrue(wait_until(emptied))
+
+
+class RetentionServiceTest(Case):
+    def probes(self):
+        return [row for row in support.log_rows(self.store) if row[2] == "probe"]
+
+    def test_construction_removes_events_older_than_90_days(self):
+        append_old(self.store, "probe")
+        self.start()
+        self.assertEqual(self.probes(), [])
+
+    def test_the_retention_thread_runs_every_period(self):
+        self.start(retention_seconds=0.05)
+        append_old(self.store, "probe")
+        self.assertTrue(wait_until(lambda: not self.probes()))
+
+    def test_a_pass_that_removes_the_last_look_matches_a_restart(self):
+        now = [T0]
+        svc = self.start(support.entries(1), retention_seconds=86400, **clocks(now))
+        self.assertEqual(look(svc)[0], 204)
+        self.assertEqual(digest_of(svc)["since"], LONG_AGO)
+        now[0] = T0 + 91 * 86400
+        removed = svc.retain()
+        running = digest_of(svc)
+        svc.close()
+        second = support.service(self, self.store, self.registry, **clocks(now))
+        restarted = digest_of(second)
+        self.assertGreaterEqual(removed, 1)
+        self.assertEqual(running, restarted)
+        self.assertIsNone(running["since"])
+        self.assertIs(running["first_visit"], True)
+
+    def test_close_joins_the_background_threads(self):
+        svc = self.start()
+        names = {t.name for t in threading.enumerate()}
+        self.assertLessEqual({service.RETENTION_THREAD, service.DIGEST_THREAD}, names)
+        svc.close()
+        names = {t.name for t in threading.enumerate()}
+        self.assertNotIn(service.RETENTION_THREAD, names)
+        self.assertNotIn(service.DIGEST_THREAD, names)
 
 
 class BindTest(Case):

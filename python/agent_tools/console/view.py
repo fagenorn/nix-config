@@ -42,7 +42,13 @@ Wire format, one object:
      "inbox": {"open": [<inbox item>, ...], "answered": [<inbox item>, ...]},
      "project_count": <int>,
      "entries": [<project entry> | <group entry>, ...],
-     "unmanaged": [<unmanaged entry>, ...]}
+     "unmanaged": [<unmanaged entry>, ...],
+     "digest": <digest> | null}
+
+`digest` is what changed since the owner last looked (see `digest.py`):
+`{"since": <last look> | null, "first_visit": <bool>, "recent": [<moment>, ...],
+"earlier": [<moment>, ...], "omitted": <int>}` with a moment `{"at", "kind", "sentence"}`; it is
+null when `derive_view` is given none.
 
 The headline is "1 thing needs you" or "<n> things need you" for open items, else
 `STALE_HEADLINE` when a registered project's tracker cannot be read, else "Nothing needs
@@ -338,6 +344,7 @@ def derive_view(
     records: Mapping[tuple[str, str], InboxRecord] | None = None,
     health: Mapping[str, ReadState] | None = None,
     sessions: Iterable[SessionState] = (),
+    digest: Mapping | None = None,
 ) -> dict:
     states = list(states)
     registered = {s.project_id for s in states}
@@ -400,6 +407,7 @@ def derive_view(
             {"type": "unmanaged", "root": root, "label": UNMANAGED_LABEL,
              "outside_sprints": _line(unmanaged[root])}
             for root in sorted(unmanaged)],
+        "digest": dict(digest) if digest is not None else None,
     }
 
 

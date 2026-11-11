@@ -297,6 +297,13 @@ class SessionViewTest(unittest.TestCase):
         self.assertEqual(view["unmanaged"], [])
 
 
+class DigestViewTest(unittest.TestCase):
+    def test_the_view_carries_the_digest_it_is_given(self):
+        given = {"since": None, "first_visit": True, "recent": [], "earlier": [], "omitted": 0}
+        self.assertEqual(derive_view([], digest=given)["digest"], given)
+        self.assertIsNone(derive_view([])["digest"])
+
+
 class EncodeTest(unittest.TestCase):
     def test_the_view_encodes_as_compact_sorted_json(self):
         self.assertEqual(encode_view({"b": 1, "a": "é"}),

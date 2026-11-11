@@ -111,15 +111,32 @@ nothing. An exception escaping a poll is one stderr line
 `console: tracker_poll_failed <Type>: <message>` and the loop goes on. Without a tracker no
 thread starts and nothing is read.
 
+Retention (ADR-console-009): construction runs one retention pass (`EventLog.retain`) after
+opening the log and before reading its events, and `RETENTION_THREAD`, started by `start()`, calls
+`retain()` every `retention_seconds` (`RETENTION_SECONDS`, one day). A pass that removed rows
+re-derives the last look and the moments from the log under the ingest lock, with the construction
+code, and publishes, so the running digest equals the one a restart would publish. A failing pass
+is one stderr line `console: retention_failed <Type>: <message>` and the loop goes on.
+
+Digest: the view carries `digest.digest(moments, last look, now)` (see `digest.py`). The last look
+is the newest `page.looked` event of the log, the same for every client and across restarts; the
+moments are folded from each appended batch against the state before it, and only those after the
+current window start are kept. The window of a first visit moves with the clock, so
+`DIGEST_THREAD`, started by `start()`, calls `expire_digest()` every `digest_seconds`
+(`DIGEST_SECONDS`): it trims the moments to the window and publishes, which changes the view only
+when a moment left. A failure is one stderr line `console: digest_expiry_failed <Type>: <message>`
+and the loop goes on.
+
 Construction order: bind the server (an `OSError` propagates and nothing else is
 opened); load or create the page token (a `write_guard.TokenError` propagates: the service does
-not start); open the event log; fold the projects, the sessions, the inbox and the read health from it; publish
+not start); open the event log; run one retention pass; fold the projects, the sessions, the inbox
+and the read health, then the last look and the digest moments, from it; publish
 the view; sample the registry's signature; `refresh()`; `poll_sessions()`. The
 absent set starts empty, so a restart drops a session only after two polls miss
 it. On any failure after the bind, what was opened is closed and the exception
 re-raised. `start()` serves on a daemon thread named `console-http`; `close()`
-sets the stop flag, then `closing`, wakes every waiter, joins the watcher, the session poll and the
-tracker thread and tears the rest down; it is idempotent.
+sets the stop flag, then `closing`, wakes every waiter, joins the watcher, the session poll, the
+tracker, retention and digest threads and tears the rest down; it is idempotent.
 """
 
 import http.server
@@ -130,6 +147,7 @@ import os
 import threading
 import time
 from collections.abc import Callable, Iterable
+from datetime import datetime, timezone
 from pathlib import Path
 
 from agent_tools.claims import owner_actions
@@ -159,6 +177,10 @@ SESSION_POLL_SECONDS = 5.0
 SESSION_THREAD = "console-session-poll"
 TRACKER_SECONDS = 120.0
 TRACKER_THREAD = "console-tracker-poll"
+RETENTION_SECONDS = 86400.0
+RETENTION_THREAD = "console-retention"
+DIGEST_SECONDS = 60.0
+DIGEST_THREAD = "console-digest"
 
 
 def default_store() -> Path:
@@ -372,6 +394,9 @@ class ConsoleService:
                  slug_of: Callable[[str], str | None] = owner_actions.checkout_slug,
                  activity: Callable[[str], float | None] = inbox.local_activity,
                  clock: Callable[[], float] = time.time,
+                 retention_seconds: float = RETENTION_SECONDS,
+                 digest_seconds: float = DIGEST_SECONDS,
+                 log_clock: Callable[[], str] = utc_now,
                  token_path: Path | None = None):
         self.registry = Path(registry)
         self._poll_seconds = poll_seconds
@@ -386,6 +411,12 @@ class ConsoleService:
         self._slug_of = slug_of
         self._activity = activity
         self._clock = clock
+        self._retention_seconds = retention_seconds
+        self._digest_seconds = digest_seconds
+        self._retention_thread: threading.Thread | None = None
+        self._digest_thread: threading.Thread | None = None
+        self._looked: str | None = None
+        self._moments: list[digest.Moment] = []
         self._tracker_thread: threading.Thread | None = None
         self._closing = False
         self._stop = threading.Event()
@@ -404,12 +435,14 @@ class ConsoleService:
                 Path(store).with_name(write_guard.TOKEN_FILE) if token_path is None
                 else token_path)
             self._page = PAGE.replace(write_guard.TOKEN_SLOT, self._token.encode("ascii"))
-            self.log = EventLog(store)
+            self.log = EventLog(store, clock=log_clock)
+            self.log.retain()
             events = self.log.events()
             self._states = project_states(events)
             self._sessions = sessions.session_states(events)
             self._inbox = inbox_records(events)
             self._health = read_states(events)
+            self._derive_digest(events)
             self._publish()
             self._signature = signature(self.registry)
             self.refresh()
@@ -453,10 +486,20 @@ class ConsoleService:
                 return None
             return self._version, self._view
 
+    def _now(self) -> datetime:
+        return datetime.fromtimestamp(self._clock(), timezone.utc)
+
+    def _derive_digest(self, events: list[Event]) -> None:
+        """Derive the last look and the moments from the whole log (construction and retention)."""
+        self._looked = digest.last_looked(events)
+        self._moments = digest.keep(digest.moments(events, {}, {}),
+                                    digest.window_start(self._looked, self._now()))
+
     def _publish(self) -> None:
         view = encode_view(derive_view(
             self._states.values(), self._inbox, self._health,
-            sessions=self._sessions.values()))
+            sessions=self._sessions.values(),
+            digest=digest.digest(self._moments, self._looked, self._now())))
         with self._published:
             if view != self._view:
                 self._view = view
@@ -531,10 +574,46 @@ class ConsoleService:
                       file=sys.stderr)
 
     def _fold(self, appended: list[Event]) -> None:
+        new = digest.moments(appended, self._sessions, self._inbox)
+        self._looked = digest.last_looked(appended, self._looked)
         self._states = project_states(appended, self._states)
         self._sessions = sessions.session_states(appended, self._sessions)
         self._inbox = inbox_records(appended, self._inbox)
         self._health = read_states(appended, self._health)
+        self._moments = digest.keep([*self._moments, *new],
+                                    digest.window_start(self._looked, self._now()))
+
+    def retain(self) -> int:
+        """One retention pass; when it removed rows, re-derive the digest state and publish."""
+        with self._ingest:
+            removed = self.log.retain()
+            if removed:
+                self._derive_digest(self.log.events())
+                self._publish()
+            return removed
+
+    def expire_digest(self) -> None:
+        """Trim the moments to the current window and publish."""
+        with self._ingest:
+            self._moments = digest.keep(
+                self._moments, digest.window_start(self._looked, self._now()))
+            self._publish()
+
+    def _retain_loop(self) -> None:
+        while not self._stop.wait(self._retention_seconds):
+            try:
+                self.retain()
+            except Exception as error:
+                print(f"console: retention_failed {type(error).__name__}: {error}",
+                      file=sys.stderr)
+
+    def _expire_loop(self) -> None:
+        while not self._stop.wait(self._digest_seconds):
+            try:
+                self.expire_digest()
+            except Exception as error:
+                print(f"console: digest_expiry_failed {type(error).__name__}: {error}",
+                      file=sys.stderr)
 
     def poll_tracker(self) -> None:
         """One refresh of the inbox of every active project; see the module docstring."""
@@ -616,6 +695,12 @@ class ConsoleService:
             self._tracker_thread = threading.Thread(
                 target=self._track, name=TRACKER_THREAD, daemon=True)
             self._tracker_thread.start()
+        self._retention_thread = threading.Thread(
+            target=self._retain_loop, name=RETENTION_THREAD, daemon=True)
+        self._retention_thread.start()
+        self._digest_thread = threading.Thread(
+            target=self._expire_loop, name=DIGEST_THREAD, daemon=True)
+        self._digest_thread.start()
         self._thread = threading.Thread(
             target=self._server.serve_forever, name="console-http", daemon=True)
         self._thread.start()
@@ -634,6 +719,10 @@ class ConsoleService:
             self._session_poller.join()
         if self._tracker_thread is not None:
             self._tracker_thread.join()
+        if self._retention_thread is not None:
+            self._retention_thread.join()
+        if self._digest_thread is not None:
+            self._digest_thread.join()
         if self._thread is not None:
             self._server.shutdown()
         self._server.server_close()
