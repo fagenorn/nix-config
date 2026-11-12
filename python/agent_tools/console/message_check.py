@@ -51,8 +51,9 @@ stops the test manager: the registry is read fresh and each listed session named
 `manager.session_name(project, sprint_id)` is stopped with `claude-account run stop <id>` under
 its own profile (`manager.stop_session`, which gives the stop the first eight characters of the
 session id, the only id it accepts); a manager not listed needs no stop. The stop comes before the
-withdrawal because a withdrawal only appends `goal.withdrawn` and drops the secret: it does not
-end the manager's background session, which would stay running and spend quota. A failed stop
+withdrawal so the check leaves nothing running whatever the console does: a withdrawal appends
+`goal.withdrawn`, drops the secret and then stops the manager's session itself (ADR-console-018),
+which finds nothing listed after this stop. A failed stop
 keeps the outcome in the state file and the run is 75 `{"status": "waiting", "reason": "the test
 manager is not stopped yet: <the stop's one-line reason>", "sprint_id"}`; the next run retries from
 the stop. Second it withdraws the sprint (204 or 409 is done); otherwise the outcome stays in the state file and the

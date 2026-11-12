@@ -240,6 +240,27 @@ class ReviveServiceTest(ReviveCase):
             "reason": "the wake could not start: RuntimeError: no thread"}])
         self.assertEqual(svc._nudging, set())
 
+    def test_a_stop_pending_during_a_wake_waits_out_the_settle_window_for_the_resumed_session(self):
+        stops = []
+        svc = self.begin(stopper=lambda session_id, profile: stops.append((session_id, profile)))
+        sid = self.on_track(svc)
+        self.gone(svc)
+        self.during = lambda: svc.withdraw_goal("owner/p01", sid)
+        self.tick(svc, 120)
+        self.assertEqual(len(self.revives()), 1)
+        self.now[0] = T0 + 121
+        svc.finish_stops()
+        self.drain()
+        self.assertEqual(stops, [])
+        self.assertEqual(self.rows("manager.stopped"), [])
+        self.now[0] = T0 + 130
+        self.listed["s-1"] = sessions.Observation(
+            "s-1", "/srv/p01", 1, "idle", None, self.name(sid), None, "work")
+        svc.finish_stops()
+        self.drain()
+        self.assertEqual(stops, [("s-1", "work")])
+        self.assertEqual(self.rows("manager.stopped"), [{"sprint_id": sid}])
+
     def test_a_manager_seen_before_the_wake_command_returns_counts_as_back(self):
         svc = self.begin()
         sid = self.on_track(svc)
