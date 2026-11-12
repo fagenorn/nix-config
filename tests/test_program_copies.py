@@ -7,7 +7,9 @@ symlink into a stand-in store (agent-helpers rule 5).
 
 from __future__ import annotations
 
+import fcntl
 import json
+import multiprocessing
 import os
 import shutil
 import subprocess
@@ -24,6 +26,13 @@ def run(*args):
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     return subprocess.run([sys.executable, "-m", "agent_tools.delivery.program_copies", *args],
                           capture_output=True, text=True, env=env, check=False)
+
+
+def place_at(barrier, repo, skill, results):
+    """One contending placement: wait at the barrier, run the command, report its exit code and output."""
+    barrier.wait()
+    done = run("--repo-root", repo, "--from", skill)
+    results.put((skill, done.returncode, done.stdout, done.stderr))
 
 
 def status(checkout):
@@ -85,7 +94,7 @@ class ProgramCopiesTest(unittest.TestCase):
         self.assertFalse((directory / "a.js").is_symlink())
         self.assertFalse((directory / "b.js").is_symlink())
         self.assertEqual(sorted(os.listdir(directory)), ["a.js", "b.js"])
-        self.assertEqual(os.listdir(self.copies), [directory.name])
+        self.assertEqual(sorted(os.listdir(self.copies)), [".lock", directory.name])
         self.assertEqual((self.repo / ".program-copies" / ".gitignore").read_text(), "*\n")
         self.assertEqual(status(self.repo), "")
 
@@ -122,7 +131,7 @@ class ProgramCopiesTest(unittest.TestCase):
         self.assertEqual(again.returncode, 0, again.stderr)
         self.assertEqual((again.stdout, json.loads(again.stdout)), (first.stdout, mapping))
         self.assertEqual(self.snapshot(directory), before)
-        self.assertEqual(os.listdir(self.copies), [directory.name])
+        self.assertEqual(sorted(os.listdir(self.copies)), [".lock", directory.name])
         after = os.stat(self.repo / ".program-copies" / ".gitignore")
         self.assertEqual((after.st_ino, after.st_mtime_ns), (ignore.st_ino, ignore.st_mtime_ns))
 
@@ -168,13 +177,93 @@ class ProgramCopiesTest(unittest.TestCase):
         self.assertEqual(self.sets(), sorted([recent.name, current.name, "notes"]))
 
     def test_an_existing_set_that_does_not_hold_the_programs_is_refused_and_kept(self):
-        _, directory = self.placed()
-        (directory / "a.js").write_bytes(b"edited")
-        done = self.place()
-        self.assertEqual(done.returncode, 1, done.stderr)
-        self.assertEqual(json.loads(done.stderr)["error"]["code"], "copy_failed")
-        self.assertEqual(done.stdout, "")
-        self.assertEqual((directory / "a.js").read_bytes(), b"edited")
+        def edited(directory):
+            (directory / "a.js").write_bytes(b"edited")
+
+        def extra(directory):
+            (directory / "c.js").write_bytes(b"C1")
+
+        def symlinked(directory):
+            (directory / "a.js").unlink()
+            (directory / "a.js").symlink_to(self.store / "a.js")
+
+        def hard_linked(directory):
+            os.link(directory / "a.js", self.tmp / "other-name.js")
+
+        for spoil in (edited, extra, symlinked, hard_linked):
+            with self.subTest(spoil.__name__):
+                shutil.rmtree(self.repo / ".program-copies", ignore_errors=True)
+                _, directory = self.placed()
+                spoil(directory)
+                before = sorted(os.listdir(directory))
+                done = self.place()
+                self.assertEqual(done.returncode, 1, done.stderr)
+                self.assertEqual(json.loads(done.stderr)["error"]["code"], "copy_failed")
+                self.assertEqual(done.stdout, "")
+                self.assertEqual(sorted(os.listdir(directory)), before)
+                if spoil is edited:
+                    self.assertEqual((directory / "a.js").read_bytes(), b"edited")
+                if spoil is symlinked:
+                    self.assertTrue((directory / "a.js").is_symlink())
+
+    def test_renaming_a_program_without_changing_its_bytes_names_another_set(self):
+        _, first = self.placed()
+        (self.skill / "b.js").rename(self.skill / "c.js")
+        mapping, second = self.placed()
+        self.assertNotEqual(second.name, first.name)
+        self.assertEqual(sorted(mapping), ["a.js", "c.js"])
+        self.assertEqual(Path(mapping["c.js"]).read_bytes(), b"B1")
+        self.assertEqual(sorted(os.listdir(first)), ["a.js", "b.js"])
+
+    def test_a_placement_waits_for_the_lock_of_its_copy_directory(self):
+        """#981: placing and pruning happen under an exclusive lock on `.program-copies/<name>/.lock`."""
+        self.placed()
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        argv = [sys.executable, "-m", "agent_tools.delivery.program_copies",
+                "--repo-root", str(self.repo), "--from", str(self.skill)]
+        with open(self.copies / ".lock", "rb") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            waiting = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env)
+            self.addCleanup(waiting.kill)
+            with self.assertRaises(subprocess.TimeoutExpired):
+                waiting.wait(timeout=1.5)
+            fcntl.flock(held, fcntl.LOCK_UN)
+            out, err = waiting.communicate(timeout=30)
+        self.assertEqual(waiting.returncode, 0, err)
+        self.assertTrue(Path(json.loads(out)["a.js"]).is_file())
+
+    def test_a_set_placed_again_survives_a_concurrent_placement_that_prunes(self):
+        """#981: a set idle over a day that one session places again is not removed by another session's prune."""
+        other = self.tmp / "other" / "deliver-standard"
+        other.mkdir(parents=True)
+        big = {"a.js": b"A1\n" * 200000, "b.js": b"B1\n" * 200000}
+        for name, data in big.items():
+            self.change(name, data)
+            (other / name).write_bytes(data.replace(b"1", b"2"))
+        fork = multiprocessing.get_context("fork")
+        for trial in range(12):
+            _, idle = self.placed()
+            long_ago = time.time() - 3 * 24 * 60 * 60
+            os.utime(idle, (long_ago, long_ago))
+            barrier, results = fork.Barrier(2), fork.Queue()
+            workers = [fork.Process(target=place_at, args=(barrier, str(self.repo), str(skill), results))
+                       for skill in (self.skill, other)]
+            for worker in workers:
+                worker.start()
+            outcomes = [results.get(timeout=60) for _ in workers]
+            for worker in workers:
+                worker.join()
+            for skill, code, out, err in outcomes:
+                with self.subTest(trial=trial, skill=skill):
+                    self.assertEqual(code, 0, err)
+                    expect = big if skill == str(self.skill) else {k: v.replace(b"1", b"2") for k, v in big.items()}
+                    for name, path in json.loads(out).items():
+                        self.assertTrue(Path(path).is_file(), path)
+                        self.assertEqual(Path(path).read_bytes(), expect[name])
+            self.assertEqual([p.name for p in self.copies.iterdir() if p.name.startswith(".tmp-")], [])
+            for entry in self.copies.iterdir():
+                if entry.is_dir():
+                    os.utime(entry)
 
     def flat_copies(self, age):
         """The earlier layout's copies, `.program-copies/<name>/<file>`, last changed `age` seconds ago."""
@@ -190,13 +279,15 @@ class ProgramCopiesTest(unittest.TestCase):
         before = self.flat_copies(23 * 60 * 60)
         _, directory = self.placed()
         self.assertEqual(directory.parent, self.copies)
-        self.assertEqual(self.snapshot(self.copies), before)
+        after = self.snapshot(self.copies)
+        after.pop(".lock")
+        self.assertEqual(after, before)
 
     def test_flat_copies_of_the_earlier_layout_older_than_a_day_are_removed(self):
         """A caller that still names a flat path fails to load it instead of running an old program."""
         self.flat_copies(25 * 60 * 60)
         _, directory = self.placed()
-        self.assertEqual(os.listdir(self.copies), [directory.name])
+        self.assertEqual(sorted(os.listdir(self.copies)), [".lock", directory.name])
 
     def test_a_copy_outlives_its_installed_program(self):
         mapping, _ = self.placed()

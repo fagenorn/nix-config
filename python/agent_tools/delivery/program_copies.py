@@ -35,7 +35,7 @@ renamed into place.
 
 Placing a set that exists writes no file and prints the same paths; it only sets the set
 directory's modification time to now, which records the set's last use. An existing set
-whose files are not exactly the programs (a missing, extra, linked or different file) is
+whose files are not exactly the programs (a missing, extra, symlinked, hard-linked or different file) is
 refused as `copy_failed` and left as it is. A new set is written to a temporary directory
 `.tmp-*` beside it, files mode 0644, and renamed into place, so a reader sees a whole set or
 none; when another placement created the same set first, that one is used. On any failure
@@ -44,6 +44,10 @@ the temporary directory is removed.
 After a placement, every other set (a directory named by 12 hex digits) and every `.tmp-*`
 directory under `.program-copies/<name>` whose modification time is more than 24 hours old
 is removed; a failure to remove one is ignored. The set just placed is never removed. A
+set is renamed to a `.tmp-*` name before its files are removed, so an interrupted removal
+never leaves part of a set under a set name. A placement holds an exclusive `flock` on
+`.program-copies/<name>/.lock` from before it looks for its set until it has pruned, so
+one placement never removes the set another has just stamped and printed. A
 batch runs about four hours and every launch stamps its set, so a set a running batch uses
 was stamped less than 24 hours ago, while the sets kept are bounded by the versions placed
 within a day. The regular `*.js` files an earlier version of this command placed directly
@@ -65,11 +69,13 @@ reading or writing, or an existing set that does not hold the programs). Exit 2:
 from __future__ import annotations
 
 import argparse
+import fcntl
 import hashlib
 import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -82,6 +88,7 @@ IGNORE_BODY = b"*\n"
 GIT_TIMEOUT = 120
 SET_NAME = re.compile(r"[0-9a-f]{12}\Z")
 TEMP_PREFIX = ".tmp-"
+LOCK_NAME = ".lock"
 KEEP_SECONDS = 24 * 60 * 60
 
 
@@ -158,11 +165,14 @@ def set_name(contents: list[tuple[str, bytes]]) -> str:
 
 
 def _holds(directory: Path, contents: list[tuple[str, bytes]]) -> bool:
-    """Whether `directory` holds exactly `contents` as regular files."""
+    """Whether `directory` holds exactly `contents`: no other entry, each a regular file with one link."""
     if sorted(os.listdir(directory)) != sorted(name for name, _ in contents):
         return False
-    return all((directory / name).is_file() and not (directory / name).is_symlink()
-               and (directory / name).read_bytes() == data for name, data in contents)
+    for name, data in contents:
+        found = os.lstat(directory / name)
+        if not stat.S_ISREG(found.st_mode) or found.st_nlink != 1 or (directory / name).read_bytes() != data:
+            return False
+    return True
 
 
 def _place_set(directory: Path, contents: list[tuple[str, bytes]]) -> None:
@@ -202,6 +212,10 @@ def _prune(target: Path, keep: Path) -> None:
             if entry.is_symlink() or entry.lstat().st_mtime >= cutoff:
                 continue
             if directory and entry.is_dir():
+                if not entry.name.startswith(TEMP_PREFIX):
+                    gone = target / f"{TEMP_PREFIX}{entry.name}"
+                    os.rename(entry, gone)
+                    entry = gone
                 shutil.rmtree(entry, ignore_errors=True)
             elif not directory and entry.is_file():
                 entry.unlink()
@@ -235,10 +249,15 @@ def place(repo_root: Path, source: Path) -> dict[str, str]:
     try:
         target.mkdir(parents=True, exist_ok=True)
         _sync(base / IGNORE_NAME, IGNORE_BODY)
-        _place_set(directory, contents)
+        lock = os.open(target / LOCK_NAME, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o644)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            _place_set(directory, contents)
+            _prune(target, directory)
+        finally:
+            os.close(lock)
     except OSError as error:
         raise CopyRefusal("copy_failed", str(error), 1) from None
-    _prune(target, directory)
     return {name: str(directory / name) for name, _ in contents}
 
 

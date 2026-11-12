@@ -13,7 +13,8 @@ ADR-delivery-008 placed the delivery programs under one directory per checkout a
 - A set that exists is never written to. Placing the same programs writes no file, prints the same paths and stamps the set directory's modification time as its last use.
 - A lead takes `scriptPath` and `child_script` from one output, so both lie in one set. The batch launches every child from the `child_script` it was given, as it already did.
 - After a placement, a set last used more than 24 hours ago is removed. The set just placed is never removed.
-- A relaunch is a new run and starts from fresh copies, `child_script` included.
+- A relaunch is a new run: its `scriptPath` and its `child_script` both come from a new placement, not from the returned args.
+- A placement holds an exclusive lock on its copy directory while it places and prunes, and a pruned set is renamed away before its files are removed.
 
 ## Considered options
 
@@ -25,6 +26,7 @@ ADR-delivery-008 placed the delivery programs under one directory per checkout a
 ## Consequences
 
 - The sets kept in a checkout are bounded by the program versions placed there within a day.
+- A resume (`resumeFromRunId`) reuses the original paths and makes no placement, so a batch resumed after its set was pruned cannot load its programs; it is then run as a relaunch.
 - A batch that outlives 24 hours with no placement of its version in that time can lose its child program; its row then names the load failure and the path.
 - The `*.js` files the earlier layout placed directly in `<skill dir name>/` are no longer written, and a placement removes each once its modification time is more than 24 hours old. A batch launched from them before this change keeps both programs unchanged while they are younger; a caller that still names a flat path fails to load it after a day instead of running an old program.
 - A flat file's modification time is when its content last changed, not its last use: a batch running from flat files that last changed more than a day before the first new placement loses its child program at that placement.
