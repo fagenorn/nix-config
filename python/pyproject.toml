@@ -11,4 +11,4 @@ dependencies = []
 include = ["agent_tools*"]
 
 [tool.setuptools.package-data]
-"agent_tools.console" = ["page.html"]
+"agent_tools.console" = ["page.html", "manager-contract.md"]

@@ -9,8 +9,12 @@ import re
 import socket
 import subprocess
 import sys
+import tomllib
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
+from unittest import mock
 
 from agent_tools.console import manager, sprint
 
@@ -21,6 +25,7 @@ from .test_console_reports import REPORT
 from .test_console_writes import Case
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+CONTRACT = REPO_ROOT / "python/agent_tools/console/manager-contract.md"
 
 
 def run_sprint(*args, stdin=None, env=None):
@@ -281,6 +286,43 @@ class SprintCommandTest(Case):
         self.assertTrue(got.stderr.endswith("the report is not a JSON object\n"), got.stderr)
 
 
+class ManagerContractTest(unittest.TestCase):
+    def test_contract_prints_the_packaged_document_and_exits_0(self):
+        got = run_sprint("contract")
+        self.assertEqual((got.returncode, got.stdout, got.stderr),
+                         (0, CONTRACT.read_text(encoding="utf-8"), ""))
+
+    def test_contract_sends_no_request(self):
+        out = StringIO()
+        refused = AssertionError("sprint contract opened a connection")
+        with mock.patch.object(sprint.http.client, "HTTPConnection", side_effect=refused), \
+                mock.patch.dict(os.environ, clear=False) as environ, redirect_stdout(out):
+            environ.pop(manager.ID_ENV, None)
+            environ.pop(manager.SECRET_ENV, None)
+            code = sprint.main(["contract"])
+        self.assertEqual((code, out.getvalue()), (0, CONTRACT.read_text(encoding="utf-8")))
+
+    def test_contract_takes_no_sprint_secret_or_port(self):
+        for args in (("--sprint", "a" * 16), ("--secret-file", "x"), ("--port", "1")):
+            with self.subTest(args=args):
+                got = run_sprint("contract", *args)
+                self.assertEqual((got.returncode, got.stdout), (2, ""))
+                self.assertIn("unrecognized arguments", got.stderr)
+
+    def test_the_package_ships_the_contract(self):
+        config = tomllib.loads((REPO_ROOT / "python/pyproject.toml").read_text(encoding="utf-8"))
+        shipped = config["tool"]["setuptools"]["package-data"]["agent_tools.console"]
+        self.assertIn(CONTRACT.name, shipped)
+
+    def test_the_contract_shows_its_send_command_and_never_handles_the_secret(self):
+        text = CONTRACT.read_text(encoding="utf-8")
+        self.assertIn("`sprint brief --brief-file -`", text)
+        self.assertIn("`sprint contract`", text)
+        for forbidden in ("--secret-file", "CONSOLE_SPRINT_SECRET", "bindings."):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, text)
+
+
 class CommandContractTest(unittest.TestCase):
     def test_the_command_table_names_the_module_and_its_docstring_states_the_contract(self):
         table = (REPO_ROOT / "lib/agent-tools.nix").read_text()
@@ -290,7 +332,7 @@ class CommandContractTest(unittest.TestCase):
         for name in ("sprint brief", "sprint status", "--sprint", "--secret-file",
                      "--brief-file", "--port", "POST /api/brief", "GET /api/sprint-status",
                      "exit 0", "exit 1", "exit 2", "printed nowhere", "sprint report", "--report-file",
-                     "POST /api/report"):
+                     "POST /api/report", "sprint contract"):
             self.assertIn(name, docstring)
         self.assertEqual(sprint.build_parser().prog, "sprint")
 

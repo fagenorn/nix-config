@@ -17,9 +17,12 @@ manager runs in its own transient systemd scope and in the background, so it out
 unit and a restart of it does not end it:
 
     systemd-run --user --scope --quiet --collect --description=agent manager <name> --
-        claude-account run --bg --name <name> --settings <file> "/manage-sprint <goal>"
+        claude-account run --bg --name <name> --settings <file> "<prompt>"
 
-The name is `<project> sprint <sprint id>`. The secret is on no argv element.
+The name is `<project> sprint <sprint id>`. The prompt is one argv element, `PROMPT_LEAD` (`You
+are the manager of one sprint, started by the console. Run "sprint contract" first and follow
+what it prints. The goal: `) followed by the goal verbatim; `sprint contract` prints the manager's
+contract, a document of this package. The secret is on no argv element.
 
 Settings file. `claude --bg` hands the session to one supervisor per configuration directory,
 and a supervisor that is already running may start the session with its own environment, not the
@@ -54,7 +57,8 @@ from pathlib import Path
 
 from agent_tools.console.sessions import DEFAULT_PROFILE, main_checkout
 
-SKILL = "manage-sprint"
+PROMPT_LEAD = ("You are the manager of one sprint, started by the console. "
+               'Run "sprint contract" first and follow what it prints. The goal: ')
 ID_ENV = "CONSOLE_SPRINT_ID"
 SECRET_ENV = "CONSOLE_SPRINT_SECRET"
 ACCOUNT_ENV = "CLAUDE_ACCOUNT"
@@ -107,7 +111,7 @@ def new_launch(sprint_id: str, project_id: str, goal: str, root: str, profile: s
                secret: str, settings_dir: Path) -> Launch:
     return Launch(
         sprint_id=sprint_id, project_id=project_id, cwd=root, profile=profile,
-        session_name=session_name(project_id, sprint_id), prompt=f"/{SKILL} {goal}",
+        session_name=session_name(project_id, sprint_id), prompt=PROMPT_LEAD + goal,
         settings=settings_path(settings_dir, sprint_id),
         env={ID_ENV: sprint_id, SECRET_ENV: secret})
 

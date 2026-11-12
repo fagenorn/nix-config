@@ -18,7 +18,9 @@ from agent_tools.console import manager
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SID = "a" * 16
 NAME = "owner/p01 sprint " + SID
-PROMPT = "/manage-sprint make it resumable"
+LEAD = ("You are the manager of one sprint, started by the console. "
+        'Run "sprint contract" first and follow what it prints. The goal: ')
+PROMPT = LEAD + "make it resumable"
 
 
 def cap(*rows, all_out=False, resumes_at=None):
@@ -77,6 +79,14 @@ class CommandTest(Case):
             "--description=agent manager " + NAME, "--", "claude-account", "run", "--bg",
             "--name", NAME, "--settings", str(self.settings), PROMPT])
         self.assertFalse([part for part in command if "s3cret" in part])
+
+    def test_the_prompt_sends_the_manager_to_its_contract_then_states_the_goal(self):
+        goal = "keep  `the` goal's \"text\" verbatim"
+        launch = manager.new_launch(SID, "owner/p01", goal, "/srv/p01", "work", "s3cret", self.dir)
+        last = manager.launch_command(launch, "linux")[-1]
+        self.assertTrue(last.startswith(LEAD), last)
+        self.assertIn('"sprint contract"', last)
+        self.assertTrue(last.endswith("The goal: " + goal), last)
 
     def test_no_command_is_built_on_macos(self):
         self.assertIsNone(manager.launch_command(self.launch(), "darwin"))

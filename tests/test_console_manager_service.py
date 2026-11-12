@@ -98,7 +98,10 @@ class ManagerServiceTest(Case):
         self.assertEqual(launch.profile, "work")
         name = manager.session_name("owner/p01", sid)
         self.assertEqual(launch.session_name, name)
-        self.assertEqual(launch.prompt, "/manage-sprint make the importer resumable")
+        self.assertEqual(launch.prompt, (
+            "You are the manager of one sprint, started by the console. "
+            'Run "sprint contract" first and follow what it prints. '
+            "The goal: make the importer resumable"))
         self.assertEqual(launch.settings,
                          self.store.parent / "sprint-secrets" / (sid + ".settings.json"))
         self.assertEqual(dict(launch.env), {"CONSOLE_SPRINT_ID": sid,

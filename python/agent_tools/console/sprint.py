@@ -3,6 +3,7 @@
     sprint brief [--sprint <id>] [--secret-file <path>] --brief-file <path | -> [--port N]
     sprint report [--sprint <id>] [--secret-file <path>] --report-file <path | -> [--port N]
     sprint status [--sprint <id>] [--port N]
+    sprint contract
 
 `--sprint` is the sprint id (16 lowercase hex characters, `agent_tools.console.sprints.SPRINT_ID`),
 else exit 2. Without `--sprint` the id is `$CONSOLE_SPRINT_ID`, the variable the console sets in
@@ -29,6 +30,11 @@ report: the console decides, in one place.
 line of JSON, `{"decision", "reply", "sprint_id", "version"}`, and exit 0. `decision` is `none`
 (no answer yet), `approved`, `changes` (the owner's exact words are `reply`) or `withdrawn`.
 
+`sprint contract` prints the manager's contract, the document `manager-contract.md` packaged
+beside this module, to stdout exactly as packaged and exit 0. It takes no sprint id, secret or
+port, reads no environment and sends no request; the console's launch prompt tells the manager to
+run it first (ADR-console-015).
+
 Any other HTTP status is stderr `sprint: refused <status>: <text>` (the console's reason) and
 exit 1. A console that cannot be reached is stderr
 `sprint: console unreachable on 127.0.0.1:<port>: <error>` and exit 1. A secret, brief or report file
@@ -50,6 +56,7 @@ from agent_tools.console import manager, service, sprints
 from agent_tools.console.console import port_number
 
 TIMEOUT_SECONDS = 10
+CONTRACT = Path(__file__).with_name("manager-contract.md")
 
 
 class Unreadable(Exception):
@@ -84,6 +91,7 @@ def build_parser() -> argparse.ArgumentParser:
                                    f"(default: ${manager.SECRET_ENV})")
             each.add_argument(f"--{name}-file", required=True,
                               help=f"the {name} as a JSON object; - reads stdin")
+    commands.add_parser("contract", help="print the manager's contract")
     return parser
 
 
@@ -167,6 +175,9 @@ def send_report(args: argparse.Namespace, sprint: str) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "contract":
+        sys.stdout.write(CONTRACT.read_text(encoding="utf-8"))
+        return 0
     try:
         sprint = resolve_sprint(args)
         if args.command == "brief":

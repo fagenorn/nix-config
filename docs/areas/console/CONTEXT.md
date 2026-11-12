@@ -42,7 +42,7 @@ The manager's answer to a goal: what done looks like, what is excluded, the slic
 _Avoid_: plan, proposal
 
 **Manager**:
-The one agent a sprint has: it writes the brief and the reports and never writes code (#835). The console starts it as a background Claude Code session in the project's root, under the profile with the most weekly allowance left, drafts the brief through the manage-sprint skill and shows it inside its sprint with its state (ADR-console-015).
+The one agent a sprint has: it writes the brief and the reports and never writes code (#835). The console starts it as a background Claude Code session in the project's root, under the profile with the most weekly allowance left, drafts the brief under the contract `sprint contract` prints and shows it inside its sprint with its state (ADR-console-015).
 _Avoid_: owner, worker, agent, bot
 
 **Report**:
