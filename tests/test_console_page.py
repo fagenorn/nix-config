@@ -1980,7 +1980,7 @@ class PageDigestTest(unittest.TestCase):
         })
         (snap,) = render([{"frame": frame}, {"snapshot": True}])
         digest = snap["digest"]
-        head = next(n for n in nodes(digest) if n["cls"] == "digest-head")
+        head = next(n for n in nodes(digest) if has_class(n, "digest-head"))
         self.assertTrue(full(head).startswith("Since you last looked, "))
         (lines,) = [n for n in nodes(digest) if n["tag"] == "ul" and n["cls"] == "digest"]
         shown = [text(n) for n in lines["children"]]
@@ -2003,7 +2003,7 @@ class PageDigestTest(unittest.TestCase):
             "earlier": [], "omitted": 0,
         })
         (snap,) = render([{"frame": frame}, {"snapshot": True}])
-        head = next(n for n in nodes(snap["digest"]) if n["cls"] == "digest-head")
+        head = next(n for n in nodes(snap["digest"]) if has_class(n, "digest-head"))
         self.assertEqual(text(head).strip(), "In the last eight hours")
 
     def test_an_empty_digest_says_nothing_changed(self) -> None:
@@ -2031,6 +2031,82 @@ class PageDigestTest(unittest.TestCase):
         ])
         (fold,) = [n for n in nodes(snap["digest"]) if n["tag"] == "details"]
         self.assertTrue(fold["open"])
+
+    @staticmethod
+    def base_rules() -> list:
+        text = PAGE.read_text(encoding="utf-8")
+        style = text[text.index("<style>"):text.index("</style>")]
+        base, at = "", 0
+        for found in re.finditer(r"@media [^{]+\{", style):
+            if found.start() < at:
+                continue
+            base += style[at:found.start()]
+            depth, at = 1, found.end()
+            while depth:
+                depth += {"{": 1, "}": -1}.get(style[at], 0)
+                at += 1
+        base += style[at:]
+        return style_rules(base)
+
+    def test_each_digest_line_is_its_age_then_its_sentence(self) -> None:
+        frame = with_digest({
+            "since": "2026-11-11T08:00:00+00:00", "first_visit": False,
+            "recent": [moment("2026-11-11T09:30:00+00:00", "Newest."),
+                       moment("2026-11-11T09:00:00+00:00", "Second.")],
+            "earlier": [moment("2026-11-11T08:30:00+00:00", "Third.")],
+            "omitted": 2,
+        })
+        (snap,) = render([{"frame": frame}, {"open": "earlier"}, {"snapshot": True}])
+        lines = [
+            li for ul in nodes(snap["digest"])
+            if ul["tag"] == "ul" and ul["cls"] in ("digest", "earlier-list")
+            for li in ul["children"]
+        ]
+        rows = [li for li in lines if not has_class(li, "more-n")]
+        for line in rows:
+            self.assertEqual([(c["tag"], c["cls"]) for c in line["children"]],
+                             [("time", "at"), ("span", "said")])
+        said = [c["text"] for li in rows for c in li["children"] if c["cls"] == "said"]
+        self.assertEqual(said, ["Newest.", "Second.", "Third."])
+        (more,) = [li for li in lines if has_class(li, "more-n")]
+        self.assertEqual(text(more).strip(), "and 2 more")
+        self.assertEqual(more["children"], [])
+        rules = self.base_rules()
+        for selector in (".digest li", ".earlier-list li"):
+            with self.subTest(selector=selector):
+                decls = {}
+                for s, d in rules:
+                    if s == selector:
+                        decls.update(d)
+                self.assertEqual(decls.get("display"), "grid")
+                self.assertEqual(decls.get("grid-template-columns"), "5.5rem minmax(0, 1fr)")
+                self.assertNotIn("flex-wrap", decls)
+        (tail,) = [d for s, d in rules if s == ".earlier-list .more-n"]
+        self.assertEqual(tail.get("display"), "block")
+        self.assertNotIn("grid-column", tail)
+
+    def test_section_headings_share_one_style(self) -> None:
+        frame = {
+            **view([project(0, [])]),
+            "digest": {"since": None, "first_visit": True,
+                       "recent": [moment("2026-11-11T09:30:00+00:00", "Newest.")],
+                       "earlier": [], "omitted": 0},
+            "capacity": capacity([profile("a", "out", out_until="2026-11-13T09:30:00+00:00")],
+                                 all_out=True, resumes_at="2026-11-13T09:30:00+00:00"),
+        }
+        (snap,) = render([START, {"frame": frame}, {"snapshot": True}])
+        for section in ("digest", "promoted", "projects"):
+            with self.subTest(section=section):
+                (head,) = [n for n in nodes(snap[section]) if n["tag"] == "h2"]
+                self.assertTrue(has_class(head, "sec-h"))
+        rules = self.base_rules()
+        (shared,) = [d for s, d in rules if s == ".sec-h"]
+        self.assertEqual(shared.get("font"), "600 .9375rem/1.4 var(--ui)")
+        self.assertEqual(shared.get("color"), "var(--text)")
+        for selector, decls in rules:
+            if selector in (".digest-head", ".side h2", "#promoted h2"):
+                for name in ("font", "font-size", "font-weight", "color"):
+                    self.assertNotIn(name, decls, selector)
 
 
 GOAL_FRAME = {**view([]), "recent_projects": ["owner/zeta", "owner/alpha", "owner/beta"]}

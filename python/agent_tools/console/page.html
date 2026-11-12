@@ -176,10 +176,13 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .item-detail summary::-webkit-details-marker { display: none; }
 #digest { margin-top: 40px; max-width: 44rem; }
 #digest:empty { margin-top: 0; }
-.digest-head { font: 600 .875rem/1.4 var(--ui); color: var(--ov2); }
+.sec-h { font: 600 .9375rem/1.4 var(--ui); color: var(--text); }
+.digest-head time { font-weight: 400; color: var(--ov2); }
 .digest, .earlier-list { margin-top: 6px; }
-.digest li, .earlier-list li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; padding: 5px 0; font-size: .875rem; color: var(--sub0); }
-.digest .at { color: var(--ov2); }
+.digest li, .earlier-list li { display: grid; grid-template-columns: 5.5rem minmax(0, 1fr); column-gap: 12px; padding: 5px 0; font-size: .875rem; }
+.digest .at, .earlier-list .at { color: var(--ov2); white-space: nowrap; }
+.said { color: var(--sub0); overflow-wrap: anywhere; }
+.earlier-list .more-n { display: block; color: var(--ov2); }
 .earlier { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--hair); }
 .earlier summary { display: flex; align-items: baseline; gap: 8px; cursor: pointer; list-style: none; padding: 4px 12px; margin: 0 -12px; border-radius: 10px; font-size: .875rem; color: var(--ov2); transition: background-color .16s; }
 .earlier summary::-webkit-details-marker { display: none; }
@@ -187,7 +190,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .earlier summary b { font-weight: 600; color: var(--sub0); }
 .answer { color: var(--lav); text-underline-offset: 3px; }
 .side { margin-top: 12px; }
-.side h2 { font: 600 .9375rem/1.4 var(--ui); display: flex; align-items: baseline; gap: 10px; }
+.side h2 { display: flex; align-items: baseline; gap: 10px; }
 .side h2 span { font-weight: 400; font-size: .8125rem; color: var(--ov2); }
 .empty { margin-top: 12px; color: var(--sub0); font-size: .84375rem; }
 #list { margin-top: 12px; }
@@ -780,7 +783,7 @@ function renderPromoted(view) {
   if (!cap.all_out) return;
   const list = el("ul");
   for (const p of cap.profiles) list.appendChild(phrase("li", "cap-out", p.profile + " ", outWords(p, "")));
-  box.appendChild(el("h2", "", "Capacity"));
+  box.appendChild(el("h2", "sec-h", "Capacity"));
   box.appendChild(list);
 }
 function holds(item) {
@@ -1555,7 +1558,7 @@ function renderInbox(view) {
 function momentLine(moment) {
   const line = el("li");
   line.appendChild(timeEl("ago", moment.at, "at"));
-  line.appendChild(el("span", "", moment.sentence));
+  line.appendChild(el("span", "said", moment.sentence));
   return line;
 }
 function renderDigest(view) {
@@ -1564,8 +1567,8 @@ function renderDigest(view) {
   const digest = view.digest;
   if (!digest) return;
   section.appendChild(digest.first_visit
-    ? el("h2", "digest-head", "In the last eight hours")
-    : phrase("h2", "digest-head", "Since you last looked, ", timeEl("ago", digest.since, "")));
+    ? el("h2", "sec-h digest-head", "In the last eight hours")
+    : phrase("h2", "sec-h digest-head", "Since you last looked, ", timeEl("ago", digest.since, "")));
   if (digest.recent.length === 0 && digest.earlier.length === 0) {
     section.appendChild(el("p", "empty", "Nothing changed."));
     return;
@@ -1582,7 +1585,7 @@ function renderDigest(view) {
   fold.appendChild(summary);
   const more = el("ul", "earlier-list");
   for (const moment of digest.earlier) more.appendChild(momentLine(moment));
-  if (digest.omitted > 0) more.appendChild(el("li", "", "and " + digest.omitted + " more"));
+  if (digest.omitted > 0) more.appendChild(el("li", "more-n", "and " + digest.omitted + " more"));
   fold.appendChild(more);
   section.appendChild(fold);
 }
@@ -1602,7 +1605,7 @@ function workCount(view) {
 }
 function renderProjects(view) {
   const section = document.getElementById("projects");
-  const heading = el("h2", "", "Work");
+  const heading = el("h2", "sec-h", "Work");
   const worked = workCount(view);
   if (worked !== "") heading.appendChild(el("span", "", worked));
   const active = document.activeElement;
