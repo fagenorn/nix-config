@@ -226,7 +226,7 @@ const FACTS_SCHEMA = {
     landed: { type: 'array', items: { type: 'object', properties: { number: { type: 'integer' }, commits: STRS }, required: ['number', 'commits'] } },
     already_fixed: { anyOf: [{ type: 'object', properties: { commit: { type: 'string' }, evidence: { type: 'string' } }, required: ['commit', 'evidence'] }, { type: 'null' }] },
     open_pr: { anyOf: [{ type: 'object', properties: { number: { type: 'integer' }, head_branch: { type: 'string' } } }, { type: 'null' }] },
-    native: { type: 'object', properties: { verdict: { type: 'string' }, blocked_by: STRS }, required: ['verdict'] },
+    native: { type: 'object', properties: { verdict: { type: 'string' }, blocked_by: STRS, error: { type: ['string', 'null'] } }, required: ['verdict'] },
     blockers: { type: 'array', items: { type: 'object', properties: { issue: { type: 'integer' }, state: { type: 'string' } }, required: ['issue', 'state'] } },
     decision: { type: 'object', properties: { verdict: { type: 'string' }, comment_id: { type: ['integer', 'null'] }, questions: { type: 'array', items: {} } } },
     lane: { type: 'string', enum: LANES }, why: { type: 'string' },
@@ -274,7 +274,7 @@ const factsPrompt = n => `You read the facts of issue #${n} of ${SLUG} (the git 
 2. branch: run alone and exactly issue-branch --repo-root ${REPO} --issue ${n} and return the branch member of the one JSON line it prints; on a non-zero exit omit branch and return branch_error: the exit code and the code and message of the JSON error it printed.
 3. claim: run alone and exactly forge-claim status --repo ${SLUG} --issue ${n} --holder ${HOLDER} and return its verdict (free, held_by or stale) and by; on exit 1 or 2 return verdict error.
 4. merged_refs: one {number, closes} per merged PR referencing the issue (gh pr list --repo ${SLUG} --state merged --search ${n} --json number,closingIssuesReferences), closes true only when its closingIssuesReferences lists issue ${n}, [] when none.${landedRead(n)} open_pr: {number, head_branch} of an open PR referencing the issue, else null.
-5. native: run alone and exactly forge-issue read --repo ${SLUG} --issue ${n} and return the verdict and blocked_by of the one JSON line it prints, unchanged. blockers: one {issue, state} per issue of ${SLUG} in that blocked_by or in the body's "Blocked by" list, with the state from gh issue view.
+5. native: run alone and exactly forge-issue read --repo ${SLUG} --issue ${n} and return the verdict, blocked_by and error of the one JSON line it prints, unchanged. blockers: one {issue, state} per issue of ${SLUG} in that blocked_by or in the body's "Blocked by" list, with the state from gh issue view.
 6. decision: run alone and exactly forge-claim owner-action status --repo ${SLUG} --issue ${n} --reason decision and return its verdict, comment_id and questions.
 7. already_fixed: name the issue's concrete symptom as one literal string taken from its body (an error string, a quoted code literal, or the quoted output of a failing command; never run the failing command). Run git -C ${REPO} fetch origin ${INT}, then git -C ${REPO} grep -n -F '<literal>' origin/${INT} and git -C ${REPO} log origin/${INT} -S'<literal>' --since=<createdAt> --format='%H %s'. Return already_fixed {commit (the full sha of the commit since the issue opened that removed the literal), evidence (the literal and what both commands printed)} only when the grep finds the literal nowhere at origin/${INT} and the log names such a commit; otherwise, or with no concrete literal, return already_fixed null.
 8. lane: invoke the deliver-direct skill with the Skill tool to read its Eligibility paragraph, the single source of what a direct issue is. Answer direct when the issue meets that Eligibility. Answer needs-design when its criteria are missing or not checkable, or it needs an open design decision that the issue, its comments and the repository docs do not settle. Otherwise answer standard. Return lane and a one-sentence why.
@@ -290,17 +290,25 @@ await parallel(ISSUES.map(n => async () => {
 
 // An issue's blockers are the union of the tracker's native dependencies and the body's "Blocked by" list: an edge added with
 // forge-issue link is in the first only (#944 was one, and #891 landed ahead of it). The native list is forge-issue read's own
-// answer, so a skipped read is a reply without verdict read, which stops the issue, and never an empty list; a native blocker
-// the reply gives no state reads as open. A dependency on another repository's issue is not followed.
+// answer, so a skipped read is a reply without verdict read, which stops the issue, and never an empty list; so does an entry
+// that is no <owner>/<name>#<n>. A blocker is open unless a stated state says closed, and open in either list is open.
+// A dependency on another repository's issue is not followed.
+const NATIVE_REF = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#[1-9][0-9]*$/
 const nativeRead = f => isObj(f.native) && f.native.verdict === 'read' && Array.isArray(f.native.blocked_by)
+// Why the native read cannot be trusted, else null.
+const nativeProblem = (n, f) => {
+  if (!nativeRead(f)) return `facts-${n} did not read the native blockers${isObj(f.native) && nonEmpty(f.native.error) ? `: ${f.native.error}` : ''}`
+  const bad = f.native.blocked_by.find(r => typeof r !== 'string' || !NATIVE_REF.test(r))
+  return bad === undefined ? null : `facts-${n} returned a native blocker that is no <owner>/<name>#<n>: ${JSON.stringify(bad)}`
+}
 const blockersOf = f => {
   const open = new Map()
   const prefix = `${SLUG}#`.toLowerCase()
   for (const r of (nativeRead(f) ? f.native.blocked_by : [])) {
-    if (typeof r === 'string' && r.toLowerCase().startsWith(prefix) && /^[1-9][0-9]*$/.test(r.slice(prefix.length))) open.set(Number(r.slice(prefix.length)), null)
+    if (typeof r === 'string' && NATIVE_REF.test(r) && r.toLowerCase().startsWith(prefix)) open.set(Number(r.slice(prefix.length)), null)
   }
   for (const b of (Array.isArray(f.blockers) ? f.blockers : [])) {
-    if (isObj(b) && Number.isInteger(b.issue) && open.get(b.issue) !== true) open.set(b.issue, String(b.state).toUpperCase() === 'OPEN')
+    if (isObj(b) && Number.isInteger(b.issue) && open.get(b.issue) !== true) open.set(b.issue, String(b.state).toUpperCase() !== 'CLOSED')
   }
   return Array.from(open, ([issue, isOpen]) => ({ issue, state: isOpen === false ? 'CLOSED' : 'OPEN' }))
 }
@@ -335,6 +343,9 @@ const eligibility = (n, f) => {
   if (claim.verdict === 'held_by' && claim.by !== HOLDER) return { issue: n, outcome: 'claimed-elsewhere', by: claim.by }
   if (claim.verdict === 'stale' && claim.by !== HOLDER) return { issue: n, outcome: 'stale-claim', by: claim.by }
   if (claim.verdict === 'error') return { issue: n, outcome: 'stopped', detail: 'claim status' }
+  // After the closed and claim rows: a closed issue settles and releases whatever its dependency read said.
+  const problem = nativeProblem(n, f)
+  if (problem) return { issue: n, outcome: 'stopped', detail: problem }
   const outside = blockersOf(f).filter(b => b.state === 'OPEN' && !ISSUES.includes(b.issue)).map(b => b.issue)
   if (outside.length) return { issue: n, outcome: 'blocked', blocker: Math.min(...outside) }
   // Only a questioned issue waits: no lane, no claim, no child until the owner answers.
@@ -349,7 +360,6 @@ const eligible = []
 for (const n of ISSUES) {
   const f = FACTS[n]
   if (f === null || f === undefined) { rows[n] = { issue: n, outcome: 'stopped', detail: `facts-${n} returned nothing` }; continue }
-  if (!nativeRead(f)) { rows[n] = { issue: n, outcome: 'stopped', detail: `facts-${n} did not read the native blockers` }; continue }
   const skip = eligibility(n, f)
   if (skip) rows[n] = skip
   else eligible.push(n)

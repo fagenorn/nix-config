@@ -299,6 +299,13 @@ class ReadTest(Base):
         code, out = run("read", "--repo", SLUG, "--issue", str(NEW))
         self.assertEqual((code, out["verdict"], out["error"], out["blocked_by"]), (1, "error", "payload_invalid", None))
 
+    def test_a_failed_listing_of_the_blocked_side_is_an_error(self):
+        self.world.respond_json("gh", listing(NEW, "blocked_by"), [[B1]])
+        self.world.respond_json("gh", listing(NEW, "blocking"), [{"not": "a page"}])
+        code, out = run("read", "--repo", SLUG, "--issue", str(NEW))
+        self.assertEqual((code, out["verdict"], out["error"], out["blocked_by"], out["blocks"]),
+                         (1, "error", "payload_invalid", None, None))
+
     def test_read_of_a_pull_request_is_an_error(self):
         code, out = run("read", "--repo", SLUG, "--issue", str(PR["number"]))
         self.assertEqual((code, out["verdict"], out["error"]), (1, "error", "not_an_issue"))

@@ -2662,7 +2662,8 @@ class DependencyTest(unittest.TestCase):
     def test_a_blocker_only_the_tracker_names_makes_the_dependent_wait(self):
         """An edge added with forge-issue link is absent from the body's list, and here from the reply's states (#944 ahead of #891)."""
         result, calls, _ = run(args=dict(ARGS, issues=[2, 1]),
-                               patch={"facts-1": {"native": native(50, 2), "blockers": [{"issue": 50, "state": "CLOSED"}]}})
+                               patch={"facts-1": {"native": {"verdict": "read", "blocked_by": ["owner/repo#50", "Owner/REPO#2"]},
+                                                  "blockers": [{"issue": 50, "state": "CLOSED"}]}})
         ls = labels(calls)
         self.assertLess(ls.index("close-out-2"), ls.index("acquire-1"))
         self.assertEqual([row(result, n)["outcome"] for n in (1, 2)], ["landed"] * 2)
@@ -2679,6 +2680,42 @@ class DependencyTest(unittest.TestCase):
         self.assertEqual(row(result, 1)["outcome"], "landed")
         ls = labels(calls)
         self.assertLess(ls.index("acquire-1"), ls.index("close-out-2"))
+
+    def test_only_a_state_that_says_closed_releases_a_blocker(self):
+        for state, outcome in (("unknown", "blocked"), ("", "blocked"), ("error", "blocked"), ("open", "blocked"),
+                               ("closed", "landed"), ("CLOSED", "landed")):
+            with self.subTest(state=state):
+                result, _, _ = run(patch={"facts-1": {"blockers": [{"issue": 50, "state": state}]}})
+                self.assertEqual(row(result, 1)["outcome"], outcome)
+
+    def test_a_blocker_stated_open_once_stays_open(self):
+        for states in (("OPEN", "CLOSED"), ("CLOSED", "OPEN")):
+            for listed in ((), (50,)):
+                with self.subTest(states=states, native=listed):
+                    facts = {"native": native(*listed), "blockers": [{"issue": 50, "state": s} for s in states]}
+                    result, _, _ = run(patch={"facts-1": facts})
+                    self.assertEqual((row(result, 1)["outcome"], row(result, 1).get("blocker")), ("blocked", 50))
+
+    def test_a_native_entry_that_is_no_qualified_reference_stops_the_issue(self):
+        for bad in ("#50", "50", "owner/repo#0", 50):
+            with self.subTest(entry=bad):
+                result, calls, _ = run(patch={"facts-1": {"native": {"verdict": "read", "blocked_by": ["owner/repo#2", bad]}}})
+                self.assertEqual(row(result, 1), {"issue": 1, "outcome": "stopped", "reason":
+                                                  f"facts-1 returned a native blocker that is no <owner>/<name>#<n>: {json.dumps(bad)}"})
+                self.assertNotIn("acquire-1", labels(calls))
+
+    def test_a_failed_native_read_names_its_error(self):
+        result, _, _ = run(patch={"facts-1": {"native": {"verdict": "error", "blocked_by": None, "error": "usage"}}})
+        self.assertEqual(row(result, 1)["reason"], "facts-1 did not read the native blockers: usage")
+        _, calls, _ = run()
+        call = next(c for c in calls if c["label"] == "facts-1")
+        self.assertIn("error", call["schema"]["properties"]["native"]["properties"])
+        self.assertIn("return the verdict, blocked_by and error of the one JSON line", call["prompt"])
+
+    def test_a_closed_issue_whose_native_read_failed_is_closed_and_released(self):
+        result, calls, _ = run(patch={"facts-1": {"state": "CLOSED", "native": {"verdict": "error"}}})
+        self.assertEqual(row(result, 1), {"issue": 1, "outcome": "closed", "released": True})
+        self.assertEqual(labels(calls), ["setup", "facts-1", "release-1"])
 
     def test_a_reply_without_the_native_read_stops_the_issue_unclaimed(self):
         for bad in (None, {"verdict": "error"}, {"verdict": "read"}, {"verdict": "linked", "blocked_by": []}):
