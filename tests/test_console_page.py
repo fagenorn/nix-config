@@ -1453,11 +1453,12 @@ class PageGoalTest(unittest.TestCase):
 
 
 def top(line: dict) -> list:
-    return [n for n in nodes(line) if n not in nodes_of_detail(line)]
-
-
-def nodes_of_detail(line: dict) -> list:
-    return [n for d in detail_nodes(line) for n in nodes(d)]
+    """The line's nodes outside the sprint-detail subtree, skipped by position, not by value."""
+    flat = [line]
+    for child in line["children"]:
+        if not (child["tag"] == "details" and has_class(child, "sprint-detail")):
+            flat += top(child)
+    return flat
 
 
 def detail_nodes(line: dict) -> list:
@@ -1471,6 +1472,18 @@ def detail(line: dict) -> dict:
 
 def top_text(line: dict) -> str:
     return " ".join(n["text"] for n in top(line))
+
+
+class TopHelperTest(unittest.TestCase):
+    def test_a_node_copied_from_the_detail_onto_the_line_still_counts_as_top(self) -> None:
+        def node(tag: str, cls: str, text: str, children: list | None = None) -> dict:
+            return {"tag": tag, "cls": cls, "text": text, "children": children or []}
+
+        issue = node("span", "issue", "#12")
+        fold = node("details", "sprint-detail", "", [node("span", "issue", "#12")])
+        line = node("li", "sprint", "g", [issue, fold])
+        self.assertIsNotNone(re.search(r"#\d", top_text(line)))
+        self.assertEqual(top_text(node("li", "sprint", "g", [fold])), "g")
 
 
 class PageSprintReportTest(unittest.TestCase):
