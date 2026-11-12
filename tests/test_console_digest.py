@@ -9,10 +9,12 @@ from pathlib import Path
 
 from agent_tools.console.digest import (
     BRIEF_APPROVED_MOMENT, BRIEF_SENT_MOMENT, EARLIER_MAX, FIRST_VISIT, LOOKED, SHOWN,
-    SPRINT_WITHDRAWN, Moment, digest, keep, last_looked, moments)
+    SPRINT_STATE_MOMENT, SPRINT_WITHDRAWN, Moment, digest, keep, last_looked, moments)
 from agent_tools.console.event_log import (
-    BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, Event)
+    BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, SPRINT_REPORTED,
+    Event)
 from agent_tools.console.sessions import SessionState
+from agent_tools.console.sprints import sprint_states
 
 CASES = json.loads(
     (Path(__file__).parent / "fixtures" / "console" / "digest-events.json").read_text())["cases"]
@@ -128,6 +130,42 @@ class DigestTest(unittest.TestCase):
                    "A brief for owner/p00 arrived, version 2: make the importer resumable"),
             Moment(5, at(5), BRIEF_APPROVED_MOMENT,
                    "The brief for owner/p00 was approved, version 2: make the importer resumable")])
+
+    def test_a_sprint_state_sentence_only_when_the_reported_state_changes(self):
+        sid, goal = "a" * 16, "make the importer resumable"
+        row = {"sprint_id": sid, "goal": goal}
+        report = {"status": "two slices are building", "phase": "running",
+                  "milestone": "Importer resumes",
+                  "tracker_url": "https://github.com/owner/p00/milestone/3",
+                  "issues": [{"issue": 12, "stage": "building"}], "inbox": [12],
+                  "next": "start the resume slice"}
+
+        def reported(seq, phase, sprint_id=sid):
+            return Event(seq, at(seq), SPRINT_REPORTED, "owner/p00", {
+                "sprint_id": sprint_id, "goal": goal, "report": {**report, "phase": phase}})
+
+        rows = [
+            Event(1, at(1), GOAL_STATED, "owner/p00", row),
+            Event(2, at(2), BRIEF_SENT, "owner/p00", {
+                **row, "version": 1,
+                "brief": {"done": "d", "excluded": ["x"], "slices": ["a"], "risks": ["r"],
+                          "asks": ["q"]}}),
+            Event(3, at(3), BRIEF_APPROVED, "owner/p00", {**row, "version": 1}),
+            reported(4, "running"), reported(5, "running"), reported(6, "closing"),
+            reported(7, "closing"), reported(8, "done"), reported(9, "paused"),
+            reported(10, "running", "b" * 16)]
+
+        def said(found):
+            return [m for m in found if m.kind == SPRINT_STATE_MOMENT]
+
+        def moment(seq, text):
+            return Moment(seq, at(seq), "sprint_state",
+                          f"The sprint for owner/p00 is now {text}: {goal}")
+
+        self.assertEqual(said(moments(rows, {}, {})), [
+            moment(4, "on track"), moment(6, "closing"), moment(8, "done")])
+        self.assertEqual(said(moments(rows[4:], {}, {}, sprints=sprint_states(rows[:4]))), [
+            moment(6, "closing"), moment(8, "done")])
 
 
 if __name__ == "__main__":

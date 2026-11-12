@@ -14,6 +14,10 @@ Event kinds read:
 - `goal.withdrawn` (`event_log.GOAL_WITHDRAWN`, `sprints.py`): the owner withdrew a sprint's goal.
 - `brief.sent`, `brief.approved` (`event_log.BRIEF_SENT`, `BRIEF_APPROVED`, `sprints.py`): a
   manager's brief arrived, or the owner approved it. `brief.replied` says nothing.
+- `sprint.reported` (`event_log.SPRINT_REPORTED`, `sprints.py`): a manager's report of its sprint.
+  It speaks only when the sprint fold accepted it and the sprint had no report before or the
+  previous report's `phase` differs from the new one; a refused, ignored or phase-repeating
+  report says nothing.
 
 Every other kind says nothing, `goal.stated` included, delivery runs (`delivery.seen`, `delivery.gone`)
 included: the console has no delivery moments yet, and #878 adds them from
@@ -45,11 +49,15 @@ session with no repository makes no moment.
     sprint_withdrawn The goal for <project_id> was withdrawn: <goal>
     brief_sent       A brief for <project_id> arrived, version <n>: <goal>
     brief_approved   The brief for <project_id> was approved, version <n>: <goal>
+    sprint_state     The sprint for <project_id> is now <PHASE_TEXT[phase]>: <goal>
 
 An inbox payload needs `project_id` (str), `issue` (int, not bool) and
 `question` (str). A withdrawal needs the event's project (str) and a payload `goal` (str); it
 reads no state, the row carries the goal. A brief event makes a moment only when its project is a
 `str`, its payload `version` an `int` (not a bool) and `goal` a `str`; it reads no state either.
+A sprint report is judged against the folded sprints before it
+(`moments` folds its own copy of the optional `sprints` argument with
+`sprints.sprint_states`), and the sentence's goal is the sprint's.
 
 The window (`window_start`, `keep`): moments strictly after the last look, so a
 moment exactly at the look is not shown; with no look stored (a first visit),
@@ -70,9 +78,11 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from agent_tools.console.event_log import BRIEF_APPROVED, BRIEF_SENT, GOAL_WITHDRAWN, Event
+from agent_tools.console.event_log import (
+    BRIEF_APPROVED, BRIEF_SENT, GOAL_WITHDRAWN, SPRINT_REPORTED, Event)
 from agent_tools.console.sessions import (
     ENDED, GONE, HOOK, LIMIT, SEEN, WORKING, SessionState, session_states)
+from agent_tools.console.sprints import PHASE_TEXT, SprintState, sprint_states
 from agent_tools.console.view import INBOX_CHANGED, INBOX_SEEN, InboxRecord, inbox_records
 
 LOOKED = "page.looked"
@@ -88,6 +98,7 @@ SESSION_ENDED = "session_ended"
 SPRINT_WITHDRAWN = "sprint_withdrawn"
 BRIEF_SENT_MOMENT = "brief_sent"
 BRIEF_APPROVED_MOMENT = "brief_approved"
+SPRINT_STATE_MOMENT = "sprint_state"
 
 
 @dataclass(frozen=True)
@@ -177,12 +188,26 @@ def _brief_moment(event: Event) -> tuple[str, str] | None:
             f"The brief for {event.project} was approved, version {version}: {goal}")
 
 
+def _report_moment(event: Event, before: Mapping[str, SprintState],
+                   after: Mapping[str, SprintState]) -> tuple[str, str] | None:
+    sprint_id = event.payload.get("sprint_id")
+    if not isinstance(sprint_id, str) or sprint_id not in after or sprint_id not in before:
+        return None
+    old, new = before[sprint_id].report, after[sprint_id].report
+    if new is None or (old is not None and old.phase == new.phase):
+        return None
+    state = PHASE_TEXT[new.phase]
+    return (SPRINT_STATE_MOMENT,
+            f"The sprint for {event.project} is now {state}: {after[sprint_id].goal}")
+
+
 def moments(
     events: Iterable[Event],
     sessions: Mapping[str, SessionState],
     records: Mapping[tuple[str, str], InboxRecord],
+    sprints: Mapping[str, SprintState] | None = None,
 ) -> list[Moment]:
-    states, held = dict(sessions), dict(records)
+    states, held, folded = dict(sessions), dict(records), dict(sprints or {})
     found = []
     for event in events:
         said = None
@@ -205,6 +230,9 @@ def moments(
             if isinstance(event.project, str) and isinstance(goal, str):
                 said = (SPRINT_WITHDRAWN,
                         f"The goal for {event.project} was withdrawn: {goal}")
+        previous, folded = folded, sprint_states([event], folded)
+        if event.kind == SPRINT_REPORTED:
+            said = _report_moment(event, previous, folded)
         if said is not None:
             found.append(Moment(event.seq, event.at, said[0], said[1]))
     return found

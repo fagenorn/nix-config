@@ -9,6 +9,7 @@ import json
 from agent_tools.console import service, sprints
 
 from . import console_test_support as support
+from .test_console_answer import view_of
 from .test_console_briefs import GOAL_TEXT, JSON, PARTS
 from .test_console_writes import Case
 
@@ -124,6 +125,19 @@ class ReportRouteTest(Case):
             with self.subTest(method=method):
                 got = support.request(svc.address, method, REPORT_PATH)
                 self.assertEqual((got[0], got[1]["Allow"]), (405, "POST"))
+
+    def test_the_digest_says_when_the_reported_state_changes(self):
+        svc = self.open()
+        sid = self.started(svc)
+        secret = self.secret(sid)
+        for report in (REPORT, REPORT, {**REPORT, "phase": "closing"}):
+            self.assertEqual(self.report(svc, sid, secret, report)[0], 200)
+        digest = view_of(svc)["digest"]
+        prefix = "The sprint for owner/p01 is now"
+        self.assertEqual(
+            [m["sentence"] for m in digest["recent"] + digest["earlier"]
+             if m["sentence"].startswith(prefix)],
+            [f"{prefix} closing: {GOAL_TEXT}", f"{prefix} on track: {GOAL_TEXT}"])
 
     def test_a_report_survives_a_restart(self):
         svc = self.open()

@@ -277,8 +277,8 @@ is one stderr line `console: retention_failed <Type>: <message>` and the loop go
 
 Digest: the view carries `digest.digest(moments, last look, now)` (see `digest.py`). The last look
 is the newest `page.looked` event of the log, the same for every client and across restarts; the
-moments are folded from each appended batch against the state before it, and only those after the
-current window start are kept. The window of a first visit moves with the clock, so
+moments are folded from each appended batch against the sessions, inbox and sprints before it, and only those
+after the current window start are kept. The window of a first visit moves with the clock, so
 `DIGEST_THREAD`, started by `start()`, calls `expire_digest()` every `digest_seconds`
 (`DIGEST_SECONDS`): it trims the moments to the window and publishes, which changes the view only
 when a moment left. A failure is one stderr line `console: digest_expiry_failed <Type>: <message>`
@@ -1326,7 +1326,7 @@ class ConsoleService:
                       file=sys.stderr)
 
     def _fold(self, appended: list[Event]) -> None:
-        new = digest.moments(appended, self._sessions, self._inbox)
+        new = digest.moments(appended, self._sessions, self._inbox, self._sprints)
         self._looked = digest.last_looked(appended, self._looked)
         self._states = project_states(appended, self._states)
         self._sessions = sessions.session_states(appended, self._sessions)
