@@ -33,7 +33,8 @@ Code applies a settings file's `env` to that session. Only the path is on argv.
 Runner. `run_launch` starts the command with no terminal (`stdin` and `stdout` to the null
 device, stderr to a temporary file, never a pipe, so a detached child that keeps the descriptors
 open cannot hold the launch), in its own session, in the project root, within `LAUNCH_TIMEOUT`
-seconds. The client's environment is the console's without `CLAUDE_CONFIG_DIR`, `CONSOLE_SPRINT_ID`
+seconds. The client's environment (`client_environment(profile, environ)`, shared with the nudge
+commands) is the console's without `CLAUDE_CONFIG_DIR`, `CONSOLE_SPRINT_ID`
 and `CONSOLE_SPRINT_SECRET`, plus `CLAUDE_ACCOUNT=<profile>` and `$HOME/.agents/bin` first on
 `PATH` (where `sprint` and `resolve-project` are installed). `LAUNCH_TOOLS` names every program the
 launch runs by name on `PATH`.
@@ -191,9 +192,9 @@ def _write_settings(launch: Launch) -> None:
             Path(temporary).unlink(missing_ok=True)
 
 
-def _client_environment(launch: Launch, environ: Mapping[str, str]) -> dict[str, str]:
+def client_environment(profile: str, environ: Mapping[str, str]) -> dict[str, str]:
     env = {key: value for key, value in environ.items() if key not in _DROPPED_ENV}
-    env[ACCOUNT_ENV] = launch.profile
+    env[ACCOUNT_ENV] = profile
     home = environ.get("HOME")
     if home:
         path = environ.get("PATH")
@@ -217,7 +218,7 @@ def run_launch(launch: Launch, *, platform: str = sys.platform, run=subprocess.r
         _write_settings(launch)
     except LaunchFailed as error:
         raise fail(str(error)) from error
-    env = _client_environment(launch, environ)
+    env = client_environment(launch.profile, environ)
     with tempfile.TemporaryFile() as err:
         try:
             result = run(argv, cwd=launch.cwd, env=env, stdin=subprocess.DEVNULL,

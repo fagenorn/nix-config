@@ -372,7 +372,8 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("`python/agent_tools/console/**`", areas[0][3])
         for term in ("Console", "Inbox item", "Quiet project", "Answered item",
                      "Held work", "Waiting since", "Session", "Outside sprints",
-                     "Not yet managed", "Delivery run", "Goal", "Sprint", "Brief"):
+                     "Not yet managed", "Delivery run", "Goal", "Sprint", "Brief",
+                     "Message", "Nudge"):
             self.assertIn([term, "Console"], cells)
         self.assertIn("- **Console → Claims**:", text)
 
@@ -487,6 +488,24 @@ class DocsTreeTest(unittest.TestCase):
         context_map = self.doc("docs/CONTEXT-MAP.md")
         for needle in ("| Manager | Console |", "| Report | Console |"):
             self.assertIn(needle, context_map)
+
+    def test_the_console_message_decision_is_recorded(self):
+        path = "docs/areas/console/adr/016-what-the-owner-says-to-a-sprint-reaches-its-manager.md"
+        first = (REPO_ROOT / path).read_text().splitlines()[0]
+        self.assertEqual(
+            first, "# ADR-console-016 — What the owner says to a sprint reaches its manager")
+        adr = self.doc(path)
+        for needle in ("sprint inbox", "sprint reply", "POST /api/message", "POST /api/inbox",
+                       "POST /api/message-reply", "SendMessage", "--resume", "manager not reachable",
+                       "schema 6", "ADR-console-008", "ADR-console-013", "ADR-console-015",
+                       "#831", "#835", "#889"):
+            self.assertIn(needle, adr)
+        write = self.doc("docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md")
+        for needle in ("/api/message", "/api/inbox", "/api/message-reply"):
+            self.assertIn(needle, write)
+        kept = self.doc("docs/areas/console/adr/009-events-are-kept-for-90-days.md")
+        for needle in ("sprint.messaged", "schema 6"):
+            self.assertIn(needle, kept)
 
     def test_the_console_delivery_decision_is_recorded(self):
         path = "docs/areas/console/adr/005-in-flight-delivery-stage-is-read-from-run-journals.md"
