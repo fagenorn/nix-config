@@ -525,13 +525,13 @@ class SprintCommandTest(Case):
         self.assertTrue(got.stderr.startswith("sprint: cannot read -:"), got.stderr)
 
     def printed_examples(self):
-        """The example report and the example closing report of the printed contract."""
+        """The example report and the example closing report, as the contract prints them."""
         text = run_sprint("contract").stdout
-        blocks = re.findall(r"```json\n(.*?)\n\s*```", text, re.S)
         reporting = text.partition("## Reporting")[2].partition("\n## ")[0]
         ending = text.partition("## Ending")[2]
-        return (json.loads(re.search(r"```json\n(.*?)\n\s*```", reporting, re.S).group(1)),
-                json.loads(re.search(r"```json\n(.*?)\n\s*```", ending, re.S).group(1)), blocks)
+        pattern = r"```json\n(.*?)\n\s*```"
+        return (re.search(pattern, reporting, re.S).group(1),
+                re.search(pattern, ending, re.S).group(1), re.findall(pattern, text, re.S))
 
     def test_the_printed_examples_are_accepted_as_printed(self):
         report, closing, blocks = self.printed_examples()
@@ -541,11 +541,11 @@ class SprintCommandTest(Case):
         secret, _ = self.reports(svc, sid, REPORT)
         port = self.port(svc)
         got = run_sprint("report", "--sprint", sid, "--secret-file", secret,
-                         "--report-file", "-", "--port", port, stdin=json.dumps(report))
+                         "--report-file", "-", "--port", port, stdin=report)
         self.assertEqual((got.returncode, got.stdout, got.stderr),
                          (0, "sprint: report sent\n", ""))
         got = run_sprint("close", "--sprint", sid, "--secret-file", secret,
-                         "--closing-file", "-", "--port", port, stdin=json.dumps(closing))
+                         "--closing-file", "-", "--port", port, stdin=closing)
         self.assertEqual((got.returncode, got.stdout, got.stderr),
                          (0, "sprint: closing report sent\n", ""))
 
@@ -773,6 +773,10 @@ class ManagerContractTest(unittest.TestCase):
                     with self.subTest(command=command, member=member, where=where):
                         self.assertIn(f"`{member}`" if where == "contract" else f"{member}:",
                                       shown)
+        limit = f"{sprints.MAX_LINE_CHARS} characters"
+        for where, shown in (("contract", ending), ("help", run_sprint("close", "--help").stdout)):
+            with self.subTest(where=where, limit=limit):
+                self.assertIn(f"first line is at most {limit}", " ".join(shown.split()))
         for phase in sprints.REPORT_PHASES:
             self.assertIn(f"`{phase}`", reporting)
             self.assertIn(phase, run_sprint("report", "--help").stdout)

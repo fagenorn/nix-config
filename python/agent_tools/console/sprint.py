@@ -123,8 +123,8 @@ example:
    "inbox": [12], "next": "start the resume slice when 12 lands"}
 """
 CLOSING_HELP = """the closing report's members, all required:
-  summary:     what the sprint did, at most 4000 characters; its first line is one plain
-               sentence with no issue number (no # and a digit)
+  summary:     what the sprint did, at most 4000 characters; its first line is at most
+               500 characters and one plain sentence with no issue number (no # and a digit)
   issues:      every issue of the sprint, [{"issue": 12, "stage": "landed"}, ...], no issue
                twice; a stage is one of landed, held, dropped, and every issue of the last
                report needs one

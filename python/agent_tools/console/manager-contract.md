@@ -88,7 +88,7 @@ If this text is no longer in your context, run `sprint contract` again.
 
 1. Close the sprint when every issue has landed (held for verification counts as landed) or been dropped: send `sprint close --closing-file -`, one JSON object on standard input:
    `{"summary": <text>, "issues": [{"issue": <number>, "stage": "landed" | "held" | "dropped"}], "differently": <text>}`
-   - `summary`: what the sprint did, at most 4000 characters. Its first line is one plain sentence with no issue number (a `#` followed by a digit is refused): the owner reads that line on the page.
+   - `summary`: what the sprint did, at most 4000 characters. Its first line is at most 500 characters and is one plain sentence with no issue number (a `#` followed by a digit is refused): the owner reads that line on the page. A longer first line is refused even when the whole summary is within 4000 characters.
    - `issues`: every issue of the sprint, each with its outcome. An issue you gave up on is listed with the stage `dropped`; leaving it out is not dropping it.
    - `differently`: what you would do differently next time, at most 4000 characters.
 
