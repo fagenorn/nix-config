@@ -2520,6 +2520,7 @@ class NoCommitTaskTest(unittest.TestCase):
                              "notes: posted the comment on the issue; checks run: [\"gh issue view -> 1\"].",
                              f"{self.TRACKED_ONLY}: another head or an uncommitted change to a tracked file is a finding. Then",
                              "Does the task file require a tracked file to be created, changed or deleted?",
+                             "Confirm each yourself, with read-only commands that change nothing, the task file's own verification commands or a lookup (",
                              "the implementer's word alone is not evidence"):
                     self.assertIn(want, text)
                 self.assertNotIn("lane:", text)
@@ -6751,9 +6752,10 @@ class PreCommitFocusTest(unittest.TestCase):
     def test_every_focused_site_has_a_scenario(self):
         # A prompt family that gains or loses FOCUSED must be reflected in SCENARIOS.
         source = PROGRAM.read_text(encoding="utf-8")
-        # The merge sync names FMT directly (it runs WHOLE, not FOCUSED); three of the FMT uses are the FOCUSED, FIX_TESTS and
-        # EVIDENCE_FIX definitions (#935: EVIDENCE_FIX is direct-fix's other wording, the same family).
-        sites = source.count("${FOCUSED}") + source.count("${FIX_TESTS}") + source.count("${FMT}") - 3
+        # The merge sync names FMT directly (it runs WHOLE, not FOCUSED); four of the FMT uses are the FOCUSED, FIX_TESTS, OWN_TESTS
+        # and EVIDENCE_FIX definitions (#935: EVIDENCE_FIX is direct-fix's other wording, the same family).
+        sites = (source.count("${FOCUSED}") + source.count("${FIX_TESTS}") + source.count("${OWN_TESTS}")
+                 + source.count("${FMT}") - 4)
         self.assertEqual(sites, len(self.FAMILIES))
 
     def test_the_evidence_fix_round_names_the_flagged_argv_too(self):
@@ -6792,10 +6794,18 @@ class PreCommitFocusTest(unittest.TestCase):
 WHOLE_RUN = ("run in full every test file among or covering", "never a single test class",
              "any fast suite the project declares", "each command and its result")
 FOCUSED_RUN = "Run only the tests covering the files you changed"
+# #963: a step the verify step follows runs whole test files of what it changed and no suite.
+OWN_RUN = ("Before returning, run in full every test file among or covering the files you changed (never a single test class) "
+           "and no suite: the verify step runs it next; return tests: each command and its result.")
 
 
 class WholeTestFileTest(unittest.TestCase):
-    """#787: every implementer step after the task loop runs whole test files and any fast suite, and reports each command and its result."""
+    """#787: every implementer step after the task loop runs whole test files and reports each command and its result; #963: only a step the verify step does not follow also runs a fast suite."""
+
+    def assert_own(self, text):
+        self.assertIn(OWN_RUN, text)
+        self.assertNotIn("fast suite", text)
+        self.assertNotIn("Run only the tests", text)
 
     def assert_whole(self, text, files):
         for needle in WHOLE_RUN + (f"covering {files}",):
@@ -6803,15 +6813,21 @@ class WholeTestFileTest(unittest.TestCase):
         self.assertNotIn("Run only the tests", text)
         self.assertNotIn("run only the tests", text)
 
-    def test_both_fix_waves_run_whole_files(self):
+    def test_both_fix_waves_run_whole_files_and_leave_the_suite_to_verify(self):
         _, calls = run(replies={"final-1": FixWaveTest.FIRST, "fix-wave-review": FixWaveTest.narrowing()})
         for label in ("fix-wave", "fix-wave-2"):
             with self.subTest(label=label):
-                self.assert_whole(prompt(calls, label), "the files you changed")
+                self.assert_own(prompt(calls, label))
+                self.assertIn("each real defect with a regression test", prompt(calls, label))
+        # The verify step runs after the last wave, before anything reads a suite result.
+        seen = labels(calls)
+        self.assertLess(seen.index("fix-wave-2"), seen.index("verify"))
 
     def test_verify_fix_runs_whole_files(self):
         _, calls = run(replies={"verify": VERIFY_RED})
-        self.assert_whole(prompt(calls, "verify-fix-1"), "the files you changed")
+        self.assert_own(prompt(calls, "verify-fix-1"))
+        seen = labels(calls)
+        self.assertLess(seen.index("verify-fix-1"), seen.index("verify-2"))
 
     def test_checks_fix_runs_whole_files(self):
         _, calls = run(patch={"pr": {"checks": {"state": "failed", "head": SHA}},
