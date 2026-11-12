@@ -200,6 +200,7 @@ agent-workflow-tests *args:
     tests/test_console_capacity_check.py \
     tests/test_console_manager_check.py \
     tests/test_console_message_check.py \
+    tests/test_console_revive_check.py \
     tests/test_console_page.py \
     tests/test_console_service.py \
     tests/test_console_stream.py \
@@ -212,12 +213,15 @@ agent-workflow-tests *args:
     tests/test_console_writes.py \
     tests/test_console_answer.py \
     tests/test_console_sprints.py \
+    tests/test_console_revive.py \
     tests/test_console_briefs.py \
     tests/test_console_messages.py \
     tests/test_console_reports.py \
     tests/test_console_sprint_command.py \
     tests/test_console_manager.py \
     tests/test_console_manager_service.py \
+    tests/test_console_stops.py \
+    tests/test_console_revive_service.py \
     tests/test_console_nudge.py \
     tests/test_console_deliveries.py \
     tests/test_console_units.py \

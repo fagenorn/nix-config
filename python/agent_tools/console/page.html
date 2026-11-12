@@ -102,9 +102,9 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .abox .meta { margin-top: 6px; }
 .abox .meta.now { color: var(--text); }
 .abox .opts { list-style: none; padding-left: 0; display: flex; flex-direction: column; align-items: stretch; gap: 2px; margin-top: 14px; }
-.opt, .send, .undo, .approve, .reply-send, .goal-send, .goal-cancel, .goal-project, .give-goal, .withdraw, .retry, .tell-open, .tell-send, .abox button[class^="ans-"] { display: inline-flex; align-items: baseline; gap: 8px; font: inherit; color: inherit; text-align: left; background: none; border: 1px solid var(--hair); border-radius: 8px; padding: 2px 10px; cursor: pointer; transition: background-color .16s; }
-.opt:hover:enabled, .send:hover:enabled, .undo:hover:enabled, .approve:hover:enabled, .reply-send:hover:enabled, .goal-send:hover:enabled, .goal-cancel:hover:enabled, .goal-project:hover:enabled, .give-goal:hover:enabled, .withdraw:hover:enabled, .retry:hover:enabled, .tell-open:hover:enabled, .tell-send:hover:enabled, .abox button[class^="ans-"]:hover:enabled { background: rgba(202, 211, 245, .05); }
-.opt:disabled, .send:disabled, .reply-send:disabled, .goal-send:disabled, .give-goal:disabled, .withdraw:disabled, .retry:disabled, .tell-open:disabled, .tell-send:disabled, .abox button[class^="ans-"]:disabled { cursor: default; }
+.opt, .send, .undo, .approve, .reply-send, .goal-send, .goal-cancel, .goal-project, .give-goal, .withdraw, .retry, .stop, .stop-confirm, .stop-cancel, .try-again, .stall-withdraw, .tell-open, .tell-send, .abox button[class^="ans-"] { display: inline-flex; align-items: baseline; gap: 8px; font: inherit; color: inherit; text-align: left; background: none; border: 1px solid var(--hair); border-radius: 8px; padding: 2px 10px; cursor: pointer; transition: background-color .16s; }
+.opt:hover:enabled, .send:hover:enabled, .undo:hover:enabled, .approve:hover:enabled, .reply-send:hover:enabled, .goal-send:hover:enabled, .goal-cancel:hover:enabled, .goal-project:hover:enabled, .give-goal:hover:enabled, .withdraw:hover:enabled, .retry:hover:enabled, .stop:hover:enabled, .stop-confirm:hover:enabled, .stop-cancel:hover:enabled, .try-again:hover:enabled, .stall-withdraw:hover:enabled, .tell-open:hover:enabled, .tell-send:hover:enabled, .abox button[class^="ans-"]:hover:enabled { background: rgba(202, 211, 245, .05); }
+.opt:disabled, .send:disabled, .reply-send:disabled, .goal-send:disabled, .give-goal:disabled, .withdraw:disabled, .retry:disabled, .stop:disabled, .stop-confirm:disabled, .stop-cancel:disabled, .try-again:disabled, .stall-withdraw:disabled, .tell-open:disabled, .tell-send:disabled, .abox button[class^="ans-"]:disabled { cursor: default; }
 .abox button[class^="ans-"]:disabled { color: var(--ov2); }
 .abox .detail { margin-top: 6px; padding: 6px 10px; max-height: 24rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: .84375rem; color: var(--sub0); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; }
 .card .detail, .rest .detail, .done .detail { flex-basis: 100%; margin: 6px 0 0; padding: 6px 10px; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: .84375rem; color: var(--sub0); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; }
@@ -182,7 +182,8 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .sprint-more summary::-webkit-details-marker { display: none; }
 .tell { width: 100%; max-width: 40rem; min-height: 3.5rem; resize: vertical; font: inherit; color: var(--text); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; padding: 4px 8px; }
 .act { flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin-top: 8px; font-size: .8125rem; color: var(--ov2); }
-.fail { color: var(--red); }
+.fail, .stop-fail, .unstopped { color: var(--red); }
+.stop-ask { color: var(--text); }
 .lead .act { margin-top: 14px; align-items: center; gap: 8px; font-size: .9375rem; }
 .act .primary.needs { display: inline-flex; align-items: center; gap: 10px; min-height: 40px; padding: 0 16px; border: 0; border-radius: 10px; font-weight: 600; background: var(--peach); color: var(--crust); text-decoration: none; }
 .act .primary.needs:hover:enabled { background: #f8bb98; }
@@ -191,6 +192,10 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .item-detail { margin-left: auto; }
 .item-detail summary { cursor: pointer; list-style: none; padding: 4px 12px; border-radius: 8px; color: var(--sub1); }
 .item-detail summary::-webkit-details-marker { display: none; }
+.finished { flex: 1 0 100%; padding: 0 0 0 16px; font-size: .8125rem; }
+.finished summary { cursor: pointer; color: var(--ov2); }
+.sprint .closing-line { color: var(--text); overflow-wrap: anywhere; }
+.sprint .closing-counts { color: var(--ov2); }
 #digest { margin-top: 40px; max-width: 44rem; }
 #digest:empty { margin-top: 0; }
 .sec-h { font: 600 .9375rem/1.4 var(--ui); color: var(--text); }
@@ -394,6 +399,19 @@ function sprintDetail(sprint) {
     }
     fold.appendChild(list);
   }
+  const closing = sprint.closing;
+  if (closing !== null && typeof closing === "object") {
+    if (typeof closing.summary === "string") fold.appendChild(el("p", "closing-summary", closing.summary));
+    for (const [label, key] of [["Landed", "landed"], ["Held", "held"], ["Dropped", "dropped"]]) {
+      const numbers = Array.isArray(closing[key]) ? closing[key] : [];
+      if (numbers.length > 0) {
+        fold.appendChild(el("p", "closing-" + key, label + ": " + numbers.map((n) => "#" + n).join(", ")));
+      }
+    }
+    if (typeof closing.differently === "string" && closing.differently !== "") {
+      fold.appendChild(el("p", "differently", "Would do differently: " + closing.differently));
+    }
+  }
   if (typeof sprint.next === "string") fold.appendChild(el("p", "next", "Next: " + sprint.next));
   if (typeof sprint.milestone === "string") {
     fold.appendChild(el("p", "milestone", "Milestone: " + sprint.milestone));
@@ -416,6 +434,8 @@ const SPRINT_LOOKS = new Map([
   ["quiet", { icon: "dashed-icon", mark: "sic-dashed", tone: "st-wait" }],
   ["closing", { icon: "check-icon", mark: "sic-closing", tone: "st-go" }],
   ["done", { icon: "tick-icon", mark: "sic-tick", tone: "st-dim" }],
+  ["stopping", { icon: "pause-icon", mark: "sic-pause", tone: "st-wait" }],
+  ["stopped", { icon: "tick-icon", mark: "sic-tick", tone: "st-dim" }],
 ]);
 function sprintLook(sprint) {
   const look = SPRINT_LOOKS.get(sprint.state);
@@ -429,6 +449,7 @@ function pipGroup(stage) {
   return stage === "landed" || stage === "held" || stage === "queued" ? stage : "delivery";
 }
 const withdrawals = new Map();
+const stops = new Map();
 const retries = new Map();
 const latestSprints = new Map();
 const tellDrafts = new Map();
@@ -557,6 +578,15 @@ function drawSprint(item, entry, sprint) {
   }
   const words = el("p", "sp-status");
   words.appendChild(el("span", "sprint-state " + look.tone, sprint.state_text));
+  const closing = sprint.closing;
+  if (closing !== null && typeof closing === "object") {
+    if (typeof closing.first_line === "string") {
+      words.appendChild(el("span", "closing-line", closing.first_line));
+    }
+    if (typeof closing.counts_text === "string") {
+      words.appendChild(el("span", "closing-counts", closing.counts_text));
+    }
+  }
   if (typeof sprint.status === "string") {
     words.appendChild(el("span", "status", sprint.status));
     if (typeof sprint.status_at === "string") {
@@ -588,7 +618,12 @@ function drawSprint(item, entry, sprint) {
     item.appendChild(el("span", "fail", "Could not retry: " + retrying.reason));
   }
   const messages = sprint.messages || [];
-  if (typeof sprint.status === "string" || (sprint.sessions || []).length > 0 || messages.length > 1) {
+  if (sprint.stoppable === true) stopControls(item, entry, sprint);
+  if (typeof sprint.stop_text === "string") {
+    item.appendChild(el("span", "stop-fail", sprint.stop_text));
+  }
+  const hasClosing = closing !== null && typeof closing === "object";
+  if (typeof sprint.status === "string" || hasClosing || (sprint.sessions || []).length > 0 || messages.length > 1) {
     const fold = sprintDetail(sprint);
     if (wasOpen) fold.open = true;
     item.appendChild(fold);
@@ -601,7 +636,9 @@ function drawSprint(item, entry, sprint) {
     item.appendChild(el("span", "unreachable", sprint.reach_text));
   }
   const controls = el("div", "sprint-acts");
-  controls.appendChild(tellBox(item, entry, sprint));
+  if (typeof sprint.ended_at !== "string" && sprint.state !== "stopped") {
+    controls.appendChild(tellBox(item, entry, sprint));
+  }
   const more = el("details", "sprint-more");
   more.dataset.key = "more:" + sprint.sprint_id;
   if (moreWasOpen) more.open = true;
@@ -611,6 +648,61 @@ function drawSprint(item, entry, sprint) {
   more.appendChild(button);
   controls.appendChild(more);
   item.appendChild(controls);
+}
+function stopControls(item, entry, sprint) {
+  const id = sprint.sprint_id;
+  const state = stops.get(id);
+  const asking = state !== undefined && (state.phase === "confirming" || state.phase === "sending");
+  if (!asking) {
+    item.appendChild(actionButton("stop", "Stop", () => {
+      stops.set(id, { phase: "confirming", reason: "" });
+      refillRows(id);
+    }));
+  } else {
+    item.appendChild(el("span", "stop-ask",
+      "Stop this sprint? The manager finishes what is mid-merge, starts nothing new and reports."));
+    const confirm = actionButton("stop-confirm", "Confirm stop", () => stop(item, entry, sprint));
+    if (state.phase === "sending") confirm.setAttribute("disabled", "");
+    item.appendChild(confirm);
+    const cancel = actionButton("stop-cancel", "Cancel", () => {
+      stops.delete(id);
+      refillRows(id);
+    });
+    if (state.phase === "sending") cancel.setAttribute("disabled", "");
+    item.appendChild(cancel);
+  }
+  if (state !== undefined && state.phase === "failed") {
+    item.appendChild(el("span", "fail", "Could not stop: " + state.reason));
+  }
+}
+async function stop(item, entry, sprint) {
+  const id = sprint.sprint_id;
+  const current = stops.get(id);
+  if (current === undefined || current.phase !== "confirming") return;
+  const state = { phase: "sending", reason: "" };
+  stops.set(id, state);
+  refillRows(id);
+  let reason = null;
+  try {
+    const response = await fetch("/api/stop", {
+      method: "POST",
+      headers: { "X-Console-Token": token, "Content-Type": "application/json" },
+      body: JSON.stringify({ project_id: entry.project_id, sprint_id: id }),
+    });
+    if (response.status !== 204) {
+      reason = (await response.text()).trim() || "HTTP " + response.status;
+    }
+  } catch (error) {
+    console.error(error);
+    reason = "the console did not answer";
+  }
+  if (stops.get(id) !== state) return;
+  if (reason === null) stops.delete(id);
+  else {
+    state.phase = "failed";
+    state.reason = reason;
+  }
+  refillRows(id);
 }
 async function tell(item, entry, sprint) {
   const id = sprint.sprint_id;
@@ -717,9 +809,69 @@ async function retry(item, entry, sprint) {
     if (row.dataset.sprintId === id) fillSprint(row, latest.entry, latest.sprint);
   }
 }
-function sprintList(entry) {
+const stallPosts = new Map();
+function isStall(item) {
+  return item.reason === "manager";
+}
+async function stallPost(item, kind, failure, send) {
+  const key = kind + "\n" + item.sprint_id;
+  const current = stallPosts.get(key);
+  if (current !== undefined && current.phase === "sending") return;
+  const state = { phase: "sending", reason: "", failure };
+  stallPosts.set(key, state);
+  redraw();
+  let reason = null;
+  try {
+    const response = await send();
+    if (response.status !== 204) {
+      reason = (await response.text()).trim() || "HTTP " + response.status;
+    }
+  } catch (error) {
+    console.error(error);
+    reason = "the console did not answer";
+  }
+  if (stallPosts.get(key) !== state) return;
+  if (reason === null) stallPosts.delete(key);
+  else {
+    state.phase = "failed";
+    state.reason = reason;
+  }
+  redraw();
+}
+function stallHeaders() {
+  return { "X-Console-Token": token, "Content-Type": "application/json" };
+}
+function stallBody(item) {
+  return JSON.stringify({ project_id: item.project_id, sprint_id: item.sprint_id });
+}
+function stallCard(item) {
+  const card = el("article", "card stall");
+  card.appendChild(el("p", "q", item.headline));
+  card.appendChild(el("span", "reason", item.last_reason));
+  const again = stallPosts.get("again\n" + item.sprint_id);
+  const away = stallPosts.get("withdraw\n" + item.sprint_id);
+  const retry = actionButton("try-again", "Try again",
+    () => stallPost(item, "again", "Could not try again: ", () => fetch("/api/retry-manager", {
+      method: "POST", headers: stallHeaders(), body: stallBody(item),
+    })));
+  if (again !== undefined && again.phase === "sending") retry.setAttribute("disabled", "");
+  card.appendChild(retry);
+  const withdrawn = actionButton("stall-withdraw", "Withdraw",
+    () => stallPost(item, "withdraw", "Could not withdraw: ", () => fetch("/api/withdraw", {
+      method: "POST", headers: stallHeaders(), body: stallBody(item),
+    })));
+  if (away !== undefined && away.phase === "sending") withdrawn.setAttribute("disabled", "");
+  card.appendChild(withdrawn);
+  for (const state of [again, away]) {
+    if (state !== undefined && state.phase === "failed") {
+      card.appendChild(el("span", "fail", state.failure + state.reason));
+    }
+  }
+  return card;
+}
+function sprintList(entry, sprints) {
   const list = el("ul", "sprints");
-  for (const sprint of entry.sprints) {
+  for (const sprint of sprints) {
     const item = el("li", "sprint");
     fillSprint(item, entry, sprint);
     list.appendChild(item);
@@ -746,7 +898,15 @@ function projectLine(entry) {
   if (entry.quiet) {
     line.appendChild(actionButton("give-goal", "Give it a goal", () => openGoalFor(entry.project_id)));
   }
-  if (entry.sprints && entry.sprints.length > 0) line.appendChild(sprintList(entry));
+  if (entry.sprints && entry.sprints.length > 0) line.appendChild(sprintList(entry, entry.sprints));
+  const finished = entry.finished_sprints;
+  if (finished !== null && typeof finished === "object" && Array.isArray(finished.sprints)) {
+    const fold = el("details", "finished");
+    fold.dataset.key = "finished:" + entry.project_id;
+    fold.appendChild(el("summary", "", finished.label + " (" + finished.count + ")"));
+    fold.appendChild(sprintList(entry, finished.sprints));
+    line.appendChild(fold);
+  }
   return line;
 }
 function renderStatement(view) {
@@ -755,6 +915,9 @@ function renderStatement(view) {
   const nodes = [h1, el("p", "sub", view.statement.sentence)];
   const cap = view.capacity;
   if (cap && cap.all_out && cap.resumes_at) nodes.push(phrase("p", "sub", "Resumes ", timeEl("weekday", cap.resumes_at, "")));
+  for (const stopped of Array.isArray(view.unstopped) ? view.unstopped : []) {
+    nodes.push(el("p", "unstopped", stopped.text));
+  }
   box.replaceChildren(...nodes);
 }
 const TICK_MS = 30000;
@@ -1617,7 +1780,12 @@ function renderInbox(view) {
   for (const fold of document.querySelectorAll("#inbox details[open]")) wasOpen.add(fold.dataset.key);
   const open = view.inbox.open;
   const briefs = open.filter(isBrief);
-  const tracked = open.filter((item) => !isBrief(item));
+  const stalls = open.filter(isStall);
+  const tracked = open.filter((item) => !isBrief(item) && !isStall(item));
+  for (const [key, state] of [...stallPosts]) {
+    const id = key.split("\n")[1];
+    if (state.phase !== "sending" && !stalls.some((item) => item.sprint_id === id)) stallPosts.delete(key);
+  }
   const present = new Set(open.map(stateId));
   // A frame that shows a sent item open again supersedes the page's own "sent"; a redraw of the same view does not.
   const reopened = new Set(fresh ? tracked.filter(answerable).map(itemId) : []);
@@ -1641,6 +1809,7 @@ function renderInbox(view) {
   const current = currentEntry(open);
   currentId = current === null ? null : itemId(current.item);
   placeBriefCards(section, briefs);
+  for (const item of stalls) section.appendChild(stallCard(item));
   if (briefs.length === 0 && tracked.length > 0) section.appendChild(leadItem(tracked[0]));
   const rows = briefs.length === 0 ? tracked.slice(1) : tracked;
   if (rows.length > 0) {
@@ -1740,16 +1909,24 @@ function drawProjects(view) {
   list.id = "list";
   const live = new Set();
   const retryable = new Set();
+  const stoppable = new Set();
   for (const entry of view.entries) {
     for (const project of entry.type === "quiet_group" ? entry.projects : [entry]) {
-      for (const sprint of project.sprints || []) {
+      const finished = project.finished_sprints;
+      const shown = (project.sprints || []).concat(
+        finished !== null && finished !== undefined && Array.isArray(finished.sprints) ? finished.sprints : []);
+      for (const sprint of shown) {
         live.add(sprint.sprint_id);
         if (sprint.retry === true) retryable.add(sprint.sprint_id);
+        if (sprint.stoppable === true) stoppable.add(sprint.sprint_id);
       }
     }
   }
   for (const id of [...retries.keys()]) {
     if (!retryable.has(id)) retries.delete(id);
+  }
+  for (const id of [...stops.keys()]) {
+    if (!stoppable.has(id)) stops.delete(id);
   }
   for (const id of [...withdrawals.keys()]) {
     if (!live.has(id)) withdrawals.delete(id);

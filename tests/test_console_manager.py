@@ -90,6 +90,21 @@ class CommandTest(Case):
         self.assertIn('"sprint contract"', last)
         self.assertTrue(last.endswith("The goal: " + goal), last)
 
+    def test_a_takeover_prompt_names_the_takeover_then_contract_then_recap(self):
+        lead = ("You take over one sprint whose manager is gone, started by the console. "
+                'Run "sprint contract" first, then "sprint recap", and follow what they print. '
+                "The goal: ")
+        self.assertEqual(lead, manager.TAKEOVER_LEAD)
+        self.assertLess(lead.index("sprint contract"), lead.index("sprint recap"))
+        launch = manager.new_launch(SID, "owner/p01", "finish it", "/srv/p01", "work", "s3cret",
+                                    self.dir, takeover=True)
+        self.assertEqual(lead + "finish it", launch.prompt)
+        self.assertTrue(launch.takeover)
+        default = manager.new_launch(SID, "owner/p01", "finish it", "/srv/p01", "work", "s3cret",
+                                     self.dir)
+        self.assertEqual(manager.PROMPT_LEAD + "finish it", default.prompt)
+        self.assertIs(default.takeover, False)
+
     def test_no_command_is_built_on_macos(self):
         self.assertIsNone(manager.launch_command(self.launch(), "darwin"))
         self.assertIs(manager.supported("darwin"), False)

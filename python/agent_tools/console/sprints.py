@@ -13,11 +13,16 @@ text); the brief and report rows carry
 The log keeps all six indefinitely (`event_log.KEPT_KINDS`).
 
 Three more kinds record the sprint's manager (#888), none of them kept (`event_log.MANAGER_STARTED`,
-`MANAGER_FAILED`, `MANAGER_WAITING`; each with the project in its project column):
+`MANAGER_FAILED`, `MANAGER_WAITING`; each with the project in its project column), and two record
+its bring-back (#893; `event_log.MANAGER_WOKEN`, `MANAGER_STALLED`, not kept either):
 
-    manager.started  {"sprint_id", "profile": <str>, "session_name": <str>}
-    manager.failed   {"sprint_id", "reason": <str>}
-    manager.waiting  {"sprint_id", "until": <str> | null}
+    manager.started  {"sprint_id", "profile": <str>, "session_name": <str>, "seen_after"?: <int>,
+                      "takeover"?: true}
+    manager.failed   {"sprint_id", "reason": <str>, "takeover"?: true}
+    manager.waiting  {"sprint_id", "until": <str> | null, "takeover"?: true}
+    manager.woken    {"sprint_id", "session_id": <str>, "ok": <bool>, "reason"?: <str>,
+                      "back"?: <bool>}
+    manager.stalled  {"sprint_id", "reason": <str>}
 
 A sprint id is `secrets.token_hex(8)`: 16 lowercase hex characters (`SPRINT_ID`), the only form a
 request may name and the file name of the sprint's secret.
@@ -84,7 +89,8 @@ one is not (the service answers it with the part).
 The fold also keeps each open sprint's `Brief(version, parts, sent_at, decision, reply)`.
 `brief.sent` changes an open sprint only when `version` is an int (not a bool) greater than the
 folded brief's version (0 with none) and `brief` is a dict: the brief is then that version with
-decision `NONE` and no reply. `brief.approved` and `brief.replied` apply only when the sprint is
+decision `NONE` and no reply, and a folded report of phase `done` is dropped (the replaced run's
+end). `brief.approved` and `brief.replied` apply only when the sprint is
 open, has a brief, the version equals its version and its decision is `NONE`; approval sets
 `APPROVED`, a reply (a string) sets `CHANGES` and the reply. A sprint whose brief is `APPROVED` is
 `STARTING`, else `DRAFTING` (`SprintState.state`). `brief.approved` and `brief.replied`, when they
@@ -98,6 +104,20 @@ was; `Manager.at` is that row's `at`. `manager.started` is valid only with a str
 string `session_name` (state `started`); `manager.failed` only with a string `reason` (`failed`);
 `manager.waiting` only with an `until` key whose value is a string or null (`waiting`). A row that
 is not valid changes nothing.
+
+The bring-back rows (#893) add to the same state. `Manager.takeover` is true when a valid started,
+failed or waiting row says `"takeover": true` (exactly true; any other value or none is false).
+`SprintState.revivals` is a tuple of `Revival(at, how, ok, reason, back)` in row order. A valid
+`manager.woken` (a string `session_id`, a bool `ok`, a `back` member that is absent or a bool; a
+`back` that is not a bool makes the row malformed) appends `Revival(at, WAKE, ok, reason, back)`,
+`reason` the row's string `reason` when `ok` is false and else `None`, `back` true only when the row
+says so. A valid `manager.started` that is a takeover appends `Revival(at, TAKEOVER, True)` and a
+valid `manager.failed` that is a takeover appends `Revival(at, TAKEOVER, False, reason)`; a
+`manager.waiting` appends none (a wait started nothing). Every valid `manager.started` also clears
+`stalled` and `stalled_at`. A `manager.stalled` with a string `reason` sets `stalled` to it and
+`stalled_at` to the row's `at`; while the sprint is stalled a valid `manager.failed` replaces
+`stalled` with its reason and keeps `stalled_at`. `revive` (which this module does not import)
+reads these fields to decide the next step.
 
 `manager_status(state, listed, now_ms, managers)` turns a sprint's manager into the view's
 `(manager_state, manager_text, retry)`; its docstring holds the rules.
@@ -181,8 +201,13 @@ row wins). Every other such row changes nothing, and a withdrawn sprint keeps no
 A `session.seen` row carries no sprint id: when its string `name` fully matches
 `<project> sprint <16 lowercase hex>` (`manager.session_name`), the sprint is open, the name's
 project and the row's project column both equal the sprint's, the row's string `session_id` becomes
-the sprint's `manager_session` (the latest row wins); a valid `manager.started` row clears it, since
-the session it named belonged to the manager that row replaces.
+the sprint's `manager_session` (the latest row wins) and the row's `seq` becomes its
+`manager_seen_seq`; the same row sets `back` on the last revival when that is a `WAKE` not yet back
+and clears `stalled` and `stalled_at`, since a manager listed again is no longer stalled.
+A valid `manager.started` row clears `manager_session`, since the session it named belonged to the
+manager that row replaces, unless the row's int `seen_after` (the `manager_seen_seq` the sprint had
+when the launch began) is below the seq of the latest seen row: that row was written while the
+launcher was still returning, so it names the new manager and is kept.
 
 `message_state(message)` is `READ` when `read_at` is set, else `DELIVERED` when `delivered_at` is,
 else `SENT`; `unread(state)` is the messages without `read_at`, in id order; `unreachable(state)` is
@@ -194,6 +219,71 @@ text)`; `parse_inbox_request(body)` reads the manager's `{"sprint_id", "secret"}
 "secret", "message": <int of at least 1>, "reply": <str>}` and returns `(sprint_id, secret,
 message_id, reply)`. All three are as strict as `parse_reply` (`ValueError` otherwise).
 `inbox_entry(message)` is the wire entry `{"id", "kind", "version", "text", "at"}`.
+
+A sprint ends with a closing report, and the owner can stop one (#892). Four rows carry that
+(`event_log.SPRINT_CLOSED`, `SPRINT_STOP_REQUESTED`, `MANAGER_STOPPED`, `MANAGER_STOP_FAILED`; each
+with the project in its project column), the first three kept, `manager.stop_failed` not:
+
+    sprint.closed          {"sprint_id", "goal": <str>, "closing": {"summary": <str>,
+                            "issues": [{"issue": <int>, "stage": "landed" | "held" | "dropped"}],
+                            "differently": <str>}}
+    sprint.stop_requested  {"sprint_id", "goal": <str>}
+    manager.stopped        {"sprint_id"}
+    manager.stop_failed    {"sprint_id", "reason": <str>}
+
+`parse_close_request(body)` reads the manager's body and returns `(sprint_id, secret, closing)`: a
+UTF-8 JSON object of exactly `sprint_id`, `secret` and `closing`, a valid sprint id, a string secret
+and a `closing` object whose keys are a subset of `CLOSING_MEMBERS`; anything else is `ValueError`.
+`parse_stop(body)` reads the owner's body, exactly `parse_withdraw`'s shape.
+
+`checked_closing(closing, reported)` refuses with `Refused(...)` at the first failure, in
+this order. `summary` is a string whose strip is non-empty and at most `MAX_CLOSING_CHARS` code
+points and whose `first_line` is at most `MAX_LINE_CHARS`, else `CLOSING_MEMBER` for `summary`; the
+first line matching `#` and a digit is `SUMMARY_NUMBER`. `issues` is a list of at most
+`MAX_REPORT_ISSUES` objects of exactly `issue` (an int, not a bool, at least 1) and `stage` (one of
+`CLOSING_STAGES`), no issue twice, possibly empty, else `CLOSING_MEMBER` for `issues`.
+`differently` is like `summary` without the first-line rules. Every number of
+`reported` must be an `issue` of the closing (landed, held or dropped), else `NOT_ENDED`. It returns
+`{"summary", "issues" (sorted by issue, new dicts), "differently"}` with the texts stripped.
+`first_line(summary)` is the first line of `summary.strip()`, itself stripped.
+
+The fold keeps, on each open sprint, `closing` as `Closing(at, summary, first_line, issues,
+differently)`, and `stop_at`, `stopped_at`, `stop_reason` and `stop_failed_at`. Each row changes only
+an open sprint:
+
+- `sprint.stop_requested` applies when `stop_at`, `closing` and `stopped_at` are all `None` and the
+  sprint has not ended (`ended_at` is `None`, so it is not done by its report either): `stop_at` is
+  the row's `at` and one `Message(seq, MESSAGE_STOP, at, None, STOP_TEXT)` is added. Otherwise it
+  changes nothing.
+- `sprint.closed` applies when `closing` and `stopped_at` are `None`, the `closing` payload is a dict,
+  the sprint is `STARTING` or has `stop_at`, and `checked_closing` accepts it with `reported` the
+  issue numbers of the sprint's report (none without one); a stopping sprint is held to the same coverage rule.
+- `manager.stopped` and `manager.stop_failed` (neither is a manager row) apply only when `stop_at`
+  is set and `stopped_at` is `None`: `manager.stopped` sets `stopped_at` and clears `stop_reason` and
+  `stop_failed_at`; `manager.stop_failed` with a string `reason` sets `stop_reason` and
+  `stop_failed_at`. Anything else changes nothing. `manager.stopped` is kept, so a stop survives
+  retention and a restart; a lost `manager.stop_failed` only drops a shown reason and makes the next
+  retry due at once.
+
+`ended_at(state)` is every route to done, first match: `stopped_at` when set; `None` when `stop_at`
+is set (the sprint is stopping); `closing.at` when `closing` is set; `report.at` when the sprint is `STARTING` and the
+report's phase is `done` (the route that predates the closing report; a newer brief drops that
+done report when it is sent, so a replaced sprint is not ended again by the old report); else `None`. A sprint has ended when `ended_at` is not `None`.
+
+`stop_due(state, now_ms)` is true when `stop_at` is set, `stopped_at` is `None`, the closing is set
+or `STOP_WAIT_MS` have passed since `stop_at`, and `stop_failed_at` is `None` or `STOP_RETRY_MS` have
+passed since it. `STOP_SETTLE_MS` is the service's settle window for a manager the listing may not
+show yet and `FINISHED_AFTER_MS` the age after which an ended sprint is shown as finished.
+`pending_stops(events, pending=None)` folds the stops a withdrawal leaves to make, keyed by sprint
+id: a `goal.withdrawn` row with a string project, `sprint_id` and `goal` adds `PendingStop(sprint_id,
+project, goal, at)` (replacing an earlier one); `manager.stopped` for a pending id removes it;
+`manager.stop_failed` for a pending id with a string `reason` sets `reason` and `failed_at`; every
+other row changes nothing, and folding `a + b` equals folding `b` onto the fold of `a`.
+`pending_due(stop, now_ms)` is true when `failed_at` is `None` or `STOP_RETRY_MS` have passed since
+it. `closing_text(landed, held, dropped)` is `<landed> landed` then `, <held> held for
+verification` and `, <dropped> dropped` for each non-zero count. The new texts are `STOP_TEXT`,
+`STOPPING_TEXT`, `STOPPED_TEXT`, `CLOSING_MEMBER`, `SUMMARY_NUMBER`, `NOT_ENDED`, `ENDED`,
+`ALREADY_STOPPING`, `STOP_FAILED_TEXT` and `UNSTOPPED_TEXT`.
 
 The module reads no clock and no environment; only the secret helpers touch the filesystem.
 """
@@ -211,9 +301,12 @@ from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_litera
 from agent_tools.console import deliveries
 from agent_tools.console.deliveries import DELIVERY_SEEN
 from agent_tools.console.event_log import (BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED,
-                                           GOAL_WITHDRAWN, MANAGER_FAILED, MANAGER_STARTED,
-                                           MANAGER_WAITING, SPRINT_ANSWERED, SPRINT_MESSAGED,
-                                           SPRINT_NUDGED, SPRINT_READ, SPRINT_REPORTED, Event)
+                                           GOAL_WITHDRAWN, MANAGER_FAILED, MANAGER_STALLED,
+                                           MANAGER_STARTED, MANAGER_STOP_FAILED, MANAGER_STOPPED,
+                                           MANAGER_WAITING, MANAGER_WOKEN, SPRINT_ANSWERED,
+                                           SPRINT_CLOSED, SPRINT_MESSAGED, SPRINT_NUDGED,
+                                           SPRINT_READ, SPRINT_REPORTED, SPRINT_STOP_REQUESTED,
+                                           Event)
 from agent_tools.console.manager import FAILED_TEXT, MISSING_TEXT, UNAVAILABLE_TEXT
 from agent_tools.console.manager import WAITING_TEXT as MANAGER_WAITING_TEXT
 from agent_tools.console.sessions import SEEN
@@ -237,12 +330,24 @@ STARTED = "started"
 FAILED = "failed"
 MISSING = "missing"
 UNAVAILABLE = "unavailable"
+WAKE = "wake"
+TAKEOVER = "takeover"
+STALLED = "stalled"
+STALLED_TEXT = "managers keep failing"
 REPORT_MEMBERS = ("status", "phase", "milestone", "tracker_url", "issues", "inbox", "next")
 REPORT_PHASES = ("running", "closing", "done")
 LANDED = "landed"
 HELD = "held"
+DROPPED = "dropped"
 REPORT_STAGES = ("queued", "planning", "plan review", "building", "final review", "verifying",
                  "landing", "working", LANDED, HELD)
+CLOSING_STAGES = (LANDED, HELD, DROPPED)
+CLOSING_MEMBERS = ("summary", "issues", "differently")
+MAX_CLOSING_CHARS = 4000
+STOP_WAIT_MS = 600_000
+STOP_RETRY_MS = 60_000
+STOP_SETTLE_MS = 30_000
+FINISHED_AFTER_MS = 86_400_000
 CLOSED_OUT = "closed out"
 MAX_LINE_CHARS = 500
 MAX_REPORT_ISSUES = 200
@@ -256,6 +361,10 @@ CLOSING = "closing"
 CLOSING_TEXT = "closing"
 DONE = "done"
 DONE_TEXT = "done"
+STOPPING = "stopping"
+STOPPING_TEXT = "stopping"
+STOPPED = "stopped"
+STOPPED_TEXT = "stopped by you"
 SECRETS_DIR = "sprint-secrets"
 SPRINT_ID = re.compile(r"[0-9a-f]{16}")
 
@@ -267,6 +376,15 @@ SECRET_REFUSED = "secret refused"
 MISSING_PART = "the brief has no {part}"
 REPORT_MEMBER = "the report has no valid {member}"
 STATUS_NUMBER = "the status line names an issue number"
+CLOSING_MEMBER = "the closing report has no valid {member}"
+SUMMARY_NUMBER = "the summary's first line names an issue number"
+NOT_ENDED = "an issue of this sprint is neither landed nor dropped"
+ENDED = "this sprint has ended"
+ALREADY_STOPPING = "this sprint is already stopping"
+STOP_FAILED_TEXT = "could not stop the manager: {reason}; trying again"
+UNSTOPPED_TEXT = "The manager of a withdrawn goal could not be stopped: {reason}; trying again"
+STOP_TEXT = ("The owner stopped this sprint: finish what is mid-merge, start nothing new, and send "
+             "your closing report with sprint close.")
 NOT_STARTED = "this sprint's brief is not approved"
 NOT_WAITING = "this brief is not waiting for you"
 REPLACED = "a newer brief replaced this one"
@@ -285,6 +403,7 @@ RENUDGE_AFTER_MS = 60_000
 MESSAGE_APPROVED = "approved"
 MESSAGE_CHANGES = "changes"
 MESSAGE_TEXT = "text"
+MESSAGE_STOP = "stop"
 SENT = "sent"
 DELIVERED = "delivered"
 READ = "read"
@@ -326,12 +445,40 @@ class Report:
 
 
 @dataclass(frozen=True)
+class Closing:
+    at: str
+    summary: str
+    first_line: str
+    issues: tuple[tuple[int, str], ...]
+    differently: str
+
+
+@dataclass(frozen=True)
+class PendingStop:
+    sprint_id: str
+    project_id: str
+    goal: str
+    at: str
+    reason: str | None = None
+    failed_at: str | None = None
+
+
+@dataclass(frozen=True)
 class Observed:
     issue: int
     moved_ms: int
     session_id: str
     run_id: str
     stage: deliveries.IssueStage
+
+
+@dataclass(frozen=True)
+class Revival:
+    at: str
+    how: str
+    ok: bool
+    reason: str | None = None
+    back: bool = False
 
 
 @dataclass(frozen=True)
@@ -342,6 +489,7 @@ class Manager:
     session_name: str | None = None
     reason: str | None = None
     until: str | None = None
+    takeover: bool = False
 
 
 @dataclass(frozen=True)
@@ -374,6 +522,15 @@ class SprintState:
     last_nudge_at: str | None = None
     last_nudge_ok: bool | None = None
     manager_session: str | None = None
+    closing: Closing | None = None
+    stop_at: str | None = None
+    stopped_at: str | None = None
+    stop_reason: str | None = None
+    stop_failed_at: str | None = None
+    manager_seen_seq: int | None = None
+    revivals: tuple[Revival, ...] = ()
+    stalled: str | None = None
+    stalled_at: str | None = None
 
     @property
     def state(self) -> str:
@@ -446,6 +603,22 @@ def parse_report_request(body: bytes) -> tuple[str, str, dict]:
     if not isinstance(report, dict) or not set(report) <= set(REPORT_MEMBERS):
         raise ValueError(f"report must be an object of {', '.join(REPORT_MEMBERS)}")
     return sprint_id, value["secret"], report
+
+
+def parse_close_request(body: bytes) -> tuple[str, str, dict]:
+    value = _object(body, {"sprint_id", "secret", "closing"}, project=False)
+    sprint_id = _sprint_id(value["sprint_id"])
+    if not isinstance(value["secret"], str):
+        raise ValueError("secret must be a string")
+    closing = value["closing"]
+    if not isinstance(closing, dict) or not set(closing) <= set(CLOSING_MEMBERS):
+        raise ValueError(f"closing must be an object of {', '.join(CLOSING_MEMBERS)}")
+    return sprint_id, value["secret"], closing
+
+
+def parse_stop(body: bytes) -> tuple[str, str]:
+    value = _object(body, {"project_id", "sprint_id"})
+    return value["project_id"], _sprint_id(value["sprint_id"])
 
 
 def parse_message(body: bytes) -> tuple[str, str, str]:
@@ -561,6 +734,38 @@ def checked_report(report: dict) -> dict:
             "inbox": sorted(set(report["inbox"])), "next": report["next"].strip()}
 
 
+def first_line(summary: str) -> str:
+    return summary.strip().split("\n", 1)[0].strip()
+
+
+def _closing_text_ok(value: object) -> bool:
+    return (isinstance(value, str) and bool(value.strip())
+            and len(value.strip()) <= MAX_CLOSING_CHARS)
+
+
+def checked_closing(closing: dict, reported: Iterable[int]) -> dict:
+    summary, issues = closing.get("summary"), closing.get("issues")
+    if not _closing_text_ok(summary) or len(first_line(summary)) > MAX_LINE_CHARS:
+        raise Refused(CLOSING_MEMBER.format(member="summary"))
+    if re.search(r"#\d", first_line(summary)):
+        raise Refused(SUMMARY_NUMBER)
+    if not (isinstance(issues, list) and len(issues) <= MAX_REPORT_ISSUES
+            and all(isinstance(row, dict) and set(row) == {"issue", "stage"}
+                    and _number(row["issue"]) and row["stage"] in CLOSING_STAGES
+                    for row in issues)
+            and len({row["issue"] for row in issues}) == len(issues)):
+        raise Refused(CLOSING_MEMBER.format(member="issues"))
+    differently = closing.get("differently")
+    if not _closing_text_ok(differently):
+        raise Refused(CLOSING_MEMBER.format(member="differently"))
+    if not set(reported) <= {row["issue"] for row in issues}:
+        raise Refused(NOT_ENDED)
+    return {"summary": summary.strip(),
+            "issues": sorted(({"issue": row["issue"], "stage": row["stage"]} for row in issues),
+                             key=lambda row: row["issue"]),
+            "differently": differently.strip()}
+
+
 def checked_reply(text: str) -> str:
     if not text.strip():
         raise Refused(EMPTY_REPLY)
@@ -610,7 +815,9 @@ def _folded_brief(state: SprintState, event: Event) -> SprintState:
     if event.kind == BRIEF_SENT:
         parts = payload.get("brief")
         if isinstance(parts, dict) and version > (brief.version if brief else 0):
-            return replace(state, brief=Brief(version, parts, event.at, NONE, None, None))
+            superseded = state.report is not None and state.report.phase == DONE
+            return replace(state, brief=Brief(version, parts, event.at, NONE, None, None),
+                           report=None if superseded else state.report)
         return state
     if brief is None or version != brief.version or brief.decision != NONE:
         return state
@@ -671,24 +878,54 @@ def _folded_session(folded: dict[str, SprintState], event: Event) -> None:
     match = MANAGER_SESSION_NAME.fullmatch(name)
     state = folded.get(match["sprint"]) if match else None
     if state is not None and match["project"] == state.project_id == event.project:
-        folded[state.sprint_id] = replace(state, manager_session=session_id)
+        revivals = state.revivals
+        if revivals and revivals[-1].how == WAKE and not revivals[-1].back:
+            revivals = (*revivals[:-1], replace(revivals[-1], back=True))
+        folded[state.sprint_id] = replace(state, manager_session=session_id,
+                                          manager_seen_seq=event.seq, revivals=revivals,
+                                          stalled=None, stalled_at=None)
 
 
 def _folded_manager(state: SprintState, event: Event) -> SprintState:
     payload = event.payload
+    takeover = payload.get("takeover") is True
     if event.kind == MANAGER_STARTED:
         profile, name = payload.get("profile"), payload.get("session_name")
         if isinstance(profile, str) and isinstance(name, str):
-            return replace(state, manager=Manager(STARTED, event.at, profile, name),
-                           manager_session=None)
+            revivals = state.revivals + ((Revival(event.at, TAKEOVER, True),) if takeover else ())
+            seen_after = payload.get("seen_after")
+            current = (_id(seen_after) and state.manager_seen_seq is not None
+                       and state.manager_seen_seq > seen_after)
+            return replace(state, manager=Manager(STARTED, event.at, profile, name,
+                                                  takeover=takeover),
+                           manager_session=state.manager_session if current else None,
+                           revivals=revivals, stalled=None, stalled_at=None)
     elif event.kind == MANAGER_FAILED:
         reason = payload.get("reason")
         if isinstance(reason, str):
-            return replace(state, manager=Manager(FAILED, event.at, reason=reason))
+            revivals = state.revivals + (
+                (Revival(event.at, TAKEOVER, False, reason),) if takeover else ())
+            return replace(state, manager=Manager(FAILED, event.at, reason=reason,
+                                                  takeover=takeover),
+                           revivals=revivals,
+                           stalled=reason if state.stalled is not None else None)
     elif event.kind == MANAGER_WAITING and "until" in payload:
         until = payload["until"]
         if until is None or isinstance(until, str):
-            return replace(state, manager=Manager(WAITING, event.at, until=until))
+            return replace(state, manager=Manager(WAITING, event.at, until=until,
+                                                  takeover=takeover))
+    elif event.kind == MANAGER_WOKEN:
+        ok, back = payload.get("ok"), payload.get("back", False)
+        if isinstance(payload.get("session_id"), str) and isinstance(ok, bool) \
+                and isinstance(back, bool):
+            reason = payload.get("reason")
+            return replace(state, revivals=state.revivals + (Revival(
+                event.at, WAKE, ok, reason if not ok and isinstance(reason, str) else None,
+                back=back),))
+    elif event.kind == MANAGER_STALLED:
+        reason = payload.get("reason")
+        if isinstance(reason, str):
+            return replace(state, stalled=reason, stalled_at=event.at)
     return state
 
 
@@ -705,6 +942,40 @@ def _folded_report(state: SprintState, event: Event) -> SprintState:
                                  checked["milestone"], checked["tracker_url"],
                                  tuple((row["issue"], row["stage"]) for row in checked["issues"]),
                                  tuple(checked["inbox"]), checked["next"]))
+
+
+def _folded_stop_request(state: SprintState, event: Event) -> SprintState:
+    if (state.stop_at is not None or state.closing is not None or state.stopped_at is not None
+            or ended_at(state) is not None):
+        return state
+    return _with_message(replace(state, stop_at=event.at),
+                         Message(event.seq, MESSAGE_STOP, event.at, None, STOP_TEXT))
+
+
+def _folded_closing(state: SprintState, event: Event) -> SprintState:
+    closing = event.payload.get("closing")
+    if (state.closing is not None or state.stopped_at is not None or not isinstance(closing, dict)
+            or not (state.state == STARTING or state.stop_at is not None)):
+        return state
+    reported = [issue for issue, _ in state.report.issues] if state.report else []
+    try:
+        checked = checked_closing(closing, reported)
+    except Refused:
+        return state
+    return replace(state, closing=Closing(
+        event.at, checked["summary"], first_line(checked["summary"]),
+        tuple((row["issue"], row["stage"]) for row in checked["issues"]), checked["differently"]))
+
+
+def _folded_stop(state: SprintState, event: Event) -> SprintState:
+    if state.stop_at is None or state.stopped_at is not None:
+        return state
+    if event.kind == MANAGER_STOPPED:
+        return replace(state, stopped_at=event.at, stop_reason=None, stop_failed_at=None)
+    reason = event.payload.get("reason")
+    if isinstance(reason, str):
+        return replace(state, stop_reason=reason, stop_failed_at=event.at)
+    return state
 
 
 def _observed(folded: dict[str, SprintState], event: Event) -> None:
@@ -754,8 +1025,14 @@ def sprint_states(events: Iterable[Event],
             folded.pop(sprint_id, None)
         elif event.kind in (BRIEF_SENT, BRIEF_APPROVED, BRIEF_REPLIED) and sprint_id in folded:
             folded[sprint_id] = _folded_brief(folded[sprint_id], event)
-        elif event.kind in (MANAGER_STARTED, MANAGER_FAILED, MANAGER_WAITING) \
-                and sprint_id in folded:
+        elif event.kind == SPRINT_STOP_REQUESTED and sprint_id in folded:
+            folded[sprint_id] = _folded_stop_request(folded[sprint_id], event)
+        elif event.kind == SPRINT_CLOSED and sprint_id in folded:
+            folded[sprint_id] = _folded_closing(folded[sprint_id], event)
+        elif event.kind in (MANAGER_STOPPED, MANAGER_STOP_FAILED) and sprint_id in folded:
+            folded[sprint_id] = _folded_stop(folded[sprint_id], event)
+        elif event.kind in (MANAGER_STARTED, MANAGER_FAILED, MANAGER_WAITING, MANAGER_WOKEN,
+                            MANAGER_STALLED) and sprint_id in folded:
             folded[sprint_id] = _folded_manager(folded[sprint_id], event)
         elif event.kind == SPRINT_REPORTED and sprint_id in folded:
             folded[sprint_id] = _folded_report(folded[sprint_id], event)
@@ -763,6 +1040,59 @@ def sprint_states(events: Iterable[Event],
                 and sprint_id in folded:
             folded[sprint_id] = _folded_message(folded[sprint_id], event)
     return folded
+
+
+def ended_at(state: SprintState) -> str | None:
+    if state.stopped_at is not None:
+        return state.stopped_at
+    if state.stop_at is not None:
+        return None
+    if state.closing is not None:
+        return state.closing.at
+    if state.state == STARTING and state.report is not None and state.report.phase == DONE:
+        return state.report.at
+    return None
+
+
+def stop_due(state: SprintState, now_ms: int) -> bool:
+    if state.stop_at is None or state.stopped_at is not None:
+        return False
+    waited = state.closing is not None or now_ms - _ms(state.stop_at) >= STOP_WAIT_MS
+    return waited and (state.stop_failed_at is None
+                       or now_ms - _ms(state.stop_failed_at) >= STOP_RETRY_MS)
+
+
+def pending_stops(events: Iterable[Event],
+                  pending: Mapping[str, PendingStop] | None = None) -> dict[str, PendingStop]:
+    folded = dict(pending or {})
+    for event in events:
+        sprint_id = event.payload.get("sprint_id")
+        if not isinstance(sprint_id, str):
+            continue
+        if event.kind == GOAL_WITHDRAWN:
+            goal = event.payload.get("goal")
+            if isinstance(event.project, str) and isinstance(goal, str):
+                folded[sprint_id] = PendingStop(sprint_id, event.project, goal, event.at)
+        elif event.kind == MANAGER_STOPPED:
+            folded.pop(sprint_id, None)
+        elif event.kind == MANAGER_STOP_FAILED and sprint_id in folded:
+            reason = event.payload.get("reason")
+            if isinstance(reason, str):
+                folded[sprint_id] = replace(folded[sprint_id], reason=reason,
+                                            failed_at=event.at)
+    return folded
+
+
+def pending_due(stop: PendingStop, now_ms: int) -> bool:
+    return stop.failed_at is None or now_ms - _ms(stop.failed_at) >= STOP_RETRY_MS
+
+
+def closing_text(landed: int, held: int, dropped: int) -> str:
+    text = f"{landed} landed"
+    for count, label in ((held, "held for verification"), (dropped, "dropped")):
+        if count:
+            text += f", {count} {label}"
+    return text
 
 
 def withdrawn_ids(events: Iterable[Event], ids: frozenset[str] = frozenset()) -> frozenset[str]:
@@ -811,6 +1141,8 @@ def manager_status(state: SprintState, listed: bool, now_ms: int | None,
 
     - `managers` false (a host that cannot start managers): `unavailable`, `UNAVAILABLE_TEXT`, no
       retry.
+    - A stalled sprint (`SprintState.stalled`): `stalled`, `"<STALLED_TEXT>: <reason>"` and retry
+      while it has no listed session and is not stopping.
     - The sprint is overdue when `now_ms` is more than `NO_MANAGER_AFTER_MS` past its start time, it
       has no brief and it has no listed session. The start time is `Manager.at` of a `started`
       manager and the stated time (`stated_at`) otherwise.
@@ -819,21 +1151,29 @@ def manager_status(state: SprintState, listed: bool, now_ms: int | None,
     - `failed`: `failed` and `"<FAILED_TEXT>: <reason>"`.
     - `waiting`: `waiting` and `manager.WAITING_TEXT`.
 
-    A `failed` or `waiting` manager offers retry only while the sprint has no listed session and no
-    brief: a launch can fail after its detached session was already handed off, and a retry would
-    then start a second manager for the sprint.
+    A `failed` or `waiting` manager of a first launch offers retry only while the sprint has no
+    listed session and no brief: a launch can fail after its detached session was already handed
+    off, and a retry would then start a second manager for the sprint. A `failed` or `waiting`
+    manager whose `takeover` is true offers retry while the sprint has no listed session, whatever
+    the brief (a takeover's sprint has a brief by design).
+
+    A sprint with `stop_at` or `stopped_at` set never offers retry, whatever its manager row says:
+    neither the view nor the service relaunches the manager of a stopping or stopped sprint.
     """
     if not managers:
         return UNAVAILABLE, UNAVAILABLE_TEXT, False
     manager = state.manager
+    stopping = state.stop_at is not None or state.stopped_at is not None
     since = state.stated_at if manager is None or manager.state != STARTED else manager.at
     overdue = (now_ms is not None and now_ms - _ms(since) > NO_MANAGER_AFTER_MS
                and state.brief is None and not listed)
+    if state.stalled is not None:
+        return STALLED, f"{STALLED_TEXT}: {state.stalled}", not listed and not stopping
     if manager is None:
-        return (NONE, NO_MANAGER_TEXT, True) if overdue else (NONE, None, False)
+        return (NONE, NO_MANAGER_TEXT, not stopping) if overdue else (NONE, None, False)
     if manager.state == STARTED:
-        return (MISSING, MISSING_TEXT, True) if overdue else (STARTED, None, False)
-    free = not listed and state.brief is None
+        return (MISSING, MISSING_TEXT, not stopping) if overdue else (STARTED, None, False)
+    free = not listed and (state.brief is None or manager.takeover) and not stopping
     if manager.state == FAILED:
         return FAILED, f"{FAILED_TEXT}: {manager.reason}", free
     return WAITING, MANAGER_WAITING_TEXT, free

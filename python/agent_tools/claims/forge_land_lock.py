@@ -99,8 +99,10 @@ only on a refusal, so a wait that succeeds is attributed by these numbers. The `
 (`held_by`, `lost_to`, `land-contended`, and `not_held` on `release`); exit 1 a forge error; exit 2
 a usage error or `no_open_pr`.
 
-D8, `--wait` attempts at offsets 0, `POLL` (120 s), ... `BOUND` (3600 s) and then answers
-`land-contended` (exit 3); a `gh_failed`/`gh_timeout` poll counts as failed, an unapplied CAS on an
+D8, `--wait` attempts at offsets 0, `POLL` (120 s), ... `BOUND` (3000 s) and then answers
+`land-contended` (exit 3). `BOUND` is 50 minutes so that one invocation ends by itself inside a
+60-minute Bash call (issue 941), and stays above `IDLE_AFTER` so that one invocation can still
+complete an idle watch; a `gh_failed`/`gh_timeout` poll counts as failed, an unapplied CAS on an
 unchanged lock included, and `FAILED_POLLS` in a row exit 1 with that error; only a poll that
 completes with a verdict resets the count. Every poll, the first included, reads the caller's
 eligible pull requests (D6) inside the poll, so a failed read is a failed poll and a transport
@@ -127,7 +129,7 @@ READBACK_RETRIES = 3
 READBACK_DELAY = 1.0
 IDLE_AFTER = 2700
 POLL = 120
-BOUND = 3600
+BOUND = 3000
 FAILED_POLLS = 3
 ACTIONS = ("acquire", "release", "status")
 
