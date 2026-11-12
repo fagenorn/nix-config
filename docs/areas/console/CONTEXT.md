@@ -41,8 +41,12 @@ _Avoid_: task, request
 The manager's answer to a goal: what done looks like, what is excluded, the slices, the risks and what it expects to ask. It waits in the inbox until the owner approves it, which starts the sprint, or answers it with a reply; a newer brief replaces it (ADR-console-013).
 _Avoid_: plan, proposal
 
+**Manager**:
+The background Claude Code session the console starts for one sprint, in the project's root and under the profile with the most weekly allowance left; it drafts the brief through the manage-sprint skill and is shown inside its sprint with its state (ADR-console-014).
+_Avoid_: agent, bot
+
 **Sprint**:
-One goal, later its issues and its outcome, in one project (#834), shown under its project with its state (drafting the brief, or starting once its brief is approved) and age until it is withdrawn (ADR-console-011, ADR-console-013).
+One goal, later its issues and its outcome, in one project (#834), shown under its project with its state (drafting the brief, or starting once its brief is approved), its manager and its age until it is withdrawn (ADR-console-011, ADR-console-013, ADR-console-014).
 _Avoid_: job, run
 
 **Session**:

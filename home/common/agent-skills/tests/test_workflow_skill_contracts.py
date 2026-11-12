@@ -2173,5 +2173,28 @@ class LiveSkillsNameNoRetiredSkillTest(unittest.TestCase):
         self.assertNotIn("direct delivery", text)
 
 
+class ManageSprintSkillTest(unittest.TestCase):
+    SKILL = REPO_ROOT / "home/common/agent-skills/skills/manage-sprint/SKILL.md"
+
+    def text(self):
+        return normalized(self.SKILL.read_text(encoding="utf-8"))
+
+    def test_the_skill_is_named_for_the_launch_and_shows_its_send_command(self):
+        from agent_tools.console import manager
+
+        raw = self.SKILL.read_text(encoding="utf-8").splitlines()
+        self.assertEqual(raw[0], "---")
+        frontmatter = raw[1:raw.index("---", 1)]
+        self.assertIn("name: manage-sprint", frontmatter)
+        self.assertIn("name: " + manager.SKILL, frontmatter)
+        self.assertIn("`sprint brief --brief-file -`", self.text())
+
+    def test_the_skill_never_handles_the_secret_or_a_binding(self):
+        text = self.text()
+        for forbidden in ("--secret-file", "CONSOLE_SPRINT_SECRET", "bindings."):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, text)
+
+
 if __name__ == "__main__":
     unittest.main()

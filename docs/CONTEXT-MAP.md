@@ -59,6 +59,7 @@
 | Limit reading | Console |
 | Limit sensing | Hosts |
 | Limit stop | Console |
+| Manager | Console |
 | Marker | Claims |
 | Migration | Project contract |
 | Not yet managed | Console |
