@@ -20,8 +20,12 @@ the unmanaged entry for its `repo`. Sessions never touch the statement or
 
 Inbox events name a project and carry the tracker's owner-action items. `inbox.seen`
 (payload: an item, with its `key`) records the item with `waiting_since` and
-`updated_at` both the event's time; `inbox.changed` (payload: the item) replaces the item and
-`updated_at` but keeps `waiting_since` (an unknown key is treated as seen); `inbox.gone`
+`updated_at` both the event's time, and `answered_at` the event's time when the item is
+answered, else null; `inbox.changed` (payload: the item) replaces the item and
+`updated_at` but keeps `waiting_since` (an unknown key is treated as seen); its `answered_at`
+is the event's time when the new item is answered and the old one was not, the old
+`answered_at` when both are answered, null when the new item is not answered, so it moves only
+when the item turns answered and a later change of any other member keeps it; `inbox.gone`
 (payload `{"key"}`) removes the item; `project.unregistered` removes every item of that
 project; an inbox event whose payload has no string `key` is ignored. `inbox.health`
 (payload `{"ok": true}` or `{"ok": false, "read_at": <time of the last good read> | null}`)
@@ -40,6 +44,7 @@ Wire format, one object:
     {"statement": {"inbox_items": <open items>, "headline": "<headline>",
                    "sentence": "<sentence>", "stale": <bool>},
      "capacity": {"tight": <bool>, "all_out": <bool>, "resumes_at": <ISO time> | null,
+                  "no_reading": "<n> with no reading yet" | null,
                   "profiles": [<profile capacity>, ...]},
      "inbox": {"open": [<inbox item>, ...], "answered": [<inbox item>, ...]},
      "project_count": <int>,
@@ -65,12 +70,17 @@ can answer), else `NEEDS_SENTENCE` when something is open, else the registered-p
 all-out promotion never changes `inbox_items`, and the statement keeps exactly its four keys.
 `capacity` is the `capacity_view` the caller passes (`capacity.py` defines its members), else the
 empty capacity, the same bytes as `capacity_view` over no profile. `stale` is true
-when any registered project's last read failed. An inbox item is the stored item plus
-`{"type": "inbox_item", "waiting_since", "stale", "read_at"}`: `stale` is that project's
-failed read, `read_at` the time of its last good read (the item's last update when the read
-time is unknown). Only items of registered projects are shown. Open tracker items are sorted by
-most held work first, then `waiting_since`, then `key`; answered items are listed apart,
-never counted, by `waiting_since` then `key`.
+when any registered project's last read failed. An inbox item is every stored member
+except `question`, plus `{"type": "inbox_item", "waiting_since", "stale", "read_at",
+"headline", "more_questions", "answered_at"}`: `stale` is that project's failed read, `read_at`
+the time of its last good read (the item's last update when the read time is unknown),
+`headline` and `more_questions` come from `item_headline` (the first question of an item that
+has questions and the count of the others; `UNREAD_DECISION` for a decision with none; else
+the stored `question`), and `answered_at` is the record's (null while open). The stored
+`question` is no wire member (a decision's is a fixed sentence). Only items of
+registered projects are shown. Open tracker items are sorted by most held work first, then
+`waiting_since`, then `key`; answered items are listed apart, never counted, by
+`waiting_since` then `key`.
 
 A waiting brief (a shown sprint whose `brief` is not None and whose decision is `none`) is one
 entry of `inbox.open`, before every tracker item, ordered by `waiting_since` then `sprint_id`, and
@@ -97,7 +107,7 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
                       "state_text": "<text>", "stated_at", "age_text", "manager_text": <text> | null,
                       "progress": {"landed", "in_delivery", "queued", "held", "total"} | null,
                       "progress_text": "<text>" | null,
-                      "status": "<status line>" | null, "status_age_text": "<n min ago>" | null,
+                      "status": "<status line>" | null, "status_at": "<report time>" | null,
                       "next": "<text>" | null, "milestone": "<text>" | null,
                       "tracker_url": "<url>" | null,
                       "issues": [{"issue": <int>, "stage": "<stage>", "stage_text": "<text>"}, ...],
@@ -107,8 +117,9 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
     <session entry> = {"session_id", "name", "state", "state_text", "cwd",
                        "deliveries": [<delivery entry>, ...]}
     <delivery entry> = {"run_id", "quiet": <bool>, "moved_text": "<text>",
+                        "summary": "<one sentence>", "moved_at": "<ISO time>",
                         "issues": [{"issue": <int>, "stage", "stage_text"}, ...]}
-    <unmanaged entry> = {"type": "unmanaged", "root": "<repo>",
+    <unmanaged entry> = {"type": "unmanaged", "root": "<repo>", "name": "<name>",
                          "label": "Not yet managed", "outside_sprints": <line>}
 
 `working` counts working sessions and `waiting` counts those waiting for an
@@ -122,7 +133,12 @@ characters of its id.
 `deliveries` (always present, possibly empty) are the in-flight workflow runs of that listed
 session, from the delivery states `derive_view` is given: the states whose `session_id` equals the
 session's id, newest `moved_ms` first, then `run_id`; each run's issues are ordered by number.
-`quiet` and `moved_text` come from `moved_text(now_ms - moved_ms)`; `now_ms` is injected by the
+`quiet` and `moved_text` come from `moved_text(now_ms - moved_ms)`; `summary` is the run as one
+sentence, `run_summary(issues, moved_text)`: "<n> issue(s) in delivery: <count> <stage>, ...,
+<moved_text>" with the stages in a fixed order and no issue number, or "No issue in delivery yet,
+<moved_text>" with none; `moved_at` is the journal's last movement as an ISO UTC time, which lets
+the page age the sentence's end itself. An unmanaged entry's `name` is the last segment of its `root` (the root
+itself when it has none). `now_ms` is injected by the
 caller (this module still reads no clock) and `None` counts as no time elapsed. The runs of an
 ended or unlisted session appear nowhere, and they change no count, summary, order or the
 statement. The word "stalled" is never written: a quiet run is only quiet.
@@ -153,7 +169,7 @@ The state is the first that holds: the brief is not approved, `drafting` ("draft
 the report's phase is `done`, `done`; `waiting` is above 0, `waiting` ("waiting on you (<n>)");
 `quiet_elapsed` reaches `QUIET_AFTER_MS`, `quiet` ("quiet for <n> min \u2014 may be stuck"); the
 phase is `closing`, `closing`; no report, `starting`; else `on_track` ("on track").
-`status_age_text` is `ago_text` of the time since the report.
+`status_at` is the report's own time, which the page words against its own clock.
 `recent_projects` is every registered project id, newest `last_seq` first, then `project_id`
 (always present, possibly empty); it derives from the states alone.
 `encode_view` writes sorted keys, compact separators, non-ASCII kept, NaN
@@ -163,7 +179,8 @@ refused, no newline.
 import json
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timezone
+from pathlib import PurePosixPath
 
 from agent_tools.console.capacity import EMPTY
 from agent_tools.console.deliveries import (
@@ -172,6 +189,7 @@ from agent_tools.console.deliveries import (
     QUIET_AFTER_MS,
     DeliveryState,
     moved_text,
+    run_summary,
     stage_text,
 )
 from agent_tools.console.event_log import Event
@@ -209,7 +227,6 @@ from agent_tools.console.sprints import (
     WAITING_TEXT,
     SprintState,
     age_text,
-    ago_text,
     progress_text,
 )
 
@@ -238,6 +255,7 @@ CHOOSE_SENTENCE = "Choose an option with its number and press Enter, or answer o
 ANSWER_SENTENCE = "Answer it here, or on the tracker."
 STALE_SENTENCE = ("The tracker could not be read for {projects}; "
                   "each item shows when it was last read.")
+UNREAD_DECISION = "A decision waits on the tracker, but its questions could not be read."
 INBOX_SEEN = "inbox.seen"
 INBOX_CHANGED = "inbox.changed"
 INBOX_GONE = "inbox.gone"
@@ -278,6 +296,7 @@ class InboxRecord:
     item: dict
     waiting_since: str
     updated_at: str
+    answered_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -307,10 +326,19 @@ def inbox_records(
         if event.kind == INBOX_GONE:
             result.pop(key, None)
         elif event.kind == INBOX_CHANGED and key in result:
+            record = result[key]
+            if event.payload.get("answered") is not True:
+                answered_at = None
+            elif record.item.get("answered") is True:
+                answered_at = record.answered_at
+            else:
+                answered_at = event.at
             result[key] = replace(
-                result[key], item=event.payload, updated_at=event.at)
+                record, item=event.payload, updated_at=event.at, answered_at=answered_at)
         else:
-            result[key] = InboxRecord(event.payload, event.at, event.at)
+            answered = event.payload.get("answered") is True
+            result[key] = InboxRecord(
+                event.payload, event.at, event.at, event.at if answered else None)
     return result
 
 
@@ -393,12 +421,19 @@ def project_for(repo: str, states: Mapping[str, ProjectState]) -> str | None:
     return min(matches) if matches else None
 
 
+def repo_name(root: str) -> str:
+    """A repository's name: the last segment of its path, or the path itself when it has none."""
+    return PurePosixPath(root).name or root
+
+
 def _delivery_entry(state: DeliveryState, now_ms: int | None) -> dict:
     quiet, text = moved_text(0 if now_ms is None else now_ms - state.moved_ms)
     return {
         "run_id": state.run_id,
         "quiet": quiet,
         "moved_text": text,
+        "summary": run_summary(state.issues, text),
+        "moved_at": datetime.fromtimestamp(state.moved_ms / 1000, timezone.utc).isoformat(),
         "issues": [
             {"issue": i.issue, "stage": i.stage, "stage_text": stage_text(i)}
             for i in sorted(state.issues, key=lambda i: i.issue)
@@ -519,8 +554,7 @@ def _sprint_entry(state: SprintState, now_ms: int | None,
             counts["landed"], counts["total"], counts["in_delivery"], counts["queued"],
             counts["held"]),
         "status": None if report is None else report.status,
-        "status_age_text": (None if report is None else
-                            ago_text(0 if now_ms is None else now_ms - _millis(report.at))),
+        "status_at": None if report is None else report.at,
         "next": None if report is None else report.next_step,
         "milestone": None if report is None else report.milestone,
         "tracker_url": None if report is None else report.tracker_url,
@@ -554,15 +588,26 @@ def _sentence(count: int) -> str:
     return f"{count} registered {noun}, and nothing is waiting on you."
 
 
+def item_headline(item: Mapping) -> tuple[str, int]:
+    questions = item.get("questions")
+    if questions:
+        return questions[0]["question"], len(questions) - 1
+    if item.get("reason") == "decision":
+        return UNREAD_DECISION, 0
+    return item.get("question", ""), 0
+
+
 def _inbox_entry(record: InboxRecord,
                  health: Mapping[str, ReadState]) -> dict:
     known = health.get(record.item["project_id"])
     stale = known is not None and not known.ok
     read_at = known.read_at if known is not None and known.read_at is not None \
         else record.updated_at
-    return {**record.item, "type": "inbox_item",
-            "waiting_since": record.waiting_since,
-            "stale": stale, "read_at": read_at}
+    headline, more = item_headline(record.item)
+    return {**{k: v for k, v in record.item.items() if k != "question"},
+            "type": "inbox_item", "waiting_since": record.waiting_since,
+            "stale": stale, "read_at": read_at, "headline": headline,
+            "more_questions": more, "answered_at": record.answered_at}
 
 
 def _brief_entry(sprint: SprintState) -> dict:
@@ -683,7 +728,8 @@ def derive_view(
         "project_count": len(states),
         "entries": entries,
         "unmanaged": [
-            {"type": "unmanaged", "root": root, "label": UNMANAGED_LABEL,
+            {"type": "unmanaged", "root": root, "name": repo_name(root),
+             "label": UNMANAGED_LABEL,
              "outside_sprints": _line(unmanaged[root], runs, now_ms)}
             for root in sorted(unmanaged)],
         "recent_projects": [s.project_id for s in _order(states)],

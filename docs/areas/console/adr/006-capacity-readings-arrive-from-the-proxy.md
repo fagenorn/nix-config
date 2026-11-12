@@ -1,7 +1,7 @@
 # ADR-console-006 — Capacity readings arrive from the proxy and are kept per profile
 
 - **Status:** accepted
-- **Decided in:** #839, #849, #860
+- **Decided in:** #839, #849, #860, #895
 
 ## Context
 
@@ -13,7 +13,7 @@ The owner needs to see from the page how much of each account's capacity is left
 
 A reading is attributed to a profile through the session the registry places under that profile (the registry directory names it), else through the last folded account-to-profile pair. No credential file is read. The last reading per profile is kept; a passed reset reads as reset and unused, a window without its own reset takes the reading's top-level reset, and a refusal that lost its top-level reset ends at the reset of the window it names.
 
-The listed profiles are `default` plus every directory under `profiles/`, used or not, and no others: a profile with no reading shows "no reading yet" and keeps "every profile is out" from firing, and one removed with `claude-account rm` drops out of the strip and the count at the next poll while its readings stay in the log. The capacity strip sits in the top bar. When every profile is out the statement says so and when everything resumes, and nothing is asked of the owner. "Tight" is one profile with room among two or more.
+The listed profiles are `default` plus every directory under `profiles/`, used or not, and no others: a profile with no reading counts in one note on the strip, "<n> with no reading yet", and keeps "every profile is out" from firing, and one removed with `claude-account rm` drops out of the strip and the count at the next poll while its readings stay in the log. The capacity strip sits in the top bar. When every profile is out the statement says so and when everything resumes, and nothing is asked of the owner. "Tight" is one profile with room among two or more while every other profile reads out.
 
 ## Consequences
 

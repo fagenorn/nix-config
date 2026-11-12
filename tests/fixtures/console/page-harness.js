@@ -33,7 +33,10 @@
 // value, else null. A key step records in state.keyPrevented whether its event
 // had preventDefault called (null before any key step). A click step skips a
 // disabled element. The fake setTimeout/clearTimeout fire when a clock step
-// reaches their due time. Each step settles pending promises before the next.
+// reaches their due time. Each step settles pending promises before the next. A snapshot holds the trees
+// of the inbox, statement, projects, unmanaged, digest, goal, capacity and
+// promoted sections; every serialized node carries its title attribute (null
+// when unset), which is where a time element keeps its exact local time.
 // Prints a JSON list of snapshots on stdout; any failure exits 1 with the
 // error on stderr. A selector the fake DOM does not support throws, so a
 // test cannot pass on a stub.
@@ -329,6 +332,7 @@ function node(n) {
     tag: n.tagName.toLowerCase(),
     cls: n.className,
     key: n.dataset.key === undefined ? null : n.dataset.key,
+    title: n.attributes.title === undefined ? null : n.attributes.title,
     open: n.open,
     value: n.value === undefined ? null : n.value,
     disabled: n.disabled === true || "disabled" in n.attributes,
@@ -432,6 +436,8 @@ async function run() {
         unmanaged: unmanaged ? node(unmanaged) : null,
         digest: byId("digest") ? node(byId("digest")) : null,
         goal: byId("goal") ? node(byId("goal")) : null,
+        capacity: byId("capacity") ? node(byId("capacity")) : null,
+        promoted: byId("promoted") ? node(byId("promoted")) : null,
         active: state.active && attached(root).includes(state.active) ? state.active.className : null,
         field: field === null || (field.tagName !== "INPUT" && field.tagName !== "TEXTAREA") ? null : {
           cls: field.className, value: field.value, start: field.selectionStart,

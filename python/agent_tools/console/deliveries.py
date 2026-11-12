@@ -82,6 +82,11 @@ Moved text: `moved_text(elapsed_ms)` turns the time since a journal's last movem
 `(quiet, text)`. Below 0 counts as 0; under a minute reads `"moved just now"`; under
 `QUIET_AFTER_MS` (15 minutes) `"moved <n> min ago"`; from then on it is quiet, `"quiet for <n> min"`.
 A journal that has not moved carries no sign of why, so the console never calls a run stalled.
+
+Run summary: `run_summary(issues, moved)` reads a run as one sentence, `"<n> issue(s) in delivery:
+<count> <stage>, ..., <moved>"`, the stages in `SUMMARY_ORDER` with a non-zero count, `moved` being
+the moved text; a run with no issue reads `"No issue in delivery yet, <moved>"`. It names stages,
+never issue numbers.
 """
 
 
@@ -89,6 +94,8 @@ import functools
 import json
 import os
 import re
+from collections import Counter
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from stat import S_ISREG
@@ -523,6 +530,20 @@ def moved_text(elapsed_ms: int) -> tuple[bool, str]:
     if elapsed_ms < QUIET_AFTER_MS:
         return False, f"moved {minutes} min ago"
     return True, f"quiet for {minutes} min"
+
+
+SUMMARY_ORDER = (DONE, LANDING, VERIFYING, FINAL_REVIEW, BUILDING, PLAN_REVIEW, PLANNING,
+                 WORKING, QUEUED)
+
+
+def run_summary(issues: Sequence[IssueStage], moved: str) -> str:
+    """One sentence for a run: how many issues, how many at each stage, and `moved`."""
+    if not issues:
+        return f"No issue in delivery yet, {moved}"
+    counts = Counter(i.stage for i in issues)
+    parts = ", ".join(f"{counts[stage]} {stage}" for stage in SUMMARY_ORDER if counts[stage])
+    n = len(issues)
+    return f"{n} {'issue' if n == 1 else 'issues'} in delivery: {parts}, {moved}"
 
 
 @dataclass(frozen=True)
