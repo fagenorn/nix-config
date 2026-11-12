@@ -21,7 +21,7 @@ from agent_tools.console import manager, sprint
 from . import console_test_support as support
 from .test_console_answer import view_of
 from .test_console_briefs import APPROVE, JSON, PARTS, REPLY
-from .test_console_reports import REPORT
+from .test_console_reports import CLOSING, REPORT
 from .test_console_writes import Case
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -391,6 +391,33 @@ class SprintCommandTest(Case):
         self.assertEqual((got.returncode, got.stdout), (2, ""))
         self.assertTrue(got.stderr.startswith("sprint: cannot read "), got.stderr)
         self.assertTrue(got.stderr.endswith("the report is not a JSON object\n"), got.stderr)
+
+    def test_close_sends_the_closing_report_and_a_refusal_exits_1(self):
+        svc = self.open()
+        sid = self.goal(svc)
+        secret, path = self.reports(svc, sid, {**REPORT, "issues": [
+            {"issue": 12, "stage": "building"}]})
+        port = self.port(svc)
+        self.assertEqual(run_sprint("report", "--sprint", sid, "--secret-file", secret,
+                                    "--report-file", path, "--port", port).returncode, 0)
+        closing = {**CLOSING, "issues": [{"issue": 12, "stage": "landed"}]}
+        before = len(support.log_rows(self.store))
+        got = run_sprint("close", "--sprint", sid, "--secret-file", secret,
+                         "--closing-file", "-", "--port", port, stdin=json.dumps(closing))
+        self.assertEqual((got.returncode, got.stdout, got.stderr),
+                         (0, "sprint: closing report sent\n", ""))
+        rows = support.log_rows(self.store)
+        self.assertEqual((len(rows), rows[-1][2]), (before + 1, "sprint.closed"))
+        got = self.assert_unchanged(svc, lambda: run_sprint(
+            "close", "--sprint", sid, "--secret-file", secret, "--closing-file", "-",
+            "--port", port, stdin=json.dumps(closing)))
+        self.assertEqual((got.returncode, got.stdout, got.stderr),
+                         (1, "", "sprint: refused 409: this sprint has ended\n"))
+        got = self.assert_unchanged(svc, lambda: run_sprint(
+            "close", "--sprint", sid, "--secret-file", secret, "--closing-file", "-",
+            "--port", port, stdin="[]"))
+        self.assertEqual((got.returncode, got.stdout), (2, ""))
+        self.assertTrue(got.stderr.startswith("sprint: cannot read -:"), got.stderr)
 
 
 class ManagerContractTest(unittest.TestCase):

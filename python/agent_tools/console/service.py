@@ -24,6 +24,7 @@ Routes (every response carries `Cache-Control: no-store` and
     POST /api/message 204, a JSON body, the page sends the owner's message to a sprint (below)
     POST /api/brief 200 application/json, a manager sends a sprint's brief (below)
     POST /api/report 200 application/json, a manager sends a sprint's report (below)
+    POST /api/close 200 application/json, a manager sends a sprint's closing report (below)
     POST /api/inbox 200 application/json, a manager reads a sprint's unread messages (below)
     POST /api/message-reply 200 application/json, a manager answers one message (below)
     GET /api/sprint-status?sprint_id=<id> 200 application/json, what became of a brief (below)
@@ -31,7 +32,7 @@ Routes (every response carries `Cache-Control: no-store` and
     other methods   405 with `Allow: GET` (`Allow: POST` on `/api/hooks`, `/api/readings`,
                     `/api/looked`, `/api/answer`, `/api/check-answer`, `/api/goal`, `/api/withdraw`,
                     `/api/approve`, `/api/reply`, `/api/retry-manager`, `/api/message`, `/api/brief`, `/api/report`,
-                    `/api/inbox` and `/api/message-reply`)
+                    `/api/close`, `/api/inbox` and `/api/message-reply`)
 
 Two kinds of write exist. The hook and reading routes append what the proxies and hooks observe:
 `POST /api/hooks` appends session observations, `POST /api/readings` the capacity kinds
@@ -190,6 +191,23 @@ reason; any other exception is `console: report_failed <Type>: <message>` and 50
 Success is 200 `application/json` `{"at":"<the row's at>"}`. Every refusal is `text/plain`, one
 line, closes the connection, appends nothing and publishes nothing. The secret appears in no stderr
 line or answer.
+
+Closing (#892): `POST /api/close` is a manager write like the report's: no token, the sprint's
+secret in its place, `_checked_length(MAX_CLOSE_BYTES)` (65536, the same refusals as the report's:
+any `Origin` is 403 `origin refused`, 415 `json only`, 411, 413), then `sprints.parse_close_request`
+(a body it does not accept is 400 `bad closing`), then `send_closing(sprint_id, secret, closing)`,
+which under the ingest lock refuses in this order, appending and publishing nothing:
+`Refused(NOT_OPEN)` or `SecretRefused` (`_manager_sprint`), `Refused(ENDED)` when the sprint has a
+closing or `stopped_at`, `Refused(NOT_STARTED)` unless the sprint is `STARTING` or has `stop_at`,
+then whatever `sprints.checked_closing` refuses, given the issue numbers of the sprint's latest
+report and `stopping` true once `stop_at` is set. It appends exactly one `sprint.closed` row
+`{"sprint_id", "goal", "closing"}` with the checked closing, folds and publishes, and returns the
+row's `at`. A `sprints.SecretRefused` is one stderr line `console: close_refused <sprint_id> secret
+refused` and 403 `secret refused`; any other `sprints.Refused` is `console: close_refused
+<sprint_id> <reason>` and 409 with the reason; any other exception is `console: close_failed
+<Type>: <message>` and 500 `close failed`. Success is 200 `application/json`
+`{"at":"<the row's at>"}`. Every refusal is `text/plain`, one line, closes the connection, appends
+nothing and publishes nothing. The secret appears in no stderr line or answer.
 
 A state request reads only `view_bytes`, which is memory: no log access, no
 registry read, no derivation, no file, no filesystem metadata call, no
@@ -428,7 +446,7 @@ from agent_tools.console import (
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
     MANAGER_STARTED, MANAGER_WAITING, SPRINT_ANSWERED, SPRINT_MESSAGED, SPRINT_NUDGED,
-    SPRINT_READ, SPRINT_REPORTED, Event, EventLog, utc_now)
+    SPRINT_CLOSED, SPRINT_READ, SPRINT_REPORTED, Event, EventLog, utc_now)
 from agent_tools.console.view import (
     INBOX_CHANGED, ReadState, derive_view, encode_view, health_change, inbox_changes, inbox_records,
     project_for, project_states, read_states, registry_changes)
@@ -464,6 +482,7 @@ REPLY_PATH = "/api/reply"
 RETRY_PATH = "/api/retry-manager"
 BRIEF_PATH = "/api/brief"
 REPORT_PATH = "/api/report"
+CLOSE_PATH = "/api/close"
 STATUS_PATH = "/api/sprint-status"
 MESSAGE_PATH = "/api/message"
 INBOX_PATH = "/api/inbox"
@@ -477,7 +496,8 @@ MAX_GOAL_BYTES = 16384
 MAX_WITHDRAW_BYTES = 4096
 MAX_BRIEF_BYTES = 32768
 MAX_REPORT_BYTES = 65536
-MANAGER_WRITES: frozenset[str] = frozenset({BRIEF_PATH, REPORT_PATH, INBOX_PATH,
+MAX_CLOSE_BYTES = 65536
+MANAGER_WRITES: frozenset[str] = frozenset({BRIEF_PATH, REPORT_PATH, CLOSE_PATH, INBOX_PATH,
                                             MESSAGE_REPLY_PATH})
 MAX_MESSAGE_BYTES = 16384
 MAX_INBOX_BYTES = 4096
@@ -619,6 +639,8 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return self._brief_request()
         if route == REPORT_PATH:
             return self._report_request()
+        if route == CLOSE_PATH:
+            return self._close_request()
         if route == INBOX_PATH:
             return self._inbox_request()
         if route == MESSAGE_REPLY_PATH:
@@ -782,6 +804,30 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         except Exception as error:
             print(f"console: report_failed {type(error).__name__}: {error}", file=sys.stderr)
             return self._refuse(500, "report failed")
+        self._send(200, "application/json", json.dumps({"at": at}, separators=(",", ":")).encode())
+
+    def _close_request(self):
+        """The manager's route: a closing report sent with the sprint's secret; no token, no page."""
+        console = self.server.console
+        length = self._checked_length(MAX_CLOSE_BYTES)
+        if length is None:
+            return
+        self.close_connection = True
+        try:
+            sprint_id, secret, closing = sprints.parse_close_request(self.rfile.read(length))
+        except ValueError:
+            return self._refuse(400, "bad closing")
+        try:
+            at = console.send_closing(sprint_id, secret, closing)
+        except sprints.SecretRefused:
+            print(f"console: close_refused {sprint_id} {sprints.SECRET_REFUSED}", file=sys.stderr)
+            return self._refuse(403, sprints.SECRET_REFUSED)
+        except sprints.Refused as error:
+            print(f"console: close_refused {sprint_id} {error}", file=sys.stderr)
+            return self._refuse(409, str(error))
+        except Exception as error:
+            print(f"console: close_failed {type(error).__name__}: {error}", file=sys.stderr)
+            return self._refuse(500, "close failed")
         self._send(200, "application/json", json.dumps({"at": at}, separators=(",", ":")).encode())
 
     def _inbox_request(self):
@@ -1526,6 +1572,22 @@ class ConsoleService:
             checked = sprints.checked_report(report)
             appended = self.log.append([(SPRINT_REPORTED, sprint.project_id, {
                 "sprint_id": sprint_id, "goal": sprint.goal, "report": checked})])
+            self._apply(appended)
+            return appended[-1].at
+
+    def send_closing(self, sprint_id: str, secret: str, closing: dict) -> str:
+        """Append one `sprint.closed` event for a sprint that may close; its at."""
+        with self._ingest:
+            sprint = self._manager_sprint(sprint_id, secret)
+            if sprint.closing is not None or sprint.stopped_at is not None:
+                raise sprints.Refused(sprints.ENDED)
+            if sprint.state != sprints.STARTING and sprint.stop_at is None:
+                raise sprints.Refused(sprints.NOT_STARTED)
+            reported = [issue for issue, _ in sprint.report.issues] if sprint.report else []
+            checked = sprints.checked_closing(closing, reported,
+                                              stopping=sprint.stop_at is not None)
+            appended = self.log.append([(SPRINT_CLOSED, sprint.project_id, {
+                "sprint_id": sprint_id, "goal": sprint.goal, "closing": checked})])
             self._apply(appended)
             return appended[-1].at
 

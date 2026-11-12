@@ -1,7 +1,8 @@
-"""`sprint`: a manager sends its sprint's brief and report and reads the owner's answer.
+"""`sprint`: a manager sends its sprint's brief, report and closing report and reads the owner's answer.
 
     sprint brief [--sprint <id>] [--secret-file <path>] --brief-file <path | -> [--port N]
     sprint report [--sprint <id>] [--secret-file <path>] --report-file <path | -> [--port N]
+    sprint close [--sprint <id>] [--secret-file <path>] --closing-file <path | -> [--port N]
     sprint inbox [--sprint <id>] [--secret-file <path>] [--port N]
     sprint reply [--sprint <id>] [--secret-file <path>] --message <id> --reply-file <path | -> [--port N]
     sprint status [--sprint <id>] [--port N]
@@ -13,7 +14,7 @@ the manager session it starts; without `--secret-file` the secret is `$CONSOLE_S
 (one trailing newline is removed, as from the file). A flag always wins over the environment. No id is stderr
 `sprint: no sprint id: pass --sprint or set CONSOLE_SPRINT_ID`, an id from the environment that
 is not a sprint id is stderr `sprint: CONSOLE_SPRINT_ID is not a sprint id (16 lowercase hex
-characters)`, and, for `brief`, `report`, `inbox` and `reply`, no secret is stderr `sprint: no secret: pass --secret-file or set
+characters)`, and, for `brief`, `report`, `close`, `inbox` and `reply`, no secret is stderr `sprint: no secret: pass --secret-file or set
 CONSOLE_SPRINT_SECRET`; each is exit 2 with no request sent. `--port` is the console's loopback
 port (0-65535; default 27184); the command only ever talks to 127.0.0.1.
 
@@ -27,6 +28,11 @@ the console decides, in one place.
 a JSON object, and sends `POST /api/report` with `{"sprint_id", "secret", "report"}`, no `Origin`.
 On success it prints `sprint: report sent` and exit 0. The command validates no member of the
 report: the console decides, in one place.
+
+`sprint close` reads the secret the same way and the closing report from `--closing-file` (`-` reads
+stdin), a JSON object, and sends `POST /api/close` with `{"sprint_id", "secret", "closing"}`, no
+`Origin`. On success it prints `sprint: closing report sent` and exit 0. The command validates no
+member of the closing report: the console decides, in one place.
 
 `sprint inbox` reads the secret the same way and sends `POST /api/inbox` with
 `{"sprint_id", "secret"}`, no `Origin`. It prints the console's answer as one line of JSON,
@@ -52,7 +58,7 @@ run it first (ADR-console-015).
 Any other HTTP status is stderr `sprint: refused <status>: <text>` (the console's reason) and
 exit 1. A console that cannot be reached is stderr
 `sprint: console unreachable on 127.0.0.1:<port>: <error>` and exit 1. A secret, brief, report or reply file
-that cannot be read, or a brief or report that is not a JSON object, is stderr `sprint: cannot read <path>:
+that cannot be read, or a brief, report or closing report that is not a JSON object, is stderr `sprint: cannot read <path>:
 <reason>` and exit 2, with no request sent; bad arguments are exit 2. The secret is printed nowhere.
 """
 
@@ -103,6 +109,7 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     for name, text in (("brief", "send the sprint's brief to the console"),
                        ("report", "send the sprint's report to the console"),
+                       ("close", "send the sprint's closing report"),
                        ("inbox", "print the owner's unread messages to the sprint"),
                        ("reply", "answer one of the owner's messages"),
                        ("status", "print the owner's answer to the sprint's brief")):
@@ -118,6 +125,9 @@ def build_parser() -> argparse.ArgumentParser:
             if name in ("brief", "report"):
                 each.add_argument(f"--{name}-file", required=True,
                                   help=f"the {name} as a JSON object; - reads stdin")
+            if name == "close":
+                each.add_argument("--closing-file", required=True,
+                                  help="the closing report as a JSON object; - reads stdin")
         if name == "reply":
             each.add_argument("--message", type=message_id, required=True,
                               help="the id of the message being answered")
@@ -214,6 +224,14 @@ def send_report(args: argparse.Namespace, sprint: str) -> str:
     return "sprint: report sent"
 
 
+def send_closing(args: argparse.Namespace, sprint: str) -> str:
+    secret = resolve_secret(args)
+    closing = read_object(args.closing_file, "closing report")
+    body = json.dumps({"sprint_id": sprint, "secret": secret, "closing": closing}).encode()
+    ask(args.port, "POST", service.CLOSE_PATH, body)
+    return "sprint: closing report sent"
+
+
 def read_inbox(args: argparse.Namespace, sprint: str) -> str:
     secret = resolve_secret(args)
     body = json.dumps({"sprint_id": sprint, "secret": secret}).encode()
@@ -240,6 +258,8 @@ def main(argv: list[str] | None = None) -> int:
             line = send_brief(args, sprint)
         elif args.command == "report":
             line = send_report(args, sprint)
+        elif args.command == "close":
+            line = send_closing(args, sprint)
         elif args.command == "inbox":
             line = read_inbox(args, sprint)
         elif args.command == "reply":
