@@ -4,6 +4,7 @@ Run: just agent-workflow-tests
 """
 import io
 import json
+import stat
 import sys
 import threading
 from datetime import datetime, timezone
@@ -193,6 +194,76 @@ class ReviveServiceTest(ReviveCase):
             ["--bg", "--name", self.name(sid), "--settings", path, nudge.RESTART_TEXT])
         self.assertEqual(self.rows("manager.woken"), [
             {"sprint_id": sid, "goal": GOAL, "session_id": "s-1", "ok": True}])
+
+    def env_only(self, svc, sid):
+        """A settings file as an earlier version wrote it: the environment and nothing else."""
+        path = manager.settings_path(svc._sprint_secrets, sid)
+        path.write_text(json.dumps({"env": {
+            manager.ID_ENV: sid, manager.SECRET_ENV: self.secret(sid)}}))
+        return path
+
+    def assert_wake_rewrites_settings(self, outcome):
+        written = []
+
+        def full(profile, cwd):
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        def nudger(sent):
+            written.append(path.read_text())
+            self.nudger(sent)
+
+        svc = self.begin(full_listing=full, nudger=nudger)
+        sid = self.on_track(svc)
+        path = self.env_only(svc, sid)
+        self.tick(svc, 0)
+        self.gone(svc)
+        self.tick(svc, 120)
+        launch = manager.new_launch(
+            sid, "owner/p01", GOAL, "/srv/p01", "work", self.secret(sid), svc._sprint_secrets)
+        self.assertEqual(len(self.revives()), 1)
+        self.assertEqual(written, [json.dumps(manager.settings_document(launch.env))])
+        self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+
+    def test_a_wake_of_a_session_the_full_listing_shows_writes_the_settings_file_again(self):
+        self.assert_wake_rewrites_settings(frozenset({"s-1"}))
+
+    def test_a_wake_of_a_session_the_full_listing_lacks_writes_the_settings_file_again(self):
+        self.assert_wake_rewrites_settings(frozenset({"other"}))
+
+    def test_a_wake_after_an_unreadable_listing_writes_the_settings_file_again(self):
+        self.assert_wake_rewrites_settings(nudge.ListingUnreadable("the listing exited 1"))
+
+    def test_a_wake_whose_settings_cannot_be_written_fails_with_that_reason(self):
+        svc = self.begin()
+        sid = self.on_track(svc)
+        blocked = manager.settings_path(svc._sprint_secrets, sid)
+        blocked.unlink(missing_ok=True)
+        blocked.mkdir()
+        self.tick(svc, 0)
+        self.gone(svc)
+        self.tick(svc, 120)
+        self.assertEqual(self.revives(), [])
+        (row,) = self.rows("manager.woken")
+        self.assertFalse(row["ok"])
+        self.assertTrue(row["reason"].startswith("cannot write the manager's settings: "))
+        self.assertNotIn(self.secret(sid), row["reason"])
+
+    def test_a_wake_of_a_sprint_whose_secret_is_missing_is_not_sent(self):
+        svc = self.begin()
+        sid = self.on_track(svc)
+        path = self.env_only(svc, sid)
+        before = path.read_text()
+        (svc._sprint_secrets / sid).unlink()
+        self.tick(svc, 0)
+        self.gone(svc)
+        self.tick(svc, 120)
+        self.assertEqual(self.revives(), [])
+        (row,) = self.rows("manager.woken")
+        self.assertFalse(row["ok"])
+        self.assertEqual(row["reason"], "the sprint's secret is missing")
+        self.assertEqual(path.read_text(), before)
 
     def test_an_unreadable_full_listing_gives_the_bare_wake_and_records_why(self):
         for error, reason in (

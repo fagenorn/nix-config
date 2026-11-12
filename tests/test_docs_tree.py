@@ -566,6 +566,18 @@ class DocsTreeTest(unittest.TestCase):
         for needle in ("/api/round-answer", "/api/ask"):
             self.assertIn(needle, write)
 
+    def test_the_console_manager_session_decision_is_recorded(self):
+        path = "docs/areas/console/adr/021-a-managers-session-runs-with-isolation-off-and-permission-prompts-refused.md"
+        first = (REPO_ROOT / path).read_text().splitlines()[0]
+        self.assertEqual(first, "# ADR-console-021 — A manager's session runs with the background "
+                                "isolation guard off and permission prompts refused")
+        adr = self.doc(path)
+        for needle in ("bgIsolation", "PermissionRequest", "sprint ask", "settings file",
+                       "ADR-console-004", "ADR-console-015", "ADR-console-017", "#835", "#973"):
+            self.assertIn(needle, adr)
+        manager = self.doc("docs/areas/console/CONTEXT.md")
+        self.assertIn("ADR-console-021", manager)
+
     def test_the_console_delivery_decision_is_recorded(self):
         path = "docs/areas/console/adr/005-in-flight-delivery-stage-is-read-from-run-journals.md"
         first = (REPO_ROOT / path).read_text().splitlines()[0]
