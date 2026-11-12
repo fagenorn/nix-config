@@ -167,6 +167,16 @@ def choose_profile(capacity: Mapping, bound: str) -> str | Wait:
     return bound
 
 
+def quota_wait(capacity: Mapping, profile: str | None) -> Wait | None:
+    """Where a manager on `profile` waits for quota (#929): `Wait(out_until)` when `capacity`
+    holds an entry for `profile` whose `state` is `out`, else None (no profile, an unknown one or
+    one that has room)."""
+    for entry in capacity["profiles"]:
+        if entry["profile"] == profile:
+            return Wait(entry["out_until"]) if entry["state"] == "out" else None
+    return None
+
+
 def bound_profile(root: str, accounts_dir: Path | None = None) -> str:
     if accounts_dir is None:
         accounts_dir = Path(os.environ.get("CLAUDE_ACCOUNTS_DIR")

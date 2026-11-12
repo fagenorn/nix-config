@@ -519,7 +519,8 @@ class RevivalFoldTest(unittest.TestCase):
 class DocumentedTest(unittest.TestCase):
     def test_the_manager_rules_are_written_where_the_view_points(self):
         self.assertTrue((sprints.manager_status.__doc__ or "").strip())
-        for name in ("manager_status", "manager.started", "manager.failed", "manager.waiting"):
+        for name in ("manager_status", "manager.started", "manager.failed", "manager.waiting",
+                     "manager.nudged", "manager.no_progress", "sprint.continued"):
             self.assertIn(name, sprints.__doc__)
 
 
@@ -1559,6 +1560,88 @@ class QuestionFoldTest(unittest.TestCase):
         state = question_state([])
         self.assertEqual(set(sprints.inbox_entry(state.messages[0])),
                          {"id", "kind", "version", "text", "at"})
+
+
+class IdleFoldTest(unittest.TestCase):
+    ROWS = [stated(1, "p00", SID, "one"), sent(2, SID, 1, PARTS), approved(3, SID, 1)]
+
+    def nudged(self, seq, **payload):
+        return managed(seq, SID, event_log.MANAGER_NUDGED,
+                       **{"session_id": "s-1", "ok": True, "goal": "one", **payload})
+
+    def no_progress(self, seq):
+        return managed(seq, SID, event_log.MANAGER_NO_PROGRESS, goal="one", status="x")
+
+    def continued(self, seq):
+        return managed(seq, SID, event_log.SPRINT_CONTINUED, goal="one")
+
+    def fold(self, *rows):
+        return sprints.sprint_states([*self.ROWS, *rows])[SID]
+
+    def test_an_idle_nudge_row_counts_and_a_report_resets_the_count(self):
+        state = self.fold(self.nudged(4), self.nudged(5, ok=False, reason="r"))
+        self.assertEqual((state.idle_nudges, state.idle_nudged_at), (2, at(5)))
+        state = self.fold(self.nudged(4), self.nudged(5, ok=False, reason="r"),
+                          reported(6, SID, REPORT))
+        self.assertEqual((state.idle_nudges, state.idle_nudged_at), (0, at(5)))
+        self.assertEqual(self.fold().idle_nudges, 0)
+        self.assertIsNone(self.fold().idle_nudged_at)
+
+    def test_no_progress_is_set_once_and_continue_clears_it(self):
+        state = self.fold(self.nudged(4), self.no_progress(5), self.no_progress(6))
+        self.assertEqual((state.no_progress_at, state.idle_nudges), (at(5), 1))
+        state = self.fold(self.nudged(4), self.no_progress(5), self.continued(6))
+        self.assertEqual((state.no_progress_at, state.idle_nudges), (None, 0))
+        self.assertEqual(state.idle_nudged_at, at(4))
+        before = self.fold(self.nudged(4))
+        self.assertEqual(self.fold(self.nudged(4), self.continued(5)), before)
+        state = self.fold(self.no_progress(4), reported(5, SID, REPORT))
+        self.assertIsNone(state.no_progress_at)
+
+    def test_malformed_idle_rows_change_nothing(self):
+        base = [self.nudged(4)]
+        other = "fedcba9876543210"
+        bad = {"ok missing": managed(5, SID, event_log.MANAGER_NUDGED, session_id="s-1"),
+               "ok text": self.nudged(5, ok="yes"),
+               "session missing": managed(5, SID, event_log.MANAGER_NUDGED, ok=True),
+               "session number": self.nudged(5, session_id=5),
+               "unknown sprint": managed(5, other, event_log.MANAGER_NUDGED, session_id="s-1",
+                                         ok=True),
+               "no progress, unknown sprint": managed(5, other, event_log.MANAGER_NO_PROGRESS,
+                                                      status=None)}
+        for name, row in bad.items():
+            with self.subTest(name):
+                self.assertEqual(self.fold(*base, row), self.fold(*base))
+
+    def test_idle_rows_fold_in_two_parts_as_at_once(self):
+        events = [*self.ROWS, self.nudged(4), self.no_progress(5), self.nudged(6, ok=False),
+                  self.continued(7), self.nudged(8), reported(9, SID, REPORT)]
+        whole = sprints.sprint_states(events)
+        for cut in range(len(events) + 1):
+            with self.subTest(cut=cut):
+                self.assertEqual(
+                    sprints.sprint_states(events[cut:], sprints.sprint_states(events[:cut])),
+                    whole)
+
+    def test_idle_kinds_are_not_kept(self):
+        kinds = (event_log.MANAGER_NUDGED, event_log.MANAGER_NO_PROGRESS,
+                 event_log.SPRINT_CONTINUED)
+        for kind in kinds:
+            with self.subTest(kind=kind):
+                self.assertNotIn(kind, event_log.KEPT_KINDS)
+        self.assertEqual(kinds, ("manager.nudged", "manager.no_progress", "sprint.continued"))
+
+    def test_parse_continue_reads_a_project_and_a_sprint(self):
+        self.assertEqual(
+            sprints.parse_continue(
+                b'{"project_id": "owner/p00", "sprint_id": "0123456789abcdef"}'),
+            ("owner/p00", "0123456789abcdef"))
+        for body in (b'{"project_id": "owner/p00", "sprint_id": "0123456789ABCDEF"}',
+                     b'{"project_id": "owner/p00", "sprint_id": "0123456789abcdef", "x": 1}',
+                     b'{"project_id": "owner/p00"}', b"[1]"):
+            with self.subTest(body=body):
+                with self.assertRaises(ValueError):
+                    sprints.parse_continue(body)
 
 
 if __name__ == "__main__":
