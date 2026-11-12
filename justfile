@@ -199,6 +199,7 @@ agent-workflow-tests *args:
     tests/test_console_capacity.py \
     tests/test_console_capacity_check.py \
     tests/test_console_manager_check.py \
+    tests/test_console_message_check.py \
     tests/test_console_page.py \
     tests/test_console_service.py \
     tests/test_console_stream.py \
