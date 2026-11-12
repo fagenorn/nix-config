@@ -3,6 +3,7 @@
 Run: just agent-workflow-tests
 """
 import json
+import os
 import threading
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -140,6 +141,26 @@ class IdleServiceTest(IdleCase):
         self.poll(svc, 2000)
         self.assertEqual(len(self.continues()), 1)
         self.poll(svc, 2001)
+        self.assertEqual(len(self.continues()), 1)
+
+    def write_setup_journal(self, moved_at):
+        """A run of s-1 that has started its setup and named no issue, last moved at `moved_at`."""
+        journal = (self.store.parent.parent.parent / "projects/-srv-p01/s-1"
+                   / "subagents/workflows/wf_1/journal.jsonl")
+        journal.parent.mkdir(parents=True)
+        journal.write_text(json.dumps(
+            {"agentId": "a1", "type": "started", "label": "setup", "phase": "setup"}) + "\n")
+        os.utime(journal, ns=(int(moved_at * 1e9),) * 2)
+
+    def test_a_run_awaiting_its_setup_result_holds_the_nudge_like_one_with_an_issue(self):
+        svc, sid = self.idle_service(session_dirs=[self.store.parent.parent.parent / "sessions"])
+        self.write_setup_journal(T0 + 200)
+        svc.poll_deliveries()
+        self.assertEqual(self.rows("delivery.seen"), [])
+        for seconds in (300, 500, 1200, 1999.999):
+            self.poll(svc, seconds)
+            self.assertEqual(self.continues(), [], seconds)
+        self.poll(svc, 2000)
         self.assertEqual(len(self.continues()), 1)
 
     def reach_no_progress(self, svc, sid):

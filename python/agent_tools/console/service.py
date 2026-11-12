@@ -545,10 +545,11 @@ idle_nudge_failed <Type>: <message>`) and returning at once without a nudger, ru
 over each open sprint that is in none of `_nudging`, `_launching` and `_stopping`: the manager's
 folded session (`_manager_session`, lowest session id), `active` (the larger of that session's last
 movement and the sprint's `_settled`, the last launch, nudge or wake), `run_ms` (`_run_moved`: the
-latest `moved_ms` of a delivery run of that session still in `_deliveries`, so one that has not
-ended; a manager with such a run is not nudged until it has been still for `idle.RUN_STILL_MS`, 30
-minutes, #974), the sprint's waiting count
-and its quota; a sprint not out whose manager row is not `started` or whose manager is seen
+latest movement of a run of that session that has not ended: the larger `moved_ms` of its
+`_deliveries` rows and of `_run_moves`, which `poll_deliveries` rebuilds each poll with the journal
+mtime of every unended run it read, whether or not the run names an issue; a manager with such a
+run is not nudged until it has been still for `idle.RUN_STILL_MS`, 30 minutes, #974), the sprint's
+waiting count and its quota; a sprint not out whose manager row is not `started` or whose manager is seen
 `working` leaves `_quota_held` (resumed without a send, no sentence). Then `idle.next_step` decides:
 `GIVE_UP` appends one `manager.no_progress {sprint_id, goal, status}` (the report's status line or
 null), `NUDGE` reserves the sprint in `_nudging` and dispatches `_idle_nudge` after the lock.
@@ -1480,6 +1481,7 @@ class ConsoleService:
         self._deliveries: dict[tuple[str, str], deliveries.DeliveryState] = {}
         self._reader = deliveries.JournalReader()
         self._runs: dict[Path, deliveries.RunFold] = {}
+        self._run_moves: dict[tuple[str, str], int] = {}
         self._unreadable: set[str] = set()
         self._session_poller: threading.Thread | None = None
         self._tracker = tracker
@@ -2510,6 +2512,7 @@ class ConsoleService:
             return None
         moved = [state.moved_ms for (sid, _), state in self._deliveries.items()
                  if sid == session.session_id]
+        moved += [ms for (sid, _), ms in self._run_moves.items() if sid == session.session_id]
         return max(moved) if moved else None
 
     def nudge_idle(self) -> None:
@@ -2815,12 +2818,14 @@ class ConsoleService:
                 projects_dirs.append(projects)
         readings: dict[tuple[str, str], deliveries.DeliveryState] = {}
         runs: dict[Path, deliveries.RunFold] = {}
+        run_moves: dict[tuple[str, str], int] = {}
         terminal: list[tuple[str, str]] = []
         for sid in sorted(scanned):
             listing = deliveries.run_journals(projects_dirs, sid)
             if isinstance(listing, deliveries.Unreadable):
                 readings.update({k: v for k, v in folded.items() if k[0] == sid})
                 runs.update({j: f for j, f in self._runs.items() if j.parents[3].name == sid})
+                run_moves.update({k: v for k, v in self._run_moves.items() if k[0] == sid})
                 self._warn_once(f"listing {sid}",
                                 f"console: journals_unreadable {sid} {listing.reason}")
                 continue
@@ -2849,11 +2854,15 @@ class ConsoleService:
                         readings[key] = folded[key]
                     if journal in self._runs:
                         runs[journal] = self._runs[journal]
+                    if key in self._run_moves:
+                        run_moves[key] = self._run_moves[key]
                     self._warn_once(path, f"console: journal_unreadable {path} {chunk.reason}")
                     continue
                 self._unreadable.discard(path)
                 if chunk is None:
                     continue
+                if not ended:
+                    run_moves[key] = chunk.moved_ms
                 fold = self._runs.get(journal)
                 if fold is None or chunk.from_start or fold.branch_pattern != pattern:
                     fold = deliveries.RunFold(pattern)
@@ -2871,6 +2880,8 @@ class ConsoleService:
             self._reader.forget(journal)
         self._runs = runs
         with self._ingest:
+            self._run_moves = run_moves
+
             def project_of(sid: str) -> str | None:
                 repo = scanned[sid].repo
                 return project_for(repo, self._states)
