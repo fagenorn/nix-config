@@ -21,7 +21,7 @@ its bring-back (#893; `event_log.MANAGER_WOKEN`, `MANAGER_STALLED`, not kept eit
     manager.failed   {"sprint_id", "reason": <str>, "takeover"?: true}
     manager.waiting  {"sprint_id", "until": <str> | null, "takeover"?: true}
     manager.woken    {"sprint_id", "session_id": <str>, "ok": <bool>, "reason"?: <str>,
-                      "back"?: <bool>}
+                      "back"?: <bool>, "listing_failed"?: <str>}
     manager.stalled  {"sprint_id", "reason": <str>}
 
 A sprint id is `secrets.token_hex(8)`: 16 lowercase hex characters (`SPRINT_ID`), the only form a
@@ -182,9 +182,10 @@ on `SprintState.messages`. Four rows carry them, the first three kept (`event_lo
     sprint.messaged {"sprint_id", "goal": <str>, "text": <str>}
     sprint.read     {"sprint_id", "through": <int message id>}
     sprint.answered {"sprint_id", "message": <int message id>, "reply": <str>}
-    sprint.nudged   {"sprint_id", "through": <int>, "route": "relay" | "wake" | null, "ok": true}
+    sprint.nudged   {"sprint_id", "through": <int>, "route": "relay" | "wake" | null, "ok": true,
+                     "listing_failed"?: <str>}
                     {"sprint_id", "through": <int>, "route": "relay" | "wake" | null, "ok": false,
-                     "reason": <str>}
+                     "reason": <str>, "listing_failed"?: <str>}
 
 A message's id is the `seq` of the row that made it. A `brief.approved` row that approves the open
 brief makes a `MESSAGE_APPROVED` message (`version` the brief's, no text); a `brief.replied` row
