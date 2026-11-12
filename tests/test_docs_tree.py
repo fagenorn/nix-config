@@ -449,7 +449,7 @@ class DocsTreeTest(unittest.TestCase):
         for needle in ("sprint brief", "sprint status", "POST /api/brief", "GET /api/sprint-status",
                        "POST /api/approve", "POST /api/reply", "ADR-console-008",
                        "ADR-console-009", "ADR-console-011", "#834", "#835", "#836", "#887",
-                       "secret refused", "five seconds", "starting", "2000"):
+                       "#911", "may be empty lists", "secret refused", "five seconds", "starting", "2000"):
             self.assertIn(needle, adr)
         write = self.doc("docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md")
         for needle in ("/api/approve", "/api/reply", "/api/brief"):

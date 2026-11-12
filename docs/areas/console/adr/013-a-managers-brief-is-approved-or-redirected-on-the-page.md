@@ -1,7 +1,7 @@
 # ADR-console-013 — A manager's brief is approved or redirected on the page
 
 - **Status:** accepted
-- **Decided in:** #834, #835, #836, #887
+- **Decided in:** #834, #835, #836, #887, #911
 
 ## Context
 
@@ -11,11 +11,11 @@ ADR-console-011 let the owner state a goal, and no manager existed to pick it up
 
 A manager uses the `sprint` command: `sprint brief` sends the brief and `sprint status` reads what became of it. The command validates nothing about the brief; the console decides, in one place.
 
-`POST /api/brief` takes the sprint id, the sprint's secret and the brief. It is not a page write: it carries no token, and the sprint's secret takes the token's place. It refuses any `Origin` (a browser page is never the manager), and it refuses in this order: the sprint is not open, then the secret refused, then the first of the five parts that is missing or empty. A refusal records nothing, and the answer to a wrong secret is the one text `secret refused`, so a caller learns nothing about the secret.
+`POST /api/brief` takes the sprint id, the sprint's secret and the brief. It is not a page write: it carries no token, and the sprint's secret takes the token's place. It refuses any `Origin` (a browser page is never the manager), and it refuses in this order: the sprint is not open, then the secret refused, then the first of the five parts that is missing, of the wrong type or empty when it may not be. A refusal records nothing, and the answer to a wrong secret is the one text `secret refused`, so a caller learns nothing about the secret.
 
 `GET /api/sprint-status` answers a sprint's decision (`none`, `approved`, `changes` or `withdrawn`), its version and the owner's reply, and needs no secret. The secret is removed when a goal is withdrawn, so a manager whose sprint was withdrawn could no longer present it, and `sprint status` is exactly how it finds that out. The route reveals only what the owner decided about the manager's own brief, and loopback trust is the boundary for reads as for writes (ADR-console-008).
 
-A brief has five parts: what done looks like, what is excluded, the slices, the risks and what the manager expects to ask the owner. Each one is required. A sprint's briefs are numbered from 1 (#835): a newer brief replaces the one before it, whatever became of it, and the sprint waits for the owner again.
+A brief has five parts: what done looks like, what is excluded, the slices, the risks and what the manager expects to ask the owner. Each one must be present: what done looks like and the slices may not be empty, while the excluded, risks and asks lists may be empty lists, so a manager that excludes nothing, sees no risk or expects to ask nothing says so instead of inventing an entry (#911). A sprint's briefs are numbered from 1 (#835): a newer brief replaces the one before it, whatever became of it, and the sprint waits for the owner again.
 
 A waiting brief is an inbox item. The page opens it with the goal above it, its version, and the five parts. `POST /api/approve` and `POST /api/reply` are page writes under ADR-console-008, each carrying the version the owner acted on. Enter starts the same undo as a decision prompt (ADR-console-010), five seconds in which Escape or Undo cancels it, and then approves; the reply field asks for changes instead. Each action is bound to the version shown when the owner acted, so a newer brief makes a late action refuse with the reason, and a newer version cancels an approval that is still waiting. A reply is kept exactly as typed, at most 2000 characters, and is what `sprint status` returns.
 

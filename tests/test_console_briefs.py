@@ -96,6 +96,24 @@ class BriefRouteTest(Case):
             "project_id": "owner/p01", "sprint_id": sid, "goal": GOAL_TEXT, "version": 1,
             "brief": PARTS, "answered": False, "waiting_since": at}])
 
+    def test_a_brief_with_empty_excluded_risks_or_asks_is_recorded(self):
+        svc = self.open()
+        cases = [{**PARTS, "excluded": []}, {**PARTS, "risks": []}, {**PARTS, "asks": []},
+                 {**PARTS, "excluded": [], "risks": [], "asks": []}]
+        for parts in cases:
+            with self.subTest(parts=parts):
+                sid = self.sprint(svc)
+                before = support.log_rows(self.store)
+                got = self.brief(svc, sid, self.secret(sid), parts)
+                self.assertEqual((got[0], got[2]), (200, b'{"version":1}'))
+                rows = support.log_rows(self.store)
+                self.assertEqual(len(rows), len(before) + 1)
+                self.assertEqual(rows[:len(before)], before)
+                self.assertEqual(rows[-1][2], "brief.sent")
+                self.assertEqual(json.loads(rows[-1][4])["brief"], parts)
+                (item,) = [i for i in view_of(svc)["inbox"]["open"] if i["sprint_id"] == sid]
+                self.assertEqual(item["brief"], parts)
+
     def test_a_refused_brief_appends_nothing(self):
         svc = self.open()
         sid = self.sprint(svc)
@@ -112,6 +130,13 @@ class BriefRouteTest(Case):
             ("withdrawn sprint", gone, former, PARTS, 409, b"this sprint is not open"),
             ("empty slices", sid, right, {**PARTS, "slices": []}, 409,
              b"the brief has no slices"),
+            ("blank done", sid, right, {**PARTS, "done": "  "}, 409, b"the brief has no done"),
+            ("asks not a list", sid, right, {**PARTS, "asks": "which store?"}, 409,
+             b"the brief has no asks"),
+            ("excluded null", sid, right, {**PARTS, "excluded": None}, 409,
+             b"the brief has no excluded"),
+            ("empty slices with empty asks", sid, right, {**PARTS, "slices": [], "asks": []},
+             409, b"the brief has no slices"),
             ("secret before parts", sid, "A" * 43,
              {k: v for k, v in PARTS.items() if k != "risks"}, 403, b"secret refused"),
         ]
