@@ -11,6 +11,7 @@ from unittest import mock
 
 from agent_tools.claims import forge_markers as fm
 from agent_tools.claims import forge_owner_action as foa
+from agent_tools.verification import verify_answer
 from agent_tools.verification import verify_owner as vo
 from agent_tools.verification import verify_pending
 from agent_tools.verification import verify_run as vr
@@ -1009,3 +1010,26 @@ class AnsweredDecisionPassTest(OwnerBase):
                   extra=[stored_comment(11, box_body([QUESTIONS[1]], ticks={(0, 0)}))])
         vr.pass_repo(self.project, "mbp", Refs(), report=True)
         self.assertEqual(sorted(self.world.issue()["labels"]), ["needs-verification", "owner-action"])
+
+
+class ConsoleAnswerTest(OwnerBase):
+    """#863: an answer given through `verify_answer` settles the check at the next pass."""
+
+    def answer_from_the_page(self, answer):
+        self.world.respond_json("gh", ["api", f"repos/{SLUG}/issues/{ISSUE}"], {"number": ISSUE, "state": "open"})
+        self.hold(ask_check())
+        self.run_pass()
+        prompt, = self.prompts("verify-ask")
+        verify_answer.answer_prompt(SLUG, ISSUE, prompt.comment_id, answer)
+        return self.run_pass()
+
+    def test_a_passed_answer_from_the_page_closes_the_issue_at_the_next_pass(self):
+        lines = self.answer_from_the_page("passed")
+        self.assertEqual(self.results(), ["pass"])
+        self.assertEqual(lines[0], line(0, "AC1", "pass", "owner_answered"))
+        self.assertEqual(self.world.issue()["state"], "closed")
+
+    def test_a_failed_answer_from_the_page_records_a_fail(self):
+        self.answer_from_the_page("failed")
+        self.assertEqual(self.results(), ["fail"])
+        self.assertIn("verification-failed", self.world.issue()["labels"])
