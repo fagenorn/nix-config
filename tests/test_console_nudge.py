@@ -12,8 +12,9 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools.console import manager, nudge as nudge_module
-from agent_tools.console.nudge import (NUDGE_TEXT, RELAY, WAKE, Nudge, NudgeFailed, nudge_command,
-                                       nudger_for, run_nudge)
+from agent_tools.console.nudge import (NUDGE_TEXT, RELAY, RESTART_TEXT, REVIVE, UNKNOWN_SESSION,
+                                       WAKE, Nudge, NudgeFailed, nudge_command, nudger_for,
+                                       run_nudge)
 
 SID = "a" * 16
 NAME = "owner/p01 sprint " + SID
@@ -64,6 +65,28 @@ class NudgeCommandTest(unittest.TestCase):
              "--resume", "s-1", "--bg", NUDGE_TEXT],
             nudge_command(self.nudge(WAKE), "linux"))
 
+    def test_the_revive_command_resumes_in_place_with_the_restart_sentence(self):
+        revive = Nudge("0123456789abcdef", REVIVE, "p sprint 0123456789abcdef", "s-1", "work",
+                       "/srv")
+        self.assertEqual(
+            ["systemd-run", "--user", "--scope", "--quiet", "--collect",
+             "--description=agent manager p sprint 0123456789abcdef", "--", "claude-account",
+             "run", "--resume", "s-1", "--bg", RESTART_TEXT],
+            nudge_command(revive, "linux"))
+
+    def test_the_restart_sentence_is_fixed_and_names_contract_then_recap(self):
+        self.assertEqual(
+            'The console restarted this session because it had stopped while its sprint had '
+            'work. Run "sprint contract", then "sprint recap", and go on.', RESTART_TEXT)
+        self.assertLess(RESTART_TEXT.index("sprint contract"), RESTART_TEXT.index("sprint recap"))
+
+    def test_a_revive_without_a_session_runs_nothing(self):
+        run = self.fake()
+        with self.assertRaises(NudgeFailed) as raised:
+            run_nudge(self.nudge(REVIVE, session_id=None), platform="linux", run=run, environ={})
+        self.assertEqual(UNKNOWN_SESSION, str(raised.exception))
+        self.assertEqual([], run.calls)
+
     def test_there_is_no_command_off_linux(self):
         self.assertIsNone(nudge_command(self.nudge(RELAY), "darwin"))
 
@@ -85,6 +108,18 @@ class NudgeCommandTest(unittest.TestCase):
                 self.assertNotIn(dropped, env)
             for value in env.values():
                 self.assertNotIn(NUDGE_TEXT, value)
+        with self.subTest(route=REVIVE):
+            run = self.fake()
+            run_nudge(self.nudge(REVIVE), platform="linux", run=run, environ=environ)
+            argv, kwargs = run.calls[0]
+            self.assertEqual([RESTART_TEXT], [part for part in argv if "sprint" in part
+                                              and part != NAME and "--description" not in part])
+            self.assertEqual(RESTART_TEXT, argv[-1])
+            for value in kwargs["env"].values():
+                self.assertNotIn(RESTART_TEXT, value)
+                self.assertNotIn(NUDGE_TEXT, value)
+            self.assertIs(subprocess.DEVNULL, kwargs["stdout"])
+            self.assertEqual(nudge_module.WAKE_TIMEOUT, kwargs["timeout"])
 
     def test_a_relay_is_delivered_only_when_it_prints_sent(self):
         run_nudge(self.nudge(RELAY), platform="linux", environ={},
@@ -161,7 +196,8 @@ class NudgeCommandTest(unittest.TestCase):
         try:
             with open(f"/proc/{pid}/stat") as stat:
                 return stat.read().rsplit(")", 1)[1].split()[0] != "Z"
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
+            # The process can end between the open and the read: the read then fails with ESRCH.
             return False
 
     def test_nudger_for_is_linux_only(self):

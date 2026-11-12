@@ -28,6 +28,7 @@
 | Blocking edge | Claims |
 | Cache proxy | Hosts |
 | Brief | Console |
+| Bring-back | Console |
 | Candidate | Release |
 | Capacity strip | Console |
 | Check | Verification |

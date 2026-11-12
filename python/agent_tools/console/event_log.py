@@ -5,7 +5,7 @@ AUTOINCREMENT, at TEXT NOT NULL, kind TEXT NOT NULL, project TEXT, payload TEXT
 NOT NULL)`. Triggers refuse every `UPDATE` of `events`, every `INSERT` that
 names an existing `seq` (which `INSERT OR REPLACE` would otherwise carry out
 without firing a delete trigger) and every deletion of a goal row, a brief row, a
-report row, a message row or a question row (`KEPT_KINDS`, kept indefinitely per #838, #887, #890, #889 and #891), whatever
+report row, a message row, a question row or a closing row (`KEPT_KINDS`, kept indefinitely per #838, #887, #890, #889, #891 and #892), whatever
 its age, or of a row that is not older than the retention cutoff, with "the
 console event log is append-only", so a raw connection cannot rewrite history
 either. The cutoff is the one row of
@@ -27,6 +27,13 @@ not, and retention removes it like any other row.
 Two kinds record a manager's questions and the owner's answers (#891): `QUESTIONS_ASKED`
 (`questions.asked`) and `QUESTION_ANSWERED` (`question.answered`), both in `KEPT_KINDS`.
 
+Three more kinds are kept (#892): `SPRINT_CLOSED` (`sprint.closed`), `SPRINT_STOP_REQUESTED`
+(`sprint.stop_requested`) and `MANAGER_STOPPED` (`manager.stopped`). `manager.stopped` is kept
+because it alone ends a stop and a withdrawal's pending stop, and retention runs before the fold at
+construction, so a restart must never reopen a finished stop. `MANAGER_STOP_FAILED`
+(`manager.stop_failed`, one failed attempt) is not kept: it is an observation like the other manager
+rows and retention removes it.
+
 Three kinds record a sprint's manager (#888): `MANAGER_STARTED` (`manager.started`), `MANAGER_FAILED`
 (`manager.failed`) and `MANAGER_WAITING` (`manager.waiting`), each with the project in its project
 column. They are not in `KEPT_KINDS`: retention removes them like any other row, and a sprint whose
@@ -39,8 +46,8 @@ and writes nothing. A payload is stored as canonical JSON (sorted keys, compact
 separators, non-ASCII kept, NaN refused), serialised before the transaction
 begins.
 
-`PRAGMA user_version` is `SCHEMA_VERSION` (7) once opened: version 0 is created
-as schema 7, versions 1, 2, 3, 4, 5 and 6 are migrated to 7 in one transaction each and
+`PRAGMA user_version` is `SCHEMA_VERSION` (8) once opened: version 0 is created
+as schema 8, versions 1, 2, 3, 4, 5, 6 and 7 are migrated to 8 in one transaction each and
 keep every row, and a file at any other version raises `EventLogError` and is not
 modified. The parent directory is created with mode 0700. The connection
 is shared across threads and every use of it holds one lock.
@@ -54,7 +61,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 RETENTION = timedelta(days=90)
 
 GOAL_STATED = "goal.stated"
@@ -65,6 +72,8 @@ BRIEF_REPLIED = "brief.replied"
 MANAGER_STARTED = "manager.started"
 MANAGER_FAILED = "manager.failed"
 MANAGER_WAITING = "manager.waiting"
+MANAGER_WOKEN = "manager.woken"
+MANAGER_STALLED = "manager.stalled"
 SPRINT_REPORTED = "sprint.reported"
 SPRINT_MESSAGED = "sprint.messaged"
 SPRINT_READ = "sprint.read"
@@ -72,16 +81,24 @@ SPRINT_ANSWERED = "sprint.answered"
 SPRINT_NUDGED = "sprint.nudged"
 QUESTIONS_ASKED = "questions.asked"
 QUESTION_ANSWERED = "question.answered"
+SPRINT_CLOSED = "sprint.closed"
+SPRINT_STOP_REQUESTED = "sprint.stop_requested"
+MANAGER_STOPPED = "manager.stopped"
+MANAGER_STOP_FAILED = "manager.stop_failed"
 # Rows of these kinds (the two goal kinds, the three brief kinds, the report
-# kind, the three message kinds and the two question kinds) are never removed:
-# not by the retention pass, not by a raw connection (the delete trigger of
-# schema 3, 4, 5, 6 and 7).
-# `SPRINT_NUDGED` is not among them.
+# Rows of these kinds (the two goal kinds, the three brief kinds, the report
+# kind, the three message kinds, the two question kinds, the closing kind, the
+# stop request and the stop's completion) are never removed: not by the retention
+# pass, not by a raw connection (the delete trigger of schema 3, 4, 5, 6, 7 and 8).
+# `SPRINT_NUDGED` and `MANAGER_STOP_FAILED` are not among them, nor is any manager kind other
+# than `MANAGER_STOPPED` (`MANAGER_STARTED`, `MANAGER_FAILED`, `MANAGER_WAITING`,
+# `MANAGER_WOKEN`, `MANAGER_STALLED`).
 KEPT_KINDS = frozenset({GOAL_STATED, GOAL_WITHDRAWN,
                         BRIEF_SENT, BRIEF_APPROVED, BRIEF_REPLIED,
                         SPRINT_REPORTED,
                         SPRINT_MESSAGED, SPRINT_READ, SPRINT_ANSWERED,
-                        QUESTIONS_ASKED, QUESTION_ANSWERED})
+                        QUESTIONS_ASKED, QUESTION_ANSWERED,
+                        SPRINT_CLOSED, SPRINT_STOP_REQUESTED, MANAGER_STOPPED})
 
 _APPEND_ONLY = "the console event log is append-only"
 
@@ -121,10 +138,11 @@ _RETENTION = (
         BEGIN SELECT RAISE(ABORT, '{_RETENTION_ONLY_FORWARD}'); END""",
 )
 
-# What schemas 3, 4, 5, 6 and 7 add to schema 2: the delete trigger also refuses every row
+# What schemas 3, 4, 5, 6, 7 and 8 add to schema 2: the delete trigger also refuses every row
 # of a kept kind, whatever its age. Built from KEPT_KINDS so a later kept kind
 # needs no hand-edited SQL, only a re-run on an existing store (schema 4 added the
-# brief kinds, schema 5 the report kind, schema 6 the message kinds, schema 7 the question kinds).
+# brief kinds, schema 5 the report kind, schema 6 the message kinds, schema 7 the closing kinds
+# and the stop's completion, schema 8 the question kinds).
 _KEPT_LITERALS = ", ".join("'" + kind.replace("'", "''") + "'"
                            for kind in sorted(KEPT_KINDS))
 _KEPT = (
@@ -178,7 +196,7 @@ class EventLog:
             return
         if version == 1:
             self._transaction(self._migrate_from_1)
-        elif version in (2, 3, 4, 5, 6):
+        elif version in (2, 3, 4, 5, 6, 7):
             self._transaction(self._migrate_from_2)
         elif version == 0:
             self._transaction(self._create_schema)

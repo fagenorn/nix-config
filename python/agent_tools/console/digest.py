@@ -14,6 +14,10 @@ Event kinds read:
 - `goal.withdrawn` (`event_log.GOAL_WITHDRAWN`, `sprints.py`): the owner withdrew a sprint's goal.
 - `brief.sent`, `brief.approved` (`event_log.BRIEF_SENT`, `BRIEF_APPROVED`, `sprints.py`): a
   manager's brief arrived, or the owner approved it. `brief.replied` says nothing.
+- `manager.woken`, `manager.started` (`event_log.MANAGER_WOKEN`, `MANAGER_STARTED`, `sprints.py`): a
+  gone manager was brought back. A wake that ran (`ok` exactly true) and a takeover start (`takeover`
+  exactly true) speak; a failed wake, a failed takeover, a first start and `manager.stalled` say
+  nothing, and none of them is an inbox item (only a stall is, `view.py`).
 - `sprint.reported` (`event_log.SPRINT_REPORTED`, `sprints.py`): a manager's report of its sprint.
   It speaks only when the sprint fold accepted it and the sprint's shown state (`view.sprint_state`,
   the open inbox items counted as the page counts them, never quiet: no clock is read) differs
@@ -21,6 +25,10 @@ Event kinds read:
 - `question.answered` (`event_log.QUESTION_ANSWERED`, `sprints.py`): the owner answered a manager's
   question. It speaks only when its `differs` is `True`, so an answer that took the recommendation
   says nothing, and nothing else about a round (asking it, answering the others) speaks.
+- `sprint.closed` (`event_log.SPRINT_CLOSED`, `sprints.py`): a manager's closing report. It speaks
+  only when the sprint was open with no closing before the row and has one after it, the sprint has
+  no stop request, and the row's project is a string; a refused or repeated closing, and the closing
+  of a sprint the owner stopped, say nothing.
 
 Every other kind says nothing, `goal.stated` included, delivery runs (`delivery.seen`, `delivery.gone`)
 included: the console has no delivery moments yet, and #878 adds them from
@@ -60,13 +68,19 @@ repository makes no moment. No sentence names an issue, a session or a path.
     brief_approved   The brief for <project_id> was approved, version <n>: <goal>
     sprint_state     The sprint for <project_id> is now <the sprint's shown state>: <goal>
     answer_differs   An answer for <project_id> went against the recommendation, <recommended>: <question>
+    sprint_done      The sprint for <project_id> is done: <the closing report's first line>
+    manager_restarted The manager of <goal> was restarted
+    manager_takeover A new manager took over <goal>
 
 An inbox payload needs `project_id` (str), `issue` (int, not bool) and
 `question` (str). A withdrawal needs the event's project (str) and a payload `goal` (str); it
 reads no state, the row carries the goal. A brief event makes a moment only when its project is a
 `str`, its payload `version` an `int` (not a bool) and `goal` a `str`; it reads no state either.
 An answer event makes a moment only when its project is a `str`, its payload `question` and
-`recommended` are `str` and `differs` is `True`; it reads no state either. A sprint report is judged against the folded sprints before it
+`recommended` are `str` and `differs` is `True`; it reads no state either.
+A restart needs the event's project (str), a payload `goal` (str) and `ok` exactly true; a takeover
+needs the event's project (str), a payload `goal` (str) and `takeover` exactly true; neither reads state.
+A sprint report is judged against the folded sprints before it
 (`moments` folds its own copy of the optional `sprints` argument with
 `sprints.sprint_states`), and the sentence's goal is the sprint's.
 
@@ -90,7 +104,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from agent_tools.console.event_log import (
-    BRIEF_APPROVED, BRIEF_SENT, GOAL_WITHDRAWN, QUESTION_ANSWERED, SPRINT_REPORTED, Event)
+    BRIEF_APPROVED, BRIEF_SENT, GOAL_WITHDRAWN, MANAGER_STARTED, MANAGER_WOKEN, QUESTION_ANSWERED,
+    SPRINT_CLOSED, SPRINT_REPORTED, Event)
 from agent_tools.console.sessions import (
     ENDED, GONE, HOOK, LIMIT, SEEN, WORKING, SessionState, session_states)
 from agent_tools.console.sprints import MANAGER_SESSION_NAME, SprintState, sprint_states
@@ -113,6 +128,9 @@ BRIEF_SENT_MOMENT = "brief_sent"
 BRIEF_APPROVED_MOMENT = "brief_approved"
 SPRINT_STATE_MOMENT = "sprint_state"
 ANSWER_DIFFERS = "answer_differs"
+SPRINT_DONE_MOMENT = "sprint_done"
+MANAGER_RESTARTED = "manager_restarted"
+MANAGER_TAKEOVER = "manager_takeover"
 
 
 @dataclass(frozen=True)
@@ -213,6 +231,17 @@ def _answer_moment(event: Event) -> tuple[str, str] | None:
                             f"{recommended}: {question}")
 
 
+def _manager_moment(event: Event) -> tuple[str, str] | None:
+    goal = event.payload.get("goal")
+    if not isinstance(event.project, str) or not isinstance(goal, str):
+        return None
+    if event.kind == MANAGER_WOKEN and event.payload.get("ok") is True:
+        return MANAGER_RESTARTED, f"The manager of {goal} was restarted"
+    if event.kind == MANAGER_STARTED and event.payload.get("takeover") is True:
+        return MANAGER_TAKEOVER, f"A new manager took over {goal}"
+    return None
+
+
 def _report_moment(event: Event, before: Mapping[str, SprintState],
                    after: Mapping[str, SprintState],
                    records: Mapping[tuple[str, str], InboxRecord]) -> tuple[str, str] | None:
@@ -232,6 +261,19 @@ def _report_moment(event: Event, before: Mapping[str, SprintState],
         return None
     return (SPRINT_STATE_MOMENT,
             f"The sprint for {event.project} is now {now[1]}: {new.goal}")
+
+
+def _closing_moment(event: Event, before: Mapping[str, SprintState],
+                    after: Mapping[str, SprintState]) -> tuple[str, str] | None:
+    sprint_id = event.payload.get("sprint_id")
+    if not isinstance(event.project, str) or not isinstance(sprint_id, str):
+        return None
+    old, new = before.get(sprint_id), after.get(sprint_id)
+    if (old is None or new is None or old.closing is not None or new.closing is None
+            or new.stop_at is not None):
+        return None
+    return (SPRINT_DONE_MOMENT,
+            f"The sprint for {event.project} is done: {new.closing.first_line}")
 
 
 def moments(
@@ -260,6 +302,8 @@ def moments(
             said = _brief_moment(event)
         elif event.kind == QUESTION_ANSWERED:
             said = _answer_moment(event)
+        elif event.kind in (MANAGER_WOKEN, MANAGER_STARTED):
+            said = _manager_moment(event)
         elif event.kind == GOAL_WITHDRAWN:
             goal = payload.get("goal") if isinstance(payload, dict) else None
             if isinstance(event.project, str) and isinstance(goal, str):
@@ -268,6 +312,8 @@ def moments(
         previous, folded = folded, sprint_states([event], folded)
         if event.kind == SPRINT_REPORTED:
             said = _report_moment(event, previous, folded, held)
+        elif event.kind == SPRINT_CLOSED:
+            said = _closing_moment(event, previous, folded)
         if said is not None:
             found.append(Moment(event.seq, event.at, said[0], said[1]))
     return found

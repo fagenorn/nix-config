@@ -42,7 +42,7 @@ The manager's answer to a goal: what done looks like, what is excluded, the slic
 _Avoid_: plan, proposal
 
 **Manager**:
-The one agent a sprint has: it writes the brief and the reports and never writes code (#835). The console starts it as a background Claude Code session in the project's root, under the profile with the most weekly allowance left, drafts the brief under the contract `sprint contract` prints and shows it inside its sprint with its state (ADR-console-015). It reads the owner's messages with `sprint inbox` at the start of every turn, and after approval its contract tells it to end the turn before any tracker action once the sprint is no longer open (ADR-console-016).
+The one agent a sprint has: it writes the brief and the reports and never writes code (#835). The console starts it as a background Claude Code session in the project's root, under the profile with the most weekly allowance left, drafts the brief under the contract `sprint contract` prints and shows it inside its sprint with its state (ADR-console-015). It reads the owner's messages with `sprint inbox` at the start of every turn, and after approval its contract tells it to end the turn before any tracker action once the sprint is no longer open (ADR-console-016). A manager gone two minutes while its sprint has work is woken in place or replaced (ADR-console-017).
 _Avoid_: owner, worker, agent, bot
 
 **Message**:
@@ -50,19 +50,23 @@ What the owner says to one sprint: an approval, a change request, free text or t
 _Avoid_: chat, comment
 
 **Question round**:
-The questions a manager sends at once with `sprint ask`: each says what it blocks and offers two to four options, one recommended. Each question is an inbox item kept only in the console's log; the owner answers it on the page with an option or their own words, and the answer reaches the manager as a message. A sprint has one open round at a time unless a round is a blocker, and reads waiting on you (n) while any question is open (ADR-console-017).
+The questions a manager sends at once with `sprint ask`: each says what it blocks and offers two to four options, one recommended. Each question is an inbox item kept only in the console's log; the owner answers it on the page with an option or their own words, and the answer reaches the manager as a message. A sprint has one open round at a time unless a round is a blocker, and reads waiting on you (n) while any question is open (ADR-console-019).
 _Avoid_: poll, survey
 
 **Nudge**:
 The console's one fixed sentence telling a manager to read its inbox, by relay to a running manager or by waking a stopped one in place; it never carries the owner's words (ADR-console-016).
 _Avoid_: ping, notification
 
+**Bring-back**:
+The console waking a gone manager in place, or starting a successor, while its sprint has work; three within an hour stop the tries and raise one inbox item, managers keep failing (ADR-console-017).
+_Avoid_: restart loop, resurrection
+
 **Report**:
-The manager's fixed-shape account after each batch and on any change of state: a status line, each issue's stage or outcome, the inbox items it raised, the next step and the milestone (ADR-console-014).
+The manager's fixed-shape account after each batch and on any change of state: a status line, each issue's stage or outcome, the inbox items it raised, the next step and the milestone; the closing report ends the sprint (ADR-console-014, ADR-console-018).
 _Avoid_: update, log
 
 **Sprint**:
-One goal, later its issues and its outcome, in one project (#834), shown under its project as one line with its state (drafting the brief, starting, on track, waiting on you, quiet and may be stuck, closing or done), its progress and its manager's status until it is withdrawn; its manager session is listed inside it, and a manager that failed to start or is missing offers a retry (ADR-console-011, ADR-console-013, ADR-console-014, ADR-console-015).
+One goal, later its issues and its outcome, in one project (#834), shown under its project as one line with its state (drafting the brief, starting, on track, waiting on you, quiet and may be stuck, closing, done, stopping or stopped by you), its progress and its manager's status; its manager session is listed inside it, and a manager that failed to start or is missing offers a retry. An ended sprint folds into its project's Finished sprints a day after it ends (ADR-console-011, ADR-console-013, ADR-console-014, ADR-console-015, ADR-console-018).
 _Avoid_: job, run
 
 **Session**:
