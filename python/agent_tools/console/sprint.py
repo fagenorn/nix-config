@@ -44,6 +44,9 @@ On success it prints `sprint: round <id> sent, <n> questions` (`1 question` when
 answer: <error>` and exit 1. The command validates no member of the round: the console decides,
 in one place.
 
+`sprint report --help` and `sprint close --help` list the members of the report and of the closing
+report, each with one line and an example, the same lists `sprint contract` prints.
+
 `sprint close` reads the secret the same way and the closing report from `--closing-file` (`-` reads
 stdin), a JSON object, and sends `POST /api/close` with `{"sprint_id", "secret", "closing"}`, no
 `Origin`. On success it prints `sprint: closing report sent` and exit 0. The command validates no
@@ -101,6 +104,37 @@ from agent_tools.console import manager, service, sprints
 from agent_tools.console.console import port_number
 
 TIMEOUT_SECONDS = 10
+REPORT_HELP = """the report's members, all required:
+  status:      one line, at most 500 characters; it names no issue number (no # and a digit)
+  phase:       one of running, closing, done
+  milestone:   one line, the tracker milestone of the sprint's issues
+  tracker_url: the milestone's link, starting with https://
+  issues:      every issue of the sprint, [{"issue": 12, "stage": "building"}, ...], no issue
+               twice; a stage is one of queued, planning, plan review, building, final review,
+               verifying, landing, working, landed, held
+  inbox:       the numbers of the issues waiting on the owner, [12], empty when none
+  next:        one line, what the manager does next
+
+example:
+  {"status": "two slices are building and one has landed", "phase": "running",
+   "milestone": "Importer resumes after a crash",
+   "tracker_url": "https://github.com/example/importer/milestone/3",
+   "issues": [{"issue": 12, "stage": "building"}, {"issue": 13, "stage": "landed"}],
+   "inbox": [12], "next": "start the resume slice when 12 lands"}
+"""
+CLOSING_HELP = """the closing report's members, all required:
+  summary:     what the sprint did, at most 4000 characters; its first line is at most
+               500 characters and one plain sentence with no issue number (no # and a digit)
+  issues:      every issue of the sprint, [{"issue": 12, "stage": "landed"}, ...], no issue
+               twice; a stage is one of landed, held, dropped, and every issue of the last
+               report needs one
+  differently: what the manager would do differently next time, at most 4000 characters
+
+example:
+  {"summary": "The importer resumes after a crash.\\nSlice 12 landed and slice 13 was dropped.",
+   "issues": [{"issue": 12, "stage": "landed"}, {"issue": 13, "stage": "dropped"}],
+   "differently": "I would cut the checkpoint slice smaller."}
+"""
 CONTRACT = Path(__file__).with_name("manager-contract.md")
 
 
@@ -140,7 +174,11 @@ def build_parser() -> argparse.ArgumentParser:
                        ("recap", "print what a manager needs to pick the sprint up"),
                        ("reply", "answer one of the owner's messages"),
                        ("status", "print the owner's answer to the sprint's brief")):
-        each = commands.add_parser(name, help=text)
+        epilog = {"report": REPORT_HELP, "close": CLOSING_HELP}.get(name)
+        each = commands.add_parser(
+            name, help=text, epilog=epilog,
+            formatter_class=argparse.RawDescriptionHelpFormatter if epilog else
+            argparse.HelpFormatter)
         each.add_argument("--sprint", type=sprint_id, default=None,
                           help=f"the sprint id (default: ${manager.ID_ENV})")
         each.add_argument("--port", type=port_number, default=service.DEFAULT_PORT,

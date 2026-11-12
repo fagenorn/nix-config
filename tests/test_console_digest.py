@@ -355,10 +355,15 @@ class QuestionDigestTest(unittest.TestCase):
     def test_an_answer_that_differs_from_the_recommendation_is_a_moment(self):
         found = self.made()
         self.assertEqual(sentences(found), [
-            "An answer for owner/p01 went against the recommendation, files: "
+            "An answer for owner/p01: You chose 'sqlite' over the recommended 'files': "
             "Which store keeps the checkpoints?"])
         self.assertEqual(found[0]["kind"], "answer_differs")
         self.assertEqual(ANSWER_DIFFERS, "answer_differs")
+
+    def test_an_answer_in_the_owners_own_words_says_what_was_said(self):
+        self.assertEqual(sentences(self.made(answer="neither, ask me later", chosen=None)), [
+            "An answer for owner/p01: You chose 'neither, ask me later' over the recommended "
+            "'files': Which store keeps the checkpoints?"])
 
     def test_an_answer_that_does_not_differ_or_lacks_a_member_says_nothing(self):
         for name, found in (
@@ -367,6 +372,7 @@ class QuestionDigestTest(unittest.TestCase):
                 ("no project", self.made(project=None)),
                 ("question not a string", self.made(question=3)),
                 ("recommended not a string", self.made(recommended=None)),
+                ("answer not a string", self.made(answer=None)),
                 ("differs not a bool", self.made(differs=1))):
             with self.subTest(name):
                 self.assertEqual(found, [])
