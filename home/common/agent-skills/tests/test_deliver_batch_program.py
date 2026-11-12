@@ -4764,7 +4764,7 @@ class ResolveBeforeLockTest(unittest.TestCase):
 
     PROBE_CMD = "git -C /r/.wt/w-issue-1-x merge-tree --write-tree --name-only --no-messages HEAD origin/dev"
     # The probe found a conflict, so land-pr ran no lock command and waited for no check.
-    EARLY = {"land-pr-1": {"probe": {"conflicted": True, "files": ["x.py"]}, "lock": None, "checks": None}}
+    EARLY = {"land-pr-1": {"probe": {"conflicted": True, "tree": "e" * 40, "files": ["x.py"]}, "lock": None, "checks": None}}
     RESOLVED = ["land-pr-1", "land-sync-resolve-1-1", "land-sync-review-1-1", "land-record-1-1"]
     FIXED = "f" * 40
     FOUND = {"verdict": "findings", "findings": [{"severity": "important", "summary": "dropped a sentence dev added"}]}
@@ -4782,10 +4782,12 @@ class ResolveBeforeLockTest(unittest.TestCase):
         _, calls, _ = run()
         text = prompt(calls, "land-pr-1")
         self.assertIn(f"run git -C /r/.wt/w-issue-1-x fetch origin, then alone and exactly: {self.PROBE_CMD}\n", text)
-        for needle in ("0 is a clean merge and 1 is a conflict", "never run git merge in this step",
+        for needle in ("exit 1 is a conflict only when the first line of its output is a tree id (40 hexadecimal characters)",
+                       "(a missing ref prints nothing there)", "never run git merge in this step",
                        "When probe's conflicted is true, run no lock command and wait for no check: return lock null and checks null"):
             self.assertIn(needle, text)
         self.assertLess(text.index("push origin issue-1-x"), text.index(self.PROBE_CMD))
+        self.assertEqual(object_branch(schema_of(calls, "land-pr-1")["properties"]["probe"])["properties"]["tree"], {"type": "string"})
         self.assertLess(text.index(self.PROBE_CMD), text.index(f"--sha {SHA} --wait\n"))
         schema = schema_of(calls, "land-pr-1")
         self.assertIn({"type": "null"}, schema["properties"]["probe"]["anyOf"])
@@ -4804,9 +4806,29 @@ class ResolveBeforeLockTest(unittest.TestCase):
         # The clean path keeps its call count: the probe rides in land-pr.
         self.assertEqual([label for label in labels(run()[1]) if label != "setup"], HAPPY)
 
+    def test_exit_one_without_a_tree_id_is_no_conflict(self):
+        """git merge-tree also exits 1, with nothing on stdout, when a ref is missing: only a tree id proves a conflict."""
+        base = self.steps(run()[1])
+        for tree in (None, "", "merge-tree: origin/dev - not something we can merge", "e" * 39, "E" * 40):
+            probe = {"conflicted": True, "files": []} if tree is None else {"conflicted": True, "tree": tree, "files": []}
+            with self.subTest(tree=tree):
+                # The step took the lock as it always did: the landing is the old flow.
+                result, calls, _ = run(patch={"land-pr-1": {"probe": probe}})
+                self.assertEqual(self.steps(calls), base)
+                self.assertEqual(row(result, 1)["outcome"], "landed")
+                # A step that ran no lock command on such a reply resolves nothing: it stops at the lock and releases the ready head.
+                out = run_full(patch={"land-pr-1": {"probe": probe, "lock": None, "checks": None}})
+                got = row(out["result"], 1)
+                self.assertEqual((got["outcome"], got["stage"]), ("stopped", "land-lock"))
+                self.assertEqual(land_labels(out["calls"]), ["land-pr-1", "land-unlock-1"])
+                self.assertEqual(land_release_shas(out["calls"]), [SHA])
+        # A tree id with surrounding whitespace is still one.
+        out = run_full(patch={"land-pr-1": dict(self.EARLY["land-pr-1"], probe={"conflicted": True, "tree": "e" * 40 + "\n"})})
+        self.assertEqual(land_labels(out["calls"]), self.RESOLVED + ["land-merge-1", "close-out-1"])
+
     def test_a_conflicted_probe_that_still_names_a_lock_verdict_is_the_old_flow(self):
         # The step took the lock against its prompt: the landing holds it, and a conflict is found by the sync under it (#913).
-        result, calls, _ = run(patch={"land-pr-1": {"probe": {"conflicted": True}, "checks": {"state": "behind", "head": SHA}}},
+        result, calls, _ = run(patch={"land-pr-1": {"probe": {"conflicted": True, "tree": "e" * 40}, "checks": {"state": "behind", "head": SHA}}},
                                replies={"land-sync-1-1": ABORTED})
         self.assertEqual(land_labels(calls), ["land-pr-1", "land-sync-1-1", "land-unlock-1", "land-sync-resolve-1-1", "land-sync-review-1-1",
                                               "land-record-1-1", "land-merge-1", "close-out-1"])
@@ -4856,19 +4878,20 @@ class ResolveBeforeLockTest(unittest.TestCase):
         self.assertIn(f"--match-head-commit {self.FIXED}", prompt(calls, "land-merge-1"))
         self.assertEqual(land_release_shas(calls), [self.FIXED])
 
-    def test_a_finding_that_survives_the_fix_round_ends_conflict_without_ever_holding_the_lock(self):
+    def test_a_finding_that_survives_the_fix_round_ends_conflict_without_ever_taking_the_lock(self):
         out = self.land(**{"land-sync-review-1-1": self.FOUND, "land-sync-rereview-1-1": self.LEFT})
         result, calls = out["result"], out["calls"]
         got = row(result, 1)
         self.assertEqual((got["outcome"], got["reason"]), ("conflict", "review finding: the sentence is still missing"))
         self.assertEqual(got["fix"], {"commit": self.FIXED, "notes": "ok"})
         self.assertEqual(land_labels(calls), ["land-pr-1", "land-sync-resolve-1-1", "land-sync-review-1-1", "land-sync-fix-1-1",
-                                              "land-sync-rereview-1-1"])
-        # No lock command ran after the probe: nothing was taken, so nothing is released.
-        self.assertEqual(land_release_shas(calls), [])
+                                              "land-sync-rereview-1-1", "land-unlock-1"])
+        # No step was told to take the lock. The one release, at the ready head, covers a land-pr that took it against its prompt.
+        self.assertNotIn("land acquire", "".join(c["prompt"] for c in calls if c["label"].startswith("land-sync-")))
+        self.assertEqual(land_release_shas(calls), [SHA])
         self.assertEqual(result["relaunch"]["conts"], PRE_MERGE_CONTS)
 
-    def test_every_stop_before_the_lock_holds_nothing_and_accepts_nothing(self):
+    def test_every_stop_before_the_lock_releases_the_ready_head_once_and_accepts_nothing(self):
         stops = {
             "the resolution is lost": ({"land-sync-resolve-1-1": None}, "stopped"),
             "the resolution is blocked": ({"land-sync-resolve-1-1": {"status": "blocked", "conflicted": True, "notes": "too tangled"}}, "conflict"),
@@ -4883,9 +4906,11 @@ class ResolveBeforeLockTest(unittest.TestCase):
                 result, calls = out["result"], out["calls"]
                 self.assertEqual(row(result, 1)["outcome"], outcome)
                 ls = labels(calls)
-                for gone in ("land-sync-1-1", "land-unlock-1", "land-record-1-1", "land-merge-1", "close-out-1", "land-ask-1"):
+                for gone in ("land-sync-1-1", "land-record-1-1", "land-merge-1", "close-out-1", "land-ask-1"):
                     self.assertNotIn(gone, ls)
-                self.assertEqual(land_release_shas(calls), [])
+                # A land-pr that answered conflicted may have taken the lock all the same: the wrapper releases the ready head, once, last.
+                self.assertEqual((ls.count("land-unlock-1"), ls[-1]), (1, "land-unlock-1"))
+                self.assertEqual(land_release_shas(calls), [SHA])
                 # The accepted head of the pull request is still the ready head: only land-pr wrote it.
                 heads = {sha for c in calls if c["kind"] == "agent" for sha in re.findall(r"Accepted head: ([0-9a-f]+)", c["prompt"])}
                 self.assertEqual(heads, {SHA})

@@ -3815,7 +3815,7 @@ class ResolveBeforeLockTest(unittest.TestCase):
     PROBE_CMD = "git -C /r/.wt/w-issue-9-x merge-tree --write-tree --name-only --no-messages HEAD origin/dev"
     RELEASE = "forge-claim land release --repo owner/repo --branch dev --sha "
     # The probe found a conflict, so the pr call ran no lock command and waited for no check.
-    EARLY = {"probe": {"conflicted": True, "files": ["a.py"]}, "lock": None, "checks": None}
+    EARLY = {"probe": {"conflicted": True, "tree": "e" * 40, "files": ["a.py"]}, "lock": None, "checks": None}
     RESOLVED = ["pr", "sync-resolve-1", "sync-review-1", "land-push-1", "checks-1"]
     M2 = "e" * 40
     M3 = "9" * 40
@@ -3837,9 +3837,11 @@ class ResolveBeforeLockTest(unittest.TestCase):
         _, calls = run()
         text = prompt(calls, "pr")
         self.assertIn(f"run git -C /r/.wt/w-issue-9-x fetch origin, then alone and exactly: {self.PROBE_CMD}\n", text)
-        for needle in ("0 is a clean merge and 1 is a conflict", "never run git merge in this step",
+        for needle in ("exit 1 is a conflict only when the first line of its output is a tree id (40 hexadecimal characters)",
+                       "(a missing ref prints nothing there)", "never run git merge in this step",
                        "When probe's conflicted is true, run no lock command and wait for no check: return lock null and checks null"):
             self.assertIn(needle, text)
+        self.assertEqual(member(schema_of(calls, "pr"), "probe")["properties"]["tree"], {"type": "string"})
         self.assertLess(text.index("push origin issue-9-x"), text.index(self.PROBE_CMD))
         self.assertLess(text.index(self.PROBE_CMD), text.index(f"--sha {SHA} --wait\n"))
         schema = schema_of(calls, "pr")
@@ -3858,9 +3860,24 @@ class ResolveBeforeLockTest(unittest.TestCase):
         names = labels(run()[1])
         self.assertEqual(names[names.index("pr"):], ["pr", "merge", "hold", "close-out"])
 
+    def test_exit_one_without_a_tree_id_is_no_conflict(self):
+        """git merge-tree also exits 1, with nothing on stdout, when a ref is missing: only a tree id proves a conflict."""
+        base = self.steps(run()[1])
+        for tree in (None, "", "merge-tree: origin/dev - not something we can merge", "e" * 39, "E" * 40):
+            probe = {"conflicted": True, "files": []} if tree is None else {"conflicted": True, "tree": tree, "files": []}
+            with self.subTest(tree=tree):
+                result, calls = run(patch={"pr": {"probe": probe}})
+                self.assertEqual(self.steps(calls), base)
+                self.assertEqual(result["stage"], "done")
+                # A call that ran no lock command on such a reply resolves nothing: it stops at the lock and releases the verified head.
+                out = run_out(patch={"pr": {"probe": probe, "lock": None, "checks": None}})
+                self.assertEqual(out["result"]["stage"], "land-lock")
+                self.assertEqual(self.shipped(out), ["pr", "land-unlock"])
+                self.assertIn(f"{self.RELEASE}{SHA}\n", prompt(out["calls"], "land-unlock"))
+
     def test_a_conflicted_probe_that_still_names_a_lock_verdict_is_the_old_flow(self):
         out = run_out(replies={"checks-2": {"state": "passed", "head": MERGE}},
-                      patch={"pr": {"probe": {"conflicted": True}, "checks": {"state": "behind", "head": SHA}},
+                      patch={"pr": {"probe": {"conflicted": True, "tree": "e" * 40}, "checks": {"state": "behind", "head": SHA}},
                              "sync-1": ABORTED, "sync-resolve-1": {"merge_commit": MERGE}})
         self.assertEqual(out["result"]["stage"], "done")
         self.assertEqual(self.shipped(out), ["pr", "sync-1", "land-unlock", "sync-resolve-1", "sync-review-1", "land-push-2", "checks-2",
@@ -3903,7 +3920,7 @@ class ResolveBeforeLockTest(unittest.TestCase):
         self.assertIn(f"--sha {FIX} --wait\n", prompt(out["calls"], "checks-1"))
         self.assertIn(f"--match-head-commit {FIX}", prompt(out["calls"], "merge"))
 
-    def test_every_stop_before_the_lock_holds_nothing_and_accepts_nothing(self):
+    def test_every_stop_before_the_lock_releases_the_verified_head_once_and_accepts_nothing(self):
         stops = {
             "the resolution is lost": ({"sync-resolve-1": None}, {}, "sync"),
             "the resolution is blocked": ({}, {"sync-resolve-1": {"status": "blocked", "notes": "too tangled"}}, "sync"),
@@ -3918,9 +3935,12 @@ class ResolveBeforeLockTest(unittest.TestCase):
                 out = self.ship(replies=replies, **patch)
                 result, names = out["result"], labels(out["calls"])
                 self.assertEqual(result["stage"], stage)
-                # No lock command ran after the probe: nothing was taken, so nothing is released.
-                for gone in ("sync-1", "land-unlock", "checks-1", "merge", "hold"):
+                for gone in ("sync-1", "checks-1", "merge", "hold"):
                     self.assertNotIn(gone, names)
+                # A pr call that answered conflicted may have taken the lock all the same: the stop releases the verified head, once, last.
+                self.assertEqual((names.count("land-unlock"), names[-1]), (1, "land-unlock"))
+                self.assertIn(f"{self.RELEASE}{SHA}\n", prompt(out["calls"], "land-unlock"))
+                self.assertNotIn(f"lock_sha {MERGE}", prompt(out["calls"], "land-unlock"))
                 self.assertNotIn("lock_unreleased", result)
                 if stage != "push":
                     self.assertNotIn("final_reviewed", result["cont"])

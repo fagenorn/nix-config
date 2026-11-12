@@ -545,12 +545,16 @@ const logWait = (label, lock) => {
 }
 // #941: the probe a landing runs before it asks for the land lock, the same text in deliver-standard.js. git merge-tree --write-tree (git 2.38
 // or later) merges in memory: it writes no commit and touches neither the worktree nor the index, and its exit status alone says whether
-// the merge is clean (0, a head that is already current included) or conflicts (1). Any other exit proves nothing, so it reads as not
-// conflicted and the landing goes on as it did before the probe existed: the sync under the lock then finds the conflict (#913).
+// the merge is clean (0, a head that is already current included) or conflicts (1). It also exits 1, with nothing on stdout, when a ref
+// is missing, so a conflict is exit 1 with the merged tree's id as the first line of output; the program checks that id itself. Anything
+// else proves nothing, so it reads as not conflicted and the landing goes on as it did before the probe existed: the sync under the lock
+// then finds the conflict (#913).
 const PROBE = (wt, int) => `before any lock command, probe whether ${int} merges cleanly into the pushed head, changing nothing: run git -C ${wt} fetch origin, then alone and exactly: git -C ${wt} merge-tree --write-tree --name-only --no-messages HEAD origin/${int}
-Only its exit status counts: 0 is a clean merge and 1 is a conflict, whose output names the conflicting files after its first line. It commits nothing and touches neither the worktree nor the index; never run git merge in this step. Return it as probe: conflicted (true only on exit 1), files (the conflicting files) and, on any other exit, conflicted false with the error in detail.
+Only its exit status and the first line of its output count: exit 0 is a clean merge; exit 1 is a conflict only when the first line of its output is a tree id (40 hexadecimal characters), and the conflicting files follow that line. Exit 1 with any other output (a missing ref prints nothing there) and every other exit are errors, not conflicts. It commits nothing and touches neither the worktree nor the index; never run git merge in this step. Return it as probe: conflicted (true only for that conflict), tree (the first line of the output, exactly as printed, when exit is 1), files (the conflicting files) and, on an error, conflicted false with the error in detail.
 When probe's conflicted is true, run no lock command and wait for no check: return lock null and checks null, because a later step resolves the conflict before the lock is asked for.`
-const PROBE_SCHEMA = { type: 'object', properties: { conflicted: { type: 'boolean' }, files: STRS, detail: { type: 'string' } }, required: ['conflicted'] }
+const PROBE_SCHEMA = { type: 'object', properties: { conflicted: { type: 'boolean' }, tree: { type: 'string' }, files: STRS, detail: { type: 'string' } }, required: ['conflicted'] }
+// A probe reply that proves a conflict: exit 1 alone does not, the tree id does.
+const probeConflict = p => !!p && typeof p === 'object' && p.conflicted === true && typeof p.tree === 'string' && /^[0-9a-f]{40}$/.test(p.tree.trim())
 // A folded reply carries its nested steps; a nested object may be absent, so its schema is nullable (#716).
 const NULLABLE = s => ({ anyOf: [s, { type: 'null' }] })
 const withRenew = (s, extra = {}) => ({ ...s, properties: { ...s.properties, renew: RENEW_SCHEMA, ...extra }, required: ['renew'] })
@@ -893,8 +897,8 @@ Return those fields as checks; otherwise return checks null.
 ${RULES}`, `land-pr-${n}`, { agentType: 'clerk', model: DEFAULT_CLERK_MODEL, effort: 'high', schema: withRenew(LAND_PR_SCHEMA, { probe: NULLABLE(PROBE_SCHEMA), lock: NULLABLE(LOCK_SCHEMA), checks: NULLABLE(LAND_CHECKS_SCHEMA) }) }), r => r.renew)
     if (!prR) return out('stopped', { stage: 'pr', detail: `land-pr-${n} returned nothing` })
     // #941: the probe found a conflict, so the step ran no lock command: nothing is held and nothing was waited for. A reply that names a
-    // lock verdict all the same is read as before the probe existed (the sync under the lock finds the conflict, #913).
-    const early = isObj(prR.probe) && prR.probe.conflicted === true && !prR.lock ? prR.probe : null
+    // lock verdict all the same, or no tree id, is read as before the probe existed (the sync under the lock finds the conflict, #913).
+    const early = probeConflict(prR.probe) && !prR.lock ? prR.probe : null
     if (early) lockHeld = false
     // A renew that ended ran nothing after it; a refused lock holds nothing (P5). Otherwise the lock stays marked held at expected (O2).
     if (prR.renew && prR.renew.verdict !== 'renewed') lockHeld = false
@@ -914,6 +918,13 @@ ${RULES}`, `land-pr-${n}`, { agentType: 'clerk', model: DEFAULT_CLERK_MODEL, eff
       // The resolution, its review and its fix round, then the record step that takes the lock at the reviewed head and carries its first poll.
       log(`#${n}: ${INT} conflicts with the head; resolving before the land lock is asked for`)
       const r = await resync(early)
+      // A row that ends the landing before the record step took the lock: a step that answered conflicted may have taken the lock at the
+      // ready head all the same, against its prompt, so that head is marked possibly held and the wrapper releases it once (not_held normally).
+      if (r && c.record === 0) {
+        lockHeld = true
+        lockSha = ready.head
+        lockMaybe = null
+      }
       if (r) return r
     }
     for (let k = 1; !early && v1 === 'land-contended' && k <= LAND_WAIT_RETRIES; k++) {
@@ -940,7 +951,8 @@ ${RULES}`, label, { ...lifecycleClerk, schema: withRenew({ type: 'object', prope
     // A retried wait polled no checks: the loop polls them itself.
     if (!early) carried = lockStep === `land-pr-${n}` ? { label: lockStep, reply: prR.checks || null } : null
 
-    // #822: the first issue of a train hands over here, holding the lock at its ready head, once its own first poll answers behind (a head that is
+    // #822: the first issue of a train hands over here, holding the lock at its ready head (the reviewed head, when it resolved a conflict
+    // before it asked for the lock, #941: the record step's poll is then the first), once its own first poll answers behind (a head that is
     // current lands alone, as ever). The train answers merged (its car, which contains this head, is merged: only the close-out is left), a row
     // that ends this landing, or nothing, and then the landing goes on below as if no train had run. The lock never moves meanwhile.
     // #936: a landing that began alone asks via.join at this same point, in the same turn its lock wait ended: it answers a train when other
@@ -1405,7 +1417,8 @@ const drain = async () => {
     for (const e of take) {
       if (trains && cands.includes(e)) continue
       // #936: this issue lands alone. Its landing asks join once, when its lock wait ended with a behind first poll: the issues waiting
-      // then (they became ready during that wait) leave WAITING and ride a train behind it, under the lock it already holds at its ready head.
+      // then (they became ready during that wait) leave WAITING and ride a train behind it, under the lock it already holds at its ready head
+      // (at its reviewed head, when it resolved a conflict before it asked for the lock, #941).
       let T = null
       const join = () => {
         const more = WAITING.filter(kindsOk).slice(0, TRAIN_MAX - 1)

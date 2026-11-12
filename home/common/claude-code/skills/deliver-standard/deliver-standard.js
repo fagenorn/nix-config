@@ -1511,12 +1511,16 @@ const logWait = (label, lock) => {
 }
 // #941: the probe a landing runs before it asks for the land lock, the same text in deliver-batch.js. git merge-tree --write-tree (git 2.38
 // or later) merges in memory: it writes no commit and touches neither the worktree nor the index, and its exit status alone says whether
-// the merge is clean (0, a head that is already current included) or conflicts (1). Any other exit proves nothing, so it reads as not
-// conflicted and the landing goes on as it did before the probe existed: the sync under the lock then finds the conflict (#913).
+// the merge is clean (0, a head that is already current included) or conflicts (1). It also exits 1, with nothing on stdout, when a ref
+// is missing, so a conflict is exit 1 with the merged tree's id as the first line of output; the program checks that id itself. Anything
+// else proves nothing, so it reads as not conflicted and the landing goes on as it did before the probe existed: the sync under the lock
+// then finds the conflict (#913).
 const PROBE = (wt, int) => `before any lock command, probe whether ${int} merges cleanly into the pushed head, changing nothing: run git -C ${wt} fetch origin, then alone and exactly: git -C ${wt} merge-tree --write-tree --name-only --no-messages HEAD origin/${int}
-Only its exit status counts: 0 is a clean merge and 1 is a conflict, whose output names the conflicting files after its first line. It commits nothing and touches neither the worktree nor the index; never run git merge in this step. Return it as probe: conflicted (true only on exit 1), files (the conflicting files) and, on any other exit, conflicted false with the error in detail.
+Only its exit status and the first line of its output count: exit 0 is a clean merge; exit 1 is a conflict only when the first line of its output is a tree id (40 hexadecimal characters), and the conflicting files follow that line. Exit 1 with any other output (a missing ref prints nothing there) and every other exit are errors, not conflicts. It commits nothing and touches neither the worktree nor the index; never run git merge in this step. Return it as probe: conflicted (true only for that conflict), tree (the first line of the output, exactly as printed, when exit is 1), files (the conflicting files) and, on an error, conflicted false with the error in detail.
 When probe's conflicted is true, run no lock command and wait for no check: return lock null and checks null, because a later step resolves the conflict before the lock is asked for.`
-const PROBE_SCHEMA = { type: 'object', properties: { conflicted: { type: 'boolean' }, files: STRS, detail: { type: 'string' } }, required: ['conflicted'] }
+const PROBE_SCHEMA = { type: 'object', properties: { conflicted: { type: 'boolean' }, tree: { type: 'string' }, files: STRS, detail: { type: 'string' } }, required: ['conflicted'] }
+// A probe reply that proves a conflict: exit 1 alone does not, the tree id does.
+const probeConflict = p => !!p && typeof p === 'object' && p.conflicted === true && typeof p.tree === 'string' && /^[0-9a-f]{40}$/.test(p.tree.trim())
 let PR = null
 let expected = verify.head
 let head = expected
@@ -1594,8 +1598,8 @@ ${LOCK_RETURN} Return it as lock; when no PR was opened or reused, run neither t
 ${RULES}`, { label: 'pr', phase: 'Ship', agentType: 'clerk', model: DEFAULT_CLERK_MODEL, effort: 'high', schema: withRenew(PR_SCHEMA, { probe: NULLABLE(PROBE_SCHEMA), lock: NULLABLE(LOCK_SCHEMA), checks: NULLABLE(CHECKS) }) }), r => r.renew)
   if (!prR) return stop('pr', { result: null })
   // #941: the probe found a conflict, so the call ran no lock command: nothing is held and nothing was waited for. A reply that names a
-  // lock verdict all the same is read as before the probe existed (the sync under the lock finds the conflict, #913).
-  const early = isEntry(prR.probe) && prR.probe.conflicted === true && !prR.lock ? prR.probe : null
+  // lock verdict all the same, or no tree id, is read as before the probe existed (the sync under the lock finds the conflict, #913).
+  const early = probeConflict(prR.probe) && !prR.lock ? prR.probe : null
   if (early) lockHeld = false
   // A renew that ended, or a refused lock, means the prompt ran no lock command that holds anything.
   if (prR.renew && prR.renew.verdict !== 'renewed') lockHeld = false
@@ -1686,10 +1690,21 @@ Review the conflict resolution in merge commit ${merge.merge_commit}: git -C ${W
     }
     return null
   }
+  // A stop before the first take (#941): a pr call that answered conflicted may have taken the lock at the verified head all the same,
+  // against its prompt, so that head is marked possibly held and the stop's release names it once (not_held normally).
+  const readyHead = expected
+  const unheld = row => {
+    if (early && lockFirst) {
+      lockHeld = true
+      lockSha = readyHead
+      lockMaybe = null
+    }
+    return row
+  }
   if (early) {
     log(`${INT} conflicts with the head; resolving before the land lock is asked for`)
     const stopped = await syncRound(early)
-    if (stopped) return stopped
+    if (stopped) return unheld(stopped)
   } else if (!HOLDING.includes(v)) return stop(refusal(v) ? 'land-contended' : 'land-lock', { pr: PR, lock: v })
   for (;;) {
     round++
@@ -1702,10 +1717,10 @@ Review the conflict resolution in merge commit ${merge.merge_commit}: git -C ${W
 ${RENEW_FIRST}
 Then push the branch ${setup.branch} of PR #${PR} at the head ${expected}: run alone git -C ${W} push origin ${setup.branch}, then return head (git -C ${W} rev-parse HEAD, the full sha).
 ${RULES}`, { label: `land-push-${round}`, phase: 'Ship', agentType: 'clerk', model: DEFAULT_CLERK_MODEL, effort: 'low', schema: withRenew(PUSH_SCHEMA) }), r => r.renew)
-      if (!pu) return stop('push', { pr: PR })
+      if (!pu) return unheld(stop('push', { pr: PR }))
       const lost = renewed(pu.renew, `checks-${round}`)
-      if (lost) return lost
-      if (!sameSha(pu.head, expected)) return stop('head-moved', { pr: PR, expected, head: pu.head })
+      if (lost) return unheld(lost)
+      if (!sameSha(pu.head, expected)) return unheld(stop('head-moved', { pr: PR, expected, head: pu.head }))
       expected = fuller(expected, pu.head)
       lockMaybe = expected
       // As for the pr call: the waiting acquire may take the lock before its reply is lost.
