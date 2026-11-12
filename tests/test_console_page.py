@@ -12,6 +12,9 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from agent_tools.console import digest as console_digest
+from agent_tools.console.event_log import Event
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PAGE = REPO_ROOT / "python/agent_tools/console/page.html"
 PYPROJECT = REPO_ROOT / "python/pyproject.toml"
@@ -139,6 +142,22 @@ class PageTest(unittest.TestCase):
 
     def test_the_page_is_under_60_kb_compressed(self) -> None:
         self.assertLess(len(gzip.compress(self.data, 9)), 61440)
+
+    def test_the_page_has_a_narrow_rule_for_480_wide(self) -> None:
+        style = self.text[self.text.index("<style>"):self.text.index("</style>")]
+        blocks = []
+        for found in re.finditer(r"@media \(max-width: (\d+)px\) \{", style):
+            depth, at = 1, found.end()
+            while depth:
+                depth += {"{": 1, "}": -1}.get(style[at], 0)
+                at += 1
+            blocks.append((int(found.group(1)), style[found.end():at - 1]))
+        (narrow,) = [body for width, body in blocks if 480 <= width < 900]
+        (top,) = re.findall(r"\.top-in \{([^}]*)\}", narrow)
+        self.assertIn("flex-wrap: wrap", top)
+        (statement,) = re.findall(r"\.statement h1 \{([^}]*)\}", narrow)
+        (size,) = re.findall(r"font-size: ([\d.]+)rem", statement)
+        self.assertLess(float(size), 2.375)
 
     def test_the_page_formats_no_time_with_the_locale(self) -> None:
         self.assertNotIn("toLocale", self.text)
@@ -487,6 +506,7 @@ RUN = {
     "run_id": "wf_a",
     "quiet": False,
     "moved_text": "moved 3 min ago",
+    "summary": "2 issues in delivery: 1 building, 1 plan review, moved 3 min ago",
     "issues": [
         {"issue": 856, "stage": "building", "stage_text": "building task 3 of 5"},
         {"issue": 857, "stage": "plan review", "stage_text": "plan review"},
@@ -500,7 +520,8 @@ class PageRenderTest(unittest.TestCase):
                             session("s1", "working", "working")])
         entry["outside_sprints"]["summary"] = "1 working, 1 waiting"
         frame = view([entry], [unmanaged_entry([session("i1", "idle", "idle")])])
-        (snap,) = render([{"frame": frame}, {"snapshot": True}])
+        (snap,) = render([{"frame": frame}, {"open": "line:owner/p00"},
+                          {"open": "line:/srv/elsewhere"}, {"snapshot": True}])
         shown = text(snap["projects"])
         for wanted in ("Outside sprints", "1 working, 1 waiting", "n2", WAITING, "working"):
             self.assertIn(wanted, shown)
@@ -512,7 +533,8 @@ class PageRenderTest(unittest.TestCase):
 
     def test_a_sessions_deliveries_render_their_stage_in_plain_words(self) -> None:
         entry = project(0, [session("s1", "working", "working", deliveries=[RUN])])
-        (snap,) = render([{"frame": view([entry])}, {"snapshot": True}])
+        (snap,) = render([{"frame": view([entry])}, {"open": "line:owner/p00"},
+                          {"snapshot": True}])
         (runs,) = [n for n in nodes(snap["projects"]) if "runs" in n["cls"].split()]
         (run,) = [n for n in nodes(snap["projects"]) if "run" in n["cls"].split()]
         self.assertEqual(
@@ -527,7 +549,8 @@ class PageRenderTest(unittest.TestCase):
     def test_a_quiet_run_says_quiet_and_never_stalled(self) -> None:
         quiet = dict(RUN, quiet=True, moved_text="quiet for 22 min")
         entry = project(0, [session("s1", "working", "working", deliveries=[quiet])])
-        (snap,) = render([{"frame": view([entry])}, {"snapshot": True}])
+        (snap,) = render([{"frame": view([entry])}, {"open": "line:owner/p00"},
+                          {"snapshot": True}])
         (moved,) = [
             n
             for n in nodes(snap["projects"])
@@ -539,7 +562,8 @@ class PageRenderTest(unittest.TestCase):
     def test_a_session_without_deliveries_renders_no_runs(self) -> None:
         entry = project(0, [session("e1", "idle", "idle", deliveries=[]),
                             session("m1", "working", "working")])
-        (snap,) = render([{"frame": view([entry])}, {"snapshot": True}])
+        (snap,) = render([{"frame": view([entry])}, {"open": "line:owner/p00"},
+                          {"snapshot": True}])
         self.assertEqual(
             [n for n in nodes(snap["projects"]) if "runs" in n["cls"].split()], []
         )
@@ -547,14 +571,19 @@ class PageRenderTest(unittest.TestCase):
         for wanted in ("e1", "idle", "m1", "working"):
             self.assertIn(wanted, shown)
 
-    def test_a_project_without_sessions_has_no_fold(self) -> None:
-        (snap,) = render([{"frame": view([project(0, [])])}, {"snapshot": True}])
-        self.assertNotIn("outside:owner/p00", [n["key"] for n in nodes(snap["projects"])])
-        self.assertEqual(snap["unmanaged"]["children"], [])
+    def test_a_project_without_sessions_still_opens_to_its_root(self) -> None:
+        closed, opened = render([{"frame": view([project(0, [])])}, {"snapshot": True},
+                                 {"open": "line:owner/p00"}, {"snapshot": True}])
+        (fold,) = [n for n in nodes(closed["projects"]) if n["key"] == "line:owner/p00"]
+        (summary,) = [c for c in fold["children"] if c["tag"] == "summary"]
+        self.assertEqual([n["text"] for n in visible(summary) if n["text"]], ["owner/p00"])
+        self.assertNotIn("/srv/p00", visible_text(closed["projects"]))
+        self.assertIn("/srv/p00", visible_text(opened["projects"]))
+        self.assertEqual(closed["unmanaged"]["children"], [])
 
     def test_an_empty_fleet_still_shows_unmanaged_repositories(self) -> None:
         frame = view([], [unmanaged_entry([session("i1", "idle", "idle")])], count=0)
-        (snap,) = render([{"frame": frame}, {"snapshot": True}])
+        (snap,) = render([{"frame": frame}, {"open": "line:/srv/elsewhere"}, {"snapshot": True}])
         self.assertIn("No project is registered yet.", text(snap["projects"]))
         shown = text(snap["unmanaged"])
         self.assertIn("/srv/elsewhere", shown)
@@ -576,16 +605,16 @@ class PageRenderTest(unittest.TestCase):
 
         (snap,) = render([
             {"frame": frame("working")},
-            {"open": "outside:owner/p00"},
+            {"open": "line:owner/p00"},
             {"open": "quiet"},
             {"frame": frame("idle")},
             {"snapshot": True},
         ])
         by_key = {n["key"]: n for n in nodes(snap["projects"]) if n["key"]}
-        self.assertTrue(by_key["outside:owner/p00"]["open"])
+        self.assertTrue(by_key["line:owner/p00"]["open"])
         self.assertTrue(by_key["quiet"]["open"])
-        self.assertFalse(by_key["outside:owner/p01"]["open"])
-        self.assertIn("idle", text(by_key["outside:owner/p00"]))
+        self.assertFalse(by_key["line:owner/p01"]["open"])
+        self.assertIn("idle", text(by_key["line:owner/p00"]))
 
     def test_a_quiet_line_says_how_long_it_is_untouched(self) -> None:
         ages = [timedelta(days=3, hours=1), timedelta(days=1, hours=1), timedelta(hours=2)]
@@ -626,15 +655,26 @@ class CapacityPageTest(unittest.TestCase):
             profile("b", "unknown"),
             profile("c", "reset"),
         ]
+        fields = {"no_reading": "1 with no reading yet", **fields}
         return {**view([]), "capacity": capacity(profiles, **fields)}
 
     def test_the_strip_shows_each_profile(self) -> None:
         result = render_page(self.strip_view())
         text = result["capacity"]["text"]
-        for expected in ("a", "62% of the week left", "40% of 5 hours", "resets ", "b",
-                         "no reading yet", "c", "reset, not yet used"):
+        for expected in ("a", "62% of the week left", "40% of 5 hours", "resets ",
+                         "1 with no reading yet", "c", "reset, not yet used"):
             self.assertIn(expected, text)
         self.assertNotIn("tight", text)
+
+    def test_profiles_without_a_reading_show_as_one_note(self) -> None:
+        frame = {**view([]), "capacity": capacity(
+            [profile("a", "ok", week_left=62), profile("b", "unknown"), profile("c", "unknown")],
+            no_reading="2 with no reading yet")}
+        (snap,) = render([START, {"frame": frame}, {"snapshot": True}])
+        strip = snap["capacity"]
+        self.assertEqual(full(strip).count("no reading yet"), 1)
+        self.assertIn("2 with no reading yet", full(strip))
+        self.assertEqual([n["text"] for n in nodes(strip) if n["tag"] == "b"], ["a"])
 
     def test_tight_is_shown_only_when_the_view_says_so(self) -> None:
         result = render_page(self.strip_view(tight=True))
@@ -1756,3 +1796,115 @@ class PageInFlightTest(unittest.TestCase):
             [full(n) for n in nodes(line) if has_class(n, "fail")],
             ["Could not withdraw: this sprint is not open"],
         )
+
+
+NOW = datetime(2026, 11, 11, 12, 0, tzinfo=timezone.utc)
+
+
+def digest_of(events: list) -> dict:
+    return console_digest.digest(console_digest.moments(events, {}, {}), None, NOW)
+
+
+def glance_events() -> list:
+    def at(minute: int) -> str:
+        return f"2026-11-11T10:{minute:02d}:00.000000+00:00"
+
+    def asked(text: str) -> dict:
+        return {"question": text, "options": ["a", "b"], "chosen": None, "recommended": None}
+
+    def inbox(issue: int, text: str, answered: bool) -> dict:
+        return {"key": f"k{issue}", "project_id": "owner/p00", "issue": issue,
+                "reason": "decision", "question": BOILER, "questions": [asked(text)],
+                "answered": answered}
+
+    def seen(seq: int, project, sid: str, repo: str, name: str) -> Event:
+        return Event(seq, at(seq), "session.seen", project,
+                     {"session_id": sid, "cwd": repo, "repo": repo, "state": "working",
+                      "name": name})
+
+    def stopped(seq: int, project, sid: str, repo: str) -> Event:
+        return Event(seq, at(seq), "session.hook", project,
+                     {"event": "StopFailure", "session_id": sid, "cwd": repo, "repo": repo,
+                      "error": "rate_limit"})
+
+    return [
+        Event(1, at(1), "inbox.seen", "owner/p00", inbox(7, "Which database?", False)),
+        Event(2, at(2), "inbox.seen", "owner/p00", inbox(8, "Merge it?", False)),
+        Event(3, at(3), "inbox.changed", "owner/p00", inbox(8, "Merge it?", True)),
+        seen(4, "owner/p00", "aaaaaaaa-1111", "/srv/p00", "fixer-session"),
+        stopped(5, "owner/p00", "aaaaaaaa-1111", "/srv/p00"),
+        seen(6, None, "cccccccc-3333", "/srv/elsewhere", "stray-session"),
+        stopped(7, None, "cccccccc-3333", "/srv/elsewhere"),
+        Event(8, at(8), "session.gone", None, {"session_id": "cccccccc-3333"}),
+    ]
+
+
+def glance_sample() -> dict:
+    ran = {**RUN, "summary": "2 issues in delivery: 1 building, 1 plan review, moved 3 min ago"}
+    worker = {**session("fixer-session", "working", "working", deliveries=[ran]),
+              "cwd": "/srv/p00/.worktrees/fix"}
+    entry = project(0, [worker])
+    entry["outside_sprints"]["summary"] = "1 working"
+    quiet = {"type": "quiet_group", "label": "4 quiet projects", "count": 4,
+             "projects": [project(n, [], quiet=True) for n in range(2, 6)]}
+    stray = {**unmanaged_entry([session("stray-session", "idle", "idle")]), "name": "elsewhere"}
+    asking = item("A", issue=7, headline="Which database?",
+                  questions=[q("Which database?", ["sqlite", "postgres"])])
+    approval = check_item("P", "approval", issue=12, headline="Approve the live check?",
+                          detail="nix-build /srv/p00/checks/live.nix")
+    conflict = item("C", issue=9, reason="conflict", headline="Landing stopped on a merge conflict.",
+                    items=["the branch conflicts with main"])
+    answered = item("Z", issue=8, answered=True, headline="Merge it?",
+                    answered_at="2026-11-11T11:00:00+00:00")
+    profiles = [profile("a", "ok", week_left=62, next_reset="2026-11-12T09:00:00+00:00"),
+                profile("b", "unknown")]
+    return {
+        **view([entry, quiet], [stray], count=6),
+        "inbox": {"open": [asking, approval, conflict], "answered": [answered]},
+        "digest": digest_of(glance_events()),
+        "capacity": capacity(profiles, no_reading="1 with no reading yet"),
+    }
+
+
+class PageGlanceTest(unittest.TestCase):
+    def test_with_every_line_closed_no_path_session_name_or_issue_number_shows(self) -> None:
+        sample = glance_sample()
+        self.assertEqual(len(sample["digest"]["recent"]) + len(sample["digest"]["earlier"]), 6)
+        closed, opened = render([
+            START, {"frame": sample}, {"snapshot": True},
+            {"open": "line:owner/p00"}, {"snapshot": True},
+        ])
+        sections = ("statement", "inbox", "projects", "unmanaged", "digest", "capacity",
+                    "promoted", "goal")
+        for name in sections:
+            shown = visible_text(closed[name])
+            with self.subTest(section=name):
+                self.assertNotIn("/srv", shown)
+                self.assertIsNone(re.search(r"(^|\s)/[\w.-]+/", shown))
+                for leaked in ("fixer-session", "stray-session", "aaaaaaaa", "cccccccc", BOILER,
+                               "Delivery waits for the owner"):
+                    self.assertNotIn(leaked, shown)
+                self.assertIsNone(re.search(r"#\d", shown))
+                self.assertIsNone(re.search(r"\d{4}-\d{2}-\d{2}", shown))
+        self.assertIn("elsewhere", visible_text(closed["unmanaged"]))
+        self.assertIn("Not yet managed", visible_text(closed["unmanaged"]))
+        self.assertIn("A session in elsewhere ended.", visible_text(closed["digest"]))
+        self.assertIn("Review and approve", visible_text(closed["inbox"]))
+        shown = visible_text(opened["projects"])
+        for wanted in ("/srv/p00", "fixer-session", "#856"):
+            self.assertIn(wanted, shown)
+
+    def test_a_project_line_is_its_name_and_its_run_sentences(self) -> None:
+        ran = {**RUN, "summary": "2 issues in delivery: 1 building, 1 plan review, moved 3 min ago"}
+        entry = project(0, [session("s1", "working", "working", deliveries=[ran])])
+        entry["outside_sprints"]["summary"] = "1 working"
+        (snap,) = render([{"frame": view([entry])}, {"snapshot": True}])
+        (fold,) = [n for n in nodes(snap["projects"]) if n["key"] == "line:owner/p00"]
+        self.assertFalse(fold["open"])
+        (summary,) = [c for c in fold["children"] if c["tag"] == "summary"]
+        self.assertEqual(
+            [n["text"] for n in visible(summary) if n["text"]],
+            ["owner/p00", "1 working",
+             "2 issues in delivery: 1 building, 1 plan review, moved 3 min ago"],
+        )
+        self.assertEqual(len([n for n in nodes(summary) if has_class(n, "run-sum")]), 1)

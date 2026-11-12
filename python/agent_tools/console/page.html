@@ -110,9 +110,13 @@ ul { list-style: none; }
 .side h2 span { font-weight: 400; font-size: .8125rem; color: var(--ov2); }
 .empty { margin-top: 12px; color: var(--sub0); font-size: .84375rem; }
 #list { margin-top: 12px; }
-.line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; padding: 5px 0; font-size: .875rem; color: var(--ov2); }
+.line { padding: 5px 0; font-size: .875rem; color: var(--ov2); }
 .line b { font-weight: 600; color: var(--sub0); }
-.line .root { overflow-wrap: anywhere; }
+.line summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; cursor: pointer; list-style: none; padding: 4px 12px; margin: 0 -12px; border-radius: 10px; transition: background-color .16s; }
+.line summary::-webkit-details-marker { display: none; }
+.line summary:hover { background: rgba(202, 211, 245, .05); }
+.run-sum { font-size: .8125rem; color: var(--sub0); }
+.line .root { display: block; margin-top: 4px; font-size: .8125rem; color: var(--ov2); overflow-wrap: anywhere; }
 .line .qw { display: inline-flex; align-items: baseline; gap: 6px; }
 .quietfold { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--hair); }
 .quietfold summary { display: flex; align-items: baseline; gap: 8px; cursor: pointer; list-style: none; padding: 4px 12px; margin: 0 -12px; border-radius: 10px; font-size: .875rem; color: var(--ov2); transition: background-color .16s; }
@@ -121,15 +125,15 @@ ul { list-style: none; }
 .quietfold summary b { font-weight: 600; color: var(--sub0); }
 .quietfold ul { margin-top: 4px; padding: 0 0 0 22px; }
 .line .untouched { font-size: .8125rem; }
-.outside { flex: 1 0 100%; font-size: .8125rem; }
-.outside summary { cursor: pointer; color: var(--ov2); }
-.outside summary b { font-weight: 600; color: var(--sub0); }
+.outside { font-size: .8125rem; margin-top: 4px; }
+.outside h3 { font-size: .8125rem; font-weight: 600; color: var(--sub0); }
 .outside ul { margin-top: 2px; padding: 0 0 0 16px; }
 .outside li { display: flex; flex-wrap: wrap; gap: 0 10px; color: var(--sub0); }
 .outside .runs { flex: 1 0 100%; margin-top: 0; padding: 0 0 0 16px; }
 .run { display: flex; flex-wrap: wrap; gap: 0 10px; }
 .run .stage { color: var(--sub0); }
 .run .moved { color: var(--ov2); }
+.cap-none { color: var(--ov2); }
 .s-working { color: var(--green); }
 .s-waiting_answer, .s-waiting_permission { color: var(--yellow); }
 .s-limit { color: var(--red); }
@@ -145,6 +149,12 @@ ul { list-style: none; }
   .side { margin-top: 48px; }
   .statement h1 { font-size: 2.375rem; letter-spacing: -.022em; }
   .statement .sub { font-size: 1rem; }
+}
+@media (max-width: 480px) {
+  .desk-grid { padding: 24px 16px 48px; }
+  .statement h1 { font-size: 2rem; }
+  .top-in { flex-wrap: wrap; }
+  .cap { margin-left: 0; }
 }
 </style>
 </head>
@@ -175,13 +185,21 @@ function el(tag, cls, text) {
 function quietIcon() {
   return document.getElementById("quiet-icon").content.firstElementChild.cloneNode(true);
 }
-function outsideFold(outside, key) {
-  const fold = el("details", "outside");
+function lineFold(key, nameNode, words, outside, root) {
+  const fold = el("details");
   fold.dataset.key = key;
   const summary = el("summary");
-  summary.appendChild(el("b", "", outside.label));
-  summary.appendChild(el("span", "", " " + outside.summary));
+  summary.appendChild(nameNode);
+  for (const word of words) summary.appendChild(word);
+  if (outside.sessions.length > 0) summary.appendChild(el("span", "", outside.summary));
+  for (const session of outside.sessions) {
+    for (const run of session.deliveries || []) summary.appendChild(el("span", "run-sum", run.summary));
+  }
   fold.appendChild(summary);
+  fold.appendChild(el("span", "root", root));
+  if (outside.sessions.length === 0) return fold;
+  const outsideBox = el("div", "outside");
+  outsideBox.appendChild(el("h3", "", outside.label));
   const list = el("ul");
   for (const session of outside.sessions) {
     const row = el("li");
@@ -203,7 +221,8 @@ function outsideFold(outside, key) {
     }
     list.appendChild(row);
   }
-  fold.appendChild(list);
+  outsideBox.appendChild(list);
+  fold.appendChild(outsideBox);
   return fold;
 }
 function untouchedDays(lastActivity) {
@@ -276,25 +295,21 @@ function sprintList(entry) {
 }
 function projectLine(entry) {
   const line = el("li", "line");
-  line.appendChild(el("b", "", entry.project_id));
+  const words = [];
   if (entry.quiet) {
     const quiet = el("span", "qw");
     quiet.appendChild(quietIcon());
     quiet.appendChild(el("span", "", "quiet"));
-    line.appendChild(quiet);
-  }
-  line.appendChild(el("span", "root", entry.root));
-  if (entry.quiet) {
+    words.push(quiet);
     if (untouchedDays(entry.last_activity) > 0) {
       const untouched = el("span", "untouched");
       untouched.appendChild(el("span", "", "untouched for "));
       untouched.appendChild(timeEl("since", entry.last_activity, ""));
-      line.appendChild(untouched);
+      words.push(untouched);
     }
   }
-  if (entry.outside_sprints.sessions.length > 0) {
-    line.appendChild(outsideFold(entry.outside_sprints, "outside:" + entry.project_id));
-  }
+  line.appendChild(lineFold("line:" + entry.project_id, el("b", "", entry.project_id), words,
+                            entry.outside_sprints, entry.root));
   if (entry.sprints && entry.sprints.length > 0) line.appendChild(sprintList(entry));
   return line;
 }
@@ -373,11 +388,13 @@ function renderCapacity(view) {
   const cap = view.capacity || {profiles: []};
   const nodes = [];
   for (const p of cap.profiles) {
+    if (p.state === "unknown") continue;
     const span = el("span", "cap-p");
     span.appendChild(el("b", "", p.profile));
     span.appendChild(capacityWords(p, p.state === "out" ? "cap-out" : ""));
     nodes.push(span);
   }
+  if (cap.no_reading) nodes.push(el("span", "cap-none", cap.no_reading));
   if (cap.tight) nodes.push(el("span", "cap-tight", "tight"));
   box.replaceChildren(...nodes);
 }
@@ -895,11 +912,8 @@ function renderUnmanaged(view) {
   const list = el("ul");
   for (const entry of view.unmanaged) {
     const line = el("li", "line");
-    line.appendChild(el("b", "root", entry.root));
-    line.appendChild(el("span", "", entry.label));
-    if (entry.outside_sprints.sessions.length > 0) {
-      line.appendChild(outsideFold(entry.outside_sprints, "outside:" + entry.root));
-    }
+    line.appendChild(lineFold("line:" + entry.root, el("b", "", entry.name),
+                              [el("span", "", entry.label)], entry.outside_sprints, entry.root));
     list.appendChild(line);
   }
   section.appendChild(list);
