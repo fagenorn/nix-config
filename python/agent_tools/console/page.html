@@ -78,8 +78,8 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .keys span { display: inline-flex; align-items: center; gap: 6px; }
 .done-item summary, .check-more summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; cursor: pointer; list-style: none; padding: 4px 12px; margin: 0 -12px; border-radius: 10px; font-size: .875rem; color: var(--ov2); transition: background-color .16s; }
 .done-item summary { flex-wrap: nowrap; }
-.done-item summary > b { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.done-item summary > span { flex: 0 1000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.done-item summary > b { flex: 0 1000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.done-item summary > span { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .done-item summary::-webkit-details-marker, .check-more summary::-webkit-details-marker { display: none; }
 .done-item summary:hover, .check-more summary:hover { background: rgba(202, 211, 245, .05); }
 .done-item > :not(summary) { margin-top: 4px; }
@@ -1264,12 +1264,12 @@ function keyStrip(current, open) {
     entries.push(span);
   };
   if (current !== null && isBrief(current.item)) {
-    entry([el("kbd", "", "Enter")], " approve");
+    if (current.state.reply.phase !== "sending") entry([el("kbd", "", "Enter")], " approve");
   } else if (current !== null) {
     const questions = current.item.questions;
     const n = Math.min(9, questions[Math.min(current.state.q, questions.length - 1)].options.length);
     entry(n > 1 ? [el("kbd", "", "1"), el("span", "", "\u2013"), el("kbd", "", String(n))] : [el("kbd", "", "1")], " choose");
-    entry([el("kbd", "", "Enter")], " send answer");
+    if (picksComplete(current.item, current.state)) entry([el("kbd", "", "Enter")], " send answer");
   }
   if (open.some((item) => { const s = answers.get(stateId(item)); return s !== undefined && s.phase === "waiting"; })) {
     entry([el("kbd", "", "Esc")], " undo");

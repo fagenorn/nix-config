@@ -2826,9 +2826,11 @@ class PageAnsweredRowTest(unittest.TestCase):
             if selector == ".done-item summary":
                 summary.update(decls)
         self.assertEqual(summary.get("flex-wrap"), "nowrap")
-        # The tail (the "more" words and the "when" phrase) must itself shrink and clip, and
-        # sooner than the question, so a narrow screen never squeezes the question to nothing
-        # nor pushes the row (and the page) wider than its column.
+        # The tail (the "more" words and the "when" phrase) must itself shrink and clip, so a
+        # narrow screen never pushes the row (and the page) wider than its column, but only
+        # after the question has given up its width: the question's shrink factor outweighs
+        # the tail's, so "answered ..., waiting for the agent" keeps its words (state is never
+        # colour alone) until the question is gone.
         tail, row_rule = {}, {}
         for selector, decls in rules:
             if selector == ".done-item summary > span":
@@ -2840,8 +2842,11 @@ class PageAnsweredRowTest(unittest.TestCase):
             {"white-space": "nowrap", "overflow": "hidden", "text-overflow": "ellipsis",
              "min-width": "0"})
         tail_flex = tail.get("flex", "").split()
+        clip_flex = clip.get("flex", "").split()
         self.assertEqual(tail_flex[:1], ["0"])
-        self.assertGreater(float(tail_flex[1]), 1)
+        self.assertEqual(clip_flex[:1], ["0"])
+        self.assertGreater(float(clip_flex[1]), float(tail_flex[1]))
+        self.assertGreater(float(tail_flex[1]), 0)
         self.assertEqual(row_rule.get("min-width"), "0")
         done = item("Z", answered=True, headline="Which database?",
                     answered_at="2026-11-11T10:00:00+00:00",
@@ -2872,7 +2877,15 @@ class PageKeyStripTest(unittest.TestCase):
             ("ten options", [START, {"frame": frame([item("T", questions=[
                 {"question": "Which?", "options": [str(i) for i in range(10)],
                  "chosen": None, "recommended": None}])])}, {"snapshot": True}],
-             ["1", "9", "Enter"], ("choose",)),
+             ["1", "9"], ("choose",)),
+            ("ten options, one picked", [START, {"frame": frame([item("T", questions=[
+                {"question": "Which?", "options": [str(i) for i in range(10)],
+                 "chosen": None, "recommended": None}])])}, {"key": "1"}, {"snapshot": True}],
+             ["1", "9", "Enter"], ("choose", "send answer")),
+            ("two questions, one picked", [START, {"frame": frame([item("U", questions=[
+                {"question": "Which?", "options": ["a", "b"], "chosen": None, "recommended": None},
+                {"question": "And?", "options": ["c", "d"], "chosen": None, "recommended": None},
+            ])])}, {"key": "1"}, {"snapshot": True}], ["1", "2"], ("choose",)),
             ("check", [START, {"frame": frame([check_item("M", "manual-check")])},
                        {"snapshot": True}], None, ()),
             ("empty", [START, {"frame": frame([])}, {"snapshot": True}], None, ()),
@@ -2887,6 +2900,10 @@ class PageKeyStripTest(unittest.TestCase):
                                     {"snapshot": True}], None, ()),
             ("brief", [START, {"frame": frame([BRIEF])}, {"snapshot": True}],
              ["Enter"], ("approve",)),
+            ("brief, reply sending", [
+                START, {"frame": frame([BRIEF])},
+                {"input": {"cls": "reply-text", "value": "redo"}}, {"hold": True},
+                {"click": "reply-send"}, {"snapshot": True}], None, ()),
         ]
         for name, steps, expected, words in rows:
             with self.subTest(row=name):
