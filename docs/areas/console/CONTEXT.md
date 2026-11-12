@@ -18,7 +18,7 @@ Anything waiting on the owner that the console asks them to act on, whatever its
 _Avoid_: ask, notification
 
 **Answered item**:
-An inbox item whose owner-action marker has every box ticked, on the tracker or from the page (ADR-console-010); for a verification prompt, the box it was answered with (ADR-console-012). A prompt with both boxes ticked is not answered. It reads answered, waiting for the agent to pick it up, is not counted, and leaves the list once its marker is no longer live.
+An inbox item whose owner-action marker has every box ticked, on the tracker or from the page (ADR-console-010); for a verification prompt, the box it was answered with (ADR-console-012). A prompt with both boxes ticked is not answered. It reads as one line, answered <age>, waiting for the agent, opening to its choices and the link; it is not counted, and leaves the list once its marker is no longer live.
 _Avoid_: resolved item
 
 **Held work**:
@@ -74,7 +74,7 @@ _Avoid_: last seen, last visit
 _Avoid_: activity feed, changelog
 
 **Delivery run**:
-One Workflow run of a delivery program started by a session, shown under that session in its project's Outside sprints line while it has no final record: each issue it carries with its stage in plain words (queued, planning, plan review, building task n of m, final review, verifying, landing, done; working for a step the console does not know), and how long since it last moved, quiet for N min after fifteen minutes (ADR-console-005).
+One Workflow run of a delivery program started by a session, shown under that session in its project's Outside sprints line while it has no final record: each issue it carries with its stage in plain words (queued, planning, plan review, building task n of m, final review, verifying, landing, done; working for a step the console does not know), and how long since it last moved, quiet for N min after fifteen minutes (ADR-console-005). The run reads as one sentence of counts by stage, its issues and stages shown when its line is opened.
 _Avoid_: sprint, job
 
 **Limit reading**:
@@ -86,7 +86,7 @@ A refusal because a window is used up, recorded with its window and reset (ADR-c
 _Avoid_: rate limit error
 
 **Capacity strip**:
-The top-bar line of each profile's share left and next reset. It reads "tight" when one profile has room among two or more, and is promoted into the statement when every profile is out (ADR-console-006).
+The top-bar line of each profile's share left and next reset. It reads "tight" when one profile has room among two or more while every other reads out, folds profiles with no reading into one note, and is promoted into the statement when every profile is out (ADR-console-006).
 _Avoid_: quota bar
 
 **Console service**:

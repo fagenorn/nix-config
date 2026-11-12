@@ -49,9 +49,9 @@ ul { list-style: none; }
 
 #inbox { margin-top: 40px; max-width: 44rem; }
 .card { padding: 0 0 18px; }
-.card h2 { font: 600 .9375rem/1.4 var(--ui); display: flex; align-items: baseline; gap: 10px; }
-.card h2 span { font-weight: 400; font-size: .8125rem; color: var(--ov2); }
-.card .ask { margin-top: 6px; font-size: 1.0625rem; color: var(--text); }
+.card .q { font: 600 1.5rem/1.3 var(--display); letter-spacing: -.012em; text-wrap: balance; }
+.more { font-size: .8125rem; color: var(--ov2); }
+.card .more { display: block; margin-top: 4px; }
 .card .opts { margin-top: 6px; padding-left: 18px; list-style: disc; color: var(--sub0); font-size: .84375rem; }
 .rest .opts, .done .opts { flex-basis: 100%; margin: 0; padding-left: 18px; list-style: disc; color: var(--sub0); font-size: .84375rem; }
 .rest .meta, .done .meta { flex-basis: 100%; margin: 0; font-size: .8125rem; color: var(--ov2); }
@@ -60,6 +60,12 @@ ul { list-style: none; }
 .rest, .done { margin-top: 10px; }
 .rest li, .done li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; padding: 5px 0; font-size: .875rem; color: var(--ov2); }
 .rest b, .done b { font-weight: 600; color: var(--sub0); }
+.done-item { flex: 1 0 100%; }
+.done-item summary, .check-more summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; cursor: pointer; list-style: none; padding: 4px 12px; margin: 0 -12px; border-radius: 10px; font-size: .875rem; color: var(--ov2); transition: background-color .16s; }
+.done-item summary::-webkit-details-marker, .check-more summary::-webkit-details-marker { display: none; }
+.done-item summary:hover, .check-more summary:hover { background: rgba(202, 211, 245, .05); }
+.done-item > :not(summary) { margin-top: 4px; }
+.check-more { margin-top: 6px; }
 .abox { flex-basis: 100%; margin-top: 6px; }
 .abox .meta { margin-top: 6px; }
 .abox .meta.now { color: var(--text); }
@@ -100,7 +106,6 @@ ul { list-style: none; }
 .sprint-session { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; }
 .act { flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin-top: 8px; font-size: .8125rem; color: var(--ov2); }
 .fail { color: var(--red); }
-.done-head { margin-top: 24px; font: 600 .875rem/1.4 var(--ui); color: var(--ov2); }
 #digest { margin-top: 40px; max-width: 44rem; }
 #digest:empty { margin-top: 0; }
 .digest-head { font: 600 .875rem/1.4 var(--ui); color: var(--ov2); }
@@ -118,9 +123,13 @@ ul { list-style: none; }
 .side h2 span { font-weight: 400; font-size: .8125rem; color: var(--ov2); }
 .empty { margin-top: 12px; color: var(--sub0); font-size: .84375rem; }
 #list { margin-top: 12px; }
-.line { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; padding: 5px 0; font-size: .875rem; color: var(--ov2); }
+.line { padding: 5px 0; font-size: .875rem; color: var(--ov2); }
 .line b { font-weight: 600; color: var(--sub0); }
-.line .root { overflow-wrap: anywhere; }
+.line summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; cursor: pointer; list-style: none; padding: 4px 12px; margin: 0 -12px; border-radius: 10px; transition: background-color .16s; }
+.line summary::-webkit-details-marker { display: none; }
+.line summary:hover { background: rgba(202, 211, 245, .05); }
+.run-sum { font-size: .8125rem; color: var(--sub0); }
+.line .root { display: block; margin-top: 4px; font-size: .8125rem; color: var(--ov2); overflow-wrap: anywhere; }
 .line .qw { display: inline-flex; align-items: baseline; gap: 6px; }
 .quietfold { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--hair); }
 .quietfold summary { display: flex; align-items: baseline; gap: 8px; cursor: pointer; list-style: none; padding: 4px 12px; margin: 0 -12px; border-radius: 10px; font-size: .875rem; color: var(--ov2); transition: background-color .16s; }
@@ -129,15 +138,15 @@ ul { list-style: none; }
 .quietfold summary b { font-weight: 600; color: var(--sub0); }
 .quietfold ul { margin-top: 4px; padding: 0 0 0 22px; }
 .line .untouched { font-size: .8125rem; }
-.outside { flex: 1 0 100%; font-size: .8125rem; }
-.outside summary { cursor: pointer; color: var(--ov2); }
-.outside summary b { font-weight: 600; color: var(--sub0); }
+.outside { font-size: .8125rem; margin-top: 4px; }
+.outside h3 { font-size: .8125rem; font-weight: 600; color: var(--sub0); }
 .outside ul { margin-top: 2px; padding: 0 0 0 16px; }
 .outside li { display: flex; flex-wrap: wrap; gap: 0 10px; color: var(--sub0); }
 .outside .runs { flex: 1 0 100%; margin-top: 0; padding: 0 0 0 16px; }
 .run { display: flex; flex-wrap: wrap; gap: 0 10px; }
 .run .stage { color: var(--sub0); }
 .run .moved { color: var(--ov2); }
+.cap-none { color: var(--ov2); }
 .s-working { color: var(--green); }
 .s-waiting_answer, .s-waiting_permission { color: var(--yellow); }
 .s-limit { color: var(--red); }
@@ -153,6 +162,12 @@ ul { list-style: none; }
   .side { margin-top: 48px; }
   .statement h1 { font-size: 2.375rem; letter-spacing: -.022em; }
   .statement .sub { font-size: 1rem; }
+}
+@media (max-width: 480px) {
+  .desk-grid { padding: 24px 16px 48px; }
+  .statement h1 { font-size: 2rem; }
+  .top-in { flex-wrap: wrap; }
+  .cap { margin-left: 0; }
 }
 </style>
 </head>
@@ -183,13 +198,31 @@ function el(tag, cls, text) {
 function quietIcon() {
   return document.getElementById("quiet-icon").content.firstElementChild.cloneNode(true);
 }
-function outsideFold(outside, key) {
-  const fold = el("details", "outside");
+function movedWords(run, cls) {
+  if (!Number.isFinite(Date.parse(run.moved_at))) return el("span", cls, run.moved_text);
+  return run.quiet ? phrase("span", cls, "quiet for ", timeEl("since", run.moved_at, ""))
+                   : phrase("span", cls, "moved ", timeEl("ago", run.moved_at, ""));
+}
+function runSummary(run) {
+  // The view's sentence ends with its moved text; the page swaps that end for a time it keeps current.
+  const tail = run.summary.endsWith(run.moved_text) ? run.moved_text.length : 0;
+  return phrase("span", "run-sum", run.summary.slice(0, run.summary.length - tail), movedWords(run, ""));
+}
+function lineFold(key, nameNode, words, outside, root) {
+  const fold = el("details");
   fold.dataset.key = key;
   const summary = el("summary");
-  summary.appendChild(el("b", "", outside.label));
-  summary.appendChild(el("span", "", " " + outside.summary));
+  summary.appendChild(nameNode);
+  for (const word of words) summary.appendChild(word);
+  if (outside.sessions.length > 0) summary.appendChild(el("span", "", outside.summary));
+  for (const session of outside.sessions) {
+    for (const run of session.deliveries || []) summary.appendChild(runSummary(run));
+  }
   fold.appendChild(summary);
+  fold.appendChild(el("span", "root", root));
+  if (outside.sessions.length === 0) return fold;
+  const outsideBox = el("div", "outside");
+  outsideBox.appendChild(el("h3", "", outside.label));
   const list = el("ul");
   for (const session of outside.sessions) {
     const row = el("li");
@@ -204,14 +237,15 @@ function outsideFold(outside, key) {
           item.appendChild(el("span", "issue", "#" + issue.issue));
           item.appendChild(el("span", "stage", issue.stage_text));
         }
-        item.appendChild(el("span", run.quiet ? "moved quiet" : "moved", run.moved_text));
+        item.appendChild(movedWords(run, run.quiet ? "moved quiet" : "moved"));
         runList.appendChild(item);
       }
       row.appendChild(runList);
     }
     list.appendChild(row);
   }
-  fold.appendChild(list);
+  outsideBox.appendChild(list);
+  fold.appendChild(outsideBox);
   return fold;
 }
 function untouchedDays(lastActivity) {
@@ -259,16 +293,19 @@ function fillSprint(item, entry, sprint) {
   }
   if (typeof sprint.status === "string") {
     item.appendChild(el("span", "status", sprint.status));
-    if (typeof sprint.status_age_text === "string") {
-      item.appendChild(el("span", "status-age", sprint.status_age_text));
+    if (typeof sprint.status_at === "string") {
+      item.appendChild(timeEl("ago", sprint.status_at, "status-age"));
     }
   }
-  item.appendChild(el("span", "age", sprint.age_text));
+  const age = el("span", "age");
+  age.appendChild(el("span", "", "stated "));
+  age.appendChild(timeEl("ago", sprint.stated_at, ""));
+  item.appendChild(age);
   if (sprint.manager_text !== null && sprint.manager_text !== undefined) {
     item.appendChild(el("span", "manager", sprint.manager_text));
   }
   if (typeof sprint.manager_until === "string") {
-    item.appendChild(el("span", "until", when(sprint.manager_until)));
+    item.appendChild(timeEl("weekday", sprint.manager_until, "until"));
   }
   const retrying = retries.get(sprint.sprint_id);
   if (sprint.retry === true) {
@@ -377,21 +414,21 @@ function sprintList(entry) {
 }
 function projectLine(entry) {
   const line = el("li", "line");
-  line.appendChild(el("b", "", entry.project_id));
+  const words = [];
   if (entry.quiet) {
     const quiet = el("span", "qw");
     quiet.appendChild(quietIcon());
     quiet.appendChild(el("span", "", "quiet"));
-    line.appendChild(quiet);
+    words.push(quiet);
+    if (untouchedDays(entry.last_activity) > 0) {
+      const untouched = el("span", "untouched");
+      untouched.appendChild(el("span", "", "untouched for "));
+      untouched.appendChild(timeEl("since", entry.last_activity, ""));
+      words.push(untouched);
+    }
   }
-  line.appendChild(el("span", "root", entry.root));
-  if (entry.quiet) {
-    const days = untouchedDays(entry.last_activity);
-    if (days > 0) line.appendChild(el("span", "untouched", "untouched for " + days + (days === 1 ? " day" : " days")));
-  }
-  if (entry.outside_sprints.sessions.length > 0) {
-    line.appendChild(outsideFold(entry.outside_sprints, "outside:" + entry.project_id));
-  }
+  line.appendChild(lineFold("line:" + entry.project_id, el("b", "", entry.project_id), words,
+                            entry.outside_sprints, entry.root));
   if (entry.sprints && entry.sprints.length > 0) line.appendChild(sprintList(entry));
   return line;
 }
@@ -400,35 +437,83 @@ function renderStatement(view) {
   const h1 = el("h1", view.statement.inbox_items > 0 ? "needs" : "", view.statement.headline);
   const nodes = [h1, el("p", "sub", view.statement.sentence)];
   const cap = view.capacity;
-  if (cap && cap.all_out && cap.resumes_at) nodes.push(el("p", "sub", "Resumes at " + when(cap.resumes_at)));
+  if (cap && cap.all_out && cap.resumes_at) nodes.push(phrase("p", "sub", "Resumes ", timeEl("weekday", cap.resumes_at, "")));
   box.replaceChildren(...nodes);
 }
-function when(stamp) {
-  return new Date(stamp).toLocaleString();
+const TICK_MS = 30000;
+const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+function pad(n) {
+  return n < 10 ? "0" + n : String(n);
 }
-function outWords(p) {
-  return p.out_until === null || p.out_until === undefined ? "out, reset unknown" : "out until " + when(p.out_until);
+function ago(stamp) {
+  const ms = Date.now() - Date.parse(stamp);
+  if (ms < 60000) return "just now";
+  if (ms < 3600000) return Math.floor(ms / 60000) + " min ago";
+  if (ms < 86400000) return Math.floor(ms / 3600000) + " h ago";
+  if (ms < 172800000) return "yesterday";
+  return Math.floor(ms / 86400000) + " days ago";
 }
-function capacityWords(p) {
-  if (p.state === "unknown") return "no reading yet";
-  if (p.state === "out") return outWords(p);
-  if (p.state === "reset") return "reset, not yet used";
+function since(stamp) {
+  const ms = Date.now() - Date.parse(stamp);
+  if (ms < 60000) return "under a minute";
+  if (ms < 3600000) return Math.floor(ms / 60000) + " min";
+  if (ms < 86400000) return Math.floor(ms / 3600000) + " h";
+  const days = Math.floor(ms / 86400000);
+  return days === 1 ? "1 day" : days + " days";
+}
+function weekdayTime(stamp) {
+  const at = new Date(stamp);
+  return DAYS[at.getDay()] + " " + pad(at.getHours()) + ":" + pad(at.getMinutes());
+}
+function exact(stamp) {
+  const at = new Date(stamp);
+  return at.getFullYear() + "-" + pad(at.getMonth() + 1) + "-" + pad(at.getDate()) + " " + pad(at.getHours()) + ":" + pad(at.getMinutes());
+}
+function timeWords(form, stamp) {
+  if (!Number.isFinite(Date.parse(stamp))) return "unknown";
+  return form === "ago" ? ago(stamp) : form === "since" ? since(stamp) : weekdayTime(stamp);
+}
+function timeEl(form, stamp, cls) {
+  const node = el("time", cls, timeWords(form, stamp));
+  node.dataset.form = form;
+  node.dataset.stamp = stamp;
+  if (Number.isFinite(Date.parse(stamp))) {
+    node.setAttribute("title", exact(stamp));
+    node.setAttribute("datetime", stamp);
+  }
+  return node;
+}
+function phrase(tag, cls, ...parts) {
+  const node = el(tag, cls);
+  for (const part of parts) node.appendChild(typeof part === "string" ? el("span", "", part) : part);
+  return node;
+}
+function outWords(p, cls) {
+  if (p.out_until === null || p.out_until === undefined) return phrase("span", cls, "out, reset unknown");
+  return phrase("span", cls, "out until ", timeEl("weekday", p.out_until, ""));
+}
+function capacityWords(p, cls) {
+  if (p.state === "unknown") return phrase("span", cls, "no reading yet");
+  if (p.state === "out") return outWords(p, cls);
+  if (p.state === "reset") return phrase("span", cls, "reset, not yet used");
   const has = (v) => v !== null && v !== undefined;
-  let words = has(p.week_left) ? p.week_left + "% of the week left" : "week unknown";
-  if (has(p.five_hour_left)) words += " \u00b7 " + p.five_hour_left + "% of 5 hours";
-  if (has(p.next_reset)) words += " \u00b7 resets " + when(p.next_reset);
-  return words;
+  const parts = [has(p.week_left) ? p.week_left + "% of the week left" : "week unknown"];
+  if (has(p.five_hour_left)) parts.push(" \u00b7 " + p.five_hour_left + "% of 5 hours");
+  if (has(p.next_reset)) parts.push(" \u00b7 resets ", timeEl("weekday", p.next_reset, ""));
+  return phrase("span", cls, ...parts);
 }
 function renderCapacity(view) {
   const box = document.getElementById("capacity");
   const cap = view.capacity || {profiles: []};
   const nodes = [];
   for (const p of cap.profiles) {
+    if (p.state === "unknown") continue;
     const span = el("span", "cap-p");
     span.appendChild(el("b", "", p.profile));
-    span.appendChild(el("span", p.state === "out" ? "cap-out" : "", capacityWords(p)));
+    span.appendChild(capacityWords(p, p.state === "out" ? "cap-out" : ""));
     nodes.push(span);
   }
+  if (cap.no_reading) nodes.push(el("span", "cap-none", cap.no_reading));
   if (cap.tight) nodes.push(el("span", "cap-tight", "tight"));
   box.replaceChildren(...nodes);
 }
@@ -438,7 +523,7 @@ function renderPromoted(view) {
   box.replaceChildren();
   if (!cap.all_out) return;
   const list = el("ul");
-  for (const p of cap.profiles) list.appendChild(el("li", "cap-out", p.profile + " " + outWords(p)));
+  for (const p of cap.profiles) list.appendChild(phrase("li", "cap-out", p.profile + " ", outWords(p, "")));
   box.appendChild(el("h2", "", "Capacity"));
   box.appendChild(list);
 }
@@ -451,17 +536,37 @@ function answerLink(item) {
   a.rel = "noreferrer";
   return a;
 }
-function metaLine(item) {
-  let text = "waiting since " + when(item.waiting_since) + " \u00b7 " + holds(item);
-  if (item.stale) text += " \u00b7 read at " + when(item.read_at);
-  return text;
+function metaLine(item, tag, cls) {
+  const line = phrase(tag, cls, item.project_id + " \u00b7 waiting ", timeEl("since", item.waiting_since, ""), " \u00b7 " + holds(item));
+  if (item.stale) {
+    line.appendChild(el("span", "", " \u00b7 "));
+    line.appendChild(phrase("span", "read-at", "read ", timeEl("ago", item.read_at, "")));
+  }
+  return line;
 }
-function appendDetail(node, item) {
-  if (item.detail) node.appendChild(el("pre", "detail", item.detail));
+function moreWords(item) {
+  if (!(item.more_questions > 0)) return null;
+  return el("span", "more", item.more_questions === 1 ? "and 1 more question" : "and " + item.more_questions + " more questions");
+}
+function checkFold(item, words, prefix) {
+  const fold = el("details", "check-more");
+  fold.dataset.key = (prefix || "check") + ":" + itemId(item);
+  fold.appendChild(el("summary", "", words));
+  return fold;
+}
+function appendDetail(node, item, folded) {
+  if (item.detail) {
+    const pre = el("pre", "detail", item.detail);
+    if (folded) {
+      const fold = checkFold(item, "Show the check");
+      fold.appendChild(pre);
+      node.appendChild(fold);
+    } else node.appendChild(pre);
+  }
   if (item.questions.length > 0) {
     const state = decision(item) ? answerState(item) : null;
     item.questions.forEach((q, qi) => {
-      node.appendChild(el("p", "meta", q.question));
+      if (item.questions.length > 1) node.appendChild(el("p", "meta", q.question));
       const list = el("ul", "opts");
       q.options.forEach((option, oi) => {
         const chosen = option === q.chosen;
@@ -473,7 +578,11 @@ function appendDetail(node, item) {
   } else if (item.items.length > 0) {
     const list = el("ul", "opts");
     for (const entry of item.items) list.appendChild(el("li", "", entry));
-    node.appendChild(list);
+    if (folded) {
+      const fold = checkFold(item, "Show the details", "items");
+      fold.appendChild(list);
+      node.appendChild(fold);
+    } else node.appendChild(list);
   }
 }
 const UNDO_MS = 5000;
@@ -760,6 +869,7 @@ function briefRecord(sprintId) {
   return rec;
 }
 function listPart(label, texts) {
+  if (texts.length === 0) return [el("p", "meta", label), el("p", "", "None")];
   const list = el("ul");
   for (const text of texts) list.appendChild(el("li", "", text));
   return [el("p", "meta", label), list];
@@ -911,7 +1021,13 @@ function confirmBox(item, box, approve) {
 function checkBox(item, state) {
   const box = el("div", "abox");
   if (item.paid) box.appendChild(el("p", "meta", "This check costs money."));
-  if (item.detail) box.appendChild(el("pre", "detail", item.detail));
+  const approves = item.answers.includes("approve");
+  let fold = box;
+  if (item.detail || approves) {
+    fold = checkFold(item, approves ? "Review and approve" : "Show the check");
+    if (item.detail) fold.appendChild(el("pre", "detail", item.detail));
+    box.appendChild(fold);
+  }
   const act = el("p", "act");
   if (statusLine(act, state)) {
     box.appendChild(act);
@@ -930,7 +1046,7 @@ function checkBox(item, state) {
       if (button.disabled) return;
       if (startCheck(item, state, answer, extra())) redraw();
     });
-    if (approve) confirmBox(item, box, button);
+    if (approve) confirmBox(item, fold, button);
     buttons.push(button);
   }
   for (const button of buttons) act.appendChild(button);
@@ -943,7 +1059,9 @@ function answerBox(item, state) {
   const now = Math.min(state.q, item.questions.length - 1);
   const box = el("div", "abox");
   item.questions.forEach((q, qi) => {
-    box.appendChild(el("p", live && itemId(item) === currentId && qi === now ? "meta now" : "meta", q.question));
+    if (item.questions.length > 1) {
+      box.appendChild(el("p", live && itemId(item) === currentId && qi === now ? "meta now" : "meta", q.question));
+    }
     const list = el("ul", "opts");
     q.options.forEach((option, oi) => {
       const button = el("button", state.picks[qi] === oi ? "opt picked" : "opt");
@@ -973,12 +1091,13 @@ function boxState(item) {
 }
 function leadItem(item) {
   const card = el("article", "card");
-  card.appendChild(el("h2", "", item.project_id + " #" + item.issue));
-  card.appendChild(el("p", "ask", item.question));
+  card.appendChild(el("h2", "q", item.headline));
+  const more = moreWords(item);
+  if (more !== null) card.appendChild(more);
   const state = boxState(item);
-  if (state === null) appendDetail(card, item);
+  if (state === null) appendDetail(card, item, true);
   else card.appendChild(answerBox(item, state));
-  card.appendChild(el("p", "meta", metaLine(item)));
+  card.appendChild(metaLine(item, "p", "meta"));
   const links = el("p", "meta");
   links.appendChild(answerLink(item));
   card.appendChild(links);
@@ -986,14 +1105,31 @@ function leadItem(item) {
 }
 function itemLine(item) {
   const line = el("li");
-  line.appendChild(el("b", "", item.project_id + " #" + item.issue));
-  line.appendChild(el("span", "", item.question));
+  line.appendChild(el("b", "", item.headline));
+  const more = moreWords(item);
+  if (more !== null) line.appendChild(more);
   const state = boxState(item);
-  if (state === null) appendDetail(line, item);
+  if (state === null) appendDetail(line, item, true);
   else line.appendChild(answerBox(item, state));
-  line.appendChild(el("span", "", metaLine(item)));
+  line.appendChild(metaLine(item, "span", ""));
   line.appendChild(answerLink(item));
   return line;
+}
+function answeredLine(item) {
+  const row = el("li");
+  const fold = el("details", "done-item");
+  fold.dataset.key = "answered:" + itemId(item);
+  const summary = el("summary");
+  summary.appendChild(el("b", "", item.headline));
+  const more = moreWords(item);
+  if (more !== null) summary.appendChild(more);
+  summary.appendChild(phrase("span", "when", "answered ", timeEl("ago", item.answered_at || item.waiting_since, ""), ", waiting for the agent"));
+  fold.appendChild(summary);
+  fold.appendChild(metaLine(item, "p", "meta"));
+  appendDetail(fold, item);
+  fold.appendChild(answerLink(item));
+  row.appendChild(fold);
+  return row;
 }
 function dropBriefState(id, state, briefs) {
   if (state.phase === "waiting") {
@@ -1015,6 +1151,8 @@ function renderInbox(view) {
     ? { key: active.dataset.draft, start: active.selectionStart, end: active.selectionEnd }
     : null;
   fields = new Map();
+  const wasOpen = new Set();
+  for (const fold of document.querySelectorAll("#inbox details[open]")) wasOpen.add(fold.dataset.key);
   const open = view.inbox.open;
   const briefs = open.filter(isBrief);
   const tracked = open.filter((item) => !isBrief(item));
@@ -1049,10 +1187,12 @@ function renderInbox(view) {
   }
   const answered = view.inbox.answered;
   if (answered.length > 0) {
-    section.appendChild(el("h2", "done-head", "Answered, waiting for the agent to pick it up"));
     const done = el("ul", "done");
-    for (const item of answered) done.appendChild(itemLine(item));
+    for (const item of answered) done.appendChild(answeredLine(item));
     section.appendChild(done);
+  }
+  for (const fold of document.querySelectorAll("#inbox details")) {
+    if (wasOpen.has(fold.dataset.key)) fold.open = true;
   }
   const again = held === null ? undefined : fields.get(held.key);
   if (again !== undefined) {
@@ -1062,7 +1202,7 @@ function renderInbox(view) {
 }
 function momentLine(moment) {
   const line = el("li");
-  line.appendChild(el("span", "at", when(moment.at)));
+  line.appendChild(timeEl("ago", moment.at, "at"));
   line.appendChild(el("span", "", moment.sentence));
   return line;
 }
@@ -1071,8 +1211,9 @@ function renderDigest(view) {
   section.replaceChildren();
   const digest = view.digest;
   if (!digest) return;
-  const heading = digest.first_visit ? "In the last eight hours" : "Since you last looked, " + when(digest.since);
-  section.appendChild(el("h2", "digest-head", heading));
+  section.appendChild(digest.first_visit
+    ? el("h2", "digest-head", "In the last eight hours")
+    : phrase("h2", "digest-head", "Since you last looked, ", timeEl("ago", digest.since, "")));
   if (digest.recent.length === 0 && digest.earlier.length === 0) {
     section.appendChild(el("p", "empty", "Nothing changed."));
     return;
@@ -1150,11 +1291,8 @@ function renderUnmanaged(view) {
   const list = el("ul");
   for (const entry of view.unmanaged) {
     const line = el("li", "line");
-    line.appendChild(el("b", "root", entry.root));
-    line.appendChild(el("span", "", entry.label));
-    if (entry.outside_sprints.sessions.length > 0) {
-      line.appendChild(outsideFold(entry.outside_sprints, "outside:" + entry.root));
-    }
+    line.appendChild(lineFold("line:" + entry.root, el("b", "", entry.name),
+                              [el("span", "", entry.label)], entry.outside_sprints, entry.root));
     list.appendChild(line);
   }
   section.appendChild(list);
@@ -1178,7 +1316,7 @@ function refreshGoalList() {
   const items = goalMatches().map((id) => {
     const button = actionButton(id === chosen ? "goal-project picked" : "goal-project", id, () => {
       draft.project = id;
-      draft.rev += 1;
+      goalEdited();
       refreshGoalList();
     });
     const row = el("li");
@@ -1192,6 +1330,12 @@ function showGoalReason() {
   goalUi.status.replaceChildren(
     ...(draft.reason === "" ? [] : [el("p", "fail", "Could not send: " + draft.reason)]),
   );
+}
+function goalEdited() {
+  draft.rev += 1;
+  if (draft.reason === "") return;
+  draft.reason = "";
+  showGoalReason();
 }
 function closeGoal() {
   if (draft.phase !== "sending") draft.reason = "";
@@ -1253,7 +1397,7 @@ function buildGoalBox(section) {
   filter.value = draft.filter;
   filter.addEventListener("input", (event) => {
     draft.filter = event.target.value;
-    draft.rev += 1;
+    goalEdited();
     refreshGoalList();
   });
   const list = el("ul", "goal-projects");
@@ -1263,7 +1407,7 @@ function buildGoalBox(section) {
   text.value = draft.text;
   text.addEventListener("input", (event) => {
     draft.text = event.target.value;
-    draft.rev += 1;
+    goalEdited();
   });
   const status = el("div", "goal-status");
   const send = actionButton("goal-send", "Send", sendGoal);
@@ -1311,6 +1455,11 @@ function render(view) {
     if (wasOpen.has(fold.dataset.key)) fold.open = true;
   }
 }
+function tick() {
+  for (const t of document.querySelectorAll("time")) t.textContent = timeWords(t.dataset.form, t.dataset.stamp);
+  setTimeout(tick, TICK_MS);
+}
+setTimeout(tick, TICK_MS);
 const token = document.getElementById("console-token").content;
 const LOOK_MS = 5000;
 let heldSince = document.hasFocus() ? Date.now() : null;

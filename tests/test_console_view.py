@@ -2,10 +2,13 @@
 
 import dataclasses
 import json
+import re
 import unittest
 from datetime import datetime, timezone
 
 from agent_tools.claims import forge_markers as fm
+from agent_tools.claims import forge_owner_action as foa
+from agent_tools.console import digest
 from agent_tools.console import inbox
 from agent_tools.console import view
 from agent_tools.console.deliveries import (
@@ -258,7 +261,7 @@ class SessionViewTest(unittest.TestCase):
         s9 = session("s9", "waiting_answer", repo="/srv/elsewhere")
         view = derive_view([state("p00", 1)], sessions=[s9])
         self.assertEqual(view["unmanaged"], [{
-            "type": "unmanaged", "root": "/srv/elsewhere",
+            "type": "unmanaged", "root": "/srv/elsewhere", "name": "elsewhere",
             "label": "Not yet managed",
             "outside_sprints": {
                 "label": "Outside sprints", "working": 0, "waiting": 1,
@@ -271,6 +274,14 @@ class SessionViewTest(unittest.TestCase):
         self.assertEqual(view["statement"], self.NO_SESSION_STATEMENT)
         self.assertEqual(view["project_count"], 1)
         self.assertEqual(view["entries"][0]["outside_sprints"]["sessions"], [])
+
+    def test_an_unmanaged_repository_is_named_by_its_last_path_segment(self):
+        sessions = [session("s1", "idle", repo="/srv/elsewhere"),
+                    session("s2", "idle", repo="/")]
+        unmanaged = derive_view([], sessions=sessions)["unmanaged"]
+        self.assertEqual([(u["root"], u["name"]) for u in unmanaged],
+                         [("/", "/"), ("/srv/elsewhere", "elsewhere")])
+        self.assertEqual(view.repo_name("/srv/elsewhere/"), "elsewhere")
 
     def test_unmanaged_repositories_are_sorted_by_root(self):
         view = derive_view([], sessions=[session("s1", "idle", repo="/srv/b"),
@@ -395,8 +406,12 @@ class DeliveryViewTest(unittest.TestCase):
         by_id = {s["session_id"]: s for s in session_entries(view)}
         self.assertEqual(by_id["s1"]["deliveries"], [
             {"run_id": "wf_b", "quiet": False, "moved_text": "moved just now",
+             "summary": "1 issue in delivery: 1 queued, moved just now",
+             "moved_at": "1970-01-01T00:00:02+00:00",
              "issues": [{"issue": 860, "stage": "queued", "stage_text": "queued"}]},
             {"run_id": "wf_a", "quiet": False, "moved_text": "moved just now",
+             "summary": "2 issues in delivery: 1 building, 1 plan review, moved just now",
+             "moved_at": "1970-01-01T00:00:01+00:00",
              "issues": [
                  {"issue": 856, "stage": "building", "stage_text": "building task 3 of 5"},
                  {"issue": 857, "stage": "plan review", "stage_text": "plan review"}]},
@@ -405,6 +420,29 @@ class DeliveryViewTest(unittest.TestCase):
         plain = derive_view([state("p00", 1)], sessions=sessions)
         self.assertEqual(view["entries"][0]["outside_sprints"]["summary"],
                          plain["entries"][0]["outside_sprints"]["summary"])
+
+    def test_a_delivery_run_is_one_sentence_of_counts_by_stage(self):
+        moved = 1_000_000_000_000
+        table = [
+            ((IssueStage(1, "landing"), IssueStage(2, "working"),
+              IssueStage(3, "working"), IssueStage(4, "queued")), 16 * 60_000,
+             "4 issues in delivery: 1 landing, 2 working, 1 queued, quiet for 16 min"),
+            ((IssueStage(856, "building", 3, 5),), 0,
+             "1 issue in delivery: 1 building, moved just now"),
+            ((IssueStage(5, "planning"), IssueStage(6, "done"),
+              IssueStage(7, "plan review")), 120_000,
+             "3 issues in delivery: 1 done, 1 plan review, 1 planning, moved 2 min ago"),
+            ((), 0, "No issue in delivery yet, moved just now"),
+        ]
+        for issues, elapsed, expected in table:
+            with self.subTest(expected=expected):
+                view = derive_view(
+                    [state("p00", 1)], sessions=[session("s1", "working")],
+                    deliveries=run("s1", "wf_1", moved, *issues),
+                    now_ms=moved + elapsed)
+                summary = session_entries(view)[0]["deliveries"][0]["summary"]
+                self.assertEqual(summary, expected)
+                self.assertNotIn("#", summary)
 
     def test_runs_of_an_ended_or_unlisted_session_are_not_shown(self):
         deliveries = {**run("s3", "wf_1", 1, IssueStage(1, "building")),
@@ -484,6 +522,26 @@ class InboxFoldTest(unittest.TestCase):
         self.assertEqual(record.updated_at, "t2")
         self.assertIs(record.item["answered"], True)
 
+    def test_answered_at_is_when_the_item_was_answered_not_its_last_change(self):
+        open_ = item("p", "k")
+        answered = {**open_, "answered": True}
+        later = {**answered, "held_work": 3}
+        e1 = Event(1, "t1", INBOX_SEEN, "p", open_)
+        e2 = Event(2, "t2", INBOX_CHANGED, "p", answered)
+        e3 = Event(3, "t3", INBOX_CHANGED, "p", later)
+        e4 = Event(4, "t4", INBOX_CHANGED, "p", {**later, "answered": False})
+        s1 = Event(1, "t9", INBOX_SEEN, "p", answered)
+        one = inbox_records([e1, e2, e3])
+        split = inbox_records([e3], inbox_records([e1, e2]))
+        reopened = inbox_records([e1, e2, e3, e4])
+        first_seen = inbox_records([s1])
+        self.assertEqual(one[("p", "k")].answered_at, "t2")
+        self.assertEqual(one[("p", "k")].updated_at, "t3")
+        self.assertEqual(split[("p", "k")].answered_at, "t2")
+        self.assertIsNone(reopened[("p", "k")].answered_at)
+        self.assertEqual(first_seen[("p", "k")].answered_at, "t9")
+        self.assertIsNone(inbox_records([e1])[("p", "k")].answered_at)
+
     def test_gone_and_unregistered_drop_items(self):
         a, b = item("p", "ka"), item("q", "kb")
         events = [
@@ -541,8 +599,60 @@ class InboxStatementTest(unittest.TestCase):
         self.assertEqual([e["key"] for e in result["inbox"]["answered"]], ["kd"])
         self.assertEqual(result["inbox"]["answered"][0]["type"], "inbox_item")
         self.assertEqual(result["inbox"]["open"][0], {
-            **open_item, "type": "inbox_item", "waiting_since": "t1",
-            "stale": False, "read_at": "u1"})
+            **{k: v for k, v in open_item.items() if k != "question"},
+            "type": "inbox_item", "waiting_since": "t1", "stale": False, "read_at": "u1",
+            "headline": "Which one?", "more_questions": 0, "answered_at": None})
+
+    def test_an_items_headline_is_its_first_question_with_a_count(self):
+        boiler = foa.SENTENCES["decision"]
+
+        def q(text):
+            return {"question": text, "options": ["a", "b"], "chosen": None,
+                    "recommended": None}
+
+        def decision(key, questions):
+            return {**item("p", key), "reason": "decision", "question": boiler,
+                    "questions": questions}
+
+        three = decision("k3", [q("Which database?"), q("Which port?"), q("Which host?")])
+        one = decision("k1", [q("Which cache?")])
+        unread = decision("k0", [])
+        conflict = {**item("p", "kc"), "reason": "conflict", "items": ["x"],
+                    "question": "Landing stopped on a second merge conflict."}
+        opened = derive_view([state("p", 1)], self.records(three, one, unread, conflict))[
+            "inbox"]["open"]
+        by_key = {entry["key"]: entry for entry in opened}
+        self.assertEqual(
+            {k: (e["headline"], e["more_questions"]) for k, e in by_key.items()},
+            {"k3": ("Which database?", 2), "k1": ("Which cache?", 0),
+             "k0": (view.UNREAD_DECISION, 0),
+             "kc": ("Landing stopped on a second merge conflict.", 0)})
+        for entry in by_key.values():
+            self.assertNotIn("question", entry)
+
+    def test_the_decision_boilerplate_is_nowhere_in_the_view(self):
+        boiler = foa.SENTENCES["decision"]
+        asked = {"question": "Which one?", "options": ["a", "b"], "chosen": None,
+                 "recommended": None}
+        base = {**item("p", "kd"), "reason": "decision", "question": boiler,
+                "questions": [asked]}
+        events = [
+            Event(1, "2026-11-11T10:00:00+00:00", INBOX_SEEN, "p", base),
+            Event(2, "2026-11-11T10:01:00+00:00", INBOX_SEEN, "p",
+                  {**base, "key": "kd2", "answered": True})]
+        made = digest.digest(digest.moments(events, {}, {}), None,
+                             datetime.fromisoformat("2026-11-11T12:00:00+00:00"))
+        result = derive_view([state("p", 1)], inbox_records(events), digest=made)
+        self.assertEqual(len(result["digest"]["recent"]), 2)
+        self.assertNotIn(boiler.encode(), encode_view(result))
+        self.assertIsNone(re.search(r"#\d", json.dumps(result["digest"])))
+
+    def test_an_answered_item_carries_when_it_was_answered(self):
+        records = {("p", "ko"): InboxRecord(item("p", "ko"), "t1", "u1"),
+                   ("p", "kd"): InboxRecord(item("p", "kd", answered=True), "t1", "u3", "u2")}
+        result = derive_view([state("p", 1)], records)["inbox"]
+        self.assertEqual(result["answered"][0]["answered_at"], "u2")
+        self.assertIsNone(result["open"][0]["answered_at"])
 
     def test_the_headline_counts_open_items(self):
         table = [(0, "Nothing needs you"), (1, "1 thing needs you"),
@@ -946,7 +1056,7 @@ class SprintReportViewTest(unittest.TestCase):
         self.assertEqual(shown["progress_text"], "3 of 7 landed, 2 in delivery, 2 queued")
         self.assertEqual(shown["state_text"], "on track")
         self.assertEqual(shown["status"], "two slices are building")
-        self.assertEqual(shown["status_age_text"], "4 min ago")
+        self.assertEqual(shown["status_at"], iso(R))
         self.assertEqual((shown["next"], shown["milestone"], shown["tracker_url"]),
                          ("start the resume slice", "Importer resumes",
                           "https://github.com/owner/p00/milestone/3"))
@@ -1060,7 +1170,7 @@ class SprintViewTest(unittest.TestCase):
             "state": "drafting", "state_text": "drafting the brief", "stated_at": T0,
             "age_text": "stated 3 min ago", "manager_text": "no manager has picked this up",
             "manager_state": "none", "manager_until": None, "retry": True,
-            "progress": None, "progress_text": None, "status": None, "status_age_text": None,
+            "progress": None, "progress_text": None, "status": None, "status_at": None,
             "next": None, "milestone": None, "tracker_url": None, "issues": [], "waiting": 0,
             "sessions": []}])
 

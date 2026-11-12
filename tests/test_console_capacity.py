@@ -246,6 +246,9 @@ class CapacityViewTest(unittest.TestCase):
                 readings[name] = reading_of(report(
                     http_status=429, status="rejected", reset=T + 1000, binding="7d",
                     windows={"7d": window("rejected", 1.0, T + 1000)}), name)
+            elif kind == "reset":
+                readings[name] = reading_of(report(
+                    reset=T - 10, windows={"7d": window("allowed", 0.1, T - 10)}), name)
         names = [f"p{index}" for index in range(len(kinds))]
         return capacity_view(names, CapacityState(readings, {}), now)
 
@@ -262,12 +265,22 @@ class CapacityViewTest(unittest.TestCase):
         self.assertEqual(current["resumes_at"], iso(T + 100))
         self.assertIs(current["tight"], False)
 
-    def test_tight_needs_one_profile_with_room_among_two(self):
-        table = [(["ok"], False), (["ok", "out"], True), (["ok", "unknown"], True),
-                 (["ok", "ok"], False), (["out", "out"], False)]
+    def test_tight_needs_every_other_profile_out(self):
+        table = [(["ok"], False), (["ok", "out"], True), (["reset", "out", "out"], True),
+                 (["ok", "unknown"], False), (["ok", "out", "unknown"], False),
+                 (["ok", "ok"], False), (["out", "out"], False), (["unknown", "unknown"], False)]
         for kinds, tight in table:
             with self.subTest(kinds=kinds):
                 self.assertIs(self.state_of(kinds)["tight"], tight)
+
+    def test_profiles_with_no_reading_fold_into_one_note(self):
+        three = self.state_of(["ok", "unknown", "unknown", "unknown"])
+        self.assertEqual(three["no_reading"], "3 with no reading yet")
+        self.assertEqual(len(three["profiles"]), 4)
+        self.assertEqual(self.state_of(["ok", "out", "unknown"])["no_reading"],
+                         "1 with no reading yet")
+        self.assertIsNone(self.state_of(["ok", "out"])["no_reading"])
+        self.assertIsNone(capacity.EMPTY["no_reading"])
 
     def test_every_profile_out_promotes_capacity_and_states_the_earliest_reset(self):
         def refused(until):

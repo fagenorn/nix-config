@@ -1,7 +1,7 @@
 # ADR-console-011 — A goal stated on the page becomes a sprint
 
 - **Status:** accepted
-- **Decided in:** #834, #837, #838, #886
+- **Decided in:** #834, #837, #838, #886, #911
 
 ## Context
 
@@ -11,7 +11,7 @@ The owner starts work by saying what they want, and until now the only place to 
 
 The goal is recorded in the console's own log as one `goal.stated` event carrying the project, a sprint id and the goal text, and never on the tracker (#834): a goal is the owner's sentence, not a piece of work, and nothing else may read it as one. `POST /api/goal` states it and `POST /api/withdraw` takes it back; both are page writes under ADR-console-008, so each is guarded by the token and the console's own origin, and a withdrawal appends one `goal.withdrawn` event.
 
-The console refuses a goal for a project that is not registered, an empty goal after stripping, and a goal over 2000 characters, each with its reason and without writing a row. The page keeps the text in the field when a goal is refused, so nothing the owner wrote is lost.
+The console refuses a goal for a project that is not registered, an empty goal after stripping, and a goal over 2000 characters, each with its reason and without writing a row. The page keeps the text in the field when a goal is refused, so nothing the owner wrote is lost. The refusal line stays until the owner edits the goal text, the project filter or the chosen project, which removes the refusal (#911).
 
 Each sprint has an id and its own secret, a random value in `sprint-secrets/` beside the event log, a directory and files readable by the owner only. The secret is never served to the page, written to a row or printed, and it is what a manager will later present to act on that sprint.
 

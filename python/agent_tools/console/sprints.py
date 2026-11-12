@@ -59,10 +59,11 @@ Registration events change nothing here: a goal row outlives the registration ro
 removes, and the view alone shows sprints only under registered projects. Folding `a + b` equals
 folding `b` onto the fold of `a`.
 
-A brief is the five `PARTS`: `done` a text, `excluded`, `slices`, `risks` and `asks` each a list of
-texts. `checked_brief(brief)` checks them in `PARTS` order and refuses with
-`Refused("the brief has no <part>")` the first that is missing, of the wrong type or empty after
-stripping; it returns a new dict of the five parts with every text stripped. `checked_reply(text)`
+A brief is the five `PARTS`: `done` a text, `slices` a non-empty list of texts, and `excluded`,
+`risks` and `asks` lists of texts that may be empty (`MAY_BE_EMPTY`). `checked_brief(brief)` checks
+them in `PARTS` order and refuses with `Refused("the brief has no <part>")` the first that is
+missing, of the wrong type, empty when it must not be, or holding a text empty after stripping; it
+returns a new dict of the five parts with every text stripped. `checked_reply(text)`
 keeps the text exactly and refuses `EMPTY_REPLY` when its strip is empty, then `REPLY_TOO_LONG` over
 `MAX_REPLY_CHARS` code points. `SecretRefused` (a `Refused`) is the service's refusal of a wrong
 secret; it maps to 403.
@@ -177,6 +178,7 @@ from agent_tools.console.manager import WAITING_TEXT as MANAGER_WAITING_TEXT
 MAX_GOAL_CHARS = 2000
 MAX_REPLY_CHARS = 2000
 PARTS = ("done", "excluded", "slices", "risks", "asks")
+MAY_BE_EMPTY = ("excluded", "risks", "asks")
 NONE = "none"
 APPROVED = "approved"
 CHANGES = "changes"
@@ -406,7 +408,8 @@ def checked_brief(brief: dict) -> dict:
                 raise Refused(MISSING_PART.format(part=part))
             checked[part] = value.strip()
         else:
-            if not isinstance(value, list) or not value or not all(_text(item) for item in value):
+            if (not isinstance(value, list) or not all(_text(item) for item in value)
+                    or (not value and part not in MAY_BE_EMPTY)):
                 raise Refused(MISSING_PART.format(part=part))
             checked[part] = [item.strip() for item in value]
     return checked

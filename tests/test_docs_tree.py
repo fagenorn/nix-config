@@ -426,7 +426,8 @@ class DocsTreeTest(unittest.TestCase):
         adr = self.doc(path)
         for needle in ("POST /api/goal", "POST /api/withdraw", "ADR-console-008",
                        "ADR-console-009", "#834", "#838", "#886", "2000", "sprint-secrets",
-                       "never on the tracker", "indefinitely", "no manager has picked this up"):
+                       "never on the tracker", "indefinitely", "no manager has picked this up",
+                       "#911", "removes the refusal"):
             self.assertIn(needle, adr)
         write = self.doc("docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md")
         for needle in ("/api/goal", "/api/withdraw", "16384"):
@@ -449,7 +450,7 @@ class DocsTreeTest(unittest.TestCase):
         for needle in ("sprint brief", "sprint status", "POST /api/brief", "GET /api/sprint-status",
                        "POST /api/approve", "POST /api/reply", "ADR-console-008",
                        "ADR-console-009", "ADR-console-011", "#834", "#835", "#836", "#887",
-                       "secret refused", "five seconds", "starting", "2000"):
+                       "#911", "may be empty lists", "secret refused", "five seconds", "starting", "2000"):
             self.assertIn(needle, adr)
         write = self.doc("docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md")
         for needle in ("/api/approve", "/api/reply", "/api/brief"):
@@ -457,8 +458,9 @@ class DocsTreeTest(unittest.TestCase):
         kept = self.doc("docs/areas/console/adr/009-events-are-kept-for-90-days.md")
         for needle in ("brief.sent", "schema 4"):
             self.assertIn(needle, kept)
-        self.assertIn("ADR-console-013",
-                      self.doc("docs/areas/console/adr/002-the-desk-page-design-rules.md"))
+        rules = self.doc("docs/areas/console/adr/002-the-desk-page-design-rules.md")
+        for needle in ("ADR-console-013", 'its label and "None"'):
+            self.assertIn(needle, rules)
 
     def test_the_console_report_decision_is_recorded(self):
         path = "docs/areas/console/adr/014-a-managers-report-becomes-the-sprints-line.md"

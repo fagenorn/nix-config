@@ -132,6 +132,29 @@ class CheckedBriefTest(unittest.TestCase):
         self.assertEqual(sprints.checked_brief(FULL), {**FULL, "done": "ship it"})
         self.assertEqual(sprints.checked_brief({**FULL, "slices": [" a "]})["slices"], ["a"])
 
+    def test_excluded_risks_and_asks_may_be_empty(self):
+        self.assertEqual(sprints.MAY_BE_EMPTY, ("excluded", "risks", "asks"))
+        for part in ("excluded", "risks", "asks"):
+            with self.subTest(part=part):
+                self.assertEqual(sprints.checked_brief({**FULL, part: []}),
+                                 {**FULL, "done": "ship it", part: []})
+        self.assertEqual(
+            sprints.checked_brief({**FULL, "excluded": [], "risks": [], "asks": []}),
+            {**FULL, "done": "ship it", "excluded": [], "risks": [], "asks": []})
+
+    def test_an_empty_done_or_slices_or_a_wrong_type_is_still_refused(self):
+        cases = [({**FULL, "slices": []}, "slices"), ({**FULL, "done": ""}, "done"),
+                 ({**FULL, "excluded": None}, "excluded"), ({**FULL, "risks": "r"}, "risks"),
+                 ({**FULL, "asks": {}}, "asks"), ({**FULL, "asks": [""]}, "asks"),
+                 ({**FULL, "excluded": [" "]}, "excluded"),
+                 ({k: v for k, v in FULL.items() if k != "asks"}, "asks"),
+                 ({**FULL, "excluded": [], "slices": []}, "slices")]
+        for brief, part in cases:
+            with self.subTest(part=part, brief=brief):
+                with self.assertRaises(sprints.Refused) as caught:
+                    sprints.checked_brief(brief)
+                self.assertEqual(str(caught.exception), f"the brief has no {part}")
+
     def test_a_reply_is_kept_exactly(self):
         text = "Drop slice 2.\nKeep the rest. "
         self.assertEqual(sprints.checked_reply(text), text)
