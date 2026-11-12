@@ -42,6 +42,20 @@ class IdleStepTest(unittest.TestCase):
         self.assertIsNone(step(now=now, active=now - 5 * MIN + 1))
         self.assertEqual(step(now=now, active=now - 5 * MIN), idle.NUDGE)
 
+    def test_a_run_in_progress_holds_the_nudge_until_it_has_been_still_for_thirty_minutes(self):
+        now = IDLE_AT + 40 * MIN
+        for moved_at, expected in ((now - idle.RUN_STILL_MS + 1, None),
+                                   (now - idle.RUN_STILL_MS, idle.NUDGE)):
+            with self.subTest(moved_at=moved_at):
+                self.assertEqual(idle.next_step(ON, 0, session(), None, False, now,
+                                                run_ms=moved_at), expected)
+        self.assertEqual(idle.next_step(ON, 0, session(), None, False, now), idle.NUDGE)
+
+    def test_a_forced_nudge_ignores_a_run_in_progress(self):
+        now = IDLE_AT + 10 * MIN
+        self.assertEqual(idle.next_step(ON, 0, session(), None, False, now, True,
+                                        run_ms=now - MIN), idle.NUDGE)
+
     def test_no_nudge_within_ten_minutes_of_the_last(self):
         now = IDLE_AT + 30 * MIN
         for at_ms, expected in ((now - 10 * MIN + 1, None), (now - 10 * MIN, idle.NUDGE)):

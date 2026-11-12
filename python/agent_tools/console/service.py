@@ -544,7 +544,10 @@ extended by `_fold`, so a run that moved and then ended (`delivery.gone`) still 
 idle_nudge_failed <Type>: <message>`) and returning at once without a nudger, runs under the lock
 over each open sprint that is in none of `_nudging`, `_launching` and `_stopping`: the manager's
 folded session (`_manager_session`, lowest session id), `active` (the larger of that session's last
-movement and the sprint's `_settled`, the last launch, nudge or wake), the sprint's waiting count
+movement and the sprint's `_settled`, the last launch, nudge or wake), `run_ms` (`_run_moved`: the
+latest `moved_ms` of a delivery run of that session still in `_deliveries`, so one that has not
+ended; a manager with such a run is not nudged until it has been still for `idle.RUN_STILL_MS`, 30
+minutes, #974), the sprint's waiting count
 and its quota; a sprint not out whose manager row is not `started` or whose manager is seen
 `working` leaves `_quota_held` (resumed without a send, no sentence). Then `idle.next_step` decides:
 `GIVE_UP` appends one `manager.no_progress {sprint_id, goal, status}` (the report's status line or
@@ -2501,6 +2504,14 @@ class ConsoleService:
         known = [t for t in times if t is not None]
         return max(known) if known else None
 
+    def _run_moved(self, session: sessions.SessionState | None) -> int | None:
+        """Under the ingest lock: the latest movement of a run of the session still in progress, else None."""
+        if session is None:
+            return None
+        moved = [state.moved_ms for (sid, _), state in self._deliveries.items()
+                 if sid == session.session_id]
+        return max(moved) if moved else None
+
     def nudge_idle(self) -> None:
         """Tell each idle manager whose sprint has work to go on, and give up after too many tries (#929)."""
         if self._nudger is None:
@@ -2523,7 +2534,7 @@ class ConsoleService:
                         or (session is not None and session.state == sessions.WORKING)):
                     self._quota_held.discard(sprint_id)
                 step = idle.next_step(sprint, waiting, session, self._active_ms(sprint, session),
-                                      quota is not None, now)
+                                      quota is not None, now, run_ms=self._run_moved(session))
                 if step == idle.GIVE_UP:
                     status = sprint.report.status if sprint.report is not None else None
                     self._apply(self.log.append([(MANAGER_NO_PROGRESS, sprint.project_id, {
@@ -2573,7 +2584,8 @@ class ConsoleService:
         session = self._manager_session(sprint)
         step = idle.next_step(
             sprint, self._waiting(sprint), session, self._active_ms(sprint, session),
-            self._quota_wait(sprint) is not None, int(self._clock() * 1000), forced)
+            self._quota_wait(sprint) is not None, int(self._clock() * 1000), forced,
+            self._run_moved(session))
         return (sprint, project.root) if step == idle.NUDGE else None
 
     def _working_now(self, observed: sessions.Observation) -> bool:
