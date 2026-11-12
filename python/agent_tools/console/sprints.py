@@ -13,11 +13,15 @@ text); the brief and report rows carry
 The log keeps all six indefinitely (`event_log.KEPT_KINDS`).
 
 Three more kinds record the sprint's manager (#888), none of them kept (`event_log.MANAGER_STARTED`,
-`MANAGER_FAILED`, `MANAGER_WAITING`; each with the project in its project column):
+`MANAGER_FAILED`, `MANAGER_WAITING`; each with the project in its project column), and two record
+its bring-back (#893; `event_log.MANAGER_WOKEN`, `MANAGER_STALLED`, not kept either):
 
-    manager.started  {"sprint_id", "profile": <str>, "session_name": <str>}
-    manager.failed   {"sprint_id", "reason": <str>}
-    manager.waiting  {"sprint_id", "until": <str> | null}
+    manager.started  {"sprint_id", "profile": <str>, "session_name": <str>, "takeover"?: true}
+    manager.failed   {"sprint_id", "reason": <str>, "takeover"?: true}
+    manager.waiting  {"sprint_id", "until": <str> | null, "takeover"?: true}
+    manager.woken    {"sprint_id", "session_id": <str>, "ok": <bool>, "reason"?: <str>,
+                      "back"?: <bool>}
+    manager.stalled  {"sprint_id", "reason": <str>}
 
 A sprint id is `secrets.token_hex(8)`: 16 lowercase hex characters (`SPRINT_ID`), the only form a
 request may name and the file name of the sprint's secret.
@@ -98,6 +102,20 @@ was; `Manager.at` is that row's `at`. `manager.started` is valid only with a str
 string `session_name` (state `started`); `manager.failed` only with a string `reason` (`failed`);
 `manager.waiting` only with an `until` key whose value is a string or null (`waiting`). A row that
 is not valid changes nothing.
+
+The bring-back rows (#893) add to the same state. `Manager.takeover` is true when a valid started,
+failed or waiting row says `"takeover": true` (exactly true; any other value or none is false).
+`SprintState.revivals` is a tuple of `Revival(at, how, ok, reason, back)` in row order. A valid
+`manager.woken` (a string `session_id`, a bool `ok`, a `back` member that is absent or a bool; a
+`back` that is not a bool makes the row malformed) appends `Revival(at, WAKE, ok, reason, back)`,
+`reason` the row's string `reason` when `ok` is false and else `None`, `back` true only when the row
+says so. A valid `manager.started` that is a takeover appends `Revival(at, TAKEOVER, True)` and a
+valid `manager.failed` that is a takeover appends `Revival(at, TAKEOVER, False, reason)`; a
+`manager.waiting` appends none (a wait started nothing). Every valid `manager.started` also clears
+`stalled` and `stalled_at`. A `manager.stalled` with a string `reason` sets `stalled` to it and
+`stalled_at` to the row's `at`; while the sprint is stalled a valid `manager.failed` replaces
+`stalled` with its reason and keeps `stalled_at`. `revive` (which this module does not import)
+reads these fields to decide the next step.
 
 `manager_status(state, listed, now_ms, managers)` turns a sprint's manager into the view's
 `(manager_state, manager_text, retry)`; its docstring holds the rules.
@@ -181,8 +199,10 @@ row wins). Every other such row changes nothing, and a withdrawn sprint keeps no
 A `session.seen` row carries no sprint id: when its string `name` fully matches
 `<project> sprint <16 lowercase hex>` (`manager.session_name`), the sprint is open, the name's
 project and the row's project column both equal the sprint's, the row's string `session_id` becomes
-the sprint's `manager_session` (the latest row wins); a valid `manager.started` row clears it, since
-the session it named belonged to the manager that row replaces.
+the sprint's `manager_session` (the latest row wins) and the row's `seq` becomes its
+`manager_seen_seq`; the same row sets `back` on the last revival when that is a `WAKE` not yet back.
+A valid `manager.started` row clears `manager_session`, since the session it named belonged to the
+manager that row replaces.
 
 `message_state(message)` is `READ` when `read_at` is set, else `DELIVERED` when `delivered_at` is,
 else `SENT`; `unread(state)` is the messages without `read_at`, in id order; `unreachable(state)` is
@@ -211,8 +231,9 @@ from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_litera
 from agent_tools.console import deliveries
 from agent_tools.console.deliveries import DELIVERY_SEEN
 from agent_tools.console.event_log import (BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED,
-                                           GOAL_WITHDRAWN, MANAGER_FAILED, MANAGER_STARTED,
-                                           MANAGER_WAITING, SPRINT_ANSWERED, SPRINT_MESSAGED,
+                                           GOAL_WITHDRAWN, MANAGER_FAILED, MANAGER_STALLED,
+                                           MANAGER_STARTED, MANAGER_WAITING, MANAGER_WOKEN,
+                                           SPRINT_ANSWERED, SPRINT_MESSAGED,
                                            SPRINT_NUDGED, SPRINT_READ, SPRINT_REPORTED, Event)
 from agent_tools.console.manager import FAILED_TEXT, MISSING_TEXT, UNAVAILABLE_TEXT
 from agent_tools.console.manager import WAITING_TEXT as MANAGER_WAITING_TEXT
@@ -237,6 +258,10 @@ STARTED = "started"
 FAILED = "failed"
 MISSING = "missing"
 UNAVAILABLE = "unavailable"
+WAKE = "wake"
+TAKEOVER = "takeover"
+STALLED = "stalled"
+STALLED_TEXT = "managers keep failing"
 REPORT_MEMBERS = ("status", "phase", "milestone", "tracker_url", "issues", "inbox", "next")
 REPORT_PHASES = ("running", "closing", "done")
 LANDED = "landed"
@@ -335,6 +360,15 @@ class Observed:
 
 
 @dataclass(frozen=True)
+class Revival:
+    at: str
+    how: str
+    ok: bool
+    reason: str | None = None
+    back: bool = False
+
+
+@dataclass(frozen=True)
 class Manager:
     state: str
     at: str
@@ -342,6 +376,7 @@ class Manager:
     session_name: str | None = None
     reason: str | None = None
     until: str | None = None
+    takeover: bool = False
 
 
 @dataclass(frozen=True)
@@ -374,6 +409,10 @@ class SprintState:
     last_nudge_at: str | None = None
     last_nudge_ok: bool | None = None
     manager_session: str | None = None
+    manager_seen_seq: int | None = None
+    revivals: tuple[Revival, ...] = ()
+    stalled: str | None = None
+    stalled_at: str | None = None
 
     @property
     def state(self) -> str:
@@ -671,24 +710,49 @@ def _folded_session(folded: dict[str, SprintState], event: Event) -> None:
     match = MANAGER_SESSION_NAME.fullmatch(name)
     state = folded.get(match["sprint"]) if match else None
     if state is not None and match["project"] == state.project_id == event.project:
-        folded[state.sprint_id] = replace(state, manager_session=session_id)
+        revivals = state.revivals
+        if revivals and revivals[-1].how == WAKE and not revivals[-1].back:
+            revivals = (*revivals[:-1], replace(revivals[-1], back=True))
+        folded[state.sprint_id] = replace(state, manager_session=session_id,
+                                          manager_seen_seq=event.seq, revivals=revivals)
 
 
 def _folded_manager(state: SprintState, event: Event) -> SprintState:
     payload = event.payload
+    takeover = payload.get("takeover") is True
     if event.kind == MANAGER_STARTED:
         profile, name = payload.get("profile"), payload.get("session_name")
         if isinstance(profile, str) and isinstance(name, str):
-            return replace(state, manager=Manager(STARTED, event.at, profile, name),
-                           manager_session=None)
+            revivals = state.revivals + ((Revival(event.at, TAKEOVER, True),) if takeover else ())
+            return replace(state, manager=Manager(STARTED, event.at, profile, name,
+                                                  takeover=takeover),
+                           manager_session=None, revivals=revivals, stalled=None, stalled_at=None)
     elif event.kind == MANAGER_FAILED:
         reason = payload.get("reason")
         if isinstance(reason, str):
-            return replace(state, manager=Manager(FAILED, event.at, reason=reason))
+            revivals = state.revivals + (
+                (Revival(event.at, TAKEOVER, False, reason),) if takeover else ())
+            return replace(state, manager=Manager(FAILED, event.at, reason=reason,
+                                                  takeover=takeover),
+                           revivals=revivals,
+                           stalled=reason if state.stalled is not None else None)
     elif event.kind == MANAGER_WAITING and "until" in payload:
         until = payload["until"]
         if until is None or isinstance(until, str):
-            return replace(state, manager=Manager(WAITING, event.at, until=until))
+            return replace(state, manager=Manager(WAITING, event.at, until=until,
+                                                  takeover=takeover))
+    elif event.kind == MANAGER_WOKEN:
+        ok, back = payload.get("ok"), payload.get("back", False)
+        if isinstance(payload.get("session_id"), str) and isinstance(ok, bool) \
+                and isinstance(back, bool):
+            reason = payload.get("reason")
+            return replace(state, revivals=state.revivals + (Revival(
+                event.at, WAKE, ok, reason if not ok and isinstance(reason, str) else None,
+                back=back),))
+    elif event.kind == MANAGER_STALLED:
+        reason = payload.get("reason")
+        if isinstance(reason, str):
+            return replace(state, stalled=reason, stalled_at=event.at)
     return state
 
 
@@ -754,8 +818,8 @@ def sprint_states(events: Iterable[Event],
             folded.pop(sprint_id, None)
         elif event.kind in (BRIEF_SENT, BRIEF_APPROVED, BRIEF_REPLIED) and sprint_id in folded:
             folded[sprint_id] = _folded_brief(folded[sprint_id], event)
-        elif event.kind in (MANAGER_STARTED, MANAGER_FAILED, MANAGER_WAITING) \
-                and sprint_id in folded:
+        elif event.kind in (MANAGER_STARTED, MANAGER_FAILED, MANAGER_WAITING, MANAGER_WOKEN,
+                            MANAGER_STALLED) and sprint_id in folded:
             folded[sprint_id] = _folded_manager(folded[sprint_id], event)
         elif event.kind == SPRINT_REPORTED and sprint_id in folded:
             folded[sprint_id] = _folded_report(folded[sprint_id], event)
@@ -811,6 +875,8 @@ def manager_status(state: SprintState, listed: bool, now_ms: int | None,
 
     - `managers` false (a host that cannot start managers): `unavailable`, `UNAVAILABLE_TEXT`, no
       retry.
+    - A stalled sprint (`SprintState.stalled`): `stalled`, `"<STALLED_TEXT>: <reason>"` and retry
+      while it has no listed session.
     - The sprint is overdue when `now_ms` is more than `NO_MANAGER_AFTER_MS` past its start time, it
       has no brief and it has no listed session. The start time is `Manager.at` of a `started`
       manager and the stated time (`stated_at`) otherwise.
@@ -819,9 +885,11 @@ def manager_status(state: SprintState, listed: bool, now_ms: int | None,
     - `failed`: `failed` and `"<FAILED_TEXT>: <reason>"`.
     - `waiting`: `waiting` and `manager.WAITING_TEXT`.
 
-    A `failed` or `waiting` manager offers retry only while the sprint has no listed session and no
-    brief: a launch can fail after its detached session was already handed off, and a retry would
-    then start a second manager for the sprint.
+    A `failed` or `waiting` manager of a first launch offers retry only while the sprint has no
+    listed session and no brief: a launch can fail after its detached session was already handed
+    off, and a retry would then start a second manager for the sprint. A `failed` or `waiting`
+    manager whose `takeover` is true offers retry while the sprint has no listed session, whatever
+    the brief (a takeover's sprint has a brief by design).
     """
     if not managers:
         return UNAVAILABLE, UNAVAILABLE_TEXT, False
@@ -829,11 +897,13 @@ def manager_status(state: SprintState, listed: bool, now_ms: int | None,
     since = state.stated_at if manager is None or manager.state != STARTED else manager.at
     overdue = (now_ms is not None and now_ms - _ms(since) > NO_MANAGER_AFTER_MS
                and state.brief is None and not listed)
+    if state.stalled is not None:
+        return STALLED, f"{STALLED_TEXT}: {state.stalled}", not listed
     if manager is None:
         return (NONE, NO_MANAGER_TEXT, True) if overdue else (NONE, None, False)
     if manager.state == STARTED:
         return (MISSING, MISSING_TEXT, True) if overdue else (STARTED, None, False)
-    free = not listed and state.brief is None
+    free = not listed and (state.brief is None or manager.takeover)
     if manager.state == FAILED:
         return FAILED, f"{FAILED_TEXT}: {manager.reason}", free
     return WAITING, MANAGER_WAITING_TEXT, free
