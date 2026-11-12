@@ -832,6 +832,32 @@ class PageAnswerTest(unittest.TestCase):
                 self.assertEqual(answers(last), [])
                 self.assertTrue(picked(last)[0].endswith("two"))
 
+    def test_a_failure_stays_visible_when_the_item_stops_leading(self) -> None:
+        held = item("B", held_work=5, questions=[
+            {"question": "Which port?", "options": ["80"], "chosen": None,
+             "recommended": None}])
+        first, last = render([
+            START, {"frame": frame([ANSWERABLE])},
+            {"respond": {"status": 502, "text": "boom"}}, {"key": "Enter"},
+            {"clock": 5000}, {"snapshot": True},
+            {"frame": frame([held, ANSWERABLE])}, {"snapshot": True},
+        ])
+        for snap in (first, last):
+            self.assertIn("Could not send: boom", full(snap["inbox"]))
+            self.assertEqual(count(snap, "fail"), 1)
+        self.assertEqual(count(last, "send"), 2)
+
+    def test_enter_and_digits_stay_with_a_focused_link_button_or_summary(self) -> None:
+        for tag in ("A", "BUTTON", "SUMMARY"):
+            with self.subTest(tag):
+                (snap,) = render([
+                    START, {"frame": frame([ANSWERABLE])}, {"key": "Enter", "target": tag},
+                    {"key": "1", "target": tag}, {"clock": 5000}, {"snapshot": True},
+                ])
+                self.assertEqual(answers(snap), [])
+                self.assertTrue(picked(snap)[0].endswith("two"))
+                self.assertNotIn(WAIT_TEXT, full(snap["inbox"]))
+
     def test_while_one_answer_waits_the_keys_choose_for_the_next(self) -> None:
         first = item("A", questions=[{**ANSWERABLE["questions"][0], "recommended": None}])
         (snap,) = render([

@@ -3,7 +3,8 @@
 //   node page-harness.js <page.html>   (JSON list of steps on stdin)
 // Steps: frame, open, snapshot, and the focus clock: a first-only start
 // {focused, clock}, then clock, focus, blur, hide, pagehide. The owner's
-// answer adds {key, ctrlKey?, altKey?, metaKey?} (a keydown on the document),
+// answer adds {key, ctrlKey?, altKey?, metaKey?, target?} (a keydown on the
+// document; target is the tag name of the focused element, default none),
 // {click: "<class>"} (the click listeners of the first attached element with
 // that class; none throws), {respond: {status, text}} (queues the answer of
 // the next /api/answer fetch, default 204 with no text) and {fail_fetch: true}
@@ -287,6 +288,7 @@ async function run() {
       fire("document", "keydown", {
         key: step.key, ctrlKey: !!step.ctrlKey, altKey: !!step.altKey, metaKey: !!step.metaKey,
         shiftKey: false, repeat: false, preventDefault() {},
+        target: step.target === undefined ? null : { tagName: step.target },
       });
     } else if ("click" in step) {
       const target = attached(root).find((n) => n.className.split(/\s+/).includes(step.click));

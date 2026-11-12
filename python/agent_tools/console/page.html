@@ -449,7 +449,7 @@ function answerBox(item, state) {
 function boxState(item) {
   if (!answerable(item)) return null;
   const state = answerState(item);
-  return itemId(item) === currentId || !choosable(state) ? state : null;
+  return itemId(item) === currentId || state.phase !== "choosing" ? state : null;
 }
 function leadItem(item) {
   const card = el("article", "card");
@@ -625,6 +625,8 @@ document.addEventListener("keydown", (event) => {
     }
     return;
   }
+  const focused = event.target && event.target.tagName;
+  if (focused === "A" || focused === "BUTTON" || focused === "SUMMARY") return;
   const current = currentEntry(lastView.inbox.open);
   if (current === null) return;
   const { item, state } = current;
