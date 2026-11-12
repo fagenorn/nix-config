@@ -48,7 +48,8 @@ NaN or Infinity literal or nesting too deep to parse raises `ValueError`.
 `sprint_states(events, states=None)` folds events into the open sprints keyed by sprint id: a
 `goal.stated` event with a project, a string `sprint_id` and a string `goal` adds a `SprintState`
 (`stated_seq` and `stated_at` are the event's `seq` and `at`); a `goal.withdrawn` with a string
-`sprint_id` removes it; every other event and any malformed goal event changes nothing.
+`sprint_id` removes it; the brief rows and the manager rows below change an open sprint; every other
+event and any malformed goal event changes nothing.
 Registration events change nothing here: a goal row outlives the registration rows retention
 removes, and the view alone shows sprints only under registered projects. Folding `a + b` equals
 folding `b` onto the fold of `a`.
@@ -79,8 +80,23 @@ The fold also keeps each open sprint's `Brief(version, parts, sent_at, decision,
 folded brief's version (0 with none) and `brief` is a dict: the brief is then that version with
 decision `NONE` and no reply. `brief.approved` and `brief.replied` apply only when the sprint is
 open, has a brief, the version equals its version and its decision is `NONE`; approval sets
-`APPROVED`, a reply (a string) sets `CHANGES` and the reply. Every other row changes nothing. A
-sprint whose brief is `APPROVED` is `STARTING`, else `DRAFTING` (`SprintState.state`).
+`APPROVED`, a reply (a string) sets `CHANGES` and the reply. A sprint whose brief is `APPROVED` is
+`STARTING`, else `DRAFTING` (`SprintState.state`).
+
+The fold also keeps each open sprint's `Manager(state, at, profile, session_name, reason, until)`,
+`None` until a valid manager row arrives. A manager row changes only an open sprint (a row for a
+sprint that is not folded changes nothing) and the latest valid row wins, whatever the earlier one
+was; `Manager.at` is that row's `at`. `manager.started` is valid only with a string `profile` and a
+string `session_name` (state `started`); `manager.failed` only with a string `reason` (`failed`);
+`manager.waiting` only with an `until` key whose value is a string or null (`waiting`). A row that
+is not valid changes nothing.
+
+`manager_status(state, listed, now_ms, managers)` turns a sprint's manager into the view's
+`(manager_state, manager_text, retry)`; its docstring holds the rules.
+
+The view's `manager_state`, `manager_text` and `retry`, and the service's retry gate, are this
+function's three results.
+
 `withdrawn_ids(events, ids)` adds the `sprint_id` of every `goal.withdrawn` row with a string one.
 
 `age_text(elapsed_ms)` is `stated just now` under a minute, `stated <m> min ago` under an hour,
@@ -372,6 +388,21 @@ def _ms(time: str) -> int:
 
 def manager_status(state: SprintState, listed: bool, now_ms: int | None,
                    managers: bool) -> tuple[str, str | None, bool]:
+    """Return `(manager_state, manager_text, retry)` for one open sprint.
+
+    `listed` is whether the sprint has a listed session of its own and `now_ms` is the clock in
+    milliseconds (`None` counts as no time elapsed). The rules, first match wins:
+
+    - `managers` false (a host that cannot start managers): `unavailable`, `UNAVAILABLE_TEXT`, no
+      retry.
+    - The sprint is overdue when `now_ms` is more than `NO_MANAGER_AFTER_MS` past its start time, it
+      has no brief and it has no listed session. The start time is `Manager.at` of a `started`
+      manager and the stated time (`stated_at`) otherwise.
+    - No manager row: `none`, with `NO_MANAGER_TEXT` and retry when overdue, else no text, no retry.
+    - `started`: `missing`, `MISSING_TEXT` and retry when overdue, else `started`, no text, no retry.
+    - `failed`: `failed`, `"<FAILED_TEXT>: <reason>"` and retry.
+    - `waiting`: `waiting`, `WAITING_TEXT` and retry.
+    """
     if not managers:
         return UNAVAILABLE, UNAVAILABLE_TEXT, False
     manager = state.manager

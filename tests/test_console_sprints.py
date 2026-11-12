@@ -377,6 +377,13 @@ class ManagerStatusTest(unittest.TestCase):
                 self.assertEqual(sprints.manager_status(state, listed, now, managers), expected)
 
 
+class DocumentedTest(unittest.TestCase):
+    def test_the_manager_rules_are_written_where_the_view_points(self):
+        self.assertTrue((sprints.manager_status.__doc__ or "").strip())
+        for name in ("manager_status", "manager.started", "manager.failed", "manager.waiting"):
+            self.assertIn(name, sprints.__doc__)
+
+
 class WithdrawnTest(unittest.TestCase):
     def test_withdrawn_ids(self):
         a, b = "aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"
