@@ -226,7 +226,7 @@ const FACTS_SCHEMA = {
     landed: { type: 'array', items: { type: 'object', properties: { number: { type: 'integer' }, commits: STRS }, required: ['number', 'commits'] } },
     already_fixed: { anyOf: [{ type: 'object', properties: { commit: { type: 'string' }, evidence: { type: 'string' } }, required: ['commit', 'evidence'] }, { type: 'null' }] },
     open_pr: { anyOf: [{ type: 'object', properties: { number: { type: 'integer' }, head_branch: { type: 'string' } } }, { type: 'null' }] },
-    native: { type: 'object', properties: { verdict: { type: 'string' }, blocked_by: STRS, blocked_by_states: { type: 'object', additionalProperties: { type: 'string' } }, error: { type: ['string', 'null'] } }, required: ['verdict'] },
+    native: { type: 'object', properties: { verdict: { type: 'string' }, blocked_by: { type: ['array', 'null'], items: { type: 'string' } }, blocked_by_states: { type: ['object', 'null'], additionalProperties: { type: 'string' } }, error: { type: ['string', 'null'] } }, required: ['verdict'] },
     blockers: { type: 'array', items: { type: 'object', properties: { issue: { type: 'integer' }, state: { type: 'string' } }, required: ['issue', 'state'] } },
     decision: { type: 'object', properties: { verdict: { type: 'string' }, comment_id: { type: ['integer', 'null'] }, questions: { type: 'array', items: {} } } },
     lane: { type: 'string', enum: LANES }, why: { type: 'string' },
@@ -274,7 +274,7 @@ const factsPrompt = n => `You read the facts of issue #${n} of ${SLUG} (the git 
 2. branch: run alone and exactly issue-branch --repo-root ${REPO} --issue ${n} and return the branch member of the one JSON line it prints; on a non-zero exit omit branch and return branch_error: the exit code and the code and message of the JSON error it printed.
 3. claim: run alone and exactly forge-claim status --repo ${SLUG} --issue ${n} --holder ${HOLDER} and return its verdict (free, held_by or stale) and by; on exit 1 or 2 return verdict error.
 4. merged_refs: one {number, closes} per merged PR referencing the issue (gh pr list --repo ${SLUG} --state merged --search ${n} --json number,closingIssuesReferences), closes true only when its closingIssuesReferences lists issue ${n}, [] when none.${landedRead(n)} open_pr: {number, head_branch} of an open PR referencing the issue, else null.
-5. native: run alone and exactly forge-issue read --repo ${SLUG} --issue ${n} and return the verdict, blocked_by, blocked_by_states and error of the one JSON line it prints, unchanged. blockers: one {issue, state} per issue of ${SLUG} in the body's "Blocked by" list that blocked_by lacks, with the state from gh issue view, [] when none.
+5. native: run alone and exactly forge-issue read --repo ${SLUG} --issue ${n} and return the verdict, blocked_by, blocked_by_states and error of the one JSON line it prints, unchanged. blockers: one {issue, state} per issue #<n> of the body's "Blocked by" list whose ${SLUG}#<n> is not in blocked_by, with the state from gh issue view, [] when none.
 6. decision: run alone and exactly forge-claim owner-action status --repo ${SLUG} --issue ${n} --reason decision and return its verdict, comment_id and questions.
 7. already_fixed: name the issue's concrete symptom as one literal string taken from its body (an error string, a quoted code literal, or the quoted output of a failing command; never run the failing command). Run git -C ${REPO} fetch origin ${INT}, then git -C ${REPO} grep -n -F '<literal>' origin/${INT} and git -C ${REPO} log origin/${INT} -S'<literal>' --since=<createdAt> --format='%H %s'. Return already_fixed {commit (the full sha of the commit since the issue opened that removed the literal), evidence (the literal and what both commands printed)} only when the grep finds the literal nowhere at origin/${INT} and the log names such a commit; otherwise, or with no concrete literal, return already_fixed null.
 8. lane: invoke the deliver-direct skill with the Skill tool to read its Eligibility paragraph, the single source of what a direct issue is. Answer direct when the issue meets that Eligibility. Answer needs-design when its criteria are missing or not checkable, or it needs an open design decision that the issue, its comments and the repository docs do not settle. Otherwise answer standard. Return lane and a one-sentence why.
@@ -306,12 +306,13 @@ const nativeProblem = (n, f) => {
 const blockersOf = f => {
   const open = new Map()
   const prefix = `${SLUG}#`.toLowerCase()
-  const states = nativeRead(f) && isObj(f.native.blocked_by_states) ? f.native.blocked_by_states : {}
+  // References compare without case, as the same-repository prefix does.
+  const states = new Map(Object.entries(nativeRead(f) && isObj(f.native.blocked_by_states) ? f.native.blocked_by_states : {}).map(([k, v]) => [k.toLowerCase(), v]))
   for (const r of (nativeRead(f) ? f.native.blocked_by : [])) {
     if (typeof r !== 'string' || !NATIVE_REF.test(r)) continue
     // A blocker of this repository is its number, another repository's is its reference.
     const key = r.toLowerCase().startsWith(prefix) ? Number(r.slice(prefix.length)) : r
-    if (open.get(key) !== true) open.set(key, String(states[r]).toUpperCase() !== 'CLOSED')
+    if (open.get(key) !== true) open.set(key, String(states.get(r.toLowerCase())).toUpperCase() !== 'CLOSED')
   }
   for (const b of (Array.isArray(f.blockers) ? f.blockers : [])) {
     if (isObj(b) && Number.isInteger(b.issue) && open.get(b.issue) !== true) open.set(b.issue, String(b.state).toUpperCase() !== 'CLOSED')
@@ -353,10 +354,13 @@ const eligibility = (n, f) => {
   const problem = nativeProblem(n, f)
   if (problem) return { issue: n, outcome: 'stopped', detail: problem }
   const outside = blockersOf(f).filter(b => b.state === 'OPEN' && !ISSUES.includes(b.issue)).map(b => b.issue)
-  const numbers = outside.filter(Number.isInteger)
-  if (numbers.length) return { issue: n, outcome: 'blocked', blocker: Math.min(...numbers) }
-  // blocker stays a number of this repository: another repository's open blocker is named whole, in blocker_ref.
-  if (outside.length) return { issue: n, outcome: 'blocked', blocker_ref: outside.sort()[0] }
+  if (outside.length) {
+    const numbers = outside.filter(Number.isInteger).sort((a, b) => a - b)
+    const refs = outside.filter(b => !Number.isInteger(b)).sort()
+    // blocker stays the lowest number of this repository, and blocker_ref names another repository's blocker when there is none;
+    // blockers names every open outside blocker, so one run shows all an owner has to close.
+    return { issue: n, outcome: 'blocked', ...(numbers.length ? { blocker: numbers[0] } : { blocker_ref: refs[0] }), blockers: [...numbers.map(b => `#${b}`), ...refs] }
+  }
   // Only a questioned issue waits: no lane, no claim, no child until the owner answers.
   const decision = f.decision || {}
   if (decision.verdict === 'open' && !(DECISIONS && DECISIONS[String(n)])) {
@@ -472,7 +476,7 @@ const rowReason = r => {
   const finding = isObj(r.review) && Array.isArray(r.review.findings) && isObj(r.review.findings[0]) ? r.review.findings[0].summary : ''
   const said = [r.detail, r.details, r.note, r.expected ? `expected ${r.expected}, head ${r.head || 'unread'}` : '',
     listed('failing', 'failing checks'), listed('pending', 'pending checks'), listed('missing', 'missing checks'),
-    nonEmpty(r.label) ? `needs the label ${r.label}` : '', r.blocker ? `waits for #${r.blocker}` : '', nonEmpty(r.blocker_ref) ? `waits for ${r.blocker_ref}` : '', nonEmpty(r.by) ? `claimed by ${r.by}` : '',
+    nonEmpty(r.label) ? `needs the label ${r.label}` : '', Array.isArray(r.blockers) && r.blockers.length ? `waits for ${r.blockers.join(', ')}` : (r.blocker ? `waits for #${r.blocker}` : ''), nonEmpty(r.by) ? `claimed by ${r.by}` : '',
     nonEmpty(finding) ? `review finding: ${finding}` : ''].filter(nonEmpty)
   if (!said.length && r.outcome !== 'stopped') return ''
   return oneLine([r.stage, said.join('; ')].filter(nonEmpty).join(': ') || 'no detail')

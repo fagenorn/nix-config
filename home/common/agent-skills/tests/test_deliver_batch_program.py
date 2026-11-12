@@ -2689,7 +2689,8 @@ class DependencyTest(unittest.TestCase):
         facts = {"native": stated({"other/repo#2": "open", "another/repo#7": "open", "owner/repo#50": "closed"})}
         result, calls, _ = run(args=dict(ARGS, issues=[1, 2]), patch={"facts-1": facts})
         self.assertEqual(row(result, 1), {"issue": 1, "outcome": "blocked", "blocker_ref": "another/repo#7",
-                                          "reason": "waits for another/repo#7"})
+                                          "blockers": ["another/repo#7", "other/repo#2"],
+                                          "reason": "waits for another/repo#7, other/repo#2"})
         self.assertNotIn("acquire-1", labels(calls))
         self.assertEqual(row(result, 2)["outcome"], "landed")
         self.assertEqual(result["relaunch"]["issues"], [1])
@@ -2697,11 +2698,46 @@ class DependencyTest(unittest.TestCase):
     def test_an_open_blocker_of_the_repository_is_named_before_another_repository_s(self):
         facts = {"native": stated({"other/repo#2": "open", "owner/repo#50": "open"})}
         result, _, _ = run(patch={"facts-1": facts})
-        self.assertEqual(row(result, 1), {"issue": 1, "outcome": "blocked", "blocker": 50, "reason": "waits for #50"})
+        self.assertEqual(row(result, 1), {"issue": 1, "outcome": "blocked", "blocker": 50, "blockers": ["#50", "other/repo#2"],
+                                          "reason": "waits for #50, other/repo#2"})
+
+    def test_a_blocked_row_names_every_open_outside_blocker(self):
+        """An owner closes them all in one round (a row naming one of two cost a relaunch)."""
+        body = [{"issue": 2213, "state": "OPEN"}, {"issue": 9, "state": "CLOSED"}, {"issue": 2, "state": "OPEN"}]
+        for facts, named in (
+                ({"native": stated({"owner/repo#2212": "open"})}, ["#2212"]),
+                ({"native": stated({"owner/repo#2212": "open", "owner/repo#77": "closed"}), "blockers": body}, ["#2212", "#2213"]),
+                ({"native": stated({"other/repo#5": "open", "owner/repo#2212": "open", "a/b#1": "open"}), "blockers": body},
+                 ["#2212", "#2213", "a/b#1", "other/repo#5"])):
+            with self.subTest(named=named):
+                # Issue 2 is in the batch: an in-batch blocker is waited for, never named as an outside one.
+                result, _, _ = run(args=dict(ARGS, issues=[1, 2]), patch={"facts-1": facts})
+                self.assertEqual(row(result, 1), {"issue": 1, "outcome": "blocked", "blocker": 2212, "blockers": named,
+                                                  "reason": f"waits for {', '.join(named)}"})
+
+    def test_the_log_line_names_every_open_outside_blocker(self):
+        out = run_full(patch={"facts-1": {"native": stated({"owner/repo#2212": "open", "other/repo#5": "open"})}})
+        self.assertIn("#1: blocked (waits for #2212, other/repo#5)", out["logs"])
+
+    def test_a_state_is_found_whatever_the_case_of_its_reference(self):
+        for listed, key in (("Owner/Repo#50", "owner/repo#50"), ("owner/repo#50", "OWNER/REPO#50"), ("Other/Repo#2", "other/repo#2")):
+            with self.subTest(listed=listed, key=key):
+                facts = {"native": {"verdict": "read", "blocked_by": [listed], "blocked_by_states": {key: "closed"}}}
+                result, _, _ = run(patch={"facts-1": facts})
+                self.assertEqual(row(result, 1)["outcome"], "landed")
+
+    def test_the_schema_takes_the_nulls_a_failed_read_prints(self):
+        _, calls, _ = run()
+        members = next(c for c in calls if c["label"] == "facts-1")["schema"]["properties"]["native"]["properties"]
+        for name, kind in (("blocked_by", "array"), ("blocked_by_states", "object")):
+            self.assertEqual(members[name]["type"], [kind, "null"])
+        result, _, _ = run(patch={"facts-1": {"native": {"verdict": "error", "blocked_by": None, "blocked_by_states": None,
+                                                         "error": "payload_invalid"}}})
+        self.assertEqual(row(result, 1)["reason"], "facts-1 did not read the native blockers: payload_invalid")
 
     def test_a_native_entry_the_reply_gives_no_state_counts_as_open(self):
         for ref, named in (("other/repo#2", {"blocker_ref": "other/repo#2"}), ("owner/repo#50", {"blocker": 50})):
-            for states in (None, {}, [], "closed", {ref: None}, {ref: "unknown"}, {ref.upper(): "closed"}):
+            for states in (None, {}, [], "closed", {ref: None}, {ref: "unknown"}, {ref + "0": "closed"}):
                 with self.subTest(ref=ref, states=states):
                     answer = {"verdict": "read", "blocked_by": [ref]}
                     if states is not None:
@@ -2709,7 +2745,7 @@ class DependencyTest(unittest.TestCase):
                     # A state the clerk looked up itself never closes a blocker the native read left open.
                     facts = {"native": answer, "blockers": [{"issue": 50, "state": "CLOSED"}, {"issue": 2, "state": "CLOSED"}]}
                     result, calls, _ = run(patch={"facts-1": facts})
-                    self.assertEqual({k: v for k, v in row(result, 1).items() if k != "reason"},
+                    self.assertEqual({k: v for k, v in row(result, 1).items() if k not in ("reason", "blockers")},
                                      dict({"issue": 1, "outcome": "blocked"}, **named))
                     self.assertNotIn("acquire-1", labels(calls))
 
@@ -2718,8 +2754,8 @@ class DependencyTest(unittest.TestCase):
         call = next(c for c in calls if c["label"] == "facts-1")
         self.assertIn("blocked_by_states", call["schema"]["properties"]["native"]["properties"])
         self.assertIn("return the verdict, blocked_by, blocked_by_states and error of the one JSON line it prints, unchanged. "
-                      "blockers: one {issue, state} per issue of owner/repo in the body's \"Blocked by\" list that blocked_by "
-                      "lacks, with the state from gh issue view, [] when none.", call["prompt"])
+                      "blockers: one {issue, state} per issue #<n> of the body's \"Blocked by\" list whose owner/repo#<n> is not in "
+                      "blocked_by, with the state from gh issue view, [] when none.", call["prompt"])
 
     def test_only_a_state_that_says_closed_releases_a_blocker(self):
         for state, outcome in (("unknown", "blocked"), ("", "blocked"), ("error", "blocked"), ("open", "blocked"),
@@ -3657,7 +3693,7 @@ class StopReasonTest(unittest.TestCase):
         # The relaunch does not get to the issue: its row still says why it stopped, and the next relaunch keeps saying so.
         waiting = run_full(args=first["relaunch"], patch=self.WAITS)
         second = waiting["result"]
-        self.assertEqual(row(second, 1), {"issue": 1, "outcome": "blocked", "blocker": 50, "reason": f"waits for #50; previous run: {reason}"})
+        self.assertEqual(row(second, 1), {"issue": 1, "outcome": "blocked", "blocker": 50, "blockers": ["#50"], "reason": f"waits for #50; previous run: {reason}"})
         self.assertIn(f"#1: blocked (waits for #50; previous run: {reason})", waiting["logs"])
         self.assertEqual(second["relaunch"]["reasons"], {"1": reason})
         third, _, _ = run(args=second["relaunch"], patch=self.WAITS)
