@@ -2066,6 +2066,11 @@ class ProgramCopiesSkillTest(unittest.TestCase):
                 self.assertGreater(text.index("`scriptPath`"), self.PLACE.search(text).end())
                 self.assertIsNone(self.INSTALLED.search(text))
 
+    def test_a_relaunch_starts_from_fresh_copies(self):
+        """#981: a relaunch takes both programs from one new placement, not the previous run's child path."""
+        self.assertIn("non-null `relaunch` with `scriptPath` and `child_script` newly placed",
+                      self.BATCH.read_text(encoding="utf-8"))
+
     def test_the_placing_command_is_a_command_table_row(self):
         table = (REPO_ROOT / "lib/agent-tools.nix").read_text(encoding="utf-8")
         self.assertIn('"program-copies" = "delivery.program_copies";', table)
