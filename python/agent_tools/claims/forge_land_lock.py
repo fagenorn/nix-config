@@ -20,9 +20,17 @@ lock, found by head sha in the closed listing `GET pulls?state=closed&base=<bran
 at most 5 pages of 100), and only an open pull request whose head is the lock holds it: the lock
 is held while it is the head of an open pull request other than the caller's, and a pull request
 that merely contains the lock's sha (a branch stacked on the holder) never holds or moves it.
+For a commit on the default branch the commit lookup lists merged pull requests only (issue 905),
+so it leaves out an open pull request whose head is already there, as the head of every sync of
+the default branch back into the locked branch is. When the lookup lists no pull request headed
+at the lock, the open pull requests based on the branch are therefore read before the closed
+ones (`GET pulls?state=open&base=<branch>&sort=updated`, at most 5 pages of 100, matched by head
+sha), and a same-repository one headed at the lock holds it, whatever closed pull requests share
+that head or contain it; the closed listing is read only when none is found. A fork's pull
+request is never taken from this listing, and an open one beyond those pages is not seen.
 A release pull request (issue 875) is one whose head is the locked branch itself, in the same
 repository, at the lock: `_on_branch` counts it whatever its base, so every caller derives it as
-the holder with no flag. The commit lookup lists it while it is open; when neither listing above
+the holder with no flag. The commit lookup lists it while it is open; when no listing above
 has a pull request headed at the lock, one the lookup left out, open or closed, is found in `GET
 pulls?state=all&head=<owner>:<branch>&sort=updated` (one page of 100), so a live release lock is
 never judged by the merged pull requests that contain it. A fork's branch of the same name is
@@ -61,7 +69,10 @@ merges on a lock that changed hands without a resync.
 D6, `acquire` needs an open pull request whose head is the caller's sha with the branch as its
 base before any ref write, and otherwise answers `error` with `no_open_pr` (exit 2). `--wait`
 re-checks this before every attempt, the first included: a caller whose pull request no longer has
-`--sha` as its head stops with `no_open_pr` and never moves the lock. With `--release` the pull
+`--sha` as its head stops with `no_open_pr` and never moves the lock. When the commit lookup of
+`--sha` lists no such pull request, the open listing of D2 is read once for a same-repository one
+(issue 905: a head on the default branch), so the common path makes no extra call and `no_open_pr`
+is answered only after both reads. With `--release` the pull
 request needed is instead an open one whose head branch is `--branch` at `--sha`, in the same
 repository (never a fork's branch of that name), with the repository's default branch as its base;
 the default branch is read once per invocation (`GET repos/<slug>`). With `--follow-head` a
@@ -201,16 +212,20 @@ def _on_branch(slug: str, sha: str, branch: str) -> list[fm.Pull]:
     plus the ones headed at it that the commit lookup did not list.
 
     The forge's commit lookup returns only open pull requests for a commit outside the default
-    branch, so a squash-merged, rebase-merged or closed holder is found by its head sha instead,
-    and only when no pull request already has that head: first among the closed pull requests on
-    `branch`, then, when none is found there, among the pull requests headed by `branch`, open
-    ones included, because the lookup can leave an open release pull request out.
+    branch and only merged ones for a commit on it, so a holder it left out is found by its head
+    sha instead, and only when no pull request already has that head: first among the open pull
+    requests on `branch` (a head on the default branch, issue 905), then among the closed ones (a
+    squash-merged, rebase-merged or closed holder), then, when none is found there, among the
+    pull requests headed by `branch`, open ones included, because the lookup can leave an open
+    release pull request out. Each listing is read only when the one before it found none.
     """
     pulls = [p for p in fm.commit_pulls(slug, sha) if p.base_ref == branch or _from_branch(p, branch)]
     if not any(p.head_sha == sha for p in pulls):
         known = {p.number for p in pulls}
-        closed = [p for p in fm.closed_pulls_headed(slug, branch, sha) if p.number not in known]
-        pulls += closed or [p for p in fm.pulls_from(slug, branch, sha) if p.number not in known]
+        for listing in (fm.open_pulls_headed, fm.closed_pulls_headed, fm.pulls_from):
+            headed = [p for p in listing(slug, branch, sha) if p.number not in known]
+            if headed:
+                return pulls + headed
     return pulls
 
 
@@ -382,7 +397,9 @@ def _acquire(args: Any, attempts: Attempts | None = None) -> tuple[int, dict[str
         else:
             opened = [p for p in fm.commit_pulls(args.repo, args.sha) if p.state == "open"]
             if not args.release:
-                return [p for p in opened if p.base_ref == args.branch and p.head_sha == args.sha]
+                mine = [p for p in opened if p.base_ref == args.branch and p.head_sha == args.sha]
+                # D6: an open head on the default branch is not in the commit lookup (issue 905).
+                return mine or fm.open_pulls_headed(args.repo, args.branch, args.sha)
             mine = [p for p in opened if _releases(p, args.branch, args.sha)]
         if mine and not default:
             default.append(fm.default_branch(args.repo))
