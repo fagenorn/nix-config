@@ -1362,6 +1362,26 @@ class SprintEndViewTest(unittest.TestCase):
         self.assertEqual(shown["ended_at"], iso(C))
         self.assertIsNone(shown["stop_text"])
 
+    def test_a_sprint_ended_by_a_closing_shows_the_closing_and_nothing_of_the_last_report(self):
+        it = reported(started(A), R, issues=((12, "building"), (13, "queued"), (14, "held")))
+        C = R + 5 * MIN
+        shown = entry(line(it, C))
+        self.assertIsNotNone(shown["status"])
+        self.assertIsNotNone(shown["next"])
+        self.assertEqual(shown["progress"]["in_delivery"], 1)
+        closed_it = closed(it, C, ((12, "landed"), (13, "dropped"), (14, "held")))
+        shown = entry(line(closed_it, C + MIN))
+        for member in ("status", "status_at", "next", "progress", "progress_text"):
+            self.assertIsNone(shown[member], member)
+        self.assertEqual(shown["milestone"], it.report.milestone)
+        self.assertEqual(shown["tracker_url"], it.report.tracker_url)
+        self.assertEqual(shown["issues"], [
+            {"issue": 12, "stage": "landed", "stage_text": "landed"},
+            {"issue": 13, "stage": "dropped", "stage_text": "dropped"},
+            {"issue": 14, "stage": "held", "stage_text": "held for verification"}])
+        self.assertEqual(shown["closing"]["counts_text"],
+                         "1 landed, 1 held for verification, 1 dropped")
+
     def test_a_done_sprint_folds_into_finished_sprints_after_24_hours(self):
         C = R + 5 * MIN
         it = closed(reported(started(A), R), C, ((12, "landed"),))

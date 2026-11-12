@@ -215,7 +215,11 @@ elapsed). A project with a shown sprint is never quiet and never folded into the
 
 A shown sprint reads its manager's latest report (`SprintState.report`); with none, `progress`,
 `progress_text`, `status`, `status_at`, `next`, `milestone` and `tracker_url` are null,
-`issues` is `[]` and `waiting` is 0. Each reported issue, ordered by number, has an effective
+`issues` is `[]` and `waiting` is 0. A sprint ended by a closing report (#980) shows its closing
+only: `progress`, `progress_text`, `status`, `status_at` and `next` are null whatever its last report
+said, and each of `issues`, ordered by number, is an issue of the closing with its closing stage
+(`landed`, `held` or `dropped`) and `stage_text` `landed`, `held for verification` or `dropped`;
+`milestone` and `tracker_url` stay the report's. Each reported issue, ordered by number, has an effective
 `stage`: the report's own when it is `landed` or `held` (an outcome the manager reported is kept
 against any run), else the stage of the sprint's observation of that issue (`SprintState.observed`),
 where a run's `done` reads `closed out` and any other run stage is that stage with its
@@ -352,6 +356,7 @@ UNREGISTERED = "project.unregistered"
 FOLD_AFTER = 3
 HEADLINE = "Nothing needs you"
 OUTSIDE_LABEL = "Outside sprints"
+CLOSING_OUTCOME_TEXT = {LANDED: "landed", HELD: "held for verification", DROPPED: "dropped"}
 FINISHED_LABEL = "Finished sprints"
 UNMANAGED_LABEL = "Not yet managed"
 
@@ -693,7 +698,10 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
     stated_ms = _millis(state.stated_at)
     elapsed = 0 if now_ms is None else now_ms - stated_ms
     report = state.report
-    stages = [] if report is None else _effective_stages(state)
+    closing = state.closing
+    stages = (sorted((issue, stage, CLOSING_OUTCOME_TEXT[stage])
+                     for issue, stage in closing.issues) if closing is not None
+              else [] if report is None else _effective_stages(state))
     waiting = sprint_waiting(state, records)
     counts = {
         "landed": sum(stage == LANDED for _, stage, _ in stages),
@@ -702,6 +710,7 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
         "held": sum(stage == HELD for _, stage, _ in stages),
         "total": len(stages),
     }
+    progressing = report is not None and closing is None
     manager_state, manager_text, retry = manager_status(state, bool(sessions), now_ms, managers)
     quota = (quota_wait(capacity, state.manager.profile)
              if state.manager is not None and state.manager.state == STARTED else None)
@@ -720,13 +729,13 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
         "manager_until": (state.manager.until
                           if manager_state == WAITING and state.manager is not None else None),
         "retry": retry,
-        "progress": None if report is None else counts,
-        "progress_text": None if report is None else progress_text(
+        "progress": counts if progressing else None,
+        "progress_text": progress_text(
             counts["landed"], counts["total"], counts["in_delivery"], counts["queued"],
-            counts["held"]),
-        "status": None if report is None else report.status,
-        "status_at": None if report is None else report.at,
-        "next": None if report is None else report.next_step,
+            counts["held"]) if progressing else None,
+        "status": report.status if progressing else None,
+        "status_at": report.at if progressing else None,
+        "next": report.next_step if progressing else None,
         "milestone": None if report is None else report.milestone,
         "tracker_url": None if report is None else report.tracker_url,
         "issues": [{"issue": issue, "stage": stage, "stage_text": text}

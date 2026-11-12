@@ -160,6 +160,95 @@ class StopServiceTest(Case):
         self.assertEqual((entry["state"], entry["state_text"]), ("stopped", "stopped by you"))
         self.assertEqual(entry["closing"]["first_line"], "Stopped early")
 
+    def seen(self, svc, sid, state):
+        """Fold one `session.seen` row of the sprint's manager at the controlled clock."""
+        with svc._ingest:
+            svc._apply(svc.log.append([("session.seen", "owner/p01", {
+                "session_id": FIRST, "cwd": "/srv/p01", "repo": "/srv/p01", "state": state,
+                "name": manager.session_name("owner/p01", sid)})]))
+
+    def close_after_landing(self, svc, sid):
+        """The last report said landing, then the manager sends its closing report (#980)."""
+        svc.send_report(sid, self.secret(sid), REPORT)
+        self.seen(svc, sid, "working")
+        self.now[0] = T0 + 10
+        svc.send_closing(sid, self.secret(sid), {
+            "summary": "Importer resumes after a crash", "differently": "cut smaller slices",
+            "issues": [{"issue": 12, "stage": "held"}, {"issue": 13, "stage": "landed"}]})
+
+    def test_a_closing_report_stops_the_done_sprints_manager_once_its_turn_has_ended(self):
+        svc = self.begin()
+        sid = self.running(svc)
+        self.close_after_landing(svc, sid)
+        self.assertEqual(self.stops, [])
+        self.now[0] = T0 + 11
+        svc.finish_stops()
+        self.assertEqual(self.stops, [])
+        self.seen(svc, sid, "idle")
+        svc.finish_stops()
+        self.assertEqual(self.stops, [(FIRST, "work")])
+        self.assertEqual(self.rows("manager.stopped"), [{"sprint_id": sid}])
+        for later in (20, 130, 4000):
+            self.now[0] = T0 + later
+            svc.finish_stops()
+        self.assertEqual(len(self.stops), 1)
+        self.assertEqual(len(self.rows("manager.stopped")), 1)
+        self.assertEqual(self.entry(svc, sid)["state"], "done")
+
+    def test_a_closing_report_stops_the_manager_two_minutes_after_it_at_the_latest(self):
+        svc = self.begin()
+        sid = self.running(svc)
+        self.close_after_landing(svc, sid)
+        self.now[0] = T0 + 10 + 119.999
+        svc.finish_stops()
+        self.assertEqual(self.stops, [])
+        self.now[0] = T0 + 10 + 120
+        svc.finish_stops()
+        self.assertEqual(self.stops, [(FIRST, "work")])
+        self.now[0] = T0 + 10 + 400
+        svc.finish_stops()
+        self.assertEqual(len(self.stops), 1)
+
+    def test_a_turn_that_ended_before_the_closing_report_does_not_stop_the_manager_early(self):
+        svc = self.begin()
+        sid = self.running(svc)
+        svc.send_report(sid, self.secret(sid), REPORT)
+        self.seen(svc, sid, "idle")
+        self.now[0] = T0 + 10
+        svc.send_closing(sid, self.secret(sid), {
+            "summary": "Importer resumes after a crash", "differently": "cut smaller slices",
+            "issues": [{"issue": 12, "stage": "held"}, {"issue": 13, "stage": "landed"}]})
+        self.now[0] = T0 + 11
+        svc.finish_stops()
+        self.assertEqual(self.stops, [])
+
+    def test_a_done_sprints_stopped_manager_is_not_brought_back_and_a_restart_keeps_it(self):
+        first = self.begin()
+        sid = self.running(first)
+        self.close_after_landing(first, sid)
+        self.now[0] = T0 + 200
+        first.finish_stops()
+        self.assertEqual(len(self.stops), 1)
+        self.listed.clear()
+        self.nudges.clear()
+        launches = len(self.rows("manager.started"))
+        self.now[0] = T0 + 4000
+        first.revive()
+        first.nudge_idle()
+        first.renudge()
+        first.finish_stops()
+        self.assertEqual(self.nudges, [])
+        self.assertEqual(self.rows("manager.woken"), [])
+        self.assertEqual(len(self.rows("manager.started")), launches)
+        first.close()
+        self.now[0] = T0 + 5000
+        svc = self.begin()
+        svc.finish_stops()
+        svc.revive()
+        self.assertEqual(len(self.stops), 1)
+        self.assertEqual(self.rows("manager.stopped"), [{"sprint_id": sid}])
+        self.assertEqual(self.nudges, [])
+
     def test_a_failed_stop_is_shown_and_retried_after_a_minute(self):
         svc = self.begin()
         sid = self.running(svc)
