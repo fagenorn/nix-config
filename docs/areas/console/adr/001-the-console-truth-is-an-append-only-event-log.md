@@ -1,7 +1,7 @@
 # ADR-console-001 — The console's truth is an append-only event log, served on loopback
 
 - **Status:** accepted
-- **Decided in:** #838, #855
+- **Decided in:** #838, #855, #886
 
 ## Context
 
@@ -14,5 +14,5 @@ Every fact the console learns is one row of an append-only SQLite log at `~/.age
 ## Consequences
 
 - One console per host: a second one cannot take the port, and the log format can be merged across hosts later.
-- Rows older than 90 days are removed by the retention pass (ADR-console-009).
+- Rows older than 90 days are removed by the retention pass (ADR-console-009), except goal rows, which are kept indefinitely (ADR-console-011).
 - Removing a project from the registry file unregisters it; deleting the file does not.
