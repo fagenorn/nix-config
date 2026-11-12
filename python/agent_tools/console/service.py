@@ -14,8 +14,10 @@ Routes (every response carries `Cache-Control: no-store` and
     POST /api/hooks 204, no body, a Claude Code hook's input (below)
     POST /api/readings 204, no body, the cache proxy's limit reading (below)
     POST /api/looked 204, no body, the page records that the owner looked (below)
+    POST /api/answer 204, a JSON body, the page sends the owner's choice (below)
     anything else   404
-    other methods   405 with `Allow: GET` (`Allow: POST` on `/api/hooks`, `/api/readings` and `/api/looked`)
+    other methods   405 with `Allow: GET` (`Allow: POST` on `/api/hooks`, `/api/readings`,
+                    `/api/looked` and `/api/answer`)
 
 Two kinds of write exist. The hook and reading routes append what the proxies and hooks observe:
 `POST /api/hooks` appends session observations, `POST /api/readings` the capacity kinds
@@ -35,14 +37,27 @@ is one stderr line `console: hook_unreadable <message>`; any other failure is
 ignored payload (an unknown event, a missing member) appends nothing. The
 route carries no token: it records observations and answers nothing (ADR-console-004).
 
-A page write (`PAGE_WRITES`, today `POST /api/looked`; ADR-console-008) is made by the desk page
+A page write (`PAGE_WRITES`, today `POST /api/looked` and `POST /api/answer`; ADR-console-008,
+ADR-console-010) is made by the desk page
 alone and goes through one guard, `_page_write`, whatever its route. After the loopback `Host`
 check and before any body is read, exactly one `Origin` header must equal `http://<Host>` (else
 403 `text/plain` `origin refused`) and exactly one `X-Console-Token` header must equal the
 install's token (else 403 `token refused`; see `write_guard.py`), each refusal closing the
-connection and appending nothing. A page write carries no body: a `Content-Length` other than
-absent or `0`, or any `Transfer-Encoding`, is 400 `no body`. `POST /api/looked` then appends one
-`page.looked` event (`record_look`) and answers an empty `204`. The token is created once in
+connection and appending nothing. The body rule is per route. `POST /api/looked` carries no body: a
+`Content-Length` other than absent or `0`, or any `Transfer-Encoding`, is 400 `no body`; it then
+appends one `page.looked` event (`record_look`) and answers an empty `204`. `POST /api/answer`
+carries one JSON body, and after the guard these checks run in order, each refusal `text/plain`, one
+line, closing the connection, appending nothing and ticking nothing: any `Transfer-Encoding` is 411
+`length required`; a `Content-Type` whose media type is not `application/json` is 415 `json only`;
+a `Content-Length` that is not ASCII digits is 411 `length required`, one above `MAX_ANSWER_BYTES`
+(4096) is 413 `too large` (the body unread); a body `answer.parse_request` does not accept is 400
+`bad answer`. Then `answer(project_id, key, choices)` runs, and each failure writes one stderr
+line before it is translated: `answer.Refused` is `console: answer_refused <project_id> <key>
+<reason>` and 409 with the reason; a `ForgeError` is `console: answer_tick_failed <project_id> <key>
+<code>: <detail>` (whitespace runs collapsed to one space; the detail is what `gh` wrote to stderr)
+and 502 `the tracker refused the tick: <error>`; any other exception is `console: answer_failed
+<Type>: <message>` and 500 `answer failed`. Success is an empty `204`. No refusal appends to the
+event log. The token is created once in
 `page-token` beside the event log and reaches a client only inside `GET /`, where it replaces
 the slot in the page's `console-token` meta tag.
 
@@ -228,7 +243,9 @@ KEEPALIVE_SECONDS = 15.0
 WATCH_THREAD = "console-registry-watch"
 HOOK_PATH = "/api/hooks"
 LOOKED_PATH = "/api/looked"
-PAGE_WRITES: frozenset[str] = frozenset({LOOKED_PATH})
+ANSWER_PATH = "/api/answer"
+PAGE_WRITES: frozenset[str] = frozenset({LOOKED_PATH, ANSWER_PATH})
+MAX_ANSWER_BYTES = 4096
 MAX_HOOK_BYTES = 8 * 1024 * 1024
 READINGS_PATH = "/api/readings"
 MAX_READING_BYTES = 64 * 1024
@@ -389,6 +406,45 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         except Exception as error:
             print(f"console: {name}_failed {type(error).__name__}: {error}", file=sys.stderr)
 
+    def _answer_request(self, console: "ConsoleService") -> bool:
+        """Read and carry out an answer; False when it was refused (already answered to the page)."""
+        if self.headers.get("Transfer-Encoding") is not None:
+            self._refuse(411, "length required")
+            return False
+        media = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        if media != "application/json":
+            self._refuse(415, "json only")
+            return False
+        length = self.headers.get("Content-Length", "")
+        if not (length.isascii() and length.isdigit()):
+            self._refuse(411, "length required")
+            return False
+        if int(length) > MAX_ANSWER_BYTES:
+            self._refuse(413, "too large")
+            return False
+        try:
+            project_id, key, choices = answer.parse_request(self.rfile.read(int(length)))
+        except ValueError:
+            self._refuse(400, "bad answer")
+            return False
+        try:
+            console.answer(project_id, key, choices)
+        except answer.Refused as error:
+            print(f"console: answer_refused {project_id} {key} {error}", file=sys.stderr)
+            self._refuse(409, str(error))
+            return False
+        except ForgeError as error:
+            detail = " ".join(error.detail.split())
+            print(f"console: answer_tick_failed {project_id} {key} {error.code}: {detail}",
+                  file=sys.stderr)
+            self._refuse(502, f"the tracker refused the tick: {' '.join(str(error).split())}")
+            return False
+        except Exception as error:
+            print(f"console: answer_failed {type(error).__name__}: {error}", file=sys.stderr)
+            self._refuse(500, "answer failed")
+            return False
+        return True
+
     def _page_write(self, route: str):
         console = self.server.console
         refusal = write_guard.refusal(
@@ -396,15 +452,20 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             self.headers.get_all(write_guard.TOKEN_HEADER) or [], console.page_token)
         if refusal is not None:
             return self._refuse(*refusal)
-        if (self.headers.get("Content-Length", "0") != "0"
-                or self.headers.get("Transfer-Encoding") is not None):
-            return self._refuse(400, "no body")
-        self.close_connection = True
-        try:
-            console.record_look()
-        except Exception as error:
-            print(f"console: look_failed {type(error).__name__}: {error}", file=sys.stderr)
-            return self._refuse(500, "look failed")
+        if route == ANSWER_PATH:
+            self.close_connection = True
+            if not self._answer_request(console):
+                return
+        else:
+            if (self.headers.get("Content-Length", "0") != "0"
+                    or self.headers.get("Transfer-Encoding") is not None):
+                return self._refuse(400, "no body")
+            self.close_connection = True
+            try:
+                console.record_look()
+            except Exception as error:
+                print(f"console: look_failed {type(error).__name__}: {error}", file=sys.stderr)
+                return self._refuse(500, "look failed")
         try:
             self.send_response(204)
             self.send_header("Cache-Control", "no-store")

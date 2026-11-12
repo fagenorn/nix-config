@@ -20,10 +20,22 @@ The tick is checked against the tracker as it is now, in this order:
 3. `forge_markers.edit` is called exactly once with `forge_owner_action.tick_body(body, choices)`.
 
 A forge error propagates unchanged. `Refused` carries the one-line reason as `str(error)`.
+
+`parse_request(body)` reads the page's request body, the one body of `POST /api/answer`
+(`service.py`), sent as `Content-Type: application/json` and at most `service.MAX_ANSWER_BYTES`
+long:
+
+    {"project_id": "<project id>", "key": "<inbox item key>", "choices": [<0-based option index per question>, ...]}
+
+and returns `(project_id, key, choices)`. It accepts only a UTF-8 JSON object with exactly the keys
+`project_id` and `key` (non-empty strings) and `choices` (a list of 1 to `forge_owner_action.MAX_ITEMS`
+integers, none a boolean, each at least 0); anything else, a repeated key included, raises `ValueError`.
 """
 
+import json
 from collections.abc import Sequence
 
+from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.claims import forge_markers as fm
 from agent_tools.claims import forge_owner_action as foa
 from agent_tools.system import forge_api
@@ -43,6 +55,24 @@ class Refused(Exception):
 
 def _reduced(questions: Sequence[dict]) -> list[tuple[str, list[str]]]:
     return [(q["question"], list(q["options"])) for q in questions]
+
+
+def parse_request(body: bytes) -> tuple[str, str, list[int]]:
+    try:
+        value = json.loads(body.decode("utf-8"), object_pairs_hook=reject_duplicate_keys,
+                           parse_constant=reject_nonfinite_literal)
+    except RecursionError as error:
+        raise ValueError("the answer is nested too deeply") from error
+    if not isinstance(value, dict) or set(value) != {"project_id", "key", "choices"}:
+        raise ValueError("the answer must be an object of project_id, key and choices")
+    project_id, key, choices = value["project_id"], value["key"], value["choices"]
+    for name, text in (("project_id", project_id), ("key", key)):
+        if not isinstance(text, str) or not text:
+            raise ValueError(f"{name} must be a non-empty string")
+    if (not isinstance(choices, list) or not 1 <= len(choices) <= foa.MAX_ITEMS
+            or any(isinstance(c, bool) or not isinstance(c, int) or c < 0 for c in choices)):
+        raise ValueError("choices must be a list of non-negative integers, one per question")
+    return project_id, key, choices
 
 
 def tick_on_tracker(slug: str, issue: int, comment_id: int, questions: list[dict],

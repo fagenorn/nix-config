@@ -1,7 +1,7 @@
 # ADR-console-008 — Only the page writes, with a per-install token and the console's own origin
 
 - **Status:** accepted
-- **Decided in:** #837, #838, #861
+- **Decided in:** #837, #838, #861, #862
 
 ## Context
 
@@ -9,9 +9,9 @@ ADR-console-004 gave the console one write route, the hook route, which appends 
 
 ## Decision
 
-A write made by the page is a page write, and the only paths that take one are the members of `PAGE_WRITES` in `agent_tools.console.service`. Every member goes through one guard, `_page_write`, and a later write joins the set rather than adding a route of its own. The first member is `POST /api/looked`, which appends one `page.looked` event and answers an empty `204`.
+A write made by the page is a page write, and the only paths that take one are the members of `PAGE_WRITES` in `agent_tools.console.service`. Every member goes through one guard, `_page_write`, and a later write joins the set rather than adding a route of its own. The first member is `POST /api/looked`, which appends one `page.looked` event and answers an empty `204`; the second is `POST /api/answer` (ADR-console-010), which ticks a decision prompt on the tracker.
 
-The guard admits a page write only when exactly one `Origin` header equals `http://<Host>`, the console's own origin, and exactly one `X-Console-Token` header equals the install's token, compared in constant time. It runs after the loopback `Host` check and before any body is read, so a refused write reads nothing and appends nothing. A terminal sends no `Origin` and a foreign page sends its own, so neither passes. A page write carries no body: a `Content-Length` other than absent or `0`, or any `Transfer-Encoding`, is refused as `400` `no body`.
+The guard admits a page write only when exactly one `Origin` header equals `http://<Host>`, the console's own origin, and exactly one `X-Console-Token` header equals the install's token, compared in constant time. It runs after the loopback `Host` check and before any body is read, so a refused write reads nothing and appends nothing. A terminal sends no `Origin` and a foreign page sends its own, so neither passes. The body rule is per route. `/api/looked` carries no body: a `Content-Length` other than absent or `0`, or any `Transfer-Encoding`, is refused as `400` `no body`. `/api/answer` carries one `application/json` body of at most 4096 bytes, read only after the guard admits the request: any `Transfer-Encoding` or a `Content-Length` that is not digits is `411`, another media type is `415`, a longer body is `413` with the body unread, and a body that is not the expected object is `400` `bad answer`.
 
 The token is 43 URL-safe characters, created once in `page-token` beside the event log (mode 0600, directory 0700, created with `O_EXCL`) and read back on every start. A token file that is unreadable or malformed stops the console, with `console: page token unusable: <error>` and exit 1. The token is placed in the page's `console-token` meta tag when the page is served and appears in no API answer, stream frame, log row or stderr line.
 

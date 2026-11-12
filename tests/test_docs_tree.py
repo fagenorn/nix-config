@@ -393,6 +393,19 @@ class DocsTreeTest(unittest.TestCase):
         ):
             self.assertIn(needle, context)
 
+    def test_the_console_answer_decision_is_recorded(self):
+        path = "docs/areas/console/adr/010-the-page-answers-a-decision-prompt-by-ticking-it-as-the-owner.md"
+        first = (REPO_ROOT / path).read_text().splitlines()[0]
+        self.assertEqual(
+            first, "# ADR-console-010 — The page answers a decision prompt by ticking its box as the owner")
+        adr = self.doc(path)
+        for needle in ("POST /api/answer", "ADR-console-008", "#836", "#838", "#862",
+                       "five seconds", "rec=", "nothing is copied"):
+            self.assertIn(needle, adr)
+        write = self.doc("docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md")
+        for needle in ("/api/answer", "4096"):
+            self.assertIn(needle, write)
+
     def test_the_console_delivery_decision_is_recorded(self):
         path = "docs/areas/console/adr/005-in-flight-delivery-stage-is-read-from-run-journals.md"
         first = (REPO_ROOT / path).read_text().splitlines()[0]
