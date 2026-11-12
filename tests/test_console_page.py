@@ -770,6 +770,19 @@ class PageAnswerTest(unittest.TestCase):
         head = next(n for n in nodes(moved["inbox"]) if has_class(n, "done-head"))
         self.assertEqual(head["text"], SENT_TEXT)
 
+    def test_an_item_the_tracker_shows_open_again_after_a_send_is_answerable_again(self) -> None:
+        reopened = {**ANSWERABLE, "questions": [{**ANSWERABLE["questions"][0], "recommended": None}]}
+        sent, again, resent = render([
+            START, {"frame": frame([ANSWERABLE])}, {"key": "Enter"}, {"clock": 5000},
+            {"snapshot": True}, {"frame": frame([reopened])}, {"snapshot": True},
+            {"key": "1"}, {"key": "Enter"}, {"clock": 10000}, {"snapshot": True},
+        ])
+        self.assertIn(SENT_TEXT, full(sent["inbox"]))
+        self.assertNotIn(SENT_TEXT, full(again["inbox"]))
+        self.assertEqual(picked(again), [])
+        self.assertEqual(count(again, "send"), 1)
+        self.assertEqual([posted(p)["choices"] for p in answers(resent)], [[1], [0]])
+
     def test_an_item_that_leaves_while_waiting_is_never_sent(self) -> None:
         (snap,) = render([
             START, {"frame": frame([ANSWERABLE])}, {"key": "Enter"}, {"clock": 2000},

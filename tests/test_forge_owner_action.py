@@ -257,17 +257,23 @@ class RecommendedTest(Base):
         self.assertEqual(code, 0)
         self.assertEqual(self.mutations(), [post(box_body(rec="2.0")), OA_ENSURE, OA_ADD])
 
-    def test_a_recommendation_that_is_not_an_option_is_a_usage_error(self):
-        self.store()
-        for value in ("Run it on host three.", 2):
+    def test_a_recommendation_that_matches_no_option_is_dropped_and_the_prompt_still_posts(self):
+        for value in ("Run it on host three.", "Run it on host two", ""):
             with self.subTest(recommended=value):
+                self.store()
+                before = len(self.mutations())
                 questions = [{**QUESTIONS[0], "recommended": value}, QUESTIONS[1]]
                 code, out = run(*action("post", "decision", "--holder", ME,
                                         "--questions-file", self.items(questions)))
-                self.assertEqual((code, out["error"]), (2, "usage"))
-                if isinstance(value, str):
-                    self.assertEqual(out["detail"], "a recommended option must be one of its question's options")
-                self.assertEqual(self.world.argvs("gh"), [])
+                self.assertEqual((code, out["verdict"]), (0, "posted"))
+                self.assertEqual(self.mutations()[before], post(box_body()))
+
+    def test_a_recommendation_that_is_not_a_string_is_a_usage_error(self):
+        self.store()
+        questions = [{**QUESTIONS[0], "recommended": 2}, QUESTIONS[1]]
+        code, out = run(*action("post", "decision", "--holder", ME, "--questions-file", self.items(questions)))
+        self.assertEqual((code, out["error"]), (2, "usage"))
+        self.assertEqual(self.world.argvs("gh"), [])
 
 
 class DecisionBoxTest(Base):

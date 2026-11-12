@@ -48,8 +48,9 @@ optionally `--clears <label>`) for `decision`.
 6. `--items-file` holds a JSON array of 1 to `MAX_ITEMS` (20) strings, each non-empty once its
    whitespace is collapsed; `--questions-file` holds a JSON array of 1 to `MAX_ITEMS` objects with
    exactly the keys `question` (string) and `options` (1 to `MAX_OPTIONS` (8) distinct strings),
-   likewise collapsed and non-empty, and optionally `recommended` (a string equal, collapsed, to
-   one of its question's options; any other value is a usage error); `--clears` names a label (recorded as `clears=<label>`) that
+   likewise collapsed and non-empty, and optionally `recommended` (a string; one equal, collapsed, to
+   one of its question's options is recorded in `rec`, any other string is only a hint and is dropped, so the
+   prompt posts with no recommendation for that question; a value that is not a string is a usage error); `--clears` names a label (recorded as `clears=<label>`) that
    fits the marker value grammar. Anything else, a missing or unreadable file, `--items-file` with
    `decision`, or `--questions-file` or `--clears` with another reason, is a usage error before
    any `gh` call.
@@ -173,9 +174,11 @@ def _read_question_file(path: str) -> list[dict[str, Any]]:
             raise _ItemsError("the options of a question must be distinct")
         recommended = raw.get("recommended")
         if "recommended" in raw:
-            if not isinstance(recommended, str) or " ".join(recommended.split()) not in collapsed:
-                raise _ItemsError("a recommended option must be one of its question's options")
+            if not isinstance(recommended, str):
+                raise _ItemsError("a recommended option must be a string")
             recommended = " ".join(recommended.split())
+            if recommended not in collapsed:
+                recommended = None
         questions.append({"question": question, "options": collapsed, "recommended": recommended})
     return questions
 

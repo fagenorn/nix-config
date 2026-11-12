@@ -476,13 +476,17 @@ function itemLine(item) {
   return line;
 }
 function renderInbox(view) {
+  const fresh = view !== lastView;
   lastView = view;
   const section = document.getElementById("inbox");
   section.replaceChildren();
   const open = view.inbox.open;
   const present = new Set(open.map(itemId));
+  // A frame that shows a sent item open again supersedes the page's own "sent"; a redraw of the same view does not.
+  const reopened = new Set(fresh ? open.filter(answerable).map(itemId) : []);
   for (const [id, state] of answers) {
-    if (!present.has(id) && state.phase !== "waiting" && state.phase !== "sending") answers.delete(id);
+    const gone = !present.has(id) && state.phase !== "waiting" && state.phase !== "sending";
+    if (gone || (state.phase === "sent" && reopened.has(id))) answers.delete(id);
   }
   const current = currentEntry(open);
   currentId = current === null ? null : itemId(current.item);
