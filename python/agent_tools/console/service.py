@@ -503,7 +503,8 @@ inbox records (`_waiting`), the time the manager was last listed (in memory, sta
 construction, so a restarted console waits two minutes first), `now`, whether there is a nudger and
 whether the manager's profile is out of quota (`out`: no wake then, #929; a takeover is unchanged);
 `revive()`, `_revive_wake` and a takeover's `_prepared_launch` all call it, so a queued job is
-decided again when it runs. `STALL` appends one `manager.stalled {sprint_id, goal, reason}` row and
+decided again when it runs. A sprint whose `no_progress_at` is set (#929) is never brought back: the
+owner's Continue or Withdraw is the handoff. `STALL` appends one `manager.stalled {sprint_id, goal, reason}` row and
 no job; `WAKE` reserves the sprint in `_nudging` and queues `_revive_wake`; `TAKEOVER` reserves it in
 `_launching` with a `_TakeoverReservation` and queues the launch. A wake dispatch that raises frees
 the reservation and appends one failed `manager.woken` row ("the wake could not start: ..."). The
@@ -546,7 +547,7 @@ and its quota; a sprint not out whose manager row is not `started` or whose mana
 null), `NUDGE` reserves the sprint in `_nudging` and dispatches `_idle_nudge` after the lock.
 `_idle_nudge(sprint_id, forced)` decides again under the lock (`_idle_due`), reads the listing off
 the lock (a manager not listed sends nothing and appends nothing: the bring-back owns a gone
-manager), decides once more under the lock (the quota recheck), calls the nudger off the lock with a
+manager), decides once more under the lock (the quota recheck) and sends nothing when the fresh listing's reading of the manager shows it `working` (`_working_now`: a reading not newer than the session's newest hook does not count), calls the nudger off the lock with a
 `continue` route `nudge.Nudge` to the lowest listed session, and appends one `manager.nudged
 {sprint_id, goal, session_id, ok[, reason][, resumed]}` while the sprint is open and the service not
 stopping (a failure also prints `console: idle_nudge_failed <sprint_id> <reason>`). A dispatch
@@ -2548,6 +2549,17 @@ class ConsoleService:
             self._quota_wait(sprint) is not None, int(self._clock() * 1000), forced)
         return (sprint, project.root) if step == idle.NUDGE else None
 
+    def _working_now(self, observed: sessions.Observation) -> bool:
+        """Under the ingest lock: whether a fresh registry reading shows the session working.
+
+        A reading older than, or as old as, the session's newest hook does not count: hooks win.
+        """
+        if sessions.registry_state(observed) != sessions.WORKING:
+            return False
+        known = self._sessions.get(observed.session_id)
+        return (known is None or known.hook_ms is None
+                or (observed.updated_ms is not None and observed.updated_ms > known.hook_ms))
+
     def _idle_nudge(self, sprint_id: str, forced: bool) -> None:
         """Tell the idle manager to go on, then record the attempt; the reservation ends here."""
         with self._ingest:
@@ -2560,14 +2572,16 @@ class ConsoleService:
             profile, session_id = sprint.manager.profile, sprint.manager_session or ""
         reason = None
         try:
-            listed = self._listed_ids(name)
+            listed = sorted((o for o in self._listing().values() if o.name == name),
+                            key=lambda o: o.session_id)
             if not listed:
                 with self._ingest:
                     self._nudging.discard(sprint_id)
                 return
-            session_id = listed[0]
+            session_id = listed[0].session_id
             with self._ingest:
-                if self._idle_due(sprint_id, forced) is None:
+                if (self._idle_due(sprint_id, forced) is None
+                        or self._working_now(listed[0])):
                     self._nudging.discard(sprint_id)
                     return
             self._nudger(nudge.Nudge(sprint_id, nudge.CONTINUE, name, session_id, profile, cwd))

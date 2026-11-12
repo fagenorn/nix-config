@@ -4,6 +4,7 @@ Run: just agent-workflow-tests
 """
 import json
 import threading
+from dataclasses import replace
 from datetime import datetime, timezone
 from unittest import mock
 
@@ -225,6 +226,46 @@ class IdleServiceTest(IdleCase):
         self.poll(svc, 300)
         self.assertEqual(self.continues(), [])
         self.assertEqual(self.rows("manager.nudged"), [])
+
+    def test_a_manager_that_turns_busy_during_the_listing_gets_no_nudge(self):
+        def listing():
+            if self.turn_busy:
+                self.listed["s-1"] = replace(self.listed["s-1"], status="busy")
+            return dict(self.listed)
+
+        self.turn_busy = False
+        svc, sid = self.idle_service(listing=listing)
+        self.turn_busy = True
+        self.poll(svc, 300)
+        self.assertEqual(self.continues(), [])
+        self.assertEqual(self.rows("manager.nudged"), [])
+        self.assertEqual(svc._nudging, set())
+        self.turn_busy = False
+        self.listed["s-1"] = replace(self.listed["s-1"], status="idle")
+        self.poll(svc, 301)
+        self.assertEqual(len(self.continues()), 1)
+
+    def test_a_busy_reading_older_than_the_sessions_newest_hook_does_not_hold_the_nudge(self):
+        svc, sid = self.idle_service()
+        self.listed["s-1"] = replace(self.listed["s-1"], status="busy", updated_ms=1)
+        self.append(svc, [("session.hook", "owner/p01", {
+            "event": "Stop", "session_id": "s-1", "cwd": "/srv/p01", "repo": "/srv/p01",
+            "received_ms": int((T0 + 10) * 1000)})])
+        self.poll(svc, 300)
+        self.assertEqual(len(self.continues()), 1)
+
+    def test_a_manager_gone_while_the_no_progress_item_is_open_is_not_brought_back(self):
+        svc, sid = self.idle_service()
+        self.reach_no_progress(svc, sid)
+        self.assertEqual(len(self.rows("manager.no_progress")), 1)
+        self.listed = {}
+        self.gone(svc)
+        for seconds in (2220, 2400, 3600, 7200):
+            self.poll(svc, seconds)
+        self.assertEqual(self.revives(), [])
+        self.assertEqual(self.rows("manager.woken"), [])
+        self.assertEqual(self.rows("manager.stalled"), [])
+        self.assertEqual(len(self.launches.calls), 1)
 
     def test_the_idle_nudge_never_holds_the_ingest_lock(self):
         held = []

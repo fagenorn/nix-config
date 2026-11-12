@@ -163,6 +163,19 @@ class NextStepTest(unittest.TestCase):
         state = with_rows(lambda rows: [])
         self.assertEqual(revive.next_step(state, 0, BASE, BASE + 120_000, False), "takeover")
 
+    def test_no_step_while_the_no_progress_item_is_open_until_it_is_continued(self):
+        later = BASE + 10 * DAY
+        held = with_rows(lambda rows: [
+            rows.row(BASE + 10, event_log.MANAGER_NO_PROGRESS, {"goal": "one", "status": None})])
+        self.assertIsNotNone(held.no_progress_at)
+        self.assertIsNone(revive.next_step(held, 0, BASE, later, True))
+        self.assertIsNone(revive.next_step(held, 0, BASE, later, False))
+        state = with_rows(lambda rows: [
+            rows.row(BASE + 10, event_log.MANAGER_NO_PROGRESS, {"goal": "one", "status": None}),
+            rows.row(BASE + 20, event_log.SPRINT_CONTINUED, {"goal": "one"})])
+        self.assertIsNone(state.no_progress_at)
+        self.assertEqual(revive.next_step(state, 0, BASE, later, True), "wake")
+
     def test_a_wake_is_not_sent_while_the_managers_account_is_out(self):
         state = with_rows(lambda rows: [])
         later = BASE + 120_000

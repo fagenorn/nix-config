@@ -19,7 +19,8 @@ that are `ok` and `back`. A wake has failed when `not (ok and back)`.
 `next_step(state, waiting, last_listed_ms, now_ms, can_wake, out=False)` returns `sprints.WAKE`,
 `sprints.TAKEOVER`, `STALL` or `None` (no step). The first rule that matches wins:
 
-1. The sprint has no manager, or it is stalled: `None`.
+1. The sprint has no manager, it is stalled, or `no_progress_at` is set (an item is open for the
+   owner, #929; `sprint.continued` clears it): `None`.
 2. The manager is neither `STARTED` nor (`FAILED` or `WAITING` with `takeover` true): `None`. A
    first launch that failed or waits is the owner's retry, not a bring-back.
 3. `has_work(state, waiting)` is false: `None`.
@@ -68,7 +69,7 @@ def _failed_wake(revival: sprints.Revival) -> bool:
 def next_step(state: SprintState, waiting: int, last_listed_ms: int, now_ms: int,
               can_wake: bool, out: bool = False) -> str | None:
     manager = state.manager
-    if manager is None or state.stalled is not None:
+    if manager is None or state.stalled is not None or state.no_progress_at is not None:
         return None
     retried = manager.state in (sprints.FAILED, sprints.WAITING) and manager.takeover
     if manager.state != sprints.STARTED and not retried:
