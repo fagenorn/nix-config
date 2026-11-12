@@ -653,6 +653,7 @@ class DocstringTest(unittest.TestCase):
                        "a `--release --wait` whose caller is bound to `--sha` (a resumed release), stop with "
                        "`no_open_pr` when the head moved",
                        "leaves the lock alone when an open pull request other than the release has its head there",
+                       "(and, when that lists no such head, the open listing of D2)",
                        "attempts the lock at that pull request's current head",
                        "`no_open_pr` means no such pull request is open",
                        "adds `head_moved`, true when it took the lock at a head other than `--sha`",
@@ -1196,6 +1197,18 @@ class ReleaseWaitTest(Base):
         self.assertEqual((code, out["verdict"], out["took_over"], out["waited_s"]), (0, "acquired", "idle", 2760))
         self.assertEqual(len(self.cas_calls()), 1)  # the idle takeover only, never a delete
 
+    def test_a_lock_at_the_starting_sha_that_an_open_sync_pull_request_heads_is_left_alone(self):
+        """Issue 905: sync 30 is headed at --sha and only the open listing shows it."""
+        self.lock(A)
+        self.world.respond("gh", DEFAULT_READ, stdout=DEFAULT + "\n")
+        self.pulls(C, release_pull(20, sha=C))
+        self.pulls(A, release_pull(20, sha=C))
+        self.based(sync_pull(30))
+        clock = FakeClock()
+        code, out = self.wait(clock, A, "--release", "--follow-head")
+        self.assertEqual((code, out["verdict"], out["took_over"], out["waited_s"]), (0, "acquired", "idle", 2760))
+        self.assertEqual(len(self.cas_calls()), 1)  # the idle takeover only, never a delete
+
     def test_a_waiting_release_never_deletes_a_lock_at_another_sha(self):
         """The lock of live lander 12 is not at --sha: the moved release only waits behind it."""
         clock, code, out = self.release_wait(
@@ -1231,6 +1244,19 @@ class ReleaseWaitTest(Base):
         self.assertEqual((code, out["verdict"]), (0, "acquired"))
         self.assertNotIn("head_moved", out)
         self.assertEqual(self.reads(OPEN_FROM), [])
+
+    def test_a_waiting_lander_behind_a_live_holder_makes_four_forge_calls_a_poll(self):
+        """Through `--wait` and its own eligibility read: the open listing of issue 905 is never
+        read while the commit lookup lists the caller's pull request."""
+        self.lock(A)
+        self.pulls(B, pull(11, sha=B))
+        self.pulls(A, pull(12, sha=A))
+        clock = FakeClock(lambda elapsed: self.world.set_ref(REF, None) if elapsed == 240 else None)
+        code, out = self.wait(clock, B)
+        self.assertEqual((code, out["verdict"], out["waited_s"]), (0, "acquired", 240))
+        # Two polls behind the holder (eligibility, create, ref read, lookup of the lock), then
+        # eligibility and the create that takes the released lock.
+        self.assertEqual((len(self.world.argvs("gh")), self.reads(OPEN_BASED)), (4 + 4 + 2, []))
 
     def test_a_lander_poll_behind_a_live_holder_makes_four_forge_calls(self):
         """The waiter's cost per poll is the same behind a lander and behind a release."""

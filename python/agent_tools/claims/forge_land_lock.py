@@ -62,8 +62,8 @@ its lock, which releases the old lock and acquires again. A following release wa
 itself (issue 901): a poll that finds the lock held at `--sha` while the release pull request's
 head is another sha sends the D9 delete of `--sha`, exactly what `release --sha` does, and attempts
 again in the same poll, competing with every other waiter. It first reads the commit lookup of
-`--sha` and leaves the lock alone when an open pull request other than the release has its head
-there: that one holds it. The answer is `acquired` or `already_held`, never `moved`, so nobody
+`--sha` (and, when that lists no such head, the open listing of D2) and leaves the lock alone when
+an open pull request other than the release has its head there: that one holds it. The answer is `acquired` or `already_held`, never `moved`, so nobody
 merges on a lock that changed hands without a resync.
 
 D6, `acquire` needs an open pull request whose head is the caller's sha with the branch as its
@@ -344,9 +344,7 @@ def wait_acquire(args: Any, node: Callable[[], str],
             mine = [p for p in mine if p.head_sha == sha]
             outcome = acquire_once(args.repo, args.branch, sha, mine, idle, node, seen)
             if (outcome.verdict == "held_by" and outcome.lock_sha == args.sha != sha
-                    and not any(p.state == "open" and p.head_sha == args.sha
-                                and p.number not in {m.number for m in mine}
-                                for p in fm.commit_pulls(args.repo, args.sha))):
+                    and not _headed_by_another(args, {m.number for m in mine})):
                 # D5: the release's own lock at the head it started from; release it, try again.
                 failure = fm.cas_ref(args.repo, node(), lock_ref(args.branch), args.sha, fm.ZERO_OID)
                 outcome = acquire_once(args.repo, args.branch, sha, mine, idle, node, seen)
@@ -372,6 +370,16 @@ def wait_acquire(args: Any, node: Callable[[], str],
                              by=holder(args.repo, last.pr) if last else None,
                              waited_s=int(monotonic() - start))
         sleep(min(POLL, start + BOUND - monotonic()))
+
+
+def _headed_by_another(args: Any, mine: Collection[int]) -> bool:
+    """D5: an open pull request outside `mine` has its head at `--sha`, so it holds a lock there.
+
+    Read as `_on_branch` reads it: the commit lookup, then the open listing of the branch when
+    the lookup lists no such head (a head on the default branch, issue 905)."""
+    heads = [p for p in fm.commit_pulls(args.repo, args.sha) if p.state == "open" and p.head_sha == args.sha]
+    heads = heads or fm.open_pulls_headed(args.repo, args.branch, args.sha)
+    return any(p.number not in mine for p in heads)
 
 
 def _no_open_pr(args: Any) -> tuple[int, dict[str, Any]]:

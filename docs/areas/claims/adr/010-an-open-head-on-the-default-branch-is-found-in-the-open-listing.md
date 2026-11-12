@@ -22,7 +22,7 @@ The open listing goes first for two reasons. A waiter polls behind a live holder
 
 Fork pull requests are left out because every fork already has the default branch's commits: anyone could otherwise open a pull request at the default tip and hold a lock there, or keep a stale one looking held, without pushing a commit. A lander from a fork, whose head is outside the default branch, is still found by the commit lookup as before.
 
-`--release` and `--follow-head` are unchanged. A release head is the integration tip, which is not on the default branch until the release is published, so the lookup lists it.
+A following release wait (ADR-claims-009) reads the same two listings before it deletes a lock at the sha it started from, so a sync pull request headed there keeps its lock. `--release` eligibility is unchanged. A release head is the integration tip, which is not on the default branch until the release is published, so the lookup lists it.
 
 ## Consequences
 
@@ -30,5 +30,5 @@ Fork pull requests are left out because every fork already has the default branc
 - A sync pull request acquires a free lock in three calls: lookup, open listing, create. A waiting one pays the open listing at every poll.
 - A lander's poll behind a sync holder is five calls. Before, the same poll read the closed listing (one to five pages) and the branch listing, and then took the live lock over as stale.
 - One call is added, once per open page, wherever the closed listing was already read: a stale lock whose holder was squash-merged, rebase-merged or closed, a lock at an earlier head of the caller's own pull request, a holder that moved past its lock, and a lock no pull request heads. The same call is added before `no_open_pr`.
-- Accepted residual: an open pull request older than the 500 most recently updated open ones on the branch is not found. It is answered `no_open_pr`, and as a holder its lock is judged by the other listings. A pull request that was just pushed or opened is at the front of that order.
+- Accepted residual: an open pull request older than the 500 most recently updated open ones on the branch is not found. As a caller it is answered `no_open_pr`. As a holder it is not seen: a live sync lock then reads stale, because the merged pull requests the lookup lists are all that is left to judge it by, and a lander can take it. The sync still does not merge on a lost lock. Its one-shot `acquire` right before the merge (ADR-claims-004) answers `held_by` when the listing finds it again, and `no_open_pr` while it is still outside the window; neither permits a merge. A pull request that was just pushed or opened is at the front of that order.
 - Accepted residual: when the lookup lists a closed pull request headed at the lock, the open listing is not read. An open pull request cannot share that head: a head the base branch has reached closes every pull request on that base at it, and the forge opens no pull request without commits ahead of its base.
