@@ -466,6 +466,25 @@ class DocsTreeTest(unittest.TestCase):
         for needle in ("fine, tight or out", "A session named for a sprint adds no line"):
             self.assertIn(needle, context)
 
+    def test_later_open_items_as_rows_are_recorded(self) -> None:
+        rules = self.doc("docs/areas/console/adr/002-the-desk-page-design-rules.md")
+        for needle in (
+            "#944", "a waiting brief included", "Or say what to change\u2026",
+            "closing it keeps a typed reply", "the owner may close it again",
+        ):
+            self.assertIn(needle, rules)
+        self.assertNotIn("keeps its own unraised brief block", rules)
+
+    def test_sprint_controls_on_demand_are_recorded(self) -> None:
+        rules = self.doc("docs/areas/console/adr/002-the-desk-page-design-rules.md")
+        for needle in ('a closed "More" fold holding "Withdraw"', "a typed draft keeps it open"):
+            self.assertIn(needle, rules)
+        self.assertNotIn('withdraw, messages and "Tell the manager" stay under the two lines', rules)
+        message = self.doc(
+            "docs/areas/console/adr/016-what-the-owner-says-to-a-sprint-reaches-its-manager.md")
+        for needle in ("opens its field on demand", 'the rest in its "Detail" fold'):
+            self.assertIn(needle, message)
+
     def test_the_console_brief_decision_is_recorded(self):
         path = "docs/areas/console/adr/013-a-managers-brief-is-approved-or-redirected-on-the-page.md"
         first = (REPO_ROOT / path).read_text().splitlines()[0]
@@ -605,6 +624,10 @@ class DocsTreeTest(unittest.TestCase):
         self.assertNotIn("An adapter makes at most one mutation", text)
         self.assertIn("The forge adapter makes at most one mutation", text)
         self.assertIn("launchd adapter", text)
+
+    def test_the_goal_field_focus_is_recorded(self):
+        text = self.doc("docs/areas/console/adr/002-the-desk-page-design-rules.md")
+        self.assertIn("In focus the field shows one border", text)
 
 
 if __name__ == "__main__":
