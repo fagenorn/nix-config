@@ -626,10 +626,13 @@ class DocstringTest(unittest.TestCase):
                        "one the lookup left out, open or closed, is found in",
                        "whatever its head, never answers `moved`",
                        "with the repository's default branch as its base",
-                       "A waiting release follows its pull request instead (issue 901)",
+                       "With `--follow-head` a waiting release follows its pull request instead (issue 901)",
+                       "`--follow-head`, which needs both (a usage error otherwise)",
+                       "a `--release --wait` whose caller is bound to `--sha` (a resumed release), stop with "
+                       "`no_open_pr` when the head moved",
+                       "leaves the lock alone when an open pull request other than the release has its head there",
                        "attempts the lock at that pull request's current head",
                        "`no_open_pr` means no such pull request is open",
-                       "A one-shot `--release` never follows",
                        "adds `head_moved`, true when it took the lock at a head other than `--sha`",
                        "the caller continues with `lock_sha` as its commit",
                        "sends the D9 delete of `--sha`, exactly what `release --sha` does",
@@ -670,11 +673,11 @@ class ReleaseHolderTest(Base):
                 self.lock()
                 self.default_branch()
                 self.pulls(A, pr, by_commit=True)
-                # A waiting release follows a moved head (issue 901); a one-shot never does.
-                for extra in ((), ("--wait",))[:1 if name == "head moved" else 2]:
+                # Only a following wait follows a moved head (issue 901).
+                for extra in ((), ("--wait",), ("--wait", "--follow-head"))[:2 if name == "head moved" else 3]:
                     code, out = run(*land("acquire", A, "--release", *extra))
                     self.assertEqual((code, out["verdict"], out["error"]), (2, "error", "no_open_pr"))
-                    self.assertEqual(len(self.reads(OPEN_FROM)), len(extra))
+                    self.assertEqual(len(self.reads(OPEN_FROM)), len(extra) // 2)
                 self.assertIn("release pull request", out["detail"])
                 self.assertEqual(self.writes(), [])
 
@@ -868,17 +871,58 @@ class ReleaseWaitTest(Base):
         clock = FakeClock(lambda elapsed: self.world.set_ref(REF, None) if elapsed == 240 else None)
         code, out = self.wait(clock, A, "--release")
         self.assertEqual((code, out["verdict"], out["pr"], out["waited_s"]), (0, "acquired", 20, 240))
-        self.assertEqual((out["sha"], out["lock_sha"], out["head_moved"]), (A, A, False))
+        self.assertNotIn("head_moved", out)
         self.assertEqual(len([a for a in self.world.argvs("gh") if a == DEFAULT_READ]), 1)
+        self.assertEqual(self.reads(OPEN_FROM), [])
+
+    def test_a_following_release_whose_head_stayed_answers_head_moved_false(self):
+        clock, code, out = self.release_wait(
+            B, lambda elapsed: self.world.set_ref(REF, None) if elapsed == 240 else None)
+        self.assertEqual((code, out["verdict"], out["pr"], out["waited_s"]), (0, "acquired", 20, 240))
+        self.assertEqual((out["sha"], out["lock_sha"], out["head_moved"]), (A, A, False))
+        self.assertEqual(len(self.reads(DEFAULT_READ)), 1)
+
+    def test_a_waiting_release_without_follow_head_stops_when_its_head_moved(self):
+        """A resumed release is bound to its commit: its wait must not take the lock at another
+        head, which its run could neither use nor release (issue 901 review)."""
+        self.lock(B)
+        self.world.respond("gh", DEFAULT_READ, stdout=DEFAULT + "\n")
+        self.pulls(A, release_pull(20))
+        self.pulls(B, pull(12, sha=B))
+
+        def forge(elapsed):
+            self.pulls(A)
+            self.pulls(C, release_pull(20, sha=C))
+            self.world.set_ref(REF, None)
+        clock = FakeClock(forge)
+        code, out = self.wait(clock, A, "--release")
+        self.assertEqual((code, out["verdict"], out["error"]), (2, "error", "no_open_pr"))
+        self.assertEqual(out["detail"], f"no open release pull request from {BRANCH} has head {A}")
+        self.assertNotIn("head_moved", out)
+        # One write only, the first poll's refused create behind lander 12; none after the move.
+        self.assertEqual((len(self.writes()), self.reads(OPEN_FROM), self.world.refs()), (1, [], {}))
+        self.assertEqual(clock.slept, [120])
+
+    def test_follow_head_needs_release_and_wait(self):
+        self.lock()
+        self.pulls(A, release_pull(20), pull(11, sha=A))
+        for flags in ((), ("--release",), ("--wait",)):
+            with self.subTest(flags=flags):
+                code, out = run(*land("acquire", A, "--follow-head", *flags))
+                self.assertEqual((code, out["verdict"], out["error"]), (2, "error", "usage"))
+        for action in ("status", "release"):
+            code, out = run(*land(action, A, "--follow-head"))
+            self.assertEqual((code, out["error"]), (2, "usage"))
+        self.assertEqual(self.world.argvs("gh"), [])
 
     def release_wait(self, lock, on_sleep=None):
-        """Release 20 at A waits with `--sha A`; `on_sleep(elapsed)` changes the forge."""
+        """Release 20 at A waits with `--sha A --follow-head`; `on_sleep(elapsed)` changes the forge."""
         self.lock(lock)
         self.world.respond("gh", DEFAULT_READ, stdout=DEFAULT + "\n")
         self.pulls(A, release_pull(20))
         self.pulls(B, pull(12, sha=B))
         clock = FakeClock(on_sleep)
-        return clock, *self.wait(clock, A, "--release")
+        return clock, *self.wait(clock, A, "--release", "--follow-head")
 
     def test_a_waiting_release_follows_its_head_past_two_landers(self):
         """Issue 901: lander 12 holds the lock and merges (head A to C), lander 13 takes the lock
@@ -939,10 +983,22 @@ class ReleaseWaitTest(Base):
         self.pulls(C, release_pull(20, sha=C))
         self.pulls(A, release_pull(20, sha=C), pull(13, sha=D))
         clock = FakeClock()
-        code, out = self.wait(clock, A, "--release")
+        code, out = self.wait(clock, A, "--release", "--follow-head")
         self.assertEqual((code, out["verdict"], out["lock_sha"], out["head_moved"], out["took_over"]),
                          (0, "acquired", C, True, None))
         self.assertEqual((len(self.cas_calls()), clock.slept, self.world.refs()), (1, [], {REF: C}))
+
+    def test_a_lock_at_the_starting_sha_that_another_open_pull_request_heads_is_left_alone(self):
+        """Lander 14 has its head at --sha, so the lock is its own: the following release never
+        deletes it and waits, here until its own idle watch passes."""
+        self.lock(A)
+        self.world.respond("gh", DEFAULT_READ, stdout=DEFAULT + "\n")
+        self.pulls(C, release_pull(20, sha=C))
+        self.pulls(A, release_pull(20, sha=C), pull(14, sha=A))
+        clock = FakeClock()
+        code, out = self.wait(clock, A, "--release", "--follow-head")
+        self.assertEqual((code, out["verdict"], out["took_over"], out["waited_s"]), (0, "acquired", "idle", 2760))
+        self.assertEqual(len(self.cas_calls()), 1)  # the idle takeover only, never a delete
 
     def test_a_waiting_release_never_deletes_a_lock_at_another_sha(self):
         """The lock of live lander 12 is not at --sha: the moved release only waits behind it."""
@@ -968,7 +1024,7 @@ class ReleaseWaitTest(Base):
             return failure
         clock = FakeClock(lambda elapsed: self.world.set_ref(REF, None) if elapsed == 120 else None)
         with mock.patch.object(fm, "cas_ref", racing):
-            code, out = self.wait(clock, A, "--release")
+            code, out = self.wait(clock, A, "--release", "--follow-head")
         self.assertEqual((code, out["verdict"], out["lock_sha"], out["waited_s"]), (0, "acquired", C, 120))
         self.assertEqual(len(self.cas_calls()), 1)
 
