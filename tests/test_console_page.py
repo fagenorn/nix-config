@@ -3646,6 +3646,16 @@ class PageBriefRowTest(unittest.TestCase):
             if selector == ".brief-row > summary":
                 self.assertEqual(decls.get("display", "flex"), "flex", selector)
 
+    def test_a_collapsed_row_title_wraps_a_long_unbroken_goal(self) -> None:
+        # A goal with a long unbroken token (a filename) sits in a flex item <b>; without
+        # overflow-wrap the row grows past a 480px viewport, as .brief .goal-line already avoids.
+        style = re.findall(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"))[0]
+        merged: dict = {}
+        for selector, decls in style_rules(style):
+            if selector == ".row-head b":
+                merged.update(decls)
+        self.assertEqual(merged.get("overflow-wrap"), "anywhere")
+
     def test_a_later_brief_is_one_row_until_opened(self) -> None:
         closed, opened, promoted = render([
             START, {"frame": frame([BRIEF, BRIEF_B, ANSWERABLE])}, {"snapshot": True},

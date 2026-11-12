@@ -76,7 +76,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .rest > li.row { display: block; padding: 12px 0; }
 .rest > li.row + li.row { border-top: 1px solid var(--hair); }
 .row-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; width: 100%; margin: 0; }
-.row-head b { font-size: 1rem; font-weight: 500; color: var(--text); }
+.row-head b { min-width: 0; font-size: 1rem; font-weight: 500; color: var(--text); overflow-wrap: anywhere; }
 .row-head .lm { font-size: .84375rem; color: var(--sub0); }
 .row-head .lw { margin-left: auto; font-size: .84375rem; color: var(--sub0); white-space: nowrap; }
 .brief-row { display: block; padding: 12px 0; }
