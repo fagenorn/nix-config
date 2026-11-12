@@ -1024,6 +1024,29 @@ class FlakyVerificationRowTest(unittest.TestCase):
                 self.assertIn("1", result["relaunch"]["conts"])
                 self.assertEqual([a for a in result["owner_actions"] if a.get("reason") == "unrelated"], [])
 
+    CONFLICT_REASON = "plan-review: the acceptance rules R5 and R1 conflict for AC5: the revise that settled one broke the other"
+    CONFLICT = {"ac": "AC5", "rules": ["R5", "R1"]}
+
+    def test_a_rules_conflict_is_an_owner_action_and_is_not_relaunched(self):
+        """#988: a plan-review stop whose criterion two rules pull apart waits for the owner's decision."""
+        cont = dict(reviewed(1), plan_reviewed=False)
+        stop = {"stage": "plan-review", "reason": self.CONFLICT_REASON, "conflict": self.CONFLICT, "cont": cont}
+        other = {"stage": "plan-review", "reason": "plan-review: 1 finding(s): s", "cont": dict(reviewed(2), plan_reviewed=False)}
+        result, _, _ = run(args=dict(ARGS, issues=[1, 2]), children={"1": stop, "2": other})
+        row = result["table"][0]
+        self.assertEqual((row["outcome"], row["stage"], row["reason"]), ("stopped", "plan-review", self.CONFLICT_REASON))
+        self.assertEqual(result["relaunch"]["issues"], [2])
+        self.assertEqual(list(result["relaunch"]["conts"]), ["2"])
+        (action,) = [a for a in result["owner_actions"] if a["issue"] == 1]
+        self.assertEqual({k: action[k] for k in ("reason", "ac", "rules", "claim", "holder")},
+                         dict(self.CONFLICT, reason="rules-conflict", claim="held", holder=HOLDER))
+        self.assertEqual(action["cont"]["plan"], cont["plan"])
+        for conflict in (None, {"ac": "", "rules": ["R1"]}, {"ac": "AC5", "rules": []}, "AC5"):
+            with self.subTest(conflict=conflict):
+                result, _, _ = run(children={"1": dict(stop, conflict=conflict)})
+                self.assertIn("1", result["relaunch"]["conts"])
+                self.assertEqual([a for a in result["owner_actions"] if a.get("reason") == "rules-conflict"], [])
+
 
 def run_child(args, replies=None, patch=None):
     node = shutil.which("node")

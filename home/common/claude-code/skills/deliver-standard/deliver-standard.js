@@ -33,10 +33,10 @@ export const meta = {
 // A fresh run re-adopts an existing branch or worktree (never resetting it) and stops `dirty` when it holds uncommitted changes.
 //
 // RESUME: every stop from the claim on returns { stage, ..., cont }, where cont is
-// { setup, lane, plan (declared branches, when any, as [{name, worktree, base, head, current, toplevel, common_dir, clean}]), plan_reviewed, plan_findings?, decisions?, done, pr? (a batch-built close-out cont: the PR the batch merged), fix_waves, fix_findings? (#924: the findings a fix-wave-review stop left open, bounded; the resume's first fix wave gets them with what its fresh final review raises; #940: such a stop also carries diverging: {file, waves} beside cont when the waves spent across runs reached FIX_WAVES_BOUND and a finding it left open is in a file the findings carried into the run named, and deliver-batch then hands the issue to the owner instead of relaunching it), checks_fixes?, sync_fixes?, verified?, final_reviewed?, partial?, reordered? (#896: [{task, after, notes}], each a blocked task moved once to just after the later task it named; cont.plan.tasks is already in that order), claim_incomplete? }. Passing it back as args.cont
+// { setup, lane, plan (declared branches, when any, as [{name, worktree, base, head, current, toplevel, common_dir, clean}]), plan_reviewed, plan_findings?, prior_findings? (#988: the blocking findings left on each plan this delivery dropped after its review, bounded; carried through every stop until a plan passes review, and shown to the planner that plans again), decisions?, done, pr? (a batch-built close-out cont: the PR the batch merged), fix_waves, fix_findings? (#924: the findings a fix-wave-review stop left open, bounded; the resume's first fix wave gets them with what its fresh final review raises; #940: such a stop also carries diverging: {file, waves} beside cont when the waves spent across runs reached FIX_WAVES_BOUND and a finding it left open is in a file the findings carried into the run named, and deliver-batch then hands the issue to the owner instead of relaunching it), checks_fixes?, sync_fixes?, verified?, final_reviewed?, partial?, reordered? (#896: [{task, after, notes}], each a blocked task moved once to just after the later task it named; cont.plan.tasks is already in that order), claim_incomplete? }. Passing it back as args.cont
 // re-adopts the claimed worktree (setup re-checks it and refuses a dirty tree
 // unless cont.partial names the task that left the edits), reuses cont.plan
-// (reviewing it first unless plan_reviewed; a plan-review stop keeps the revised plan with plan_findings { rules, findings, rounds }, and the resume reads the owner's answer and, when every finding left names a rule and none has source codex, runs one rules-only revise of it whatever triggered the full revise (#823), dropping the plan once rounds reach two; any other finding left has spent the plan's one full revise, so the resume plans again), skips the tasks in cont.done, then
+// (reviewing it first unless plan_reviewed; a plan-review stop keeps the revised plan with plan_findings { rules, findings, rounds, noted? (#988: the rules reviewer's minor findings on the criteria of rules, context for the revise only) }, and the resume reads the owner's answer and, when every finding left names a rule and none has source codex, runs one rules-only revise of it whatever triggered the full revise (#823), dropping the plan once rounds reach two; any other finding left has spent the plan's one full revise, so the resume plans again), skips the tasks in cont.done, then
 // runs final review, verify and ship again (ship reuses an open PR). Every resume re-reads the facts of each branch cont.plan declares (a missing or wrong one stops setup with branch_heads.<name> missing, but only for a plan whose declarations are valid: an invalid one is dropped by the Plan section first); cont.verified and cont.final_reviewed carry branches { <name>: <head> }, and a resume reuses either only when every declared head the setup re-read is unchanged. When the PR
 // is already merged, the re-adopt goes straight to close-out; that PR is the delivery's own only when it is cont.pr or carries a commit of cont.done (#752). A resume skips the final review when cont.final_reviewed names the head it
 // passed at and the head is unchanged or only gained integration-branch merges with no unreviewed conflict resolution; a stop between a
@@ -117,7 +117,7 @@ const PLAN_REVIEW = {
   ...FINDINGS,
   properties: {
     ...FINDINGS.properties,
-    findings: { ...FINDINGS.properties.findings, items: { ...FINDINGS.properties.findings.items, properties: { ...FINDINGS.properties.findings.items.properties, rule: { type: 'string', enum: ['R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7', 'R8', 'R9'] } } } },
+    findings: { ...FINDINGS.properties.findings, items: { ...FINDINGS.properties.findings.items, properties: { ...FINDINGS.properties.findings.items.properties, rule: { type: 'string', enum: ['R1', 'R2', 'R3', 'R4', 'R5', 'R6', 'R7', 'R8', 'R9'] }, ac: { type: 'string' } } } },
   },
 }
 const CODEX = {
@@ -284,6 +284,8 @@ const stopReason = (stage, x) => {
   const task = isEntry(x.task) ? `task ${x.task.n} ` : ''
   // #940: a stop whose fix waves do not converge says so first, so the cap cuts the findings and never the verdict.
   if (isEntry(x.diverging)) say(`the fix waves do not converge on ${String(x.diverging.file).slice(0, 120)} after ${x.diverging.waves} waves; an owner decision on the design is needed`)
+  // #988: a criterion the rules revise answered and that drew a blocking rule finding again; said first, as the diverging verdict is.
+  if (isEntry(x.conflict) && Array.isArray(x.conflict.rules)) say(`${x.conflict.rules.length > 1 ? `the acceptance rules ${x.conflict.rules.join(' and ')} conflict for ${x.conflict.ac}: the revise that settled one broke the other` : `the ${x.conflict.rules[0]} finding on ${x.conflict.ac} survived its rules revise`}; an owner decision on how ${x.conflict.ac} is classified is needed, a relaunch without one stops here again`)
   say(x.details)
   say(x.error)
   if (Array.isArray(x.branch_problems)) say(`branch problems: ${x.branch_problems.join('; ')}`)
@@ -511,7 +513,7 @@ let plan = CONT && CONT.plan ? CONT.plan : null
 let planReviewed = !!(CONT && CONT.plan && CONT.plan_reviewed)
 // A plan-review stop keeps the revised plan and the findings left on it; a resume runs one rules-only revise on it.
 const KEPT = CONT && CONT.plan && !CONT.plan_reviewed && CONT.plan_findings && Array.isArray(CONT.plan_findings.rules) ? CONT.plan_findings : null
-let planFindingsKept = KEPT ? { rules: KEPT.rules, findings: Array.isArray(KEPT.findings) ? KEPT.findings : [], rounds: Number.isInteger(KEPT.rounds) ? KEPT.rounds : 0 } : null
+let planFindingsKept = KEPT ? { rules: KEPT.rules, findings: Array.isArray(KEPT.findings) ? KEPT.findings : [], rounds: Number.isInteger(KEPT.rounds) ? KEPT.rounds : 0, ...(Array.isArray(KEPT.noted) && KEPT.noted.length ? { noted: KEPT.noted } : {}) } : null
 const taskLog = CONT && CONT.done ? CONT.done.slice() : []
 let claimIncomplete = !!(CONT && CONT.claim_incomplete) || CLAIM_TAKEN
 // A partial task's edits stay claimed through any stop until that task is done.
@@ -528,6 +530,23 @@ const carryOf = list => (Array.isArray(list) ? list : []).filter(f => isEntry(f)
   .map(f => ({ severity: f.severity === 'critical' ? 'critical' : 'important', ...(typeof f.file === 'string' && f.file ? { file: clip(f.file) } : {}), summary: clip(f.summary), ...(typeof f.failing_input === 'string' && f.failing_input ? { failing_input: clip(f.failing_input) } : {}) }))
 const findingKey = f => `${typeof f.file === 'string' ? f.file : ''}\n${clip(String(f.summary)).toLowerCase().replace(/\s+/g, ' ').trim()}`
 let carried = carryOf(CONT && CONT.fix_findings)
+// #988: the blocking findings left on a plan this delivery dropped after its review (a second failed rules revise, a kept plan no rules
+// revise may settle, a revise that came back as questions or not well formed). Kept in cont.prior_findings through every stop until a
+// plan passes review, newest first and bounded as the fix findings are, so the next planner does not rediscover them.
+const PRIOR_MAX = 20
+const priorOf = list => {
+  const seen = new Set()
+  return (Array.isArray(list) ? list : []).filter(f => isEntry(f) && typeof f.summary === 'string' && f.summary.trim() && f.severity !== 'minor')
+    .map(f => ({ severity: f.severity === 'critical' ? 'critical' : 'important', ...Object.fromEntries(['rule', 'ac', 'source', 'file'].filter(k => typeof f[k] === 'string' && f[k]).map(k => [k, clip(f[k])])), summary: clip(f.summary) }))
+    .filter(f => { const k = JSON.stringify(f); return seen.has(k) ? false : !!seen.add(k) }).slice(0, PRIOR_MAX)
+}
+let priorFindings = priorOf(CONT && CONT.prior_findings)
+// Every drop of a plan goes through here: left is what its review found when no plan-review stop has kept it yet.
+const dropPlan = (left = []) => {
+  priorFindings = priorOf(left.concat(planFindingsKept ? planFindingsKept.rules.concat(planFindingsKept.findings) : [], priorFindings))
+  plan = null
+  planFindingsKept = null
+}
 const CARRIED_AT_START = carried
 // #940: fix waves that do not converge. A fix-wave-review stop that leaves findings open once the waves spent across runs (cont.fix_waves
 // and this run's) have reached FIX_WAVES_BOUND, with a finding left in a file the findings carried into this run already named, is marked
@@ -579,7 +598,7 @@ addDecision(args.decisions)
 let amendApplied = false
 const stop = (stage, extra) => {
   const fr = SYNC_WINDOW.includes(stage) ? (finalReviewed = null) : finalReviewed
-  return { stage, ...extra, ...(stage === 'planned' || stage === 'ready' ? {} : { reason: stopReason(stage, extra || {}) }), ...(amendApplied ? { amended: true } : {}), ...deadOf(), cont: { setup, lane: LANE, plan, plan_reviewed: planReviewed, ...(plan && !planReviewed && planFindingsKept ? { plan_findings: planFindingsKept } : {}), ...(decisions.length ? { decisions } : {}), done: taskLog, ...(OWN_PR !== null ? { pr: OWN_PR } : {}), fix_waves: fixWaves, ...(carried.length ? { fix_findings: carried } : {}), ...(checksFixes ? { checks_fixes: checksFixes } : {}), ...(syncFixes ? { sync_fixes: syncFixes } : {}), ...(verified ? { verified } : {}), ...(outsideFixes.length ? { outside_fixes: outsideFixes } : {}), ...(fr ? { final_reviewed: fr } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}), ...(reordered.length ? { reordered } : {}) } }
+  return { stage, ...extra, ...(stage === 'planned' || stage === 'ready' ? {} : { reason: stopReason(stage, extra || {}) }), ...(amendApplied ? { amended: true } : {}), ...deadOf(), cont: { setup, lane: LANE, plan, plan_reviewed: planReviewed, ...(plan && !planReviewed && planFindingsKept ? { plan_findings: planFindingsKept } : {}), ...(!planReviewed && priorFindings.length ? { prior_findings: priorFindings } : {}), ...(decisions.length ? { decisions } : {}), done: taskLog, ...(OWN_PR !== null ? { pr: OWN_PR } : {}), fix_waves: fixWaves, ...(carried.length ? { fix_findings: carried } : {}), ...(checksFixes ? { checks_fixes: checksFixes } : {}), ...(syncFixes ? { sync_fixes: syncFixes } : {}), ...(verified ? { verified } : {}), ...(outsideFixes.length ? { outside_fixes: outsideFixes } : {}), ...(fr ? { final_reviewed: fr } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}), ...(reordered.length ? { reordered } : {}) } }
 }
 
 const haltTask = (n, stage, extra) => { const s = stop(stage, extra); return { ...s, cont: { ...s.cont, partial: n } } }
@@ -800,6 +819,15 @@ const PLAN_SCHEMA = {
 const wellFormed = p => !!(p && p.status === 'planned' && present(p.plan_root) && Array.isArray(p.acceptance) && p.acceptance.length && Array.isArray(p.tasks) && p.tasks.length)
 const HUMAN_REASONS = ['senses', 'hands', 'credentials', 'money', 'taste']
 const RULE_OF = { pre_merge_only: 'R1', approval_ask: 'R2', reason_required: 'R3' }
+// #988: every message names each way out the rules allow, so a planner that follows it is not led into another rule's violation
+// (a message that named only the evidence check turned a locally enforced cap into a post-merge hold, an R1 violation).
+const HUMAN_FIX = `name the one of ${HUMAN_REASONS.join(', ')} that applies, or, when none does, make the criterion code or evidence`
+const CODE_FIX = `make it a code criterion when a test, CI or a local evaluation shows it before merge (R1)`
+const LINT_FIX = {
+  pre_merge_only: `: make it a code criterion, graded at ship, or, when only a deploy or a later observation shows it, trigger the check on that`,
+  approval_ask: `: the approval is given on the pull request, so drop the post-merge ask; keep a human check only for what a person must sense or do after the merge (R3)`,
+  reason_required: `: ${HUMAN_FIX}`,
+}
 // The program-checkable violations of the acceptance planning rules (R1 to R5, and R9); the rules file is the source, never copied here.
 const planRules = p => {
   const out = []
@@ -807,16 +835,18 @@ const planRules = p => {
   for (const a of p.acceptance) {
     const hit = (rule, why) => out.push({ severity: 'important', rule, ac: a.id, summary: `${rule} (${a.id}): ${why}` })
     const v = a.verify
-    if (a.metric === true && !(a.kind === 'evidence' && v && typeof v === 'object' && v.mode === 'observe')) hit('R5', 'a metric is accepted only as an evidence check with mode observe')
+    if (a.metric === true && !(a.kind === 'evidence' && v && typeof v === 'object' && v.mode === 'observe')) hit('R5', a.kind === 'note'
+      ? `a note carries no metric: drop metric (R9), or, when no decision makes the reading the orchestrator's own, make it an evidence check with mode observe`
+      : `metric is set on a criterion that is not an evidence check with mode observe: make it one when only a deploy or observation over time shows the threshold, or make it a plain code criterion with no metric when the bound is a cap that a test or another criterion enforces before merge (R1)`)
     if (a.kind === 'note') {
-      if (a.verify != null || a.script != null) hit('R9', 'a note carries no verify block and no script')
+      if (a.verify != null || a.script != null) hit('R9', `a note carries no verify block and no script: drop them, or, when no decision makes the reading the orchestrator's own observation, make the criterion evidence (R4) or, if a test shows it before merge, code (R1)`)
       continue
     }
     if (a.kind !== 'evidence' && a.kind !== 'human') continue
-    if (!v || typeof v !== 'object') { hit('R4', 'no verify block'); continue }
-    if (v.ac !== a.id || v.kind !== a.kind) { hit('R4', 'the verify block names another criterion or kind'); continue }
-    if (a.kind === 'human' && !HUMAN_REASONS.includes(v.reason)) hit('R3', 'the human reason is not one of the listed reasons')
-    if (commandOutside(v)) hit('R4', 'the unattended command is not a declared verification id and can never complete')
+    if (!v || typeof v !== 'object') { hit('R4', `no verify block: add one, or ${CODE_FIX}`); continue }
+    if (v.ac !== a.id || v.kind !== a.kind) { hit('R4', `the verify block names another criterion or kind: set its ac and kind to this criterion's`); continue }
+    if (a.kind === 'human' && !HUMAN_REASONS.includes(v.reason)) hit('R3', `the human reason is not one of the listed reasons: ${HUMAN_FIX}`)
+    if (commandOutside(v)) hit('R4', `the unattended command is not a declared verification id and can never complete: use one of ${JSON.stringify(VERIFY_IDS)}, a committed script or a probe, or ${CODE_FIX}`)
     const l = a.lint
     if (!l || typeof l !== 'object' || typeof l.ok !== 'boolean') { hit('R4', 'the verify block was not linted'); continue }
     if (l.ok) continue
@@ -825,7 +855,7 @@ const planRules = p => {
     const script = v.run && typeof v.run === 'object' ? (typeof v.run.script === 'string' ? v.run.script : (v.run.then && typeof v.run.then.script === 'string' ? v.run.then.script : null)) : null
     for (const e of errors) {
       if (e.code === 'not_committed' && typeof e.field === 'string' && e.field.endsWith('.script') && script !== null && scripts.includes(script)) continue
-      hit(RULE_OF[e.code] || 'R4', `lint ${e.code} at ${e.field}: ${e.message}`)
+      hit(RULE_OF[e.code] || 'R4', `lint ${e.code} at ${e.field}: ${e.message}${LINT_FIX[e.code] || ''}`)
     }
   }
   return out
@@ -857,13 +887,13 @@ const TEST_CASES = `Task files of this plan step state each failing test as a ca
 const planPrompt = (extra, pace = PLAN_PACE) => `${PLAN_LOOKUPS(pace)} ${extra ? PLAN_EDITS : PLAN_WRITES}
 ${CTX}
 ${TEST_CASES}
-Plan this issue. Read the issue (gh issue view ${ISSUE} --repo ${SLUG} --json title,body,comments) and the code it touches.${SPEC}${FACTS} Use the writing-plans skill for the plan's form only: its file location, size checks and reports do not apply here. Write the plan to ${setup.plan_dir}/plan.md and one task file per task beside it (${setup.plan_dir}/task-<n>.md); never commit them and never write under the project's artifact directories. Also write the code map ${CODE_MAP} for the agents after you, who read it before the code: per area the plan touches, list the files and symbols with line ranges, their tests and fixtures, the callers that matter and the facts you confirmed (for example a library's behaviour, with its source), each with a pointer (a path:line or a URL). Like the plan, it is never committed. On a revision, read it first and keep it true to the plan and the code. Do not build, prototype or run the change; confirming each task's failing test later is the implementers' job. If the issue needs a decision only the user can make (a preference, an irreversible or scope choice not settled by the issue, the spec, the repo's docs or ADRs), return status needs_user, never for an action that R8 of ~/.agents/standards/acceptance-planning.md says the delivery does itself, with questions, each {question, options}: every option one full sentence naming a real choice, a single option for a yes or no, and, when you would choose one option, recommended: its exact text; then stop. Otherwise return status planned with plan_root ${setup.plan_dir}/plan.md, the issue's acceptance criteria (${KIND_GUIDE}) and the task list in execution order with each task's file and a risk: security for authentication, permission or command guards, secrets, CI/CD or deploy config, data migrations; mechanical or low for small contained edits; else standard. When a task commits to a branch other than ${setup.branch}, declare it in branches as {name, worktree, base, head, current, toplevel, common_dir, clean}: only a branch already checked out in its own existing worktree other than ${W}, never ${INT} or ${setup.default_branch}; worktree as git -C <it> rev-parse --show-toplevel prints it, base the ref its changes are measured from, and ${BRANCH_FACTS}, and clean: true only when git -C <its worktree> status --porcelain prints nothing (a worktree with any staged, unstaged or untracked change is not declared); give each task that commits there branch: <name>. Classify and write every acceptance criterion by ~/.agents/standards/acceptance-planning.md (read it); set metric true on a cost, timing or rate threshold of a code, evidence or human criterion, never on a note (R9): an owner-designated observation stays a note even when it reads a cost, a time or a rate. Give every evidence or human criterion a verify member: one check of the verify block grammar with ac its id and kind its kind, writing any sha that will name the merge commit as the base sha ${setup.base_sha} (ship substitutes the merge commit); an unattended evidence command run must be one of ${JSON.stringify(VERIFY_IDS)}, else use a script or a probe. Lint each member alone: write {"v": 1, "merge": "${setup.base_sha}", "checks": [<that member>]} to a file in ${setup.plan_dir} and run verify-pending lint --input <that file> --repo-root ${W} --pr-branch ${setup.branch} plus one --pr-workflow <name> for each CI workflow that runs on this repository's pull requests; return the verdict as that criterion's lint. List in scripts each script path a verify run names that a task of this plan commits. Before you return, check the plan against the review it will get: ${PLAN_RUBRIC}; and every rule ${RULE_IDS[0]}-${RULE_IDS[RULE_IDS.length - 1]} of ~/.agents/standards/acceptance-planning.md (read it). ${PLAN_SELF_CHECK}${decisions.length ? `\nThe owner has answered the open decisions for this issue; they are binding: ${decisions.join('\n')} Do not ask them again; record them as decisions in the plan.` : ''}${extra || ''}
+Plan this issue. Read the issue (gh issue view ${ISSUE} --repo ${SLUG} --json title,body,comments) and the code it touches.${SPEC}${FACTS} Use the writing-plans skill for the plan's form only: its file location, size checks and reports do not apply here. Write the plan to ${setup.plan_dir}/plan.md and one task file per task beside it (${setup.plan_dir}/task-<n>.md); never commit them and never write under the project's artifact directories. Also write the code map ${CODE_MAP} for the agents after you, who read it before the code: per area the plan touches, list the files and symbols with line ranges, their tests and fixtures, the callers that matter and the facts you confirmed (for example a library's behaviour, with its source), each with a pointer (a path:line or a URL). Like the plan, it is never committed. On a revision, read it first and keep it true to the plan and the code. Do not build, prototype or run the change; confirming each task's failing test later is the implementers' job. If the issue needs a decision only the user can make (a preference, an irreversible or scope choice not settled by the issue, the spec, the repo's docs or ADRs), return status needs_user, never for an action that R8 of ~/.agents/standards/acceptance-planning.md says the delivery does itself, with questions, each {question, options}: every option one full sentence naming a real choice, a single option for a yes or no, and, when you would choose one option, recommended: its exact text; then stop. Otherwise return status planned with plan_root ${setup.plan_dir}/plan.md, the issue's acceptance criteria (${KIND_GUIDE}) and the task list in execution order with each task's file and a risk: security for authentication, permission or command guards, secrets, CI/CD or deploy config, data migrations; mechanical or low for small contained edits; else standard. When a task commits to a branch other than ${setup.branch}, declare it in branches as {name, worktree, base, head, current, toplevel, common_dir, clean}: only a branch already checked out in its own existing worktree other than ${W}, never ${INT} or ${setup.default_branch}; worktree as git -C <it> rev-parse --show-toplevel prints it, base the ref its changes are measured from, and ${BRANCH_FACTS}, and clean: true only when git -C <its worktree> status --porcelain prints nothing (a worktree with any staged, unstaged or untracked change is not declared); give each task that commits there branch: <name>. Classify and write every acceptance criterion by ~/.agents/standards/acceptance-planning.md (read it); set metric true only on an evidence criterion whose threshold is a cost, a time or a rate that only a deploy or observation over time shows, and give its verify member mode observe (R5); a bound that a test or a run before merge enforces belongs to a code criterion with metric false (R1); never on a note (R9): an owner-designated observation stays a note even when it reads a cost, a time or a rate. Give every evidence or human criterion a verify member: one check of the verify block grammar with ac its id and kind its kind, writing any sha that will name the merge commit as the base sha ${setup.base_sha} (ship substitutes the merge commit); an unattended evidence command run must be one of ${JSON.stringify(VERIFY_IDS)}, else use a script or a probe. Lint each member alone: write {"v": 1, "merge": "${setup.base_sha}", "checks": [<that member>]} to a file in ${setup.plan_dir} and run verify-pending lint --input <that file> --repo-root ${W} --pr-branch ${setup.branch} plus one --pr-workflow <name> for each CI workflow that runs on this repository's pull requests; return the verdict as that criterion's lint. List in scripts each script path a verify run names that a task of this plan commits. Before you return, check the plan against the review it will get: ${PLAN_RUBRIC}; and every rule ${RULE_IDS[0]}-${RULE_IDS[RULE_IDS.length - 1]} of ~/.agents/standards/acceptance-planning.md (read it). ${PLAN_SELF_CHECK}${decisions.length ? `\nThe owner has answered the open decisions for this issue; they are binding: ${decisions.join('\n')} Do not ask them again; record them as decisions in the plan.` : ''}${!extra && priorFindings.length ? `\nAn earlier plan of this issue was dropped at plan review with these findings left on it; write this plan so that none of them recurs: ${JSON.stringify(priorFindings)}` : ''}${extra || ''}
 ${RULES}`
 // A planner reply is either questions (the plan is dropped so a resume plans again with decisions) or a well-formed plan.
 // #869: a well-formed plan refused only for its declared branches gets one revise in place first, so a naming fault does not cost the whole plan.
 // #819: the accepted reply's criteria_edited, taken off the plan so it reaches no cont and no stop.
 let planEdited
-const takePlan = async (p, label) => {
+const takePlan = async (p, label, left) => {
   if (wellFormed(p) && branchProblems(p).length) {
     const faults = branchProblems(p)
     log(`${label}: ${faults.length} branch problems, revising once`)
@@ -871,11 +901,11 @@ const takePlan = async (p, label) => {
     p = await call(planPrompt(`\nYour plan at ${p.plan_root} declares its branches wrongly; fix only these problems in place, change nothing else, and return the full result again: ${JSON.stringify(faults)}`), { label: 'plan-branch-revise', phase: 'Plan', agentType: 'planner', schema: PLAN_SCHEMA })
   }
   reordered = []
-  if (p && p.status === 'needs_user') { plan = null; planReviewed = false; return stop('plan', { needs_user: p.questions }) }
+  if (p && p.status === 'needs_user') { dropPlan(left); planReviewed = false; return stop('plan', { needs_user: p.questions }) }
   // A failed revision may have half-edited the files on disk, so the plan is dropped and a resume plans again.
-  if (!wellFormed(p)) { plan = null; planReviewed = false; return stop('plan', { step: label, invalid: p }) }
+  if (!wellFormed(p)) { dropPlan(left); planReviewed = false; return stop('plan', { step: label, invalid: p }) }
   const bad = branchProblems(p)
-  if (bad.length) { plan = null; planReviewed = false; return stop('plan', { step: label, invalid: p, branch_problems: bad }) }
+  if (bad.length) { dropPlan(left); planReviewed = false; return stop('plan', { step: label, invalid: p, branch_problems: bad }) }
   const { criteria_edited: listed, ...rest } = p
   plan = rest
   planEdited = listed
@@ -1030,7 +1060,7 @@ Re-review only these previously reported findings against the fix: ${span(fix)};
 phase('Plan')
 if (plan) {
   const bad = branchProblems(plan)
-  if (bad.length) { plan = null; planReviewed = false; planFindingsKept = null; return stop('plan', { step: 'resume', invalid: CONT.plan, branch_problems: bad }) }
+  if (bad.length) { dropPlan(); planReviewed = false; return stop('plan', { step: 'resume', invalid: CONT.plan, branch_problems: bad }) }
 }
 // The owner's answer is read when there is no plan or a kept plan awaits it; that read carries the plan's claim renew.
 const RESUME_KEPT = !!(plan && !planReviewed && planFindingsKept)
@@ -1068,7 +1098,7 @@ if (ANSWER_NEEDED) {
   const stopped = !CONT && !ACQ_RECALL && !RENEW_RECALL ? takeAnswer(FOLD_ANSWER) : await readAnswer()
   if (stopped) return stopped
 }
-if (RESUME_KEPT && !RESUME_RULES) { plan = null; planFindingsKept = null }
+if (RESUME_KEPT && !RESUME_RULES) dropPlan()
 if (AMEND !== null) {
   if (!plan) return why({ stage: 'amend', error: 'this resume plans the kept plan again, which would overwrite the amendment; resume without amend, then amend the new plan after its stop', ...deadOf(), cont: CONT })
   // A plan not yet reviewed was renewed above; a reviewed plan's renew would ride in the first implementer call, which runs after this step.
@@ -1104,7 +1134,7 @@ if (!plan) {
 }
 const rulesReview = async triggered => {
   return call(`${CTX}
-Re-check only the acceptance criteria of the revised plan at ${plan.plan_root} against every rule of ~/.agents/standards/acceptance-planning.md (read it). The findings that triggered the revision were ${JSON.stringify(triggered)}. Report each criterion that still or newly breaks a rule, with the broken rule's id in the finding's rule. Do not edit anything.`, { label: 'plan-rules-review', phase: 'Plan', agentType: 'reviewer', schema: PLAN_REVIEW })
+Re-check only the acceptance criteria of the revised plan at ${plan.plan_root} against every rule of ~/.agents/standards/acceptance-planning.md (read it). The findings that triggered the revision were ${JSON.stringify(triggered)}. Report each criterion that still or newly breaks a rule, with the broken rule's id in the finding's rule and the criterion's id in its ac (on a minor finding too). Do not edit anything.`, { label: 'plan-rules-review', phase: 'Plan', agentType: 'reviewer', schema: PLAN_REVIEW })
 }
 // #819: the members of a criterion the rules judge (its wording among them), key order aside; a revise that leaves them as reviewed needs no rules re-review.
 const ruleFacts = p => canon(p.acceptance.map(a => [a.id, a.text === undefined ? null : a.text, a.kind, a.metric === true, a.verify === undefined ? null : a.verify]))
@@ -1119,30 +1149,55 @@ const keepUnlistedText = (before, after, edited) => after.map(a => {
   if (!was || typeof was.text !== 'string' || was.text === a.text || edited.includes(a.id.toLowerCase())) return a
   return { ...a, text: was.text }
 })
+// #988: the rules reviewer's minor findings on a criterion that also has a blocking finding (the program's or the reviewer's), matched by
+// the ac member alone (case and spaces aside, never by reading the summary). They go to the rules revise as context: they are no part
+// of rules, so they neither block nor count toward a stop. A minor finding with no ac, or on another criterion, stays dropped.
+const acKey = f => (isEntry(f) && typeof f.ac === 'string' ? f.ac.replace(/\s+/g, '').toLowerCase() : '')
+const notedOn = (found, blocking) => {
+  const keys = blocking.map(acKey).filter(k => k !== '')
+  return (Array.isArray(found) ? found : []).filter(f => isEntry(f) && f.severity === 'minor' && keys.includes(acKey(f))).slice(0, 8)
+}
 // One targeted planner call fixing only the given findings, then the program's rule check and the rules re-review (D4-D6).
 // Its findings all carry a rule, so its re-review always runs.
-const rulesRevise = async findings => {
+// #988: a criterion (by its ac member) with a blocking rule finding before the rules revise and again after it. Under another rule the
+// rules pull against each other for it; under the same rule the revise did not settle it. Either way one more revise is not expected
+// to, so the stop says so and deliver-batch reports an owner action instead of relaunching.
+const conflictOf = (before, after) => {
+  for (const f of after) {
+    const k = acKey(f)
+    const was = k && present(f.rule) ? before.filter(b => acKey(b) === k && present(b.rule)) : []
+    if (was.length) return { ac: f.ac.trim(), rules: [...new Set(was.map(b => b.rule).concat(f.rule))] }
+  }
+  return null
+}
+// left: the review findings to keep as prior findings when this revise drops a plan that no plan-review stop has kept yet.
+const rulesRevise = async (findings, noted, left = []) => {
   const root = plan.plan_root
-  const halted = await takePlan(await call(planPrompt(`\nFix only these rule findings in your plan at ${root} in place, change nothing else, and return the full result again: ${JSON.stringify(findings)}`), { label: 'plan-rules-revise', phase: 'Plan', agentType: 'planner', schema: PLAN_SCHEMA }), 'plan-rules-revise')
+  const also = noted.length ? ` The rules reviewer also noted these minor findings on the same criteria; they are context for choosing the fix, not findings to fix by themselves: ${JSON.stringify(noted)}` : ''
+  const halted = await takePlan(await call(planPrompt(`\nFix only these rule findings in your plan at ${root} in place, change nothing else, and return the full result again: ${JSON.stringify(findings)}${also}`), { label: 'plan-rules-revise', phase: 'Plan', agentType: 'planner', schema: PLAN_SCHEMA }), 'plan-rules-revise', findings.concat(left))
   if (halted) return { halted }
   const still = planRules(plan)
   const rr = await rulesReview(findings)
   if (!rr) return { silent: true }
-  return { rules: still.concat(findingsOf(rr)) }
+  const rules = still.concat(findingsOf(rr))
+  const conflict = conflictOf(findings, rules)
+  return { rules, noted: notedOn(rr.findings, rules), ...(conflict ? { extra: { conflict } } : {}) }
 }
 // A plan-review stop keeps the revised plan unless this was the second failed rules revise (D5).
-const reviewStop = (rules, findings, rounds, extra) => {
+const reviewStop = (rules, findings, rounds, extra, noted = []) => {
   planReviewed = false
-  if (rounds >= 2) { plan = null; planFindingsKept = null } else planFindingsKept = { rules, findings, rounds }
+  if (rounds >= 2) dropPlan(rules.concat(findings))
+  else planFindingsKept = { rules, findings, rounds, ...(noted.length ? { noted } : {}) }
   return stop('plan-review', { ...(extra || {}), rules, findings })
 }
 const SILENT = { details: 'the rules re-reviewer returned nothing' }
 if (RESUME_RULES) {
   const { rules, findings, rounds } = planFindingsKept
-  const r = await rulesRevise(rules)
+  const noted = notedOn(planFindingsKept.noted, rules)
+  const r = await rulesRevise(rules, noted)
   if (r.halted) return { ...r.halted, findings }
-  if (r.silent) return reviewStop(rules, findings, rounds + 1, SILENT)
-  if (r.rules.length) return reviewStop(r.rules, findings, rounds + 1)
+  if (r.silent) return reviewStop(rules, findings, rounds + 1, SILENT, noted)
+  if (r.rules.length) return reviewStop(r.rules, findings, rounds + 1, r.extra, r.noted)
   planFindingsKept = null
   planReviewed = true
 }
@@ -1168,7 +1223,7 @@ Review the implementation plan at ${plan.plan_root} (and its task files) against
     log(`plan review: ${planFindings.length} blocking findings, revising once`)
     const reviewedFacts = ruleFacts(plan), reviewedCriteria = plan.acceptance
     const revised = await call(planPrompt(`\n${MAP_FIRST} A reviewer found these defects in your plan at ${plan.plan_root}; fix them in place and return the full result again, with criteria_edited: the ids of the criteria whose text you changed to fix a finding (typing the same criterion again in other words is not a change; an empty list when you changed none): ${JSON.stringify(planFindings)}`, REVISE_PACE), { label: 'plan-revise', phase: 'Plan', agentType: 'planner', schema: PLAN_SCHEMA })
-    const halted = await takePlan(revised, 'plan-revise')
+    const halted = await takePlan(revised, 'plan-revise', planFindings)
     if (halted) return { ...halted, findings: planFindings }
     // #819: the restored candidate replaces the reply only when it makes the skip below fire; a renumbered, reused or duplicated id,
     // or any other change, leaves the reply exactly as returned. A plan-revise reply with no criteria_edited is unknown: no restore.
@@ -1188,15 +1243,17 @@ Review the implementation plan at ${plan.plan_root} (and its task files) against
     if (sameRules) log('plan rules re-review skipped: no finding named a rule and the acceptance criteria are unchanged')
     const rr = sameRules ? { findings: [] } : await rulesReview(planFindings)
     if (!rr) return reviewStop(planFindings, planFindings, 0, SILENT)
-    let rules = still.concat(findingsOf(rr)), rounds = 0
+    let rules = still.concat(findingsOf(rr)), rounds = 0, noted = notedOn(rr.findings, rules), extra
     if (rulesOnly(rules)) {
       rounds++
-      const r = await rulesRevise(rules)
+      const r = await rulesRevise(rules, noted, planFindings)
       if (r.halted) return { ...r.halted, findings: planFindings }
-      if (r.silent) return reviewStop(rules, planFindings, rounds, SILENT)
+      if (r.silent) return reviewStop(rules, planFindings, rounds, SILENT, noted)
       rules = r.rules
+      noted = r.noted
+      extra = r.extra
     }
-    if (rules.length) return reviewStop(rules, planFindings, rounds)
+    if (rules.length) return reviewStop(rules, planFindings, rounds, extra, noted)
   }
   planFindingsKept = null
   planReviewed = true
