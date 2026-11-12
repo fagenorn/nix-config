@@ -16,7 +16,7 @@ export const meta = {
 // (positive integers, distinct) or label (every open issue carrying it; exactly one of the two),
 // decisions ({"<issue>": owner answer}), conts ({"<issue>": a previous run's forwarded child
 // continuation}, only for listed issues, D9; the relaunch keeps of each cont's setup only what a resume reads, see slimCont), unattended (boolean, default false: true only for a run
-// no session watches, D12), review_sizing (boolean, default off: passed to every child and kept in the relaunch, #747), clerk_model (sonnet, the default, or haiku: the model of every clerk call except the setup step and the steps that emit a lifecycle verb (land-pr, land-lock, land-merge, land-unlock), which stay on sonnet, #813;
+// no session watches, D12), review_sizing (boolean, default off: passed to every child and kept in the relaunch, #747), clerk_model (sonnet, the default, or haiku: the model of every clerk call except the setup step and the steps that emit a lifecycle verb (land-pr, land-lock, land-relock, land-merge, land-unlock), which stay on sonnet, #813;
 // passed to every child and kept in the relaunch when haiku, #803), amend ({"<issue>": a non-empty list of {file, find, replace} edits of
 // that issue's plan files}, only for an issue in conts, #811: sent with its cont to the first child call of the run, kept in the relaunch with that cont).
 // train (boolean, default false, #822: true lands up to TRAIN_MAX ready issues waiting behind a busy land queue through one car pull request, see Train landing below;
@@ -161,7 +161,7 @@ if (!HOLDER_RE.test(HOLDER)) return { stage: 'setup', result: setup, invalid: 'h
 const SLUG = SETUP.slug, INT = SETUP.integration_branch, MAX = SETUP.max_parallel
 // The land lock command, its return sentence and the conditional second release, one line each so deliver-standard.js carries them byte for byte (#716).
 const LAND_ACQUIRE = (sha, wait) => `forge-claim land acquire --repo ${SLUG} --branch ${INT} --sha ${sha}${wait ? ' --wait' : ''}`
-const LOCK_RETURN = `Return its verdict (acquired, already_held, moved, land-contended, held_by, lost_to, or error on any other exit), lock_sha, by and detail from its output. ${FORGE_TIMEOUT}`
+const LOCK_RETURN = `Return its verdict (acquired, already_held, moved, land-contended, held_by, lost_to, or error on any other exit), lock_sha, by, detail, waited_s and waited_on from its output. ${FORGE_TIMEOUT}`
 const RELEASE_AGAIN = maybe => `When it prints not_held with lock_sha ${maybe}, run alone and exactly: forge-claim land release --repo ${SLUG} --branch ${INT} --sha ${maybe}, then return the verdict of that second release.\n`
 const RELEASE_FIRST = (sha, maybe) => `First, before anything below, release the cross-host landing lock of the branch ${INT}: run alone and exactly: forge-claim land release --repo ${SLUG} --branch ${INT} --sha ${sha}
 released and not_held are both fine. ${FORGE_TIMEOUT} Return its verdict and any detail as release.
@@ -504,7 +504,7 @@ const findingsOf = r => (r.findings || []).filter(f => f.severity !== 'minor')
 const RENEW_SCHEMA = { type: 'object', properties: { verdict: { type: 'string', enum: ['renewed', 'not_held', 'error'] }, by: { type: 'string' }, detail: { type: 'string' }, transient: { type: 'boolean' } }, required: ['verdict'] }
 const LOCK_SCHEMA = {
   type: 'object',
-  properties: { verdict: { type: 'string', enum: ['acquired', 'already_held', 'moved', 'held_by', 'lost_to', 'land-contended', 'error'] }, lock_sha: { type: 'string' }, pr: { type: 'integer' }, by: { type: 'string' }, detail: { type: 'string' } },
+  properties: { verdict: { type: 'string', enum: ['acquired', 'already_held', 'moved', 'held_by', 'lost_to', 'land-contended', 'error'] }, lock_sha: { type: 'string' }, pr: { type: 'integer' }, by: { type: 'string' }, detail: { type: 'string' }, waited_s: { type: 'integer' }, waited_on: { type: 'array', items: { type: 'integer' } } },
   required: ['verdict'],
 }
 const STATUS_SCHEMA = { type: 'object', properties: { verdict: { type: 'string', enum: ['free', 'held_by', 'stale', 'error'] }, lock_sha: { type: 'string' }, by: { type: 'string' }, detail: { type: 'string' } }, required: ['verdict'] }
@@ -517,7 +517,7 @@ const LAND_CHECKS_SCHEMA = {
 const RECORD_SCHEMA = { type: 'object', properties: { ok: { type: 'boolean' }, head: { type: 'string' }, detail: { type: 'string' } }, required: ['ok'] }
 const LAND_SYNC_SCHEMA = {
   type: 'object',
-  properties: { status: { type: 'string', enum: ['current', 'done', 'blocked'] }, conflicted: { type: 'boolean' }, head: { type: 'string' }, merge_commit: { type: 'string' }, resolved_files: STRS, markers_checked: { type: 'boolean' }, tests: STRS, notes: { type: 'string' } },
+  properties: { status: { type: 'string', enum: ['current', 'done', 'conflicted', 'blocked'] }, conflicted: { type: 'boolean' }, head: { type: 'string' }, merge_commit: { type: 'string' }, resolved_files: STRS, markers_checked: { type: 'boolean' }, tests: STRS, notes: { type: 'string' } },
   required: ['status'],
 }
 const LAND_MERGE_SCHEMA = { type: 'object', properties: { merged: { type: 'boolean' }, behind: { type: 'boolean' }, merge_commit: { type: 'string' }, notes: { type: 'string' } }, required: ['merged'] }
@@ -529,6 +529,15 @@ const MAX_SYNCS = 2
 const MERGE_REFUSAL_RETRIES = 2
 // #818: the extra waits a landing spends on the land lock after its first acquire --wait answered land-contended at the CLI's own bound.
 const LAND_WAIT_RETRIES = 3
+// #913: the conflicted sync merges one landing resolves, each outside the land lock; the next conflict goes to the owner.
+const MAX_CONFLICT_ROUNDS = 2
+// #913: a wait for the land lock of this many seconds or more is logged with the pull requests it waited on (forge-claim's waited_on).
+const LOCK_WAIT_LOG_S = 300
+const logWait = (label, lock) => {
+  if (!lock || !(lock.waited_s >= LOCK_WAIT_LOG_S)) return
+  const on = Array.isArray(lock.waited_on) ? lock.waited_on : []
+  log(`${label}: waited ${Math.round(lock.waited_s / 60)} min for the land lock of ${INT}${on.length ? ` behind PR ${on.map(p => `#${p}`).join(', ')}` : ''}`)
+}
 // A folded reply carries its nested steps; a nested object may be absent, so its schema is nullable (#716).
 const NULLABLE = s => ({ anyOf: [s, { type: 'null' }] })
 const withRenew = (s, extra = {}) => ({ ...s, properties: { ...s.properties, renew: RENEW_SCHEMA, ...extra }, required: ['renew'] })
@@ -543,7 +552,7 @@ const HOLDING = v => v === 'acquired' || v === 'already_held' || v === 'moved'
 // take the land lock with --wait and wait for the first checks (one agent call, land-pr), the checks loop (a resync only on a behind answer or a retaken lock), renew, the one-shot
 // pre-merge acquire and the merge (one agent call, land-merge), close out with the lock release first in that call (#677, #716, #801). Every exit goes through the wrapper at the bottom: a landing that holds the
 // lock releases it exactly once, at the last sha it was held at (P8): in the close-out call, and the wrapper releases only what that call did not confirm. A failed landing keeps the
-// claim and its cont (D9).
+// claim and its cont (D9). A conflicted sync merge ends that hold early and its reviewed resolution starts a new one (#913, at resync below).
 // The kinds a criterion row can carry. A note is the orchestrator's own observation: never held, listed in a close-out comment (#736).
 // This copy of the rule lives here because the program has no filesystem access and shares no module with deliver-standard.js.
 const ACCEPT_KINDS = ['code', 'evidence', 'human', 'note']
@@ -585,7 +594,7 @@ const land = async (n, ready, via = {}) => {
   // The poll a previous call carried for the next round: { label, reply } or null (#801).
   let carried = null
   const PENDING_WAITS = 3
-  const c = { sync: 0, syncReview: 0, checks: 0, record: 0, conflicts: 0, ciFails: 0, pending: 0, refused: 0 }
+  const c = { sync: 0, syncReview: 0, checks: 0, record: 0, relock: 0, conflicts: 0, ciFails: 0, pending: 0, refused: 0 }
   const out = (outcome, extra) => ({ issue: n, outcome, ...(pr ? { pr } : {}), ...(extra || {}) })
   const call = (prompt, label, opts) => ask(agent(prompt, { label, phase: 'Land', ...opts }), label)
   const clerk = { agentType: 'clerk', model: CLERK_MODEL, effort: 'low' }
@@ -604,13 +613,20 @@ ${CHECKS_TAIL(prRef, '(Bash timeout up to 60 minutes; rerun while any is pending
     return out('stopped', { stage: 'renew', detail: r.detail || r.verdict })
   }
 
+  // Releases the lock at lockSha. A release that is not confirmed (any verdict but released or not_held, a lost reply, a dead agent) leaves the
+  // lock marked held at that sha, so the next release tries the same sha again: a conflicted sync goes on without the lock either way (#913).
   const unlock = async () => {
     if (!lockHeld) return
     lockHeld = false
-    await call(`Release the cross-host landing lock of the branch ${INT} held for issue #${n} of ${SLUG}.
+    let r = null
+    try {
+      r = await call(`Release the cross-host landing lock of the branch ${INT} held for issue #${n} of ${SLUG}.
 Run alone and exactly: forge-claim land release --repo ${SLUG} --branch ${INT} --sha ${lockSha}
 released and not_held are both fine. ${FORGE_TIMEOUT} Return its verdict and any detail. Run nothing else.
 ${lockMaybe && lockMaybe !== lockSha ? RELEASE_AGAIN(lockMaybe) : ''}${RULES}`, `land-unlock-${n}`, { ...lifecycleClerk, schema: RELEASE_SCHEMA })
+    } finally {
+      if (!r || (r.verdict !== 'released' && r.verdict !== 'not_held')) lockHeld = true
+    }
   }
 
   // D12: only an unattended run posts the marker; a session-launched run returns the same items on its row.
@@ -629,28 +645,39 @@ ${RULES}`, `land-ask-${n}`, { ...clerk, schema: ASK_SCHEMA })
   }
 
   // After a head change that passed its gate once the PR exists (D13): record it, then move the lock.
-  const advance = async () => {
+  // #913: with retake, the lock was released for a conflicted sync and the same step takes it again at the reviewed head, waiting
+  // (acquire --wait; a wait that runs out at the CLI's bound is waited for again in a land-relock step, LAND_WAIT_RETRIES times at most, as
+  // the first wait is). Like land-pr, the call is marked as possibly holding the lock first (P5); a refusal holds nothing. When the release
+  // before the resolution was not confirmed, the lock is still marked held at the earlier sha: the retake is then tracked as a move, so a
+  // lost answer releases the earlier sha first and the reviewed head after it (P10).
+  const advance = async (retake = false) => {
     c.record++
     const label = `land-record-${n}-${c.record}`
+    const fresh = retake && !lockHeld
+    if (fresh) {
+      lockHeld = true
+      lockSha = expected
+      lockMaybe = null
     // The move may land and its answer be lost: the release then also tries expected (P10).
-    if (expected !== lockSha) lockMaybe = expected
+    } else if (expected !== lockSha) lockMaybe = expected
     const rec = await call(`The head of PR #${pr} of issue #${n} of ${SLUG} changed to ${expected} and passed its gate. Record it in the PR body.
 1. Run gh pr view ${pr} --repo ${SLUG} --json body,headRefOid and confirm headRefOid is ${expected}. If it is not, change nothing and return ok false with the head it shows.
 2. Make a fresh directory with mktemp -d and write the body to a file in it, rewriting only the Accepted head line (the last line of the Evidence section) to exactly this text, everything else unchanged:
 Accepted head: ${expected}
 3. Run gh pr edit ${pr} --repo ${SLUG} --body-file <that file>. When the line already reads exactly so, change nothing.
 Return ok true and head (the headRefOid you read).
-Only when ok is true, move the cross-host landing lock of the branch ${INT} to the head ${expected}: run alone and exactly: ${LAND_ACQUIRE(expected, false)}
+Only when ok is true, ${retake ? `take the cross-host landing lock of the branch ${INT} again, at the head ${expected}; it was released while a conflict was resolved` : `move the cross-host landing lock of the branch ${INT} to the head ${expected}`}: run alone and exactly: ${LAND_ACQUIRE(expected, retake)}
 ${LOCK_RETURN} Return it as lock; otherwise return lock null.
 Then, only when ok is true and lock's verdict is acquired, already_held or moved, wait for every check of PR #${pr} at the head, required or not:
 ${CHECKS_STEPS(pr)}
 Return those fields as checks; otherwise return checks null.
 ${RULES}`, label, { ...lifecycleClerk, schema: { ...RECORD_SCHEMA, properties: { ...RECORD_SCHEMA.properties, lock: NULLABLE(LOCK_SCHEMA), checks: NULLABLE(LAND_CHECKS_SCHEMA) } } })
     let lv = rec && rec.lock ? rec.lock.verdict : null
+    if (rec) logWait(label, rec.lock)
     let reread = false
     let unread = false
     // #816: a refusal naming this batch at the lock it already held is a move whose read-back lagged, not contention: read the lock once and go on when it is at expected.
-    if (rec && rec.ok === true && rec.head === expected && (lv === 'lost_to' || lv === 'held_by') && rec.lock.by === HOLDER && rec.lock.lock_sha === lockSha) {
+    if (!retake && rec && rec.ok === true && rec.head === expected && (lv === 'lost_to' || lv === 'held_by') && rec.lock.by === HOLDER && rec.lock.lock_sha === lockSha) {
       const st = await call(`The lock move to ${expected} for PR #${pr} of issue #${n} of ${SLUG} answered ${lv} naming this batch at ${lockSha}, which may be a lagging read. Read the cross-host landing lock of the branch ${INT} once: run alone and exactly: forge-claim land status --repo ${SLUG} --branch ${INT} --sha ${expected}
 Return its verdict (free, held_by, stale, or error on any other exit), lock_sha, by and detail from its output. ${FORGE_TIMEOUT} Run nothing else.
 ${RULES}`, `land-status-${n}-${c.record}`, { ...clerk, schema: STATUS_SCHEMA })
@@ -658,61 +685,116 @@ ${RULES}`, `land-status-${n}-${c.record}`, { ...clerk, schema: STATUS_SCHEMA })
       // A failed or lost read proves nothing about where the lock is: the move may have landed, so expected stays a release target.
       else if (!st || st.verdict === 'error') unread = true
     }
+    // #913: the retake's wait ran out behind other landings, so another holder has the lock and nothing of this landing's is held: renew the
+    // claim and wait again. Each call is marked as possibly holding the lock at the reviewed head first (P5).
+    let relocked = false
+    for (let k = 1; retake && rec && rec.ok === true && rec.head === expected && lv === 'land-contended' && k <= LAND_WAIT_RETRIES; k++) {
+      c.relock++
+      const rl = `land-relock-${n}-${c.relock}`
+      lockHeld = true
+      lockSha = expected
+      lockMaybe = null
+      const lk = await recall(() => call(`${RENEW_FIRST}
+Then take the cross-host landing lock of the branch ${INT} again for PR #${pr} of issue #${n} of ${SLUG} at the reviewed head ${expected}; an earlier wait for it ran out behind other landings. Run alone and exactly: ${LAND_ACQUIRE(expected, true)}
+${LOCK_RETURN} Return it as lock. Run nothing else.
+${RULES}`, rl, { ...lifecycleClerk, schema: withRenew({ type: 'object', properties: {} }, { lock: NULLABLE(LOCK_SCHEMA) }) }), r => r.renew)
+      if (!lk) return out('stopped', { stage: 'land-lock', detail: `${rl} returned nothing` })
+      if (lk.renew && lk.renew.verdict !== 'renewed') lockHeld = false
+      lv = lk.lock ? lk.lock.verdict : null
+      logWait(rl, lk.lock)
+      if (lv === 'land-contended' || lv === 'held_by' || lv === 'lost_to') lockHeld = false
+      const lost = renewed(lk.renew, rl)
+      if (lost) return lost
+      relocked = true
+    }
     if (HOLDING(lv)) {
       lockHeld = true
       lockSha = expected
       lockMaybe = null
-    } else if (!unread && (lv === 'land-contended' || lv === 'held_by' || lv === 'lost_to' || (rec && rec.ok === false && !rec.lock))) lockMaybe = null
+    } else if (!unread && (lv === 'land-contended' || lv === 'held_by' || lv === 'lost_to')) {
+      lockMaybe = null
+      // A refused retake holds nothing: another landing has the lock, whatever the release before the resolution answered.
+      if (retake) lockHeld = false
+    } else if (!unread && rec && rec.ok === false && !rec.lock) {
+      lockMaybe = null
+      // A retake that never ran holds nothing new; a lock still marked held at the earlier sha stays so.
+      if (fresh) lockHeld = false
+    }
     if (!rec || rec.ok !== true || rec.head !== expected) return out('stopped', { stage: 'land-record', detail: rec ? rec.detail : `${label} returned nothing`, head: rec ? rec.head : undefined })
-    if (!HOLDING(lv)) return out('land-contended', { detail: `the lock did not move to ${expected}` })
+    if (!HOLDING(lv)) return out('land-contended', { detail: retake ? `the land lock was not taken again at the reviewed head ${expected} (${lv})` : `the lock did not move to ${expected}` })
     // The record step polled no checks when the lock was only confirmed by the status read: the loop polls them itself.
-    carried = reread ? null : { label, reply: rec.checks || null }
+    carried = reread || relocked ? null : { label, reply: rec.checks || null }
     return null
   }
 
   // One resync of the branch with the integration branch (D10); a row ends the landing, null continues.
+  // #913: the sync step runs under the lock and only merges cleanly. A merge that conflicts is aborted there, so the worktree is clean, and the
+  // lock is released before anything else: the resolution, its tests, its review and the fix round all run outside it, with other landings free
+  // to merge. Only a resolution the review passed (and the re-review, after a fix) reaches advance(true), which records it as the accepted head
+  // and takes the lock again, waiting; its checks poll then answers behind when the integration branch moved meanwhile, and the loop resyncs
+  // again: a clean merge under the lock, a conflicted one outside it once more, MAX_CONFLICT_ROUNDS times at most and within the sync budgets.
+  // Every row returned between the release and the retake holds no lock, and the pushed merge is not the accepted head, so a relaunch sends
+  // the issue through its child's review instead of landing it as it stands.
   const resync = async () => {
     c.sync++
     const label = `land-sync-${n}-${c.sync}`
-    const second = c.conflicts > 0
     const sy = await call(`Issue #${n} of ${SLUG} is being landed into ${INT}. Bring the branch ${B} up to date in the worktree ${W}.
 1. git -C ${W} fetch origin. If origin/${INT} is an ancestor of HEAD (git -C ${W} merge-base --is-ancestor origin/${INT} HEAD succeeds), change nothing and answer status current with head (git -C ${W} rev-parse HEAD, the full sha).
 2. Otherwise merge it: git -C ${W} merge origin/${INT}. A clean merge: answer status done, conflicted false, head (the full sha of the merge commit).
-3. ${second
-      ? `This landing already resolved one conflict. If the merge conflicts, run git merge --abort inside ${W} and answer status blocked, conflicted true, with head (the full sha of HEAD) and notes. Do not resolve it.`
-      : `If the merge conflicts, resolve each conflict keeping both sides' intent, ${MARKER_CHECK(W, INT)}, commit the merge, and ${WHOLE('the files the merge changed against its first parent')}; answer status done, conflicted true, with head (the full sha of the merge commit), resolved_files and markers_checked (true when both checks ran). If you cannot resolve it safely, run git merge --abort inside ${W} and answer status blocked, conflicted true, with notes.`}
-${pr ? `4. After a merge you completed, push the result: git -C ${W} push origin ${B}.` : '4. Do not push.'}
+3. If the merge conflicts, do not resolve it: run git merge --abort inside ${W}, confirm no merge is left in progress (git -C ${W} rev-parse -q --verify MERGE_HEAD fails), and answer status conflicted, conflicted true, with head (the full sha of HEAD, unchanged) and the conflicting files in notes. A later step resolves it.
+${pr ? `4. After a clean merge, push the result: git -C ${W} push origin ${B}.` : '4. Do not push.'}
 ${RULES}`, label, { phase: 'Land', agentType: 'implementer', model: 'sonnet', schema: LAND_SYNC_SCHEMA })
     if (!sy) return out('stopped', { stage: 'land-sync', detail: `${label} returned nothing` })
-    const conflictOwner = notes => ownerAction('conflict', [`PR #${pr} of issue #${n} conflicts with ${INT} a second time in one landing, so the merge was aborted. ${notes || ''} Resolve the conflict on the branch ${B}, then relaunch the batch.`], 'conflict', { detail: sy.notes })
-    if (sy.status === 'blocked') {
-      if (!sy.conflicted) return out('stopped', { stage: 'land-sync', detail: sy.notes })
-      if (!second) { c.conflicts++; return out('conflict', { detail: sy.notes }) }
-      return await conflictOwner(sy.notes)
-    }
-    let head = sy.head || sy.merge_commit || (sy.status === 'current' ? expected : null)
-    if (!head) return out('stopped', { stage: 'land-sync', detail: 'the resync named no head' })
+    // A blocked answer that names a conflict is the aborted merge under another name.
+    const aborted = sy.status === 'conflicted' || (sy.status === 'blocked' && sy.conflicted === true)
+    if (sy.status === 'blocked' && !aborted) return out('stopped', { stage: 'land-sync', detail: sy.notes })
     if (sy.status === 'current') {
-      if (head !== expected) return out('stopped', { stage: 'head-moved', expected, head })
+      const at = sy.head || sy.merge_commit || expected
+      if (at !== expected) return out('stopped', { stage: 'head-moved', expected, head: at })
       return null
     }
-    if (sy.status !== 'done') return out('stopped', { stage: 'land-sync', detail: sy.notes })
-    if (sy.conflicted) {
-      if (second) return await conflictOwner(sy.notes)
+    if (!aborted && sy.status !== 'done') return out('stopped', { stage: 'land-sync', detail: sy.notes })
+    // The reply that names the merge to land: the sync step's own, or the resolution's.
+    let merge = sy
+    // True once the lock was released for a conflict: the reviewed head then takes it again in advance(true).
+    let outside = false
+    // A sync step that resolved the conflict itself, against its prompt, is released and reviewed like any resolution.
+    if (aborted || sy.conflicted) {
+      if (c.conflicts >= MAX_CONFLICT_ROUNDS) {
+        return await ownerAction('conflict', [`PR #${pr} of issue #${n} conflicts with ${INT} again, after ${c.conflicts} earlier conflicts in one landing, so the landing stopped and accepted no merge for this one. ${sy.notes || ''} Bring the branch ${B} up to date with ${INT}, then relaunch the batch.`], 'conflict', { detail: sy.notes })
+      }
       c.conflicts++
+      await unlock()
+      outside = true
+      if (aborted) {
+        const rlabel = `land-sync-resolve-${n}-${c.sync}`
+        merge = await call(`Issue #${n} of ${SLUG} is being landed into ${INT}, and merging origin/${INT} into the branch ${B} conflicts. Resolve it in the worktree ${W}. The landing lock is not held while you work.
+1. If a merge is in progress in ${W} (git -C ${W} rev-parse -q --verify MERGE_HEAD succeeds), run git merge --abort inside ${W} first. Then git -C ${W} fetch origin and git -C ${W} merge origin/${INT}.
+2. A merge that is clean this time (the integration branch moved): answer status done, conflicted false, head (the full sha of the merge commit); it is reviewed all the same.
+3. Otherwise resolve each conflict keeping both sides' intent, ${MARKER_CHECK(W, INT)}, commit the merge, and ${WHOLE('the files the merge changed against its first parent')}; answer status done, conflicted true, with head (the full sha of the merge commit), resolved_files and markers_checked (true when both checks ran). If you cannot resolve it safely, run git merge --abort inside ${W} and answer status blocked, conflicted true, with notes.
+4. After a merge you completed, push the result: git -C ${W} push origin ${B}.
+${RULES}`, rlabel, { phase: 'Land', agentType: 'implementer', model: 'sonnet', schema: LAND_SYNC_SCHEMA })
+        if (!merge) return out('stopped', { stage: 'land-sync', detail: `${rlabel} returned nothing` })
+        if (merge.status !== 'done') return out('conflict', { detail: merge.notes })
+      }
+    }
+    let head = merge.head || merge.merge_commit
+    if (!head) return out('stopped', { stage: 'land-sync', detail: 'the resync named no head' })
+    // A merge that conflicted is reviewed whatever its resolution says of itself: the sync step saw the conflict.
+    if (aborted || merge.conflicted) {
+      const mc = merge.merge_commit || head
+      // The review reads the merge commit and the landing merges the head: they must be one commit.
+      if (!sameSha(head, mc)) return out('stopped', { stage: 'land-sync', detail: `the resolution names the head ${head} and the merge commit ${mc}: only a reviewed merge commit lands` })
       c.syncReview++
-      const mc = sy.merge_commit || head
       const rv = await call(`Issue #${n} of ${SLUG}, worktree ${W}, branch ${B}.
-Review the conflict resolution in merge commit ${mc}: git -C ${W} show --cc ${mc} and the resolved files ${JSON.stringify(sy.resolved_files || [])}; the tests run: ${JSON.stringify(sy.tests || [])}. Report Important or Critical defects only: a dropped change from either side, a broken merge of intent, a resolved file whose tests were not run.${sy.markers_checked === true ? '' : MARKERS_UNCHECKED} Do not edit anything.
+Review the conflict resolution in merge commit ${mc}: git -C ${W} show --cc ${mc} and the resolved files ${JSON.stringify(merge.resolved_files || [])}; the tests run: ${JSON.stringify(merge.tests || [])}. Report Important or Critical defects only: a dropped change from either side, a broken merge of intent, a resolved file whose tests were not run.${merge.markers_checked === true ? '' : MARKERS_UNCHECKED} Do not edit anything.
 ${RULES}`, `land-sync-review-${n}-${c.syncReview}`, { agentType: 'reviewer', schema: FINDINGS })
       if (!rv) return out('conflict', { review: rv })
       const found = findingsOf(rv)
       if (found.length) {
-        // #907: one fix round, at most one per landing (a landing reviews one conflicted merge; a second conflict goes to the owner above). It is
-        // no resync, so it spends neither MAX_SYNCS nor MERGE_REFUSAL_RETRIES. The lock stays held at the head it had before this resync through
-        // the merge, its review, the fix and the re-review: none of them moves it, and a row returned here is released by the wrapper at that sha.
-        // Only a fix the re-review passes is recorded: advance() below moves the lock to it and waits for its checks. The lock is unchanged
-        // meanwhile, so a waiter that watched it for 45 minutes may take it over; the move is then refused and the row ends land-contended.
+        // #907: one fix round per reviewed merge. It is no resync, so it spends neither MAX_SYNCS nor MERGE_REFUSAL_RETRIES, and like the
+        // resolution it runs outside the lock (#913). Only a fix the re-review passes is recorded: advance(true) below takes the lock at it
+        // and waits for its checks.
         const fix = await call(`Issue #${n} of ${SLUG}, worktree ${W}, branch ${B}.
 ${SYNC_FIX(W, mc, found)} Then push (git -C ${W} push origin ${B}); before pushing, ${WHOLE('the files you changed')}. ${COMMIT_SCOPE} ${IMPL_RETURN}
 ${RULES}`, `land-sync-fix-${n}-${c.syncReview}`, { agentType: 'implementer', model: 'sonnet', schema: IMPL })
@@ -731,9 +813,9 @@ ${RULES}`, `land-sync-rereview-${n}-${c.syncReview}`, { agentType: 'reviewer', s
         if (moved) head = fix.commit
       }
     }
-    if (head !== expected) {
+    if (head !== expected || outside) {
       expected = head
-      if (pr) return await advance()
+      if (pr) return await advance(outside)
     }
     return null
   }
@@ -790,6 +872,7 @@ ${RULES}`, `land-pr-${n}`, { agentType: 'clerk', model: DEFAULT_CLERK_MODEL, eff
     // A renew that ended ran nothing after it; a refused lock holds nothing (P5). Otherwise the lock stays marked held at expected (O2).
     if (prR.renew && prR.renew.verdict !== 'renewed') lockHeld = false
     let v1 = prR.lock ? prR.lock.verdict : null
+    logWait(`land-pr-${n}`, prR.lock)
     const refusal = v => v === 'land-contended' || v === 'held_by' || v === 'lost_to'
     if (refusal(v1)) lockHeld = false
     const lostA = renewed(prR.renew, `land-pr-${n}`)
@@ -811,6 +894,7 @@ ${RULES}`, label, { ...lifecycleClerk, schema: withRenew({ type: 'object', prope
       if (!lk) return out('stopped', { stage: 'land-lock', detail: `${label} returned nothing` })
       if (lk.renew && lk.renew.verdict !== 'renewed') lockHeld = false
       v1 = lk.lock ? lk.lock.verdict : null
+      logWait(label, lk.lock)
       if (refusal(v1)) lockHeld = false
       const lost = renewed(lk.renew, label)
       if (lost) return lost
