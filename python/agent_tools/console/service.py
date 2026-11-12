@@ -332,6 +332,35 @@ or `manager.failed {sprint_id, reason}` is appended (the reason of a `LaunchFail
 <sprint_id> <reason>`, and the view is published. `withdraw_goal` also removes the manager's
 settings file. The sprint's secret appears in no row, view or stderr line.
 
+Nudges (#889): the service takes `nudger` (`nudge.nudger_for(sys.platform)` from `console.py`; None
+means no nudge is ever made, no reservation, row or listing read) and `listing` (default: read
+`sessions.read_session_registry(self._session_dirs())` when called). After `send_message`,
+`approve_brief` and `reply_brief` append, still under the ingest lock, the sprint is reserved for a
+nudge (`_nudging`) when there is a nudger, the sprint is open, its manager row is `started` and
+`sprints.unread(sprint)` is non-empty; a sprint already reserved is marked in `_nudge_again`
+instead. The job is dispatched through `self._dispatch` after the lock is released. A dispatch that
+raises is a failed nudge, never the caller's failure (the message is already stored): the
+reservation is freed and, while the sprint is open, one `sprint.nudged {sprint_id, through, route:
+null, ok: false, reason: "the nudge could not start: <Type>: <message>"}` is appended and
+`console: nudge_failed <sprint_id> <reason>` printed, so the route still answers normally.
+`_nudge(sprint_id)`, under the lock, drops the reservation and returns unless the sprint is open, its
+manager started and something unread (the project's root is the working directory); off the lock
+it lists the sessions named `manager.session_name(project, sprint)`: a listed one gets a `RELAY`
+`nudge.Nudge` to the lowest session id, else the sprint's `manager_session` gets a `WAKE`, else
+there is no nudger call and the reason is `nudge.UNKNOWN_SESSION` with a null route; a `NudgeFailed`
+gives its text and any other exception (the listing's included) `<Type>: <message>`. Under the lock
+again it releases the reservation and, while the sprint is open and the service is not stopping,
+appends one `sprint.nudged {sprint_id, through: the last unread id, route, ok[, reason]}` (a failure
+also prints `console: nudge_failed <sprint_id> <reason>`); when the sprint was marked in
+`_nudge_again` and now holds an unread message above `through`, it is reserved and dispatched once
+more (never after a success alone). `renudge()`, called by `_poll_loop` after `poll_deliveries` (a
+failure is `console: renudge_failed <Type>: <message>`), reserves under the lock each open
+unreserved sprint with a started manager, `failed_nudges < sprints.UNREACHABLE_AFTER`, an unread
+message with no `delivered_at` whose `at` is at least `sprints.RENUDGE_AFTER_MS` before
+`self._clock()` and a `last_nudge_at` that is None or as old, and dispatches each after the lock
+(row times are compared as epoch milliseconds). The nudger and the listing are never called with the
+ingest lock held, and no `Nudge`, row or stderr line carries the owner's text.
+
 Retention (ADR-console-009): construction runs one retention pass (`EventLog.retain`) after
 opening the log and before reading its events, and `RETENTION_THREAD`, started by `start()`, calls
 `retain()` every `retention_seconds` (`RETENTION_SECONDS`, one day). A pass that removed rows
@@ -387,24 +416,28 @@ import sys
 import os
 import threading
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qsl
 
 from agent_tools.claims import owner_actions
 from agent_tools.console import (
-    answer, capacity, deliveries, digest, inbox, manager, sessions, sprints, write_guard)
+    answer, capacity, deliveries, digest, inbox, manager, nudge, sessions, sprints, write_guard)
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
-    MANAGER_STARTED, MANAGER_WAITING, SPRINT_ANSWERED, SPRINT_MESSAGED, SPRINT_READ,
-    SPRINT_REPORTED, Event, EventLog, utc_now)
+    MANAGER_STARTED, MANAGER_WAITING, SPRINT_ANSWERED, SPRINT_MESSAGED, SPRINT_NUDGED,
+    SPRINT_READ, SPRINT_REPORTED, Event, EventLog, utc_now)
 from agent_tools.console.view import (
     INBOX_CHANGED, ReadState, derive_view, encode_view, health_change, inbox_changes, inbox_records,
     project_for, project_states, read_states, registry_changes)
 from agent_tools.project_contract import agent_platform
 from agent_tools.system.forge_api import ForgeError
 from agent_tools.verification import verify_answer
+
+def _epoch_ms(at: str) -> int:
+    return int(datetime.fromisoformat(at).timestamp() * 1000)
+
 
 def _reduced(questions: list[dict]) -> list[tuple[str, list[str]]]:
     return [(q["question"], list(q["options"])) for q in questions]
@@ -1016,8 +1049,16 @@ class ConsoleService:
                  owner_path: Callable[..., None] = verify_answer.answer_prompt,
                  launcher: Callable[[manager.Launch], None] | None = None,
                  bound_profile_of: Callable[[str], str] = manager.bound_profile,
-                 dispatch: Callable[[Callable[[], None]], None] | None = None):
+                 dispatch: Callable[[Callable[[], None]], None] | None = None,
+                 nudger: Callable[[nudge.Nudge], None] | None = None,
+                 listing: Callable[[], Mapping[str, sessions.Observation]] | None = None):
         self.registry = Path(registry)
+        self._nudger = nudger
+        self._listing = (
+            (lambda: sessions.read_session_registry(self._session_dirs()))
+            if listing is None else listing)
+        self._nudging: set[str] = set()
+        self._nudge_again: set[str] = set()
         self._launcher = launcher
         self._bound_profile_of = bound_profile_of
         self._dispatch = self._on_new_thread if dispatch is None else dispatch
@@ -1506,6 +1547,9 @@ class ConsoleService:
             appended = self.log.append([(BRIEF_APPROVED, project_id, {
                 "sprint_id": sprint_id, "version": version, "goal": sprint.goal})])
             self._apply(appended)
+            reserved = self._reserve_nudge(sprint_id)
+        if reserved:
+            self._dispatch_nudge(sprint_id)
 
     def reply_brief(self, project_id: str, sprint_id: str, version: int, reply: str) -> None:
         """Append one `brief.replied` event carrying the owner's words exactly as sent."""
@@ -1516,6 +1560,9 @@ class ConsoleService:
                 "sprint_id": sprint_id, "version": version, "goal": sprint.goal,
                 "reply": reply})])
             self._apply(appended)
+            reserved = self._reserve_nudge(sprint_id)
+        if reserved:
+            self._dispatch_nudge(sprint_id)
 
     def send_message(self, project_id: str, sprint_id: str, text: str) -> int:
         """Append one `sprint.messaged` event with the owner's text exactly as sent; its id."""
@@ -1527,7 +1574,123 @@ class ConsoleService:
             appended = self.log.append([(SPRINT_MESSAGED, project_id, {
                 "sprint_id": sprint_id, "goal": sprint.goal, "text": text})])
             self._apply(appended)
-            return appended[-1].seq
+            reserved = self._reserve_nudge(sprint_id)
+        if reserved:
+            self._dispatch_nudge(sprint_id)
+        return appended[-1].seq
+
+    def _nudgeable(self, sprint_id: str) -> tuple[sprints.SprintState, tuple[sprints.Message, ...]] | None:
+        """Under the ingest lock: the open sprint and its unread messages when its manager can be nudged."""
+        sprint = self._sprints.get(sprint_id)
+        if sprint is None or sprint.manager is None or sprint.manager.state != sprints.STARTED:
+            return None
+        unread = sprints.unread(sprint)
+        return (sprint, unread) if unread else None
+
+    def _reserve_nudge(self, sprint_id: str) -> bool:
+        """Under the ingest lock: reserve the sprint for a nudge; a reserved sprint is marked to nudge again."""
+        if self._nudger is None or self._nudgeable(sprint_id) is None:
+            return False
+        if sprint_id in self._nudging:
+            self._nudge_again.add(sprint_id)
+            return False
+        self._nudging.add(sprint_id)
+        return True
+
+    def _dispatch_nudge(self, sprint_id: str) -> None:
+        """Hand a reserved sprint's nudge to the dispatcher; one that cannot start is a failed nudge."""
+        try:
+            self._dispatch(lambda: self._nudge(sprint_id))
+        except Exception as error:
+            reason = f"the nudge could not start: {type(error).__name__}: {error}"
+            with self._ingest:
+                self._nudging.discard(sprint_id)
+                self._nudge_again.discard(sprint_id)
+                self._record_nudge(sprint_id, None, None, reason)
+
+    def _record_nudge(self, sprint_id: str, through: int | None, route: str | None,
+                      reason: str | None) -> None:
+        """Under the ingest lock: append one `sprint.nudged` row for the open sprint and fold it."""
+        sprint = self._sprints.get(sprint_id)
+        if sprint is None or self._stop.is_set():
+            return
+        if through is None:
+            unread = sprints.unread(sprint)
+            if not unread:
+                return
+            through = unread[-1].message_id
+        payload = {"sprint_id": sprint_id, "through": through, "route": route,
+                   "ok": reason is None}
+        if reason is not None:
+            payload["reason"] = reason
+        self._apply(self.log.append([(SPRINT_NUDGED, sprint.project_id, payload)]))
+        if reason is not None:
+            print(f"console: nudge_failed {sprint_id} {reason}", file=sys.stderr)
+
+    def _nudge(self, sprint_id: str) -> None:
+        """Tell the sprint's manager to read its inbox, then record the attempt; the reservation ends here."""
+        with self._ingest:
+            found = self._nudgeable(sprint_id)
+            project = None if found is None else self._states.get(found[0].project_id)
+            if found is None or project is None:
+                self._nudging.discard(sprint_id)
+                self._nudge_again.discard(sprint_id)
+                return
+            sprint, unread = found
+            through = unread[-1].message_id
+            name = manager.session_name(sprint.project_id, sprint_id)
+            profile, known, cwd = sprint.manager.profile, sprint.manager_session, project.root
+        route, reason = None, None
+        try:
+            listed = sorted(o.session_id for o in self._listing().values() if o.name == name)
+            if listed:
+                route = nudge.RELAY
+                self._nudger(nudge.Nudge(sprint_id, route, name, listed[0], profile, cwd))
+            elif known is not None:
+                route = nudge.WAKE
+                self._nudger(nudge.Nudge(sprint_id, route, name, known, profile, cwd))
+            else:
+                reason = nudge.UNKNOWN_SESSION
+        except Exception as error:
+            reason = (str(error) if isinstance(error, nudge.NudgeFailed)
+                      else f"{type(error).__name__}: {error}")
+        again = False
+        with self._ingest:
+            self._nudging.discard(sprint_id)
+            wanted = sprint_id in self._nudge_again
+            self._nudge_again.discard(sprint_id)
+            self._record_nudge(sprint_id, through, route, reason)
+            found = self._nudgeable(sprint_id)
+            if wanted and found is not None and found[1][-1].message_id > through \
+                    and not self._stop.is_set():
+                self._nudging.add(sprint_id)
+                again = True
+        if again:
+            self._dispatch_nudge(sprint_id)
+
+    def renudge(self) -> None:
+        """Nudge again the managers whose message went unread and undelivered for a minute."""
+        if self._nudger is None:
+            return
+        due = []
+        with self._ingest:
+            now = int(self._clock() * 1000)
+            for sprint_id, sprint in self._sprints.items():
+                found = self._nudgeable(sprint_id)
+                if (found is None or sprint_id in self._nudging
+                        or sprints.unreachable(sprint)):
+                    continue
+                if not any(message.delivered_at is None
+                           and now - _epoch_ms(message.at) >= sprints.RENUDGE_AFTER_MS
+                           for message in found[1]):
+                    continue
+                if sprint.last_nudge_at is not None and \
+                        now - _epoch_ms(sprint.last_nudge_at) < sprints.RENUDGE_AFTER_MS:
+                    continue
+                self._nudging.add(sprint_id)
+                due.append(sprint_id)
+        for sprint_id in due:
+            self._dispatch_nudge(sprint_id)
 
     def read_inbox(self, sprint_id: str, secret: str) -> list[dict]:
         """The unread messages in id order; the same locked section records them as read."""
@@ -1711,6 +1874,11 @@ class ConsoleService:
                 self.poll_deliveries()
             except Exception as error:
                 print(f"console: delivery_poll_failed {type(error).__name__}: {error}",
+                      file=sys.stderr)
+            try:
+                self.renudge()
+            except Exception as error:
+                print(f"console: renudge_failed {type(error).__name__}: {error}",
                       file=sys.stderr)
 
     def _fold(self, appended: list[Event]) -> None:

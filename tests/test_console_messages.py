@@ -5,8 +5,11 @@ Run: just agent-workflow-tests
 import contextlib
 import io
 import json
+import time
+from datetime import datetime, timezone
 
-from agent_tools.console import write_guard
+from agent_tools.console import manager, nudge, sessions, sprints, write_guard
+from agent_tools.console.event_log import EventLog
 
 from . import console_test_support as support
 from .test_console_answer import view_of
@@ -240,3 +243,310 @@ class MessageRouteTest(Case):
         self.assertIn("console: message_reply_refused", lines)
         self.assertNotIn(secret, lines)
         self.assertNotIn(private, lines)
+
+
+T0 = 1_800_000_000.0
+
+
+class NudgeServiceTest(MessageRouteTest):
+    """The service nudges a running manager, wakes a stopped one and counts failures (#889)."""
+
+    def setUp(self):
+        super().setUp()
+        support.write_registry(self.registry, support.entries(2))
+        self.queued = support.Queued()
+        self.nudges = []
+        self.outcomes = []
+        self.listed = {}
+        self.now = [T0]
+
+    def log_clock(self):
+        return datetime.fromtimestamp(self.now[0], timezone.utc).isoformat(timespec="microseconds")
+
+    def nudger(self, sent):
+        self.nudges.append(sent)
+        outcome = self.outcomes.pop(0) if self.outcomes else None
+        if outcome is not None:
+            raise nudge.NudgeFailed(outcome)
+
+    def begin(self, **overrides):
+        options = dict(
+            launcher=support.Launches(), bound_profile_of=lambda root: "work",
+            dispatch=self.queued, nudger=self.nudger, listing=lambda: dict(self.listed),
+            clock=lambda: self.now[0], log_clock=self.log_clock, session_poll_seconds=3600)
+        return self.start(**{**options, **overrides})
+
+    def running(self, svc):
+        """A sprint whose manager is started and listed as running."""
+        sid = svc.state_goal("owner/p01", GOAL_TEXT)
+        self.queued.run_next()
+        self.listed["s-1"] = sessions.Observation(
+            "s-1", "/srv/p01", 1, "idle", None, manager.session_name("owner/p01", sid), None)
+        return sid
+
+    def nudged(self):
+        return [(row[0], json.loads(row[4])) for row in support.log_rows(self.store)
+                if row[2] == "sprint.nudged"]
+
+    def name(self, sid):
+        return manager.session_name("owner/p01", sid)
+
+    def test_a_message_to_a_running_manager_is_relayed_with_the_fixed_sentence_only(self):
+        svc = self.begin()
+        sid = self.running(svc)
+        svc.send_message("owner/p01", sid, TEXT)
+        self.queued.run_next()
+        self.assertEqual(self.nudges, [nudge.Nudge(
+            sid, "relay", self.name(sid), "s-1", "work", "/srv/p01")])
+        self.assertNotIn("importer", repr(self.nudges[0]))
+        message = self.sprint_state(svc, sid).messages[-1]
+        last = support.log_rows(self.store)[-1]
+        self.assertEqual((last[2], json.loads(last[4])), (
+            "sprint.nudged",
+            {"sprint_id": sid, "through": message.message_id, "route": "relay", "ok": True}))
+        self.assertIsNotNone(message.delivered_at)
+        self.assertEqual(self.queued.jobs, [])
+
+    def test_a_listed_session_is_relayed_to_by_its_lowest_session_id(self):
+        svc = self.begin()
+        sid = self.running(svc)
+        self.listed["s-0"] = sessions.Observation(
+            "s-0", "/srv/p01", 2, "idle", None, self.name(sid), None)
+        svc.send_message("owner/p01", sid, TEXT)
+        self.queued.run_next()
+        self.assertEqual([(n.route, n.session_id) for n in self.nudges], [("relay", "s-0")])
+
+    def test_a_stopped_manager_is_woken_in_place(self):
+        first = self.begin()
+        sid = self.running(first)
+        first.close()
+        log = EventLog(self.store, clock=self.log_clock)
+        log.append([("session.seen", "owner/p01", {
+            "session_id": "s-1", "cwd": "/srv/p01", "repo": "/srv/p01", "state": "idle",
+            "name": self.name(sid)})])
+        log.close()
+        self.listed.clear()
+        svc = self.begin()
+        svc.send_message("owner/p01", sid, TEXT)
+        self.queued.run_next()
+        self.assertEqual(self.nudges, [nudge.Nudge(
+            sid, "wake", self.name(sid), "s-1", "work", "/srv/p01")])
+        ((_, row),) = self.nudged()
+        self.assertEqual((row["route"], row["ok"]), ("wake", True))
+
+    def test_an_unknown_session_fails_the_nudge_without_calling_the_nudger(self):
+        svc = self.begin()
+        sid = svc.state_goal("owner/p01", GOAL_TEXT)
+        self.queued.run_next()
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            message = svc.send_message("owner/p01", sid, TEXT)
+            self.queued.run_next()
+        self.assertEqual(self.nudges, [])
+        ((_, row),) = self.nudged()
+        self.assertEqual(row, {"sprint_id": sid, "through": message, "route": None, "ok": False,
+                               "reason": "the manager's session is not known"})
+        self.assertIn(f"console: nudge_failed {sid} the manager's session is not known",
+                      stderr.getvalue())
+
+    def test_two_failed_nudges_in_a_row_mark_the_manager_not_reachable_and_keep_the_messages(self):
+        svc = self.begin()
+        sid = self.running(svc)
+        self.outcomes[:] = ["relay refused", "relay refused"]
+        svc.send_message("owner/p01", sid, TEXT)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.queued.run_next()
+            self.now[0] += 61
+            svc.renudge()
+            self.queued.run_next()
+        self.assertTrue(sprints.unreachable(self.sprint_state(svc, sid)))
+        self.now[0] += 120
+        svc.renudge()
+        self.assertEqual(self.queued.jobs, [])
+        self.assertEqual([m["text"] for m in svc.read_inbox(sid, self.secret(sid))], [TEXT])
+
+    def test_a_first_failure_is_retried_once_after_a_minute_and_not_before(self):
+        svc = self.begin()
+        sid = self.running(svc)
+        self.outcomes[:] = ["relay refused"]
+        svc.send_message("owner/p01", sid, TEXT)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.queued.run_next()
+        self.now[0] += 30
+        svc.renudge()
+        self.assertEqual(self.queued.jobs, [])
+        self.now[0] += 31
+        svc.renudge()
+        self.assertEqual(len(self.queued.jobs), 1)
+
+    def test_a_re_nudge_waits_a_minute_from_the_last_attempt(self):
+        svc = self.begin()
+        sid = self.running(svc)
+        self.outcomes[:] = ["relay refused"]
+        svc.send_message("owner/p01", sid, TEXT)
+        self.now[0] += 100
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.queued.run_next()
+        self.now[0] += 30
+        svc.renudge()
+        self.assertEqual(self.queued.jobs, [])
+        self.now[0] += 31
+        svc.renudge()
+        self.assertEqual(len(self.queued.jobs), 1)
+
+    def test_a_stored_message_nobody_nudged_is_nudged_after_a_minute_not_before(self):
+        first = self.begin()
+        sid = self.running(first)
+        first.close()
+        log = EventLog(self.store, clock=self.log_clock)
+        log.append([("sprint.messaged", "owner/p01", {
+            "sprint_id": sid, "goal": GOAL_TEXT, "text": TEXT})])
+        log.close()
+        svc = self.begin()
+        self.now[0] += 30
+        svc.renudge()
+        self.assertEqual(self.queued.jobs, [])
+        self.now[0] += 31
+        svc.renudge()
+        self.assertEqual(len(self.queued.jobs), 1)
+
+    def test_the_poll_loop_renudges(self):
+        svc = self.begin(session_poll_seconds=0.05)
+        sid = self.running(svc)
+        self.outcomes[:] = ["relay refused"]
+        svc.send_message("owner/p01", sid, TEXT)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.queued.run_next()
+        self.now[0] += 61
+        deadline = time.monotonic() + 10
+        while not self.queued.jobs and time.monotonic() < deadline:
+            time.sleep(0.02)
+        self.assertEqual(len(self.queued.jobs), 1)
+
+    def test_a_delivered_message_is_not_nudged_again(self):
+        svc = self.begin()
+        sid = self.running(svc)
+        svc.send_message("owner/p01", sid, TEXT)
+        self.queued.run_next()
+        self.now[0] += 600
+        svc.renudge()
+        self.assertEqual(self.queued.jobs, [])
+
+    def test_no_nudge_without_a_started_manager_or_a_nudger(self):
+        for name, options in (
+                ("no launcher", {"launcher": None}),
+                ("a failed launch", {"launcher": support.Launches(fail=["no claude"])}),
+                ("no nudger", {"nudger": None})):
+            with self.subTest(name), contextlib.redirect_stderr(io.StringIO()):
+                self.setUp()
+                svc = self.begin(**options)
+                sid = svc.state_goal("owner/p01", GOAL_TEXT)
+                if self.queued.jobs:
+                    self.queued.run_next()
+                svc.send_message("owner/p01", sid, TEXT)
+                self.now[0] += 600
+                svc.renudge()
+                self.assertEqual(self.queued.jobs, [])
+                self.assertEqual(self.nudged(), [])
+                self.assertEqual(self.nudges, [])
+                svc.close()
+
+    def test_a_message_sent_while_a_nudge_runs_is_nudged_once_more_after_it(self):
+        svc = self.begin()
+        sid = self.running(svc)
+        second = []
+
+        def nudger(sent):
+            self.nudger(sent)
+            if len(self.nudges) == 1:
+                second.append(svc.send_message("owner/p01", sid, "and keep the tests"))
+
+        svc._nudger = nudger
+        first = svc.send_message("owner/p01", sid, TEXT)
+        self.queued.run_next()
+        self.assertEqual(len(self.queued.jobs), 1)
+        self.queued.run_next()
+        self.assertEqual(len(self.nudges), 2)
+        self.assertEqual([row["through"] for _, row in self.nudged()], [first, second[0]])
+        self.assertEqual(self.queued.jobs, [])
+
+    def test_approving_and_asking_for_changes_nudge_too(self):
+        svc = self.begin()
+        sid = self.running(svc)
+        version = self.send(svc, sid)
+        self.assertEqual(self.reply(svc, sid, version, "smaller slices")[0], 204)
+        self.queued.run_next()
+        version = self.send(svc, sid)
+        self.assertEqual(self.approve(svc, sid, version)[0], 204)
+        self.queued.run_next()
+        rows = support.log_rows(self.store)
+        kinds = [row[2] for row in rows]
+        replied, approved = rows[kinds.index("brief.replied")], rows[kinds.index("brief.approved")]
+        self.assertEqual([row["through"] for _, row in self.nudged()], [replied[0], approved[0]])
+
+    def test_a_stored_message_whose_nudge_cannot_be_dispatched_is_sent_once_and_retried(self):
+        calls = []
+
+        def dispatch(job):
+            calls.append(job)
+            if len(calls) == 1:
+                job()
+            elif len(calls) == 2:
+                raise RuntimeError("no thread")
+            else:
+                self.queued(job)
+
+        svc = self.begin(dispatch=dispatch)
+        sid = self.running_after(svc)
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            status = self.message(svc, sid, TEXT)[0]
+        self.assertEqual(status, 204)
+        rows = support.log_rows(self.store)
+        self.assertEqual(self.kinds().count("sprint.messaged"), 1)
+        message = self.sprint_state(svc, sid).messages[-1]
+        reason = "the nudge could not start: RuntimeError: no thread"
+        self.assertEqual((rows[-1][2], json.loads(rows[-1][4])), (
+            "sprint.nudged", {"sprint_id": sid, "through": message.message_id, "route": None,
+                              "ok": False, "reason": reason}))
+        self.assertIn(f"console: nudge_failed {sid} {reason}", stderr.getvalue())
+        self.assertNotIn(TEXT, stderr.getvalue())
+        folded = self.sprint_state(svc, sid)
+        self.assertEqual(folded.failed_nudges, 1)
+        self.assertIsNone(folded.messages[-1].delivered_at)
+        self.now[0] += 61
+        svc.renudge()
+        self.assertEqual(len(self.queued.jobs), 1)
+        self.queued.run_next()
+        self.assertEqual(len(self.nudges), 1)
+        self.assertEqual(self.nudged()[-1][1]["ok"], True)
+
+    def running_after(self, svc):
+        sid = svc.state_goal("owner/p01", GOAL_TEXT)
+        self.listed["s-1"] = sessions.Observation(
+            "s-1", "/srv/p01", 1, "idle", None, self.name(sid), None)
+        return sid
+
+    def test_a_nudge_never_holds_the_ingest_lock(self):
+        held = []
+
+        def free():
+            got = svc._ingest.acquire(blocking=False)
+            held.append(got)
+            if got:
+                svc._ingest.release()
+
+        def listing():
+            free()
+            return dict(self.listed)
+
+        def nudger(sent):
+            free()
+            self.nudger(sent)
+
+        svc = self.begin(nudger=nudger, listing=listing)
+        sid = self.running(svc)
+        svc.send_message("owner/p01", sid, TEXT)
+        self.queued.run_next()
+        self.assertEqual(held, [True, True])
+
