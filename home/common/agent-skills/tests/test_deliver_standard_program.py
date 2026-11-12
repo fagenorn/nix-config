@@ -4461,6 +4461,296 @@ class FixWaveTest(unittest.TestCase):
         self.assertEqual((result["stage"], result["fix_waves"]), ("done", 1))
 
 
+def waves(calls):
+    return [name for name in labels(calls) if name.startswith("fix-wave")]
+
+
+def narrow(*summaries, severity="important", **more):
+    return {"verdict": "findings",
+            "findings": [dict({"severity": severity, "file": "claim.py", "summary": s, "relation": "narrowing"}, **more)
+                         for s in summaries]}
+
+
+class ThirdFixWaveTest(unittest.TestCase):
+    """#924: a third wave for narrowing, non-critical, non-growing findings; a fix-wave-review stop carries what it left open."""
+
+    FIRST = FixWaveTest.FIRST
+    AFTER_1 = narrow("race in release", "race in renew")
+    AFTER_2 = narrow("race in expire", "race in adopt")
+    CLASS = "Fix the class of defect: enumerate every path of the same kind"
+    THREE = ["fix-wave", "fix-wave-review", "fix-wave-2", "fix-wave-review-2", "fix-wave-3", "fix-wave-review-3"]
+
+    def replies(self, **more):
+        return dict({"final-1": self.FIRST, "fix-wave-review": self.AFTER_1, "fix-wave-review-2": self.AFTER_2}, **more)
+
+    def test_deliveries_that_clear_in_up_to_two_waves_keep_their_steps(self):
+        for replies, expected in (({}, []),
+                                  ({"final-1": self.FIRST}, self.THREE[:2]),
+                                  ({"final-1": self.FIRST, "fix-wave-review": self.AFTER_1}, self.THREE[:4])):
+            with self.subTest(expected=expected):
+                result, calls = run(replies=replies)
+                self.assertEqual((result["stage"], result["fix_waves"]), ("done", len(expected) // 2))
+                self.assertEqual(waves(calls), expected)
+                self.assertFalse([c for c in calls if c["label"].startswith("fix-wave") and self.CLASS in c["prompt"]])
+
+    def test_a_third_wave_that_clears_lets_the_delivery_continue(self):
+        result, calls = run(replies=self.replies())
+        self.assertEqual((result["stage"], result["fix_waves"]), ("done", 3))
+        self.assertEqual(waves(calls), self.THREE)
+        self.assertEqual(labels(calls)[labels(calls).index("fix-wave-review-3") + 1], "verify")
+        third = prompt(calls, "fix-wave-3")
+        for needle in (self.CLASS, "close them all, not only the reported instance", "race in expire", "race in acquire",
+                       "If a finding is wrong, explain with evidence in notes."):
+            self.assertIn(needle, third)
+        self.assertNotIn("race in release", third)
+        for label in ("fix-wave", "fix-wave-2"):
+            self.assertNotIn(self.CLASS, prompt(calls, label))
+        by_label = {c["label"]: c for c in calls}
+        self.assertEqual((by_label["fix-wave-3"]["agentType"], by_label["fix-wave-review-3"]["agentType"]),
+                         ("implementer", "reviewer"))
+
+    def test_the_third_rereview_is_scoped_like_the_second(self):
+        _, calls = run(replies=self.replies(), patch={"fix-wave-2": {"start_head": "d" * 40, "commit": "e" * 40},
+                                                      "fix-wave-3": {"start_head": "e" * 40, "commit": "f" * 40}})
+        second, third = prompt(calls, "fix-wave-review-2"), prompt(calls, "fix-wave-review-3")
+        self.assertIn("f" * 40, third)
+        self.assertIn("race in expire", third)
+        self.assertNotIn("race in release", third)
+        # The same prompt, wave for wave: only the fix's range and the findings under re-review differ.
+        blank = lambda text: re.sub(r"Findings: \[.*?\]\. Report", "Findings: []. Report", re.sub(r"\b[def]{40}\b", "SHA", text))
+        self.assertEqual(blank(second), blank(third))
+
+    def test_each_clause_of_the_admission_refuses_the_third_wave(self):
+        mixed = narrow("race in expire")
+        mixed["findings"].append({"severity": "important", "summary": "leak", "relation": "new"})
+        unmarked = {"verdict": "findings", "findings": [{"severity": "important", "summary": "race in expire"}]}
+        for name, after_2 in (("a finding that is not narrowing", mixed), ("a finding with no relation", unmarked),
+                              ("a critical finding", narrow("race in expire", severity="critical")),
+                              ("a finding with no severity", {"verdict": "findings", "findings": [
+                                  {"file": "claim.py", "summary": "race in expire", "relation": "narrowing"}]}),
+                              ("more findings than after wave 1", narrow("race a", "race b", "race c"))):
+            with self.subTest(name):
+                result, calls = run(replies=self.replies(**{"fix-wave-review-2": after_2}))
+                self.assertEqual((result["stage"], result["fix_waves"]), ("fix-wave-review", 2))
+                self.assertEqual(waves(calls), self.THREE[:4])
+                self.assertEqual([f["summary"] for f in result["cont"]["fix_findings"]], [f["summary"] for f in after_2["findings"]])
+
+    def test_a_minor_finding_after_wave_one_does_not_raise_the_allowed_count(self):
+        after_1 = narrow("race in release")
+        after_1["findings"].append({"severity": "minor", "summary": "naming", "relation": "narrowing"})
+        result, calls = run(replies=self.replies(**{"fix-wave-review": after_1}))
+        self.assertEqual((result["stage"], result["fix_waves"]), ("fix-wave-review", 2))
+        self.assertNotIn("fix-wave-3", labels(calls))
+        _, calls = run(replies=self.replies(**{"fix-wave-review": after_1, "fix-wave-review-2": narrow("race in expire")}))
+        self.assertIn("fix-wave-3", labels(calls))
+
+    def test_as_many_findings_as_after_wave_one_are_admitted(self):
+        for after_2 in (narrow("race in expire"), self.AFTER_2):
+            with self.subTest(count=len(after_2["findings"])):
+                _, calls = run(replies=self.replies(**{"fix-wave-review-2": after_2}))
+                self.assertIn("fix-wave-3", labels(calls))
+
+    def test_minor_findings_do_not_count_against_the_third_wave(self):
+        after_2 = narrow("race in expire", "race in adopt")
+        after_2["findings"].append({"severity": "minor", "summary": "naming", "relation": "new"})
+        _, calls = run(replies=self.replies(**{"fix-wave-review-2": after_2}))
+        self.assertIn("fix-wave-3", labels(calls))
+
+    def test_a_third_wave_that_leaves_findings_stops_and_carries_them(self):
+        left = narrow("race in adopt", failing_input="two adopters")
+        result, calls = run(replies=self.replies(**{"fix-wave-review-3": left}))
+        self.assertEqual((result["stage"], result["fix_waves"]), ("fix-wave-review", 3))
+        self.assertEqual(waves(calls), self.THREE)
+        self.assertEqual(result["cont"]["fix_findings"],
+                         [{"severity": "important", "file": "claim.py", "summary": "race in adopt", "failing_input": "two adopters"}])
+        self.assertEqual(result["cont"]["fix_waves"], 3)
+        self.assertIn("race in adopt", result["reason"])
+
+    def test_no_fourth_wave(self):
+        again = narrow("race in adopt")
+        _, calls = run(replies=self.replies(**{"fix-wave-review-3": again, "fix-wave-review-4": again}))
+        self.assertEqual(waves(calls), self.THREE)
+
+    def test_a_failed_third_wave_stops(self):
+        result, _ = run(replies=self.replies(**{"fix-wave-3": {"status": "blocked", "notes": "no"}}))
+        self.assertEqual((result["stage"], result["fix_waves"]), ("fix-wave", 3))
+
+    def test_a_stop_after_the_first_wave_carries_its_findings(self):
+        new = {"verdict": "findings", "findings": [{"severity": "critical", "summary": "leak", "relation": "new"}]}
+        result, _ = run(replies={"final-1": self.FIRST, "fix-wave-review": new})
+        self.assertEqual(result["cont"]["fix_findings"], [{"severity": "critical", "summary": "leak"}])
+
+    def test_a_lost_rereview_and_a_clean_delivery_carry_nothing(self):
+        lost, _ = run(replies={"final-1": self.FIRST, "fix-wave-review": None})
+        self.assertEqual(lost["stage"], "fix-wave-review")
+        self.assertNotIn("fix_findings", lost["cont"])
+        later, _ = run(replies=self.replies(verify=None))
+        self.assertEqual(later["stage"], "verify")
+        self.assertNotIn("fix_findings", later["cont"])
+
+    def test_the_carried_findings_are_bounded(self):
+        many = narrow(*[f"race {i} " + "x" * 900 for i in range(14)], failing_input="y" * 900, source="codex")
+        many["findings"][0]["file"] = "f" * 900
+        out = run_out(replies={"final-1": self.FIRST, "fix-wave-review": self.AFTER_1, "fix-wave-review-2": many})
+        result = out["result"]
+        kept = result["cont"]["fix_findings"]
+        self.assertEqual(len(kept), 10)
+        for finding in kept:
+            self.assertLessEqual(set(finding), {"severity", "file", "summary", "failing_input"})
+            self.assertTrue(all(len(v) <= 300 for v in finding.values()), finding)
+        self.assertLess(len(json.dumps(kept)), 10 * 1000)
+        self.assertIn("4 of 14 open finding(s) not carried in cont", json.dumps(out))
+        # A cont that came back larger (edited by hand, or from before the bound) is cut again on the way in.
+        cont = dict(result["cont"], fix_findings=many["findings"] + [{"severity": "minor", "summary": "naming"}, "text", {"file": "a"}])
+        again, _ = run(args=dict(ARGS, cont=cont), replies={"final-1": None})
+        self.assertEqual(again["stage"], "final-review")
+        self.assertEqual(again["cont"]["fix_findings"], kept)
+
+    def stopped(self):
+        left = narrow("race in adopt", failing_input="two adopters")
+        result, _ = run(replies=self.replies(**{"fix-wave-review-3": left}))
+        return result["cont"]
+
+    def test_a_resume_feeds_the_carried_findings_to_the_first_wave(self):
+        fresh = {"verdict": "findings", "findings": [{"severity": "important", "file": "lock.py", "summary": "stale lock"}]}
+        result, calls = run(args=dict(ARGS, cont=self.stopped()), replies={"final-1": fresh})
+        self.assertEqual((result["stage"], result["fix_waves"]), ("done", 4))
+        self.assertEqual(waves(calls), self.THREE[:2])
+        self.assertIn("final-1", labels(calls))
+        wave = prompt(calls, "fix-wave")
+        for needle in ("stale lock", "race in adopt", "two adopters",
+                       "The last 1 were left open by an earlier run's fix waves and may repeat the ones before them: "
+                       "check each against the current head, and explain one that no longer holds in notes; "
+                       "when you commit nothing, return commit equal to start_head."):
+            self.assertIn(needle, wave)
+        self.assertLess(wave.index("stale lock"), wave.index("race in adopt"))
+        rereview = prompt(calls, "fix-wave-review")
+        for needle in ("race in adopt", "stale lock", "against the fix (git -C",
+                       "The last 1 were left open by an earlier run and may repeat the ones before them: "
+                       "check each against the head, not only the diff."):
+            self.assertIn(needle, rereview)
+
+    def test_a_first_run_names_no_carried_findings(self):
+        _, calls = run(replies={"final-1": self.FIRST})
+        for label in ("fix-wave", "fix-wave-review"):
+            self.assertNotIn("earlier run", prompt(calls, label))
+
+    def test_a_minor_carried_finding_is_dropped_when_the_cont_is_read(self):
+        cont = dict(self.stopped(), fix_findings=[{"severity": "minor", "summary": "naming nit"},
+                                                  {"severity": "important", "summary": "race in adopt"}])
+        _, calls = run(args=dict(ARGS, cont=cont))
+        wave = prompt(calls, "fix-wave")
+        self.assertNotIn("naming nit", wave)
+        self.assertIn("The last 1 were left open", wave)
+        only_minor = dict(cont, fix_findings=[{"severity": "minor", "summary": "naming nit"}])
+        _, calls = run(args=dict(ARGS, cont=only_minor))
+        self.assertEqual(waves(calls), [])
+
+    NOTHING = {"start_head": "d" * 40, "commit": "d" * 40, "notes": "already closed by 1234"}
+
+    def test_carried_findings_already_closed_are_checked_against_the_head_and_the_delivery_continues(self):
+        result, calls = run(args=dict(ARGS, cont=self.stopped()), patch={"fix-wave": self.NOTHING})
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(waves(calls), self.THREE[:2])
+        rereview = prompt(calls, "fix-wave-review")
+        for needle in ("against the current head of /r/.wt/w-issue-9-x (the fix wave committed nothing, so there is no diff to read). "
+                       "Nothing changed since these were raised, so each finding stands unless the code at the head shows it does "
+                       "not hold. The notes are the implementer's claims: check each against the code and never clear a finding on "
+                       "the notes alone; notes: already closed by 1234. Findings: ",
+                       "race in adopt"):
+            self.assertIn(needle, rereview)
+        self.assertNotIn("declared branch", rereview)
+        # The head check covers every wave-1 finding, the fresh ones too: nothing was committed for any of them.
+        fresh = {"verdict": "findings", "findings": [{"severity": "important", "file": "lock.py", "summary": "stale lock"}]}
+        _, calls = run(args=dict(ARGS, cont=self.stopped()), replies={"final-1": fresh}, patch={"fix-wave": self.NOTHING})
+        rereview = prompt(calls, "fix-wave-review")
+        for needle in ("the fix wave committed nothing", "stale lock", "race in adopt"):
+            self.assertIn(needle, rereview)
+
+    def branch_resume(self, head):
+        """A resume of a declared-branch delivery with a carried finding, whose first wave commits nothing on the issue branch."""
+        new = {"verdict": "findings", "findings": [{"severity": "important", "summary": "leak on cand", "relation": "new"}]}
+        at_e = {"start_head": TIP, "commit": TIP, "branch_heads": [{"name": "cand", "head": "e" * 40}]}
+        stopped, _ = run(replies={"plan": bplan(), "final-1": self.FIRST, "fix-wave-review": new},
+                         patch={"impl-1": {"commit": TIP}, "impl-2": {"commit": "d" * 40}, "fix-wave": at_e})
+        self.assertEqual([f["summary"] for f in stopped["cont"]["fix_findings"]], ["leak on cand"])
+        facts = [{"name": "cand", "head": "e" * 40, "current": "cand", "toplevel": "/r/.wt/cand", "common_dir": "/r/.git"}]
+        wave = {"start_head": TIP, "commit": TIP, "branch_heads": [{"name": "cand", "head": head}]}
+        result, calls = run(args=dict(ARGS, cont=stopped["cont"]),
+                            patch={"setup": {"head": TIP, "branch_heads": facts}, "fix-wave": wave})
+        self.assertEqual(result["stage"], "done")
+        self.assertIn("leak on cand", prompt(calls, "fix-wave"))
+        return prompt(calls, "fix-wave-review")
+
+    def test_a_wave_that_commits_only_on_a_declared_branch_is_reviewed_over_that_range(self):
+        rereview = self.branch_resume("f" * 40)
+        self.assertIn(f"git -C /r/.wt/cand diff {'e' * 40}..{'f' * 40}", rereview)
+        self.assertIn("check each against the head, not only the diff", rereview)
+        self.assertNotIn("committed nothing", rereview)
+
+    def test_the_head_check_names_the_declared_branch_worktrees(self):
+        rereview = self.branch_resume("e" * 40)
+        self.assertIn("against the current head of /r/.wt/w-issue-9-x and of each declared branch's worktree (cand in /r/.wt/cand) "
+                      "(the fix wave committed nothing, so there is no diff to read).", rereview)
+        self.assertNotIn("git -C /r/.wt/cand diff", rereview)
+        self.assertNotIn("d" * 40, rereview)
+        self.assertNotIn("not only the diff", rereview)
+
+    def test_a_carried_finding_the_head_check_still_holds_stops_and_is_carried(self):
+        cont = self.stopped()
+        for held in (narrow("race in adopt"), narrow("race in adopt", relation="new")):
+            with self.subTest(held=held):
+                result, calls = run(args=dict(ARGS, cont=cont), replies={"fix-wave-review": held}, patch={"fix-wave": self.NOTHING})
+                self.assertEqual(result["stage"], "fix-wave-review")
+                self.assertEqual(waves(calls), self.THREE[:2])
+                self.assertEqual([f["summary"] for f in result["cont"]["fix_findings"]], ["race in adopt"])
+        lost, _ = run(args=dict(ARGS, cont=cont), replies={"fix-wave-review": None}, patch={"fix-wave": self.NOTHING})
+        self.assertEqual(lost["cont"]["fix_findings"], cont["fix_findings"])
+
+    def test_a_first_run_wave_that_commits_nothing_is_reviewed_as_before(self):
+        _, calls = run(replies={"final-1": self.FIRST}, patch={"fix-wave": self.NOTHING})
+        self.assertIn(f"against the fix (git -C /r/.wt/w-issue-9-x diff {'d' * 40}..{'d' * 40})", prompt(calls, "fix-wave-review"))
+
+    def test_a_resume_runs_the_wave_when_the_fresh_review_raises_nothing(self):
+        result, calls = run(args=dict(ARGS, cont=self.stopped()))
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(waves(calls), self.THREE[:2])
+        self.assertIn("race in adopt", prompt(calls, "fix-wave"))
+
+    def test_a_finding_the_fresh_review_raises_again_is_passed_once(self):
+        fresh = {"verdict": "findings", "findings": [{"severity": "critical", "file": "claim.py", "summary": "Race  in ADOPT"}]}
+        _, calls = run(args=dict(ARGS, cont=self.stopped()), replies={"final-1": fresh})
+        wave = prompt(calls, "fix-wave")
+        self.assertIn("Race  in ADOPT", wave)
+        self.assertNotIn("race in adopt", wave)
+        self.assertNotIn("left open by an earlier run", wave)
+
+    def test_the_carried_findings_last_until_a_wave_takes_them(self):
+        cont = self.stopped()
+        for replies in ({"final-1": None}, {"fix-wave": None}):
+            with self.subTest(replies=replies):
+                result, _ = run(args=dict(ARGS, cont=cont), replies=replies)
+                self.assertIn(result["stage"], ("final-review", "fix-wave"))
+                self.assertEqual(result["cont"]["fix_findings"], cont["fix_findings"])
+        # A wave that answered and failed has had them: the resume's fresh review decides.
+        for reply in ({"status": "blocked", "notes": "no"}, {"status": "done", "start_head": "d" * 40, "notes": "nothing to do"}):
+            with self.subTest(reply=reply):
+                out = run_out(args=dict(ARGS, cont=cont), replies={"fix-wave": reply})
+                self.assertEqual(out["result"]["stage"], "fix-wave")
+                self.assertNotIn("fix_findings", out["result"]["cont"])
+                self.assertIn("1 carried finding(s) dropped after a wave that answered and failed", json.dumps(out))
+        taken, _ = run(args=dict(ARGS, cont=cont), replies={"verify": None})
+        self.assertEqual(taken["stage"], "verify")
+        self.assertNotIn("fix_findings", taken["cont"])
+        resolved, _ = run(args=dict(ARGS, cont=cont), replies={"fix-wave-review": None})
+        self.assertNotIn("fix_findings", resolved["cont"])
+
+    def test_a_resumed_run_gets_its_own_three_waves(self):
+        result, calls = run(args=dict(ARGS, cont=self.stopped()), replies=self.replies())
+        self.assertEqual((result["stage"], result["fix_waves"]), ("done", 6))
+        self.assertEqual(waves(calls), self.THREE)
+
+
 class ModeTest(unittest.TestCase):
     """#635: each mode stops at its stage and returns its stage object."""
 
