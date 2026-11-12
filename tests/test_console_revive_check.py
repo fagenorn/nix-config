@@ -30,6 +30,7 @@ OLD = "b" * 16
 LEGACY = {"project": "owner/p01", "sprint_id": OLD, "phase": "successor",
           "approved_versions": [1], "first_session": "s-0", "first_profile": "work",
           "stopped_at": T0, "back_seconds": 120, "removed_at": T0 + 200}
+CLEARED = {"project": "owner/p01", "names": [NAME], "profiles": ["work"]}
 
 
 def listed(session_id):
@@ -95,6 +96,8 @@ class ReviveCheckTest(unittest.TestCase):
         self.token_file = self.dir / "token"
         self.token_file.write_text("tok\n")
         self.failing = {}
+        self.failing_removes = {}
+        self.slow = {}
         self.removals = []
         self.stop_time = None
         self.time = Time(T0)
@@ -106,9 +109,13 @@ class ReviveCheckTest(unittest.TestCase):
         if self.failing.get(session_id):
             self.failing[session_id] -= 1
             raise StopFailed("the stop failed")
+        self.time.now += self.slow.get(session_id, 0)
 
     def remove(self, session_id, profile):
         self.events.append(("remove", session_id, profile))
+        if self.failing_removes.get(session_id):
+            self.failing_removes[session_id] -= 1
+            raise manager.RemoveFailed("the removal failed")
         self.removals.append(session_id)
 
     def run_check(self, views, readings, *, saved=None, url=None, budget="2000", now=None,
@@ -152,6 +159,13 @@ class ReviveCheckTest(unittest.TestCase):
     def stops(self):
         return [event[1] for event in self.events if event[0] == "stop"]
 
+    def removes(self):
+        return [e for e in self.events if e[0] == "remove"]
+
+    def finish_events(self):
+        return [(e[0], e[1]) for e in self.events
+                if e[0] in ("stop", "remove") or (e[0] == "post" and e[1] == "/api/withdraw")]
+
     def result(self):
         return json.loads(self.result_file.read_text())
 
@@ -173,10 +187,10 @@ class ReviveCheckTest(unittest.TestCase):
                          [{"project_id": "owner/p01", "sprint_id": SID, "version": 1}])
         self.assertEqual(self.posts("/api/message"), [
             {"project_id": "owner/p01", "sprint_id": SID, "text": revive_check.MESSAGE}])
-        self.assertEqual(self.removals, ["s-1"])
+        self.assertEqual(self.removals, ["s-1", "s-1"])
         self.assertIn(("remove", "s-1", "work"), self.events)
         self.assertFalse(self.state_file.exists())
-        self.assertEqual(self.result(), {"back_seconds": 130, "status": "met"})
+        self.assertEqual(self.result(), {"back_seconds": 130, "status": "met", "cleared": CLEARED})
 
     def test_a_new_manager_under_the_sprints_name_reading_a_message_is_met(self):
         code, out = self.run_check(SCRIPT + [SENT, READ], [
@@ -197,7 +211,7 @@ class ReviveCheckTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(out, {"back_seconds": None, "status": "not_met",
                                "reason": "the manager did not come back within 600 s of the stop"})
-        self.assertEqual(self.result(), out)
+        self.assertEqual(self.result(), {**out, "cleared": CLEARED})
         self.assertEqual(len(self.posts("/api/withdraw")), 1)
         self.assertFalse(self.state_file.exists())
 
@@ -205,7 +219,7 @@ class ReviveCheckTest(unittest.TestCase):
         code, out = self.run_check(SCRIPT, [(None, listed("s-1")), (700, listed("s-1"))])
         self.assertEqual((code, out["status"], out["back_seconds"]), (1, "not_met", None))
         self.assertEqual(out["reason"], "the manager did not come back within 600 s of the stop")
-        self.assertEqual(self.removals, [])
+        self.assertEqual(self.removals, ["s-1"])
 
     def test_the_return_limit_holds_across_resumed_runs(self):
         code, out = self.run_check(SCRIPT, [(None, listed("s-1")), (300, GONE)], budget="250")
@@ -310,7 +324,7 @@ class ReviveCheckTest(unittest.TestCase):
         self.assertEqual(self.posts("/api/message"), [])
         self.assertEqual(self.posts("/api/goal"), [])
         self.assertEqual(self.posts("/api/approve"), [])
-        self.assertEqual(self.removals, ["s-1"])
+        self.assertEqual(self.removals, ["s-1", "s-1"])
         self.assertFalse(self.state_file.exists())
 
     def test_a_failed_stop_in_the_finish_is_not_yet_and_retried(self):
@@ -328,6 +342,7 @@ class ReviveCheckTest(unittest.TestCase):
         self.assertEqual((code, out), (0, {"after_removal": "new", "back_seconds": 20,
                                            "status": "met"}))
         self.assertEqual(self.stops(), ["s-2"])
+        self.assertEqual(self.removals[-1], "s-2")
         self.assertEqual(len(self.posts("/api/withdraw")), 1)
         self.assertEqual(self.paths(), ["/api/withdraw"])
         self.assertFalse(self.state_file.exists())
@@ -345,7 +360,7 @@ class ReviveCheckTest(unittest.TestCase):
         self.assertEqual(self.posts("/api/withdraw")[0],
                          {"project_id": "owner/p01", "sprint_id": OLD})
         self.assertEqual(len(self.posts("/api/message")), 1)
-        self.assertEqual(self.result(), {"back_seconds": 130, "status": "met"})
+        self.assertEqual(self.result(), {"back_seconds": 130, "status": "met", "cleared": CLEARED})
         self.assertFalse(self.state_file.exists())
 
     def test_a_saved_success_of_the_previous_check_is_discarded_and_a_fresh_check_runs(self):
@@ -364,6 +379,134 @@ class ReviveCheckTest(unittest.TestCase):
         self.assertEqual(self.stops(), ["s-0"])
         self.assertEqual(self.paths(), [])
         self.assertEqual(json.loads(self.state_file.read_text()), LEGACY)
+
+    def test_the_finish_removes_the_replacement_and_not_the_first_session_again(self):
+        code, out = self.run_check(SCRIPT + [SENT, READ], [
+            (None, listed("s-1")), (None, GONE), (130, listed("s-1")), (None, GONE),
+            (None, listed("s-2"))])
+        self.assertEqual((code, out), (0, {"after_removal": "new", "back_seconds": 130,
+                                           "status": "met"}))
+        self.assertEqual(self.removals, ["s-1", "s-2"])
+        self.assertEqual(self.finish_events()[-3:], [
+            ("stop", "s-2"), ("remove", "s-2"), ("post", "/api/withdraw")])
+        self.assertEqual(self.result()["cleared"], CLEARED)
+
+    def test_a_manager_that_never_returns_has_its_stopped_session_removed(self):
+        code, out = self.run_check(SCRIPT, [(None, listed("s-1")), (None, GONE)])
+        self.assertEqual(code, 1)
+        self.assertEqual(self.removals, ["s-1"])
+        self.assertLess(self.events.index(("remove", "s-1", "work")),
+                        self.finish_index("/api/withdraw"))
+
+    def finish_index(self, path):
+        return next(i for i, e in enumerate(self.events) if e[0] == "post" and e[1] == path)
+
+    def test_a_retry_after_one_removal_succeeded_removes_only_the_one_that_failed(self):
+        self.failing_removes = {"s-3": 1}
+        code, out = self.run_check(SCRIPT, [(None, listed("s-1")), (None, GONE),
+                                            (700, listed("s-3"))])
+        self.assertEqual((code, out), (75, {
+            "reason": "the test manager's session is not removed yet: the removal failed",
+            "sprint_id": SID, "status": "waiting"}))
+        self.assertEqual(self.removals, ["s-1"])
+        self.assertEqual(self.posts("/api/withdraw"), [])
+        saved = json.loads(self.state_file.read_text())
+        self.assertIsNone(saved["removed_at"])
+        self.assertEqual(saved["outcome"], {"code": 1, "reason": revive_check.NO_RETURN_TEXT})
+        self.assertEqual(saved["stopped"], [
+            {"session_id": "s-1", "profile": "work", "removed": True},
+            {"session_id": "s-3", "profile": "work"}])
+        code, out = self.run_check([view()], [(None, GONE)])
+        self.assertEqual((code, out["status"], out["reason"]),
+                         (1, "not_met", revive_check.NO_RETURN_TEXT))
+        self.assertEqual(self.removes(), [("remove", "s-3", "work")])
+        self.assertEqual(self.removals, ["s-1", "s-3"])
+        self.assertEqual(self.paths(), ["/api/withdraw"])
+        self.assertFalse(self.state_file.exists())
+        self.assertEqual(self.result()["cleared"], CLEARED)
+
+    def test_a_session_stopped_in_the_removal_phase_is_removed_at_the_finish_under_its_profile(
+            self):
+        both = {**listed("s-1"),
+                "s-9": Observation("s-9", "/srv/p01", 2, "idle", None, NAME, None, "p2")}
+        code, out = self.run_check(SCRIPT + [SENT, READ], [
+            (None, listed("s-1")), (None, GONE), (130, listed("s-1")), (None, both),
+            (None, listed("s-2")), (None, GONE)])
+        self.assertEqual((code, out), (0, {"after_removal": "new", "back_seconds": 130,
+                                           "status": "met"}))
+        self.assertIn(("stop", "s-9", "p2"), self.events)
+        removed = self.events.index(("remove", "s-9", "p2"))
+        self.assertGreater(removed, next(i for i, e in enumerate(self.events)
+                                         if e[0] == "post" and e[1] == "/api/message"))
+        self.assertLess(removed, self.finish_index("/api/withdraw"))
+        self.assertEqual(self.removals, ["s-1", "s-9"])
+        self.assertEqual(self.result()["cleared"], {
+            "project": "owner/p01", "names": [NAME], "profiles": ["p2", "work"]})
+
+    def test_a_failed_removal_keeps_the_outcome_and_the_next_run_removes_the_recorded_session(
+            self):
+        self.failing_removes = {"s-2": 1}
+        readings = [(None, listed("s-1")), (None, GONE), (130, listed("s-1")), (None, GONE),
+                    (None, listed("s-2"))]
+        code, out = self.run_check(SCRIPT + [SENT, READ], readings)
+        self.assertEqual((code, out), (75, {
+            "reason": "the test manager's session is not removed yet: the removal failed",
+            "sprint_id": SID, "status": "waiting"}))
+        self.assertEqual(self.posts("/api/withdraw"), [])
+        self.assertFalse(self.result_file.exists())
+        saved = json.loads(self.state_file.read_text())
+        self.assertEqual(saved["outcome"], {"code": 0, "reason": None})
+        self.assertEqual(saved["stopped"], [
+            {"session_id": "s-1", "profile": "work", "removed": True},
+            {"session_id": "s-2", "profile": "work"}])
+        code, out = self.run_check([READ], [(None, GONE)])
+        self.assertEqual((code, out), (0, {"after_removal": "new", "back_seconds": 130,
+                                           "status": "met"}))
+        self.assertEqual(self.stops(), [])
+        self.assertEqual(self.removes(), [("remove", "s-2", "work")])
+        self.assertEqual(self.paths(), ["/api/withdraw"])
+        self.assertFalse(self.state_file.exists())
+
+    def test_a_removal_with_no_time_left_is_left_to_the_next_run_with_the_stop_recorded(self):
+        self.slow = {"s-2": 2000}
+        readings = [(None, listed("s-1")), (None, GONE), (130, listed("s-1")), (None, GONE),
+                    (None, listed("s-2"))]
+        code, out = self.run_check(SCRIPT + [SENT, READ], readings)
+        self.assertEqual((code, out), (75, {
+            "reason": "the test manager's session is not removed yet: " + manager.OUT_OF_TIME_TEXT,
+            "sprint_id": SID, "status": "waiting"}))
+        self.assertNotIn(("remove", "s-2", "work"), self.events)
+        self.assertEqual(self.posts("/api/withdraw"), [])
+        saved = json.loads(self.state_file.read_text())
+        self.assertEqual(saved["stopped"][-1], {"session_id": "s-2", "profile": "work"})
+        self.assertEqual(saved["outcome"], {"code": 0, "reason": None})
+        self.slow = {}
+        code, out = self.run_check([READ], [(None, GONE)])
+        self.assertEqual(code, 0)
+        self.assertEqual(self.removes(), [("remove", "s-2", "work")])
+        self.assertEqual(len(self.posts("/api/withdraw")), 1)
+
+    def test_a_running_check_from_before_the_record_has_its_first_session_removed_once(self):
+        saved = {"project": "owner/p01", "sprint_id": SID, "phase": "read",
+                 "approved_versions": [1], "first_session": "s-1", "first_profile": "work",
+                 "stopped_at": T0, "back_seconds": 130, "removed_at": T0 + 200,
+                 "after_removal": "new", "messaged_at": T0 + 300}
+        code, out = self.run_check([READ], [(None, listed("s-2"))], saved=saved, now=T0 + 310)
+        self.assertEqual((code, out["status"]), (0, "met"))
+        self.assertEqual(self.removals, ["s-2"])
+        self.assertEqual(self.result()["cleared"], CLEARED)
+        saved = {**saved, "removed_at": None, "phase": "back", "after_removal": None,
+                 "messaged_at": None}
+        code, out = self.run_check([view()], [(None, GONE)], saved=saved, now=T0 + 700)
+        self.assertEqual((code, out["reason"]), (1, revive_check.NO_RETURN_TEXT))
+        self.assertEqual(self.removals[-1:], ["s-1"])
+
+    def test_the_previous_checks_cleanup_removes_what_it_stops_before_it_withdraws(self):
+        self.run_check([view()], [(None, old_listed())], saved=LEGACY, budget="5")
+        self.assertEqual(self.finish_events()[:3], [
+            ("stop", "s-0"), ("remove", "s-0"), ("post", "/api/withdraw")])
+        self.assertEqual(self.posts("/api/withdraw")[0], {"project_id": "owner/p01",
+                                                          "sprint_id": OLD})
 
     def test_preconditions_post_nothing(self):
         with socket.socket() as probe:

@@ -3,6 +3,7 @@
 # `start` states a marked goal, approves its brief, waits for "on track", stops the manager, waits
 # for the same session to be listed again, removes it and waits for a manager under the sprint's
 # name, the same session or a new one, that reads a message; `timing` reports how long the stopped
-# manager took to come back.
+# manager took to come back. The finish stops and removes the managers it stopped before it
+# withdraws the sprint.
 # Exit 0 met, 1 not met, 75 not yet. Run from the repository root at the block's commit.
 PYTHONPATH=python exec python3 -m agent_tools.console.revive_check "$@"

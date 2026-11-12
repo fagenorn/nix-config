@@ -22,12 +22,16 @@ sprint found by its goal and states no second goal; any other state file is a re
 states no goal and continues from its phase.
 
 A state file with a `sprint_id` and no `after_removal` was written by the previous check (#893):
-its sprint is released (the test manager stopped, the sprint withdrawn; a failure is 75 `waiting`
-with the file kept, so the next run retries) and the run starts afresh, deleting that file and the
-result file, so a result of that check never stands for this one.
+its sprint is released (the test manager stopped and removed, the sprint withdrawn; a failure is 75
+`waiting` with the file kept, so the next run retries) and the run starts afresh, deleting that
+file and the result file, so a result of that check never stands for this one.
 
 The state file is `{"project", "sprint_id", "phase", "approved_versions", "first_session",
-"first_profile", "stopped_at", "back_seconds", "removed_at", "after_removal", "messaged_at"}`.
+"first_profile", "stopped_at", "back_seconds", "removed_at", "after_removal", "messaged_at",
+"stopped"}`; `"stopped"` is the record of every session the check stopped, `{"session_id",
+"profile"}` each, marked `"removed": true` once its removal succeeded. A state file of this check
+written before `"stopped"` existed is upgraded at load: its first session is recorded, marked
+removed when `removed_at` is set.
 Each phase is resumable by the next run, polls the view every 5 seconds (`POLL_SECONDS`) and ends
 75 `{"phase", "sprint_id", "status": "waiting"}` with the state file kept when `--budget` is
 spent:
@@ -39,7 +43,8 @@ spent:
   that is not null.
 - `stop`: the registry is read fresh and the listed session named
   `manager.session_name(project, sprint id)` is `first_session`; it is stopped with
-  `stop(session_id, profile)` and `stopped_at` is `clock()`. A failed stop, or no such session,
+  `stop(session_id, profile)`, recorded in `stopped`, and `stopped_at` is `clock()`. A failed stop,
+  or no such session,
   is tried again on the next poll. The stop waits for a run with `STOP_WINDOW` (190) seconds of
   budget left (`DEFAULT_DEADLINE` plus two polls), so the return is polled within the run that
   stopped the manager and `back_seconds` is not the gap to the next scheduled run; a run short of
@@ -47,8 +52,10 @@ spent:
   `STOP_WINDOW` stops at once, as no run could ever have the window.
 - `back`: wait until the registry lists that name with `first_session`; `back_seconds` is
   `int(clock() - stopped_at)`.
-- `remove`: stop the listed session, then `remove(first_session, first_profile)` (claude-account
-  run rm); `removed_at` is `clock()`. A failure is tried again on the next poll.
+- `remove`: stop the listed session (every session listed under the name is stopped and recorded
+  in `stopped`, the state file written before each stop and before the removal), then
+  `remove(first_session, first_profile)` (claude-account run rm), which marks the first session
+  removed; `removed_at` is `clock()`. A failure is tried again on the next poll.
 - `relisted`: wait until the registry lists the name, with `first_session` or with another
   session id; `after_removal` is `"same"` or `"new"` accordingly.
 - `message`: `POST /api/message` with `MESSAGE` (204 records `messaged_at`; no answer is tried
@@ -72,15 +79,25 @@ sprint is gone`), a sprint whose `manager_state` is `stalled` or `unavailable` (
 `manager_text`), the three deadlines above, a refused message or a `reach_text` while waiting for
 the read.
 
-The finish (any met or not met outcome) runs in this order. First it stops the test manager:
+The finish (any met or not met outcome) runs in four steps. First it stops the test manager:
 `manager.stop_listed` on the manager's name, the registry read fresh (a stop is given the first
-eight characters of the session id, the only id it accepts). A failed stop keeps the outcome in
-the state file and the run is 75 `{"status": "waiting", "reason": "the test manager is not
-stopped yet: <the stop's one-line reason>", "sprint_id"}`; the next run retries from the stop.
-Second it withdraws the sprint (`POST /api/withdraw`, 204 or 409 is done); otherwise the outcome
-stays in the state file and the run is 75 `waiting` (`the test sprint is not withdrawn yet`).
-Third it writes the result file `{"back_seconds": int | null, "status": "met" | "not_met",
-"reason"?}`, removes the state file and prints the outcome (met with `"after_removal"`).
+eight characters of the session id, the only id it accepts), which records each stopped id and
+profile in `stopped`. A failed stop keeps the outcome in the state file and the run is 75
+`{"status": "waiting", "reason": "the test manager is not stopped yet: <the stop's one-line
+reason>", "sprint_id"}`; the next run retries from the stop. Second it removes each recorded
+session not yet marked removed, under its own profile (`manager.remove_session`, `claude-account
+run rm <short id>`). A failure here is 75 `the test manager's session is not removed yet:
+<reason>`, and the next run retries from the recorded ids although the registry no longer lists
+them. Third it withdraws the sprint (`POST /api/withdraw`, 204 or 409 is done); otherwise the
+outcome stays in the state file and the run is 75 `waiting` (`the test sprint is not withdrawn
+yet`). Fourth it writes the result file `{"back_seconds": int | null, "status": "met" |
+"not_met", "reason"?, "cleared": {"project", "names", "profiles"}}` (the project, the test
+manager's session name and the sorted profiles of the stopped sessions), removes the state file
+and prints the outcome (met with `"after_removal"`). Before each stop and each removal the outcome
+and `stopped` are saved, and a call that could end past `max(manager.FINISH_LIMIT, budget +
+manager.FINISH_SECONDS)` seconds of the run (590 with the default budget) is left to the next run.
+The finish removes the replacement listed at its end and every session a phase stopped and did not
+remove; a removal that succeeded is never repeated, unless the finish finds that id listed again.
 
 `timing` only reads the result file: absent or unreadable is 75 `{"status": "no_result"}`;
 `back_seconds` null or above `--deadline` is 1 `{"back_seconds", "reason": "slow", "status":
@@ -128,6 +145,7 @@ GOAL = ("[verify #893] check that a gone manager is brought back: brief one slic
         "approved, send one report with phase running, no issues and next set to wait for the "
         "owner, then end your turn; cut no issues and deliver nothing; withdraw me")
 NOT_STOPPED_TEXT = "the test manager is not stopped yet"
+NOT_REMOVED_TEXT = "the test manager's session is not removed yet"
 NOT_WITHDRAWN_TEXT = "the test sprint is not withdrawn yet"
 NO_RETURN_TEXT = f"the manager did not come back within {RETURN_LIMIT} s of the stop"
 MESSAGE = "[verify #949] the console checks that you read this; no action needed, end your turn"
@@ -191,15 +209,28 @@ def _start(args, registry, stop, remove, clock, sleep) -> int:
     def name() -> str:
         return manager.session_name(project, state["sprint_id"])
 
-    def release() -> int | None:
-        """Stop the test manager and withdraw the sprint; `NOT_YET` (printed) when either fails."""
+    def release(save: Callable[[], None]) -> int | None:
+        """Stop the test manager, remove what was stopped and withdraw the sprint.
+
+        `NOT_YET` (printed) when any of them fails; `save` writes the state file.
+        """
         sprint_id = state["sprint_id"]
+        guard = manager.finish_guard(clock, run_start, args.budget, save)
         try:
-            manager.stop_listed([name()], registry, stop)
+            manager.stop_listed([name()], registry, stop, state["stopped"], guard)
         except Exception as error:
+            save()
             waiting = f"{NOT_STOPPED_TEXT}: {error}" if str(error) else NOT_STOPPED_TEXT
             _print({"status": "waiting", "reason": waiting, "sprint_id": sprint_id})
             return NOT_YET
+        try:
+            manager.remove_stopped(state["stopped"], remove, guard)
+        except Exception as error:
+            save()
+            waiting = f"{NOT_REMOVED_TEXT}: {error}" if str(error) else NOT_REMOVED_TEXT
+            _print({"status": "waiting", "reason": waiting, "sprint_id": sprint_id})
+            return NOT_YET
+        save()
         status, _ = console.post("/api/withdraw",
                                  {"project_id": project, "sprint_id": sprint_id})
         if status not in (204, 409):
@@ -207,20 +238,33 @@ def _start(args, registry, stop, remove, clock, sleep) -> int:
             return NOT_YET
         return None
 
+    def save_if_stopped() -> None:
+        # a previous check's state file stays as it was unless this cleanup stopped something
+        if state["stopped"]:
+            checkpoint()
+
     def settle(code: int, reason: str | None) -> int:
-        """Stop the test manager, withdraw the sprint, then record and print the outcome."""
+        """Stop and remove the test manager, withdraw the sprint, record and print the outcome."""
         seconds = state.get("back_seconds")
-        if state.get("sprint_id") is not None and release() is not None:
+        sprint_id = state.get("sprint_id")
+
+        def save() -> None:
             checkpoint(outcome={"code": code, "reason": reason})
+
+        if sprint_id is not None and release(save) is not None:
+            save()
             return NOT_YET
+        cleared = {"project": project,
+                   "names": [] if sprint_id is None else [name()],
+                   "profiles": sorted({entry["profile"] for entry in state.get("stopped", [])})}
         state_file.unlink(missing_ok=True)
         if code == 0:
             document = {"back_seconds": seconds, "status": "met"}
-            _write_json(result_file, document)
+            _write_json(result_file, {**document, "cleared": cleared})
             _print({**document, "after_removal": state["after_removal"]})
         else:
             document = {"back_seconds": seconds, "reason": reason, "status": "not_met"}
-            _write_json(result_file, document)
+            _write_json(result_file, {**document, "cleared": cleared})
             _print(document)
         return code
 
@@ -230,6 +274,12 @@ def _start(args, registry, stop, remove, clock, sleep) -> int:
             project = state["project"]
             unresolved = bool(state.get("unresolved"))
             state.setdefault("approved_versions", [])
+            if "after_removal" in state and "stopped" not in state:
+                first = state.get("first_session")
+                state["stopped"] = [] if first is None else [{
+                    "session_id": first, "profile": state["first_profile"],
+                    **({"removed": True} if state.get("removed_at") is not None else {})}]
+            state.setdefault("stopped", [])
             outcome = state.get("outcome")
             if outcome is not None:
                 outcome = (outcome["code"], outcome["reason"])
@@ -239,7 +289,7 @@ def _start(args, registry, stop, remove, clock, sleep) -> int:
         if not read_token():
             return NOT_YET
         if "sprint_id" in state and "after_removal" not in state:
-            if release() is not None:
+            if release(save_if_stopped) is not None:
                 return NOT_YET
             state_file.unlink(missing_ok=True)
             result_file.unlink(missing_ok=True)
@@ -276,7 +326,7 @@ def _start(args, registry, stop, remove, clock, sleep) -> int:
         state = {"project": project, "sprint_id": stated["sprint_id"], "phase": "brief",
                  "approved_versions": [], "first_session": None, "first_profile": None,
                  "stopped_at": None, "back_seconds": None, "removed_at": None,
-                 "after_removal": None, "messaged_at": None}
+                 "after_removal": None, "messaged_at": None, "stopped": []}
         checkpoint()
 
     sprint_id = state["sprint_id"]
@@ -320,7 +370,9 @@ def _start(args, registry, stop, remove, clock, sleep) -> int:
                     pass
                 else:
                     checkpoint(phase="back", first_session=found[0].session_id,
-                               first_profile=profile, stopped_at=clock())
+                               first_profile=profile, stopped_at=clock(),
+                               stopped=[*state["stopped"],
+                                        {"session_id": found[0].session_id, "profile": profile}])
                     advanced = True
         elif phase == "back":
             returned = any(o.name == name() and o.session_id == state["first_session"]
@@ -333,11 +385,14 @@ def _start(args, registry, stop, remove, clock, sleep) -> int:
                 advanced = True
         elif phase == "remove":
             try:
-                manager.stop_listed([name()], registry, stop)
+                manager.stop_listed([name()], registry, stop, state["stopped"], checkpoint)
+                checkpoint()
                 remove(state["first_session"], state["first_profile"])
             except manager.StopFailed:
-                pass
+                checkpoint()
             else:
+                manager.mark_removed(state["stopped"], state["first_session"],
+                                     state["first_profile"])
                 checkpoint(phase="relisted", removed_at=clock())
                 advanced = True
         elif phase == "relisted":
