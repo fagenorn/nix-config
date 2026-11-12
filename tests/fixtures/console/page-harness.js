@@ -339,7 +339,9 @@ async function run() {
     } else if ("click" in step) {
       const target = attached(root).find((n) => n.className.split(/\s+/).includes(step.click));
       if (!target) throw new Error("no element with class " + step.click);
-      for (const fn of target.listeners.click || []) fn({ type: "click", preventDefault() {} });
+      if (target.disabled !== true) {
+        for (const fn of target.listeners.click || []) fn({ type: "click", preventDefault() {} });
+      }
     } else if ("type" in step) {
       typeInto(step.type, false);
     } else if ("append" in step) {

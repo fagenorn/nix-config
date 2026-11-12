@@ -36,10 +36,12 @@ is sorted by `key` and holds only JSON-native values; every item is
     {"key": "<slug>#<issue>/<comment id>", "project_id", "repo", "issue", "comment_id", "url",
      "reason", "kind", "question", "detail", "questions": [{"question", "options", "chosen", "recommended"}]
      (decision only), "items": [str] (conflict and needs-label only), "answers": [str], "paid": bool,
-     "confirm", "answered", "held_work"}
+     "confirm", "answered", "held_work"} and, for a verification prompt only, "version"
 
 For `decision`, `conflict` and `needs-label` the kind is the reason, `detail` and `confirm` are `""`,
-`answers` is `[]` and `paid` is false.
+`answers` is `[]`, `paid` is false and there is no `version`. A verification prompt's `version` is
+`verify_answer.content_version` of its marker: the page returns it with an answer, and an answer to a
+prompt whose text or fields have changed since is refused.
 
 `url` is built from the slug, the issue and the comment id, never read from the answer.
 
@@ -184,6 +186,7 @@ def _verify_item(project_id: str, slug: str, issue: int, held: int, marker: fm.M
         "detail": _detail(marker), "questions": [], "items": [], "answers": list(verify_answer.ANSWERS[reason]),
         "paid": verify_answer.is_paid(marker), "confirm": f"{slug}#{issue}" if reason == "verify-approve" else "",
         "answered": verify_answer.answered(marker, runner_markers), "held_work": held,
+        "version": verify_answer.content_version(marker),
     }
 
 

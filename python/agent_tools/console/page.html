@@ -372,7 +372,7 @@ function start(item, state) {
 }
 function startCheck(item, state, answer, extra) {
   if (!choosable(state) || !check(item)) return false;
-  return begin(item, state, { check: true, body: { project_id: state.project_id, key: state.key, answer, ...extra } });
+  return begin(item, state, { check: true, body: { project_id: state.project_id, key: state.key, answer, version: item.version, ...extra } });
 }
 function dropDrafts(id, names) {
   for (const name of names) drafts.delete(id + "\n" + name);
@@ -485,8 +485,8 @@ function noteBox(item, state, box) {
     if (text.trim() === "") return;
     if (startCheck(item, state, "note", { note: text })) redraw();
   });
-  send.disabled = area.value.trim() === "";
   box.appendChild(draftField(area, itemId(item) + "\nnote", (value) => { send.disabled = value.trim() === ""; }));
+  send.disabled = area.value.trim() === "";
   return send;
 }
 function confirmBox(item, box, approve) {

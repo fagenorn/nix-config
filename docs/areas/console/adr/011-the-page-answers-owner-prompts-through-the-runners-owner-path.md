@@ -9,7 +9,7 @@ A held verification waits on the owner through an owner prompt, a live `owner-ac
 
 ## Decision
 
-1. **One route, one item.** The page answers a verification prompt with `POST /api/check-answer`, a page write under ADR-console-008, whose body names the project, one item key and the answer, plus the note for a note and the typed confirmation for an approval. The console answers through the single-prompt owner path of the verification area (`verify_answer`), which re-reads the live prompt as the owner and ticks, ends or comments exactly once; the console passes no token and copies nothing, so the tracker stays the record. This is the console's one new import edge.
+1. **One route, one item.** The page answers a verification prompt with `POST /api/check-answer`, a page write under ADR-console-008, whose body names the project, one item key, the answer and the item's content version (a digest of the prompt's fields and text as the page showed it), plus the note for a note and the typed confirmation for an approval. The console answers through the single-prompt owner path of the verification area (`verify_answer`), which re-reads the live prompt as the owner, refuses it when its content no longer matches the version the page sent, and ticks, ends or comments exactly once; the console passes no token and copies nothing, so the tracker stays the record. This is the console's one new import edge.
 2. **The answers by kind.** A manual check takes passed, failed or a note. A verdict takes "Accept as passed" or "Close as not verified". An approval takes approve. A stale check takes keep or drop. An act prompt has no box, so the page shows its detail and offers no answer.
 3. **A note ticks nothing.** It is one plain owner comment on the issue, the note verbatim after a fixed first line naming the prompt; the check keeps waiting and the item stays open. A note that would carry a verify block is refused, because a trusted comment with one becomes the held block. The note field is a multi-line textarea.
 4. **Keep and drop.** `drop` ticks the prompt's only box, "Accept without <host>". `keep` ends the stale prompt as `kept`: the check keeps waiting on its host and the runner never asks that stale identity again.
@@ -23,5 +23,5 @@ A held verification waits on the owner through an owner prompt, a live `owner-ac
 
 - The page now has two answer calls, each literal, and no other write answers an item.
 - An old logged item lacks the new members, so the view reads them with defaults and the next tracker read rewrites it.
-- An answer for a prompt that changed since the last read is refused with the tracker's reason and shown as "Could not send".
+- An answer for a prompt that changed since the page showed it, in its text or fields as well as in its boxes, is refused with the tracker's reason and shown as "Could not send"; the version is taken when the owner chooses the answer, so a frame that revises the prompt during the undo does not rebind it.
 - A page closed inside the undo sends nothing.

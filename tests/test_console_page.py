@@ -918,7 +918,7 @@ ANSWERS = {"manual-check": ["passed", "failed", "note"], "verdict": ["passed", "
 
 def check_item(key: str, kind: str, **fields) -> dict:
     base = {"reason": REASONS[kind], "kind": kind, "answers": ANSWERS[kind],
-            "detail": "", "paid": kind == "paid-approval", "confirm": ""}
+            "detail": "", "paid": kind == "paid-approval", "confirm": "", "version": "v1-" + key}
     if kind in ("approval", "paid-approval"):
         base["confirm"] = "octo/widgets#12"
     base.update(fields)
@@ -944,9 +944,20 @@ class PageCheckAnswerTest(unittest.TestCase):
         self.assertEqual(post["headers"],
                          {"X-Console-Token": TOKEN, "Content-Type": "application/json"})
         self.assertEqual(posted(post),
-                         {"project_id": "owner/p00", "key": "A", "answer": "passed"})
+                         {"project_id": "owner/p00", "key": "A", "answer": "passed",
+                          "version": "v1-A"})
         self.assertEqual(answers(late), [])
         self.assertIn(SENT_TEXT, full(late["inbox"]))
+
+    def test_an_answer_carries_the_version_seen_when_it_was_chosen(self) -> None:
+        (snap,) = render([
+            START, {"frame": frame([check_item("A", "manual-check")])},
+            {"click": "ans-passed"},
+            {"frame": frame([check_item("A", "manual-check", version="v2-A")])},
+            {"clock": 5000}, {"snapshot": True},
+        ])
+        (post,) = checks(snap)
+        self.assertEqual(posted(post)["version"], "v1-A")
 
     def test_undo_withdraws_a_check_answer(self) -> None:
         for name, undo in (("escape", {"key": "Escape"}), ("button", {"click": "undo"})):
@@ -971,7 +982,7 @@ class PageCheckAnswerTest(unittest.TestCase):
         self.assertEqual((area["tag"], area["value"]), ("textarea", note))
         (post,) = checks(sent)
         self.assertEqual(posted(post), {"project_id": "owner/p00", "key": "A",
-                                        "answer": "note", "note": note})
+                                        "answer": "note", "version": "v1-A", "note": note})
         self.assertEqual(field(sent, "note-text")["value"], "")
         self.assertIn("Note sent.", full(sent["inbox"]))
         self.assertNotIn(SENT_TEXT, full(sent["inbox"]))
@@ -1027,7 +1038,7 @@ class PageCheckAnswerTest(unittest.TestCase):
         self.assertFalse(field(exact, "ans-approve")["disabled"])
         (post,) = checks(sent)
         self.assertEqual(posted(post), {"project_id": "owner/p00", "key": "P",
-                                        "answer": "approve", "confirm": "octo/widgets#10"})
+                                        "answer": "approve", "version": "v1-P", "confirm": "octo/widgets#10"})
 
     def test_a_live_approval_needs_its_typed_confirmation(self) -> None:
         live = check_item("L", "approval", detail='Command: ["just", "check"]')
@@ -1046,7 +1057,7 @@ class PageCheckAnswerTest(unittest.TestCase):
         self.assertFalse(field(exact, "ans-approve")["disabled"])
         (post,) = checks(sent)
         self.assertEqual(posted(post), {"project_id": "owner/p00", "key": "L",
-                                        "answer": "approve", "confirm": "octo/widgets#12"})
+                                        "answer": "approve", "version": "v1-L", "confirm": "octo/widgets#12"})
 
     def test_a_disabled_approve_sends_nothing(self) -> None:
         (snap,) = render([
@@ -1078,6 +1089,32 @@ class PageCheckAnswerTest(unittest.TestCase):
         self.assertEqual((box["value"], box["focused"]), ("octo/widgets", True))
         self.assertTrue(field(three, "ans-approve")["disabled"])
         self.assertFalse(field(four, "ans-approve")["disabled"])
+
+    def test_a_restored_note_is_sendable_at_once_after_a_redraw(self) -> None:
+        a = check_item("A", "manual-check")
+        b = check_item("B", "manual-check")
+        frame_then, undone, sent = render([
+            START, {"frame": frame([a])},
+            {"type": {"class": "note-text", "text": "Loads"}},
+            {"frame": frame([a, b])}, {"snapshot": True},
+            {"click": "ans-note"}, {"key": "Escape"}, {"snapshot": True},
+            {"click": "ans-note"}, {"clock": 5000}, {"snapshot": True},
+        ])
+        for snap in (frame_then, undone):
+            self.assertEqual(field(snap, "note-text")["value"], "Loads")
+            self.assertFalse(field(snap, "ans-note")["disabled"])
+        (post,) = checks(sent)
+        self.assertEqual(posted(post)["note"], "Loads")
+
+    def test_a_failed_note_can_be_retried_without_typing(self) -> None:
+        (snap,) = render([
+            START, {"frame": frame([check_item("A", "manual-check")])},
+            {"respond": {"status": 502, "text": "gh_failed\n"}},
+            {"type": {"class": "note-text", "text": "Loads"}},
+            {"click": "ans-note"}, {"clock": 5000},
+            {"click": "ans-note"}, {"clock": 10000}, {"snapshot": True},
+        ])
+        self.assertEqual([posted(p)["note"] for p in checks(snap)], ["Loads", "Loads"])
 
     def test_a_draft_is_dropped_when_its_item_is_gone(self) -> None:
         a = check_item("A", "manual-check")

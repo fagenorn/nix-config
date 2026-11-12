@@ -58,8 +58,8 @@ line before it is translated: `answer.Refused` is `console: answer_refused <proj
 <code>: <detail>` (whitespace runs collapsed to one space; the detail is what `gh` wrote to stderr)
 and 502 `the tracker refused the tick: <error>`; any other exception is `console: answer_failed
 <Type>: <message>` and 500 `answer failed`. `POST /api/check-answer` (#863) runs the same body checks in the same order, with
-`answer.parse_check_request` as the parser, and calls `answer_check(project_id, key, answer, note,
-confirm)`; an `answer.Refused` or a `verify_answer.Refused` is the same stderr line and 409, and a
+`answer.parse_check_request` as the parser, and calls `answer_check(project_id, key, answer, version,
+note, confirm)`; an `answer.Refused` or a `verify_answer.Refused` is the same stderr line and 409, and a
 `ForgeError` and any other exception are mapped as above. Success is an empty `204`. No refusal
 appends to the event log. The token is created once in
 `page-token` beside the event log and reaches a client only inside `GET /`, where it replaces
@@ -164,10 +164,11 @@ the next read appends nothing. A tracker read that began before an answer finish
 item back to unanswered (each answer takes a generation; a read keeps the answered item when its
 own generation is older), and a read that began after it is authoritative.
 
-Verification answers (#863): `answer_check(project_id, key, answer, note, confirm)` answers one runner
+Verification answers (#863): `answer_check(project_id, key, answer, version, note, confirm)` answers one runner
 prompt of the inbox (a manual check, a verdict, an approval or a stale check) through `owner_path`
-(default `verify_answer.answer_prompt`; `owner_path(slug, issue, comment_id, answer, note=note,
-paid=paid)`), which runs outside the ingest lock. Under the lock, in order, it raises `answer.Refused`
+(default `verify_answer.answer_prompt`; `owner_path(slug, issue, comment_id, answer, version=version,
+note=note, paid=paid)`, where `version` is the one the page sent, so the owner path refuses a prompt that
+changed since the owner read it), which runs outside the ingest lock. Under the lock, in order, it raises `answer.Refused`
 with `NOT_OPEN` when the project is not registered, no record exists, the item is answered or the
 item takes no answer; with `NOT_AN_ANSWER` when the word is not among the item's answers; with
 `CONFIRM` when the word is `approve` and `confirm` is not exactly the item's own `confirm` text (an
@@ -797,8 +798,8 @@ class ConsoleService:
                     self._answer_generation += 1
                     self._mark_answered(slot, questions, choices)
 
-    def answer_check(self, project_id: str, key: str, answer_word: str, note: str | None = None,
-                     confirm: str | None = None) -> None:
+    def answer_check(self, project_id: str, key: str, answer_word: str, version: str,
+                     note: str | None = None, confirm: str | None = None) -> None:
         """Answer one verification prompt through the owner path; see the module docstring."""
         slot = (project_id, key)
         with self._ingest:
@@ -816,7 +817,7 @@ class ConsoleService:
         sent = False
         try:
             self._owner_path(item["repo"], item["issue"], item["comment_id"], answer_word,
-                             note=note, paid=bool(item.get("paid")))
+                             version=version, note=note, paid=bool(item.get("paid")))
             sent = True
         finally:
             with self._ingest:

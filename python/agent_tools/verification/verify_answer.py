@@ -27,12 +27,14 @@ string `state` is `ForgeError("payload_invalid")`; any state but `open` is `CLOS
 the `TRUSTED` (OWNER, MEMBER) comments only and live in that listing (`GONE`); the answer is one the
 reason takes (`NOT_AN_ANSWER`); the prompt is not already `answered` (`ALREADY`); it is not `ambiguous`,
 both boxes ticked, which the runner keeps pending and still needs the owner to untick one (`AMBIGUOUS`);
-a paid approval carries `paid=True`, its typed confirmation (`PAID`); a note carries no `verify` fence
-(`NOTE_BLOCK`). When the box to tick is missing from the body, the answer is `CHANGED` and nothing is
+its `content_version` is the `version` the owner saw (`EDITED`), so a prompt whose fields or text were
+edited in place since the owner read it is never answered; a paid approval carries `paid=True`, its typed
+confirmation (`PAID`); a note carries no `verify` fence (`NOTE_BLOCK`). When the box to tick is missing from the body, the answer is `CHANGED` and nothing is
 edited.
 """
 from collections.abc import Sequence
 
+from agent_tools.canonical import telemetry_digest
 from agent_tools.claims import forge_markers
 from agent_tools.claims.forge_markers import Marker
 from agent_tools.system import forge_api
@@ -55,6 +57,7 @@ ALREADY = "the prompt is already answered on the tracker"
 CHANGED = "the prompt no longer carries that box"
 PAID = "a paid check is approved only with its typed confirmation"
 NOTE_BLOCK = "a note may not carry a verify block"
+EDITED = "the prompt changed on the tracker since you read it"
 AMBIGUOUS = "both boxes are ticked on the tracker; untick one there"
 # Which of `labels(prompt)` an answer ticks.
 BOX_OF = {"passed": 0, "failed": 1, "approve": 0, "drop": 0}
@@ -78,6 +81,11 @@ def is_paid(marker: Marker) -> bool:
 def kind_of(marker: Marker) -> str:
     """The console's name for the prompt: `paid-approval` for a paid one, else its reason's kind."""
     return PAID_KIND if is_paid(marker) else KINDS[marker.fields["reason"]]
+
+
+def content_version(marker: Marker) -> str:
+    """A digest of what the owner reads in the prompt: its marker fields and its whole body."""
+    return telemetry_digest({"fields": marker.fields, "body": marker.body})
 
 
 def labels(marker: Marker) -> tuple[str, ...]:
@@ -123,9 +131,11 @@ def _check_arguments(answer: str, note: str | None) -> None:
         raise ValueError(f"a note is a non-blank string of at most {MAX_NOTE_CHARS} characters")
 
 
-def answer_prompt(slug: str, issue: int, comment_id: int, answer: str, *,
+def answer_prompt(slug: str, issue: int, comment_id: int, answer: str, *, version: str,
                   note: str | None = None, paid: bool = False) -> None:
-    """Write the owner's `answer` to prompt `comment_id` of `issue`: one tick, one `end` or one note."""
+    """Write the owner's `answer` to prompt `comment_id` of `issue`: one tick, one `end` or one note.
+
+    `version` is the `content_version` of the prompt as the owner read it; a prompt that differs is refused."""
     _check_arguments(answer, note)
     parent = forge_api.api_get(f"repos/{slug}/issues/{issue}")
     if not isinstance(parent, dict) or not isinstance(parent.get("state"), str):
@@ -142,6 +152,8 @@ def answer_prompt(slug: str, issue: int, comment_id: int, answer: str, *,
         raise Refused(ALREADY)
     if ambiguous(prompt):
         raise Refused(AMBIGUOUS)
+    if version != content_version(prompt):
+        raise Refused(EDITED)
     if is_paid(prompt) and answer == "approve" and not paid:
         raise Refused(PAID)
     if answer == "note":

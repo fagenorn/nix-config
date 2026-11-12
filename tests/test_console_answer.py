@@ -340,17 +340,18 @@ class CheckAnswerServiceTest(unittest.TestCase):
 
     def test_passed_failed_and_note_reach_the_owner_path_unchanged(self):
         svc = self.serve([ASK7, ASK8, ASK9])
-        svc.answer_check(P, ASK7["key"], "passed")
-        svc.answer_check(P, ASK8["key"], "failed")
-        svc.answer_check(P, ASK9["key"], "note", note=NOTE)
-        body = json.dumps({"project_id": P, "key": ASK9["key"], "answer": "note", "note": NOTE}).encode()
+        svc.answer_check(P, ASK7["key"], "passed", ASK7["version"])
+        svc.answer_check(P, ASK8["key"], "failed", ASK8["version"])
+        svc.answer_check(P, ASK9["key"], "note", ASK9["version"], note=NOTE)
+        body = json.dumps({"project_id": P, "key": ASK9["key"], "answer": "note", "version": ASK9["version"],
+                           "note": NOTE}).encode()
         got = support.post_page(svc.address, "/api/check-answer", self.headers, body)
         self.assertEqual((got[0], got[2]), (204, b""))
         self.assertEqual(self.calls, [
-            ((SLUG, 7, C + 7, "passed"), {"note": None, "paid": False}),
-            ((SLUG, 8, C + 8, "failed"), {"note": None, "paid": False}),
-            ((SLUG, 9, C + 9, "note"), {"note": NOTE, "paid": False}),
-            ((SLUG, 9, C + 9, "note"), {"note": NOTE, "paid": False})])
+            ((SLUG, 7, C + 7, "passed"), {"version": ASK7["version"], "note": None, "paid": False}),
+            ((SLUG, 8, C + 8, "failed"), {"version": ASK8["version"], "note": None, "paid": False}),
+            ((SLUG, 9, C + 9, "note"), {"version": ASK9["version"], "note": NOTE, "paid": False}),
+            ((SLUG, 9, C + 9, "note"), {"version": ASK9["version"], "note": NOTE, "paid": False})])
 
     def test_a_paid_approval_without_its_typed_confirmation_is_refused(self):
         svc = self.open(Scripted([PAID10, LIVE12]))
@@ -360,26 +361,27 @@ class CheckAnswerServiceTest(unittest.TestCase):
         for item, confirm in rows:
             with self.subTest(key=item["key"], confirm=confirm):
                 with self.assertRaises(answer.Refused) as caught:
-                    svc.answer_check(P, item["key"], "approve", confirm=confirm)
+                    svc.answer_check(P, item["key"], "approve", item["version"], confirm=confirm)
                 self.assertEqual(str(caught.exception), answer.CONFIRM)
         bare = self.open(Scripted([{**LIVE12, "confirm": ""}]))
         bare.poll_tracker()
         with self.assertRaises(answer.Refused) as caught:
-            bare.answer_check(P, LIVE12["key"], "approve", confirm="")
+            bare.answer_check(P, LIVE12["key"], "approve", LIVE12["version"], confirm="")
         self.assertEqual(str(caught.exception), answer.CONFIRM)
         self.assertEqual(self.calls, [])
-        svc.answer_check(P, PAID10["key"], "approve", confirm="octo/widgets#10")
-        svc.answer_check(P, LIVE12["key"], "approve", confirm="octo/widgets#12")
+        svc.answer_check(P, PAID10["key"], "approve", PAID10["version"], confirm="octo/widgets#10")
+        svc.answer_check(P, LIVE12["key"], "approve", LIVE12["version"], confirm="octo/widgets#12")
         self.assertEqual(self.calls, [
-            ((SLUG, 10, C + 10, "approve"), {"note": None, "paid": True}),
-            ((SLUG, 12, C + 12, "approve"), {"note": None, "paid": False})])
+            ((SLUG, 10, C + 10, "approve"), {"version": PAID10["version"], "note": None, "paid": True}),
+            ((SLUG, 12, C + 12, "approve"), {"version": LIVE12["version"], "note": None, "paid": False})])
 
     def test_a_paid_approval_is_excluded_from_any_multi_item_action(self):
         self.assertEqual(service.PAGE_WRITES, {"/api/looked", "/api/answer", "/api/check-answer"})
         keys = [PAID10["key"], LIVE12["key"]]
-        single = {"project_id": P, "key": LIVE12["key"], "answer": "approve", "confirm": "octo/widgets#12"}
+        single = {"project_id": P, "key": LIVE12["key"], "answer": "approve", "version": LIVE12["version"],
+                  "confirm": "octo/widgets#12"}
         several = [
-            {"project_id": P, "key": keys, "answer": "approve", "confirm": "octo/widgets#10"},
+            {**single, "key": keys, "confirm": "octo/widgets#10"},
             {**single, "items": [{"project_id": P, "key": LIVE12["key"]}]},
             [single, {**single, "key": PAID10["key"]}]]
         for body in several:
@@ -405,7 +407,7 @@ class CheckAnswerServiceTest(unittest.TestCase):
         for project, key, word, reason in table:
             with self.subTest(key=key, word=word, project=project):
                 with self.assertRaises(answer.Refused) as caught:
-                    svc.answer_check(project, key, word)
+                    svc.answer_check(project, key, word, "any")
                 self.assertEqual(str(caught.exception), reason)
         self.assertEqual(self.calls, [])
 
@@ -413,11 +415,11 @@ class CheckAnswerServiceTest(unittest.TestCase):
         svc = self.open(Scripted([ASK7, ASK8]))
         svc.poll_tracker()
         self.assertEqual(view_of(svc)["statement"]["inbox_items"], 2)
-        svc.answer_check(P, ASK7["key"], "passed")
+        svc.answer_check(P, ASK7["key"], "passed", ASK7["version"])
         self.assertEqual(self.keys(svc, "answered"), [ASK7["key"]])
         self.assertEqual(view_of(svc)["statement"]["inbox_items"], 1)
         rows = support.log_rows(self.store)
-        svc.answer_check(P, ASK8["key"], "note", note=NOTE)
+        svc.answer_check(P, ASK8["key"], "note", ASK8["version"], note=NOTE)
         self.assertEqual(support.log_rows(self.store), rows)
         self.assertEqual(self.keys(svc, "open"), [ASK8["key"]])
         self.assertEqual(view_of(svc)["statement"]["inbox_items"], 1)
@@ -428,7 +430,7 @@ class CheckAnswerServiceTest(unittest.TestCase):
         def tracker(project_id, slug, *, cancelled):
             calls.append(project_id)
             if len(calls) == 2:
-                svc.answer_check(P, ASK7["key"], "passed")
+                svc.answer_check(P, ASK7["key"], "passed", ASK7["version"])
             return [ASK7]
 
         svc = self.open(tracker)
@@ -446,7 +448,7 @@ class CheckAnswerServiceTest(unittest.TestCase):
                 rows, version = support.log_rows(self.store), svc.version
                 self.raise_ = error
                 with self.assertRaises(type(error)):
-                    svc.answer_check(P, ASK7["key"], "passed")
+                    svc.answer_check(P, ASK7["key"], "passed", ASK7["version"])
                 self.assertEqual(support.log_rows(self.store), rows)
                 self.assertEqual(svc.version, version)
                 self.assertEqual(self.keys(svc, "open"), [ASK7["key"]])
@@ -463,7 +465,7 @@ class CheckAnswerServiceTest(unittest.TestCase):
                 svc._ingest.release()
 
         self.inside = probe
-        svc.answer_check(P, ASK7["key"], "passed")
+        svc.answer_check(P, ASK7["key"], "passed", ASK7["version"])
         self.assertEqual(free, [True])
 
     def test_a_second_answer_while_one_is_sending_is_refused(self):
@@ -474,38 +476,41 @@ class CheckAnswerServiceTest(unittest.TestCase):
         def again():
             self.inside = None
             try:
-                svc.answer_check(P, ASK7["key"], "passed")
+                svc.answer_check(P, ASK7["key"], "passed", ASK7["version"])
             except answer.Refused as error:
                 raised.append(error)
 
         self.inside = again
-        svc.answer_check(P, ASK7["key"], "passed")
+        svc.answer_check(P, ASK7["key"], "passed", ASK7["version"])
         self.assertEqual([str(e) for e in raised], [answer.SENDING])
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(self.keys(svc, "answered"), [ASK7["key"]])
 
 
 class ParseCheckRequestTest(unittest.TestCase):
-    BASE = {"project_id": P, "key": "octo/widgets#7/1", "answer": "passed"}
+    BASE = {"project_id": P, "key": "octo/widgets#7/1", "answer": "passed", "version": "v1"}
 
     def parse(self, value):
         return answer.parse_check_request(value if isinstance(value, bytes) else json.dumps(value).encode())
 
     def test_valid_bodies_round_trip(self):
-        self.assertEqual(self.parse(self.BASE), (P, "octo/widgets#7/1", "passed", None, None))
+        self.assertEqual(self.parse(self.BASE), (P, "octo/widgets#7/1", "passed", "v1", None, None))
         self.assertEqual(self.parse({**self.BASE, "answer": "note", "note": NOTE}),
-                         (P, "octo/widgets#7/1", "note", NOTE, None))
+                         (P, "octo/widgets#7/1", "note", "v1", NOTE, None))
         self.assertEqual(self.parse({**self.BASE, "answer": "approve", "confirm": "octo/widgets#7"}),
-                         (P, "octo/widgets#7/1", "approve", None, "octo/widgets#7"))
+                         (P, "octo/widgets#7/1", "approve", "v1", None, "octo/widgets#7"))
         for word in answer.CHECK_ANSWERS:
             if word != "note":
                 self.assertEqual(self.parse({**self.BASE, "answer": word})[2], word)
-        self.assertEqual(self.parse({**self.BASE, "confirm": "x" * 200})[4], "x" * 200)
+        self.assertEqual(self.parse({**self.BASE, "confirm": "x" * 200})[5], "x" * 200)
 
     def test_anything_else_is_a_value_error(self):
         no_answer = {k: v for k, v in self.BASE.items() if k != "answer"}
         table = {
             "missing answer": no_answer,
+            "missing version": {k: v for k, v in self.BASE.items() if k != "version"},
+            "empty version": {**self.BASE, "version": ""},
+            "non-string version": {**self.BASE, "version": 5},
             "extra key": {**self.BASE, "extra": 1},
             "unknown word": {**self.BASE, "answer": "maybe"},
             "note with passed": {**self.BASE, "note": "hi"},
@@ -517,15 +522,15 @@ class ParseCheckRequestTest(unittest.TestCase):
             "non-string confirm": {**self.BASE, "confirm": 5},
             "empty key": {**self.BASE, "key": ""},
             "empty project": {**self.BASE, "project_id": ""},
-            "duplicate key": (b'{"project_id": "p", "project_id": "q", "key": "k", "answer": "passed"}'),
-            "nan": (b'{"project_id": "p", "key": "k", "answer": "passed", "confirm": NaN}'),
+            "duplicate key": (b'{"project_id": "p", "project_id": "q", "key": "k", "answer": "passed", "version": "v"}'),
+            "nan": (b'{"project_id": "p", "key": "k", "answer": "passed", "version": "v", "confirm": NaN}'),
             "not an object": [self.BASE],
         }
         for name, body in table.items():
             with self.subTest(name):
                 with self.assertRaises(ValueError):
                     self.parse(body)
-        self.assertEqual(self.parse({**self.BASE, "answer": "note", "note": "n" * 600})[3], "n" * 600)
+        self.assertEqual(self.parse({**self.BASE, "answer": "note", "note": "n" * 600})[4], "n" * 600)
 
 
 if __name__ == "__main__":

@@ -1020,7 +1020,8 @@ class ConsoleAnswerTest(OwnerBase):
         self.hold(ask_check())
         self.run_pass()
         prompt, = self.prompts("verify-ask")
-        verify_answer.answer_prompt(SLUG, ISSUE, prompt.comment_id, answer)
+        verify_answer.answer_prompt(SLUG, ISSUE, prompt.comment_id, answer,
+                                    version=verify_answer.content_version(prompt))
         return self.run_pass()
 
     def test_a_passed_answer_from_the_page_closes_the_issue_at_the_next_pass(self):

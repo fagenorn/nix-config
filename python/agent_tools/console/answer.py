@@ -34,12 +34,13 @@ integers, none a boolean, each at least 0); anything else, a repeated key includ
 `parse_check_request(body)` reads the body of `POST /api/check-answer` (#863), the answer to one
 verification prompt of the runner, sent the same way and at most as long:
 
-    {"project_id": "<project id>", "key": "<inbox item key>", "answer": "<word>", "note": "<text>"?, "confirm": "<text>"?}
+    {"project_id": "<project id>", "key": "<inbox item key>", "answer": "<word>", "version": "<item version>",
+     "note": "<text>"?, "confirm": "<text>"?}
 
-and returns `(project_id, key, answer, note, confirm)`, where `note` and `confirm` are None when absent.
+and returns `(project_id, key, answer, version, note, confirm)`, where `note` and `confirm` are None when absent.
 It accepts only a UTF-8 JSON object whose keys include `project_id`, `key` and `answer` and lie within
 those five, so a key that is a list, or any further member, is refused: no body answers more than one
-item. `project_id` and `key` are non-empty strings and `answer` is one of `CHECK_ANSWERS`. `note` is present
+item. `project_id`, `key` and `version` are non-empty strings and `answer` is one of `CHECK_ANSWERS`. `note` is present
 exactly when `answer` is `note`, a string that is not blank and has at most
 `verify_answer.MAX_NOTE_CHARS` characters; `confirm` is optional, a string of at most `MAX_CONFIRM_CHARS`
 characters. Anything else, a repeated key included, raises `ValueError`.
@@ -93,17 +94,18 @@ def parse_request(body: bytes) -> tuple[str, str, list[int]]:
     return project_id, key, choices
 
 
-def parse_check_request(body: bytes) -> tuple[str, str, str, str | None, str | None]:
+def parse_check_request(body: bytes) -> tuple[str, str, str, str, str | None, str | None]:
     try:
         value = json.loads(body.decode("utf-8"), object_pairs_hook=reject_duplicate_keys,
                            parse_constant=reject_nonfinite_literal)
     except RecursionError as error:
         raise ValueError("the answer is nested too deeply") from error
-    required = {"project_id", "key", "answer"}
+    required = {"project_id", "key", "answer", "version"}
     if not isinstance(value, dict) or not required <= set(value) <= required | {"note", "confirm"}:
-        raise ValueError("the answer must be an object of project_id, key, answer, note and confirm")
+        raise ValueError("the answer must be an object of project_id, key, answer, version, note and confirm")
     project_id, key, word = value["project_id"], value["key"], value["answer"]
-    for name, text in (("project_id", project_id), ("key", key)):
+    version = value["version"]
+    for name, text in (("project_id", project_id), ("key", key), ("version", version)):
         if not isinstance(text, str) or not text:
             raise ValueError(f"{name} must be a non-empty string")
     if word not in CHECK_ANSWERS:
@@ -116,7 +118,7 @@ def parse_check_request(body: bytes) -> tuple[str, str, str, str | None, str | N
         raise ValueError(f"note must be a non-blank string of at most {verify_answer.MAX_NOTE_CHARS} characters")
     if "confirm" in value and (not isinstance(confirm, str) or len(confirm) > MAX_CONFIRM_CHARS):
         raise ValueError(f"confirm must be a string of at most {MAX_CONFIRM_CHARS} characters")
-    return project_id, key, word, note, confirm
+    return project_id, key, word, version, note, confirm
 
 
 def tick_on_tracker(slug: str, issue: int, comment_id: int, questions: list[dict],

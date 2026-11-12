@@ -185,10 +185,25 @@ class VerifyPromptTableTest(unittest.TestCase):
         for item, (n, body, reason, want) in zip(items, rows):
             with self.subTest(reason=reason, issue=n):
                 kind, answers, paid, confirm, detail, answered = want
-                self.assertEqual(item, expected(n, C1 + n, reason, kind=kind, answers=answers, paid=paid,
-                                                confirm=confirm, detail=detail, answered=answered,
-                                                question=SENTENCES[reason], held_work=1))
+                self.assertRegex(item["version"], r"^sha256:[0-9a-f]{64}$")
+                self.assertEqual({k: v for k, v in item.items() if k != "version"},
+                                 expected(n, C1 + n, reason, kind=kind, answers=answers, paid=paid,
+                                          confirm=confirm, detail=detail, answered=answered,
+                                          question=SENTENCES[reason], held_work=1))
         self.assertEqual(json.loads(json.dumps(items)), items)
+
+    def test_the_version_names_the_prompt_content_the_owner_saw(self):
+        def version(body):
+            return read(page([issue_node(7, [comment_node(C1, body)])]))[0]["version"]
+        self.assertEqual(version(ask()), version(ask()))
+        for name, revised in {
+                "instructions": ask(f"Open the production site.\n\n{ASK_BOXES}"),
+                "host": verify_body("verify-ask", {"host": "eleven-m5"}, SENTENCES["verify-ask"],
+                                    f"{ASK_TEXT}\n\n{ASK_BOXES}"),
+                "check": verify_body("verify-ask", {"host": "mbp", "check": "1"}, SENTENCES["verify-ask"],
+                                     f"{ASK_TEXT}\n\n{ASK_BOXES}")}.items():
+            with self.subTest(name):
+                self.assertNotEqual(version(revised), version(ask()))
 
     def one(self, *comments):
         return read(page([issue_node(7, list(comments))]))

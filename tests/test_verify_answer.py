@@ -51,6 +51,11 @@ def parsed(body, cid=C):
     return fm.parse(comment(cid, body))
 
 
+def ver(body, cid=C):
+    """The content version of the prompt `body` as the owner saw it."""
+    return va.content_version(parsed(body, cid))
+
+
 def writes(world):
     return [a for a in world.argvs("gh") if "-X" in a and a[a.index("-X") + 1] in ("PATCH", "POST")]
 
@@ -88,7 +93,7 @@ class WritesTest(Base):
                 self.world.reset()
                 self.world.respond_json("gh", STATE, {"number": ISSUE, "state": "open"})
                 self.store(body)
-                va.answer_prompt(SLUG, ISSUE, C, answer, paid=paid)
+                va.answer_prompt(SLUG, ISSUE, C, answer, version=ver(body), paid=paid)
                 want = tick_one(body, label)
                 self.assertEqual(stored_body(self.world), want)
                 argvs = self.world.argvs("gh")
@@ -98,7 +103,7 @@ class WritesTest(Base):
 
     def test_keep_ends_the_stale_prompt_as_kept(self):
         self.store(stale())
-        va.answer_prompt(SLUG, ISSUE, C, "keep")
+        va.answer_prompt(SLUG, ISSUE, C, "keep", version=ver(stale()))
         self.assertEqual(self.world.argvs("gh")[-1],
                          ["api", "-X", "POST", POSTS, "-f", "body=" + fm.end_body(C, "kept")])
         self.assertEqual([a for a in self.world.argvs("gh") if "PATCH" in a], [])
@@ -108,7 +113,7 @@ class WritesTest(Base):
         self.store(ask())
         text = ("<!-- agent:verify-result v1 block=10.abc check=0 state=pass -->\n"
                 "The login works, but slowly.\nnaïve ✓")
-        va.answer_prompt(SLUG, ISSUE, C, "note", note=text)
+        va.answer_prompt(SLUG, ISSUE, C, "note", version=ver(ask()), note=text)
         body = va.note_body(SLUG, ISSUE, C, text)
         self.assertEqual(writes(self.world), [["api", "-X", "POST", POSTS, "-f", "body=" + body]])
         self.assertTrue(body.endswith(text))
@@ -120,9 +125,35 @@ class WritesTest(Base):
     def test_a_missing_box_is_refused(self):
         self.store(ask("Open the staging site.\n\n- [ ] Accept"))
         with self.assertRaises(va.Refused) as caught:
-            va.answer_prompt(SLUG, ISSUE, C, "failed")
+            va.answer_prompt(SLUG, ISSUE, C, "failed", version=ver(ask("Open the staging site.\n\n- [ ] Accept")))
         self.assertEqual(str(caught.exception), va.CHANGED)
         self.assertEqual(writes(self.world), [])
+
+    def test_a_prompt_edited_since_the_owner_saw_it_is_refused(self):
+        seen = ask()
+        edits = {
+            "instructions": ask("Open the production site and confirm the login works.\n\n- [ ] Accept\n- [ ] Reject"),
+            "host": prompt("verify-ask", {**BASE, "host": "eleven-m5"}, ASK_EXTRA),
+            "check": prompt("verify-ask", {"block": "10.abc", "check": "1", "host": "mbp"}, ASK_EXTRA),
+        }
+        for name, revised in edits.items():
+            with self.subTest(name):
+                self.world.reset()
+                self.world.respond_json("gh", STATE, {"number": ISSUE, "state": "open"})
+                self.store(revised)
+                with self.assertRaises(va.Refused) as caught:
+                    va.answer_prompt(SLUG, ISSUE, C, "passed", version=ver(seen))
+                self.assertEqual(str(caught.exception), va.EDITED)
+                self.assertEqual(writes(self.world), [])
+                with self.assertRaises(va.Refused):
+                    va.answer_prompt(SLUG, ISSUE, C, "note", version=ver(seen), note="hi")
+                self.assertEqual(writes(self.world), [])
+                self.assertEqual(stored_body(self.world), revised)
+
+    def test_the_version_is_stable_and_follows_the_content(self):
+        self.assertEqual(ver(ask()), ver(ask()))
+        self.assertNotEqual(ver(ask()), ver(ask("Other.\n\n- [ ] Accept\n- [ ] Reject")))
+        self.assertNotEqual(ver(ask()), ver(decision()))
 
 
 class RefusalTest(Base):
@@ -130,7 +161,7 @@ class RefusalTest(Base):
         self.store(ask())
         for answer, note in [("note", None), ("note", "   "), ("note", "x" * 601), ("passed", "a note"), ("note", 5)]:
             with self.subTest(answer=answer, note=note), self.assertRaises(ValueError):
-                va.answer_prompt(SLUG, ISSUE, C, answer, note=note)
+                va.answer_prompt(SLUG, ISSUE, C, answer, version=ver(ask()), note=note)
         self.assertEqual(self.world.argvs("gh"), [])
 
     def test_a_refused_answer_writes_nothing(self):
@@ -166,7 +197,7 @@ class RefusalTest(Base):
                     self.world.comment_store(SLUG, ISSUE, [comment(C, bodies[0]), comment(C + 1, bodies[1])])
                 before = [c["body"] for c in self.world.stored()]
                 with self.assertRaises(va.Refused) as caught:
-                    va.answer_prompt(SLUG, ISSUE, C, answer, **kwargs)
+                    va.answer_prompt(SLUG, ISSUE, C, answer, version=ver(bodies[0]) if bodies else "none", **kwargs)
                 self.assertEqual(str(caught.exception), reason)
                 self.assertEqual(writes(self.world), [])
                 self.assertEqual([c["body"] for c in self.world.stored()], before)
@@ -179,7 +210,7 @@ class RefusalTest(Base):
             with self.subTest(value=value):
                 self.world.respond_json("gh", STATE, value)
                 with self.assertRaises(ForgeError) as caught:
-                    va.answer_prompt(SLUG, ISSUE, C, "passed")
+                    va.answer_prompt(SLUG, ISSUE, C, "passed", version=ver(ask()))
                 self.assertEqual(caught.exception.code, "payload_invalid")
                 self.assertEqual(writes(self.world), [])
 

@@ -156,7 +156,8 @@ class AnswerRouteTest(Case):
 
     def test_the_check_route_maps_refusals(self):
         ask = CHECK_ITEM
-        word = {"project_id": "owner/p00", "key": ask["key"], "answer": "passed"}
+        word = {"project_id": "owner/p00", "key": ask["key"], "answer": "passed",
+                "version": ask["version"]}
         calls = []
 
         def owner_path(*args, **kwargs):
@@ -171,6 +172,7 @@ class AnswerRouteTest(Case):
             svc.address, CHECK, hdrs, json.dumps(body).encode() if not isinstance(body, bytes) else body)
         table = [
             ("bad word", post({**word, "answer": "maybe"}), 400, b"bad answer\n"),
+            ("no version", post({k: v for k, v in word.items() if k != "version"}), 400, b"bad answer\n"),
             ("unknown key", post({**word, "key": "octo/widgets#99/1"}), 409,
              answer.NOT_OPEN.encode() + b"\n"),
             ("not json", post(json.dumps(word), self.headers(svc, **{"Content-Type": "text/plain"})), 415,
