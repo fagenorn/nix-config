@@ -40,7 +40,12 @@
 // promoted sections; every serialized node carries its title attribute (null
 // when unset), which is where a time element keeps its exact local time, and
 // its placeholder attribute (null when unset) and its inline style.width (null
-// when unset; Elem.style is a plain object).
+// when unset; Elem.style is a plain object) and its aria-label attribute as
+// label (null when unset). {close: "<details key>"} sets that fold's open to
+// false (none throws), the mirror of open. An optional "in": "<details key>" on
+// a click, type, append, input, select or focus_on step limits the lookup to the
+// first attached element with the class inside that fold's subtree (an unknown
+// key or no match throws); without it the lookup is unchanged.
 // Prints a JSON list of snapshots on stdout; any failure exits 1 with the
 // error on stderr. A selector the fake DOM does not support throws, so a
 // test cannot pass on a stub.
@@ -344,6 +349,7 @@ function node(n) {
     key: n.dataset.key === undefined ? null : n.dataset.key,
     title: n.attributes.title === undefined ? null : n.attributes.title,
     placeholder: n.attributes.placeholder === undefined ? null : n.attributes.placeholder,
+    label: n.attributes["aria-label"] === undefined ? null : n.attributes["aria-label"],
     width: n.style.width === undefined ? null : n.style.width,
     open: n.open,
     pressed: n.attributes["aria-pressed"] === undefined ? null : n.attributes["aria-pressed"],
@@ -358,8 +364,8 @@ function node(n) {
   };
 }
 
-function typeInto(spec, append) {
-  const target = attached(root).find((n) => n.className.split(/\s+/).includes(spec.class));
+function typeInto(spec, append, scope) {
+  const target = attached(scope).find((n) => n.className.split(/\s+/).includes(spec.class));
   if (!target) throw new Error("no element with class " + spec.class);
   const text = target.tagName === "INPUT"
     ? spec.text.replace(/[\r\n]/g, "")
@@ -372,8 +378,15 @@ function typeInto(spec, append) {
 }
 
 
-function byClass(cls) {
-  const found = attached(root).find((n) => n.className.split(/\s+/).includes(cls));
+function scopeOf(step) {
+  if (step.in === undefined) return root;
+  const fold = attached(root).find((n) => n.tagName === "DETAILS" && n.dataset.key === step.in);
+  if (!fold) throw new Error("no details with key " + step.in);
+  return fold;
+}
+
+function byClass(cls, scope) {
+  const found = attached(scope).find((n) => n.className.split(/\s+/).includes(cls));
   if (!found) throw new Error("no element with class " + cls);
   return found;
 }
@@ -389,6 +402,10 @@ async function run() {
       const fold = attached(root).find((n) => n.tagName === "DETAILS" && n.dataset.key === step.open);
       if (!fold) throw new Error("no details with key " + step.open);
       fold.open = true;
+    } else if ("close" in step) {
+      const fold = attached(root).find((n) => n.tagName === "DETAILS" && n.dataset.key === step.close);
+      if (!fold) throw new Error("no details with key " + step.close);
+      fold.open = false;
     } else if ("clock" in step) {
       state.clock = step.clock;
       runDueTimers();
@@ -401,23 +418,23 @@ async function run() {
       });
       state.keyPrevented = prevented;
     } else if ("click" in step) {
-      const target = byClass(step.click);
+      const target = byClass(step.click, scopeOf(step));
       if (target.disabled !== true) {
         for (const fn of target.listeners.click || []) fn({ type: "click", preventDefault() {} });
       }
     } else if ("type" in step) {
-      typeInto(step.type, false);
+      typeInto(step.type, false, scopeOf(step));
     } else if ("append" in step) {
-      typeInto(step.append, true);
+      typeInto(step.append, true, scopeOf(step));
     } else if ("input" in step) {
-      const target = byClass(step.input.cls);
+      const target = byClass(step.input.cls, scopeOf(step));
       target.value = step.input.value;
       target.selectionStart = target.selectionEnd = target.value.length;
       for (const fn of target.listeners.input || []) fn({ type: "input", target });
     } else if ("select" in step) {
-      byClass(step.select.cls).setSelectionRange(step.select.start, step.select.end);
+      byClass(step.select.cls, scopeOf(step)).setSelectionRange(step.select.start, step.select.end);
     } else if ("focus_on" in step) {
-      byClass(step.focus_on).focus();
+      byClass(step.focus_on, scopeOf(step)).focus();
     } else if ("respond" in step) {
       replies.push(step.respond);
     } else if ("fail_fetch" in step) {

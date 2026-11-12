@@ -456,6 +456,15 @@ class DocsTreeTest(unittest.TestCase):
         for needle in ("fine, tight or out", "A session named for a sprint adds no line"):
             self.assertIn(needle, context)
 
+    def test_later_open_items_as_rows_are_recorded(self) -> None:
+        rules = self.doc("docs/areas/console/adr/002-the-desk-page-design-rules.md")
+        for needle in (
+            "#944", "a waiting brief included", "Or say what to change\u2026",
+            "closing it keeps a typed reply", "the owner may close it again",
+        ):
+            self.assertIn(needle, rules)
+        self.assertNotIn("keeps its own unraised brief block", rules)
+
     def test_the_console_brief_decision_is_recorded(self):
         path = "docs/areas/console/adr/013-a-managers-brief-is-approved-or-redirected-on-the-page.md"
         first = (REPO_ROOT / path).read_text().splitlines()[0]

@@ -3208,6 +3208,7 @@ BRIEF_B = {
     **BRIEF, "key": "brief/" + "b" * 16, "sprint_id": "b" * 16, "version": 1,
     "waiting_since": stamp(timedelta(minutes=8)),
 }
+KEY_B = "brief:" + "b" * 16
 APPROVING_TEXT = "Approving in five seconds."
 APPROVED_TEXT = "Approved, the sprint is starting"
 REPLIED_TEXT = "Reply sent, waiting for a new brief"
@@ -3452,6 +3453,10 @@ class PageBriefTest(unittest.TestCase):
         self.assertEqual(
             [n["value"] for n in nodes(second) if has_class(n, "reply-text")], ["abcdef"]
         )
+        (row,) = [n for n in nodes(snap["inbox"]) if n["tag"] == "details" and n["key"] == KEY_B]
+        self.assertTrue(row["open"])
+        self.assertIn(second, nodes(row))
+        self.assertEqual(sum(1 for n in nodes(row) if has_class(n, "kind")), 1)
         self.assertNotIn(
             "abcdef", [n["value"] for n in nodes(first) if has_class(n, "reply-text")]
         )
@@ -3471,6 +3476,154 @@ class PageBriefTest(unittest.TestCase):
         self.assertEqual([n for n in nodes(plain["inbox"]) if n["tag"] == "textarea"], [])
         (field,) = [n for n in nodes(brief["inbox"]) if n["tag"] == "textarea"]
         self.assertEqual(field["cls"], "reply-text")
+
+
+def brief_row(snap: dict, key: str = KEY_B) -> dict:
+    (row,) = [n for n in nodes(snap["inbox"]) if n["tag"] == "details" and n["key"] == key]
+    return row
+
+
+def has_any(tree: dict, names: tuple) -> bool:
+    return any(has_class(n, name) for n in visible(tree) for name in names)
+
+
+ROW_BODY = ("parts", "approve", "reply-text", "reply-send")
+
+
+class PageBriefRowTest(unittest.TestCase):
+    def test_a_later_brief_is_one_row_until_opened(self) -> None:
+        closed, opened, promoted = render([
+            START, {"frame": frame([BRIEF, BRIEF_B, ANSWERABLE])}, {"snapshot": True},
+            {"open": KEY_B}, {"snapshot": True},
+            {"frame": frame([BRIEF_B])}, {"snapshot": True},
+        ])
+        kids = closed["inbox"]["children"]
+        self.assertEqual(kids[0]["tag"], "article")
+        for name in ("card", "brief", "lead"):
+            self.assertTrue(has_class(kids[0], name))
+        self.assertEqual((kids[1]["tag"], kids[1]["key"]), ("details", KEY_B))
+        self.assertTrue(has_class(kids[1], "row") and has_class(kids[1], "brief-row"))
+        self.assertFalse(kids[1]["open"])
+        self.assertEqual(kids[2]["tag"], "ul")
+        self.assertTrue(has_class(kids[2], "rest"))
+        row = brief_row(closed)
+        self.assertFalse(has_any(row, ROW_BODY))
+        summary = row["children"][0]
+        self.assertEqual(summary["tag"], "summary")
+        self.assertEqual(
+            [(c["tag"], c["cls"].split()[0] if c["cls"] else "") for c in summary["children"]],
+            [("span", "kind"), ("b", ""), ("span", "lm"), ("span", "lw")])
+        texts = [full(c) for c in summary["children"]]
+        self.assertEqual(texts[:3], ["Brief", GOAL_TEXT, "owner/p01"])
+        self.assertTrue(texts[3].startswith("waiting "))
+        self.assertIn("svg", [c["tag"] for c in summary["children"][0]["children"]])
+
+        row = brief_row(opened)
+        self.assertTrue(row["open"])
+        shown = visible(row)
+        self.assertEqual(sum(1 for n in shown if has_class(n, "approve")), 1)
+        self.assertEqual(sum(1 for n in shown if has_class(n, "primary")), 0)
+        self.assertEqual(sum(1 for n in shown if has_class(n, "reply-text")), 1)
+        self.assertEqual(sum(1 for n in shown if has_class(n, "reply-send")), 1)
+        text = visible_text(row)
+        self.assertIn("owner/p01 brief, version 1", text)
+        for label in LABELS:
+            self.assertIn(label, text)
+        self.assertEqual(sum(1 for n in nodes(row) if has_class(n, "kind")), 1)
+
+        first = promoted["inbox"]["children"][0]
+        self.assertEqual(first["tag"], "article")
+        self.assertTrue(has_class(first, "lead") and has_class(first, "brief"))
+        self.assertIn("owner/p01 brief, version 1", full(first))
+        self.assertFalse(any(has_class(n, "brief-row") for n in nodes(promoted["inbox"])))
+
+    def test_a_reply_in_a_later_brief_survives_frames_and_closing(self) -> None:
+        both = {"frame": frame([BRIEF, BRIEF_B])}
+        typed, closed, reopened = render([
+            START, both, {"open": KEY_B},
+            {"focus_on": "reply-text", "in": KEY_B},
+            {"input": {"cls": "reply-text", "value": "smaller slices"}, "in": KEY_B},
+            both, {"snapshot": True},
+            {"close": KEY_B}, both, {"snapshot": True},
+            {"open": KEY_B}, {"snapshot": True},
+        ])
+        self.assertEqual(typed["active"], "reply-text")
+        self.assertEqual(typed["field"]["value"], "smaller slices")
+        for snap in (typed, closed, reopened):
+            row = brief_row(snap)
+            self.assertEqual(reply_fields(dict(inbox=row)), ["smaller slices"])
+            lead = snap["inbox"]["children"][0]
+            self.assertEqual(reply_fields(dict(inbox=lead)), [""])
+        self.assertFalse(brief_row(closed)["open"])
+        self.assertEqual(
+            [n["value"] for n in visible(brief_row(reopened)) if has_class(n, "reply-text")],
+            ["smaller slices"])
+        self.assertEqual(replies(reopened), [])
+
+    def test_a_later_brief_opens_itself_once_per_approval_step(self) -> None:
+        both = {"frame": frame([BRIEF, BRIEF_B])}
+        waiting, closed, approved, closed_again = render([
+            START, both, {"key": "Enter"}, {"key": "Enter"}, {"snapshot": True},
+            {"close": KEY_B}, both, {"snapshot": True},
+            {"clock": 5000}, {"snapshot": True},
+            {"close": KEY_B}, both, {"snapshot": True},
+        ])
+        row = brief_row(waiting)
+        self.assertTrue(row["open"])
+        self.assertIn(APPROVING_TEXT, visible_text(row))
+        self.assertEqual(approvals(waiting), [])
+        row = brief_row(closed)
+        self.assertFalse(row["open"])
+        self.assertNotIn(APPROVING_TEXT, visible_text(row))
+        row = brief_row(approved)
+        self.assertTrue(row["open"])
+        self.assertIn(APPROVED_TEXT, visible_text(row))
+        self.assertFalse(brief_row(closed_again)["open"])
+
+    def test_the_brief_reply_field_carries_a_hint_and_a_name(self) -> None:
+        (snap,) = render([START, {"frame": frame([BRIEF])}, {"snapshot": True}])
+        (field,) = [n for n in nodes(snap["inbox"]) if has_class(n, "reply-text")]
+        self.assertEqual(field["placeholder"], "Or say what to change\u2026")
+        self.assertEqual(field["label"], "Or say what to change")
+
+    def test_the_first_row_sits_one_row_gap_below_the_card(self) -> None:
+        text = PAGE.read_text(encoding="utf-8")
+        (body,) = re.findall(r"(?s)<style>(.*?)</style>", text)
+        top = re.sub(r"(?s)@media[^{]*\{.*?\}\s*\}", "", body)
+        rules = style_rules(top)
+
+        def decls(selector: str) -> dict:
+            merged: dict = {}
+            for sel, found in rules:
+                if sel == selector:
+                    merged.update(found)
+            return merged
+
+        self.assertEqual(decls(".brief-row").get("padding"), decls(".rest > li.row")["padding"])
+        self.assertEqual(decls(".brief-row").get("padding"), "12px 0")
+        self.assertEqual(decls(".card.lead + .brief-row").get("margin-top"), "12px")
+        self.assertEqual(decls(".card.lead + .rest").get("margin-top"), "12px")
+        self.assertIn("var(--hair)", decls(".brief-row + .brief-row").get("border-top", ""))
+
+    def test_a_closed_brief_row_stays_closed_after_its_reply_is_sent(self) -> None:
+        both = {"frame": frame([BRIEF, BRIEF_B])}
+        sent, closed = render([
+            START, both, {"open": KEY_B},
+            {"input": {"cls": "reply-text", "value": "smaller slices"}, "in": KEY_B},
+            {"respond": {"status": 204}},
+            {"click": "reply-send", "in": KEY_B}, {"snapshot": True},
+            {"close": KEY_B}, both, {"snapshot": True},
+        ])
+        (post,) = replies(sent)
+        self.assertEqual(posted(post), {
+            "project_id": "owner/p01", "sprint_id": "b" * 16, "version": 1,
+            "reply": "smaller slices"})
+        row = brief_row(sent)
+        self.assertTrue(row["open"])
+        self.assertIn(REPLIED_TEXT, visible_text(row))
+        row = brief_row(closed)
+        self.assertFalse(row["open"])
+        self.assertFalse(has_any(row, ROW_BODY))
 
 
 def style_rules(block: str) -> list:

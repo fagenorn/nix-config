@@ -79,6 +79,14 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .row-head b { font-size: 1rem; font-weight: 500; color: var(--text); }
 .row-head .lm { font-size: .84375rem; color: var(--sub0); }
 .row-head .lw { margin-left: auto; font-size: .84375rem; color: var(--sub0); white-space: nowrap; }
+.brief-row { display: block; padding: 12px 0; }
+.card.lead + .brief-row, .card.lead + .rest { margin-top: 12px; }
+.brief-row + .brief-row, .brief-row + .rest > li.row:first-child { border-top: 1px solid var(--hair); }
+.brief-row + .rest { margin-top: 0; }
+.brief-row > summary { display: block; cursor: pointer; list-style: none; padding: 4px 12px; margin: 0 -12px; border-radius: 10px; transition: background-color .16s; }
+.brief-row > summary::-webkit-details-marker { display: none; }
+.brief-row > summary:hover { background: rgba(202, 211, 245, .05); }
+.brief-row > .card { margin-top: 6px; }
 .done-item { flex: 1 0 100%; min-width: 0; }
 .keys { margin-top: 18px; display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: .8125rem; color: var(--ov2); }
 .keys span { display: inline-flex; align-items: center; gap: 6px; }
@@ -1158,8 +1166,16 @@ function briefRecord(sprintId) {
     const parts = el("div", "parts");
     const act = el("div", "act");
     const field = el("textarea", "reply-text");
-    field.setAttribute("aria-label", "Reply");
-    rec = { card, top, head, goal, parts, act, field, status: el("p", "act"), item: null };
+    field.setAttribute("placeholder", "Or say what to change\u2026");
+    field.setAttribute("aria-label", "Or say what to change");
+    const row = el("details", "row brief-row");
+    row.dataset.key = "brief:" + sprintId;
+    const rowHead = el("summary", "row-head");
+    row.appendChild(rowHead);
+    rec = {
+      card, top, head, goal, parts, act, field, status: el("p", "act"), item: null,
+      row, rowHead, seen: null,
+    };
     rec.send = actionButton("reply-send", "Ask for changes", () => sendReply(rec));
     const box = el("div", "reply");
     for (const part of [field, rec.send, rec.status]) box.appendChild(part);
@@ -1179,10 +1195,24 @@ function drawBrief(rec, item, lead) {
   const parts = item.brief;
   rec.item = item;
   rec.card.className = lead ? "card brief lead" : "card brief";
-  rec.top.replaceChildren(
-    kindWords(item), el("span", "proj", item.project_id),
-    phrase("span", "wait", "waiting ", timeEl("since", item.waiting_since, "")),
-  );
+  if (lead) {
+    rec.top.replaceChildren(
+      kindWords(item), el("span", "proj", item.project_id),
+      phrase("span", "wait", "waiting ", timeEl("since", item.waiting_since, "")),
+    );
+    rec.seen = null;
+  } else {
+    rec.top.replaceChildren();
+    rec.rowHead.replaceChildren(
+      kindWords(item), el("b", "", item.goal), el("span", "lm", item.project_id),
+      phrase("span", "lw", "waiting ", timeEl("since", item.waiting_since, "")),
+    );
+    // A row opens itself once per change of its approval or reply phase; the owner's own open or close stands between.
+    const pair = state.phase + "/" + state.reply.phase;
+    const busy = state.phase !== "choosing" || ["sending", "failed", "sent"].includes(state.reply.phase);
+    if (busy && pair !== rec.seen) rec.row.open = true;
+    rec.seen = pair;
+  }
   rec.head.textContent = item.project_id + " brief, version " + item.version;
   rec.goal.textContent = item.goal;
   rec.parts.replaceChildren(
@@ -1225,10 +1255,17 @@ function placeBriefCards(section, briefs) {
     const busy = [...answers.values()].some((s) => s.kind === "brief" && s.sprint_id === id && sending(s));
     if (!open.has(id) && !busy) briefCards.delete(id);
   }
+  // Moving a focused node blurs it in a browser, so the field is put back.
+  const active = document.activeElement;
+  const field = [...briefCards.values()].some((rec) => rec.field === active) ? active : null;
+  const from = field === null ? 0 : field.selectionStart;
+  const to = field === null ? 0 : field.selectionEnd;
   const wanted = briefs.map((item, i) => {
     const rec = briefRecord(item.sprint_id);
     drawBrief(rec, item, i === 0);
-    return rec.card;
+    if (i === 0) return rec.card;
+    if (rec.card.parentNode !== rec.row) rec.row.appendChild(rec.card);
+    return rec.row;
   });
   const keep = new Set(wanted);
   const kept = Array.from(section.children).filter((child) => {
@@ -1236,17 +1273,15 @@ function placeBriefCards(section, briefs) {
     child.remove();
     return false;
   });
-  if (kept.every((card, i) => card === wanted[i])) {
-    for (const card of wanted.slice(kept.length)) section.appendChild(card);
-    return;
+  if (kept.every((node, i) => node === wanted[i])) {
+    for (const node of wanted.slice(kept.length)) section.appendChild(node);
+  } else {
+    for (const node of wanted) section.appendChild(node);
   }
-  // Moving a focused node blurs it in a browser, so the field is put back.
-  const active = document.activeElement;
-  const field = [...briefCards.values()].some((rec) => rec.field === active) ? active : null;
-  const from = field === null ? 0 : field.selectionStart;
-  const to = field === null ? 0 : field.selectionEnd;
-  for (const card of wanted) section.appendChild(card);
   if (field !== null && field !== document.activeElement) {
+    for (const rec of briefCards.values()) {
+      if (rec.field === field && rec.card.parentNode === rec.row) rec.row.open = true;
+    }
     field.focus();
     field.setSelectionRange(from, to);
   }
