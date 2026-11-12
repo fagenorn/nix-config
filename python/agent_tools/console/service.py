@@ -58,7 +58,8 @@ route carries no token: it records observations and answers nothing (ADR-console
 
 A page write (`PAGE_WRITES`, today `POST /api/looked`, `POST /api/answer`, `POST /api/check-answer`,
 `POST /api/goal`, `POST /api/withdraw`, `POST /api/approve`, `POST /api/reply`,
-`POST /api/retry-manager`, `POST /api/message`, `POST /api/stop` and `POST /api/round-answer`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
+`POST /api/retry-manager`, `POST /api/message`, `POST /api/stop`, `POST /api/round-answer` and
+`POST /api/continue`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
 alone and goes through one guard, `_page_write`, whatever its route. After the loopback `Host`
 check and before any body is read, exactly one `Origin` header must equal `http://<Host>` (else
 403 `text/plain` `origin refused`) and exactly one `X-Console-Token` header must equal the
@@ -448,7 +449,11 @@ ingest lock held, and no `Nudge`, row or stderr line carries the owner's text. N
 sprint's session stop is reserved (`_stopping`) or once the sprint has `stopped_at` (a wake would resume
 the stopped manager), and `send_message` refuses `Refused(ENDED)` (409 `this sprint has ended`) a
 sprint with `stopped_at` or one that has ended (`sprints.ended_at`), after `NOT_OPEN` and before the
-text check, appending nothing.
+text check, appending nothing. No message nudge is made while the manager's profile is out of quota
+(#929, see Idle managers): `_nudgeable` gives None, so `send_message`, `stop_sprint` and `renudge`
+reserve nothing and `renudge` sends the held message once the profile is no longer out; `_nudge`
+takes the lock again after its listings and, when the sprint is gone or its profile reads out by
+then, drops the reservation and returns with no nudger call and no row.
 
 Stops (#892): the service takes `stopper` (`manager.stopper_for(sys.platform)` from `console.py`;
 None means a due stop is recorded without a call). `stop_sprint(project_id, sprint_id)`, under the
@@ -494,8 +499,9 @@ revive_failed <Type>: <message>`) and returning at once without a launcher, runs
 over each open sprint: a manager listed (`_manager_listed`) sets `_last_listed[sprint_id]` to now and
 the sprint is skipped, as is a sprint reserved for a launch or a nudge. `_revive_step(sprint, now)` is
 the one decision, `revive.next_step` over the sprint, `view.sprint_waiting` of its project's open
-inbox records, the time the manager was last listed (in memory, starting at the service's
-construction, so a restarted console waits two minutes first), `now` and whether there is a nudger;
+inbox records (`_waiting`), the time the manager was last listed (in memory, starting at the service's
+construction, so a restarted console waits two minutes first), `now`, whether there is a nudger and
+whether the manager's profile is out of quota (`out`: no wake then, #929; a takeover is unchanged);
 `revive()`, `_revive_wake` and a takeover's `_prepared_launch` all call it, so a queued job is
 decided again when it runs. `STALL` appends one `manager.stalled {sprint_id, goal, reason}` row and
 no job; `WAKE` reserves the sprint in `_nudging` and queues `_revive_wake`; `TAKEOVER` reserves it in
@@ -521,6 +527,42 @@ or is a retry of a stalled sprint or of a manager row that is a takeover; every 
 launcher returned, and the launch uses `manager.new_launch(..., takeover=True)`. The
 nudger, launcher and listing are never called with the ingest lock held; the owner's text and the
 secret appear in no new row or stderr line.
+
+Idle managers (#929, ADR-console-020): a manager listed in state `idle` or `limit` while its sprint has
+work is told to go on. `_quota_wait(sprint)`, under the ingest lock, is `manager.quota_wait` over
+`capacity.capacity_view` of the last poll's profiles (what the view shows) and the manager row's
+profile: a `Wait` while that profile reads out. It also keeps the quota mark `_quota_held` (in
+memory, lost on a restart): a started manager with work and an account that is out joins it, a
+sprint without work leaves it. `_moved` is `idle.last_moved` of the log, rebuilt at construction and
+extended by `_fold`, so a run that moved and then ended (`delivery.gone`) still holds the nudge.
+`nudge_idle()`, called by `_poll_loop` after `revive()` in its own try (a failure is `console:
+idle_nudge_failed <Type>: <message>`) and returning at once without a nudger, runs under the lock
+over each open sprint that is in none of `_nudging`, `_launching` and `_stopping`: the manager's
+folded session (`_manager_session`, lowest session id), `active` (the larger of that session's last
+movement and the sprint's `_settled`, the last launch, nudge or wake), the sprint's waiting count
+and its quota; a sprint not out whose manager row is not `started` or whose manager is seen
+`working` leaves `_quota_held` (resumed without a send, no sentence). Then `idle.next_step` decides:
+`GIVE_UP` appends one `manager.no_progress {sprint_id, goal, status}` (the report's status line or
+null), `NUDGE` reserves the sprint in `_nudging` and dispatches `_idle_nudge` after the lock.
+`_idle_nudge(sprint_id, forced)` decides again under the lock (`_idle_due`), reads the listing off
+the lock (a manager not listed sends nothing and appends nothing: the bring-back owns a gone
+manager), decides once more under the lock (the quota recheck), calls the nudger off the lock with a
+`continue` route `nudge.Nudge` to the lowest listed session, and appends one `manager.nudged
+{sprint_id, goal, session_id, ok[, reason][, resumed]}` while the sprint is open and the service not
+stopping (a failure also prints `console: idle_nudge_failed <sprint_id> <reason>`). A dispatch
+that raises is a failed nudge with reason `the nudge could not start: <Type>: <message>`. After a
+quota wait one send resumes the sprint: the first successful send recorded for a sprint in
+`_quota_held` that still has work, whether a held message (`sprint.nudged`), an idle nudge or a wake
+(`manager.woken`), carries `"resumed": true` and clears the mark (`_resume`); the idle nudge waits
+`idle.IDLE_AFTER_MS` after any send because every send sets `_settled`. `continue_sprint(project_id,
+sprint_id)` (`POST /api/continue`, body `{"project_id", "sprint_id"}`, at most `MAX_CONTINUE_BYTES`;
+a bad body is 400 `bad continue`, a refusal 409, any other failure 500 `continue failed`) raises
+`Refused(NOT_OPEN)` unless the sprint is open and of that project and `Refused(NOT_STUCK)` unless
+its `no_progress_at` is set, appending nothing; else it appends one `sprint.continued {sprint_id,
+goal}` and, with a nudger and the sprint in none of `_nudging`, `_launching` and `_stopping`,
+reserves it and dispatches one forced idle nudge (the idle-time and spacing rules are skipped, every
+other rule holds). The nudger, the listing and the full listing are never called with the ingest
+lock held, and no row or stderr line carries the owner's text or the sprint's secret.
 
 Retention (ADR-console-009): construction runs one retention pass (`EventLog.retain`) after
 opening the log and before reading its events, and `RETENTION_THREAD`, started by `start()`, calls
@@ -584,13 +626,13 @@ from urllib.parse import parse_qsl
 
 from agent_tools.claims import owner_actions
 from agent_tools.console import (
-    answer, capacity, deliveries, digest, inbox, manager, nudge, revive, sessions, sprints,
+    answer, capacity, deliveries, digest, idle, inbox, manager, nudge, revive, sessions, sprints,
     write_guard)
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
-    MANAGER_STALLED, MANAGER_STARTED, MANAGER_STOP_FAILED, MANAGER_STOPPED, MANAGER_WAITING,
-    MANAGER_WOKEN, QUESTION_ANSWERED, QUESTIONS_ASKED, SPRINT_ANSWERED, SPRINT_MESSAGED,
-    SPRINT_NUDGED, SPRINT_CLOSED, SPRINT_READ, SPRINT_REPORTED, SPRINT_STOP_REQUESTED, Event,
+    MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_STOP_FAILED,
+    MANAGER_STOPPED, MANAGER_WAITING, MANAGER_WOKEN, QUESTION_ANSWERED, QUESTIONS_ASKED,
+    SPRINT_ANSWERED, SPRINT_CONTINUED, SPRINT_MESSAGED, SPRINT_NUDGED, SPRINT_CLOSED, SPRINT_READ, SPRINT_REPORTED, SPRINT_STOP_REQUESTED, Event,
     EventLog, utc_now)
 from agent_tools.console.view import (
     INBOX_CHANGED, ReadState, derive_view, encode_view, health_change, inbox_changes, inbox_records,
@@ -625,6 +667,7 @@ WITHDRAW_PATH = "/api/withdraw"
 APPROVE_PATH = "/api/approve"
 REPLY_PATH = "/api/reply"
 RETRY_PATH = "/api/retry-manager"
+CONTINUE_PATH = "/api/continue"
 BRIEF_PATH = "/api/brief"
 REPORT_PATH = "/api/report"
 CLOSE_PATH = "/api/close"
@@ -638,7 +681,7 @@ ROUND_ANSWER_PATH = "/api/round-answer"
 CHECK_PATH = "/api/check-answer"
 PAGE_WRITES: frozenset[str] = frozenset({
     LOOKED_PATH, ANSWER_PATH, CHECK_PATH, GOAL_PATH, WITHDRAW_PATH, APPROVE_PATH, REPLY_PATH,
-    RETRY_PATH, MESSAGE_PATH, STOP_PATH, ROUND_ANSWER_PATH})
+    RETRY_PATH, MESSAGE_PATH, STOP_PATH, ROUND_ANSWER_PATH, CONTINUE_PATH})
 MAX_ANSWER_BYTES = 4096
 MAX_GOAL_BYTES = 16384
 MAX_WITHDRAW_BYTES = 4096
@@ -658,6 +701,7 @@ MAX_MESSAGE_REPLY_BYTES = 16384
 MAX_APPROVE_BYTES = 4096
 MAX_REPLY_BYTES = 16384
 MAX_RETRY_BYTES = 4096
+MAX_CONTINUE_BYTES = 4096
 MAX_HOOK_BYTES = 8 * 1024 * 1024
 READINGS_PATH = "/api/readings"
 MAX_READING_BYTES = 64 * 1024
@@ -1182,6 +1226,28 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return False
         return True
 
+    def _continue_request(self, console: "ConsoleService") -> bool:
+        """Read and carry out the owner's tell-it-to-continue; False when it was refused."""
+        body = self._json_body(MAX_CONTINUE_BYTES)
+        if body is None:
+            return False
+        try:
+            project_id, sprint_id = sprints.parse_continue(body)
+        except ValueError:
+            self._refuse(400, "bad continue")
+            return False
+        try:
+            console.continue_sprint(project_id, sprint_id)
+        except sprints.Refused as error:
+            print(f"console: continue_refused {error}", file=sys.stderr)
+            self._refuse(409, str(error))
+            return False
+        except Exception as error:
+            print(f"console: continue_failed {type(error).__name__}: {error}", file=sys.stderr)
+            self._refuse(500, "continue failed")
+            return False
+        return True
+
     def _stop_request(self, console: "ConsoleService") -> bool:
         """Read and carry out an owner's stop of a sprint; False when it was refused."""
         body = self._json_body(MAX_STOP_BYTES)
@@ -1242,6 +1308,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         elif route == RETRY_PATH:
             self.close_connection = True
             if not self._retry_request(console):
+                return
+        elif route == CONTINUE_PATH:
+            self.close_connection = True
+            if not self._continue_request(console):
                 return
         elif route == MESSAGE_PATH:
             self.close_connection = True
@@ -1371,6 +1441,8 @@ class ConsoleService:
         self._stopping: set[str] = set()
         self._pending: dict[str, sprints.PendingStop] = {}
         self._settled: dict[str, int] = {}
+        self._quota_held: set[str] = set()
+        self._moved: dict[str, int] = {}
         self._listing = (
             (lambda: sessions.read_session_registry(self._session_dirs()))
             if listing is None else listing)
@@ -1444,6 +1516,7 @@ class ConsoleService:
             self._capacity = capacity.capacity_state(events)
             self._derive_digest(events)
             self._deliveries = deliveries.delivery_states(events)
+            self._moved = idle.last_moved(events)
             self._sprints = sprints.sprint_states(events)
             self._withdrawn = sprints.withdrawn_ids(events)
             self._pending = sprints.pending_stops(events)
@@ -1683,13 +1756,51 @@ class ConsoleService:
         if token is not None and self._launching.get(sprint_id) is token:
             del self._launching[sprint_id]
 
+    def _manager_session(self, sprint: sprints.SprintState) -> sessions.SessionState | None:
+        """The folded session a listed manager is: the lowest session id carrying its name, or None."""
+        name = manager.session_name(sprint.project_id, sprint.sprint_id)
+        return min((s for s in self._sessions.values()
+                    if s.name == name and s.state != sessions.ENDED and s.repo is not None
+                    and project_for(s.repo, self._states) == sprint.project_id),
+                   key=lambda s: s.session_id, default=None)
+
     def _manager_listed(self, sprint: sprints.SprintState) -> bool:
         """Whether a listed session of the sprint's project carries the sprint's manager name."""
-        name = manager.session_name(sprint.project_id, sprint.sprint_id)
-        return any(
-            s.name == name and s.state != sessions.ENDED and s.repo is not None
-            and project_for(s.repo, self._states) == sprint.project_id
-            for s in self._sessions.values())
+        return self._manager_session(sprint) is not None
+
+    def _waiting(self, sprint: sprints.SprintState) -> int:
+        """Under the ingest lock: how many open records of the sprint's project wait on the owner."""
+        records = [r for r in self._inbox.values()
+                   if r.item.get("project_id") == sprint.project_id and not r.item["answered"]]
+        return sprint_waiting(sprint, records)
+
+    def _quota_wait(self, sprint: sprints.SprintState) -> manager.Wait | None:
+        """Under the ingest lock: where the sprint's manager waits for quota, None when its account has room.
+
+        Also keeps the quota mark (`_quota_held`): a started manager with work and an account that is
+        out joins it, a sprint without work leaves it.
+        """
+        wait = manager.quota_wait(
+            capacity.capacity_view(self._profiles, self._capacity, self._clock()),
+            sprint.manager.profile if sprint.manager else None)
+        if wait is not None or sprint.sprint_id in self._quota_held:
+            if not idle.has_work(sprint, self._waiting(sprint)):
+                self._quota_held.discard(sprint.sprint_id)
+            elif wait is not None and sprint.manager.state == sprints.STARTED:
+                self._quota_held.add(sprint.sprint_id)
+        return wait
+
+    def _resume(self, sprint_id: str) -> bool:
+        """Under the ingest lock, for a send that succeeded: whether it resumes a sprint held for quota."""
+        held = sprint_id in self._quota_held
+        self._quota_held.discard(sprint_id)
+        sprint = self._sprints.get(sprint_id)
+        return held and sprint is not None and idle.has_work(sprint, self._waiting(sprint))
+
+    def _held_for_quota(self, sprint_id: str) -> bool:
+        """Under the ingest lock: whether a send to the sprint must not go: it is gone or its account is out."""
+        sprint = self._sprints.get(sprint_id)
+        return sprint is None or self._quota_wait(sprint) is not None
 
     def _manager_state(self, sprint: sprints.SprintState) -> tuple[str, str | None, bool]:
         return sprints.manager_status(
@@ -1963,11 +2074,13 @@ class ConsoleService:
 
         A sprint with a launch reserved is not nudgeable: a wake would resume the manager the launch replaces.
         Nor is one whose session stop is reserved or whose manager is stopped (#892): a wake would resume it.
+        Nor is one whose manager's account is out of quota (#929): the message waits for the reset.
         """
         sprint = self._sprints.get(sprint_id)
         if (sprint is None or sprint_id in self._launching or sprint_id in self._stopping
                 or sprint.stopped_at is not None or sprint.manager is None
-                or sprint.manager.state != sprints.STARTED):
+                or sprint.manager.state != sprints.STARTED
+                or self._quota_wait(sprint) is not None):
             return None
         unread = sprints.unread(sprint)
         return (sprint, unread) if unread else None
@@ -2030,6 +2143,8 @@ class ConsoleService:
                    "ok": reason is None}
         if reason is not None:
             payload["reason"] = reason
+        elif self._resume(sprint_id):
+            payload["resumed"] = True
         if listing_failed is not None:
             payload["listing_failed"] = listing_failed
         self._apply(self.log.append([(SPRINT_NUDGED, sprint.project_id, payload)]))
@@ -2061,6 +2176,11 @@ class ConsoleService:
             if not listed and known is not None:
                 settings, listing_failed = self._wake_settings(sprint_id, known, profile, cwd)
                 listed = self._listed_ids(name)  # the full listing is slow: the manager may be running now
+            with self._ingest:
+                if self._held_for_quota(sprint_id):
+                    self._nudging.discard(sprint_id)
+                    self._nudge_again.discard(sprint_id)
+                    return
             if listed:
                 route, listing_failed = nudge.RELAY, None
                 self._nudger(nudge.Nudge(sprint_id, route, name, listed[0], profile, cwd))
@@ -2225,12 +2345,10 @@ class ConsoleService:
 
     def _revive_step(self, sprint: sprints.SprintState, now: int) -> str | None:
         """Under the ingest lock: the one bring-back decision for the sprint at `now` (milliseconds)."""
-        records = [r for r in self._inbox.values()
-                   if r.item.get("project_id") == sprint.project_id and not r.item["answered"]]
         return revive.next_step(
-            sprint, sprint_waiting(sprint, records),
+            sprint, self._waiting(sprint),
             self._last_listed.get(sprint.sprint_id, self._revive_since_ms), now,
-            self._nudger is not None)
+            self._nudger is not None, self._quota_wait(sprint) is not None)
 
     def revive(self) -> None:
         """Bring back each manager that is gone while its sprint has work (#893)."""
@@ -2292,6 +2410,8 @@ class ConsoleService:
             payload["reason"] = reason
         if back:
             payload["back"] = True
+        if ok and self._resume(sprint_id):
+            payload["resumed"] = True
         if listing_failed is not None:
             payload["listing_failed"] = listing_failed
         self._apply(self.log.append([(MANAGER_WOKEN, sprint.project_id, payload)]))
@@ -2343,6 +2463,136 @@ class ConsoleService:
             back = (reason is None and sprint is not None
                     and (self._manager_listed(sprint) or sprint.manager_seen_seq != seen_before))
             self._record_wake(sprint_id, reason is None, reason, back, listing_failed)
+
+    def _active_ms(self, sprint: sprints.SprintState,
+                   session: sessions.SessionState | None) -> int | None:
+        """Under the ingest lock: the latest movement of the manager's runs or send to it, else None."""
+        times = [self._settled.get(sprint.sprint_id)]
+        if session is not None:
+            times.append(self._moved.get(session.session_id))
+        known = [t for t in times if t is not None]
+        return max(known) if known else None
+
+    def nudge_idle(self) -> None:
+        """Tell each idle manager whose sprint has work to go on, and give up after too many tries (#929)."""
+        if self._nudger is None:
+            return
+        jobs: list[str] = []
+        with self._ingest:
+            if self._stop.is_set():
+                return
+            now = int(self._clock() * 1000)
+            self._quota_held.intersection_update(self._sprints)
+            for sprint_id, sprint in list(self._sprints.items()):
+                if (sprint_id in self._nudging or sprint_id in self._launching
+                        or sprint_id in self._stopping):
+                    continue
+                session = self._manager_session(sprint)
+                waiting = self._waiting(sprint)
+                quota = self._quota_wait(sprint)
+                if quota is None and (
+                        sprint.manager is None or sprint.manager.state != sprints.STARTED
+                        or (session is not None and session.state == sessions.WORKING)):
+                    self._quota_held.discard(sprint_id)
+                step = idle.next_step(sprint, waiting, session, self._active_ms(sprint, session),
+                                      quota is not None, now)
+                if step == idle.GIVE_UP:
+                    status = sprint.report.status if sprint.report is not None else None
+                    self._apply(self.log.append([(MANAGER_NO_PROGRESS, sprint.project_id, {
+                        "sprint_id": sprint_id, "goal": sprint.goal, "status": status})]))
+                elif step == idle.NUDGE:
+                    self._nudging.add(sprint_id)
+                    jobs.append(sprint_id)
+        for sprint_id in jobs:
+            self._dispatch_idle(sprint_id)
+
+    def continue_sprint(self, project_id: str, sprint_id: str) -> None:
+        """Clear a sprint's no-progress item and send its manager one idle nudge at once (#929)."""
+        with self._ingest:
+            sprint = self._sprints.get(sprint_id)
+            if sprint is None or sprint.project_id != project_id:
+                raise sprints.Refused(sprints.NOT_OPEN)
+            if sprint.no_progress_at is None:
+                raise sprints.Refused(sprints.NOT_STUCK)
+            self._apply(self.log.append([(SPRINT_CONTINUED, project_id, {
+                "sprint_id": sprint_id, "goal": sprint.goal})]))
+            reserved = (self._nudger is not None and sprint_id not in self._nudging
+                        and sprint_id not in self._launching and sprint_id not in self._stopping)
+            if reserved:
+                self._nudging.add(sprint_id)
+        if reserved:
+            self._dispatch_idle(sprint_id, forced=True)
+
+    def _dispatch_idle(self, sprint_id: str, forced: bool = False) -> None:
+        """Hand a reserved sprint's idle nudge to the dispatcher; one that cannot start is a failed nudge."""
+        try:
+            self._dispatch(lambda: self._idle_nudge(sprint_id, forced))
+        except Exception as error:
+            reason = f"the nudge could not start: {type(error).__name__}: {error}"
+            with self._ingest:
+                self._nudging.discard(sprint_id)
+                self._settled[sprint_id] = int(self._clock() * 1000)
+                sprint = self._sprints.get(sprint_id)
+                self._record_idle(
+                    sprint_id, "" if sprint is None else sprint.manager_session or "", reason)
+
+    def _idle_due(self, sprint_id: str, forced: bool) -> tuple[sprints.SprintState, str] | None:
+        """Under the ingest lock: the open sprint and its project's root while an idle nudge is still the step."""
+        sprint = self._sprints.get(sprint_id)
+        project = None if sprint is None else self._states.get(sprint.project_id)
+        if sprint is None or project is None:
+            return None
+        session = self._manager_session(sprint)
+        step = idle.next_step(
+            sprint, self._waiting(sprint), session, self._active_ms(sprint, session),
+            self._quota_wait(sprint) is not None, int(self._clock() * 1000), forced)
+        return (sprint, project.root) if step == idle.NUDGE else None
+
+    def _idle_nudge(self, sprint_id: str, forced: bool) -> None:
+        """Tell the idle manager to go on, then record the attempt; the reservation ends here."""
+        with self._ingest:
+            due = self._idle_due(sprint_id, forced)
+            if due is None:
+                self._nudging.discard(sprint_id)
+                return
+            sprint, cwd = due
+            name = manager.session_name(sprint.project_id, sprint_id)
+            profile, session_id = sprint.manager.profile, sprint.manager_session or ""
+        reason = None
+        try:
+            listed = self._listed_ids(name)
+            if not listed:
+                with self._ingest:
+                    self._nudging.discard(sprint_id)
+                return
+            session_id = listed[0]
+            with self._ingest:
+                if self._idle_due(sprint_id, forced) is None:
+                    self._nudging.discard(sprint_id)
+                    return
+            self._nudger(nudge.Nudge(sprint_id, nudge.CONTINUE, name, session_id, profile, cwd))
+        except Exception as error:
+            reason = (str(error) if isinstance(error, nudge.NudgeFailed)
+                      else f"{type(error).__name__}: {error}")
+        with self._ingest:
+            self._nudging.discard(sprint_id)
+            self._settled[sprint_id] = int(self._clock() * 1000)
+            self._record_idle(sprint_id, session_id, reason)
+
+    def _record_idle(self, sprint_id: str, session_id: str, reason: str | None) -> None:
+        """Under the ingest lock: append one `manager.nudged` row for the open sprint and fold it."""
+        sprint = self._sprints.get(sprint_id)
+        if sprint is None or self._stop.is_set():
+            return
+        payload = {"sprint_id": sprint_id, "goal": sprint.goal, "session_id": session_id,
+                   "ok": reason is None}
+        if reason is not None:
+            payload["reason"] = reason
+        elif self._resume(sprint_id):
+            payload["resumed"] = True
+        self._apply(self.log.append([(MANAGER_NUDGED, sprint.project_id, payload)]))
+        if reason is not None:
+            print(f"console: idle_nudge_failed {sprint_id} {reason}", file=sys.stderr)
 
     def read_inbox(self, sprint_id: str, secret: str) -> list[dict]:
         """The unread messages in id order; the same locked section records them as read."""
@@ -2608,6 +2858,11 @@ class ConsoleService:
             except Exception as error:
                 print(f"console: revive_failed {type(error).__name__}: {error}",
                       file=sys.stderr)
+            try:
+                self.nudge_idle()
+            except Exception as error:
+                print(f"console: idle_nudge_failed {type(error).__name__}: {error}",
+                      file=sys.stderr)
 
     def _fold(self, appended: list[Event]) -> None:
         new = digest.moments(appended, self._sessions, self._inbox, self._sprints)
@@ -2618,6 +2873,7 @@ class ConsoleService:
         self._health = read_states(appended, self._health)
         self._capacity = capacity.capacity_state(appended, self._capacity)
         self._deliveries = deliveries.delivery_states(appended, self._deliveries)
+        self._moved = idle.last_moved(appended, self._moved)
         self._sprints = sprints.sprint_states(appended, self._sprints)
         self._withdrawn = sprints.withdrawn_ids(appended, self._withdrawn)
         self._pending = sprints.pending_stops(appended, self._pending)

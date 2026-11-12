@@ -163,6 +163,14 @@ class NextStepTest(unittest.TestCase):
         state = with_rows(lambda rows: [])
         self.assertEqual(revive.next_step(state, 0, BASE, BASE + 120_000, False), "takeover")
 
+    def test_a_wake_is_not_sent_while_the_managers_account_is_out(self):
+        state = with_rows(lambda rows: [])
+        later = BASE + 120_000
+        self.assertEqual(revive.next_step(state, 0, BASE, later, True), "wake")
+        self.assertIsNone(revive.next_step(state, 0, BASE, later, True, out=True))
+        state = with_rows(lambda rows: [], session=False)
+        self.assertEqual(revive.next_step(state, 0, BASE, later, True, out=True), "takeover")
+
     def test_two_failed_wakes_in_a_row_mean_a_takeover(self):
         table = [
             ("two failed wakes", lambda r: [r.woken(BASE + 10, ok=False, reason="x"),

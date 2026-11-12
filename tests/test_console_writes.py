@@ -131,7 +131,7 @@ class WriteRouteTest(Case):
                          {"/api/looked", "/api/answer", "/api/check-answer", "/api/goal",
                           "/api/withdraw", "/api/approve", "/api/reply",
                           "/api/retry-manager", "/api/message", "/api/stop",
-                          "/api/round-answer"})
+                          "/api/round-answer", "/api/continue"})
         for path in service.PAGE_WRITES:
             with self.subTest(path=path):
                 status, _, body = support.post_page(
