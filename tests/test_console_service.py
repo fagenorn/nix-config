@@ -21,12 +21,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import deliveries, digest, service, sessions
+from agent_tools.console import deliveries, digest, service, sessions, sprints
 from agent_tools.console import view
 from agent_tools.console.event_log import EventLog
 from agent_tools.console.view import derive_view, encode_view, project_states
 
 from . import console_test_support as support
+from .test_console_briefs import PARTS
 
 PAGE_FILE = Path(__file__).resolve().parents[1] / "python/agent_tools/console/page.html"
 
@@ -1067,6 +1068,53 @@ class DeliveryTest(Case):
         gone = self.rows("delivery.gone")
         self.assertEqual(len(gone), 1)
         self.assertEqual(json.loads(gone[0][4]), {"run_id": "wf_t1", "session_id": self.sid})
+
+    def sprint_of(self, svc):
+        view = json.loads(svc.view_bytes)
+        for entry in view["entries"]:
+            for project in entry.get("projects", [entry]):
+                if project["project_id"] == "owner/p00":
+                    (shown,) = project["sprints"]
+                    return shown
+        raise AssertionError("sprint not listed")
+
+    def test_a_sprint_keeps_its_runs_last_stage_after_the_run_leaves(self):
+        sid = self.svc.state_goal("owner/p00", "make the importer resumable")
+        secret = sprints.read_secret(self.store.with_name(sprints.SECRETS_DIR), sid)
+        self.svc.send_brief(sid, secret, PARTS)
+        self.svc.approve_brief("owner/p00", sid, 1)
+        self.svc.send_report(sid, secret, {
+            "status": "one slice is queued", "phase": "running", "milestone": "Importer resumes",
+            "tracker_url": "https://github.com/owner/p00/milestone/3",
+            "issues": [{"issue": 858, "stage": "queued"}], "inbox": [],
+            "next": "start the resume slice"})
+        report_at = support.log_rows(self.store)[-1][1]
+        report_ms = datetime.fromisoformat(report_at).timestamp() * 1000
+        self.now = report_ms / 1000 + 14 * 60
+        self.write(10)
+        self.svc.poll_deliveries()
+        self.assertEqual(self.sprint_of(self.svc)["issues"], [
+            {"issue": 858, "stage": "building", "stage_text": "building task 1 of 3"}])
+        record = self.root / "projects/-srv-p00" / self.sid / "workflows/wf_t1.json"
+        record.parent.mkdir(parents=True)
+        record.write_text("{}")
+        self.now += 60
+        self.svc.poll_deliveries()
+        self.assertEqual(len(self.rows("delivery.gone")), 1)
+        kept = self.sprint_of(self.svc)
+        self.assertEqual(kept["issues"], [
+            {"issue": 858, "stage": "building", "stage_text": "building task 1 of 3"}])
+        self.assertEqual(kept["progress"],
+                         {"landed": 0, "in_delivery": 1, "queued": 0, "held": 0, "total": 1})
+        self.assertEqual((kept["state"], kept["state_text"]), ("on_track", "on track"))
+        self.svc.close()
+        second = self.start(session_poll_seconds=3600, clock=lambda: self.now)
+        self.assertEqual(self.sprint_of(second), kept)
+        self.now += 15 * 60
+        second.poll_deliveries()
+        shown = self.sprint_of(second)
+        self.assertEqual((shown["state"], shown["state_text"]),
+                         ("quiet", "quiet for 16 min \u2014 may be stuck"))
 
     def test_an_unchanged_journal_appends_nothing(self):
         self.write(10)
