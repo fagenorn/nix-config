@@ -91,7 +91,7 @@ if (!(CONT && CONT.setup && CONT.setup.holder)) {
 const CLAIMING = !CONT || !!CONT.claim_incomplete
 
 // forge-claim retries a transport error itself (#740), up to 150 s in a hanging outage, above the Bash tool's 120 s default.
-const FORGE_TIMEOUT = 'Give each forge-claim command a Bash timeout of 20 minutes (1200000 ms), and land acquire --wait 60 minutes (3600000 ms): forge-claim retries a forge outage itself before it prints its one JSON line.'
+const FORGE_TIMEOUT = 'Give each forge-claim command a Bash timeout of 20 minutes (1200000 ms). Only a land acquire command that ends in --wait gets more: the flag takes no value, so write nothing after it, and the command itself can run for up to 60 minutes, so give it a Bash timeout of 60 minutes (3600000 ms). The reason for both: forge-claim retries a forge outage itself before it prints its one JSON line.'
 const BASE_RULES = `
 Hard rules for this step (they override anything else you remember):
 - Work only in the worktree path you are given. Never commit in the shared checkout. Never git stash. Never sed -i (use python for edits).
@@ -1224,6 +1224,8 @@ ${RULES}`
   const liteLane = t.risk === 'mechanical' || t.risk === 'low'
   // False until the task's diff had its first pass; a task with no commit has none to review.
   let diffReviewed = !sameSha(impl.commit, accepted)
+  // #932: a no-change check names the head the program holds (the fuller spelling), never the reply's short or uppercase one.
+  let held = diffReviewed ? impl.commit : fuller(accepted, impl.commit)
   // reviewer-lite first-passes only a task whose declared lane is mechanical or low (its lane verification mode).
   let reviewer = liteLane && diffReviewed ? 'reviewer-lite' : 'reviewer'
   const diffReview = (range, label, answers) => call(`${start}
@@ -1232,7 +1234,7 @@ ${reviewer === 'reviewer-lite' ? `lane: ${t.risk}. ` : ''}Review the diff of tas
   const HEAD_UNMOVED = h => `First confirm that git -C ${TW} rev-parse HEAD prints ${h} and git -C ${TW} status --porcelain --untracked-files=no prints nothing: another head or an uncommitted change to a tracked file is a finding.${waiting ? `${WAITS}those are not a finding.` : ''}`
   const CONFIRM = `with the task file's own verification commands or a read-only lookup (run a gh command as ${UNSET}gh ...)`
   let review = diffReviewed ? await diffReview(`git -C ${TW} diff ${taskStart}..${impl.commit}`, `review-${t.n}`) : await call(`${start}
-Task ${t.n} ended with no new commit: the head of ${TW} is still ${impl.commit}. There is no diff to review and none is missing; do not ask for a range. Judge the task from its task file ${t.file} (the contract) and the implementer's report: notes: ${impl.notes}; checks run: ${JSON.stringify(Array.isArray(impl.tests) ? impl.tests : [])}. ${HEAD_UNMOVED(impl.commit)} Then decide two things. 1. Does the task file require a tracked file to be created, changed or deleted? If it does, the task is not done: report one Critical finding naming the files it requires. 2. If it requires none, is every output the task file asks for in place? Confirm each yourself, ${CONFIRM}; the implementer's word alone is not evidence, and an output you cannot confirm is a finding. Report Important or Critical findings only, each with what is missing. Do not edit anything.`, { label: `review-${t.n}`, phase: 'Tasks', agentType: 'reviewer', schema: FINDINGS })
+Task ${t.n} ended with no new commit: the head of ${TW} is still ${held}. There is no diff to review and none is missing; do not ask for a range. Judge the task from its task file ${t.file} (the contract) and the implementer's report: notes: ${impl.notes}; checks run: ${JSON.stringify(Array.isArray(impl.tests) ? impl.tests : [])}. ${HEAD_UNMOVED(held)} Then decide two things. 1. Does the task file require a tracked file to be created, changed or deleted? If it does, the task is not done: report one Critical finding naming the files it requires. 2. If it requires none, is every output the task file asks for in place? Confirm each yourself, ${CONFIRM}; the implementer's word alone is not evidence, and an output you cannot confirm is a finding. Report Important or Critical findings only, each with what is missing. Do not edit anything.`, { label: `review-${t.n}`, phase: 'Tasks', agentType: 'reviewer', schema: FINDINGS })
   if (!review) return halt('task-review', { task: t, review: null })
   let rounds = 0
   while (findingsOf(review).length && rounds < 2) {
@@ -1244,10 +1246,11 @@ ${RULES}`, { label: `fix-${t.n}-${rounds}`, phase: 'Tasks', agentType: 'implemen
     // The head the last review saw: the fix added a commit only when its commit is another one.
     const reviewed = impl.commit
     impl = fix
+    held = sameSha(fix.commit, reviewed) ? fuller(held, fix.commit) : fix.commit
     const label = `rereview-${t.n}-${rounds}`
     if (sameSha(fix.commit, reviewed)) {
       review = await call(`${start}
-Re-review only these previously reported findings for task ${t.n} against the implementer's answer. The fix made no new commit (the head of ${TW} is still ${fix.commit}), so there is no fix diff to review and none is missing; do not ask for a range. The implementer's notes: ${fix.notes}. Findings: ${JSON.stringify(findingsOf(review))}. ${HEAD_UNMOVED(fix.commit)} Then check each answer yourself against the task file ${t.file}${diffReviewed ? `, the task's diff (git -C ${TW} diff ${taskStart}..${fix.commit})` : ''} and the evidence the notes name, ${CONFIRM}; a finding the evidence does not refute is still unresolved. Report any finding still unresolved. Do not edit anything.`, { label, phase: 'Tasks', agentType: 'reviewer', schema: FINDINGS })
+Re-review only these previously reported findings for task ${t.n} against the implementer's answer. The fix made no new commit (the head of ${TW} is still ${held}), so there is no fix diff to review and none is missing; do not ask for a range. The implementer's notes: ${fix.notes}. Findings: ${JSON.stringify(findingsOf(review))}. ${HEAD_UNMOVED(held)} Then check each answer yourself against the task file ${t.file}${diffReviewed ? `, the task's diff (git -C ${TW} diff ${taskStart}..${fix.commit})` : ''} and the evidence the notes name, ${CONFIRM}; a finding the evidence does not refute is still unresolved. Report any finding still unresolved. Do not edit anything.`, { label, phase: 'Tasks', agentType: 'reviewer', schema: FINDINGS })
     } else if (!diffReviewed) {
       reviewer = liteLane ? 'reviewer-lite' : 'reviewer'
       review = await diffReview(`git -C ${TW} diff ${taskStart}..${fix.commit}`, label, findingsOf(review))
