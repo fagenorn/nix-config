@@ -972,7 +972,7 @@ class SprintReportViewTest(unittest.TestCase):
         self.assertEqual(shown["progress_text"], "3 of 7 landed, 2 in delivery, 2 queued")
         self.assertEqual(shown["state_text"], "on track")
         self.assertEqual(shown["status"], "two slices are building")
-        self.assertEqual(shown["status_age_text"], "4 min ago")
+        self.assertEqual(shown["status_at"], iso(R))
         self.assertEqual((shown["next"], shown["milestone"], shown["tracker_url"]),
                          ("start the resume slice", "Importer resumes",
                           "https://github.com/owner/p00/milestone/3"))
@@ -1085,7 +1085,7 @@ class SprintViewTest(unittest.TestCase):
             "type": "sprint", "sprint_id": "a" * 16, "goal": "make the importer resumable",
             "state": "drafting", "state_text": "drafting the brief", "stated_at": T0,
             "age_text": "stated 3 min ago", "manager_text": "no manager has picked this up",
-            "progress": None, "progress_text": None, "status": None, "status_age_text": None,
+            "progress": None, "progress_text": None, "status": None, "status_at": None,
             "next": None, "milestone": None, "tracker_url": None, "issues": [], "waiting": 0}])
 
     def test_a_sprint_older_than_two_minutes_says_no_manager_has_picked_it_up(self):

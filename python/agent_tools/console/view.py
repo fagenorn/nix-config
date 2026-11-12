@@ -107,7 +107,7 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
                       "state_text": "<text>", "stated_at", "age_text", "manager_text": <text> | null,
                       "progress": {"landed", "in_delivery", "queued", "held", "total"} | null,
                       "progress_text": "<text>" | null,
-                      "status": "<status line>" | null, "status_age_text": "<n min ago>" | null,
+                      "status": "<status line>" | null, "status_at": "<report time>" | null,
                       "next": "<text>" | null, "milestone": "<text>" | null,
                       "tracker_url": "<url>" | null,
                       "issues": [{"issue": <int>, "stage": "<stage>", "stage_text": "<text>"}, ...],
@@ -169,7 +169,7 @@ The state is the first that holds: the brief is not approved, `drafting` ("draft
 the report's phase is `done`, `done`; `waiting` is above 0, `waiting` ("waiting on you (<n>)");
 `quiet_elapsed` reaches `QUIET_AFTER_MS`, `quiet` ("quiet for <n> min \u2014 may be stuck"); the
 phase is `closing`, `closing`; no report, `starting`; else `on_track` ("on track").
-`status_age_text` is `ago_text` of the time since the report.
+`status_at` is the report's own time, which the page words against its own clock.
 `recent_projects` is every registered project id, newest `last_seq` first, then `project_id`
 (always present, possibly empty); it derives from the states alone.
 `encode_view` writes sorted keys, compact separators, non-ASCII kept, NaN
@@ -227,7 +227,6 @@ from agent_tools.console.sprints import (
     WAITING_TEXT,
     SprintState,
     age_text,
-    ago_text,
     progress_text,
 )
 
@@ -555,8 +554,7 @@ def _sprint_entry(state: SprintState, now_ms: int | None,
             counts["landed"], counts["total"], counts["in_delivery"], counts["queued"],
             counts["held"]),
         "status": None if report is None else report.status,
-        "status_age_text": (None if report is None else
-                            ago_text(0 if now_ms is None else now_ms - _millis(report.at))),
+        "status_at": None if report is None else report.at,
         "next": None if report is None else report.next_step,
         "milestone": None if report is None else report.milestone,
         "tracker_url": None if report is None else report.tracker_url,

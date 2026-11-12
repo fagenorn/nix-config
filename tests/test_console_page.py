@@ -1644,7 +1644,7 @@ REPORTED = {
     **SPRINT, "state": "on_track", "state_text": "on track", "manager_text": None,
     "progress": {"landed": 3, "in_delivery": 2, "queued": 2, "held": 0, "total": 7},
     "progress_text": "3 of 7 landed, 2 in delivery, 2 queued",
-    "status": "two slices are building", "status_age_text": "4 min ago",
+    "status": "two slices are building", "status_at": utc(4 * 60000),
     "next": "start the resume slice", "milestone": "Importer resumes",
     "tracker_url": "https://github.com/owner/p00/milestone/3",
     "issues": [
@@ -1905,7 +1905,8 @@ class PageSprintReportTest(unittest.TestCase):
     def test_a_reported_sprint_line_reads_state_progress_status_and_age(self) -> None:
         quiet = {**REPORTED, "state": "quiet", "state_text": "quiet for 16 min — may be stuck"}
         snap, stuck = render([
-            START, {"frame": with_sprints([REPORTED])}, {"snapshot": True},
+            {"start": {"focused": False, "clock": NOW_MS}},
+            {"frame": with_sprints([REPORTED])}, {"snapshot": True},
             {"frame": with_sprints([quiet])}, {"snapshot": True},
         ])
         (line,) = sprint_lines(snap)
@@ -1915,6 +1916,18 @@ class PageSprintReportTest(unittest.TestCase):
         (line,) = sprint_lines(stuck)
         self.assertIn("quiet for 16 min — may be stuck", top_text(line))
         self.assertNotIn("stalled", top_text(line).lower())
+
+    def test_the_report_age_is_a_time_element_that_follows_the_page_clock(self) -> None:
+        before, after = render([
+            {"start": {"focused": False, "clock": NOW_MS}},
+            {"frame": with_sprints([REPORTED])}, {"snapshot": True},
+            {"clock": NOW_MS + 3 * 3600 * 1000}, {"snapshot": True},
+        ])
+        (line,) = sprint_lines(before)
+        (shown,) = [n for n in nodes(line) if n["tag"] == "time" and n["text"] == "4 min ago"]
+        self.assertEqual(shown["title"], "2026-11-11 11:56")
+        (line,) = sprint_lines(after)
+        self.assertIn("3 h ago", top_text(line))
 
     def test_a_non_https_tracker_url_draws_no_link(self) -> None:
         bad = {**REPORTED, "tracker_url": "javascript:alert(1)"}

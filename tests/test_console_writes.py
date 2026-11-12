@@ -368,7 +368,7 @@ class GoalRouteTest(Case):
             "goal": "make the importer resumable", "state": "drafting",
             "state_text": "drafting the brief", "stated_at": at,
             "age_text": "stated just now", "manager_text": None,
-            "progress": None, "progress_text": None, "status": None, "status_age_text": None,
+            "progress": None, "progress_text": None, "status": None, "status_at": None,
             "next": None, "milestone": None, "tracker_url": None, "issues": [], "waiting": 0}])
         self.assertEqual(view_of(svc)["recent_projects"][0], "owner/p01")
 

@@ -290,8 +290,8 @@ function fillSprint(item, entry, sprint) {
   }
   if (typeof sprint.status === "string") {
     item.appendChild(el("span", "status", sprint.status));
-    if (typeof sprint.status_age_text === "string") {
-      item.appendChild(el("span", "status-age", sprint.status_age_text));
+    if (typeof sprint.status_at === "string") {
+      item.appendChild(timeEl("ago", sprint.status_at, "status-age"));
     }
   }
   const age = el("span", "age");
