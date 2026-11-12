@@ -20,13 +20,14 @@ Routes (every response carries `Cache-Control: no-store` and
     POST /api/withdraw 204, a JSON body, the page withdraws a goal (below)
     POST /api/approve 204, a JSON body, the page approves a brief (below)
     POST /api/reply 204, a JSON body, the page asks a brief for changes (below)
+    POST /api/retry-manager 204, a JSON body, the page starts a sprint's manager again (below)
     POST /api/brief 200 application/json, a manager sends a sprint's brief (below)
     POST /api/report 200 application/json, a manager sends a sprint's report (below)
     GET /api/sprint-status?sprint_id=<id> 200 application/json, what became of a brief (below)
     anything else   404
     other methods   405 with `Allow: GET` (`Allow: POST` on `/api/hooks`, `/api/readings`,
                     `/api/looked`, `/api/answer`, `/api/check-answer`, `/api/goal`, `/api/withdraw`,
-                    `/api/approve`, `/api/reply`, `/api/brief` and `/api/report`)
+                    `/api/approve`, `/api/reply`, `/api/retry-manager`, `/api/brief` and `/api/report`)
 
 Two kinds of write exist. The hook and reading routes append what the proxies and hooks observe:
 `POST /api/hooks` appends session observations, `POST /api/readings` the capacity kinds
@@ -47,7 +48,8 @@ ignored payload (an unknown event, a missing member) appends nothing. The
 route carries no token: it records observations and answers nothing (ADR-console-004).
 
 A page write (`PAGE_WRITES`, today `POST /api/looked`, `POST /api/answer`, `POST /api/check-answer`,
-`POST /api/goal`, `POST /api/withdraw`, `POST /api/approve` and `POST /api/reply`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
+`POST /api/goal`, `POST /api/withdraw`, `POST /api/approve`, `POST /api/reply` and
+`POST /api/retry-manager`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
 alone and goes through one guard, `_page_write`, whatever its route. After the loopback `Host`
 check and before any body is read, exactly one `Origin` header must equal `http://<Host>` (else
 403 `text/plain` `origin refused`) and exactly one `X-Console-Token` header must equal the
@@ -83,7 +85,10 @@ or `sprints.parse_reply` does not accept is 400 `bad approve` or `bad reply`; `s
 one stderr line `console: approve_refused <reason>` or `console: reply_refused <reason>` and 409
 with the reason; any other exception is `console: approve_failed <Type>: <message>` or
 `console: reply_failed <Type>: <message>` and 500 `approve failed` or `reply failed`; success is an
-empty `204`. The token is created once in
+empty `204`. `POST /api/retry-manager` (#888) runs the same checks once more with `MAX_RETRY_BYTES`
+(4096) and `sprints.parse_retry`: 400 `bad retry`, `sprints.Refused` is one stderr line `console:
+retry_refused <reason>` and 409 with the reason, any other exception is `console: retry_failed
+<Type>: <message>` and 500 `retry failed`; success is an empty `204`. The token is created once in
 `page-token` beside the event log and reaches a client only inside `GET /`, where it replaces
 the slot in the page's `console-token` meta tag.
 
@@ -267,6 +272,33 @@ failure to remove is one stderr line `console: sprint_secret_unremoved <sprint_i
 (`sprints.sprint_states`) and handed to `derive_view`; `retain()` re-folds nothing, because goal rows
 are never removed. The secret's value appears in no answer, view, stream frame, row or stderr line.
 
+Managers (#888): the service takes `launcher` (`manager.launcher_for(sys.platform)` from `console.py`;
+None means managers are not available on this host, no launch is ever made, no manager row is
+written and every sprint reads `unavailable`), `bound_profile_of` (default `manager.bound_profile`)
+and `dispatch` (default None: each launch runs on a new daemon thread named `MANAGER_THREAD`,
+`console-manager-launch`; a test passes a stand-in). With a launcher, `state_goal` reserves the new
+sprint (`_launching`, changed only under the ingest lock) in the critical section that appends
+`goal.stated` and dispatches `_launch_reserved(sprint_id)` after releasing it. `retry_manager(
+project_id, sprint_id)`, under the lock, raises `Refused` with `manager.UNAVAILABLE_TEXT` without a
+launcher, `NOT_OPEN` unless the sprint is open and of that project, `LAUNCHING` while the sprint is
+reserved, and, from `sprints.manager_status`, `HAS_MANAGER` when the manager is started and `TOO_SOON`
+otherwise when no retry is offered; else it reserves the sprint before the lock is released and
+dispatches, so a second retry that arrives while the first is queued or running is refused
+`LAUNCHING`. `start_manager(sprint_id)` reserves (returning when it cannot) and launches in the
+calling thread. `_launch_reserved`, under the lock, drops its own attempt's reservation (each reservation is one token, so a finished attempt never frees a later retry's) and returns when the sprint
+is no longer open or its manager reads `started` (a stale or duplicate job never starts a second
+manager), and a launch a retry reserved also returns when the sprint no longer offers retry (the
+failed manager registered or briefed meanwhile); a missing secret appends `manager.failed` ("the sprint's secret is missing"); the profile
+is chosen by `manager.choose_profile` over `capacity.capacity_view` of the profile directories read
+at that moment (`_read_profiles`, never the last poll's) and the project's bound profile, and
+`Wait` appends `manager.waiting`. Otherwise the launcher is called outside the lock, and then,
+under it, a sprint that was withdrawn meanwhile has its secret and settings file removed again and
+no row appended, and otherwise, unless the service is stopping, `manager.started {sprint_id, profile, session_name}`
+or `manager.failed {sprint_id, reason}` is appended (the reason of a `LaunchFailed`, else `<Type>:
+<message>`, the secret shown as `<secret>`), a failure is one stderr line `console: manager_failed
+<sprint_id> <reason>`, and the view is published. `withdraw_goal` also removes the manager's
+settings file. The sprint's secret appears in no row, view or stderr line.
+
 Retention (ADR-console-009): construction runs one retention pass (`EventLog.retain`) after
 opening the log and before reading its events, and `RETENTION_THREAD`, started by `start()`, calls
 `retain()` every `retention_seconds` (`RETENTION_SECONDS`, one day). A pass that removed rows
@@ -329,10 +361,10 @@ from urllib.parse import parse_qsl
 
 from agent_tools.claims import owner_actions
 from agent_tools.console import (
-    answer, capacity, deliveries, digest, inbox, sessions, sprints, write_guard)
+    answer, capacity, deliveries, digest, inbox, manager, sessions, sprints, write_guard)
 from agent_tools.console.event_log import (
-    BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, SPRINT_REPORTED, Event,
-    EventLog, utc_now)
+    BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
+    MANAGER_STARTED, MANAGER_WAITING, SPRINT_REPORTED, Event, EventLog, utc_now)
 from agent_tools.console.view import (
     INBOX_CHANGED, ReadState, derive_view, encode_view, health_change, inbox_changes, inbox_records,
     project_for, project_states, read_states, registry_changes)
@@ -361,12 +393,14 @@ GOAL_PATH = "/api/goal"
 WITHDRAW_PATH = "/api/withdraw"
 APPROVE_PATH = "/api/approve"
 REPLY_PATH = "/api/reply"
+RETRY_PATH = "/api/retry-manager"
 BRIEF_PATH = "/api/brief"
 REPORT_PATH = "/api/report"
 STATUS_PATH = "/api/sprint-status"
 CHECK_PATH = "/api/check-answer"
 PAGE_WRITES: frozenset[str] = frozenset({
-    LOOKED_PATH, ANSWER_PATH, CHECK_PATH, GOAL_PATH, WITHDRAW_PATH, APPROVE_PATH, REPLY_PATH})
+    LOOKED_PATH, ANSWER_PATH, CHECK_PATH, GOAL_PATH, WITHDRAW_PATH, APPROVE_PATH, REPLY_PATH,
+    RETRY_PATH})
 MAX_ANSWER_BYTES = 4096
 MAX_GOAL_BYTES = 16384
 MAX_WITHDRAW_BYTES = 4096
@@ -375,6 +409,7 @@ MAX_REPORT_BYTES = 65536
 MANAGER_WRITES: frozenset[str] = frozenset({BRIEF_PATH, REPORT_PATH})
 MAX_APPROVE_BYTES = 4096
 MAX_REPLY_BYTES = 16384
+MAX_RETRY_BYTES = 4096
 MAX_HOOK_BYTES = 8 * 1024 * 1024
 READINGS_PATH = "/api/readings"
 MAX_READING_BYTES = 64 * 1024
@@ -387,6 +422,7 @@ RETENTION_SECONDS = 86400.0
 RETENTION_THREAD = "console-retention"
 DIGEST_SECONDS = 60.0
 DIGEST_THREAD = "console-digest"
+MANAGER_THREAD = "console-manager-launch"
 
 
 def default_store() -> Path:
@@ -698,6 +734,28 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return False
         return True
 
+    def _retry_request(self, console: "ConsoleService") -> bool:
+        """Read and carry out a manager retry; False when it was refused."""
+        body = self._json_body(MAX_RETRY_BYTES)
+        if body is None:
+            return False
+        try:
+            project_id, sprint_id = sprints.parse_retry(body)
+        except ValueError:
+            self._refuse(400, "bad retry")
+            return False
+        try:
+            console.retry_manager(project_id, sprint_id)
+        except sprints.Refused as error:
+            print(f"console: retry_refused {error}", file=sys.stderr)
+            self._refuse(409, str(error))
+            return False
+        except Exception as error:
+            print(f"console: retry_failed {type(error).__name__}: {error}", file=sys.stderr)
+            self._refuse(500, "retry failed")
+            return False
+        return True
+
     def _status_request(self):
         query = self.path.partition("?")[2]
         try:
@@ -732,6 +790,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         elif route in (APPROVE_PATH, REPLY_PATH):
             self.close_connection = True
             if not self._decision_request(console, route):
+                return
+        elif route == RETRY_PATH:
+            self.close_connection = True
+            if not self._retry_request(console):
                 return
         else:
             if (self.headers.get("Content-Length", "0") != "0"
@@ -807,6 +869,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
     do_PUT = do_DELETE = do_PATCH = do_HEAD = do_OPTIONS = _refuse_method
 
 
+class _RetryReservation:
+    """A launch reservation made by a retry: it runs only while the sprint still offers retry."""
+
+
 class ConsoleService:
     def __init__(self, store: Path, registry: Path, *, port: int = DEFAULT_PORT,
                  poll_seconds: float = POLL_SECONDS,
@@ -826,8 +892,15 @@ class ConsoleService:
                  token_path: Path | None = None,
                  sprint_secrets: Path | None = None,
                  tick: Callable[[str, int, int, list[dict], list[int]], None] = answer.tick_on_tracker,
-                 owner_path: Callable[..., None] = verify_answer.answer_prompt):
+                 owner_path: Callable[..., None] = verify_answer.answer_prompt,
+                 launcher: Callable[[manager.Launch], None] | None = None,
+                 bound_profile_of: Callable[[str], str] = manager.bound_profile,
+                 dispatch: Callable[[Callable[[], None]], None] | None = None):
         self.registry = Path(registry)
+        self._launcher = launcher
+        self._bound_profile_of = bound_profile_of
+        self._dispatch = self._on_new_thread if dispatch is None else dispatch
+        self._launching: dict[str, object] = {}
         self._tick = tick
         self._owner_path = owner_path
         self._sprint_secrets = (Path(store).with_name(sprints.SECRETS_DIR)
@@ -956,7 +1029,8 @@ class ConsoleService:
             sessions=self._sessions.values(), deliveries=self._deliveries,
             now_ms=int(self._clock() * 1000), sprints=self._sprints,
             digest=digest.digest(self._moments, self._looked, self._now()),
-            capacity=capacity.capacity_view(self._profiles, self._capacity, self._clock())))
+            capacity=capacity.capacity_view(self._profiles, self._capacity, self._clock()),
+            managers=self._launcher is not None))
         with self._published:
             if view != self._view:
                 self._view = view
@@ -1101,7 +1175,142 @@ class ConsoleService:
                 sprints.remove_secret(self._sprint_secrets, sprint_id)
                 raise
             self._apply(appended)
-            return sprint_id
+            if self._launcher is not None:
+                self._launching[sprint_id] = object()
+        if self._launcher is not None:
+            self._dispatch_launch(sprint_id)
+        return sprint_id
+
+    def _on_new_thread(self, job: Callable[[], None]) -> None:
+        threading.Thread(target=job, name=MANAGER_THREAD, daemon=True).start()
+
+    def _dispatch_launch(self, sprint_id: str) -> None:
+        """Hand a reserved sprint's launch to the dispatcher; a dispatch that fails frees the reservation."""
+        with self._ingest:
+            token = self._launching.get(sprint_id)
+        try:
+            self._dispatch(lambda: self._launch_reserved(sprint_id))
+        except BaseException:
+            with self._ingest:
+                self._release(sprint_id, token)
+            raise
+
+    def _release(self, sprint_id: str, token: object) -> None:
+        """Under the ingest lock: end the reservation `token` names; a later attempt's stays."""
+        if token is not None and self._launching.get(sprint_id) is token:
+            del self._launching[sprint_id]
+
+    def _manager_listed(self, sprint: sprints.SprintState) -> bool:
+        """Whether a listed session of the sprint's project carries the sprint's manager name."""
+        name = manager.session_name(sprint.project_id, sprint.sprint_id)
+        return any(
+            s.name == name and s.state != sessions.ENDED and s.repo is not None
+            and project_for(s.repo, self._states) == sprint.project_id
+            for s in self._sessions.values())
+
+    def _manager_state(self, sprint: sprints.SprintState) -> tuple[str, str | None, bool]:
+        return sprints.manager_status(
+            sprint, self._manager_listed(sprint), int(self._clock() * 1000), True)
+
+    def start_manager(self, sprint_id: str) -> None:
+        """Reserve the sprint's launch and run it in this thread; nothing when it cannot be reserved."""
+        with self._ingest:
+            if (self._launcher is None or sprint_id not in self._sprints
+                    or sprint_id in self._launching):
+                return
+            self._launching[sprint_id] = object()
+        self._launch_reserved(sprint_id)
+
+    def retry_manager(self, project_id: str, sprint_id: str) -> None:
+        """Reserve a new launch for an open sprint whose manager failed, waits or is missing."""
+        with self._ingest:
+            if self._launcher is None:
+                raise sprints.Refused(manager.UNAVAILABLE_TEXT)
+            sprint = self._sprints.get(sprint_id)
+            if sprint is None or sprint.project_id != project_id:
+                raise sprints.Refused(sprints.NOT_OPEN)
+            if sprint_id in self._launching:
+                raise sprints.Refused(sprints.LAUNCHING)
+            state, _, retry = self._manager_state(sprint)
+            if not retry:
+                raise sprints.Refused(
+                    sprints.HAS_MANAGER if state == sprints.STARTED else sprints.TOO_SOON)
+            self._launching[sprint_id] = _RetryReservation()
+        self._dispatch_launch(sprint_id)
+
+    def _launch_reserved(self, sprint_id: str) -> None:
+        """Start the reserved sprint's manager and record the outcome; the reservation ends here."""
+        with self._ingest:
+            token = self._launching.get(sprint_id)
+        if token is None:
+            return
+        try:
+            with self._ingest:
+                launch = self._prepared_launch(sprint_id, token)
+            if launch is None:
+                return
+            reason = None
+            try:
+                self._launcher(launch)
+            except Exception as error:
+                reason = (str(error) if isinstance(error, manager.LaunchFailed)
+                          else f"{type(error).__name__}: {error}")
+            self._record_launch(launch, reason, token)
+        finally:
+            with self._ingest:
+                self._release(sprint_id, token)
+
+    def _prepared_launch(self, sprint_id: str, token: object) -> manager.Launch | None:
+        """Under the ingest lock: the launch to run, or None after dropping the reservation."""
+        sprint = self._sprints.get(sprint_id)
+        if (sprint is None or self._manager_state(sprint)[0] == sprints.STARTED
+                or (isinstance(token, _RetryReservation) and not self._manager_state(sprint)[2])):
+            self._release(sprint_id, token)
+            return None
+        project_id = sprint.project_id
+        secret = sprints.read_secret(self._sprint_secrets, sprint_id)
+        if secret is None:
+            self._append_manager(MANAGER_FAILED, project_id, {
+                "sprint_id": sprint_id, "reason": "the sprint's secret is missing"}, token)
+            return None
+        project = self._states.get(project_id)
+        if project is None:
+            self._release(sprint_id, token)
+            return None
+        choice = manager.choose_profile(
+            capacity.capacity_view(self._read_profiles(), self._capacity, self._clock()),
+            self._bound_profile_of(project.root))
+        if isinstance(choice, manager.Wait):
+            self._append_manager(MANAGER_WAITING, project_id, {
+                "sprint_id": sprint_id, "until": choice.until}, token)
+            return None
+        return manager.new_launch(sprint_id, project_id, sprint.goal, project.root, choice,
+                                  secret, self._sprint_secrets)
+
+    def _append_manager(self, kind: str, project_id: str, payload: dict, token: object) -> None:
+        """Under the ingest lock: append one manager row, release the attempt's hold, publish."""
+        self._release(payload["sprint_id"], token)
+        self._apply(self.log.append([(kind, project_id, payload)]))
+
+    def _record_launch(self, launch: manager.Launch, reason: str | None, token: object) -> None:
+        secret = launch.env[manager.SECRET_ENV]
+        with self._ingest:
+            self._release(launch.sprint_id, token)
+            if launch.sprint_id not in self._sprints:
+                self._drop_sprint_files(launch.sprint_id)
+                return
+            if self._stop.is_set():
+                return
+            if reason is None:
+                self._append_manager(MANAGER_STARTED, launch.project_id, {
+                    "sprint_id": launch.sprint_id, "profile": launch.profile,
+                    "session_name": launch.session_name}, token)
+                return
+            if secret:
+                reason = reason.replace(secret, "<secret>")
+            self._append_manager(MANAGER_FAILED, launch.project_id, {
+                "sprint_id": launch.sprint_id, "reason": reason}, token)
+            print(f"console: manager_failed {launch.sprint_id} {reason}", file=sys.stderr)
 
     def withdraw_goal(self, project_id: str, sprint_id: str) -> None:
         """Append one `goal.withdrawn` event for an open sprint of that project, then drop its secret."""
@@ -1112,8 +1321,13 @@ class ConsoleService:
             appended = self.log.append(
                 [(GOAL_WITHDRAWN, project_id, {"sprint_id": sprint_id, "goal": sprint.goal})])
             self._apply(appended)
+            self._drop_sprint_files(sprint_id)
+
+    def _drop_sprint_files(self, sprint_id: str) -> None:
+        """Remove a sprint's secret and its manager's settings file; a failure is logged, not raised."""
+        for remove in (sprints.remove_secret, manager.remove_settings):
             try:
-                sprints.remove_secret(self._sprint_secrets, sprint_id)
+                remove(self._sprint_secrets, sprint_id)
             except Exception as error:
                 print(f"console: sprint_secret_unremoved {sprint_id} "
                       f"{type(error).__name__}: {error}", file=sys.stderr)
@@ -1220,12 +1434,15 @@ class ConsoleService:
                 self._sessions, observations, self._absent, self._repo_of, project_of)
             appended = self.log.append(changes)
             self._absent = absent
-            self._profiles = frozenset(
-                sessions.profile_name(d) for d in self._profile_dirs() if d.is_dir())
+            self._profiles = self._read_profiles()
             if appended:
                 self._fold(appended)
             self._publish()
             return appended
+
+    def _read_profiles(self) -> frozenset[str]:
+        """The profile directories as they are now."""
+        return frozenset(sessions.profile_name(d) for d in self._profile_dirs() if d.is_dir())
 
     def _warn_once(self, key: str, line: str) -> None:
         """Print `line` unless `key` is already unreadable; `_unreadable` is cleared by a good read."""
@@ -1515,4 +1732,5 @@ class ConsoleService:
         if self._thread is not None:
             self._server.shutdown()
         self._server.server_close()
-        self.log.close()
+        with self._ingest:
+            self.log.close()

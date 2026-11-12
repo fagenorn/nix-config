@@ -10,10 +10,11 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 
-from agent_tools.console import sprints
+from agent_tools.console import event_log, manager, sprints
 from agent_tools.console.deliveries import DELIVERY_GONE, DELIVERY_SEEN, IssueStage
 from agent_tools.console.event_log import (BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED,
-                                           GOAL_WITHDRAWN, SPRINT_REPORTED, Event)
+                                           GOAL_WITHDRAWN, MANAGER_FAILED, MANAGER_STARTED,
+                                           MANAGER_WAITING, SPRINT_REPORTED, Event)
 from agent_tools.console.sprints import Observed, Report
 
 
@@ -296,6 +297,123 @@ class BriefFoldTest(unittest.TestCase):
                 self.assertEqual(
                     sprints.sprint_states(events[cut:], sprints.sprint_states(events[:cut])),
                     whole)
+
+def managed(seq, sprint_id, kind, **payload):
+    return Event(seq, at(seq), kind, "p00", {"sprint_id": sprint_id, **payload})
+
+
+class ManagerFoldTest(unittest.TestCase):
+    def test_manager_rows_fold_onto_open_sprints(self):
+        goal = stated(1, "p00", SID, "one")
+        name = "p00 sprint " + SID
+
+        def folded(*rows):
+            return sprints.sprint_states([goal, *rows])[SID].manager
+
+        started = managed(2, SID, MANAGER_STARTED, profile="work", session_name=name)
+        self.assertEqual(folded(started), sprints.Manager("started", at(2), "work", name))
+        failed = managed(3, SID, MANAGER_FAILED, reason="x")
+        self.assertEqual(folded(started, failed), sprints.Manager("failed", at(3), reason="x"))
+        waiting = managed(4, SID, MANAGER_WAITING, until="T")
+        self.assertEqual(folded(started, failed, waiting),
+                         sprints.Manager("waiting", at(4), until="T"))
+        open_ended = managed(5, SID, MANAGER_WAITING, until=None)
+        self.assertEqual(folded(started, failed, waiting, open_ended),
+                         sprints.Manager("waiting", at(5), until=None))
+        self.assertIsNone(sprints.sprint_states([goal])[SID].manager)
+
+    def test_malformed_manager_rows_change_nothing(self):
+        name = "p00 sprint " + SID
+        base = [stated(1, "p00", SID, "one"),
+                managed(2, SID, MANAGER_STARTED, profile="work", session_name=name)]
+        bad = [managed(3, SID, MANAGER_STARTED, session_name=name),
+               managed(4, SID, MANAGER_STARTED, profile="work", session_name=5),
+               managed(5, SID, MANAGER_FAILED, reason=3),
+               managed(6, SID, MANAGER_WAITING, until=5),
+               managed(7, "fedcba9876543210", MANAGER_FAILED, reason="x")]
+        self.assertEqual(sprints.sprint_states(base + bad), sprints.sprint_states(base))
+        gone = [stated(1, "p00", SID, "one"), withdrawn(2, "p00", SID, "one")]
+        late = managed(3, SID, MANAGER_FAILED, reason="x")
+        self.assertEqual(sprints.sprint_states(gone + [late]), {})
+
+    def test_folding_manager_rows_in_two_parts_equals_at_once(self):
+        events = [stated(1, "p00", SID, "one"),
+                  managed(2, SID, MANAGER_STARTED, profile="work", session_name="n"),
+                  managed(3, SID, MANAGER_FAILED, reason="x"),
+                  managed(4, SID, MANAGER_WAITING, until=None),
+                  stated(5, "p00", "fedcba9876543210", "two"),
+                  managed(6, "fedcba9876543210", MANAGER_FAILED, reason="y"),
+                  withdrawn(7, "p00", "fedcba9876543210", "two")]
+        whole = sprints.sprint_states(events)
+        for cut in range(len(events) + 1):
+            with self.subTest(cut=cut):
+                self.assertEqual(
+                    sprints.sprint_states(events[cut:], sprints.sprint_states(events[:cut])),
+                    whole)
+
+    def test_manager_kinds_are_not_kept(self):
+        for kind in (MANAGER_STARTED, MANAGER_FAILED, MANAGER_WAITING):
+            with self.subTest(kind=kind):
+                self.assertNotIn(kind, event_log.KEPT_KINDS)
+        self.assertEqual((MANAGER_STARTED, MANAGER_FAILED, MANAGER_WAITING),
+                         ("manager.started", "manager.failed", "manager.waiting"))
+
+
+class ManagerStatusTest(unittest.TestCase):
+    def test_the_manager_status_rule(self):
+        t = at(1)
+        t_ms = int(datetime.fromisoformat(t).timestamp() * 1000)
+        started = sprints.Manager("started", t, "work", "n")
+        failed = sprints.Manager("failed", t, reason="the directory is not trusted")
+        waiting = sprints.Manager("waiting", t, until="U")
+        brief = sprints.Brief(1, PARTS, t, "none", None)
+        unavailable = ("unavailable", manager.UNAVAILABLE_TEXT, False)
+        missing = ("missing", "the manager is not running", True)
+        no_manager = ("none", sprints.NO_MANAGER_TEXT, True)
+        later = sprints.Manager("started", at(5), "work", "n")
+        later_ms = int(datetime.fromisoformat(at(5)).timestamp() * 1000)
+        table = [
+            ("started later than the goal, at the limit", later, None, False, later_ms + 120_000,
+             True, ("started", None, False)),
+            ("started at the limit", started, None, False, t_ms + 120_000, True,
+             ("started", None, False)),
+            ("started past the limit", started, None, False, t_ms + 120_001, True, missing),
+            ("started, listed", started, None, True, t_ms + 600_000, True,
+             ("started", None, False)),
+            ("started, briefed", started, brief, False, t_ms + 600_000, True,
+             ("started", None, False)),
+            ("started, no clock", started, None, False, None, True, ("started", None, False)),
+            ("failed", failed, None, False, t_ms, True,
+             ("failed", "could not start a manager: the directory is not trusted", True)),
+            ("waiting", waiting, None, False, t_ms, True,
+             ("waiting", "waiting on quota until", True)),
+            ("failed, listed", failed, None, True, t_ms, True,
+             ("failed", "could not start a manager: the directory is not trusted", False)),
+            ("failed, briefed", failed, brief, False, t_ms, True,
+             ("failed", "could not start a manager: the directory is not trusted", False)),
+            ("waiting, listed", waiting, None, True, t_ms, True,
+             ("waiting", "waiting on quota until", False)),
+            ("waiting, briefed", waiting, brief, False, t_ms, True,
+             ("waiting", "waiting on quota until", False)),
+            ("none past the limit", None, None, False, t_ms + 120_001, True, no_manager),
+            ("none at the limit", None, None, False, t_ms + 120_000, True, ("none", None, False)),
+            ("none, listed", None, None, True, t_ms + 600_000, True, ("none", None, False)),
+            ("none, briefed", None, brief, False, t_ms + 600_000, True, ("none", None, False)),
+            ("unavailable, none", None, None, False, t_ms + 600_000, False, unavailable),
+            ("unavailable, failed", failed, None, False, t_ms, False, unavailable),
+            ("unavailable, started", started, None, False, t_ms + 600_000, False, unavailable),
+        ]
+        for name, row, brief_, listed, now, managers, expected in table:
+            with self.subTest(name):
+                state = sprints.SprintState(SID, "p00", "one", 1, t, brief_, row)
+                self.assertEqual(sprints.manager_status(state, listed, now, managers), expected)
+
+
+class DocumentedTest(unittest.TestCase):
+    def test_the_manager_rules_are_written_where_the_view_points(self):
+        self.assertTrue((sprints.manager_status.__doc__ or "").strip())
+        for name in ("manager_status", "manager.started", "manager.failed", "manager.waiting"):
+            self.assertIn(name, sprints.__doc__)
 
 
 URL = "https://github.com/owner/p00/milestone/3"

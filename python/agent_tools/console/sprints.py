@@ -12,6 +12,13 @@ text); the brief and report rows carry
 
 The log keeps all six indefinitely (`event_log.KEPT_KINDS`).
 
+Three more kinds record the sprint's manager (#888), none of them kept (`event_log.MANAGER_STARTED`,
+`MANAGER_FAILED`, `MANAGER_WAITING`; each with the project in its project column):
+
+    manager.started  {"sprint_id", "profile": <str>, "session_name": <str>}
+    manager.failed   {"sprint_id", "reason": <str>}
+    manager.waiting  {"sprint_id", "until": <str> | null}
+
 A sprint id is `secrets.token_hex(8)`: 16 lowercase hex characters (`SPRINT_ID`), the only form a
 request may name and the file name of the sprint's secret.
 
@@ -36,13 +43,18 @@ be empty so the service can give the plain reason:
 
     {"project_id": "<project id>", "sprint_id": "<16 lowercase hex>"}
 
+`parse_retry(body)` reads the body of the manager retry write, the same shape as the withdraw's, and
+returns `(project_id, sprint_id)`. `HAS_MANAGER`, `LAUNCHING` and `TOO_SOON` are the service's
+retry refusals.
+
 Both accept only a UTF-8 JSON object with exactly those keys; anything else, a repeated key, a
 NaN or Infinity literal or nesting too deep to parse raises `ValueError`.
 
 `sprint_states(events, states=None)` folds events into the open sprints keyed by sprint id: a
 `goal.stated` event with a project, a string `sprint_id` and a string `goal` adds a `SprintState`
 (`stated_seq` and `stated_at` are the event's `seq` and `at`); a `goal.withdrawn` with a string
-`sprint_id` removes it; every other event and any malformed goal event changes nothing.
+`sprint_id` removes it; the brief rows and the manager rows below change an open sprint; every other
+event and any malformed goal event changes nothing.
 Registration events change nothing here: a goal row outlives the registration rows retention
 removes, and the view alone shows sprints only under registered projects. Folding `a + b` equals
 folding `b` onto the fold of `a`.
@@ -74,10 +86,25 @@ The fold also keeps each open sprint's `Brief(version, parts, sent_at, decision,
 folded brief's version (0 with none) and `brief` is a dict: the brief is then that version with
 decision `NONE` and no reply. `brief.approved` and `brief.replied` apply only when the sprint is
 open, has a brief, the version equals its version and its decision is `NONE`; approval sets
-`APPROVED`, a reply (a string) sets `CHANGES` and the reply. Every other row changes nothing. A
-sprint whose brief is `APPROVED` is `STARTING`, else `DRAFTING` (`SprintState.state`).
-`brief.approved` and `brief.replied`, when they apply, also set the brief's `decided_at` to the
-event's `at`; a `brief.sent` brief has `decided_at` `None`.
+`APPROVED`, a reply (a string) sets `CHANGES` and the reply. A sprint whose brief is `APPROVED` is
+`STARTING`, else `DRAFTING` (`SprintState.state`). `brief.approved` and `brief.replied`, when they
+apply, also set the brief's `decided_at` to the event's `at`; a `brief.sent` brief has `decided_at`
+`None`.
+
+The fold also keeps each open sprint's `Manager(state, at, profile, session_name, reason, until)`,
+`None` until a valid manager row arrives. A manager row changes only an open sprint (a row for a
+sprint that is not folded changes nothing) and the latest valid row wins, whatever the earlier one
+was; `Manager.at` is that row's `at`. `manager.started` is valid only with a string `profile` and a
+string `session_name` (state `started`); `manager.failed` only with a string `reason` (`failed`);
+`manager.waiting` only with an `until` key whose value is a string or null (`waiting`). A row that
+is not valid changes nothing.
+
+`manager_status(state, listed, now_ms, managers)` turns a sprint's manager into the view's
+`(manager_state, manager_text, retry)`; its docstring holds the rules.
+
+The view's `manager_state`, `manager_text` and `retry`, and the service's retry gate, are this
+function's three results.
+
 `withdrawn_ids(events, ids)` adds the `sprint_id` of every `goal.withdrawn` row with a string one.
 
 A report is what the approved sprint's manager says about the sprint. `parse_report_request(body)`
@@ -143,7 +170,10 @@ from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_litera
 from agent_tools.console import deliveries
 from agent_tools.console.deliveries import DELIVERY_SEEN
 from agent_tools.console.event_log import (BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED,
-                                           GOAL_WITHDRAWN, SPRINT_REPORTED, Event)
+                                           GOAL_WITHDRAWN, MANAGER_FAILED, MANAGER_STARTED,
+                                           MANAGER_WAITING, SPRINT_REPORTED, Event)
+from agent_tools.console.manager import FAILED_TEXT, MISSING_TEXT, UNAVAILABLE_TEXT
+from agent_tools.console.manager import WAITING_TEXT as MANAGER_WAITING_TEXT
 
 MAX_GOAL_CHARS = 2000
 MAX_REPLY_CHARS = 2000
@@ -159,6 +189,10 @@ NO_MANAGER_AFTER_MS = 120_000
 DRAFTING = "drafting"
 DRAFTING_TEXT = "drafting the brief"
 NO_MANAGER_TEXT = "no manager has picked this up"
+STARTED = "started"
+FAILED = "failed"
+MISSING = "missing"
+UNAVAILABLE = "unavailable"
 REPORT_MEMBERS = ("status", "phase", "milestone", "tracker_url", "issues", "inbox", "next")
 REPORT_PHASES = ("running", "closing", "done")
 LANDED = "landed"
@@ -195,6 +229,9 @@ REPLACED = "a newer brief replaced this one"
 EMPTY_REPLY = "write the reply first"
 REPLY_TOO_LONG = "a reply is at most 2000 characters"
 UNKNOWN = "this sprint is not known"
+HAS_MANAGER = "this sprint has a manager"
+LAUNCHING = "a manager is starting for this sprint"
+TOO_SOON = "retry is offered two minutes after the goal"
 
 _MINUTE_MS = 60_000
 _HOUR_MS = 3_600_000
@@ -241,6 +278,16 @@ class Observed:
 
 
 @dataclass(frozen=True)
+class Manager:
+    state: str
+    at: str
+    profile: str | None = None
+    session_name: str | None = None
+    reason: str | None = None
+    until: str | None = None
+
+
+@dataclass(frozen=True)
 class SprintState:
     sprint_id: str
     project_id: str
@@ -248,6 +295,7 @@ class SprintState:
     stated_seq: int
     stated_at: str
     brief: Brief | None = None
+    manager: Manager | None = None
     report: Report | None = None
     observed: tuple[Observed, ...] = ()
     moved_ms: int | None = None
@@ -294,6 +342,11 @@ def parse_goal(body: bytes) -> tuple[str, str]:
 
 
 def parse_withdraw(body: bytes) -> tuple[str, str]:
+    value = _object(body, {"project_id", "sprint_id"})
+    return value["project_id"], _sprint_id(value["sprint_id"])
+
+
+def parse_retry(body: bytes) -> tuple[str, str]:
     value = _object(body, {"project_id", "sprint_id"})
     return value["project_id"], _sprint_id(value["sprint_id"])
 
@@ -436,6 +489,23 @@ def _folded_brief(state: SprintState, event: Event) -> SprintState:
     return state
 
 
+def _folded_manager(state: SprintState, event: Event) -> SprintState:
+    payload = event.payload
+    if event.kind == MANAGER_STARTED:
+        profile, name = payload.get("profile"), payload.get("session_name")
+        if isinstance(profile, str) and isinstance(name, str):
+            return replace(state, manager=Manager(STARTED, event.at, profile, name))
+    elif event.kind == MANAGER_FAILED:
+        reason = payload.get("reason")
+        if isinstance(reason, str):
+            return replace(state, manager=Manager(FAILED, event.at, reason=reason))
+    elif event.kind == MANAGER_WAITING and "until" in payload:
+        until = payload["until"]
+        if until is None or isinstance(until, str):
+            return replace(state, manager=Manager(WAITING, event.at, until=until))
+    return state
+
+
 def _folded_report(state: SprintState, event: Event) -> SprintState:
     report = event.payload.get("report")
     if state.state != STARTING or not isinstance(report, dict):
@@ -495,6 +565,9 @@ def sprint_states(events: Iterable[Event],
             folded.pop(sprint_id, None)
         elif event.kind in (BRIEF_SENT, BRIEF_APPROVED, BRIEF_REPLIED) and sprint_id in folded:
             folded[sprint_id] = _folded_brief(folded[sprint_id], event)
+        elif event.kind in (MANAGER_STARTED, MANAGER_FAILED, MANAGER_WAITING) \
+                and sprint_id in folded:
+            folded[sprint_id] = _folded_manager(folded[sprint_id], event)
         elif event.kind == SPRINT_REPORTED and sprint_id in folded:
             folded[sprint_id] = _folded_report(folded[sprint_id], event)
     return folded
@@ -531,6 +604,47 @@ def progress_text(landed: int, total: int, in_delivery: int, queued: int, held: 
         if count:
             text += f", {count} {label}"
     return text
+
+
+def _ms(time: str) -> int:
+    return int(datetime.fromisoformat(time).timestamp() * 1000)
+
+
+def manager_status(state: SprintState, listed: bool, now_ms: int | None,
+                   managers: bool) -> tuple[str, str | None, bool]:
+    """Return `(manager_state, manager_text, retry)` for one open sprint.
+
+    `listed` is whether the sprint has a listed session of its own and `now_ms` is the clock in
+    milliseconds (`None` counts as no time elapsed). The rules, first match wins:
+
+    - `managers` false (a host that cannot start managers): `unavailable`, `UNAVAILABLE_TEXT`, no
+      retry.
+    - The sprint is overdue when `now_ms` is more than `NO_MANAGER_AFTER_MS` past its start time, it
+      has no brief and it has no listed session. The start time is `Manager.at` of a `started`
+      manager and the stated time (`stated_at`) otherwise.
+    - No manager row: `none`, with `NO_MANAGER_TEXT` and retry when overdue, else no text, no retry.
+    - `started`: `missing`, `MISSING_TEXT` and retry when overdue, else `started`, no text, no retry.
+    - `failed`: `failed` and `"<FAILED_TEXT>: <reason>"`.
+    - `waiting`: `waiting` and `manager.WAITING_TEXT`.
+
+    A `failed` or `waiting` manager offers retry only while the sprint has no listed session and no
+    brief: a launch can fail after its detached session was already handed off, and a retry would
+    then start a second manager for the sprint.
+    """
+    if not managers:
+        return UNAVAILABLE, UNAVAILABLE_TEXT, False
+    manager = state.manager
+    since = state.stated_at if manager is None or manager.state != STARTED else manager.at
+    overdue = (now_ms is not None and now_ms - _ms(since) > NO_MANAGER_AFTER_MS
+               and state.brief is None and not listed)
+    if manager is None:
+        return (NONE, NO_MANAGER_TEXT, True) if overdue else (NONE, None, False)
+    if manager.state == STARTED:
+        return (MISSING, MISSING_TEXT, True) if overdue else (STARTED, None, False)
+    free = not listed and state.brief is None
+    if manager.state == FAILED:
+        return FAILED, f"{FAILED_TEXT}: {manager.reason}", free
+    return WAITING, MANAGER_WAITING_TEXT, free
 
 
 def new_sprint_id() -> str:

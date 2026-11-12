@@ -378,7 +378,7 @@ class CheckAnswerServiceTest(unittest.TestCase):
     def test_a_paid_approval_is_excluded_from_any_multi_item_action(self):
         self.assertEqual(service.PAGE_WRITES, {"/api/looked", "/api/answer", "/api/check-answer",
                                                "/api/goal", "/api/withdraw", "/api/approve",
-                                               "/api/reply"})
+                                               "/api/reply", "/api/retry-manager"})
         keys = [PAID10["key"], LIVE12["key"]]
         single = {"project_id": P, "key": LIVE12["key"], "answer": "approve", "version": LIVE12["version"],
                   "confirm": "octo/widgets#12"}

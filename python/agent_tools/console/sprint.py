@@ -1,15 +1,22 @@
 """`sprint`: a manager sends its sprint's brief and report and reads the owner's answer.
 
-    sprint brief --sprint <id> --secret-file <path> --brief-file <path | -> [--port N]
-    sprint report --sprint <id> --secret-file <path> --report-file <path | -> [--port N]
-    sprint status --sprint <id> [--port N]
+    sprint brief [--sprint <id>] [--secret-file <path>] --brief-file <path | -> [--port N]
+    sprint report [--sprint <id>] [--secret-file <path>] --report-file <path | -> [--port N]
+    sprint status [--sprint <id>] [--port N]
+    sprint contract
 
 `--sprint` is the sprint id (16 lowercase hex characters, `agent_tools.console.sprints.SPRINT_ID`),
-else exit 2. `--port` is the console's loopback port (0-65535; default 27184); the command only
-ever talks to 127.0.0.1.
+else exit 2. Without `--sprint` the id is `$CONSOLE_SPRINT_ID`, the variable the console sets in
+the manager session it starts; without `--secret-file` the secret is `$CONSOLE_SPRINT_SECRET`
+(one trailing newline is removed, as from the file). A flag always wins over the environment. No id is stderr
+`sprint: no sprint id: pass --sprint or set CONSOLE_SPRINT_ID`, an id from the environment that
+is not a sprint id is stderr `sprint: CONSOLE_SPRINT_ID is not a sprint id (16 lowercase hex
+characters)`, and, for `brief` and `report`, no secret is stderr `sprint: no secret: pass --secret-file or set
+CONSOLE_SPRINT_SECRET`; each is exit 2 with no request sent. `--port` is the console's loopback
+port (0-65535; default 27184); the command only ever talks to 127.0.0.1.
 
 `sprint brief` reads the sprint's secret from `--secret-file` (the file the console made for the
-sprint; one trailing newline is removed) and the brief from `--brief-file` (`-` reads stdin), a JSON
+sprint; one trailing newline is removed) or the environment, and the brief from `--brief-file` (`-` reads stdin), a JSON
 object, and sends `POST /api/brief` with `{"sprint_id", "secret", "brief"}`, no `Origin`. On success
 it prints `sprint: brief version <n> sent` and exit 0. The command validates no part of the brief:
 the console decides, in one place.
@@ -23,6 +30,11 @@ report: the console decides, in one place.
 line of JSON, `{"decision", "reply", "sprint_id", "version"}`, and exit 0. `decision` is `none`
 (no answer yet), `approved`, `changes` (the owner's exact words are `reply`) or `withdrawn`.
 
+`sprint contract` prints the manager's contract, the document `manager-contract.md` packaged
+beside this module, to stdout exactly as packaged and exit 0. It takes no sprint id, secret or
+port, reads no environment and sends no request; the console's launch prompt tells the manager to
+run it first (ADR-console-015).
+
 Any other HTTP status is stderr `sprint: refused <status>: <text>` (the console's reason) and
 exit 1. A console that cannot be reached is stderr
 `sprint: console unreachable on 127.0.0.1:<port>: <error>` and exit 1. A secret, brief or report file
@@ -35,14 +47,16 @@ from __future__ import annotations
 import argparse
 import http.client
 import json
+import os
 import sys
 from pathlib import Path
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
-from agent_tools.console import service, sprints
+from agent_tools.console import manager, service, sprints
 from agent_tools.console.console import port_number
 
 TIMEOUT_SECONDS = 10
+CONTRACT = Path(__file__).with_name("manager-contract.md")
 
 
 class Unreadable(Exception):
@@ -67,14 +81,17 @@ def build_parser() -> argparse.ArgumentParser:
                        ("report", "send the sprint's report to the console"),
                        ("status", "print the owner's answer to the sprint's brief")):
         each = commands.add_parser(name, help=text)
-        each.add_argument("--sprint", type=sprint_id, required=True, help="the sprint id")
+        each.add_argument("--sprint", type=sprint_id, default=None,
+                          help=f"the sprint id (default: ${manager.ID_ENV})")
         each.add_argument("--port", type=port_number, default=service.DEFAULT_PORT,
                           help="the console's loopback port (default: %(default)s)")
         if name != "status":
-            each.add_argument("--secret-file", type=Path, required=True,
-                              help="the file holding the sprint's secret")
+            each.add_argument("--secret-file", type=Path, default=None,
+                              help="the file holding the sprint's secret "
+                                   f"(default: ${manager.SECRET_ENV})")
             each.add_argument(f"--{name}-file", required=True,
                               help=f"the {name} as a JSON object; - reads stdin")
+    commands.add_parser("contract", help="print the manager's contract")
     return parser
 
 
@@ -114,10 +131,33 @@ def ask(port: int, method: str, path: str, body: bytes | None = None) -> str:
     return text
 
 
-def send_brief(args: argparse.Namespace) -> str:
-    secret = read_secret(args.secret_file)
+def resolve_sprint(args: argparse.Namespace) -> str:
+    """The sprint id: the flag, else the manager's environment, else `Unreadable`."""
+    if args.sprint is not None:
+        return args.sprint
+    text = os.environ.get(manager.ID_ENV)
+    if text is None:
+        raise Unreadable(f"sprint: no sprint id: pass --sprint or set {manager.ID_ENV}")
+    if sprints.SPRINT_ID.fullmatch(text) is None:
+        raise Unreadable(f"sprint: {manager.ID_ENV} is not a sprint id "
+                         "(16 lowercase hex characters)")
+    return text
+
+
+def resolve_secret(args: argparse.Namespace) -> str:
+    """The secret: the flag's file, else the manager's environment, else `Unreadable`."""
+    if args.secret_file is not None:
+        return read_secret(args.secret_file)
+    secret = os.environ.get(manager.SECRET_ENV)
+    if secret is None:
+        raise Unreadable(f"sprint: no secret: pass --secret-file or set {manager.SECRET_ENV}")
+    return secret.removesuffix("\n")
+
+
+def send_brief(args: argparse.Namespace, sprint: str) -> str:
+    secret = resolve_secret(args)
     brief = read_object(args.brief_file, "brief")
-    body = json.dumps({"sprint_id": args.sprint, "secret": secret, "brief": brief}).encode()
+    body = json.dumps({"sprint_id": sprint, "secret": secret, "brief": brief}).encode()
     text = ask(args.port, "POST", service.BRIEF_PATH, body)
     try:
         return f"sprint: brief version {json.loads(text)['version']} sent"
@@ -125,23 +165,27 @@ def send_brief(args: argparse.Namespace) -> str:
         raise Refused(f"sprint: refused 200: unreadable answer: {error}") from error
 
 
-def send_report(args: argparse.Namespace) -> str:
-    secret = read_secret(args.secret_file)
+def send_report(args: argparse.Namespace, sprint: str) -> str:
+    secret = resolve_secret(args)
     report = read_object(args.report_file, "report")
-    body = json.dumps({"sprint_id": args.sprint, "secret": secret, "report": report}).encode()
+    body = json.dumps({"sprint_id": sprint, "secret": secret, "report": report}).encode()
     ask(args.port, "POST", service.REPORT_PATH, body)
     return "sprint: report sent"
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.command == "contract":
+        sys.stdout.write(CONTRACT.read_text(encoding="utf-8"))
+        return 0
     try:
+        sprint = resolve_sprint(args)
         if args.command == "brief":
-            line = send_brief(args)
+            line = send_brief(args, sprint)
         elif args.command == "report":
-            line = send_report(args)
+            line = send_report(args, sprint)
         else:
-            line = ask(args.port, "GET", f"{service.STATUS_PATH}?sprint_id={args.sprint}")
+            line = ask(args.port, "GET", f"{service.STATUS_PATH}?sprint_id={sprint}")
     except Unreadable as error:
         print(error, file=sys.stderr)
         return 2

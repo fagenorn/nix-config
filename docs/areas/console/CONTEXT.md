@@ -42,15 +42,15 @@ The manager's answer to a goal: what done looks like, what is excluded, the slic
 _Avoid_: plan, proposal
 
 **Manager**:
-The one agent a sprint has: it writes the brief and the reports and never writes code (#835).
-_Avoid_: owner, worker
+The one agent a sprint has: it writes the brief and the reports and never writes code (#835). The console starts it as a background Claude Code session in the project's root, under the profile with the most weekly allowance left, drafts the brief under the contract `sprint contract` prints and shows it inside its sprint with its state (ADR-console-015).
+_Avoid_: owner, worker, agent, bot
 
 **Report**:
 The manager's fixed-shape account after each batch and on any change of state: a status line, each issue's stage or outcome, the inbox items it raised, the next step and the milestone (ADR-console-014).
 _Avoid_: update, log
 
 **Sprint**:
-One goal, later its issues and its outcome, in one project (#834), shown under its project as one line with its state (drafting the brief, starting, on track, waiting on you, quiet and may be stuck, closing or done), its progress and its manager's status until it is withdrawn (ADR-console-011, ADR-console-013, ADR-console-014).
+One goal, later its issues and its outcome, in one project (#834), shown under its project as one line with its state (drafting the brief, starting, on track, waiting on you, quiet and may be stuck, closing or done), its progress and its manager's status until it is withdrawn; its manager session is listed inside it, and a manager that failed to start or is missing offers a retry (ADR-console-011, ADR-console-013, ADR-console-014, ADR-console-015).
 _Avoid_: job, run
 
 **Session**:

@@ -9,10 +9,14 @@ import re
 import socket
 import subprocess
 import sys
+import tomllib
 import unittest
+from contextlib import redirect_stdout
+from io import StringIO
 from pathlib import Path
+from unittest import mock
 
-from agent_tools.console import sprint
+from agent_tools.console import manager, sprint
 
 from . import console_test_support as support
 from .test_console_answer import view_of
@@ -21,12 +25,15 @@ from .test_console_reports import REPORT
 from .test_console_writes import Case
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+CONTRACT = REPO_ROOT / "python/agent_tools/console/manager-contract.md"
 
 
-def run_sprint(*args, stdin=None):
+def run_sprint(*args, stdin=None, env=None):
+    inherited = {k: v for k, v in os.environ.items()
+                 if k not in (manager.ID_ENV, manager.SECRET_ENV)}
     return subprocess.run(
         [sys.executable, "-m", "agent_tools.console.sprint", *map(str, args)],
-        env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "python")},
+        env={**inherited, "PYTHONPATH": str(REPO_ROOT / "python"), **(env or {})},
         input=stdin, capture_output=True, text=True, timeout=30)
 
 
@@ -172,6 +179,57 @@ class SprintCommandTest(Case):
         self.assertEqual((got.returncode, got.stdout, got.stderr),
                          (0, "sprint: brief version 1 sent\n", ""))
 
+    def test_the_sprint_and_secret_may_come_from_the_environment(self):
+        svc = self.open()
+        sid = self.goal(svc)
+        secret, brief = self.files(sid, PARTS)
+        text = secret.read_text()
+        env = {manager.ID_ENV: sid, manager.SECRET_ENV: text}
+        port = self.port(svc)
+        got = run_sprint("brief", "--brief-file", brief, "--port", port, env=env)
+        self.assertEqual((got.returncode, got.stdout, got.stderr),
+                         (0, "sprint: brief version 1 sent\n", ""))
+        after = run_sprint("status", "--port", port, env=env)
+        self.assertEqual(after.returncode, 0)
+        parsed = json.loads(after.stdout)
+        self.assertEqual((parsed["decision"], parsed["version"]), ("none", 1))
+        for output in (got.stdout + got.stderr, after.stdout + after.stderr):
+            self.assertNotIn(text.strip(), output)
+
+    def test_a_missing_id_or_secret_exits_2_and_sends_nothing(self):
+        svc = self.open()
+        sid = self.goal(svc)
+        secret, brief = self.files(sid, PARTS)
+        text = secret.read_text()
+        port = self.port(svc)
+        no_id = "sprint: no sprint id: pass --sprint or set CONSOLE_SPRINT_ID\n"
+        cases = [
+            (("brief", "--brief-file", brief, "--port", port), {}, no_id),
+            (("brief", "--brief-file", brief, "--port", port), {manager.ID_ENV: sid},
+             "sprint: no secret: pass --secret-file or set CONSOLE_SPRINT_SECRET\n"),
+            (("brief", "--brief-file", brief, "--port", port),
+             {manager.ID_ENV: "XYZ", manager.SECRET_ENV: text},
+             "sprint: CONSOLE_SPRINT_ID is not a sprint id (16 lowercase hex characters)\n"),
+            (("status", "--port", port), {}, no_id),
+        ]
+        for args, env, line in cases:
+            with self.subTest(args=args, env=sorted(env)):
+                got = self.assert_unchanged(svc, lambda: run_sprint(*args, env=env))
+                self.assertEqual((got.returncode, got.stdout, got.stderr), (2, "", line))
+                self.assertNotIn(text.strip(), got.stderr)
+
+    def test_flags_win_over_the_environment(self):
+        svc = self.open()
+        sid = self.goal(svc)
+        secret, brief = self.files(sid, PARTS)
+        env = {manager.ID_ENV: "b" * 16, manager.SECRET_ENV: "not the secret"}
+        got = run_sprint("brief", "--sprint", sid, "--secret-file", secret,
+                         "--brief-file", brief, "--port", self.port(svc), env=env)
+        self.assertEqual((got.returncode, got.stdout, got.stderr),
+                         (0, "sprint: brief version 1 sent\n", ""))
+        after = run_sprint("status", "--sprint", sid, "--port", self.port(svc), env=env)
+        self.assertEqual(json.loads(after.stdout)["sprint_id"], sid)
+
     def reports(self, svc, sid, report):
         """An approved sprint, its secret file and a report file holding `report`."""
         secret, _ = self.files(sid, PARTS)
@@ -228,6 +286,43 @@ class SprintCommandTest(Case):
         self.assertTrue(got.stderr.endswith("the report is not a JSON object\n"), got.stderr)
 
 
+class ManagerContractTest(unittest.TestCase):
+    def test_contract_prints_the_packaged_document_and_exits_0(self):
+        got = run_sprint("contract")
+        self.assertEqual((got.returncode, got.stdout, got.stderr),
+                         (0, CONTRACT.read_text(encoding="utf-8"), ""))
+
+    def test_contract_sends_no_request(self):
+        out = StringIO()
+        refused = AssertionError("sprint contract opened a connection")
+        with mock.patch.object(sprint.http.client, "HTTPConnection", side_effect=refused), \
+                mock.patch.dict(os.environ, clear=False) as environ, redirect_stdout(out):
+            environ.pop(manager.ID_ENV, None)
+            environ.pop(manager.SECRET_ENV, None)
+            code = sprint.main(["contract"])
+        self.assertEqual((code, out.getvalue()), (0, CONTRACT.read_text(encoding="utf-8")))
+
+    def test_contract_takes_no_sprint_secret_or_port(self):
+        for args in (("--sprint", "a" * 16), ("--secret-file", "x"), ("--port", "1")):
+            with self.subTest(args=args):
+                got = run_sprint("contract", *args)
+                self.assertEqual((got.returncode, got.stdout), (2, ""))
+                self.assertIn("unrecognized arguments", got.stderr)
+
+    def test_the_package_ships_the_contract(self):
+        config = tomllib.loads((REPO_ROOT / "python/pyproject.toml").read_text(encoding="utf-8"))
+        shipped = config["tool"]["setuptools"]["package-data"]["agent_tools.console"]
+        self.assertIn(CONTRACT.name, shipped)
+
+    def test_the_contract_shows_its_send_command_and_never_handles_the_secret(self):
+        text = CONTRACT.read_text(encoding="utf-8")
+        self.assertIn("`sprint brief --brief-file -`", text)
+        self.assertIn("`sprint contract`", text)
+        for forbidden in ("--secret-file", "CONSOLE_SPRINT_SECRET", "bindings."):
+            with self.subTest(forbidden=forbidden):
+                self.assertNotIn(forbidden, text)
+
+
 class CommandContractTest(unittest.TestCase):
     def test_the_command_table_names_the_module_and_its_docstring_states_the_contract(self):
         table = (REPO_ROOT / "lib/agent-tools.nix").read_text()
@@ -237,7 +332,7 @@ class CommandContractTest(unittest.TestCase):
         for name in ("sprint brief", "sprint status", "--sprint", "--secret-file",
                      "--brief-file", "--port", "POST /api/brief", "GET /api/sprint-status",
                      "exit 0", "exit 1", "exit 2", "printed nowhere", "sprint report", "--report-file",
-                     "POST /api/report"):
+                     "POST /api/report", "sprint contract"):
             self.assertIn(name, docstring)
         self.assertEqual(sprint.build_parser().prog, "sprint")
 

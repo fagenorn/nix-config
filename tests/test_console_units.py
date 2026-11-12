@@ -7,7 +7,7 @@ import plistlib
 import re
 import unittest
 
-from agent_tools.console import service
+from agent_tools.console import manager, service
 
 from . import test_verify_pending_units as units
 
@@ -28,6 +28,11 @@ class LinuxUnit(unittest.TestCase):
       command = u.agentConsole.command;
       path = u.agentConsole.path;
       gh = "${u.programs.gh.package}";
+      profile = u.home.profileDirectory;
+      system = map (p: p.pname or (builtins.parseDrvName p.name).name) c.environment.systemPackages;
+      homePackages = map (p: p.name) u.home.packages;
+      claude = u.programs.claude-code.package.name;
+      agentBin = builtins.filter (n: n == ".agents/bin/sprint" || n == ".agents/bin/resolve-project") (builtins.attrNames u.home.file);
       service = u.systemd.user.services.agent-console;
     }"""
 
@@ -63,9 +68,24 @@ class LinuxUnit(unittest.TestCase):
         self.assertIsInstance(description, str)
         self.assertTrue(description.strip())
 
-    def test_the_service_path_finds_gh_for_the_tracker(self):
+    def test_the_service_path_finds_gh_the_user_profile_and_the_system_tools(self):
         self.assertRegex(self.got["gh"], r"^/nix/store/[0-9a-z]{32}-gh-")
-        self.assertEqual(self.got["path"], f"{self.got['gh']}/bin:/usr/bin:/bin")
+        self.assertEqual(self.got["path"].split(":"), [
+            f"{self.got['gh']}/bin", f"{self.got['profile']}/bin",
+            "/run/current-system/sw/bin", "/usr/bin", "/bin"])
+
+    def test_the_unit_path_carries_every_launch_tool(self):
+        packages = {"bash": "bash", "dirname": "coreutils", "mkdir": "coreutils",
+                    "chmod": "coreutils", "ln": "coreutils", "systemd-run": "systemd"}
+        self.assertEqual(set(packages), set(manager.LAUNCH_TOOLS))
+        for tool, package in packages.items():
+            with self.subTest(tool=tool):
+                self.assertTrue(any(name.startswith(package) for name in self.got["system"]), package)
+        self.assertIn(self.got["claude"], self.got["homePackages"])
+
+    def test_the_manager_finds_the_sprint_command(self):
+        self.assertEqual(sorted(self.got["agentBin"]),
+                         [".agents/bin/resolve-project", ".agents/bin/sprint"])
 
 
 class DarwinAgent(unittest.TestCase):
@@ -110,6 +130,12 @@ class DarwinAgent(unittest.TestCase):
     def test_the_agent_finds_gh_and_home(self):
         for got, plist in self.hosts():
             self.assertEqual(plist["EnvironmentVariables"], {"PATH": got["path"], "HOME": got["home"]})
+
+    def test_the_agent_path_is_gh_then_the_system_tools(self):
+        for got, _ in self.hosts():
+            segments = got["path"].split(":")
+            self.assertRegex(segments[0], r"^/nix/store/[0-9a-z]{32}-gh-[^/]+/bin$")
+            self.assertEqual(segments[1:], ["/usr/bin", "/bin"])
 
     def test_the_agent_logs_to_one_file_and_has_no_other_keys(self):
         for got, plist in self.hosts():

@@ -129,7 +129,8 @@ class WriteRouteTest(Case):
         svc = self.start()
         self.assertEqual(service.PAGE_WRITES,
                          {"/api/looked", "/api/answer", "/api/check-answer", "/api/goal",
-                          "/api/withdraw", "/api/approve", "/api/reply"})
+                          "/api/withdraw", "/api/approve", "/api/reply",
+                          "/api/retry-manager"})
         for path in service.PAGE_WRITES:
             with self.subTest(path=path):
                 status, _, body = support.post_page(
@@ -367,9 +368,11 @@ class GoalRouteTest(Case):
             "type": "sprint", "sprint_id": payload["sprint_id"],
             "goal": "make the importer resumable", "state": "drafting",
             "state_text": "drafting the brief", "stated_at": at,
-            "age_text": "stated just now", "manager_text": None,
+            "age_text": "stated just now", "manager_text": "managers are not available on this host yet",
+            "manager_state": "unavailable", "manager_until": None, "retry": False,
             "progress": None, "progress_text": None, "status": None, "status_at": None,
-            "next": None, "milestone": None, "tracker_url": None, "issues": [], "waiting": 0}])
+            "next": None, "milestone": None, "tracker_url": None, "issues": [], "waiting": 0,
+            "sessions": []}])
         self.assertEqual(view_of(svc)["recent_projects"][0], "owner/p01")
 
     def test_an_unregistered_empty_or_over_long_goal_is_refused_and_appends_nothing(self):

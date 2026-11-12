@@ -51,7 +51,8 @@ Wire format, one object:
      "entries": [<project entry> | <group entry>, ...],
      "unmanaged": [<unmanaged entry>, ...],
      "recent_projects": ["<project id>", ...],
-     "digest": <digest> | null}
+     "digest": <digest> | null,
+     "managers": <bool>}
 
 `digest` is what changed since the owner last looked (see `digest.py`):
 `{"since": <last look> | null, "first_visit": <bool>, "recent": [<moment>, ...],
@@ -105,13 +106,17 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
                       "state": "drafting" | "starting" | "on_track" | "waiting" | "quiet"
                                | "closing" | "done",
                       "state_text": "<text>", "stated_at", "age_text", "manager_text": <text> | null,
+                      "manager_state": "none" | "started" | "missing" | "failed" | "waiting"
+                                       | "unavailable",
+                      "manager_until": "<time>" | null, "retry": <bool>,
                       "progress": {"landed", "in_delivery", "queued", "held", "total"} | null,
                       "progress_text": "<text>" | null,
                       "status": "<status line>" | null, "status_at": "<report time>" | null,
                       "next": "<text>" | null, "milestone": "<text>" | null,
                       "tracker_url": "<url>" | null,
                       "issues": [{"issue": <int>, "stage": "<stage>", "stage_text": "<text>"}, ...],
-                      "waiting": <int>}
+                      "waiting": <int>,
+                      "sessions": [<session entry>, ...]}
     <line> = {"label": "Outside sprints", "working": <int>, "waiting": <int>,
               "summary": "<text>", "sessions": [<session entry>, ...]}
     <session entry> = {"session_id", "name", "state", "state_text", "cwd",
@@ -145,13 +150,11 @@ statement. The word "stalled" is never written: a quiet run is only quiet.
 `sprints` (always present, possibly empty) are the open sprints `derive_view` is given whose
 `project_id` is that project, newest `stated_seq` first; a sprint of a project that is not
 registered appears nowhere and changes no count, order or statement. `age_text` is
-`age_text(elapsed)` and `manager_text` is "no manager has picked this up" once `elapsed` is over two
-minutes (`NO_MANAGER_AFTER_MS`) and the sprint has no brief, else null, where `elapsed` is `now_ms`
-minus the stated time (`None` counts as no time elapsed). A project with a shown sprint is never
-quiet and never folded into the quiet group.
+`age_text(elapsed)`, where `elapsed` is `now_ms` minus the stated time (`None` counts as no time
+elapsed). A project with a shown sprint is never quiet and never folded into the quiet group.
 
 A shown sprint reads its manager's latest report (`SprintState.report`); with none, `progress`,
-`progress_text`, `status`, `status_age_text`, `next`, `milestone` and `tracker_url` are null,
+`progress_text`, `status`, `status_at`, `next`, `milestone` and `tracker_url` are null,
 `issues` is `[]` and `waiting` is 0. Each reported issue, ordered by number, has an effective
 `stage`: the report's own when it is `landed` or `held` (an outcome the manager reported is kept
 against any run), else the stage of the sprint's observation of that issue (`SprintState.observed`),
@@ -170,6 +173,17 @@ the report's phase is `done`, `done`; `waiting` is above 0, `waiting` ("waiting 
 `quiet_elapsed` reaches `QUIET_AFTER_MS`, `quiet` ("quiet for <n> min \u2014 may be stuck"); the
 phase is `closing`, `closing`; no report, `starting`; else `on_track` ("on track").
 `status_at` is the report's own time, which the page words against its own clock.
+`manager_state`, `manager_text` and `retry` are all `sprints.manager_status` (its docstring holds
+the rules, so the view and the service's retry agree) over the sprint, whether it has a listed
+session of its own (below) and `now_ms`; `manager_until` is the `until` of a `waiting` manager, else
+null. `derive_view(..., managers=False)` is a host that cannot start managers: every sprint is
+`unavailable` with `UNAVAILABLE_TEXT` and no retry, and the view's top-level `managers` is the flag
+(default true).
+A listed session of the sprint's project whose name is `manager.session_name(project_id,
+sprint_id)` is one of that sprint's `sessions` (ordered and shaped as in the line), not of the
+project's `outside_sprints`, and is counted in none of its numbers or its summary; inside a sprint
+a session waiting for an answer or a permission reads "waiting for an answer" or "waiting for a
+permission".
 `recent_projects` is every registered project id, newest `last_seq` first, then `project_id`
 (always present, possibly empty); it derives from the states alone.
 `encode_view` writes sorted keys, compact separators, non-ASCII kept, NaN
@@ -193,6 +207,7 @@ from agent_tools.console.deliveries import (
     stage_text,
 )
 from agent_tools.console.event_log import Event
+from agent_tools.console.manager import session_name
 from agent_tools.console.sessions import (
     ENDED,
     IDLE,
@@ -214,8 +229,6 @@ from agent_tools.console.sprints import (
     DRAFTING_TEXT,
     HELD,
     LANDED,
-    NO_MANAGER_AFTER_MS,
-    NO_MANAGER_TEXT,
     NONE,
     ON_TRACK,
     ON_TRACK_TEXT,
@@ -227,6 +240,7 @@ from agent_tools.console.sprints import (
     WAITING_TEXT,
     SprintState,
     age_text,
+    manager_status,
     progress_text,
 )
 
@@ -240,6 +254,8 @@ UNMANAGED_LABEL = "Not yet managed"
 _RANK = {state: rank for rank, state in enumerate(
     (WAITING_ANSWER, WAITING_PERMISSION, WORKING, LIMIT, IDLE))}
 _WAITING = (WAITING_ANSWER, WAITING_PERMISSION)
+_SPRINT_STATE_TEXT = {**STATE_TEXT, WAITING_ANSWER: "waiting for an answer",
+                      WAITING_PERMISSION: "waiting for a permission"}
 _SUMMARY_PARTS = (
     ("working", (WORKING,)),
     ("waiting", _WAITING),
@@ -443,24 +459,28 @@ def _delivery_entry(state: DeliveryState, now_ms: int | None) -> dict:
 
 def _session_entry(session: SessionState,
                    deliveries: Mapping[str, Sequence[DeliveryState]],
-                   now_ms: int | None) -> dict:
+                   now_ms: int | None,
+                   texts: Mapping[str, str] = STATE_TEXT) -> dict:
     runs = sorted(deliveries.get(session.session_id, ()),
                   key=lambda d: (-d.moved_ms, d.run_id))
     return {
         "session_id": session.session_id,
         "name": session.name or session.session_id[:8],
         "state": session.state,
-        "state_text": STATE_TEXT[session.state],
+        "state_text": texts[session.state],
         "cwd": session.cwd,
         "deliveries": [_delivery_entry(d, now_ms) for d in runs],
     }
 
 
+def _ordered(sessions: Iterable[SessionState]) -> list[SessionState]:
+    return sorted(sessions, key=lambda s: (_RANK[s.state], -s.last_seq, s.session_id))
+
+
 def _line(sessions: Iterable[SessionState],
           deliveries: Mapping[str, Sequence[DeliveryState]],
           now_ms: int | None) -> dict:
-    ordered = sorted(sessions, key=lambda s: (
-        _RANK[s.state], -s.last_seq, s.session_id))
+    ordered = _ordered(sessions)
     summary = ", ".join(
         f"{n} {text}" for text, members in _SUMMARY_PARTS
         if (n := sum(s.state in members for s in ordered)))
@@ -524,7 +544,9 @@ def sprint_state(state: SprintState, now_ms: int | None, waiting: int) -> tuple[
     return ON_TRACK, ON_TRACK_TEXT
 
 
-def _sprint_entry(state: SprintState, now_ms: int | None,
+def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
+                  sessions: Sequence[SessionState],
+                  deliveries: Mapping[str, Sequence[DeliveryState]],
                   records: Sequence[InboxRecord] = ()) -> dict:
     stated_ms = _millis(state.stated_at)
     elapsed = 0 if now_ms is None else now_ms - stated_ms
@@ -538,6 +560,7 @@ def _sprint_entry(state: SprintState, now_ms: int | None,
         "held": sum(stage == HELD for _, stage, _ in stages),
         "total": len(stages),
     }
+    manager_state, manager_text, retry = manager_status(state, bool(sessions), now_ms, managers)
     name, text = sprint_state(state, now_ms, waiting)
     return {
         "type": "sprint",
@@ -547,8 +570,11 @@ def _sprint_entry(state: SprintState, now_ms: int | None,
         "state_text": text,
         "stated_at": state.stated_at,
         "age_text": age_text(elapsed),
-        "manager_text": (NO_MANAGER_TEXT
-                         if state.brief is None and elapsed > NO_MANAGER_AFTER_MS else None),
+        "manager_text": manager_text,
+        "manager_state": manager_state,
+        "manager_until": (state.manager.until
+                          if manager_state == WAITING and state.manager is not None else None),
+        "retry": retry,
         "progress": None if report is None else counts,
         "progress_text": None if report is None else progress_text(
             counts["landed"], counts["total"], counts["in_delivery"], counts["queued"],
@@ -561,6 +587,8 @@ def _sprint_entry(state: SprintState, now_ms: int | None,
         "issues": [{"issue": issue, "stage": stage, "stage_text": text}
                    for issue, stage, text in stages],
         "waiting": waiting,
+        "sessions": [_session_entry(s, deliveries, now_ms, _SPRINT_STATE_TEXT)
+                     for s in _ordered(sessions)],
     }
 
 
@@ -568,6 +596,8 @@ def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
                    deliveries: Mapping[str, Sequence[DeliveryState]],
                    now_ms: int | None,
                    sprints: Sequence[SprintState] = (),
+                   managers: bool = True,
+                   sprint_sessions: Mapping[str, Sequence[SessionState]] | None = None,
                    records: Sequence[InboxRecord] = ()) -> dict:
     return {
         "type": "project",
@@ -576,7 +606,8 @@ def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
         "quiet": state.open_work == 0 and not sessions and not sprints,
         "open_work": state.open_work,
         "last_activity": state.last_at,
-        "sprints": [_sprint_entry(s, now_ms, records) for s in sprints],
+        "sprints": [_sprint_entry(s, now_ms, managers, (sprint_sessions or {}).get(s.sprint_id, ()),
+                                  deliveries, records) for s in sprints],
         "outside_sprints": _line(sessions, deliveries, now_ms),
     }
 
@@ -638,6 +669,7 @@ def derive_view(
     deliveries: Mapping[tuple[str, str], DeliveryState] | None = None,
     now_ms: int | None = None,
     sprints: Mapping[str, SprintState] | None = None,
+    managers: bool = True,
 ) -> dict:
     states = list(states)
     capacity = EMPTY if capacity is None else capacity
@@ -694,6 +726,15 @@ def derive_view(
         else:
             owned.setdefault(project_id, []).append(session)
 
+    in_sprint: dict[str, list[SessionState]] = {}
+    for project_id, group in drafted.items():
+        for sprint in group:
+            name = session_name(project_id, sprint.sprint_id)
+            mine = [s for s in owned.get(project_id, ()) if s.name == name]
+            if mine:
+                in_sprint[sprint.sprint_id] = mine
+                owned[project_id] = [s for s in owned[project_id] if s.name != name]
+
     def is_active(state: ProjectState) -> bool:
         return (state.open_work > 0 or state.project_id in owned
                 or state.project_id in drafted)
@@ -704,10 +745,10 @@ def derive_view(
     for record in open_items:
         open_by_project.setdefault(record.item["project_id"], []).append(record)
     entries = [_project_entry(s, owned.get(s.project_id, ()), runs, now_ms,
-                              drafted.get(s.project_id, ()),
+                              drafted.get(s.project_id, ()), managers, in_sprint,
                               open_by_project.get(s.project_id, ()))
                for s in active]
-    quiet_entries = [_project_entry(s, (), runs, now_ms) for s in quiet]
+    quiet_entries = [_project_entry(s, (), runs, now_ms, (), managers) for s in quiet]
     if len(quiet_entries) <= FOLD_AFTER:
         entries.extend(quiet_entries)
     else:
@@ -734,6 +775,7 @@ def derive_view(
             for root in sorted(unmanaged)],
         "recent_projects": [s.project_id for s in _order(states)],
         "digest": dict(digest) if digest is not None else None,
+        "managers": managers,
     }
 
 

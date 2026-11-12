@@ -149,6 +149,7 @@ class StateTest(Case):
         self.assertEqual(
             body, encode_view(derive_view(
                 project_states(svc.log.events()).values(),
+                managers=False,
                 digest=digest.digest([], None, datetime.fromtimestamp(1_800_000_000.0, timezone.utc)))))
         rows = support.log_rows(self.store)
         self.assertEqual([row[2] for row in rows], ["project.registered"] * 3)

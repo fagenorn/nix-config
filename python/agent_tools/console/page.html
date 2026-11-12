@@ -70,9 +70,9 @@ ul { list-style: none; }
 .abox .meta { margin-top: 6px; }
 .abox .meta.now { color: var(--text); }
 .abox .opts { list-style: none; padding-left: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; margin-top: 4px; }
-.opt, .send, .undo, .approve, .reply-send, .goal-open, .goal-send, .goal-cancel, .goal-project, .withdraw, .abox button[class^="ans-"] { display: inline-flex; align-items: baseline; gap: 8px; font: inherit; color: inherit; text-align: left; background: none; border: 1px solid var(--hair); border-radius: 8px; padding: 2px 10px; cursor: pointer; transition: background-color .16s; }
-.opt:hover:enabled, .send:hover:enabled, .undo:hover:enabled, .approve:hover:enabled, .reply-send:hover:enabled, .goal-open:hover:enabled, .goal-send:hover:enabled, .goal-cancel:hover:enabled, .goal-project:hover:enabled, .withdraw:hover:enabled, .abox button[class^="ans-"]:hover:enabled { background: rgba(202, 211, 245, .05); }
-.opt:disabled, .send:disabled, .reply-send:disabled, .goal-send:disabled, .withdraw:disabled, .abox button[class^="ans-"]:disabled { cursor: default; }
+.opt, .send, .undo, .approve, .reply-send, .goal-open, .goal-send, .goal-cancel, .goal-project, .withdraw, .retry, .abox button[class^="ans-"] { display: inline-flex; align-items: baseline; gap: 8px; font: inherit; color: inherit; text-align: left; background: none; border: 1px solid var(--hair); border-radius: 8px; padding: 2px 10px; cursor: pointer; transition: background-color .16s; }
+.opt:hover:enabled, .send:hover:enabled, .undo:hover:enabled, .approve:hover:enabled, .reply-send:hover:enabled, .goal-open:hover:enabled, .goal-send:hover:enabled, .goal-cancel:hover:enabled, .goal-project:hover:enabled, .withdraw:hover:enabled, .retry:hover:enabled, .abox button[class^="ans-"]:hover:enabled { background: rgba(202, 211, 245, .05); }
+.opt:disabled, .send:disabled, .reply-send:disabled, .goal-send:disabled, .withdraw:disabled, .retry:disabled, .abox button[class^="ans-"]:disabled { cursor: default; }
 .abox button[class^="ans-"]:disabled { color: var(--ov2); }
 .abox .detail { margin-top: 6px; padding: 6px 10px; max-height: 24rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: .84375rem; color: var(--sub0); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; }
 .card .detail, .rest .detail, .done .detail { flex-basis: 100%; margin: 6px 0 0; padding: 6px 10px; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: .84375rem; color: var(--sub0); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; }
@@ -94,7 +94,7 @@ ul { list-style: none; }
 .sprints { flex: 1 0 100%; padding: 0 0 0 16px; }
 .sprint { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; font-size: .8125rem; color: var(--sub0); }
 .sprint .goal-line { color: var(--text); overflow-wrap: anywhere; }
-.sprint .age, .sprint .manager, .sprint .status-age { color: var(--ov2); }
+.sprint .age, .sprint .manager, .sprint .until, .sprint .status-age { color: var(--ov2); }
 .sprint .progress::before { content: "\2014  "; }
 .sprint-detail { flex: 1 0 100%; font-size: .8125rem; }
 .sprint-detail summary { cursor: pointer; color: var(--ov2); }
@@ -102,6 +102,8 @@ ul { list-style: none; }
 .sprint-detail li { display: flex; flex-wrap: wrap; gap: 0 10px; color: var(--sub0); }
 .sprint-detail p { color: var(--sub0); }
 .sprint-detail .tracker { color: var(--lav); text-underline-offset: 3px; }
+.sprint-sessions { flex: 1 0 100%; list-style: none; padding: 0 0 0 16px; }
+.sprint-session { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; }
 .act { flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin-top: 8px; font-size: .8125rem; color: var(--ov2); }
 .fail { color: var(--red); }
 #digest { margin-top: 40px; max-width: 44rem; }
@@ -275,6 +277,7 @@ function sprintDetail(sprint) {
   return fold;
 }
 const withdrawals = new Map();
+const retries = new Map();
 const latestSprints = new Map();
 function fillSprint(item, entry, sprint) {
   const state = withdrawals.get(sprint.sprint_id);
@@ -301,6 +304,18 @@ function fillSprint(item, entry, sprint) {
   if (sprint.manager_text !== null && sprint.manager_text !== undefined) {
     item.appendChild(el("span", "manager", sprint.manager_text));
   }
+  if (typeof sprint.manager_until === "string") {
+    item.appendChild(timeEl("weekday", sprint.manager_until, "until"));
+  }
+  const retrying = retries.get(sprint.sprint_id);
+  if (sprint.retry === true) {
+    const again = actionButton("retry", "Retry", () => retry(item, entry, sprint));
+    if (retrying !== undefined && retrying.phase === "sending") again.setAttribute("disabled", "");
+    item.appendChild(again);
+  }
+  if (sprint.retry === true && retrying !== undefined && retrying.phase === "failed") {
+    item.appendChild(el("span", "fail", "Could not retry: " + retrying.reason));
+  }
   const button = actionButton("withdraw", "Withdraw", () => withdraw(item, entry, sprint));
   if (state !== undefined && state.phase === "sending") button.setAttribute("disabled", "");
   item.appendChild(button);
@@ -311,6 +326,17 @@ function fillSprint(item, entry, sprint) {
   }
   if (state !== undefined && state.phase === "failed") {
     item.appendChild(el("span", "fail", "Could not withdraw: " + state.reason));
+  }
+  const sessions = sprint.sessions || [];
+  if (sessions.length > 0) {
+    const list = el("ul", "sprint-sessions");
+    for (const session of sessions) {
+      const row = el("li", "sprint-session");
+      row.appendChild(el("span", "", session.name));
+      row.appendChild(el("span", "s-" + session.state, session.state_text));
+      list.appendChild(row);
+    }
+    item.appendChild(list);
   }
 }
 async function withdraw(item, entry, sprint) {
@@ -336,6 +362,38 @@ async function withdraw(item, entry, sprint) {
   }
   if (withdrawals.get(id) !== state) return;
   if (reason === null) withdrawals.delete(id);
+  else {
+    state.phase = "failed";
+    state.reason = reason;
+  }
+  const latest = latestSprints.get(id);
+  for (const row of document.querySelectorAll("li.sprint")) {
+    if (row.dataset.sprintId === id) fillSprint(row, latest.entry, latest.sprint);
+  }
+}
+async function retry(item, entry, sprint) {
+  const id = sprint.sprint_id;
+  const current = retries.get(id);
+  if (current !== undefined && current.phase === "sending") return;
+  const state = { phase: "sending", reason: "" };
+  retries.set(id, state);
+  fillSprint(item, entry, sprint);
+  let reason = null;
+  try {
+    const response = await fetch("/api/retry-manager", {
+      method: "POST",
+      headers: { "X-Console-Token": token, "Content-Type": "application/json" },
+      body: JSON.stringify({ project_id: entry.project_id, sprint_id: id }),
+    });
+    if (response.status !== 204) {
+      reason = (await response.text()).trim() || "HTTP " + response.status;
+    }
+  } catch (error) {
+    console.error(error);
+    reason = "the console did not answer";
+  }
+  if (retries.get(id) !== state) return;
+  if (reason === null) retries.delete(id);
   else {
     state.phase = "failed";
     state.reason = reason;
@@ -1188,10 +1246,17 @@ function renderProjects(view) {
   const list = el("ul");
   list.id = "list";
   const live = new Set();
+  const retryable = new Set();
   for (const entry of view.entries) {
     for (const project of entry.type === "quiet_group" ? entry.projects : [entry]) {
-      for (const sprint of project.sprints || []) live.add(sprint.sprint_id);
+      for (const sprint of project.sprints || []) {
+        live.add(sprint.sprint_id);
+        if (sprint.retry === true) retryable.add(sprint.sprint_id);
+      }
     }
+  }
+  for (const id of [...retries.keys()]) {
+    if (!retryable.has(id)) retries.delete(id);
   }
   for (const id of [...withdrawals.keys()]) {
     if (!live.has(id)) withdrawals.delete(id);
