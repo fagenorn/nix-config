@@ -373,7 +373,7 @@ class DocsTreeTest(unittest.TestCase):
         for term in ("Console", "Inbox item", "Quiet project", "Answered item",
                      "Held work", "Waiting since", "Session", "Outside sprints",
                      "Not yet managed", "Delivery run", "Goal", "Sprint", "Brief",
-                     "Message", "Nudge"):
+                     "Message", "Nudge", "Question round"):
             self.assertIn([term, "Console"], cells)
         self.assertIn("- **Console → Claims**:", text)
 
@@ -547,8 +547,24 @@ class DocsTreeTest(unittest.TestCase):
         for needle in ("/api/message", "/api/inbox", "/api/message-reply"):
             self.assertIn(needle, write)
         kept = self.doc("docs/areas/console/adr/009-events-are-kept-for-90-days.md")
-        for needle in ("sprint.messaged", "schema 6"):
+        for needle in ("sprint.messaged", "schema 6", "questions.asked",
+                       "question.answered", "schema 7", "schema 8"):
             self.assertIn(needle, kept)
+
+    def test_the_console_question_decision_is_recorded(self):
+        path = "docs/areas/console/adr/019-a-managers-questions-arrive-as-inbox-items.md"
+        first = (REPO_ROOT / path).read_text().splitlines()[0]
+        self.assertEqual(first, "# ADR-console-019 — A manager's questions arrive as inbox "
+                                "items and are answered on the page")
+        adr = self.doc(path)
+        for needle in ("sprint ask", "POST /api/ask", "POST /api/round-answer",
+                       "questions.asked", "question.answered", "schema 8", "blocker",
+                       "may I proceed", "ADR-console-008", "ADR-console-016",
+                       "#826", "#836", "#891"):
+            self.assertIn(needle, adr)
+        write = self.doc("docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md")
+        for needle in ("/api/round-answer", "/api/ask"):
+            self.assertIn(needle, write)
 
     def test_the_console_delivery_decision_is_recorded(self):
         path = "docs/areas/console/adr/005-in-flight-delivery-stage-is-read-from-run-journals.md"

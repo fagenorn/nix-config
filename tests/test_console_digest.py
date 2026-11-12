@@ -9,13 +9,13 @@ from pathlib import Path
 
 from agent_tools.claims import forge_owner_action as foa
 from agent_tools.console.digest import (
-    BRIEF_APPROVED_MOMENT, BRIEF_SENT_MOMENT, EARLIER_MAX, FIRST_VISIT, LOOKED, SHOWN,
+    ANSWER_DIFFERS, BRIEF_APPROVED_MOMENT, BRIEF_SENT_MOMENT, EARLIER_MAX, FIRST_VISIT, LOOKED, SHOWN,
     SPRINT_DONE_MOMENT, SPRINT_STATE_MOMENT, SPRINT_WITHDRAWN, Moment, digest, keep, last_looked,
     moments)
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
-    MANAGER_STALLED, MANAGER_STARTED, MANAGER_WOKEN, SPRINT_CLOSED, SPRINT_REPORTED,
-    SPRINT_STOP_REQUESTED, Event)
+    MANAGER_STALLED, MANAGER_STARTED, MANAGER_WOKEN, QUESTION_ANSWERED, SPRINT_CLOSED,
+    SPRINT_REPORTED, SPRINT_STOP_REQUESTED, Event)
 from agent_tools.console.sessions import SessionState
 from agent_tools.console.sprints import sprint_states
 from agent_tools.console.view import InboxRecord
@@ -339,6 +339,37 @@ class DigestTest(unittest.TestCase):
         self.assertEqual(found, [
             (4, f"The sprint for owner/p00 is now waiting on you (1): {goal}"),
             (7, f"The sprint for owner/p00 is now done: {goal}")])
+
+
+class QuestionDigestTest(unittest.TestCase):
+    ROW = {"sprint_id": "a" * 16, "goal": "make the importer resumable", "round": 41, "index": 0,
+           "question": "Which store keeps the checkpoints?", "answer": "sqlite",
+           "chosen": "sqlite", "recommended": "files", "differs": True}
+
+    def made(self, project="owner/p01", **change):
+        payload = {**self.ROW, **change}
+        payload = {k: v for k, v in payload.items() if v is not ...}
+        return digest(moments([Event(7, at(30), QUESTION_ANSWERED, project, payload)], {}, {}),
+                      LOOK, NOW)["recent"]
+
+    def test_an_answer_that_differs_from_the_recommendation_is_a_moment(self):
+        found = self.made()
+        self.assertEqual(sentences(found), [
+            "An answer for owner/p01 went against the recommendation, files: "
+            "Which store keeps the checkpoints?"])
+        self.assertEqual(found[0]["kind"], "answer_differs")
+        self.assertEqual(ANSWER_DIFFERS, "answer_differs")
+
+    def test_an_answer_that_does_not_differ_or_lacks_a_member_says_nothing(self):
+        for name, found in (
+                ("agrees", self.made(differs=False)),
+                ("no differs", self.made(differs=...)),
+                ("no project", self.made(project=None)),
+                ("question not a string", self.made(question=3)),
+                ("recommended not a string", self.made(recommended=None)),
+                ("differs not a bool", self.made(differs=1))):
+            with self.subTest(name):
+                self.assertEqual(found, [])
 
 
 if __name__ == "__main__":

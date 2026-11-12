@@ -28,13 +28,15 @@ Routes (every response carries `Cache-Control: no-store` and
     POST /api/close 200 application/json, a manager sends a sprint's closing report (below)
     POST /api/inbox 200 application/json, a manager reads a sprint's unread messages (below)
     POST /api/message-reply 200 application/json, a manager answers one message (below)
+    POST /api/ask   200 application/json, a manager sends a round of questions (below)
+    POST /api/round-answer 204, a JSON body, the page answers one question (below)
     POST /api/recap 200 application/json, a manager reads what it needs to pick a sprint up (below)
     GET /api/sprint-status?sprint_id=<id> 200 application/json, what became of a brief (below)
     anything else   404
     other methods   405 with `Allow: GET` (`Allow: POST` on `/api/hooks`, `/api/readings`,
                     `/api/looked`, `/api/answer`, `/api/check-answer`, `/api/goal`, `/api/withdraw`,
                     `/api/approve`, `/api/reply`, `/api/retry-manager`, `/api/message`, `/api/stop`, `/api/brief`, `/api/report`,
-                    `/api/close`, `/api/inbox`, `/api/message-reply` and `/api/recap`)
+                    `/api/close`, `/api/inbox`, `/api/message-reply`, `/api/recap`, `/api/ask` and `/api/round-answer`)
 
 Two kinds of write exist. The hook and reading routes append what the proxies and hooks observe:
 `POST /api/hooks` appends session observations, `POST /api/readings` the capacity kinds
@@ -56,7 +58,7 @@ route carries no token: it records observations and answers nothing (ADR-console
 
 A page write (`PAGE_WRITES`, today `POST /api/looked`, `POST /api/answer`, `POST /api/check-answer`,
 `POST /api/goal`, `POST /api/withdraw`, `POST /api/approve`, `POST /api/reply`,
-`POST /api/retry-manager`, `POST /api/message` and `POST /api/stop`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
+`POST /api/retry-manager`, `POST /api/message`, `POST /api/stop` and `POST /api/round-answer`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
 alone and goes through one guard, `_page_write`, whatever its route. After the loopback `Host`
 check and before any body is read, exactly one `Origin` header must equal `http://<Host>` (else
 403 `text/plain` `origin refused`) and exactly one `X-Console-Token` header must equal the
@@ -102,7 +104,11 @@ the reason, any other exception is `console: message_failed <Type>: <message>` a
 failed`; success is an empty `204`. `POST /api/stop` (#892) runs the same checks with
 `MAX_STOP_BYTES` (4096) and `sprints.parse_stop`: 400 `bad stop`, `sprints.Refused` is one stderr
 line `console: stop_refused <reason>` and 409 with the reason, any other exception is `console:
-stop_failed <Type>: <message>` and 500 `stop failed`; success is an empty `204`. The token is created once in
+stop_failed <Type>: <message>` and 500 `stop failed`; success is an empty `204`. `POST /api/round-answer` (#891) runs the same checks with
+`MAX_ROUND_ANSWER_BYTES` (16384) and `sprints.parse_round_answer`: 400 `bad round answer`,
+`sprints.Refused` is one stderr line `console: round_answer_refused <reason>` and 409 with the
+reason, any other exception is `console: round_answer_failed <Type>: <message>` and 500 `round
+answer failed`; success is an empty `204`. The token is created once in
 `page-token` beside the event log and reaches a client only inside `GET /`, where it replaces
 the slot in the page's `console-token` meta tag.
 
@@ -194,6 +200,31 @@ nothing, publishes nothing and marks nothing read. It answers 200 `application/j
 `report` is null until a report is sent, else the last report `{"at", "status", "phase",
 "milestone", "tracker_url", "issues": [{"issue", "stage"}, ...], "inbox", "next"}`, which a newer
 brief does not remove; `unread` is the number of the owner's messages not yet read.
+
+Questions (#891): `POST /api/ask` is a manager write dispatched like `/api/brief`, before
+`PAGE_WRITES`: `_checked_length(MAX_ASK_BYTES)` (65536: any `Origin` 403 `origin refused`, 415, 411,
+413), a body `sprints.parse_ask_request` does not accept is 400 `bad round`, a `sprints.SecretRefused`
+is `console: ask_refused <sprint_id> secret refused` and 403 `secret refused`, any other
+`sprints.Refused` is `console: ask_refused <sprint_id> <reason>` and 409 with the reason, any other
+exception is `console: ask_failed <Type>: <message>` and 500 `ask failed`; success is 200
+`application/json` `{"questions":<n>,"round":<id>}` (sorted keys, compact). `ask_questions(sprint_id,
+secret, round_)`, under the ingest lock, is `_manager_sprint` (`NOT_OPEN`, then `SecretRefused`),
+`Refused(NOT_STARTED)` unless the sprint's brief is approved, `Refused(ENDED)` unless
+`sprints.takes_questions` (a stopped, closed or ended sprint asks no more), `sprints.checked_round`, then
+`Refused(ROUND_OPEN)` when a question is open and the round is not a blocker; it appends exactly one
+`questions.asked` row `{"sprint_id", "goal", "blocker", "questions"}` (the checked round), folds,
+publishes and returns the row's `seq` (the round's id) and the question count; it nudges nobody.
+`answer_question(project_id, sprint_id, round_id, index, choice, text)`, under the lock, raises
+`Refused(NOT_OPEN)` unless the sprint is open and of that project, `ENDED` unless
+`sprints.takes_questions`, `UNKNOWN_QUESTION` unless
+`(round_id, index)` is one of its questions, `ANSWERED_ALREADY` when it is answered, with a choice
+`NOT_AN_OPTION` unless it indexes an option, with text whatever `sprints.checked_message` refuses;
+the answer is the option or the text exactly, `chosen` the option or None, `differs` is `chosen`
+not being the recommendation. It appends exactly one `question.answered` row `{"sprint_id",
+"goal", "round", "index", "question", "answer", "chosen", "recommended", "differs"}`, folds,
+publishes, nudges the manager as `send_message` does and returns the row's `seq`, the message's id.
+Every refusal appends and publishes nothing, and neither the secret nor the owner's text appears
+in a stderr line.
 
 Reports (#890): `POST /api/report` is a manager write like the brief's: no token, the sprint's secret
 in its place. After the loopback `Host` check it runs `_checked_length(MAX_REPORT_BYTES)`, 65536
@@ -545,8 +576,9 @@ from agent_tools.console import (
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
     MANAGER_STALLED, MANAGER_STARTED, MANAGER_STOP_FAILED, MANAGER_STOPPED, MANAGER_WAITING,
-    MANAGER_WOKEN, SPRINT_ANSWERED, SPRINT_MESSAGED, SPRINT_NUDGED, SPRINT_CLOSED, SPRINT_READ,
-    SPRINT_REPORTED, SPRINT_STOP_REQUESTED, Event, EventLog, utc_now)
+    MANAGER_WOKEN, QUESTION_ANSWERED, QUESTIONS_ASKED, SPRINT_ANSWERED, SPRINT_MESSAGED,
+    SPRINT_NUDGED, SPRINT_CLOSED, SPRINT_READ, SPRINT_REPORTED, SPRINT_STOP_REQUESTED, Event,
+    EventLog, utc_now)
 from agent_tools.console.view import (
     INBOX_CHANGED, ReadState, derive_view, encode_view, health_change, inbox_changes, inbox_records,
     project_for, project_states, read_states, registry_changes, sprint_waiting)
@@ -588,10 +620,12 @@ STATUS_PATH = "/api/sprint-status"
 MESSAGE_PATH = "/api/message"
 INBOX_PATH = "/api/inbox"
 MESSAGE_REPLY_PATH = "/api/message-reply"
+ASK_PATH = "/api/ask"
+ROUND_ANSWER_PATH = "/api/round-answer"
 CHECK_PATH = "/api/check-answer"
 PAGE_WRITES: frozenset[str] = frozenset({
     LOOKED_PATH, ANSWER_PATH, CHECK_PATH, GOAL_PATH, WITHDRAW_PATH, APPROVE_PATH, REPLY_PATH,
-    RETRY_PATH, MESSAGE_PATH, STOP_PATH})
+    RETRY_PATH, MESSAGE_PATH, STOP_PATH, ROUND_ANSWER_PATH})
 MAX_ANSWER_BYTES = 4096
 MAX_GOAL_BYTES = 16384
 MAX_WITHDRAW_BYTES = 4096
@@ -601,8 +635,10 @@ MAX_CLOSE_BYTES = 65536
 MAX_STOP_BYTES = 4096
 RECAP_PATH = "/api/recap"
 MANAGER_WRITES: frozenset[str] = frozenset({BRIEF_PATH, REPORT_PATH, CLOSE_PATH, INBOX_PATH,
-                                            MESSAGE_REPLY_PATH, RECAP_PATH})
+                                            MESSAGE_REPLY_PATH, RECAP_PATH, ASK_PATH})
 MAX_RECAP_BYTES = 4096
+MAX_ASK_BYTES = 65536
+MAX_ROUND_ANSWER_BYTES = 16384
 MAX_MESSAGE_BYTES = 16384
 MAX_INBOX_BYTES = 4096
 MAX_MESSAGE_REPLY_BYTES = 16384
@@ -749,6 +785,8 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return self._inbox_request()
         if route == MESSAGE_REPLY_PATH:
             return self._message_reply_request()
+        if route == ASK_PATH:
+            return self._ask_request()
         if route == RECAP_PATH:
             return self._recap_request()
         if route in PAGE_WRITES:
@@ -1010,6 +1048,54 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return self._refuse(500, "message reply failed")
         self._send(200, "application/json", json.dumps({"at": at}, separators=(",", ":")).encode())
 
+    def _ask_request(self):
+        """The manager's route: a round of questions sent with the sprint's secret."""
+        length = self._checked_length(MAX_ASK_BYTES)
+        if length is None:
+            return
+        self.close_connection = True
+        try:
+            sprint_id, secret, round_ = sprints.parse_ask_request(self.rfile.read(length))
+        except ValueError:
+            return self._refuse(400, "bad round")
+        try:
+            round_id, count = self.server.console.ask_questions(sprint_id, secret, round_)
+        except sprints.SecretRefused:
+            print(f"console: ask_refused {sprint_id} {sprints.SECRET_REFUSED}", file=sys.stderr)
+            return self._refuse(403, sprints.SECRET_REFUSED)
+        except sprints.Refused as error:
+            print(f"console: ask_refused {sprint_id} {error}", file=sys.stderr)
+            return self._refuse(409, str(error))
+        except Exception as error:
+            print(f"console: ask_failed {type(error).__name__}: {error}", file=sys.stderr)
+            return self._refuse(500, "ask failed")
+        self._send(200, "application/json", json.dumps(
+            {"questions": count, "round": round_id}, sort_keys=True,
+            separators=(",", ":")).encode())
+
+    def _round_answer_request(self, console: "ConsoleService") -> bool:
+        """Read and carry out the owner's answer to one question; False when it was refused."""
+        body = self._json_body(MAX_ROUND_ANSWER_BYTES)
+        if body is None:
+            return False
+        try:
+            parsed = sprints.parse_round_answer(body)
+        except ValueError:
+            self._refuse(400, "bad round answer")
+            return False
+        try:
+            console.answer_question(*parsed)
+        except sprints.Refused as error:
+            print(f"console: round_answer_refused {error}", file=sys.stderr)
+            self._refuse(409, str(error))
+            return False
+        except Exception as error:
+            print(f"console: round_answer_failed {type(error).__name__}: {error}",
+                  file=sys.stderr)
+            self._refuse(500, "round answer failed")
+            return False
+        return True
+
     def _message_request(self, console: "ConsoleService") -> bool:
         """Read and carry out an owner's message; False when it was refused."""
         body = self._json_body(MAX_MESSAGE_BYTES)
@@ -1147,6 +1233,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         elif route == MESSAGE_PATH:
             self.close_connection = True
             if not self._message_request(console):
+                return
+        elif route == ROUND_ANSWER_PATH:
+            self.close_connection = True
+            if not self._round_answer_request(console):
                 return
         elif route == STOP_PATH:
             self.close_connection = True
@@ -2241,6 +2331,54 @@ class ConsoleService:
                 "sprint_id": sprint_id, "message": message_id, "reply": reply})])
             self._apply(appended)
             return appended[-1].at
+
+    def ask_questions(self, sprint_id: str, secret: str, round_: dict) -> tuple[int, int]:
+        """Append one `questions.asked` event for an approved sprint; the round's id and size."""
+        with self._ingest:
+            sprint = self._manager_sprint(sprint_id, secret)
+            if sprint.state != sprints.STARTING:
+                raise sprints.Refused(sprints.NOT_STARTED)
+            if not sprints.takes_questions(sprint):
+                raise sprints.Refused(sprints.ENDED)
+            checked = sprints.checked_round(round_)
+            if sprints.round_open(sprint) and not checked["blocker"]:
+                raise sprints.Refused(sprints.ROUND_OPEN)
+            appended = self.log.append([(QUESTIONS_ASKED, sprint.project_id, {
+                "sprint_id": sprint_id, "goal": sprint.goal, "blocker": checked["blocker"],
+                "questions": checked["questions"]})])
+            self._apply(appended)
+            return appended[-1].seq, len(checked["questions"])
+
+    def answer_question(self, project_id: str, sprint_id: str, round_id: int, index: int,
+                        choice: int | None, text: str | None) -> int:
+        """Append one `question.answered` event, a message to the manager; its id."""
+        with self._ingest:
+            sprint = self._sprints.get(sprint_id)
+            if sprint is None or sprint.project_id != project_id:
+                raise sprints.Refused(sprints.NOT_OPEN)
+            if not sprints.takes_questions(sprint):
+                raise sprints.Refused(sprints.ENDED)
+            asked = next((question for question in sprint.questions
+                          if (question.round_id, question.index) == (round_id, index)), None)
+            if asked is None:
+                raise sprints.Refused(sprints.UNKNOWN_QUESTION)
+            if asked.answer is not None:
+                raise sprints.Refused(sprints.ANSWERED_ALREADY)
+            if choice is not None:
+                if not 0 <= choice < len(asked.options):
+                    raise sprints.Refused(sprints.NOT_AN_OPTION)
+                chosen = answer = asked.options[choice]
+            else:
+                chosen, answer = None, sprints.checked_message(text)
+            appended = self.log.append([(QUESTION_ANSWERED, project_id, {
+                "sprint_id": sprint_id, "goal": sprint.goal, "round": round_id, "index": index,
+                "question": asked.question, "answer": answer, "chosen": chosen,
+                "recommended": asked.recommended, "differs": chosen != asked.recommended})])
+            self._apply(appended)
+            reserved = self._reserve_nudge(sprint_id)
+        if reserved:
+            self._dispatch_nudge(sprint_id)
+        return appended[-1].seq
 
     def sprint_status(self, sprint_id: str) -> dict:
         """What became of a sprint's brief: its decision, version and the reply asking for changes."""

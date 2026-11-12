@@ -1396,12 +1396,12 @@ class LandTest(unittest.TestCase):
         self.assertNotIn("land-ask-1", labels(calls))
         self.assertIn(f"--match-head-commit {B}", prompt(calls, "land-merge-1"))
 
-    def test_a_rejected_resolution_is_conflict_without_an_owner_action(self):
+    def test_a_rejected_resolution_is_sync_review_without_an_owner_action(self):
         result, calls, _ = run(patch=BEHIND, replies={
             "land-sync-1-1": ABORTED, "land-sync-resolve-1-1": {"status": "done", "conflicted": True, "head": B, "merge_commit": B, "notes": "ok"},
             "land-sync-review-1-1": {"verdict": "findings", "findings": [{"severity": "important", "summary": "dropped a change"}]},
             "land-sync-rereview-1-1": {"verdict": "findings", "findings": [{"severity": "important", "summary": "dropped a change"}]}})
-        self.assertEqual(row(result, 1)["outcome"], "conflict")
+        self.assertEqual(row(result, 1)["outcome"], "sync-review")
         for label in ("land-ask-1", "release-1"):
             self.assertNotIn(label, labels(calls))
         ls = labels(calls)
@@ -2135,7 +2135,7 @@ def blocked_by(*issues):
 
 class SyncFixRoundTest(unittest.TestCase):
     """#907: a conflicted sync merge checks for conflict markers itself, and a sync-review finding gets one fix round and one
-    re-review before the landing ends as conflict."""
+    re-review before the landing ends as sync-review (#955: the merge is resolved, so the row is not a conflict one)."""
 
     FIXED = "f" * 40
     CONFLICTED = {"status": "done", "conflicted": True, "head": B, "merge_commit": B, "resolved_files": ["x.py"],
@@ -2199,10 +2199,21 @@ class SyncFixRoundTest(unittest.TestCase):
         self.assertIn(f"--sha {self.FIXED}", prompt(calls, "close-out-1"))
         self.assertEqual(labels(calls).count("land-unlock-1"), 1)
 
-    def test_a_finding_that_survives_the_fix_round_ends_conflict_with_its_reason(self):
-        result, calls, _ = self.land(**{"land-sync-review-1-1": self.FOUND, "land-sync-rereview-1-1": self.LEFT})
+    def test_a_finding_that_survives_the_fix_round_ends_sync_review_with_its_reason(self):
+        left = {"verdict": "findings", "findings": [dict(self.LEFT["findings"][0], file="docs/x.md"), {"severity": "minor", "summary": "style"}]}
+        out = run_full(patch=BEHIND, replies={"land-sync-1-1": ABORTED, "land-sync-resolve-1-1": self.CONFLICTED,
+                                              "land-sync-review-1-1": self.FOUND, "land-sync-rereview-1-1": left})
+        result, calls, logs = out["result"], out["calls"], out["logs"]
         got = row(result, 1)
-        self.assertEqual((got["outcome"], got["reason"]), ("conflict", "review finding: the sentence is still missing"))
+        reason = (f"sync-review of merge {B}: a finding survived the fix round; unaccepted fix commit {self.FIXED}; "
+                  "finding docs/x.md: the sentence is still missing")
+        self.assertEqual((got["outcome"], got["reason"]), ("sync-review", reason))
+        self.assertNotIn("detail", got)
+        # The table, the log and the relaunch show the same line; no owner action is posted, as for any other open row.
+        self.assertIn(f"#1: sync-review ({reason})", logs)
+        self.assertEqual(result["relaunch"]["reasons"], {"1": reason})
+        self.assertEqual(result["owner_actions"], [])
+        self.assertNotIn("owner_ask", got)
         # The pushed, unaccepted fix is named on the row.
         self.assertEqual(got["fix"], {"commit": self.FIXED, "notes": "ok"})
         ls = labels(calls)
@@ -2212,7 +2223,49 @@ class SyncFixRoundTest(unittest.TestCase):
         # The lock was released before the resolution, at the head it was held at, and nothing took it again.
         self.assertIn(f"forge-claim land release --repo owner/repo --branch dev --sha {SHA}\n", prompt(calls, "land-unlock-1"))
 
-    def test_a_fix_round_that_does_not_finish_ends_conflict_without_a_rereview(self):
+    def test_a_surviving_finding_with_a_long_summary_keeps_the_fix_commit_within_the_cap(self):
+        long = {"verdict": "findings", "findings": [{"severity": "critical", "file": "x.py", "summary": "the merge dropped a guard " * 40}]}
+        got = row(self.land(**{"land-sync-review-1-1": self.FOUND, "land-sync-rereview-1-1": long})[0], 1)
+        self.assertEqual((got["outcome"], len(got["reason"])), ("sync-review", 300))
+        self.assertTrue(got["reason"].startswith(f"sync-review of merge {B}: a finding survived the fix round; unaccepted fix commit "
+                                                 f"{self.FIXED}; finding x.py: the merge dropped a guard"))
+        self.assertTrue(got["reason"].endswith("..."))
+        self.assertNotIn("\n", got["reason"])
+
+    def test_a_rebuttal_the_rereview_rejects_ends_sync_review_without_a_fix_commit(self):
+        rebuttal = {"status": "done", "start_head": B, "commit": B, "notes": "the sentence is on line 12"}
+        result, _, _ = self.land(**{"land-sync-review-1-1": self.FOUND, "land-sync-fix-1-1": rebuttal, "land-sync-rereview-1-1": self.LEFT})
+        got = row(result, 1)
+        self.assertEqual((got["outcome"], got["reason"]), ("sync-review", f"sync-review of merge {B}: a finding survived the fix round "
+                                                           "(a rebuttal, no fix commit); finding the sentence is still missing"))
+
+    def test_a_lost_sync_review_ends_sync_review(self):
+        got = row(self.land(**{"land-sync-review-1-1": None})[0], 1)
+        self.assertEqual((got["outcome"], got["reason"]), ("sync-review", f"sync-review of merge {B}: the sync review returned nothing"))
+
+    def test_an_unresolved_merge_stays_conflict_with_its_own_reason(self):
+        """#955: only a merge that was not resolved is a conflict row: a blocked resolution here, the conflict-round bound in
+        test_a_third_conflict_aborts_and_posts_an_owner_action."""
+        got = row(self.land(**{"land-sync-resolve-1-1": {"status": "blocked", "conflicted": True, "notes": "too tangled"}})[0], 1)
+        self.assertEqual((got["outcome"], got["reason"]), ("conflict", "too tangled"))
+
+    def test_a_sync_review_row_is_relaunched_and_readopted_as_a_conflict_row_is(self):
+        """#955: the relaunch of a sync-review row differs from that of a conflict row only in its reason, and the new run takes both the same way."""
+        survived = self.land(**{"land-sync-review-1-1": self.FOUND, "land-sync-rereview-1-1": self.LEFT})[0]
+        blocked = self.land(**{"land-sync-resolve-1-1": {"status": "blocked", "conflicted": True, "notes": "too tangled"}})[0]
+        self.assertEqual([row(r, 1)["outcome"] for r in (survived, blocked)], ["sync-review", "conflict"])
+        self.assertEqual(without(survived["relaunch"], "reasons"), without(blocked["relaunch"], "reasons"))
+        self.assertEqual(survived["relaunch"]["issues"], [1])
+        self.assertEqual(survived["relaunch"]["conts"], PRE_MERGE_CONTS)
+        runs = [run(args=first["relaunch"], patch={"facts-1": dict(HELD, open_pr=OPEN_PR)},
+                    replies={"readopt-1": {"ok": False, "reason": "unaccepted", "detail": self.FIXED}}) for first in (survived, blocked)]
+        self.assertEqual(labels(runs[0][1]), labels(runs[1][1]))
+        ls = labels(runs[0][1])
+        self.assertLess(ls.index("readopt-1"), ls.index("child-1"))
+        self.assertLess(ls.index("child-1"), ls.index("land-pr-1"))
+        self.assertEqual(row(runs[0][0], 1)["outcome"], "landed")
+
+    def test_a_fix_round_that_does_not_finish_ends_sync_review_without_a_rereview(self):
         fixes = {"nothing": None, "blocked": {"status": "blocked", "notes": "no"},
                  "started elsewhere": {"status": "done", "start_head": "e" * 40, "commit": self.FIXED, "notes": "ok"},
                  "no commit and no evidence": {"status": "done", "start_head": B, "commit": B, "notes": ""}}
@@ -2220,19 +2273,22 @@ class SyncFixRoundTest(unittest.TestCase):
             with self.subTest(fix=name):
                 result, calls, _ = self.land(**{"land-sync-review-1-1": self.FOUND, "land-sync-fix-1-1": fix})
                 got = row(result, 1)
+                pushed = isinstance(fix, dict) and fix.get("commit") == self.FIXED
                 self.assertEqual((got["outcome"], got["reason"]),
-                                 ("conflict", "the sync fix round did not finish; review finding: dropped a sentence dev added"))
+                                 ("sync-review", f"sync-review of merge {B}: the sync fix round did not finish; "
+                                  + (f"unaccepted fix commit {self.FIXED}; " if pushed else "") + "finding dropped a sentence dev added"))
                 self.assertEqual(got.get("fix"), None if fix is None else {k: fix[k] for k in ("commit", "notes") if k in fix})
                 ls = labels(calls)
                 for gone in ("land-sync-rereview-1-1", "land-record-1-1", "land-merge-1"):
                     self.assertNotIn(gone, ls)
                 self.assertEqual(ls.count("land-unlock-1"), 1)
 
-    def test_a_lost_rereview_ends_conflict(self):
+    def test_a_lost_rereview_ends_sync_review(self):
         result, calls, _ = self.land(**{"land-sync-review-1-1": self.FOUND, "land-sync-rereview-1-1": None})
         got = row(result, 1)
         self.assertEqual((got["outcome"], got["reason"]),
-                         ("conflict", "the sync re-review returned nothing; review finding: dropped a sentence dev added"))
+                         ("sync-review", f"sync-review of merge {B}: the sync re-review returned nothing; unaccepted fix commit {self.FIXED}; "
+                          "finding dropped a sentence dev added"))
         self.assertEqual(got["fix"], {"commit": self.FIXED, "notes": "ok"})
         self.assertEqual(labels(calls).count("land-unlock-1"), 1)
 
@@ -2406,9 +2462,9 @@ class ConflictedSyncOutsideLockTest(unittest.TestCase):
             "the resolution is lost": ({"land-sync-resolve-1-1": None}, "stopped"),
             "the resolution is blocked": ({"land-sync-resolve-1-1": {"status": "blocked", "conflicted": True, "notes": "too tangled"}}, "conflict"),
             "the resolution names no head": ({"land-sync-resolve-1-1": {"status": "done", "conflicted": True, "notes": "ok"}}, "stopped"),
-            "the review is lost": ({"land-sync-review-1-1": None}, "conflict"),
-            "the fix is lost": ({"land-sync-review-1-1": self.FOUND, "land-sync-fix-1-1": None}, "conflict"),
-            "the finding survives": ({"land-sync-review-1-1": self.FOUND, "land-sync-rereview-1-1": self.FOUND}, "conflict"),
+            "the review is lost": ({"land-sync-review-1-1": None}, "sync-review"),
+            "the fix is lost": ({"land-sync-review-1-1": self.FOUND, "land-sync-fix-1-1": None}, "sync-review"),
+            "the finding survives": ({"land-sync-review-1-1": self.FOUND, "land-sync-rereview-1-1": self.FOUND}, "sync-review"),
         }
         for name, (replies, outcome) in stops.items():
             with self.subTest(stop=name):
@@ -2440,7 +2496,7 @@ class ConflictedSyncOutsideLockTest(unittest.TestCase):
         self.assertIn(f"--sha {B} --wait\n", prompt(calls, "land-record-1-1"))
         result, calls, _ = run(patch=BEHIND, replies={"land-sync-1-1": resolved, "land-sync-review-1-1": self.FOUND,
                                                       "land-sync-rereview-1-1": self.FOUND})
-        self.assertEqual(row(result, 1)["outcome"], "conflict")
+        self.assertEqual(row(result, 1)["outcome"], "sync-review")
         self.assertNotIn("land-merge-1", labels(calls))
 
     def test_a_resolution_that_says_it_merged_cleanly_is_reviewed_all_the_same(self):
@@ -2452,7 +2508,7 @@ class ConflictedSyncOutsideLockTest(unittest.TestCase):
         self.assertIn(f"merge commit {B}", prompt(out["calls"], "land-sync-review-1-1"))
         self.assertIn(f"--sha {B} --wait\n", prompt(out["calls"], "land-record-1-1"))
         out = self.land(**clean, **{"land-sync-review-1-1": self.FOUND, "land-sync-rereview-1-1": self.FOUND})
-        self.assertEqual(row(out["result"], 1)["outcome"], "conflict")
+        self.assertEqual(row(out["result"], 1)["outcome"], "sync-review")
         self.assertNotIn("land-merge-1", labels(out["calls"]))
 
     def test_a_resolution_whose_head_is_not_its_reviewed_merge_commit_never_lands(self):
@@ -2514,7 +2570,7 @@ class ConflictedSyncOutsideLockTest(unittest.TestCase):
             with self.subTest(release=name):
                 out = self.land(**{"land-unlock-1": [first, {"verdict": "released"}], "land-sync-review-1-1": None})
                 dead = name == "a dead agent"  # the landing ends where the agent died; the resolution never starts
-                self.assertEqual(row(out["result"], 1)["outcome"], "stopped" if dead else "conflict")
+                self.assertEqual(row(out["result"], 1)["outcome"], "stopped" if dead else "sync-review")
                 self.assertEqual("land-sync-resolve-1-1" in labels(out["calls"]), not dead)
                 # Both releases name the sha the lock is held at: the head it was taken at.
                 self.assertEqual([f"{self.RELEASE}{SHA}\n" in text for text in self.unlocks(out)], [True, True])
@@ -3540,7 +3596,9 @@ class StopReasonTest(unittest.TestCase):
         self.assertEqual([(row(result, n)["outcome"], row(result, n)["reason"]) for n in (1, 2)],
                          [("blocked", "cycle"), ("blocked", "cycle")])
         result, _, _ = run(patch=BEHIND, replies=rejected)
-        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["reason"]), ("conflict", "review finding: dropped a change"))
+        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["reason"]),
+                         ("sync-review", f"sync-review of merge {'b' * 40}: a finding survived the fix round; unaccepted fix commit {'f' * 40}; "
+                          "finding dropped a change"))
         waiting, _, _ = run(patch={"facts-1": {"decision": {"verdict": "open", "comment_id": 5, "questions": ["Which?"]}}})
         self.assertEqual(row(waiting, 1)["outcome"], "questions")
         self.assertNotIn("reason", row(waiting, 1))
@@ -4969,11 +5027,13 @@ class ResolveBeforeLockTest(unittest.TestCase):
         self.assertIn(f"--match-head-commit {self.FIXED}", prompt(calls, "land-merge-1"))
         self.assertEqual(land_release_shas(calls), [self.FIXED])
 
-    def test_a_finding_that_survives_the_fix_round_ends_conflict_without_ever_taking_the_lock(self):
+    def test_a_finding_that_survives_the_fix_round_ends_sync_review_without_ever_taking_the_lock(self):
         out = self.land(**{"land-sync-review-1-1": self.FOUND, "land-sync-rereview-1-1": self.LEFT})
         result, calls = out["result"], out["calls"]
         got = row(result, 1)
-        self.assertEqual((got["outcome"], got["reason"]), ("conflict", "review finding: the sentence is still missing"))
+        self.assertEqual((got["outcome"], got["reason"]),
+                         ("sync-review", f"sync-review of merge {B}: a finding survived the fix round; unaccepted fix commit {self.FIXED}; "
+                          "finding the sentence is still missing"))
         self.assertEqual(got["fix"], {"commit": self.FIXED, "notes": "ok"})
         self.assertEqual(land_labels(calls), ["land-pr-1", "land-sync-resolve-1-1", "land-sync-review-1-1", "land-sync-fix-1-1",
                                               "land-sync-rereview-1-1", "land-unlock-1"])
@@ -4987,9 +5047,9 @@ class ResolveBeforeLockTest(unittest.TestCase):
             "the resolution is lost": ({"land-sync-resolve-1-1": None}, "stopped"),
             "the resolution is blocked": ({"land-sync-resolve-1-1": {"status": "blocked", "conflicted": True, "notes": "too tangled"}}, "conflict"),
             "the resolution names two commits": ({"land-sync-resolve-1-1": {"status": "done", "conflicted": True, "head": B, "merge_commit": C}}, "stopped"),
-            "the review is lost": ({"land-sync-review-1-1": None}, "conflict"),
-            "the fix is blocked": ({"land-sync-review-1-1": self.FOUND, "land-sync-fix-1-1": {"status": "blocked", "notes": "no"}}, "conflict"),
-            "the re-review is lost": ({"land-sync-review-1-1": self.FOUND, "land-sync-rereview-1-1": None}, "conflict"),
+            "the review is lost": ({"land-sync-review-1-1": None}, "sync-review"),
+            "the fix is blocked": ({"land-sync-review-1-1": self.FOUND, "land-sync-fix-1-1": {"status": "blocked", "notes": "no"}}, "sync-review"),
+            "the re-review is lost": ({"land-sync-review-1-1": self.FOUND, "land-sync-rereview-1-1": None}, "sync-review"),
         }
         for name, (replies, outcome) in stops.items():
             with self.subTest(stop=name):
@@ -5009,7 +5069,7 @@ class ResolveBeforeLockTest(unittest.TestCase):
 
     def test_a_relaunch_after_a_stop_before_the_lock_reviews_again_before_it_lands(self):
         first = self.land(**{"land-sync-review-1-1": None})["result"]
-        self.assertEqual(row(first, 1)["outcome"], "conflict")
+        self.assertEqual(row(first, 1)["outcome"], "sync-review")
         # Run 2: the PR is open at the pushed, unaccepted merge; readopt refuses to land it as it stands, as after a #913 stop.
         result, calls, _ = run(args=first["relaunch"],
                                patch={"facts-1": {"open_pr": OPEN_PR, "claim": {"verdict": "held_by", "by": HOLDER}, "lane": None}},
