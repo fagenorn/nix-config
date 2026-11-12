@@ -2135,6 +2135,11 @@ def native(*issues):
     return {"verdict": "read", "blocked_by": [f"owner/repo#{n}" for n in issues]}
 
 
+def stated(states):
+    """forge-issue read's answer (#964): every reference of `states` as a native blocker, with its state."""
+    return {"verdict": "read", "blocked_by": sorted(states), "blocked_by_states": states}
+
+
 def blocked_by(*issues):
     return {"blockers": [{"issue": b, "state": "OPEN"} for b in issues]}
 
@@ -2660,10 +2665,9 @@ class DependencyTest(unittest.TestCase):
         self.assertEqual([row(result, n)["outcome"] for n in (1, 2, 3)], ["landed"] * 3)
 
     def test_a_blocker_only_the_tracker_names_makes_the_dependent_wait(self):
-        """An edge added with forge-issue link is absent from the body's list, and here from the reply's states (#944 ahead of #891)."""
+        """An edge added with forge-issue link is absent from the body's list (#944 ahead of #891)."""
         result, calls, _ = run(args=dict(ARGS, issues=[2, 1]),
-                               patch={"facts-1": {"native": {"verdict": "read", "blocked_by": ["owner/repo#50", "Owner/REPO#2"]},
-                                                  "blockers": [{"issue": 50, "state": "CLOSED"}]}})
+                               patch={"facts-1": {"native": stated({"owner/repo#50": "closed", "Owner/REPO#2": "open"})}})
         ls = labels(calls)
         self.assertLess(ls.index("close-out-2"), ls.index("acquire-1"))
         self.assertEqual([row(result, n)["outcome"] for n in (1, 2)], ["landed"] * 2)
@@ -2673,13 +2677,49 @@ class DependencyTest(unittest.TestCase):
         self.assertEqual((row(result, 1)["outcome"], row(result, 1)["blocker"]), ("blocked", 50))
         self.assertNotIn("acquire-1", labels(calls))
 
-    def test_a_closed_native_blocker_and_another_repository_s_issue_do_not_block(self):
-        facts = {"native": {"verdict": "read", "blocked_by": ["Owner/Repo#50", "other/repo#2"]},
-                 "blockers": [{"issue": 50, "state": "closed"}]}
+    def test_a_closed_native_blocker_of_either_repository_does_not_block(self):
+        """The native states release with no clerk lookup, and another repository's #2 is never the batch's #2."""
+        facts = {"native": stated({"Owner/Repo#50": "closed", "other/repo#2": "CLOSED"})}
         result, calls, _ = run(args=dict(ARGS, issues=[1, 2]), patch={"facts-1": facts})
         self.assertEqual(row(result, 1)["outcome"], "landed")
         ls = labels(calls)
         self.assertLess(ls.index("acquire-1"), ls.index("close-out-2"))
+
+    def test_an_open_blocker_in_another_repository_blocks_and_is_named_whole(self):
+        facts = {"native": stated({"other/repo#2": "open", "another/repo#7": "open", "owner/repo#50": "closed"})}
+        result, calls, _ = run(args=dict(ARGS, issues=[1, 2]), patch={"facts-1": facts})
+        self.assertEqual(row(result, 1), {"issue": 1, "outcome": "blocked", "blocker_ref": "another/repo#7",
+                                          "reason": "waits for another/repo#7"})
+        self.assertNotIn("acquire-1", labels(calls))
+        self.assertEqual(row(result, 2)["outcome"], "landed")
+        self.assertEqual(result["relaunch"]["issues"], [1])
+
+    def test_an_open_blocker_of_the_repository_is_named_before_another_repository_s(self):
+        facts = {"native": stated({"other/repo#2": "open", "owner/repo#50": "open"})}
+        result, _, _ = run(patch={"facts-1": facts})
+        self.assertEqual(row(result, 1), {"issue": 1, "outcome": "blocked", "blocker": 50, "reason": "waits for #50"})
+
+    def test_a_native_entry_the_reply_gives_no_state_counts_as_open(self):
+        for ref, named in (("other/repo#2", {"blocker_ref": "other/repo#2"}), ("owner/repo#50", {"blocker": 50})):
+            for states in (None, {}, [], "closed", {ref: None}, {ref: "unknown"}, {ref.upper(): "closed"}):
+                with self.subTest(ref=ref, states=states):
+                    answer = {"verdict": "read", "blocked_by": [ref]}
+                    if states is not None:
+                        answer["blocked_by_states"] = states
+                    # A state the clerk looked up itself never closes a blocker the native read left open.
+                    facts = {"native": answer, "blockers": [{"issue": 50, "state": "CLOSED"}, {"issue": 2, "state": "CLOSED"}]}
+                    result, calls, _ = run(patch={"facts-1": facts})
+                    self.assertEqual({k: v for k, v in row(result, 1).items() if k != "reason"},
+                                     dict({"issue": 1, "outcome": "blocked"}, **named))
+                    self.assertNotIn("acquire-1", labels(calls))
+
+    def test_the_facts_step_relays_the_states_and_looks_up_only_body_blockers_the_native_list_lacks(self):
+        _, calls, _ = run()
+        call = next(c for c in calls if c["label"] == "facts-1")
+        self.assertIn("blocked_by_states", call["schema"]["properties"]["native"]["properties"])
+        self.assertIn("return the verdict, blocked_by, blocked_by_states and error of the one JSON line it prints, unchanged. "
+                      "blockers: one {issue, state} per issue of owner/repo in the body's \"Blocked by\" list that blocked_by "
+                      "lacks, with the state from gh issue view, [] when none.", call["prompt"])
 
     def test_only_a_state_that_says_closed_releases_a_blocker(self):
         for state, outcome in (("unknown", "blocked"), ("", "blocked"), ("error", "blocked"), ("open", "blocked"),
@@ -2710,7 +2750,7 @@ class DependencyTest(unittest.TestCase):
         _, calls, _ = run()
         call = next(c for c in calls if c["label"] == "facts-1")
         self.assertIn("error", call["schema"]["properties"]["native"]["properties"])
-        self.assertIn("return the verdict, blocked_by and error of the one JSON line", call["prompt"])
+        self.assertIn("blocked_by_states and error of the one JSON line", call["prompt"])
 
     def test_a_closed_issue_whose_native_read_failed_is_closed_and_released(self):
         result, calls, _ = run(patch={"facts-1": {"state": "CLOSED", "native": {"verdict": "error"}}})

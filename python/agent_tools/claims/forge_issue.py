@@ -7,8 +7,9 @@ edges go through the forge's dependencies endpoints instead of prose.
 [--blocked-by <n>]... [--blocks <n>]...` adds the edges an existing issue lacks (and needs at
 least one edge). `--blocked-by <n>` records that the issue is blocked by #n, `--blocks <n>` that
 #n is blocked by the issue. `read --repo <owner/name> --issue <n>` posts nothing: it prints both
-lists of the issue as they stand (`read`, exit 0), with `missing_*` and `unexpected_*` empty, and
-is the read a caller that orders work by blockers uses, since an edge `link` added is in no body.
+lists of the issue as they stand (`read`, exit 0), with `missing_*` and `unexpected_*` empty and
+each blocker's state, and is the read a caller that orders work by blockers uses, since an edge
+`link` added is in no body.
 
 D1, identity on the wire: every link posts `issue_id=<database id>` of the blocker, read from
 `repos/<owner/name>/issues/<n>` (`.id`), never an issue number, which the dependencies endpoint
@@ -34,10 +35,14 @@ set equals the requested one, `link` (`linked`) when it contains it; otherwise t
 
 D8, output: every call, a usage error included, prints exactly one line,
 `json.dumps(result, sort_keys=True)`, with exactly the keys `command`, `repo`, `issue`,
-`verdict`, `blocked_by`, `blocks`, `missing_blocked_by`, `missing_blocks`, `unexpected_blocked_by`,
-`unexpected_blocks`, `error` and `detail`. `blocked_by` and `blocks` are the read-back entries as
-sorted `<owner>/<name>#<n>` references (the owner and name come from each entry's
-`repository_url` after `/repos/`; null when no read-back happened); `missing_*` are the requested
+`verdict`, `blocked_by`, `blocked_by_states`, `blocks`, `missing_blocked_by`, `missing_blocks`,
+`unexpected_blocked_by`, `unexpected_blocks`, `error` and `detail`. `blocked_by` and `blocks` are
+the read-back entries as sorted `<owner>/<name>#<n>` references (the owner and name come from each
+entry's `repository_url` after `/repos/`; null when no read-back happened); `blocked_by_states`
+(issue 964) is null except for `read`, where it maps every `blocked_by` reference to `open` or
+`closed`, the `state` of that entry in the same `dependencies/blocked_by` listing, and an entry
+whose `state` is neither fails the read as `payload_invalid`, so no blocker reads as closed
+unless the forge said so; `missing_*` are the requested
 numbers of `--repo` whose database id is absent from the read-back, sorted; `unexpected_*` are the
 references of read-back entries whose id was not requested, sorted (always empty for `link`).
 Exit 0 is `created`, `linked` or `read`, exit 1 a forge error (`verdict: "error"`, `error` the
@@ -67,8 +72,9 @@ from agent_tools.system.forge_api import ForgeError
 
 REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 NUMBER = re.compile(r"[1-9][0-9]*")
-KEYS = ("command", "repo", "issue", "verdict", "blocked_by", "blocks", "missing_blocked_by",
+KEYS = ("command", "repo", "issue", "verdict", "blocked_by", "blocked_by_states", "blocks", "missing_blocked_by",
         "missing_blocks", "unexpected_blocked_by", "unexpected_blocks", "error", "detail")
+STATES = ("open", "closed")
 OK, FORGE_ERROR, USAGE = 0, 1, 2
 # The user-only Instruction Budget raise label: the lifecycle guard sees `gh --add-label`, not this
 # helper's API call, and the helper is allowed outright, so it refuses the label itself (COR-001).
@@ -176,8 +182,11 @@ def _entry(item: Any, path: str) -> tuple[int, str]:
     return ident, f"{url.split('/repos/', 1)[1]}#{number}"
 
 
-def entries(slug: str, issue: int, side: str) -> dict[int, str]:
-    """The `blocked_by` or `blocking` list of an issue: database id -> qualified reference."""
+def entries(slug: str, issue: int, side: str, states: dict[str, str] | None = None) -> dict[int, str]:
+    """The `blocked_by` or `blocking` list of an issue: database id -> qualified reference.
+
+    With `states`, each entry's `state` is recorded there by reference; one that is neither open nor closed is an error.
+    """
     path = f"repos/{slug}/issues/{issue}/dependencies/{side}?per_page=100"
     found: dict[int, str] = {}
     for page in forge_api.api_pages(path):
@@ -186,6 +195,11 @@ def entries(slug: str, issue: int, side: str) -> dict[int, str]:
         for item in page:
             ident, reference = _entry(item, path)
             found[ident] = reference
+            if states is not None:
+                state = item.get("state")
+                if not isinstance(state, str) or state not in STATES:
+                    raise ForgeError("payload_invalid", f"{path} holds {reference} without a state of {' or '.join(STATES)}")
+                states[reference] = state
     return found
 
 
@@ -198,9 +212,9 @@ def verdict_of(requested: dict[int, int], got: dict[int, str], exact: bool):
 
 def result(command=None, repo=None, issue=None, verdict="error", blocked_by=None, blocks=None,
            missing_blocked_by=None, missing_blocks=None, unexpected_blocked_by=None,
-           unexpected_blocks=None, error=None, detail=None) -> dict:
+           unexpected_blocks=None, error=None, detail=None, blocked_by_states=None) -> dict:
     return {"command": command, "repo": repo, "issue": issue, "verdict": verdict,
-            "blocked_by": blocked_by, "blocks": blocks, "missing_blocked_by": missing_blocked_by,
+            "blocked_by": blocked_by, "blocked_by_states": blocked_by_states, "blocks": blocks, "missing_blocked_by": missing_blocked_by,
             "missing_blocks": missing_blocks, "unexpected_blocked_by": unexpected_blocked_by,
             "unexpected_blocks": unexpected_blocks, "error": error, "detail": detail}
 
@@ -253,9 +267,10 @@ def _link(args, state: dict) -> tuple[dict, int]:
 def _read(args, state: dict) -> tuple[dict, int]:
     issue = state["issue"] = args.issue
     database_id(args.repo, issue)  # proves --issue is this repository's issue, not a transfer's redirect
-    by = sorted(entries(args.repo, issue, "blocked_by").values())
+    states: dict[str, str] = {}
+    by = sorted(entries(args.repo, issue, "blocked_by", states).values())
     blocking = sorted(entries(args.repo, issue, "blocking").values())
-    return result("read", args.repo, issue, "read", by, blocking, [], [], [], []), OK
+    return result("read", args.repo, issue, "read", by, blocking, [], [], [], [], blocked_by_states=states), OK
 
 
 COMMANDS = {"create": _create, "link": _link, "read": _read}
