@@ -170,7 +170,7 @@ class PageTest(unittest.TestCase):
             {p for _, p in literals},
             {"/api/stream", "/api/looked", "/api/answer", "/api/check-answer", "/api/goal",
              "/api/withdraw", "/api/retry-manager", "/api/approve", "/api/reply",
-             "/api/message"},
+             "/api/message", "/api/stop"},
         )
         self.assertEqual(
             len(re.findall(r"\b(?:fetch|EventSource)\(", self.text)), len(literals)
@@ -179,7 +179,7 @@ class PageTest(unittest.TestCase):
     def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
         # A separate snapshot request can answer after a newer streamed frame
         # and render over it; the stream's first frame is already the snapshot.
-        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 9)
+        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 10)
         self.assertIsNotNone(
             re.search(r'fetch\("/api/looked",\s*\{\s*method:\s*"POST"', self.text)
         )
@@ -190,7 +190,7 @@ class PageTest(unittest.TestCase):
             re.search(r'fetch\("/api/check-answer",\s*\{\s*method:\s*"POST"', self.text)
         )
         for route in ("/api/goal", "/api/withdraw", "/api/retry-manager", "/api/approve",
-                      "/api/reply", "/api/message"):
+                      "/api/reply", "/api/message", "/api/stop"):
             self.assertIsNotNone(
                 re.search(rf'fetch\("{route}",\s*\{{\s*method:\s*"POST"', self.text)
             )
@@ -2252,6 +2252,150 @@ class PageSprintReportTest(unittest.TestCase):
         self.assertEqual(detail_nodes(line), [])
         for cls in ("sprint-detail", "progress", "status"):
             self.assertEqual([n for n in nodes(line) if has_class(n, cls)], [])
+
+
+CLOSING = {
+    "at": "2026-11-12T11:00:00+00:00", "summary": "The importer now resumes after a crash.",
+    "first_line": "Importer resumes after a crash", "differently": "cut smaller slices",
+    "landed": [12], "held": [], "dropped": [13], "counts_text": "1 landed, 1 dropped",
+}
+ASK = ("Stop this sprint? The manager finishes what is mid-merge, starts nothing new "
+       "and reports.")
+DONE_SPRINT = {
+    **SPRINT, "state": "done", "state_text": "done", "stoppable": False,
+    "ended_at": "2026-11-12T11:00:00+00:00", "closing": CLOSING,
+}
+
+
+def of_class(line: dict, tag: str, cls: str) -> list:
+    return [n for n in nodes(line) if n["tag"] == tag and has_class(n, cls)]
+
+
+class PageSprintEndTest(unittest.TestCase):
+    def test_stop_asks_to_confirm_then_posts_the_sprint(self) -> None:
+        asked, sent = render([
+            START, {"frame": with_sprints([{**SPRINT, "stoppable": True}])},
+            {"click": "stop"}, {"snapshot": True},
+            {"click": "stop-confirm"}, {"snapshot": True},
+        ])
+        self.assertEqual([p for p in asked["posts"] if p["url"] == "/api/stop"], [])
+        (line,) = sprint_lines(asked)
+        self.assertEqual([full(n) for n in of_class(line, "span", "stop-ask")], [ASK])
+        self.assertEqual(len(of_class(line, "button", "stop-confirm")), 1)
+        (post,) = [p for p in sent["posts"] if p["url"] == "/api/stop"]
+        self.assertEqual(post["method"], "POST")
+        self.assertEqual(post["headers"], GOAL_HEADERS)
+        self.assertEqual(
+            json.loads(post["body"]), {"project_id": "owner/p00", "sprint_id": "a" * 16}
+        )
+
+    def test_cancel_sends_nothing_and_restores_stop(self) -> None:
+        (snap,) = render([
+            START, {"frame": with_sprints([{**SPRINT, "stoppable": True}])},
+            {"click": "stop"}, {"click": "stop-cancel"}, {"snapshot": True},
+        ])
+        self.assertEqual([p for p in snap["posts"] if p["url"] == "/api/stop"], [])
+        (line,) = sprint_lines(snap)
+        self.assertEqual(len(of_class(line, "button", "stop")), 1)
+        self.assertEqual(of_class(line, "button", "stop-confirm"), [])
+
+    def test_a_refused_stop_says_why(self) -> None:
+        (snap,) = render([
+            START, {"frame": with_sprints([{**SPRINT, "stoppable": True}])},
+            {"click": "stop"},
+            {"respond": {"status": 409, "text": "this sprint is already stopping\n"}},
+            {"click": "stop-confirm"}, {"snapshot": True},
+        ])
+        (line,) = sprint_lines(snap)
+        self.assertEqual(
+            [full(n) for n in nodes(line) if has_class(n, "fail")],
+            ["Could not stop: this sprint is already stopping"],
+        )
+
+    def test_a_sprint_that_cannot_be_stopped_has_no_stop_button(self) -> None:
+        refused, absent = render([
+            START, {"frame": with_sprints([{**SPRINT, "stoppable": False}])}, {"snapshot": True},
+            {"frame": with_sprints([SPRINT])}, {"snapshot": True},
+        ])
+        for snap in (refused, absent):
+            (line,) = sprint_lines(snap)
+            self.assertEqual(of_class(line, "button", "stop"), [])
+            self.assertEqual(len(of_class(line, "button", "withdraw")), 1)
+
+    def test_a_done_sprint_reads_done_with_its_first_line_and_counts(self) -> None:
+        (snap,) = render([START, {"frame": with_sprints([DONE_SPRINT])}, {"snapshot": True}])
+        (line,) = sprint_lines(snap)
+        shown = top_text(line)
+        for expected in ("done", "Importer resumes after a crash", "1 landed, 1 dropped"):
+            self.assertIn(expected, shown)
+        self.assertEqual(
+            [full(n) for n in of_class(line, "span", "closing-line")],
+            ["Importer resumes after a crash"],
+        )
+        self.assertEqual(
+            [full(n) for n in of_class(line, "span", "closing-counts")], ["1 landed, 1 dropped"]
+        )
+        self.assertIsNone(re.search(r"#?\b1[23]\b", shown))
+        inside = full(detail(line))
+        self.assertIn("12", inside)
+        self.assertIn("Would do differently: cut smaller slices", inside)
+        self.assertIn("The importer now resumes after a crash.", inside)
+
+    def test_a_stopped_sprint_reads_stopped_by_you_with_its_report(self) -> None:
+        stopped = {**DONE_SPRINT, "state": "stopped", "state_text": "stopped by you"}
+        bare = {**stopped, "closing": None}
+        with_report, without = render([
+            START, {"frame": with_sprints([stopped])}, {"snapshot": True},
+            {"frame": with_sprints([bare])}, {"snapshot": True},
+        ])
+        (line,) = sprint_lines(with_report)
+        for expected in ("stopped by you", "Importer resumes after a crash",
+                         "1 landed, 1 dropped"):
+            self.assertIn(expected, top_text(line))
+        (line,) = sprint_lines(without)
+        self.assertIn("stopped by you", top_text(line))
+        self.assertEqual(of_class(line, "span", "closing-line"), [])
+
+    def test_a_stop_failure_shows_on_the_line(self) -> None:
+        text = "could not stop the manager: boom; trying again"
+        (snap,) = render([
+            START, {"frame": with_sprints([{**SPRINT, "stop_text": text}])}, {"snapshot": True},
+        ])
+        (line,) = sprint_lines(snap)
+        self.assertEqual([full(n) for n in of_class(line, "span", "stop-fail")], [text])
+
+    def test_finished_sprints_render_in_a_closed_fold_under_their_project(self) -> None:
+        finished = {"label": "Finished sprints", "count": 1, "sprints": [DONE_SPRINT]}
+        (snap,) = render([
+            START,
+            {"frame": view([{**project(0, []), "sprints": [], "finished_sprints": finished}])},
+            {"snapshot": True},
+        ])
+        (fold,) = of_class(snap["projects"], "details", "finished")
+        self.assertFalse(fold["open"])
+        (summary,) = [c for c in fold["children"] if c["tag"] == "summary"]
+        self.assertEqual(full(summary), "Finished sprints (1)")
+        (item,) = [n for n in nodes(fold) if n["tag"] == "li" and has_class(n, "sprint")]
+        self.assertIn(GOAL_TEXT, full(item))
+
+    def test_an_ended_sprint_offers_no_message_box(self) -> None:
+        ended = {**SPRINT, "ended_at": "2026-11-12T10:00:00+00:00"}
+        stopped = {**SPRINT, "state": "stopped", "state_text": "stopped by you"}
+        for sprint, boxes in ((ended, 0), (stopped, 0), (SPRINT, 1)):
+            with self.subTest(state=sprint["state"], ended=sprint.get("ended_at")):
+                (snap,) = render([START, {"frame": with_sprints([sprint])}, {"snapshot": True}])
+                self.assertEqual(len(of_class(snap["projects"], "div", "sprint-tell")), boxes)
+
+    def test_an_unstopped_manager_is_shown_under_the_statement(self) -> None:
+        text = "The manager of a withdrawn goal could not be stopped: boom; trying again"
+        (snap,) = render([
+            START,
+            {"frame": {**view([]), "unstopped": [{
+                "project_id": "owner/p00", "sprint_id": "a" * 16, "goal": GOAL_TEXT,
+                "text": text, "failed_at": "2026-11-12T10:00:00+00:00"}]}},
+            {"snapshot": True},
+        ])
+        self.assertEqual([full(n) for n in of_class(snap["statement"], "p", "unstopped")], [text])
 
 
 class PageInFlightTest(unittest.TestCase):
