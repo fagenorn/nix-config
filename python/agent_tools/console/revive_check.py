@@ -1,4 +1,4 @@
-"""`revive_check`: the verify checks that a gone manager is brought back, and how fast (#893).
+"""`revive_check`: the verify checks that a gone manager is brought back, and how fast (#893, #949).
 
 `python -m agent_tools.console.revive_check start --project ID [--url URL] [--state-file PATH]
 [--result-file PATH] [--token-file PATH] [--budget SECONDS]` is the gating check;
@@ -21,10 +21,16 @@ states the goal and records the sprint it finds by its goal. An `unresolved` sta
 sprint found by its goal and states no second goal; any other state file is a resumed run that
 states no goal and continues from its phase.
 
+A state file with a `sprint_id` and no `after_removal` was written by the previous check (#893):
+its sprint is released (the test manager stopped, the sprint withdrawn; a failure is 75 `waiting`
+with the file kept, so the next run retries) and the run starts afresh, deleting that file and the
+result file, so a result of that check never stands for this one.
+
 The state file is `{"project", "sprint_id", "phase", "approved_versions", "first_session",
-"first_profile", "stopped_at", "back_seconds", "removed_at"}`. Each phase is resumable by the next
-run, polls the view every 5 seconds (`POLL_SECONDS`) and ends 75 `{"phase", "sprint_id", "status":
-"waiting"}` with the state file kept when `--budget` is spent:
+"first_profile", "stopped_at", "back_seconds", "removed_at", "after_removal", "messaged_at"}`.
+Each phase is resumable by the next run, polls the view every 5 seconds (`POLL_SECONDS`) and ends
+75 `{"phase", "sprint_id", "status": "waiting"}` with the state file kept when `--budget` is
+spent:
 
 - `brief`: an open `brief/<sprint id>` item at a version not in `approved_versions` gets
   `POST /api/approve` (204 or 409 record the version, any other answer or none is tried again on
@@ -43,20 +49,28 @@ run, polls the view every 5 seconds (`POLL_SECONDS`) and ends 75 `{"phase", "spr
   `int(clock() - stopped_at)`.
 - `remove`: stop the listed session, then `remove(first_session, first_profile)` (claude-account
   run rm); `removed_at` is `clock()`. A failure is tried again on the next poll.
-- `successor`: wait until the registry lists the name with a session id other than
-  `first_session`.
+- `relisted`: wait until the registry lists the name, with `first_session` or with another
+  session id; `after_removal` is `"same"` or `"new"` accordingly.
+- `message`: `POST /api/message` with `MESSAGE` (204 records `messaged_at`; no answer is tried
+  again on the next poll; any other status is not met `the console refused the message: <status>
+  <text>`). A resumed run never posts a second message in phase `read`.
+- `read`: wait until the sprint row's newest message of kind `text` carrying `MESSAGE` is in state
+  `read`; a non-null `reach_text` is not met with that text.
 
 The deadlines are wall-clock times in the state file, so they hold across resumed runs, and they
 are checked on every poll, the first of a resumed run included, before any wait: in `back`,
 `clock() - stopped_at` above `RETURN_LIMIT` (600) without the return is not met `the manager did
-not come back within 600 s of the stop`; in `successor`, `clock() - removed_at` above
-`SUCCESSOR_LIMIT` (900) is not met `no new manager within 900 s of the removal`.
+not come back within 600 s of the stop`; in `relisted`, `clock() - removed_at` above
+`RELIST_LIMIT` (900) is not met `no manager under the sprint's name within 900 s of the removal`;
+in `read`, `clock() - messaged_at` above `READ_LIMIT` (600) is not met `the message was not read
+within 600 s`.
 
-Met (exit 0) is `{"back_seconds": n, "status": "met", "successor": true}` once the successor is
-listed, whatever `back_seconds` is: speed is `timing`'s alone. Not met (exit 1) only for a
-functional failure: the sprint is gone (`the sprint is gone`), a sprint whose `manager_state` is
-`stalled` or `unavailable` (its `manager_text`), the two deadlines above, or `first_session`
-listed again after the removal (`the removed session came back`).
+Met (exit 0) is `{"after_removal": "same" | "new", "back_seconds": n, "status": "met"}` once the
+message is read, whatever `back_seconds` is: speed is `timing`'s alone; the removed session coming
+back is no failure. Not met (exit 1) only for a functional failure: the sprint is gone (`the
+sprint is gone`), a sprint whose `manager_state` is `stalled` or `unavailable` (its
+`manager_text`), the three deadlines above, a refused message or a `reach_text` while waiting for
+the read.
 
 The finish (any met or not met outcome) runs in this order. First it stops the test manager:
 `manager.stop_listed` on the manager's name, the registry read fresh (a stop is given the first
@@ -66,7 +80,7 @@ stopped yet: <the stop's one-line reason>", "sprint_id"}`; the next run retries 
 Second it withdraws the sprint (`POST /api/withdraw`, 204 or 409 is done); otherwise the outcome
 stays in the state file and the run is 75 `waiting` (`the test sprint is not withdrawn yet`).
 Third it writes the result file `{"back_seconds": int | null, "status": "met" | "not_met",
-"reason"?}`, removes the state file and prints the outcome (met with `"successor": true`).
+"reason"?}`, removes the state file and prints the outcome (met with `"after_removal"`).
 
 `timing` only reads the result file: absent or unreadable is 75 `{"status": "no_result"}`;
 `back_seconds` null or above `--deadline` is 1 `{"back_seconds", "reason": "slow", "status":
@@ -112,7 +126,8 @@ POLL_SECONDS = 5
 RETURN_SECONDS = 60
 STOP_WINDOW = DEFAULT_DEADLINE + 2 * POLL_SECONDS
 RETURN_LIMIT = 600
-SUCCESSOR_LIMIT = 900
+RELIST_LIMIT = 900
+READ_LIMIT = 600
 REMOVE_TIMEOUT = 60
 GOAL = ("[verify #893] check that a gone manager is brought back: brief one slice; once "
         "approved, send one report with phase running, no issues and next set to wait for the "
@@ -120,8 +135,9 @@ GOAL = ("[verify #893] check that a gone manager is brought back: brief one slic
 NOT_STOPPED_TEXT = "the test manager is not stopped yet"
 NOT_WITHDRAWN_TEXT = "the test sprint is not withdrawn yet"
 NO_RETURN_TEXT = f"the manager did not come back within {RETURN_LIMIT} s of the stop"
-NO_SUCCESSOR_TEXT = f"no new manager within {SUCCESSOR_LIMIT} s of the removal"
-CAME_BACK_TEXT = "the removed session came back"
+MESSAGE = "[verify #949] the console checks that you read this; no action needed, end your turn"
+NO_RELIST_TEXT = f"no manager under the sprint's name within {RELIST_LIMIT} s of the removal"
+UNREAD_TEXT = f"the message was not read within {READ_LIMIT} s"
 GONE_TEXT = "the sprint is gone"
 
 
@@ -200,30 +216,33 @@ def _start(args, registry, stop, remove, clock, sleep) -> int:
     def name() -> str:
         return manager.session_name(project, state["sprint_id"])
 
+    def release() -> int | None:
+        """Stop the test manager and withdraw the sprint; `NOT_YET` (printed) when either fails."""
+        sprint_id = state["sprint_id"]
+        try:
+            manager.stop_listed([name()], registry, stop)
+        except Exception as error:
+            waiting = f"{NOT_STOPPED_TEXT}: {error}" if str(error) else NOT_STOPPED_TEXT
+            _print({"status": "waiting", "reason": waiting, "sprint_id": sprint_id})
+            return NOT_YET
+        status, _ = console.post("/api/withdraw",
+                                 {"project_id": project, "sprint_id": sprint_id})
+        if status not in (204, 409):
+            _print({"status": "waiting", "reason": NOT_WITHDRAWN_TEXT, "sprint_id": sprint_id})
+            return NOT_YET
+        return None
+
     def settle(code: int, reason: str | None) -> int:
         """Stop the test manager, withdraw the sprint, then record and print the outcome."""
-        sprint_id = state.get("sprint_id")
         seconds = state.get("back_seconds")
-        if sprint_id is not None:
-            try:
-                manager.stop_listed([name()], registry, stop)
-            except Exception as error:
-                checkpoint(outcome={"code": code, "reason": reason})
-                waiting = f"{NOT_STOPPED_TEXT}: {error}" if str(error) else NOT_STOPPED_TEXT
-                _print({"status": "waiting", "reason": waiting, "sprint_id": sprint_id})
-                return NOT_YET
-            status, _ = console.post("/api/withdraw",
-                                     {"project_id": project, "sprint_id": sprint_id})
-            if status not in (204, 409):
-                checkpoint(outcome={"code": code, "reason": reason})
-                _print({"status": "waiting", "reason": NOT_WITHDRAWN_TEXT,
-                        "sprint_id": sprint_id})
-                return NOT_YET
+        if state.get("sprint_id") is not None and release() is not None:
+            checkpoint(outcome={"code": code, "reason": reason})
+            return NOT_YET
         state_file.unlink(missing_ok=True)
         if code == 0:
             document = {"back_seconds": seconds, "status": "met"}
             _write_json(result_file, document)
-            _print({**document, "successor": True})
+            _print({**document, "after_removal": state["after_removal"]})
         else:
             document = {"back_seconds": seconds, "reason": reason, "status": "not_met"}
             _write_json(result_file, document)
@@ -244,7 +263,13 @@ def _start(args, registry, stop, remove, clock, sleep) -> int:
             return 1
         if not read_token():
             return NOT_YET
-        if outcome is not None:
+        if "sprint_id" in state and "after_removal" not in state:
+            if release() is not None:
+                return NOT_YET
+            state_file.unlink(missing_ok=True)
+            result_file.unlink(missing_ok=True)
+            state, unresolved = {}, False
+        elif outcome is not None:
             return settle(*outcome)
     if not state_file.exists() or unresolved:
         view = console.state()
@@ -275,7 +300,8 @@ def _start(args, registry, stop, remove, clock, sleep) -> int:
             return settle(1, GONE_TEXT)
         state = {"project": project, "sprint_id": stated["sprint_id"], "phase": "brief",
                  "approved_versions": [], "first_session": None, "first_profile": None,
-                 "stopped_at": None, "back_seconds": None, "removed_at": None}
+                 "stopped_at": None, "back_seconds": None, "removed_at": None,
+                 "after_removal": None, "messaged_at": None}
         checkpoint()
 
     sprint_id = state["sprint_id"]
@@ -337,17 +363,36 @@ def _start(args, registry, stop, remove, clock, sleep) -> int:
             except manager.StopFailed:
                 pass
             else:
-                checkpoint(phase="successor", removed_at=clock())
+                checkpoint(phase="relisted", removed_at=clock())
                 advanced = True
-        else:
+        elif phase == "relisted":
             ids = {o.session_id for o in registry().values() if o.name == name()}
-            now = clock()
-            if state["first_session"] in ids:
-                return settle(1, CAME_BACK_TEXT)
-            if now - state["removed_at"] > SUCCESSOR_LIMIT:
-                return settle(1, NO_SUCCESSOR_TEXT)
+            if clock() - state["removed_at"] > RELIST_LIMIT:
+                return settle(1, NO_RELIST_TEXT)
             if ids:
-                return settle(0, None)
+                checkpoint(after_removal="same" if state["first_session"] in ids else "new",
+                           phase="message")
+                advanced = True
+        elif phase == "message":
+            if row is not None:
+                status, text = console.post("/api/message", {
+                    "project_id": project, "sprint_id": sprint_id, "text": MESSAGE})
+                if status == 204:
+                    checkpoint(messaged_at=clock(), phase="read")
+                    advanced = True
+                elif status is not None:
+                    return settle(1, f"the console refused the message: {status} {text}".strip())
+        else:
+            if clock() - state["messaged_at"] > READ_LIMIT:
+                return settle(1, UNREAD_TEXT)
+            if row is not None:
+                sent = [m for m in row.get("messages") or []
+                        if isinstance(m, dict) and m.get("kind") == "text"
+                        and m.get("text") == MESSAGE]
+                if sent and sent[-1].get("state") == "read":
+                    return settle(0, None)
+                if row.get("reach_text") is not None:
+                    return settle(1, row["reach_text"])
         if clock() - run_start >= args.budget:
             _print({"phase": state["phase"], "sprint_id": sprint_id, "status": "waiting"})
             return NOT_YET
