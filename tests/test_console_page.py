@@ -142,7 +142,7 @@ class PageTest(unittest.TestCase):
         self.assertEqual(
             {p for _, p in literals},
             {"/api/stream", "/api/looked", "/api/answer", "/api/check-answer", "/api/goal",
-             "/api/withdraw", "/api/approve", "/api/reply"},
+             "/api/withdraw", "/api/retry-manager", "/api/approve", "/api/reply"},
         )
         self.assertEqual(
             len(re.findall(r"\b(?:fetch|EventSource)\(", self.text)), len(literals)
@@ -151,7 +151,7 @@ class PageTest(unittest.TestCase):
     def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
         # A separate snapshot request can answer after a newer streamed frame
         # and render over it; the stream's first frame is already the snapshot.
-        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 7)
+        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 8)
         self.assertIsNotNone(
             re.search(r'fetch\("/api/looked",\s*\{\s*method:\s*"POST"', self.text)
         )
@@ -161,7 +161,8 @@ class PageTest(unittest.TestCase):
         self.assertIsNotNone(
             re.search(r'fetch\("/api/check-answer",\s*\{\s*method:\s*"POST"', self.text)
         )
-        for route in ("/api/goal", "/api/withdraw", "/api/approve", "/api/reply"):
+        for route in ("/api/goal", "/api/withdraw", "/api/retry-manager", "/api/approve",
+                      "/api/reply"):
             self.assertIsNotNone(
                 re.search(rf'fetch\("{route}",\s*\{{\s*method:\s*"POST"', self.text)
             )
@@ -1248,6 +1249,7 @@ SPRINT = {
     "type": "sprint", "sprint_id": "a" * 16, "goal": GOAL_TEXT, "state": "drafting",
     "state_text": "drafting the brief", "stated_at": "2026-11-12T10:00:00+00:00",
     "age_text": "stated 3 min ago", "manager_text": "no manager has picked this up",
+    "manager_state": "none", "manager_until": None, "retry": False, "sessions": [],
 }
 
 
@@ -1432,6 +1434,84 @@ class PageGoalTest(unittest.TestCase):
         self.assertEqual(
             [full(n) for n in nodes(line) if has_class(n, "fail")],
             ["Could not withdraw: this sprint is not open"],
+        )
+
+
+class PageManagerTest(unittest.TestCase):
+    def test_a_failed_manager_shows_its_reason_and_retry_posts(self) -> None:
+        reason = "could not start a manager: the directory is not trusted"
+        (snap,) = render([
+            START,
+            {"frame": with_sprints([
+                {**SPRINT, "manager_state": "failed", "manager_text": reason, "retry": True}
+            ])},
+            {"respond": {"status": 409, "text": "this sprint has a manager\n"}},
+            {"click": "retry"}, {"snapshot": True},
+        ])
+        (line,) = sprint_lines(snap)
+        self.assertIn(reason, full(line))
+        self.assertEqual(
+            len([n for n in nodes(line) if n["tag"] == "button" and has_class(n, "retry")]), 1
+        )
+        (post,) = [p for p in snap["posts"] if p["url"] == "/api/retry-manager"]
+        self.assertEqual(post["method"], "POST")
+        self.assertEqual(post["headers"], GOAL_HEADERS)
+        self.assertEqual(
+            json.loads(post["body"]), {"project_id": "owner/p00", "sprint_id": "a" * 16}
+        )
+        self.assertEqual(
+            [full(n) for n in nodes(line) if has_class(n, "fail")],
+            ["Could not retry: this sprint has a manager"],
+        )
+
+    def test_a_sprint_without_retry_has_no_retry_button(self) -> None:
+        started, unavailable = render([
+            START,
+            {"frame": with_sprints([{**SPRINT, "manager_state": "started", "manager_text": None}])},
+            {"snapshot": True},
+            {"frame": with_sprints([{
+                **SPRINT, "manager_state": "unavailable", "retry": False,
+                "manager_text": "managers are not available on this host yet",
+            }])},
+            {"snapshot": True},
+        ])
+        (line,) = sprint_lines(started)
+        self.assertEqual([n for n in nodes(line) if has_class(n, "retry")], [])
+        self.assertEqual([n for n in nodes(line) if has_class(n, "manager")], [])
+        (line,) = sprint_lines(unavailable)
+        self.assertIn("managers are not available on this host yet", full(line))
+        self.assertEqual([n for n in nodes(line) if has_class(n, "retry")], [])
+
+    def test_waiting_on_quota_shows_when(self) -> None:
+        (snap,) = render([
+            START,
+            {"frame": with_sprints([{
+                **SPRINT, "manager_state": "waiting", "manager_text": "waiting on quota until",
+                "manager_until": "2026-11-13T00:00:00+00:00", "retry": True,
+            }])},
+            {"snapshot": True},
+        ])
+        (line,) = sprint_lines(snap)
+        self.assertIn("waiting on quota until", full(line))
+        (until,) = [n for n in nodes(line) if has_class(n, "until")]
+        self.assertNotEqual(full(until), "")
+        self.assertNotIn("Invalid Date", full(until))
+
+    def test_a_manager_session_renders_inside_its_sprint(self) -> None:
+        name = "owner/p00 sprint " + "a" * 16
+        (snap,) = render([
+            START,
+            {"frame": with_sprints([{**SPRINT, "sessions": [{
+                "session_id": "s1", "name": name, "state": "working", "state_text": "working",
+                "cwd": "/srv/p00", "deliveries": [],
+            }]}])},
+            {"snapshot": True},
+        ])
+        (line,) = sprint_lines(snap)
+        (row,) = [n for n in nodes(line) if n["tag"] == "li" and has_class(n, "sprint-session")]
+        self.assertIn(name, full(row))
+        self.assertEqual(
+            [full(n) for n in nodes(row) if has_class(n, "s-working")], ["working"]
         )
 
 
