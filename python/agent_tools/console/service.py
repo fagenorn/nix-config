@@ -442,7 +442,11 @@ profile's full listing shows, stopped ones included: `_wake_settings` gives `Nud
 record was removed and the client would otherwise resume it under another name without its settings.
 A listing that raises is a bare wake whose row carries `"listing_failed": <reason>` (a
 `nudge.ListingUnreadable`'s text, else `<Type>: <message>`) and one stderr line `console:
-listing_failed <sprint_id> <reason>`; the wake is still sent and `ok` is its own outcome. The full
+listing_failed <sprint_id> <reason>`; the wake is still sent and `ok` is its own outcome. Before every wake or revive, bare or not,
+`_refresh_settings` writes the sprint's settings file again with `manager.write_settings` from the stored
+secret (ADR-console-021), so a sprint started before that decision gets the isolation and permission members;
+a file that cannot be written is a failed wake with the write's reason, and a missing secret leaves the file
+as it is. The full
 listing is read only on the wake routes, never for a relay or when the running listing shows the
 manager. The nudger, the listing and the full listing are never called with the
 ingest lock held, and no `Nudge`, row or stderr line carries the owner's text. No nudge is made while the
@@ -2129,6 +2133,22 @@ class ConsoleService:
             return None, None
         return str(manager.settings_path(self._sprint_secrets, sprint_id)), None
 
+    def _refresh_settings(self, sprint_id: str) -> None:
+        """Off the ingest lock: write the sprint's manager settings file again before a wake (ADR-console-021).
+
+        The content is what a launch writes, from the sprint's stored secret. A missing secret leaves the
+        file as it is; a file that cannot be written raises `NudgeFailed` with the write's reason, which
+        fails the wake.
+        """
+        secret = sprints.read_secret(self._sprint_secrets, sprint_id)
+        if secret is None:
+            return
+        try:
+            manager.write_settings(manager.settings_path(self._sprint_secrets, sprint_id),
+                                   {manager.ID_ENV: sprint_id, manager.SECRET_ENV: secret})
+        except manager.LaunchFailed as error:
+            raise nudge.NudgeFailed(str(error)) from error
+
     def _record_nudge(self, sprint_id: str, through: int | None, route: str | None,
                       reason: str | None, listing_failed: str | None = None) -> None:
         """Under the ingest lock: append one `sprint.nudged` row for the open sprint and fold it."""
@@ -2187,6 +2207,7 @@ class ConsoleService:
                 self._nudger(nudge.Nudge(sprint_id, route, name, listed[0], profile, cwd))
             elif known is not None:
                 route = nudge.WAKE
+                self._refresh_settings(sprint_id)
                 self._nudger(nudge.Nudge(sprint_id, route, name, known, profile, cwd, settings))
             else:
                 reason = nudge.UNKNOWN_SESSION
@@ -2452,6 +2473,7 @@ class ConsoleService:
                 if self._wake_due(sprint_id) is None:
                     self._nudging.discard(sprint_id)
                     return
+            self._refresh_settings(sprint_id)
             self._nudger(nudge.Nudge(
                 sprint_id, nudge.REVIVE, name, session_id, profile, root, settings))
         except Exception as error:

@@ -334,6 +334,25 @@ class NudgeServiceTest(MessageRouteTest):
         ((_, row),) = self.nudged()
         self.assertEqual((row["route"], row["ok"]), ("wake", True))
 
+    def assert_message_wake_rewrites_settings(self, svc, sid):
+        path = manager.settings_path(svc._sprint_secrets, sid)
+        path.write_text(json.dumps({"env": {"CONSOLE_SPRINT_ID": sid}}))
+        svc.send_message("owner/p01", sid, TEXT)
+        self.queued.run_next()
+        self.assertEqual([n.route for n in self.nudges], ["wake"])
+        secret = (svc._sprint_secrets / sid).read_text().removesuffix("\n")
+        launch = manager.new_launch(
+            sid, "owner/p01", "g", "/srv/p01", "work", secret, svc._sprint_secrets)
+        self.assertEqual(path.read_text(), json.dumps(manager.settings_document(launch.env)))
+
+    def test_a_wake_of_a_session_the_full_listing_shows_writes_the_settings_file_again(self):
+        svc, sid = self.stopped_with_full_listing(frozenset({"s-1"}))
+        self.assert_message_wake_rewrites_settings(svc, sid)
+
+    def test_a_wake_with_name_and_settings_writes_the_settings_file_again(self):
+        svc, sid = self.stopped_with_full_listing(frozenset())
+        self.assert_message_wake_rewrites_settings(svc, sid)
+
     def stopped_with_full_listing(self, outcome):
         """A restarted service whose manager is unlisted; `outcome` is what its full listing gives."""
         first = self.begin()

@@ -23,6 +23,9 @@ NAME = "owner/p01 sprint " + SID
 LEAD = ("You are the manager of one sprint, started by the console. "
         'Run "sprint contract" first and follow what it prints. The goal: ')
 PROMPT = LEAD + "make it resumable"
+REFUSAL = ("Nobody watches this session, so the permission prompt was refused: do the step "
+           "another way that needs no permission, or bring the choice to the owner with "
+           "`sprint ask`.")
 
 
 def cap(*rows, all_out=False, resumes_at=None):
@@ -141,8 +144,8 @@ class RunTest(Case):
 
     def test_the_identity_is_written_to_a_private_settings_file(self):
         self.run_fake()
-        self.assertEqual(json.loads(self.settings.read_text()), {"env": {
-            "CONSOLE_SPRINT_ID": SID, "CONSOLE_SPRINT_SECRET": "s3cret"}})
+        self.assertEqual(json.loads(self.settings.read_text())["env"], {
+            "CONSOLE_SPRINT_ID": SID, "CONSOLE_SPRINT_SECRET": "s3cret"})
         self.assertEqual(stat.S_IMODE(self.settings.stat().st_mode), 0o600)
         manager.run_launch(self.launch(secret="n3w", root=str(self.root)), platform="linux",
                            run=self.fake(), environ=self.ENVIRON)
@@ -153,6 +156,29 @@ class RunTest(Case):
         manager.remove_settings(self.dir, SID)
         self.assertFalse(self.settings.exists())
         manager.remove_settings(self.dir, SID)
+
+    def test_the_settings_turn_the_isolation_guard_off_and_refuse_every_permission_prompt(self):
+        self.run_fake()
+        settings = json.loads(self.settings.read_text())
+        self.assertEqual(set(settings), {"env", "worktree", "hooks"})
+        self.assertEqual(settings["worktree"], {"bgIsolation": "none"})
+        self.assertEqual(set(settings["hooks"]), {"PermissionRequest"})
+        [group] = settings["hooks"]["PermissionRequest"]
+        self.assertNotIn("matcher", group)
+        [hook] = group["hooks"]
+        self.assertEqual(hook["type"], "command")
+        done = subprocess.run(["sh", "-c", hook["command"]], capture_output=True, text=True,
+                              check=True)
+        self.assertEqual(json.loads(done.stdout), {"hookSpecificOutput": {
+            "hookEventName": "PermissionRequest",
+            "decision": {"behavior": "deny", "message": REFUSAL}}})
+        self.assertEqual(done.stderr, "")
+
+    def test_the_refusal_names_the_fixed_reason_and_the_two_ways_on(self):
+        self.assertIn("nobody watches this session", REFUSAL.lower())
+        self.assertIn("refused", REFUSAL)
+        self.assertIn("needs no permission", REFUSAL)
+        self.assertIn("sprint ask", REFUSAL)
 
     def test_a_lingering_child_does_not_hold_the_launch(self):
         bin_dir = self.tmp / "bin"
