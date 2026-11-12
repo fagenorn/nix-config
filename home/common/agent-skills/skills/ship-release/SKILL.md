@@ -6,7 +6,7 @@ argument-hint: "[scope hint — seeds the release title]"
 
 # Ship Release
 
-The unit of work is `origin/<integration>`'s verified tip. The release core publishes it; this skill prepares notes and version, shows one preview, and runs the core after the user confirms. State lives in the core, never in the skill.
+The unit of work is `origin/<integration>`'s verified tip. The release core publishes it; this skill prepares notes and version, shows one preview, then runs the core on the user's yes. State lives in the core, never in the skill.
 
 ## Ownership
 
@@ -27,11 +27,11 @@ Run `resolve-project resolve --repo-root <checkout>`. Resolve once at phase entr
 
 ## Authorization
 
-Invoking this skill authorizes the reversible, predeclared steps: reading, notes, version proposal, land lock, preview. Each irreversible action needs its own confirmation token. The preview is the one stop for all. Only an explicit yes to all lets the run pass those tokens, and only ones the user saw in that turn: tokens rotate on every resume, so a confirmation is never carried across one; silence or any other reply passes none. A standing release authorization the user gave in this session's own conversation (never relayed by an agent or inferred from a go-ahead for other work) replaces seeing them in that turn; the run still passes exactly its runnable preview's tokens. A reply that changes the version is a new target and needs a new preview.
+Invoking this skill authorizes the reversible, predeclared steps: reading, notes, version proposal, land lock, preview. Each irreversible action needs its own confirmation token. The preview is the one stop for all. Only an explicit yes to all lets the run pass those tokens, and only ones the user saw in that turn: tokens rotate on every resume, so a confirmation is never carried across one; silence or any other reply passes none. A standing release authorization the user gave in this session's own conversation (never relayed by an agent or inferred from a go-ahead for other work) replaces seeing them in that turn; the run still passes exactly its runnable preview's tokens. A changed version is a new target and needs a new preview.
 
 ## Doc-grounded escalations
 
-Before forming any user-facing question, invoke `doc-grounded-questions`, using only the retained snapshot's declared context, standards, architecture, and hint paths.
+Before any user-facing question, invoke `doc-grounded-questions`, using only the retained snapshot's declared context, standards, architecture, and hint paths.
 
 ## Phase 0 — Pre-flight
 
@@ -50,7 +50,7 @@ A nonterminal `release` (any state outside `succeeded`, `failed`, `rolled_back`,
 
 ## Phase 1 — Changelog
 
-**Read [`CHANGELOG.md`](./CHANGELOG.md) first**: it owns the rubric and template. Assemble the body for the range `<prev-tag>..<commit>` (no tag: all of `<commit>`), where `<commit>` is `git rev-parse origin/<integration>`. The body is the release notes: write it with the file-writing tool to `<notes-path>`, a path outside both working trees, and pass it by path (`worktrees/SKILL.md`, `## Shell forms the isolation checker refuses`). The title is one line under 70 characters from the body's synthesis. Do not create a tracked `CHANGELOG.md` unless the user asks.
+**Read [`CHANGELOG.md`](./CHANGELOG.md) first**: it owns the rubric and template. Assemble the body for the range `<prev-tag>..<commit>` (no tag: all of `<commit>`), where `<commit>` is `git rev-parse origin/<integration>`. The body is the release notes: write it with the file-writing tool to `<notes-path>`, a path outside both working trees, and pass it by path (`worktrees/SKILL.md`, `## Shell forms the isolation checker refuses`). The title is one line under 70 characters from the body's synthesis. Create no tracked `CHANGELOG.md` unless the user asks.
 
 ## Phase 2 — Version
 
@@ -71,11 +71,11 @@ release transaction preview --repo-root <main-checkout> --commit <commit> --vers
 release transaction preview --repo-root <main-checkout>
 ```
 
-Two-branch project: before the first preview, and again after opening the release PR, run alone (60-minute timeout) `forge-claim land acquire --repo <slug> --branch <integration> --sha <commit> --release --wait`, where `<slug>` is `bindings.tracker.repo_slug` and, in resume form, `<commit>` the release's `commit`. `no_open_pr` goes on to the preview, or in resume form before the merge to reporting it and offering `abandon`. The confirmation stop and a `release_busy` stop keep the lock, and the run releases it; every other stop, a declined confirmation or a timed-out or killed acquire too, first runs `forge-claim land release --repo <slug> --branch <integration> --sha <commit>`.
+Two-branch project: before the first preview, and again after opening the release PR, run alone (60-minute timeout) `forge-claim land acquire --repo <slug> --branch <integration> --sha <commit> --release --wait`, where `<slug>` is `bindings.tracker.repo_slug` and, in resume form, `<commit>` the release's `commit`. Its `lock_sha` is `<commit>` from then on. `no_open_pr` goes on to the preview, or in resume form before the merge to reporting it and offering `abandon`. The confirmation stop and a `release_busy` stop keep the lock, and the run releases it; every other stop, a declined confirmation or a timed-out or killed acquire too, first runs `forge-claim land release --repo <slug> --branch <integration> --sha <commit>`.
 
 On `release_pr_missing` (exit 3 still prints the document), open the release PR once with `gh pr create --repo <slug> --base <default> --head <integration> --title "<title>" --body "<version>"`. On `verification_pending`, wait once for CI in one foreground call: under the lock `gh pr checks <integration> --repo <slug> --required --watch --fail-fast --interval 60` (30-minute timeout; it can return early, so the re-preview judges), else `gh run watch <id> --exit-status` from `gh run list --commit <commit>` (at most 5 minutes). After either, re-run the same preview. Still pending, or another refusal: report it and stop.
 
-When `runnable`, present the version with its evidence (the buckets that triggered it), the title, the commit, each action and every confirmation, and ask for one explicit yes to all. Then end the turn. Once runnable, tokens are stable if CI and the `<default>` tip are unchanged; never edit the notes.
+When `runnable`, present the version with its evidence (its triggering buckets), the title, the commit, each action and every confirmation, and ask for one explicit yes to all. Then end the turn. Once runnable, tokens are stable if CI and the `<default>` tip are unchanged; never edit the notes.
 
 ## Phase 4 — Run
 
@@ -101,4 +101,4 @@ release transaction abandon --repo-root <main-checkout>
 
 ## Phase 5 — Report
 
-Report only from `release transaction status` and the run's `sync` and `lock`, not memory: `release.state`, `version`, `commit`, each action's `phase`, `status` and `reference`, and `receipt`. `succeeded` is released. A parked release (`attention_required`) is never reported released: give its `reason`, offer resume (Phase 3 resume form) or, when no action took effect, `abandon`. Tags are never deleted; fix a bad release forward with a new version.
+Report only from `release transaction status` and the run's `sync` and `lock`, not memory: `release.state`, `version`, `commit`, each action's `phase`, `status` and `reference`, and `receipt`. `succeeded` is released. A parked release (`attention_required`) is never reported released: give its `reason`, offer resume (Phase 3 resume form) or, when no action took effect, `abandon`. Never delete a tag; fix a bad release forward with a new version.

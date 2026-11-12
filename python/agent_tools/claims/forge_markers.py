@@ -390,6 +390,18 @@ def pulls_from(slug: str, branch: str, sha: str) -> list[Pull]:
             if pull.head_sha == sha and pull.head_ref == branch and pull.same_repo]
 
 
+def open_pulls_from(slug: str, branch: str) -> list[Pull]:
+    """The open pull requests whose head is `branch` of this repository, whatever their base and
+    head sha (issue 901): one call, since a branch heads one open pull request per base."""
+    owner = slug.split("/", 1)[0]
+    payload = forge_api.gh_json(["api", f"repos/{slug}/pulls?state=open&head={quote(owner, safe='')}:"
+                                 f"{quote(branch, safe='/')}&per_page=100"])
+    if not isinstance(payload, list):
+        raise ForgeError("payload_invalid", "open branch pulls are not an array")
+    return [pull for pull in map(_pull, payload)
+            if pull.state == "open" and pull.head_ref == branch and pull.same_repo]
+
+
 def closing_issues(slug: str, pr: int) -> list[int]:
     """The issue numbers the pull request closes, in the forge's order."""
     owner, name = slug.split("/", 1)

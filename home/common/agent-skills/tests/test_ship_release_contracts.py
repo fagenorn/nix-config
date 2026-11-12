@@ -176,6 +176,8 @@ class ShipReleaseContractsTest(unittest.TestCase):
         for form in ("Two-branch project: before the first preview, and again after opening the "
                      "release PR, run alone (60-minute timeout) " + acquire,
                      "in resume form, `<commit>` the release's `commit`",
+                     # Issue 901: the wait follows the release head, so the answer names the commit.
+                     "Its `lock_sha` is `<commit>` from then on.",
                      "`no_open_pr` goes on to the preview, or in resume form before the merge "
                      "to reporting it and offering `abandon`.",
                      "The confirmation stop and a `release_busy` stop keep the lock, and the run "

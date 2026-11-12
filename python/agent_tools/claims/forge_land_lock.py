@@ -49,7 +49,11 @@ locked branch contains, in the same repository and whatever its head, never answ
 branch itself has reached that sha, so where this rule would move the lock it is taken over as
 `closed` instead and the caller, answered `acquired`, resyncs. That covers a published release
 whose lock the caller's pull request alone still contains, and a release whose head moved past
-its lock, which releases the old lock and acquires again.
+its lock, which releases the old lock and acquires again. A waiting release does that itself
+(issue 901): a poll that finds the lock held at `--sha` while the release pull request's head is
+another sha sends the D9 delete of `--sha`, exactly what `release --sha` does, and attempts again
+in the same poll, competing with every other waiter. The answer is `acquired` or `already_held`,
+never `moved`, so nobody merges on a lock that changed hands without a resync.
 
 D6, `acquire` needs an open pull request whose head is the caller's sha with the branch as its
 base before any ref write, and otherwise answers `error` with `no_open_pr` (exit 2). `--wait`
@@ -57,12 +61,21 @@ re-checks this before every attempt, the first included: a caller whose pull req
 `--sha` as its head stops with `no_open_pr` and never moves the lock. With `--release` the pull
 request needed is instead an open one whose head branch is `--branch` at `--sha`, in the same
 repository (never a fork's branch of that name), with the repository's default branch as its base;
-the default branch is read once per invocation (`GET repos/<slug>`).
+the default branch is read once per invocation (`GET repos/<slug>`). A waiting release follows its
+pull request instead (issue 901), because every landing ahead of it moves the release head: each
+poll of `--release --wait` reads the open pull requests headed by `--branch` (`GET
+pulls?state=open&head=<owner>:<branch>`, one call in place of the commit lookup), keeps the
+same-repository one based on the default branch, and attempts the lock at that pull request's
+current head. `--sha` is then only the caller's starting belief, and `no_open_pr` means no such
+pull request is open. A one-shot `--release` never follows.
 
 D7, every call prints one JSON object on one stdout line with `command`, `action`, `repo`,
 `branch`, `sha`, `verdict`, `lock_sha`, `pr`, `by`, `took_over` (`null`, `"closed"` or `"idle"`)
-and `waited_s`. The `acquire` verdicts are `acquired`, `already_held` (the lock is already at
-`--sha`), `moved`, `held_by` and `lost_to`. Exit 0 is `acquired`, `already_held`, `moved`,
+and `waited_s`. `sha` is always `--sha` as given and `lock_sha` is where the lock is: a successful
+`acquire --release --wait` adds `head_moved`, true when it took the lock at a head other than
+`--sha`, and the caller continues with `lock_sha` as its commit. The `acquire` verdicts are
+`acquired`, `already_held` (the lock is already at `--sha`, or at the followed head), `moved`,
+`held_by` and `lost_to`. Exit 0 is `acquired`, `already_held`, `moved`,
 `released` and every `status` verdict (`free`, `held_by`, `stale`); exit 3 is contention
 (`held_by`, `lost_to`, `land-contended`, and `not_held` on `release`); exit 1 a forge error; exit 2
 a usage error or `no_open_pr`.
@@ -286,7 +299,8 @@ def wait_acquire(args: Any, node: Callable[[], str],
 
     D6 holds at every attempt: `mine` is read inside every poll, the first included, so a failed
     read is a failed poll (issue 740), and a caller whose pull request no longer has its sha as
-    head stops with `no_open_pr`.
+    head stops with `no_open_pr`. The attempt is made at the head of `mine`, which is `--sha`
+    except for a release, whose `eligible` follows its pull request (issue 901).
     """
     start = monotonic()
     watch: list[Any] = [object(), None]  # [oid or None, first seen]; the sentinel matches nothing
@@ -306,7 +320,16 @@ def wait_acquire(args: Any, node: Callable[[], str],
             mine = eligible()
             if not mine:
                 return _no_open_pr(args)
-            outcome = acquire_once(args.repo, args.branch, args.sha, mine, idle, node, seen)
+            sha = mine[0].head_sha
+            mine = [p for p in mine if p.head_sha == sha]
+            outcome = acquire_once(args.repo, args.branch, sha, mine, idle, node, seen)
+            if outcome.verdict == "held_by" and outcome.lock_sha == args.sha != sha:
+                # D5: the release's own lock at the head it started from; release it, try again.
+                failure = fm.cas_ref(args.repo, node(), lock_ref(args.branch), args.sha, fm.ZERO_OID)
+                outcome = acquire_once(args.repo, args.branch, sha, mine, idle, node, seen)
+                if failure and outcome.verdict == "held_by" and outcome.lock_sha == args.sha:
+                    raise forge_api.ForgeError(failure.code, "compare-and-swap delete not applied and "
+                                               "the lock is unchanged", transient=failure.transient)
         except forge_api.ForgeError as error:
             failures += 1
             if error.code not in ("gh_failed", "gh_timeout") or failures >= FAILED_POLLS:
@@ -314,8 +337,10 @@ def wait_acquire(args: Any, node: Callable[[], str],
         else:
             failures = 0
             if outcome.verdict in ("acquired", "already_held", "moved"):
+                moved = {"head_moved": sha != args.sha} if args.release else {}
                 return 0, result(args, outcome.verdict, lock_sha=outcome.lock_sha, pr=outcome.pr,
-                                 took_over=outcome.took_over, waited_s=int(monotonic() - start))
+                                 took_over=outcome.took_over, waited_s=int(monotonic() - start),
+                                 **moved)
             if outcome.lock_sha is not None:
                 last = outcome
         if monotonic() - start >= BOUND:
@@ -327,8 +352,9 @@ def wait_acquire(args: Any, node: Callable[[], str],
 
 
 def _no_open_pr(args: Any) -> tuple[int, dict[str, Any]]:
-    detail = (f"no open release pull request from {args.branch} has head {args.sha}" if args.release
-              else f"no open pull request on {args.branch} has head {args.sha}")
+    detail = (f"no open pull request on {args.branch} has head {args.sha}" if not args.release
+              else f"no open release pull request from {args.branch} into the default branch"
+              if args.wait else f"no open release pull request from {args.branch} has head {args.sha}")
     return 2, result(args, "error", error="no_open_pr", detail=detail)
 
 
@@ -336,10 +362,13 @@ def _acquire(args: Any, attempts: Attempts | None = None) -> tuple[int, dict[str
     default: list[str] = []
 
     def eligible() -> list[fm.Pull]:
-        opened = [p for p in fm.commit_pulls(args.repo, args.sha) if p.state == "open"]
-        if not args.release:
-            return [p for p in opened if p.base_ref == args.branch and p.head_sha == args.sha]
-        mine = [p for p in opened if _releases(p, args.branch, args.sha)]
+        if args.release and args.wait:  # D6: a waiting release follows its pull request's head
+            mine = fm.open_pulls_from(args.repo, args.branch)
+        else:
+            opened = [p for p in fm.commit_pulls(args.repo, args.sha) if p.state == "open"]
+            if not args.release:
+                return [p for p in opened if p.base_ref == args.branch and p.head_sha == args.sha]
+            mine = [p for p in opened if _releases(p, args.branch, args.sha)]
         if mine and not default:
             default.append(fm.default_branch(args.repo))
         return [p for p in mine if p.base_ref == default[0]]
