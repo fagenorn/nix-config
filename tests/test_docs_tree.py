@@ -426,7 +426,8 @@ class DocsTreeTest(unittest.TestCase):
         adr = self.doc(path)
         for needle in ("POST /api/goal", "POST /api/withdraw", "ADR-console-008",
                        "ADR-console-009", "#834", "#838", "#886", "2000", "sprint-secrets",
-                       "never on the tracker", "indefinitely", "no manager has picked this up"):
+                       "never on the tracker", "indefinitely", "no manager has picked this up",
+                       "#911", "removes the refusal"):
             self.assertIn(needle, adr)
         write = self.doc("docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md")
         for needle in ("/api/goal", "/api/withdraw", "16384"):

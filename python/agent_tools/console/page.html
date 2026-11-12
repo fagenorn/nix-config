@@ -1114,7 +1114,7 @@ function refreshGoalList() {
   const items = goalMatches().map((id) => {
     const button = actionButton(id === chosen ? "goal-project picked" : "goal-project", id, () => {
       draft.project = id;
-      draft.rev += 1;
+      goalEdited();
       refreshGoalList();
     });
     const row = el("li");
@@ -1128,6 +1128,12 @@ function showGoalReason() {
   goalUi.status.replaceChildren(
     ...(draft.reason === "" ? [] : [el("p", "fail", "Could not send: " + draft.reason)]),
   );
+}
+function goalEdited() {
+  draft.rev += 1;
+  if (draft.reason === "") return;
+  draft.reason = "";
+  showGoalReason();
 }
 function closeGoal() {
   if (draft.phase !== "sending") draft.reason = "";
@@ -1189,7 +1195,7 @@ function buildGoalBox(section) {
   filter.value = draft.filter;
   filter.addEventListener("input", (event) => {
     draft.filter = event.target.value;
-    draft.rev += 1;
+    goalEdited();
     refreshGoalList();
   });
   const list = el("ul", "goal-projects");
@@ -1199,7 +1205,7 @@ function buildGoalBox(section) {
   text.value = draft.text;
   text.addEventListener("input", (event) => {
     draft.text = event.target.value;
-    draft.rev += 1;
+    goalEdited();
   });
   const status = el("div", "goal-status");
   const send = actionButton("goal-send", "Send", sendGoal);
