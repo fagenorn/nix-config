@@ -18,6 +18,9 @@ Event kinds read:
   It speaks only when the sprint fold accepted it and the sprint's shown state (`view.sprint_state`,
   the open inbox items counted as the page counts them, never quiet: no clock is read) differs
   from the one before the report; a refused, ignored or state-repeating report says nothing.
+- `question.answered` (`event_log.QUESTION_ANSWERED`, `sprints.py`): the owner answered a manager's
+  question. It speaks only when its `differs` is `True`, so an answer that took the recommendation
+  says nothing, and nothing else about a round (asking it, answering the others) speaks.
 
 Every other kind says nothing, `goal.stated` included, delivery runs (`delivery.seen`, `delivery.gone`)
 included: the console has no delivery moments yet, and #878 adds them from
@@ -56,12 +59,14 @@ repository makes no moment. No sentence names an issue, a session or a path.
     brief_sent       A brief for <project_id> arrived, version <n>: <goal>
     brief_approved   The brief for <project_id> was approved, version <n>: <goal>
     sprint_state     The sprint for <project_id> is now <the sprint's shown state>: <goal>
+    answer_differs   An answer for <project_id> went against the recommendation, <recommended>: <question>
 
 An inbox payload needs `project_id` (str), `issue` (int, not bool) and
 `question` (str). A withdrawal needs the event's project (str) and a payload `goal` (str); it
 reads no state, the row carries the goal. A brief event makes a moment only when its project is a
 `str`, its payload `version` an `int` (not a bool) and `goal` a `str`; it reads no state either.
-A sprint report is judged against the folded sprints before it
+An answer event makes a moment only when its project is a `str`, its payload `question` and
+`recommended` are `str` and `differs` is `True`; it reads no state either. A sprint report is judged against the folded sprints before it
 (`moments` folds its own copy of the optional `sprints` argument with
 `sprints.sprint_states`), and the sentence's goal is the sprint's.
 
@@ -85,7 +90,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from agent_tools.console.event_log import (
-    BRIEF_APPROVED, BRIEF_SENT, GOAL_WITHDRAWN, SPRINT_REPORTED, Event)
+    BRIEF_APPROVED, BRIEF_SENT, GOAL_WITHDRAWN, QUESTION_ANSWERED, SPRINT_REPORTED, Event)
 from agent_tools.console.sessions import (
     ENDED, GONE, HOOK, LIMIT, SEEN, WORKING, SessionState, session_states)
 from agent_tools.console.sprints import MANAGER_SESSION_NAME, SprintState, sprint_states
@@ -107,6 +112,7 @@ SPRINT_WITHDRAWN = "sprint_withdrawn"
 BRIEF_SENT_MOMENT = "brief_sent"
 BRIEF_APPROVED_MOMENT = "brief_approved"
 SPRINT_STATE_MOMENT = "sprint_state"
+ANSWER_DIFFERS = "answer_differs"
 
 
 @dataclass(frozen=True)
@@ -198,6 +204,15 @@ def _brief_moment(event: Event) -> tuple[str, str] | None:
             f"The brief for {event.project} was approved, version {version}: {goal}")
 
 
+def _answer_moment(event: Event) -> tuple[str, str] | None:
+    question, recommended = event.payload.get("question"), event.payload.get("recommended")
+    if (not isinstance(event.project, str) or not isinstance(question, str)
+            or not isinstance(recommended, str) or event.payload.get("differs") is not True):
+        return None
+    return (ANSWER_DIFFERS, f"An answer for {event.project} went against the recommendation, "
+                            f"{recommended}: {question}")
+
+
 def _report_moment(event: Event, before: Mapping[str, SprintState],
                    after: Mapping[str, SprintState],
                    records: Mapping[tuple[str, str], InboxRecord]) -> tuple[str, str] | None:
@@ -243,6 +258,8 @@ def moments(
             said = _inbox_moment(event, before)
         elif event.kind in (BRIEF_SENT, BRIEF_APPROVED):
             said = _brief_moment(event)
+        elif event.kind == QUESTION_ANSWERED:
+            said = _answer_moment(event)
         elif event.kind == GOAL_WITHDRAWN:
             goal = payload.get("goal") if isinstance(payload, dict) else None
             if isinstance(event.project, str) and isinstance(goal, str):

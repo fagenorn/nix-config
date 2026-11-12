@@ -31,6 +31,7 @@ from agent_tools.console.sprints import (
     Brief,
     Manager,
     Observed,
+    Question,
     Report,
     SprintState,
     sprint_states,
@@ -44,6 +45,7 @@ from agent_tools.console.view import (
     INBOX_HEALTH,
     INBOX_SEEN,
     NEEDS_SENTENCE,
+    QUESTION_SENTENCE,
     REGISTERED,
     STALE_HEADLINE,
     STALE_SENTENCE,
@@ -1161,6 +1163,80 @@ class SprintReportViewTest(unittest.TestCase):
             {"issue": 16, "stage": "final review", "stage_text": "final review"}])
         self.assertEqual(shown["progress"],
                          {"landed": 1, "in_delivery": 1, "queued": 0, "held": 1, "total": 3})
+
+
+
+def asked(sprint_state):
+    return dataclasses.replace(sprint_state, questions=(
+        Question(41, 0, T0, False, "Which store keeps the checkpoints?", "the resume slice",
+                 ("sqlite", "files"), "files"),
+        Question(41, 1, T0, False, "May the reader change?", "the reader slice",
+                 ("yes", "no"), "no")))
+
+
+def answer_question(sprint_state, index):
+    questions = tuple(
+        dataclasses.replace(q, answer="sqlite", chosen="sqlite", differs=True, answered_at=T0)
+        if q.index == index else q for q in sprint_state.questions)
+    return dataclasses.replace(sprint_state, questions=questions)
+
+
+def question_entry(index, text, options, recommended, blocks, sid=A):
+    return {"type": "inbox_item", "reason": "question", "key": f"question/{sid}/41/{index}",
+            "project_id": "p00", "sprint_id": sid, "goal": "make the importer resumable",
+            "round": 41, "index": index, "blocker": False, "blocks": blocks,
+            "headline": text, "more_questions": 0,
+            "questions": [{"question": text, "options": options, "chosen": None,
+                           "recommended": recommended}],
+            "items": [], "answers": [], "answered": False, "waiting_since": T0}
+
+
+FIRST = question_entry(0, "Which store keeps the checkpoints?", ["sqlite", "files"], "files",
+                       "the resume slice")
+SECOND = question_entry(1, "May the reader change?", ["yes", "no"], "no", "the reader slice")
+
+
+class QuestionViewTest(unittest.TestCase):
+    def test_each_open_question_is_one_inbox_item_with_its_recommendation(self):
+        shown = derive_view([state("p00", 1)], sprints={A: asked(started(A))})
+        self.assertEqual(shown["inbox"]["open"], [FIRST, SECOND])
+        self.assertEqual(shown["statement"]["inbox_items"], 2)
+        self.assertEqual(shown["statement"]["headline"], "2 things need you")
+        self.assertEqual(shown["statement"]["sentence"], QUESTION_SENTENCE)
+        self.assertEqual(QUESTION_SENTENCE,
+                         "Choose an option with its number and press Enter, or answer in your own words.")
+
+    def test_questions_follow_briefs_and_lead_tracker_items(self):
+        b = "b" * 16
+        records = {("p00", "k1"): InboxRecord(
+            {**item("p00", "k1"), "reason": "decision", "questions": [
+                {"question": "Which one?", "options": ["x"], "chosen": None}]}, "t1", "u1")}
+        shown = derive_view([state("p00", 1)], records, sprints={
+            A: asked(started(A)), b: briefed(sprint(b), at="t5")})
+        self.assertEqual([i["reason"] for i in shown["inbox"]["open"]],
+                         ["brief", "question", "question", "decision"])
+        self.assertEqual(shown["statement"]["sentence"], BRIEF_SENTENCE)
+        self.assertEqual(shown["statement"]["inbox_items"], 4)
+
+    def test_the_sprint_waits_on_you_while_questions_are_open_and_not_after(self):
+        it = reported(asked(started(A)), R)
+        shown = line(it, R + 4 * MIN)
+        self.assertEqual((entry(shown)["state"], entry(shown)["state_text"]),
+                         ("waiting", "waiting on you (2)"))
+        self.assertEqual(entry(shown)["waiting"], 2)
+        shown = entry(line(answer_question(it, 0), R + 4 * MIN))
+        self.assertEqual((shown["state"], shown["state_text"]), ("waiting", "waiting on you (1)"))
+        shown = line(answer_question(answer_question(it, 0), 1), R + 4 * MIN)
+        self.assertEqual((entry(shown)["state"], entry(shown)["state_text"]),
+                         ("on_track", "on track"))
+        self.assertEqual(entry(shown)["waiting"], 0)
+        self.assertEqual(shown["inbox"]["open"], [])
+
+    def test_an_unregistered_projects_questions_are_not_shown(self):
+        shown = derive_view([state("p00", 1)], sprints={
+            A: dataclasses.replace(asked(started(A)), project_id="p09")})
+        self.assertEqual(shown["inbox"]["open"], [])
+        self.assertEqual(shown["statement"]["inbox_items"], 0)
 
 
 class SprintViewTest(unittest.TestCase):

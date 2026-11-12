@@ -64,7 +64,8 @@ see below), else
 `ALL_OUT_HEADLINE` when every profile is out of usage, else `STALE_HEADLINE` when a registered
 project's tracker cannot be read, else "Nothing needs you". The sentence is `ALL_OUT_SENTENCE`
 when every profile is out of usage, else `STALE_SENTENCE` naming those projects when any is
-stale, else `BRIEF_SENTENCE` when any brief is open, else `CHOOSE_SENTENCE` when an open item is a
+stale, else `BRIEF_SENTENCE` when any brief is open, else `QUESTION_SENTENCE` when any manager
+question is open, else `CHOOSE_SENTENCE` when an open item is a
 decision with questions (the page can
 answer it), else `ANSWER_SENTENCE` when an open item has answers (a verification prompt the page
 can answer), else `NEEDS_SENTENCE` when something is open, else the registered-project count. The
@@ -94,6 +95,20 @@ counts in `inbox_items` and the headline. Its entry is
 `BRIEF_SENTENCE` ("Press Enter to approve the brief, or write a reply to ask for changes.") says
 what the page offers. An approved or changes-asked brief is no inbox item; only registered
 projects' briefs appear, as for sprints.
+
+Each open question of a shown sprint (`sprints.open_questions`; a registered project, as briefs) is
+one entry of `inbox.open` too, after the briefs and before every tracker item, ordered by
+`(at, sprint_id, round, index)`, and counts in `inbox_items` and the headline; an answered question
+is none. Its entry is
+
+    {"type": "inbox_item", "reason": "question", "key": "question/<sprint id>/<round>/<index>",
+     "project_id", "sprint_id", "goal", "round": <int>, "index": <int>, "blocker": <bool>,
+     "blocks": "<text>", "headline": "<question>", "more_questions": 0,
+     "questions": [{"question", "options": [<str>, ...], "chosen": null, "recommended": "<option>"}],
+     "items": [], "answers": [], "answered": false, "waiting_since": "<time it was asked>"}
+
+`QUESTION_SENTENCE` ("Choose an option with its number and press Enter, or answer in your own
+words.") says what the page offers.
 
 A project entry is `{"type": "project", "project_id", "root", "quiet",
 "open_work", "last_activity", "sprints": [<sprint entry>, ...],
@@ -173,7 +188,7 @@ where a run's `done` reads `closed out` and any other run stage is that stage wi
 never from the `deliveries` mapping: a run leaves that mapping once its final record exists, while
 the fold keeps its last stage and movement, so they outlive the run. `waiting` is the number of
 open inbox items of registered projects whose project is the sprint's and whose issue is one of the
-report's issues or its `inbox` numbers. Movement is the latest of the approval time (`decided_at`,
+report's issues or its `inbox` numbers, plus the sprint's open questions. Movement is the latest of the approval time (`decided_at`,
 else the brief's sent time), the report's time and the fold's `moved_ms`; `quiet_elapsed` is
 `now_ms` minus it, computed only for an approved brief and only when `now_ms` is not None (else 0).
 The state is the first that holds: the brief is not approved, `drafting` ("drafting the brief");
@@ -252,10 +267,12 @@ from agent_tools.console.sprints import (
     WAITING_TEXT,
     UNREACHABLE_TEXT,
     Message,
+    Question,
     SprintState,
     age_text,
     manager_status,
     message_state,
+    open_questions,
     progress_text,
     unreachable,
 )
@@ -284,6 +301,7 @@ ALL_OUT_HEADLINE = "Every profile is out of usage"
 ALL_OUT_SENTENCE = "Everything resumes at the earliest reset; nothing is asked of you."
 NEEDS_SENTENCE = "Each one links to the tracker, where it is answered."
 BRIEF_SENTENCE = "Press Enter to approve the brief, or write a reply to ask for changes."
+QUESTION_SENTENCE = "Choose an option with its number and press Enter, or answer in your own words."
 CHOOSE_SENTENCE = "Choose an option with its number and press Enter, or answer on the tracker."
 ANSWER_SENTENCE = "Answer it here, or on the tracker."
 STALE_SENTENCE = ("The tracker could not be read for {projects}; "
@@ -529,10 +547,11 @@ def _effective_stages(state: SprintState) -> list[tuple[int, str, str]]:
 
 
 def sprint_waiting(state: SprintState, records: Iterable[InboxRecord]) -> int:
-    """How many of `records` (open items) wait on an issue the sprint's report names."""
+    """How many open items wait on the sprint: `records` naming an issue its report names, plus its
+    open questions."""
     report = state.report
     named = set() if report is None else {issue for issue, _ in report.issues} | set(report.inbox)
-    return sum(r.item.get("issue") in named for r in records)
+    return sum(r.item.get("issue") in named for r in records) + len(open_questions(state))
 
 
 def sprint_state(state: SprintState, now_ms: int | None, waiting: int) -> tuple[str, str]:
@@ -675,6 +694,17 @@ def _brief_entry(sprint: SprintState) -> dict:
             "answered": False, "waiting_since": brief.sent_at}
 
 
+def _question_entry(sprint: SprintState, question: Question) -> dict:
+    return {"type": "inbox_item", "reason": "question",
+            "key": f"question/{sprint.sprint_id}/{question.round_id}/{question.index}",
+            "project_id": sprint.project_id, "sprint_id": sprint.sprint_id, "goal": sprint.goal,
+            "round": question.round_id, "index": question.index, "blocker": question.blocker,
+            "blocks": question.blocks, "headline": question.question, "more_questions": 0,
+            "questions": [{"question": question.question, "options": list(question.options),
+                           "chosen": None, "recommended": question.recommended}],
+            "items": [], "answers": [], "answered": False, "waiting_since": question.at}
+
+
 def _headline(open_count: int, stale: bool, all_out: bool) -> str:
     if open_count == 1:
         return "1 thing needs you"
@@ -721,7 +751,11 @@ def derive_view(
     briefs = sorted((s for group in drafted.values() for s in group
                      if s.brief is not None and s.brief.decision == NONE),
                     key=lambda s: (s.brief.sent_at, s.sprint_id))
-    open_count = len(briefs) + len(open_items)
+    asked = sorted(((s, q) for group in drafted.values() for s in group
+                    for q in open_questions(s)),
+                   key=lambda pair: (pair[1].at, pair[0].sprint_id, pair[1].round_id,
+                                     pair[1].index))
+    open_count = len(briefs) + len(asked) + len(open_items)
     all_out = bool(capacity["all_out"])
     if all_out:
         sentence = ALL_OUT_SENTENCE
@@ -729,6 +763,8 @@ def derive_view(
         sentence = STALE_SENTENCE.format(projects=", ".join(stale_projects))
     elif briefs:
         sentence = BRIEF_SENTENCE
+    elif asked:
+        sentence = QUESTION_SENTENCE
     elif any(r.item["reason"] == "decision" and r.item["questions"] for r in open_items):
         sentence = CHOOSE_SENTENCE
     elif any(r.item.get("answers") for r in open_items):
@@ -790,6 +826,7 @@ def derive_view(
                       "sentence": sentence, "stale": bool(stale_projects)},
         "capacity": capacity,
         "inbox": {"open": [_brief_entry(s) for s in briefs]
+                          + [_question_entry(s, q) for s, q in asked]
                           + [_inbox_entry(r, health) for r in open_items],
                   "answered": [_inbox_entry(r, health) for r in answered]},
         "project_count": len(states),
