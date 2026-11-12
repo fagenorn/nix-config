@@ -33,7 +33,7 @@ export const meta = {
 // A fresh run re-adopts an existing branch or worktree (never resetting it) and stops `dirty` when it holds uncommitted changes.
 //
 // RESUME: every stop from the claim on returns { stage, ..., cont }, where cont is
-// { setup, lane, plan (declared branches, when any, as [{name, worktree, base, head, current, toplevel, common_dir, clean}]), plan_reviewed, plan_findings?, decisions?, done, pr? (a batch-built close-out cont: the PR the batch merged), fix_waves, fix_findings? (#924: the findings a fix-wave-review stop left open, bounded; the resume's first fix wave gets them with what its fresh final review raises), checks_fixes?, sync_fixes?, verified?, final_reviewed?, partial?, reordered? (#896: [{task, after, notes}], each a blocked task moved once to just after the later task it named; cont.plan.tasks is already in that order), claim_incomplete? }. Passing it back as args.cont
+// { setup, lane, plan (declared branches, when any, as [{name, worktree, base, head, current, toplevel, common_dir, clean}]), plan_reviewed, plan_findings?, decisions?, done, pr? (a batch-built close-out cont: the PR the batch merged), fix_waves, fix_findings? (#924: the findings a fix-wave-review stop left open, bounded; the resume's first fix wave gets them with what its fresh final review raises; #940: such a stop also carries diverging: {file, waves} beside cont when the waves spent across runs reached FIX_WAVES_BOUND and a finding it left open is in a file the findings carried into the run named, and deliver-batch then hands the issue to the owner instead of relaunching it), checks_fixes?, sync_fixes?, verified?, final_reviewed?, partial?, reordered? (#896: [{task, after, notes}], each a blocked task moved once to just after the later task it named; cont.plan.tasks is already in that order), claim_incomplete? }. Passing it back as args.cont
 // re-adopts the claimed worktree (setup re-checks it and refuses a dirty tree
 // unless cont.partial names the task that left the edits), reuses cont.plan
 // (reviewing it first unless plan_reviewed; a plan-review stop keeps the revised plan with plan_findings { rules, findings, rounds }, and the resume reads the owner's answer and, when every finding left names a rule and none has source codex, runs one rules-only revise of it whatever triggered the full revise (#823), dropping the plan once rounds reach two; any other finding left has spent the plan's one full revise, so the resume plans again), skips the tasks in cont.done, then
@@ -280,6 +280,8 @@ const stopReason = (stage, x) => {
   const say = v => { if (typeof v === 'string' && v.trim()) parts.push(v) }
   const names = (k, what) => { if (Array.isArray(x[k]) && x[k].length) say(`${what} ${x[k].map(v => (isEntry(v) ? v.id || v.ac || v.file : v)).join(', ')}`) }
   const task = isEntry(x.task) ? `task ${x.task.n} ` : ''
+  // #940: a stop whose fix waves do not converge says so first, so the cap cuts the findings and never the verdict.
+  if (isEntry(x.diverging)) say(`the fix waves do not converge on ${String(x.diverging.file).slice(0, 120)} after ${x.diverging.waves} waves; an owner decision on the design is needed`)
   say(x.details)
   say(x.error)
   if (Array.isArray(x.branch_problems)) say(`branch problems: ${x.branch_problems.join('; ')}`)
@@ -524,6 +526,27 @@ const carryOf = list => (Array.isArray(list) ? list : []).filter(f => isEntry(f)
   .map(f => ({ severity: f.severity === 'critical' ? 'critical' : 'important', ...(typeof f.file === 'string' && f.file ? { file: clip(f.file) } : {}), summary: clip(f.summary), ...(typeof f.failing_input === 'string' && f.failing_input ? { failing_input: clip(f.failing_input) } : {}) }))
 const findingKey = f => `${typeof f.file === 'string' ? f.file : ''}\n${clip(String(f.summary)).toLowerCase().replace(/\s+/g, ' ').trim()}`
 let carried = carryOf(CONT && CONT.fix_findings)
+const CARRIED_AT_START = carried
+// #940: fix waves that do not converge. A fix-wave-review stop that leaves findings open once the waves spent across runs (cont.fix_waves
+// and this run's) have reached FIX_WAVES_BOUND, with a finding left in a file the findings carried into this run already named, is marked
+// diverging: { file, waves }: more waves on that file are not expected to close it, so the owner decides the design. A first run carries no
+// findings in, so it is never marked; neither is a resume whose open findings are all in other files.
+const FIX_WAVES_BOUND = 4
+// Reviewers name one file as path, ./path, an absolute path under the worktree, path:line, path:line-line, path:line:column or path#L<line>
+// (#L<line>-L<line> too): files are compared, and the marker names the file, as the path relative to the worktree without the surrounding
+// whitespace, a leading ./ and that trailing position; nothing else is folded, case included.
+const fileOf = f => {
+  if (typeof f.file !== 'string') return ''
+  let p = f.file.trim().replace(/#L\d+(?:-L?\d+)?$/, '').replace(/:\d+(?:[-:]\d+)?$/, '').trim()
+  const roots = [setup && setup.worktree, setup && setup.worktree_path].filter(r => typeof r === 'string' && r.startsWith('/')).map(r => r.replace(/\/+$/, ''))
+  for (const r of roots) if (r && p.startsWith(`${r}/`)) { p = p.slice(r.length + 1); break }
+  return p.replace(/^(?:\.\/)+/, '').trim()
+}
+const divergingOf = left => {
+  if (fixWaves < FIX_WAVES_BOUND) return null
+  const hit = left.map(fileOf).find(f => f && CARRIED_AT_START.map(fileOf).includes(f))
+  return hit ? { file: hit, waves: fixWaves } : null
+}
 // The head the final review and its fix waves passed at ({ head, accepted? }), carried so a resume on it skips the review.
 let finalReviewed = (CONT && CONT.final_reviewed) || null
 // The stages between a sync merge and its acceptance: a stop there must not carry a marker over the unreviewed merge.
@@ -1392,7 +1415,9 @@ if (finalFindings.length) {
     if (!again) {
       carried = carryOf(next)
       if (carried.length < next.length) log(`fix-wave-review: ${next.length - carried.length} of ${next.length} open finding(s) not carried in cont`)
-      return stop('fix-wave-review', { rv, fix_waves: fixWaves })
+      const diverging = divergingOf(carried)
+      if (diverging) log(`fix-wave-review: the fix waves do not converge on ${diverging.file} after ${diverging.waves} waves`)
+      return stop('fix-wave-review', { rv, fix_waves: fixWaves, ...(diverging ? { diverging } : {}) })
     }
     if (k === 1) afterFirst = next.length
     waveFindings = next

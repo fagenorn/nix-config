@@ -5009,6 +5009,123 @@ class ThirdFixWaveTest(unittest.TestCase):
         self.assertEqual(waves(calls), self.THREE)
 
 
+class FixWavesConvergeTest(unittest.TestCase):
+    """#940: a fix-wave-review stop at the wave bound, with a finding left in a file the carried findings named, is marked diverging."""
+
+    VERDICT = "the fix waves do not converge on claim.py after 4 waves; an owner decision on the design is needed"
+
+    @staticmethod
+    def left(file="claim.py", summary="race in steal", **more):
+        finding = dict({"severity": "important", "summary": summary, "relation": "new"}, **more)
+        if file is not None:
+            finding["file"] = file
+        return {"verdict": "findings", "findings": [finding]}
+
+    def stopped(self, **changes):
+        """The cont of a first run stopped after three waves, one finding left open in claim.py."""
+        result, _ = run(replies=ThirdFixWaveTest().replies(**{"fix-wave-review-3": narrow("race in adopt")}))
+        self.assertEqual((result["stage"], result["cont"]["fix_waves"]), ("fix-wave-review", 3))
+        self.assertNotIn("diverging", result)
+        return dict(result["cont"], **changes)
+
+    def test_a_resume_that_leaves_the_same_file_open_at_the_bound_is_marked(self):
+        result, calls = run(args=dict(ARGS, cont=self.stopped()), replies={"fix-wave-review": self.left()})
+        self.assertEqual((result["stage"], result["fix_waves"]), ("fix-wave-review", 4))
+        self.assertEqual(result["diverging"], {"file": "claim.py", "waves": 4})
+        self.assertEqual(result["reason"], f"fix-wave-review: {self.VERDICT}; 1 finding(s): race in steal")
+        self.assertEqual(result["cont"]["fix_waves"], 4)
+        self.assertEqual(result["cont"]["fix_findings"], [{"severity": "important", "file": "claim.py", "summary": "race in steal"}])
+        self.assertNotIn("diverging", result["cont"])
+        self.assertEqual(waves(calls), ThirdFixWaveTest.THREE[:2])
+
+    def test_the_waves_counted_are_those_of_every_run(self):
+        replies = {"fix-wave-review": narrow("race in steal"), "fix-wave-review-2": narrow("race in steal", severity="critical")}
+        result, _ = run(args=dict(ARGS, cont=self.stopped()), replies=replies)
+        self.assertEqual(result["diverging"], {"file": "claim.py", "waves": 5})
+        self.assertIn("after 5 waves", result["reason"])
+
+    def test_below_the_bound_the_stop_is_an_ordinary_one(self):
+        for spent, marked in ((1, False), (2, False), (3, True), (7, True)):
+            with self.subTest(spent=spent):
+                result, _ = run(args=dict(ARGS, cont=self.stopped(fix_waves=spent)), replies={"fix-wave-review": self.left()})
+                self.assertEqual((result["stage"], result["fix_waves"]), ("fix-wave-review", spent + 1))
+                self.assertEqual("diverging" in result, marked)
+                self.assertEqual("do not converge" in result["reason"], marked)
+                self.assertEqual([f["summary"] for f in result["cont"]["fix_findings"]], ["race in steal"])
+
+    def test_findings_left_in_other_files_stop_as_before(self):
+        mixed = self.left("lock.py")
+        mixed["findings"].append({"severity": "minor", "file": "claim.py", "summary": "naming", "relation": "new"})
+        for name, rv in (("another file", self.left("lock.py")), ("no file", self.left(None)), ("only a minor one in the file", mixed)):
+            with self.subTest(name):
+                result, _ = run(args=dict(ARGS, cont=self.stopped()), replies={"fix-wave-review": rv})
+                self.assertEqual((result["stage"], result["fix_waves"]), ("fix-wave-review", 4))
+                self.assertNotIn("diverging", result)
+                self.assertEqual(result["reason"], "fix-wave-review: 1 finding(s): race in steal")
+                self.assertEqual([f["summary"] for f in result["cont"]["fix_findings"]], ["race in steal"])
+
+    def test_a_position_or_a_leading_dot_slash_names_the_same_file(self):
+        path = "src/claim.py"
+        root = "/r/.wt/w-issue-9-x"
+        forms = (path, f"{path}:328", f"{path}:328-337", f"{path}:328:12", f"./{path}", f" ./{path}:9 ",
+                 f"{root}/{path}", f"{root}/{path}:328-337", f"{path}#L328", f"{path}#L328-L337", f"{root}/./{path}#L3-9")
+        for carried_as in forms:
+            for left_as in forms:
+                with self.subTest(carried=carried_as, left=left_as):
+                    cont = self.stopped(fix_findings=[{"severity": "important", "file": carried_as, "summary": "race in adopt"}])
+                    result, _ = run(args=dict(ARGS, cont=cont), replies={"fix-wave-review": self.left(left_as)})
+                    self.assertEqual(result["diverging"], {"file": path, "waves": 4})
+                    self.assertIn(f"do not converge on {path} after 4 waves;", result["reason"])
+                    # The cont keeps the finding as the reviewer wrote it.
+                    self.assertEqual(result["cont"]["fix_findings"][0]["file"], left_as)
+
+    def test_other_differences_between_paths_are_different_files(self):
+        cont = self.stopped(fix_findings=[{"severity": "important", "file": "src/claim.py:328-337", "summary": "race in adopt"}])
+        for other in ("src/Claim.py", "claim.py", "src/claim.py.bak", "src/claim.pyc:3", "src/claim.py:fn", "../src/claim.py",
+                      "/elsewhere/src/claim.py", "/r/.wt/w-issue-9-xy/src/claim.py", "src/claim.py#fn"):
+            with self.subTest(other=other):
+                result, _ = run(args=dict(ARGS, cont=cont), replies={"fix-wave-review": self.left(other)})
+                self.assertEqual(result["stage"], "fix-wave-review")
+                self.assertNotIn("diverging", result)
+
+    def test_one_shared_file_among_several_is_named(self):
+        rv = self.left("lock.py", "stale lock")
+        rv["findings"].append({"severity": "critical", "file": "claim.py", "summary": "race in steal", "relation": "new"})
+        result, _ = run(args=dict(ARGS, cont=self.stopped()), replies={"fix-wave-review": rv})
+        self.assertEqual(result["diverging"], {"file": "claim.py", "waves": 4})
+
+    def test_a_run_that_carried_no_findings_in_is_never_marked(self):
+        first, calls = run(replies=ThirdFixWaveTest().replies(**{"fix-wave-review-3": narrow("race in adopt")}))
+        self.assertEqual((first["stage"], first["fix_waves"]), ("fix-wave-review", 3))
+        self.assertNotIn("diverging", first)
+        # Waves at the bound, but nothing carried in (the earlier run stopped elsewhere): no earlier finding named the file.
+        cont = {k: v for k, v in self.stopped(fix_waves=6).items() if k != "fix_findings"}
+        result, _ = run(args=dict(ARGS, cont=cont), replies={"final-1": self.left(), "fix-wave-review": self.left()})
+        self.assertEqual((result["stage"], result["fix_waves"]), ("fix-wave-review", 7))
+        self.assertNotIn("diverging", result)
+
+    def test_a_delivery_that_converges_and_a_lost_rereview_are_unchanged(self):
+        done, _ = run(args=dict(ARGS, cont=self.stopped()))
+        self.assertEqual((done["stage"], done["fix_waves"]), ("done", 4))
+        self.assertNotIn("diverging", done)
+        lost, _ = run(args=dict(ARGS, cont=self.stopped()), replies={"fix-wave-review": None})
+        self.assertEqual(lost["stage"], "fix-wave-review")
+        self.assertNotIn("diverging", lost)
+        failed, _ = run(args=dict(ARGS, cont=self.stopped()), replies={"fix-wave": {"status": "blocked", "notes": "no"}})
+        self.assertEqual(failed["stage"], "fix-wave")
+        self.assertNotIn("diverging", failed)
+
+    def test_the_reason_is_capped_and_keeps_the_verdict(self):
+        long = "dir/" * 200 + "claim.py"
+        cont = self.stopped(fix_findings=[{"severity": "important", "file": long, "summary": "race in adopt"}])
+        result, _ = run(args=dict(ARGS, cont=cont), replies={"fix-wave-review": self.left(long, "s" * 900)})
+        self.assertEqual(result["diverging"]["waves"], 4)
+        self.assertLessEqual(len(result["diverging"]["file"]), 300)
+        self.assertLessEqual(len(result["reason"]), 300)
+        self.assertNotIn("\n", result["reason"])
+        self.assertIn("after 4 waves; an owner decision on the design is needed", result["reason"])
+
+
 class ModeTest(unittest.TestCase):
     """#635: each mode stops at its stage and returns its stage object."""
 
