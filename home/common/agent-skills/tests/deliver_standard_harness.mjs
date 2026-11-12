@@ -4,7 +4,8 @@
 // A label with no reply gets the default for its kind (DEFAULTS below); a patch
 // is merged over that default; a reply "throw" throws, and a program throw prints { result: null, error, calls }. A folded label (NESTED) given an explicit object reply with no own key for a nested step
 // gets that step's default; a key present with null stays null. The fresh setup prompt (it names `--holder <host>/<id> `)
-// also gets the folded claim: holder (built from the merged host, unless the patch sets it), acquire, claim, answer (the owner's answer) and renew (the already_held claim renew); a resume setup gets none. Prints { result, calls: [{label, agentType, model, effort, schema, prompt}], logs: [each log() line] }.
+// A scenario's "after": { "<label>": "<other label>" } holds the reply of <label> until <other label> has been called (a run where it never is does not end).
+// also gets the folded claim: holder (built from the merged host, unless the patch sets it), acquire, claim, answer (the owner's answer) and renew (the already_held claim renew); a resume setup gets none. Prints { result, calls: [{label, agentType, model, effort, schema, prompt}], logs: [each log() line], events: ["call <label>" and "reply <label>" in order] }.
 import { readFileSync } from 'node:fs'
 
 const program = readFileSync(process.argv[2], 'utf8')
@@ -91,7 +92,24 @@ const defaultOf = (label, prompt, over = {}) => {
 
 const calls = []
 const seen = {}
+// The "after" gates: one promise per awaited label, resolved when that label is called.
+const called = {}
+// Each agent call and each reply, in the order they happened.
+const events = []
+const gate = label => (called[label] = called[label] || (() => { let open; const p = new Promise(r => { open = r }); return { p, open } })())
 async function agent(prompt, opts = {}) {
+  events.push(`call ${opts.label}`)
+  gate(opts.label).open()
+  try {
+    const reply = replyOf(prompt, opts)
+    const wait = (scenario.after || {})[opts.label]
+    if (wait) await gate(wait).p
+    return reply
+  } finally {
+    events.push(`reply ${opts.label}`)
+  }
+}
+function replyOf(prompt, opts) {
   const label = opts.label
   calls.push({ label, agentType: opts.agentType || null, model: opts.model || null, effort: opts.effort || null, schema: opts.schema || null, prompt })
   const n = seen[label] = (seen[label] || 0) + 1
@@ -137,4 +155,4 @@ try {
 } catch (e) {
   error = String((e && e.message) || e)
 }
-process.stdout.write(JSON.stringify(error === null ? { result, calls, logs } : { result: null, error, calls, logs }))
+process.stdout.write(JSON.stringify(error === null ? { result, calls, logs, events } : { result: null, error, calls, logs, events }))
