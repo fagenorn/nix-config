@@ -43,6 +43,18 @@ Failures are `LaunchFailed` with a one-line reason, the secret shown as `<secret
 not Linux (`UNAVAILABLE_TEXT`), `the project root <root> is not a directory`, `cannot write the
 manager's settings: <reason>`, `<program> is not installed`, `the launch did not return within
 <n> s`, the last non-empty stderr line of a launch that failed, or `the launch exited <n>`.
+
+Stopping. A withdrawal only appends `goal.withdrawn`: it does not end the manager's background
+session, so a check that states a real goal stops its test manager first (ADR-console-016).
+`stop_session(session_id, profile)` runs `claude-account run stop <short id>` under the session's own
+profile (`client_environment`), within `STOP_TIMEOUT` seconds. The short id is the first eight
+characters of the session id (`short_id`): the stop command accepts only the id the session listing
+prints for a background session, and answers `No job matching '<id>'` to the full one. A failed stop
+is `StopFailed` with a one-line reason: `claude-account is not installed`, `the stop did not return
+within <n> s`, the last non-empty stderr line, or `the stop exited <n>`. `stop_listed(names,
+registry, stop)` reads `registry()` fresh and calls `stop(session_id, profile)` for each listed
+session whose name is in `names` (profile `default` when the record has none), attempts every one
+even after a failure, then raises the first `StopFailed`; a name not listed needs no stop.
 """
 
 from __future__ import annotations
@@ -64,6 +76,8 @@ ID_ENV = "CONSOLE_SPRINT_ID"
 SECRET_ENV = "CONSOLE_SPRINT_SECRET"
 ACCOUNT_ENV = "CLAUDE_ACCOUNT"
 LAUNCH_TIMEOUT = 60
+STOP_TIMEOUT = 60
+SHORT_ID_LENGTH = 8
 SETTINGS_SUFFIX = ".settings.json"
 LAUNCH_TOOLS = ("bash", "dirname", "mkdir", "chmod", "ln", "systemd-run")
 
@@ -77,6 +91,10 @@ _DROPPED_ENV = ("CLAUDE_CONFIG_DIR", ID_ENV, SECRET_ENV)
 
 class LaunchFailed(Exception):
     """The manager did not start; `str` is the one-line reason."""
+
+
+class StopFailed(Exception):
+    """A manager's background session could not be stopped; `str` is the one-line reason."""
 
 
 @dataclass(frozen=True)
@@ -233,3 +251,40 @@ def run_launch(launch: Launch, *, platform: str = sys.platform, run=subprocess.r
     if result.returncode != 0:
         lines = [line.strip() for line in stderr.splitlines() if line.strip()]
         raise fail(lines[-1] if lines else f"the launch exited {result.returncode}")
+
+
+def short_id(session_id: str) -> str:
+    return session_id[:SHORT_ID_LENGTH]
+
+
+def stop_session(session_id: str, profile: str, *, run=subprocess.run,
+                 environ: Mapping[str, str] = os.environ) -> None:
+    argv = ["claude-account", "run", "stop", short_id(session_id)]
+    with tempfile.TemporaryFile() as err:
+        try:
+            result = run(argv, env=client_environment(profile, environ),
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err,
+                         timeout=STOP_TIMEOUT, check=False)
+        except FileNotFoundError:
+            raise StopFailed(f"{argv[0]} is not installed") from None
+        except subprocess.TimeoutExpired:
+            raise StopFailed(f"the stop did not return within {STOP_TIMEOUT} s") from None
+        err.seek(0)
+        stderr = err.read().decode("utf-8", errors="replace")
+    if result.returncode != 0:
+        lines = [line.strip() for line in stderr.splitlines() if line.strip()]
+        raise StopFailed(lines[-1] if lines else f"the stop exited {result.returncode}")
+
+
+def stop_listed(names, registry: Callable[[], Mapping],
+                stop: Callable[[str, str], None]) -> None:
+    wanted = set(names)
+    failure = None
+    for observation in registry().values():
+        if observation.name in wanted:
+            try:
+                stop(observation.session_id, observation.profile or DEFAULT_PROFILE)
+            except StopFailed as error:
+                failure = failure or error
+    if failure is not None:
+        raise failure

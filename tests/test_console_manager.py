@@ -11,9 +11,11 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 from agent_tools.console import manager
+from agent_tools.console.sessions import Observation
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SID = "a" * 16
@@ -289,6 +291,75 @@ class ProfileTest(unittest.TestCase):
             self.assertEqual(manager.bound_profile(str(worktree), d), "work")
             self.assertEqual(manager.bound_profile(str(main), d), "work")
             self.assertEqual(manager.bound_profile(str(d / "work"), d), "default")
+
+
+class StopTest(unittest.TestCase):
+    FULL = "0123456789abcdef-0123-4567"
+
+    def test_the_stop_names_the_first_eight_characters_under_the_sessions_profile(self):
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append((argv, kwargs))
+            return SimpleNamespace(returncode=0)
+
+        environ = {"HOME": "/home/u", "PATH": "/bin", "CONSOLE_SPRINT_SECRET": "s"}
+        manager.stop_session(self.FULL, "work", run=run, environ=environ)
+        argv, kwargs = calls[0]
+        self.assertEqual(argv, ["claude-account", "run", "stop", "01234567"])
+        self.assertEqual(kwargs["env"]["CLAUDE_ACCOUNT"], "work")
+        self.assertNotIn("CONSOLE_SPRINT_SECRET", kwargs["env"])
+        self.assertIs(kwargs["stdin"], subprocess.DEVNULL)
+        self.assertEqual(kwargs["timeout"], 60)
+
+    def test_a_failed_stop_raises_its_one_line_reason(self):
+        def failing(argv, **kwargs):
+            kwargs["stderr"].write(b"first\nNo job matching '01234567'\n")
+            return SimpleNamespace(returncode=1)
+
+        def silent(argv, **kwargs):
+            return SimpleNamespace(returncode=3)
+
+        def missing(argv, **kwargs):
+            raise FileNotFoundError
+
+        def slow(argv, **kwargs):
+            raise subprocess.TimeoutExpired(argv, 60)
+
+        cases = ((failing, "No job matching '01234567'"), (silent, "the stop exited 3"),
+                 (missing, "claude-account is not installed"),
+                 (slow, "the stop did not return within 60 s"))
+        for stand_in, reason in cases:
+            with self.subTest(reason):
+                with self.assertRaises(manager.StopFailed) as raised:
+                    manager.stop_session(self.FULL, "work", run=stand_in, environ={})
+                self.assertEqual(str(raised.exception), reason)
+
+    def test_every_listed_session_of_the_names_is_stopped_and_the_rest_left(self):
+        def listed(session_id, name, profile):
+            return Observation(session_id, "/srv", 1, "idle", None, name, None, profile)
+
+        registry = {1: listed("s-a", "n a", "work"), 2: listed("s-b", "n b", None),
+                    3: listed("s-c", "other", "work")}
+        stopped = []
+        manager.stop_listed(["n a", "n b"], lambda: registry,
+                            lambda session_id, profile: stopped.append((session_id, profile)))
+        self.assertEqual(stopped, [("s-a", "work"), ("s-b", "default")])
+
+    def test_one_failed_stop_does_not_leave_the_others_running(self):
+        registry = {i: Observation(f"s-{i}", "/srv", 1, "idle", None, "n", None, "work")
+                    for i in (1, 2, 3)}
+        stopped = []
+
+        def stop(session_id, profile):
+            stopped.append(session_id)
+            if session_id != "s-3":
+                raise manager.StopFailed(f"no {session_id}")
+
+        with self.assertRaises(manager.StopFailed) as raised:
+            manager.stop_listed(["n"], lambda: registry, stop)
+        self.assertEqual(stopped, ["s-1", "s-2", "s-3"])
+        self.assertEqual(str(raised.exception), "no s-1")
 
 
 if __name__ == "__main__":
