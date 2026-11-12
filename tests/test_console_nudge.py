@@ -196,7 +196,8 @@ class NudgeCommandTest(unittest.TestCase):
         try:
             with open(f"/proc/{pid}/stat") as stat:
                 return stat.read().rsplit(")", 1)[1].split()[0] != "Z"
-        except FileNotFoundError:
+        except (FileNotFoundError, ProcessLookupError):
+            # The process can end between the open and the read: the read then fails with ESRCH.
             return False
 
     def test_nudger_for_is_linux_only(self):

@@ -47,8 +47,9 @@ not Linux (`UNAVAILABLE_TEXT`), `the project root <root> is not a directory`, `c
 manager's settings: <reason>`, `<program> is not installed`, `the launch did not return within
 <n> s`, the last non-empty stderr line of a launch that failed, or `the launch exited <n>`.
 
-Stopping. A withdrawal only appends `goal.withdrawn`: it does not end the manager's background
-session, so a check that states a real goal stops its test manager first (ADR-console-016).
+Stopping. A withdrawal appends `goal.withdrawn` and the console then stops the manager's background
+session (ADR-console-018), so a check that states a real goal still stops its test manager first and
+the withdrawal's own stop finds nothing listed (ADR-console-016).
 `stop_session(session_id, profile)` runs `claude-account run stop <short id>` under the session's own
 profile (`client_environment`), within `STOP_TIMEOUT` seconds. The short id is the first eight
 characters of the session id (`short_id`): the stop command accepts only the id the session listing
@@ -58,6 +59,8 @@ within <n> s`, the last non-empty stderr line, or `the stop exited <n>`. `stop_l
 registry, stop)` reads `registry()` fresh and calls `stop(session_id, profile)` for each listed
 session whose name is in `names` (profile `default` when the record has none), attempts every one
 even after a failure, then raises the first `StopFailed`; a name not listed needs no stop.
+`stopper_for(platform)` is `stop_session` where `supported(platform)`, else None: the owner's stop
+of a sprint (#892) uses it through the console service.
 """
 
 from __future__ import annotations
@@ -195,6 +198,10 @@ def launch_command(launch: Launch, platform: str) -> list[str] | None:
             f"--description=agent manager {launch.session_name}", "--",
             "claude-account", "run", "--bg", "--name", launch.session_name,
             "--settings", str(launch.settings), launch.prompt]
+
+
+def stopper_for(platform: str) -> Callable[[str, str], None] | None:
+    return stop_session if supported(platform) else None
 
 
 def launcher_for(platform: str) -> Callable[[Launch], None] | None:

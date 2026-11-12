@@ -21,7 +21,7 @@ from agent_tools.console import manager, sprint, sprints
 from . import console_test_support as support
 from .test_console_answer import view_of
 from .test_console_briefs import APPROVE, JSON, PARTS, REPLY
-from .test_console_reports import CHECKED, REPORT
+from .test_console_reports import CHECKED, CLOSING, REPORT
 from .test_console_writes import Case
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -392,6 +392,33 @@ class SprintCommandTest(Case):
         self.assertTrue(got.stderr.startswith("sprint: cannot read "), got.stderr)
         self.assertTrue(got.stderr.endswith("the report is not a JSON object\n"), got.stderr)
 
+    def test_close_sends_the_closing_report_and_a_refusal_exits_1(self):
+        svc = self.open()
+        sid = self.goal(svc)
+        secret, path = self.reports(svc, sid, {**REPORT, "issues": [
+            {"issue": 12, "stage": "building"}]})
+        port = self.port(svc)
+        self.assertEqual(run_sprint("report", "--sprint", sid, "--secret-file", secret,
+                                    "--report-file", path, "--port", port).returncode, 0)
+        closing = {**CLOSING, "issues": [{"issue": 12, "stage": "landed"}]}
+        before = len(support.log_rows(self.store))
+        got = run_sprint("close", "--sprint", sid, "--secret-file", secret,
+                         "--closing-file", "-", "--port", port, stdin=json.dumps(closing))
+        self.assertEqual((got.returncode, got.stdout, got.stderr),
+                         (0, "sprint: closing report sent\n", ""))
+        rows = support.log_rows(self.store)
+        self.assertEqual((len(rows), rows[-1][2]), (before + 1, "sprint.closed"))
+        got = self.assert_unchanged(svc, lambda: run_sprint(
+            "close", "--sprint", sid, "--secret-file", secret, "--closing-file", "-",
+            "--port", port, stdin=json.dumps(closing)))
+        self.assertEqual((got.returncode, got.stdout, got.stderr),
+                         (1, "", "sprint: refused 409: this sprint has ended\n"))
+        got = self.assert_unchanged(svc, lambda: run_sprint(
+            "close", "--sprint", sid, "--secret-file", secret, "--closing-file", "-",
+            "--port", port, stdin="[]"))
+        self.assertEqual((got.returncode, got.stdout), (2, ""))
+        self.assertTrue(got.stderr.startswith("sprint: cannot read -:"), got.stderr)
+
     SECTION = "## After a restart or a takeover\n\n1. When the console tells you that it restarted this session, or your first prompt says you take over a sprint whose manager is gone, run `sprint recap`, then `sprint inbox`, and act on what `sprint inbox` prints first.\n2. `sprint recap` prints the goal, the latest brief with its decision and the owner's reply, the last report and how many of the owner's messages are unread. The console keeps this record; nothing was handed over to you.\n3. The latest brief's decision comes before the last report, because a newer brief does not remove an older report:\n   - No brief: draft one, as Drafting the brief says.\n   - Decision `changes`: revise the brief from the reply `sprint recap` printed and send the new version, even when `sprint inbox` printed nothing, because that change request was read before the restart.\n   - Decision `none`: the brief waits for the owner; end your turn.\n   - Decision `approved`: the last report may describe an earlier version of the brief, so check its next step against the approved brief's parts before following it. Continue only the work the approved brief still includes and drop what it removed; follow After approval when there is no report or nothing is left.\n"
 
     def test_the_contract_says_what_follows_a_restart_or_a_takeover(self):
@@ -579,6 +606,19 @@ class ManagerContractTest(unittest.TestCase):
                        "this sprint is not open", "secret refused", "no tracker action"):
             with self.subTest(section=needle):
                 self.assertIn(needle, after)
+
+
+    def test_the_contract_says_how_a_sprint_ends(self):
+        text = CONTRACT.read_text(encoding="utf-8")
+        after = text.partition("## Ending")[2]
+        self.assertTrue(after)
+        for needle in ("`sprint close --closing-file -`", '"summary"', '"differently"',
+                       '"landed"', '"held"', '"dropped"', "mid-merge", "start nothing new",
+                       "`stop`", "an issue of this sprint is neither landed nor dropped",
+                       "no tracker action", "what you would do differently"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, after)
+        self.assertNotIn("what went differently", after)
 
 
 class CommandContractTest(unittest.TestCase):
