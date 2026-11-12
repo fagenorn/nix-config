@@ -52,7 +52,7 @@ stops the test manager: the registry is read fresh and each listed session named
 its own profile (`manager.stop_session`, which gives the stop the first eight characters of the
 session id, the only id it accepts); a manager not listed needs no stop. The stop comes before the
 withdrawal so the check leaves nothing running whatever the console does: a withdrawal appends
-`goal.withdrawn`, drops the secret and then stops the manager's session itself (ADR-console-017),
+`goal.withdrawn`, drops the secret and then stops the manager's session itself (ADR-console-018),
 which finds nothing listed after this stop. A failed stop
 keeps the outcome in the state file and the run is 75 `{"status": "waiting", "reason": "the test
 manager is not stopped yet: <the stop's one-line reason>", "sprint_id"}`; the next run retries from

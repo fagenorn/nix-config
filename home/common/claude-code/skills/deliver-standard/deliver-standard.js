@@ -33,7 +33,7 @@ export const meta = {
 // A fresh run re-adopts an existing branch or worktree (never resetting it) and stops `dirty` when it holds uncommitted changes.
 //
 // RESUME: every stop from the claim on returns { stage, ..., cont }, where cont is
-// { setup, lane, plan (declared branches, when any, as [{name, worktree, base, head, current, toplevel, common_dir, clean}]), plan_reviewed, plan_findings?, decisions?, done, pr? (a batch-built close-out cont: the PR the batch merged), fix_waves, fix_findings? (#924: the findings a fix-wave-review stop left open, bounded; the resume's first fix wave gets them with what its fresh final review raises), checks_fixes?, sync_fixes?, verified?, final_reviewed?, partial?, reordered? (#896: [{task, after, notes}], each a blocked task moved once to just after the later task it named; cont.plan.tasks is already in that order), claim_incomplete? }. Passing it back as args.cont
+// { setup, lane, plan (declared branches, when any, as [{name, worktree, base, head, current, toplevel, common_dir, clean}]), plan_reviewed, plan_findings?, decisions?, done, pr? (a batch-built close-out cont: the PR the batch merged), fix_waves, fix_findings? (#924: the findings a fix-wave-review stop left open, bounded; the resume's first fix wave gets them with what its fresh final review raises; #940: such a stop also carries diverging: {file, waves} beside cont when the waves spent across runs reached FIX_WAVES_BOUND and a finding it left open is in a file the findings carried into the run named, and deliver-batch then hands the issue to the owner instead of relaunching it), checks_fixes?, sync_fixes?, verified?, final_reviewed?, partial?, reordered? (#896: [{task, after, notes}], each a blocked task moved once to just after the later task it named; cont.plan.tasks is already in that order), claim_incomplete? }. Passing it back as args.cont
 // re-adopts the claimed worktree (setup re-checks it and refuses a dirty tree
 // unless cont.partial names the task that left the edits), reuses cont.plan
 // (reviewing it first unless plan_reviewed; a plan-review stop keeps the revised plan with plan_findings { rules, findings, rounds }, and the resume reads the owner's answer and, when every finding left names a rule and none has source codex, runs one rules-only revise of it whatever triggered the full revise (#823), dropping the plan once rounds reach two; any other finding left has spent the plan's one full revise, so the resume plans again), skips the tasks in cont.done, then
@@ -91,7 +91,7 @@ if (!(CONT && CONT.setup && CONT.setup.holder)) {
 const CLAIMING = !CONT || !!CONT.claim_incomplete
 
 // forge-claim retries a transport error itself (#740), up to 150 s in a hanging outage, above the Bash tool's 120 s default.
-const FORGE_TIMEOUT = 'Give each forge-claim command a Bash timeout of 20 minutes (1200000 ms), and land acquire --wait 60 minutes (3600000 ms): forge-claim retries a forge outage itself before it prints its one JSON line.'
+const FORGE_TIMEOUT = 'Give each forge-claim command a Bash timeout of 20 minutes (1200000 ms). Only a land acquire command that ends in --wait gets more: the flag takes no value, so write nothing after it, and the command itself can run for up to 60 minutes, so give it a Bash timeout of 60 minutes (3600000 ms). The reason for both: forge-claim retries a forge outage itself before it prints its one JSON line.'
 const BASE_RULES = `
 Hard rules for this step (they override anything else you remember):
 - Work only in the worktree path you are given. Never commit in the shared checkout. Never git stash. Never sed -i (use python for edits).
@@ -278,6 +278,8 @@ const stopReason = (stage, x) => {
   const say = v => { if (typeof v === 'string' && v.trim()) parts.push(v) }
   const names = (k, what) => { if (Array.isArray(x[k]) && x[k].length) say(`${what} ${x[k].map(v => (isEntry(v) ? v.id || v.ac || v.file : v)).join(', ')}`) }
   const task = isEntry(x.task) ? `task ${x.task.n} ` : ''
+  // #940: a stop whose fix waves do not converge says so first, so the cap cuts the findings and never the verdict.
+  if (isEntry(x.diverging)) say(`the fix waves do not converge on ${String(x.diverging.file).slice(0, 120)} after ${x.diverging.waves} waves; an owner decision on the design is needed`)
   say(x.details)
   say(x.error)
   if (Array.isArray(x.branch_problems)) say(`branch problems: ${x.branch_problems.join('; ')}`)
@@ -522,6 +524,27 @@ const carryOf = list => (Array.isArray(list) ? list : []).filter(f => isEntry(f)
   .map(f => ({ severity: f.severity === 'critical' ? 'critical' : 'important', ...(typeof f.file === 'string' && f.file ? { file: clip(f.file) } : {}), summary: clip(f.summary), ...(typeof f.failing_input === 'string' && f.failing_input ? { failing_input: clip(f.failing_input) } : {}) }))
 const findingKey = f => `${typeof f.file === 'string' ? f.file : ''}\n${clip(String(f.summary)).toLowerCase().replace(/\s+/g, ' ').trim()}`
 let carried = carryOf(CONT && CONT.fix_findings)
+const CARRIED_AT_START = carried
+// #940: fix waves that do not converge. A fix-wave-review stop that leaves findings open once the waves spent across runs (cont.fix_waves
+// and this run's) have reached FIX_WAVES_BOUND, with a finding left in a file the findings carried into this run already named, is marked
+// diverging: { file, waves }: more waves on that file are not expected to close it, so the owner decides the design. A first run carries no
+// findings in, so it is never marked; neither is a resume whose open findings are all in other files.
+const FIX_WAVES_BOUND = 4
+// Reviewers name one file as path, ./path, an absolute path under the worktree, path:line, path:line-line, path:line:column or path#L<line>
+// (#L<line>-L<line> too): files are compared, and the marker names the file, as the path relative to the worktree without the surrounding
+// whitespace, a leading ./ and that trailing position; nothing else is folded, case included.
+const fileOf = f => {
+  if (typeof f.file !== 'string') return ''
+  let p = f.file.trim().replace(/#L\d+(?:-L?\d+)?$/, '').replace(/:\d+(?:[-:]\d+)?$/, '').trim()
+  const roots = [setup && setup.worktree, setup && setup.worktree_path].filter(r => typeof r === 'string' && r.startsWith('/')).map(r => r.replace(/\/+$/, ''))
+  for (const r of roots) if (r && p.startsWith(`${r}/`)) { p = p.slice(r.length + 1); break }
+  return p.replace(/^(?:\.\/)+/, '').trim()
+}
+const divergingOf = left => {
+  if (fixWaves < FIX_WAVES_BOUND) return null
+  const hit = left.map(fileOf).find(f => f && CARRIED_AT_START.map(fileOf).includes(f))
+  return hit ? { file: hit, waves: fixWaves } : null
+}
 // The head the final review and its fix waves passed at ({ head, accepted? }), carried so a resume on it skips the review.
 let finalReviewed = (CONT && CONT.final_reviewed) || null
 // The stages between a sync merge and its acceptance: a stop there must not carry a marker over the unreviewed merge.
@@ -906,6 +929,11 @@ const ungradedFindings = (review, criteria) => criteria.filter(a => a.kind === '
   if (g && g.met === true && typeof g.evidence === 'string' && g.evidence.trim()) return []
   return [{ severity: 'important', summary: `Acceptance criterion ${a.id} (${a.text}) is not shown met with evidence: ${g ? (g.met === true ? 'the review gave no evidence' : 'the review graded it unmet') : 'the review did not grade it'}. Assert it with a test, or show the command that proves it.` }]
 })
+// #935: a criterion restating the declared verification had no evidence before verify (the direct lane runs focused tests only), so it stopped the delivery.
+const NO_VERIFY_AC = 'Do not write the declared verification commands as an acceptance criterion: the verify step gates on them.'
+// #935: a fix round whose findings are all ungraded criteria produces their evidence; FOCUSED would forbid the command a criterion names.
+const EVIDENCE_FIX = `Produce the evidence each criterion asks for: run the command it names (or the test that asserts it, written first when none exists) in the worktree, and report in notes, per criterion id, the command, its exit status and its last lines. The focused-tests-only rule does not apply to a command a criterion names. If it fails, fix the cause with a regression test and commit; when nothing has to change, commit nothing and return commit equal to start_head. ${FMT}`
+const EVIDENCE_REREVIEW = ' These findings are acceptance criteria the review did not see shown met, and the notes carry the evidence produced for each (the command, its exit status and last lines; the diff is empty when nothing had to change): a criterion that evidence shows met is resolved, and one without it, or whose command failed, is still unresolved.'
 
 // ---------------- Direct lane ----------------
 if (LANE === 'direct') {
@@ -915,7 +943,7 @@ if (LANE === 'direct') {
     phase('Tasks')
     impl = await recall(() => call(`${CTX}
 ${RENEW_FIRST}
-Then deliver issue #${ISSUE} in the direct lane. Invoke the deliver-direct skill with the Skill tool to read it: it is the single source for this step. Its steps 1 and 2 are done by this program (the claim is held by ${setup.holder}; the worktree is ${W} on branch ${setup.branch}). Check its Eligibility first: if the issue fails it, change nothing and return status blocked with ineligible true and why. Otherwise follow its step 3 exactly and commit. Do not run its steps 4 to 7: review, verification, ship and close-out belong to this program. Return acceptance (the issue's criteria; ${KIND_GUIDE}) and sensitive (true when the diff touches authentication or authorization, permission or command guards, secrets or credentials, CI/CD or deploy config, or data migrations). ${FOCUSED} ${IMPL_RETURN}${CONT && CONT.partial === 1 ? `
+Then deliver issue #${ISSUE} in the direct lane. Invoke the deliver-direct skill with the Skill tool to read it: it is the single source for this step. Its steps 1 and 2 are done by this program (the claim is held by ${setup.holder}; the worktree is ${W} on branch ${setup.branch}). Check its Eligibility first: if the issue fails it, change nothing and return status blocked with ineligible true and why. Otherwise follow its step 3 exactly and commit. Do not run its steps 4 to 7: review, verification, ship and close-out belong to this program. Return acceptance (the issue's criteria; ${KIND_GUIDE}) and sensitive (true when the diff touches authentication or authorization, permission or command guards, secrets or credentials, CI/CD or deploy config, or data migrations). ${NO_VERIFY_AC} ${FOCUSED} ${IMPL_RETURN}${CONT && CONT.partial === 1 ? `
 An earlier attempt at this task was cut off and may have left uncommitted edits or commits in the worktree (git -C ${W} status, git -C ${W} diff and git -C ${W} log ${RANGE}). Inspect them: keep what matches, finish or redo the rest, and make sure the failing-test-first and mutation checks still hold for the final result; start_head is the head before this task's first commit.` : ''}
 ${RULES}`, { label: 'direct-impl', phase: 'Tasks', agentType: 'implementer', model: 'sonnet', schema: withRenew(DIRECT_IMPL) }), r => r.renew)
     if (impl) {
@@ -957,14 +985,18 @@ ${isLite ? 'lane: direct. ' : ''}Review the delivery diff git -C ${W} diff ${RAN
     const codexR = await codexP
     if (!review) return stop('direct-review', { review: null })
     if (REVIEW_CODE && (!codexR || !codexR.available)) return stop('codex-unavailable', { step: 'code', details: codexWhy(codexR), codex: codexR })
-    const findings = findingsOf(review).concat(ungradedFindings(review, plan.acceptance), REVIEW_CODE ? findingsOf(codexR).map(f => ({ ...f, source: 'codex' })) : [])
+    const ungraded = ungradedFindings(review, plan.acceptance)
+    const findings = findingsOf(review).concat(ungraded, REVIEW_CODE ? findingsOf(codexR).map(f => ({ ...f, source: 'codex' })) : [])
     if (REVIEW_CODE) log(`codex review: ${findingsOf(codexR).length} blocking findings`)
     if (findings.length) {
       log(`direct review: ${findings.length} blocking findings, one fix round`)
-      fix = await call(`${CTX}\n${PLAN_REF} Fix these review findings in the worktree, with a regression test for each real defect, then commit: ${JSON.stringify(findings)}. If a finding is wrong, say so in notes with evidence instead of changing code. ${FOCUSED} ${COMMIT_SCOPE} ${IMPL_RETURN}\n${RULES}`, { label: 'direct-fix', phase: 'Final review', agentType: 'implementer', model: 'sonnet', schema: IMPL })
+      // No reviewer or Codex finding among them: only evidence is missing.
+      const evidenceOnly = findings.length === ungraded.length
+      if (evidenceOnly) log('direct review: only ungraded criteria, the fix round produces their evidence')
+      fix = await call(evidenceOnly ? `${CTX}\n${PLAN_REF} The review did not see these acceptance criteria shown met: ${JSON.stringify(findings)}. ${EVIDENCE_FIX} ${COMMIT_SCOPE} ${IMPL_RETURN}\n${RULES}` : `${CTX}\n${PLAN_REF} Fix these review findings in the worktree, with a regression test for each real defect, then commit: ${JSON.stringify(findings)}. If a finding is wrong, say so in notes with evidence instead of changing code. ${FOCUSED} ${COMMIT_SCOPE} ${IMPL_RETURN}\n${RULES}`, { label: 'direct-fix', phase: 'Final review', agentType: 'implementer', model: 'sonnet', schema: IMPL })
       if (!implDone(fix)) return stop('direct-fix', { fix })
       const rereview = await call(`${CTX}
-Re-review only these previously reported findings against the fix: ${span(fix)}; the implementer's notes: ${fix.notes}. Findings: ${JSON.stringify(findings)}. Report any finding still unresolved and any new Important or Critical defect the fix introduced.`, { label: 'direct-rereview', phase: 'Final review', agentType: 'reviewer-lite', schema: FINDINGS })
+Re-review only these previously reported findings against the fix: ${span(fix)}; the implementer's notes: ${fix.notes}. Findings: ${JSON.stringify(findings)}. Report any finding still unresolved and any new Important or Critical defect the fix introduced.${evidenceOnly ? EVIDENCE_REREVIEW : ''}`, { label: 'direct-rereview', phase: 'Final review', agentType: 'reviewer-lite', schema: FINDINGS })
       if (!rereview || findingsOf(rereview).length) return stop('direct-review', { review: rereview, findings })
       passedBy = 'reviewer-lite'
     }
@@ -1224,6 +1256,8 @@ ${RULES}`
   const liteLane = t.risk === 'mechanical' || t.risk === 'low'
   // False until the task's diff had its first pass; a task with no commit has none to review.
   let diffReviewed = !sameSha(impl.commit, accepted)
+  // #932: a no-change check names the head the program holds (the fuller spelling), never the reply's short or uppercase one.
+  let held = diffReviewed ? impl.commit : fuller(accepted, impl.commit)
   // reviewer-lite first-passes only a task whose declared lane is mechanical or low (its lane verification mode).
   let reviewer = liteLane && diffReviewed ? 'reviewer-lite' : 'reviewer'
   const diffReview = (range, label, answers) => call(`${start}
@@ -1232,7 +1266,7 @@ ${reviewer === 'reviewer-lite' ? `lane: ${t.risk}. ` : ''}Review the diff of tas
   const HEAD_UNMOVED = h => `First confirm that git -C ${TW} rev-parse HEAD prints ${h} and git -C ${TW} status --porcelain --untracked-files=no prints nothing: another head or an uncommitted change to a tracked file is a finding.${waiting ? `${WAITS}those are not a finding.` : ''}`
   const CONFIRM = `with the task file's own verification commands or a read-only lookup (run a gh command as ${UNSET}gh ...)`
   let review = diffReviewed ? await diffReview(`git -C ${TW} diff ${taskStart}..${impl.commit}`, `review-${t.n}`) : await call(`${start}
-Task ${t.n} ended with no new commit: the head of ${TW} is still ${impl.commit}. There is no diff to review and none is missing; do not ask for a range. Judge the task from its task file ${t.file} (the contract) and the implementer's report: notes: ${impl.notes}; checks run: ${JSON.stringify(Array.isArray(impl.tests) ? impl.tests : [])}. ${HEAD_UNMOVED(impl.commit)} Then decide two things. 1. Does the task file require a tracked file to be created, changed or deleted? If it does, the task is not done: report one Critical finding naming the files it requires. 2. If it requires none, is every output the task file asks for in place? Confirm each yourself, ${CONFIRM}; the implementer's word alone is not evidence, and an output you cannot confirm is a finding. Report Important or Critical findings only, each with what is missing. Do not edit anything.`, { label: `review-${t.n}`, phase: 'Tasks', agentType: 'reviewer', schema: FINDINGS })
+Task ${t.n} ended with no new commit: the head of ${TW} is still ${held}. There is no diff to review and none is missing; do not ask for a range. Judge the task from its task file ${t.file} (the contract) and the implementer's report: notes: ${impl.notes}; checks run: ${JSON.stringify(Array.isArray(impl.tests) ? impl.tests : [])}. ${HEAD_UNMOVED(held)} Then decide two things. 1. Does the task file require a tracked file to be created, changed or deleted? If it does, the task is not done: report one Critical finding naming the files it requires. 2. If it requires none, is every output the task file asks for in place? Confirm each yourself, ${CONFIRM}; the implementer's word alone is not evidence, and an output you cannot confirm is a finding. Report Important or Critical findings only, each with what is missing. Do not edit anything.`, { label: `review-${t.n}`, phase: 'Tasks', agentType: 'reviewer', schema: FINDINGS })
   if (!review) return halt('task-review', { task: t, review: null })
   let rounds = 0
   while (findingsOf(review).length && rounds < 2) {
@@ -1244,10 +1278,11 @@ ${RULES}`, { label: `fix-${t.n}-${rounds}`, phase: 'Tasks', agentType: 'implemen
     // The head the last review saw: the fix added a commit only when its commit is another one.
     const reviewed = impl.commit
     impl = fix
+    held = sameSha(fix.commit, reviewed) ? fuller(held, fix.commit) : fix.commit
     const label = `rereview-${t.n}-${rounds}`
     if (sameSha(fix.commit, reviewed)) {
       review = await call(`${start}
-Re-review only these previously reported findings for task ${t.n} against the implementer's answer. The fix made no new commit (the head of ${TW} is still ${fix.commit}), so there is no fix diff to review and none is missing; do not ask for a range. The implementer's notes: ${fix.notes}. Findings: ${JSON.stringify(findingsOf(review))}. ${HEAD_UNMOVED(fix.commit)} Then check each answer yourself against the task file ${t.file}${diffReviewed ? `, the task's diff (git -C ${TW} diff ${taskStart}..${fix.commit})` : ''} and the evidence the notes name, ${CONFIRM}; a finding the evidence does not refute is still unresolved. Report any finding still unresolved. Do not edit anything.`, { label, phase: 'Tasks', agentType: 'reviewer', schema: FINDINGS })
+Re-review only these previously reported findings for task ${t.n} against the implementer's answer. The fix made no new commit (the head of ${TW} is still ${held}), so there is no fix diff to review and none is missing; do not ask for a range. The implementer's notes: ${fix.notes}. Findings: ${JSON.stringify(findingsOf(review))}. ${HEAD_UNMOVED(held)} Then check each answer yourself against the task file ${t.file}${diffReviewed ? `, the task's diff (git -C ${TW} diff ${taskStart}..${fix.commit})` : ''} and the evidence the notes name, ${CONFIRM}; a finding the evidence does not refute is still unresolved. Report any finding still unresolved. Do not edit anything.`, { label, phase: 'Tasks', agentType: 'reviewer', schema: FINDINGS })
     } else if (!diffReviewed) {
       reviewer = liteLane ? 'reviewer-lite' : 'reviewer'
       review = await diffReview(`git -C ${TW} diff ${taskStart}..${fix.commit}`, label, findingsOf(review))
@@ -1376,7 +1411,9 @@ if (finalFindings.length) {
     if (!again) {
       carried = carryOf(next)
       if (carried.length < next.length) log(`fix-wave-review: ${next.length - carried.length} of ${next.length} open finding(s) not carried in cont`)
-      return stop('fix-wave-review', { rv, fix_waves: fixWaves })
+      const diverging = divergingOf(carried)
+      if (diverging) log(`fix-wave-review: the fix waves do not converge on ${diverging.file} after ${diverging.waves} waves`)
+      return stop('fix-wave-review', { rv, fix_waves: fixWaves, ...(diverging ? { diverging } : {}) })
     }
     if (k === 1) afterFirst = next.length
     waveFindings = next

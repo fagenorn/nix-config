@@ -2,10 +2,11 @@
 
 The owner's words never travel in a nudge. A nudge carries `NUDGE_TEXT`, one fixed sentence that
 names no sprint, project or owner text; the manager runs `sprint inbox` (which authenticates with
-the sprint's secret) and reads the message there. `Nudge` has no text member, and no argv element
-or environment value carries anything for the manager but `NUDGE_TEXT`.
+the sprint's secret) and reads the message there. `Nudge` has no text member: the route chooses
+the sentence (`relay` and `wake` carry `NUDGE_TEXT`, `revive` carries `RESTART_TEXT`), and no argv
+element or environment value carries anything for the manager but that one sentence.
 
-Two routes, chosen by the caller (this module only runs the one it is given):
+Three routes, chosen by the caller (this module only runs the one it is given):
 
     relay: claude-account run -p --allowedTools SendMessage --no-session-persistence "<prompt>"
 
@@ -23,6 +24,14 @@ the console unit (ADR-console-015). `--resume <id> --bg` wakes a stopped session
 the same id, but starts a copy of a session that is running; the caller must therefore use the
 wake only for a session the session listing does not show (issue #831). A wake with no session id
 raises `NudgeFailed(UNKNOWN_SESSION)` and runs nothing.
+
+    revive: the wake command with `RESTART_TEXT` in place of `NUDGE_TEXT`
+
+`RESTART_TEXT` is `The console restarted this session because it had stopped while its sprint had
+work. Run "sprint contract", then "sprint recap", and go on.` The revive resumes a stopped manager
+the console brings back, not one that was told of a message; it follows the wake's rules in every
+other respect (the same command shape, `WAKE_TIMEOUT`, stdout to the null device, no `SENT` check,
+and a revive with no session id raises `NudgeFailed(UNKNOWN_SESSION)` and runs nothing).
 
 Runner. `run_nudge` starts the command with no terminal (`stdin` to the null device; `stdout` to
 a temporary file for the relay and to the null device for the wake; stderr to a temporary file,
@@ -54,8 +63,11 @@ from agent_tools.console import manager
 
 NUDGE_TEXT = ('The owner left you a message on the console. Run "sprint inbox" now and act on '
               "what it returns.")
+RESTART_TEXT = ('The console restarted this session because it had stopped while its sprint had '
+                'work. Run "sprint contract", then "sprint recap", and go on.')
 RELAY = "relay"
 WAKE = "wake"
+REVIVE = "revive"
 RELAY_TIMEOUT = 180
 WAKE_TIMEOUT = 60
 SENT_MARK = "SENT"
@@ -91,9 +103,10 @@ def nudge_command(nudge: Nudge, platform: str) -> list[str] | None:
     if nudge.route == RELAY:
         return ["claude-account", "run", "-p", "--allowedTools", "SendMessage",
                 "--no-session-persistence", relay_prompt(nudge.session_name)]
+    text = RESTART_TEXT if nudge.route == REVIVE else NUDGE_TEXT
     return ["systemd-run", "--user", "--scope", "--quiet", "--collect",
             f"--description=agent manager {nudge.session_name}", "--",
-            "claude-account", "run", "--resume", nudge.session_id, "--bg", NUDGE_TEXT]
+            "claude-account", "run", "--resume", nudge.session_id, "--bg", text]
 
 
 def _last_line(text: str) -> str | None:
@@ -125,7 +138,7 @@ def run_nudge(nudge: Nudge, *, platform: str = sys.platform, run=run_in_own_grou
     argv = nudge_command(nudge, platform)
     if argv is None:
         raise NudgeFailed(manager.UNAVAILABLE_TEXT)
-    if nudge.route == WAKE and nudge.session_id is None:
+    if nudge.route in (WAKE, REVIVE) and nudge.session_id is None:
         raise NudgeFailed(UNKNOWN_SESSION)
     if not Path(nudge.cwd).is_dir():
         raise NudgeFailed(f"the project root {nudge.cwd} is not a directory")

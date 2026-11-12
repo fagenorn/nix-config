@@ -50,7 +50,7 @@ neither. Each manager listed in a fresh registry read under its name (`manager.s
 stopped with `manager.stop_session`, which gives the stop the first eight characters of the
 session id and runs it under the session's own profile; every one is tried, and a manager not
 listed needs no stop. The stop comes first so the check leaves nothing running whatever the
-console's own stop of a withdrawn sprint does (ADR-console-017), which then finds nothing listed. When any stop fails the outcome is kept in the state file, nothing is withdrawn and the
+console's own stop of a withdrawn sprint does (ADR-console-018), which then finds nothing listed. When any stop fails the outcome is kept in the state file, nothing is withdrawn and the
 run is 75 `waiting` (`the test managers are not stopped yet: <the stop's one-line reason>`). A
 withdrawal counts as done on 204 or 409 (already gone). When any withdrawal fails the outcome is
 kept in the state file, nothing else is written and the run is 75 `waiting` (`the test sprints

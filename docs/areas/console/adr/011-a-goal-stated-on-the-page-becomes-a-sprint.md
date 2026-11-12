@@ -19,7 +19,7 @@ A goal may be withdrawn while its brief is not approved, which is every sprint i
 
 Goal rows are kept indefinitely: the retention pass of ADR-console-009 never removes one, and the schema 3 delete trigger refuses a raw delete of a goal row whatever its age.
 
-The goal field is a first-screen object (#837), opened by a visible "State a goal" button or by the `g` key.
+The goal field is a first-screen object (#837), opened by focusing the top bar's goal field or by the `g` key (#922).
 
 ## Consequences
 

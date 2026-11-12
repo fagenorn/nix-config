@@ -10,9 +10,9 @@
 <style>
 :root {
   --base: #24273a; --mantle: #1e2030;
-  --s1: #494d64; --s2: #5b6078;
+  --s0: #363a4f; --s1: #494d64; --s2: #5b6078;
   --text: #cad3f5; --sub1: #b8c0e0; --sub0: #a5adcb; --ov2: #939ab7;
-  --peach: #f5a97f; --lav: #b7bdf8;
+  --crust: #181926; --peach: #f5a97f; --lav: #b7bdf8;
   --green: #a6da95; --yellow: #eed49f; --red: #ed8796;
   --hair: rgba(202, 211, 245, .09);
   --ui: "Segoe UI Variable Text", "Segoe UI", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter Variable", "Inter", system-ui, "Noto Sans", "Helvetica Neue", Arial, sans-serif;
@@ -29,17 +29,24 @@ body {
 h1, h2, p, ul { margin: 0; padding: 0; }
 ul { list-style: none; }
 :focus-visible { outline: 2px solid var(--lav); outline-offset: 2px; border-radius: 6px; }
+kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; padding: 0 5px; font: 600 .71875rem/1 var(--ui); color: var(--sub0); border: 1px solid var(--s2); border-radius: 5px; }
 .ic { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; align-self: center; }
+.ic .f { fill: currentColor; stroke: none; }
 
 .top { position: sticky; top: 0; z-index: 10; background: var(--base); border-bottom: 1px solid var(--hair); }
 .top-in { max-width: 1360px; margin: 0 auto; padding: 8px 48px; display: flex; align-items: center; gap: 28px; min-height: 56px; }
 .brand { font-weight: 600; color: var(--sub1); white-space: nowrap; letter-spacing: -.005em; }
 .conn { color: var(--ov2); font-size: .8125rem; }
-.cap { display: flex; flex-wrap: wrap; gap: 2px 20px; margin-left: auto; font-size: .8125rem; color: var(--sub0); }
-.cap-p { display: inline-flex; gap: 6px; }
-.cap-p b { font-weight: 600; }
-.cap-out { color: var(--red); }
+.cap { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; margin-left: auto; min-width: 0; max-width: 100%; font-size: .8125rem; color: var(--sub0); }
+.cap-state { display: inline-flex; align-items: center; gap: 7px; font-weight: 600; }
+.cap-fine { color: var(--green); }
 .cap-tight { color: var(--yellow); }
+.cap-out { color: var(--red); }
+.cap-acct { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; min-width: 0; max-width: 100%; }
+.cap-acct b { font-weight: 600; color: var(--sub1); max-width: 9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.meter { display: block; flex: none; width: 34px; height: 4px; border-radius: 2px; background: var(--s1); overflow: hidden; }
+.meter i { display: block; height: 100%; background: var(--sub0); }
+.cap-pc { color: var(--sub1); }
 
 .desk-grid { max-width: 1360px; margin: 0 auto; padding: 30px 48px 72px; display: grid; grid-template-columns: minmax(0, 1fr) 460px; column-gap: 88px; align-items: start; }
 
@@ -49,7 +56,8 @@ ul { list-style: none; }
 
 #inbox { margin-top: 40px; max-width: 44rem; }
 .card { padding: 0 0 18px; }
-.card .q { font: 600 1.5rem/1.3 var(--display); letter-spacing: -.012em; text-wrap: balance; }
+.card.lead { background: var(--s0); border: 1px solid var(--hair); border-radius: 16px; padding: 22px 32px 20px; margin: 0 -32px; box-shadow: 0 28px 48px -30px rgba(8, 9, 16, .9), 0 3px 8px -3px rgba(8, 9, 16, .45); }
+.card .q { margin-top: 10px; font: 600 1.5rem/1.3 var(--display); letter-spacing: -.012em; text-wrap: balance; }
 .more { font-size: .8125rem; color: var(--ov2); }
 .card .more { display: block; margin-top: 4px; }
 .card .opts { margin-top: 6px; padding-left: 18px; list-style: disc; color: var(--sub0); font-size: .84375rem; }
@@ -57,11 +65,27 @@ ul { list-style: none; }
 .rest .meta, .done .meta { flex-basis: 100%; margin: 0; font-size: .8125rem; color: var(--ov2); }
 .card .opts .picked, .rest .opts .picked, .done .opts .picked { color: var(--lav); }
 .card .meta { margin-top: 8px; font-size: .8125rem; color: var(--ov2); }
+.card .head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 0; font-size: .84375rem; color: var(--sub0); }
+.head .wait { margin-left: auto; }
+.kind { display: inline-flex; gap: 7px; font-weight: 600; }
+.kind.needs { color: var(--peach); }
+.held { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--hair); font-size: .84375rem; color: var(--sub0); }
 .rest, .done { margin-top: 10px; }
 .rest li, .done li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; padding: 5px 0; font-size: .875rem; color: var(--ov2); }
 .rest b, .done b { font-weight: 600; color: var(--sub0); }
-.done-item { flex: 1 0 100%; }
+.rest > li.row { display: block; padding: 12px 0; }
+.rest > li.row + li.row { border-top: 1px solid var(--hair); }
+.row-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; width: 100%; margin: 0; }
+.row-head b { font-size: 1rem; font-weight: 500; color: var(--text); }
+.row-head .lm { font-size: .84375rem; color: var(--sub0); }
+.row-head .lw { margin-left: auto; font-size: .84375rem; color: var(--sub0); white-space: nowrap; }
+.done-item { flex: 1 0 100%; min-width: 0; }
+.keys { margin-top: 18px; display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: .8125rem; color: var(--ov2); }
+.keys span { display: inline-flex; align-items: center; gap: 6px; }
 .done-item summary, .check-more summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; cursor: pointer; list-style: none; padding: 4px 12px; margin: 0 -12px; border-radius: 10px; font-size: .875rem; color: var(--ov2); transition: background-color .16s; }
+.done-item summary { flex-wrap: nowrap; }
+.done-item summary > b { flex: 0 1000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.done-item summary > span { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .done-item summary::-webkit-details-marker, .check-more summary::-webkit-details-marker { display: none; }
 .done-item summary:hover, .check-more summary:hover { background: rgba(202, 211, 245, .05); }
 .done-item > :not(summary) { margin-top: 4px; }
@@ -69,33 +93,64 @@ ul { list-style: none; }
 .abox { flex-basis: 100%; margin-top: 6px; }
 .abox .meta { margin-top: 6px; }
 .abox .meta.now { color: var(--text); }
-.abox .opts { list-style: none; padding-left: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; margin-top: 4px; }
-.opt, .send, .undo, .approve, .reply-send, .goal-open, .goal-send, .goal-cancel, .goal-project, .withdraw, .retry, .stop, .stop-confirm, .stop-cancel, .tell-send, .abox button[class^="ans-"] { display: inline-flex; align-items: baseline; gap: 8px; font: inherit; color: inherit; text-align: left; background: none; border: 1px solid var(--hair); border-radius: 8px; padding: 2px 10px; cursor: pointer; transition: background-color .16s; }
-.opt:hover:enabled, .send:hover:enabled, .undo:hover:enabled, .approve:hover:enabled, .reply-send:hover:enabled, .goal-open:hover:enabled, .goal-send:hover:enabled, .goal-cancel:hover:enabled, .goal-project:hover:enabled, .withdraw:hover:enabled, .retry:hover:enabled, .stop:hover:enabled, .stop-confirm:hover:enabled, .stop-cancel:hover:enabled, .tell-send:hover:enabled, .abox button[class^="ans-"]:hover:enabled { background: rgba(202, 211, 245, .05); }
-.opt:disabled, .send:disabled, .reply-send:disabled, .goal-send:disabled, .withdraw:disabled, .retry:disabled, .stop:disabled, .stop-confirm:disabled, .stop-cancel:disabled, .tell-send:disabled, .abox button[class^="ans-"]:disabled { cursor: default; }
+.abox .opts { list-style: none; padding-left: 0; display: flex; flex-direction: column; align-items: stretch; gap: 2px; margin-top: 14px; }
+.opt, .send, .undo, .approve, .reply-send, .goal-send, .goal-cancel, .goal-project, .give-goal, .withdraw, .retry, .stop, .stop-confirm, .stop-cancel, .try-again, .stall-withdraw, .tell-send, .abox button[class^="ans-"] { display: inline-flex; align-items: baseline; gap: 8px; font: inherit; color: inherit; text-align: left; background: none; border: 1px solid var(--hair); border-radius: 8px; padding: 2px 10px; cursor: pointer; transition: background-color .16s; }
+.opt:hover:enabled, .send:hover:enabled, .undo:hover:enabled, .approve:hover:enabled, .reply-send:hover:enabled, .goal-send:hover:enabled, .goal-cancel:hover:enabled, .goal-project:hover:enabled, .give-goal:hover:enabled, .withdraw:hover:enabled, .retry:hover:enabled, .stop:hover:enabled, .stop-confirm:hover:enabled, .stop-cancel:hover:enabled, .try-again:hover:enabled, .stall-withdraw:hover:enabled, .tell-send:hover:enabled, .abox button[class^="ans-"]:hover:enabled { background: rgba(202, 211, 245, .05); }
+.opt:disabled, .send:disabled, .reply-send:disabled, .goal-send:disabled, .give-goal:disabled, .withdraw:disabled, .retry:disabled, .stop:disabled, .stop-confirm:disabled, .stop-cancel:disabled, .try-again:disabled, .stall-withdraw:disabled, .tell-send:disabled, .abox button[class^="ans-"]:disabled { cursor: default; }
 .abox button[class^="ans-"]:disabled { color: var(--ov2); }
 .abox .detail { margin-top: 6px; padding: 6px 10px; max-height: 24rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: .84375rem; color: var(--sub0); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; }
 .card .detail, .rest .detail, .done .detail { flex-basis: 100%; margin: 6px 0 0; padding: 6px 10px; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: .84375rem; color: var(--sub0); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; }
 .abox textarea, .abox input { display: block; width: 100%; max-width: 40rem; margin-top: 6px; padding: 4px 8px; font: inherit; color: var(--text); background: var(--mantle); border: 1px solid var(--s1); border-radius: 8px; }
 .abox textarea { min-height: 4.5rem; resize: vertical; }
-.opt kbd { font: inherit; color: var(--ov2); }
-.opt.picked, .goal-project.picked { color: var(--lav); border-color: var(--lav); }
-#goal { margin-top: 24px; max-width: 44rem; }
-.goal-box { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
-.goal-filter, .goal-text, .reply-text { width: 100%; font: inherit; color: var(--text); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; padding: 6px 10px; }
-.goal-text, .reply-text { min-height: 6em; resize: vertical; }
+.opt { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; align-items: center; column-gap: 14px; width: 100%; padding: 9px 14px; border-radius: 10px; border: 1px solid transparent; }
+.opt .ot { font-size: 1.0625rem; line-height: 1.4; font-weight: 500; overflow-wrap: anywhere; }
+.opt kbd { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border: 1px solid var(--s2); border-radius: 6px; font: inherit; font-size: .75rem; font-weight: 600; color: var(--sub1); }
+.opt .rec { font-size: .75rem; font-weight: 600; color: var(--sub1); border: 1px solid var(--s2); border-radius: 999px; padding: 1px 8px; white-space: nowrap; }
+.opt.picked { border-color: var(--lav); background: rgba(183, 189, 248, .10); }
+.opt.picked kbd { background: var(--lav); border-color: var(--lav); color: var(--crust); }
+.goal-project.picked { color: var(--lav); border-color: var(--lav); }
+.goal-bar { position: relative; flex: 0 1 440px; min-width: 12rem; }
+.goal-in { display: flex; align-items: flex-start; gap: 10px; padding: 0 10px 0 12px; background: var(--mantle); border: 1px solid var(--s0); border-radius: 12px; transition: border-color .16s; }
+.goal-in:hover { border-color: var(--s1); }
+.goal-in:focus-within { border-color: var(--lav); }
+.goal-in .goal-text { flex: 1 1 auto; min-width: 0; height: 38px; padding: 8px 0; font: inherit; line-height: 22px; color: var(--text); background: none; border: 0; border-radius: 0; resize: none; overflow: hidden; }
+.goal-in .goal-text::placeholder { color: var(--ov2); }
+.goal-key { margin-top: 9px; }
+.goal-bar.open .goal-in { background: var(--base); border-color: var(--lav); }
+.goal-bar.open .goal-text { height: 82px; overflow: auto; }
+.goal-box { position: absolute; top: calc(100% + 6px); left: 0; z-index: 20; display: flex; flex-direction: column; align-items: flex-start; gap: 8px; width: min(600px, calc(100vw - 32px)); max-height: calc(100vh - 14rem); overflow-y: auto; padding: 12px; background: var(--base); border: 1px solid var(--lav); border-radius: 12px; box-shadow: 0 28px 48px -24px rgba(8, 9, 16, .9); }
+.goal-filter { min-width: 0; }
+.goal-filter, .reply-text { width: 100%; font: inherit; color: var(--text); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; padding: 6px 10px; }
+.reply-text { min-height: 6em; resize: vertical; }
 .brief .goal-line { margin-top: 6px; font-size: 1.0625rem; overflow-wrap: anywhere; }
 .brief .parts p { margin-top: 10px; }
 .brief .parts ul { margin-top: 4px; padding-left: 18px; list-style: disc; color: var(--sub0); font-size: .84375rem; }
 .reply { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; margin-top: 12px; }
-.goal-projects { display: flex; flex-wrap: wrap; gap: 4px; }
+.goal-projects { display: flex; flex-wrap: wrap; flex: 0 1 auto; gap: 4px; min-width: 0; max-width: 100%; min-height: 0; overflow-y: auto; }
+.goal-projects li { min-width: 0; max-width: 100%; }
+.goal-project { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 .goal-status:empty { display: none; }
-.goal-act { display: flex; gap: 8px; }
+.goal-act { display: flex; flex: none; gap: 8px; }
 .sprints { flex: 1 0 100%; padding: 0 0 0 16px; }
 .sprint { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; font-size: .8125rem; color: var(--sub0); }
-.sprint .goal-line { color: var(--text); overflow-wrap: anywhere; }
+.sprint .goal-line { color: var(--text); font-weight: 500; overflow-wrap: anywhere; }
 .sprint .age, .sprint .manager, .sprint .until, .sprint .status-age { color: var(--ov2); }
-.sprint .progress::before { content: "\2014  "; }
+.sp-head { flex: 1 0 100%; display: grid; grid-template-columns: 16px minmax(0, 1fr) fit-content(40%); column-gap: 12px; row-gap: 2px; align-items: start; }
+.sp-status { grid-column: 2 / -1; display: flex; flex-wrap: wrap; gap: 0 8px; }
+.sp-prog { display: flex; align-items: flex-start; justify-content: flex-end; gap: 8px; min-width: 0; font-size: .8125rem; color: var(--sub0); }
+.pips { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; padding-top: 3px; }
+.pip-count { flex: none; white-space: nowrap; }
+.pip { display: block; width: 9px; height: 9px; border-radius: 2px; flex: none; }
+.pip.pip-landed { background: var(--sub0); }
+.pip.pip-delivery { border: 1.5px solid var(--green); background: var(--green); box-shadow: inset 0 0 0 1.5px var(--base); }
+.pip.pip-queued { border: 1.5px solid var(--s2); }
+.pip.pip-held { background: linear-gradient(90deg, var(--yellow) 0 3.5px, transparent 3.5px 5.5px, var(--yellow) 5.5px 9px); border-radius: 1.5px; }
+.sprint-state { font-weight: 600; }
+.st-go { color: var(--green); }
+.st-wait { color: var(--yellow); }
+.st-dim { color: var(--ov2); }
+.sprint-state.needs, .sic.needs { color: var(--peach); }
+.sic { display: flex; align-self: start; padding-top: 2px; }
 .sprint-detail { flex: 1 0 100%; font-size: .8125rem; }
 .sprint-detail summary { cursor: pointer; color: var(--ov2); }
 .sprint-detail ul { margin-top: 2px; padding: 0 0 0 16px; }
@@ -115,16 +170,27 @@ ul { list-style: none; }
 .act { flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin-top: 8px; font-size: .8125rem; color: var(--ov2); }
 .fail, .stop-fail, .unstopped { color: var(--red); }
 .stop-ask { color: var(--text); }
+.lead .act { margin-top: 14px; align-items: center; gap: 8px; font-size: .9375rem; }
+.act .primary.needs { display: inline-flex; align-items: center; gap: 10px; min-height: 40px; padding: 0 16px; border: 0; border-radius: 10px; font-weight: 600; background: var(--peach); color: var(--crust); text-decoration: none; }
+.act .primary.needs:hover:enabled { background: #f8bb98; }
+.act .primary.needs:disabled { background: var(--s1); color: var(--sub0); cursor: not-allowed; }
+.act .primary.needs kbd { border-color: rgba(24, 25, 38, .28); color: var(--crust); }
+.item-detail { margin-left: auto; }
+.item-detail summary { cursor: pointer; list-style: none; padding: 4px 12px; border-radius: 8px; color: var(--sub1); }
+.item-detail summary::-webkit-details-marker { display: none; }
 .finished { flex: 1 0 100%; padding: 0 0 0 16px; font-size: .8125rem; }
 .finished summary { cursor: pointer; color: var(--ov2); }
 .sprint .closing-line { color: var(--text); overflow-wrap: anywhere; }
 .sprint .closing-counts { color: var(--ov2); }
 #digest { margin-top: 40px; max-width: 44rem; }
 #digest:empty { margin-top: 0; }
-.digest-head { font: 600 .875rem/1.4 var(--ui); color: var(--ov2); }
+.sec-h { font: 600 .9375rem/1.4 var(--ui); color: var(--text); }
+.digest-head time { font-weight: 400; color: var(--ov2); }
 .digest, .earlier-list { margin-top: 6px; }
-.digest li, .earlier-list li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; padding: 5px 0; font-size: .875rem; color: var(--sub0); }
-.digest .at { color: var(--ov2); }
+.digest li, .earlier-list li { display: grid; grid-template-columns: 5.5rem minmax(0, 1fr); column-gap: 12px; padding: 5px 0; font-size: .875rem; }
+.digest .at, .earlier-list .at { color: var(--ov2); white-space: nowrap; }
+.said { color: var(--sub0); overflow-wrap: anywhere; }
+.earlier-list .more-n { display: block; color: var(--ov2); }
 .earlier { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--hair); }
 .earlier summary { display: flex; align-items: baseline; gap: 8px; cursor: pointer; list-style: none; padding: 4px 12px; margin: 0 -12px; border-radius: 10px; font-size: .875rem; color: var(--ov2); transition: background-color .16s; }
 .earlier summary::-webkit-details-marker { display: none; }
@@ -132,15 +198,21 @@ ul { list-style: none; }
 .earlier summary b { font-weight: 600; color: var(--sub0); }
 .answer { color: var(--lav); text-underline-offset: 3px; }
 .side { margin-top: 12px; }
-.side h2 { font: 600 .9375rem/1.4 var(--ui); display: flex; align-items: baseline; gap: 10px; }
+.side h2 { display: flex; align-items: baseline; gap: 10px; }
 .side h2 span { font-weight: 400; font-size: .8125rem; color: var(--ov2); }
 .empty { margin-top: 12px; color: var(--sub0); font-size: .84375rem; }
 #list { margin-top: 12px; }
 .line { padding: 5px 0; font-size: .875rem; color: var(--ov2); }
 .line b { font-weight: 600; color: var(--sub0); }
+.pname { margin: 0; font-size: .9375rem; line-height: 1.4; font-weight: 600; color: var(--text); }
+#list > li.line + li.line { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--hair); }
 .line summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; cursor: pointer; list-style: none; padding: 4px 12px; margin: 0 -12px; border-radius: 10px; transition: background-color .16s; }
 .line summary::-webkit-details-marker { display: none; }
 .line summary:hover { background: rgba(202, 211, 245, .05); }
+.line summary > .sess-sum, .line summary > .run-sum { flex-basis: 100%; }
+.line.quiet { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.line.quiet > details { flex: 1 1 auto; min-width: 0; }
+.give-goal { margin-left: auto; font-size: .8125rem; color: var(--sub1); }
 .run-sum { font-size: .8125rem; color: var(--sub0); }
 .line .root { display: block; margin-top: 4px; font-size: .8125rem; color: var(--ov2); overflow-wrap: anywhere; }
 .line .qw { display: inline-flex; align-items: baseline; gap: 6px; }
@@ -170,8 +242,10 @@ ul { list-style: none; }
   .desk-grid { grid-template-columns: minmax(0, 1fr) 400px; column-gap: 56px; }
 }
 @media (max-width: 900px) {
+  .card.lead { margin: 0 -8px; padding: 20px 16px; }
   .desk-grid { grid-template-columns: minmax(0, 1fr); padding: 32px 16px 56px; }
-  .top-in { padding: 10px 16px; gap: 10px 16px; }
+  .top-in { padding: 10px 16px; gap: 10px 16px; flex-wrap: wrap; }
+  .goal-bar { order: 3; flex: 1 0 100%; }
   .side { margin-top: 48px; }
   .statement h1 { font-size: 2.375rem; letter-spacing: -.022em; }
   .statement .sub { font-size: 1rem; }
@@ -182,14 +256,16 @@ ul { list-style: none; }
   .top-in { flex-wrap: wrap; }
   .cap { margin-left: 0; }
 }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .001ms !important; animation-delay: 0s !important; transition-duration: .001ms !important; }
+}
 </style>
 </head>
 <body>
-<header class="top"><div class="top-in"><span class="brand">Console</span><span class="cap" id="capacity"></span><span class="conn" id="conn" role="status">Reconnecting…</span></div></header>
+<header class="top"><div class="top-in"><span class="brand">Console</span><div class="goal-bar" id="goal" role="group" aria-label="Goal"></div><span class="cap" id="capacity"></span><span class="conn" id="conn" role="status">Reconnecting…</span></div></header>
 <div class="desk-grid">
 <main>
 <div class="statement" id="statement"></div>
-<section id="goal" aria-label="Goal"></section>
 <section id="promoted" aria-label="Capacity"></section>
 <section id="inbox" aria-label="Inbox"></section>
 <section id="digest" aria-label="Since you last looked"></section>
@@ -200,6 +276,19 @@ ul { list-style: none; }
 </aside>
 </div>
 <template id="quiet-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M12.5 9.5A5 5 0 0 1 6.5 3.5a5 5 0 1 0 6 6z"/></svg></template>
+<template id="decision-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 13.5V9.5M8 9.5c0-3-3.6-2.6-3.6-6M8 9.5c0-3 3.6-2.6 3.6-6"/></svg></template>
+<template id="brief-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5h5.2L12 5.3v8.2H4zM9 2.5v3h3M6.2 8.5h3.6M6.2 11h3.6"/></svg></template>
+<template id="check-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.8"/><path d="M5.4 8.2l1.8 1.8 3.4-3.7"/></svg></template>
+<template id="approval-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><circle cx="5.4" cy="10.6" r="2.6"/><path d="M7.3 8.7L13 3M10.4 5.6l1.9 1.9"/></svg></template>
+<template id="conflict-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 3.5l7 9M11.5 3.5l-7 9"/></svg></template>
+<template id="play-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path class="f" d="M5 3.2v9.6a.6.6 0 0 0 .9.5l7.4-4.8a.6.6 0 0 0 0-1L5.9 2.7a.6.6 0 0 0-.9.5z"/></svg></template>
+<template id="pause-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><rect class="f" x="3.5" y="3" width="3.2" height="10" rx="1"/><rect class="f" x="9.3" y="3" width="3.2" height="10" rx="1"/></svg></template>
+<template id="clock-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.8"/><path d="M8 4.8V8l2.2 1.5"/></svg></template>
+<template id="dashed-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.8" stroke-dasharray="2.1 2.5"/><circle class="f" cx="8" cy="8" r="1.3"/></svg></template>
+<template id="stop-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><rect class="f" x="3.5" y="3.5" width="9" height="9" rx="2"/></svg></template>
+<template id="tick-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.6l3.2 3.1L13 4.4"/></svg></template>
+<template id="lines-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 4.5h10M3 8h10M3 11.5h6"/></svg></template>
+<template id="label-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 3.5h5.2l5.8 5.8-4.2 4.2-6.8-6.8z"/><circle cx="5.4" cy="6.2" r=".9"/></svg></template>
 <script>
 "use strict";
 function el(tag, cls, text) {
@@ -208,8 +297,11 @@ function el(tag, cls, text) {
   if (text !== undefined) node.textContent = text;
   return node;
 }
+function icon(id) {
+  return document.getElementById(id).content.firstElementChild.cloneNode(true);
+}
 function quietIcon() {
-  return document.getElementById("quiet-icon").content.firstElementChild.cloneNode(true);
+  return icon("quiet-icon");
 }
 function movedWords(run, cls) {
   if (!Number.isFinite(Date.parse(run.moved_at))) return el("span", cls, run.moved_text);
@@ -227,7 +319,7 @@ function lineFold(key, nameNode, words, outside, root) {
   const summary = el("summary");
   summary.appendChild(nameNode);
   for (const word of words) summary.appendChild(word);
-  if (outside.sessions.length > 0) summary.appendChild(el("span", "", outside.summary));
+  if (outside.sessions.length > 0) summary.appendChild(el("span", "sess-sum", outside.summary));
   for (const session of outside.sessions) {
     for (const run of session.deliveries || []) summary.appendChild(runSummary(run));
   }
@@ -269,14 +361,30 @@ function sprintDetail(sprint) {
   const fold = el("details", "sprint-detail");
   fold.dataset.key = "sprint:" + sprint.sprint_id;
   fold.appendChild(el("summary", "", "Detail"));
-  const list = el("ul", "sprint-issues");
-  for (const issue of sprint.issues || []) {
-    const row = el("li");
-    row.appendChild(el("span", "issue", "#" + issue.issue));
-    row.appendChild(el("span", "stage", issue.stage_text));
-    list.appendChild(row);
+  if (typeof sprint.progress_text === "string") {
+    fold.appendChild(el("p", "progress", sprint.progress_text));
   }
-  fold.appendChild(list);
+  if (typeof sprint.status === "string") {
+    const list = el("ul", "sprint-issues");
+    for (const issue of sprint.issues || []) {
+      const row = el("li");
+      row.appendChild(el("span", "issue", "#" + issue.issue));
+      row.appendChild(el("span", "stage", issue.stage_text));
+      list.appendChild(row);
+    }
+    fold.appendChild(list);
+  }
+  const sessions = sprint.sessions || [];
+  if (sessions.length > 0) {
+    const list = el("ul", "sprint-sessions");
+    for (const session of sessions) {
+      const row = el("li", "sprint-session");
+      row.appendChild(el("span", "", session.name));
+      row.appendChild(el("span", "s-" + session.state, session.state_text));
+      list.appendChild(row);
+    }
+    fold.appendChild(list);
+  }
   const closing = sprint.closing;
   if (closing !== null && typeof closing === "object") {
     if (typeof closing.summary === "string") fold.appendChild(el("p", "closing-summary", closing.summary));
@@ -301,6 +409,28 @@ function sprintDetail(sprint) {
     fold.appendChild(link);
   }
   return fold;
+}
+const SPRINT_LOOKS = new Map([
+  ["drafting", { icon: "lines-icon", mark: "sic-lines", tone: "st-dim" }],
+  ["starting", { icon: "play-icon", mark: "sic-play", tone: "st-go" }],
+  ["on_track", { icon: "play-icon", mark: "sic-play", tone: "st-go" }],
+  ["waiting", { icon: "pause-icon", mark: "sic-pause", tone: "needs" }],
+  ["quiet", { icon: "dashed-icon", mark: "sic-dashed", tone: "st-wait" }],
+  ["closing", { icon: "check-icon", mark: "sic-closing", tone: "st-go" }],
+  ["done", { icon: "tick-icon", mark: "sic-tick", tone: "st-dim" }],
+  ["stopping", { icon: "pause-icon", mark: "sic-pause", tone: "st-wait" }],
+  ["stopped", { icon: "tick-icon", mark: "sic-tick", tone: "st-dim" }],
+]);
+function sprintLook(sprint) {
+  const look = SPRINT_LOOKS.get(sprint.state);
+  if (look === undefined) throw new Error("unknown sprint state " + JSON.stringify(sprint.state));
+  if (sprint.state !== "waiting" && sprint.manager_state === "waiting") {
+    return { icon: "clock-icon", mark: "sic-clock", tone: "st-wait" };
+  }
+  return look;
+}
+function pipGroup(stage) {
+  return stage === "landed" || stage === "held" || stage === "queued" ? stage : "delivery";
 }
 const withdrawals = new Map();
 const stops = new Map();
@@ -356,30 +486,52 @@ function fillSprint(item, entry, sprint) {
   const before = Array.from(item.children).find((c) => c.className === "sprint-detail");
   const wasOpen = before !== undefined && before.open === true;
   item.replaceChildren();
-  item.appendChild(el("span", "goal-line", sprint.goal));
-  item.appendChild(el("span", "sprint-state", sprint.state_text));
-  if (typeof sprint.progress_text === "string") {
-    item.appendChild(el("span", "progress", sprint.progress_text));
+  const look = sprintLook(sprint);
+  const head = el("div", "sp-head");
+  const mark = el("span", "sic " + look.mark + " " + look.tone);
+  mark.appendChild(icon(look.icon));
+  head.appendChild(mark);
+  head.appendChild(el("span", "goal-line", sprint.goal));
+  const progress = sprint.progress;
+  if (progress !== null && typeof progress === "object" && progress.total > 0) {
+    const prog = el("span", "sp-prog");
+    const pips = el("span", "pips");
+    pips.setAttribute("role", "img");
+    pips.setAttribute("aria-label", sprint.progress_text);
+    pips.setAttribute("title", sprint.progress_text);
+    for (const issue of sprint.issues || []) {
+      pips.appendChild(el("i", "pip pip-" + pipGroup(issue.stage)));
+    }
+    prog.appendChild(pips);
+    prog.appendChild(el("span", "pip-count", progress.landed + " of " + progress.total));
+    head.appendChild(prog);
   }
+  const words = el("p", "sp-status");
+  words.appendChild(el("span", "sprint-state " + look.tone, sprint.state_text));
   const closing = sprint.closing;
   if (closing !== null && typeof closing === "object") {
     if (typeof closing.first_line === "string") {
-      item.appendChild(el("span", "closing-line", closing.first_line));
+      words.appendChild(el("span", "closing-line", closing.first_line));
     }
     if (typeof closing.counts_text === "string") {
-      item.appendChild(el("span", "closing-counts", closing.counts_text));
+      words.appendChild(el("span", "closing-counts", closing.counts_text));
     }
   }
   if (typeof sprint.status === "string") {
-    item.appendChild(el("span", "status", sprint.status));
+    words.appendChild(el("span", "status", sprint.status));
     if (typeof sprint.status_at === "string") {
-      item.appendChild(timeEl("ago", sprint.status_at, "status-age"));
+      words.appendChild(timeEl("ago", sprint.status_at, "status-age"));
     }
+  }
+  for (const session of sprint.sessions || []) {
+    words.appendChild(el("span", "manager-now s-" + session.state, "manager " + session.state_text));
   }
   const age = el("span", "age");
   age.appendChild(el("span", "", "stated "));
   age.appendChild(timeEl("ago", sprint.stated_at, ""));
-  item.appendChild(age);
+  words.appendChild(age);
+  head.appendChild(words);
+  item.appendChild(head);
   if (sprint.manager_text !== null && sprint.manager_text !== undefined) {
     item.appendChild(el("span", "manager", sprint.manager_text));
   }
@@ -403,24 +555,13 @@ function fillSprint(item, entry, sprint) {
     item.appendChild(el("span", "stop-fail", sprint.stop_text));
   }
   const hasClosing = closing !== null && typeof closing === "object";
-  if (typeof sprint.status === "string" || hasClosing) {
+  if (typeof sprint.status === "string" || hasClosing || (sprint.sessions || []).length > 0) {
     const fold = sprintDetail(sprint);
     if (wasOpen) fold.open = true;
     item.appendChild(fold);
   }
   if (state !== undefined && state.phase === "failed") {
     item.appendChild(el("span", "fail", "Could not withdraw: " + state.reason));
-  }
-  const sessions = sprint.sessions || [];
-  if (sessions.length > 0) {
-    const list = el("ul", "sprint-sessions");
-    for (const session of sessions) {
-      const row = el("li", "sprint-session");
-      row.appendChild(el("span", "", session.name));
-      row.appendChild(el("span", "s-" + session.state, session.state_text));
-      list.appendChild(row);
-    }
-    item.appendChild(list);
   }
   const messages = sprint.messages || [];
   if (messages.length > 0) item.appendChild(messageList(messages));
@@ -595,6 +736,66 @@ async function retry(item, entry, sprint) {
     if (row.dataset.sprintId === id) fillSprint(row, latest.entry, latest.sprint);
   }
 }
+const stallPosts = new Map();
+function isStall(item) {
+  return item.reason === "manager";
+}
+async function stallPost(item, kind, failure, send) {
+  const key = kind + "\n" + item.sprint_id;
+  const current = stallPosts.get(key);
+  if (current !== undefined && current.phase === "sending") return;
+  const state = { phase: "sending", reason: "", failure };
+  stallPosts.set(key, state);
+  redraw();
+  let reason = null;
+  try {
+    const response = await send();
+    if (response.status !== 204) {
+      reason = (await response.text()).trim() || "HTTP " + response.status;
+    }
+  } catch (error) {
+    console.error(error);
+    reason = "the console did not answer";
+  }
+  if (stallPosts.get(key) !== state) return;
+  if (reason === null) stallPosts.delete(key);
+  else {
+    state.phase = "failed";
+    state.reason = reason;
+  }
+  redraw();
+}
+function stallHeaders() {
+  return { "X-Console-Token": token, "Content-Type": "application/json" };
+}
+function stallBody(item) {
+  return JSON.stringify({ project_id: item.project_id, sprint_id: item.sprint_id });
+}
+function stallCard(item) {
+  const card = el("article", "card stall");
+  card.appendChild(el("p", "q", item.headline));
+  card.appendChild(el("span", "reason", item.last_reason));
+  const again = stallPosts.get("again\n" + item.sprint_id);
+  const away = stallPosts.get("withdraw\n" + item.sprint_id);
+  const retry = actionButton("try-again", "Try again",
+    () => stallPost(item, "again", "Could not try again: ", () => fetch("/api/retry-manager", {
+      method: "POST", headers: stallHeaders(), body: stallBody(item),
+    })));
+  if (again !== undefined && again.phase === "sending") retry.setAttribute("disabled", "");
+  card.appendChild(retry);
+  const withdrawn = actionButton("stall-withdraw", "Withdraw",
+    () => stallPost(item, "withdraw", "Could not withdraw: ", () => fetch("/api/withdraw", {
+      method: "POST", headers: stallHeaders(), body: stallBody(item),
+    })));
+  if (away !== undefined && away.phase === "sending") withdrawn.setAttribute("disabled", "");
+  card.appendChild(withdrawn);
+  for (const state of [again, away]) {
+    if (state !== undefined && state.phase === "failed") {
+      card.appendChild(el("span", "fail", state.failure + state.reason));
+    }
+  }
+  return card;
+}
 function sprintList(entry, sprints) {
   const list = el("ul", "sprints");
   for (const sprint of sprints) {
@@ -605,7 +806,7 @@ function sprintList(entry, sprints) {
   return list;
 }
 function projectLine(entry) {
-  const line = el("li", "line");
+  const line = el("li", entry.quiet ? "line quiet" : "line");
   const words = [];
   if (entry.quiet) {
     const quiet = el("span", "qw");
@@ -619,8 +820,11 @@ function projectLine(entry) {
       words.push(untouched);
     }
   }
-  line.appendChild(lineFold("line:" + entry.project_id, el("b", "", entry.project_id), words,
+  line.appendChild(lineFold("line:" + entry.project_id, el("h3", "pname", entry.project_id), words,
                             entry.outside_sprints, entry.root));
+  if (entry.quiet) {
+    line.appendChild(actionButton("give-goal", "Give it a goal", () => openGoalFor(entry.project_id)));
+  }
   if (entry.sprints && entry.sprints.length > 0) line.appendChild(sprintList(entry, entry.sprints));
   const finished = entry.finished_sprints;
   if (finished !== null && typeof finished === "object" && Array.isArray(finished.sprints)) {
@@ -695,29 +899,54 @@ function outWords(p, cls) {
   if (p.out_until === null || p.out_until === undefined) return phrase("span", cls, "out, reset unknown");
   return phrase("span", cls, "out until ", timeEl("weekday", p.out_until, ""));
 }
-function capacityWords(p, cls) {
-  if (p.state === "unknown") return phrase("span", cls, "no reading yet");
-  if (p.state === "out") return outWords(p, cls);
-  if (p.state === "reset") return phrase("span", cls, "reset, not yet used");
-  const has = (v) => v !== null && v !== undefined;
-  const parts = [has(p.week_left) ? p.week_left + "% of the week left" : "week unknown"];
-  if (has(p.five_hour_left)) parts.push(" \u00b7 " + p.five_hour_left + "% of 5 hours");
-  if (has(p.next_reset)) parts.push(" \u00b7 resets ", timeEl("weekday", p.next_reset, ""));
-  return phrase("span", cls, ...parts);
-}
 function renderCapacity(view) {
   const box = document.getElementById("capacity");
   const cap = view.capacity || {profiles: []};
+  const known = (v) => v !== null && v !== undefined;
+  const readings = cap.profiles.filter((p) => p.state !== "unknown");
   const nodes = [];
-  for (const p of cap.profiles) {
-    if (p.state === "unknown") continue;
-    const span = el("span", "cap-p");
-    span.appendChild(el("b", "", p.profile));
-    span.appendChild(capacityWords(p, p.state === "out" ? "cap-out" : ""));
-    nodes.push(span);
+  if (readings.length) {
+    const [tone, word, mark] = cap.all_out ? ["cap-out", "out", "stop-icon"]
+      : cap.tight ? ["cap-tight", "tight", "clock-icon"] : ["cap-fine", "fine", "tick-icon"];
+    const state = el("span", "cap-state " + tone);
+    state.appendChild(icon(mark));
+    state.appendChild(el("span", "", word));
+    nodes.push(state);
+  }
+  for (const p of readings) {
+    const acct = el("span", p.state === "out" ? "cap-acct cap-out" : "cap-acct");
+    const shares = [known(p.week_left) ? p.week_left + "% of the week left" : "week unknown"];
+    if (known(p.five_hour_left)) shares.push(p.five_hour_left + "% of 5 hours");
+    acct.setAttribute("title", shares.join(", "));
+    const name = el("b", "", p.profile);
+    name.setAttribute("title", p.profile);
+    acct.appendChild(name);
+    if (known(p.week_left)) {
+      const meter = el("span", "meter");
+      meter.setAttribute("aria-hidden", "true");
+      const fill = el("i");
+      fill.style.width = p.week_left + "%";
+      meter.appendChild(fill);
+      acct.appendChild(meter);
+    }
+    if (p.state === "out") acct.appendChild(outWords(p, ""));
+    else if (p.state === "reset") acct.appendChild(el("span", "cap-pc", "reset, not yet used"));
+    else acct.appendChild(el("span", "cap-pc", known(p.week_left) ? p.week_left + "%" : "week unknown"));
+    nodes.push(acct);
+  }
+  if (readings.length) {
+    if (cap.all_out) {
+      if (cap.resumes_at) nodes.push(phrase("span", "cap-when", "resumes ", timeEl("weekday", cap.resumes_at, "")));
+    } else {
+      const stamps = readings.filter((p) => p.state !== "out").map((p) => p.next_reset)
+        .filter((t) => Number.isFinite(Date.parse(t)));
+      if (stamps.length) {
+        const next = stamps.reduce((a, b) => (Date.parse(b) < Date.parse(a) ? b : a));
+        nodes.push(phrase("span", "cap-when", "resets ", timeEl("weekday", next, "")));
+      }
+    }
   }
   if (cap.no_reading) nodes.push(el("span", "cap-none", cap.no_reading));
-  if (cap.tight) nodes.push(el("span", "cap-tight", "tight"));
   box.replaceChildren(...nodes);
 }
 function renderPromoted(view) {
@@ -727,14 +956,14 @@ function renderPromoted(view) {
   if (!cap.all_out) return;
   const list = el("ul");
   for (const p of cap.profiles) list.appendChild(phrase("li", "cap-out", p.profile + " ", outWords(p, "")));
-  box.appendChild(el("h2", "", "Capacity"));
+  box.appendChild(el("h2", "sec-h", "Capacity"));
   box.appendChild(list);
 }
 function holds(item) {
   return item.held_work === 1 ? "holds 1 issue" : "holds " + item.held_work + " issues";
 }
-function answerLink(item) {
-  const a = el("a", "answer", "Answer on the tracker");
+function answerLink(item, cls) {
+  const a = el("a", cls || "answer", "Answer on the tracker");
   a.href = item.url;
   a.rel = "noreferrer";
   return a;
@@ -746,6 +975,43 @@ function metaLine(item, tag, cls) {
     line.appendChild(phrase("span", "read-at", "read ", timeEl("ago", item.read_at, "")));
   }
   return line;
+}
+function kindOf(item) {
+  if (isBrief(item)) return ["Brief", "brief-icon"];
+  if (item.reason === "decision") return ["Decision", "decision-icon"];
+  if (item.reason === "conflict") return ["Conflict", "conflict-icon"];
+  if (item.reason === "needs-label") return ["Label", "label-icon"];
+  if (item.kind === "approval" || item.kind === "paid-approval") return ["Approval", "approval-icon"];
+  return ["Check", "check-icon"];
+}
+function kindWords(item) {
+  const [word, id] = kindOf(item);
+  const node = el("span", "kind needs");
+  node.appendChild(icon(id));
+  node.appendChild(el("span", "", word));
+  return node;
+}
+function headLine(item) {
+  const line = el("p", "head meta");
+  line.appendChild(kindWords(item));
+  line.appendChild(el("span", "proj", item.project_id));
+  line.appendChild(phrase("span", "wait", "waiting ", timeEl("since", item.waiting_since, "")));
+  return line;
+}
+function heldLine(item) {
+  const line = phrase("p", "held", holds(item));
+  if (item.stale) {
+    line.appendChild(el("span", "", " \u00b7 "));
+    line.appendChild(phrase("span", "read-at", "read ", timeEl("ago", item.read_at, "")));
+  }
+  return line;
+}
+function detailFold(item) {
+  const fold = el("details", "item-detail");
+  fold.dataset.key = "detail:" + itemId(item);
+  fold.appendChild(el("summary", "", "Detail"));
+  fold.appendChild(answerLink(item));
+  return fold;
 }
 function moreWords(item) {
   if (!(item.more_questions > 0)) return null;
@@ -1056,17 +1322,18 @@ function briefRecord(sprintId) {
   let rec = briefCards.get(sprintId);
   if (rec === undefined) {
     const card = el("article", "card brief");
-    const head = el("h2");
+    const top = el("p", "head meta");
+    const head = el("h2", "q");
     const goal = el("p", "goal-line");
     const parts = el("div", "parts");
-    const act = el("p", "act");
+    const act = el("div", "act");
     const field = el("textarea", "reply-text");
     field.setAttribute("aria-label", "Reply");
-    rec = { card, head, goal, parts, act, field, status: el("p", "act"), item: null };
+    rec = { card, top, head, goal, parts, act, field, status: el("p", "act"), item: null };
     rec.send = actionButton("reply-send", "Ask for changes", () => sendReply(rec));
     const box = el("div", "reply");
     for (const part of [field, rec.send, rec.status]) box.appendChild(part);
-    for (const part of [head, goal, parts, act, box]) card.appendChild(part);
+    for (const part of [top, head, goal, parts, act, box]) card.appendChild(part);
     briefCards.set(sprintId, rec);
   }
   return rec;
@@ -1077,10 +1344,15 @@ function listPart(label, texts) {
   for (const text of texts) list.appendChild(el("li", "", text));
   return [el("p", "meta", label), list];
 }
-function drawBrief(rec, item) {
+function drawBrief(rec, item, lead) {
   const state = briefState(item);
   const parts = item.brief;
   rec.item = item;
+  rec.card.className = lead ? "card brief lead" : "card brief";
+  rec.top.replaceChildren(
+    kindWords(item), el("span", "proj", item.project_id),
+    phrase("span", "wait", "waiting ", timeEl("since", item.waiting_since, "")),
+  );
   rec.head.textContent = item.project_id + " brief, version " + item.version;
   rec.goal.textContent = item.goal;
   rec.parts.replaceChildren(
@@ -1088,7 +1360,7 @@ function drawBrief(rec, item) {
     ...listPart("Excluded", parts.excluded), ...listPart("Slices", parts.slices),
     ...listPart("Risks", parts.risks), ...listPart("What I expect to ask", parts.asks),
   );
-  rec.act.replaceChildren(...approveLine(item, state));
+  rec.act.replaceChildren(...approveLine(item, state, lead));
   const reply = state.reply;
   const words = { sending: "Sending\u2026", sent: "Reply sent, waiting for a new brief" };
   const status = reply.phase === "failed"
@@ -1097,7 +1369,7 @@ function drawBrief(rec, item) {
   rec.status.replaceChildren(...status);
   rec.send.disabled = reply.phase === "sending";
 }
-function approveLine(item, state) {
+function approveLine(item, state, lead) {
   if (state.phase === "waiting") {
     return [
       el("span", "", "Approving in five seconds."),
@@ -1112,7 +1384,9 @@ function approveLine(item, state) {
   if (old !== undefined) {
     nodes.push(el("span", "", "A newer brief replaced version " + old + "; nothing was approved."));
   }
-  nodes.push(actionButton("approve", "Approve", () => { if (startApproval(item, state)) redraw(); }));
+  const approve = actionButton(lead ? "approve primary needs" : "approve", "Approve", () => { if (startApproval(item, state)) redraw(); });
+  if (itemId(item) === currentId) approve.appendChild(el("kbd", "", "Enter"));
+  nodes.push(approve);
   return nodes;
 }
 function placeBriefCards(section, briefs) {
@@ -1121,9 +1395,9 @@ function placeBriefCards(section, briefs) {
     const busy = [...answers.values()].some((s) => s.kind === "brief" && s.sprint_id === id && sending(s));
     if (!open.has(id) && !busy) briefCards.delete(id);
   }
-  const wanted = briefs.map((item) => {
+  const wanted = briefs.map((item, i) => {
     const rec = briefRecord(item.sprint_id);
-    drawBrief(rec, item);
+    drawBrief(rec, item, i === 0);
     return rec.card;
   });
   const keep = new Set(wanted);
@@ -1168,13 +1442,15 @@ function statusLine(act, state) {
   }
   return true;
 }
-function actionLine(item, state) {
-  const act = el("p", "act");
+function actionLine(item, state, lead) {
+  const act = el("div", "act");
   if (!statusLine(act, state)) {
-    const send = actionButton("send", "Send", () => { if (start(item, state)) redraw(); });
+    const send = actionButton(lead ? "send primary needs" : "send", "Send answer", () => { if (start(item, state)) redraw(); });
+    if (itemId(item) === currentId) send.appendChild(el("kbd", "", "Enter"));
     if (!picksComplete(item, state)) send.setAttribute("disabled", "");
     act.appendChild(send);
   }
+  if (lead) act.appendChild(detailFold(item));
   return act;
 }
 const ANSWER_LABELS = {
@@ -1221,7 +1497,7 @@ function confirmBox(item, box, approve) {
   box.appendChild(draftField(input, itemId(item) + "\nconfirm", (value) => { approve.disabled = value !== item.confirm; }));
   approve.disabled = input.value !== item.confirm;
 }
-function checkBox(item, state) {
+function checkBox(item, state, lead) {
   const box = el("div", "abox");
   if (item.paid) box.appendChild(el("p", "meta", "This check costs money."));
   const approves = item.answers.includes("approve");
@@ -1231,13 +1507,19 @@ function checkBox(item, state) {
     if (item.detail) fold.appendChild(el("pre", "detail", item.detail));
     box.appendChild(fold);
   }
-  const act = el("p", "act");
-  if (statusLine(act, state)) {
+  const act = el("div", "act");
+  const finish = () => {
+    if (lead) {
+      box.appendChild(heldLine(item));
+      act.appendChild(detailFold(item));
+    }
     box.appendChild(act);
     return box;
-  }
+  };
+  if (statusLine(act, state)) return finish();
   const labels = ANSWER_LABELS[item.kind] || {};
   const buttons = [];
+  let marked = false;
   for (const answer of item.answers) {
     if (answer === "note") {
       buttons.push(noteBox(item, state, box));
@@ -1245,7 +1527,9 @@ function checkBox(item, state) {
     }
     const approve = answer === "approve";
     const extra = () => (approve ? { confirm: draftOf(itemId(item) + "\nconfirm").value } : {});
-    const button = actionButton("ans-" + answer, labels[answer] || answer, () => {
+    const primary = lead && !marked;
+    if (primary) marked = true;
+    const button = actionButton("ans-" + answer + (primary ? " primary needs" : ""), labels[answer] || answer, () => {
       if (button.disabled) return;
       if (startCheck(item, state, answer, extra())) redraw();
     });
@@ -1253,11 +1537,10 @@ function checkBox(item, state) {
     buttons.push(button);
   }
   for (const button of buttons) act.appendChild(button);
-  box.appendChild(act);
-  return box;
+  return finish();
 }
-function answerBox(item, state) {
-  if (check(item)) return checkBox(item, state);
+function answerBox(item, state, lead) {
+  if (check(item)) return checkBox(item, state, lead);
   const live = choosable(state);
   const now = Math.min(state.q, item.questions.length - 1);
   const box = el("div", "abox");
@@ -1271,7 +1554,9 @@ function answerBox(item, state) {
       button.type = "button";
       if (!live) button.setAttribute("disabled", "");
       button.appendChild(el("kbd", "", String(oi + 1)));
-      button.appendChild(el("span", "", option === q.chosen ? "chosen: " + option : option));
+      button.setAttribute("aria-pressed", String(state.picks[qi] === oi));
+      button.appendChild(el("span", "ot", option === q.chosen ? "chosen: " + option : option));
+      if (option === q.recommended) button.appendChild(el("span", "rec", "Recommended"));
       button.addEventListener("click", () => {
         if (!choosable(state)) return;
         choose(state, qi, oi);
@@ -1283,7 +1568,8 @@ function answerBox(item, state) {
     });
     box.appendChild(list);
   });
-  box.appendChild(actionLine(item, state));
+  if (lead) box.appendChild(heldLine(item));
+  box.appendChild(actionLine(item, state, lead));
   return box;
 }
 function boxState(item) {
@@ -1293,28 +1579,39 @@ function boxState(item) {
   return itemId(item) === currentId || state.phase !== "choosing" ? state : null;
 }
 function leadItem(item) {
-  const card = el("article", "card");
+  const card = el("article", "card lead");
+  card.appendChild(headLine(item));
   card.appendChild(el("h2", "q", item.headline));
   const more = moreWords(item);
   if (more !== null) card.appendChild(more);
   const state = boxState(item);
-  if (state === null) appendDetail(card, item, true);
-  else card.appendChild(answerBox(item, state));
-  card.appendChild(metaLine(item, "p", "meta"));
-  const links = el("p", "meta");
-  links.appendChild(answerLink(item));
-  card.appendChild(links);
+  if (state === null) {
+    appendDetail(card, item, true);
+    card.appendChild(heldLine(item));
+    const act = el("div", "act");
+    act.appendChild(answerLink(item, "answer primary needs"));
+    card.appendChild(act);
+  } else card.appendChild(answerBox(item, state, true));
   return card;
 }
 function itemLine(item) {
-  const line = el("li");
-  line.appendChild(el("b", "", item.headline));
+  const line = el("li", "row");
+  const head = el("p", "row-head");
+  head.appendChild(kindWords(item));
+  head.appendChild(el("b", "", item.headline));
+  const lm = phrase("span", "lm", item.project_id + " \u00b7 " + holds(item));
+  if (item.stale) {
+    lm.appendChild(el("span", "", " \u00b7 "));
+    lm.appendChild(phrase("span", "read-at", "read ", timeEl("ago", item.read_at, "")));
+  }
+  head.appendChild(lm);
+  head.appendChild(phrase("span", "lw", "waiting ", timeEl("since", item.waiting_since, "")));
+  line.appendChild(head);
   const more = moreWords(item);
   if (more !== null) line.appendChild(more);
   const state = boxState(item);
   if (state === null) appendDetail(line, item, true);
-  else line.appendChild(answerBox(item, state));
-  line.appendChild(metaLine(item, "span", ""));
+  else line.appendChild(answerBox(item, state, false));
   line.appendChild(answerLink(item));
   return line;
 }
@@ -1345,6 +1642,31 @@ function dropBriefState(id, state, briefs) {
   }
   if (!sending(state)) answers.delete(id);
 }
+function keyStrip(current, open) {
+  if (open.length === 0) return null;
+  const entries = [];
+  const entry = (keys, word) => {
+    const span = el("span");
+    for (const key of keys) span.appendChild(key);
+    span.appendChild(el("span", "", word));
+    entries.push(span);
+  };
+  if (current !== null && isBrief(current.item)) {
+    if (current.state.reply.phase !== "sending") entry([el("kbd", "", "Enter")], " approve");
+  } else if (current !== null) {
+    const questions = current.item.questions;
+    const n = Math.min(9, questions[Math.min(current.state.q, questions.length - 1)].options.length);
+    entry(n > 1 ? [el("kbd", "", "1"), el("span", "", "\u2013"), el("kbd", "", String(n))] : [el("kbd", "", "1")], " choose");
+    if (picksComplete(current.item, current.state)) entry([el("kbd", "", "Enter")], " send answer");
+  }
+  if (open.some((item) => { const s = answers.get(stateId(item)); return s !== undefined && s.phase === "waiting"; })) {
+    entry([el("kbd", "", "Esc")], " undo");
+  }
+  if (entries.length === 0) return null;
+  const strip = el("p", "keys");
+  for (const e of entries) strip.appendChild(e);
+  return strip;
+}
 function renderInbox(view) {
   const fresh = view !== lastView;
   lastView = view;
@@ -1358,7 +1680,12 @@ function renderInbox(view) {
   for (const fold of document.querySelectorAll("#inbox details[open]")) wasOpen.add(fold.dataset.key);
   const open = view.inbox.open;
   const briefs = open.filter(isBrief);
-  const tracked = open.filter((item) => !isBrief(item));
+  const stalls = open.filter(isStall);
+  const tracked = open.filter((item) => !isBrief(item) && !isStall(item));
+  for (const [key, state] of [...stallPosts]) {
+    const id = key.split("\n")[1];
+    if (state.phase !== "sending" && !stalls.some((item) => item.sprint_id === id)) stallPosts.delete(key);
+  }
   const present = new Set(open.map(stateId));
   // A frame that shows a sent item open again supersedes the page's own "sent"; a redraw of the same view does not.
   const reopened = new Set(fresh ? tracked.filter(answerable).map(itemId) : []);
@@ -1382,10 +1709,12 @@ function renderInbox(view) {
   const current = currentEntry(open);
   currentId = current === null ? null : itemId(current.item);
   placeBriefCards(section, briefs);
-  if (tracked.length > 0) section.appendChild(leadItem(tracked[0]));
-  if (tracked.length > 1) {
+  for (const item of stalls) section.appendChild(stallCard(item));
+  if (briefs.length === 0 && tracked.length > 0) section.appendChild(leadItem(tracked[0]));
+  const rows = briefs.length === 0 ? tracked.slice(1) : tracked;
+  if (rows.length > 0) {
     const rest = el("ul", "rest");
-    for (const item of tracked.slice(1)) rest.appendChild(itemLine(item));
+    for (const item of rows) rest.appendChild(itemLine(item));
     section.appendChild(rest);
   }
   const answered = view.inbox.answered;
@@ -1394,6 +1723,8 @@ function renderInbox(view) {
     for (const item of answered) done.appendChild(answeredLine(item));
     section.appendChild(done);
   }
+  const strip = keyStrip(current, open);
+  if (strip !== null) section.appendChild(strip);
   for (const fold of document.querySelectorAll("#inbox details")) {
     if (wasOpen.has(fold.dataset.key)) fold.open = true;
   }
@@ -1406,7 +1737,7 @@ function renderInbox(view) {
 function momentLine(moment) {
   const line = el("li");
   line.appendChild(timeEl("ago", moment.at, "at"));
-  line.appendChild(el("span", "", moment.sentence));
+  line.appendChild(el("span", "said", moment.sentence));
   return line;
 }
 function renderDigest(view) {
@@ -1415,8 +1746,8 @@ function renderDigest(view) {
   const digest = view.digest;
   if (!digest) return;
   section.appendChild(digest.first_visit
-    ? el("h2", "digest-head", "In the last eight hours")
-    : phrase("h2", "digest-head", "Since you last looked, ", timeEl("ago", digest.since, "")));
+    ? el("h2", "sec-h digest-head", "In the last eight hours")
+    : phrase("h2", "sec-h digest-head", "Since you last looked, ", timeEl("ago", digest.since, "")));
   if (digest.recent.length === 0 && digest.earlier.length === 0) {
     section.appendChild(el("p", "empty", "Nothing changed."));
     return;
@@ -1433,14 +1764,29 @@ function renderDigest(view) {
   fold.appendChild(summary);
   const more = el("ul", "earlier-list");
   for (const moment of digest.earlier) more.appendChild(momentLine(moment));
-  if (digest.omitted > 0) more.appendChild(el("li", "", "and " + digest.omitted + " more"));
+  if (digest.omitted > 0) more.appendChild(el("li", "more-n", "and " + digest.omitted + " more"));
   fold.appendChild(more);
   section.appendChild(fold);
 }
+function workCount(view) {
+  let sprints = 0;
+  let projects = 0;
+  for (const entry of view.entries) {
+    for (const one of entry.type === "quiet_group" ? entry.projects : [entry]) {
+      const n = one.sprints ? one.sprints.length : 0;
+      sprints += n;
+      if (n > 0) projects += 1;
+    }
+  }
+  if (sprints === 0) return "";
+  return sprints + (sprints === 1 ? " sprint" : " sprints") + " across " + projects
+    + (projects === 1 ? " project" : " projects");
+}
 function renderProjects(view) {
   const section = document.getElementById("projects");
-  const heading = el("h2", "", "Projects ");
-  heading.appendChild(el("span", "", String(view.project_count)));
+  const heading = el("h2", "sec-h", "Work");
+  const worked = workCount(view);
+  if (worked !== "") heading.appendChild(el("span", "", worked));
   const active = document.activeElement;
   const heldTell = active && active.tagName === "TEXTAREA" && active.dataset
     && active.dataset.tell !== undefined
@@ -1521,7 +1867,7 @@ function renderUnmanaged(view) {
   const list = el("ul");
   for (const entry of view.unmanaged) {
     const line = el("li", "line");
-    line.appendChild(lineFold("line:" + entry.root, el("b", "", entry.name),
+    line.appendChild(lineFold("line:" + entry.root, el("h3", "pname", entry.name),
                               [el("span", "", entry.label)], entry.outside_sprints, entry.root));
     list.appendChild(line);
   }
@@ -1570,8 +1916,8 @@ function goalEdited() {
 function closeGoal() {
   if (draft.phase !== "sending") draft.reason = "";
   draft.open = false;
-  goalUi = null;
   renderGoal();
+  goalText.blur();
 }
 async function sendGoal() {
   if (draft.phase === "sending") return;
@@ -1610,6 +1956,7 @@ async function sendGoal() {
     if (draft.rev === sentRev) {
       draft.filter = "";
       draft.text = "";
+      goalText.value = "";
       draft.project = null;
       if (draft.open) closeGoal();
     } else showGoalReason();
@@ -1618,7 +1965,27 @@ async function sendGoal() {
     showGoalReason();
   }
 }
-function buildGoalBox(section) {
+const goalText = el("textarea", "goal-text");
+goalText.setAttribute("rows", "1");
+goalText.setAttribute("placeholder", "Tell a manager what you want next\u2026");
+goalText.setAttribute("aria-label", "Tell a manager what you want next");
+goalText.setAttribute("aria-keyshortcuts", "g");
+goalText.addEventListener("input", (event) => {
+  draft.text = event.target.value;
+  goalEdited();
+});
+goalText.addEventListener("focus", () => {
+  if (!draft.open) {
+    draft.open = true;
+    renderGoal();
+  }
+});
+const goalIn = el("div", "goal-in");
+goalIn.appendChild(goalText);
+goalIn.appendChild(el("kbd", "goal-key", "g"));
+document.getElementById("goal").appendChild(goalIn);
+let goalPanel = null;
+function buildGoalBox() {
   const box = el("div", "goal-box");
   const filter = el("input", "goal-filter");
   filter.setAttribute("type", "text");
@@ -1631,42 +1998,44 @@ function buildGoalBox(section) {
     refreshGoalList();
   });
   const list = el("ul", "goal-projects");
-  const text = el("textarea", "goal-text");
-  text.setAttribute("aria-label", "Goal");
-  text.setAttribute("placeholder", "What should the next sprint achieve?");
-  text.value = draft.text;
-  text.addEventListener("input", (event) => {
-    draft.text = event.target.value;
-    goalEdited();
-  });
   const status = el("div", "goal-status");
   const send = actionButton("goal-send", "Send", sendGoal);
   const act = el("div", "goal-act");
   act.appendChild(send);
   act.appendChild(actionButton("goal-cancel", "Cancel", closeGoal));
-  for (const part of [filter, list, text, status, act]) box.appendChild(part);
-  section.replaceChildren(box);
-  goalUi = { filter, list, text, status, send };
+  for (const part of [filter, list, status, act]) box.appendChild(part);
+  goalPanel = box;
+  goalUi = { filter, list, status, send };
   send.disabled = draft.phase === "sending";
   refreshGoalList();
   showGoalReason();
+  return box;
 }
 function openGoal() {
   draft.open = true;
-  if (goalUi === null) buildGoalBox(document.getElementById("goal"));
-  goalUi.filter.focus();
+  renderGoal();
+  goalText.focus();
 }
-const goalOpener = el("button", "goal-open", "State a goal");
-goalOpener.setAttribute("type", "button");
-goalOpener.setAttribute("aria-keyshortcuts", "g");
-goalOpener.addEventListener("click", openGoal);
+function openGoalFor(projectId) {
+  draft.filter = "";
+  draft.project = projectId;
+  goalEdited();
+  draft.open = true;
+  renderGoal();
+  goalUi.filter.value = "";
+  refreshGoalList();
+  goalText.focus();
+}
 function renderGoal() {
-  const section = document.getElementById("goal");
+  const bar = document.getElementById("goal");
+  bar.className = draft.open ? "goal-bar open" : "goal-bar";
   if (draft.open) {
-    if (goalUi === null) buildGoalBox(section);
+    if (goalPanel === null) bar.appendChild(buildGoalBox());
     else refreshGoalList();
-  } else if (section.children.length !== 1 || section.children[0] !== goalOpener) {
-    section.replaceChildren(goalOpener);
+  } else if (goalPanel !== null) {
+    goalPanel.remove();
+    goalPanel = null;
+    goalUi = null;
   }
 }
 function render(view) {

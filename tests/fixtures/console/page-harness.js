@@ -24,8 +24,10 @@
 // the first attached element with that class; none throws; {focus: true} stays
 // the window's focus). {select: {cls, start, end}} sets the selection of the
 // first attached element with that class (none throws); {input} also puts the
-// caret at the end of the value. Elem.focus() sets state.active and counts in
-// state.focusCount; removing a node (replaceChildren dropping it, appendChild
+// caret at the end of the value. Elem.focus() sets state.active, counts in
+// state.focusCount and, only when the element was not already active, fires its
+// own focus listeners with {type: "focus", target}; Elem.blur() clears
+// state.active when it is that element and fires nothing; removing a node (replaceChildren dropping it, appendChild
 // moving it, the textContent setter, Elem.remove()) clears state.active when it
 // is that node or inside its subtree, as a browser blurs a removed element, and
 // document.activeElement is state.active only while attached. A snapshot adds
@@ -36,7 +38,9 @@
 // reaches their due time. Each step settles pending promises before the next. A snapshot holds the trees
 // of the inbox, statement, projects, unmanaged, digest, goal, capacity and
 // promoted sections; every serialized node carries its title attribute (null
-// when unset), which is where a time element keeps its exact local time.
+// when unset), which is where a time element keeps its exact local time, and
+// its placeholder attribute (null when unset) and its inline style.width (null
+// when unset; Elem.style is a plain object).
 // Prints a JSON list of snapshots on stdout; any failure exits 1 with the
 // error on stderr. A selector the fake DOM does not support throws, so a
 // test cannot pass on a stub.
@@ -67,6 +71,7 @@ class Elem {
     this.id = "";
     this.dataset = {};
     this.attributes = {};
+    this.style = {};
     this.listeners = {};
     this.open = false;
     this.value = "";
@@ -90,8 +95,13 @@ class Elem {
     if (name === "disabled") this.disabled = true;
   }
   focus() {
+    const was = state.active === this;
     state.active = this;
     state.focusCount += 1;
+    if (!was) for (const fn of this.listeners.focus || []) fn({ type: "focus", target: this });
+  }
+  blur() {
+    if (state.active === this) state.active = null;
   }
   setSelectionRange(start, end) {
     this.selectionStart = start;
@@ -198,14 +208,14 @@ const script = html.slice(open + "<script>".length, close);
 const markup = html.slice(0, open) + html.slice(close);
 
 const root = new Elem("html");
-let template = null;
+const templates = new Map();
 for (const m of markup.matchAll(/<([a-zA-Z][a-zA-Z0-9]*)\b([^>]*?\bid="([^"]+)"[^>]*)>/g)) {
   const node = new Elem(m[1]);
   node.id = m[3];
   const withContent = /\bcontent="([^"]*)"/.exec(m[2]);
   if (withContent) node.content = withContent[1];
   if (m[1] === "template") {
-    template = node;
+    templates.set(node.id, node);
     node.content = new Elem("fragment");
     node.content.appendChild(new Elem("svg"));
   } else {
@@ -298,7 +308,7 @@ const document = {
   },
   createElement: (tag) => new Elem(tag),
   getElementById(id) {
-    if (template && template.id === id) return template;
+    if (templates.has(id)) return templates.get(id);
     return attached(root).find((n) => n.id === id) || null;
   },
   querySelectorAll(selector) {
@@ -333,7 +343,10 @@ function node(n) {
     cls: n.className,
     key: n.dataset.key === undefined ? null : n.dataset.key,
     title: n.attributes.title === undefined ? null : n.attributes.title,
+    placeholder: n.attributes.placeholder === undefined ? null : n.attributes.placeholder,
+    width: n.style.width === undefined ? null : n.style.width,
     open: n.open,
+    pressed: n.attributes["aria-pressed"] === undefined ? null : n.attributes["aria-pressed"],
     value: n.value === undefined ? null : n.value,
     disabled: n.disabled === true || "disabled" in n.attributes,
     text: n.children.filter((c) => c.isText).map((c) => c.text).join(""),

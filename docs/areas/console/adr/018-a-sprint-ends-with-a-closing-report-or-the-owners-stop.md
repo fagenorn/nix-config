@@ -1,4 +1,4 @@
-# ADR-console-017 — A sprint ends with a closing report or the owner's stop
+# ADR-console-018 — A sprint ends with a closing report or the owner's stop
 
 - **Status:** accepted
 - **Decided in:** #834, #928, #892

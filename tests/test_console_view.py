@@ -1449,3 +1449,88 @@ class SprintMessageViewTest(unittest.TestCase):
         entry = message_entry(rows)
         self.assertEqual(view.SHOWN_MESSAGES, 10)
         self.assertEqual([m["id"] for m in entry["messages"]], list(range(5, 15)))
+
+
+class ReviveViewTest(unittest.TestCase):
+    SID = "a" * 16
+    GOAL = "make the importer resumable"
+
+    @staticmethod
+    def row(seq, kind, **payload):
+        return Event(seq, f"2026-11-12T10:0{seq}:00.000000+00:00", kind, "p00", payload)
+
+    def stated(self, sid=None):
+        return self.row(1, event_log.GOAL_STATED, sprint_id=sid or self.SID, goal=self.GOAL)
+
+    def stalled(self, seq=3, sid=None, reason="r"):
+        return self.row(seq, event_log.MANAGER_STALLED, sprint_id=sid or self.SID,
+                        goal=self.GOAL, reason=reason)
+
+    def test_a_restart_and_a_takeover_each_add_one_digest_sentence_and_no_inbox_item(self):
+        rows = [
+            self.stated(),
+            self.row(2, event_log.MANAGER_STARTED, sprint_id=self.SID, profile="work",
+                     session_name="n"),
+            self.row(3, event_log.MANAGER_WOKEN, sprint_id=self.SID, ok=True, goal=self.GOAL,
+                     session_id="s-1"),
+            self.row(4, event_log.MANAGER_STARTED, sprint_id=self.SID, takeover=True,
+                     goal=self.GOAL, profile="work", session_name="n")]
+        folded = sprint_states(rows)
+        made = digest.moments(rows, {}, {})
+        now = datetime.fromisoformat("2026-11-12T11:00:00.000000+00:00")
+        shown = derive_view([state("p00", 1)], sprints=folded,
+                            digest=digest.digest(made, None, now))
+        self.assertEqual([m["sentence"] for m in shown["digest"]["recent"]], [
+            "A new manager took over " + self.GOAL,
+            "The manager of " + self.GOAL + " was restarted"])
+        self.assertEqual(shown["inbox"]["open"], [])
+        self.assertEqual(shown["statement"]["inbox_items"], 0)
+
+    def test_a_stalled_sprint_is_one_counted_inbox_item_with_its_reason(self):
+        folded = sprint_states([self.stated(), self.stalled()])
+        shown = derive_view([state("p00", 1)], sprints=folded)
+        self.assertEqual(shown["inbox"]["open"], [{
+            "type": "inbox_item", "reason": "manager", "key": "manager/" + self.SID,
+            "project_id": "p00", "sprint_id": self.SID, "goal": self.GOAL,
+            "headline": "managers keep failing on " + self.GOAL, "last_reason": "r",
+            "answered": False, "waiting_since": "2026-11-12T10:03:00.000000+00:00"}])
+        self.assertEqual(shown["statement"]["inbox_items"], 1)
+        self.assertEqual(shown["statement"]["headline"], "1 thing needs you")
+        self.assertEqual(shown["statement"]["sentence"], view.MANAGER_SENTENCE)
+        self.assertEqual(view.MANAGER_SENTENCE,
+                         "Try again to start a new manager, or withdraw the sprint.")
+        entry = shown["entries"][0]["sprints"][0]
+        self.assertEqual((entry["manager_state"], entry["manager_text"], entry["retry"]),
+                         ("stalled", "managers keep failing: r", True))
+
+    def test_a_stalled_manager_seen_again_leaves_no_stall_item_and_reads_started(self):
+        seen = self.row(4, "session.seen", session_id="s-1", cwd="/x", repo=None, state="idle",
+                        name="p00 sprint " + self.SID)
+        started = self.row(2, event_log.MANAGER_STARTED, sprint_id=self.SID, profile="work",
+                           session_name="p00 sprint " + self.SID)
+        folded = sprint_states([self.stated(), started, self.stalled(), seen])
+        shown = derive_view([state("p00", 1)], sprints=folded)
+        self.assertEqual(shown["inbox"]["open"], [])
+        self.assertEqual(shown["statement"]["inbox_items"], 0)
+        entry = shown["entries"][0]["sprints"][0]
+        self.assertEqual((entry["manager_state"], entry["retry"]), ("started", False))
+
+    def test_stall_items_follow_briefs_and_precede_tracker_items(self):
+        a, b, c = "a" * 16, "b" * 16, "c" * 16
+        stall = dataclasses.replace
+        records = {("p00", "k1"): InboxRecord(item("p00", "k1", held=9), "t1", "u1")}
+        shown = derive_view([state("p00", 1)], records, sprints={
+            a: stall(sprint(a), stalled="r", stalled_at="t7"),
+            b: stall(sprint(b), stalled="r", stalled_at="t5"),
+            c: briefed(sprint(c), at="t9")})
+        self.assertEqual([e["key"] for e in shown["inbox"]["open"]],
+                         ["brief/" + c, "manager/" + b, "manager/" + a, "k1"])
+        self.assertEqual(shown["statement"]["inbox_items"], 4)
+        self.assertEqual(shown["statement"]["sentence"], BRIEF_SENTENCE)
+
+    def test_a_stall_of_an_unregistered_project_is_not_shown(self):
+        sprints = {self.SID: dataclasses.replace(
+            sprint(self.SID, pid="p09"), stalled="r", stalled_at="t7")}
+        shown = derive_view([state("p00", 1)], sprints=sprints)
+        self.assertEqual(shown["inbox"]["open"], [])
+        self.assertEqual(shown["statement"], derive_view([state("p00", 1)])["statement"])

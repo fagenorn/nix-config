@@ -4,6 +4,7 @@
     sprint report [--sprint <id>] [--secret-file <path>] --report-file <path | -> [--port N]
     sprint close [--sprint <id>] [--secret-file <path>] --closing-file <path | -> [--port N]
     sprint inbox [--sprint <id>] [--secret-file <path>] [--port N]
+    sprint recap [--sprint <id>] [--secret-file <path>] [--port N]
     sprint reply [--sprint <id>] [--secret-file <path>] --message <id> --reply-file <path | -> [--port N]
     sprint status [--sprint <id>] [--port N]
     sprint contract
@@ -14,7 +15,7 @@ the manager session it starts; without `--secret-file` the secret is `$CONSOLE_S
 (one trailing newline is removed, as from the file). A flag always wins over the environment. No id is stderr
 `sprint: no sprint id: pass --sprint or set CONSOLE_SPRINT_ID`, an id from the environment that
 is not a sprint id is stderr `sprint: CONSOLE_SPRINT_ID is not a sprint id (16 lowercase hex
-characters)`, and, for `brief`, `report`, `close`, `inbox` and `reply`, no secret is stderr `sprint: no secret: pass --secret-file or set
+characters)`, and, for `brief`, `report`, `close`, `inbox`, `recap` and `reply`, no secret is stderr `sprint: no secret: pass --secret-file or set
 CONSOLE_SPRINT_SECRET`; each is exit 2 with no request sent. `--port` is the console's loopback
 port (0-65535; default 27184); the command only ever talks to 127.0.0.1.
 
@@ -38,6 +39,13 @@ member of the closing report: the console decides, in one place.
 `{"sprint_id", "secret"}`, no `Origin`. It prints the console's answer as one line of JSON,
 `{"messages": [{"id", "kind", "version", "text", "at"}, ...]}`: the owner's messages the manager has
 not read, in id order, each once, and exit 0. An inbox with nothing unread is `{"messages": []}`.
+
+`sprint recap` reads the secret the same way and sends `POST /api/recap` with `{"sprint_id",
+"secret"}`, no `Origin`. It prints the console's answer as one line of JSON, `{"sprint_id", "goal",
+"brief", "report", "unread"}`, and exit 0: the goal, the latest brief (`version`, `decision`,
+`reply`, `parts`, or null), the last report (or null) and the number of the owner's unread
+messages. It marks nothing read; a manager that was restarted or takes a sprint over runs it, then
+`sprint inbox`.
 
 `sprint reply` reads the secret the same way and the reply from `--reply-file` (`-` reads stdin) as
 UTF-8 text with one trailing newline removed, and sends `POST /api/message-reply` with
@@ -111,6 +119,7 @@ def build_parser() -> argparse.ArgumentParser:
                        ("report", "send the sprint's report to the console"),
                        ("close", "send the sprint's closing report"),
                        ("inbox", "print the owner's unread messages to the sprint"),
+                       ("recap", "print what a manager needs to pick the sprint up"),
                        ("reply", "answer one of the owner's messages"),
                        ("status", "print the owner's answer to the sprint's brief")):
         each = commands.add_parser(name, help=text)
@@ -238,6 +247,12 @@ def read_inbox(args: argparse.Namespace, sprint: str) -> str:
     return ask(args.port, "POST", service.INBOX_PATH, body)
 
 
+def read_recap(args: argparse.Namespace, sprint: str) -> str:
+    secret = resolve_secret(args)
+    body = json.dumps({"sprint_id": sprint, "secret": secret}).encode()
+    return ask(args.port, "POST", service.RECAP_PATH, body)
+
+
 def send_reply(args: argparse.Namespace, sprint: str) -> str:
     secret = resolve_secret(args)
     reply = read_text(args.reply_file)
@@ -262,6 +277,8 @@ def main(argv: list[str] | None = None) -> int:
             line = send_closing(args, sprint)
         elif args.command == "inbox":
             line = read_inbox(args, sprint)
+        elif args.command == "recap":
+            line = read_recap(args, sprint)
         elif args.command == "reply":
             line = send_reply(args, sprint)
         else:

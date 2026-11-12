@@ -1,9 +1,9 @@
 // Runs deliver-batch.js against stub agents and a stub child workflow (issue 636).
 // Usage: node deliver_batch_harness.mjs <program.js> with a scenario JSON on stdin:
 //   { "args": {...}, "replies": {"<label>": reply | [reply per call]}, "patch": {"<label>": {...}},
-//     "children": {"<issue>": child result | [one per call] | "throw"}, "turns": {"<issue>:<mode>": n} }
+//     "children": {"<issue>": child result | [one per call] | "throw"}, "turns": {"<issue>:<mode>": n}, "delays": {"<label>": n} }
 // A label with no reply gets its default (DEFAULTS); a patch is merged over that default. A reply
-// of null is returned as null (a dead agent). Prints { result, calls, logs (each log() line), max_active, max_planning, child_events }:
+// of null is returned as null (a dead agent). Prints { result, calls, logs (each log() line), max_active, max_planning, child_events, child_returns }:
 // calls lists agents ({kind: 'agent', label, prompt, schema, agentType, model, effort, facts_pending}) and children
 // ({kind: 'workflow', label: 'child-<issue>', script, args}) in start order. A children entry applies to every child
 // call of its issue, mode 'plan' and 'ready' alike, in call order, and a list element "throw" throws Error('child failed'); an object
@@ -11,7 +11,7 @@
 // entry gets plannedOf(a) for a mode 'plan' call and readyOf(a) otherwise. turns ({"<issue>:<mode>": n}) makes that
 // child take n macrotask turns instead of 5, so a test can hold it pending. max_active is the most children not in
 // plan mode at once, max_planning the most executing plan-mode children at once, and child_events the ordered
-// {event: 'start'|'return', issue, mode} of every child.
+// {event: 'start'|'return', issue, mode} of every child; child_returns lists, per child return, {issue, mode, calls: the number of calls started before it}.
 // A reply equal to "throw" makes the stub agent throw after its call was recorded (land() catches it and releases).
 // A folded label (NESTED) given an explicit object reply with no own key for one of its nested steps gets that
 // step's default; a key present with null stays null (the nested step did not run).
@@ -84,6 +84,8 @@ async function agent(prompt, opts = {}) {
   }
   // A landing agent takes a macrotask, so two landings that were not serialised would interleave their calls.
   if (/^(renew|land|close-out|train)-/.test(label)) await new Promise(r => setImmediate(r))
+  // delays ({"<label>": n}) holds that agent n more macrotask turns, so a test can let a child return while the step is pending (#936).
+  for (let i = 0; i < ((scenario.delays || {})[label] || 0); i++) await new Promise(r => setImmediate(r))
   const n = seen[label] = (seen[label] || 0) + 1
   const replies = scenario.replies || {}
   if (Object.prototype.hasOwnProperty.call(replies, label)) {
@@ -120,6 +122,7 @@ let maxActive = 0
 let planning = 0
 let maxPlanning = 0
 const childEvents = []
+const childReturns = [] // per child return, the number of calls started before it (#936)
 const childSeen = {}
 async function workflow(ref, a) {
   calls.push({ kind: 'workflow', label: `child-${a.issue}`, script: ref && ref.scriptPath, args: structuredClone(a) })
@@ -141,6 +144,7 @@ async function workflow(ref, a) {
   } finally {
     if (plan) planning--; else active--
     childEvents.push({ event: 'return', issue: a.issue, mode: a.mode })
+    childReturns.push({ issue: a.issue, mode: a.mode, calls: calls.length })
   }
 }
 const parallel = thunks => Promise.all(thunks.map(t => Promise.resolve().then(t).catch(() => null)))
@@ -159,4 +163,4 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
 const run = new AsyncFunction('agent', 'parallel', 'pipeline', 'phase', 'log', 'args', 'budget', 'workflow', body)
 const logs = []
 const result = await run(agent, parallel, pipeline, noop, line => { logs.push(String(line)) }, scenario.args, budget, workflow)
-process.stdout.write(JSON.stringify({ result, calls, logs, max_active: maxActive, max_planning: maxPlanning, child_events: childEvents }))
+process.stdout.write(JSON.stringify({ result, calls, logs, max_active: maxActive, max_planning: maxPlanning, child_events: childEvents, child_returns: childReturns }))

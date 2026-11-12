@@ -420,11 +420,11 @@ class DocsTreeTest(unittest.TestCase):
             "Nothing is typed",
             self.doc("docs/areas/console/adr/002-the-desk-page-design-rules.md"))
 
-    def test_console_adr_017_records_how_a_sprint_ends(self):
-        path = "docs/areas/console/adr/017-a-sprint-ends-with-a-closing-report-or-the-owners-stop.md"
+    def test_console_adr_018_records_how_a_sprint_ends(self):
+        path = "docs/areas/console/adr/018-a-sprint-ends-with-a-closing-report-or-the-owners-stop.md"
         first = (REPO_ROOT / path).read_text().splitlines()[0]
         self.assertEqual(
-            first, "# ADR-console-017 — A sprint ends with a closing report or the owner's stop")
+            first, "# ADR-console-018 — A sprint ends with a closing report or the owner's stop")
         adr = self.doc(path)
         for needle in ("POST /api/close", "POST /api/stop", "ADR-console-014", "ADR-console-016",
                        "#834", "#928", "ten minutes", "schema 7", "manager.stopped"):
@@ -450,6 +450,20 @@ class DocsTreeTest(unittest.TestCase):
                       self.doc("docs/areas/console/adr/001-the-console-truth-is-an-append-only-event-log.md"))
         context = self.doc("docs/areas/console/CONTEXT.md")
         for needle in ("**Sprint**", "**Goal**"):
+            self.assertIn(needle, context)
+
+    def test_the_desk_finish_is_recorded(self):
+        rules = self.doc("docs/areas/console/adr/002-the-desk-page-design-rules.md")
+        goal = self.doc("docs/areas/console/adr/011-a-goal-stated-on-the-page-becomes-a-sprint.md")
+        context = self.doc("docs/areas/console/CONTEXT.md")
+        for needle in ("#922", "Tell a manager what you want next\u2026", "fine, tight or out",
+                       "never Peach", "resumes <weekday time>", "the age, then the sentence",
+                       "A session named for a sprint adds no line",
+                       "one shared style, 600 .9375rem/1.4"):
+            self.assertIn(needle, rules)
+        self.assertNotIn("State a goal", goal)
+        self.assertIn("#922", goal)
+        for needle in ("fine, tight or out", "A session named for a sprint adds no line"):
             self.assertIn(needle, context)
 
     def test_the_console_brief_decision_is_recorded(self):

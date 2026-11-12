@@ -69,6 +69,8 @@ BRIEF_REPLIED = "brief.replied"
 MANAGER_STARTED = "manager.started"
 MANAGER_FAILED = "manager.failed"
 MANAGER_WAITING = "manager.waiting"
+MANAGER_WOKEN = "manager.woken"
+MANAGER_STALLED = "manager.stalled"
 SPRINT_REPORTED = "sprint.reported"
 SPRINT_MESSAGED = "sprint.messaged"
 SPRINT_READ = "sprint.read"
@@ -82,7 +84,9 @@ MANAGER_STOP_FAILED = "manager.stop_failed"
 # kind, the three message kinds, the closing kind, the stop request and the
 # stop's completion) are never removed: not by the retention pass, not by a raw
 # connection (the delete trigger of schema 3, 4, 5, 6 and 7). `SPRINT_NUDGED`
-# and `MANAGER_STOP_FAILED` are not among them.
+# and `MANAGER_STOP_FAILED` are not among them, nor is any manager kind other
+# than `MANAGER_STOPPED` (`MANAGER_STARTED`, `MANAGER_FAILED`, `MANAGER_WAITING`,
+# `MANAGER_WOKEN`, `MANAGER_STALLED`).
 KEPT_KINDS = frozenset({GOAL_STATED, GOAL_WITHDRAWN,
                         BRIEF_SENT, BRIEF_APPROVED, BRIEF_REPLIED,
                         SPRINT_REPORTED,
