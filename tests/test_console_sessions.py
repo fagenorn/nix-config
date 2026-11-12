@@ -148,7 +148,25 @@ class SessionModelTest(unittest.TestCase):
         result = session_states(events)
         self.assertEqual(result, session_states(events[3:], session_states(events[:3])))
         self.assertEqual(result, {"s1": SessionState(
-            "s1", "/srv/p00", "/srv/p00", "idle", "n1", 4, iso(4000), 4000)})
+            "s1", "/srv/p00", "/srv/p00", "idle", "n1", 4, iso(4000), 4000, None, 4000)})
+
+    def test_a_state_keeps_its_own_time_through_a_row_that_leaves_it_as_it_is(self):
+        hook = {"session_id": "s1", "cwd": "/srv/p00", "repo": "/srv/p00"}
+        events = [
+            Event(1, iso(1000), SEEN, None, {**hook, "state": "working"}),
+            Event(2, iso(2000), SEEN, None, {**hook, "state": "idle"}),
+            Event(3, iso(3000), SEEN, None, {**hook, "state": "idle", "name": "renamed"}),
+            Event(4, iso(4000), HOOK, None, {**hook, "event": "Notification",
+                                             "notification_type": "other"}),
+        ]
+        got = session_states(events)["s1"]
+        self.assertEqual((got.state, got.last_at, got.state_ms), ("idle", iso(4000), 2000))
+        late = Event(5, iso(5000), HOOK, None, {**hook, "event": "Stop", "received_ms": 1500})
+        got = session_states([late], session_states(events))["s1"]
+        self.assertEqual((got.state, got.last_at, got.hook_ms, got.state_ms),
+                         ("idle", iso(5000), 1500, 1500))
+        got = session_states([events[0], events[1]])["s1"]
+        self.assertEqual((got.state, got.state_ms), ("idle", 2000))
 
     def test_an_ended_session_is_a_tombstone_a_new_start_revives(self):
         hook = {"session_id": "s1", "cwd": "/srv/p00", "repo": "/srv/p00"}

@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from agent_tools.console import event_log, revive, sprints
 from agent_tools.console.event_log import (MANAGER_FAILED, MANAGER_STARTED, MANAGER_WAITING,
                                            Event)
-from tests.test_console_sprints import PARTS, REPORT, SID
+from tests.test_console_sprints import CLOSING, PARTS, REPORT, SID
 
 NAME = "p00 sprint " + SID
 BASE = int(datetime(2026, 11, 12, 10, 0, tzinfo=timezone.utc).timestamp() * 1000)
@@ -259,6 +259,17 @@ class RetryTest(unittest.TestCase):
                 first = with_rows(lambda r: [r.row(BASE + 10, kind, payload)])
                 self.assertIsNotNone(first.brief)
                 self.assertIs(sprints.manager_status(first, False, BASE + 20, True)[2], False)
+
+    def test_a_closed_sprint_never_offers_retry_whatever_its_manager_row_says(self):
+        cases = {"failed": (MANAGER_FAILED, {"reason": "boom", "takeover": True}),
+                 "waiting": (MANAGER_WAITING, {"until": None, "takeover": True})}
+        for name, (kind, payload) in cases.items():
+            with self.subTest(name):
+                closed = with_rows(lambda r: [
+                    r.row(BASE + 10, kind, payload),
+                    r.row(BASE + 11, event_log.SPRINT_CLOSED, {"goal": "one", "closing": CLOSING})])
+                self.assertIsNotNone(closed.closing)
+                self.assertIs(sprints.manager_status(closed, False, BASE + 20, True)[2], False)
 
 
 def _drafting():

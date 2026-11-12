@@ -482,10 +482,16 @@ One sprint's launch, nudge and session stop never overlap: `_reserve_stop(sprint
 adds the sprint to `_stopping` only when it is in none of `_stopping`, `_launching` and `_nudging`
 (a stop that cannot be reserved stays due and the next `finish_stops` takes it). `finish_stops()`,
 called by `_poll_loop` after `renudge` (a failure is `console: stop_poll_failed <Type>: <message>`),
-reserves under the lock every sprint for which `sprints.stop_due` holds and dispatches each after
-it; `send_closing` on a sprint with `stop_at` does the same for that sprint at once, and a closing on
-a sprint without `stop_at` stops nothing. `_stop_session(sprint_id)`, under the lock, drops the
-reservation and returns unless the sprint has `stop_at` and not `stopped_at`; off the lock, without
+reserves under the lock every sprint for which `sprints.stop_due` or `sprints.done_stop_due` holds
+and dispatches each after it; `send_closing` on a sprint with `stop_at` does the same for that
+sprint at once. A closing on a sprint without `stop_at` (#980) leaves its session to `finish_stops`:
+`done_stop_due` is true once the manager's folded session is idle (`idle.IDLE_STATES`) with a `state_ms`
+(`sessions`: the time its state was asserted, not `last_at`) after the closing's, or `sprints.DONE_STOP_WAIT_MS` (two minutes) after the closing, whichever
+comes first; `_stop_session` then stops it as below and the `manager.stopped` row folds into
+`done_stopped_at`, so it is stopped exactly once, also across a restart. `_nudgeable` is None for a sprint with a closing and no
+`stop_at`, so nothing wakes the stopped manager. `_stop_session(sprint_id)`, under the lock, drops the
+reservation and returns unless the sprint has `stop_at` and not `stopped_at` (or is a done sprint
+whose session is still to stop); off the lock, without
 a stopper it makes no listing and no call (a success); with one it reads `listing()` once and, when
 no listed session carries the manager's name and the sprint's last launch, nudge or wake (`_settled`, epoch
 ms, set under the lock when a reservation ends and, at construction, for every sprint still to be stopped, so a restart keeps the window) ended less than `sprints.STOP_SETTLE_MS` ago, defers
@@ -1879,7 +1885,8 @@ class ConsoleService:
                          ) -> manager.Launch | None:
         """Under the ingest lock: the launch to run, or None after dropping the reservation."""
         sprint = self._sprints.get(sprint_id)
-        if sprint is None or sprint.stop_at is not None or sprint.stopped_at is not None:
+        if (sprint is None or sprint.stop_at is not None or sprint.stopped_at is not None
+                or sprint.closing is not None):
             self._release(sprint_id, token)
             return None
         if isinstance(token, _TakeoverReservation):
@@ -2084,12 +2091,14 @@ class ConsoleService:
 
         A sprint with a launch reserved is not nudgeable: a wake would resume the manager the launch replaces.
         Nor is one whose session stop is reserved or whose manager is stopped (#892): a wake would resume it.
+        Nor is one ended by a closing report (#980): its manager is stopped, and stays stopped.
         Nor is one whose manager's account is out of quota (#929): the message waits for the reset.
         """
         sprint = self._sprints.get(sprint_id)
         if (sprint is None or sprint_id in self._launching or sprint_id in self._stopping
                 or sprint.stopped_at is not None or sprint.manager is None
                 or sprint.manager.state != sprints.STARTED
+                or (sprint.closing is not None and sprint.stop_at is None)
                 or self._quota_wait(sprint) is not None):
             return None
         unread = sprints.unread(sprint)
@@ -2284,10 +2293,24 @@ class ConsoleService:
         """Start the settle window of every session still to be stopped: a restart loses `_settled`."""
         now = int(self._clock() * 1000)
         for sprint_id, sprint in self._sprints.items():
-            if sprint.stop_at is not None and sprint.stopped_at is None:
+            if (sprint.stop_at is not None and sprint.stopped_at is None) \
+                    or self._done_stop_pending(sprint):
                 self._settled[sprint_id] = now
         for sprint_id in self._pending:
             self._settled[sprint_id] = now
+
+    @staticmethod
+    def _done_stop_pending(sprint: sprints.SprintState) -> bool:
+        """Whether a sprint ended by a closing report still has its manager's session to stop (#980)."""
+        return (sprint.closing is not None and sprint.stop_at is None
+                and sprint.done_stopped_at is None)
+
+    def _turn_ended(self, sprint: sprints.SprintState) -> bool:
+        """Under the ingest lock: whether the manager's session went idle after the sprint's closing report: its state's own time is later."""
+        session = self._manager_session(sprint)
+        return (session is not None and sprint.closing is not None
+                and session.state in idle.IDLE_STATES and session.state_ms is not None
+                and session.state_ms > sprints._ms(sprint.closing.at))
 
     def _reserve_stop(self, sprint_id: str) -> bool:
         """Under the ingest lock: reserve the sprint's session stop unless a launch, nudge or stop holds it."""
@@ -2303,7 +2326,9 @@ class ConsoleService:
         with self._ingest:
             now = int(self._clock() * 1000)
             for sprint_id, sprint in self._sprints.items():
-                if sprints.stop_due(sprint, now) and self._reserve_stop(sprint_id):
+                if (sprints.stop_due(sprint, now)
+                        or sprints.done_stop_due(sprint, now, self._turn_ended(sprint))) \
+                        and self._reserve_stop(sprint_id):
                     due.append(sprint_id)
             if self._stopper is not None:
                 for sprint_id, pending in self._pending.items():
@@ -2329,8 +2354,8 @@ class ConsoleService:
         """
         sprint = self._sprints.get(sprint_id)
         if sprint is not None:
-            return sprint.project_id if sprint.stop_at is not None and sprint.stopped_at is None \
-                else None
+            stopping = sprint.stop_at is not None and sprint.stopped_at is None
+            return sprint.project_id if stopping or self._done_stop_pending(sprint) else None
         pending = self._pending.get(sprint_id)
         return pending.project_id if pending is not None else None
 

@@ -324,8 +324,8 @@ first line matching `#` and a digit is `SUMMARY_NUMBER`. `issues` is a list of a
 `first_line(summary)` is the first line of `summary.strip()`, itself stripped.
 
 The fold keeps, on each open sprint, `closing` as `Closing(at, summary, first_line, issues,
-differently)`, and `stop_at`, `stopped_at`, `stop_reason` and `stop_failed_at`. Each row changes only
-an open sprint:
+differently)`, and `stop_at`, `stopped_at`, `stop_reason`, `stop_failed_at` and `done_stopped_at`.
+Each row changes only an open sprint:
 
 - `sprint.stop_requested` applies when `stop_at`, `closing` and `stopped_at` are all `None` and the
   sprint has not ended (`ended_at` is `None`, so it is not done by its report either): `stop_at` is
@@ -339,7 +339,10 @@ an open sprint:
   `stop_failed_at`; `manager.stop_failed` with a string `reason` sets `stop_reason` and
   `stop_failed_at`. Anything else changes nothing. `manager.stopped` is kept, so a stop survives
   retention and a restart; a lost `manager.stop_failed` only drops a shown reason and makes the next
-  retry due at once.
+  retry due at once. Both also apply to a sprint with a `closing`, no `stop_at` and no
+  `done_stopped_at` (#980, a closing report stops the manager's session): `manager.stopped` sets
+  `done_stopped_at` and clears `stop_failed_at`, `manager.stop_failed` sets `stop_failed_at` only,
+  and neither sets `stopped_at`, `stop_reason` or the "stopped by you" state.
 
 `ended_at(state)` is every route to done, first match: `stopped_at` when set; `None` when `stop_at`
 is set (the sprint is stopping); `closing.at` when `closing` is set; `report.at` when the sprint is `STARTING`, no question is open and the
@@ -350,6 +353,10 @@ done report when it is sent, so a replaced sprint is not ended again by the old 
 or `STOP_WAIT_MS` have passed since `stop_at`, and `stop_failed_at` is `None` or `STOP_RETRY_MS` have
 passed since it. `STOP_SETTLE_MS` is the service's settle window for a manager the listing may not
 show yet and `FINISHED_AFTER_MS` the age after which an ended sprint is shown as finished.
+`done_stop_due(state, now_ms, turn_ended)` (#980) is true when `closing` is set, `stop_at` and
+`done_stopped_at` are `None`, `turn_ended` (the caller saw the manager's session end a turn after the
+closing) is true or `DONE_STOP_WAIT_MS` have passed since `closing.at`, and `stop_failed_at` is `None`
+or `STOP_RETRY_MS` have passed since it.
 `pending_stops(events, pending=None)` folds the stops a withdrawal leaves to make, keyed by sprint
 id: a `goal.withdrawn` row with a string project, `sprint_id` and `goal` adds `PendingStop(sprint_id,
 project, goal, at)` (replacing an earlier one); `manager.stopped` for a pending id removes it;
@@ -428,6 +435,7 @@ MAX_CLOSING_CHARS = 4000
 STOP_WAIT_MS = 600_000
 STOP_RETRY_MS = 60_000
 STOP_SETTLE_MS = 30_000
+DONE_STOP_WAIT_MS = 120_000
 FINISHED_AFTER_MS = 86_400_000
 CLOSED_OUT = "closed out"
 MAX_LINE_CHARS = 500
@@ -645,6 +653,7 @@ class SprintState:
     stopped_at: str | None = None
     stop_reason: str | None = None
     stop_failed_at: str | None = None
+    done_stopped_at: str | None = None
     manager_seen_seq: int | None = None
     revivals: tuple[Revival, ...] = ()
     stalled: str | None = None
@@ -1240,6 +1249,12 @@ def _folded_closing(state: SprintState, event: Event) -> SprintState:
 
 
 def _folded_stop(state: SprintState, event: Event) -> SprintState:
+    if state.stop_at is None and state.closing is not None and state.done_stopped_at is None:
+        if event.kind == MANAGER_STOPPED:
+            return replace(state, done_stopped_at=event.at, stop_failed_at=None)
+        if isinstance(event.payload.get("reason"), str):
+            return replace(state, stop_failed_at=event.at)
+        return state
     if state.stop_at is None or state.stopped_at is not None:
         return state
     if event.kind == MANAGER_STOPPED:
@@ -1340,6 +1355,14 @@ def stop_due(state: SprintState, now_ms: int) -> bool:
                        or now_ms - _ms(state.stop_failed_at) >= STOP_RETRY_MS)
 
 
+def done_stop_due(state: SprintState, now_ms: int, turn_ended: bool) -> bool:
+    if state.closing is None or state.stop_at is not None or state.done_stopped_at is not None:
+        return False
+    waited = turn_ended or now_ms - _ms(state.closing.at) >= DONE_STOP_WAIT_MS
+    return waited and (state.stop_failed_at is None
+                       or now_ms - _ms(state.stop_failed_at) >= STOP_RETRY_MS)
+
+
 def pending_stops(events: Iterable[Event],
                   pending: Mapping[str, PendingStop] | None = None) -> dict[str, PendingStop]:
     folded = dict(pending or {})
@@ -1435,13 +1458,15 @@ def manager_status(state: SprintState, listed: bool, now_ms: int | None,
     manager whose `takeover` is true offers retry while the sprint has no listed session, whatever
     the brief (a takeover's sprint has a brief by design).
 
-    A sprint with `stop_at` or `stopped_at` set never offers retry, whatever its manager row says:
-    neither the view nor the service relaunches the manager of a stopping or stopped sprint.
+    A sprint with `stop_at`, `stopped_at` or `closing` set never offers retry, whatever its manager
+    row says: neither the view nor the service relaunches the manager of a stopping, stopped or
+    closed sprint (#980).
     """
     if not managers:
         return UNAVAILABLE, UNAVAILABLE_TEXT, False
     manager = state.manager
-    stopping = state.stop_at is not None or state.stopped_at is not None
+    stopping = (state.stop_at is not None or state.stopped_at is not None
+                or state.closing is not None)
     since = state.stated_at if manager is None or manager.state != STARTED else manager.at
     overdue = (now_ms is not None and now_ms - _ms(since) > NO_MANAGER_AFTER_MS
                and state.brief is None and not listed)

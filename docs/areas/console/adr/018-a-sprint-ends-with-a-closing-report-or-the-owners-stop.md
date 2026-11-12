@@ -1,7 +1,7 @@
 # ADR-console-018 — A sprint ends with a closing report or the owner's stop
 
 - **Status:** accepted
-- **Decided in:** #834, #928, #892
+- **Decided in:** #834, #928, #892, #980
 
 ## Context
 
@@ -25,7 +25,7 @@ ADR-console-014 left a done sprint on the page until its goal was withdrawn, and
 
 **Every route to done ends a sprint the same way.** A report of phase `done` stays a route to "done" (ADR-console-014); stored reports carry it. It ends the sprint at the report's time and folds like a closing, which moves the end to its own time when one is sent later. A stop overrides both.
 
-**The fold.** An ended sprint, done or stopped by you, folds into its project's "Finished sprints" a day (24 h) after it ended, and a finished sprint does not make its project active. With no clock nothing folds. A plain closing report does not stop the manager's session: only the owner's stop and a withdrawal do, so a done sprint's idle manager stays until it is withdrawn.
+**The fold.** An ended sprint, done or stopped by you, folds into its project's "Finished sprints" a day (24 h) after it ended, and a finished sprint does not make its project active. With no clock nothing folds. A closing report stops the manager's session (#980): the console stops it the way a stop or a withdrawal does, once the session has ended its turn after the closing or two minutes after the closing, whichever comes first, exactly once (`manager.stopped`, kept, so a restart does not repeat it) and never brings it back. The session's record is kept, so ADR-console-016's wake of a stopped manager is unchanged. A done sprint shows its closing only: the state, the closing summary's first line and the closing's count of landed, held and dropped issues; the last progress report's status line, its age, its next step and its in-delivery count are not shown, and each issue shows its outcome from the closing report. The milestone link and the messages stay.
 
 The digest says one new sentence, that the sprint for a project is done with the summary's first line; a stop makes no sentence. The page confirms a stop with a second in-page button, never `window.confirm` (ADR-console-002).
 
@@ -33,6 +33,7 @@ The digest says one new sentence, that the sprint for a project is done with the
 
 - ADR-console-014's "A done sprint stays shown until its goal is withdrawn" no longer holds: an ended sprint folds into Finished sprints a day after it ends, and is shown until then.
 - ADR-console-016's "a withdrawal ... does not end the session" no longer holds: a withdrawal stops the manager's session. Its other statements stand, among them that a verification check must stop its test manager first, which now leaves the withdrawal's own stop with nothing listed to stop.
+- ADR-console-018's earlier sentence that a closing report does not stop the session no longer holds: a finished sprint no longer leaves an idle manager on the host.
 - The manager's contract gains an `Ending` section; it is not in the instruction corpus (ADR-console-015), so there is no Instruction Budget raise.
 - A sprint stopped by the owner cannot be resumed: the owner states a new goal.
 - A closing report cannot be amended once sent: the sprint has ended.

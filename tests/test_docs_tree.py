@@ -429,6 +429,10 @@ class DocsTreeTest(unittest.TestCase):
         for needle in ("POST /api/close", "POST /api/stop", "ADR-console-014", "ADR-console-016",
                        "#834", "#928", "ten minutes", "schema 7", "manager.stopped"):
             self.assertIn(needle, adr)
+        for needle in ("#980", "A closing report stops the manager's session", "two minutes",
+                       "ADR-console-016"):
+            self.assertIn(needle, adr)
+        self.assertNotIn("A plain closing report does not stop the manager's session", adr)
 
     def test_the_console_goal_decision_is_recorded(self):
         path = "docs/areas/console/adr/011-a-goal-stated-on-the-page-becomes-a-sprint.md"

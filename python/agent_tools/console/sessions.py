@@ -44,6 +44,12 @@ other type keeps the state (idle for a session not yet seen) and the time of
 that state, so it never makes a newer registry reading look older than the
 hook. SessionEnd gives ended.
 
+`state_ms` (#980) is the epoch milliseconds of the session's current state: a hook gives its `hook_ms`
+(the time it was received, so a hook ingested late carries its early time) and a `session.seen` row
+the time of the row, except that a hook that keeps the state and a row that leaves the state as it
+is (a rename, a move) keep the `state_ms` already held. `last_at` moves on every such row; `state_ms`
+moves only when the state is asserted afresh. `session.profile` leaves it as it is.
+
 Registry mapping (`registry_state`): `busy` is working, `idle` is idle,
 `waiting` is waiting_permission when `waitingFor` is `permission prompt` and
 waiting_answer otherwise; any other status (`shell` included) says nothing. An
@@ -154,6 +160,7 @@ class SessionState:
     last_at: str
     hook_ms: int | None
     profile: str | None = None
+    state_ms: int | None = None
 
 
 def _text(value: object) -> bool:
@@ -375,10 +382,12 @@ def session_states(
             hook_ms = received if _integer(received) else at_ms(event.at)
             if previous in STATES and _keeps_state(kind, payload):
                 hook_ms = known.hook_ms
+            state_ms = known.state_ms if previous in STATES and _keeps_state(kind, payload) \
+                else hook_ms
             result[session_id] = SessionState(
                 session_id, payload["repo"], cwd, hook_transition(kind, payload, previous),
                 known.name if known else None, event.seq, event.at, hook_ms,
-                known.profile if known else None)
+                known.profile if known else None, state_ms)
         elif event.kind == SEEN:
             cwd, state = payload.get("cwd"), payload.get("state")
             if not isinstance(cwd, str) or not _repo_member(payload) or state not in STATES:
@@ -389,9 +398,10 @@ def session_states(
             profile = payload.get("profile")
             if not isinstance(profile, str):
                 profile = known.profile if known else None
+            state_ms = known.state_ms if known and known.state == state else at_ms(event.at)
             result[session_id] = SessionState(
                 session_id, payload["repo"], cwd, state, name, event.seq, event.at,
-                known.hook_ms if known else None, profile)
+                known.hook_ms if known else None, profile, state_ms)
         elif event.kind == PROFILE:
             profile = payload.get("profile")
             if known is not None and isinstance(profile, str):

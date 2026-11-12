@@ -373,14 +373,18 @@ function untouchedDays(lastActivity) {
   const days = Math.floor((Date.now() - Date.parse(lastActivity)) / 86400000);
   return Number.isFinite(days) && days >= 1 ? days : 0;
 }
+function isClosed(sprint) {
+  return sprint.closing !== null && typeof sprint.closing === "object";
+}
 function sprintDetail(sprint) {
   const fold = el("details", "sprint-detail");
   fold.dataset.key = "sprint:" + sprint.sprint_id;
   fold.appendChild(el("summary", "", "Detail"));
-  if (typeof sprint.progress_text === "string") {
+  const ended = isClosed(sprint);
+  if (!ended && typeof sprint.progress_text === "string") {
     fold.appendChild(el("p", "progress", sprint.progress_text));
   }
-  if (typeof sprint.status === "string") {
+  if (!ended && typeof sprint.status === "string") {
     const list = el("ul", "sprint-issues");
     for (const issue of sprint.issues || []) {
       const row = el("li");
@@ -414,7 +418,7 @@ function sprintDetail(sprint) {
       fold.appendChild(el("p", "differently", "Would do differently: " + closing.differently));
     }
   }
-  if (typeof sprint.next === "string") fold.appendChild(el("p", "next", "Next: " + sprint.next));
+  if (!ended && typeof sprint.next === "string") fold.appendChild(el("p", "next", "Next: " + sprint.next));
   if (typeof sprint.milestone === "string") {
     fold.appendChild(el("p", "milestone", "Milestone: " + sprint.milestone));
   }
@@ -566,7 +570,7 @@ function drawSprint(item, entry, sprint) {
   head.appendChild(mark);
   head.appendChild(el("span", "goal-line", sprint.goal));
   const progress = sprint.progress;
-  if (progress !== null && typeof progress === "object" && progress.total > 0) {
+  if (!isClosed(sprint) && progress !== null && typeof progress === "object" && progress.total > 0) {
     const prog = el("span", "sp-prog");
     const pips = el("span", "pips");
     pips.setAttribute("role", "img");
@@ -593,7 +597,7 @@ function drawSprint(item, entry, sprint) {
       words.appendChild(el("span", "closing-counts", closing.counts_text));
     }
   }
-  if (typeof sprint.status === "string") {
+  if (!isClosed(sprint) && typeof sprint.status === "string") {
     words.appendChild(el("span", "status", sprint.status));
     if (typeof sprint.status_at === "string") {
       words.appendChild(timeEl("ago", sprint.status_at, "status-age"));

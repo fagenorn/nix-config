@@ -3337,6 +3337,20 @@ class PageSprintEndTest(unittest.TestCase):
         self.assertIn("Would do differently: cut smaller slices", inside)
         self.assertIn("The importer now resumes after a crash.", inside)
 
+    def test_a_done_sprint_is_drawn_from_its_closing_only(self) -> None:
+        stale = {**REPORTED, **DONE_SPRINT, "state": "done", "state_text": "done"}
+        (snap,) = render([START, {"frame": with_sprints([stale])}, {"snapshot": True}])
+        (line,) = sprint_lines(snap)
+        for cls in ("status", "status-age", "next", "progress", "sp-prog", "pips",
+                    "sprint-issues"):
+            self.assertEqual(of_class(line, "span", cls) + of_class(line, "p", cls)
+                             + of_class(line, "ul", cls) + of_class(line, "time", cls), [], cls)
+        shown = top_text(line) + " " + full(detail(line))
+        for stale_text in ("two slices are building", "start the resume slice", "in delivery"):
+            self.assertNotIn(stale_text, shown)
+        self.assertIn("Importer resumes after a crash", top_text(line))
+        self.assertIn("Milestone: Importer resumes", full(detail(line)))
+
     def test_a_stopped_sprint_reads_stopped_by_you_with_its_report(self) -> None:
         stopped = {**DONE_SPRINT, "state": "stopped", "state_text": "stopped by you"}
         bare = {**stopped, "closing": None}
