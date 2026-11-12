@@ -4412,9 +4412,46 @@ class ThirdFixWaveTest(unittest.TestCase):
         self.assertEqual(result["stage"], "done")
         self.assertEqual(waves(calls), self.THREE[:2])
         rereview = prompt(calls, "fix-wave-review")
-        for needle in ("against the current head of /r/.wt/w-issue-9-x (the fix wave committed nothing, so there is no diff to read)",
-                       "race in adopt", "already closed by 1234"):
+        for needle in ("against the current head of /r/.wt/w-issue-9-x (the fix wave committed nothing, so there is no diff to read). "
+                       "Nothing changed since these were raised, so each finding stands unless the code at the head shows it does "
+                       "not hold. The notes are the implementer's claims: check each against the code and never clear a finding on "
+                       "the notes alone; notes: already closed by 1234. Findings: ",
+                       "race in adopt"):
             self.assertIn(needle, rereview)
+        self.assertNotIn("declared branch", rereview)
+        # The head check covers every wave-1 finding, the fresh ones too: nothing was committed for any of them.
+        fresh = {"verdict": "findings", "findings": [{"severity": "important", "file": "lock.py", "summary": "stale lock"}]}
+        _, calls = run(args=dict(ARGS, cont=self.stopped()), replies={"final-1": fresh}, patch={"fix-wave": self.NOTHING})
+        rereview = prompt(calls, "fix-wave-review")
+        for needle in ("the fix wave committed nothing", "stale lock", "race in adopt"):
+            self.assertIn(needle, rereview)
+
+    def branch_resume(self, head):
+        """A resume of a declared-branch delivery with a carried finding, whose first wave commits nothing on the issue branch."""
+        new = {"verdict": "findings", "findings": [{"severity": "important", "summary": "leak on cand", "relation": "new"}]}
+        at_e = {"start_head": TIP, "commit": TIP, "branch_heads": [{"name": "cand", "head": "e" * 40}]}
+        stopped, _ = run(replies={"plan": bplan(), "final-1": self.FIRST, "fix-wave-review": new},
+                         patch={"impl-1": {"commit": TIP}, "impl-2": {"commit": "d" * 40}, "fix-wave": at_e})
+        self.assertEqual([f["summary"] for f in stopped["cont"]["fix_findings"]], ["leak on cand"])
+        facts = [{"name": "cand", "head": "e" * 40, "current": "cand", "toplevel": "/r/.wt/cand", "common_dir": "/r/.git"}]
+        wave = {"start_head": TIP, "commit": TIP, "branch_heads": [{"name": "cand", "head": head}]}
+        result, calls = run(args=dict(ARGS, cont=stopped["cont"]),
+                            patch={"setup": {"head": TIP, "branch_heads": facts}, "fix-wave": wave})
+        self.assertEqual(result["stage"], "done")
+        self.assertIn("leak on cand", prompt(calls, "fix-wave"))
+        return prompt(calls, "fix-wave-review")
+
+    def test_a_wave_that_commits_only_on_a_declared_branch_is_reviewed_over_that_range(self):
+        rereview = self.branch_resume("f" * 40)
+        self.assertIn(f"git -C /r/.wt/cand diff {'e' * 40}..{'f' * 40}", rereview)
+        self.assertIn("check each against the head, not only the diff", rereview)
+        self.assertNotIn("committed nothing", rereview)
+
+    def test_the_head_check_names_the_declared_branch_worktrees(self):
+        rereview = self.branch_resume("e" * 40)
+        self.assertIn("against the current head of /r/.wt/w-issue-9-x and of each declared branch's worktree (cand in /r/.wt/cand) "
+                      "(the fix wave committed nothing, so there is no diff to read).", rereview)
+        self.assertNotIn("git -C /r/.wt/cand diff", rereview)
         self.assertNotIn("d" * 40, rereview)
         self.assertNotIn("not only the diff", rereview)
 
