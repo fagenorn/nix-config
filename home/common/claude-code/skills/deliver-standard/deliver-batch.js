@@ -570,16 +570,16 @@ const SYNC_REREVIEW = (wt, mc, findings, fix, moved, after = '') => `Re-review t
 // the fix round and the re-review name the same range (SYNC_AFTER). A head that does not descend from its merge commit never lands.
 // The same text in both programs, like the wording above.
 const SYNC_AFTER = (wt, mc, head) => ` and the commits made on top of it up to the head ${head} (git -C ${wt} diff ${mc}..${head})`
-const DESCENDS = (wt, mc, head) => ` The resolution's head ${head} is not its merge commit: first run git -C ${wt} merge-base --is-ancestor ${mc} ${head} and git -C ${wt} rev-list --count --min-parents=2 ${mc}..${head}, and return descends true only when the first exits 0 and the second prints 0 (the head is the merge commit with plain commits on top of it), else descends false and no finding. When it descends, review those commits as well (git -C ${wt} diff ${mc}..${head}) and report any conflict marker git -C ${wt} diff --check ${mc} ${head} shows in them.`
+const DESCENDS = (wt, mc, head) => ` The resolution's head ${head} is not its merge commit: first run git -C ${wt} merge-base --is-ancestor ${mc} ${head} and git -C ${wt} rev-list --count --min-parents=2 ${mc}..${head}, and return descends true only when the first exits 0 and the second prints 0 (the head is the merge commit with plain commits on top of it), else descends false and no finding. When it descends, review those commits as well (git -C ${wt} diff ${mc}..${head}), above all for a test or check they weaken, skip or delete, and report any conflict marker git -C ${wt} diff --check ${mc} ${head} shows in them.`
 const RESOLVE_ORDER = 'Fix in the resolution itself what those tests show and commit the merge only once they pass. When a defect shows only after the merge is committed, never amend or redo the merge: fix it in a commit on top of it, run those tests again, and report the merge commit and the head as they are'
 // #986: a rerun covers every failed run of the head. Each check is its own workflow run, so a gate or aggregate check that failed only
 // because another check failed keeps its old failure unless its own run is rerun too; a gate that waits for the head's other runs then
 // goes green with them, so the reruns need no order.
-const RERUN_ALL = (unset, slug, sha) => `rerun the failed jobs once, with ${unset}gh run rerun <run-id> --repo ${slug} --failed for each failed run of the head: list them with ${unset}gh run list --repo ${slug} --commit ${sha} --json databaseId,workflowName,conclusion and rerun every run whose conclusion is failure, cancelled or timed_out, not only the run of the check that broke first. Every check is its own run, so a gate or aggregate check that failed only because another check failed is rerun too, with the same command`
+const RERUN_ALL = (unset, slug, sha) => `rerun the failed jobs once, with ${unset}gh run rerun <run-id> --repo ${slug} --failed for each failed run of the head: list them with ${unset}gh run list --repo ${slug} --commit ${sha} --json databaseId,workflowName,conclusion, keep the newest run of each workflowName (the highest databaseId; never an older run that one superseded) and rerun each of those whose conclusion is failure, cancelled or timed_out, not only the run of the check that broke first. Every check is its own run, so a gate or aggregate check that failed only because another check failed is rerun too, with the same command`
 // #986: the backstop for a gate that was not rerun, or was rerun before the checks it reports on finished: in the one poll that follows a
 // rerun, the checks step reruns such a gate and names its runs as stale. The program then polls once more and does not count that poll
 // as red; the poll after it carries no such instruction, so a check that is red there ends the landing as any second red poll does.
-const STALE_RERUN = (unset, slug) => `This poll follows a rerun of failed jobs at this head. When checks still fail once none is pending, decide whether every failing check is stale: a check that only reports on other checks (a gate or aggregate job) is stale when every check it reports on now passes at head and its own run finished before theirs did (it was not rerun, or it was rerun too early). Only when every failing check is stale, rerun each of their runs once with ${unset}gh run rerun <run-id> --repo ${slug} --failed (the run id is in the check's link), do not wait for them, and answer failed with failing and with stale: the run ids you reran. In every other case rerun nothing and return no stale.`
+const STALE_RERUN = (unset, slug) => `This poll follows a rerun of failed jobs at this head. When checks still fail once none is pending, decide whether every failing check is stale: a check that only reports on other checks (a gate or aggregate job) is stale when every check it reports on now passes at head and its own run finished before theirs did (compare updatedAt from ${unset}gh run view <run-id> --repo ${slug} --json updatedAt; it was not rerun, or it was rerun too early). Only when every failing check is stale, rerun each of their runs once with ${unset}gh run rerun <run-id> --repo ${slug} --failed (the run id is in the check's link), do not wait for them, and answer failed with failing and with stale: the run ids you reran. In every other case rerun nothing and return no stale.`
 const WITH_STALE = s => ({ ...s, properties: { ...s.properties, stale: { type: 'array', items: { type: 'integer' } } } })
 const staleOf = ck => (Array.isArray(ck.stale) ? ck.stale.filter(Number.isInteger) : [])
 const findingsOf = r => (r.findings || []).filter(f => f.severity !== 'minor')
@@ -876,17 +876,21 @@ ${RULES}`, label, { phase: 'Land', agentType: 'implementer', model: 'sonnet', sc
 ${RULES}`, rlabel, { phase: 'Land', agentType: 'implementer', model: 'sonnet', schema: LAND_SYNC_SCHEMA })
         if (!merge) return out('stopped', { stage: 'land-sync', detail: `${rlabel} returned nothing` })
         if (merge.status !== 'done') return out('conflict', { detail: merge.notes })
+        // #986: the head may be a commit on top of the merge, so a resolution that names no merge commit names nothing the review can
+        // read as the merge: it never lands. (A merge that was clean this time names its head alone, as the sync step does.)
+        if (merge.conflicted === true && !nonEmpty(merge.merge_commit)) return out('stopped', { stage: 'land-sync', detail: 'the resolution named no merge commit' })
       }
     }
     let head = merge.head || merge.merge_commit
     if (!head) return out('stopped', { stage: 'land-sync', detail: 'the resync named no head' })
-    // A merge that conflicted is reviewed whatever its resolution says of itself: the sync step saw the conflict.
-    if (aborted || merge.conflicted) {
-      const mc = merge.merge_commit || head
-      // The review reads the merge commit and the landing merges the head. They are one commit, or (#986) the head is the merge commit
-      // with plain commits on top of it: the review then proves that ancestry and reads the range between them too, and the fix round
-      // and the re-review start at the head. Any other head is refused below, on the review's own answer.
-      const followup = !sameSha(head, mc)
+    // The review reads the merge commit and the landing merges the head. They are one commit, or (#986) the head is the merge commit
+    // with plain commits on top of it: the review then proves that ancestry and reads the range between them too, and the fix round
+    // and the re-review start at the head. Any other head is refused below, on the review's own answer.
+    const mc = merge.merge_commit || head
+    const followup = !sameSha(head, mc)
+    // A merge that conflicted is reviewed whatever its resolution says of itself: the sync step saw the conflict. A head that is not the
+    // merge commit is reviewed too, even after a clean merge: nothing else would read the commits on top of it.
+    if (aborted || merge.conflicted || followup) {
       const after = followup ? SYNC_AFTER(W, mc, head) : ''
       c.syncReview++
       const rv = await call(`Issue #${n} of ${SLUG}, worktree ${W}, branch ${B}.

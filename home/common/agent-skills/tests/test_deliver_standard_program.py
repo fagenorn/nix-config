@@ -4053,7 +4053,7 @@ class ConflictedSyncOutsideLockTest(unittest.TestCase):
         wt = "/r/.wt/w-issue-9-x"
         for needle in (f"git -C {wt} show --cc {MERGE}", f"git -C {wt} merge-base --is-ancestor {MERGE} {self.M2}",
                        f"git -C {wt} rev-list --count --min-parents=2 {MERGE}..{self.M2}", f"git -C {wt} diff {MERGE}..{self.M2}",
-                       f"git -C {wt} diff --check {MERGE} {self.M2}"):
+                       f"git -C {wt} diff --check {MERGE} {self.M2}", "above all for a test or check they weaken, skip or delete"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, review)
         self.assertIn("descends", schema_of(calls, "sync-review-1")["required"])
@@ -4080,6 +4080,25 @@ class ConflictedSyncOutsideLockTest(unittest.TestCase):
         out = self.ship(**{"sync-resolve-1": {"merge_commit": MERGE, "head": MERGE}})
         self.assertEqual(out["result"]["stage"], "done")
         self.assertNotIn("descends", prompt(out["calls"], "sync-review-1"))
+
+    def test_a_clean_sync_whose_head_is_not_its_merge_commit_is_reviewed_too(self):
+        """A sync step that committed on top of its clean merge is asked for its head, and those commits are reviewed or refused."""
+        clean = {**self.BEHIND, "sync-1": {"conflicted": False, "merge_commit": MERGE, "head": self.M2}}
+        out = run_out(replies={"checks-2": {"state": "passed", "head": self.M2}, "sync-review-1": self.DESCENDS}, patch=clean)
+        self.assertEqual(out["result"]["stage"], "done")
+        self.assertEqual(self.shipped(out), ["pr", "sync-1", "sync-review-1", "land-push-2", "checks-2", "merge", "hold", "close-out"])
+        self.assertIn(f"diff {MERGE}..{self.M2}", prompt(out["calls"], "sync-review-1"))
+        self.assertIn(f"--match-head-commit {self.M2}", prompt(out["calls"], "merge"))
+        self.assertIn("head (the full sha of HEAD after the merge: the merge commit itself, unless you committed on top of it)",
+                      prompt(out["calls"], "sync-1"))
+        out = run_out(replies={"sync-review-1": {"verdict": "pass", "findings": [], "descends": False}}, patch=clean)
+        self.assertEqual(out["result"]["stage"], "sync")
+        self.assertNotIn("merge", self.shipped(out))
+        # A clean merge whose head is the merge commit runs no review, as ever.
+        out = run_out(replies={"checks-2": {"state": "passed", "head": MERGE}},
+                      patch={**self.BEHIND, "sync-1": {"conflicted": False, "merge_commit": MERGE, "head": MERGE}})
+        self.assertEqual(out["result"]["stage"], "done")
+        self.assertNotIn("sync-review-1", self.shipped(out))
 
     def test_the_fix_wave_of_a_resolution_with_follow_up_commits_starts_at_its_head_and_names_the_range(self):
         fixed = "9" * 40
@@ -4579,7 +4598,8 @@ class ShipFixWaveTest(unittest.TestCase):
         self.assertEqual(names[names.index("pr"):], ["pr", "fix-ci", "checks-2", "checks-3", "merge", "hold", "close-out"])
         self.assertIn("checks-2 reran a stale gate run (43286872194); polling once more", out["logs"])
         asked = prompt(calls, "checks-2")
-        for needle in (self.STALE_LEAD, "a gate or aggregate job", "Only when every failing check is stale",
+        for needle in (self.STALE_LEAD, "a gate or aggregate job", "gh run view <run-id> --repo owner/repo --json updatedAt",
+                       "Only when every failing check is stale",
                        "gh run rerun <run-id> --repo owner/repo --failed", "stale: the run ids you reran"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, asked)
@@ -4614,7 +4634,8 @@ class ShipFixWaveTest(unittest.TestCase):
                        patch={"setup": {"unset_env": ["GITHUB_TOKEN"]}, "pr": {"checks": RED}, "fix-ci": self.RERAN})
         text = prompt(calls, "fix-ci")
         for needle in (f"unset GITHUB_TOKEN && gh run list --repo owner/repo --commit {SHA} --json databaseId,workflowName,conclusion",
-                       "every run whose conclusion is failure, cancelled or timed_out, not only the run of the check that broke first",
+                       "keep the newest run of each workflowName (the highest databaseId; never an older run that one superseded)",
+                       "rerun each of those whose conclusion is failure, cancelled or timed_out, not only the run of the check that broke first",
                        "a gate or aggregate check that failed only because another check failed is rerun too, with the same command"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, text)

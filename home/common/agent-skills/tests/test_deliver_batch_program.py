@@ -1796,7 +1796,8 @@ class RerunAndContendedRetryTest(unittest.TestCase):
         # Only the poll that follows the rerun is told of stale checks and may name them.
         asked = prompt(calls, "land-checks-1-2")
         for needle in (self.STALE_LEAD, "a gate or aggregate job", "every check it reports on now passes at head",
-                       "its own run finished before theirs did", "Only when every failing check is stale",
+                       "its own run finished before theirs did", "gh run view <run-id> --repo owner/repo --json updatedAt",
+                       "Only when every failing check is stale",
                        "gh run rerun <run-id> --repo owner/repo --failed", "stale: the run ids you reran",
                        "In every other case rerun nothing and return no stale."):
             with self.subTest(needle=needle):
@@ -1842,7 +1843,8 @@ class RerunAndContendedRetryTest(unittest.TestCase):
         _, calls, _ = run(patch=dict({"setup": {"unset_env": ["GITHUB_TOKEN"]}}, **folded(CI_RED)), replies={"land-fix-1": self.RERAN})
         text = prompt(calls, "land-fix-1")
         for needle in (f"unset GITHUB_TOKEN && gh run list --repo owner/repo --commit {SHA} --json databaseId,workflowName,conclusion",
-                       "every run whose conclusion is failure, cancelled or timed_out, not only the run of the check that broke first",
+                       "keep the newest run of each workflowName (the highest databaseId; never an older run that one superseded)",
+                       "rerun each of those whose conclusion is failure, cancelled or timed_out, not only the run of the check that broke first",
                        "a gate or aggregate check that failed only because another check failed is rerun too, with the same command"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, text)
@@ -2703,7 +2705,8 @@ class ConflictedSyncOutsideLockTest(unittest.TestCase):
         wt = "/r/.wt/w-issue-1-x"
         for needle in (f"git -C {wt} show --cc {B}", f"git -C {wt} merge-base --is-ancestor {B} {C}",
                        f"git -C {wt} rev-list --count --min-parents=2 {B}..{C}", f"git -C {wt} diff {B}..{C}",
-                       f"git -C {wt} diff --check {B} {C}", "return descends true only when the first exits 0 and the second prints 0"):
+                       f"git -C {wt} diff --check {B} {C}", "return descends true only when the first exits 0 and the second prints 0",
+                       "above all for a test or check they weaken, skip or delete"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, review)
         schema = schema_of(calls, "land-sync-review-1-1")
@@ -2716,6 +2719,31 @@ class ConflictedSyncOutsideLockTest(unittest.TestCase):
         self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {C} --wait\n", record)
         self.assertIn(f"--match-head-commit {C}", prompt(calls, "land-merge-1"))
         self.assertEqual(land_release_shas(calls), [SHA, C])
+
+    def test_a_resolution_that_names_no_merge_commit_never_lands(self):
+        """#986: the head may be a follow-up commit, so a conflicted resolution naming a head alone names no merge to review."""
+        result, calls, _ = run(patch=BEHIND, replies={"land-sync-1-1": ABORTED, "land-sync-resolve-1-1": {
+            "status": "done", "conflicted": True, "head": C, "resolved_files": ["x.py"], "notes": "ok"}})
+        got = row(result, 1)
+        self.assertEqual((got["outcome"], got["stage"], got["reason"]),
+                         ("stopped", "land-sync", "land-sync: the resolution named no merge commit"))
+        ls = labels(calls)
+        for gone in ("land-sync-review-1-1", "land-record-1-1", "land-merge-1"):
+            self.assertNotIn(gone, ls)
+        # The only step that runs a merge command, land-merge, never ran (asserted above); what ran is the landing up to the resolution.
+        self.assertEqual(land_labels(calls), ["land-pr-1", "land-sync-1-1", "land-unlock-1", "land-sync-resolve-1-1"])
+        self.assertEqual(ls.count("land-unlock-1"), 1)
+
+    def test_a_clean_sync_whose_head_is_not_its_merge_commit_is_reviewed_too(self):
+        clean = {"status": "done", "conflicted": False, "head": C, "merge_commit": B, "notes": "ok"}
+        result, calls, _ = run(patch=BEHIND, replies={"land-sync-1-1": clean, "land-sync-review-1-1": self.DESCENDS})
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+        self.assertEqual(land_labels(calls), ["land-pr-1", "land-sync-1-1", "land-sync-review-1-1", "land-record-1-1", "land-merge-1", "close-out-1"])
+        self.assertIn(f"diff {B}..{C}", prompt(calls, "land-sync-review-1-1"))
+        self.assertIn(f"--match-head-commit {C}", prompt(calls, "land-merge-1"))
+        result, calls, _ = run(patch=BEHIND, replies={"land-sync-1-1": clean, "land-sync-review-1-1": {"verdict": "pass", "findings": [], "descends": False}})
+        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "land-sync"))
+        self.assertNotIn("land-merge-1", labels(calls))
 
     def test_the_fix_round_of_a_resolution_with_follow_up_commits_starts_at_its_head_and_names_the_range(self):
         d = "d" * 40
@@ -5204,6 +5232,14 @@ class TrainJoinTest(unittest.TestCase):
         serial = run(args=dict(ARGS, train=False), replies=self.RETRIED)[1]
         self.assertEqual([(c["label"], c.get("prompt")) for c in lone["calls"] if c["label"] != "train-sweep-1"],
                          [(c["label"], c.get("prompt")) for c in serial])
+
+    def test_a_carried_first_poll_that_is_behind_at_another_head_takes_no_joiner(self):
+        # The handover is asked only for a behind poll at the head the lock is held at.
+        out = join_run(patch={"land-pr-1": {"checks": {"state": "behind", "head": B}}})
+        self.assertEqual(ready_during(out, 2), "land-pr-1")
+        self.assertEqual((train_labels(out["calls"]), join_logs(out)), ([], []))
+        self.assertEqual((row(out["result"], 1)["outcome"], row(out["result"], 1)["stage"]), ("stopped", "head-moved"))
+        self.assertEqual(row(out["result"], 2)["outcome"], "landed")
 
     def test_a_batch_without_train_or_with_another_merge_strategy_never_joins(self):
         for name, args, patch in (("no train", {"train": False}, None), ("squash", None, {"setup": {"max_parallel": 2, "merge_strategy": "squash"}})):
