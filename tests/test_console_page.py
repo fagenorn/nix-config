@@ -3930,6 +3930,16 @@ class PageStandingRulesTest(unittest.TestCase):
         declared = {name for _, decls in style_rules(block) for name in decls}
         self.assertLessEqual({"transition-duration", "animation-duration"}, declared)
 
+    def test_the_goal_field_shows_one_border_in_focus(self) -> None:
+        top = re.sub(r"(?s)@media[^{]*\{.*?\}\s*\}", "", self.style)
+        rules = style_rules(top)
+        self.assertTrue([
+            d for s, d in rules
+            if s == ".goal-in .goal-text:focus-visible" and d.get("outline") in ("none", "0")])
+        self.assertTrue([
+            d for s, d in rules
+            if s == ".goal-in:focus-within" and d.get("border-color") == "var(--lav)"])
+
     def test_the_lead_card_narrows_under_900(self) -> None:
         horizontal = []
         for selector, decls in style_rules(media_block(self.style, "(max-width: 900px)")):

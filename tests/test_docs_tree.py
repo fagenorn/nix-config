@@ -599,6 +599,10 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("The forge adapter makes at most one mutation", text)
         self.assertIn("launchd adapter", text)
 
+    def test_the_goal_field_focus_is_recorded(self):
+        text = self.doc("docs/areas/console/adr/002-the-desk-page-design-rules.md")
+        self.assertIn("In focus the field shows one border", text)
+
 
 if __name__ == "__main__":
     unittest.main()
