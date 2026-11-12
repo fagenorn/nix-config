@@ -75,6 +75,7 @@
 | Project contract | Project contract |
 | Projection | Project contract |
 | Publication-free profile | Release |
+| Question round | Console |
 | Quiet project | Console |
 | Raise label | Guard |
 | Receipt | Release |
