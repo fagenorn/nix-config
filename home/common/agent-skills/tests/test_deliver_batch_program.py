@@ -771,6 +771,78 @@ class NoChangesTest(unittest.TestCase):
                 self.assertEqual(result["relaunch"]["conts"], {"1": self.CONT})
 
 
+class NotConvergingTest(unittest.TestCase):
+    """#940: a child whose fix waves do not converge goes to the owner: final, not relaunched, the work left for a finisher."""
+
+    FINDINGS = [{"severity": "important", "file": "claim.py", "summary": "race in steal", "failing_input": "two stealers"}]
+    CONT = {"setup": {"holder": HOLDER, "branch": "issue-1-x", "worktree_path": "/r/.wt/w-issue-1-x"}, "lane": "standard",
+            "plan": {"tasks": []}, "plan_reviewed": True, "done": [], "fix_waves": 4, "fix_findings": FINDINGS}
+    REASON = ("fix-wave-review: the fix waves do not converge on claim.py after 4 waves; an owner decision on the design is needed; "
+              "1 finding(s): race in steal")
+    STOP = {"stage": "fix-wave-review", "fix_waves": 4, "diverging": {"file": "claim.py", "waves": 4}, "reason": REASON, "cont": CONT}
+    TAKEN = {"file": "claim.py", "waves": 4, "worktree": "/r/.wt/w-issue-1-x", "branch": "issue-1-x"}
+
+    def test_a_diverging_child_is_final_released_and_an_owner_action(self):
+        result, calls, _ = run(children={"1": self.STOP})
+        self.assertEqual(row(result, 1), dict({"issue": 1, "outcome": "not-converging", "stage": "fix-wave-review",
+                                               "released": True, "reason": self.REASON}, **self.TAKEN))
+        self.assertEqual(result["owner_actions"],
+                         [dict({"issue": 1, "reason": "not-converging", "claim": "released", "findings": self.FINDINGS}, **self.TAKEN)])
+        self.assertIsNone(result["relaunch"])
+        release = prompt(calls, "release-1")
+        self.assertIn(f"forge-claim release --repo owner/repo --issue 1 --holder {HOLDER} --reason skipped", release)
+        self.assertIn("leave the worktree, the branch and any pull request exactly as they are", release)
+        self.assertEqual(labels(calls).count("child-1"), 1)
+        for label in labels(calls):
+            self.assertFalse(label.startswith(("settle-", "land-")), label)
+
+    def test_the_relaunch_of_the_other_issues_does_not_carry_it(self):
+        other = {"setup": {}, "lane": "standard"}
+        result, _, _ = run(args=dict(ARGS, issues=[1, 2]),
+                           children={"1": self.STOP, "2": {"stage": "verify", "verify": {}, "cont": other}})
+        self.assertEqual(row(result, 1)["outcome"], "not-converging")
+        relaunch = result["relaunch"]
+        self.assertEqual((relaunch["issues"], relaunch["conts"]), ([2], {"2": other}))
+        self.assertNotIn("1", relaunch.get("reasons", {}))
+
+    def test_a_failed_release_still_ends_the_row_and_says_the_claim_is_held(self):
+        for reply, why in ((None, "release-1 returned nothing"), ({"verdict": "error", "detail": "forge down"}, "forge down")):
+            with self.subTest(reply=reply):
+                result, _, _ = run(children={"1": self.STOP}, replies={"release-1": reply})
+                found = row(result, 1)
+                self.assertEqual((found["outcome"], found["released"]), ("not-converging", False))
+                self.assertEqual(found["detail"], f"the claim was not released: {why}")
+                self.assertEqual(result["owner_actions"][0]["claim"], "held")
+                self.assertEqual(result["owner_actions"][0]["findings"], self.FINDINGS)
+                self.assertIsNone(result["relaunch"])
+
+    def test_a_claim_already_gone_counts_as_released(self):
+        result, _, _ = run(children={"1": self.STOP}, replies={"release-1": {"verdict": "not_held"}})
+        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["released"]), ("not-converging", False))
+        self.assertNotIn("detail", row(result, 1))
+        self.assertEqual(result["owner_actions"][0]["claim"], "released")
+
+    def test_the_pr_and_bounded_findings_reach_the_owner_action(self):
+        many = [{"severity": "important", "file": "claim.py", "summary": f"race {i} " + "x" * 900, "extra": "dropped"} for i in range(14)]
+        stop = dict(self.STOP, cont=dict(self.CONT, pr=77, fix_findings=many + ["text"]))
+        result, _, _ = run(children={"1": stop})
+        action = result["owner_actions"][0]
+        self.assertEqual((action["pr"], row(result, 1)["pr"]), (77, 77))
+        self.assertEqual(len(action["findings"]), 10)
+        for finding in action["findings"]:
+            self.assertEqual(set(finding), {"severity", "file", "summary"})
+            self.assertLessEqual(len(finding["summary"]), 300)
+        self.assertNotIn("findings", row(result, 1))
+
+    def test_an_ordinary_fix_wave_review_stop_is_relaunched_with_its_cont(self):
+        stop = without(dict(self.STOP, reason="fix-wave-review: 1 finding(s): race in steal"), "diverging")
+        result, calls, _ = run(children={"1": stop})
+        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "fix-wave-review"))
+        self.assertEqual(result["owner_actions"], [])
+        self.assertEqual(result["relaunch"]["conts"], {"1": self.CONT})
+        self.assertNotIn("release-1", labels(calls))
+
+
 class ContTest(unittest.TestCase):
     def test_an_interrupted_task_resumes_through_its_forwarded_cont(self):
         cont = {"setup": {"holder": HOLDER, "branch": "issue-1-x"}, "lane": "direct", "plan": None,
