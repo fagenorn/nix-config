@@ -3,6 +3,7 @@
 Run: just agent-workflow-tests
 """
 import dataclasses
+import json
 import os
 import subprocess
 import tempfile
@@ -74,6 +75,89 @@ class NudgeCommandTest(unittest.TestCase):
              "run", "--resume", "s-1", "--bg", RESTART_TEXT],
             nudge_command(revive, "linux"))
 
+    def test_a_wake_with_settings_passes_the_session_name_and_settings_file_again(self):
+        settings = "/s/" + SID + ".settings.json"
+        for route, text in ((WAKE, NUDGE_TEXT), (REVIVE, RESTART_TEXT)):
+            with self.subTest(route=route):
+                n = Nudge(SID, route, NAME, "s-1", "work", self.root, settings)
+                self.assertEqual(
+                    ["systemd-run", "--user", "--scope", "--quiet", "--collect",
+                     "--description=agent manager " + NAME, "--", "claude-account", "run",
+                     "--resume", "s-1", "--bg", "--name", NAME, "--settings", settings, text],
+                    nudge_command(n, "linux"))
+
+    def test_a_wake_without_settings_carries_no_name_or_settings_flag(self):
+        for route, text in ((WAKE, NUDGE_TEXT), (REVIVE, RESTART_TEXT)):
+            with self.subTest(route=route):
+                argv = nudge_command(self.nudge(route), "linux")
+                self.assertNotIn("--name", argv)
+                self.assertNotIn("--settings", argv)
+                self.assertEqual(text, argv[-1])
+        self.assertEqual(
+            nudge_command(self.nudge(RELAY), "linux"),
+            nudge_command(Nudge(SID, RELAY, NAME, "s-1", "work", self.root, "/s/x"), "linux"))
+
+    def listing(self, stdout="", returncode=0, stderr=b"", raises=None):
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append((argv, kwargs))
+            if raises is not None:
+                raise raises
+            kwargs["stdout"].write(stdout.encode() if isinstance(stdout, str) else stdout)
+            kwargs["stderr"].write(stderr)
+            return subprocess.CompletedProcess(argv, returncode)
+        run.calls = calls
+        return run
+
+    def test_the_full_listing_reads_every_session_id_under_the_profile(self):
+        run = self.listing(json.dumps([
+            {"kind": "background", "id": "0123abcd", "sessionId": "s-1", "state": "stopped"},
+            {"kind": "background", "sessionId": "s-2", "state": "done"},
+            {"kind": "interactive", "pid": 7, "sessionId": "s-3"},
+            {"kind": "background", "sessionId": ""}, "junk", {"kind": "background"}]))
+        environ = {"HOME": "/h", "PATH": "/bin", "CLAUDE_CONFIG_DIR": "/c",
+                   "CONSOLE_SPRINT_SECRET": "x"}
+        ids = nudge_module.read_full_listing("work", self.root, run=run, environ=environ)
+        self.assertEqual(frozenset({"s-1", "s-2", "s-3"}), ids)
+        self.assertEqual(1, len(run.calls))
+        argv, kwargs = run.calls[0]
+        self.assertEqual(["claude-account", "run", "agents", "--json", "--all"], argv)
+        self.assertEqual(self.root, kwargs["cwd"])
+        self.assertEqual("work", kwargs["env"]["CLAUDE_ACCOUNT"])
+        self.assertNotIn("CLAUDE_CONFIG_DIR", kwargs["env"])
+        self.assertNotIn("CONSOLE_SPRINT_SECRET", kwargs["env"])
+        self.assertIs(subprocess.DEVNULL, kwargs["stdin"])
+        self.assertIsNot(subprocess.PIPE, kwargs["stdout"])
+        self.assertIsNot(subprocess.PIPE, kwargs["stderr"])
+        self.assertIs(True, kwargs["start_new_session"])
+        self.assertEqual(30, kwargs["timeout"])
+
+    def test_an_unreadable_full_listing_raises_one_line_reasons(self):
+        cases = [
+            ("the listing is not a JSON array", self.root, dict(stdout="not json")),
+            ("the listing is not a JSON array", self.root, dict(stdout='{"a": 1}')),
+            ("the listing is not a JSON array", self.root, dict(stdout=b"\xff\xfe")),
+            ("auth expired", self.root, dict(returncode=1, stderr=b"first\nauth expired\n\n")),
+            ("the listing exited 3", self.root, dict(returncode=3)),
+            ("claude-account is not installed", self.root, dict(raises=FileNotFoundError())),
+            ("the listing did not return within 30 s", self.root,
+             dict(raises=subprocess.TimeoutExpired("claude-account", 30))),
+            ("the project root /nonexistent/root is not a directory", "/nonexistent/root", {}),
+        ]
+        for reason, cwd, kwargs in cases:
+            with self.subTest(reason=reason, kwargs=kwargs):
+                run = self.listing(**kwargs)
+                with self.assertRaises(nudge_module.ListingUnreadable) as raised:
+                    nudge_module.read_full_listing("work", cwd, run=run, environ={})
+                self.assertEqual(reason, str(raised.exception))
+                if cwd != self.root:
+                    self.assertEqual([], run.calls)
+
+    def test_full_lister_for_is_linux_only(self):
+        self.assertIs(nudge_module.read_full_listing, nudge_module.full_lister_for("linux"))
+        self.assertIsNone(nudge_module.full_lister_for("darwin"))
+
     def test_the_restart_sentence_is_fixed_and_names_contract_then_recap(self):
         self.assertEqual(
             'The console restarted this session because it had stopped while its sprint had '
@@ -92,7 +176,7 @@ class NudgeCommandTest(unittest.TestCase):
 
     def test_no_argv_element_or_environment_value_carries_anything_but_the_fixed_sentence(self):
         self.assertEqual(
-            {"sprint_id", "route", "session_name", "session_id", "profile", "cwd"},
+            {"sprint_id", "route", "session_name", "session_id", "profile", "cwd", "settings"},
             {f.name for f in dataclasses.fields(Nudge)})
         environ = {"HOME": "/h", "PATH": "/bin", "CONSOLE_SPRINT_SECRET": "x",
                    "CONSOLE_SPRINT_ID": SID, "CLAUDE_CONFIG_DIR": "/c"}
