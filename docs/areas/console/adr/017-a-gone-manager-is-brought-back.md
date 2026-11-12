@@ -1,0 +1,41 @@
+# ADR-console-017 — A manager gone while its sprint has work is brought back
+
+- **Status:** accepted
+- **Decided in:** #835, #837, #889, #893
+
+## Context
+
+ADR-console-015 starts a sprint's manager and lets the owner retry a start that failed, but says "Nothing relaunches automatically": a manager that stops later, on a usage limit, a crash or a host restart, stays gone, and its sprint stops moving until the owner notices. ADR-console-016 gave the console a way to reach a manager that is listed (a relay) and to wake a stopped one in place with `--resume <id> --bg`, never for a listed session, because that starts a copy. #835 decided that a sprint has one manager and that the console talks to it; #837 decided that the owner sees what changed in the digest. This slice brings a gone manager back while its sprint has work, and stops trying when managers keep failing. It amends ADR-console-015's "Nothing relaunches automatically" for a started manager with work. A manager that is listed but idle while work remains is not gone, and is a separate slice.
+
+## Decision
+
+**Work.** A sprint has work when its shown state, read without the clock, is starting or on track, or drafting with no brief or with a brief whose decision is `changes` (the owner answered and the manager owes a new version). Without the clock a quiet closing sprint is closing, so it has none. A brief waiting for the owner, a sprint waiting on the owner, closing, done or withdrawn has none.
+
+**The gone clock.** A manager is gone when two minutes have passed since the latest of the time it was last listed, the time of its manager row and the time of the latest bring-back. The service keeps the last listed time in memory, starting at its construction, so a restarted console waits two minutes before its first bring-back.
+
+**Wake first.** Only a sprint whose manager row is `started`, or a `failed` or `waiting` row of a takeover, is brought back; a first launch that failed or waits stays the owner's retry. The first step is a wake in place with `manager.woken`, one row per attempt, carrying `ok`, a `reason` when it failed and a `back` flag. The wake runs through the nudger on its own `revive` route with the fixed restart sentence (`RESTART_TEXT`), only when a fresh listing does not show the manager, and holds the same reservation as a nudge so a retry and a nudge wait for it. A wake came back when its row says `back: true`, or when a `session.seen` of the manager is folded after the row. The service writes `back: true` when, at the moment it records the wake, the manager is listed or was seen after the wake began: the registry poll can see the resumed manager while the wake command still runs and writes another sighting only on a change of state, cwd or name. The fold reads the flag from the row, so replay keeps it. A wake has failed when its command failed or it never came back.
+
+**Then a successor.** A new manager takes over when the session id is unknown, when the host has no nudger, after two failed wakes in a row, or when the manager row is a takeover's `failed` or `waiting`. It starts like the first one with the takeover prompt (`TAKEOVER_LEAD`) in place of the first-launch one. Every row a takeover attempt writes (`manager.started`, `manager.failed`, including the missing-secret one, and `manager.waiting` when every account is out) is marked `takeover: true`, so no takeover ends in a row that stops the bring-back: a quota wait is tried again once its `until` has passed and two minutes have passed since the row, and a missing secret is tried again like any failure. A takeover's `failed` or `waiting` row offers retry with a brief as well as without one, while no manager is listed; a first launch keeps the no-brief rule of ADR-console-015. Retry on a stalled sprint also launches a takeover.
+
+**A queued takeover is decided again.** A takeover is reserved on one poll and run later by the dispatcher. When it runs, the service reads a fresh listing off the ingest lock, then under the lock launches only while the sprint is open, neither the fresh listing nor the folded sessions show the manager, and the bring-back decision over the current fold and clock is still a takeover. Otherwise it ends the reservation and appends nothing.
+
+**The limit.** Takeovers that started or failed, and wakes that came back, count when their time is strictly within the last hour; a takeover that only waited for quota started nothing and does not count. When three are counted and another step is due, the console writes one `manager.stalled` row with a reason and tries nothing more until a `manager.started` row, which only the owner's try again produces. A `manager.failed` row while stalled replaces the reason.
+
+**Rows not kept.** `manager.woken` and `manager.stalled` are observations like the manager rows of ADR-console-015: they are not kept kinds, the store stays at schema 6, and a takeover's rows are the existing kinds with the extra `takeover` and `goal` members.
+
+**Recap is the handoff.** A restarted or replacing manager has no memory the console can give it, so the console hands it its own record: `POST /api/recap`, a manager write under ADR-console-013 (the sprint's secret, no token, refusing any `Origin`) that reads and appends nothing, and `sprint recap`, which prints the goal, the latest brief with its decision and the owner's reply, the last report and the count of unread messages. A brief of a higher version replaces the brief and leaves the report in place, so a recap can show an older report beside a newer brief whose decision is `changes`.
+
+**What the owner sees.** The digest says `The manager of <goal> was restarted` for a wake whose command succeeded and `A new manager took over <goal>` for a takeover that started, and neither raises an inbox item. A stall is one inbox item, `managers keep failing on <goal>`, with its reason, try again (the existing retry) and withdraw. The sprint's manager state reads `managers keep failing: <reason>`.
+
+**The contract.** The manager's contract gains a section for a restart or a takeover: run `sprint recap`, then `sprint inbox`, and act on the latest brief's decision first. A brief whose decision is `changes` is revised from the reply the recap prints, even when `sprint inbox` prints nothing, because that change request was read before the restart and even when an older report exists; only an approved brief sends the manager to the last report's next step. The contract is not in the instruction corpus (ADR-console-015), so there is no Instruction Budget raise.
+
+**The check.** One committed script, `console-manager-revive`, has two subcommands, as the check of ADR-console-016. `start` gates (an assert check): it states a goal, approves the brief, stops the manager and requires it back, then removes it and requires a successor, each within a limit measured from times persisted in its state file so they hold across resumed runs (600 seconds for the return, 900 for the successor). `timing` observes: it reads the back time `start` recorded and reports the three-minute bound, because a timing threshold is a metric and not a reason to fail the hold.
+
+## Consequences
+
+- ADR-console-015's "Nothing relaunches automatically" no longer holds for a started manager with work; a first launch that failed or waits, and a quota reset on it, still wait for the owner's retry.
+- A manager that is listed but idle while work remains is not brought back here; it is a separate slice.
+- A wake of a session the registry still lists is never sent, so a manager the console cannot see is not copied.
+- A takeover starts a new session on the best profile and costs one launch; three bring-backs in an hour cost at most three, and the fourth step is the owner's.
+- The new rows are not kept: after a restart the console forgets older bring-backs beyond the log's window, and a stall persists only as long as its row is in the log.
+- The manager's memory of a lost session is the console's record, not its own: `sprint recap` can only repeat what was sent to the console.
