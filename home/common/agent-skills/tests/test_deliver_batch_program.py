@@ -294,6 +294,23 @@ class IntakeTest(unittest.TestCase):
         self.assertEqual(row(result, 1)["outcome"], "needs-design")
         self.assertNotIn("acquire-1", labels(calls))
 
+    def test_an_intake_routing_keeps_its_reason_in_the_row_and_the_log(self):
+        """#932: the needs-design row carries intake's why as one capped line, and the log line prints it."""
+        out = run_full(patch={"facts-1": {"lane": "needs-design", "why": "no criteria:\n  the issue names no check"}})
+        self.assertEqual(row(out["result"], 1),
+                         {"issue": 1, "outcome": "needs-design", "lane": "needs-design",
+                          "reason": "no criteria: the issue names no check"})
+        self.assertIn("#1: needs-design (no criteria: the issue names no check)", out["logs"])
+        out = run_full(patch={"facts-1": {"lane": "needs-design", "why": "w" * 400}})
+        self.assertEqual(row(out["result"], 1)["reason"], "w" * 297 + "...")
+        out = run_full(patch={"facts-1": {"lane": "needs-design", "why": " "}})
+        self.assertNotIn("reason", row(out["result"], 1))
+        self.assertIn("#1: needs-design", out["logs"])
+        # A readopted issue routed at its unaccepted PR keeps the reason the same way.
+        out = run_full(patch={"facts-1": {"open_pr": OPEN_PR, "lane": "needs-design", "why": "an open design decision"}},
+                       replies={"readopt-1": {"ok": False, "reason": "unaccepted"}})
+        self.assertEqual(row(out["result"], 1)["reason"], "an open design decision")
+
     def test_table_keeps_the_given_issue_order(self):
         result, _, _ = run(args=dict(ARGS, issues=[3, 1, 2]), patch={"facts-3": {"state": "CLOSED"}})
         self.assertEqual([r["issue"] for r in result["table"]], [3, 1, 2])
@@ -1638,7 +1655,8 @@ class RerunAndContendedRetryTest(unittest.TestCase):
         text = prompt(calls, "land-lock-1-1")
         self.assertIn(f"forge-claim renew --repo owner/repo --issue 1 --holder {HOLDER} --branch issue-1-x", text)
         self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {SHA} --wait\n", text)
-        self.assertIn("land acquire --wait 60 minutes (3600000 ms)", text)
+        self.assertIn("ends in --wait gets more: the flag takes no value", text)
+        self.assertNotIn("--wait 60", text)
         schema = schema_of(calls, "land-lock-1-1")
         self.assertEqual(schema["required"], ["renew"])
         self.assertLessEqual(RENEW_READ, set(schema["properties"]["renew"]["properties"]))
@@ -1874,7 +1892,9 @@ class TransientTest(unittest.TestCase):
                 self.assertIn("transient", prompt(calls, label))
 
     def test_every_forge_claim_prompt_gives_the_long_bash_timeout(self):
-        timeout = "a Bash timeout of 20 minutes (1200000 ms), and land acquire --wait 60 minutes (3600000 ms)"
+        timeout = ("a Bash timeout of 20 minutes (1200000 ms). Only a land acquire command that ends in --wait gets more: "
+                   "the flag takes no value, so write nothing after it, and the command itself can run for up to 60 minutes, "
+                   "so give it a Bash timeout of 60 minutes (3600000 ms).")
         _, calls, _ = run()
         for label in ("acquire-1", "land-pr-1", "land-merge-1", "close-out-1"):
             with self.subTest(label=label):

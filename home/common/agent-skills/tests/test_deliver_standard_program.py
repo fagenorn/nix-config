@@ -1165,7 +1165,9 @@ class TransientTest(unittest.TestCase):
         self.assertIn("transient", prompt(calls, "acquire"))
 
     def test_every_forge_claim_prompt_gives_the_long_bash_timeout(self):
-        timeout = "a Bash timeout of 20 minutes (1200000 ms), and land acquire --wait 60 minutes (3600000 ms)"
+        timeout = ("a Bash timeout of 20 minutes (1200000 ms). Only a land acquire command that ends in --wait gets more: "
+                   "the flag takes no value, so write nothing after it, and the command itself can run for up to 60 minutes, "
+                   "so give it a Bash timeout of 60 minutes (3600000 ms).")
         _, calls = run()
         for via in ("setup", "impl-1", "renew-final-review", "verify", "pr", "merge"):
             with self.subTest(via=via):
@@ -2480,6 +2482,26 @@ class NoCommitTaskTest(unittest.TestCase):
                 self.assertNotIn("fix-2-1", labels(calls))
                 self.assertEqual([d for d in result["tasks"] if d["n"] == 2],
                                  [{"n": 2, "commit": self.HEAD, "review_rounds": 0, "reviewer": "reviewer", "no_change": True}])
+
+    def test_a_no_change_check_names_the_head_the_program_holds_not_the_reply_spelling(self):
+        """#932: an abbreviated or uppercase reply sha is not what the reviewer compares rev-parse HEAD with."""
+        full = "c0ffee1" + "0" * 33
+        for said in ("C0FFEE1", full[:12], full.upper()):
+            with self.subTest(said=said):
+                short = {"start_head": said, "commit": said, "notes": "see the comment", "tests": []}
+                result, calls = self.go(replies={"review-2": self.NEEDS_CHANGE},
+                                        patch={"impl-1": {"commit": full}, "impl-2": short, "fix-2-1": short})
+                self.assertEqual(result["stage"], "done")
+                first, again = prompt(calls, "review-2"), self.call_of(calls, "rereview-2-1")["prompt"]
+                self.assertIn(f"Task 2 ended with no new commit: the head of {self.WT} is still {full}.", first)
+                self.assertIn(f"The fix made no new commit (the head of {self.WT} is still {full})", again)
+                for text in (first, again):
+                    self.assertIn(f"First confirm that git -C {self.WT} rev-parse HEAD prints {full} and", text)
+                    self.assertNotIn(f"prints {said} and" if said != full else full.upper(), text)
+        # The program's own head may be the shorter one: the fuller of the two is printed, lowercased.
+        long = {"start_head": "C0FFEE" + "1" * 34, "commit": "C0FFEE" + "1" * 34, "notes": "n", "tests": []}
+        _, calls = self.go(patch={"impl-1": {"commit": "c0ffee1"}, "impl-2": long})
+        self.assertIn(f"rev-parse HEAD prints {'c0ffee' + '1' * 34} and", prompt(calls, "review-2"))
 
     def test_a_no_commit_task_whose_brief_required_a_change_goes_back_and_its_diff_gets_a_first_pass(self):
         for risk, kind in (("low", "reviewer-lite"), ("standard", "reviewer")):
