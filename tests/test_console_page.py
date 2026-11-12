@@ -1753,6 +1753,61 @@ class PageGoalTest(unittest.TestCase):
                 self.assertEqual(goal_picked(snap), ["owner/alpha"])
                 self.assertTrue(box_open(snap))
 
+    def test_editing_after_a_refused_goal_removes_the_refusal(self) -> None:
+        refused_reply = {"respond": {"status": 409, "text": "write the goal first\n"}}
+        refused_steps = [
+            START, {"frame": GOAL_FRAME}, {"key": "g"}, refused_reply,
+            {"click": "goal-send"}, {"snapshot": True},
+        ]
+        for edit in (
+            {"input": {"cls": "goal-text", "value": GOAL_TEXT}},
+            {"input": {"cls": "goal-filter", "value": "a"}},
+        ):
+            with self.subTest(edit=edit):
+                refused, edited = render([*refused_steps, edit, {"snapshot": True}])
+                self.assertEqual(goal_fail(refused), ["Could not send: write the goal first"])
+                self.assertEqual(goal_fail(edited), [])
+                self.assertTrue(box_open(edited))
+                self.assertEqual(len(goals(edited)), 1)
+        with self.subTest(edit="project"):
+            alpha_refused_steps = [
+                START, {"frame": GOAL_FRAME}, {"key": "g"},
+                {"input": {"cls": "goal-filter", "value": "alpha"}},
+                {"click": "goal-project"},
+                {"input": {"cls": "goal-filter", "value": ""}},
+                refused_reply, {"click": "goal-send"}, {"snapshot": True},
+            ]
+            refused, edited = render([*alpha_refused_steps, {"click": "goal-project"}, {"snapshot": True}])
+            self.assertEqual(goal_names(refused), ["owner/zeta", "owner/alpha", "owner/beta"])
+            self.assertEqual(goal_picked(refused), ["owner/alpha"])
+            self.assertEqual(goal_fail(refused), ["Could not send: write the goal first"])
+            self.assertEqual(json.loads(goals(refused)[0]["body"])["project_id"], "owner/alpha")
+            self.assertEqual(goal_picked(edited), ["owner/zeta"])
+            self.assertEqual(goal_fail(edited), [])
+            self.assertTrue(box_open(edited))
+            self.assertEqual(len(goals(edited)), 1)
+        with self.subTest(edit="a frame"):
+            _, framed = render([*refused_steps, {"frame": GOAL_FRAME}, {"snapshot": True}])
+            self.assertEqual(goal_fail(framed), ["Could not send: write the goal first"])
+        with self.subTest(edit="a local refusal"):
+            first, second = render([
+                START, {"frame": GOAL_FRAME}, {"key": "g"},
+                {"input": {"cls": "goal-filter", "value": "nomatch"}},
+                {"click": "goal-send"}, {"snapshot": True},
+                {"input": {"cls": "goal-filter", "value": ""}}, {"snapshot": True},
+            ])
+            self.assertEqual(goal_fail(first), ["Could not send: choose a project"])
+            self.assertEqual(goal_fail(second), [])
+            self.assertEqual(goals(first), [])
+            self.assertEqual(goals(second), [])
+        with self.subTest(edit="refused again"):
+            (*_, last) = render([
+                *refused_steps, {"input": {"cls": "goal-text", "value": "  "}},
+                refused_reply, {"click": "goal-send"}, {"snapshot": True},
+            ])
+            self.assertEqual(goal_fail(last), ["Could not send: write the goal first"])
+            self.assertEqual(len(goals(last)), 2)
+
     def test_local_refusals_send_nothing(self) -> None:
         nothing, long = render([
             START, {"frame": GOAL_FRAME}, {"key": "g"},
@@ -2163,6 +2218,37 @@ class PageBriefTest(unittest.TestCase):
             self.assertGreaterEqual(found, 0, needle)
             at = found + len(needle)
         self.assertIn("Which host?", full(snap["inbox"]))
+
+    def test_an_empty_list_part_reads_its_label_and_none(self) -> None:
+        empty = {**BRIEF, "brief": {**BRIEF["brief"], "excluded": [], "risks": [], "asks": []}}
+        shown, approved = render([
+            START, {"frame": frame([empty])}, {"snapshot": True}, {"key": "Enter"},
+            {"clock": 5000}, {"snapshot": True},
+        ])
+        card = shown["inbox"]["children"][0]
+        self.assertTrue(has_class(card, "brief"))
+
+        def after(label: str) -> dict:
+            (found,) = [
+                (n, i) for n in nodes(card) for i, c in enumerate(n["children"])
+                if has_class(c, "meta") and c["text"] == label
+            ]
+            parent, at = found
+            return parent["children"][at + 1]
+
+        for label in ("Excluded", "Risks", "What I expect to ask"):
+            with self.subTest(label=label):
+                following = after(label)
+                self.assertEqual(following["tag"], "p")
+                self.assertEqual(full(following), "None")
+        slices = after("Slices")
+        self.assertEqual(slices["tag"], "ul")
+        self.assertEqual([full(li) for li in slices["children"]], ["checkpoint", "resume"])
+        self.assertEqual([n for n in nodes(card) if n["tag"] == "ul" and n["children"] == []], [])
+        (post,) = approvals(approved)
+        self.assertEqual(posted(post), {
+            "project_id": "owner/p01", "sprint_id": "a" * 16, "version": 2,
+        })
 
     def test_enter_approves_after_five_seconds(self) -> None:
         early, late = render([
