@@ -37,15 +37,17 @@ moments. Transitions:
   known unanswered record to `answered` true. Anything else about the inbox says
   nothing.
 
-Sentences (exact). `<name>` is the session's name, else the first 8 characters
-of its id; `<where>` is the event's project, else the session's repository; a
-session with no repository makes no moment.
+Sentences (exact). `<headline>` is the first question of an item that has
+questions, else the stored question (`view.item_headline`, so a decision never
+reads its fixed boilerplate); `<where>` is the event's project, else the last
+path segment of the session's repository (`view.repo_name`); a session with no
+repository makes no moment. No sentence names an issue, a session or a path.
 
-    inbox_appeared   <project_id> #<issue> needs you: <question>
-    inbox_answered   <project_id> #<issue> was answered.
-    limit_stop       <name> stopped on a usage limit in <where>.
-    resumed          <name> resumed work in <where>.
-    session_ended    <name> ended in <where>.
+    inbox_appeared   <project_id> needs you: <headline>
+    inbox_answered   <project_id> was answered: <headline>
+    limit_stop       A session in <where> stopped on a usage limit.
+    resumed          A session in <where> resumed work.
+    session_ended    A session in <where> ended.
     sprint_withdrawn The goal for <project_id> was withdrawn: <goal>
     brief_sent       A brief for <project_id> arrived, version <n>: <goal>
     brief_approved   The brief for <project_id> was approved, version <n>: <goal>
@@ -84,7 +86,8 @@ from agent_tools.console.sessions import (
     ENDED, GONE, HOOK, LIMIT, SEEN, WORKING, SessionState, session_states)
 from agent_tools.console.sprints import SprintState, sprint_states
 from agent_tools.console.view import (
-    INBOX_CHANGED, INBOX_SEEN, InboxRecord, inbox_records, sprint_state, sprint_waiting)
+    INBOX_CHANGED, INBOX_SEEN, InboxRecord, inbox_records, item_headline, repo_name,
+    sprint_state, sprint_waiting)
 
 LOOKED = "page.looked"
 FIRST_VISIT = timedelta(hours=8)
@@ -143,11 +146,10 @@ def _session_moment(event: Event, before: SessionState | None,
         session = after
     if session.repo is None:
         return None
-    name = session.name or session.session_id[:8]
-    where = event.project or session.repo
-    words = {LIMIT_STOP: "stopped on a usage limit in", RESUMED: "resumed work in",
-             SESSION_ENDED: "ended in"}[kind]
-    return kind, f"{name} {words} {where}."
+    where = event.project or repo_name(session.repo)
+    words = {LIMIT_STOP: "stopped on a usage limit", RESUMED: "resumed work",
+             SESSION_ENDED: "ended"}[kind]
+    return kind, f"A session in {where} {words}."
 
 
 def _inbox_fields(payload: object) -> tuple[str, int, str] | None:
@@ -165,15 +167,16 @@ def _inbox_moment(event: Event, before: InboxRecord | None) -> tuple[str, str] |
     fields = _inbox_fields(event.payload)
     if fields is None:
         return None
-    project_id, issue, question = fields
+    project_id = fields[0]
+    headline = item_headline(event.payload)[0]
     answered = event.payload.get("answered")
     if event.kind == INBOX_SEEN and answered is False:
-        return INBOX_APPEARED, f"{project_id} #{issue} needs you: {question}"
+        return INBOX_APPEARED, f"{project_id} needs you: {headline}"
     if event.kind == INBOX_SEEN and answered is True:
-        return INBOX_ANSWERED, f"{project_id} #{issue} was answered."
+        return INBOX_ANSWERED, f"{project_id} was answered: {headline}"
     if (event.kind == INBOX_CHANGED and answered is True and before is not None
             and before.item.get("answered") is False):
-        return INBOX_ANSWERED, f"{project_id} #{issue} was answered."
+        return INBOX_ANSWERED, f"{project_id} was answered: {headline}"
     return None
 
 
