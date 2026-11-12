@@ -84,7 +84,8 @@ one is not (the service answers it with the part).
 The fold also keeps each open sprint's `Brief(version, parts, sent_at, decision, reply)`.
 `brief.sent` changes an open sprint only when `version` is an int (not a bool) greater than the
 folded brief's version (0 with none) and `brief` is a dict: the brief is then that version with
-decision `NONE` and no reply. `brief.approved` and `brief.replied` apply only when the sprint is
+decision `NONE` and no reply, and a folded report of phase `done` is dropped (the replaced run's
+end). `brief.approved` and `brief.replied` apply only when the sprint is
 open, has a brief, the version equals its version and its decision is `NONE`; approval sets
 `APPROVED`, a reply (a string) sets `CHANGES` and the reply. A sprint whose brief is `APPROVED` is
 `STARTING`, else `DRAFTING` (`SprintState.state`). `brief.approved` and `brief.replied`, when they
@@ -242,8 +243,8 @@ an open sprint:
 
 `ended_at(state)` is every route to done, first match: `stopped_at` when set; `None` when `stop_at`
 is set (the sprint is stopping); `closing.at` when `closing` is set; `report.at` when the sprint is `STARTING` and the
-report's phase is `done` (the route that predates the closing report; a newer brief awaiting
-approval hides it); else `None`. A sprint has ended when `ended_at` is not `None`.
+report's phase is `done` (the route that predates the closing report; a newer brief drops that
+done report when it is sent, so a replaced sprint is not ended again by the old report); else `None`. A sprint has ended when `ended_at` is not `None`.
 
 `stop_due(state, now_ms)` is true when `stop_at` is set, `stopped_at` is `None`, the closing is set
 or `STOP_WAIT_MS` have passed since `stop_at`, and `stop_failed_at` is `None` or `STOP_RETRY_MS` have
@@ -771,7 +772,9 @@ def _folded_brief(state: SprintState, event: Event) -> SprintState:
     if event.kind == BRIEF_SENT:
         parts = payload.get("brief")
         if isinstance(parts, dict) and version > (brief.version if brief else 0):
-            return replace(state, brief=Brief(version, parts, event.at, NONE, None, None))
+            superseded = state.report is not None and state.report.phase == DONE
+            return replace(state, brief=Brief(version, parts, event.at, NONE, None, None),
+                           report=None if superseded else state.report)
         return state
     if brief is None or version != brief.version or brief.decision != NONE:
         return state

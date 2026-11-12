@@ -768,8 +768,13 @@ class StopFoldTest(unittest.TestCase):
         self.assertEqual(ended(reported(4, SID, done)), at(4))
         self.assertIsNone(ended(reported(4, SID, done), reported(5, SID, REPORT)))
         self.assertIsNone(ended(reported(4, SID, done), sent(5, SID, 2, PARTS)))
-        self.assertEqual(ended(reported(4, SID, done), sent(5, SID, 2, PARTS), approved(6, SID, 2)),
-                         at(4))
+        newer = ended(reported(4, SID, done), sent(5, SID, 2, PARTS), approved(6, SID, 2))
+        self.assertIsNone(newer)
+        self.assertEqual(ended(reported(4, SID, done), sent(5, SID, 2, PARTS),
+                               approved(6, SID, 2), reported(7, SID, done)), at(7))
+        replaced = sprints.sprint_states([*head, reported(4, SID, done), sent(5, SID, 2, PARTS),
+                                          approved(6, SID, 2)])[SID]
+        self.assertIsNone(replaced.report)
         self.assertEqual(ended(reported(4, SID, done), closed(5, SID, both)), at(5))
         self.assertEqual(ended(reported(4, SID, REPORT), closed(5, SID, both)), at(5))
         self.assertIsNone(ended(stop_requested(4, SID)))
