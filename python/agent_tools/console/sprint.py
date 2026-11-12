@@ -2,6 +2,7 @@
 
     sprint brief [--sprint <id>] [--secret-file <path>] --brief-file <path | -> [--port N]
     sprint report [--sprint <id>] [--secret-file <path>] --report-file <path | -> [--port N]
+    sprint ask [--sprint <id>] [--secret-file <path>] --round-file <path | -> [--port N]
     sprint inbox [--sprint <id>] [--secret-file <path>] [--port N]
     sprint reply [--sprint <id>] [--secret-file <path>] --message <id> --reply-file <path | -> [--port N]
     sprint status [--sprint <id>] [--port N]
@@ -13,7 +14,7 @@ the manager session it starts; without `--secret-file` the secret is `$CONSOLE_S
 (one trailing newline is removed, as from the file). A flag always wins over the environment. No id is stderr
 `sprint: no sprint id: pass --sprint or set CONSOLE_SPRINT_ID`, an id from the environment that
 is not a sprint id is stderr `sprint: CONSOLE_SPRINT_ID is not a sprint id (16 lowercase hex
-characters)`, and, for `brief`, `report`, `inbox` and `reply`, no secret is stderr `sprint: no secret: pass --secret-file or set
+characters)`, and, for `brief`, `report`, `ask`, `inbox` and `reply`, no secret is stderr `sprint: no secret: pass --secret-file or set
 CONSOLE_SPRINT_SECRET`; each is exit 2 with no request sent. `--port` is the console's loopback
 port (0-65535; default 27184); the command only ever talks to 127.0.0.1.
 
@@ -28,10 +29,26 @@ a JSON object, and sends `POST /api/report` with `{"sprint_id", "secret", "repor
 On success it prints `sprint: report sent` and exit 0. The command validates no member of the
 report: the console decides, in one place.
 
+`sprint ask` reads the secret the same way and the round from `--round-file` (`-` reads stdin), a
+JSON object, and sends `POST /api/ask` with `{"sprint_id", "secret", "round"}`, no `Origin`. The
+round is
+
+    {"questions": [{"question": "<text>", "blocks": "<one line>", "options": ["<one line>", ...],
+                    "recommended": "<exact text of one option>"}, ...],
+     "blocker": true | false}                   (blocker optional, default false)
+
+On success it prints `sprint: round <id> sent, <n> questions` (`1 question` when n is 1) and exit
+0; a 200 answer without integer `round` and `questions` is `sprint: refused 200: unreadable
+answer: <error>` and exit 1. The command validates no member of the round: the console decides,
+in one place.
+
 `sprint inbox` reads the secret the same way and sends `POST /api/inbox` with
 `{"sprint_id", "secret"}`, no `Origin`. It prints the console's answer as one line of JSON,
 `{"messages": [{"id", "kind", "version", "text", "at"}, ...]}`: the owner's messages the manager has
-not read, in id order, each once, and exit 0. An inbox with nothing unread is `{"messages": []}`.
+not read, in id order, each once, and exit 0. An answer to one of the manager's questions (kind
+`answer`) also carries `"question"` (the question's text), `"round"` (the round id) and `"chosen"`
+(the option's text, or null for the owner's own words). An inbox with nothing unread is
+`{"messages": []}`.
 
 `sprint reply` reads the secret the same way and the reply from `--reply-file` (`-` reads stdin) as
 UTF-8 text with one trailing newline removed, and sends `POST /api/message-reply` with
@@ -51,8 +68,8 @@ run it first (ADR-console-015).
 
 Any other HTTP status is stderr `sprint: refused <status>: <text>` (the console's reason) and
 exit 1. A console that cannot be reached is stderr
-`sprint: console unreachable on 127.0.0.1:<port>: <error>` and exit 1. A secret, brief, report or reply file
-that cannot be read, or a brief or report that is not a JSON object, is stderr `sprint: cannot read <path>:
+`sprint: console unreachable on 127.0.0.1:<port>: <error>` and exit 1. A secret, brief, report, round or reply file
+that cannot be read, or a brief, report or round that is not a JSON object, is stderr `sprint: cannot read <path>:
 <reason>` and exit 2, with no request sent; bad arguments are exit 2. The secret is printed nowhere.
 """
 
@@ -103,6 +120,7 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     for name, text in (("brief", "send the sprint's brief to the console"),
                        ("report", "send the sprint's report to the console"),
+                       ("ask", "send one round of questions to the owner"),
                        ("inbox", "print the owner's unread messages to the sprint"),
                        ("reply", "answer one of the owner's messages"),
                        ("status", "print the owner's answer to the sprint's brief")):
@@ -115,9 +133,11 @@ def build_parser() -> argparse.ArgumentParser:
             each.add_argument("--secret-file", type=Path, default=None,
                               help="the file holding the sprint's secret "
                                    f"(default: ${manager.SECRET_ENV})")
-            if name in ("brief", "report"):
-                each.add_argument(f"--{name}-file", required=True,
-                                  help=f"the {name} as a JSON object; - reads stdin")
+            if name in ("brief", "report", "ask"):
+                flag, what = (("--round-file", "round") if name == "ask"
+                              else (f"--{name}-file", name))
+                each.add_argument(flag, required=True,
+                                  help=f"the {what} as a JSON object; - reads stdin")
         if name == "reply":
             each.add_argument("--message", type=message_id, required=True,
                               help="the id of the message being answered")
@@ -206,6 +226,22 @@ def send_brief(args: argparse.Namespace, sprint: str) -> str:
         raise Refused(f"sprint: refused 200: unreadable answer: {error}") from error
 
 
+def send_round(args: argparse.Namespace, sprint: str) -> str:
+    secret = resolve_secret(args)
+    round_ = read_object(args.round_file, "round")
+    body = json.dumps({"sprint_id": sprint, "secret": secret, "round": round_}).encode()
+    text = ask(args.port, "POST", service.ASK_PATH, body)
+    try:
+        answer = json.loads(text)
+        sent, questions = answer["round"], answer["questions"]
+        if any(type(n) is not int for n in (sent, questions)):
+            raise TypeError("round and questions are not both integers")
+    except (ValueError, KeyError, TypeError) as error:
+        raise Refused(f"sprint: refused 200: unreadable answer: {error}") from error
+    noun = "question" if questions == 1 else "questions"
+    return f"sprint: round {sent} sent, {questions} {noun}"
+
+
 def send_report(args: argparse.Namespace, sprint: str) -> str:
     secret = resolve_secret(args)
     report = read_object(args.report_file, "report")
@@ -240,6 +276,8 @@ def main(argv: list[str] | None = None) -> int:
             line = send_brief(args, sprint)
         elif args.command == "report":
             line = send_report(args, sprint)
+        elif args.command == "ask":
+            line = send_round(args, sprint)
         elif args.command == "inbox":
             line = read_inbox(args, sprint)
         elif args.command == "reply":
