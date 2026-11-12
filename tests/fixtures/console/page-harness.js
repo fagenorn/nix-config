@@ -39,7 +39,8 @@
 // of the inbox, statement, projects, unmanaged, digest, goal, capacity and
 // promoted sections; every serialized node carries its title attribute (null
 // when unset), which is where a time element keeps its exact local time, and
-// its placeholder attribute (null when unset).
+// its placeholder attribute (null when unset) and its inline style.width (null
+// when unset; Elem.style is a plain object).
 // Prints a JSON list of snapshots on stdout; any failure exits 1 with the
 // error on stderr. A selector the fake DOM does not support throws, so a
 // test cannot pass on a stub.
@@ -70,6 +71,7 @@ class Elem {
     this.id = "";
     this.dataset = {};
     this.attributes = {};
+    this.style = {};
     this.listeners = {};
     this.open = false;
     this.value = "";
@@ -342,6 +344,7 @@ function node(n) {
     key: n.dataset.key === undefined ? null : n.dataset.key,
     title: n.attributes.title === undefined ? null : n.attributes.title,
     placeholder: n.attributes.placeholder === undefined ? null : n.attributes.placeholder,
+    width: n.style.width === undefined ? null : n.style.width,
     open: n.open,
     pressed: n.attributes["aria-pressed"] === undefined ? null : n.attributes["aria-pressed"],
     value: n.value === undefined ? null : n.value,

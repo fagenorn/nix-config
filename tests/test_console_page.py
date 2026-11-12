@@ -26,7 +26,7 @@ const ids = new Set(JSON.parse(process.argv[3]));
 class Node {
   constructor(tag) {
     this.tagName = tag; this.className = ""; this.id = ""; this.href = "";
-    this.rel = ""; this.open = false; this.children = []; this.dataset = {};
+    this.rel = ""; this.open = false; this.children = []; this.dataset = {}; this.style = {};
   }
   addEventListener() {}
   setAttribute() {}
@@ -197,6 +197,33 @@ class PageTest(unittest.TestCase):
                 values.append(parts[2])
             for value in values:
                 self.assertTrue(fits(value), selector + " sets " + value)
+
+        name = [d for s, d in style_rules(base) if s == ".cap-acct b"]
+        self.assertEqual(len(name), 1)
+        self.assertEqual(name[0].get("overflow"), "hidden")
+        self.assertEqual(name[0].get("text-overflow"), "ellipsis")
+        self.assertEqual(name[0].get("white-space"), "nowrap")
+        cut = re.fullmatch(r"([\d.]+)(px|rem)", name[0].get("max-width", ""))
+        self.assertTrue(cut)
+        self.assertLessEqual(float(cut.group(1)) * (16 if cut.group(2) == "rem" else 1), 160)
+        (cap,) = [d for s, d in style_rules(base) if s == ".cap"]
+        self.assertEqual(cap.get("min-width"), "0")
+        self.assertEqual(cap.get("max-width"), "100%")
+        (acct,) = [d for s, d in style_rules(base) if s == ".cap-acct"]
+        self.assertEqual(acct.get("max-width"), "100%")
+        unwrapped = {
+            selector for selector, decls in style_rules(base)
+            if selector.split()[0].startswith((".top", ".brand", ".conn", ".goal-", "#goal", ".cap", ".meter"))
+            and decls.get("white-space") == "nowrap"
+        }
+        self.assertEqual(unwrapped, {".brand", ".cap-acct", ".cap-acct b"})
+        (long_name,) = render([
+            START,
+            {"frame": {**view([]), "capacity": capacity([profile("a" * 60, "ok", week_left=50)])}},
+            {"snapshot": True},
+        ])
+        (label,) = [n for n in nodes(long_name["capacity"]) if n["tag"] == "b"]
+        self.assertEqual(label["title"], "a" * 60)
 
     def test_the_page_formats_no_time_with_the_locale(self) -> None:
         self.assertNotIn("toLocale", self.text)
@@ -695,24 +722,136 @@ def capacity(profiles: list, **fields) -> dict:
     return base
 
 
-class CapacityPageTest(unittest.TestCase):
-    def strip_view(self, **fields) -> dict:
-        profiles = [
-            profile("a", "ok", week_left=62, five_hour_left=40,
-                    next_reset="2026-11-12T09:00:00+00:00"),
-            profile("b", "unknown"),
-            profile("c", "reset"),
-        ]
-        fields = {"no_reading": "1 with no reading yet", **fields}
-        return {**view([]), "capacity": capacity(profiles, **fields)}
+def strip(snap: dict) -> list:
+    return snap["capacity"]["children"]
 
-    def test_the_strip_shows_each_profile(self) -> None:
-        result = render_page(self.strip_view())
-        text = result["capacity"]["text"]
-        for expected in ("a", "62% of the week left", "40% of 5 hours", "resets ",
-                         "1 with no reading yet", "c", "reset, not yet used"):
-            self.assertIn(expected, text)
-        self.assertNotIn("tight", text)
+
+def bars(n: dict) -> list:
+    return [m for m in nodes(n) if m["tag"] == "i"]
+
+
+def bar(n: dict) -> str:
+    (i,) = bars(n)
+    return i["width"]
+
+
+def capacity_snap(cap: dict) -> dict:
+    (snap,) = render([START, {"frame": {**view([]), "capacity": cap}}, {"snapshot": True}])
+    return snap
+
+
+def accounts(snap: dict) -> list:
+    return [n for n in strip(snap) if has_class(n, "cap-acct")]
+
+
+def part(snap: dict, name: str) -> dict:
+    (found,) = [n for n in strip(snap) if has_class(n, name)]
+    return found
+
+
+class CapacityPageTest(unittest.TestCase):
+    def test_fine_reads_one_word_then_each_account_with_a_bar_and_the_next_reset(self) -> None:
+        snap = capacity_snap(capacity([
+            profile("a", "ok", week_left=65, five_hour_left=40, next_reset="2026-11-16T05:00:00+00:00"),
+            profile("b", "unknown"),
+            profile("c", "ok", week_left=30, next_reset="2026-11-17T05:00:00+00:00"),
+        ], no_reading="1 with no reading yet"))
+        self.assertEqual(
+            [n["cls"] for n in strip(snap)],
+            ["cap-state cap-fine", "cap-acct", "cap-acct", "cap-when", "cap-none"])
+        state = strip(snap)[0]
+        self.assertEqual(full(state), "fine")
+        self.assertIn("svg", [c["tag"] for c in state["children"]])
+        a, c = accounts(snap)
+        labels = [n for n in nodes(snap["capacity"]) if n["tag"] == "b"]
+        self.assertEqual([n["text"] for n in labels], ["a", "c"])
+        for n in labels:
+            self.assertEqual(n["title"], n["text"])
+        self.assertEqual(bar(a), "65%")
+        self.assertEqual(bar(c), "30%")
+        (pc,) = [n for n in nodes(a) if has_class(n, "cap-pc")]
+        self.assertEqual(full(pc), "65%")
+        self.assertEqual(a["title"], "65% of the week left, 40% of 5 hours")
+        self.assertEqual(c["title"], "30% of the week left")
+        self.assertEqual(full(part(snap, "cap-when")), "resets Mon 05:00")
+        self.assertEqual(full(part(snap, "cap-none")), "1 with no reading yet")
+
+    def test_tight_reads_tight_and_an_out_account_reads_out_until(self) -> None:
+        snap = capacity_snap(capacity([
+            profile("a", "ok", week_left=12, next_reset="2026-11-16T05:00:00+00:00"),
+            profile("b", "out", week_left=55, five_hour_left=0,
+                    out_until="2026-11-13T09:30:00+00:00", next_reset="2026-11-13T08:00:00+00:00"),
+        ], tight=True))
+        self.assertEqual(
+            [n["cls"] for n in strip(snap)],
+            ["cap-state cap-tight", "cap-acct", "cap-acct cap-out", "cap-when"])
+        state = strip(snap)[0]
+        self.assertEqual(full(state), "tight")
+        self.assertIn("svg", [c["tag"] for c in state["children"]])
+        a, b = accounts(snap)
+        self.assertEqual(bar(a), "12%")
+        self.assertEqual(bar(b), "55%")
+        self.assertEqual(b["title"], "55% of the week left, 0% of 5 hours")
+        self.assertIn("out until Fri 09:30", full(b))
+        self.assertEqual([n for n in nodes(b) if has_class(n, "cap-pc")], [])
+        self.assertEqual(full(part(snap, "cap-when")), "resets Mon 05:00")
+
+    def test_every_account_out_reads_out_in_red_and_when_work_resumes(self) -> None:
+        snap = capacity_snap(capacity([
+            profile("a", "out", week_left=0, out_until="2026-11-13T09:30:00+00:00"),
+            profile("b", "out", out_until="2026-11-13T10:00:00+00:00"),
+        ], all_out=True, resumes_at="2026-11-13T09:30:00+00:00"))
+        self.assertEqual(
+            [n["cls"] for n in strip(snap)],
+            ["cap-state cap-out", "cap-acct cap-out", "cap-acct cap-out", "cap-when"])
+        state = strip(snap)[0]
+        self.assertEqual(full(state), "out")
+        self.assertIn("svg", [c["tag"] for c in state["children"]])
+        a, b = accounts(snap)
+        self.assertEqual(bar(a), "0%")
+        self.assertEqual(bars(b), [])
+        self.assertEqual(full(part(snap, "cap-when")), "resumes Fri 09:30")
+        self.assertNotIn("resets", full(snap["capacity"]))
+        for n in nodes(snap["capacity"]):
+            self.assertNotIn("needs", n["cls"])
+        text = PAGE.read_text(encoding="utf-8")
+        style = text[text.index("<style>"):text.index("</style>")]
+        base, at = "", 0
+        for found in re.finditer(r"@media [^{]+\{", style):
+            if found.start() < at:
+                continue
+            base += style[at:found.start()]
+            depth, at = 1, found.end()
+            while depth:
+                depth += {"{": 1, "}": -1}.get(style[at], 0)
+                at += 1
+        base += style[at:]
+        rules = style_rules(base)
+        (out,) = [d for s, d in rules if s == ".cap-out"]
+        self.assertEqual(out.get("color"), "var(--red)")
+        for selector, decls in rules:
+            if ".cap" in selector:
+                self.assertNotIn("var(--peach)", " ".join(decls.values()), selector)
+
+    def test_no_reading_at_all_shows_only_the_note(self) -> None:
+        snap = capacity_snap(capacity(
+            [profile("b", "unknown"), profile("c", "unknown")], no_reading="2 with no reading yet"))
+        self.assertEqual([n["cls"] for n in strip(snap)], ["cap-none"])
+
+    def test_a_reset_account_reads_reset_not_yet_used(self) -> None:
+        snap = capacity_snap(capacity([
+            profile("c", "reset"),
+            profile("d", "reset", week_left=100, five_hour_left=100),
+        ]))
+        self.assertEqual(
+            [n["cls"] for n in strip(snap)], ["cap-state cap-fine", "cap-acct", "cap-acct"])
+        c, d = accounts(snap)
+        self.assertIn("reset, not yet used", full(c))
+        self.assertIn("reset, not yet used", full(d))
+        self.assertEqual(bars(c), [])
+        self.assertEqual(bar(d), "100%")
+        self.assertNotIn("week unknown", full(c))
+        self.assertEqual(d["title"], "100% of the week left, 100% of 5 hours")
 
     def test_profiles_without_a_reading_show_as_one_note(self) -> None:
         frame = {**view([]), "capacity": capacity(
@@ -723,10 +862,6 @@ class CapacityPageTest(unittest.TestCase):
         self.assertEqual(full(strip).count("no reading yet"), 1)
         self.assertIn("2 with no reading yet", full(strip))
         self.assertEqual([n["text"] for n in nodes(strip) if n["tag"] == "b"], ["a"])
-
-    def test_tight_is_shown_only_when_the_view_says_so(self) -> None:
-        result = render_page(self.strip_view(tight=True))
-        self.assertTrue(result["capacity"]["text"].endswith("tight"))
 
     def test_every_profile_out_is_promoted_above_the_inbox(self) -> None:
         out = [profile("a", "out", out_until="2026-11-12T09:00:00+00:00"),
@@ -746,19 +881,22 @@ class CapacityPageTest(unittest.TestCase):
         self.assertNotIn("Resumes ", shown["statement"]["text"])
 
     def test_unknown_values_read_as_words_not_null_or_1970(self) -> None:
-        profiles = [profile("a", "ok", five_hour_left=40), profile("b", "out")]
-        text = render_page({**view([]), "capacity": capacity(profiles)})["capacity"]["text"]
-        for expected in ("week unknown", "40% of 5 hours", "out, reset unknown"):
-            self.assertIn(expected, text)
+        snap = capacity_snap(capacity([profile("a", "ok", five_hour_left=40), profile("b", "out")]))
+        a, b = accounts(snap)
+        self.assertEqual(bars(a), [])
+        self.assertIn("week unknown", full(a))
+        self.assertEqual(a["title"], "week unknown, 40% of 5 hours")
+        self.assertIn("out, reset unknown", full(b))
+        self.assertEqual(bars(b), [])
+        self.assertEqual([n for n in strip(snap) if has_class(n, "cap-when")], [])
+        text = full(snap["capacity"])
         for banned in ("null", "1970", "resets "):
             self.assertNotIn(banned, text)
         out = [profile("a", "out"), profile("b", "out")]
-        result = render_page({**view([]), "capacity": capacity(out, all_out=True)})
-        promoted = result["promoted"]["text"]
-        self.assertEqual(promoted.count("out, reset unknown"), 2)
-        for banned in ("null", "1970"):
-            self.assertNotIn(banned, promoted)
-        self.assertNotIn("Resumes ", result["statement"]["text"])
+        both = capacity_snap(capacity(out, all_out=True))
+        self.assertEqual([n for n in strip(both) if has_class(n, "cap-when")], [])
+        self.assertEqual(full(both["promoted"]).count("out, reset unknown"), 2)
+        self.assertNotIn("Resumes ", full(both["statement"]))
 
     def test_a_view_without_capacity_still_renders(self) -> None:
         result = render_page(view([]))

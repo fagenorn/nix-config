@@ -37,11 +37,16 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .top-in { max-width: 1360px; margin: 0 auto; padding: 8px 48px; display: flex; align-items: center; gap: 28px; min-height: 56px; }
 .brand { font-weight: 600; color: var(--sub1); white-space: nowrap; letter-spacing: -.005em; }
 .conn { color: var(--ov2); font-size: .8125rem; }
-.cap { display: flex; flex-wrap: wrap; gap: 2px 20px; margin-left: auto; font-size: .8125rem; color: var(--sub0); }
-.cap-p { display: inline-flex; gap: 6px; }
-.cap-p b { font-weight: 600; }
-.cap-out { color: var(--red); }
+.cap { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; margin-left: auto; min-width: 0; max-width: 100%; font-size: .8125rem; color: var(--sub0); }
+.cap-state { display: inline-flex; align-items: center; gap: 7px; font-weight: 600; }
+.cap-fine { color: var(--green); }
 .cap-tight { color: var(--yellow); }
+.cap-out { color: var(--red); }
+.cap-acct { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; min-width: 0; max-width: 100%; }
+.cap-acct b { font-weight: 600; color: var(--sub1); max-width: 9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.meter { display: block; flex: none; width: 34px; height: 4px; border-radius: 2px; background: var(--s1); overflow: hidden; }
+.meter i { display: block; height: 100%; background: var(--sub0); }
+.cap-pc { color: var(--sub1); }
 
 .desk-grid { max-width: 1360px; margin: 0 auto; padding: 30px 48px 72px; display: grid; grid-template-columns: minmax(0, 1fr) 460px; column-gap: 88px; align-items: start; }
 
@@ -269,6 +274,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 <template id="pause-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><rect class="f" x="3.5" y="3" width="3.2" height="10" rx="1"/><rect class="f" x="9.3" y="3" width="3.2" height="10" rx="1"/></svg></template>
 <template id="clock-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.8"/><path d="M8 4.8V8l2.2 1.5"/></svg></template>
 <template id="dashed-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.8" stroke-dasharray="2.1 2.5"/><circle class="f" cx="8" cy="8" r="1.3"/></svg></template>
+<template id="stop-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><rect class="f" x="3.5" y="3.5" width="9" height="9" rx="2"/></svg></template>
 <template id="tick-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.6l3.2 3.1L13 4.4"/></svg></template>
 <template id="lines-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 4.5h10M3 8h10M3 11.5h6"/></svg></template>
 <template id="label-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 3.5h5.2l5.8 5.8-4.2 4.2-6.8-6.8z"/><circle cx="5.4" cy="6.2" r=".9"/></svg></template>
@@ -717,29 +723,54 @@ function outWords(p, cls) {
   if (p.out_until === null || p.out_until === undefined) return phrase("span", cls, "out, reset unknown");
   return phrase("span", cls, "out until ", timeEl("weekday", p.out_until, ""));
 }
-function capacityWords(p, cls) {
-  if (p.state === "unknown") return phrase("span", cls, "no reading yet");
-  if (p.state === "out") return outWords(p, cls);
-  if (p.state === "reset") return phrase("span", cls, "reset, not yet used");
-  const has = (v) => v !== null && v !== undefined;
-  const parts = [has(p.week_left) ? p.week_left + "% of the week left" : "week unknown"];
-  if (has(p.five_hour_left)) parts.push(" \u00b7 " + p.five_hour_left + "% of 5 hours");
-  if (has(p.next_reset)) parts.push(" \u00b7 resets ", timeEl("weekday", p.next_reset, ""));
-  return phrase("span", cls, ...parts);
-}
 function renderCapacity(view) {
   const box = document.getElementById("capacity");
   const cap = view.capacity || {profiles: []};
+  const known = (v) => v !== null && v !== undefined;
+  const readings = cap.profiles.filter((p) => p.state !== "unknown");
   const nodes = [];
-  for (const p of cap.profiles) {
-    if (p.state === "unknown") continue;
-    const span = el("span", "cap-p");
-    span.appendChild(el("b", "", p.profile));
-    span.appendChild(capacityWords(p, p.state === "out" ? "cap-out" : ""));
-    nodes.push(span);
+  if (readings.length) {
+    const [tone, word, mark] = cap.all_out ? ["cap-out", "out", "stop-icon"]
+      : cap.tight ? ["cap-tight", "tight", "clock-icon"] : ["cap-fine", "fine", "tick-icon"];
+    const state = el("span", "cap-state " + tone);
+    state.appendChild(icon(mark));
+    state.appendChild(el("span", "", word));
+    nodes.push(state);
+  }
+  for (const p of readings) {
+    const acct = el("span", p.state === "out" ? "cap-acct cap-out" : "cap-acct");
+    const shares = [known(p.week_left) ? p.week_left + "% of the week left" : "week unknown"];
+    if (known(p.five_hour_left)) shares.push(p.five_hour_left + "% of 5 hours");
+    acct.setAttribute("title", shares.join(", "));
+    const name = el("b", "", p.profile);
+    name.setAttribute("title", p.profile);
+    acct.appendChild(name);
+    if (known(p.week_left)) {
+      const meter = el("span", "meter");
+      meter.setAttribute("aria-hidden", "true");
+      const fill = el("i");
+      fill.style.width = p.week_left + "%";
+      meter.appendChild(fill);
+      acct.appendChild(meter);
+    }
+    if (p.state === "out") acct.appendChild(outWords(p, ""));
+    else if (p.state === "reset") acct.appendChild(el("span", "cap-pc", "reset, not yet used"));
+    else acct.appendChild(el("span", "cap-pc", known(p.week_left) ? p.week_left + "%" : "week unknown"));
+    nodes.push(acct);
+  }
+  if (readings.length) {
+    if (cap.all_out) {
+      if (cap.resumes_at) nodes.push(phrase("span", "cap-when", "resumes ", timeEl("weekday", cap.resumes_at, "")));
+    } else {
+      const stamps = readings.filter((p) => p.state !== "out").map((p) => p.next_reset)
+        .filter((t) => Number.isFinite(Date.parse(t)));
+      if (stamps.length) {
+        const next = stamps.reduce((a, b) => (Date.parse(b) < Date.parse(a) ? b : a));
+        nodes.push(phrase("span", "cap-when", "resets ", timeEl("weekday", next, "")));
+      }
+    }
   }
   if (cap.no_reading) nodes.push(el("span", "cap-none", cap.no_reading));
-  if (cap.tight) nodes.push(el("span", "cap-tight", "tight"));
   box.replaceChildren(...nodes);
 }
 function renderPromoted(view) {
