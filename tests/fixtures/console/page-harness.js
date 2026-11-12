@@ -45,7 +45,17 @@
 // false (none throws), the mirror of open. An optional "in": "<details key>" on
 // a click, type, append, input, select or focus_on step limits the lookup to the
 // first attached element with the class inside that fold's subtree (an unknown
-// key or no match throws); without it the lookup is unchanged.
+// key or no match throws); without it the lookup is unchanged. A key step may
+// carry "on": "<class>": its target is then the first attached element with
+// that class (none throws), its own keydown listeners run first and then the
+// document's, with one event {key, ctrlKey, altKey, metaKey, shiftKey: false,
+// repeat: false, target: <element>, preventDefault()}. {blur_on: "<class>",
+// to?: "<class>"} calls the element's blur() and fires its blur listeners with
+// {type: "blur", target, relatedTarget}, relatedTarget being the first attached
+// element with the to class, else null. When a removal clears state.active
+// (remove, appendChild moving it, replaceChildren, textContent) the removed
+// active element's blur listeners then fire with relatedTarget null, as an
+// engine blurs a removed element.
 // Prints a JSON list of snapshots on stdout; any failure exits 1 with the
 // error on stderr. A selector the fake DOM does not support throws, so a
 // test cannot pass on a stub.
@@ -61,9 +71,11 @@ class Text {
 }
 
 function loseFocus(removed) {
-  for (let n = state.active; n; n = n.parentNode) {
+  const was = state.active;
+  for (let n = was; n; n = n.parentNode) {
     if (n === removed) {
       state.active = null;
+      for (const fn of was.listeners.blur || []) fn({ type: "blur", target: was, relatedTarget: null });
       return;
     }
   }
@@ -411,12 +423,21 @@ async function run() {
       runDueTimers();
     } else if ("key" in step) {
       let prevented = false;
-      fire("document", "keydown", {
+      const own = step.on === undefined ? null : byClass(step.on, root);
+      const event = {
         key: step.key, ctrlKey: !!step.ctrlKey, altKey: !!step.altKey, metaKey: !!step.metaKey,
         shiftKey: false, repeat: false, preventDefault() { prevented = true; },
-        target: step.target === undefined ? null : { tagName: step.target, isContentEditable: step.editable === true },
-      });
+        target: own !== null ? own
+          : step.target === undefined ? null : { tagName: step.target, isContentEditable: step.editable === true },
+      };
+      if (own !== null) for (const fn of own.listeners.keydown || []) fn(Object.assign({ type: "keydown" }, event));
+      fire("document", "keydown", event);
       state.keyPrevented = prevented;
+    } else if ("blur_on" in step) {
+      const target = byClass(step.blur_on, root);
+      const related = step.to === undefined ? null : byClass(step.to, root);
+      target.blur();
+      for (const fn of target.listeners.blur || []) fn({ type: "blur", target, relatedTarget: related });
     } else if ("click" in step) {
       const target = byClass(step.click, scopeOf(step));
       if (target.disabled !== true) {

@@ -465,6 +465,16 @@ class DocsTreeTest(unittest.TestCase):
             self.assertIn(needle, rules)
         self.assertNotIn("keeps its own unraised brief block", rules)
 
+    def test_sprint_controls_on_demand_are_recorded(self) -> None:
+        rules = self.doc("docs/areas/console/adr/002-the-desk-page-design-rules.md")
+        for needle in ('a closed "More" fold holding "Withdraw"', "a typed draft keeps it open"):
+            self.assertIn(needle, rules)
+        self.assertNotIn('withdraw, messages and "Tell the manager" stay under the two lines', rules)
+        message = self.doc(
+            "docs/areas/console/adr/016-what-the-owner-says-to-a-sprint-reaches-its-manager.md")
+        for needle in ("opens its field on demand", 'the rest in its "Detail" fold'):
+            self.assertIn(needle, message)
+
     def test_the_console_brief_decision_is_recorded(self):
         path = "docs/areas/console/adr/013-a-managers-brief-is-approved-or-redirected-on-the-page.md"
         first = (REPO_ROOT / path).read_text().splitlines()[0]

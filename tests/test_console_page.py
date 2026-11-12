@@ -2496,7 +2496,7 @@ class PageMessageTest(unittest.TestCase):
 
     def test_tell_the_manager_posts_the_text_with_the_token_and_keeps_it_on_refusal(self) -> None:
         refused, after = render([
-            START, {"frame": with_sprints([SPRINT])},
+            START, {"frame": with_sprints([SPRINT])}, {"click": "tell-open"},
             {"type": {"class": "tell", "text": TELL_TEXT}},
             {"respond": {"status": 409, "text": "this sprint is not open\n"}},
             {"click": "tell-send"}, {"snapshot": True},
@@ -2516,7 +2516,7 @@ class PageMessageTest(unittest.TestCase):
 
     def test_an_unanswered_send_keeps_the_text(self) -> None:
         (snap,) = render([
-            START, {"frame": with_sprints([SPRINT])},
+            START, {"frame": with_sprints([SPRINT])}, {"click": "tell-open"},
             {"type": {"class": "tell", "text": TELL_TEXT}},
             {"fail_fetch": True}, {"click": "tell-send"}, {"snapshot": True},
         ])
@@ -2525,20 +2525,26 @@ class PageMessageTest(unittest.TestCase):
                          ["Could not send: the console did not answer"])
         self.assertEqual(tell_field(snap)["value"], TELL_TEXT)
 
-    def test_a_sent_message_clears_the_field(self) -> None:
+    def test_a_sent_message_closes_the_field(self) -> None:
         (snap,) = render([
-            START, {"frame": with_sprints([SPRINT])},
+            START, {"frame": with_sprints([SPRINT])}, {"click": "tell-open"},
             {"type": {"class": "tell", "text": TELL_TEXT}},
             {"click": "tell-send"}, {"snapshot": True},
         ])
-        self.assertEqual(tell_field(snap)["value"], "")
         (line,) = sprint_lines(snap)
+        self.assertEqual([n for n in nodes(snap["projects"]) if has_class(n, "tell")], [])
+        self.assertEqual(
+            len([n for n in nodes(line) if n["tag"] == "button" and has_class(n, "tell-open")]), 1
+        )
+        (post,) = [p for p in snap["posts"] if p["url"] == "/api/message"]
+        self.assertEqual(json.loads(post["body"]), {
+            "project_id": "owner/p00", "sprint_id": "a" * 16, "text": TELL_TEXT})
         self.assertEqual([n for n in nodes(line) if has_class(n, "fail")], [])
 
     def test_a_typed_message_keeps_its_focus_and_selection_across_frames(self) -> None:
         sent = message_entry(3, "text", "delivered")
         before, after, more = render([
-            START, {"frame": with_sprints([SPRINT])},
+            START, {"frame": with_sprints([SPRINT])}, {"click": "tell-open"},
             {"type": {"class": "tell", "text": TELL_TEXT}},
             {"select": {"cls": "tell", "start": 6, "end": 9}}, {"snapshot": True},
             {"frame": with_sprints([{**SPRINT, "messages": [sent], "reach_text": None}])},
@@ -2554,12 +2560,150 @@ class PageMessageTest(unittest.TestCase):
         self.assertTrue(tell_field(more)["value"].endswith("!"))
 
     def test_a_sprint_no_longer_listed_restores_no_focus(self) -> None:
-        (gone,) = render([
-            START, {"frame": with_sprints([SPRINT])},
+        gone, back = render([
+            START, {"frame": with_sprints([SPRINT])}, {"click": "tell-open"},
             {"type": {"class": "tell", "text": TELL_TEXT}},
             {"frame": with_sprints([])}, {"snapshot": True},
+            {"frame": with_sprints([SPRINT])}, {"snapshot": True},
         ])
         self.assertIsNone(gone["active"])
+        self.assertEqual([n for n in nodes(back["projects"]) if has_class(n, "tell")], [])
+
+
+MORE_KEY = "more:" + "a" * 16
+DETAIL_KEY = "sprint:" + "a" * 16
+
+
+def in_line(line: dict, tag: str, cls: str) -> list:
+    return [n for n in visible(line) if n["tag"] == tag and has_class(n, cls)]
+
+
+def more_fold(line: dict) -> dict:
+    (found,) = [n for n in nodes(line) if n["tag"] == "details" and n["key"] == MORE_KEY]
+    return found
+
+
+class PageSprintControlsTest(unittest.TestCase):
+    def test_a_sprint_shows_tell_the_manager_and_more_until_used(self) -> None:
+        bare, telling, more = render([
+            START, {"frame": with_sprints([SPRINT])}, {"snapshot": True},
+            {"click": "tell-open"}, {"snapshot": True},
+            {"open": MORE_KEY}, {"snapshot": True},
+        ])
+        (line,) = sprint_lines(bare)
+        self.assertEqual([n for n in visible(line) if n["tag"] == "textarea"], [])
+        self.assertEqual([n for n in visible(line) if has_class(n, "withdraw")], [])
+        (opener,) = in_line(line, "button", "tell-open")
+        self.assertEqual(full(opener), "Tell the manager")
+        fold = more_fold(line)
+        self.assertFalse(fold["open"])
+        (summary,) = [c for c in fold["children"] if c["tag"] == "summary"]
+        self.assertEqual(full(summary), "More")
+        self.assertEqual(telling["active"], "tell")
+        (line,) = sprint_lines(telling)
+        (field,) = in_line(line, "textarea", "tell")
+        self.assertTrue(field["focused"])
+        (send,) = in_line(line, "button", "tell-send")
+        self.assertEqual(full(send), "Send")
+        self.assertEqual(in_line(line, "button", "tell-open"), [])
+        (line,) = sprint_lines(more)
+        (withdraw,) = in_line(line, "button", "withdraw")
+        self.assertEqual(full(withdraw), "Withdraw")
+
+    def test_escape_or_leaving_an_empty_field_closes_it(self) -> None:
+        escaped, left, within = render([
+            START, {"frame": with_sprints([SPRINT])}, {"click": "tell-open"},
+            {"key": "Escape", "on": "tell"}, {"snapshot": True},
+            {"click": "tell-open"}, {"blur_on": "tell"}, {"snapshot": True},
+            {"click": "tell-open"}, {"blur_on": "tell", "to": "tell-send"}, {"snapshot": True},
+        ])
+        for snap in (escaped, left):
+            (line,) = sprint_lines(snap)
+            self.assertEqual(in_line(line, "textarea", "tell"), [])
+            self.assertEqual(len(in_line(line, "button", "tell-open")), 1)
+        self.assertEqual(escaped["active"], "tell-open")
+        (line,) = sprint_lines(within)
+        self.assertEqual(len(in_line(line, "textarea", "tell")), 1)
+
+    def test_a_draft_keeps_the_field_open(self) -> None:
+        streamed, left, escaped, again = render([
+            START, {"frame": with_sprints([SPRINT])}, {"click": "tell-open"},
+            {"frame": with_sprints([SPRINT])}, {"snapshot": True},
+            {"type": {"class": "tell", "text": TELL_TEXT}},
+            {"blur_on": "tell"}, {"snapshot": True},
+            {"key": "Escape", "on": "tell"}, {"snapshot": True},
+            {"frame": with_sprints([SPRINT])}, {"snapshot": True},
+        ])
+        self.assertTrue(tell_field(streamed)["focused"])
+        self.assertEqual(streamed["active"], "tell")
+        for snap in (left, escaped, again):
+            self.assertEqual(tell_field(snap)["value"], TELL_TEXT)
+
+    def test_more_keeps_withdraw_and_its_failure_shows_closed(self) -> None:
+        refusal = {"status": 409, "text": "this sprint is not open\n"}
+        sending, streamed, failed = render([
+            START, {"frame": with_sprints([SPRINT])}, {"open": MORE_KEY}, {"hold": True},
+            {"click": "withdraw"}, {"snapshot": True},
+            {"frame": with_sprints([SPRINT])}, {"snapshot": True},
+            {"release": refusal}, {"snapshot": True},
+        ])
+        for snap in (sending, streamed, failed):
+            (line,) = sprint_lines(snap)
+            self.assertTrue(more_fold(line)["open"])
+        for snap, disabled in ((sending, True), (streamed, True), (failed, False)):
+            (line,) = sprint_lines(snap)
+            (withdraw,) = in_line(line, "button", "withdraw")
+            self.assertEqual(withdraw["disabled"], disabled)
+        closed, failed = render([
+            START, {"frame": with_sprints([SPRINT])}, {"open": MORE_KEY}, {"hold": True},
+            {"click": "withdraw"}, {"close": MORE_KEY},
+            {"frame": with_sprints([SPRINT])}, {"snapshot": True},
+            {"release": refusal}, {"snapshot": True},
+        ])
+        for snap in (closed, failed):
+            (line,) = sprint_lines(snap)
+            self.assertFalse(more_fold(line)["open"])
+        self.assertIn("Could not withdraw: this sprint is not open", visible_text(line))
+
+    def test_a_failed_manager_start_and_its_retry_need_no_opening(self) -> None:
+        reason = "could not start a manager: the directory is not trusted"
+        (snap,) = render([
+            START,
+            {"frame": with_sprints([
+                {**SPRINT, "manager_state": "failed", "manager_text": reason, "retry": True}
+            ])},
+            {"respond": {"status": 409, "text": "this sprint has a manager\n"}},
+            {"click": "retry"}, {"snapshot": True},
+        ])
+        (line,) = sprint_lines(snap)
+        self.assertIn(reason, visible_text(line))
+        (again,) = in_line(line, "button", "retry")
+        self.assertFalse(again["disabled"])
+        self.assertIn("Could not retry: this sprint has a manager", visible_text(line))
+        self.assertEqual(in_line(line, "button", "withdraw"), [])
+        self.assertEqual([n for n in visible(line) if n["tag"] == "textarea"], [])
+
+    def test_the_newest_message_shows_and_the_rest_sit_in_detail(self) -> None:
+        many = {**SPRINT, "messages": PageMessageTest.messages(None), "reach_text": None}
+        one = {**SPRINT, "messages": [message_entry(3, "text", "sent")], "reach_text": None}
+        closed, opened, single = render([
+            START, {"frame": with_sprints([many])}, {"snapshot": True},
+            {"open": DETAIL_KEY}, {"snapshot": True},
+            {"frame": with_sprints([one])}, {"snapshot": True},
+        ])
+        (line,) = sprint_lines(closed)
+        shown = visible_text(line)
+        self.assertIn("a third note", shown)
+        self.assertIn("Manager: " + REPLY_TEXT, shown)
+        self.assertNotIn(TELL_TEXT, shown)
+        self.assertNotIn("Approved version 2", shown)
+        (line,) = sprint_lines(opened)
+        shown = visible_text(line)
+        self.assertIn(TELL_TEXT, shown)
+        self.assertIn("Approved version 2", shown)
+        (line,) = sprint_lines(single)
+        self.assertIn(TELL_TEXT, visible_text(line))
+        self.assertEqual([n for n in nodes(line) if n["key"] == DETAIL_KEY], [])
 
 
 class PageManagerTest(unittest.TestCase):

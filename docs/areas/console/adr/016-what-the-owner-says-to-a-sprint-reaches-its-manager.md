@@ -19,7 +19,7 @@ ADR-console-013 carried a manager's brief to the page and the owner's approval o
 
 **Routes.** `POST /api/message` is a page write under ADR-console-008: it carries the sprint id and the owner's text and answers an empty `204` once the row is stored. `POST /api/inbox` and `POST /api/message-reply` are the manager's writes under ADR-console-013, guarded by the sprint's secret, refusing any `Origin`, and dispatched before the page writes like `POST /api/brief`.
 
-**The page.** A sprint line has a "Tell the manager" field. Each message shows sent (stored), delivered (a nudge reached the manager) or read (`sprint inbox` returned it), with the manager's reply under it; the ten newest are shown, oldest first. The digest says nothing about messages.
+**The page.** A sprint line offers "Tell the manager", which opens its field on demand (ADR-console-002). Each message shows sent (stored), delivered (a nudge reached the manager) or read (`sprint inbox` returned it), with the manager's reply under it; the ten newest are kept, oldest first, the newest shown under the sprint's two lines and the rest in its "Detail" fold. The digest says nothing about messages.
 
 **The contract.** The manager's contract gains an every-turn section (start with `sprint inbox`, answer each message with `sprint reply`) and an after-approval section (check `sprint status` before each batch, end the turn before any tracker action once the sprint is no longer open, report after each batch, and answer a scope change with a new brief). The contract is not in the instruction corpus (ADR-console-015), so there is no Instruction Budget raise.
 
