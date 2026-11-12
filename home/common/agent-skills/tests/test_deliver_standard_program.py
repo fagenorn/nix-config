@@ -5126,6 +5126,171 @@ class FixWavesConvergeTest(unittest.TestCase):
         self.assertIn("after 4 waves; an owner decision on the design is needed", result["reason"])
 
 
+class FixDiffFindingTest(unittest.TestCase):
+    """#950: a finding not marked narrowing, in a file the fix wave's commits changed, is admitted to the next wave like a narrowing one."""
+
+    FIRST = FixWaveTest.FIRST
+    CHANGED = {"changed_files": ["src/claim.py", "tests/test_claim.py"]}
+    NAME_ONLY = "git -C /r/.wt/w-issue-9-x diff --no-renames --name-only "
+
+    @staticmethod
+    def found(*findings, changed=CHANGED["changed_files"]):
+        """A re-review reply: its findings, each (file, relation) or a whole finding, and the files it read as changed."""
+        rows = []
+        for i, f in enumerate(findings):
+            if isinstance(f, tuple):
+                f = {k: v for k, v in (("file", f[0]), ("relation", f[1])) if v is not None}
+            rows.append(dict({"severity": "important", "summary": f"leak {i}"}, **f))
+        return dict({"verdict": "findings", "findings": rows}, **({} if changed is None else {"changed_files": changed}))
+
+    def first_wave(self, rv, wave=CHANGED):
+        return run(replies={"final-1": self.FIRST, "fix-wave-review": rv}, patch={"fix-wave": wave or {}})
+
+    def test_a_new_finding_in_a_file_the_fix_changed_gets_the_second_wave(self):
+        narrowing = {"file": "lock.py", "relation": "narrowing"}
+        for name, rv in (("new", self.found(("src/claim.py", "new"))),
+                         ("no relation", self.found(("src/claim.py", None))),
+                         ("a position and an absolute path", self.found(("/r/.wt/w-issue-9-x/./src/claim.py:12-14", "new"))),
+                         ("the test file", self.found(("tests/test_claim.py#L3", "new"))),
+                         ("beside a narrowing one elsewhere", self.found(narrowing, ("src/claim.py", "new"))),
+                         ("listed with a dot slash", self.found(("src/claim.py", "new"), changed=[" ./src/claim.py "]))):
+            with self.subTest(name):
+                out = run_out(replies={"final-1": self.FIRST, "fix-wave-review": rv}, patch={"fix-wave": self.CHANGED})
+                result, calls = out["result"], out["calls"]
+                self.assertEqual((result["stage"], result["fix_waves"]), ("done", 2))
+                self.assertEqual(waves(calls), ThirdFixWaveTest.THREE[:4])
+                second = prompt(calls, "fix-wave-2")
+                self.assertIn("leak ", second)
+                self.assertIn("They follow the fix of these first-round findings (one not marked narrowing is a defect in a file "
+                              "the previous fix wave changed): ", second)
+                self.assertNotIn("They narrow", second)
+                self.assertEqual(len([line for line in out["logs"] if "are in files fix wave 1 changed; they get the next wave" in line]), 1)
+
+    def test_a_new_finding_outside_the_fix_diff_or_with_no_file_stops(self):
+        rows = (("another file", self.found(("src/lock.py", "new")), self.CHANGED),
+                ("no file", self.found((None, "new")), self.CHANGED),
+                ("no file and no relation", self.found((None, None)), self.CHANGED),
+                ("an empty file", self.found(("  ", "new")), self.CHANGED),
+                ("one of two outside", self.found(("src/claim.py", "new"), ("src/lock.py", "new")), self.CHANGED),
+                ("another case", self.found(("src/Claim.py", "new")), self.CHANGED),
+                ("a file only the reviewer lists", self.found(("src/claim.py", "new")), {"changed_files": ["src/lock.py"]}),
+                ("a file only the implementer lists", self.found(("src/claim.py", "new"), changed=["src/lock.py"]), self.CHANGED),
+                ("no list from the implementer", self.found(("src/claim.py", "new")), None),
+                ("no list from the reviewer", self.found(("src/claim.py", "new"), changed=None), self.CHANGED),
+                ("lists that are not lists", self.found(("src/claim.py", "new"), changed="src/claim.py"), {"changed_files": "src/claim.py"}),
+                ("empty lists", self.found(("src/claim.py", "new"), changed=[]), {"changed_files": []}))
+        for name, rv, wave in rows:
+            with self.subTest(name):
+                result, calls = self.first_wave(rv, wave)
+                self.assertEqual((result["stage"], result["fix_waves"]), ("fix-wave-review", 1))
+                self.assertEqual(waves(calls), ThirdFixWaveTest.THREE[:2])
+                self.assertEqual([f["summary"] for f in result["cont"]["fix_findings"]], [f["summary"] for f in rv["findings"]])
+                self.assertNotIn("diverging", result)
+
+    def third(self, after_2, wave_2=CHANGED, **more):
+        replies = dict({"final-1": self.FIRST, "fix-wave-review": ThirdFixWaveTest.AFTER_1, "fix-wave-review-2": after_2}, **more)
+        return run(replies=replies, patch={"fix-wave": {"changed_files": ["src/first.py"]}, "fix-wave-2": wave_2,
+                                           "fix-wave-3": {"changed_files": ["src/claim.py"]}})
+
+    def test_a_new_finding_in_the_second_fix_diff_gets_the_third_wave_under_the_other_clauses(self):
+        for name, after_2 in (("one", self.found(("src/claim.py", "new"))),
+                              ("as many as after wave 1", self.found(("src/claim.py", "new"), {"file": "x.py", "relation": "narrowing"}))):
+            with self.subTest(name):
+                result, calls = self.third(after_2)
+                self.assertEqual((result["stage"], result["fix_waves"]), ("done", 3))
+                self.assertEqual(waves(calls), ThirdFixWaveTest.THREE)
+                self.assertIn(ThirdFixWaveTest.CLASS, prompt(calls, "fix-wave-3"))
+                self.assertIn("They follow the fix of these first-round findings", prompt(calls, "fix-wave-3"))
+                # Wave 2 took narrowing findings only, so its prompt is the one it always had.
+                self.assertIn("They narrow these first-round findings: ", prompt(calls, "fix-wave-2"))
+
+    def test_each_other_clause_still_refuses_the_third_wave(self):
+        in_diff = ("src/claim.py", "new")
+        rows = (("a critical finding", self.found({"file": "src/claim.py", "relation": "new", "severity": "critical"}), self.CHANGED),
+                ("no severity", {"verdict": "findings", "changed_files": ["src/claim.py"],
+                                 "findings": [{"file": "src/claim.py", "summary": "leak", "relation": "new"}]}, self.CHANGED),
+                ("more findings than after wave 1", self.found(in_diff, in_diff, in_diff), self.CHANGED),
+                ("a file only the first wave changed", self.found(("src/first.py", "new"), changed=["src/first.py"]), self.CHANGED),
+                ("a file outside the diff", self.found(("src/lock.py", "new")), self.CHANGED),
+                ("no file", self.found((None, "new")), self.CHANGED))
+        for name, after_2, wave_2 in rows:
+            with self.subTest(name):
+                result, calls = self.third(after_2, wave_2)
+                self.assertEqual((result["stage"], result["fix_waves"]), ("fix-wave-review", 2))
+                self.assertEqual(waves(calls), ThirdFixWaveTest.THREE[:4])
+
+    def test_no_fourth_wave_for_a_finding_in_the_third_fix_diff(self):
+        again = self.found(("src/claim.py", "new"), changed=["src/claim.py"])
+        for after_2 in (self.found(("src/claim.py", "new")), ThirdFixWaveTest.AFTER_2):
+            with self.subTest(after_2=after_2):
+                result, calls = self.third(after_2, **{"fix-wave-review-3": again, "fix-wave-review-4": again})
+                self.assertEqual((result["stage"], result["fix_waves"]), ("fix-wave-review", 3))
+                self.assertEqual(waves(calls), ThirdFixWaveTest.THREE)
+                self.assertEqual([f["summary"] for f in result["cont"]["fix_findings"]], ["leak 0"])
+
+    def test_an_idle_wave_admits_nothing(self):
+        cont = ThirdFixWaveTest().stopped()
+        idle = dict(ThirdFixWaveTest.NOTHING, **self.CHANGED)
+        result, calls = run(args=dict(ARGS, cont=cont), replies={"fix-wave-review": self.found(("src/claim.py", "new"))},
+                            patch={"fix-wave": idle})
+        self.assertEqual(result["stage"], "fix-wave-review")
+        self.assertEqual(waves(calls), ThirdFixWaveTest.THREE[:2])
+        self.assertNotIn("--name-only", prompt(calls, "fix-wave-review"))
+
+    def test_the_not_converging_marker_is_decided_at_the_stop_as_before(self):
+        cont = FixWavesConvergeTest().stopped()
+        # Without the lists the resume stops marked, as #940 has it.
+        left = FixWavesConvergeTest.left()
+        result, _ = run(args=dict(ARGS, cont=cont), replies={"fix-wave-review": left}, patch={"fix-wave": {"changed_files": ["claim.py"]}})
+        self.assertEqual(result["diverging"], {"file": "claim.py", "waves": 4})
+        # In the fix diff, the finding gets the next wave; the stop that follows it is marked with the waves then spent.
+        in_diff = dict(left, changed_files=["claim.py"])
+        still = FixWavesConvergeTest.left(severity="critical")
+        result, calls = run(args=dict(ARGS, cont=cont), replies={"fix-wave-review": in_diff, "fix-wave-review-2": still},
+                            patch={"fix-wave": {"changed_files": ["claim.py"]}})
+        self.assertEqual(waves(calls), ThirdFixWaveTest.THREE[:4])
+        self.assertEqual((result["stage"], result["fix_waves"]), ("fix-wave-review", 5))
+        self.assertEqual(result["diverging"], {"file": "claim.py", "waves": 5})
+        cleared, _ = run(args=dict(ARGS, cont=cont), replies={"fix-wave-review": in_diff}, patch={"fix-wave": {"changed_files": ["claim.py"]}})
+        self.assertEqual((cleared["stage"], cleared["fix_waves"]), ("done", 5))
+        self.assertNotIn("diverging", cleared)
+
+    def test_deliveries_without_such_a_finding_do_not_read_the_lists(self):
+        """Narrowing-only and clean deliveries run the same calls to the same result, whatever the lists say."""
+        third = ThirdFixWaveTest().replies()
+        scenarios = ({}, {"final-1": self.FIRST}, {"final-1": self.FIRST, "fix-wave-review": ThirdFixWaveTest.AFTER_1}, third,
+                     dict(third, **{"fix-wave-review-3": narrow("race in adopt")}),
+                     dict(third, **{"fix-wave-review-2": narrow("race in expire", severity="critical")}))
+        lists = {label: self.CHANGED for label in ("fix-wave", "fix-wave-2", "fix-wave-3")}
+        for replies in scenarios:
+            with self.subTest(replies=sorted(replies)):
+                plain = run_out(replies=replies)
+                listed = run_out(replies={k: dict(v, **self.CHANGED) if "review" in k else v for k, v in replies.items()}, patch=lists)
+                # A stop shows the re-review's reply as it came, its list included; nothing else differs.
+                (listed["result"].get("rv") or {}).pop("changed_files", None)
+                self.assertEqual(listed, plain)
+                self.assertFalse([line for line in plain["logs"] if "they get the next wave" in line])
+                for call in plain["calls"]:
+                    if call["label"].startswith("fix-wave"):
+                        self.assertNotIn("follow the fix of", call["prompt"])
+
+    def test_both_steps_are_asked_for_the_changed_files_of_the_range_the_program_holds(self):
+        _, calls = run(replies=ThirdFixWaveTest().replies(), patch={"fix-wave-2": {"start_head": "d" * 40, "commit": "e" * 40}})
+        for label in ("fix-wave", "fix-wave-2", "fix-wave-3"):
+            self.assertIn(f" Also return changed_files: the output lines of {self.NAME_ONLY}<start_head>..<commit>, run alone after "
+                          "your last commit.", prompt(calls, label))
+            self.assertEqual(schema_of(calls, label)["properties"]["changed_files"], {"type": "array", "items": {"type": "string"}})
+            self.assertNotIn("changed_files", schema_of(calls, label)["required"])
+        for label, span in (("fix-wave-review", "b0..c0ffee"), ("fix-wave-review-2", f"{'d' * 40}..{'e' * 40}")):
+            self.assertIn(f" Unsure is new. Also return changed_files: the output lines of {self.NAME_ONLY}{span}, run alone.",
+                          prompt(calls, label))
+            self.assertEqual(schema_of(calls, label)["properties"]["changed_files"], {"type": "array", "items": {"type": "string"}})
+            self.assertNotIn("changed_files", schema_of(calls, label)["required"])
+        # No other implementer or reviewer step is asked.
+        asked = {c["label"] for c in calls if "changed_files" in c["prompt"] or "changed_files" in json.dumps(c["schema"])}
+        self.assertEqual(asked, set(ThirdFixWaveTest.THREE))
+
+
 class ModeTest(unittest.TestCase):
     """#635: each mode stops at its stage and returns its stage object."""
 
