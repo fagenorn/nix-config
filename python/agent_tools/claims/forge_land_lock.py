@@ -89,7 +89,10 @@ D7, every call prints one JSON object on one stdout line with `command`, `action
 `branch`, `sha`, `verdict`, `lock_sha`, `pr`, `by`, `took_over` (`null`, `"closed"` or `"idle"`)
 and `waited_s`. `sha` is always `--sha` as given and `lock_sha` is where the lock is: a successful
 `acquire --release --wait --follow-head` adds `head_moved`, true when it took the lock at a head other than
-`--sha`, and the caller continues with `lock_sha` as its commit. The `acquire` verdicts are
+`--sha`, and the caller continues with `lock_sha` as its commit. `acquire --wait` adds `waited_on`
+(issue 913): the pull requests, in ascending order, its polls saw holding the lock while it waited,
+on a successful answer and on `land-contended` alike, `[]` when no poll was held off; `by` is derived
+only on a refusal, so a wait that succeeds is attributed by these numbers. The `acquire` verdicts are
 `acquired`, `already_held` (the lock is already at `--sha`, or at the followed head), `moved`,
 `held_by` and `lost_to`. Exit 0 is `acquired`, `already_held`, `moved`,
 `released` and every `status` verdict (`free`, `held_by`, `stale`); exit 3 is contention
@@ -326,6 +329,7 @@ def wait_acquire(args: Any, node: Callable[[], str],
     watch: list[Any] = [object(), None]  # [oid or None, first seen]; the sentinel matches nothing
     failures = 0
     last: Outcome | None = None
+    waited_on: set[int] = set()  # D7: the pull requests seen holding the lock
 
     def seen(oid: str | None) -> None:
         if watch[0] != oid:
@@ -361,14 +365,16 @@ def wait_acquire(args: Any, node: Callable[[], str],
                 moved = {"head_moved": sha != args.sha} if _follows(args) else {}
                 return 0, result(args, outcome.verdict, lock_sha=outcome.lock_sha, pr=outcome.pr,
                                  took_over=outcome.took_over, waited_s=int(monotonic() - start),
-                                 **moved)
+                                 waited_on=sorted(waited_on), **moved)
             if outcome.lock_sha is not None:
                 last = outcome
+            if outcome.pr is not None:
+                waited_on.add(outcome.pr)
         if monotonic() - start >= BOUND:
             return 3, result(args, "land-contended", lock_sha=last.lock_sha if last else None,
                              pr=last.pr if last else None,
                              by=holder(args.repo, last.pr) if last else None,
-                             waited_s=int(monotonic() - start))
+                             waited_s=int(monotonic() - start), waited_on=sorted(waited_on))
         sleep(min(POLL, start + BOUND - monotonic()))
 
 

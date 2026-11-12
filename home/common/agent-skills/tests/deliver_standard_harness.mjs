@@ -60,6 +60,8 @@ const DEFAULTS = [
   }],
   [/^direct-review/, { ...PASS, acceptance: [{ id: 'AC1', met: true, evidence: 'test_a.py:10 test_works' }] }],
   [/review|^final-/, PASS],
+  // #913: the resolution of an aborted sync merge, outside the land lock; like the sync default, its merge commit is the head unless a scenario names one.
+  [/^sync-resolve-/, { status: 'done', conflicted: true, merge_commit: SHA, resolved_files: ['a.py'], notes: 'resolved' }],
   [/^sync-/, { status: 'done', conflicted: false, merge_commit: SHA, notes: 'clean' }],
   [/^ws-check-/, { whitespace_exit: 1, changed_paths: ['src/a.js'] }],
   [/^verify-fix-/, DONE],

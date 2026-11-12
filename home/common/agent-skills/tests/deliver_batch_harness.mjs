@@ -22,6 +22,7 @@ const scenario = JSON.parse(readFileSync(0, 'utf8'))
 const SHA = 'a'.repeat(40)
 const PASS = { verdict: 'pass', findings: [] }
 const SYNC_FIXED = 'f'.repeat(40)
+const RESOLVED = 'b'.repeat(40)
 const DONE = { status: 'done', start_head: 'b0', commit: 'c0ffee', tests: ['t'], notes: 'ok' }
 const AC = [{ id: 'AC1', text: 'works', kind: 'code' }]
 const promptHead = p => (p.match(/Accepted head: ([0-9a-f]+)/) || [])[1] || SHA
@@ -44,6 +45,8 @@ const DEFAULTS = [
   // #907: a sync fix defaults to one commit, SYNC_FIXED, on top of the merge commit its prompt names.
   [/^land-sync-fix-/, (l, p) => ({ ...DONE, start_head: (p.match(/merge commit ([0-9a-f]{40})/) || [])[1], commit: SYNC_FIXED })],
   [/^land-record-/, (l, p) => { const head = promptHead(p); return { ok: true, head, lock: { verdict: 'moved', lock_sha: head }, checks: { state: 'passed', head, required: ['ci'], passed: ['ci'] } } }],
+  // #913: the resolution of an aborted sync merge, outside the land lock, defaults to a resolved merge commit RESOLVED.
+  [/^land-sync-resolve-/, () => ({ status: 'done', conflicted: true, head: RESOLVED, merge_commit: RESOLVED, resolved_files: ['x.py'], markers_checked: true, tests: ['t'], notes: 'ok' })],
   [/^land-sync-/, () => ({ status: 'current', conflicted: false, head: SHA, notes: 'ok' })],
   [/^land-pr-/, (l, p) => ({ pr: 40 + num(l), head: SHA, renew: { verdict: 'renewed' }, lock: { verdict: 'already_held', lock_sha: SHA }, checks: { state: 'passed', head: promptHead(p), required: ['ci'], passed: ['ci'] } })],
   [/^land-lock-/, () => ({ renew: { verdict: 'renewed' }, lock: { verdict: 'acquired', lock_sha: SHA } })],

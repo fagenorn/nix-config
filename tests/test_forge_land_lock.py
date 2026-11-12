@@ -1327,6 +1327,31 @@ class WaitTest(Base):
         self.assertEqual(self.cas_calls(), [])
         self.assertEqual(self.world.refs(), {REF: C})
 
+    def test_a_wait_reports_the_pull_requests_it_waited_on(self):
+        """Issue 913: the holders seen while polling, in order, whether the wait succeeds or gives up."""
+        def handover(elapsed):
+            if elapsed == 240:
+                self.world.set_ref(REF, C)  # PR 12 moves its lock to its new head
+                self.pulls(D, pull(13, sha=D))
+            if elapsed == 480:
+                self.world.set_ref(REF, D)  # PR 13 takes it next
+            if elapsed == 720:
+                self.world.set_ref(REF, None)
+        code, out = self.wait(FakeClock(handover))
+        self.assertEqual((code, out["verdict"], out["waited_s"], out["waited_on"]), (0, "acquired", 720, [12, 13]))
+        self.world.reset()
+        self.prepare(B)
+        code, out = self.wait(FakeClock(self.move_once(2400, C)))
+        self.assertEqual((code, out["verdict"], out["waited_on"]), (3, "land-contended", [12]))
+
+    def test_a_wait_that_was_never_held_off_waited_on_nobody(self):
+        self.world.reset()
+        self.prepare(None)
+        code, out = self.wait(FakeClock())
+        self.assertEqual((code, out["verdict"], out["waited_s"], out["waited_on"]), (0, "acquired", 0, []))
+        code, out = run(*land("acquire", A))  # a one-shot acquire never waits and carries no such key
+        self.assertEqual((out["verdict"], "waited_on" in out), ("already_held", False))
+
     def test_waiter_takes_over_only_after_its_own_45_minute_watch(self):
         clock = FakeClock()
         with host_clock(datetime(2100, 1, 1, tzinfo=timezone.utc), fm, forge_claim):
