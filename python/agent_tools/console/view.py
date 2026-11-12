@@ -104,6 +104,24 @@ A stalled sprint (a shown sprint whose `stalled` is not None, `sprints.py`) is o
 `MANAGER_SENTENCE` says what the page offers. The sentence precedence is all out, stale, briefs, stalls,
 then the existing ones. A restart or a takeover adds no item, only a stall does.
 
+A shown sprint whose `no_progress_at` is set (#929, a manager that stopped making progress) is
+one entry of `inbox.open`, after the stalls and before the questions, ordered by
+`(no_progress_at, sprint_id)`, and counts in `inbox_items` and the headline. Its entry is
+
+    {"type": "inbox_item", "reason": "progress", "key": "progress/<sprint id>", "project_id",
+     "sprint_id", "goal", "headline": "the manager has stopped making progress on <goal>",
+     "last_status": <report status> | null, "answered": false,
+     "waiting_since": "<time the stop was noticed>"}
+
+`PROGRESS_SENTENCE` says what the page offers. The sentence precedence is all out, stale, briefs,
+stalls, progress, questions, then the existing ones.
+
+A sprint's `state` is `quota` ("waiting on quota until") when its manager is `started` and the
+capacity view holds an `out` entry for the manager's profile (`manager.quota_wait`), unless the
+sprint is waiting on you, closing (fresh), done, drafting, stopping or stopped; `state_until` is
+then that entry's `out_until` (null when unknown), else null. Digest and bring-back read the
+state without the quota. `view` reads no clock.
+
 `BRIEF_SENTENCE` ("Press Enter to approve the brief, or write a reply to ask for changes.") says
 what the page offers. An approved or changes-asked brief is no inbox item; only registered
 projects' briefs appear, as for sprints.
@@ -131,7 +149,7 @@ A project entry is `{"type": "project", "project_id", "root", "quiet",
 only. `unmanaged` is always present, possibly empty, sorted by `root`.
 
     <sprint entry> = {"type": "sprint", "sprint_id", "goal",
-                      "state": "drafting" | "starting" | "on_track" | "waiting" | "quiet"
+                      "state": "drafting" | "starting" | "on_track" | "waiting" | "quota" | "quiet"
                                | "closing" | "done" | "stopping" | "stopped",
                       "state_text": "<text>", "stated_at", "age_text", "manager_text": <text> | null,
                       "manager_state": "none" | "started" | "missing" | "failed" | "waiting"
@@ -151,7 +169,8 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
                       "stop_text": "<text>" | null,
                       "closing": null | {"at", "summary", "first_line", "differently",
                                          "landed": [<int>], "held": [<int>], "dropped": [<int>],
-                                         "counts_text": "<text>"}}
+                                         "counts_text": "<text>"},
+                      "state_until": "<time>" | null}
     <message entry> = {"id": <int>, "kind": "approved" | "changes" | "text" | "stop",
                        "version": <int> | null, "text": <str> | null, "at": "<time>",
                        "state": "sent" | "delivered" | "read",
@@ -268,7 +287,7 @@ from agent_tools.console.deliveries import (
     stage_text,
 )
 from agent_tools.console.event_log import Event
-from agent_tools.console.manager import session_name
+from agent_tools.console.manager import Wait, quota_wait, session_name
 from agent_tools.console.sessions import (
     ENDED,
     IDLE,
@@ -292,11 +311,15 @@ from agent_tools.console.sprints import (
     FINISHED_AFTER_MS,
     HELD,
     LANDED,
+    NO_PROGRESS_TEXT,
     NONE,
     ON_TRACK,
     ON_TRACK_TEXT,
     QUIET,
     QUIET_TEXT,
+    QUOTA,
+    QUOTA_TEXT,
+    STARTED,
     STARTING,
     STARTING_TEXT,
     STOP_FAILED_TEXT,
@@ -350,6 +373,7 @@ NEEDS_SENTENCE = "Each one links to the tracker, where it is answered."
 BRIEF_SENTENCE = "Press Enter to approve the brief, or write a reply to ask for changes."
 QUESTION_SENTENCE = "Choose an option with its number and press Enter, or answer in your own words."
 MANAGER_SENTENCE = "Try again to start a new manager, or withdraw the sprint."
+PROGRESS_SENTENCE = "Tell the manager to continue, or withdraw the sprint."
 CHOOSE_SENTENCE = "Choose an option with its number and press Enter, or answer on the tracker."
 ANSWER_SENTENCE = "Answer it here, or on the tracker."
 STALE_SENTENCE = ("The tracker could not be read for {projects}; "
@@ -602,8 +626,11 @@ def sprint_waiting(state: SprintState, records: Iterable[InboxRecord]) -> int:
     return sum(r.item.get("issue") in named for r in records) + len(open_questions(state))
 
 
-def sprint_state(state: SprintState, now_ms: int | None, waiting: int) -> tuple[str, str]:
-    """The sprint's one shown state and its text; with `now_ms` None the sprint is never quiet."""
+def sprint_state(state: SprintState, now_ms: int | None, waiting: int,
+                 quota: Wait | None = None) -> tuple[str, str]:
+    """The sprint's one shown state and its text; with `now_ms` None the sprint is never quiet.
+    A `quota` (its manager's profile is out, #929) replaces every state but waiting on the owner,
+    closing and the ones before them."""
     brief, report = state.brief, state.report
     if state.stopped_at is not None:
         return STOPPED, STOPPED_TEXT
@@ -617,6 +644,8 @@ def sprint_state(state: SprintState, now_ms: int | None, waiting: int) -> tuple[
         return DONE, DONE_TEXT
     if waiting:
         return WAITING, WAITING_TEXT.format(n=waiting)
+    if quota is not None and (report is None or report.phase != CLOSING):
+        return QUOTA, QUOTA_TEXT
     quiet_elapsed = 0
     if now_ms is not None:
         moves = [_millis(brief.decided_at or brief.sent_at)]
@@ -660,7 +689,7 @@ def _finished(state: SprintState, now_ms: int | None) -> bool:
 def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
                   sessions: Sequence[SessionState],
                   deliveries: Mapping[str, Sequence[DeliveryState]],
-                  records: Sequence[InboxRecord] = ()) -> dict:
+                  records: Sequence[InboxRecord] = (), capacity: Mapping = EMPTY) -> dict:
     stated_ms = _millis(state.stated_at)
     elapsed = 0 if now_ms is None else now_ms - stated_ms
     report = state.report
@@ -674,7 +703,9 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
         "total": len(stages),
     }
     manager_state, manager_text, retry = manager_status(state, bool(sessions), now_ms, managers)
-    name, text = sprint_state(state, now_ms, waiting)
+    quota = (quota_wait(capacity, state.manager.profile)
+             if state.manager is not None and state.manager.state == STARTED else None)
+    name, text = sprint_state(state, now_ms, waiting, quota)
     ended = ended_at(state)
     return {
         "type": "sprint",
@@ -710,6 +741,7 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
         "stop_text": (STOP_FAILED_TEXT.format(reason=state.stop_reason)
                       if state.stop_reason is not None and state.stopped_at is None else None),
         "closing": None if state.closing is None else _closing_entry(state.closing),
+        "state_until": quota.until if name == QUOTA else None,
     }
 
 
@@ -720,10 +752,11 @@ def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
                    managers: bool = True,
                    sprint_sessions: Mapping[str, Sequence[SessionState]] | None = None,
                    records: Sequence[InboxRecord] = (),
-                   finished: Sequence[SprintState] = ()) -> dict:
+                   finished: Sequence[SprintState] = (),
+                   capacity: Mapping = EMPTY) -> dict:
     def entries(group: Sequence[SprintState]) -> list[dict]:
         return [_sprint_entry(s, now_ms, managers, (sprint_sessions or {}).get(s.sprint_id, ()),
-                              deliveries, records) for s in group]
+                              deliveries, records, capacity) for s in group]
 
     return {
         "type": "project",
@@ -795,6 +828,15 @@ def _stall_entry(sprint: SprintState) -> dict:
             "answered": False, "waiting_since": sprint.stalled_at}
 
 
+def _progress_entry(sprint: SprintState) -> dict:
+    report = sprint.report
+    return {"type": "inbox_item", "reason": "progress", "key": f"progress/{sprint.sprint_id}",
+            "project_id": sprint.project_id, "sprint_id": sprint.sprint_id, "goal": sprint.goal,
+            "headline": NO_PROGRESS_TEXT.format(goal=sprint.goal),
+            "last_status": None if report is None else report.status,
+            "answered": False, "waiting_since": sprint.no_progress_at}
+
+
 def _headline(open_count: int, stale: bool, all_out: bool) -> str:
     if open_count == 1:
         return "1 thing needs you"
@@ -850,7 +892,11 @@ def derive_view(
                                      pair[1].index))
     stalls = sorted((s for group in drafted.values() for s in group if s.stalled is not None),
                     key=lambda s: (s.stalled_at, s.sprint_id))
-    open_count = len(briefs) + len(stalls) + len(asked) + len(open_items)
+    unprogressed = sorted((s for group in drafted.values() for s in group
+                           if s.no_progress_at is not None),
+                          key=lambda s: (s.no_progress_at, s.sprint_id))
+    open_count = (len(briefs) + len(stalls) + len(unprogressed) + len(asked)
+                  + len(open_items))
     all_out = bool(capacity["all_out"])
     if all_out:
         sentence = ALL_OUT_SENTENCE
@@ -860,6 +906,8 @@ def derive_view(
         sentence = BRIEF_SENTENCE
     elif stalls:
         sentence = MANAGER_SENTENCE
+    elif unprogressed:
+        sentence = PROGRESS_SENTENCE
     elif asked:
         sentence = QUESTION_SENTENCE
     elif any(r.item["reason"] == "decision" and r.item["questions"] for r in open_items):
@@ -906,10 +954,10 @@ def derive_view(
     entries = [_project_entry(s, owned.get(s.project_id, ()), runs, now_ms,
                               drafted.get(s.project_id, ()), managers, in_sprint,
                               open_by_project.get(s.project_id, ()),
-                              finished.get(s.project_id, ()))
+                              finished.get(s.project_id, ()), capacity)
                for s in active]
     quiet_entries = [_project_entry(s, (), runs, now_ms, (), managers, in_sprint,
-                                    finished=finished.get(s.project_id, ()))
+                                    finished=finished.get(s.project_id, ()), capacity=capacity)
                      for s in quiet]
     if len(quiet_entries) <= FOLD_AFTER:
         entries.extend(quiet_entries)
@@ -926,6 +974,7 @@ def derive_view(
                       "sentence": sentence, "stale": bool(stale_projects)},
         "capacity": capacity,
         "inbox": {"open": [_brief_entry(s) for s in briefs] + [_stall_entry(s) for s in stalls]
+                          + [_progress_entry(s) for s in unprogressed]
                           + [_question_entry(s, q) for s, q in asked]
                           + [_inbox_entry(r, health) for r in open_items],
                   "answered": [_inbox_entry(r, health) for r in answered]},

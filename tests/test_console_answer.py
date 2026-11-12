@@ -379,7 +379,8 @@ class CheckAnswerServiceTest(unittest.TestCase):
         self.assertEqual(service.PAGE_WRITES, {"/api/looked", "/api/answer", "/api/check-answer",
                                                "/api/goal", "/api/withdraw", "/api/approve",
                                                "/api/reply", "/api/retry-manager",
-                                               "/api/message", "/api/stop", "/api/round-answer"})
+                                               "/api/message", "/api/stop", "/api/round-answer",
+                                               "/api/continue"})
         keys = [PAID10["key"], LIVE12["key"]]
         single = {"project_id": P, "key": LIVE12["key"], "answer": "approve", "version": LIVE12["version"],
                   "confirm": "octo/widgets#12"}

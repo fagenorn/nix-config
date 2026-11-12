@@ -39,6 +39,11 @@ Three kinds record a sprint's manager (#888): `MANAGER_STARTED` (`manager.starte
 column. They are not in `KEPT_KINDS`: retention removes them like any other row, and a sprint whose
 manager rows are gone reads as having none.
 
+Three more rows record an idle manager's nudges (#929): `MANAGER_NUDGED` (`manager.nudged`, one
+nudge to a manager session that sat idle), `MANAGER_NO_PROGRESS` (`manager.no_progress`, the
+console's give-up that opens an item for the owner) and `SPRINT_CONTINUED` (`sprint.continued`, the
+owner's answer to it). Like the other manager rows they are not in `KEPT_KINDS`.
+
 `EventLog.append` writes all its entries in one transaction under one `at`
 taken from the clock: a failure writes no row, rolls back the earlier entries of
 the same call and leaves the connection usable. An empty sequence returns `[]`
@@ -74,6 +79,9 @@ MANAGER_FAILED = "manager.failed"
 MANAGER_WAITING = "manager.waiting"
 MANAGER_WOKEN = "manager.woken"
 MANAGER_STALLED = "manager.stalled"
+MANAGER_NUDGED = "manager.nudged"
+MANAGER_NO_PROGRESS = "manager.no_progress"
+SPRINT_CONTINUED = "sprint.continued"
 SPRINT_REPORTED = "sprint.reported"
 SPRINT_MESSAGED = "sprint.messaged"
 SPRINT_READ = "sprint.read"
@@ -92,7 +100,8 @@ MANAGER_STOP_FAILED = "manager.stop_failed"
 # pass, not by a raw connection (the delete trigger of schema 3, 4, 5, 6, 7 and 8).
 # `SPRINT_NUDGED` and `MANAGER_STOP_FAILED` are not among them, nor is any manager kind other
 # than `MANAGER_STOPPED` (`MANAGER_STARTED`, `MANAGER_FAILED`, `MANAGER_WAITING`,
-# `MANAGER_WOKEN`, `MANAGER_STALLED`).
+# `MANAGER_WOKEN`, `MANAGER_STALLED`, `MANAGER_NUDGED`, `MANAGER_NO_PROGRESS`), nor is
+# `SPRINT_CONTINUED`.
 KEPT_KINDS = frozenset({GOAL_STATED, GOAL_WITHDRAWN,
                         BRIEF_SENT, BRIEF_APPROVED, BRIEF_REPLIED,
                         SPRINT_REPORTED,

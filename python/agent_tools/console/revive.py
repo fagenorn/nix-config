@@ -16,10 +16,11 @@ sprint has no brief or its brief's decision is `changes` (a brief waiting on the
 `WINDOW_MS` before `now_ms` (strictly after `now_ms - WINDOW_MS`) that are takeovers, or wakes
 that are `ok` and `back`. A wake has failed when `not (ok and back)`.
 
-`next_step(state, waiting, last_listed_ms, now_ms, can_wake)` returns `sprints.WAKE`,
+`next_step(state, waiting, last_listed_ms, now_ms, can_wake, out=False)` returns `sprints.WAKE`,
 `sprints.TAKEOVER`, `STALL` or `None` (no step). The first rule that matches wins:
 
-1. The sprint has no manager, or it is stalled: `None`.
+1. The sprint has no manager, it is stalled, or `no_progress_at` is set (an item is open for the
+   owner, #929; `sprint.continued` clears it): `None`.
 2. The manager is neither `STARTED` nor (`FAILED` or `WAITING` with `takeover` true): `None`. A
    first launch that failed or waits is the owner's retry, not a bring-back.
 3. `has_work(state, waiting)` is false: `None`.
@@ -30,7 +31,8 @@ that are `ok` and `back`. A wake has failed when `not (ok and back)`.
 5. `counted(state, now_ms) >= LIMIT`: `STALL`.
 6. The manager is `FAILED` or `WAITING` (a takeover), or `not can_wake`, or the sprint has no
    `manager_session`, or the last `FAILED_WAKES` revivals are all wakes that failed: `TAKEOVER`.
-7. Otherwise `WAKE`.
+7. Otherwise `WAKE`, or `None` while `out` (the manager's profile is out of quota, #929: nothing
+   is sent to it; `STALL` and `TAKEOVER` are unchanged).
 
 `stall_reason(state)` is the last revival's `reason` when that revival is not ok and has one, else
 `GONE_AGAIN_TEXT`.
@@ -65,9 +67,9 @@ def _failed_wake(revival: sprints.Revival) -> bool:
 
 
 def next_step(state: SprintState, waiting: int, last_listed_ms: int, now_ms: int,
-              can_wake: bool) -> str | None:
+              can_wake: bool, out: bool = False) -> str | None:
     manager = state.manager
-    if manager is None or state.stalled is not None:
+    if manager is None or state.stalled is not None or state.no_progress_at is not None:
         return None
     retried = manager.state in (sprints.FAILED, sprints.WAITING) and manager.takeover
     if manager.state != sprints.STARTED and not retried:
@@ -88,7 +90,7 @@ def next_step(state: SprintState, waiting: int, last_listed_ms: int, now_ms: int
     if (retried or not can_wake or state.manager_session is None
             or (len(last) == FAILED_WAKES and all(_failed_wake(r) for r in last))):
         return sprints.TAKEOVER
-    return sprints.WAKE
+    return None if out else sprints.WAKE
 
 
 def stall_reason(state: SprintState) -> str:

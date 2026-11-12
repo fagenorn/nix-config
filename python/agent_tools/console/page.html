@@ -433,6 +433,7 @@ const SPRINT_LOOKS = new Map([
   ["on_track", { icon: "play-icon", mark: "sic-play", tone: "st-go" }],
   ["waiting", { icon: "pause-icon", mark: "sic-pause", tone: "needs" }],
   ["quiet", { icon: "dashed-icon", mark: "sic-dashed", tone: "st-wait" }],
+  ["quota", { icon: "clock-icon", mark: "sic-clock", tone: "st-wait" }],
   ["closing", { icon: "check-icon", mark: "sic-closing", tone: "st-go" }],
   ["done", { icon: "tick-icon", mark: "sic-tick", tone: "st-dim" }],
   ["stopping", { icon: "pause-icon", mark: "sic-pause", tone: "st-wait" }],
@@ -579,6 +580,9 @@ function drawSprint(item, entry, sprint) {
   }
   const words = el("p", "sp-status");
   words.appendChild(el("span", "sprint-state " + look.tone, sprint.state_text));
+  if (typeof sprint.state_until === "string") {
+    words.appendChild(timeEl("weekday", sprint.state_until, "until"));
+  }
   const closing = sprint.closing;
   if (closing !== null && typeof closing === "object") {
     if (typeof closing.first_line === "string") {
@@ -868,6 +872,34 @@ function stallCard(item) {
   if (away !== undefined && away.phase === "sending") withdrawn.setAttribute("disabled", "");
   card.appendChild(withdrawn);
   for (const state of [again, away]) {
+    if (state !== undefined && state.phase === "failed") {
+      card.appendChild(el("span", "fail", state.failure + state.reason));
+    }
+  }
+  return card;
+}
+function isProgress(item) {
+  return item.reason === "progress";
+}
+function progressCard(item) {
+  const card = el("article", "card progress");
+  card.appendChild(el("p", "q", item.headline));
+  if (typeof item.last_status === "string") card.appendChild(el("span", "reason", item.last_status));
+  const going = stallPosts.get("continue\n" + item.sprint_id);
+  const away = stallPosts.get("progress-withdraw\n" + item.sprint_id);
+  const onward = actionButton("continue", "Continue",
+    () => stallPost(item, "continue", "Could not continue: ", () => fetch("/api/continue", {
+      method: "POST", headers: stallHeaders(), body: stallBody(item),
+    })));
+  if (going !== undefined && going.phase === "sending") onward.setAttribute("disabled", "");
+  card.appendChild(onward);
+  const withdrawn = actionButton("progress-withdraw", "Withdraw",
+    () => stallPost(item, "progress-withdraw", "Could not withdraw: ", () => fetch("/api/withdraw", {
+      method: "POST", headers: stallHeaders(), body: stallBody(item),
+    })));
+  if (away !== undefined && away.phase === "sending") withdrawn.setAttribute("disabled", "");
+  card.appendChild(withdrawn);
+  for (const state of [going, away]) {
     if (state !== undefined && state.phase === "failed") {
       card.appendChild(el("span", "fail", state.failure + state.reason));
     }
@@ -1829,10 +1861,12 @@ function renderInbox(view) {
   const open = view.inbox.open;
   const briefs = open.filter(isBrief);
   const stalls = open.filter(isStall);
-  const tracked = open.filter((item) => !isBrief(item) && !isStall(item));
+  const progress = open.filter(isProgress);
+  const tracked = open.filter((item) => !isBrief(item) && !isStall(item) && !isProgress(item));
   for (const [key, state] of [...stallPosts]) {
     const id = key.split("\n")[1];
-    if (state.phase !== "sending" && !stalls.some((item) => item.sprint_id === id)) stallPosts.delete(key);
+    const shown = key.startsWith("continue\n") || key.startsWith("progress-withdraw\n") ? progress : stalls;
+    if (state.phase !== "sending" && !shown.some((item) => item.sprint_id === id)) stallPosts.delete(key);
   }
   const present = new Set(open.map(stateId));
   // A frame that shows a sent item open again supersedes the page's own "sent"; a redraw of the same view does not.
@@ -1858,6 +1892,7 @@ function renderInbox(view) {
   currentId = current === null ? null : itemId(current.item);
   placeBriefCards(section, briefs);
   for (const item of stalls) section.appendChild(stallCard(item));
+  for (const item of progress) section.appendChild(progressCard(item));
   if (briefs.length === 0 && tracked.length > 0) section.appendChild(leadItem(tracked[0]));
   const rows = briefs.length === 0 ? tracked.slice(1) : tracked;
   if (rows.length > 0) {

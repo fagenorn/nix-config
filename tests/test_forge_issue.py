@@ -21,7 +21,7 @@ B1, B2, DOWN = (FIXTURE["issues"][n] for n in ("555", "688", "689"))
 PR, CHILD, FOREIGN = FIXTURE["pull_request"], FIXTURE["created"], FIXTURE["foreign"]
 NEW = CHILD["number"]
 TITLE, BODY = "Wire the widget", "## Blocked by\n\n- #555\n- #688\n"
-KEYS = {"command", "repo", "issue", "verdict", "blocked_by", "blocks", "missing_blocked_by", "missing_blocks",
+KEYS = {"command", "repo", "issue", "verdict", "blocked_by", "blocked_by_states", "blocks", "missing_blocked_by", "missing_blocks",
         "unexpected_blocked_by", "unexpected_blocks", "error", "detail"}
 NUMBERS = {str(r["number"]) for r in (B1, B2, DOWN, CHILD)}
 
@@ -284,7 +284,9 @@ class ReadTest(Base):
         self.lists(NEW, [B2, B1], [DOWN])
         code, out = run("read", "--repo", SLUG, "--issue", str(NEW))
         self.assertEqual(out, {"command": "read", "repo": SLUG, "issue": NEW, "verdict": "read",
-                               "blocked_by": [ref(B1), ref(B2)], "blocks": [ref(DOWN)], "missing_blocked_by": [],
+                               "blocked_by": [ref(B1), ref(B2)],
+                               "blocked_by_states": {ref(B1): "closed", ref(B2): "open"},
+                               "blocks": [ref(DOWN)], "missing_blocked_by": [],
                                "missing_blocks": [], "unexpected_blocked_by": [], "unexpected_blocks": [],
                                "error": None, "detail": None})
         self.assertEqual((code, self.posts()), (0, []))
@@ -292,7 +294,34 @@ class ReadTest(Base):
     def test_read_of_an_issue_without_edges_prints_empty_lists(self):
         self.lists(NEW, [], [])
         code, out = run("read", "--repo", SLUG, "--issue", str(NEW))
-        self.assertEqual((code, out["verdict"], out["blocked_by"], out["blocks"]), (0, "read", [], []))
+        self.assertEqual((code, out["verdict"], out["blocked_by"], out["blocked_by_states"], out["blocks"]),
+                         (0, "read", [], {}, []))
+
+    def test_read_states_another_repository_s_blocker(self):
+        self.lists(NEW, [FOREIGN, B1], [])
+        code, out = run("read", "--repo", SLUG, "--issue", str(NEW))
+        self.assertEqual((code, out["blocked_by_states"]), (0, {ref(B1): "closed", ref(FOREIGN): "open"}))
+
+    def test_a_blocker_without_a_readable_state_is_an_error_and_never_closed(self):
+        for state in (None, "", "CLOSED", "merged", True):
+            with self.subTest(state=state):
+                entry = dict(B1, state=state)
+                if state is None:
+                    del entry["state"]
+                self.lists(NEW, [B2, entry], [])
+                code, out = run("read", "--repo", SLUG, "--issue", str(NEW))
+                self.assertEqual((code, out["verdict"], out["error"], out["blocked_by"], out["blocked_by_states"]),
+                                 (1, "error", "payload_invalid", None, None))
+                self.assertIn(ref(B1), out["detail"])
+
+    def test_only_read_needs_a_state_and_only_of_its_blockers(self):
+        self.lists(NEW, [B1], [{k: v for k, v in DOWN.items() if k != "state"}])
+        code, out = run("read", "--repo", SLUG, "--issue", str(NEW))
+        self.assertEqual((code, out["blocks"], out["blocked_by_states"]), (0, [ref(DOWN)], {ref(B1): "closed"}))
+        self.lists(NEW, [{k: v for k, v in B1.items() if k != "state"}], [])
+        code, out = run("link", "--repo", SLUG, "--issue", str(NEW), "--blocked-by", "555")
+        self.assertEqual((code, out["verdict"], out["blocked_by"], out["blocked_by_states"]),
+                         (0, "linked", [ref(B1)], None))
 
     def test_a_failed_listing_is_an_error_and_never_an_empty_list(self):
         self.world.respond_json("gh", listing(NEW, "blocked_by"), [{"not": "a page"}])

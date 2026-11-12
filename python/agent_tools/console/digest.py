@@ -17,7 +17,19 @@ Event kinds read:
 - `manager.woken`, `manager.started` (`event_log.MANAGER_WOKEN`, `MANAGER_STARTED`, `sprints.py`): a
   gone manager was brought back. A wake that ran (`ok` exactly true) and a takeover start (`takeover`
   exactly true) speak; a failed wake, a failed takeover, a first start and `manager.stalled` say
-  nothing, and none of them is an inbox item (only a stall is, `view.py`).
+  nothing, and none of them is an inbox item (only a stall is, `view.py`). A wake that ran with
+  `resumed` exactly true (work resumed after a quota wait, #929) says `quota_resumed` in place of
+  `manager_restarted`.
+- `manager.nudged` (`event_log.MANAGER_NUDGED`, #929): the console told an idle manager to go on. It
+  speaks only when the event's project is a str, the payload `goal` is a str, `ok` is exactly true
+  and `resumed` is exactly true (the nudge that ended a quota wait): `quota_resumed`. Any other
+  idle nudge says nothing.
+- `sprint.nudged` (`event_log.SPRINT_NUDGED`): a held owner's message sent after the quota reset
+  speaks when `ok` and `resumed` are exactly true, the event's project is a str and its `sprint_id`
+  names a sprint of the fold before the row; the sentence's goal is that sprint's (the row carries
+  none). Any other `sprint.nudged` row says nothing.
+- `manager.no_progress`, `sprint.continued` (`event_log.MANAGER_NO_PROGRESS`, `SPRINT_CONTINUED`):
+  say nothing; the inbox item speaks.
 - `sprint.reported` (`event_log.SPRINT_REPORTED`, `sprints.py`): a manager's report of its sprint.
   It speaks only when the sprint fold accepted it and the sprint's shown state (`view.sprint_state`,
   the open inbox items counted as the page counts them, never quiet: no clock is read) differs
@@ -71,6 +83,7 @@ repository makes no moment. No sentence names an issue, a session or a path.
     sprint_done      The sprint for <project_id> is done: <the closing report's first line>
     manager_restarted The manager of <goal> was restarted
     manager_takeover A new manager took over <goal>
+    quota_resumed    <goal> resumed after the quota reset
 
 An inbox payload needs `project_id` (str), `issue` (int, not bool) and
 `question` (str). A withdrawal needs the event's project (str) and a payload `goal` (str); it
@@ -80,7 +93,8 @@ An answer event makes a moment only when its project is a `str`, its payload `qu
 `recommended` are `str` and `differs` is `True`; it reads no state either. `<answer>` is the option the
 owner chose or, for an answer in the owner's own words, those words.
 A restart needs the event's project (str), a payload `goal` (str) and `ok` exactly true; a takeover
-needs the event's project (str), a payload `goal` (str) and `takeover` exactly true; neither reads state.
+needs the event's project (str), a payload `goal` (str) and `takeover` exactly true; neither reads state,
+and neither does a `manager.nudged` or `manager.woken` quota resume.
 A sprint report is judged against the folded sprints before it
 (`moments` folds its own copy of the optional `sprints` argument with
 `sprints.sprint_states`), and the sentence's goal is the sprint's.
@@ -105,8 +119,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from agent_tools.console.event_log import (
-    BRIEF_APPROVED, BRIEF_SENT, GOAL_WITHDRAWN, MANAGER_STARTED, MANAGER_WOKEN, QUESTION_ANSWERED,
-    SPRINT_CLOSED, SPRINT_REPORTED, Event)
+    BRIEF_APPROVED, BRIEF_SENT, GOAL_WITHDRAWN, MANAGER_NUDGED, MANAGER_STARTED, MANAGER_WOKEN,
+    QUESTION_ANSWERED, SPRINT_CLOSED, SPRINT_NUDGED, SPRINT_REPORTED, Event)
 from agent_tools.console.sessions import (
     ENDED, GONE, HOOK, LIMIT, SEEN, WORKING, SessionState, session_states)
 from agent_tools.console.sprints import MANAGER_SESSION_NAME, SprintState, sprint_states
@@ -132,6 +146,7 @@ ANSWER_DIFFERS = "answer_differs"
 SPRINT_DONE_MOMENT = "sprint_done"
 MANAGER_RESTARTED = "manager_restarted"
 MANAGER_TAKEOVER = "manager_takeover"
+QUOTA_RESUMED = "quota_resumed"
 
 
 @dataclass(frozen=True)
@@ -234,10 +249,26 @@ def _answer_moment(event: Event) -> tuple[str, str] | None:
                             f"recommended '{recommended}': {question}")
 
 
+def _resumed_sentence(goal: str) -> str:
+    return f"{goal} resumed after the quota reset"
+
+
+def _resumed_moment(event: Event, folded: Mapping[str, SprintState]) -> tuple[str, str] | None:
+    sprint_id = event.payload.get("sprint_id")
+    if (not isinstance(event.project, str) or not isinstance(sprint_id, str)
+            or sprint_id not in folded or event.payload.get("ok") is not True
+            or event.payload.get("resumed") is not True):
+        return None
+    return QUOTA_RESUMED, _resumed_sentence(folded[sprint_id].goal)
+
+
 def _manager_moment(event: Event) -> tuple[str, str] | None:
     goal = event.payload.get("goal")
     if not isinstance(event.project, str) or not isinstance(goal, str):
         return None
+    if (event.kind in (MANAGER_NUDGED, MANAGER_WOKEN) and event.payload.get("ok") is True
+            and event.payload.get("resumed") is True):
+        return QUOTA_RESUMED, _resumed_sentence(goal)
     if event.kind == MANAGER_WOKEN and event.payload.get("ok") is True:
         return MANAGER_RESTARTED, f"The manager of {goal} was restarted"
     if event.kind == MANAGER_STARTED and event.payload.get("takeover") is True:
@@ -305,8 +336,10 @@ def moments(
             said = _brief_moment(event)
         elif event.kind == QUESTION_ANSWERED:
             said = _answer_moment(event)
-        elif event.kind in (MANAGER_WOKEN, MANAGER_STARTED):
+        elif event.kind in (MANAGER_NUDGED, MANAGER_WOKEN, MANAGER_STARTED):
             said = _manager_moment(event)
+        elif event.kind == SPRINT_NUDGED:
+            said = _resumed_moment(event, folded)
         elif event.kind == GOAL_WITHDRAWN:
             goal = payload.get("goal") if isinstance(payload, dict) else None
             if isinstance(event.project, str) and isinstance(goal, str):

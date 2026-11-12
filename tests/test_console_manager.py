@@ -280,6 +280,18 @@ class ProfileTest(unittest.TestCase):
             with self.subTest(rows=capacity["profiles"], bound=bound):
                 self.assertEqual(manager.choose_profile(capacity, bound), expected)
 
+    def test_quota_wait_reads_only_an_out_profile(self):
+        until = "2026-11-13T00:00:00+00:00"
+        capacity = {"profiles": [
+            {"profile": "work", "state": "out", "week_left": 0, "five_hour_left": 0,
+             "next_reset": until, "out_until": until, "read_at": None},
+            {"profile": "home", "state": "ok", "week_left": 50, "five_hour_left": 50,
+             "next_reset": None, "out_until": None, "read_at": None}]}
+        self.assertEqual(manager.quota_wait(capacity, "work"), manager.Wait(until))
+        for profile in ("home", "gone", None):
+            with self.subTest(profile=profile):
+                self.assertIsNone(manager.quota_wait(capacity, profile))
+
     def test_the_bound_profile_is_read_from_the_bindings(self):
         with tempfile.TemporaryDirectory() as tmp:
             d = Path(tmp)

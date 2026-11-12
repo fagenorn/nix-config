@@ -268,7 +268,7 @@ class PageTest(unittest.TestCase):
             {p for _, p in literals},
             {"/api/stream", "/api/looked", "/api/answer", "/api/check-answer", "/api/goal",
              "/api/withdraw", "/api/retry-manager", "/api/approve", "/api/reply",
-             "/api/message", "/api/stop", "/api/round-answer"},
+             "/api/message", "/api/stop", "/api/round-answer", "/api/continue"},
         )
         self.assertEqual(
             len(re.findall(r"\b(?:fetch|EventSource)\(", self.text)), len(literals)
@@ -277,7 +277,7 @@ class PageTest(unittest.TestCase):
     def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
         # A separate snapshot request can answer after a newer streamed frame
         # and render over it; the stream's first frame is already the snapshot.
-        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 13)
+        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 15)
         self.assertIsNotNone(
             re.search(r'fetch\("/api/looked",\s*\{\s*method:\s*"POST"', self.text)
         )
@@ -2905,6 +2905,15 @@ STALL = {
 }
 
 
+PROGRESS = {
+    "type": "inbox_item", "reason": "progress", "key": "progress/" + "a" * 16,
+    "project_id": "owner/p00", "sprint_id": "a" * 16, "goal": "make the importer resumable",
+    "headline": "the manager has stopped making progress on make the importer resumable",
+    "last_status": "two slices are building", "answered": False,
+    "waiting_since": "2026-11-10T08:00:00+00:00",
+}
+
+
 class PageManagerTest(unittest.TestCase):
     def test_a_failed_manager_shows_its_reason_and_retry_posts(self) -> None:
         reason = "could not start a manager: the directory is not trusted"
@@ -2964,6 +2973,52 @@ class PageManagerTest(unittest.TestCase):
                          {"project_id": "owner/p00", "sprint_id": "a" * 16})
         self.assertEqual(
             [p["url"] for p in snap["posts"] if p["url"] == "/api/retry-manager"], [])
+
+    def test_a_progress_card_shows_its_headline_status_and_continue_posts(self) -> None:
+        (snap,) = render([
+            START, {"frame": frame([PROGRESS])},
+            {"respond": {"status": 409, "text": "this sprint's manager is not waiting for you\n"}},
+            {"click": "continue"}, {"snapshot": True},
+        ])
+        (card,) = [n for n in nodes(snap["inbox"]) if has_class(n, "progress")]
+        self.assertEqual(card["tag"], "article")
+        self.assertTrue(has_class(card, "card"))
+        self.assertIn(PROGRESS["headline"], full(card))
+        self.assertEqual([full(n) for n in nodes(card) if has_class(n, "reason")],
+                         ["two slices are building"])
+        (post,) = [p for p in snap["posts"] if p["url"] == "/api/continue"]
+        self.assertEqual(post["method"], "POST")
+        self.assertEqual(post["headers"], GOAL_HEADERS)
+        self.assertEqual(json.loads(post["body"]),
+                         {"project_id": "owner/p00", "sprint_id": "a" * 16})
+        self.assertEqual([full(n) for n in nodes(card) if has_class(n, "fail")],
+                         ["Could not continue: this sprint's manager is not waiting for you"])
+        self.assertEqual([full(n) for n in nodes(card) if n["tag"] == "button"],
+                         ["Continue", "Withdraw"])
+
+    def test_a_progress_card_withdraw_posts_the_withdrawal(self) -> None:
+        (snap,) = render([
+            START, {"frame": frame([PROGRESS])}, {"click": "progress-withdraw"},
+            {"snapshot": True},
+        ])
+        (post,) = [p for p in snap["posts"] if p["url"] == "/api/withdraw"]
+        self.assertEqual(post["headers"], GOAL_HEADERS)
+        self.assertEqual(json.loads(post["body"]),
+                         {"project_id": "owner/p00", "sprint_id": "a" * 16})
+        self.assertEqual([p["url"] for p in snap["posts"] if p["url"] == "/api/continue"], [])
+
+    def test_a_sprint_waiting_on_quota_reads_until_its_reset(self) -> None:
+        (snap,) = render([
+            START,
+            {"frame": with_sprints([{
+                **SPRINT, "state": "quota", "state_text": "waiting on quota until",
+                "state_until": "2026-11-13T09:30:00+00:00",
+            }])},
+            {"snapshot": True},
+        ])
+        (line,) = sprint_lines(snap)
+        self.assertIn("waiting on quota until", full(line))
+        self.assertIn("Fri 09:30", full(line))
 
     def test_a_refused_retry_message_goes_once_the_manager_has_started(self) -> None:
         failed, started, missing_again, gone, back = render([
