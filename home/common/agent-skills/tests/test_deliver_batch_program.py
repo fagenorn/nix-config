@@ -36,12 +36,12 @@ def untyped(calls):
             if c.get("kind", "agent") == "agent" and c["agentType"] not in PROGRAM_AGENT_TYPES]
 
 
-def run_full(args=None, replies=None, patch=None, children=None, turns=None):
+def run_full(args=None, replies=None, patch=None, children=None, turns=None, delays=None):
     node = shutil.which("node")
     if node is None:
         raise AssertionError("node is not on PATH; the deliver-batch scenarios need it")
     scenario = {"args": ARGS if args is None else args, "replies": replies or {},
-                "patch": patch or {}, "children": children or {}, "turns": turns or {}}
+                "patch": patch or {}, "children": children or {}, "turns": turns or {}, "delays": delays or {}}
     done = subprocess.run([node, str(HARNESS), str(PROGRAM)], input=json.dumps(scenario),
                           capture_output=True, text=True, timeout=60, check=False)
     if done.returncode != 0:
@@ -4479,3 +4479,279 @@ class TrainRelaunchTest(unittest.TestCase):
         self.assertEqual([l for l in labels(calls) if l.startswith(("land-", "train-", "close-out-"))], [])
         self.assertEqual(row(second, 2), {"issue": 2, "outcome": "landed", "pr": 42})
         self.assertIsNone(second["relaunch"])
+
+
+# #936: land-pr-1 is held this many turns (its wait for the land lock), and a joining issue's child returns this many turns into it.
+LOCK_WAIT = 60
+DURING_WAIT = 40
+AFTER_WAIT = 90
+JOIN_LOG = "#1: #2 became ready while it waited for the land lock; they land with it as a train"
+JOIN_LOG_23 = "#1: #2, #3 became ready while it waited for the land lock; they land with it as a train"
+
+
+def join_run(issues=(1, 2), replies=None, patch=None, children=None, args=None, late=DURING_WAIT, delays=None):
+    """A train-enabled batch whose issue 1 is ready first and lands alone, behind; the others become ready `late` turns later.
+
+    An issue with a `children` entry answers ready from its plan-mode call, so that call is the one held."""
+    issues = list(issues)
+    merged = {"setup": {"max_parallel": len(issues)}, **BEHIND, **(patch or {})}
+    return run_full(args={**ARGS, "issues": issues, "train": True, **(args or {})}, replies=replies, patch=merged, children=children,
+                    turns={f"{n}:{'plan' if str(n) in (children or {}) else 'ready'}": late for n in issues[1:]},
+                    delays={"land-pr-1": LOCK_WAIT, **(delays or {})})
+
+
+def ready_during(out, n):
+    """The landing step that was running when issue n's child returned ready: the last call started before that return."""
+    at = [r["calls"] for r in out["child_returns"] if r["issue"] == n][-1]
+    return out["calls"][at - 1]["label"]
+
+
+def land_release_shas(calls):
+    """Every land lock release any step of the run was told to run, by sha."""
+    return [sha for c in calls if c["kind"] == "agent" for sha in re.findall(re.escape(LAND_RELEASE) + r"([0-9a-f]+)", c["prompt"])]
+
+
+def join_logs(out):
+    """The join lines the run logged: one per landing that took joiners, naming them."""
+    return [line for line in out["logs"] if "became ready while it waited" in line]
+
+
+def waited_acquires(calls):
+    return [c["label"] for c in calls if c["kind"] == "agent" and re.search(r"forge-claim land acquire [^\n]* --wait\n", c["prompt"])]
+
+
+def landing_of(calls, n):
+    """Issue n's landing steps, label and prompt, in order."""
+    return [(c["label"], c["prompt"]) for c in calls if c["label"].startswith(("land-", "close-out-")) and c["label"] in of(calls, n)]
+
+
+class TrainJoinTest(unittest.TestCase):
+    """#936: an issue that becomes ready while the batch's one landing still waits for the land lock lands with it as a train, under that hold."""
+
+    def test_an_issue_ready_by_the_end_of_the_lock_wait_joins_the_landing_as_a_train(self):
+        out = join_run()
+        result, calls = out["result"], out["calls"]
+        # The drain took issue 1 alone: issue 2 was not waiting when it started, and never gets a land-pr of its own.
+        self.assertEqual(land_labels(calls), [
+            "train-sweep-1", "land-pr-1", "train-pr-2", "train-build-1", "train-checks-1-1", "train-checks-1-2",
+            "train-ready-1", "train-merge-1", "close-out-1", "train-sweep-2", "close-out-2"])
+        self.assertEqual(ready_during(out, 2), "land-pr-1")
+        self.assertEqual(join_logs(out), [JOIN_LOG])
+        # One lock hold: taken once, waiting, by land-pr-1 at issue 1's ready head; re-checked there by the train merge; released there once.
+        self.assertEqual(waited_acquires(calls), ["land-pr-1"])
+        merge = prompt(calls, "train-merge-1")
+        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {SHA}\n", merge)
+        self.assertIn(f"gh pr merge 92 --repo owner/repo --merge --match-head-commit {X2} --delete-branch", merge)
+        self.assertNotIn("forge-claim land", prompt(calls, "train-pr-2"))
+        self.assertEqual(lock_releases(calls), ["close-out-1"])
+        self.assertEqual(land_release_shas(calls), [SHA])
+        self.assertEqual(lock_releases(calls, 2), [])
+        self.assertEqual(row(result, 1), {"issue": 1, "outcome": "landed", "pr": 41, "train": 1, "car_pr": 92})
+        self.assertEqual(row(result, 2), {"issue": 2, "outcome": "landed", "pr": 42, "train": 1, "car_pr": 92})
+        self.assertIsNone(result["relaunch"])
+
+    def test_the_joined_train_is_the_train_of_two_issues_that_waited_together(self):
+        together = train_run()[1]
+        out = join_run()
+        self.assertEqual(join_logs(out), [JOIN_LOG])
+        joined = out["calls"]
+        steps = lambda found: [(c["label"], c["prompt"]) for c in found if c["label"].startswith(("land-", "train-", "close-out-"))]
+        self.assertEqual(steps(joined), steps(together))
+
+    def test_a_lone_landing_with_nothing_ready_at_the_end_of_its_wait_adds_no_step(self):
+        serial = run(args=dict(ARGS, train=False), patch=BEHIND)[1]
+        lone = run_full(args=dict(ARGS, train=True), patch=BEHIND, delays={"land-pr-1": LOCK_WAIT})
+        self.assertEqual([(c["label"], c.get("prompt")) for c in lone["calls"] if c["label"] != "train-sweep-1"],
+                         [(c["label"], c.get("prompt")) for c in serial])
+        self.assertEqual([line for line in lone["logs"] if "train" in line], [])
+        # A second issue that is ready only after the wait ended changes nothing in the first landing either.
+        out = join_run(late=AFTER_WAIT)
+        self.assertEqual(landing_of(out["calls"], 1), landing_of(serial, 1))
+        self.assertEqual(train_labels(out["calls"]), [])
+        self.assertEqual(join_logs(out), [])
+        self.assertNotEqual(ready_during(out, 2), "land-pr-1")
+
+    def test_nothing_joins_once_the_sync_or_the_checks_started(self):
+        lone = run(args=dict(ARGS, train=True), patch=BEHIND)[1]
+        for step in ("land-sync-1-1", "land-checks-1-2", "land-merge-1"):
+            with self.subTest(step=step):
+                # Issue 2 becomes ready while `step` runs, after land-pr-1 returned.
+                out = join_run(late=AFTER_WAIT, delays={step: LOCK_WAIT})
+                result, calls = out["result"], out["calls"]
+                self.assertEqual(ready_during(out, 2), step)
+                self.assertEqual(train_labels(calls), [])
+                self.assertEqual(landing_of(calls, 1), landing_of(lone, 1))
+                self.assertEqual(of(land_labels_calls(calls), 2), ["land-pr-2", "land-merge-2", "close-out-2"])
+                self.assertEqual(land_release_shas(calls), [SHA, SHA])
+                self.assertEqual([row(result, n) for n in (1, 2)], [{"issue": n, "outcome": "landed", "pr": 40 + n} for n in (1, 2)])
+                self.assertEqual(join_logs(out), [])
+
+    def test_a_first_poll_that_is_not_behind_or_a_retried_wait_takes_no_joiner(self):
+        # A current head waited for its own checks inside land-pr; a retried wait is polled by the loop: neither is the handover point.
+        for name, replies, patch in (
+                ("current", None, {"land-pr-1": {}}),
+                ("pending", None, {"land-pr-1": {"checks": {"state": "pending", "head": SHA, "pending": ["e2e"]}}}),
+                ("retried wait", {"land-pr-1": {"pr": 41, "head": SHA, "lock": {"verdict": "land-contended", "lock_sha": B}, "checks": None}}, None)):
+            with self.subTest(name=name):
+                out = join_run(replies=replies, patch=patch)
+                result, calls = out["result"], out["calls"]
+                self.assertEqual(ready_during(out, 2), "land-pr-1")
+                self.assertEqual(train_labels(calls), [])
+                self.assertIn("land-pr-2", labels(calls))
+                self.assertEqual([row(result, n)["outcome"] for n in (1, 2)], ["landed", "landed"])
+                self.assertEqual(join_logs(out), [])
+
+    def test_a_batch_without_train_or_with_another_merge_strategy_never_joins(self):
+        for name, args, patch in (("no train", {"train": False}, None), ("squash", None, {"setup": {"max_parallel": 2, "merge_strategy": "squash"}})):
+            with self.subTest(name=name):
+                out = join_run(args=args, patch=patch)
+                calls = out["calls"]
+                self.assertEqual(ready_during(out, 2), "land-pr-1")
+                self.assertEqual(join_logs(out), [])
+                self.assertEqual(train_labels(calls), [])
+                self.assertEqual(of(land_labels_calls(calls), 2), ["land-pr-2", "land-merge-2", "close-out-2"])
+                self.assertEqual([row(out["result"], n)["outcome"] for n in (1, 2)], ["landed", "landed"])
+        base = run_full(args=dict(ARGS, issues=[1, 2]), patch=BEHIND, turns={"2:ready": DURING_WAIT}, delays={"land-pr-1": LOCK_WAIT})["calls"]
+        off = join_run(args={"train": False}, patch={"setup": {}})["calls"]
+        self.assertEqual([(c["label"], c.get("prompt")) for c in off], [(c["label"], c.get("prompt")) for c in base])
+
+    def test_up_to_two_issues_join_and_a_third_lands_in_its_own_drain(self):
+        out = join_run(issues=(1, 2, 3))
+        self.assertEqual([ready_during(out, n) for n in (2, 3)], ["land-pr-1"] * 2)
+        self.assertEqual(join_logs(out), [JOIN_LOG_23])
+        self.assertEqual([m["issue"] for m in members_of(out["calls"], "train-build-1")], [1, 2, 3])
+        self.assertEqual(land_release_shas(out["calls"]), [SHA])
+        out = join_run(issues=(1, 2, 3, 4))
+        result, calls = out["result"], out["calls"]
+        self.assertEqual([ready_during(out, n) for n in (2, 3, 4)], ["land-pr-1"] * 3)
+        self.assertEqual(join_logs(out), [JOIN_LOG_23])
+        self.assertEqual([m["issue"] for m in members_of(calls, "train-build-1")], [1, 2, 3])
+        self.assertNotIn("train-pr-4", labels(calls))
+        order = land_labels(calls)
+        self.assertLess(order.index("close-out-3"), order.index("land-pr-4"))
+        self.assertEqual(labels(calls).count("train-build-1"), 1)
+        self.assertEqual([row(result, n)["outcome"] for n in (1, 2, 3, 4)], ["landed"] * 4)
+        self.assertEqual(row(result, 4), {"issue": 4, "outcome": "landed", "pr": 44})
+        self.assertEqual(land_release_shas(calls), [SHA, SHA])
+
+    def test_an_issue_with_an_unknown_criterion_kind_never_joins(self):
+        odd = ready(2, acceptance=[{"id": "AC1", "text": "works", "kind": "vibes"}])
+        out = join_run(issues=(1, 2, 3), children={"1": ready(1), "2": odd, "3": ready(3)})
+        result, calls = out["result"], out["calls"]
+        # Both became ready inside the lock wait, so the landing itself chose its joiners: only the valid one.
+        self.assertEqual([ready_during(out, n) for n in (2, 3)], ["land-pr-1"] * 2)
+        self.assertEqual(join_logs(out), ["#1: #3 became ready while it waited for the land lock; they land with it as a train"])
+        self.assertEqual([m["issue"] for m in members_of(calls, "train-build-1")], [1, 3])
+        self.assertEqual(train_labels(calls).count("train-pr-3"), 1)
+        self.assertNotIn("train-pr-2", labels(calls))
+        self.assertNotIn("land-pr-2", labels(calls))
+        self.assertEqual((row(result, 2)["outcome"], row(result, 2)["stage"]), ("stopped", "plan"))
+        self.assertEqual([row(result, n)["outcome"] for n in (1, 3)], ["landed", "landed"])
+        self.assertEqual(land_release_shas(calls), [SHA])
+
+    def test_a_joined_train_that_fails_before_its_merge_falls_back_to_serial_landing_under_the_same_hold(self):
+        for name, replies in (
+                ("conflict at car one", {"train-build-1": {"status": "blocked", "conflicted": True, "cars": []}}),
+                ("car one red", {"train-checks-1-1": {"state": "failed", "head": X1, "failing": ["ci"]}}),
+                ("build died", {"train-build-1": None}),
+                ("build threw", {"train-build-1": "throw"}),
+                ("ready died", {"train-ready-1": None})):
+            with self.subTest(name=name):
+                out = join_run(replies=replies)
+                result, calls = out["result"], out["calls"]
+                order = land_labels(calls)
+                self.assertNotIn("train-merge-1", order)
+                self.assertEqual((ready_during(out, 2), join_logs(out)), ("land-pr-1", [JOIN_LOG]))
+                self.assertEqual(order.count("land-pr-1"), 1)
+                tail = ["train-sweep-2", "land-sync-1-1", "land-checks-1-2", "land-merge-1", "close-out-1",
+                        "land-pr-2", "land-merge-2", "close-out-2"]
+                self.assertEqual(order[-len(tail):], tail)
+                # Issue 1 kept its one hold through the failed train; issue 2 then takes and releases its own.
+                self.assertEqual(waited_acquires(calls), ["land-pr-1", "land-pr-2"])
+                self.assertEqual(lock_releases(calls), ["close-out-1"])
+                self.assertEqual(lock_releases(calls, 2), ["close-out-2"])
+                self.assertEqual(land_release_shas(calls), [SHA, SHA])
+                self.assertEqual(row(result, 1), {"issue": 1, "outcome": "landed", "pr": 41})
+                self.assertEqual(row(result, 2), {"issue": 2, "outcome": "landed", "pr": 42})
+
+    def test_a_joined_train_merge_refused_as_behind_resyncs_the_first_landing_and_releases_at_the_moved_sha(self):
+        refused = dict(merge_reply({}, merged=False), behind=True, notes="the head branch is not up to date with the base branch")
+        out = join_run(replies={"train-merge-1": refused, **OPEN_CAR,
+                                "land-sync-1-1": {"status": "done", "conflicted": False, "head": C, "notes": "ok"}})
+        result, calls = out["result"], out["calls"]
+        self.assertEqual((ready_during(out, 2), join_logs(out)), ("land-pr-1", [JOIN_LOG]))
+        order = land_labels(calls)
+        self.assertEqual(order[order.index("train-merge-1") + 1:], [
+            "train-flip-1-1", "train-sweep-2", "land-sync-1-1", "land-record-1-1", "land-merge-1", "close-out-1", "land-pr-2", "land-merge-2", "close-out-2"])
+        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {C}\n", prompt(calls, "land-record-1-1"))
+        self.assertEqual(land_release_shas(calls), [C, SHA])
+        self.assertNotIn("land-unlock-1", order)
+        self.assertEqual([row(result, n) for n in (1, 2)], [{"issue": n, "outcome": "landed", "pr": 40 + n} for n in (1, 2)])
+
+    def test_a_joiner_whose_pr_step_fails_leaves_the_first_landing_alone(self):
+        for name, reply, outcome in (("claim lost", {"renew": {"verdict": "not_held", "by": "h2/b9"}}, "claim-lost"), ("dead", None, "stopped")):
+            with self.subTest(name=name):
+                out = join_run(replies={"train-pr-2": reply})
+                result, calls = out["result"], out["calls"]
+                self.assertEqual((ready_during(out, 2), join_logs(out)), ("land-pr-1", [JOIN_LOG]))
+                self.assertNotIn("train-build-1", labels(calls))
+                self.assertNotIn("land-pr-2", labels(calls))
+                self.assertEqual(row(result, 2)["outcome"], outcome)
+                self.assertEqual(row(result, 1), {"issue": 1, "outcome": "landed", "pr": 41})
+                self.assertEqual(land_release_shas(calls), [SHA])
+                self.assertEqual(result["relaunch"]["issues"], [2])
+
+    def test_a_lost_reply_on_the_joined_path_releases_the_lock_once(self):
+        stopped = lambda n, detail: {"issue": n, "outcome": "stopped", "pr": 40 + n, "stage": "train-merge", "reason": f"train-merge: {detail}"}
+        for name, replies, tail, release in (
+                # The merge reply and the read after it are lost: the car may be merged, so both members stop and nothing lands serially.
+                ("merge and read lost", {"train-merge-1": None, "train-flip-1-1": None}, ["train-flip-1-1", "land-unlock-1", "train-sweep-2"], "land-unlock-1"),
+                ("merge threw, car open", {"train-merge-1": "throw", **OPEN_CAR}, ["train-flip-1-1", "land-unlock-1", "train-sweep-2"], "land-unlock-1"),
+                # The merge reply is lost and the car reads merged: both are closed out.
+                ("merge lost, car merged", {"train-merge-1": None}, ["train-flip-1-1", "close-out-1", "train-sweep-2", "close-out-2"], "close-out-1"),
+                # The folded release in the close-out is lost: the wrapper releases the same sha.
+                ("close-out lost", {"close-out-1": None}, ["close-out-1", "land-unlock-1", "train-sweep-2", "close-out-2"], None)):
+            with self.subTest(name=name):
+                out = join_run(replies=replies)
+                result, calls = out["result"], out["calls"]
+                order = land_labels(calls)
+                self.assertEqual(order[order.index("train-merge-1") + 1:], tail)
+                self.assertEqual((ready_during(out, 2), join_logs(out)), ("land-pr-1", [JOIN_LOG]))
+                self.assertEqual(waited_acquires(calls), ["land-pr-1"])
+                if release:
+                    self.assertEqual(lock_releases(calls), [release])
+                    self.assertEqual(land_release_shas(calls), [SHA])
+                else:
+                    self.assertEqual(lock_releases(calls), ["close-out-1", "land-unlock-1"])
+                    self.assertEqual(land_release_shas(calls), [SHA, SHA])
+                self.assertEqual(lock_releases(calls, 2), [])
+                if tail[-1] == "train-sweep-2":
+                    detail = "stub agent train-merge-1 threw" if name == "merge threw, car open" else "train-merge-1 returned nothing"
+                    self.assertEqual([row(result, n) for n in (1, 2)], [stopped(1, detail), stopped(2, detail)])
+                    self.assertEqual(result["relaunch"]["issues"], [1, 2])
+                elif release:
+                    self.assertEqual([row(result, n)["outcome"] for n in (1, 2)], ["landed", "landed"])
+
+    def test_a_lost_lock_before_the_joined_merge_ends_every_member_land_contended(self):
+        out = join_run(replies={"train-merge-1": merge_reply({}, lock="acquired", merged=False)})
+        result, calls = out["result"], out["calls"]
+        self.assertEqual((ready_during(out, 2), join_logs(out)), ("land-pr-1", [JOIN_LOG]))
+        order = land_labels(calls)
+        self.assertEqual(order[order.index("train-merge-1") + 1:], ["land-unlock-1", "train-sweep-2"])
+        self.assertEqual([row(result, n)["outcome"] for n in (1, 2)], ["land-contended", "land-contended"])
+        self.assertEqual(land_release_shas(calls), [SHA])
+
+    def test_a_dead_first_landing_step_before_the_handover_leaves_the_joiner_to_its_own_drain(self):
+        out = join_run(replies={"land-pr-1": None})
+        result, calls = out["result"], out["calls"]
+        self.assertEqual((ready_during(out, 2), join_logs(out)), ("land-pr-1", []))
+        self.assertEqual(train_labels(calls), [])
+        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "pr"))
+        # The lost land-pr may have taken the lock: its landing releases the ready head, and issue 2 lands by itself.
+        self.assertEqual(lock_releases(calls), ["land-unlock-1"])
+        self.assertEqual(of(land_labels_calls(calls), 2), ["land-pr-2", "land-merge-2", "close-out-2"])
+        self.assertEqual(row(result, 2), {"issue": 2, "outcome": "landed", "pr": 42})
+
+
+def land_labels_calls(calls):
+    return [c for c in calls if c["label"].startswith(("land-", "close-out-"))]
