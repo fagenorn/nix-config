@@ -59,6 +59,7 @@ let
     "release" = "release.release";
     "resolve-project" = "project_contract.resolve_project";
     "skill-lint" = "skill_lint";
+    "sprint" = "console.sprint";
     "verified-tree" = "verification.verified_tree";
     "verify-pending" = "verification.verify_pending";
   };

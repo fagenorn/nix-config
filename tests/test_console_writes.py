@@ -128,7 +128,8 @@ class WriteRouteTest(Case):
     def test_every_page_write_route_is_guarded(self):
         svc = self.start()
         self.assertEqual(service.PAGE_WRITES,
-                         {"/api/looked", "/api/answer", "/api/check-answer", "/api/goal", "/api/withdraw"})
+                         {"/api/looked", "/api/answer", "/api/check-answer", "/api/goal",
+                          "/api/withdraw", "/api/approve", "/api/reply"})
         for path in service.PAGE_WRITES:
             with self.subTest(path=path):
                 status, _, body = support.post_page(
