@@ -1,7 +1,7 @@
 export const meta = {
   name: 'deliver-batch',
   description: 'Deliver a batch of tracker issues in one repository: intake, just-in-time claims, deliver-standard children (a standard-lane issue planned ahead in plan mode, then resumed in ready mode), a serial land queue under the cross-host land lock, one table',
-  whenToUse: 'A batch of issues of one repository the user asked to deliver together; args {repo_root, batch_id (<host>-<yyyymmdd-hhmm>), child_script (the absolute path of deliver-standard.js), issues (numbers) or label (every open issue carrying it), decisions? (owner answers by issue), conts? (a previous run forwarded child continuations), amend? ({"<issue>": a list of {file, find, replace} edits of that issue\'s plan files, only for an issue in conts: sent with its cont to the first child call of the run, and kept in the relaunch with that cont}), unattended? (true only for a run no session watches: its questions are then posted as box prompts), review_sizing? (true passes review_sizing to every deliver-standard child: sized Claude plan and final reviews), train? (true lands up to three ready issues that wait behind a busy land queue through one cumulative car pull request, a landing train; false or absent lands every issue serially), clerk_model? (sonnet, the default, or haiku: the model of the status clerk steps, here and in every deliver-standard child; the setup steps and every step that emits a lifecycle verb stay on sonnet)}; returns one table and, when any issue is unfinished, the relaunch args for a new run',
+  whenToUse: 'A batch of issues of one repository the user asked to deliver together; args {repo_root, batch_id (<host>-<yyyymmdd-hhmm>), child_script (the absolute path of the deliver-standard.js copy program-copies placed), issues (numbers) or label (every open issue carrying it), decisions? (owner answers by issue), conts? (a previous run forwarded child continuations), amend? ({"<issue>": a list of {file, find, replace} edits of that issue\'s plan files, only for an issue in conts: sent with its cont to the first child call of the run, and kept in the relaunch with that cont}), unattended? (true only for a run no session watches: its questions are then posted as box prompts), review_sizing? (true passes review_sizing to every deliver-standard child: sized Claude plan and final reviews), train? (true lands up to three ready issues that wait behind a busy land queue through one cumulative car pull request, a landing train; false or absent lands every issue serially), clerk_model? (sonnet, the default, or haiku: the model of the status clerk steps, here and in every deliver-standard child; the setup steps and every step that emits a lifecycle verb stay on sonnet)}; returns one table and, when any issue is unfinished, the relaunch args for a new run',
   phases: [
     { title: 'Setup', detail: 'resolve the project contract once' },
     { title: 'Intake', detail: 'read every issue\'s facts and lane behind one barrier, decide eligibility in code' },
@@ -12,7 +12,7 @@ export const meta = {
 
 // Args: repo_root (the checkout), batch_id (the caller-supplied id; the claim holder is
 // <host>/<batch_id>, so a relaunch with the same batch_id re-adopts its own claims), child_script
-// (the absolute path of deliver-standard.js: this program has no filesystem access, D8), issues
+// (the absolute path of the deliver-standard.js copy program-copies placed: this program has no filesystem access, D8), issues
 // (positive integers, distinct) or label (every open issue carrying it; exactly one of the two),
 // decisions ({"<issue>": owner answer}), conts ({"<issue>": a previous run's forwarded child
 // continuation}, only for listed issues, D9; the relaunch keeps of each cont's setup only what a resume reads, see slimCont), unattended (boolean, default false: true only for a run
@@ -426,6 +426,20 @@ const rowReason = r => {
   if (!said.length && r.outcome !== 'stopped') return ''
   return oneLine([r.stage, said.join('; ')].filter(nonEmpty).join(': ') || 'no detail')
 }
+// #912: a thrown child call's reason is the error's first line and the child script, one line within REASON_MAX. A script path too long to leave
+// MSG_MIN characters for the message is cut from its front ("..." then its ending), so the file name stays.
+const THREW = 'child program could not be loaded or threw: '
+const MSG_MIN = 24
+const threwReason = e => {
+  const msg = e && typeof e.message === 'string' ? e.message : String(e)
+  const first = msg.split('\n')[0].replace(/\s+/g, ' ').trim() || 'no message'
+  const script = String(CHILD).replace(/\s+/g, ' ').trim()
+  const pathRoom = REASON_MAX - THREW.length - MSG_MIN - ' ()'.length
+  const shown = script.length > pathRoom ? `...${script.slice(-(pathRoom - 3))}` : script
+  const tail = ` (${shown})`
+  const room = REASON_MAX - THREW.length - tail.length
+  return `${THREW}${first.length > room ? `${first.slice(0, room - 3)}...` : first}${tail}`
+}
 // An issue this run never got to deliver: its row keeps the previous run's reason beside its own.
 const UNTRIED = ['not-admitted', 'blocked', 'waits-verification']
 const POST_MERGE = ['hold', 'close-out', 'code-unmet']
@@ -476,6 +490,16 @@ const IMPL_RETURN = 'Return start_head (git rev-parse HEAD before you change any
 const WHOLE = files => `run in full every test file among or covering ${files} (never a single test class) and any fast suite the project declares, not the declared verification; return tests: each command and its result`
 // The fix-commit scope, one line so deliver-standard.js carries it byte for byte: a fix agent once committed a lock file a tool had generated beside its fix.
 const COMMIT_SCOPE = 'Before committing, read git status in the worktree you commit in and stage by path only the files the fix itself changed or created; never run git add -A, git commit -a or git add on a directory (the dot included); a lock file, a generated file or an untracked file the fix did not need is left unstaged and named in notes.'
+// #907: the conflicted-sync wording, the same text in deliver-standard.js. The marker check runs before the merge is committed, when HEAD is still the
+// branch's own head: git diff --check HEAD compares the whole working tree with it, so it reads every line the merge brings in, in a file
+// resolved by hand as in one merged cleanly, staged or not (the plain form goes silent once a file is staged, --cached misses a later edit).
+// It also reports content the integration branch brought in (a setext or RST underline of seven =, a fixture with markers, whitespace), so the same
+// check runs against origin's head too: a line both report, by file and line number, is in neither parent, so it is a real leftover, wherever else
+// such a line stands. Removal is limited to those lines in hand-resolved files; markers_checked says both checks ran, whatever they reported.
+const MARKER_CHECK = (wt, int) => `run git -C ${wt} diff --check HEAD and git -C ${wt} diff --check origin/${int} before committing and remove each leftover conflict marker both report (same file and line) in a file you resolved by hand; every other line they report is content and stays`
+const MARKERS_UNCHECKED = ' The merge was not checked for leftover conflict markers: report any left in the files it changed.'
+const SYNC_FIX = (wt, mc, findings) => `A reviewer found defects in the conflict resolution of merge commit ${mc} (git -C ${wt} show --cc ${mc}): ${JSON.stringify(findings)}. Fix each real defect on top of the merge with a regression test (never redo or rewrite the merge), then commit; if a finding is wrong, commit nothing for it and say so with evidence in notes.`
+const SYNC_REREVIEW = (wt, mc, findings, fix, moved) => `Re-review these conflict-resolution findings against ${moved ? `the fix (git -C ${wt} diff ${fix.start_head}..${fix.commit}) made on top of` : 'the rebuttal (no new commit) of'} merge commit ${mc}: ${JSON.stringify(findings)}; notes: ${fix.notes}. ${moved ? '' : `Check each rebuttal against the code yourself (git -C ${wt} show --cc ${mc}); a finding the evidence does not refute is still unresolved. `}Report any still unresolved and any new Important or Critical defect. Do not edit anything.`
 const findingsOf = r => (r.findings || []).filter(f => f.severity !== 'minor')
 const RENEW_SCHEMA = { type: 'object', properties: { verdict: { type: 'string', enum: ['renewed', 'not_held', 'error'] }, by: { type: 'string' }, detail: { type: 'string' }, transient: { type: 'boolean' } }, required: ['verdict'] }
 const LOCK_SCHEMA = {
@@ -493,7 +517,7 @@ const LAND_CHECKS_SCHEMA = {
 const RECORD_SCHEMA = { type: 'object', properties: { ok: { type: 'boolean' }, head: { type: 'string' }, detail: { type: 'string' } }, required: ['ok'] }
 const LAND_SYNC_SCHEMA = {
   type: 'object',
-  properties: { status: { type: 'string', enum: ['current', 'done', 'blocked'] }, conflicted: { type: 'boolean' }, head: { type: 'string' }, merge_commit: { type: 'string' }, resolved_files: STRS, tests: STRS, notes: { type: 'string' } },
+  properties: { status: { type: 'string', enum: ['current', 'done', 'blocked'] }, conflicted: { type: 'boolean' }, head: { type: 'string' }, merge_commit: { type: 'string' }, resolved_files: STRS, markers_checked: { type: 'boolean' }, tests: STRS, notes: { type: 'string' } },
   required: ['status'],
 }
 const LAND_MERGE_SCHEMA = { type: 'object', properties: { merged: { type: 'boolean' }, behind: { type: 'boolean' }, merge_commit: { type: 'string' }, notes: { type: 'string' } }, required: ['merged'] }
@@ -656,7 +680,7 @@ ${RULES}`, `land-status-${n}-${c.record}`, { ...clerk, schema: STATUS_SCHEMA })
 2. Otherwise merge it: git -C ${W} merge origin/${INT}. A clean merge: answer status done, conflicted false, head (the full sha of the merge commit).
 3. ${second
       ? `This landing already resolved one conflict. If the merge conflicts, run git merge --abort inside ${W} and answer status blocked, conflicted true, with head (the full sha of HEAD) and notes. Do not resolve it.`
-      : `If the merge conflicts, resolve each conflict keeping both sides' intent, commit the merge, and ${WHOLE('the files the merge changed against its first parent')}; answer status done, conflicted true, with head (the full sha of the merge commit) and resolved_files. If you cannot resolve it safely, run git merge --abort inside ${W} and answer status blocked, conflicted true, with notes.`}
+      : `If the merge conflicts, resolve each conflict keeping both sides' intent, ${MARKER_CHECK(W, INT)}, commit the merge, and ${WHOLE('the files the merge changed against its first parent')}; answer status done, conflicted true, with head (the full sha of the merge commit), resolved_files and markers_checked (true when both checks ran). If you cannot resolve it safely, run git merge --abort inside ${W} and answer status blocked, conflicted true, with notes.`}
 ${pr ? `4. After a merge you completed, push the result: git -C ${W} push origin ${B}.` : '4. Do not push.'}
 ${RULES}`, label, { phase: 'Land', agentType: 'implementer', model: 'sonnet', schema: LAND_SYNC_SCHEMA })
     if (!sy) return out('stopped', { stage: 'land-sync', detail: `${label} returned nothing` })
@@ -666,7 +690,7 @@ ${RULES}`, label, { phase: 'Land', agentType: 'implementer', model: 'sonnet', sc
       if (!second) { c.conflicts++; return out('conflict', { detail: sy.notes }) }
       return await conflictOwner(sy.notes)
     }
-    const head = sy.head || sy.merge_commit || (sy.status === 'current' ? expected : null)
+    let head = sy.head || sy.merge_commit || (sy.status === 'current' ? expected : null)
     if (!head) return out('stopped', { stage: 'land-sync', detail: 'the resync named no head' })
     if (sy.status === 'current') {
       if (head !== expected) return out('stopped', { stage: 'head-moved', expected, head })
@@ -679,9 +703,33 @@ ${RULES}`, label, { phase: 'Land', agentType: 'implementer', model: 'sonnet', sc
       c.syncReview++
       const mc = sy.merge_commit || head
       const rv = await call(`Issue #${n} of ${SLUG}, worktree ${W}, branch ${B}.
-Review the conflict resolution in merge commit ${mc}: git -C ${W} show --cc ${mc} and the resolved files ${JSON.stringify(sy.resolved_files || [])}; the tests run: ${JSON.stringify(sy.tests || [])}. Report Important or Critical defects only: a dropped change from either side, a broken merge of intent, a resolved file whose tests were not run. Do not edit anything.
+Review the conflict resolution in merge commit ${mc}: git -C ${W} show --cc ${mc} and the resolved files ${JSON.stringify(sy.resolved_files || [])}; the tests run: ${JSON.stringify(sy.tests || [])}. Report Important or Critical defects only: a dropped change from either side, a broken merge of intent, a resolved file whose tests were not run.${sy.markers_checked === true ? '' : MARKERS_UNCHECKED} Do not edit anything.
 ${RULES}`, `land-sync-review-${n}-${c.syncReview}`, { agentType: 'reviewer', schema: FINDINGS })
-      if (!rv || findingsOf(rv).length) return out('conflict', { review: rv })
+      if (!rv) return out('conflict', { review: rv })
+      const found = findingsOf(rv)
+      if (found.length) {
+        // #907: one fix round, at most one per landing (a landing reviews one conflicted merge; a second conflict goes to the owner above). It is
+        // no resync, so it spends neither MAX_SYNCS nor MERGE_REFUSAL_RETRIES. The lock stays held at the head it had before this resync through
+        // the merge, its review, the fix and the re-review: none of them moves it, and a row returned here is released by the wrapper at that sha.
+        // Only a fix the re-review passes is recorded: advance() below moves the lock to it and waits for its checks. The lock is unchanged
+        // meanwhile, so a waiter that watched it for 45 minutes may take it over; the move is then refused and the row ends land-contended.
+        const fix = await call(`Issue #${n} of ${SLUG}, worktree ${W}, branch ${B}.
+${SYNC_FIX(W, mc, found)} Then push (git -C ${W} push origin ${B}); before pushing, ${WHOLE('the files you changed')}. ${COMMIT_SCOPE} ${IMPL_RETURN}
+${RULES}`, `land-sync-fix-${n}-${c.syncReview}`, { agentType: 'implementer', model: 'sonnet', schema: IMPL })
+        // As shipFix in deliver-standard.js: the fix starts at the reviewed merge, no commit is accepted only as a rebuttal with evidence, and a
+        // full reviewer re-reviews either. A conflict row from here on names the fix reply: its commit is pushed and unaccepted.
+        const tried = fix ? { fix: { commit: fix.commit, notes: fix.notes } } : {}
+        const moved = !!fix && !sameSha(fix.commit, head)
+        if (!fix || fix.status !== 'done' || !fix.commit || !sameSha(fix.start_head, head) || (!moved && !nonEmpty(fix.notes))) {
+          return out('conflict', { review: rv, detail: 'the sync fix round did not finish', ...tried })
+        }
+        const rr = await call(`Issue #${n} of ${SLUG}, worktree ${W}, branch ${B}.
+${SYNC_REREVIEW(W, mc, found, fix, moved)}
+${RULES}`, `land-sync-rereview-${n}-${c.syncReview}`, { agentType: 'reviewer', schema: FINDINGS })
+        if (!rr) return out('conflict', { review: rv, detail: 'the sync re-review returned nothing', ...tried })
+        if (findingsOf(rr).length) return out('conflict', { review: { ...rr, findings: findingsOf(rr) }, sync_review: rv, ...tried })
+        if (moved) head = fix.commit
+      }
     }
     if (head !== expected) {
       expected = head
@@ -1351,9 +1399,20 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
     }
 
     let r = null
+    let threw = ''
+    // #912: a thrown call logs its error whole and keeps its reason for the row; it reads laneName when called.
+    const child = async mode => {
+      try {
+        return amended(n, await workflow({ scriptPath: CHILD }, childArgs(n, laneName, mode)))
+      } catch (e) {
+        log(`#${n}: child-${n} threw: ${String((e && (e.stack || e.message)) || e)}`)
+        threw = threwReason(e)
+        return null
+      }
+    }
     try {
       if (ahead) {
-        try { r = amended(n, await workflow({ scriptPath: CHILD }, childArgs(n, laneName, 'plan'))) } catch (e) { r = null }
+        r = await child('plan')
         if (r && r.stage === 'planned' && isObj(r.cont) && !terminalChild(r)) {
           CONTS[n] = r.cont
           if (breaker) { rows[n] = { issue: n, outcome: 'not-admitted', stage: 'planned' }; return }
@@ -1361,18 +1420,18 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
           PLAN.leave()
           held = RUN
           if (breaker) { rows[n] = { issue: n, outcome: 'not-admitted', stage: 'planned' }; return }
-          try { r = amended(n, await workflow({ scriptPath: CHILD }, childArgs(n, laneName, 'ready'))) } catch (e) { r = null }
+          r = await child('ready')
         }
         // D9: a live stop with no cont makes the forwarded or planned cont obsolete (terminalChild(null) is true: a dead child keeps it).
         if (!terminalChild(r) && !r.cont) delete CONTS[n]
       } else {
-        try { r = amended(n, await workflow({ scriptPath: CHILD }, childArgs(n, laneName, 'ready'))) } catch (e) { r = null }
+        r = await child('ready')
         if (r && r.stage === 'ineligible' && !terminalChild(r)) {
           // The direct lane rejected the issue: its cont would repeat the rejected attempt, so drop it and rerun once in the standard lane (setup re-adopts the worktree and the claim).
           delete CONTS[n]
           laneName = 'standard'
           rows[n] = { issue: n, outcome: 'eligible', lane: laneName }
-          try { r = amended(n, await workflow({ scriptPath: CHILD }, childArgs(n, laneName, 'ready'))) } catch (e) { r = null }
+          r = await child('ready')
         }
       }
       if (terminalChild(r)) trip(`child-${n}`)
@@ -1380,7 +1439,7 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
       release()
     }
 
-    if (r === null || r === undefined) { rows[n] = { issue: n, outcome: 'stopped', detail: `child-${n} returned nothing` }; return }
+    if (r === null || r === undefined) { rows[n] = { issue: n, outcome: 'stopped', detail: threw || `child-${n} returned nothing` }; return }
     if (r.cont) CONTS[n] = r.cont
     if (terminalChild(r)) { rows[n] = { issue: n, outcome: 'stopped', stage: r.stage, dead_agents: r.dead_agents, ...stopDetail(r) }; return }
     if (r.stage === 'done') {

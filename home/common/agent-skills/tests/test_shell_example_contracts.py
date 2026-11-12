@@ -47,7 +47,7 @@ COMMAND_VOCABULARY = frozenset({
     "darwin-rebuild", "devenv", "diff", "diff-scope", "docker", "dotnet",
     "echo", "env", "eval", "export", "find", "gh", "git", "glab", "go",
     "grep", "head", "jq", "just", "kubectl", "ls", "make", "mkdir", "mktemp",
-    "mv", "nix", "nixos-rebuild", "node", "npm", "pnpm", "printf", "pytest",
+    "mv", "nix", "nixos-rebuild", "node", "npm", "pnpm", "printf", "program-copies", "pytest",
     "python3", "railway", "release", "resolve-project", "rg", "rm",
     "sed", "sh", "sleep", "sops", "sort", "source", "ssh",
     "tail", "tar", "tee", "terraform", "test", "timeout",

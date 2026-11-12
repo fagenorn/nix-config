@@ -840,6 +840,16 @@ const WHOLE = files => `run in full every test file among or covering ${files} (
 const FIX_TESTS = `Before returning, ${WHOLE('the files you changed')}. ${FMT}`
 // A fix agent once committed a lock file a tool had generated beside its fix; every fix prompt carries this.
 const COMMIT_SCOPE = 'Before committing, read git status in the worktree you commit in and stage by path only the files the fix itself changed or created; never run git add -A, git commit -a or git add on a directory (the dot included); a lock file, a generated file or an untracked file the fix did not need is left unstaged and named in notes.'
+// #907: the conflicted-sync wording, the same text in deliver-batch.js. The marker check runs before the merge is committed, when HEAD is still the
+// branch's own head: git diff --check HEAD compares the whole working tree with it, so it reads every line the merge brings in, in a file
+// resolved by hand as in one merged cleanly, staged or not (the plain form goes silent once a file is staged, --cached misses a later edit).
+// It also reports content the integration branch brought in (a setext or RST underline of seven =, a fixture with markers, whitespace), so the same
+// check runs against origin's head too: a line both report, by file and line number, is in neither parent, so it is a real leftover, wherever else
+// such a line stands. Removal is limited to those lines in hand-resolved files; markers_checked says both checks ran, whatever they reported.
+const MARKER_CHECK = (wt, int) => `run git -C ${wt} diff --check HEAD and git -C ${wt} diff --check origin/${int} before committing and remove each leftover conflict marker both report (same file and line) in a file you resolved by hand; every other line they report is content and stays`
+const MARKERS_UNCHECKED = ' The merge was not checked for leftover conflict markers: report any left in the files it changed.'
+const SYNC_FIX = (wt, mc, findings) => `A reviewer found defects in the conflict resolution of merge commit ${mc} (git -C ${wt} show --cc ${mc}): ${JSON.stringify(findings)}. Fix each real defect on top of the merge with a regression test (never redo or rewrite the merge), then commit; if a finding is wrong, commit nothing for it and say so with evidence in notes.`
+const SYNC_REREVIEW = (wt, mc, findings, fix, moved) => `Re-review these conflict-resolution findings against ${moved ? `the fix (git -C ${wt} diff ${fix.start_head}..${fix.commit}) made on top of` : 'the rebuttal (no new commit) of'} merge commit ${mc}: ${JSON.stringify(findings)}; notes: ${fix.notes}. ${moved ? '' : `Check each rebuttal against the code yourself (git -C ${wt} show --cc ${mc}); a finding the evidence does not refute is still unresolved. `}Report any still unresolved and any new Important or Critical defect. Do not edit anything.`
 const CX_USE = 'Use the codex-collaboration skill (invoke it with the Skill tool) to run that Codex'
 const CX_WAIT = 'this step may dispatch the Codex reviewer that skill uses, and must wait for its result in this turn.'
 const CX_NONE = 'If Codex cannot be run, return available false with the reason in raw_summary; never substitute your own review.'
@@ -1394,7 +1404,7 @@ const MERGE_SCHEMA = { type: 'object', properties: { merged: { type: 'boolean' }
 const CHECKS = { type: 'object', properties: { state: { type: 'string', enum: ['passed', 'failed', 'pending', 'behind'] }, head: FULL_SHA, required: STRS, passed: STRS, failing: STRS, pending: STRS, details: { type: 'string' } }, required: ['state', 'head'] }
 const PUSH_SCHEMA = { type: 'object', properties: { head: FULL_SHA, notes: { type: 'string' } }, required: ['head'] }
 const CHECKS_WAIT = pr => `for PR #${pr} to be mergeable. 1. git -C ${W} fetch origin; if the local branch is ahead of origin/${setup.branch}, push it. head is git -C ${W} rev-parse HEAD (full sha). 2. If origin/${INT} is not an ancestor of HEAD (git -C ${W} merge-base --is-ancestor origin/${INT} HEAD fails), return state behind at once. 3. Otherwise wait in this turn until every check on head has completed, required or not. List every check with gh pr checks ${pr} --repo ${SLUG} --json name,bucket,link (never --required) and wait with gh pr checks ${pr} --repo ${SLUG} --watch (Bash timeout up to 60 minutes; rerun while any is pending). It can return early and a list can be partial: never treat a partial list as green, and read the list again before you answer. Bucket pass has passed; fail or cancel has failed; pending is still running; skipping never started and is ignored. Report as required the required check names from gh api repos/${SLUG}/rules/branches/${INT} (its required_status_checks rules) or else classic branch protection, none when neither answers. Return passed only when no check on head is pending, failing or cancelled, with required and passed (the names passing at head). Return failed when any check failed, required or not, with failing (every failing or cancelled name) and details (for each failing check, the last 60 lines of its failed log: gh run view <run id> --repo ${SLUG} --log-failed). Return pending with pending (the names still running) only when the wait ran out and no check failed.`
-const SYNC = { type: 'object', properties: { status: { type: 'string', enum: ['done', 'blocked'] }, conflicted: { type: 'boolean' }, merge_commit: FULL_SHA, resolved_files: STRS, tests: STRS, notes: { type: 'string' } }, required: ['status', 'conflicted', 'notes'] }
+const SYNC = { type: 'object', properties: { status: { type: 'string', enum: ['done', 'blocked'] }, conflicted: { type: 'boolean' }, merge_commit: FULL_SHA, resolved_files: STRS, markers_checked: { type: 'boolean' }, tests: STRS, notes: { type: 'string' } }, required: ['status', 'conflicted', 'notes'] }
 const LOCK_SCHEMA = {
   type: 'object',
   properties: { verdict: { type: 'string', enum: ['acquired', 'already_held', 'moved', 'held_by', 'lost_to', 'land-contended', 'error'] }, lock_sha: { type: 'string' }, pr: { type: 'integer' }, by: { type: 'string' }, detail: { type: 'string' } },
@@ -1600,13 +1610,13 @@ ${RULES}`, { label: 'merge', phase: 'Ship', agentType: 'clerk', model: DEFAULT_C
     raced = false
     syncs++
     const sy = await call(`${CTX}
-The branch is behind ${INT}. Merge origin/${INT} into it in the worktree (git -C ${W} merge origin/${INT}). If it conflicts, resolve each conflict keeping both sides' intent, commit the merge, and ${WHOLE('the files the merge changed against its first parent')}. ${FMT} Do not push. Return conflicted, merge_commit (full sha) and resolved_files; status blocked with notes if you cannot resolve it safely.
+The branch is behind ${INT}. Merge origin/${INT} into it in the worktree (git -C ${W} merge origin/${INT}). If it conflicts, resolve each conflict keeping both sides' intent, ${MARKER_CHECK(W, INT)}, commit the merge, and ${WHOLE('the files the merge changed against its first parent')}. ${FMT} Do not push. Return conflicted, merge_commit (full sha), resolved_files and markers_checked (true when both checks ran); status blocked with notes if you cannot resolve it safely.
 ${RULES}`, { label: `sync-${syncs}`, phase: 'Ship', agentType: 'implementer', model: 'sonnet', schema: SYNC })
     if (!sy || sy.status !== 'done' || !present(sy.merge_commit)) return stop('sync', { pr: PR, sync: sy })
     expected = sy.merge_commit
     if (sy.conflicted) {
       const sr = await call(`${CTX}
-Review the conflict resolution in merge commit ${sy.merge_commit}: git -C ${W} show --cc ${sy.merge_commit} and the resolved files ${JSON.stringify(sy.resolved_files || [])}; the tests run: ${JSON.stringify(sy.tests || [])}. Report Important or Critical defects only: a dropped change from either side, a broken merge of intent, a resolved file whose tests were not run.`, { label: `sync-review-${syncs}`, phase: 'Ship', agentType: 'reviewer', schema: FINDINGS })
+Review the conflict resolution in merge commit ${sy.merge_commit}: git -C ${W} show --cc ${sy.merge_commit} and the resolved files ${JSON.stringify(sy.resolved_files || [])}; the tests run: ${JSON.stringify(sy.tests || [])}. Report Important or Critical defects only: a dropped change from either side, a broken merge of intent, a resolved file whose tests were not run.${sy.markers_checked === true ? '' : MARKERS_UNCHECKED}`, { label: `sync-review-${syncs}`, phase: 'Ship', agentType: 'reviewer', schema: FINDINGS })
       if (!sr) return stop('sync-review', { pr: PR, review: sr })
       if (findingsOf(sr).length) {
         if (syncFixes >= 1) return stop('sync-review', { pr: PR, review: sr })
@@ -1614,8 +1624,8 @@ Review the conflict resolution in merge commit ${sy.merge_commit}: git -C ${W} s
         const w = await shipFix({
           label: `fix-sync-${syncs}`, reviewLabel: `fix-sync-review-${syncs}`,
           rebuttal: true,
-          fixPrompt: `${CTX}\nA reviewer found defects in the conflict resolution of merge commit ${sy.merge_commit} (git -C ${W} show --cc ${sy.merge_commit}): ${JSON.stringify(findingsOf(sr))}. Fix each real defect on top of the merge with a regression test (never redo or rewrite the merge), then commit; if a finding is wrong, commit nothing for it and say so with evidence in notes. Do not push. ${FIX_TESTS} ${COMMIT_SCOPE} ${IMPL_RETURN}\n${RULES}`,
-          reviewPrompt: (fix, moved) => `${CTX}\nRe-review these conflict-resolution findings against ${moved ? `the fix (${span(fix)}) made on top of` : 'the rebuttal (no new commit) of'} merge commit ${sy.merge_commit}: ${JSON.stringify(findingsOf(sr))}; notes: ${fix.notes}. ${moved ? '' : `Check each rebuttal against the code yourself (git -C ${W} show --cc ${sy.merge_commit}); a finding the evidence does not refute is still unresolved. `}Report any still unresolved and any new Important or Critical defect. Do not edit anything.`,
+          fixPrompt: `${CTX}\n${SYNC_FIX(W, sy.merge_commit, findingsOf(sr))} Do not push. ${FIX_TESTS} ${COMMIT_SCOPE} ${IMPL_RETURN}\n${RULES}`,
+          reviewPrompt: (fix, moved) => `${CTX}\n${SYNC_REREVIEW(W, sy.merge_commit, findingsOf(sr), fix, moved)}`,
         })
         if (!w.ok) return stop('sync-fix', { pr: PR, review: sr, fix: w.fix })
         if (!w.review || findingsOf(w.review).length) return stop('sync-review', { pr: PR, review: w.review, sync_review: sr, fix: w.fix })
