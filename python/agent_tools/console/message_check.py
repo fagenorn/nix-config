@@ -49,12 +49,13 @@ A sprint entry with no `messages` member is 75 `not_deployed`, after the finish 
 The finish (any met or not met outcome, and the `not_deployed` one) runs in this order. First it
 stops the test manager: the registry is read fresh and each listed session named
 `manager.session_name(project, sprint_id)` is stopped with `claude-account run stop <id>` under
-its own profile (`default_stop`); a manager not listed needs no stop. The stop comes before the
+its own profile (`manager.stop_session`, which gives the stop the first eight characters of the
+session id, the only id it accepts); a manager not listed needs no stop. The stop comes before the
 withdrawal because a withdrawal only appends `goal.withdrawn` and drops the secret: it does not
 end the manager's background session, which would stay running and spend quota. A failed stop
 keeps the outcome in the state file and the run is 75 `{"status": "waiting", "reason": "the test
-manager is not stopped yet", "sprint_id"}`; the next run retries from the stop. Second it
-withdraws the sprint (204 or 409 is done); otherwise the outcome stays in the state file and the
+manager is not stopped yet: <the stop's one-line reason>", "sprint_id"}`; the next run retries from
+the stop. Second it withdraws the sprint (204 or 409 is done); otherwise the outcome stays in the state file and the
 run is 75 `waiting` (`the test sprint is not withdrawn yet`) and the next run retries from the
 stop. Third it writes the result file `{"status": "met" | "not_met", "reason"?, "read_seconds":
 int | null}`, removes the state file and prints the outcome: met `{"read_seconds", "status"}`,
@@ -72,15 +73,12 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
-import subprocess
 import sys
-import tempfile
 import time
 from collections.abc import Callable
 from pathlib import Path
 
-from agent_tools.console import manager, sessions
+from agent_tools.console import manager
 from agent_tools.console.manager_check import (
     DEFAULT_URL,
     NOT_YET,
@@ -101,35 +99,11 @@ DEFAULT_DEADLINE = 300
 POLL_SECONDS = 10
 READ_POLL_SECONDS = 2
 RETURN_SECONDS = 60
-STOP_TIMEOUT = 60
 GOAL = ("[verify #889] check that an approval reaches the manager: brief one slice, and once you "
         "have read the approval answer it with sprint reply and end your turn; cut no issues and "
         "deliver nothing; withdraw me")
 NOT_STOPPED_TEXT = "the test manager is not stopped yet"
 NOT_WITHDRAWN_TEXT = "the test sprint is not withdrawn yet"
-
-
-class StopFailed(Exception):
-    """A test manager's background session could not be stopped; `str` is the one-line reason."""
-
-
-def default_stop(session_id: str, profile: str, *, run=subprocess.run,
-                 environ=os.environ) -> None:
-    argv = ["claude-account", "run", "stop", session_id]
-    with tempfile.TemporaryFile() as err:
-        try:
-            result = run(argv, env=manager.client_environment(profile, environ),
-                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err,
-                         timeout=STOP_TIMEOUT, check=False)
-        except FileNotFoundError:
-            raise StopFailed("claude-account is not installed") from None
-        except subprocess.TimeoutExpired:
-            raise StopFailed(f"the stop did not return within {STOP_TIMEOUT} s") from None
-        err.seek(0)
-        stderr = err.read().decode("utf-8", errors="replace")
-    if result.returncode != 0:
-        lines = [line.strip() for line in stderr.splitlines() if line.strip()]
-        raise StopFailed(lines[-1] if lines else f"the stop exited {result.returncode}")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -184,10 +158,7 @@ def _start(args, registry, stop, clock, sleep) -> int:
             sleep(5)
 
     def stop_manager() -> None:
-        name = manager.session_name(project, state["sprint_id"])
-        for observation in registry().values():
-            if observation.name == name:
-                stop(observation.session_id, observation.profile or sessions.DEFAULT_PROFILE)
+        manager.stop_listed([manager.session_name(project, state["sprint_id"])], registry, stop)
 
     def settle(code: int, reason: str | None, seconds: int | None) -> int:
         """Stop the test manager, withdraw the sprint, then record and print the outcome."""
@@ -196,9 +167,10 @@ def _start(args, registry, stop, clock, sleep) -> int:
         if sprint_id is not None:
             try:
                 stop_manager()
-            except Exception:
+            except Exception as error:
                 checkpoint(outcome=outcome)
-                _print({"status": "waiting", "reason": NOT_STOPPED_TEXT, "sprint_id": sprint_id})
+                waiting = f"{NOT_STOPPED_TEXT}: {error}" if str(error) else NOT_STOPPED_TEXT
+                _print({"status": "waiting", "reason": waiting, "sprint_id": sprint_id})
                 return NOT_YET
             status, _ = console.post("/api/withdraw",
                                      {"project_id": project, "sprint_id": sprint_id})
@@ -334,7 +306,7 @@ def _timing(args) -> int:
 
 def main(argv: list[str] | None = None, *,
          registry: Callable[[], dict] = default_registry,
-         stop: Callable[[str, str], None] = default_stop,
+         stop: Callable[[str, str], None] = manager.stop_session,
          clock: Callable[[], float] = time.time,
          sleep: Callable[[float], None] = time.sleep) -> int:
     args = build_parser().parse_args(argv)

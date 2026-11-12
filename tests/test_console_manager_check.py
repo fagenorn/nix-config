@@ -15,6 +15,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 from agent_tools.console import manager_check
+from agent_tools.console.manager import StopFailed
 from agent_tools.console.manager_check import GOALS
 from agent_tools.console.sessions import Observation
 
@@ -118,6 +119,14 @@ class ManagerCheckTest(unittest.TestCase):
         self.token_file = self.dir / "token"
         self.token_file.write_text("tok\n")
         self.restarts = []
+        self.stops = []
+        self.failing_stops = 0
+
+    def stop(self, session_id, profile):
+        self.stops.append((session_id, profile, len(self.posted("/api/withdraw"))))
+        if self.failing_stops:
+            self.failing_stops -= 1
+            raise StopFailed(f"No job matching {session_id}")
 
     def start(self, views, *, resume=False, at=T0, registry=None, budget="30", url=None,
               withdraws=()):
@@ -135,7 +144,7 @@ class ManagerCheckTest(unittest.TestCase):
                 ["start", "--project", "owner/p01", "--url", url, "--state-file",
                  str(self.state_file), "--result-file", str(self.result_file),
                  "--token-file", str(self.token_file), "--budget", budget],
-                restart=lambda: self.restarts.append(1), registry=self.registry,
+                restart=lambda: self.restarts.append(1), registry=self.registry, stop=self.stop,
                 clock=self.time.clock, sleep=self.time.sleep)
         return code, json.loads(out.getvalue())
 
@@ -222,6 +231,36 @@ class ManagerCheckTest(unittest.TestCase):
         self.assertEqual(len(self.posted("/api/withdraw")), 2)
         self.assertFalse(self.state_file.exists())
         self.assertEqual(self.result(), {A: 120, B: 180})
+        self.assertEqual(self.stops, [(A, "default", 0), (B, "default", 0)])
+
+    def test_a_failed_stop_keeps_the_sprints_open_until_every_manager_is_stopped(self):
+        briefs = view(both(), [brief(A, "10:02:00"), brief(B, "10:03:00")])
+        registry = Registry({1: obs(A), 2: obs(B)})
+        self.failing_stops = 1
+        code, out = self.start([briefs], resume=True, registry=registry)
+        self.assertEqual((code, out), (75, {
+            "reason": "the test managers are not stopped yet: No job matching " + A,
+            "sprints": [{"sprint_id": A}, {"sprint_id": B}], "status": "waiting"}))
+        self.assertEqual([stop[:2] for stop in self.stops], [(A, "default"), (B, "default")])
+        self.assertEqual(self.posted("/api/withdraw"), [])
+        self.assertTrue(self.state_file.exists())
+        self.assertFalse(self.result_file.exists())
+        self.stops.clear()
+        code, out = self.start([briefs], url=self.url, registry=registry)
+        self.assertEqual((code, out["status"], out["sessions"]),
+                         (0, "met", [NAMES[A], NAMES[B]]))
+        self.assertEqual(self.stops, [(A, "default", 0), (B, "default", 0)])
+        self.assertEqual(len(self.posted("/api/withdraw")), 2)
+        self.assertEqual(len(self.restarts), 1)
+        self.assertFalse(self.state_file.exists())
+        self.assertEqual(self.result(), {A: 120, B: 180})
+
+    def test_a_not_met_finish_stops_the_listed_managers_before_it_withdraws(self):
+        code, out = self.start([view(both(manager_state="failed", manager_text="x"))],
+                               resume=True, registry=Registry({1: obs(A)}))
+        self.assertEqual((code, out["reason"]), (1, "x"))
+        self.assertEqual(self.stops, [(A, "default", 0)])
+        self.assertEqual(len(self.posted("/api/withdraw")), 2)
 
     def test_a_manager_shown_by_the_console_but_not_running_is_not_met(self):
         shown = [sprint(A, GOALS[0], sessions=[{}]), sprint(B, GOALS[1], sessions=[{}])]
@@ -231,7 +270,8 @@ class ManagerCheckTest(unittest.TestCase):
         self.assertEqual((code, out["reason"]),
                          (1, "the manager is not running after the restart"))
         self.assertEqual(len(self.posted("/api/withdraw")), 2)
-        self.assertEqual(registry.calls, 3)
+        self.assertEqual(registry.calls, 4)
+        self.assertEqual(self.stops, [(A, "default", 0)])
 
     def test_a_second_brief_version_is_not_met(self):
         views = [view(both(), [brief(A, "10:02:00", version=2)]),

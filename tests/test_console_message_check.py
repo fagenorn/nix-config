@@ -13,10 +13,10 @@ import unittest
 from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from types import SimpleNamespace
 
 from agent_tools.console import manager, message_check, sprints
-from agent_tools.console.message_check import GOAL, StopFailed
+from agent_tools.console.manager import StopFailed
+from agent_tools.console.message_check import GOAL
 from agent_tools.console.sessions import Observation
 from tests.test_console_manager_check import Registry, Time
 
@@ -271,7 +271,7 @@ class MessageCheckTest(unittest.TestCase):
         code, out = self.run_check(self.stated_views(
             view(messages=[approval("read", later(40))])))
         self.assertEqual((code, out), (75, {
-            "reason": "the test manager is not stopped yet", "sprint_id": SID,
+            "reason": "the test manager is not stopped yet: the stop failed", "sprint_id": SID,
             "status": "waiting"}))
         self.assertEqual(self.posts("/api/withdraw"), [])
         self.assertTrue(self.state_file.exists())
@@ -313,36 +313,6 @@ class MessageCheckTest(unittest.TestCase):
         self.assertIn("cut no issues and deliver nothing", GOAL)
         self.assertIn("withdraw me", GOAL)
         self.assertEqual(sprints.checked_goal(GOAL), GOAL)
-
-    def test_the_default_stop_runs_claude_stop_under_the_managers_profile(self):
-        calls = []
-
-        def run(argv, **kwargs):
-            calls.append((argv, kwargs))
-            return SimpleNamespace(returncode=0)
-
-        environ = {"HOME": "/home/u", "PATH": "/bin", "CONSOLE_SPRINT_SECRET": "s"}
-        message_check.default_stop("s-1", "work", run=run, environ=environ)
-        argv, kwargs = calls[0]
-        self.assertEqual(argv, ["claude-account", "run", "stop", "s-1"])
-        self.assertEqual(kwargs["env"]["CLAUDE_ACCOUNT"], "work")
-        self.assertNotIn("CONSOLE_SPRINT_SECRET", kwargs["env"])
-        self.assertIs(kwargs["stdin"], subprocess.DEVNULL)
-        self.assertEqual(kwargs["timeout"], 60)
-
-        def failing(argv, **kwargs):
-            kwargs["stderr"].write(b"x\n")
-            return SimpleNamespace(returncode=1)
-
-        def missing(argv, **kwargs):
-            raise FileNotFoundError
-
-        for stand_in, reason in ((failing, "x"),
-                                 (missing, "claude-account is not installed")):
-            with self.subTest(reason):
-                with self.assertRaises(StopFailed) as raised:
-                    message_check.default_stop("s-1", "work", run=stand_in, environ=environ)
-                self.assertEqual(str(raised.exception), reason)
 
     def test_the_wrapper_is_executable_in_the_index(self):
         listed = subprocess.run(["git", "ls-files", "-s", WRAPPER], cwd=ROOT,
