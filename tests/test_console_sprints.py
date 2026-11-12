@@ -684,5 +684,204 @@ class SecretTest(unittest.TestCase):
         self.assertNotEqual(first, second)
 
 
+def messaged(seq, sprint_id, text):
+    return Event(seq, at(seq), event_log.SPRINT_MESSAGED, "owner/p00",
+                 {"sprint_id": sprint_id, "goal": "one", "text": text})
+
+
+def read_through(seq, sprint_id, through):
+    return Event(seq, at(seq), event_log.SPRINT_READ, "owner/p00",
+                 {"sprint_id": sprint_id, "through": through})
+
+
+def answered(seq, sprint_id, message, reply):
+    return Event(seq, at(seq), event_log.SPRINT_ANSWERED, "owner/p00",
+                 {"sprint_id": sprint_id, "message": message, "reply": reply})
+
+
+def nudged(seq, sprint_id, through, ok):
+    payload = {"sprint_id": sprint_id, "through": through, "route": "relay", "ok": ok}
+    if not ok:
+        payload["reason"] = "no route"
+    return Event(seq, at(seq), event_log.SPRINT_NUDGED, "owner/p00", payload)
+
+
+def message_rows():
+    return [stated(1, "owner/p00", SID, "one"), sent(2, SID, 1, PARTS),
+            replied(3, SID, 1, "smaller slices"), sent(4, SID, 2, PARTS), approved(5, SID, 2),
+            messaged(6, SID, "leave the importer's schema alone")]
+
+
+def message_state_of(events):
+    return sprints.sprint_states(events)[SID]
+
+
+class MessageFoldTest(unittest.TestCase):
+    def test_an_approval_a_change_request_and_a_text_each_become_one_message_in_order(self):
+        state = message_state_of(message_rows())
+        self.assertEqual(
+            [(m.message_id, m.kind, m.version, m.text) for m in state.messages],
+            [(3, "changes", 1, "smaller slices"), (5, "approved", 2, None),
+             (6, "text", None, "leave the importer's schema alone")])
+        self.assertEqual([sprints.message_state(m) for m in state.messages],
+                         ["sent", "sent", "sent"])
+        self.assertEqual([m.at for m in state.messages], [at(3), at(5), at(6)])
+
+    def test_a_stale_or_repeated_decision_makes_no_message(self):
+        base = [stated(1, "owner/p00", SID, "one"), sent(2, SID, 1, PARTS),
+                sent(3, SID, 2, PARTS), approved(4, SID, 2)]
+        stale = [approved(5, SID, 1), approved(6, SID, 2), replied(7, SID, 2, "late")]
+        self.assertEqual([m.message_id for m in message_state_of(base + stale).messages], [4])
+
+    def test_a_read_marks_messages_through_its_id_and_unread_returns_the_rest(self):
+        state = message_state_of([*message_rows(), read_through(7, SID, 5)])
+        self.assertEqual([m.read_at for m in state.messages], [at(7), at(7), None])
+        self.assertEqual([m.message_id for m in sprints.unread(state)], [6])
+        self.assertEqual([sprints.message_state(m) for m in state.messages],
+                         ["read", "read", "sent"])
+
+    def test_a_nudge_delivers_and_two_failures_in_a_row_are_unreachable(self):
+        failing = [*message_rows(), nudged(7, SID, 6, False)]
+        state = message_state_of(failing)
+        self.assertEqual((state.failed_nudges, sprints.unreachable(state)), (1, False))
+        state = message_state_of([*failing, nudged(8, SID, 6, False)])
+        self.assertEqual((state.failed_nudges, sprints.unreachable(state)), (2, True))
+        self.assertEqual(len(state.messages), 3)
+        self.assertEqual((state.last_nudge_at, state.last_nudge_ok), (at(8), False))
+        state = message_state_of([*failing, nudged(8, SID, 6, False), nudged(9, SID, 6, True)])
+        self.assertEqual((state.failed_nudges, sprints.unreachable(state)), (0, False))
+        self.assertEqual([m.delivered_at for m in state.messages], [at(9)] * 3)
+        self.assertEqual([sprints.message_state(m) for m in state.messages], ["delivered"] * 3)
+        self.assertEqual((state.last_nudge_at, state.last_nudge_ok), (at(9), True))
+        state = message_state_of([*failing, read_through(8, SID, 6)])
+        self.assertEqual(state.failed_nudges, 0)
+        state = message_state_of([*message_rows(), nudged(7, SID, 5, True)])
+        self.assertEqual([m.delivered_at for m in state.messages], [at(7), at(7), None])
+
+    def test_an_answer_shows_under_its_message_and_the_latest_wins(self):
+        state = message_state_of([*message_rows(), answered(7, SID, 6, "kept it"),
+                                  answered(8, SID, 6, "kept the schema; moved the change"),
+                                  answered(9, SID, 99, "nothing")])
+        self.assertEqual([(m.reply, m.reply_at) for m in state.messages],
+                         [(None, None), (None, None),
+                          ("kept the schema; moved the change", at(8))])
+        self.assertEqual(state.messages, message_state_of(
+            [*message_rows(), answered(7, SID, 6, "kept it"),
+             answered(8, SID, 6, "kept the schema; moved the change")]).messages)
+
+    def test_the_managers_session_is_learned_from_its_seen_row(self):
+        goal = stated(1, "owner/p01", SID, "one")
+
+        def session_row(seq, project, name, session_id="s-1"):
+            return Event(seq, at(seq), "session.seen", project,
+                         {"session_id": session_id, "name": name, "cwd": "/x", "repo": None,
+                          "state": "idle"})
+
+        name = manager.session_name("owner/p01", SID)
+        folded = sprints.sprint_states([goal, session_row(2, "owner/p01", name)])
+        self.assertEqual(folded[SID].manager_session, "s-1")
+        folded = sprints.sprint_states([goal, session_row(2, "owner/p01", name),
+                                        session_row(3, "owner/p01", name, "s-2")])
+        self.assertEqual(folded[SID].manager_session, "s-2")
+        for row in (session_row(2, "owner/p02", name),
+                    session_row(2, "owner/p01", manager.session_name("owner/p01",
+                                                                     "fedcba9876543210")),
+                    session_row(2, "owner/p01", manager.session_name("owner/p02", SID)),
+                    session_row(2, "owner/p01", name + " x"),
+                    session_row(2, "owner/p01", None),
+                    session_row(2, "owner/p01", name, 5)):
+            with self.subTest(row=row.payload):
+                self.assertIsNone(sprints.sprint_states([goal, row])[SID].manager_session)
+
+    def test_a_started_manager_forgets_the_session_of_the_manager_it_replaces(self):
+        name = manager.session_name("owner/p01", SID)
+        seen = Event(2, at(2), "session.seen", "owner/p01",
+                     {"session_id": "s-1", "name": name, "cwd": "/x", "repo": None,
+                      "state": "ended"})
+        rows = [stated(1, "owner/p01", SID, "one"), seen,
+                managed(3, SID, MANAGER_STARTED, profile="work", session_name=name)]
+        self.assertIsNone(sprints.sprint_states(rows)[SID].manager_session)
+        later = Event(4, at(4), "session.seen", "owner/p01",
+                      {"session_id": "s-2", "name": name, "cwd": "/x", "repo": None,
+                       "state": "idle"})
+        self.assertEqual(sprints.sprint_states([*rows, later])[SID].manager_session, "s-2")
+
+    def test_malformed_message_rows_change_nothing(self):
+        base = message_rows()
+        bad = [read_through(7, SID, True), read_through(7, SID, "6"),
+               Event(7, at(7), event_log.SPRINT_MESSAGED, "owner/p00",
+                     {"sprint_id": SID, "goal": "one", "text": 5}),
+               Event(7, at(7), event_log.SPRINT_NUDGED, "owner/p00",
+                     {"sprint_id": SID, "through": 6, "route": None, "ok": "yes"}),
+               Event(7, at(7), event_log.SPRINT_NUDGED, "owner/p00",
+                     {"sprint_id": SID, "through": True, "route": None, "ok": True}),
+               answered(7, SID, True, "x"), answered(7, SID, 6, 5),
+               messaged(7, "fedcba9876543210", "unknown sprint")]
+        self.assertEqual(sprints.sprint_states(base + bad), sprints.sprint_states(base))
+
+    def test_a_withdrawn_sprint_keeps_no_messages(self):
+        events = [*message_rows(), withdrawn(7, "owner/p00", SID, "one"), messaged(8, SID, "x")]
+        self.assertEqual(sprints.sprint_states(events), {})
+
+    def test_message_folding_in_two_parts_equals_folding_at_once(self):
+        events = [*message_rows(), nudged(7, SID, 6, False), read_through(8, SID, 5),
+                  answered(9, SID, 6, "kept it")]
+        whole = sprints.sprint_states(events)
+        for cut in range(len(events) + 1):
+            with self.subTest(cut=cut):
+                self.assertEqual(
+                    sprints.sprint_states(events[cut:], sprints.sprint_states(events[:cut])),
+                    whole)
+
+    def test_message_bodies_and_the_message_rule(self):
+        secret_id = '"sprint_id": "0123456789abcdef"'
+        self.assertEqual(
+            sprints.parse_message(
+                ('{"project_id": "owner/p00", ' + secret_id + ', "text": "hi"}').encode()),
+            ("owner/p00", SID, "hi"))
+        self.assertEqual(
+            sprints.parse_inbox_request(('{' + secret_id + ', "secret": "k"}').encode()),
+            (SID, "k"))
+        self.assertEqual(
+            sprints.parse_message_reply_request(
+                ('{' + secret_id + ', "secret": "k", "message": 3, "reply": "ok"}').encode()),
+            (SID, "k", 3, "ok"))
+        for body in ('{"project_id": "owner/p00", %s}' % secret_id,
+                     '{"project_id": "owner/p00", %s, "text": 5}' % secret_id,
+                     '{"project_id": "owner/p00", %s, "text": "a", "x": 1}' % secret_id):
+            with self.subTest(body=body), self.assertRaises(ValueError):
+                sprints.parse_message(body.encode())
+        for body in ('{%s}' % secret_id, '{%s, "secret": 5}' % secret_id,
+                     '{%s, "secret": "k", "x": 1}' % secret_id):
+            with self.subTest(body=body), self.assertRaises(ValueError):
+                sprints.parse_inbox_request(body.encode())
+        for message in ("0", "true", '"1"', "1.5", "-1"):
+            body = '{%s, "secret": "k", "message": %s, "reply": "r"}' % (secret_id, message)
+            with self.subTest(message=message), self.assertRaises(ValueError):
+                sprints.parse_message_reply_request(body.encode())
+        for body in ('{%s, "secret": "k", "message": 1}' % secret_id,
+                     '{%s, "secret": "k", "message": 1, "reply": 2}' % secret_id,
+                     '{%s, "secret": 7, "message": 1, "reply": "r"}' % secret_id):
+            with self.subTest(body=body), self.assertRaises(ValueError):
+                sprints.parse_message_reply_request(body.encode())
+        for text, reason in (("  ", "write the message first"),
+                             ("x" * 2001, "a message is at most 2000 characters")):
+            with self.subTest(text=text[:5]), self.assertRaises(sprints.Refused) as caught:
+                sprints.checked_message(text)
+            self.assertEqual(str(caught.exception), reason)
+        self.assertEqual(sprints.checked_message("  keep it  "), "  keep it  ")
+        self.assertEqual(sprints.checked_message("x" * 2000), "x" * 2000)
+
+    def test_a_message_has_its_wire_entry_and_constants(self):
+        state = message_state_of(message_rows())
+        self.assertEqual(sprints.inbox_entry(state.messages[0]),
+                         {"id": 3, "kind": "changes", "version": 1, "text": "smaller slices",
+                          "at": at(3)})
+        self.assertEqual(sprints.inbox_entry(state.messages[1])["text"], None)
+        self.assertEqual((sprints.UNREACHABLE_AFTER, sprints.UNREACHABLE_TEXT,
+                          sprints.RENUDGE_AFTER_MS, sprints.UNKNOWN_MESSAGE),
+                         (2, "manager not reachable", 60_000, "this message is not known"))
+
+
 if __name__ == "__main__":
     unittest.main()

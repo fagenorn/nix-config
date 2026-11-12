@@ -18,6 +18,10 @@ stderr `console: page token unusable: <error>` and exit 1. A bad argument is exi
 The service is given `manager.launcher_for(sys.platform)`: on Linux a stated goal starts that
 sprint's manager (`agent_tools.console.manager`), elsewhere there is no launcher and every sprint
 says managers are not available on this host yet.
+
+It is also given `nudge.nudger_for(sys.platform)`: on Linux a message the owner leaves a sprint with a
+running manager is relayed to it (or its stopped session is woken in place) by one fixed sentence
+(`agent_tools.console.nudge`); elsewhere there is no nudger and no nudge is made.
 """
 
 from __future__ import annotations
@@ -28,7 +32,7 @@ import sqlite3
 import sys
 import threading
 
-from agent_tools.console import inbox, manager, service
+from agent_tools.console import inbox, manager, nudge, service
 from agent_tools.console.event_log import EventLogError
 from agent_tools.console.write_guard import TokenError
 
@@ -55,7 +59,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         console = service.ConsoleService(
             service.default_store(), service.default_registry(), port=args.port,
-            tracker=inbox.read_items, launcher=manager.launcher_for(sys.platform))
+            tracker=inbox.read_items, launcher=manager.launcher_for(sys.platform),
+            nudger=nudge.nudger_for(sys.platform))
     except TokenError as error:
         print(f"console: page token unusable: {error}", file=sys.stderr)
         return 1

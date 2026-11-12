@@ -1,0 +1,6 @@
+#!/bin/sh
+# Verify checks for issue 889: approving a marked test sprint's brief on the page reaches its manager.
+# `start` states a marked goal, approves its brief, waits for the manager to read the approval,
+# then stops that manager and withdraws the sprint; `timing` reports how long the read took.
+# Exit 0 met, 1 not met, 75 not yet. Run from the repository root at the block's commit.
+PYTHONPATH=python exec python3 -m agent_tools.console.message_check "$@"

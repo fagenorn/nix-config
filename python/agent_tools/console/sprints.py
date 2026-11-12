@@ -154,6 +154,47 @@ plus that. `progress_text(landed, total, in_delivery, queued, held)` is `<landed
 followed by `, <n> in delivery`, `, <n> queued` and `, <n> held` for each non-zero count, in that
 order. The view states and texts are the constants `ON_TRACK`, `WAITING`, `QUIET`, `CLOSING`,
 `DONE` and their `_TEXT`; `CLOSED_OUT` is the view's stage for a run's `done` (not a report stage).
+
+Messages (#889) are what the owner says to a sprint, each one a `Message` kept in `message_id` order
+on `SprintState.messages`. Four rows carry them, the first three kept (`event_log.SPRINT_MESSAGED`,
+`SPRINT_READ`, `SPRINT_ANSWERED`, `SPRINT_NUDGED`; each with the project in its project column):
+
+    sprint.messaged {"sprint_id", "goal": <str>, "text": <str>}
+    sprint.read     {"sprint_id", "through": <int message id>}
+    sprint.answered {"sprint_id", "message": <int message id>, "reply": <str>}
+    sprint.nudged   {"sprint_id", "through": <int>, "route": "relay" | "wake" | null, "ok": true}
+                    {"sprint_id", "through": <int>, "route": "relay" | "wake" | null, "ok": false,
+                     "reason": <str>}
+
+A message's id is the `seq` of the row that made it. A `brief.approved` row that approves the open
+brief makes a `MESSAGE_APPROVED` message (`version` the brief's, no text); a `brief.replied` row
+that asks the open brief for changes makes a `MESSAGE_CHANGES` message (`version`, `text` the reply);
+a `sprint.messaged` row with a string `text` makes a `MESSAGE_TEXT` message (no version). A stale or
+repeated decision, which `_folded_brief` ignores, makes none. `sprint.read` with an int (not bool)
+`through` sets `read_at` (the row's `at`) on every message up to that id still unread and resets
+`failed_nudges`. `sprint.nudged` with a bool `ok` and an int `through` sets `last_nudge_at` and
+`last_nudge_ok`; `ok` true sets `delivered_at` on every message up to `through` without one and
+resets `failed_nudges`, `ok` false adds one to it. `sprint.answered` with an int `message` naming one
+of the sprint's messages and a string `reply` sets that message's `reply` and `reply_at` (the latest
+row wins). Every other such row changes nothing, and a withdrawn sprint keeps nothing.
+
+A `session.seen` row carries no sprint id: when its string `name` fully matches
+`<project> sprint <16 lowercase hex>` (`manager.session_name`), the sprint is open, the name's
+project and the row's project column both equal the sprint's, the row's string `session_id` becomes
+the sprint's `manager_session` (the latest row wins); a valid `manager.started` row clears it, since
+the session it named belonged to the manager that row replaces.
+
+`message_state(message)` is `READ` when `read_at` is set, else `DELIVERED` when `delivered_at` is,
+else `SENT`; `unread(state)` is the messages without `read_at`, in id order; `unreachable(state)` is
+true once `failed_nudges` reaches `UNREACHABLE_AFTER`. `checked_message(text)` refuses
+`EMPTY_MESSAGE` for a blank text and `MESSAGE_TOO_LONG` above `MAX_MESSAGE_CHARS`, and returns the
+text unchanged. `parse_message(body)` reads the owner's write and returns `(project_id, sprint_id,
+text)`; `parse_inbox_request(body)` reads the manager's `{"sprint_id", "secret"}` and returns
+`(sprint_id, secret)`; `parse_message_reply_request(body)` reads the manager's `{"sprint_id",
+"secret", "message": <int of at least 1>, "reply": <str>}` and returns `(sprint_id, secret,
+message_id, reply)`. All three are as strict as `parse_reply` (`ValueError` otherwise).
+`inbox_entry(message)` is the wire entry `{"id", "kind", "version", "text", "at"}`.
+
 The module reads no clock and no environment; only the secret helpers touch the filesystem.
 """
 
@@ -171,12 +212,15 @@ from agent_tools.console import deliveries
 from agent_tools.console.deliveries import DELIVERY_SEEN
 from agent_tools.console.event_log import (BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED,
                                            GOAL_WITHDRAWN, MANAGER_FAILED, MANAGER_STARTED,
-                                           MANAGER_WAITING, SPRINT_REPORTED, Event)
+                                           MANAGER_WAITING, SPRINT_ANSWERED, SPRINT_MESSAGED,
+                                           SPRINT_NUDGED, SPRINT_READ, SPRINT_REPORTED, Event)
 from agent_tools.console.manager import FAILED_TEXT, MISSING_TEXT, UNAVAILABLE_TEXT
 from agent_tools.console.manager import WAITING_TEXT as MANAGER_WAITING_TEXT
+from agent_tools.console.sessions import SEEN
 
 MAX_GOAL_CHARS = 2000
 MAX_REPLY_CHARS = 2000
+MAX_MESSAGE_CHARS = 2000
 PARTS = ("done", "excluded", "slices", "risks", "asks")
 MAY_BE_EMPTY = ("excluded", "risks", "asks")
 NONE = "none"
@@ -232,6 +276,19 @@ UNKNOWN = "this sprint is not known"
 HAS_MANAGER = "this sprint has a manager"
 LAUNCHING = "a manager is starting for this sprint"
 TOO_SOON = "retry is offered two minutes after the goal"
+EMPTY_MESSAGE = "write the message first"
+MESSAGE_TOO_LONG = "a message is at most 2000 characters"
+UNKNOWN_MESSAGE = "this message is not known"
+UNREACHABLE_TEXT = "manager not reachable"
+UNREACHABLE_AFTER = 2
+RENUDGE_AFTER_MS = 60_000
+MESSAGE_APPROVED = "approved"
+MESSAGE_CHANGES = "changes"
+MESSAGE_TEXT = "text"
+SENT = "sent"
+DELIVERED = "delivered"
+READ = "read"
+MANAGER_SESSION_NAME = re.compile(r"(?P<project>.+) sprint (?P<sprint>[0-9a-f]{16})")
 
 _MINUTE_MS = 60_000
 _HOUR_MS = 3_600_000
@@ -288,6 +345,19 @@ class Manager:
 
 
 @dataclass(frozen=True)
+class Message:
+    message_id: int
+    kind: str
+    at: str
+    version: int | None
+    text: str | None
+    delivered_at: str | None = None
+    read_at: str | None = None
+    reply: str | None = None
+    reply_at: str | None = None
+
+
+@dataclass(frozen=True)
 class SprintState:
     sprint_id: str
     project_id: str
@@ -299,6 +369,11 @@ class SprintState:
     report: Report | None = None
     observed: tuple[Observed, ...] = ()
     moved_ms: int | None = None
+    messages: tuple[Message, ...] = ()
+    failed_nudges: int = 0
+    last_nudge_at: str | None = None
+    last_nudge_ok: bool | None = None
+    manager_session: str | None = None
 
     @property
     def state(self) -> str:
@@ -371,6 +446,33 @@ def parse_report_request(body: bytes) -> tuple[str, str, dict]:
     if not isinstance(report, dict) or not set(report) <= set(REPORT_MEMBERS):
         raise ValueError(f"report must be an object of {', '.join(REPORT_MEMBERS)}")
     return sprint_id, value["secret"], report
+
+
+def parse_message(body: bytes) -> tuple[str, str, str]:
+    value = _object(body, {"project_id", "sprint_id", "text"})
+    if not isinstance(value["text"], str):
+        raise ValueError("text must be a string")
+    return value["project_id"], _sprint_id(value["sprint_id"]), value["text"]
+
+
+def parse_inbox_request(body: bytes) -> tuple[str, str]:
+    value = _object(body, {"sprint_id", "secret"}, project=False)
+    sprint_id = _sprint_id(value["sprint_id"])
+    if not isinstance(value["secret"], str):
+        raise ValueError("secret must be a string")
+    return sprint_id, value["secret"]
+
+
+def parse_message_reply_request(body: bytes) -> tuple[str, str, int, str]:
+    value = _object(body, {"sprint_id", "secret", "message", "reply"}, project=False)
+    sprint_id = _sprint_id(value["sprint_id"])
+    if not isinstance(value["secret"], str):
+        raise ValueError("secret must be a string")
+    if not _number(value["message"]):
+        raise ValueError("message must be an integer of at least 1")
+    if not isinstance(value["reply"], str):
+        raise ValueError("reply must be a string")
+    return sprint_id, value["secret"], value["message"], value["reply"]
 
 
 def parse_approve(body: bytes) -> tuple[str, str, int]:
@@ -467,6 +569,38 @@ def checked_reply(text: str) -> str:
     return text
 
 
+def checked_message(text: str) -> str:
+    if not text.strip():
+        raise Refused(EMPTY_MESSAGE)
+    if len(text) > MAX_MESSAGE_CHARS:
+        raise Refused(MESSAGE_TOO_LONG)
+    return text
+
+
+def message_state(message: Message) -> str:
+    if message.read_at is not None:
+        return READ
+    return DELIVERED if message.delivered_at is not None else SENT
+
+
+def unread(state: SprintState) -> tuple[Message, ...]:
+    return tuple(message for message in state.messages if message.read_at is None)
+
+
+def unreachable(state: SprintState) -> bool:
+    return state.failed_nudges >= UNREACHABLE_AFTER
+
+
+def inbox_entry(message: Message) -> dict:
+    return {"id": message.message_id, "kind": message.kind, "version": message.version,
+            "text": message.text, "at": message.at}
+
+
+def _with_message(state: SprintState, message: Message) -> SprintState:
+    messages = sorted((*state.messages, message), key=lambda item: item.message_id)
+    return replace(state, messages=tuple(messages))
+
+
 def _folded_brief(state: SprintState, event: Event) -> SprintState:
     payload = event.payload
     version = payload.get("version")
@@ -481,12 +615,63 @@ def _folded_brief(state: SprintState, event: Event) -> SprintState:
     if brief is None or version != brief.version or brief.decision != NONE:
         return state
     if event.kind == BRIEF_APPROVED:
-        return replace(state, brief=replace(brief, decision=APPROVED, decided_at=event.at))
+        return _with_message(
+            replace(state, brief=replace(brief, decision=APPROVED, decided_at=event.at)),
+            Message(event.seq, MESSAGE_APPROVED, event.at, version, None))
     reply = payload.get("reply")
     if isinstance(reply, str):
-        return replace(state,
-                       brief=replace(brief, decision=CHANGES, reply=reply, decided_at=event.at))
+        return _with_message(
+            replace(state,
+                    brief=replace(brief, decision=CHANGES, reply=reply, decided_at=event.at)),
+            Message(event.seq, MESSAGE_CHANGES, event.at, version, reply))
     return state
+
+
+def _id(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _folded_message(state: SprintState, event: Event) -> SprintState:
+    payload = event.payload
+    if event.kind == SPRINT_MESSAGED:
+        text = payload.get("text")
+        if isinstance(text, str):
+            return _with_message(state, Message(event.seq, MESSAGE_TEXT, event.at, None, text))
+    elif event.kind == SPRINT_READ:
+        through = payload.get("through")
+        if _id(through):
+            return replace(state, failed_nudges=0, messages=tuple(
+                replace(message, read_at=event.at)
+                if message.message_id <= through and message.read_at is None else message
+                for message in state.messages))
+    elif event.kind == SPRINT_NUDGED:
+        through, ok = payload.get("through"), payload.get("ok")
+        if _id(through) and isinstance(ok, bool):
+            messages = state.messages
+            if ok:
+                messages = tuple(
+                    replace(message, delivered_at=event.at)
+                    if message.message_id <= through and message.delivered_at is None
+                    else message for message in messages)
+            return replace(state, messages=messages, last_nudge_at=event.at, last_nudge_ok=ok,
+                           failed_nudges=0 if ok else state.failed_nudges + 1)
+    elif event.kind == SPRINT_ANSWERED:
+        target, reply = payload.get("message"), payload.get("reply")
+        if _id(target) and isinstance(reply, str):
+            return replace(state, messages=tuple(
+                replace(message, reply=reply, reply_at=event.at)
+                if message.message_id == target else message for message in state.messages))
+    return state
+
+
+def _folded_session(folded: dict[str, SprintState], event: Event) -> None:
+    name, session_id = event.payload.get("name"), event.payload.get("session_id")
+    if not isinstance(name, str) or not isinstance(session_id, str):
+        return
+    match = MANAGER_SESSION_NAME.fullmatch(name)
+    state = folded.get(match["sprint"]) if match else None
+    if state is not None and match["project"] == state.project_id == event.project:
+        folded[state.sprint_id] = replace(state, manager_session=session_id)
 
 
 def _folded_manager(state: SprintState, event: Event) -> SprintState:
@@ -494,7 +679,8 @@ def _folded_manager(state: SprintState, event: Event) -> SprintState:
     if event.kind == MANAGER_STARTED:
         profile, name = payload.get("profile"), payload.get("session_name")
         if isinstance(profile, str) and isinstance(name, str):
-            return replace(state, manager=Manager(STARTED, event.at, profile, name))
+            return replace(state, manager=Manager(STARTED, event.at, profile, name),
+                           manager_session=None)
     elif event.kind == MANAGER_FAILED:
         reason = payload.get("reason")
         if isinstance(reason, str):
@@ -553,6 +739,9 @@ def sprint_states(events: Iterable[Event],
         if event.kind == DELIVERY_SEEN:
             _observed(folded, event)
             continue
+        if event.kind == SEEN:
+            _folded_session(folded, event)
+            continue
         sprint_id = event.payload.get("sprint_id")
         if not isinstance(sprint_id, str):
             continue
@@ -570,6 +759,9 @@ def sprint_states(events: Iterable[Event],
             folded[sprint_id] = _folded_manager(folded[sprint_id], event)
         elif event.kind == SPRINT_REPORTED and sprint_id in folded:
             folded[sprint_id] = _folded_report(folded[sprint_id], event)
+        elif event.kind in (SPRINT_MESSAGED, SPRINT_READ, SPRINT_ANSWERED, SPRINT_NUDGED) \
+                and sprint_id in folded:
+            folded[sprint_id] = _folded_message(folded[sprint_id], event)
     return folded
 
 

@@ -169,7 +169,8 @@ class PageTest(unittest.TestCase):
         self.assertEqual(
             {p for _, p in literals},
             {"/api/stream", "/api/looked", "/api/answer", "/api/check-answer", "/api/goal",
-             "/api/withdraw", "/api/retry-manager", "/api/approve", "/api/reply"},
+             "/api/withdraw", "/api/retry-manager", "/api/approve", "/api/reply",
+             "/api/message"},
         )
         self.assertEqual(
             len(re.findall(r"\b(?:fetch|EventSource)\(", self.text)), len(literals)
@@ -178,7 +179,7 @@ class PageTest(unittest.TestCase):
     def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
         # A separate snapshot request can answer after a newer streamed frame
         # and render over it; the stream's first frame is already the snapshot.
-        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 8)
+        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 9)
         self.assertIsNotNone(
             re.search(r'fetch\("/api/looked",\s*\{\s*method:\s*"POST"', self.text)
         )
@@ -189,7 +190,7 @@ class PageTest(unittest.TestCase):
             re.search(r'fetch\("/api/check-answer",\s*\{\s*method:\s*"POST"', self.text)
         )
         for route in ("/api/goal", "/api/withdraw", "/api/retry-manager", "/api/approve",
-                      "/api/reply"):
+                      "/api/reply", "/api/message"):
             self.assertIsNotNone(
                 re.search(rf'fetch\("{route}",\s*\{{\s*method:\s*"POST"', self.text)
             )
@@ -1895,6 +1896,144 @@ class PageGoalTest(unittest.TestCase):
             [full(n) for n in nodes(line) if has_class(n, "fail")],
             ["Could not withdraw: this sprint is not open"],
         )
+
+
+TELL_TEXT = "leave the importer's schema alone"
+REPLY_TEXT = "kept the schema; moved the change to the reader"
+
+
+def message_entry(mid: int, kind: str, state: str, **extra: object) -> dict:
+    return {
+        "id": mid, "kind": kind, "version": 2 if kind != "text" else None,
+        "text": TELL_TEXT if kind == "text" else None, "at": "2026-11-12T10:05:00+00:00",
+        "state": state, "state_text": state, "read_at": None, "reply": None, "reply_at": None,
+        **extra,
+    }
+
+
+def tell_field(snap: dict) -> dict:
+    (found,) = [n for n in nodes(snap["projects"]) if has_class(n, "tell")]
+    return found
+
+
+class PageMessageTest(unittest.TestCase):
+    def messages(self) -> list:
+        return [
+            message_entry(3, "text", "sent"),
+            message_entry(4, "approved", "delivered"),
+            message_entry(5, "text", "read", text="a third note", reply=REPLY_TEXT,
+                          reply_at="2026-11-12T10:07:00+00:00"),
+        ]
+
+    def test_a_sprint_line_shows_each_message_with_its_state_and_the_reply_under_it(self) -> None:
+        (snap,) = render([
+            START,
+            {"frame": with_sprints([{**SPRINT, "messages": self.messages(), "reach_text": None}])},
+            {"snapshot": True},
+        ])
+        (line,) = sprint_lines(snap)
+        shown = full(line)
+        for expected in (TELL_TEXT, "Approved version 2", "a third note", "sent", "delivered",
+                         "read", "Manager: " + REPLY_TEXT):
+            self.assertIn(expected, shown)
+        states = [n for n in nodes(line) if has_class(n, "message-state")]
+        self.assertEqual([full(n) for n in states], ["sent", "delivered", "read"])
+        (reply,) = [n for n in nodes(line) if has_class(n, "message-reply")]
+        self.assertEqual(full(reply), "Manager: " + REPLY_TEXT)
+        third = [n for n in nodes(line) if n["tag"] == "li" and "a third note" in full(n)][-1]
+        self.assertIn("Manager: " + REPLY_TEXT, full(third))
+        self.assertEqual(
+            [n for n in nodes(line) if has_class(n, "unreachable")], [])
+
+    def test_a_change_request_reads_its_version_and_text(self) -> None:
+        asked = message_entry(3, "changes", "sent", version=1, text="smaller slices")
+        (snap,) = render([
+            START, {"frame": with_sprints([{**SPRINT, "messages": [asked], "reach_text": None}])},
+            {"snapshot": True},
+        ])
+        (line,) = sprint_lines(snap)
+        self.assertIn("Asked for changes to version 1: smaller slices", full(line))
+
+    def test_two_failed_nudges_read_manager_not_reachable(self) -> None:
+        (snap,) = render([
+            START,
+            {"frame": with_sprints([{
+                **SPRINT, "messages": self.messages(), "reach_text": "manager not reachable",
+                "retry": False}])},
+            {"snapshot": True},
+        ])
+        (line,) = sprint_lines(snap)
+        (reach,) = [n for n in nodes(line) if has_class(n, "unreachable")]
+        self.assertEqual(full(reach), "manager not reachable")
+        self.assertIn(TELL_TEXT, full(line))
+        self.assertEqual([n for n in nodes(line) if has_class(n, "retry")], [])
+
+    def test_tell_the_manager_posts_the_text_with_the_token_and_keeps_it_on_refusal(self) -> None:
+        refused, after = render([
+            START, {"frame": with_sprints([SPRINT])},
+            {"type": {"class": "tell", "text": TELL_TEXT}},
+            {"respond": {"status": 409, "text": "this sprint is not open\n"}},
+            {"click": "tell-send"}, {"snapshot": True},
+            {"frame": with_sprints([SPRINT])}, {"snapshot": True},
+        ])
+        (line,) = sprint_lines(refused)
+        self.assertIn("Tell the manager", full(line))
+        (post,) = [p for p in refused["posts"] if p["url"] == "/api/message"]
+        self.assertEqual(post["method"], "POST")
+        self.assertEqual(post["headers"], GOAL_HEADERS)
+        self.assertEqual(json.loads(post["body"]), {
+            "project_id": "owner/p00", "sprint_id": "a" * 16, "text": TELL_TEXT})
+        self.assertEqual([full(n) for n in nodes(line) if has_class(n, "fail")],
+                         ["Could not send: this sprint is not open"])
+        self.assertEqual(tell_field(refused)["value"], TELL_TEXT)
+        self.assertEqual(tell_field(after)["value"], TELL_TEXT)
+
+    def test_an_unanswered_send_keeps_the_text(self) -> None:
+        (snap,) = render([
+            START, {"frame": with_sprints([SPRINT])},
+            {"type": {"class": "tell", "text": TELL_TEXT}},
+            {"fail_fetch": True}, {"click": "tell-send"}, {"snapshot": True},
+        ])
+        (line,) = sprint_lines(snap)
+        self.assertEqual([full(n) for n in nodes(line) if has_class(n, "fail")],
+                         ["Could not send: the console did not answer"])
+        self.assertEqual(tell_field(snap)["value"], TELL_TEXT)
+
+    def test_a_sent_message_clears_the_field(self) -> None:
+        (snap,) = render([
+            START, {"frame": with_sprints([SPRINT])},
+            {"type": {"class": "tell", "text": TELL_TEXT}},
+            {"click": "tell-send"}, {"snapshot": True},
+        ])
+        self.assertEqual(tell_field(snap)["value"], "")
+        (line,) = sprint_lines(snap)
+        self.assertEqual([n for n in nodes(line) if has_class(n, "fail")], [])
+
+    def test_a_typed_message_keeps_its_focus_and_selection_across_frames(self) -> None:
+        sent = message_entry(3, "text", "delivered")
+        before, after, more = render([
+            START, {"frame": with_sprints([SPRINT])},
+            {"type": {"class": "tell", "text": TELL_TEXT}},
+            {"select": {"cls": "tell", "start": 6, "end": 9}}, {"snapshot": True},
+            {"frame": with_sprints([{**SPRINT, "messages": [sent], "reach_text": None}])},
+            {"snapshot": True},
+            {"append": {"class": "tell", "text": "!"}}, {"snapshot": True},
+        ])
+        self.assertTrue(tell_field(before)["focused"])
+        field = tell_field(after)
+        self.assertEqual(field["value"], TELL_TEXT)
+        self.assertTrue(field["focused"])
+        self.assertEqual(field["selection"], [6, 9])
+        self.assertEqual(after["active"], "tell")
+        self.assertTrue(tell_field(more)["value"].endswith("!"))
+
+    def test_a_sprint_no_longer_listed_restores_no_focus(self) -> None:
+        (gone,) = render([
+            START, {"frame": with_sprints([SPRINT])},
+            {"type": {"class": "tell", "text": TELL_TEXT}},
+            {"frame": with_sprints([])}, {"snapshot": True},
+        ])
+        self.assertIsNone(gone["active"])
 
 
 class PageManagerTest(unittest.TestCase):

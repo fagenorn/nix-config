@@ -21,13 +21,17 @@ Routes (every response carries `Cache-Control: no-store` and
     POST /api/approve 204, a JSON body, the page approves a brief (below)
     POST /api/reply 204, a JSON body, the page asks a brief for changes (below)
     POST /api/retry-manager 204, a JSON body, the page starts a sprint's manager again (below)
+    POST /api/message 204, a JSON body, the page sends the owner's message to a sprint (below)
     POST /api/brief 200 application/json, a manager sends a sprint's brief (below)
     POST /api/report 200 application/json, a manager sends a sprint's report (below)
+    POST /api/inbox 200 application/json, a manager reads a sprint's unread messages (below)
+    POST /api/message-reply 200 application/json, a manager answers one message (below)
     GET /api/sprint-status?sprint_id=<id> 200 application/json, what became of a brief (below)
     anything else   404
     other methods   405 with `Allow: GET` (`Allow: POST` on `/api/hooks`, `/api/readings`,
                     `/api/looked`, `/api/answer`, `/api/check-answer`, `/api/goal`, `/api/withdraw`,
-                    `/api/approve`, `/api/reply`, `/api/retry-manager`, `/api/brief` and `/api/report`)
+                    `/api/approve`, `/api/reply`, `/api/retry-manager`, `/api/message`, `/api/brief`, `/api/report`,
+                    `/api/inbox` and `/api/message-reply`)
 
 Two kinds of write exist. The hook and reading routes append what the proxies and hooks observe:
 `POST /api/hooks` appends session observations, `POST /api/readings` the capacity kinds
@@ -48,8 +52,8 @@ ignored payload (an unknown event, a missing member) appends nothing. The
 route carries no token: it records observations and answers nothing (ADR-console-004).
 
 A page write (`PAGE_WRITES`, today `POST /api/looked`, `POST /api/answer`, `POST /api/check-answer`,
-`POST /api/goal`, `POST /api/withdraw`, `POST /api/approve`, `POST /api/reply` and
-`POST /api/retry-manager`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
+`POST /api/goal`, `POST /api/withdraw`, `POST /api/approve`, `POST /api/reply`,
+`POST /api/retry-manager` and `POST /api/message`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
 alone and goes through one guard, `_page_write`, whatever its route. After the loopback `Host`
 check and before any body is read, exactly one `Origin` header must equal `http://<Host>` (else
 403 `text/plain` `origin refused`) and exactly one `X-Console-Token` header must equal the
@@ -88,7 +92,11 @@ with the reason; any other exception is `console: approve_failed <Type>: <messag
 empty `204`. `POST /api/retry-manager` (#888) runs the same checks once more with `MAX_RETRY_BYTES`
 (4096) and `sprints.parse_retry`: 400 `bad retry`, `sprints.Refused` is one stderr line `console:
 retry_refused <reason>` and 409 with the reason, any other exception is `console: retry_failed
-<Type>: <message>` and 500 `retry failed`; success is an empty `204`. The token is created once in
+<Type>: <message>` and 500 `retry failed`; success is an empty `204`. `POST /api/message` (#889)
+runs the same checks with `MAX_MESSAGE_BYTES` (16384) and `sprints.parse_message`: 400 `bad
+message`, `sprints.Refused` is one stderr line `console: message_refused <reason>` and 409 with
+the reason, any other exception is `console: message_failed <Type>: <message>` and 500 `message
+failed`; success is an empty `204`. The token is created once in
 `page-token` beside the event log and reaches a client only inside `GET /`, where it replaces
 the slot in the page's `console-token` meta tag.
 
@@ -139,6 +147,31 @@ under the lock, is `{"sprint_id", "decision", "version", "reply"}`: `none`, `app
 for an open sprint (`reply` only with `changes`), `withdrawn` for an id in `_withdrawn` (the
 `sprints.withdrawn_ids` fold of the log, kept beside the sprints), else `Refused(UNKNOWN)`. The
 secret, presented or stored, appears in no stderr line, answer, view or row.
+
+Messages (#889): `send_message(project_id, sprint_id, text)`, under the ingest lock, raises
+`Refused(NOT_OPEN)` unless the sprint is open and belongs to that project, then applies
+`sprints.checked_message`; it appends exactly one `sprint.messaged` row `{"sprint_id", "goal",
+"text"}` with the text exactly as sent, folds and publishes, and returns the row's `seq`, the
+message's id. An approval and a change request need no new code to become messages: the fold makes
+them of the `brief.approved` and `brief.replied` rows. `POST /api/inbox` and `POST
+/api/message-reply` are manager writes dispatched like `/api/brief`, before `PAGE_WRITES`:
+`_checked_length(MAX_INBOX_BYTES)` (4096) or `_checked_length(MAX_MESSAGE_REPLY_BYTES)` (16384),
+a body the parser does not accept is 400 `bad inbox` or `bad message reply`, a
+`sprints.SecretRefused` is `console: inbox_refused <sprint_id> secret refused` or `console:
+message_reply_refused <sprint_id> secret refused` and 403 `secret refused`, any other
+`sprints.Refused` the same prefix with the reason and 409, any other exception `console:
+inbox_failed <Type>: <message>` or `console: message_reply_failed <Type>: <message>` and 500
+`inbox failed` or `message reply failed`. `read_inbox(sprint_id, secret)`, under the lock, is
+`_manager_sprint` (`NOT_OPEN`, then `SecretRefused`), then `sprints.unread`; when that is not
+empty it appends exactly one `sprint.read` row `{"sprint_id", "through": <last id>}` in the same
+locked section and answers 200 `application/json` `{"messages": [...]}` of `sprints.inbox_entry`
+dicts in id order, as `json.dumps(answer, sort_keys=True, separators=(",", ":"))`; a second call
+with nothing new appends nothing and answers `{"messages":[]}`. `answer_message(sprint_id, secret,
+message_id, reply)`, under the lock, is `_manager_sprint`, `Refused(UNKNOWN_MESSAGE)` unless
+`message_id` is one of the sprint's messages, `sprints.checked_reply`, then exactly one
+`sprint.answered` row `{"sprint_id", "message", "reply"}` with the reply exactly as sent; it
+answers 200 `{"at": <row at>}`. Every refusal appends and publishes nothing, and neither the
+secret nor the owner's text appears in a stderr line.
 
 Reports (#890): `POST /api/report` is a manager write like the brief's: no token, the sprint's secret
 in its place. After the loopback `Host` check it runs `_checked_length(MAX_REPORT_BYTES)`, 65536
@@ -281,10 +314,11 @@ sprint (`_launching`, changed only under the ingest lock) in the critical sectio
 `goal.stated` and dispatches `_launch_reserved(sprint_id)` after releasing it. `retry_manager(
 project_id, sprint_id)`, under the lock, raises `Refused` with `manager.UNAVAILABLE_TEXT` without a
 launcher, `NOT_OPEN` unless the sprint is open and of that project, `LAUNCHING` while the sprint is
-reserved, and, from `sprints.manager_status`, `HAS_MANAGER` when the manager is started and `TOO_SOON`
+reserved for a launch or a nudge (`_nudging`; the two never overlap, so a wake never resumes the manager a
+retry replaces), and, from `sprints.manager_status`, `HAS_MANAGER` when the manager is started and `TOO_SOON`
 otherwise when no retry is offered; else it reserves the sprint before the lock is released and
 dispatches, so a second retry that arrives while the first is queued or running is refused
-`LAUNCHING`. `start_manager(sprint_id)` reserves (returning when it cannot) and launches in the
+`LAUNCHING`. `start_manager(sprint_id)` reserves (returning when it cannot, a nudge reservation included) and launches in the
 calling thread. `_launch_reserved`, under the lock, drops its own attempt's reservation (each reservation is one token, so a finished attempt never frees a later retry's) and returns when the sprint
 is no longer open or its manager reads `started` (a stale or duplicate job never starts a second
 manager), and a launch a retry reserved also returns when the sprint no longer offers retry (the
@@ -298,6 +332,35 @@ or `manager.failed {sprint_id, reason}` is appended (the reason of a `LaunchFail
 <message>`, the secret shown as `<secret>`), a failure is one stderr line `console: manager_failed
 <sprint_id> <reason>`, and the view is published. `withdraw_goal` also removes the manager's
 settings file. The sprint's secret appears in no row, view or stderr line.
+
+Nudges (#889): the service takes `nudger` (`nudge.nudger_for(sys.platform)` from `console.py`; None
+means no nudge is ever made, no reservation, row or listing read) and `listing` (default: read
+`sessions.read_session_registry(self._session_dirs())` when called). After `send_message`,
+`approve_brief` and `reply_brief` append, still under the ingest lock, the sprint is reserved for a
+nudge (`_nudging`) when there is a nudger, the sprint is open, its manager row is `started`, no
+launch is reserved for it (`_launching`) and `sprints.unread(sprint)` is non-empty; a sprint already reserved is marked in `_nudge_again`
+instead. The job is dispatched through `self._dispatch` after the lock is released. A dispatch that
+raises is a failed nudge, never the caller's failure (the message is already stored): the
+reservation is freed and, while the sprint is open, one `sprint.nudged {sprint_id, through, route:
+null, ok: false, reason: "the nudge could not start: <Type>: <message>"}` is appended and
+`console: nudge_failed <sprint_id> <reason>` printed, so the route still answers normally.
+`_nudge(sprint_id)`, under the lock, drops the reservation and returns unless the sprint is open, its
+manager started and something unread (the project's root is the working directory); off the lock
+it lists the sessions named `manager.session_name(project, sprint)`: a listed one gets a `RELAY`
+`nudge.Nudge` to the lowest session id, else the sprint's `manager_session` gets a `WAKE`, else
+there is no nudger call and the reason is `nudge.UNKNOWN_SESSION` with a null route; a `NudgeFailed`
+gives its text and any other exception (the listing's included) `<Type>: <message>`. Under the lock
+again it releases the reservation and, while the sprint is open and the service is not stopping,
+appends one `sprint.nudged {sprint_id, through: the last unread id, route, ok[, reason]}` (a failure
+also prints `console: nudge_failed <sprint_id> <reason>`); when the sprint was marked in
+`_nudge_again` and now holds an unread message above `through`, it is reserved and dispatched once
+more (never after a success alone). `renudge()`, called by `_poll_loop` after `poll_deliveries` (a
+failure is `console: renudge_failed <Type>: <message>`), reserves under the lock each open
+unreserved sprint with a started manager, `failed_nudges < sprints.UNREACHABLE_AFTER`, an unread
+message with no `delivered_at` whose `at` is at least `sprints.RENUDGE_AFTER_MS` before
+`self._clock()` and a `last_nudge_at` that is None or as old, and dispatches each after the lock
+(row times are compared as epoch milliseconds). The nudger and the listing are never called with the
+ingest lock held, and no `Nudge`, row or stderr line carries the owner's text.
 
 Retention (ADR-console-009): construction runs one retention pass (`EventLog.retain`) after
 opening the log and before reading its events, and `RETENTION_THREAD`, started by `start()`, calls
@@ -354,23 +417,28 @@ import sys
 import os
 import threading
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qsl
 
 from agent_tools.claims import owner_actions
 from agent_tools.console import (
-    answer, capacity, deliveries, digest, inbox, manager, sessions, sprints, write_guard)
+    answer, capacity, deliveries, digest, inbox, manager, nudge, sessions, sprints, write_guard)
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
-    MANAGER_STARTED, MANAGER_WAITING, SPRINT_REPORTED, Event, EventLog, utc_now)
+    MANAGER_STARTED, MANAGER_WAITING, SPRINT_ANSWERED, SPRINT_MESSAGED, SPRINT_NUDGED,
+    SPRINT_READ, SPRINT_REPORTED, Event, EventLog, utc_now)
 from agent_tools.console.view import (
     INBOX_CHANGED, ReadState, derive_view, encode_view, health_change, inbox_changes, inbox_records,
     project_for, project_states, read_states, registry_changes)
 from agent_tools.project_contract import agent_platform
 from agent_tools.system.forge_api import ForgeError
 from agent_tools.verification import verify_answer
+
+def _epoch_ms(at: str) -> int:
+    return int(datetime.fromisoformat(at).timestamp() * 1000)
+
 
 def _reduced(questions: list[dict]) -> list[tuple[str, list[str]]]:
     return [(q["question"], list(q["options"])) for q in questions]
@@ -397,16 +465,23 @@ RETRY_PATH = "/api/retry-manager"
 BRIEF_PATH = "/api/brief"
 REPORT_PATH = "/api/report"
 STATUS_PATH = "/api/sprint-status"
+MESSAGE_PATH = "/api/message"
+INBOX_PATH = "/api/inbox"
+MESSAGE_REPLY_PATH = "/api/message-reply"
 CHECK_PATH = "/api/check-answer"
 PAGE_WRITES: frozenset[str] = frozenset({
     LOOKED_PATH, ANSWER_PATH, CHECK_PATH, GOAL_PATH, WITHDRAW_PATH, APPROVE_PATH, REPLY_PATH,
-    RETRY_PATH})
+    RETRY_PATH, MESSAGE_PATH})
 MAX_ANSWER_BYTES = 4096
 MAX_GOAL_BYTES = 16384
 MAX_WITHDRAW_BYTES = 4096
 MAX_BRIEF_BYTES = 32768
 MAX_REPORT_BYTES = 65536
-MANAGER_WRITES: frozenset[str] = frozenset({BRIEF_PATH, REPORT_PATH})
+MANAGER_WRITES: frozenset[str] = frozenset({BRIEF_PATH, REPORT_PATH, INBOX_PATH,
+                                            MESSAGE_REPLY_PATH})
+MAX_MESSAGE_BYTES = 16384
+MAX_INBOX_BYTES = 4096
+MAX_MESSAGE_REPLY_BYTES = 16384
 MAX_APPROVE_BYTES = 4096
 MAX_REPLY_BYTES = 16384
 MAX_RETRY_BYTES = 4096
@@ -544,6 +619,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return self._brief_request()
         if route == REPORT_PATH:
             return self._report_request()
+        if route == INBOX_PATH:
+            return self._inbox_request()
+        if route == MESSAGE_REPLY_PATH:
+            return self._message_reply_request()
         if route in PAGE_WRITES:
             return self._page_write(route)
         if route not in POST_LIMITS:
@@ -705,6 +784,78 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return self._refuse(500, "report failed")
         self._send(200, "application/json", json.dumps({"at": at}, separators=(",", ":")).encode())
 
+    def _inbox_request(self):
+        """The manager's route: the unread messages, read with the sprint's secret."""
+        length = self._checked_length(MAX_INBOX_BYTES)
+        if length is None:
+            return
+        self.close_connection = True
+        try:
+            sprint_id, secret = sprints.parse_inbox_request(self.rfile.read(length))
+        except ValueError:
+            return self._refuse(400, "bad inbox")
+        try:
+            entries = self.server.console.read_inbox(sprint_id, secret)
+        except sprints.SecretRefused:
+            print(f"console: inbox_refused {sprint_id} {sprints.SECRET_REFUSED}", file=sys.stderr)
+            return self._refuse(403, sprints.SECRET_REFUSED)
+        except sprints.Refused as error:
+            print(f"console: inbox_refused {sprint_id} {error}", file=sys.stderr)
+            return self._refuse(409, str(error))
+        except Exception as error:
+            print(f"console: inbox_failed {type(error).__name__}: {error}", file=sys.stderr)
+            return self._refuse(500, "inbox failed")
+        self._send(200, "application/json", json.dumps(
+            {"messages": entries}, sort_keys=True, separators=(",", ":")).encode())
+
+    def _message_reply_request(self):
+        """The manager's route: an answer to one message, sent with the sprint's secret."""
+        length = self._checked_length(MAX_MESSAGE_REPLY_BYTES)
+        if length is None:
+            return
+        self.close_connection = True
+        try:
+            sprint_id, secret, message, reply = sprints.parse_message_reply_request(
+                self.rfile.read(length))
+        except ValueError:
+            return self._refuse(400, "bad message reply")
+        try:
+            at = self.server.console.answer_message(sprint_id, secret, message, reply)
+        except sprints.SecretRefused:
+            print(f"console: message_reply_refused {sprint_id} {sprints.SECRET_REFUSED}",
+                  file=sys.stderr)
+            return self._refuse(403, sprints.SECRET_REFUSED)
+        except sprints.Refused as error:
+            print(f"console: message_reply_refused {sprint_id} {error}", file=sys.stderr)
+            return self._refuse(409, str(error))
+        except Exception as error:
+            print(f"console: message_reply_failed {type(error).__name__}: {error}",
+                  file=sys.stderr)
+            return self._refuse(500, "message reply failed")
+        self._send(200, "application/json", json.dumps({"at": at}, separators=(",", ":")).encode())
+
+    def _message_request(self, console: "ConsoleService") -> bool:
+        """Read and carry out an owner's message; False when it was refused."""
+        body = self._json_body(MAX_MESSAGE_BYTES)
+        if body is None:
+            return False
+        try:
+            parsed = sprints.parse_message(body)
+        except ValueError:
+            self._refuse(400, "bad message")
+            return False
+        try:
+            console.send_message(*parsed)
+        except sprints.Refused as error:
+            print(f"console: message_refused {error}", file=sys.stderr)
+            self._refuse(409, str(error))
+            return False
+        except Exception as error:
+            print(f"console: message_failed {type(error).__name__}: {error}", file=sys.stderr)
+            self._refuse(500, "message failed")
+            return False
+        return True
+
     def _decision_request(self, console: "ConsoleService", route: str) -> bool:
         """Read and carry out an approval or a reply; False when it was refused."""
         name = "approve" if route == APPROVE_PATH else "reply"
@@ -794,6 +945,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         elif route == RETRY_PATH:
             self.close_connection = True
             if not self._retry_request(console):
+                return
+        elif route == MESSAGE_PATH:
+            self.close_connection = True
+            if not self._message_request(console):
                 return
         else:
             if (self.headers.get("Content-Length", "0") != "0"
@@ -895,8 +1050,16 @@ class ConsoleService:
                  owner_path: Callable[..., None] = verify_answer.answer_prompt,
                  launcher: Callable[[manager.Launch], None] | None = None,
                  bound_profile_of: Callable[[str], str] = manager.bound_profile,
-                 dispatch: Callable[[Callable[[], None]], None] | None = None):
+                 dispatch: Callable[[Callable[[], None]], None] | None = None,
+                 nudger: Callable[[nudge.Nudge], None] | None = None,
+                 listing: Callable[[], Mapping[str, sessions.Observation]] | None = None):
         self.registry = Path(registry)
+        self._nudger = nudger
+        self._listing = (
+            (lambda: sessions.read_session_registry(self._session_dirs()))
+            if listing is None else listing)
+        self._nudging: set[str] = set()
+        self._nudge_again: set[str] = set()
         self._launcher = launcher
         self._bound_profile_of = bound_profile_of
         self._dispatch = self._on_new_thread if dispatch is None else dispatch
@@ -1216,7 +1379,7 @@ class ConsoleService:
         """Reserve the sprint's launch and run it in this thread; nothing when it cannot be reserved."""
         with self._ingest:
             if (self._launcher is None or sprint_id not in self._sprints
-                    or sprint_id in self._launching):
+                    or sprint_id in self._launching or sprint_id in self._nudging):
                 return
             self._launching[sprint_id] = object()
         self._launch_reserved(sprint_id)
@@ -1229,7 +1392,7 @@ class ConsoleService:
             sprint = self._sprints.get(sprint_id)
             if sprint is None or sprint.project_id != project_id:
                 raise sprints.Refused(sprints.NOT_OPEN)
-            if sprint_id in self._launching:
+            if sprint_id in self._launching or sprint_id in self._nudging:
                 raise sprints.Refused(sprints.LAUNCHING)
             state, _, retry = self._manager_state(sprint)
             if not retry:
@@ -1385,6 +1548,9 @@ class ConsoleService:
             appended = self.log.append([(BRIEF_APPROVED, project_id, {
                 "sprint_id": sprint_id, "version": version, "goal": sprint.goal})])
             self._apply(appended)
+            reserved = self._reserve_nudge(sprint_id)
+        if reserved:
+            self._dispatch_nudge(sprint_id)
 
     def reply_brief(self, project_id: str, sprint_id: str, version: int, reply: str) -> None:
         """Append one `brief.replied` event carrying the owner's words exactly as sent."""
@@ -1395,6 +1561,164 @@ class ConsoleService:
                 "sprint_id": sprint_id, "version": version, "goal": sprint.goal,
                 "reply": reply})])
             self._apply(appended)
+            reserved = self._reserve_nudge(sprint_id)
+        if reserved:
+            self._dispatch_nudge(sprint_id)
+
+    def send_message(self, project_id: str, sprint_id: str, text: str) -> int:
+        """Append one `sprint.messaged` event with the owner's text exactly as sent; its id."""
+        with self._ingest:
+            sprint = self._sprints.get(sprint_id)
+            if sprint is None or sprint.project_id != project_id:
+                raise sprints.Refused(sprints.NOT_OPEN)
+            sprints.checked_message(text)
+            appended = self.log.append([(SPRINT_MESSAGED, project_id, {
+                "sprint_id": sprint_id, "goal": sprint.goal, "text": text})])
+            self._apply(appended)
+            reserved = self._reserve_nudge(sprint_id)
+        if reserved:
+            self._dispatch_nudge(sprint_id)
+        return appended[-1].seq
+
+    def _nudgeable(self, sprint_id: str) -> tuple[sprints.SprintState, tuple[sprints.Message, ...]] | None:
+        """Under the ingest lock: the open sprint and its unread messages when its manager can be nudged.
+
+        A sprint with a launch reserved is not nudgeable: a wake would resume the manager the launch replaces.
+        """
+        sprint = self._sprints.get(sprint_id)
+        if sprint is None or sprint_id in self._launching or sprint.manager is None or sprint.manager.state != sprints.STARTED:
+            return None
+        unread = sprints.unread(sprint)
+        return (sprint, unread) if unread else None
+
+    def _reserve_nudge(self, sprint_id: str) -> bool:
+        """Under the ingest lock: reserve the sprint for a nudge; a reserved sprint is marked to nudge again."""
+        if self._nudger is None or self._nudgeable(sprint_id) is None:
+            return False
+        if sprint_id in self._nudging:
+            self._nudge_again.add(sprint_id)
+            return False
+        self._nudging.add(sprint_id)
+        return True
+
+    def _dispatch_nudge(self, sprint_id: str) -> None:
+        """Hand a reserved sprint's nudge to the dispatcher; one that cannot start is a failed nudge."""
+        try:
+            self._dispatch(lambda: self._nudge(sprint_id))
+        except Exception as error:
+            reason = f"the nudge could not start: {type(error).__name__}: {error}"
+            with self._ingest:
+                self._nudging.discard(sprint_id)
+                self._nudge_again.discard(sprint_id)
+                self._record_nudge(sprint_id, None, None, reason)
+
+    def _record_nudge(self, sprint_id: str, through: int | None, route: str | None,
+                      reason: str | None) -> None:
+        """Under the ingest lock: append one `sprint.nudged` row for the open sprint and fold it."""
+        sprint = self._sprints.get(sprint_id)
+        if sprint is None or self._stop.is_set():
+            return
+        if through is None:
+            unread = sprints.unread(sprint)
+            if not unread:
+                return
+            through = unread[-1].message_id
+        payload = {"sprint_id": sprint_id, "through": through, "route": route,
+                   "ok": reason is None}
+        if reason is not None:
+            payload["reason"] = reason
+        self._apply(self.log.append([(SPRINT_NUDGED, sprint.project_id, payload)]))
+        if reason is not None:
+            print(f"console: nudge_failed {sprint_id} {reason}", file=sys.stderr)
+
+    def _nudge(self, sprint_id: str) -> None:
+        """Tell the sprint's manager to read its inbox, then record the attempt; the reservation ends here."""
+        with self._ingest:
+            found = self._nudgeable(sprint_id)
+            project = None if found is None else self._states.get(found[0].project_id)
+            if found is None or project is None:
+                self._nudging.discard(sprint_id)
+                self._nudge_again.discard(sprint_id)
+                return
+            sprint, unread = found
+            through = unread[-1].message_id
+            name = manager.session_name(sprint.project_id, sprint_id)
+            profile, known, cwd = sprint.manager.profile, sprint.manager_session, project.root
+        route, reason = None, None
+        try:
+            listed = sorted(o.session_id for o in self._listing().values() if o.name == name)
+            if listed:
+                route = nudge.RELAY
+                self._nudger(nudge.Nudge(sprint_id, route, name, listed[0], profile, cwd))
+            elif known is not None:
+                route = nudge.WAKE
+                self._nudger(nudge.Nudge(sprint_id, route, name, known, profile, cwd))
+            else:
+                reason = nudge.UNKNOWN_SESSION
+        except Exception as error:
+            reason = (str(error) if isinstance(error, nudge.NudgeFailed)
+                      else f"{type(error).__name__}: {error}")
+        again = False
+        with self._ingest:
+            self._nudging.discard(sprint_id)
+            wanted = sprint_id in self._nudge_again
+            self._nudge_again.discard(sprint_id)
+            self._record_nudge(sprint_id, through, route, reason)
+            found = self._nudgeable(sprint_id)
+            if wanted and found is not None and found[1][-1].message_id > through \
+                    and not self._stop.is_set():
+                self._nudging.add(sprint_id)
+                again = True
+        if again:
+            self._dispatch_nudge(sprint_id)
+
+    def renudge(self) -> None:
+        """Nudge again the managers whose message went unread and undelivered for a minute."""
+        if self._nudger is None:
+            return
+        due = []
+        with self._ingest:
+            now = int(self._clock() * 1000)
+            for sprint_id, sprint in self._sprints.items():
+                found = self._nudgeable(sprint_id)
+                if (found is None or sprint_id in self._nudging
+                        or sprints.unreachable(sprint)):
+                    continue
+                if not any(message.delivered_at is None
+                           and now - _epoch_ms(message.at) >= sprints.RENUDGE_AFTER_MS
+                           for message in found[1]):
+                    continue
+                if sprint.last_nudge_at is not None and \
+                        now - _epoch_ms(sprint.last_nudge_at) < sprints.RENUDGE_AFTER_MS:
+                    continue
+                self._nudging.add(sprint_id)
+                due.append(sprint_id)
+        for sprint_id in due:
+            self._dispatch_nudge(sprint_id)
+
+    def read_inbox(self, sprint_id: str, secret: str) -> list[dict]:
+        """The unread messages in id order; the same locked section records them as read."""
+        with self._ingest:
+            sprint = self._manager_sprint(sprint_id, secret)
+            unread = sprints.unread(sprint)
+            if not unread:
+                return []
+            appended = self.log.append([(SPRINT_READ, sprint.project_id, {
+                "sprint_id": sprint_id, "through": unread[-1].message_id})])
+            self._apply(appended)
+            return [sprints.inbox_entry(message) for message in unread]
+
+    def answer_message(self, sprint_id: str, secret: str, message_id: int, reply: str) -> str:
+        """Append one `sprint.answered` event under a message of the sprint; its at."""
+        with self._ingest:
+            sprint = self._manager_sprint(sprint_id, secret)
+            if all(message.message_id != message_id for message in sprint.messages):
+                raise sprints.Refused(sprints.UNKNOWN_MESSAGE)
+            sprints.checked_reply(reply)
+            appended = self.log.append([(SPRINT_ANSWERED, sprint.project_id, {
+                "sprint_id": sprint_id, "message": message_id, "reply": reply})])
+            self._apply(appended)
+            return appended[-1].at
 
     def sprint_status(self, sprint_id: str) -> dict:
         """What became of a sprint's brief: its decision, version and the reply asking for changes."""
@@ -1554,6 +1878,11 @@ class ConsoleService:
                 self.poll_deliveries()
             except Exception as error:
                 print(f"console: delivery_poll_failed {type(error).__name__}: {error}",
+                      file=sys.stderr)
+            try:
+                self.renudge()
+            except Exception as error:
+                print(f"console: renudge_failed {type(error).__name__}: {error}",
                       file=sys.stderr)
 
     def _fold(self, appended: list[Event]) -> None:
