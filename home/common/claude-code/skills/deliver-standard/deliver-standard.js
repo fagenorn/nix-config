@@ -524,18 +524,25 @@ const carryOf = list => (Array.isArray(list) ? list : []).filter(f => isEntry(f)
   .map(f => ({ severity: f.severity === 'critical' ? 'critical' : 'important', ...(typeof f.file === 'string' && f.file ? { file: clip(f.file) } : {}), summary: clip(f.summary), ...(typeof f.failing_input === 'string' && f.failing_input ? { failing_input: clip(f.failing_input) } : {}) }))
 const findingKey = f => `${typeof f.file === 'string' ? f.file : ''}\n${clip(String(f.summary)).toLowerCase().replace(/\s+/g, ' ').trim()}`
 let carried = carryOf(CONT && CONT.fix_findings)
+const CARRIED_AT_START = carried
 // #940: fix waves that do not converge. A fix-wave-review stop that leaves findings open once the waves spent across runs (cont.fix_waves
 // and this run's) have reached FIX_WAVES_BOUND, with a finding left in a file the findings carried into this run already named, is marked
 // diverging: { file, waves }: more waves on that file are not expected to close it, so the owner decides the design. A first run carries no
 // findings in, so it is never marked; neither is a resume whose open findings are all in other files.
 const FIX_WAVES_BOUND = 4
-// Reviewers name one file as path, ./path, path:line, path:line-line or path:line:column: files are compared, and the marker names the file,
-// without the surrounding whitespace, a leading ./ and that trailing position; nothing else is folded, case included.
-const fileOf = f => (typeof f.file === 'string' ? f.file.trim().replace(/:\d+(?:[-:]\d+)?$/, '').replace(/^(?:\.\/)+/, '').trim() : '')
-const CARRIED_FILES = carried.map(fileOf).filter(Boolean)
+// Reviewers name one file as path, ./path, an absolute path under the worktree, path:line, path:line-line, path:line:column or path#L<line>
+// (#L<line>-L<line> too): files are compared, and the marker names the file, as the path relative to the worktree without the surrounding
+// whitespace, a leading ./ and that trailing position; nothing else is folded, case included.
+const fileOf = f => {
+  if (typeof f.file !== 'string') return ''
+  let p = f.file.trim().replace(/#L\d+(?:-L?\d+)?$/, '').replace(/:\d+(?:[-:]\d+)?$/, '').trim()
+  const roots = [setup && setup.worktree, setup && setup.worktree_path].filter(r => typeof r === 'string' && r.startsWith('/')).map(r => r.replace(/\/+$/, ''))
+  for (const r of roots) if (r && p.startsWith(`${r}/`)) { p = p.slice(r.length + 1); break }
+  return p.replace(/^(?:\.\/)+/, '').trim()
+}
 const divergingOf = left => {
   if (fixWaves < FIX_WAVES_BOUND) return null
-  const hit = left.map(fileOf).find(f => f && CARRIED_FILES.includes(f))
+  const hit = left.map(fileOf).find(f => f && CARRIED_AT_START.map(fileOf).includes(f))
   return hit ? { file: hit, waves: fixWaves } : null
 }
 // The head the final review and its fix waves passed at ({ head, accepted? }), carried so a resume on it skips the review.

@@ -30,10 +30,13 @@ export const meta = {
 // A no-changes row (#923: every task of the child's plan ended with no commit, so there is nothing to land) is final too, once its claim
 // is released, and reported in owner_actions: the owner closes the issue. A release that failed leaves the row stopped for a relaunch.
 // A not-converging row (#940: the child stopped at fix-wave-review marked diverging, its fix waves spent across runs not closing the
-// findings in one file) is final and reported in owner_actions with the file, the waves, the worktree, the branch, the PR when one exists and
-// the findings left open: the owner decides the design, and the owner or a finisher takes the work over. The worktree and the branch are
-// left as they are and the claim is released, so whoever takes over can claim the issue. A release that failed keeps the row final with
-// released: false (a relaunch would resume the cont into the final review and the waves this outcome ends); the claim then lapses on its own.
+// findings in one file) is final and reported in owner_actions with the file, the waves, the worktree, the branch, the PR when one exists,
+// the findings left open, the claim holder and the child's cont (slimmed as a relaunch cont is): the owner decides the design, then the
+// owner or a finisher takes the work over, or a relaunch with that cont in conts resumes it. The worktree and the branch are left as they
+// are and the claim stays held: a released claim would leave nothing on the tracker, and a later batch would plan the issue afresh on
+// the diverged branch with its wave count at zero. A held claim fails closed: a later batch under another holder sees claimed-elsewhere,
+// and after 24h idle the status command posts a stale-claim owner action; a claim never lapses on its own, so the owner or the finisher
+// releases it with the holder the entry names. An issue closed meanwhile is settled as closed first, as any stop with a cont is.
 // A closed issue whose claim this batch holds is released (at intake, or by the settle step after a stop with a cont
 // that is not post-merge) and its row is final with released; a release that failed leaves the row stopped for a relaunch.
 // A questions row is {issue, outcome: 'questions', lane?, questions, marker}: marker is the box prompt's
@@ -1620,28 +1623,6 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `release-${n}`, phase: 'Deliver', agentT
       } else rows[n] = { issue: n, outcome: 'stopped', stage: 'release', detail: rel ? (rel.detail || rel.verdict) : `release-${n} returned nothing` }
       return
     }
-    if (r.stage === 'fix-wave-review' && isObj(r.diverging) && isObj(r.cont)) {
-      // #940: more fix waves are not expected to close this, so no relaunch. The worktree and the branch stay for whoever takes over;
-      // the claim is given back so that they can claim the issue.
-      const rel = await ask(agent(`The delivery of issue #${n} of ${SLUG} (the git repository at ${REPO}) stopped for an owner decision: its fix waves do not converge. Release the batch claim and leave the worktree, the branch and any pull request exactly as they are.
-Run alone and exactly: forge-claim release --repo ${SLUG} --issue ${n} --holder ${HOLDER} --reason skipped
-Return its verdict (released on exit 0, not_held (exit 3) when the claim is already gone, or error on any other exit) and any detail. ${FORGE_TIMEOUT} Run nothing else.
-${RULES_FOR(REPO, f.branch)}`, { label: `release-${n}`, phase: 'Deliver', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: RELEASE_SCHEMA }), `release-${n}`)
-      const released = !!rel && (rel.verdict === 'released' || rel.verdict === 'not_held')
-      const s = isObj(r.cont.setup) ? r.cont.setup : {}
-      const pr = [r.cont.pr, r.pr].find(v => isPosInt(v))
-      const taken = {
-        ...(nonEmpty(r.diverging.file) ? { file: oneLine(r.diverging.file) } : {}), ...(isPosInt(r.diverging.waves) ? { waves: r.diverging.waves } : {}),
-        ...(nonEmpty(s.worktree_path || s.worktree) ? { worktree: s.worktree_path || s.worktree } : {}), ...(nonEmpty(s.branch) ? { branch: s.branch } : {}),
-        ...(pr ? { pr } : {}),
-      }
-      // The child bounds the findings it carries (their count and each text); the same bounds are applied again here.
-      DIVERGING[n] = { ...taken, claim: released ? 'released' : 'held', findings: (Array.isArray(r.cont.fix_findings) ? r.cont.fix_findings : []).filter(isObj).slice(0, FINDINGS_MAX)
-        .map(x => Object.fromEntries(['severity', 'file', 'summary', 'failing_input'].filter(k => nonEmpty(x[k])).map(k => [k, oneLine(x[k])]))) }
-      delete CONTS[n]
-      rows[n] = { issue: n, outcome: 'not-converging', stage: r.stage, ...taken, released: !!rel && rel.verdict === 'released', ...(released ? {} : { detail: oneLine(`the claim was not released: ${rel ? (rel.detail || rel.verdict) : `release-${n} returned nothing`}`) }), ...stopDetail(r) }
-      return
-    }
     if (r.cont) {
       if (r.stage !== 'planned' && !postMerge(r) && !mergedReadopt(n, f)) {
         // A stop on an issue closed meanwhile: give the claim back and drop the cont; an open issue keeps both (#714).
@@ -1653,6 +1634,25 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `settle-${n}`, phase: 'Deliver', agentTy
         if (st && st.state === 'CLOSED' && (st.release === 'released' || st.release === 'not_held')) {
           delete CONTS[n]
           rows[n] = { issue: n, outcome: 'closed', stage: r.stage, released: st.release === 'released' }
+          return
+        }
+        if (r.stage === 'fix-wave-review' && isObj(r.diverging) && isObj(r.cont) && !(st && st.state === 'CLOSED')) {
+          // #940: more fix waves are not expected to close this, so no relaunch. The worktree, the branch and the claim stay as they are
+          // (see the header); a closed issue whose release failed stays stopped instead, so that a relaunch releases it.
+          const s = isObj(r.cont.setup) ? r.cont.setup : {}
+          const pr = [r.cont.pr, r.pr].find(v => isPosInt(v))
+          const wt = [s.worktree_path, s.worktree].find(nonEmpty)
+          const taken = {
+            ...(nonEmpty(r.diverging.file) ? { file: oneLine(r.diverging.file) } : {}), ...(isPosInt(r.diverging.waves) ? { waves: r.diverging.waves } : {}),
+            ...(wt ? { worktree: oneLine(wt) } : {}), ...(nonEmpty(s.branch) ? { branch: oneLine(s.branch) } : {}),
+            ...(pr ? { pr } : {}),
+          }
+          // The child bounds the findings it carries (their count and each text); the same bounds are applied again here, in the entry and in its cont.
+          const findings = (Array.isArray(r.cont.fix_findings) ? r.cont.fix_findings : []).filter(isObj).slice(0, FINDINGS_MAX)
+            .map(x => Object.fromEntries(['severity', 'file', 'summary', 'failing_input'].filter(k => nonEmpty(x[k])).map(k => [k, oneLine(x[k])])))
+          DIVERGING[n] = { ...taken, claim: 'held', holder: HOLDER, findings, cont: { ...r.cont, ...(findings.length ? { fix_findings: findings } : {}) } }
+          delete CONTS[n]
+          rows[n] = { issue: n, outcome: 'not-converging', stage: r.stage, ...taken, ...stopDetail(r) }
           return
         }
       }
@@ -1736,7 +1736,7 @@ for (const r of table) log(`#${r.issue}: ${r.outcome}${r.reason || r.detail ? ` 
 return {
   stage: breaker ? 'breaker' : 'done', batch_id: BATCH, table,
   questions: table.filter(r => r.outcome === 'questions').map(r => ({ issue: r.issue, questions: r.questions, marker: r.marker })),
-  owner_actions: [...table.filter(r => r.outcome === 'questions' && r.marker !== null && r.marker !== undefined).map(r => ({ issue: r.issue, reason: 'decision', comment_id: r.marker })), ...table.filter(r => r.outcome === 'already-fixed').map(r => ({ issue: r.issue, reason: 'already-fixed', commit: r.commit })), ...table.filter(r => r.outcome === 'no-changes').map(r => ({ issue: r.issue, reason: 'no-changes' })), ...table.filter(r => r.outcome === 'not-converging').map(r => ({ issue: r.issue, reason: 'not-converging', ...DIVERGING[r.issue] })), ...cycle.map(n => ({ issue: n, reason: 'cycle' })), ...LAND_OA],
+  owner_actions: [...table.filter(r => r.outcome === 'questions' && r.marker !== null && r.marker !== undefined).map(r => ({ issue: r.issue, reason: 'decision', comment_id: r.marker })), ...table.filter(r => r.outcome === 'already-fixed').map(r => ({ issue: r.issue, reason: 'already-fixed', commit: r.commit })), ...table.filter(r => r.outcome === 'no-changes').map(r => ({ issue: r.issue, reason: 'no-changes' })), ...table.filter(r => r.outcome === 'not-converging').map(r => ({ issue: r.issue, reason: 'not-converging', ...DIVERGING[r.issue], cont: slimCont(DIVERGING[r.issue].cont) })), ...cycle.map(n => ({ issue: n, reason: 'cycle' })), ...LAND_OA],
   relaunch: open.length ? relaunchArgs() : null,
   ...(breaker ? { breaker } : {}),
 }

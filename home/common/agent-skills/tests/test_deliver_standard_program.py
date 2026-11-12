@@ -4852,7 +4852,9 @@ class FixWavesConvergeTest(unittest.TestCase):
 
     def test_a_position_or_a_leading_dot_slash_names_the_same_file(self):
         path = "src/claim.py"
-        forms = (path, f"{path}:328", f"{path}:328-337", f"{path}:328:12", f"./{path}", f" ./{path}:9 ")
+        root = "/r/.wt/w-issue-9-x"
+        forms = (path, f"{path}:328", f"{path}:328-337", f"{path}:328:12", f"./{path}", f" ./{path}:9 ",
+                 f"{root}/{path}", f"{root}/{path}:328-337", f"{path}#L328", f"{path}#L328-L337", f"{root}/./{path}#L3-9")
         for carried_as in forms:
             for left_as in forms:
                 with self.subTest(carried=carried_as, left=left_as):
@@ -4865,7 +4867,8 @@ class FixWavesConvergeTest(unittest.TestCase):
 
     def test_other_differences_between_paths_are_different_files(self):
         cont = self.stopped(fix_findings=[{"severity": "important", "file": "src/claim.py:328-337", "summary": "race in adopt"}])
-        for other in ("src/Claim.py", "claim.py", "src/claim.py.bak", "src/claim.pyc:3", "src/claim.py:fn", "../src/claim.py"):
+        for other in ("src/Claim.py", "claim.py", "src/claim.py.bak", "src/claim.pyc:3", "src/claim.py:fn", "../src/claim.py",
+                      "/elsewhere/src/claim.py", "/r/.wt/w-issue-9-xy/src/claim.py", "src/claim.py#fn"):
             with self.subTest(other=other):
                 result, _ = run(args=dict(ARGS, cont=cont), replies={"fix-wave-review": self.left(other)})
                 self.assertEqual(result["stage"], "fix-wave-review")
