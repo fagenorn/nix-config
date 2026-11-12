@@ -3,10 +3,12 @@
 The owner's words never travel in a nudge. A nudge carries `NUDGE_TEXT`, one fixed sentence that
 names no sprint, project or owner text; the manager runs `sprint inbox` (which authenticates with
 the sprint's secret) and reads the message there. `Nudge` has no text member: the route chooses
-the sentence (`relay` and `wake` carry `NUDGE_TEXT`, `revive` carries `RESTART_TEXT`), and no argv
-element or environment value carries anything for the manager but that one sentence.
+the sentence (`relay` and `wake` carry `NUDGE_TEXT`, `continue` carries `CONTINUE_TEXT`, `revive`
+carries `RESTART_TEXT`), and no argv element or environment value carries anything for the manager
+but that one sentence.
+`continue` is the one other fixed sentence a relay carries: `CONTINUE_TEXT`, the idle nudge (#929).
 
-Three routes, chosen by the caller (this module only runs the one it is given):
+Four routes, chosen by the caller (this module only runs the one it is given):
 
     relay: claude-account run -p --allowedTools SendMessage --no-session-persistence "<prompt>"
 
@@ -15,6 +17,14 @@ Three routes, chosen by the caller (this module only runs the one it is given):
 line if the tool reported the message sent or accepted, otherwise print FAILED.` The relay sends
 by session name (the tool's recipient accepts a peer session name) and is delivered only when its
 last non-empty stdout line is exactly `SENT`.
+
+    continue: the relay command with `CONTINUE_TEXT` in place of `NUDGE_TEXT`
+
+`CONTINUE_TEXT` is `The console found you idle while your sprint has work. Run "sprint recap", then
+"sprint inbox", and go on with the next step.` The continue is sent to a listed idle manager the
+console found quiet (#929); it follows the relay's rules in every respect (stdout captured,
+`RELAY_TIMEOUT`, delivered only on `SENT`, else `NudgeFailed(UNCONFIRMED_TEXT)`) and needs no
+session id.
 
     wake: systemd-run --user --scope --quiet --collect --description=agent manager <name> --
           claude-account run --resume <session id> --bg [--name <name> --settings <file>]
@@ -86,7 +96,10 @@ NUDGE_TEXT = ('The owner left you a message on the console. Run "sprint inbox" n
               "what it returns.")
 RESTART_TEXT = ('The console restarted this session because it had stopped while its sprint had '
                 'work. Run "sprint contract", then "sprint recap", and go on.')
+CONTINUE_TEXT = ('The console found you idle while your sprint has work. Run "sprint recap", '
+                 'then "sprint inbox", and go on with the next step.')
 RELAY = "relay"
+CONTINUE = "continue"
 WAKE = "wake"
 REVIVE = "revive"
 RELAY_TIMEOUT = 180
@@ -117,9 +130,9 @@ class Nudge:
     settings: str | None = None
 
 
-def relay_prompt(session_name: str) -> str:
+def relay_prompt(session_name: str, text: str = NUDGE_TEXT) -> str:
     return ('Use the SendMessage tool exactly once, to the peer session named "' + session_name
-            + '", with this message and nothing else: ' + NUDGE_TEXT
+            + '", with this message and nothing else: ' + text
             + " Then print SENT on its own line if the tool reported the message sent or "
               "accepted, otherwise print FAILED.")
 
@@ -127,9 +140,10 @@ def relay_prompt(session_name: str) -> str:
 def nudge_command(nudge: Nudge, platform: str) -> list[str] | None:
     if not manager.supported(platform):
         return None
-    if nudge.route == RELAY:
+    if nudge.route in (RELAY, CONTINUE):
+        text = CONTINUE_TEXT if nudge.route == CONTINUE else NUDGE_TEXT
         return ["claude-account", "run", "-p", "--allowedTools", "SendMessage",
-                "--no-session-persistence", relay_prompt(nudge.session_name)]
+                "--no-session-persistence", relay_prompt(nudge.session_name, text)]
     text = RESTART_TEXT if nudge.route == REVIVE else NUDGE_TEXT
     flags = (["--name", nudge.session_name, "--settings", nudge.settings]
              if nudge.settings is not None else [])
@@ -171,7 +185,7 @@ def run_nudge(nudge: Nudge, *, platform: str = sys.platform, run=run_in_own_grou
         raise NudgeFailed(UNKNOWN_SESSION)
     if not Path(nudge.cwd).is_dir():
         raise NudgeFailed(f"the project root {nudge.cwd} is not a directory")
-    relay = nudge.route == RELAY
+    relay = nudge.route in (RELAY, CONTINUE)
     timeout = RELAY_TIMEOUT if relay else WAKE_TIMEOUT
     env = manager.client_environment(nudge.profile, environ)
     with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
