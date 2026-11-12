@@ -18,9 +18,15 @@ Routes (every response carries `Cache-Control: no-store` and
     POST /api/check-answer 204, a JSON body, the page answers one verification prompt (below)
     POST /api/goal  204, a JSON body, the page states a goal (below)
     POST /api/withdraw 204, a JSON body, the page withdraws a goal (below)
+    POST /api/approve 204, a JSON body, the page approves a brief (below)
+    POST /api/reply 204, a JSON body, the page asks a brief for changes (below)
+    POST /api/brief 200 application/json, a manager sends a sprint's brief (below)
+    POST /api/report 200 application/json, a manager sends a sprint's report (below)
+    GET /api/sprint-status?sprint_id=<id> 200 application/json, what became of a brief (below)
     anything else   404
     other methods   405 with `Allow: GET` (`Allow: POST` on `/api/hooks`, `/api/readings`,
-                    `/api/looked`, `/api/answer`, `/api/check-answer`, `/api/goal` and `/api/withdraw`)
+                    `/api/looked`, `/api/answer`, `/api/check-answer`, `/api/goal`, `/api/withdraw`,
+                    `/api/approve`, `/api/reply`, `/api/brief` and `/api/report`)
 
 Two kinds of write exist. The hook and reading routes append what the proxies and hooks observe:
 `POST /api/hooks` appends session observations, `POST /api/readings` the capacity kinds
@@ -41,7 +47,7 @@ ignored payload (an unknown event, a missing member) appends nothing. The
 route carries no token: it records observations and answers nothing (ADR-console-004).
 
 A page write (`PAGE_WRITES`, today `POST /api/looked`, `POST /api/answer`, `POST /api/check-answer`,
-`POST /api/goal` and `POST /api/withdraw`; ADR-console-008, ADR-console-010, ADR-console-011) is made by the desk page
+`POST /api/goal`, `POST /api/withdraw`, `POST /api/approve` and `POST /api/reply`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
 alone and goes through one guard, `_page_write`, whatever its route. After the loopback `Host`
 check and before any body is read, exactly one `Origin` header must equal `http://<Host>` (else
 403 `text/plain` `origin refused`) and exactly one `X-Console-Token` header must equal the
@@ -71,7 +77,13 @@ serves the three), with the limits `MAX_GOAL_BYTES` (16384) and `MAX_WITHDRAW_BY
 goal_failed <Type>: <message>` and 500 `goal failed`; success is an empty `204`. The withdraw route
 is the same with `bad withdraw`, `console: withdraw_refused <reason>`, `console: withdraw_failed
 <Type>: <message>` and 500 `withdraw failed`. No refusal appends a row, publishes or creates a
-secret file. The token is created once in
+secret file. `POST /api/approve` and `POST /api/reply` run the same checks again (one helper), with
+the limits `MAX_APPROVE_BYTES` (4096) and `MAX_REPLY_BYTES` (16384): a body `sprints.parse_approve`
+or `sprints.parse_reply` does not accept is 400 `bad approve` or `bad reply`; `sprints.Refused` is
+one stderr line `console: approve_refused <reason>` or `console: reply_refused <reason>` and 409
+with the reason; any other exception is `console: approve_failed <Type>: <message>` or
+`console: reply_failed <Type>: <message>` and 500 `approve failed` or `reply failed`; success is an
+empty `204`. The token is created once in
 `page-token` beside the event log and reaches a client only inside `GET /`, where it replaces
 the slot in the page's `console-token` meta tag.
 
@@ -89,6 +101,57 @@ a refusal, and published. Every poll of the session registry also lists the prof
 (`profile_dirs()`, `default_profile_dirs()`: `$HOME/.claude` and each directory of `profiles/` under
 `$CLAUDE_ACCOUNTS_DIR`, else `$HOME/.claude-accounts`; only `is_dir` touches one) so a profile never
 used reads `unknown` and a removed one is no longer listed, and ends by publishing, so a reset that has passed shows within one poll.
+
+The manager's route, `POST /api/brief`, is not a page write: it carries no token and the sprint's
+secret takes the token's place. After the loopback `Host` check it runs the hook route's body checks
+(`_checked_length(MAX_BRIEF_BYTES)`, 32768: any `Origin` is 403 `origin refused`, a media type that
+is not `application/json` 415 `json only`, a length that is not ASCII digits 411 `length required`,
+one over the limit 413 `too large`, the body unread), reads the body and runs
+`sprints.parse_brief_request` (a body it does not accept is 400 `bad brief`), then `send_brief`. A
+`sprints.SecretRefused` is one stderr line `console: brief_refused <sprint_id> secret refused` and
+403 `secret refused`; any other `sprints.Refused` is `console: brief_refused <sprint_id> <reason>` and
+409 with the reason; any other exception is `console: brief_failed <Type>: <message>` and 500 `brief
+failed`. Success is 200 `application/json` `{"version":<n>}`. Every refusal is `text/plain`, one line,
+closes the connection and appends nothing.
+`GET /api/sprint-status?sprint_id=<id>` carries no write guard: its query must hold exactly one
+parameter, `sprint_id`, matching `sprints.SPRINT_ID` (else 400 `bad sprint`); an id that is neither
+open nor withdrawn is 404 `this sprint is not known`; else 200 `application/json`,
+`sprint_status(sprint_id)` as compact JSON with sorted keys.
+
+Briefs (#887): `send_brief(sprint_id, secret, brief)`, under the ingest lock, raises
+`Refused(NOT_OPEN)` unless the sprint is open, `SecretRefused` unless `sprints.read_secret` holds a
+secret equal (`hmac.compare_digest`) to the presented one, then applies `sprints.checked_brief`
+(the secret is checked before the parts); it appends exactly one `brief.sent` row
+`{"sprint_id", "version", "goal", "brief"}` with the version one above the folded brief's (1 for
+none), folds and publishes, and returns the version. A brief after an approval or a reply replaces
+the decision: the sprint waits again. `approve_brief(project_id, sprint_id, version)` and
+`reply_brief(project_id, sprint_id, version, reply)`, under the lock, raise `Refused(NOT_OPEN)`
+unless the sprint is open and belongs to that project, `NOT_WAITING` when it has no brief, `REPLACED`
+when `version` is not the folded brief's, `NOT_WAITING` when its decision is not `none`, and for a
+reply `sprints.checked_reply`; each appends exactly one `brief.approved` row `{"sprint_id",
+"version", "goal"}` or `brief.replied` row with the reply exactly as sent. `sprint_status(sprint_id)`,
+under the lock, is `{"sprint_id", "decision", "version", "reply"}`: `none`, `approved` or `changes`
+for an open sprint (`reply` only with `changes`), `withdrawn` for an id in `_withdrawn` (the
+`sprints.withdrawn_ids` fold of the log, kept beside the sprints), else `Refused(UNKNOWN)`. The
+secret, presented or stored, appears in no stderr line, answer, view or row.
+
+Reports (#890): `POST /api/report` is a manager write like the brief's: no token, the sprint's secret
+in its place. After the loopback `Host` check it runs `_checked_length(MAX_REPORT_BYTES)`, 65536
+(any `Origin` is 403 `origin refused`, a media type that is not `application/json` 415 `json only`,
+a length that is not ASCII digits 411 `length required`, one over the limit 413 `too large`, the
+body unread), then `sprints.parse_report_request` (a body it does not accept is 400 `bad report`),
+then `send_report(sprint_id, secret, report)`, which under the ingest lock raises
+`Refused(NOT_OPEN)` unless the sprint is open, `SecretRefused` unless `sprints.read_secret` holds a
+secret equal (`hmac.compare_digest`) to the presented one, `Refused(NOT_STARTED)` unless the
+sprint's brief is approved, then whatever `sprints.checked_report` refuses (the secret is checked
+before the members). It appends exactly one `sprint.reported` row `{"sprint_id", "goal", "report"}`
+with the checked report, folds and publishes, and returns the row's `at`. A `sprints.SecretRefused`
+is one stderr line `console: report_refused <sprint_id> secret refused` and 403 `secret refused`;
+any other `sprints.Refused` is `console: report_refused <sprint_id> <reason>` and 409 with the
+reason; any other exception is `console: report_failed <Type>: <message>` and 500 `report failed`.
+Success is 200 `application/json` `{"at":"<the row's at>"}`. Every refusal is `text/plain`, one
+line, closes the connection, appends nothing and publishes nothing. The secret appears in no stderr
+line or answer.
 
 A state request reads only `view_bytes`, which is memory: no log access, no
 registry read, no derivation, no file, no filesystem metadata call, no
@@ -214,8 +277,8 @@ is one stderr line `console: retention_failed <Type>: <message>` and the loop go
 
 Digest: the view carries `digest.digest(moments, last look, now)` (see `digest.py`). The last look
 is the newest `page.looked` event of the log, the same for every client and across restarts; the
-moments are folded from each appended batch against the state before it, and only those after the
-current window start are kept. The window of a first visit moves with the clock, so
+moments are folded from each appended batch against the sessions, inbox and sprints before it, and only those
+after the current window start are kept. The window of a first visit moves with the clock, so
 `DIGEST_THREAD`, started by `start()`, calls `expire_digest()` every `digest_seconds`
 (`DIGEST_SECONDS`): it trims the moments to the window and publishes, which changes the view only
 when a moment left. A failure is one stderr line `console: digest_expiry_failed <Type>: <message>`
@@ -242,7 +305,7 @@ unreadable, again only after it read successfully in between) and `console: jour
 Construction order: bind the server (an `OSError` propagates and nothing else is
 opened); load or create the page token (a `write_guard.TokenError` propagates: the service does
 not start); open the event log; run one retention pass; fold the projects, the sessions, the inbox,
-the read health, the deliveries and the sprints, then the last look and the digest moments, from it; publish
+the read health, the deliveries, the sprints and the withdrawn ids, then the last look and the digest moments, from it; publish
 the view; sample the registry's signature; `refresh()`; `poll_sessions()`; `poll_deliveries()`. The
 absent set starts empty, so a restart drops a session only after two polls miss
 it. On any failure after the bind, what was opened is closed and the exception
@@ -251,6 +314,7 @@ sets the stop flag, then `closing`, wakes every waiter, joins the watcher, the s
 tracker, retention and digest threads and tears the rest down; it is idempotent.
 """
 
+import hmac
 import http.server
 import json
 import socketserver
@@ -261,11 +325,14 @@ import time
 from collections.abc import Callable, Iterable
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import parse_qsl
 
 from agent_tools.claims import owner_actions
 from agent_tools.console import (
     answer, capacity, deliveries, digest, inbox, sessions, sprints, write_guard)
-from agent_tools.console.event_log import GOAL_STATED, GOAL_WITHDRAWN, Event, EventLog, utc_now
+from agent_tools.console.event_log import (
+    BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, SPRINT_REPORTED, Event,
+    EventLog, utc_now)
 from agent_tools.console.view import (
     INBOX_CHANGED, ReadState, derive_view, encode_view, health_change, inbox_changes, inbox_records,
     project_for, project_states, read_states, registry_changes)
@@ -292,11 +359,22 @@ LOOKED_PATH = "/api/looked"
 ANSWER_PATH = "/api/answer"
 GOAL_PATH = "/api/goal"
 WITHDRAW_PATH = "/api/withdraw"
+APPROVE_PATH = "/api/approve"
+REPLY_PATH = "/api/reply"
+BRIEF_PATH = "/api/brief"
+REPORT_PATH = "/api/report"
+STATUS_PATH = "/api/sprint-status"
 CHECK_PATH = "/api/check-answer"
-PAGE_WRITES: frozenset[str] = frozenset({LOOKED_PATH, ANSWER_PATH, CHECK_PATH, GOAL_PATH, WITHDRAW_PATH})
+PAGE_WRITES: frozenset[str] = frozenset({
+    LOOKED_PATH, ANSWER_PATH, CHECK_PATH, GOAL_PATH, WITHDRAW_PATH, APPROVE_PATH, REPLY_PATH})
 MAX_ANSWER_BYTES = 4096
 MAX_GOAL_BYTES = 16384
 MAX_WITHDRAW_BYTES = 4096
+MAX_BRIEF_BYTES = 32768
+MAX_REPORT_BYTES = 65536
+MANAGER_WRITES: frozenset[str] = frozenset({BRIEF_PATH, REPORT_PATH})
+MAX_APPROVE_BYTES = 4096
+MAX_REPLY_BYTES = 16384
 MAX_HOOK_BYTES = 8 * 1024 * 1024
 READINGS_PATH = "/api/readings"
 MAX_READING_BYTES = 64 * 1024
@@ -426,6 +504,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         if not self._loopback():
             return
         route = self.path.split("?", 1)[0]
+        if route == BRIEF_PATH:
+            return self._brief_request()
+        if route == REPORT_PATH:
+            return self._report_request()
         if route in PAGE_WRITES:
             return self._page_write(route)
         if route not in POST_LIMITS:
@@ -538,6 +620,100 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return False
         return True
 
+    def _brief_request(self):
+        """The manager's route: a brief sent with the sprint's secret; no token, no page."""
+        console = self.server.console
+        length = self._checked_length(MAX_BRIEF_BYTES)
+        if length is None:
+            return
+        self.close_connection = True
+        try:
+            sprint_id, secret, brief = sprints.parse_brief_request(self.rfile.read(length))
+        except ValueError:
+            return self._refuse(400, "bad brief")
+        try:
+            version = console.send_brief(sprint_id, secret, brief)
+        except sprints.SecretRefused:
+            print(f"console: brief_refused {sprint_id} {sprints.SECRET_REFUSED}", file=sys.stderr)
+            return self._refuse(403, sprints.SECRET_REFUSED)
+        except sprints.Refused as error:
+            print(f"console: brief_refused {sprint_id} {error}", file=sys.stderr)
+            return self._refuse(409, str(error))
+        except Exception as error:
+            print(f"console: brief_failed {type(error).__name__}: {error}", file=sys.stderr)
+            return self._refuse(500, "brief failed")
+        self._send(200, "application/json",
+                   json.dumps({"version": version}, separators=(",", ":")).encode())
+
+    def _report_request(self):
+        """The manager's route: a report sent with the sprint's secret; no token, no page."""
+        console = self.server.console
+        length = self._checked_length(MAX_REPORT_BYTES)
+        if length is None:
+            return
+        self.close_connection = True
+        try:
+            sprint_id, secret, report = sprints.parse_report_request(self.rfile.read(length))
+        except ValueError:
+            return self._refuse(400, "bad report")
+        try:
+            at = console.send_report(sprint_id, secret, report)
+        except sprints.SecretRefused:
+            print(f"console: report_refused {sprint_id} {sprints.SECRET_REFUSED}", file=sys.stderr)
+            return self._refuse(403, sprints.SECRET_REFUSED)
+        except sprints.Refused as error:
+            print(f"console: report_refused {sprint_id} {error}", file=sys.stderr)
+            return self._refuse(409, str(error))
+        except Exception as error:
+            print(f"console: report_failed {type(error).__name__}: {error}", file=sys.stderr)
+            return self._refuse(500, "report failed")
+        self._send(200, "application/json", json.dumps({"at": at}, separators=(",", ":")).encode())
+
+    def _decision_request(self, console: "ConsoleService", route: str) -> bool:
+        """Read and carry out an approval or a reply; False when it was refused."""
+        name = "approve" if route == APPROVE_PATH else "reply"
+        body = self._json_body(MAX_APPROVE_BYTES if route == APPROVE_PATH else MAX_REPLY_BYTES)
+        if body is None:
+            return False
+        try:
+            if route == APPROVE_PATH:
+                parsed = sprints.parse_approve(body)
+            else:
+                parsed = sprints.parse_reply(body)
+        except ValueError:
+            self._refuse(400, f"bad {name}")
+            return False
+        try:
+            if route == APPROVE_PATH:
+                console.approve_brief(*parsed)
+            else:
+                console.reply_brief(*parsed)
+        except sprints.Refused as error:
+            print(f"console: {name}_refused {error}", file=sys.stderr)
+            self._refuse(409, str(error))
+            return False
+        except Exception as error:
+            print(f"console: {name}_failed {type(error).__name__}: {error}", file=sys.stderr)
+            self._refuse(500, f"{name} failed")
+            return False
+        return True
+
+    def _status_request(self):
+        query = self.path.partition("?")[2]
+        try:
+            pairs = parse_qsl(query, keep_blank_values=True, strict_parsing=bool(query))
+        except ValueError:
+            pairs = []
+        if (len(pairs) != 1 or pairs[0][0] != "sprint_id"
+                or sprints.SPRINT_ID.fullmatch(pairs[0][1]) is None):
+            return self._send(400, "text/plain", b"bad sprint\n")
+        try:
+            status = self.server.console.sprint_status(pairs[0][1])
+        except sprints.Refused as error:
+            return self._send(404, "text/plain", str(error).encode() + b"\n")
+        self._send(200, "application/json",
+                   json.dumps(status, sort_keys=True, separators=(",", ":")).encode())
+
     def _page_write(self, route: str):
         console = self.server.console
         refusal = write_guard.refusal(
@@ -552,6 +728,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         elif route in (GOAL_PATH, WITHDRAW_PATH):
             self.close_connection = True
             if not self._goal_request(console, route):
+                return
+        elif route in (APPROVE_PATH, REPLY_PATH):
+            self.close_connection = True
+            if not self._decision_request(console, route):
                 return
         else:
             if (self.headers.get("Content-Length", "0") != "0"
@@ -584,7 +764,9 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             self._send(200, "application/json", self.server.console.view_bytes)
         elif route == "/api/stream":
             self._stream()
-        elif route in POST_LIMITS or route in PAGE_WRITES:
+        elif route == STATUS_PATH:
+            self._status_request()
+        elif route in POST_LIMITS or route in PAGE_WRITES or route in MANAGER_WRITES:
             self._refuse_method()
         else:
             self._send(404, "text/plain", b"not found\n")
@@ -617,7 +799,8 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return
         self.close_connection = True
         route = self.path.split("?", 1)[0]
-        allow = "POST" if route in POST_LIMITS or route in PAGE_WRITES else "GET"
+        allow = "POST" if (route in POST_LIMITS or route in PAGE_WRITES
+                           or route in MANAGER_WRITES) else "GET"
         self._send(405, "text/plain", b"method not allowed\n",
                    ("Allow", allow), ("Connection", "close"))
 
@@ -708,6 +891,7 @@ class ConsoleService:
             self._derive_digest(events)
             self._deliveries = deliveries.delivery_states(events)
             self._sprints = sprints.sprint_states(events)
+            self._withdrawn = sprints.withdrawn_ids(events)
             self._publish()
             self._signature = signature(self.registry)
             self.refresh()
@@ -934,6 +1118,85 @@ class ConsoleService:
                 print(f"console: sprint_secret_unremoved {sprint_id} "
                       f"{type(error).__name__}: {error}", file=sys.stderr)
 
+    def send_brief(self, sprint_id: str, secret: str, brief: dict) -> int:
+        """Append one `brief.sent` event for an open sprint whose secret is presented; its version."""
+        with self._ingest:
+            sprint = self._manager_sprint(sprint_id, secret)
+            parts = sprints.checked_brief(brief)
+            version = (sprint.brief.version if sprint.brief else 0) + 1
+            appended = self.log.append([(BRIEF_SENT, sprint.project_id, {
+                "sprint_id": sprint_id, "version": version, "goal": sprint.goal,
+                "brief": parts})])
+            self._apply(appended)
+            return version
+
+    def _manager_sprint(self, sprint_id: str, secret: str) -> sprints.SprintState:
+        """The open sprint whose secret is presented (the caller holds the ingest lock)."""
+        sprint = self._sprints.get(sprint_id)
+        if sprint is None:
+            raise sprints.Refused(sprints.NOT_OPEN)
+        expected = sprints.read_secret(self._sprint_secrets, sprint_id)
+        if expected is None or not hmac.compare_digest(expected.encode(), secret.encode()):
+            raise sprints.SecretRefused(sprints.SECRET_REFUSED)
+        return sprint
+
+    def send_report(self, sprint_id: str, secret: str, report: dict) -> str:
+        """Append one `sprint.reported` event for an approved sprint whose secret is presented; its at."""
+        with self._ingest:
+            sprint = self._manager_sprint(sprint_id, secret)
+            if sprint.state != sprints.STARTING:
+                raise sprints.Refused(sprints.NOT_STARTED)
+            checked = sprints.checked_report(report)
+            appended = self.log.append([(SPRINT_REPORTED, sprint.project_id, {
+                "sprint_id": sprint_id, "goal": sprint.goal, "report": checked})])
+            self._apply(appended)
+            return appended[-1].at
+
+    def _waiting_brief(self, project_id: str, sprint_id: str, version: int) -> sprints.SprintState:
+        sprint = self._sprints.get(sprint_id)
+        if sprint is None or sprint.project_id != project_id:
+            raise sprints.Refused(sprints.NOT_OPEN)
+        if sprint.brief is None:
+            raise sprints.Refused(sprints.NOT_WAITING)
+        if version != sprint.brief.version:
+            raise sprints.Refused(sprints.REPLACED)
+        if sprint.brief.decision != sprints.NONE:
+            raise sprints.Refused(sprints.NOT_WAITING)
+        return sprint
+
+    def approve_brief(self, project_id: str, sprint_id: str, version: int) -> None:
+        """Append one `brief.approved` event for the waiting brief of that version."""
+        with self._ingest:
+            sprint = self._waiting_brief(project_id, sprint_id, version)
+            appended = self.log.append([(BRIEF_APPROVED, project_id, {
+                "sprint_id": sprint_id, "version": version, "goal": sprint.goal})])
+            self._apply(appended)
+
+    def reply_brief(self, project_id: str, sprint_id: str, version: int, reply: str) -> None:
+        """Append one `brief.replied` event carrying the owner's words exactly as sent."""
+        with self._ingest:
+            sprint = self._waiting_brief(project_id, sprint_id, version)
+            sprints.checked_reply(reply)
+            appended = self.log.append([(BRIEF_REPLIED, project_id, {
+                "sprint_id": sprint_id, "version": version, "goal": sprint.goal,
+                "reply": reply})])
+            self._apply(appended)
+
+    def sprint_status(self, sprint_id: str) -> dict:
+        """What became of a sprint's brief: its decision, version and the reply asking for changes."""
+        with self._ingest:
+            sprint = self._sprints.get(sprint_id)
+            if sprint is not None:
+                brief = sprint.brief
+                decision = brief.decision if brief else sprints.NONE
+                return {"sprint_id": sprint_id, "decision": decision,
+                        "version": brief.version if brief else None,
+                        "reply": brief.reply if decision == sprints.CHANGES else None}
+            if sprint_id in self._withdrawn:
+                return {"sprint_id": sprint_id, "decision": sprints.WITHDRAWN,
+                        "version": None, "reply": None}
+            raise sprints.Refused(sprints.UNKNOWN)
+
     def _mark_answered(self, slot: tuple[str, str], questions: list[dict], choices: list[int]) -> None:
         record = self._inbox.get(slot)
         if record is None or record.item["answered"] or _reduced(record.item["questions"]) != _reduced(questions):
@@ -994,6 +1257,7 @@ class ConsoleService:
                 projects_dirs.append(projects)
         readings: dict[tuple[str, str], deliveries.DeliveryState] = {}
         runs: dict[Path, deliveries.RunFold] = {}
+        terminal: list[tuple[str, str]] = []
         for sid in sorted(scanned):
             listing = deliveries.run_journals(projects_dirs, sid)
             if isinstance(listing, deliveries.Unreadable):
@@ -1008,7 +1272,11 @@ class ConsoleService:
                 key = (sid, journal.parent.name)
                 path = str(journal)
                 final = deliveries.has_final_record(journal)
-                if final is True:
+                # A run that ended between two polls, or while the console was down (the log still
+                # holds it), is read once more, so its close-out reaches the log as the run's last
+                # observation before the run leaves.
+                ended = final is True and (journal in self._runs or key in folded)
+                if final is True and not ended:
                     self._reader.forget(journal)
                     self._unreadable.discard(path)
                     continue
@@ -1016,6 +1284,8 @@ class ConsoleService:
                 if known is not None and known.branch_pattern != pattern:
                     self._reader.forget(journal)
                 chunk = final if isinstance(final, deliveries.Unreadable) else self._reader.read(journal)
+                if ended:
+                    self._reader.forget(journal)
                 if isinstance(chunk, deliveries.Unreadable):
                     if key in folded:
                         readings[key] = folded[key]
@@ -1030,10 +1300,15 @@ class ConsoleService:
                 if fold is None or chunk.from_start or fold.branch_pattern != pattern:
                     fold = deliveries.RunFold(pattern)
                 fold.apply(chunk.records)
-                runs[journal] = fold
                 issues = fold.issues()
                 if issues:
                     readings[key] = deliveries.DeliveryState(sid, key[1], chunk.moved_ms, issues)
+                if ended:
+                    self._unreadable.discard(path)
+                    if issues:
+                        terminal.append(key)
+                else:
+                    runs[journal] = fold
         for journal in self._runs.keys() - runs.keys():
             self._reader.forget(journal)
         self._runs = runs
@@ -1042,8 +1317,10 @@ class ConsoleService:
                 repo = scanned[sid].repo
                 return project_for(repo, self._states)
 
-            appended = self.log.append(deliveries.delivery_changes(
-                self._deliveries, readings, scanned, project_of))
+            changes = deliveries.delivery_changes(self._deliveries, readings, scanned, project_of)
+            changes += [(deliveries.DELIVERY_GONE, project_of(sid), {"session_id": sid, "run_id": run})
+                        for sid, run in terminal]
+            appended = self.log.append(changes)
             if appended:
                 self._fold(appended)
             self._publish()
@@ -1063,7 +1340,7 @@ class ConsoleService:
                       file=sys.stderr)
 
     def _fold(self, appended: list[Event]) -> None:
-        new = digest.moments(appended, self._sessions, self._inbox)
+        new = digest.moments(appended, self._sessions, self._inbox, self._sprints)
         self._looked = digest.last_looked(appended, self._looked)
         self._states = project_states(appended, self._states)
         self._sessions = sessions.session_states(appended, self._sessions)
@@ -1072,6 +1349,7 @@ class ConsoleService:
         self._capacity = capacity.capacity_state(appended, self._capacity)
         self._deliveries = deliveries.delivery_states(appended, self._deliveries)
         self._sprints = sprints.sprint_states(appended, self._sprints)
+        self._withdrawn = sprints.withdrawn_ids(appended, self._withdrawn)
         self._moments = digest.keep([*self._moments, *new],
                                     digest.window_start(self._looked, self._now()))
 

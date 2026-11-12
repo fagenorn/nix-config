@@ -1,0 +1,156 @@
+"""`sprint`: a manager sends its sprint's brief and report and reads the owner's answer.
+
+    sprint brief --sprint <id> --secret-file <path> --brief-file <path | -> [--port N]
+    sprint report --sprint <id> --secret-file <path> --report-file <path | -> [--port N]
+    sprint status --sprint <id> [--port N]
+
+`--sprint` is the sprint id (16 lowercase hex characters, `agent_tools.console.sprints.SPRINT_ID`),
+else exit 2. `--port` is the console's loopback port (0-65535; default 27184); the command only
+ever talks to 127.0.0.1.
+
+`sprint brief` reads the sprint's secret from `--secret-file` (the file the console made for the
+sprint; one trailing newline is removed) and the brief from `--brief-file` (`-` reads stdin), a JSON
+object, and sends `POST /api/brief` with `{"sprint_id", "secret", "brief"}`, no `Origin`. On success
+it prints `sprint: brief version <n> sent` and exit 0. The command validates no part of the brief:
+the console decides, in one place.
+
+`sprint report` reads the secret the same way and the report from `--report-file` (`-` reads stdin),
+a JSON object, and sends `POST /api/report` with `{"sprint_id", "secret", "report"}`, no `Origin`.
+On success it prints `sprint: report sent` and exit 0. The command validates no member of the
+report: the console decides, in one place.
+
+`sprint status` sends `GET /api/sprint-status?sprint_id=<id>` and prints the console's answer as one
+line of JSON, `{"decision", "reply", "sprint_id", "version"}`, and exit 0. `decision` is `none`
+(no answer yet), `approved`, `changes` (the owner's exact words are `reply`) or `withdrawn`.
+
+Any other HTTP status is stderr `sprint: refused <status>: <text>` (the console's reason) and
+exit 1. A console that cannot be reached is stderr
+`sprint: console unreachable on 127.0.0.1:<port>: <error>` and exit 1. A secret, brief or report file
+that cannot be read, or a brief or report that is not a JSON object, is stderr `sprint: cannot read <path>:
+<reason>` and exit 2, with no request sent; bad arguments are exit 2. The secret is printed nowhere.
+"""
+
+from __future__ import annotations
+
+import argparse
+import http.client
+import json
+import sys
+from pathlib import Path
+
+from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
+from agent_tools.console import service, sprints
+from agent_tools.console.console import port_number
+
+TIMEOUT_SECONDS = 10
+
+
+class Unreadable(Exception):
+    """An input the command cannot read; `str` is the stderr line."""
+
+
+class Refused(Exception):
+    """The console answered with something other than 200, or could not be reached."""
+
+
+def sprint_id(text: str) -> str:
+    if sprints.SPRINT_ID.fullmatch(text) is None:
+        raise argparse.ArgumentTypeError(
+            f"{text!r} is not a sprint id (16 lowercase hex characters)")
+    return text
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="sprint", description=__doc__.splitlines()[0])
+    commands = parser.add_subparsers(dest="command", required=True)
+    for name, text in (("brief", "send the sprint's brief to the console"),
+                       ("report", "send the sprint's report to the console"),
+                       ("status", "print the owner's answer to the sprint's brief")):
+        each = commands.add_parser(name, help=text)
+        each.add_argument("--sprint", type=sprint_id, required=True, help="the sprint id")
+        each.add_argument("--port", type=port_number, default=service.DEFAULT_PORT,
+                          help="the console's loopback port (default: %(default)s)")
+        if name != "status":
+            each.add_argument("--secret-file", type=Path, required=True,
+                              help="the file holding the sprint's secret")
+            each.add_argument(f"--{name}-file", required=True,
+                              help=f"the {name} as a JSON object; - reads stdin")
+    return parser
+
+
+def read_secret(path: Path) -> str:
+    try:
+        return path.read_text().removesuffix("\n")
+    except (OSError, UnicodeDecodeError) as error:
+        raise Unreadable(f"sprint: cannot read {path}: {error}") from error
+
+
+def read_object(name: str, what: str) -> dict:
+    try:
+        text = sys.stdin.read() if name == "-" else Path(name).read_text()
+        value = json.loads(text, object_pairs_hook=reject_duplicate_keys,
+                           parse_constant=reject_nonfinite_literal)
+    except (OSError, ValueError) as error:
+        raise Unreadable(f"sprint: cannot read {name}: {error}") from error
+    if not isinstance(value, dict):
+        raise Unreadable(f"sprint: cannot read {name}: the {what} is not a JSON object")
+    return value
+
+
+def ask(port: int, method: str, path: str, body: bytes | None = None) -> str:
+    """The console's answer text to one request, or `Refused` carrying the stderr line."""
+    headers = {"Content-Type": "application/json"} if body is not None else {}
+    connection = http.client.HTTPConnection(service.HOST, port, timeout=TIMEOUT_SECONDS)
+    try:
+        connection.request(method, path, body=body, headers=headers)
+        response = connection.getresponse()
+        text = response.read().decode("utf-8", "replace").strip()
+    except (OSError, http.client.HTTPException) as error:
+        raise Refused(f"sprint: console unreachable on {service.HOST}:{port}: {error}") from error
+    finally:
+        connection.close()
+    if response.status != 200:
+        raise Refused(f"sprint: refused {response.status}: {text}")
+    return text
+
+
+def send_brief(args: argparse.Namespace) -> str:
+    secret = read_secret(args.secret_file)
+    brief = read_object(args.brief_file, "brief")
+    body = json.dumps({"sprint_id": args.sprint, "secret": secret, "brief": brief}).encode()
+    text = ask(args.port, "POST", service.BRIEF_PATH, body)
+    try:
+        return f"sprint: brief version {json.loads(text)['version']} sent"
+    except (ValueError, KeyError, TypeError) as error:
+        raise Refused(f"sprint: refused 200: unreadable answer: {error}") from error
+
+
+def send_report(args: argparse.Namespace) -> str:
+    secret = read_secret(args.secret_file)
+    report = read_object(args.report_file, "report")
+    body = json.dumps({"sprint_id": args.sprint, "secret": secret, "report": report}).encode()
+    ask(args.port, "POST", service.REPORT_PATH, body)
+    return "sprint: report sent"
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    try:
+        if args.command == "brief":
+            line = send_brief(args)
+        elif args.command == "report":
+            line = send_report(args)
+        else:
+            line = ask(args.port, "GET", f"{service.STATUS_PATH}?sprint_id={args.sprint}")
+    except Unreadable as error:
+        print(error, file=sys.stderr)
+        return 2
+    except Refused as error:
+        print(error, file=sys.stderr)
+        return 1
+    print(line)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

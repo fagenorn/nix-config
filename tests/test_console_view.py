@@ -1,9 +1,10 @@
 """The console's view (#855): projection, registry diff, ordering and folding, encoding."""
 
+import dataclasses
 import json
 import re
 import unittest
-from datetime import datetime
+from datetime import datetime, timezone
 
 from agent_tools.claims import forge_markers as fm
 from agent_tools.claims import forge_owner_action as foa
@@ -21,8 +22,19 @@ from agent_tools.console.deliveries import (
 )
 from agent_tools.console.event_log import Event
 from agent_tools.console.sessions import ENDED, SessionState
-from agent_tools.console.sprints import SprintState
+from agent_tools.console.capacity import EMPTY
+from agent_tools.console.sprints import (
+    APPROVED,
+    CHANGES,
+    NONE,
+    Brief,
+    Observed,
+    Report,
+    SprintState,
+)
 from agent_tools.console.view import (
+    ALL_OUT_SENTENCE,
+    BRIEF_SENTENCE,
     CHOOSE_SENTENCE,
     INBOX_CHANGED,
     INBOX_GONE,
@@ -836,6 +848,235 @@ def sprint(sid, pid="p00", seq=5, goal="make the importer resumable"):
     return SprintState(sid, pid, goal, seq, T0)
 
 
+PARTS = {"done": "ship it", "excluded": ["x"], "slices": ["a"], "risks": ["r"], "asks": ["q"]}
+
+
+def briefed(sprint, version=1, decision=NONE, reply=None, at="t9"):
+    return dataclasses.replace(sprint, brief=Brief(version, PARTS, at, decision, reply))
+
+
+class BriefViewTest(unittest.TestCase):
+    def test_a_waiting_brief_is_one_open_item_counted_in_the_statement(self):
+        sid = "a" * 16
+        view = derive_view([state("p00", 1)], sprints={sid: briefed(sprint(sid), version=2)})
+        self.assertEqual(view["inbox"]["open"], [{
+            "type": "inbox_item", "reason": "brief", "key": "brief/" + sid,
+            "project_id": "p00", "sprint_id": sid, "goal": "make the importer resumable",
+            "version": 2, "brief": PARTS, "answered": False, "waiting_since": "t9"}])
+        self.assertEqual(view["statement"]["inbox_items"], 1)
+        self.assertEqual(view["statement"]["headline"], "1 thing needs you")
+        self.assertEqual(view["statement"]["sentence"], BRIEF_SENTENCE)
+
+    def test_briefs_lead_the_tracker_items(self):
+        a, b = "a" * 16, "b" * 16
+        records = {("p00", "k1"): InboxRecord(item("p00", "k1", held=9), "t1", "u1")}
+        view = derive_view([state("p00", 1)], records, sprints={
+            a: briefed(sprint(a), at="t7"), b: briefed(sprint(b), at="t5")})
+        self.assertEqual([e["key"] for e in view["inbox"]["open"]],
+                         ["brief/" + b, "brief/" + a, "k1"])
+        self.assertEqual(view["statement"]["inbox_items"], 3)
+
+    def test_a_decided_or_unregistered_brief_is_no_item(self):
+        a, b, c = "a" * 16, "b" * 16, "c" * 16
+        view = derive_view([state("p00", 1)], sprints={
+            a: briefed(sprint(a), decision=APPROVED),
+            b: briefed(sprint(b), decision=CHANGES, reply="shrink it"),
+            c: briefed(sprint(c, pid="p09"))})
+        self.assertEqual(view["inbox"]["open"], [])
+        self.assertEqual(view["statement"], derive_view([state("p00", 1)])["statement"])
+
+    def test_an_approved_brief_makes_the_sprint_starting(self):
+        sid = "a" * 16
+        for decision, name, text in ((APPROVED, "starting", "starting"),
+                                     (NONE, "drafting", "drafting the brief")):
+            with self.subTest(decision=decision):
+                view = derive_view([state("p00", 1)], sprints={
+                    sid: briefed(sprint(sid), decision=decision)})
+                shown = view["entries"][0]["sprints"][0]
+                self.assertEqual((shown["state"], shown["state_text"]), (name, text))
+
+    def test_a_sprint_with_a_brief_never_says_no_manager(self):
+        a, b = "a" * 16, "b" * 16
+        view = derive_view([state("p00", 1)], sprints={a: briefed(sprint(a, seq=6)),
+                                                       b: sprint(b, seq=5)},
+                           now_ms=T0_MS + 10 * 60_000)
+        shown = {s["sprint_id"]: s["manager_text"] for s in view["entries"][0]["sprints"]}
+        self.assertEqual(shown, {a: None, b: "no manager has picked this up"})
+
+    def test_the_brief_sentence_yields_only_to_all_out_and_stale(self):
+        sid = "a" * 16
+        sprints = {sid: briefed(sprint(sid))}
+        decision = {**item("p00", "kd"), "reason": "decision", "questions": [
+            {"question": "Which?", "options": ["a", "b"], "chosen": None, "recommended": None}]}
+        records = {("p00", "kd"): InboxRecord(decision, "t1", "u1")}
+        stale = STALE_SENTENCE.format(projects="p00")
+        table = [
+            ("a decision item", {"records": records}, BRIEF_SENTENCE),
+            ("a stale project", {"health": {"p00": ReadState(False, None)}}, stale),
+            ("every profile out", {"capacity": {**EMPTY, "all_out": True}}, ALL_OUT_SENTENCE),
+        ]
+        for name, extra, expected in table:
+            with self.subTest(name):
+                view = derive_view([state("p00", 1)], sprints=sprints, **extra)
+                self.assertEqual(view["statement"]["sentence"], expected)
+
+
+MIN = 60_000
+R = T0_MS + MIN
+SEVEN = ((1, "landed"), (2, "landed"), (3, "landed"), (4, "building"), (5, "plan review"),
+         (6, "queued"), (7, "queued"))
+A = "a" * 16
+
+
+def iso(ms):
+    return datetime.fromtimestamp(ms / 1000, timezone.utc).isoformat(timespec="microseconds")
+
+
+def started(sid, decided_ms=T0_MS):
+    return dataclasses.replace(
+        sprint(sid), brief=Brief(1, PARTS, T0, APPROVED, None, iso(decided_ms)))
+
+
+def reported(state, at_ms, phase="running", issues=SEVEN, inbox=(),
+             status="two slices are building"):
+    return dataclasses.replace(state, report=Report(
+        iso(at_ms), status, phase, "Importer resumes",
+        "https://github.com/owner/p00/milestone/3", issues, inbox, "start the resume slice"))
+
+
+def observed(state, moved_ms, *stages, run_id="wf_c"):
+    return dataclasses.replace(
+        state, observed=tuple(Observed(s.issue, moved_ms, "s1", run_id, s) for s in stages),
+        moved_ms=moved_ms)
+
+
+def entry(view):
+    return next(s for e in view["entries"] for s in e["sprints"])
+
+
+def line(sprint_state, now_ms, records=None, projects=None, **extra):
+    projects = projects or [state("p00", 1)]
+    return derive_view(projects, records, sprints={A: sprint_state}, now_ms=now_ms, **extra)
+
+
+def open_item(pid, key, issue, answered=False):
+    return InboxRecord({**item(pid, key, answered=answered), "issue": issue}, "t1", "u1")
+
+
+class SprintReportViewTest(unittest.TestCase):
+    def test_the_line_counts_landed_in_delivery_queued_and_held(self):
+        it = reported(started(A), R, issues=SEVEN)
+        shown = entry(line(it, T0_MS + 5 * MIN))
+        self.assertEqual(shown["progress"],
+                         {"landed": 3, "in_delivery": 2, "queued": 2, "held": 0, "total": 7})
+        self.assertEqual(shown["progress_text"], "3 of 7 landed, 2 in delivery, 2 queued")
+        self.assertEqual(shown["state_text"], "on track")
+        self.assertEqual(shown["status"], "two slices are building")
+        self.assertEqual(shown["status_age_text"], "4 min ago")
+        self.assertEqual((shown["next"], shown["milestone"], shown["tracker_url"]),
+                         ("start the resume slice", "Importer resumes",
+                          "https://github.com/owner/p00/milestone/3"))
+        held = reported(started(A), R, issues=SEVEN[:6] + ((7, "held"),))
+        shown = entry(line(held, T0_MS + 5 * MIN))
+        self.assertEqual(shown["progress_text"],
+                         "3 of 7 landed, 2 in delivery, 1 queued, 1 held")
+        self.assertEqual(shown["progress"]["held"], 1)
+
+    def test_state_drafting_the_brief(self):
+        it = reported(dataclasses.replace(
+            started(A), brief=Brief(2, PARTS, T0, NONE, None, None)), R)
+        shown = entry(line(it, R + MIN))
+        self.assertEqual((shown["state"], shown["state_text"]), ("drafting", "drafting the brief"))
+
+    def test_state_starting(self):
+        shown = entry(line(started(A), T0_MS + 5 * MIN))
+        self.assertEqual((shown["state"], shown["state_text"]), ("starting", "starting"))
+        self.assertIsNone(shown["progress"])
+        self.assertEqual(shown["issues"], [])
+        self.assertEqual(shown["waiting"], 0)
+
+    def test_state_on_track(self):
+        shown = entry(line(reported(started(A), R), R + 4 * MIN))
+        self.assertEqual((shown["state"], shown["state_text"]), ("on_track", "on track"))
+
+    def test_state_waiting_on_you_counts_open_items_of_the_sprint(self):
+        it = reported(started(A), R, issues=((12, "building"), (13, "queued")), inbox=(40,))
+        records = {("p00", "k1"): open_item("p00", "k1", 12),
+                   ("p00", "k2"): open_item("p00", "k2", 40),
+                   ("p00", "k3"): open_item("p00", "k3", 13, answered=True),
+                   ("p00", "k4"): open_item("p00", "k4", 99),
+                   ("p01", "k5"): open_item("p01", "k5", 12)}
+        shown = entry(line(it, R + 4 * MIN, records, [state("p00", 1), state("p01", 2)]))
+        self.assertEqual((shown["state"], shown["state_text"]), ("waiting", "waiting on you (2)"))
+        self.assertEqual(shown["waiting"], 2)
+
+    def test_state_quiet_may_be_stuck(self):
+        view = line(reported(started(A), R), R + 16 * MIN)
+        shown = entry(view)
+        self.assertEqual((shown["state"], shown["state_text"]),
+                         ("quiet", "quiet for 16 min \u2014 may be stuck"))
+        self.assertNotIn("stalled", json.dumps(view))
+
+    def test_state_closing(self):
+        shown = entry(line(reported(started(A), R, phase="closing"), R + MIN))
+        self.assertEqual((shown["state"], shown["state_text"]), ("closing", "closing"))
+
+    def test_state_done(self):
+        it = reported(started(A), R, phase="done")
+        records = {("p00", "k1"): open_item("p00", "k1", 4)}
+        shown = entry(line(it, R + 60 * MIN, records))
+        self.assertEqual((shown["state"], shown["state_text"]), ("done", "done"))
+
+    def test_state_precedence(self):
+        records = {("p00", "k1"): open_item("p00", "k1", 4)}
+        shown = entry(line(reported(started(A), R), R + 30 * MIN, records))
+        self.assertEqual(shown["state"], "waiting")
+        shown = entry(line(reported(started(A), R, phase="closing"), R + 20 * MIN))
+        self.assertEqual(shown["state"], "quiet")
+        shown = entry(line(started(A), T0_MS + 15 * MIN))
+        self.assertEqual((shown["state"], shown["state_text"]),
+                         ("quiet", "quiet for 15 min \u2014 may be stuck"))
+
+    def test_quiet_after_fifteen_minutes_with_a_controlled_clock(self):
+        it = reported(started(A), R, issues=SEVEN)
+        for now_ms, expected in ((R + 15 * MIN - 1, ("on_track", "on track")),
+                                 (R + 15 * MIN, ("quiet", "quiet for 15 min \u2014 may be stuck")),
+                                 (R + 16 * MIN, ("quiet", "quiet for 16 min \u2014 may be stuck")),
+                                 (None, ("on_track", "on track"))):
+            with self.subTest(now_ms=now_ms):
+                shown = entry(line(it, now_ms))
+                self.assertEqual((shown["state"], shown["state_text"]), expected)
+        moved = observed(it, R + 10 * MIN, IssueStage(4, "final review"))
+        shown = entry(line(moved, R + 16 * MIN))
+        self.assertEqual((shown["state"], shown["state_text"]), ("on_track", "on track"))
+
+    def test_between_reports_an_issue_follows_its_delivery_run(self):
+        it = reported(started(A), R, issues=((12, "queued"), (13, "building"), (14, "landing")))
+        it = observed(it, R + 3 * MIN, IssueStage(12, "building", 2, 4), IssueStage(14, "done"))
+        live = {("s1", "wf_z"): DeliveryState("s1", "wf_z", R + 5 * MIN,
+                                              (IssueStage(13, "verifying"),))}
+        shown = entry(line(it, R + 6 * MIN, sessions=[session("s1", "working")],
+                           deliveries=live))
+        self.assertEqual(shown["issues"], [
+            {"issue": 12, "stage": "building", "stage_text": "building task 2 of 4"},
+            {"issue": 13, "stage": "building", "stage_text": "building"},
+            {"issue": 14, "stage": "closed out", "stage_text": "closed out"}])
+        self.assertEqual(shown["progress"],
+                         {"landed": 0, "in_delivery": 3, "queued": 0, "held": 0, "total": 3})
+
+    def test_a_reported_outcome_is_kept_against_a_run(self):
+        it = reported(started(A), R, issues=((14, "held"), (15, "landed"), (16, "building")))
+        it = observed(it, R + 3 * MIN, IssueStage(14, "done"), IssueStage(15, "done"),
+                      IssueStage(16, "final review"))
+        shown = entry(line(it, R + 4 * MIN))
+        self.assertEqual(shown["issues"], [
+            {"issue": 14, "stage": "held", "stage_text": "held"},
+            {"issue": 15, "stage": "landed", "stage_text": "landed"},
+            {"issue": 16, "stage": "final review", "stage_text": "final review"}])
+        self.assertEqual(shown["progress"],
+                         {"landed": 1, "in_delivery": 1, "queued": 0, "held": 1, "total": 3})
+
+
 class SprintViewTest(unittest.TestCase):
     def test_a_sprint_shows_its_goal_state_and_age(self):
         view = derive_view([state("p00", 1)], sprints={"a" * 16: sprint("a" * 16)},
@@ -843,7 +1084,9 @@ class SprintViewTest(unittest.TestCase):
         self.assertEqual(view["entries"][0]["sprints"], [{
             "type": "sprint", "sprint_id": "a" * 16, "goal": "make the importer resumable",
             "state": "drafting", "state_text": "drafting the brief", "stated_at": T0,
-            "age_text": "stated 3 min ago", "manager_text": "no manager has picked this up"}])
+            "age_text": "stated 3 min ago", "manager_text": "no manager has picked this up",
+            "progress": None, "progress_text": None, "status": None, "status_age_text": None,
+            "next": None, "milestone": None, "tracker_url": None, "issues": [], "waiting": 0}])
 
     def test_a_sprint_older_than_two_minutes_says_no_manager_has_picked_it_up(self):
         for now_ms, expected in ((None, None), (T0_MS, None), (T0_MS + 120_000, None),

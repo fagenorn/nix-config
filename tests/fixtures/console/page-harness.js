@@ -18,18 +18,22 @@
 // sets its value to the text (an INPUT drops every CR and LF, a TEXTAREA turns
 // CRLF and CR into LF), puts the selection at the end and fires its input
 // listeners; {append: {class, text}} does the same on top of the current
-// value. document.activeElement is the focused element while it is still
-// attached under the root, else null, so a replaceChildren that detaches it
-// drops focus as a browser does. The goal field adds {input: {cls, value}}
-// (the first attached element with that class gets .value, then its input
-// listeners run with {type: "input", target}; none throws) and
-// {focus_on: "<class>"} (calls .focus() on the first attached element with
-// that class; none throws; {focus: true} stays the window's focus).
-// Elem.focus() sets state.active and counts in state.focusCount; a key step
-// records in state.keyPrevented whether its event had preventDefault called
-// (null before any key step). A click step skips a disabled element. The fake
-// setTimeout/clearTimeout fire when a clock step reaches their due time. Each
-// step settles pending promises before the next. A snapshot holds the trees
+// value. The goal field adds {input: {cls, value}} (the first attached element
+// with that class gets .value, then its input listeners run with {type:
+// "input", target}; none throws) and {focus_on: "<class>"} (calls .focus() on
+// the first attached element with that class; none throws; {focus: true} stays
+// the window's focus). {select: {cls, start, end}} sets the selection of the
+// first attached element with that class (none throws); {input} also puts the
+// caret at the end of the value. Elem.focus() sets state.active and counts in
+// state.focusCount; removing a node (replaceChildren dropping it, appendChild
+// moving it, the textContent setter, Elem.remove()) clears state.active when it
+// is that node or inside its subtree, as a browser blurs a removed element, and
+// document.activeElement is state.active only while attached. A snapshot adds
+// field: {cls, value, start, end} of the attached active element when it has a
+// value, else null. A key step records in state.keyPrevented whether its event
+// had preventDefault called (null before any key step). A click step skips a
+// disabled element. The fake setTimeout/clearTimeout fire when a clock step
+// reaches their due time. Each step settles pending promises before the next. A snapshot holds the trees
 // of the inbox, statement, projects, unmanaged, digest, goal, capacity and
 // promoted sections; every serialized node carries its title attribute (null
 // when unset), which is where a time element keeps its exact local time.
@@ -47,7 +51,14 @@ class Text {
   }
 }
 
-let focusedElem = null;
+function loseFocus(removed) {
+  for (let n = state.active; n; n = n.parentNode) {
+    if (n === removed) {
+      state.active = null;
+      return;
+    }
+  }
+}
 
 class Elem {
   constructor(tag) {
@@ -65,6 +76,12 @@ class Elem {
     this.children = [];
     this.parentNode = null;
   }
+  remove() {
+    if (!this.parentNode) return;
+    loseFocus(this);
+    this.parentNode.children = this.parentNode.children.filter((c) => c !== this);
+    this.parentNode = null;
+  }
   addEventListener(name, fn) {
     (this.listeners[name] = this.listeners[name] || []).push(fn);
   }
@@ -73,7 +90,6 @@ class Elem {
     if (name === "disabled") this.disabled = true;
   }
   focus() {
-    focusedElem = this;
     state.active = this;
     state.focusCount += 1;
   }
@@ -86,6 +102,7 @@ class Elem {
   }
   _adopt(node) {
     if (node.parentNode) {
+      loseFocus(node);
       node.parentNode.children = node.parentNode.children.filter((c) => c !== node);
     }
     node.parentNode = this;
@@ -96,7 +113,10 @@ class Elem {
     return node;
   }
   replaceChildren(...nodes) {
-    for (const old of this.children) old.parentNode = null;
+    for (const old of this.children) {
+      loseFocus(old);
+      old.parentNode = null;
+    }
     this.children = [];
     for (const node of nodes) this.appendChild(node);
   }
@@ -271,10 +291,7 @@ const document = {
   addEventListener: listen("document"),
   hasFocus: () => state.focused,
   get activeElement() {
-    for (let up = focusedElem; up; up = up.parentNode) {
-      if (up === root) return focusedElem;
-    }
-    return null;
+    return state.active && attached(root).includes(state.active) ? state.active : null;
   },
   get visibilityState() {
     return state.visibility;
@@ -382,7 +399,10 @@ async function run() {
     } else if ("input" in step) {
       const target = byClass(step.input.cls);
       target.value = step.input.value;
+      target.selectionStart = target.selectionEnd = target.value.length;
       for (const fn of target.listeners.input || []) fn({ type: "input", target });
+    } else if ("select" in step) {
+      byClass(step.select.cls).setSelectionRange(step.select.start, step.select.end);
     } else if ("focus_on" in step) {
       byClass(step.focus_on).focus();
     } else if ("respond" in step) {
@@ -408,6 +428,7 @@ async function run() {
     } else if (step.snapshot) {
       const byId = (id) => root.children.find((n) => n.id === id) || null;
       const unmanaged = byId("unmanaged");
+      const field = document.activeElement;
       snapshots.push({
         inbox: byId("inbox") ? node(byId("inbox")) : null,
         statement: byId("statement") ? node(byId("statement")) : null,
@@ -418,6 +439,10 @@ async function run() {
         capacity: byId("capacity") ? node(byId("capacity")) : null,
         promoted: byId("promoted") ? node(byId("promoted")) : null,
         active: state.active && attached(root).includes(state.active) ? state.active.className : null,
+        field: field === null || (field.tagName !== "INPUT" && field.tagName !== "TEXTAREA") ? null : {
+          cls: field.className, value: field.value, start: field.selectionStart,
+          end: field.selectionEnd,
+        },
         focus_count: state.focusCount,
         key_prevented: state.keyPrevented,
         posts: posts.slice(),

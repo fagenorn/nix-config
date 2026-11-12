@@ -58,11 +58,13 @@ Wire format, one object:
 "earlier": [<moment>, ...], "omitted": <int>}` with a moment `{"at", "kind", "sentence"}`; it is
 null when `derive_view` is given none.
 
-The headline is "1 thing needs you" or "<n> things need you" for open items, else
+The headline is "1 thing needs you" or "<n> things need you" for open items (a waiting brief is one,
+see below), else
 `ALL_OUT_HEADLINE` when every profile is out of usage, else `STALE_HEADLINE` when a registered
 project's tracker cannot be read, else "Nothing needs you". The sentence is `ALL_OUT_SENTENCE`
 when every profile is out of usage, else `STALE_SENTENCE` naming those projects when any is
-stale, else `CHOOSE_SENTENCE` when an open item is a decision with questions (the page can
+stale, else `BRIEF_SENTENCE` when any brief is open, else `CHOOSE_SENTENCE` when an open item is a
+decision with questions (the page can
 answer it), else `ANSWER_SENTENCE` when an open item has answers (a verification prompt the page
 can answer), else `NEEDS_SENTENCE` when something is open, else the registered-project count. The
 all-out promotion never changes `inbox_items`, and the statement keeps exactly its four keys.
@@ -76,9 +78,21 @@ the time of its last good read (the item's last update when the read time is unk
 has questions and the count of the others; `UNREAD_DECISION` for a decision with none; else
 the stored `question`), and `answered_at` is the record's (null while open). The stored
 `question` is no wire member (a decision's is a fixed sentence). Only items of
-registered projects are shown. Open items are sorted by most held work first, then
+registered projects are shown. Open tracker items are sorted by most held work first, then
 `waiting_since`, then `key`; answered items are listed apart, never counted, by
 `waiting_since` then `key`.
+
+A waiting brief (a shown sprint whose `brief` is not None and whose decision is `none`) is one
+entry of `inbox.open`, before every tracker item, ordered by `waiting_since` then `sprint_id`, and
+counts in `inbox_items` and the headline. Its entry is
+
+    {"type": "inbox_item", "reason": "brief", "key": "brief/<sprint id>", "project_id",
+     "sprint_id", "goal", "version": <int>, "brief": {"done", "excluded", "slices", "risks",
+     "asks"}, "answered": false, "waiting_since": "<time the brief was sent>"}
+
+`BRIEF_SENTENCE` ("Press Enter to approve the brief, or write a reply to ask for changes.") says
+what the page offers. An approved or changes-asked brief is no inbox item; only registered
+projects' briefs appear, as for sprints.
 
 A project entry is `{"type": "project", "project_id", "root", "quiet",
 "open_work", "last_activity", "sprints": [<sprint entry>, ...],
@@ -87,9 +101,17 @@ A project entry is `{"type": "project", "project_id", "root", "quiet",
 "projects": [<project entry>]}`. `project_count` counts registered projects
 only. `unmanaged` is always present, possibly empty, sorted by `root`.
 
-    <sprint entry> = {"type": "sprint", "sprint_id", "goal", "state": "drafting",
-                      "state_text": "drafting the brief", "stated_at": "<time>",
-                      "age_text": "<text>", "manager_text": "<text>" | null}
+    <sprint entry> = {"type": "sprint", "sprint_id", "goal",
+                      "state": "drafting" | "starting" | "on_track" | "waiting" | "quiet"
+                               | "closing" | "done",
+                      "state_text": "<text>", "stated_at", "age_text", "manager_text": <text> | null,
+                      "progress": {"landed", "in_delivery", "queued", "held", "total"} | null,
+                      "progress_text": "<text>" | null,
+                      "status": "<status line>" | null, "status_age_text": "<n min ago>" | null,
+                      "next": "<text>" | null, "milestone": "<text>" | null,
+                      "tracker_url": "<url>" | null,
+                      "issues": [{"issue": <int>, "stage": "<stage>", "stage_text": "<text>"}, ...],
+                      "waiting": <int>}
     <line> = {"label": "Outside sprints", "working": <int>, "waiting": <int>,
               "summary": "<text>", "sessions": [<session entry>, ...]}
     <session entry> = {"session_id", "name", "state", "state_text", "cwd",
@@ -122,11 +144,32 @@ ended or unlisted session appear nowhere, and they change no count, summary, ord
 statement. The word "stalled" is never written: a quiet run is only quiet.
 `sprints` (always present, possibly empty) are the open sprints `derive_view` is given whose
 `project_id` is that project, newest `stated_seq` first; a sprint of a project that is not
-registered appears nowhere and changes no count, order or statement. Every shown sprint is
-`drafting` (`state_text` "drafting the brief"); `age_text` is `age_text(elapsed)` and `manager_text`
-is "no manager has picked this up" once `elapsed` is over two minutes (`NO_MANAGER_AFTER_MS`), else
-null, where `elapsed` is `now_ms` minus the stated time (`None` counts as no time elapsed). A
-project with a shown sprint is never quiet and never folded into the quiet group.
+registered appears nowhere and changes no count, order or statement. `age_text` is
+`age_text(elapsed)` and `manager_text` is "no manager has picked this up" once `elapsed` is over two
+minutes (`NO_MANAGER_AFTER_MS`) and the sprint has no brief, else null, where `elapsed` is `now_ms`
+minus the stated time (`None` counts as no time elapsed). A project with a shown sprint is never
+quiet and never folded into the quiet group.
+
+A shown sprint reads its manager's latest report (`SprintState.report`); with none, `progress`,
+`progress_text`, `status`, `status_age_text`, `next`, `milestone` and `tracker_url` are null,
+`issues` is `[]` and `waiting` is 0. Each reported issue, ordered by number, has an effective
+`stage`: the report's own when it is `landed` or `held` (an outcome the manager reported is kept
+against any run), else the stage of the sprint's observation of that issue (`SprintState.observed`),
+where a run's `done` reads `closed out` and any other run stage is that stage with its
+`stage_text`, else the report's stage. `progress` counts the effective stages: `landed`, `held`,
+`queued`, `in_delivery` (every other stage, `closed out` included) and `total`;
+`progress_text` is `progress_text` of those counts. Observations come only from the sprint's fold,
+never from the `deliveries` mapping: a run leaves that mapping once its final record exists, while
+the fold keeps its last stage and movement, so they outlive the run. `waiting` is the number of
+open inbox items of registered projects whose project is the sprint's and whose issue is one of the
+report's issues or its `inbox` numbers. Movement is the latest of the approval time (`decided_at`,
+else the brief's sent time), the report's time and the fold's `moved_ms`; `quiet_elapsed` is
+`now_ms` minus it, computed only for an approved brief and only when `now_ms` is not None (else 0).
+The state is the first that holds: the brief is not approved, `drafting` ("drafting the brief");
+the report's phase is `done`, `done`; `waiting` is above 0, `waiting` ("waiting on you (<n>)");
+`quiet_elapsed` reaches `QUIET_AFTER_MS`, `quiet` ("quiet for <n> min \u2014 may be stuck"); the
+phase is `closing`, `closing`; no report, `starting`; else `on_track` ("on track").
+`status_age_text` is `ago_text` of the time since the report.
 `recent_projects` is every registered project id, newest `last_seq` first, then `project_id`
 (always present, possibly empty); it derives from the states alone.
 `encode_view` writes sorted keys, compact separators, non-ASCII kept, NaN
@@ -140,7 +183,15 @@ from datetime import datetime, timezone
 from pathlib import PurePosixPath
 
 from agent_tools.console.capacity import EMPTY
-from agent_tools.console.deliveries import DeliveryState, moved_text, run_summary, stage_text
+from agent_tools.console.deliveries import (
+    DONE as RUN_DONE,
+    QUEUED,
+    QUIET_AFTER_MS,
+    DeliveryState,
+    moved_text,
+    run_summary,
+    stage_text,
+)
 from agent_tools.console.event_log import Event
 from agent_tools.console.sessions import (
     ENDED,
@@ -153,12 +204,31 @@ from agent_tools.console.sessions import (
     SessionState,
 )
 from agent_tools.console.sprints import (
+    APPROVED,
+    CLOSED_OUT,
+    CLOSING,
+    CLOSING_TEXT,
+    DONE,
+    DONE_TEXT,
     DRAFTING,
     DRAFTING_TEXT,
+    HELD,
+    LANDED,
     NO_MANAGER_AFTER_MS,
     NO_MANAGER_TEXT,
+    NONE,
+    ON_TRACK,
+    ON_TRACK_TEXT,
+    QUIET,
+    QUIET_TEXT,
+    STARTING,
+    STARTING_TEXT,
+    WAITING,
+    WAITING_TEXT,
     SprintState,
     age_text,
+    ago_text,
+    progress_text,
 )
 
 REGISTERED = "project.registered"
@@ -181,6 +251,7 @@ STALE_HEADLINE = "The tracker cannot be read"
 ALL_OUT_HEADLINE = "Every profile is out of usage"
 ALL_OUT_SENTENCE = "Everything resumes at the earliest reset; nothing is asked of you."
 NEEDS_SENTENCE = "Each one links to the tracker, where it is answered."
+BRIEF_SENTENCE = "Press Enter to approve the brief, or write a reply to ask for changes."
 CHOOSE_SENTENCE = "Choose an option with its number and press Enter, or answer on the tracker."
 ANSWER_SENTENCE = "Answer it here, or on the tracker."
 STALE_SENTENCE = ("The tracker could not be read for {projects}; "
@@ -403,25 +474,103 @@ def _line(sessions: Iterable[SessionState],
     }
 
 
-def _sprint_entry(state: SprintState, now_ms: int | None) -> dict:
-    stated_ms = int(datetime.fromisoformat(state.stated_at).timestamp() * 1000)
+def _millis(text: str) -> int:
+    return int(datetime.fromisoformat(text).timestamp() * 1000)
+
+
+def _effective_stages(state: SprintState) -> list[tuple[int, str, str]]:
+    seen = {item.issue: item.stage for item in state.observed}
+    rows = []
+    for issue, stage in sorted(state.report.issues):
+        run = seen.get(issue)
+        if stage in (LANDED, HELD) or run is None:
+            rows.append((issue, stage, stage))
+        elif run.stage == RUN_DONE:
+            rows.append((issue, CLOSED_OUT, CLOSED_OUT))
+        else:
+            rows.append((issue, run.stage, stage_text(run)))
+    return rows
+
+
+def sprint_waiting(state: SprintState, records: Iterable[InboxRecord]) -> int:
+    """How many of `records` (open items) wait on an issue the sprint's report names."""
+    report = state.report
+    named = set() if report is None else {issue for issue, _ in report.issues} | set(report.inbox)
+    return sum(r.item.get("issue") in named for r in records)
+
+
+def sprint_state(state: SprintState, now_ms: int | None, waiting: int) -> tuple[str, str]:
+    """The sprint's one shown state and its text; with `now_ms` None the sprint is never quiet."""
+    brief, report = state.brief, state.report
+    if brief is None or brief.decision != APPROVED:
+        return DRAFTING, DRAFTING_TEXT
+    if report is not None and report.phase == DONE:
+        return DONE, DONE_TEXT
+    if waiting:
+        return WAITING, WAITING_TEXT.format(n=waiting)
+    quiet_elapsed = 0
+    if now_ms is not None:
+        moves = [_millis(brief.decided_at or brief.sent_at)]
+        if report is not None:
+            moves.append(_millis(report.at))
+        if state.moved_ms is not None:
+            moves.append(state.moved_ms)
+        quiet_elapsed = now_ms - max(moves)
+    if quiet_elapsed >= QUIET_AFTER_MS:
+        return QUIET, QUIET_TEXT.format(minutes=quiet_elapsed // 60_000)
+    if report is not None and report.phase == CLOSING:
+        return CLOSING, CLOSING_TEXT
+    if report is None:
+        return STARTING, STARTING_TEXT
+    return ON_TRACK, ON_TRACK_TEXT
+
+
+def _sprint_entry(state: SprintState, now_ms: int | None,
+                  records: Sequence[InboxRecord] = ()) -> dict:
+    stated_ms = _millis(state.stated_at)
     elapsed = 0 if now_ms is None else now_ms - stated_ms
+    report = state.report
+    stages = [] if report is None else _effective_stages(state)
+    waiting = sprint_waiting(state, records)
+    counts = {
+        "landed": sum(stage == LANDED for _, stage, _ in stages),
+        "in_delivery": sum(stage not in (LANDED, HELD, QUEUED) for _, stage, _ in stages),
+        "queued": sum(stage == QUEUED for _, stage, _ in stages),
+        "held": sum(stage == HELD for _, stage, _ in stages),
+        "total": len(stages),
+    }
+    name, text = sprint_state(state, now_ms, waiting)
     return {
         "type": "sprint",
         "sprint_id": state.sprint_id,
         "goal": state.goal,
-        "state": DRAFTING,
-        "state_text": DRAFTING_TEXT,
+        "state": name,
+        "state_text": text,
         "stated_at": state.stated_at,
         "age_text": age_text(elapsed),
-        "manager_text": NO_MANAGER_TEXT if elapsed > NO_MANAGER_AFTER_MS else None,
+        "manager_text": (NO_MANAGER_TEXT
+                         if state.brief is None and elapsed > NO_MANAGER_AFTER_MS else None),
+        "progress": None if report is None else counts,
+        "progress_text": None if report is None else progress_text(
+            counts["landed"], counts["total"], counts["in_delivery"], counts["queued"],
+            counts["held"]),
+        "status": None if report is None else report.status,
+        "status_age_text": (None if report is None else
+                            ago_text(0 if now_ms is None else now_ms - _millis(report.at))),
+        "next": None if report is None else report.next_step,
+        "milestone": None if report is None else report.milestone,
+        "tracker_url": None if report is None else report.tracker_url,
+        "issues": [{"issue": issue, "stage": stage, "stage_text": text}
+                   for issue, stage, text in stages],
+        "waiting": waiting,
     }
 
 
 def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
                    deliveries: Mapping[str, Sequence[DeliveryState]],
                    now_ms: int | None,
-                   sprints: Sequence[SprintState] = ()) -> dict:
+                   sprints: Sequence[SprintState] = (),
+                   records: Sequence[InboxRecord] = ()) -> dict:
     return {
         "type": "project",
         "project_id": state.project_id,
@@ -429,7 +578,7 @@ def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
         "quiet": state.open_work == 0 and not sessions and not sprints,
         "open_work": state.open_work,
         "last_activity": state.last_at,
-        "sprints": [_sprint_entry(s, now_ms) for s in sprints],
+        "sprints": [_sprint_entry(s, now_ms, records) for s in sprints],
         "outside_sprints": _line(sessions, deliveries, now_ms),
     }
 
@@ -461,6 +610,14 @@ def _inbox_entry(record: InboxRecord,
             "type": "inbox_item", "waiting_since": record.waiting_since,
             "stale": stale, "read_at": read_at, "headline": headline,
             "more_questions": more, "answered_at": record.answered_at}
+
+
+def _brief_entry(sprint: SprintState) -> dict:
+    brief = sprint.brief
+    return {"type": "inbox_item", "reason": "brief", "key": f"brief/{sprint.sprint_id}",
+            "project_id": sprint.project_id, "sprint_id": sprint.sprint_id,
+            "goal": sprint.goal, "version": brief.version, "brief": brief.parts,
+            "answered": False, "waiting_since": brief.sent_at}
 
 
 def _headline(open_count: int, stale: bool, all_out: bool) -> str:
@@ -499,16 +656,28 @@ def derive_view(
         key=lambda r: (r.waiting_since, r.item["key"], r.item["project_id"]))
     stale_projects = sorted(
         p for p in registered if p in health and not health[p].ok)
+    drafted: dict[str, list[SprintState]] = {}
+    for sprint in sorted((sprints or {}).values(),
+                         key=lambda s: (-s.stated_seq, s.sprint_id)):
+        if sprint.project_id in registered:
+            drafted.setdefault(sprint.project_id, []).append(sprint)
+
+    briefs = sorted((s for group in drafted.values() for s in group
+                     if s.brief is not None and s.brief.decision == NONE),
+                    key=lambda s: (s.brief.sent_at, s.sprint_id))
+    open_count = len(briefs) + len(open_items)
     all_out = bool(capacity["all_out"])
     if all_out:
         sentence = ALL_OUT_SENTENCE
     elif stale_projects:
         sentence = STALE_SENTENCE.format(projects=", ".join(stale_projects))
+    elif briefs:
+        sentence = BRIEF_SENTENCE
     elif any(r.item["reason"] == "decision" and r.item["questions"] for r in open_items):
         sentence = CHOOSE_SENTENCE
     elif any(r.item.get("answers") for r in open_items):
         sentence = ANSWER_SENTENCE
-    elif open_items:
+    elif open_count:
         sentence = NEEDS_SENTENCE
     else:
         sentence = _sentence(len(states))
@@ -527,20 +696,18 @@ def derive_view(
         else:
             owned.setdefault(project_id, []).append(session)
 
-    drafted: dict[str, list[SprintState]] = {}
-    for sprint in sorted((sprints or {}).values(),
-                         key=lambda s: (-s.stated_seq, s.sprint_id)):
-        if sprint.project_id in registered:
-            drafted.setdefault(sprint.project_id, []).append(sprint)
-
     def is_active(state: ProjectState) -> bool:
         return (state.open_work > 0 or state.project_id in owned
                 or state.project_id in drafted)
 
     active = _order(s for s in states if is_active(s))
     quiet = _order(s for s in states if not is_active(s))
+    open_by_project: dict[str, list[InboxRecord]] = {}
+    for record in open_items:
+        open_by_project.setdefault(record.item["project_id"], []).append(record)
     entries = [_project_entry(s, owned.get(s.project_id, ()), runs, now_ms,
-                              drafted.get(s.project_id, ()))
+                              drafted.get(s.project_id, ()),
+                              open_by_project.get(s.project_id, ()))
                for s in active]
     quiet_entries = [_project_entry(s, (), runs, now_ms) for s in quiet]
     if len(quiet_entries) <= FOLD_AFTER:
@@ -553,12 +720,12 @@ def derive_view(
             "projects": quiet_entries,
         })
     return {
-        "statement": {"inbox_items": len(open_items),
-                      "headline": _headline(len(open_items),
-                                            bool(stale_projects), all_out),
+        "statement": {"inbox_items": open_count,
+                      "headline": _headline(open_count, bool(stale_projects), all_out),
                       "sentence": sentence, "stale": bool(stale_projects)},
         "capacity": capacity,
-        "inbox": {"open": [_inbox_entry(r, health) for r in open_items],
+        "inbox": {"open": [_brief_entry(s) for s in briefs]
+                          + [_inbox_entry(r, health) for r in open_items],
                   "answered": [_inbox_entry(r, health) for r in answered]},
         "project_count": len(states),
         "entries": entries,

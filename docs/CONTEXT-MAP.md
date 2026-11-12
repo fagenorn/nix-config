@@ -27,6 +27,7 @@
 | Base policy | Guard |
 | Blocking edge | Claims |
 | Cache proxy | Hosts |
+| Brief | Console |
 | Candidate | Release |
 | Capacity strip | Console |
 | Check | Verification |
@@ -58,6 +59,7 @@
 | Limit reading | Console |
 | Limit sensing | Hosts |
 | Limit stop | Console |
+| Manager | Console |
 | Marker | Claims |
 | Migration | Project contract |
 | Not yet managed | Console |
@@ -76,6 +78,7 @@
 | Receipt | Release |
 | Release profile | Release |
 | Removal | Project contract |
+| Report | Console |
 | ResolvedProject | Project contract |
 | Row check | Guard |
 | Session | Console |

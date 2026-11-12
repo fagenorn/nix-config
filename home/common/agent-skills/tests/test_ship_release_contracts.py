@@ -170,17 +170,25 @@ class ShipReleaseContractsTest(unittest.TestCase):
         from agent_tools.claims import forge_claim
         phase3 = self.skill.split("## Phase 3", 1)[1].split("\n## ", 1)[0]
         acquire = ("`forge-claim land acquire --repo <slug> --branch <integration> --sha <commit> "
-                   "--release --wait`")
+                   "--release --wait --follow-head`")
         release = "`forge-claim land release --repo <slug> --branch <integration> --sha <commit>`"
         at = 0
         for form in ("Two-branch project: before the first preview, and again after opening the "
                      "release PR, run alone (60-minute timeout) " + acquire,
-                     "in resume form, `<commit>` the release's `commit`",
+                     # Issue 901: only a new release follows the head; a resumed one is bound to
+                     # its commit. A moved head means notes and version are written again.
+                     "resume form drops `--follow-head` and `<commit>` is the release's `commit`.",
+                     # The followed head arrived during the wait: without a fetch it is a bad revision.
+                     "On `head_moved`, `git fetch origin`, then redo Phases 1–2 with its "
+                     "`lock_sha` as `<commit>`.",
                      "`no_open_pr` goes on to the preview, or in resume form before the merge "
-                     "to reporting it and offering `abandon`.",
+                     "is reported with an `abandon` offer.",
                      "The confirmation stop and a `release_busy` stop keep the lock, and the run "
                      "releases it; every other stop, a declined confirmation or a timed-out or "
                      "killed acquire too, first runs " + release,
+                     # A followed wait may have taken the lock at a head the caller never saw.
+                     ", and after such an acquire also at the head from `gh pr view "
+                     "<integration> --repo <slug> --json headRefOid`.",
                      "`release_pr_missing`",
                      "wait once for CI in one foreground call: under the lock `gh pr checks "
                      "<integration> --repo <slug> --required --watch --fail-fast --interval 60` "
@@ -212,6 +220,10 @@ class ShipReleaseContractsTest(unittest.TestCase):
         self.assertTrue(forge_claim.build_parser().parse_args(
             ["land", "acquire", "--repo", "o/r", "--branch", "dev", "--sha", "a" * 40,
              "--release", "--wait"]).release)
+        follow = [forge_claim.build_parser().parse_args(
+            ["land", "acquire", "--repo", "o/r", "--branch", "dev", "--sha", "a" * 40, "--release",
+             "--wait", *flag]).follow_head for flag in ((), ("--follow-head",))]
+        self.assertEqual(follow, [False, True])
 
     def test_release_examples_parse_and_cover_every_subcommand(self):
         from agent_tools.release import release

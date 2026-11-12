@@ -291,8 +291,8 @@ OWNER_LABELS: tuple[tuple[str | None, str], ...] = (
     (VERIFYING, r"verify|verify-\d+|verify-fix-\d+|verify-fix-review-\d+|ws-check-\d+"),
     (
         LANDING,
-        r"pr|hold|merge|close-out|land-unlock|fix-ci|fix-ci-review|land-lock-\d+|land-push-\d+|checks-\d+"
-        r"|sync-\d+|sync-review-\d+|fix-sync-\d+|fix-sync-review-\d+",
+        r"pr|hold|merge|close-out|land-unlock|fix-ci|fix-ci-review|land-lock-\d+|land-relock-\d+|land-push-\d+|checks-\d+"
+        r"|sync-\d+|sync-resolve-\d+|sync-review-\d+|fix-sync-\d+|fix-sync-review-\d+",
     ),
 )
 

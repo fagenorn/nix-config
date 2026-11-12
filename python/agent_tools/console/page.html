@@ -70,9 +70,9 @@ ul { list-style: none; }
 .abox .meta { margin-top: 6px; }
 .abox .meta.now { color: var(--text); }
 .abox .opts { list-style: none; padding-left: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; margin-top: 4px; }
-.opt, .send, .undo, .goal-open, .goal-send, .goal-cancel, .goal-project, .withdraw, .abox button[class^="ans-"] { display: inline-flex; align-items: baseline; gap: 8px; font: inherit; color: inherit; text-align: left; background: none; border: 1px solid var(--hair); border-radius: 8px; padding: 2px 10px; cursor: pointer; transition: background-color .16s; }
-.opt:hover:enabled, .send:hover:enabled, .undo:hover:enabled, .goal-open:hover:enabled, .goal-send:hover:enabled, .goal-cancel:hover:enabled, .goal-project:hover:enabled, .withdraw:hover:enabled, .abox button[class^="ans-"]:hover:enabled { background: rgba(202, 211, 245, .05); }
-.opt:disabled, .send:disabled, .goal-send:disabled, .withdraw:disabled, .abox button[class^="ans-"]:disabled { cursor: default; }
+.opt, .send, .undo, .approve, .reply-send, .goal-open, .goal-send, .goal-cancel, .goal-project, .withdraw, .abox button[class^="ans-"] { display: inline-flex; align-items: baseline; gap: 8px; font: inherit; color: inherit; text-align: left; background: none; border: 1px solid var(--hair); border-radius: 8px; padding: 2px 10px; cursor: pointer; transition: background-color .16s; }
+.opt:hover:enabled, .send:hover:enabled, .undo:hover:enabled, .approve:hover:enabled, .reply-send:hover:enabled, .goal-open:hover:enabled, .goal-send:hover:enabled, .goal-cancel:hover:enabled, .goal-project:hover:enabled, .withdraw:hover:enabled, .abox button[class^="ans-"]:hover:enabled { background: rgba(202, 211, 245, .05); }
+.opt:disabled, .send:disabled, .reply-send:disabled, .goal-send:disabled, .withdraw:disabled, .abox button[class^="ans-"]:disabled { cursor: default; }
 .abox button[class^="ans-"]:disabled { color: var(--ov2); }
 .abox .detail { margin-top: 6px; padding: 6px 10px; max-height: 24rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: .84375rem; color: var(--sub0); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; }
 .card .detail, .rest .detail, .done .detail { flex-basis: 100%; margin: 6px 0 0; padding: 6px 10px; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: .84375rem; color: var(--sub0); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; }
@@ -82,15 +82,26 @@ ul { list-style: none; }
 .opt.picked, .goal-project.picked { color: var(--lav); border-color: var(--lav); }
 #goal { margin-top: 24px; max-width: 44rem; }
 .goal-box { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
-.goal-filter, .goal-text { width: 100%; font: inherit; color: var(--text); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; padding: 6px 10px; }
-.goal-text { min-height: 6em; resize: vertical; }
+.goal-filter, .goal-text, .reply-text { width: 100%; font: inherit; color: var(--text); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; padding: 6px 10px; }
+.goal-text, .reply-text { min-height: 6em; resize: vertical; }
+.brief .goal-line { margin-top: 6px; font-size: 1.0625rem; overflow-wrap: anywhere; }
+.brief .parts p { margin-top: 10px; }
+.brief .parts ul { margin-top: 4px; padding-left: 18px; list-style: disc; color: var(--sub0); font-size: .84375rem; }
+.reply { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; margin-top: 12px; }
 .goal-projects { display: flex; flex-wrap: wrap; gap: 4px; }
 .goal-status:empty { display: none; }
 .goal-act { display: flex; gap: 8px; }
 .sprints { flex: 1 0 100%; padding: 0 0 0 16px; }
 .sprint { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; font-size: .8125rem; color: var(--sub0); }
 .sprint .goal-line { color: var(--text); overflow-wrap: anywhere; }
-.sprint .age, .sprint .manager { color: var(--ov2); }
+.sprint .age, .sprint .manager, .sprint .status-age { color: var(--ov2); }
+.sprint .progress::before { content: "\2014  "; }
+.sprint-detail { flex: 1 0 100%; font-size: .8125rem; }
+.sprint-detail summary { cursor: pointer; color: var(--ov2); }
+.sprint-detail ul { margin-top: 2px; padding: 0 0 0 16px; }
+.sprint-detail li { display: flex; flex-wrap: wrap; gap: 0 10px; color: var(--sub0); }
+.sprint-detail p { color: var(--sub0); }
+.sprint-detail .tracker { color: var(--lav); text-underline-offset: 3px; }
 .act { flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin-top: 8px; font-size: .8125rem; color: var(--ov2); }
 .fail { color: var(--red); }
 #digest { margin-top: 40px; max-width: 44rem; }
@@ -239,15 +250,50 @@ function untouchedDays(lastActivity) {
   const days = Math.floor((Date.now() - Date.parse(lastActivity)) / 86400000);
   return Number.isFinite(days) && days >= 1 ? days : 0;
 }
+function sprintDetail(sprint) {
+  const fold = el("details", "sprint-detail");
+  fold.dataset.key = "sprint:" + sprint.sprint_id;
+  fold.appendChild(el("summary", "", "Detail"));
+  const list = el("ul", "sprint-issues");
+  for (const issue of sprint.issues || []) {
+    const row = el("li");
+    row.appendChild(el("span", "issue", "#" + issue.issue));
+    row.appendChild(el("span", "stage", issue.stage_text));
+    list.appendChild(row);
+  }
+  fold.appendChild(list);
+  if (typeof sprint.next === "string") fold.appendChild(el("p", "next", "Next: " + sprint.next));
+  if (typeof sprint.milestone === "string") {
+    fold.appendChild(el("p", "milestone", "Milestone: " + sprint.milestone));
+  }
+  if (typeof sprint.tracker_url === "string" && sprint.tracker_url.startsWith("https:")) {
+    const link = el("a", "tracker", "Open on the tracker");
+    link.rel = "noreferrer";
+    link.href = sprint.tracker_url;
+    fold.appendChild(link);
+  }
+  return fold;
+}
 const withdrawals = new Map();
 const latestSprints = new Map();
 function fillSprint(item, entry, sprint) {
   const state = withdrawals.get(sprint.sprint_id);
   latestSprints.set(sprint.sprint_id, { entry, sprint });
   item.dataset.sprintId = sprint.sprint_id;
+  const before = Array.from(item.children).find((c) => c.className === "sprint-detail");
+  const wasOpen = before !== undefined && before.open === true;
   item.replaceChildren();
   item.appendChild(el("span", "goal-line", sprint.goal));
   item.appendChild(el("span", "sprint-state", sprint.state_text));
+  if (typeof sprint.progress_text === "string") {
+    item.appendChild(el("span", "progress", sprint.progress_text));
+  }
+  if (typeof sprint.status === "string") {
+    item.appendChild(el("span", "status", sprint.status));
+    if (typeof sprint.status_age_text === "string") {
+      item.appendChild(el("span", "status-age", sprint.status_age_text));
+    }
+  }
   const age = el("span", "age");
   age.appendChild(el("span", "", "stated "));
   age.appendChild(timeEl("ago", sprint.stated_at, ""));
@@ -258,6 +304,11 @@ function fillSprint(item, entry, sprint) {
   const button = actionButton("withdraw", "Withdraw", () => withdraw(item, entry, sprint));
   if (state !== undefined && state.phase === "sending") button.setAttribute("disabled", "");
   item.appendChild(button);
+  if (typeof sprint.status === "string") {
+    const fold = sprintDetail(sprint);
+    if (wasOpen) fold.open = true;
+    item.appendChild(fold);
+  }
   if (state !== undefined && state.phase === "failed") {
     item.appendChild(el("span", "fail", "Could not withdraw: " + state.reason));
   }
@@ -519,7 +570,38 @@ function answerState(item) {
 function choosable(state) {
   return state.phase === "choosing" || state.phase === "failed";
 }
+function isBrief(item) {
+  return item.reason === "brief";
+}
+function briefId(item) {
+  return itemId(item) + "@" + item.version;
+}
+function stateId(item) {
+  return isBrief(item) ? briefId(item) : itemId(item);
+}
+function sending(state) {
+  return state.phase === "sending" || (state.kind === "brief" && state.reply.phase === "sending");
+}
+const replaced = new Map();
+function briefState(item) {
+  const id = briefId(item);
+  let state = answers.get(id);
+  if (state === undefined) {
+    state = {
+      kind: "brief", phase: "choosing", timer: null, reason: "",
+      project_id: item.project_id, sprint_id: item.sprint_id, version: item.version,
+      reply: { phase: "idle", reason: "", text: "" },
+    };
+    answers.set(id, state);
+  }
+  return state;
+}
 function currentEntry(open) {
+  for (const item of open) {
+    if (!isBrief(item)) continue;
+    const state = briefState(item);
+    if (choosable(state)) return { item, state };
+  }
   for (const item of open) {
     if (!decision(item)) continue;
     const state = answerState(item);
@@ -607,6 +689,201 @@ async function sendAnswer(id, state, item) {
     state.reason = reason;
   }
   redraw();
+}
+function startApproval(item, state) {
+  if (!choosable(state) || state.reply.phase === "sending") return false;
+  const id = briefId(item);
+  state.phase = "waiting";
+  state.reason = "";
+  replaced.delete(state.sprint_id);
+  state.timer = setTimeout(() => fireApprove(id), UNDO_MS);
+  return true;
+}
+function fireApprove(id) {
+  const state = answers.get(id);
+  if (state === undefined || state.phase !== "waiting") return;
+  state.timer = null;
+  const open = lastView === null ? [] : lastView.inbox.open;
+  if (!open.some((item) => isBrief(item) && briefId(item) === id)) {
+    answers.delete(id);
+    return;
+  }
+  sendApproval(id, state);
+}
+async function sendApproval(id, state) {
+  state.phase = "sending";
+  redraw();
+  let reason = null;
+  try {
+    const response = await fetch("/api/approve", {
+      method: "POST",
+      headers: { "X-Console-Token": token, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        project_id: state.project_id, sprint_id: state.sprint_id, version: state.version,
+      }),
+    });
+    if (response.status !== 204) {
+      reason = (await response.text()).trim() || "HTTP " + response.status;
+    }
+  } catch (error) {
+    console.error(error);
+    reason = "the console did not answer";
+  }
+  if (answers.get(id) !== state) return;
+  if (reason === null) {
+    state.phase = "approved";
+  } else {
+    state.phase = "failed";
+    state.reason = reason;
+  }
+  redraw();
+}
+const briefCards = new Map();
+async function sendReply(rec) {
+  const item = rec.item;
+  const id = briefId(item);
+  const state = briefState(item);
+  const reply = state.reply;
+  if (reply.phase === "sending") return;
+  if (state.phase === "sending") {
+    reply.phase = "failed";
+    reply.reason = "the approval is already on its way";
+    redraw();
+    return;
+  }
+  const sent = rec.field.value;
+  replaced.delete(state.sprint_id);
+  if (sent.trim() === "") {
+    reply.phase = "failed";
+    reply.reason = "write the reply first";
+    redraw();
+    return;
+  }
+  undo(state);
+  reply.phase = "sending";
+  reply.reason = "";
+  reply.text = sent;
+  redraw();
+  let reason = null;
+  try {
+    const response = await fetch("/api/reply", {
+      method: "POST",
+      headers: { "X-Console-Token": token, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        project_id: state.project_id, sprint_id: state.sprint_id, version: state.version,
+        reply: sent,
+      }),
+    });
+    if (response.status !== 204) {
+      reason = (await response.text()).trim() || "HTTP " + response.status;
+    }
+  } catch (error) {
+    console.error(error);
+    reason = "the console did not answer";
+  }
+  if (answers.get(id) !== state) return;
+  if (reason === null) {
+    reply.phase = "sent";
+    if (rec.item.version === state.version && rec.field.value === sent) rec.field.value = "";
+  } else {
+    reply.phase = "failed";
+    reply.reason = reason;
+  }
+  redraw();
+}
+function briefRecord(sprintId) {
+  let rec = briefCards.get(sprintId);
+  if (rec === undefined) {
+    const card = el("article", "card brief");
+    const head = el("h2");
+    const goal = el("p", "goal-line");
+    const parts = el("div", "parts");
+    const act = el("p", "act");
+    const field = el("textarea", "reply-text");
+    field.setAttribute("aria-label", "Reply");
+    rec = { card, head, goal, parts, act, field, status: el("p", "act"), item: null };
+    rec.send = actionButton("reply-send", "Ask for changes", () => sendReply(rec));
+    const box = el("div", "reply");
+    for (const part of [field, rec.send, rec.status]) box.appendChild(part);
+    for (const part of [head, goal, parts, act, box]) card.appendChild(part);
+    briefCards.set(sprintId, rec);
+  }
+  return rec;
+}
+function listPart(label, texts) {
+  const list = el("ul");
+  for (const text of texts) list.appendChild(el("li", "", text));
+  return [el("p", "meta", label), list];
+}
+function drawBrief(rec, item) {
+  const state = briefState(item);
+  const parts = item.brief;
+  rec.item = item;
+  rec.head.textContent = item.project_id + " brief, version " + item.version;
+  rec.goal.textContent = item.goal;
+  rec.parts.replaceChildren(
+    el("p", "meta", "What done looks like"), el("p", "", parts.done),
+    ...listPart("Excluded", parts.excluded), ...listPart("Slices", parts.slices),
+    ...listPart("Risks", parts.risks), ...listPart("What I expect to ask", parts.asks),
+  );
+  rec.act.replaceChildren(...approveLine(item, state));
+  const reply = state.reply;
+  const words = { sending: "Sending\u2026", sent: "Reply sent, waiting for a new brief" };
+  const status = reply.phase === "failed"
+    ? [el("span", "fail", "Could not send: " + reply.reason)]
+    : words[reply.phase] === undefined ? [] : [el("span", "", words[reply.phase])];
+  rec.status.replaceChildren(...status);
+  rec.send.disabled = reply.phase === "sending";
+}
+function approveLine(item, state) {
+  if (state.phase === "waiting") {
+    return [
+      el("span", "", "Approving in five seconds."),
+      actionButton("undo", "Undo", () => { undo(state); redraw(); }),
+    ];
+  }
+  if (state.phase === "sending") return [el("span", "", "Approving\u2026")];
+  if (state.phase === "approved") return [el("span", "", "Approved, the sprint is starting")];
+  const nodes = [];
+  if (state.phase === "failed") nodes.push(el("span", "fail", "Could not send: " + state.reason));
+  const old = replaced.get(item.sprint_id);
+  if (old !== undefined) {
+    nodes.push(el("span", "", "A newer brief replaced version " + old + "; nothing was approved."));
+  }
+  nodes.push(actionButton("approve", "Approve", () => { if (startApproval(item, state)) redraw(); }));
+  return nodes;
+}
+function placeBriefCards(section, briefs) {
+  const open = new Set(briefs.map((item) => item.sprint_id));
+  for (const id of [...briefCards.keys()]) {
+    const busy = [...answers.values()].some((s) => s.kind === "brief" && s.sprint_id === id && sending(s));
+    if (!open.has(id) && !busy) briefCards.delete(id);
+  }
+  const wanted = briefs.map((item) => {
+    const rec = briefRecord(item.sprint_id);
+    drawBrief(rec, item);
+    return rec.card;
+  });
+  const keep = new Set(wanted);
+  const kept = Array.from(section.children).filter((child) => {
+    if (keep.has(child)) return true;
+    child.remove();
+    return false;
+  });
+  if (kept.every((card, i) => card === wanted[i])) {
+    for (const card of wanted.slice(kept.length)) section.appendChild(card);
+    return;
+  }
+  // Moving a focused node blurs it in a browser, so the field is put back.
+  const active = document.activeElement;
+  const field = [...briefCards.values()].some((rec) => rec.field === active) ? active : null;
+  const from = field === null ? 0 : field.selectionStart;
+  const to = field === null ? 0 : field.selectionEnd;
+  for (const card of wanted) section.appendChild(card);
+  if (field !== null && field !== document.activeElement) {
+    field.focus();
+    field.setSelectionRange(from, to);
+  }
 }
 function actionButton(cls, label, onClick) {
   const button = el("button", cls, label);
@@ -795,6 +1072,17 @@ function answeredLine(item) {
   row.appendChild(fold);
   return row;
 }
+function dropBriefState(id, state, briefs) {
+  if (state.phase === "waiting") {
+    clearTimeout(state.timer);
+    state.timer = null;
+    state.phase = "choosing";
+    if (briefs.some((b) => b.sprint_id === state.sprint_id && b.version > state.version)) {
+      replaced.set(state.sprint_id, state.version);
+    }
+  }
+  if (!sending(state)) answers.delete(id);
+}
 function renderInbox(view) {
   const fresh = view !== lastView;
   lastView = view;
@@ -806,14 +1094,22 @@ function renderInbox(view) {
   fields = new Map();
   const wasOpen = new Set();
   for (const fold of document.querySelectorAll("#inbox details[open]")) wasOpen.add(fold.dataset.key);
-  section.replaceChildren();
   const open = view.inbox.open;
-  const present = new Set(open.map(itemId));
+  const briefs = open.filter(isBrief);
+  const tracked = open.filter((item) => !isBrief(item));
+  const present = new Set(open.map(stateId));
   // A frame that shows a sent item open again supersedes the page's own "sent"; a redraw of the same view does not.
-  const reopened = new Set(fresh ? open.filter(answerable).map(itemId) : []);
+  const reopened = new Set(fresh ? tracked.filter(answerable).map(itemId) : []);
   for (const [id, state] of answers) {
+    if (state.kind === "brief") {
+      if (!present.has(id)) dropBriefState(id, state, briefs);
+      continue;
+    }
     const gone = !present.has(id) && state.phase !== "waiting" && state.phase !== "sending";
     if (gone || (state.phase === "sent" && reopened.has(id))) answers.delete(id);
+  }
+  for (const id of [...replaced.keys()]) {
+    if (!briefs.some((b) => b.sprint_id === id)) replaced.delete(id);
   }
   for (const key of Array.from(drafts.keys())) {
     const id = key.split("\n")[0];
@@ -823,10 +1119,11 @@ function renderInbox(view) {
   }
   const current = currentEntry(open);
   currentId = current === null ? null : itemId(current.item);
-  if (open.length > 0) section.appendChild(leadItem(open[0]));
-  if (open.length > 1) {
+  placeBriefCards(section, briefs);
+  if (tracked.length > 0) section.appendChild(leadItem(tracked[0]));
+  if (tracked.length > 1) {
     const rest = el("ul", "rest");
-    for (const item of open.slice(1)) rest.appendChild(itemLine(item));
+    for (const item of tracked.slice(1)) rest.appendChild(itemLine(item));
     section.appendChild(rest);
   }
   const answered = view.inbox.answered;
@@ -1137,11 +1434,12 @@ document.addEventListener("keydown", (event) => {
   if (current === null) return;
   const { item, state } = current;
   if (event.key === "Enter") {
-    if (start(item, state)) {
+    if (isBrief(item) ? startApproval(item, state) : start(item, state)) {
       event.preventDefault();
       redraw();
     }
   } else if (/^[1-9]$/.test(event.key)) {
+    if (isBrief(item)) return;
     const qi = Math.min(state.q, item.questions.length - 1);
     const oi = Number(event.key) - 1;
     if (oi >= item.questions[qi].options.length) return;

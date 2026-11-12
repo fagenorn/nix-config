@@ -14,7 +14,7 @@ The per-host loopback service and its one page that say whether the owner is nee
 _Avoid_: dashboard, lead console
 
 **Inbox item**:
-Anything waiting on the owner that the console asks them to act on, whatever its source. The console's statement counts the open ones, "N things need you"; with none and a readable tracker it reads "Nothing needs you". A session waiting in its terminal is not one: it is answered there (ADR-console-004).
+Anything waiting on the owner that the console asks them to act on, whatever its source; a manager's brief is one. The console's statement counts the open ones, "N things need you"; with none and a readable tracker it reads "Nothing needs you". A session waiting in its terminal is not one: it is answered there (ADR-console-004).
 _Avoid_: ask, notification
 
 **Answered item**:
@@ -37,8 +37,20 @@ _Avoid_: dormant project, idle project
 The sentence or two the owner states on the page for one registered project, kept in the console's log and never on the tracker (ADR-console-011).
 _Avoid_: task, request
 
+**Brief**:
+The manager's answer to a goal: what done looks like, what is excluded, the slices, the risks and what it expects to ask. It waits in the inbox until the owner approves it, which starts the sprint, or answers it with a reply; a newer brief replaces it (ADR-console-013).
+_Avoid_: plan, proposal
+
+**Manager**:
+The one agent a sprint has: it writes the brief and the reports and never writes code (#835).
+_Avoid_: owner, worker
+
+**Report**:
+The manager's fixed-shape account after each batch and on any change of state: a status line, each issue's stage or outcome, the inbox items it raised, the next step and the milestone (ADR-console-014).
+_Avoid_: update, log
+
 **Sprint**:
-One goal, later its issues and its outcome, in one project (#834), shown under its project with its state and age until it is withdrawn (ADR-console-011).
+One goal, later its issues and its outcome, in one project (#834), shown under its project as one line with its state (drafting the brief, starting, on track, waiting on you, quiet and may be stuck, closing or done), its progress and its manager's status until it is withdrawn (ADR-console-011, ADR-console-013, ADR-console-014).
 _Avoid_: job, run
 
 **Session**:

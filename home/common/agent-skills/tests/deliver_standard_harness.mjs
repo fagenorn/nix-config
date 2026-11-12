@@ -42,7 +42,7 @@ const openChecks = prompt => {
 const DEFAULTS = [
   [/^land-push-/, prompt => ({ head: (/at the head ([0-9a-f]+)/.exec(prompt) || [])[1] || SHA, renew: { verdict: 'renewed' } })],
   [/^land-unlock$/, { verdict: 'released' }],
-  [/^land-lock-/, { renew: { verdict: 'renewed' }, lock: { verdict: 'acquired', lock_sha: SHA } }],
+  [/^land-(re)?lock-/, { renew: { verdict: 'renewed' }, lock: { verdict: 'acquired', lock_sha: SHA } }],
   [/^renew-/, { verdict: 'renewed', comment_id: 7 }],
   [/^acquire$/, { verdict: 'acquired', comment_id: 7 }],
   [/^setup$/, prompt => (HOLDER_ID(prompt) ? { ...SETUP, ...holderOf(SETUP.host, prompt), ...FOLDED_SETUP } : SETUP)],
@@ -60,6 +60,8 @@ const DEFAULTS = [
   }],
   [/^direct-review/, { ...PASS, acceptance: [{ id: 'AC1', met: true, evidence: 'test_a.py:10 test_works' }] }],
   [/review|^final-/, PASS],
+  // #913: the resolution of an aborted sync merge, outside the land lock; like the sync default, its merge commit is the head unless a scenario names one.
+  [/^sync-resolve-/, { status: 'done', conflicted: true, merge_commit: SHA, resolved_files: ['a.py'], notes: 'resolved' }],
   [/^sync-/, { status: 'done', conflicted: false, merge_commit: SHA, notes: 'clean' }],
   [/^ws-check-/, { whitespace_exit: 1, changed_paths: ['src/a.js'] }],
   [/^verify-fix-/, DONE],
@@ -73,7 +75,7 @@ const DEFAULTS = [
   [/^close-out$/, { issue_state: 'CLOSED', branch_deleted: true, released: true, decision_ended: true, notes: 'ok' }],
 ]
 // Folded labels: the nested steps their reply carries, each defaulted when an explicit reply leaves it out.
-const NESTED = [[/^(owner-answer|verify)$/, ['renew']], [/^setup$/, ['holder', 'acquire', 'claim', 'answer', 'renew']], [/^pr$/, ['renew', 'lock', 'checks']], [/^merge$/, ['renew', 'lock']], [/^land-push-/, ['renew']], [/^land-lock-/, ['renew', 'lock']], [/^checks-/, ['renew', 'lock']], [/^(impl-\d+|direct-impl)$/, ['renew']], [/^hold$/, ['release']]]
+const NESTED = [[/^(owner-answer|verify)$/, ['renew']], [/^setup$/, ['holder', 'acquire', 'claim', 'answer', 'renew']], [/^pr$/, ['renew', 'lock', 'checks']], [/^merge$/, ['renew', 'lock']], [/^land-push-/, ['renew']], [/^land-(re)?lock-/, ['renew', 'lock']], [/^checks-/, ['renew', 'lock']], [/^(impl-\d+|direct-impl)$/, ['renew']], [/^hold$/, ['release']]]
 const defaultOf = (label, prompt, over = {}) => {
   const hit = DEFAULTS.find(([re]) => re.test(label))
   if (!hit) throw new Error(`no stub reply for agent label ${label}`)

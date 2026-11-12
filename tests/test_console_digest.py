@@ -9,10 +9,14 @@ from pathlib import Path
 
 from agent_tools.claims import forge_owner_action as foa
 from agent_tools.console.digest import (
-    EARLIER_MAX, FIRST_VISIT, LOOKED, SHOWN, SPRINT_WITHDRAWN, Moment, digest, keep, last_looked,
-    moments)
-from agent_tools.console.event_log import GOAL_STATED, GOAL_WITHDRAWN, Event
+    BRIEF_APPROVED_MOMENT, BRIEF_SENT_MOMENT, EARLIER_MAX, FIRST_VISIT, LOOKED, SHOWN,
+    SPRINT_STATE_MOMENT, SPRINT_WITHDRAWN, Moment, digest, keep, last_looked, moments)
+from agent_tools.console.event_log import (
+    BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, SPRINT_REPORTED,
+    Event)
 from agent_tools.console.sessions import SessionState
+from agent_tools.console.sprints import sprint_states
+from agent_tools.console.view import InboxRecord
 
 CASES = json.loads(
     (Path(__file__).parent / "fixtures" / "console" / "digest-events.json").read_text())["cases"]
@@ -148,6 +152,94 @@ class DigestTest(unittest.TestCase):
             Event(4, at(4), GOAL_WITHDRAWN, None, {"sprint_id": "c" * 16, "goal": "g"})], {}, {})
         self.assertEqual(found, [Moment(2, at(2), SPRINT_WITHDRAWN,
                                         "The goal for owner/p00 was withdrawn: make the importer resumable")])
+
+    def test_a_brief_arriving_and_approved_are_moments(self):
+        sid, goal = "a" * 16, "make the importer resumable"
+        row = {"sprint_id": sid, "goal": goal}
+        found = moments([
+            Event(1, at(1), GOAL_STATED, "owner/p00", row),
+            Event(2, at(2), BRIEF_SENT, "owner/p00", {**row, "version": 1, "brief": {}}),
+            Event(3, at(3), BRIEF_REPLIED, "owner/p00", {**row, "version": 1, "reply": "smaller"}),
+            Event(4, at(4), BRIEF_SENT, "owner/p00", {**row, "version": 2, "brief": {}}),
+            Event(5, at(5), BRIEF_APPROVED, "owner/p00", {**row, "version": 2}),
+            Event(6, at(6), BRIEF_SENT, "owner/p00", {**row, "version": True, "brief": {}}),
+            Event(7, at(7), BRIEF_SENT, "owner/p00", {"sprint_id": sid, "version": 3}),
+            Event(8, at(8), BRIEF_SENT, None, {**row, "version": 3, "brief": {}})], {}, {})
+        self.assertEqual(found, [
+            Moment(2, at(2), BRIEF_SENT_MOMENT,
+                   "A brief for owner/p00 arrived, version 1: make the importer resumable"),
+            Moment(4, at(4), BRIEF_SENT_MOMENT,
+                   "A brief for owner/p00 arrived, version 2: make the importer resumable"),
+            Moment(5, at(5), BRIEF_APPROVED_MOMENT,
+                   "The brief for owner/p00 was approved, version 2: make the importer resumable")])
+
+    def test_a_sprint_state_sentence_only_when_the_reported_state_changes(self):
+        sid, goal = "a" * 16, "make the importer resumable"
+        row = {"sprint_id": sid, "goal": goal}
+        report = {"status": "two slices are building", "phase": "running",
+                  "milestone": "Importer resumes",
+                  "tracker_url": "https://github.com/owner/p00/milestone/3",
+                  "issues": [{"issue": 12, "stage": "building"}], "inbox": [12],
+                  "next": "start the resume slice"}
+
+        def reported(seq, phase, sprint_id=sid):
+            return Event(seq, at(seq), SPRINT_REPORTED, "owner/p00", {
+                "sprint_id": sprint_id, "goal": goal, "report": {**report, "phase": phase}})
+
+        rows = [
+            Event(1, at(1), GOAL_STATED, "owner/p00", row),
+            Event(2, at(2), BRIEF_SENT, "owner/p00", {
+                **row, "version": 1,
+                "brief": {"done": "d", "excluded": ["x"], "slices": ["a"], "risks": ["r"],
+                          "asks": ["q"]}}),
+            Event(3, at(3), BRIEF_APPROVED, "owner/p00", {**row, "version": 1}),
+            reported(4, "running"), reported(5, "running"), reported(6, "closing"),
+            reported(7, "closing"), reported(8, "done"), reported(9, "paused"),
+            reported(10, "running", "b" * 16)]
+
+        def said(found):
+            return [m for m in found if m.kind == SPRINT_STATE_MOMENT]
+
+        def moment(seq, text):
+            return Moment(seq, at(seq), "sprint_state",
+                          f"The sprint for owner/p00 is now {text}: {goal}")
+
+        self.assertEqual(said(moments(rows, {}, {})), [
+            moment(4, "on track"), moment(6, "closing"), moment(8, "done")])
+        self.assertEqual(said(moments(rows[4:], {}, {}, sprints=sprint_states(rows[:4]))), [
+            moment(6, "closing"), moment(8, "done")])
+
+    def test_a_sprint_sentence_follows_the_shown_state_not_the_phase(self):
+        sid, goal = "a" * 16, "make the importer resumable"
+        row = {"sprint_id": sid, "goal": goal}
+        report = {"status": "one slice is building", "phase": "running",
+                  "milestone": "Importer resumes",
+                  "tracker_url": "https://github.com/owner/p00/milestone/3",
+                  "issues": [{"issue": 12, "stage": "building"}], "inbox": [],
+                  "next": "start the resume slice"}
+
+        def reported(seq, phase):
+            return Event(seq, at(seq), SPRINT_REPORTED, "owner/p00", {
+                "sprint_id": sid, "goal": goal, "report": {**report, "phase": phase}})
+
+        rows = [
+            Event(1, at(1), GOAL_STATED, "owner/p00", row),
+            Event(2, at(2), BRIEF_SENT, "owner/p00", {
+                **row, "version": 1,
+                "brief": {"done": "d", "excluded": ["x"], "slices": ["a"], "risks": ["r"],
+                          "asks": ["q"]}}),
+            Event(3, at(3), BRIEF_APPROVED, "owner/p00", {**row, "version": 1}),
+            reported(4, "running"), reported(5, "closing"), reported(6, "running"),
+            reported(7, "done")]
+        open_item = InboxRecord(
+            {"project_id": "owner/p00", "issue": 12, "key": "k", "answered": False},
+            at(0), at(0))
+        waiting = {("owner/p00", "k"): open_item}
+        found = [(m.seq, m.sentence) for m in moments(rows, {}, waiting)
+                 if m.kind == SPRINT_STATE_MOMENT]
+        self.assertEqual(found, [
+            (4, f"The sprint for owner/p00 is now waiting on you (1): {goal}"),
+            (7, f"The sprint for owner/p00 is now done: {goal}")])
 
 
 if __name__ == "__main__":

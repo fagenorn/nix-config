@@ -4,10 +4,11 @@ The store is one SQLite file. Its table is `events(seq INTEGER PRIMARY KEY
 AUTOINCREMENT, at TEXT NOT NULL, kind TEXT NOT NULL, project TEXT, payload TEXT
 NOT NULL)`. Triggers refuse every `UPDATE` of `events`, every `INSERT` that
 names an existing `seq` (which `INSERT OR REPLACE` would otherwise carry out
-without firing a delete trigger) and every deletion of a goal row (`KEPT_KINDS`,
-kept indefinitely per #838), whatever its age, or of a row that is not older
-than the retention cutoff, with "the console event log is append-only", so a
-raw connection cannot rewrite history either. The cutoff is the one row of
+without firing a delete trigger) and every deletion of a goal row, a brief row or a
+report row (`KEPT_KINDS`, kept indefinitely per #838, #887 and #890), whatever
+its age, or of a row that is not older than the retention cutoff, with "the
+console event log is append-only", so a raw connection cannot rewrite history
+either. The cutoff is the one row of
 `retention(id, cutoff)`: it starts empty, triggers let it only move forward and
 refuse to delete, replace or duplicate that row, and `at` is compared as text,
 which is valid for the `utc_now` format. This module issues no `UPDATE` except
@@ -25,9 +26,9 @@ and writes nothing. A payload is stored as canonical JSON (sorted keys, compact
 separators, non-ASCII kept, NaN refused), serialised before the transaction
 begins.
 
-`PRAGMA user_version` is `SCHEMA_VERSION` (3) once opened: version 0 is created
-as schema 3, versions 1 and 2 are migrated to 3 in one transaction each and keep
-every row, and a file at any other version raises `EventLogError` and is not
+`PRAGMA user_version` is `SCHEMA_VERSION` (5) once opened: version 0 is created
+as schema 5, versions 1, 2, 3 and 4 are migrated to 5 in one transaction each and
+keep every row, and a file at any other version raises `EventLogError` and is not
 modified. The parent directory is created with mode 0700. The connection
 is shared across threads and every use of it holds one lock.
 """
@@ -40,14 +41,21 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 5
 RETENTION = timedelta(days=90)
 
 GOAL_STATED = "goal.stated"
 GOAL_WITHDRAWN = "goal.withdrawn"
-# Rows of these kinds are never removed: not by the retention pass, not by a raw
-# connection (the schema-3 delete trigger).
-KEPT_KINDS = frozenset({GOAL_STATED, GOAL_WITHDRAWN})
+BRIEF_SENT = "brief.sent"
+BRIEF_APPROVED = "brief.approved"
+BRIEF_REPLIED = "brief.replied"
+SPRINT_REPORTED = "sprint.reported"
+# Rows of these kinds (the two goal kinds, the three brief kinds and the report
+# kind) are never removed: not by the retention pass, not by a raw connection
+# (the delete trigger of schema 3, 4 and 5).
+KEPT_KINDS = frozenset({GOAL_STATED, GOAL_WITHDRAWN,
+                        BRIEF_SENT, BRIEF_APPROVED, BRIEF_REPLIED,
+                        SPRINT_REPORTED})
 
 _APPEND_ONLY = "the console event log is append-only"
 
@@ -87,9 +95,10 @@ _RETENTION = (
         BEGIN SELECT RAISE(ABORT, '{_RETENTION_ONLY_FORWARD}'); END""",
 )
 
-# What schema 3 adds to schema 2: the delete trigger also refuses every row of a
-# kept kind, whatever its age. Built from KEPT_KINDS so a later kept kind needs
-# no hand-edited SQL.
+# What schemas 3, 4 and 5 add to schema 2: the delete trigger also refuses every row
+# of a kept kind, whatever its age. Built from KEPT_KINDS so a later kept kind
+# needs no hand-edited SQL, only a re-run on an existing store (schema 4 added the
+# brief kinds, schema 5 the report kind).
 _KEPT_LITERALS = ", ".join("'" + kind.replace("'", "''") + "'"
                            for kind in sorted(KEPT_KINDS))
 _KEPT = (
@@ -143,7 +152,7 @@ class EventLog:
             return
         if version == 1:
             self._transaction(self._migrate_from_1)
-        elif version == 2:
+        elif version in (2, 3, 4):
             self._transaction(self._migrate_from_2)
         elif version == 0:
             self._transaction(self._create_schema)

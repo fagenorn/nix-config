@@ -55,10 +55,12 @@ let
     "lane-triage" = "delivery.lane_triage";
     "owner-actions" = "claims.owner_actions";
     "plan-amend" = "delivery.plan_amend";
+    "program-copies" = "delivery.program_copies";
     "promotion" = "delivery.promotion";
     "release" = "release.release";
     "resolve-project" = "project_contract.resolve_project";
     "skill-lint" = "skill_lint";
+    "sprint" = "console.sprint";
     "verified-tree" = "verification.verified_tree";
     "verify-pending" = "verification.verify_pending";
   };

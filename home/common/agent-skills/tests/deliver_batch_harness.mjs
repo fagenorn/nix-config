@@ -6,7 +6,8 @@
 // of null is returned as null (a dead agent). Prints { result, calls, logs (each log() line), max_active, max_planning, child_events }:
 // calls lists agents ({kind: 'agent', label, prompt, schema, agentType, model, effort, facts_pending}) and children
 // ({kind: 'workflow', label: 'child-<issue>', script, args}) in start order. A children entry applies to every child
-// call of its issue, mode 'plan' and 'ready' alike, in call order, and a list element "throw" throws; an issue with no
+// call of its issue, mode 'plan' and 'ready' alike, in call order, and a list element "throw" throws Error('child failed'); an object
+// with a string `throw` member (as the entry or a list element) throws new Error(<that string>) instead; an issue with no
 // entry gets plannedOf(a) for a mode 'plan' call and readyOf(a) otherwise. turns ({"<issue>:<mode>": n}) makes that
 // child take n macrotask turns instead of 5, so a test can hold it pending. max_active is the most children not in
 // plan mode at once, max_planning the most executing plan-mode children at once, and child_events the ordered
@@ -21,6 +22,8 @@ const program = readFileSync(process.argv[2], 'utf8')
 const scenario = JSON.parse(readFileSync(0, 'utf8'))
 const SHA = 'a'.repeat(40)
 const PASS = { verdict: 'pass', findings: [] }
+const SYNC_FIXED = 'f'.repeat(40)
+const RESOLVED = 'b'.repeat(40)
 const DONE = { status: 'done', start_head: 'b0', commit: 'c0ffee', tests: ['t'], notes: 'ok' }
 const AC = [{ id: 'AC1', text: 'works', kind: 'code' }]
 const promptHead = p => (p.match(/Accepted head: ([0-9a-f]+)/) || [])[1] || SHA
@@ -39,11 +42,15 @@ const DEFAULTS = [
   [/^(ask|land-ask)-/, () => ({ verdict: 'posted', comment_id: 99 })],
   [/^recover-end-/, () => ({ verdict: 'ended' })],
   [/^readopt-/, l => ({ ok: true, worktree: `/r/.wt/w-issue-${num(l)}-x`, branch: `issue-${num(l)}-x`, head: SHA, acceptance: AC })],
-  [/^land-sync-review-|^land-fix-review-/, () => PASS],
+  [/^land-sync-review-|^land-sync-rereview-|^land-fix-review-/, () => PASS],
+  // #907: a sync fix defaults to one commit, SYNC_FIXED, on top of the merge commit its prompt names.
+  [/^land-sync-fix-/, (l, p) => ({ ...DONE, start_head: (p.match(/merge commit ([0-9a-f]{40})/) || [])[1], commit: SYNC_FIXED })],
   [/^land-record-/, (l, p) => { const head = promptHead(p); return { ok: true, head, lock: { verdict: 'moved', lock_sha: head }, checks: { state: 'passed', head, required: ['ci'], passed: ['ci'] } } }],
+  // #913: the resolution of an aborted sync merge, outside the land lock, defaults to a resolved merge commit RESOLVED.
+  [/^land-sync-resolve-/, () => ({ status: 'done', conflicted: true, head: RESOLVED, merge_commit: RESOLVED, resolved_files: ['x.py'], markers_checked: true, tests: ['t'], notes: 'ok' })],
   [/^land-sync-/, () => ({ status: 'current', conflicted: false, head: SHA, notes: 'ok' })],
   [/^land-pr-/, (l, p) => ({ pr: 40 + num(l), head: SHA, renew: { verdict: 'renewed' }, lock: { verdict: 'already_held', lock_sha: SHA }, checks: { state: 'passed', head: promptHead(p), required: ['ci'], passed: ['ci'] } })],
-  [/^land-lock-/, () => ({ renew: { verdict: 'renewed' }, lock: { verdict: 'acquired', lock_sha: SHA } })],
+  [/^land-(re)?lock-/, () => ({ renew: { verdict: 'renewed' }, lock: { verdict: 'acquired', lock_sha: SHA } })],
   [/^land-checks-/, () => ({ state: 'passed', head: SHA, required: ['ci'], passed: ['ci'] })],
   [/^land-fix-/, () => DONE],
   [/^land-merge-/, () => ({ merged: true, merge_commit: SHA, notes: 'merged', renew: { verdict: 'renewed' }, lock: { verdict: 'already_held', lock_sha: SHA } })],
@@ -59,7 +66,7 @@ const DEFAULTS = [
   [/^train-merge-/, (l, p) => ({ lock: { verdict: 'already_held', lock_sha: SHA }, merged: true, notes: 'merged', prs: jsonAfter(p, 'The member pull requests, as JSON: ').map(pr => ({ pr, state: 'MERGED' })) })],
 ]
 // Folded labels: the nested steps their reply carries, each defaulted when an explicit reply leaves it out.
-const NESTED = [[/^train-pr-/, ['renew']], [/^train-merge-/, ['lock']], [/^land-pr-/, ['renew', 'lock', 'checks']], [/^land-lock-/, ['renew', 'lock']], [/^land-merge-/, ['renew', 'lock']], [/^land-record-/, ['lock', 'checks']], [/^close-out-/, ['release']]]
+const NESTED = [[/^train-pr-/, ['renew']], [/^train-merge-/, ['lock']], [/^land-pr-/, ['renew', 'lock', 'checks']], [/^land-(re)?lock-/, ['renew', 'lock']], [/^land-merge-/, ['renew', 'lock']], [/^land-record-/, ['lock', 'checks']], [/^close-out-/, ['release']]]
 
 const calls = []
 let factsPending = 0 // facts agents started and not yet answered
@@ -125,9 +132,11 @@ async function workflow(ref, a) {
     const n = childSeen[a.issue] = (childSeen[a.issue] || 0) + 1
     const c = (scenario.children || {})[String(a.issue)]
     if (c === 'throw') throw new Error('child failed')
+    if (c && typeof c === 'object' && !Array.isArray(c) && typeof c.throw === 'string') throw new Error(c.throw)
     if (c === undefined) return plan ? plannedOf(a) : readyOf(a)
     const out = Array.isArray(c) ? c[Math.min(n, c.length) - 1] : c
     if (out === 'throw') throw new Error('child failed')
+    if (out && typeof out === 'object' && typeof out.throw === 'string') throw new Error(out.throw)
     return structuredClone(out)
   } finally {
     if (plan) planning--; else active--

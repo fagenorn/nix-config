@@ -128,7 +128,8 @@ class WriteRouteTest(Case):
     def test_every_page_write_route_is_guarded(self):
         svc = self.start()
         self.assertEqual(service.PAGE_WRITES,
-                         {"/api/looked", "/api/answer", "/api/check-answer", "/api/goal", "/api/withdraw"})
+                         {"/api/looked", "/api/answer", "/api/check-answer", "/api/goal",
+                          "/api/withdraw", "/api/approve", "/api/reply"})
         for path in service.PAGE_WRITES:
             with self.subTest(path=path):
                 status, _, body = support.post_page(
@@ -366,7 +367,9 @@ class GoalRouteTest(Case):
             "type": "sprint", "sprint_id": payload["sprint_id"],
             "goal": "make the importer resumable", "state": "drafting",
             "state_text": "drafting the brief", "stated_at": at,
-            "age_text": "stated just now", "manager_text": None}])
+            "age_text": "stated just now", "manager_text": None,
+            "progress": None, "progress_text": None, "status": None, "status_age_text": None,
+            "next": None, "milestone": None, "tracker_url": None, "issues": [], "waiting": 0}])
         self.assertEqual(view_of(svc)["recent_projects"][0], "owner/p01")
 
     def test_an_unregistered_empty_or_over_long_goal_is_refused_and_appends_nothing(self):

@@ -344,7 +344,9 @@ def commit_pulls(slug: str, sha: str) -> list[Pull]:
 
     GitHub documents that a commit outside the default branch gets only its open pull requests
     (verified live: a closed-unmerged head answers `[]`), so this never finds a squash-merged,
-    rebase-merged or closed holder; `closed_pulls_headed` does.
+    rebase-merged or closed holder; `closed_pulls_headed` does. A commit on the default branch
+    gets only merged ones, so an open pull request headed there is left out; `open_pulls_headed`
+    finds it.
     """
     payload = forge_api.gh_json(["api", f"repos/{slug}/commits/{sha}/pulls?per_page=100"])
     if not isinstance(payload, list):
@@ -373,6 +375,31 @@ def closed_pulls_headed(slug: str, branch: str, sha: str) -> list[Pull]:
     return found
 
 
+OPEN_PAGES = 5  # 500 most recently updated open pull requests
+
+
+def open_pulls_headed(slug: str, branch: str, sha: str) -> list[Pull]:
+    """The open pull requests on base `branch` whose head is `sha`, in this repository (issue 905).
+
+    The commit lookup lists only merged pull requests for a commit on the default branch, so an
+    open pull request whose head is already there (a sync of the default branch back into
+    `branch`) is found here. The listing cannot filter by head sha, so it is scanned: at most
+    `OPEN_PAGES` pages, most recently updated first, and an open pull request older than that
+    window is not found. A fork's is dropped: every fork has the default branch's commits.
+    """
+    found: list[Pull] = []
+    for page in range(1, OPEN_PAGES + 1):
+        payload = forge_api.gh_json(["api", f"repos/{slug}/pulls?state=open&base={quote(branch, safe='/')}"
+                                     f"&sort=updated&direction=desc&per_page=100&page={page}"])
+        if not isinstance(payload, list):
+            raise ForgeError("payload_invalid", "open pulls are not an array")
+        found += [pull for pull in map(_pull, payload)
+                  if pull.state == "open" and pull.base_ref == branch and pull.head_sha == sha and pull.same_repo]
+        if len(payload) < 100:
+            break
+    return found
+
+
 def pulls_from(slug: str, branch: str, sha: str) -> list[Pull]:
     """The pull requests, open or closed, whose head is `branch` of this repository at `sha`,
     whatever their base.
@@ -388,6 +415,18 @@ def pulls_from(slug: str, branch: str, sha: str) -> list[Pull]:
         raise ForgeError("payload_invalid", "branch pulls are not an array")
     return [pull for pull in map(_pull, payload)
             if pull.head_sha == sha and pull.head_ref == branch and pull.same_repo]
+
+
+def open_pulls_from(slug: str, branch: str) -> list[Pull]:
+    """The open pull requests whose head is `branch` of this repository, whatever their base and
+    head sha (issue 901): one call, since a branch heads one open pull request per base."""
+    owner = slug.split("/", 1)[0]
+    payload = forge_api.gh_json(["api", f"repos/{slug}/pulls?state=open&head={quote(owner, safe='')}:"
+                                 f"{quote(branch, safe='/')}&per_page=100"])
+    if not isinstance(payload, list):
+        raise ForgeError("payload_invalid", "open branch pulls are not an array")
+    return [pull for pull in map(_pull, payload)
+            if pull.state == "open" and pull.head_ref == branch and pull.same_repo]
 
 
 def closing_issues(slug: str, pr: int) -> list[int]:
