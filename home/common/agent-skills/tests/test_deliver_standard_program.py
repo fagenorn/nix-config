@@ -2992,7 +2992,7 @@ class IntegrationBesideCodexTest(unittest.TestCase):
         self.assertEqual(result["dead_agents"], ["final-integration"])
         self.assertIn("codex review: 1 blocking findings", out["logs"])
 
-    def test_a_throwing_integration_reviewer_fails_the_run_as_a_dead_agent(self):
+    def test_a_throwing_integration_reviewer_fails_the_run(self):
         scenario = dict(self.FOUR, **{"final-integration": "throw"})
         for after in (self.HELD, None):
             with self.subTest(after=after):
@@ -3007,6 +3007,13 @@ class IntegrationBesideCodexTest(unittest.TestCase):
         self.assertEqual(self.final_labels(out), ["final-codex", "final-1", "final-2"])
         # Codex is still waited for, as before.
         self.assertIn("reply final-codex", out["events"])
+
+    def test_a_silent_chunk_reviewer_still_awaits_a_throwing_codex(self):
+        # The stop waits for Codex: its throw fails the run instead of being dropped behind the stop.
+        out = run_out(replies=dict(self.FOUR, **{"final-2": None, "final-codex": "throw"}))
+        self.assertIsNone(out["result"])
+        self.assertIn("stub agent final-codex threw", out["error"])
+        self.assertEqual(self.final_labels(out), ["final-codex", "final-1", "final-2"])
 
     def test_one_chunk_has_no_integration_review(self):
         out = run_out(replies={"final-codex": self.found(self.CODEX, available=True)})

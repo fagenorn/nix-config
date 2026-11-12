@@ -1376,7 +1376,7 @@ if (finals.some(r => !r)) {
   return stop('final-review', { details: 'a final reviewer returned nothing', finals })
 }
 // #967: the integration review reads only the chunk verdicts, so it runs beside Codex. It counts as dead only where its reply is read:
-// a Codex stop leaves it unused.
+// a Codex stop leaves it unused, and still running unread, on purpose: waiting for it would cost wall time for nothing.
 const integP = chunked ? call(`${CTX}
 ${PLAN_REF} Integration review. The delivery was reviewed in ${groups.length} chunks by task; their verdicts: ${JSON.stringify(finals)}. Read the full changed-file list (git -C ${W} diff --stat ${RANGE}) and the head tree as needed.${EXTRA_RANGES()} ${KNOW} Check the interfaces between chunks and grade every acceptance criterion: ${ACS}. Report Important or Critical findings only.`, { label: 'final-integration', phase: 'Final review', agentType: 'reviewer', schema: FINDINGS }, true) : null
 if (integP) integP.catch(() => {})
@@ -1388,13 +1388,7 @@ if (REVIEW_CODE) {
   log(`codex review: ${findingsOf(codexR).length} blocking findings`)
 }
 if (integP) {
-  let integ
-  try {
-    integ = await integP
-  } catch (error) {
-    DEAD.push('final-integration')
-    throw error
-  }
+  const integ = await integP
   if (!integ) {
     DEAD.push('final-integration')
     return stop('final-review', { details: 'the integration reviewer returned nothing' })
