@@ -64,6 +64,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .rest .opts, .done .opts { flex-basis: 100%; margin: 0; padding-left: 18px; list-style: disc; color: var(--sub0); font-size: .84375rem; }
 .rest .meta, .done .meta { flex-basis: 100%; margin: 0; font-size: .8125rem; color: var(--ov2); }
 .card .opts .picked, .rest .opts .picked, .done .opts .picked { color: var(--lav); }
+.card .reason { display: block; margin-top: 8px; font-size: .8125rem; color: var(--ov2); }
 .card .meta { margin-top: 8px; font-size: .8125rem; color: var(--ov2); }
 .card .head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 0; font-size: .84375rem; color: var(--sub0); }
 .head .wait { margin-left: auto; }
@@ -103,9 +104,9 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .abox .meta { margin-top: 6px; }
 .abox .meta.now { color: var(--text); }
 .abox .opts { list-style: none; padding-left: 0; display: flex; flex-direction: column; align-items: stretch; gap: 2px; margin-top: 14px; }
-.opt, .send, .undo, .approve, .reply-send, .goal-send, .goal-cancel, .goal-project, .give-goal, .withdraw, .retry, .stop, .stop-confirm, .stop-cancel, .try-again, .stall-withdraw, .tell-open, .tell-send, .abox button[class^="ans-"] { display: inline-flex; align-items: baseline; gap: 8px; font: inherit; color: inherit; text-align: left; background: none; border: 1px solid var(--hair); border-radius: 8px; padding: 2px 10px; cursor: pointer; transition: background-color .16s; }
-.opt:hover:enabled, .send:hover:enabled, .undo:hover:enabled, .approve:hover:enabled, .reply-send:hover:enabled, .goal-send:hover:enabled, .goal-cancel:hover:enabled, .goal-project:hover:enabled, .give-goal:hover:enabled, .withdraw:hover:enabled, .retry:hover:enabled, .stop:hover:enabled, .stop-confirm:hover:enabled, .stop-cancel:hover:enabled, .try-again:hover:enabled, .stall-withdraw:hover:enabled, .tell-open:hover:enabled, .tell-send:hover:enabled, .abox button[class^="ans-"]:hover:enabled { background: rgba(202, 211, 245, .05); }
-.opt:disabled, .send:disabled, .reply-send:disabled, .goal-send:disabled, .give-goal:disabled, .withdraw:disabled, .retry:disabled, .stop:disabled, .stop-confirm:disabled, .stop-cancel:disabled, .try-again:disabled, .stall-withdraw:disabled, .tell-open:disabled, .tell-send:disabled, .abox button[class^="ans-"]:disabled { cursor: default; }
+.opt, .send, .undo, .approve, .reply-send, .goal-send, .goal-cancel, .goal-project, .give-goal, .withdraw, .retry, .stop, .stop-confirm, .stop-cancel, .try-again, .stall-withdraw, .continue, .progress-withdraw, .tell-open, .tell-send, .abox button[class^="ans-"] { display: inline-flex; align-items: baseline; gap: 8px; font: inherit; color: inherit; text-align: left; background: none; border: 1px solid var(--hair); border-radius: 8px; padding: 2px 10px; cursor: pointer; transition: background-color .16s; }
+.opt:hover:enabled, .send:hover:enabled, .undo:hover:enabled, .approve:hover:enabled, .reply-send:hover:enabled, .goal-send:hover:enabled, .goal-cancel:hover:enabled, .goal-project:hover:enabled, .give-goal:hover:enabled, .withdraw:hover:enabled, .retry:hover:enabled, .stop:hover:enabled, .stop-confirm:hover:enabled, .stop-cancel:hover:enabled, .try-again:hover:enabled, .stall-withdraw:hover:enabled, .continue:hover:enabled, .progress-withdraw:hover:enabled, .tell-open:hover:enabled, .tell-send:hover:enabled, .abox button[class^="ans-"]:hover:enabled { background: rgba(202, 211, 245, .05); }
+.opt:disabled, .send:disabled, .reply-send:disabled, .goal-send:disabled, .give-goal:disabled, .withdraw:disabled, .retry:disabled, .stop:disabled, .stop-confirm:disabled, .stop-cancel:disabled, .try-again:disabled, .stall-withdraw:disabled, .continue:disabled, .progress-withdraw:disabled, .tell-open:disabled, .tell-send:disabled, .abox button[class^="ans-"]:disabled { cursor: default; }
 .abox button[class^="ans-"]:disabled { color: var(--ov2); }
 .abox .detail { margin-top: 6px; padding: 6px 10px; max-height: 24rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: .84375rem; color: var(--sub0); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; }
 .card .detail, .rest .detail, .done .detail { flex-basis: 100%; margin: 6px 0 0; padding: 6px 10px; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: .84375rem; color: var(--sub0); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; }
@@ -859,23 +860,25 @@ function stallCard(item) {
   card.appendChild(el("span", "reason", item.last_reason));
   const again = stallPosts.get("again\n" + item.sprint_id);
   const away = stallPosts.get("withdraw\n" + item.sprint_id);
-  const retry = actionButton("try-again", "Try again",
+  const retry = actionButton("try-again primary needs", "Try again",
     () => stallPost(item, "again", "Could not try again: ", () => fetch("/api/retry-manager", {
       method: "POST", headers: stallHeaders(), body: stallBody(item),
     })));
   if (again !== undefined && again.phase === "sending") retry.setAttribute("disabled", "");
-  card.appendChild(retry);
+  const act = el("div", "act");
+  act.appendChild(retry);
   const withdrawn = actionButton("stall-withdraw", "Withdraw",
     () => stallPost(item, "withdraw", "Could not withdraw: ", () => fetch("/api/withdraw", {
       method: "POST", headers: stallHeaders(), body: stallBody(item),
     })));
   if (away !== undefined && away.phase === "sending") withdrawn.setAttribute("disabled", "");
-  card.appendChild(withdrawn);
+  act.appendChild(withdrawn);
   for (const state of [again, away]) {
     if (state !== undefined && state.phase === "failed") {
-      card.appendChild(el("span", "fail", state.failure + state.reason));
+      act.appendChild(el("span", "fail", state.failure + state.reason));
     }
   }
+  card.appendChild(act);
   return card;
 }
 function isProgress(item) {
@@ -887,23 +890,25 @@ function progressCard(item) {
   if (typeof item.last_status === "string") card.appendChild(el("span", "reason", item.last_status));
   const going = stallPosts.get("continue\n" + item.sprint_id);
   const away = stallPosts.get("progress-withdraw\n" + item.sprint_id);
-  const onward = actionButton("continue", "Continue",
+  const onward = actionButton("continue primary needs", "Continue",
     () => stallPost(item, "continue", "Could not continue: ", () => fetch("/api/continue", {
       method: "POST", headers: stallHeaders(), body: stallBody(item),
     })));
   if (going !== undefined && going.phase === "sending") onward.setAttribute("disabled", "");
-  card.appendChild(onward);
+  const act = el("div", "act");
+  act.appendChild(onward);
   const withdrawn = actionButton("progress-withdraw", "Withdraw",
     () => stallPost(item, "progress-withdraw", "Could not withdraw: ", () => fetch("/api/withdraw", {
       method: "POST", headers: stallHeaders(), body: stallBody(item),
     })));
   if (away !== undefined && away.phase === "sending") withdrawn.setAttribute("disabled", "");
-  card.appendChild(withdrawn);
+  act.appendChild(withdrawn);
   for (const state of [going, away]) {
     if (state !== undefined && state.phase === "failed") {
-      card.appendChild(el("span", "fail", state.failure + state.reason));
+      act.appendChild(el("span", "fail", state.failure + state.reason));
     }
   }
+  card.appendChild(act);
   return card;
 }
 function sprintList(entry, sprints) {
