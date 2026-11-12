@@ -64,9 +64,14 @@ ul { list-style: none; }
 .abox .meta { margin-top: 6px; }
 .abox .meta.now { color: var(--text); }
 .abox .opts { list-style: none; padding-left: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; margin-top: 4px; }
-.opt, .send, .undo { display: inline-flex; align-items: baseline; gap: 8px; font: inherit; color: inherit; text-align: left; background: none; border: 1px solid var(--hair); border-radius: 8px; padding: 2px 10px; cursor: pointer; transition: background-color .16s; }
-.opt:hover:enabled, .send:hover:enabled, .undo:hover:enabled { background: rgba(202, 211, 245, .05); }
-.opt:disabled, .send:disabled { cursor: default; }
+.opt, .send, .undo, .abox button[class^="ans-"] { display: inline-flex; align-items: baseline; gap: 8px; font: inherit; color: inherit; text-align: left; background: none; border: 1px solid var(--hair); border-radius: 8px; padding: 2px 10px; cursor: pointer; transition: background-color .16s; }
+.opt:hover:enabled, .send:hover:enabled, .undo:hover:enabled, .abox button[class^="ans-"]:hover:enabled { background: rgba(202, 211, 245, .05); }
+.opt:disabled, .send:disabled, .abox button[class^="ans-"]:disabled { cursor: default; }
+.abox button[class^="ans-"]:disabled { color: var(--ov2); }
+.abox .detail { margin-top: 6px; padding: 6px 10px; max-height: 24rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: .84375rem; color: var(--sub0); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; }
+.card .detail, .rest .detail, .done .detail { flex-basis: 100%; margin: 6px 0 0; padding: 6px 10px; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: .84375rem; color: var(--sub0); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; }
+.abox textarea, .abox input { display: block; width: 100%; max-width: 40rem; margin-top: 6px; padding: 4px 8px; font: inherit; color: var(--text); background: var(--mantle); border: 1px solid var(--s1); border-radius: 8px; }
+.abox textarea { min-height: 4.5rem; resize: vertical; }
 .opt kbd { font: inherit; color: var(--ov2); }
 .opt.picked { color: var(--lav); border-color: var(--lav); }
 .act { flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin-top: 8px; font-size: .8125rem; color: var(--ov2); }
@@ -269,8 +274,9 @@ function metaLine(item) {
   return text;
 }
 function appendDetail(node, item) {
+  if (item.detail) node.appendChild(el("pre", "detail", item.detail));
   if (item.questions.length > 0) {
-    const state = answerable(item) ? answerState(item) : null;
+    const state = decision(item) ? answerState(item) : null;
     item.questions.forEach((q, qi) => {
       node.appendChild(el("p", "meta", q.question));
       const list = el("ul", "opts");
@@ -289,13 +295,21 @@ function appendDetail(node, item) {
 }
 const UNDO_MS = 5000;
 const answers = new Map();
+const drafts = new Map();
+let fields = new Map();
 let lastView = null;
 let currentId = null;
 function itemId(item) {
   return item.project_id + "#" + item.key;
 }
-function answerable(item) {
+function decision(item) {
   return item.reason === "decision" && item.questions.length > 0 && !item.answered;
+}
+function check(item) {
+  return (item.answers || []).length > 0 && !item.answered;
+}
+function answerable(item) {
+  return decision(item) || check(item);
 }
 function startPicks(item) {
   return item.questions.map((q) => {
@@ -312,7 +326,7 @@ function answerState(item) {
     const picks = startPicks(item);
     const first = picks.indexOf(null);
     state = {
-      phase: "choosing", picks, q: first >= 0 ? first : 0, timer: null, reason: "",
+      phase: "choosing", picks, q: first >= 0 ? first : 0, timer: null, reason: "", notice: "", pending: null,
       project_id: item.project_id, key: item.key,
     };
     answers.set(id, state);
@@ -324,7 +338,7 @@ function choosable(state) {
 }
 function currentEntry(open) {
   for (const item of open) {
-    if (!answerable(item)) continue;
+    if (!decision(item)) continue;
     const state = answerState(item);
     if (choosable(state)) return { item, state };
   }
@@ -343,12 +357,25 @@ function choose(state, qi, oi) {
   state.phase = "choosing";
   state.reason = "";
 }
-function start(item, state) {
-  if (!choosable(state) || !picksComplete(item, state)) return false;
+function begin(item, state, pending) {
   state.phase = "waiting";
   state.reason = "";
+  state.notice = "";
+  state.pending = pending;
   state.timer = setTimeout(() => fireAnswer(itemId(item)), UNDO_MS);
   return true;
+}
+function start(item, state) {
+  if (!choosable(state) || !picksComplete(item, state)) return false;
+  const body = { project_id: state.project_id, key: state.key, choices: item.questions.map((_, i) => state.picks[i]) };
+  return begin(item, state, { check: false, body });
+}
+function startCheck(item, state, answer, extra) {
+  if (!choosable(state) || !check(item)) return false;
+  return begin(item, state, { check: true, body: { project_id: state.project_id, key: state.key, answer, ...extra } });
+}
+function dropDrafts(id, names) {
+  for (const name of names) drafts.delete(id + "\n" + name);
 }
 function undo(state) {
   if (state.phase !== "waiting") return;
@@ -372,14 +399,11 @@ async function sendAnswer(id, state, item) {
   redraw();
   let reason = null;
   try {
-    const response = await fetch("/api/answer", {
-      method: "POST",
-      headers: { "X-Console-Token": token, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        project_id: state.project_id, key: state.key,
-        choices: item.questions.map((_, i) => state.picks[i]),
-      }),
-    });
+    const headers = { "X-Console-Token": token, "Content-Type": "application/json" };
+    const body = JSON.stringify(state.pending.body);
+    const response = state.pending.check
+      ? await fetch("/api/check-answer", { method: "POST", headers, body })
+      : await fetch("/api/answer", { method: "POST", headers, body });
     if (response.status !== 204) {
       reason = (await response.text()).trim() || "HTTP " + response.status;
     }
@@ -388,7 +412,12 @@ async function sendAnswer(id, state, item) {
     reason = "the console did not answer";
   }
   if (answers.get(id) !== state) return;
-  if (reason === null) {
+  if (reason === null && state.pending.body.answer === "note") {
+    dropDrafts(id, ["note"]);
+    state.phase = "choosing";
+    state.notice = "Note sent.";
+  } else if (reason === null) {
+    dropDrafts(id, ["note", "confirm"]);
     state.phase = "sent";
   } else {
     state.phase = "failed";
@@ -402,8 +431,7 @@ function actionButton(cls, label, onClick) {
   button.addEventListener("click", onClick);
   return button;
 }
-function actionLine(item, state) {
-  const act = el("p", "act");
+function statusLine(act, state) {
   if (state.phase === "waiting") {
     act.appendChild(el("span", "", "Sending in five seconds."));
     act.appendChild(actionButton("undo", "Undo", () => { undo(state); redraw(); }));
@@ -413,13 +441,95 @@ function actionLine(item, state) {
     act.appendChild(el("span", "", "Answered, waiting for the agent to pick it up"));
   } else {
     if (state.phase === "failed") act.appendChild(el("span", "fail", "Could not send: " + state.reason));
+    if (state.notice) act.appendChild(el("span", "", state.notice));
+    return false;
+  }
+  return true;
+}
+function actionLine(item, state) {
+  const act = el("p", "act");
+  if (!statusLine(act, state)) {
     const send = actionButton("send", "Send", () => { if (start(item, state)) redraw(); });
     if (!picksComplete(item, state)) send.setAttribute("disabled", "");
     act.appendChild(send);
   }
   return act;
 }
+const ANSWER_LABELS = {
+  "manual-check": { passed: "Passed", failed: "Failed" },
+  verdict: { passed: "Accept as passed", failed: "Close as not verified" },
+  approval: { approve: "Approve" },
+  "paid-approval": { approve: "Approve" },
+  "stale-check": { keep: "Keep waiting", drop: "Accept without the host" },
+};
+function draftOf(key) {
+  return drafts.get(key) || { value: "", start: 0, end: 0 };
+}
+function draftField(field, key, onInput) {
+  const draft = draftOf(key);
+  field.dataset.draft = key;
+  field.value = draft.value;
+  field.addEventListener("input", () => {
+    drafts.set(key, { value: field.value, start: field.selectionStart, end: field.selectionEnd });
+    onInput(field.value);
+  });
+  fields.set(key, field);
+  return field;
+}
+function noteBox(item, state, box) {
+  const area = document.createElement("textarea");
+  area.className = "note-text";
+  area.setAttribute("aria-label", "Note");
+  const send = actionButton("ans-note", "Send note", () => {
+    const text = area.value;
+    if (text.trim() === "") return;
+    if (startCheck(item, state, "note", { note: text })) redraw();
+  });
+  send.disabled = area.value.trim() === "";
+  box.appendChild(draftField(area, itemId(item) + "\nnote", (value) => { send.disabled = value.trim() === ""; }));
+  return send;
+}
+function confirmBox(item, box, approve) {
+  box.appendChild(el("p", "meta", "Type " + item.confirm + " to approve."));
+  const input = document.createElement("input");
+  input.type = "text";
+  input.autocomplete = "off";
+  input.className = "confirm-text";
+  input.setAttribute("aria-label", "Typed confirmation");
+  box.appendChild(draftField(input, itemId(item) + "\nconfirm", (value) => { approve.disabled = value !== item.confirm; }));
+  approve.disabled = input.value !== item.confirm;
+}
+function checkBox(item, state) {
+  const box = el("div", "abox");
+  if (item.paid) box.appendChild(el("p", "meta", "This check costs money."));
+  if (item.detail) box.appendChild(el("pre", "detail", item.detail));
+  const act = el("p", "act");
+  if (statusLine(act, state)) {
+    box.appendChild(act);
+    return box;
+  }
+  const labels = ANSWER_LABELS[item.kind] || {};
+  const buttons = [];
+  for (const answer of item.answers) {
+    if (answer === "note") {
+      buttons.push(noteBox(item, state, box));
+      continue;
+    }
+    const approve = answer === "approve";
+    const extra = () => (approve ? { confirm: draftOf(itemId(item) + "\nconfirm").value } : {});
+    const button = actionButton("ans-" + answer, labels[answer] || answer, () => {
+      if (button.disabled) return;
+      if (startCheck(item, state, answer, extra())) redraw();
+    });
+    if (approve) confirmBox(item, box, button);
+    buttons.push(button);
+  }
+  for (const button of buttons) act.appendChild(button);
+  box.appendChild(act);
+  return box;
+}
 function answerBox(item, state) {
+  if (check(item)) return checkBox(item, state);
   const live = choosable(state);
   const now = Math.min(state.q, item.questions.length - 1);
   const box = el("div", "abox");
@@ -449,6 +559,7 @@ function answerBox(item, state) {
 function boxState(item) {
   if (!answerable(item)) return null;
   const state = answerState(item);
+  if (check(item)) return state;
   return itemId(item) === currentId || state.phase !== "choosing" ? state : null;
 }
 function leadItem(item) {
@@ -479,6 +590,11 @@ function renderInbox(view) {
   const fresh = view !== lastView;
   lastView = view;
   const section = document.getElementById("inbox");
+  const active = document.activeElement;
+  const held = active && active.dataset && active.dataset.draft !== undefined
+    ? { key: active.dataset.draft, start: active.selectionStart, end: active.selectionEnd }
+    : null;
+  fields = new Map();
   section.replaceChildren();
   const open = view.inbox.open;
   const present = new Set(open.map(itemId));
@@ -487,6 +603,12 @@ function renderInbox(view) {
   for (const [id, state] of answers) {
     const gone = !present.has(id) && state.phase !== "waiting" && state.phase !== "sending";
     if (gone || (state.phase === "sent" && reopened.has(id))) answers.delete(id);
+  }
+  for (const key of Array.from(drafts.keys())) {
+    const id = key.split("\n")[0];
+    const state = answers.get(id);
+    const busy = state !== undefined && (state.phase === "waiting" || state.phase === "sending");
+    if (!present.has(id) && !busy) drafts.delete(key);
   }
   const current = currentEntry(open);
   currentId = current === null ? null : itemId(current.item);
@@ -502,6 +624,11 @@ function renderInbox(view) {
     const done = el("ul", "done");
     for (const item of answered) done.appendChild(itemLine(item));
     section.appendChild(done);
+  }
+  const again = held === null ? undefined : fields.get(held.key);
+  if (again !== undefined) {
+    again.focus();
+    again.setSelectionRange(held.start, held.end);
   }
 }
 function momentLine(moment) {
@@ -631,6 +758,8 @@ document.addEventListener("keydown", (event) => {
   }
   const focused = event.target && event.target.tagName;
   if (focused === "A" || focused === "BUTTON" || focused === "SUMMARY") return;
+  if (focused === "INPUT" || focused === "TEXTAREA" || focused === "SELECT") return;
+  if (event.target && event.target.isContentEditable === true) return;
   const current = currentEntry(lastView.inbox.open);
   if (current === null) return;
   const { item, state } = current;

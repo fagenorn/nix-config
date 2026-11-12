@@ -18,7 +18,7 @@ Anything waiting on the owner that the console asks them to act on, whatever its
 _Avoid_: ask, notification
 
 **Answered item**:
-An inbox item whose owner-action marker has every box ticked, on the tracker or from the page (ADR-console-010). It reads answered, waiting for the agent to pick it up, is not counted, and leaves the list once its marker is no longer live.
+An inbox item whose owner-action marker has every box ticked, on the tracker or from the page (ADR-console-010); for a verification prompt, the box it was answered with (ADR-console-011). A prompt with both boxes ticked is not answered. It reads answered, waiting for the agent to pick it up, is not counted, and leaves the list once its marker is no longer live.
 _Avoid_: resolved item
 
 **Held work**:

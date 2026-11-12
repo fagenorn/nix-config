@@ -8,9 +8,18 @@
 // {click: "<class>"} (the click listeners of the first attached element with
 // that class; none throws), {respond: {status, text}} (queues the answer of
 // the next /api/answer fetch, default 204 with no text) and {fail_fetch: true}
-// (the next /api/answer fetch rejects). The fake setTimeout/clearTimeout fire
-// when a clock step reaches their due time. Each step settles pending
-// promises before the next.
+// (the next /api/answer or /api/check-answer fetch rejects; both routes take
+// the queued replies). The key step also accepts editable: true, which gives
+// the target isContentEditable. The fake controls hold a value, a disabled
+// flag, a selection and focus: {type: {class, text}} focuses the first
+// attached element with that class, sets its value to the text (an INPUT
+// drops every CR and LF, a TEXTAREA turns CRLF and CR into LF), puts the
+// selection at the end and fires its input listeners; {append: {class, text}}
+// does the same on top of the current value. document.activeElement is the
+// focused element while it is still attached under the root, else null, so a
+// replaceChildren that detaches it drops focus as a browser does. The fake
+// setTimeout/clearTimeout fire when a clock step reaches their due time. Each
+// step settles pending promises before the next.
 // Prints a JSON list of snapshots on stdout; any failure exits 1 with the
 // error on stderr. A selector the fake DOM does not support throws, so a
 // test cannot pass on a stub.
@@ -25,6 +34,8 @@ class Text {
   }
 }
 
+let focusedElem = null;
+
 class Elem {
   constructor(tag) {
     this.tagName = tag.toUpperCase();
@@ -34,6 +45,10 @@ class Elem {
     this.attributes = {};
     this.listeners = {};
     this.open = false;
+    this.value = "";
+    this.disabled = false;
+    this.selectionStart = 0;
+    this.selectionEnd = 0;
     this.children = [];
     this.parentNode = null;
   }
@@ -42,6 +57,14 @@ class Elem {
   }
   setAttribute(name, value) {
     this.attributes[name] = String(value);
+    if (name === "disabled") this.disabled = true;
+  }
+  focus() {
+    focusedElem = this;
+  }
+  setSelectionRange(start, end) {
+    this.selectionStart = start;
+    this.selectionEnd = end;
   }
   get firstElementChild() {
     return this.children.find((c) => !c.isText) || null;
@@ -187,7 +210,7 @@ function fetch(url, options) {
   };
   if (options.body !== undefined) post.body = options.body;
   posts.push(post);
-  if (url !== "/api/answer") return Promise.resolve({});
+  if (url !== "/api/answer" && url !== "/api/check-answer") return Promise.resolve({});
   const reply = replies.length > 0 ? replies.shift() : { status: 204, text: "" };
   if (reply.reject) return Promise.reject(new Error("the console did not answer"));
   return Promise.resolve({
@@ -225,6 +248,12 @@ const settle = async () => {
 const document = {
   addEventListener: listen("document"),
   hasFocus: () => state.focused,
+  get activeElement() {
+    for (let up = focusedElem; up; up = up.parentNode) {
+      if (up === root) return focusedElem;
+    }
+    return null;
+  },
   get visibilityState() {
     return state.visibility;
   },
@@ -266,8 +295,25 @@ function node(n) {
     key: n.dataset.key === undefined ? null : n.dataset.key,
     open: n.open,
     text: n.children.filter((c) => c.isText).map((c) => c.text).join(""),
+    value: n.tagName === "INPUT" || n.tagName === "TEXTAREA" ? n.value : null,
+    selection: n.tagName === "INPUT" || n.tagName === "TEXTAREA" ? [n.selectionStart, n.selectionEnd] : null,
+    disabled: n.disabled === true,
+    focused: n === document.activeElement,
     children: n.children.filter((c) => !c.isText).map(node),
   };
+}
+
+function typeInto(spec, append) {
+  const target = attached(root).find((n) => n.className.split(/\s+/).includes(spec.class));
+  if (!target) throw new Error("no element with class " + spec.class);
+  const text = target.tagName === "INPUT"
+    ? spec.text.replace(/[\r\n]/g, "")
+    : spec.text.replace(/\r\n?/g, "\n");
+  target.focus();
+  target.value = append ? target.value + text : text;
+  target.selectionStart = target.value.length;
+  target.selectionEnd = target.value.length;
+  for (const fn of target.listeners.input || []) fn({ type: "input", target });
 }
 
 const snapshots = [];
@@ -288,12 +334,16 @@ async function run() {
       fire("document", "keydown", {
         key: step.key, ctrlKey: !!step.ctrlKey, altKey: !!step.altKey, metaKey: !!step.metaKey,
         shiftKey: false, repeat: false, preventDefault() {},
-        target: step.target === undefined ? null : { tagName: step.target },
+        target: step.target === undefined ? null : { tagName: step.target, isContentEditable: step.editable === true },
       });
     } else if ("click" in step) {
       const target = attached(root).find((n) => n.className.split(/\s+/).includes(step.click));
       if (!target) throw new Error("no element with class " + step.click);
       for (const fn of target.listeners.click || []) fn({ type: "click", preventDefault() {} });
+    } else if ("type" in step) {
+      typeInto(step.type, false);
+    } else if ("append" in step) {
+      typeInto(step.append, true);
     } else if ("respond" in step) {
       replies.push(step.respond);
     } else if ("fail_fetch" in step) {
