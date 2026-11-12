@@ -2425,6 +2425,132 @@ class BlockedOnLaterTaskTest(unittest.TestCase):
         self.assertEqual([d["n"] for d in result["cont"]["done"]], [1, 2, 3, 4, 6, 5])
 
 
+EMPTY_RANGE = re.compile(r"diff (\S+)\.\.\1(?!\w)")
+KNOW_TEXT = ("Ground the review in: ~/.agents/standards/the-bar.md and its stacks/ shards matching the changed file types (when present); "
+             "the project's standards (/r/docs/standards), only shards whose globs intersect the change; review hints (/r/.hints); "
+             "recorded rejections (/r/.rej): never raise a finding a rejection already settles.")
+
+
+class NoCommitTaskTest(unittest.TestCase):
+    """#923: a task that ends with no new commit gets a no-change check, never a diff review of an empty range."""
+
+    HEAD = "c0ffee"
+    NO_COMMIT = {"start_head": HEAD, "commit": HEAD, "notes": "posted the comment on the issue", "tests": ["gh issue view -> 1"]}
+    NEEDS_CHANGE = {"verdict": "findings",
+                    "findings": [{"severity": "critical", "summary": "the task file requires src/a.py to change"}]}
+
+    def go(self, risk="low", replies=None, patch=None, **more):
+        replies = dict({"plan": dict(PLAN, tasks=tasks(2, risk))}, **(replies or {}))
+        return run(replies=replies, patch=dict({"impl-2": self.NO_COMMIT}, **(patch or {})), **more)
+
+    def assert_no_empty_range(self, calls):
+        for c in calls:
+            self.assertIsNone(EMPTY_RANGE.search(c["prompt"]), c["label"])
+
+    def test_a_no_commit_task_is_accepted_on_evidence_a_reviewer_checks(self):
+        for risk in ("low", "mechanical", "standard", "security"):
+            with self.subTest(risk=risk):
+                result, calls = self.go(risk)
+                self.assertEqual(result["stage"], "done")
+                self.assert_no_empty_range(calls)
+                review = [c for c in calls if c["label"] == "review-2"]
+                self.assertEqual([c["agentType"] for c in review], ["reviewer"])
+                text = review[0]["prompt"]
+                for want in ("Task 2 ended with no new commit: the head of /r/.wt/w-issue-9-x is still c0ffee.",
+                             "There is no diff to review and none is missing",
+                             "its task file /g/task-2.md (the contract)",
+                             "notes: posted the comment on the issue; checks run: [\"gh issue view -> 1\"].",
+                             "git -C /r/.wt/w-issue-9-x status --porcelain prints nothing",
+                             "Does the task file require a tracked file to be created, changed or deleted?",
+                             "the implementer's word alone is not evidence"):
+                    self.assertIn(want, text)
+                self.assertNotIn("lane:", text)
+                self.assertNotIn("Review the diff of task", text)
+                self.assertNotIn("fix-2-1", labels(calls))
+                self.assertEqual([d for d in result["tasks"] if d["n"] == 2],
+                                 [{"n": 2, "commit": self.HEAD, "review_rounds": 0, "reviewer": "reviewer"}])
+
+    def test_a_no_commit_task_whose_brief_required_a_change_goes_back_and_its_diff_gets_a_first_pass(self):
+        for risk, kind in (("low", "reviewer-lite"), ("standard", "reviewer")):
+            with self.subTest(risk=risk):
+                result, calls = self.go(risk, replies={"review-2": self.NEEDS_CHANGE},
+                                        patch={"fix-2-1": {"start_head": self.HEAD, "commit": "d1"}})
+                self.assertEqual(result["stage"], "done")
+                self.assert_no_empty_range(calls)
+                self.assertIn("the task file requires src/a.py to change", prompt(calls, "fix-2-1"))
+                again = [c for c in calls if c["label"] == "rereview-2-1"][0]
+                self.assertEqual(again["agentType"], kind)
+                self.assertIn(f"{'lane: low. ' if risk == 'low' else ''}Review the diff of task 2 only: "
+                              "git -C /r/.wt/w-issue-9-x diff c0ffee..d1 (and the task file /g/task-2.md as its contract).",
+                              again["prompt"])
+                self.assertIn("this diff answers these findings: "
+                              '[{"severity":"critical","summary":"the task file requires src/a.py to change"}]', again["prompt"])
+                self.assertEqual([d for d in result["tasks"] if d["n"] == 2],
+                                 [{"n": 2, "commit": "d1", "review_rounds": 1, "reviewer": kind}])
+
+    def test_a_no_commit_task_that_never_changes_what_its_brief_required_stops(self):
+        result, calls = self.go(replies={"review-2": self.NEEDS_CHANGE, "rereview-2-1": self.NEEDS_CHANGE,
+                                         "rereview-2-2": self.NEEDS_CHANGE},
+                                patch={"fix-2-1": self.NO_COMMIT, "fix-2-2": self.NO_COMMIT})
+        self.assertEqual((result["stage"], result["cont"]["partial"]), ("task-review", 2))
+        self.assertTrue(result["reason"].startswith("task-review: task 2 1 finding(s): the task file requires src/a.py"))
+        self.assertEqual([d["n"] for d in result["cont"]["done"]], [1])
+        self.assert_no_empty_range(calls)
+        for label in ("rereview-2-1", "rereview-2-2"):
+            again = [c for c in calls if c["label"] == label][0]
+            self.assertEqual(again["agentType"], "reviewer")
+            self.assertIn("The fix made no new commit (the head of /r/.wt/w-issue-9-x is still c0ffee)", again["prompt"])
+            self.assertIn("a finding the evidence does not refute is still unresolved", again["prompt"])
+            self.assertNotIn("the task's diff", again["prompt"])
+
+    def test_a_fix_that_answers_a_normal_task_with_no_commit_is_reviewed_as_a_rebuttal(self):
+        result, calls = run(replies={"review-1": TASK_FINDING},
+                            patch={"fix-1-1": {"start_head": "c0ffee", "commit": "c0ffee", "notes": "the finding is wrong: see a.py:3"}})
+        self.assertEqual(result["stage"], "done")
+        self.assert_no_empty_range(calls)
+        again = [c for c in calls if c["label"] == "rereview-1-1"][0]
+        self.assertEqual(again["agentType"], "reviewer")
+        self.assertIn("the task's diff (git -C /r/.wt/w-issue-9-x diff b0..c0ffee)", again["prompt"])
+        self.assertIn("The implementer's notes: the finding is wrong: see a.py:3.", again["prompt"])
+
+    def test_a_resume_at_a_partial_no_commit_task_passes_the_same_way(self):
+        stopped, _ = self.go(replies={"review-2": None})
+        self.assertEqual((stopped["stage"], stopped["cont"]["partial"]), ("task-review", 2))
+        result, calls = run(args=dict(ARGS, cont=stopped["cont"]), patch={"impl-2": self.NO_COMMIT})
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(labels(calls)[:3], ["setup", "impl-2", "review-2"])
+        self.assertIn("start_head is the head before this task's first commit", prompt(calls, "impl-2"))
+        self.assert_no_empty_range(calls)
+        review = [c for c in calls if c["label"] == "review-2"][0]
+        self.assertEqual(review["agentType"], "reviewer")
+        self.assertIn("Task 2 ended with no new commit", review["prompt"])
+
+    def test_a_declared_branch_no_commit_task_is_checked_in_its_worktree(self):
+        one = "1" * 40
+        result, calls = run(replies={"plan": bplan()}, patch={"impl-2": {"start_head": one, "commit": one}})
+        self.assertEqual(result["stage"], "done")
+        self.assert_no_empty_range(calls)
+        self.assertIn(f"the head of /r/.wt/cand is still {one}", prompt(calls, "review-2"))
+
+    def test_a_task_that_commits_is_reviewed_with_the_same_bytes_as_before(self):
+        for risk, lane in (("standard", ""), ("low", "lane: low. ")):
+            with self.subTest(risk=risk):
+                _, calls = run(replies={"plan": dict(PLAN, tasks=tasks(1, risk)), "review-1": TASK_FINDING})
+                impl = prompt(calls, "impl-1")
+                head = impl[:impl.index("\nFirst renew the claim")]
+                self.assertEqual(prompt(calls, "review-1"), f"{head}\n{lane}Review the diff of task 1 only: "
+                                 f"git -C /r/.wt/w-issue-9-x diff b0..c0ffee (and the task file /g/task-1.md as its contract). {KNOW_TEXT} "
+                                 "Report Important or Critical correctness defects and unmet task requirements only, each with a "
+                                 "concrete failing input. No style notes. Do not edit anything.")
+                self.assertEqual(prompt(calls, "rereview-1-1"), f"{head}\nRe-review only these previously reported findings for "
+                                 "task 1 against the fix: git -C /r/.wt/w-issue-9-x diff b0..c0ffee; the implementer's notes: ok. "
+                                 'Findings: [{"severity":"important","summary":"bug on the candidate"}]. Report any finding still '
+                                 "unresolved and any new Important or Critical defect the fix introduced.")
+                kinds = {c["label"]: c["agentType"] for c in calls}
+                self.assertEqual((kinds["review-1"], kinds["rereview-1-1"]),
+                                 ("reviewer-lite" if lane else "reviewer", "reviewer-lite"))
+
+
 class ResumeTest(unittest.TestCase):
     def cont(self, **extra):
         setup = {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x",
@@ -5253,8 +5379,9 @@ EXPECTED = {stem: frozenset({kind}) if isinstance(kind, str) else kind for kind,
             "fix-sync-")),
     (REV, ("plan-review", "plan-rules-review", "direct-review-full", "final-", "final-integration", "fix-wave-review",
            "fix-wave-review-", "verify-fix-review-", "fix-ci-review", "sync-review-", "fix-sync-review-")),
-    (EITHER, ("review-", "direct-review")),
-    (LITE, ("direct-rereview", "rereview-")),
+    # #923: a review with no diff range (a no-commit task, a fix answered with no commit) runs on reviewer.
+    (EITHER, ("review-", "direct-review", "rereview-")),
+    (LITE, ("direct-rereview",)),
 ) for stem in stems}
 STEM_PATTERNS = (
     r"\b(?:label|reviewLabel): (['`])([a-z][a-z0-9-]*)",

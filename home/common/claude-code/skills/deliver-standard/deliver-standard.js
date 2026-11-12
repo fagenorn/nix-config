@@ -1196,11 +1196,25 @@ ${RULES}`
     ti--
     continue
   }
-  const taskSpan = spanIn(TW, impl)
-  const reviewer = (t.risk === 'mechanical' || t.risk === 'low') ? 'reviewer-lite' : 'reviewer'
+  // #923: a task that ends with no new commit (its output is not a file change: an issue comment, a check that needs no edit) has no
+  // diff, and a review of the empty range head..head is refused as a missing diff boundary. Its first pass is a no-change check
+  // instead: a reviewer judges from the task file whether the task needs a tracked file changed (then it is not done, and the finding
+  // goes back to the implementer as any other) and confirms each required output itself. reviewer-lite reviews only a bounded diff,
+  // so every review without one runs on reviewer, whatever the task's risk. Once such a task does commit (a fix round), that diff gets
+  // the first pass a task diff always gets; a fix that answers with evidence and no commit is re-reviewed as a rebuttal, with no range.
+  const taskStart = impl.start_head
+  const liteLane = t.risk === 'mechanical' || t.risk === 'low'
+  let reviewer = liteLane ? 'reviewer-lite' : 'reviewer'
   // reviewer-lite first-passes only a task whose declared lane is mechanical or low (its lane verification mode).
-  let review = await call(`${start}
-${reviewer === 'reviewer-lite' ? `lane: ${t.risk}. ` : ''}Review the diff of task ${t.n} only: ${taskSpan} (and the task file ${t.file} as its contract). ${KNOW} Report Important or Critical correctness defects and unmet task requirements only, each with a concrete failing input. No style notes. Do not edit anything.`, { label: `review-${t.n}`, phase: 'Tasks', agentType: reviewer, schema: FINDINGS })
+  const diffReview = (range, label, answers) => call(`${start}
+${reviewer === 'reviewer-lite' ? `lane: ${t.risk}. ` : ''}Review the diff of task ${t.n} only: ${range} (and the task file ${t.file} as its contract). ${KNOW} Report Important or Critical correctness defects and unmet task requirements only, each with a concrete failing input. No style notes. Do not edit anything.${answers ? ` The task first ended with no commit, and this diff answers these findings: ${JSON.stringify(answers)}; report any still unresolved.` : ''}`, { label, phase: 'Tasks', agentType: reviewer, schema: FINDINGS })
+  const HEAD_UNMOVED = h => `First confirm that git -C ${TW} rev-parse HEAD prints ${h} and git -C ${TW} status --porcelain prints nothing: another head or an uncommitted edit is a finding.`
+  const CONFIRM = `with the task file's own verification commands or a read-only lookup (run a gh command as ${UNSET}gh ...)`
+  // False until the task's diff had its first pass; a task with no commit has none to review.
+  let diffReviewed = !sameSha(impl.start_head, impl.commit)
+  if (!diffReviewed) reviewer = 'reviewer'
+  let review = diffReviewed ? await diffReview(spanIn(TW, impl), `review-${t.n}`) : await call(`${start}
+Task ${t.n} ended with no new commit: the head of ${TW} is still ${impl.commit}. There is no diff to review and none is missing; do not ask for a range. Judge the task from its task file ${t.file} (the contract) and the implementer's report: notes: ${impl.notes}; checks run: ${JSON.stringify(Array.isArray(impl.tests) ? impl.tests : [])}. ${HEAD_UNMOVED(impl.commit)} Then decide two things. 1. Does the task file require a tracked file to be created, changed or deleted? If it does, the task is not done: report one Critical finding naming the files it requires. 2. If it requires none, is every output the task file asks for in place? Confirm each yourself, ${CONFIRM}; the implementer's word alone is not evidence, and an output you cannot confirm is a finding. Report Important or Critical findings only, each with what is missing. Do not edit anything.`, { label: `review-${t.n}`, phase: 'Tasks', agentType: 'reviewer', schema: FINDINGS })
   if (!review) return halt('task-review', { task: t, review: null })
   let rounds = 0
   while (findingsOf(review).length && rounds < 2) {
@@ -1210,8 +1224,18 @@ Fix these review findings for task ${t.n} (${t.file}) in the worktree, with a re
 ${RULES}`, { label: `fix-${t.n}-${rounds}`, phase: 'Tasks', agentType: 'implementer', model: 'sonnet', schema: IMPL })
     if (!implDone(fix)) return halt('task-fix', { task: t, impl: fix })
     impl = fix
-    review = await call(`${start}
-Re-review only these previously reported findings for task ${t.n} against the fix: ${spanIn(TW, fix)}; the implementer's notes: ${fix.notes}. Findings: ${JSON.stringify(findingsOf(review))}. Report any finding still unresolved and any new Important or Critical defect the fix introduced.`, { label: `rereview-${t.n}-${rounds}`, phase: 'Tasks', agentType: 'reviewer-lite', schema: FINDINGS })
+    const label = `rereview-${t.n}-${rounds}`
+    if (sameSha(fix.start_head, fix.commit)) {
+      review = await call(`${start}
+Re-review only these previously reported findings for task ${t.n} against the implementer's answer. The fix made no new commit (the head of ${TW} is still ${fix.commit}), so there is no fix diff to review and none is missing; do not ask for a range. The implementer's notes: ${fix.notes}. Findings: ${JSON.stringify(findingsOf(review))}. ${HEAD_UNMOVED(fix.commit)} Then check each answer yourself against the task file ${t.file}${diffReviewed ? `, the task's diff (git -C ${TW} diff ${taskStart}..${fix.commit})` : ''} and the evidence the notes name, ${CONFIRM}; a finding the evidence does not refute is still unresolved. Report any finding still unresolved. Do not edit anything.`, { label, phase: 'Tasks', agentType: 'reviewer', schema: FINDINGS })
+    } else if (!diffReviewed) {
+      reviewer = liteLane ? 'reviewer-lite' : 'reviewer'
+      review = await diffReview(`git -C ${TW} diff ${taskStart}..${fix.commit}`, label, findingsOf(review))
+      diffReviewed = true
+    } else {
+      review = await call(`${start}
+Re-review only these previously reported findings for task ${t.n} against the fix: ${spanIn(TW, fix)}; the implementer's notes: ${fix.notes}. Findings: ${JSON.stringify(findingsOf(review))}. Report any finding still unresolved and any new Important or Critical defect the fix introduced.`, { label, phase: 'Tasks', agentType: 'reviewer-lite', schema: FINDINGS })
+    }
     if (!review) return halt('task-review', { task: t, review: null })
   }
   if (findingsOf(review).length) return halt('task-review', { task: t, review })
