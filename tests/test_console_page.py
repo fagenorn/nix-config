@@ -26,7 +26,7 @@ const ids = new Set(JSON.parse(process.argv[3]));
 class Node {
   constructor(tag) {
     this.tagName = tag; this.className = ""; this.id = ""; this.href = "";
-    this.rel = ""; this.open = false; this.children = []; this.dataset = {};
+    this.rel = ""; this.open = false; this.children = []; this.dataset = {}; this.style = {};
   }
   addEventListener() {}
   setAttribute() {}
@@ -159,6 +159,103 @@ class PageTest(unittest.TestCase):
         (statement,) = re.findall(r"\.statement h1 \{([^}]*)\}", narrow)
         (size,) = re.findall(r"font-size: ([\d.]+)rem", statement)
         self.assertLess(float(size), 2.375)
+
+    def test_the_open_chooser_stays_inside_the_viewport_and_the_panel(self) -> None:
+        # A long unbroken project id must wrap inside the 480px panel, and a long project list
+        # must scroll inside a panel bounded to the viewport so Send and Cancel stay reachable.
+        style = self.text[self.text.index("<style>"):self.text.index("</style>")]
+        base = style_rules(style[:style.index("@media")])
+
+        def rule(selector: str) -> dict:
+            found = {}
+            for s, d in base:
+                if s == selector:
+                    found.update(d)
+            return found
+
+        box = rule(".goal-box")
+        self.assertRegex(box.get("max-height", ""), r"^calc\(100d?vh - [\d.]+rem\)$")
+        self.assertEqual(box.get("overflow-y"), "auto")
+        projects = rule(".goal-projects")
+        self.assertEqual(projects.get("min-width"), "0")
+        self.assertEqual(projects.get("max-width"), "100%")
+        self.assertEqual(projects.get("overflow-y"), "auto")
+        self.assertEqual(projects.get("flex"), "0 1 auto")
+        self.assertEqual(projects.get("min-height"), "0")
+        self.assertEqual(rule(".goal-projects li").get("min-width"), "0")
+        self.assertEqual(rule(".goal-projects li").get("max-width"), "100%")
+        for name in ("min-width", "max-width", "overflow-wrap"):
+            with self.subTest(name=name):
+                self.assertEqual(
+                    rule(".goal-project").get(name), {"min-width": "0", "max-width": "100%", "overflow-wrap": "anywhere"}[name]
+                )
+        self.assertEqual(rule(".goal-filter").get("min-width"), "0")
+        self.assertEqual(rule(".goal-act").get("flex"), "none")
+
+    def test_the_top_bar_fits_480_wide(self) -> None:
+        style = self.text[self.text.index("<style>"):self.text.index("</style>")]
+        base, at = "", 0
+        for found in re.finditer(r"@media [^{]+\{", style):
+            if found.start() < at:
+                continue
+            base += style[at:found.start()]
+            depth, at = 1, found.end()
+            while depth:
+                depth += {"{": 1, "}": -1}.get(style[at], 0)
+                at += 1
+        base += style[at:]
+        phone = style_rules(media_block(style, "(max-width: 480px)"))
+        narrow = style_rules(media_block(style, "(max-width: 900px)")) + phone
+        rules = style_rules(base) + narrow
+        self.assertTrue(any(s == ".top-in" and d.get("flex-wrap") == "wrap" for s, d in phone))
+        self.assertTrue(any(s == ".goal-bar" and d.get("flex") == "1 0 100%" for s, d in narrow))
+        self.assertTrue(any(
+            s == ".goal-box" and d.get("width") == "min(600px, calc(100vw - 32px))"
+            for s, d in style_rules(base)
+        ))
+
+        def fits(value: str) -> bool:
+            if value in ("auto", "0") or value.endswith("%") or "100vw" in value:
+                return True
+            found = re.fullmatch(r"([\d.]+)(px|rem)", value)
+            return bool(found) and float(found.group(1)) * (16 if found.group(2) == "rem" else 1) <= 448
+
+        for selector, decls in rules:
+            if not selector.split()[0].startswith((".top", ".brand", ".conn", ".goal-", "#goal", ".cap", ".meter")):
+                continue
+            values = [decls[n] for n in ("width", "min-width", "flex-basis") if n in decls]
+            parts = decls.get("flex", "").split()
+            if len(parts) == 3:
+                values.append(parts[2])
+            for value in values:
+                self.assertTrue(fits(value), selector + " sets " + value)
+
+        name = [d for s, d in style_rules(base) if s == ".cap-acct b"]
+        self.assertEqual(len(name), 1)
+        self.assertEqual(name[0].get("overflow"), "hidden")
+        self.assertEqual(name[0].get("text-overflow"), "ellipsis")
+        self.assertEqual(name[0].get("white-space"), "nowrap")
+        cut = re.fullmatch(r"([\d.]+)(px|rem)", name[0].get("max-width", ""))
+        self.assertTrue(cut)
+        self.assertLessEqual(float(cut.group(1)) * (16 if cut.group(2) == "rem" else 1), 160)
+        (cap,) = [d for s, d in style_rules(base) if s == ".cap"]
+        self.assertEqual(cap.get("min-width"), "0")
+        self.assertEqual(cap.get("max-width"), "100%")
+        (acct,) = [d for s, d in style_rules(base) if s == ".cap-acct"]
+        self.assertEqual(acct.get("max-width"), "100%")
+        unwrapped = {
+            selector for selector, decls in style_rules(base)
+            if selector.split()[0].startswith((".top", ".brand", ".conn", ".goal-", "#goal", ".cap", ".meter"))
+            and decls.get("white-space") == "nowrap"
+        }
+        self.assertEqual(unwrapped, {".brand", ".cap-acct", ".cap-acct b"})
+        (long_name,) = render([
+            START,
+            {"frame": {**view([]), "capacity": capacity([profile("a" * 60, "ok", week_left=50)])}},
+            {"snapshot": True},
+        ])
+        (label,) = [n for n in nodes(long_name["capacity"]) if n["tag"] == "b"]
+        self.assertEqual(label["title"], "a" * 60)
 
     def test_the_page_formats_no_time_with_the_locale(self) -> None:
         self.assertNotIn("toLocale", self.text)
@@ -657,24 +754,136 @@ def capacity(profiles: list, **fields) -> dict:
     return base
 
 
-class CapacityPageTest(unittest.TestCase):
-    def strip_view(self, **fields) -> dict:
-        profiles = [
-            profile("a", "ok", week_left=62, five_hour_left=40,
-                    next_reset="2026-11-12T09:00:00+00:00"),
-            profile("b", "unknown"),
-            profile("c", "reset"),
-        ]
-        fields = {"no_reading": "1 with no reading yet", **fields}
-        return {**view([]), "capacity": capacity(profiles, **fields)}
+def strip(snap: dict) -> list:
+    return snap["capacity"]["children"]
 
-    def test_the_strip_shows_each_profile(self) -> None:
-        result = render_page(self.strip_view())
-        text = result["capacity"]["text"]
-        for expected in ("a", "62% of the week left", "40% of 5 hours", "resets ",
-                         "1 with no reading yet", "c", "reset, not yet used"):
-            self.assertIn(expected, text)
-        self.assertNotIn("tight", text)
+
+def bars(n: dict) -> list:
+    return [m for m in nodes(n) if m["tag"] == "i"]
+
+
+def bar(n: dict) -> str:
+    (i,) = bars(n)
+    return i["width"]
+
+
+def capacity_snap(cap: dict) -> dict:
+    (snap,) = render([START, {"frame": {**view([]), "capacity": cap}}, {"snapshot": True}])
+    return snap
+
+
+def accounts(snap: dict) -> list:
+    return [n for n in strip(snap) if has_class(n, "cap-acct")]
+
+
+def part(snap: dict, name: str) -> dict:
+    (found,) = [n for n in strip(snap) if has_class(n, name)]
+    return found
+
+
+class CapacityPageTest(unittest.TestCase):
+    def test_fine_reads_one_word_then_each_account_with_a_bar_and_the_next_reset(self) -> None:
+        snap = capacity_snap(capacity([
+            profile("a", "ok", week_left=65, five_hour_left=40, next_reset="2026-11-16T05:00:00+00:00"),
+            profile("b", "unknown"),
+            profile("c", "ok", week_left=30, next_reset="2026-11-17T05:00:00+00:00"),
+        ], no_reading="1 with no reading yet"))
+        self.assertEqual(
+            [n["cls"] for n in strip(snap)],
+            ["cap-state cap-fine", "cap-acct", "cap-acct", "cap-when", "cap-none"])
+        state = strip(snap)[0]
+        self.assertEqual(full(state), "fine")
+        self.assertIn("svg", [c["tag"] for c in state["children"]])
+        a, c = accounts(snap)
+        labels = [n for n in nodes(snap["capacity"]) if n["tag"] == "b"]
+        self.assertEqual([n["text"] for n in labels], ["a", "c"])
+        for n in labels:
+            self.assertEqual(n["title"], n["text"])
+        self.assertEqual(bar(a), "65%")
+        self.assertEqual(bar(c), "30%")
+        (pc,) = [n for n in nodes(a) if has_class(n, "cap-pc")]
+        self.assertEqual(full(pc), "65%")
+        self.assertEqual(a["title"], "65% of the week left, 40% of 5 hours")
+        self.assertEqual(c["title"], "30% of the week left")
+        self.assertEqual(full(part(snap, "cap-when")), "resets Mon 05:00")
+        self.assertEqual(full(part(snap, "cap-none")), "1 with no reading yet")
+
+    def test_tight_reads_tight_and_an_out_account_reads_out_until(self) -> None:
+        snap = capacity_snap(capacity([
+            profile("a", "ok", week_left=12, next_reset="2026-11-16T05:00:00+00:00"),
+            profile("b", "out", week_left=55, five_hour_left=0,
+                    out_until="2026-11-13T09:30:00+00:00", next_reset="2026-11-13T08:00:00+00:00"),
+        ], tight=True))
+        self.assertEqual(
+            [n["cls"] for n in strip(snap)],
+            ["cap-state cap-tight", "cap-acct", "cap-acct cap-out", "cap-when"])
+        state = strip(snap)[0]
+        self.assertEqual(full(state), "tight")
+        self.assertIn("svg", [c["tag"] for c in state["children"]])
+        a, b = accounts(snap)
+        self.assertEqual(bar(a), "12%")
+        self.assertEqual(bar(b), "55%")
+        self.assertEqual(b["title"], "55% of the week left, 0% of 5 hours")
+        self.assertIn("out until Fri 09:30", full(b))
+        self.assertEqual([n for n in nodes(b) if has_class(n, "cap-pc")], [])
+        self.assertEqual(full(part(snap, "cap-when")), "resets Mon 05:00")
+
+    def test_every_account_out_reads_out_in_red_and_when_work_resumes(self) -> None:
+        snap = capacity_snap(capacity([
+            profile("a", "out", week_left=0, out_until="2026-11-13T09:30:00+00:00"),
+            profile("b", "out", out_until="2026-11-13T10:00:00+00:00"),
+        ], all_out=True, resumes_at="2026-11-13T09:30:00+00:00"))
+        self.assertEqual(
+            [n["cls"] for n in strip(snap)],
+            ["cap-state cap-out", "cap-acct cap-out", "cap-acct cap-out", "cap-when"])
+        state = strip(snap)[0]
+        self.assertEqual(full(state), "out")
+        self.assertIn("svg", [c["tag"] for c in state["children"]])
+        a, b = accounts(snap)
+        self.assertEqual(bar(a), "0%")
+        self.assertEqual(bars(b), [])
+        self.assertEqual(full(part(snap, "cap-when")), "resumes Fri 09:30")
+        self.assertNotIn("resets", full(snap["capacity"]))
+        for n in nodes(snap["capacity"]):
+            self.assertNotIn("needs", n["cls"])
+        text = PAGE.read_text(encoding="utf-8")
+        style = text[text.index("<style>"):text.index("</style>")]
+        base, at = "", 0
+        for found in re.finditer(r"@media [^{]+\{", style):
+            if found.start() < at:
+                continue
+            base += style[at:found.start()]
+            depth, at = 1, found.end()
+            while depth:
+                depth += {"{": 1, "}": -1}.get(style[at], 0)
+                at += 1
+        base += style[at:]
+        rules = style_rules(base)
+        (out,) = [d for s, d in rules if s == ".cap-out"]
+        self.assertEqual(out.get("color"), "var(--red)")
+        for selector, decls in rules:
+            if ".cap" in selector:
+                self.assertNotIn("var(--peach)", " ".join(decls.values()), selector)
+
+    def test_no_reading_at_all_shows_only_the_note(self) -> None:
+        snap = capacity_snap(capacity(
+            [profile("b", "unknown"), profile("c", "unknown")], no_reading="2 with no reading yet"))
+        self.assertEqual([n["cls"] for n in strip(snap)], ["cap-none"])
+
+    def test_a_reset_account_reads_reset_not_yet_used(self) -> None:
+        snap = capacity_snap(capacity([
+            profile("c", "reset"),
+            profile("d", "reset", week_left=100, five_hour_left=100),
+        ]))
+        self.assertEqual(
+            [n["cls"] for n in strip(snap)], ["cap-state cap-fine", "cap-acct", "cap-acct"])
+        c, d = accounts(snap)
+        self.assertIn("reset, not yet used", full(c))
+        self.assertIn("reset, not yet used", full(d))
+        self.assertEqual(bars(c), [])
+        self.assertEqual(bar(d), "100%")
+        self.assertNotIn("week unknown", full(c))
+        self.assertEqual(d["title"], "100% of the week left, 100% of 5 hours")
 
     def test_profiles_without_a_reading_show_as_one_note(self) -> None:
         frame = {**view([]), "capacity": capacity(
@@ -685,10 +894,6 @@ class CapacityPageTest(unittest.TestCase):
         self.assertEqual(full(strip).count("no reading yet"), 1)
         self.assertIn("2 with no reading yet", full(strip))
         self.assertEqual([n["text"] for n in nodes(strip) if n["tag"] == "b"], ["a"])
-
-    def test_tight_is_shown_only_when_the_view_says_so(self) -> None:
-        result = render_page(self.strip_view(tight=True))
-        self.assertTrue(result["capacity"]["text"].endswith("tight"))
 
     def test_every_profile_out_is_promoted_above_the_inbox(self) -> None:
         out = [profile("a", "out", out_until="2026-11-12T09:00:00+00:00"),
@@ -708,19 +913,22 @@ class CapacityPageTest(unittest.TestCase):
         self.assertNotIn("Resumes ", shown["statement"]["text"])
 
     def test_unknown_values_read_as_words_not_null_or_1970(self) -> None:
-        profiles = [profile("a", "ok", five_hour_left=40), profile("b", "out")]
-        text = render_page({**view([]), "capacity": capacity(profiles)})["capacity"]["text"]
-        for expected in ("week unknown", "40% of 5 hours", "out, reset unknown"):
-            self.assertIn(expected, text)
+        snap = capacity_snap(capacity([profile("a", "ok", five_hour_left=40), profile("b", "out")]))
+        a, b = accounts(snap)
+        self.assertEqual(bars(a), [])
+        self.assertIn("week unknown", full(a))
+        self.assertEqual(a["title"], "week unknown, 40% of 5 hours")
+        self.assertIn("out, reset unknown", full(b))
+        self.assertEqual(bars(b), [])
+        self.assertEqual([n for n in strip(snap) if has_class(n, "cap-when")], [])
+        text = full(snap["capacity"])
         for banned in ("null", "1970", "resets "):
             self.assertNotIn(banned, text)
         out = [profile("a", "out"), profile("b", "out")]
-        result = render_page({**view([]), "capacity": capacity(out, all_out=True)})
-        promoted = result["promoted"]["text"]
-        self.assertEqual(promoted.count("out, reset unknown"), 2)
-        for banned in ("null", "1970"):
-            self.assertNotIn(banned, promoted)
-        self.assertNotIn("Resumes ", result["statement"]["text"])
+        both = capacity_snap(capacity(out, all_out=True))
+        self.assertEqual([n for n in strip(both) if has_class(n, "cap-when")], [])
+        self.assertEqual(full(both["promoted"]).count("out, reset unknown"), 2)
+        self.assertNotIn("Resumes ", full(both["statement"]))
 
     def test_a_view_without_capacity_still_renders(self) -> None:
         result = render_page(view([]))
@@ -1804,7 +2012,7 @@ class PageDigestTest(unittest.TestCase):
         })
         (snap,) = render([{"frame": frame}, {"snapshot": True}])
         digest = snap["digest"]
-        head = next(n for n in nodes(digest) if n["cls"] == "digest-head")
+        head = next(n for n in nodes(digest) if has_class(n, "digest-head"))
         self.assertTrue(full(head).startswith("Since you last looked, "))
         (lines,) = [n for n in nodes(digest) if n["tag"] == "ul" and n["cls"] == "digest"]
         shown = [text(n) for n in lines["children"]]
@@ -1827,7 +2035,7 @@ class PageDigestTest(unittest.TestCase):
             "earlier": [], "omitted": 0,
         })
         (snap,) = render([{"frame": frame}, {"snapshot": True}])
-        head = next(n for n in nodes(snap["digest"]) if n["cls"] == "digest-head")
+        head = next(n for n in nodes(snap["digest"]) if has_class(n, "digest-head"))
         self.assertEqual(text(head).strip(), "In the last eight hours")
 
     def test_an_empty_digest_says_nothing_changed(self) -> None:
@@ -1855,6 +2063,82 @@ class PageDigestTest(unittest.TestCase):
         ])
         (fold,) = [n for n in nodes(snap["digest"]) if n["tag"] == "details"]
         self.assertTrue(fold["open"])
+
+    @staticmethod
+    def base_rules() -> list:
+        text = PAGE.read_text(encoding="utf-8")
+        style = text[text.index("<style>"):text.index("</style>")]
+        base, at = "", 0
+        for found in re.finditer(r"@media [^{]+\{", style):
+            if found.start() < at:
+                continue
+            base += style[at:found.start()]
+            depth, at = 1, found.end()
+            while depth:
+                depth += {"{": 1, "}": -1}.get(style[at], 0)
+                at += 1
+        base += style[at:]
+        return style_rules(base)
+
+    def test_each_digest_line_is_its_age_then_its_sentence(self) -> None:
+        frame = with_digest({
+            "since": "2026-11-11T08:00:00+00:00", "first_visit": False,
+            "recent": [moment("2026-11-11T09:30:00+00:00", "Newest."),
+                       moment("2026-11-11T09:00:00+00:00", "Second.")],
+            "earlier": [moment("2026-11-11T08:30:00+00:00", "Third.")],
+            "omitted": 2,
+        })
+        (snap,) = render([{"frame": frame}, {"open": "earlier"}, {"snapshot": True}])
+        lines = [
+            li for ul in nodes(snap["digest"])
+            if ul["tag"] == "ul" and ul["cls"] in ("digest", "earlier-list")
+            for li in ul["children"]
+        ]
+        rows = [li for li in lines if not has_class(li, "more-n")]
+        for line in rows:
+            self.assertEqual([(c["tag"], c["cls"]) for c in line["children"]],
+                             [("time", "at"), ("span", "said")])
+        said = [c["text"] for li in rows for c in li["children"] if c["cls"] == "said"]
+        self.assertEqual(said, ["Newest.", "Second.", "Third."])
+        (more,) = [li for li in lines if has_class(li, "more-n")]
+        self.assertEqual(text(more).strip(), "and 2 more")
+        self.assertEqual(more["children"], [])
+        rules = self.base_rules()
+        for selector in (".digest li", ".earlier-list li"):
+            with self.subTest(selector=selector):
+                decls = {}
+                for s, d in rules:
+                    if s == selector:
+                        decls.update(d)
+                self.assertEqual(decls.get("display"), "grid")
+                self.assertEqual(decls.get("grid-template-columns"), "5.5rem minmax(0, 1fr)")
+                self.assertNotIn("flex-wrap", decls)
+        (tail,) = [d for s, d in rules if s == ".earlier-list .more-n"]
+        self.assertEqual(tail.get("display"), "block")
+        self.assertNotIn("grid-column", tail)
+
+    def test_section_headings_share_one_style(self) -> None:
+        frame = {
+            **view([project(0, [])]),
+            "digest": {"since": None, "first_visit": True,
+                       "recent": [moment("2026-11-11T09:30:00+00:00", "Newest.")],
+                       "earlier": [], "omitted": 0},
+            "capacity": capacity([profile("a", "out", out_until="2026-11-13T09:30:00+00:00")],
+                                 all_out=True, resumes_at="2026-11-13T09:30:00+00:00"),
+        }
+        (snap,) = render([START, {"frame": frame}, {"snapshot": True}])
+        for section in ("digest", "promoted", "projects"):
+            with self.subTest(section=section):
+                (head,) = [n for n in nodes(snap[section]) if n["tag"] == "h2"]
+                self.assertTrue(has_class(head, "sec-h"))
+        rules = self.base_rules()
+        (shared,) = [d for s, d in rules if s == ".sec-h"]
+        self.assertEqual(shared.get("font"), "600 .9375rem/1.4 var(--ui)")
+        self.assertEqual(shared.get("color"), "var(--text)")
+        for selector, decls in rules:
+            if selector in (".digest-head", ".side h2", "#promoted h2"):
+                for name in ("font", "font-size", "font-weight", "color"):
+                    self.assertNotIn(name, decls, selector)
 
 
 GOAL_FRAME = {**view([]), "recent_projects": ["owner/zeta", "owner/alpha", "owner/beta"]}
@@ -1916,6 +2200,21 @@ def sprint_lines(snap: dict) -> list:
 
 
 class PageGoalTest(unittest.TestCase):
+    def test_the_goal_field_sits_in_the_top_bar(self) -> None:
+        html = PAGE.read_text(encoding="utf-8")
+        header = html[html.index('<header class="top">'):html.index("</header>")]
+        main = html[html.index("<main>"):html.index("</main>")]
+        (snap,) = render([START, {"frame": GOAL_FRAME}, {"snapshot": True}])
+        self.assertIn('id="goal"', header)
+        self.assertNotIn('id="goal"', main)
+        self.assertNotIn("goal-open", html)
+        self.assertNotIn("State a goal", html)
+        (field,) = goal_named(snap, "goal-text")
+        self.assertEqual(field["tag"], "textarea")
+        self.assertEqual(field["placeholder"], "Tell a manager what you want next\u2026")
+        self.assertEqual([full(n) for n in nodes(snap["goal"]) if n["tag"] == "kbd"], ["g"])
+        self.assertFalse(box_open(snap))
+
     def test_g_opens_the_goal_field_and_filters_projects_most_recent_first(self) -> None:
         closed, opened, upper, one = render([
             START, {"frame": GOAL_FRAME}, {"snapshot": True}, {"key": "g"}, {"snapshot": True},
@@ -1923,12 +2222,11 @@ class PageGoalTest(unittest.TestCase):
             {"input": {"cls": "goal-filter", "value": "alpha"}}, {"snapshot": True},
         ])
         self.assertFalse(box_open(closed))
-        self.assertEqual([full(n) for n in goal_named(closed, "goal-open")], ["State a goal"])
+        self.assertEqual(len(goal_named(closed, "goal-text")), 1)
         self.assertTrue(box_open(opened))
-        self.assertEqual(goal_named(opened, "goal-open"), [])
         self.assertEqual(goal_names(opened), ["owner/zeta", "owner/alpha", "owner/beta"])
         self.assertEqual(goal_picked(opened), ["owner/zeta"])
-        self.assertEqual(opened["active"], "goal-filter")
+        self.assertEqual(opened["active"], "goal-text")
         self.assertIs(opened["key_prevented"], True)
         (filter_node,) = goal_named(opened, "goal-filter")
         self.assertIn(filter_node["value"], ("", None))
@@ -1936,17 +2234,17 @@ class PageGoalTest(unittest.TestCase):
         self.assertEqual(goal_names(one), ["owner/alpha"])
         self.assertEqual(goal_picked(one), ["owner/alpha"])
 
-    def test_the_goal_field_opens_from_a_visible_button(self) -> None:
+    def test_focusing_the_goal_field_opens_the_project_choice(self) -> None:
         opened, closed = render([
-            START, {"frame": GOAL_FRAME}, {"click": "goal-open"}, {"snapshot": True},
+            START, {"frame": GOAL_FRAME}, {"focus_on": "goal-text"}, {"snapshot": True},
             {"key": "Escape"}, {"snapshot": True},
         ])
         self.assertTrue(box_open(opened))
         self.assertEqual(goal_names(opened), ["owner/zeta", "owner/alpha", "owner/beta"])
-        self.assertEqual(opened["active"], "goal-filter")
-        self.assertEqual(goal_named(opened, "goal-open"), [])
+        self.assertEqual(opened["active"], "goal-text")
         self.assertFalse(box_open(closed))
-        self.assertEqual(len(goal_named(closed, "goal-open")), 1)
+        self.assertIsNone(closed["active"])
+        self.assertEqual(len(goal_named(closed, "goal-text")), 1)
 
     def test_a_sent_goal_posts_the_project_and_text_and_closes(self) -> None:
         (snap,) = render([
@@ -1960,7 +2258,8 @@ class PageGoalTest(unittest.TestCase):
         self.assertEqual(post["headers"], GOAL_HEADERS)
         self.assertEqual(json.loads(post["body"]), {"project_id": "owner/alpha", "goal": GOAL_TEXT})
         self.assertFalse(box_open(snap))
-        self.assertEqual(len(goal_named(snap, "goal-open")), 1)
+        (field,) = goal_named(snap, "goal-text")
+        self.assertEqual(field["value"], "")
 
     def test_a_refused_goal_keeps_its_text_and_says_why(self) -> None:
         for reply, reason in (
@@ -2085,6 +2384,8 @@ class PageGoalTest(unittest.TestCase):
             {"snapshot": True}, {"key": "g"}, {"snapshot": True},
         ])
         self.assertFalse(box_open(closed))
+        self.assertIsNone(closed["active"])
+        self.assertEqual(len(goal_named(closed, "goal-text")), 1)
         (text_node,) = goal_named(reopened, "goal-text")
         self.assertEqual(text_node["value"], "draft")
 

@@ -37,11 +37,16 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .top-in { max-width: 1360px; margin: 0 auto; padding: 8px 48px; display: flex; align-items: center; gap: 28px; min-height: 56px; }
 .brand { font-weight: 600; color: var(--sub1); white-space: nowrap; letter-spacing: -.005em; }
 .conn { color: var(--ov2); font-size: .8125rem; }
-.cap { display: flex; flex-wrap: wrap; gap: 2px 20px; margin-left: auto; font-size: .8125rem; color: var(--sub0); }
-.cap-p { display: inline-flex; gap: 6px; }
-.cap-p b { font-weight: 600; }
-.cap-out { color: var(--red); }
+.cap { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; margin-left: auto; min-width: 0; max-width: 100%; font-size: .8125rem; color: var(--sub0); }
+.cap-state { display: inline-flex; align-items: center; gap: 7px; font-weight: 600; }
+.cap-fine { color: var(--green); }
 .cap-tight { color: var(--yellow); }
+.cap-out { color: var(--red); }
+.cap-acct { display: inline-flex; align-items: center; gap: 7px; white-space: nowrap; min-width: 0; max-width: 100%; }
+.cap-acct b { font-weight: 600; color: var(--sub1); max-width: 9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.meter { display: block; flex: none; width: 34px; height: 4px; border-radius: 2px; background: var(--s1); overflow: hidden; }
+.meter i { display: block; height: 100%; background: var(--sub0); }
+.cap-pc { color: var(--sub1); }
 
 .desk-grid { max-width: 1360px; margin: 0 auto; padding: 30px 48px 72px; display: grid; grid-template-columns: minmax(0, 1fr) 460px; column-gap: 88px; align-items: start; }
 
@@ -89,8 +94,8 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .abox .meta { margin-top: 6px; }
 .abox .meta.now { color: var(--text); }
 .abox .opts { list-style: none; padding-left: 0; display: flex; flex-direction: column; align-items: stretch; gap: 2px; margin-top: 14px; }
-.opt, .send, .undo, .approve, .reply-send, .goal-open, .goal-send, .goal-cancel, .goal-project, .give-goal, .withdraw, .retry, .tell-send, .abox button[class^="ans-"] { display: inline-flex; align-items: baseline; gap: 8px; font: inherit; color: inherit; text-align: left; background: none; border: 1px solid var(--hair); border-radius: 8px; padding: 2px 10px; cursor: pointer; transition: background-color .16s; }
-.opt:hover:enabled, .send:hover:enabled, .undo:hover:enabled, .approve:hover:enabled, .reply-send:hover:enabled, .goal-open:hover:enabled, .goal-send:hover:enabled, .goal-cancel:hover:enabled, .goal-project:hover:enabled, .give-goal:hover:enabled, .withdraw:hover:enabled, .retry:hover:enabled, .tell-send:hover:enabled, .abox button[class^="ans-"]:hover:enabled { background: rgba(202, 211, 245, .05); }
+.opt, .send, .undo, .approve, .reply-send, .goal-send, .goal-cancel, .goal-project, .give-goal, .withdraw, .retry, .tell-send, .abox button[class^="ans-"] { display: inline-flex; align-items: baseline; gap: 8px; font: inherit; color: inherit; text-align: left; background: none; border: 1px solid var(--hair); border-radius: 8px; padding: 2px 10px; cursor: pointer; transition: background-color .16s; }
+.opt:hover:enabled, .send:hover:enabled, .undo:hover:enabled, .approve:hover:enabled, .reply-send:hover:enabled, .goal-send:hover:enabled, .goal-cancel:hover:enabled, .goal-project:hover:enabled, .give-goal:hover:enabled, .withdraw:hover:enabled, .retry:hover:enabled, .tell-send:hover:enabled, .abox button[class^="ans-"]:hover:enabled { background: rgba(202, 211, 245, .05); }
 .opt:disabled, .send:disabled, .reply-send:disabled, .goal-send:disabled, .give-goal:disabled, .withdraw:disabled, .retry:disabled, .tell-send:disabled, .abox button[class^="ans-"]:disabled { cursor: default; }
 .abox button[class^="ans-"]:disabled { color: var(--ov2); }
 .abox .detail { margin-top: 6px; padding: 6px 10px; max-height: 24rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: .84375rem; color: var(--sub0); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; }
@@ -104,17 +109,28 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .opt.picked { border-color: var(--lav); background: rgba(183, 189, 248, .10); }
 .opt.picked kbd { background: var(--lav); border-color: var(--lav); color: var(--crust); }
 .goal-project.picked { color: var(--lav); border-color: var(--lav); }
-#goal { margin-top: 24px; max-width: 44rem; }
-.goal-box { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
-.goal-filter, .goal-text, .reply-text { width: 100%; font: inherit; color: var(--text); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; padding: 6px 10px; }
-.goal-text, .reply-text { min-height: 6em; resize: vertical; }
+.goal-bar { position: relative; flex: 0 1 440px; min-width: 12rem; }
+.goal-in { display: flex; align-items: flex-start; gap: 10px; padding: 0 10px 0 12px; background: var(--mantle); border: 1px solid var(--s0); border-radius: 12px; transition: border-color .16s; }
+.goal-in:hover { border-color: var(--s1); }
+.goal-in:focus-within { border-color: var(--lav); }
+.goal-in .goal-text { flex: 1 1 auto; min-width: 0; height: 38px; padding: 8px 0; font: inherit; line-height: 22px; color: var(--text); background: none; border: 0; border-radius: 0; resize: none; overflow: hidden; }
+.goal-in .goal-text::placeholder { color: var(--ov2); }
+.goal-key { margin-top: 9px; }
+.goal-bar.open .goal-in { background: var(--base); border-color: var(--lav); }
+.goal-bar.open .goal-text { height: 82px; overflow: auto; }
+.goal-box { position: absolute; top: calc(100% + 6px); left: 0; z-index: 20; display: flex; flex-direction: column; align-items: flex-start; gap: 8px; width: min(600px, calc(100vw - 32px)); max-height: calc(100vh - 14rem); overflow-y: auto; padding: 12px; background: var(--base); border: 1px solid var(--lav); border-radius: 12px; box-shadow: 0 28px 48px -24px rgba(8, 9, 16, .9); }
+.goal-filter { min-width: 0; }
+.goal-filter, .reply-text { width: 100%; font: inherit; color: var(--text); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; padding: 6px 10px; }
+.reply-text { min-height: 6em; resize: vertical; }
 .brief .goal-line { margin-top: 6px; font-size: 1.0625rem; overflow-wrap: anywhere; }
 .brief .parts p { margin-top: 10px; }
 .brief .parts ul { margin-top: 4px; padding-left: 18px; list-style: disc; color: var(--sub0); font-size: .84375rem; }
 .reply { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; margin-top: 12px; }
-.goal-projects { display: flex; flex-wrap: wrap; gap: 4px; }
+.goal-projects { display: flex; flex-wrap: wrap; flex: 0 1 auto; gap: 4px; min-width: 0; max-width: 100%; min-height: 0; overflow-y: auto; }
+.goal-projects li { min-width: 0; max-width: 100%; }
+.goal-project { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 .goal-status:empty { display: none; }
-.goal-act { display: flex; gap: 8px; }
+.goal-act { display: flex; flex: none; gap: 8px; }
 .sprints { flex: 1 0 100%; padding: 0 0 0 16px; }
 .sprint { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; font-size: .8125rem; color: var(--sub0); }
 .sprint .goal-line { color: var(--text); font-weight: 500; overflow-wrap: anywhere; }
@@ -163,10 +179,13 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .item-detail summary::-webkit-details-marker { display: none; }
 #digest { margin-top: 40px; max-width: 44rem; }
 #digest:empty { margin-top: 0; }
-.digest-head { font: 600 .875rem/1.4 var(--ui); color: var(--ov2); }
+.sec-h { font: 600 .9375rem/1.4 var(--ui); color: var(--text); }
+.digest-head time { font-weight: 400; color: var(--ov2); }
 .digest, .earlier-list { margin-top: 6px; }
-.digest li, .earlier-list li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; padding: 5px 0; font-size: .875rem; color: var(--sub0); }
-.digest .at { color: var(--ov2); }
+.digest li, .earlier-list li { display: grid; grid-template-columns: 5.5rem minmax(0, 1fr); column-gap: 12px; padding: 5px 0; font-size: .875rem; }
+.digest .at, .earlier-list .at { color: var(--ov2); white-space: nowrap; }
+.said { color: var(--sub0); overflow-wrap: anywhere; }
+.earlier-list .more-n { display: block; color: var(--ov2); }
 .earlier { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--hair); }
 .earlier summary { display: flex; align-items: baseline; gap: 8px; cursor: pointer; list-style: none; padding: 4px 12px; margin: 0 -12px; border-radius: 10px; font-size: .875rem; color: var(--ov2); transition: background-color .16s; }
 .earlier summary::-webkit-details-marker { display: none; }
@@ -174,7 +193,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .earlier summary b { font-weight: 600; color: var(--sub0); }
 .answer { color: var(--lav); text-underline-offset: 3px; }
 .side { margin-top: 12px; }
-.side h2 { font: 600 .9375rem/1.4 var(--ui); display: flex; align-items: baseline; gap: 10px; }
+.side h2 { display: flex; align-items: baseline; gap: 10px; }
 .side h2 span { font-weight: 400; font-size: .8125rem; color: var(--ov2); }
 .empty { margin-top: 12px; color: var(--sub0); font-size: .84375rem; }
 #list { margin-top: 12px; }
@@ -220,7 +239,8 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 @media (max-width: 900px) {
   .card.lead { margin: 0 -8px; padding: 20px 16px; }
   .desk-grid { grid-template-columns: minmax(0, 1fr); padding: 32px 16px 56px; }
-  .top-in { padding: 10px 16px; gap: 10px 16px; }
+  .top-in { padding: 10px 16px; gap: 10px 16px; flex-wrap: wrap; }
+  .goal-bar { order: 3; flex: 1 0 100%; }
   .side { margin-top: 48px; }
   .statement h1 { font-size: 2.375rem; letter-spacing: -.022em; }
   .statement .sub { font-size: 1rem; }
@@ -237,11 +257,10 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 </style>
 </head>
 <body>
-<header class="top"><div class="top-in"><span class="brand">Console</span><span class="cap" id="capacity"></span><span class="conn" id="conn" role="status">Reconnecting…</span></div></header>
+<header class="top"><div class="top-in"><span class="brand">Console</span><div class="goal-bar" id="goal" role="group" aria-label="Goal"></div><span class="cap" id="capacity"></span><span class="conn" id="conn" role="status">Reconnecting…</span></div></header>
 <div class="desk-grid">
 <main>
 <div class="statement" id="statement"></div>
-<section id="goal" aria-label="Goal"></section>
 <section id="promoted" aria-label="Capacity"></section>
 <section id="inbox" aria-label="Inbox"></section>
 <section id="digest" aria-label="Since you last looked"></section>
@@ -261,6 +280,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 <template id="pause-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><rect class="f" x="3.5" y="3" width="3.2" height="10" rx="1"/><rect class="f" x="9.3" y="3" width="3.2" height="10" rx="1"/></svg></template>
 <template id="clock-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.8"/><path d="M8 4.8V8l2.2 1.5"/></svg></template>
 <template id="dashed-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.8" stroke-dasharray="2.1 2.5"/><circle class="f" cx="8" cy="8" r="1.3"/></svg></template>
+<template id="stop-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><rect class="f" x="3.5" y="3.5" width="9" height="9" rx="2"/></svg></template>
 <template id="tick-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.6l3.2 3.1L13 4.4"/></svg></template>
 <template id="lines-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 4.5h10M3 8h10M3 11.5h6"/></svg></template>
 <template id="label-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 3.5h5.2l5.8 5.8-4.2 4.2-6.8-6.8z"/><circle cx="5.4" cy="6.2" r=".9"/></svg></template>
@@ -709,29 +729,54 @@ function outWords(p, cls) {
   if (p.out_until === null || p.out_until === undefined) return phrase("span", cls, "out, reset unknown");
   return phrase("span", cls, "out until ", timeEl("weekday", p.out_until, ""));
 }
-function capacityWords(p, cls) {
-  if (p.state === "unknown") return phrase("span", cls, "no reading yet");
-  if (p.state === "out") return outWords(p, cls);
-  if (p.state === "reset") return phrase("span", cls, "reset, not yet used");
-  const has = (v) => v !== null && v !== undefined;
-  const parts = [has(p.week_left) ? p.week_left + "% of the week left" : "week unknown"];
-  if (has(p.five_hour_left)) parts.push(" \u00b7 " + p.five_hour_left + "% of 5 hours");
-  if (has(p.next_reset)) parts.push(" \u00b7 resets ", timeEl("weekday", p.next_reset, ""));
-  return phrase("span", cls, ...parts);
-}
 function renderCapacity(view) {
   const box = document.getElementById("capacity");
   const cap = view.capacity || {profiles: []};
+  const known = (v) => v !== null && v !== undefined;
+  const readings = cap.profiles.filter((p) => p.state !== "unknown");
   const nodes = [];
-  for (const p of cap.profiles) {
-    if (p.state === "unknown") continue;
-    const span = el("span", "cap-p");
-    span.appendChild(el("b", "", p.profile));
-    span.appendChild(capacityWords(p, p.state === "out" ? "cap-out" : ""));
-    nodes.push(span);
+  if (readings.length) {
+    const [tone, word, mark] = cap.all_out ? ["cap-out", "out", "stop-icon"]
+      : cap.tight ? ["cap-tight", "tight", "clock-icon"] : ["cap-fine", "fine", "tick-icon"];
+    const state = el("span", "cap-state " + tone);
+    state.appendChild(icon(mark));
+    state.appendChild(el("span", "", word));
+    nodes.push(state);
+  }
+  for (const p of readings) {
+    const acct = el("span", p.state === "out" ? "cap-acct cap-out" : "cap-acct");
+    const shares = [known(p.week_left) ? p.week_left + "% of the week left" : "week unknown"];
+    if (known(p.five_hour_left)) shares.push(p.five_hour_left + "% of 5 hours");
+    acct.setAttribute("title", shares.join(", "));
+    const name = el("b", "", p.profile);
+    name.setAttribute("title", p.profile);
+    acct.appendChild(name);
+    if (known(p.week_left)) {
+      const meter = el("span", "meter");
+      meter.setAttribute("aria-hidden", "true");
+      const fill = el("i");
+      fill.style.width = p.week_left + "%";
+      meter.appendChild(fill);
+      acct.appendChild(meter);
+    }
+    if (p.state === "out") acct.appendChild(outWords(p, ""));
+    else if (p.state === "reset") acct.appendChild(el("span", "cap-pc", "reset, not yet used"));
+    else acct.appendChild(el("span", "cap-pc", known(p.week_left) ? p.week_left + "%" : "week unknown"));
+    nodes.push(acct);
+  }
+  if (readings.length) {
+    if (cap.all_out) {
+      if (cap.resumes_at) nodes.push(phrase("span", "cap-when", "resumes ", timeEl("weekday", cap.resumes_at, "")));
+    } else {
+      const stamps = readings.filter((p) => p.state !== "out").map((p) => p.next_reset)
+        .filter((t) => Number.isFinite(Date.parse(t)));
+      if (stamps.length) {
+        const next = stamps.reduce((a, b) => (Date.parse(b) < Date.parse(a) ? b : a));
+        nodes.push(phrase("span", "cap-when", "resets ", timeEl("weekday", next, "")));
+      }
+    }
   }
   if (cap.no_reading) nodes.push(el("span", "cap-none", cap.no_reading));
-  if (cap.tight) nodes.push(el("span", "cap-tight", "tight"));
   box.replaceChildren(...nodes);
 }
 function renderPromoted(view) {
@@ -741,7 +786,7 @@ function renderPromoted(view) {
   if (!cap.all_out) return;
   const list = el("ul");
   for (const p of cap.profiles) list.appendChild(phrase("li", "cap-out", p.profile + " ", outWords(p, "")));
-  box.appendChild(el("h2", "", "Capacity"));
+  box.appendChild(el("h2", "sec-h", "Capacity"));
   box.appendChild(list);
 }
 function holds(item) {
@@ -1516,7 +1561,7 @@ function renderInbox(view) {
 function momentLine(moment) {
   const line = el("li");
   line.appendChild(timeEl("ago", moment.at, "at"));
-  line.appendChild(el("span", "", moment.sentence));
+  line.appendChild(el("span", "said", moment.sentence));
   return line;
 }
 function renderDigest(view) {
@@ -1525,8 +1570,8 @@ function renderDigest(view) {
   const digest = view.digest;
   if (!digest) return;
   section.appendChild(digest.first_visit
-    ? el("h2", "digest-head", "In the last eight hours")
-    : phrase("h2", "digest-head", "Since you last looked, ", timeEl("ago", digest.since, "")));
+    ? el("h2", "sec-h digest-head", "In the last eight hours")
+    : phrase("h2", "sec-h digest-head", "Since you last looked, ", timeEl("ago", digest.since, "")));
   if (digest.recent.length === 0 && digest.earlier.length === 0) {
     section.appendChild(el("p", "empty", "Nothing changed."));
     return;
@@ -1543,7 +1588,7 @@ function renderDigest(view) {
   fold.appendChild(summary);
   const more = el("ul", "earlier-list");
   for (const moment of digest.earlier) more.appendChild(momentLine(moment));
-  if (digest.omitted > 0) more.appendChild(el("li", "", "and " + digest.omitted + " more"));
+  if (digest.omitted > 0) more.appendChild(el("li", "more-n", "and " + digest.omitted + " more"));
   fold.appendChild(more);
   section.appendChild(fold);
 }
@@ -1563,7 +1608,7 @@ function workCount(view) {
 }
 function renderProjects(view) {
   const section = document.getElementById("projects");
-  const heading = el("h2", "", "Work");
+  const heading = el("h2", "sec-h", "Work");
   const worked = workCount(view);
   if (worked !== "") heading.appendChild(el("span", "", worked));
   const active = document.activeElement;
@@ -1687,8 +1732,8 @@ function goalEdited() {
 function closeGoal() {
   if (draft.phase !== "sending") draft.reason = "";
   draft.open = false;
-  goalUi = null;
   renderGoal();
+  goalText.blur();
 }
 async function sendGoal() {
   if (draft.phase === "sending") return;
@@ -1727,6 +1772,7 @@ async function sendGoal() {
     if (draft.rev === sentRev) {
       draft.filter = "";
       draft.text = "";
+      goalText.value = "";
       draft.project = null;
       if (draft.open) closeGoal();
     } else showGoalReason();
@@ -1735,7 +1781,27 @@ async function sendGoal() {
     showGoalReason();
   }
 }
-function buildGoalBox(section) {
+const goalText = el("textarea", "goal-text");
+goalText.setAttribute("rows", "1");
+goalText.setAttribute("placeholder", "Tell a manager what you want next\u2026");
+goalText.setAttribute("aria-label", "Tell a manager what you want next");
+goalText.setAttribute("aria-keyshortcuts", "g");
+goalText.addEventListener("input", (event) => {
+  draft.text = event.target.value;
+  goalEdited();
+});
+goalText.addEventListener("focus", () => {
+  if (!draft.open) {
+    draft.open = true;
+    renderGoal();
+  }
+});
+const goalIn = el("div", "goal-in");
+goalIn.appendChild(goalText);
+goalIn.appendChild(el("kbd", "goal-key", "g"));
+document.getElementById("goal").appendChild(goalIn);
+let goalPanel = null;
+function buildGoalBox() {
   const box = el("div", "goal-box");
   const filter = el("input", "goal-filter");
   filter.setAttribute("type", "text");
@@ -1748,54 +1814,44 @@ function buildGoalBox(section) {
     refreshGoalList();
   });
   const list = el("ul", "goal-projects");
-  const text = el("textarea", "goal-text");
-  text.setAttribute("aria-label", "Goal");
-  text.setAttribute("placeholder", "What should the next sprint achieve?");
-  text.value = draft.text;
-  text.addEventListener("input", (event) => {
-    draft.text = event.target.value;
-    goalEdited();
-  });
   const status = el("div", "goal-status");
   const send = actionButton("goal-send", "Send", sendGoal);
   const act = el("div", "goal-act");
   act.appendChild(send);
   act.appendChild(actionButton("goal-cancel", "Cancel", closeGoal));
-  for (const part of [filter, list, text, status, act]) box.appendChild(part);
-  section.replaceChildren(box);
-  goalUi = { filter, list, text, status, send };
+  for (const part of [filter, list, status, act]) box.appendChild(part);
+  goalPanel = box;
+  goalUi = { filter, list, status, send };
   send.disabled = draft.phase === "sending";
   refreshGoalList();
   showGoalReason();
+  return box;
 }
 function openGoal() {
   draft.open = true;
-  if (goalUi === null) buildGoalBox(document.getElementById("goal"));
-  goalUi.filter.focus();
+  renderGoal();
+  goalText.focus();
 }
 function openGoalFor(projectId) {
   draft.filter = "";
   draft.project = projectId;
   goalEdited();
   draft.open = true;
-  if (goalUi === null) buildGoalBox(document.getElementById("goal"));
-  else {
-    goalUi.filter.value = "";
-    refreshGoalList();
-  }
-  goalUi.text.focus();
+  renderGoal();
+  goalUi.filter.value = "";
+  refreshGoalList();
+  goalText.focus();
 }
-const goalOpener = el("button", "goal-open", "State a goal");
-goalOpener.setAttribute("type", "button");
-goalOpener.setAttribute("aria-keyshortcuts", "g");
-goalOpener.addEventListener("click", openGoal);
 function renderGoal() {
-  const section = document.getElementById("goal");
+  const bar = document.getElementById("goal");
+  bar.className = draft.open ? "goal-bar open" : "goal-bar";
   if (draft.open) {
-    if (goalUi === null) buildGoalBox(section);
+    if (goalPanel === null) bar.appendChild(buildGoalBox());
     else refreshGoalList();
-  } else if (section.children.length !== 1 || section.children[0] !== goalOpener) {
-    section.replaceChildren(goalOpener);
+  } else if (goalPanel !== null) {
+    goalPanel.remove();
+    goalPanel = null;
+    goalUi = null;
   }
 }
 function render(view) {

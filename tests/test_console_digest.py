@@ -137,6 +137,34 @@ class DigestTest(unittest.TestCase):
             for leaked in ("deliver", "stray-session", "aaaaaaaa", "cccccccc", "/srv"):
                 self.assertNotIn(leaked, sentence)
 
+    def test_a_session_named_for_a_sprint_adds_no_moment(self):
+        manager = "owner/p00 sprint 0123456789abcdef"
+
+        def seen(seq, sid, state="working", **named):
+            return Event(seq, at(seq), "session.seen", "owner/p00" if seq == 1 else None,
+                         {"session_id": sid, "cwd": "/srv/p00", "repo": "/srv/p00",
+                          "state": state, **named})
+
+        def gone(seq, sid):
+            return Event(seq, at(seq), "session.gone", None, {"session_id": sid})
+
+        events = [
+            seen(1, "m1", name=manager),
+            Event(2, at(2), "session.hook", "owner/p00",
+                  {"event": "StopFailure", "session_id": "m1", "cwd": "/srv/p00",
+                   "repo": "/srv/p00", "error": "rate_limit"}),
+            seen(3, "m1"),
+            gone(4, "m1"),
+            seen(5, "n1", name="owner/p00 sprint 0123"), gone(6, "n1"),
+            seen(7, "w1", name="deliver"), gone(8, "w1"),
+            seen(9, "u1"), gone(10, "u1"),
+            seen(11, "x1", name=manager + " extra"), gone(12, "x1")]
+        found = moments(events, {}, {})
+        ended = "A session in p00 ended."
+        self.assertEqual([(m.seq, m.kind, m.sentence) for m in found],
+                         [(6, "session_ended", ended), (8, "session_ended", ended),
+                          (10, "session_ended", ended), (12, "session_ended", ended)])
+
     def test_keep_drops_moments_at_or_before_the_start(self):
         made = [Moment(1, at(0), "k", "before"), Moment(2, at(1), "k", "at"),
                 Moment(3, at(1, 1), "k", "after")]
