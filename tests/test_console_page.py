@@ -160,6 +160,38 @@ class PageTest(unittest.TestCase):
         (size,) = re.findall(r"font-size: ([\d.]+)rem", statement)
         self.assertLess(float(size), 2.375)
 
+    def test_the_open_chooser_stays_inside_the_viewport_and_the_panel(self) -> None:
+        # A long unbroken project id must wrap inside the 480px panel, and a long project list
+        # must scroll inside a panel bounded to the viewport so Send and Cancel stay reachable.
+        style = self.text[self.text.index("<style>"):self.text.index("</style>")]
+        base = style_rules(style[:style.index("@media")])
+
+        def rule(selector: str) -> dict:
+            found = {}
+            for s, d in base:
+                if s == selector:
+                    found.update(d)
+            return found
+
+        box = rule(".goal-box")
+        self.assertRegex(box.get("max-height", ""), r"^calc\(100d?vh - [\d.]+rem\)$")
+        self.assertEqual(box.get("overflow-y"), "auto")
+        projects = rule(".goal-projects")
+        self.assertEqual(projects.get("min-width"), "0")
+        self.assertEqual(projects.get("max-width"), "100%")
+        self.assertEqual(projects.get("overflow-y"), "auto")
+        self.assertEqual(projects.get("flex"), "0 1 auto")
+        self.assertEqual(projects.get("min-height"), "0")
+        self.assertEqual(rule(".goal-projects li").get("min-width"), "0")
+        self.assertEqual(rule(".goal-projects li").get("max-width"), "100%")
+        for name in ("min-width", "max-width", "overflow-wrap"):
+            with self.subTest(name=name):
+                self.assertEqual(
+                    rule(".goal-project").get(name), {"min-width": "0", "max-width": "100%", "overflow-wrap": "anywhere"}[name]
+                )
+        self.assertEqual(rule(".goal-filter").get("min-width"), "0")
+        self.assertEqual(rule(".goal-act").get("flex"), "none")
+
     def test_the_top_bar_fits_480_wide(self) -> None:
         style = self.text[self.text.index("<style>"):self.text.index("</style>")]
         base, at = "", 0
