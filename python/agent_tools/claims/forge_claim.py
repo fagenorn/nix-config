@@ -75,7 +75,7 @@ An honour reads the server time and the branch activity first, then takes a fres
 ends the claim right after judging that listing's `updated_at`, so a renewal that landed before
 that listing is never undone.
 
-The `land` subcommand (`land acquire|release|status`, issue 629) is the cross-host land lock
+The `land` subcommand (`land acquire|release|status|refresh`, issue 629) is the cross-host land lock
 of `agent_tools.claims.forge_land_lock`: `main` routes it there and reports its usage errors in its
 own one-line shape. `land acquire --release` (issue 875) acquires it for a release pull request,
 and with `--wait --follow-head` at that pull request's current head (issue 901).
@@ -95,7 +95,8 @@ idempotent for its holder under a lost reply (#623), so a retry finishes the sam
 a hanging forge holds a retried verb for about 150 s (3 x 30 s + 60 s), more when earlier calls of
 a try answer slowly: a caller gives the command a Bash timeout well above that (the delivery
 programs give 20 minutes). `land acquire --wait` keeps its own D8 bound and is never wrapped;
-`owner-action post`, `owner-action end` and `land status` run once. Every exit-1 line carries
+`owner-action post`, `owner-action end`, `land status` and `land refresh` (its holder runs it
+again within minutes) run once. Every exit-1 line carries
 `transient`: true when the error was a transport error (the tries ran out). A retried `land
 acquire` that raised after it sent a create or a swap reports `acquired`, not `already_held`, for
 a lock then found at its sha: the programs recheck the base on `acquired`. A retried `renew`

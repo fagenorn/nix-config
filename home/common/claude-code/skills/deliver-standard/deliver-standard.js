@@ -16,7 +16,7 @@ export const meta = {
 // holder is <host>/<batch_id> or <host>/session-<session_id>), decisions (owner answers to a
 // needs_user stop; decisions also come from a fully ticked decision prompt read after the claim), spec (path of an approved design spec), mode (plan: stop after the plan
 // review with { stage: 'planned', plan, cont }; ready: stop after verify with { stage: 'ready',
-// head, branch, worktree, verify, tasks, acceptance, fix_waves, cont } and no PR, keeping the claim;
+// head, branch, worktree, verify, flaky? (#972: [{id, summary}], each check that failed outside the branch's changed files and passed on its one rerun), outside_fixes? (#972: [{file, why}], each file outside the branch's diff a verification fix edited, with the cause it established; a done result carries both too), tasks, acceptance, fix_waves, cont } and no PR, keeping the claim;
 // ship, the default: merge. A ready cont resumed in ship skips the final review and verify when
 // the head is unchanged and the tree clean), lane (standard, the default, or direct: no planner, one
 // implementer following the deliver-direct skill, one fresh reviewer and at most one fix round; a cont keeps
@@ -566,6 +566,10 @@ let checksFixes = (CONT && CONT.checks_fixes) || 0
 let syncFixes = (CONT && CONT.sync_fixes) || 0
 // The verified head, results and verification contract of a ready stop; carried until a resume finds the head moved; its results are reused only under the same contract.
 let verified = (CONT && CONT.verified) || null
+// #972: the files outside the branch's diff a verification fix edited, each with the cause the fix step established. Carried in cont on its
+// own, not with the verified head: the edit stays on the branch when a resume finds the head moved, so the flag stays too.
+const outsideOf = xs => (Array.isArray(xs) ? xs : []).filter(x => isEntry(x) && present(x.file) && present(x.why)).map(x => ({ file: String(x.file), why: String(x.why).slice(0, REASON_MAX) }))
+const outsideFixes = outsideOf(CONT && CONT.outside_fixes)
 // The owner's binding decisions: distinct non-empty strings, from args, from cont and from the decision prompt read after the claim.
 let decisions = []
 const addDecision = text => { if (typeof text === 'string' && text.trim() && !decisions.includes(text)) decisions.push(text) }
@@ -575,7 +579,7 @@ addDecision(args.decisions)
 let amendApplied = false
 const stop = (stage, extra) => {
   const fr = SYNC_WINDOW.includes(stage) ? (finalReviewed = null) : finalReviewed
-  return { stage, ...extra, ...(stage === 'planned' || stage === 'ready' ? {} : { reason: stopReason(stage, extra || {}) }), ...(amendApplied ? { amended: true } : {}), ...deadOf(), cont: { setup, lane: LANE, plan, plan_reviewed: planReviewed, ...(plan && !planReviewed && planFindingsKept ? { plan_findings: planFindingsKept } : {}), ...(decisions.length ? { decisions } : {}), done: taskLog, ...(OWN_PR !== null ? { pr: OWN_PR } : {}), fix_waves: fixWaves, ...(carried.length ? { fix_findings: carried } : {}), ...(checksFixes ? { checks_fixes: checksFixes } : {}), ...(syncFixes ? { sync_fixes: syncFixes } : {}), ...(verified ? { verified } : {}), ...(fr ? { final_reviewed: fr } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}), ...(reordered.length ? { reordered } : {}) } }
+  return { stage, ...extra, ...(stage === 'planned' || stage === 'ready' ? {} : { reason: stopReason(stage, extra || {}) }), ...(amendApplied ? { amended: true } : {}), ...deadOf(), cont: { setup, lane: LANE, plan, plan_reviewed: planReviewed, ...(plan && !planReviewed && planFindingsKept ? { plan_findings: planFindingsKept } : {}), ...(decisions.length ? { decisions } : {}), done: taskLog, ...(OWN_PR !== null ? { pr: OWN_PR } : {}), fix_waves: fixWaves, ...(carried.length ? { fix_findings: carried } : {}), ...(checksFixes ? { checks_fixes: checksFixes } : {}), ...(syncFixes ? { sync_fixes: syncFixes } : {}), ...(verified ? { verified } : {}), ...(outsideFixes.length ? { outside_fixes: outsideFixes } : {}), ...(fr ? { final_reviewed: fr } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}), ...(reordered.length ? { reordered } : {}) } }
 }
 
 const haltTask = (n, stage, extra) => { const s = stop(stage, extra); return { ...s, cont: { ...s.cont, partial: n } } }
@@ -838,15 +842,19 @@ const PLAN_CODEX_OWNS = `The Codex plan review running beside you owns code corr
 // #819: the planner's own half of that check, the finding classes a planner can settle itself; never part of the reviewer's rubric.
 const PLAN_SELF_CHECK = `Also before you return: run every grep or deny gate a task prescribes against the text this plan requires and confirm it does not reject that text; for each invariant, threshold and decision a task states, name the test case that fails when that one rule is removed; one with no such case needs a test; and list for each new test or doc the CI workflow test list, the generated index and the project gate that must also change.`
 // The plan step's turn structure (#737, #819), first in the prompt: at least four lookups a message and writing by the twelfth, then one message of writes.
+// #967: the review-findings revise gets its own pace instead (one message that checks every finding, at most two more), never both.
 // No subagent grant: the Agent tool does not exist inside a workflow agent.
-const PLAN_LOOKUPS = `Procedure for this step. Look things up in rounds: put every open question's Bash or Read call in the same message as the others (several tool calls per message, never one small lookup per turn), send at least four lookups in each exploration message and start writing by your twelfth message. No subagent can be dispatched: the Agent tool does not exist in this step. Check against the tree yourself every path and symbol you write into a task.`
+const PLAN_PACE = `send at least four lookups in each exploration message and start writing by your twelfth message`
+const REVISE_PACE = `check every finding's claim in the first lookup message after the load below, one call per finding, and send at most two follow-up lookup messages before editing`
+const PLAN_LOOKUPS = pace => `Procedure for this step. Look things up in rounds: put every open question's Bash or Read call in the same message as the others (several tool calls per message, never one small lookup per turn), ${pace}. No subagent can be dispatched: the Agent tool does not exist in this step. Check against the tree yourself every path and symbol you write into a task.`
 const PLAN_WRITES = `Then write the code map, plan.md and every task file as parallel Write calls in one message (a second message only if the output limit forces it), then run any checks in one message.`
-const PLAN_EDITS = `This is a revision: first load plan.md, every task file and the code map with one command (cat ${setup.plan_dir}/*.md), then fix the findings with Edit in place, the independent Edit calls in one message; rewrite a whole file only when most of it changes; leave each acceptance criterion's text unchanged unless fixing a finding requires changing it. Then run any checks in one message.`
+// #967: parallel Read calls, since one cat of the plan directory overflows the Bash output cap.
+const PLAN_EDITS = `This is a revision: first list ${setup.plan_dir}/*.md and load them all as parallel Read calls in one message, then fix the findings with Edit in place, the independent Edit calls in one message; rewrite a whole file only when most of it changes; leave each acceptance criterion's text unchanged unless fixing a finding requires changing it. Then run any checks in one message.`
 const FACTS = present(setup.details) ? `\nSetup facts: ${setup.details}` : ''
 const KIND_GUIDE = `kind code if a test or command in this repo can show it, evidence if it needs a deploy, an activation or observation over time, human if only the user can judge, note if a decision makes a post-deploy reading the orchestrator's own observation or not a hold (no verify member, no script and no metric, R9 of ~/.agents/standards/acceptance-planning.md)`
 // #746 trial: only this plan step asks for test cases; writing-plans keeps full test code for its other callers until the trial reports.
 const TEST_CASES = `Task files of this plan step state each failing test as a case, not as code: its name, the arrange, the act, the exact assertion and the expected failure. This replaces writing-plans' "Write failing tests out in full." here; full test code stays only under its carve-out, where prose cannot preserve a decision (an exact wire format). The implementer writes the test code from the case.`
-const planPrompt = extra => `${PLAN_LOOKUPS} ${extra ? PLAN_EDITS : PLAN_WRITES}
+const planPrompt = (extra, pace = PLAN_PACE) => `${PLAN_LOOKUPS(pace)} ${extra ? PLAN_EDITS : PLAN_WRITES}
 ${CTX}
 ${TEST_CASES}
 Plan this issue. Read the issue (gh issue view ${ISSUE} --repo ${SLUG} --json title,body,comments) and the code it touches.${SPEC}${FACTS} Use the writing-plans skill for the plan's form only: its file location, size checks and reports do not apply here. Write the plan to ${setup.plan_dir}/plan.md and one task file per task beside it (${setup.plan_dir}/task-<n>.md); never commit them and never write under the project's artifact directories. Also write the code map ${CODE_MAP} for the agents after you, who read it before the code: per area the plan touches, list the files and symbols with line ranges, their tests and fixtures, the callers that matter and the facts you confirmed (for example a library's behaviour, with its source), each with a pointer (a path:line or a URL). Like the plan, it is never committed. On a revision, read it first and keep it true to the plan and the code. Do not build, prototype or run the change; confirming each task's failing test later is the implementers' job. If the issue needs a decision only the user can make (a preference, an irreversible or scope choice not settled by the issue, the spec, the repo's docs or ADRs), return status needs_user, never for an action that R8 of ~/.agents/standards/acceptance-planning.md says the delivery does itself, with questions, each {question, options}: every option one full sentence naming a real choice, a single option for a yes or no, and, when you would choose one option, recommended: its exact text; then stop. Otherwise return status planned with plan_root ${setup.plan_dir}/plan.md, the issue's acceptance criteria (${KIND_GUIDE}) and the task list in execution order with each task's file and a risk: security for authentication, permission or command guards, secrets, CI/CD or deploy config, data migrations; mechanical or low for small contained edits; else standard. When a task commits to a branch other than ${setup.branch}, declare it in branches as {name, worktree, base, head, current, toplevel, common_dir, clean}: only a branch already checked out in its own existing worktree other than ${W}, never ${INT} or ${setup.default_branch}; worktree as git -C <it> rev-parse --show-toplevel prints it, base the ref its changes are measured from, and ${BRANCH_FACTS}, and clean: true only when git -C <its worktree> status --porcelain prints nothing (a worktree with any staged, unstaged or untracked change is not declared); give each task that commits there branch: <name>. Classify and write every acceptance criterion by ~/.agents/standards/acceptance-planning.md (read it); set metric true on a cost, timing or rate threshold of a code, evidence or human criterion, never on a note (R9): an owner-designated observation stays a note even when it reads a cost, a time or a rate. Give every evidence or human criterion a verify member: one check of the verify block grammar with ac its id and kind its kind, writing any sha that will name the merge commit as the base sha ${setup.base_sha} (ship substitutes the merge commit); an unattended evidence command run must be one of ${JSON.stringify(VERIFY_IDS)}, else use a script or a probe. Lint each member alone: write {"v": 1, "merge": "${setup.base_sha}", "checks": [<that member>]} to a file in ${setup.plan_dir} and run verify-pending lint --input <that file> --repo-root ${W} --pr-branch ${setup.branch} plus one --pr-workflow <name> for each CI workflow that runs on this repository's pull requests; return the verdict as that criterion's lint. List in scripts each script path a verify run names that a task of this plan commits. Before you return, check the plan against the review it will get: ${PLAN_RUBRIC}; and every rule ${RULE_IDS[0]}-${RULE_IDS[RULE_IDS.length - 1]} of ~/.agents/standards/acceptance-planning.md (read it). ${PLAN_SELF_CHECK}${decisions.length ? `\nThe owner has answered the open decisions for this issue; they are binding: ${decisions.join('\n')} Do not ask them again; record them as decisions in the plan.` : ''}${extra || ''}
@@ -1159,7 +1167,7 @@ Review the implementation plan at ${plan.plan_root} (and its task files) against
   if (planFindings.length) {
     log(`plan review: ${planFindings.length} blocking findings, revising once`)
     const reviewedFacts = ruleFacts(plan), reviewedCriteria = plan.acceptance
-    const revised = await call(planPrompt(`\n${MAP_FIRST} A reviewer found these defects in your plan at ${plan.plan_root}; fix them in place and return the full result again, with criteria_edited: the ids of the criteria whose text you changed to fix a finding (typing the same criterion again in other words is not a change; an empty list when you changed none): ${JSON.stringify(planFindings)}`), { label: 'plan-revise', phase: 'Plan', agentType: 'planner', schema: PLAN_SCHEMA })
+    const revised = await call(planPrompt(`\n${MAP_FIRST} A reviewer found these defects in your plan at ${plan.plan_root}; fix them in place and return the full result again, with criteria_edited: the ids of the criteria whose text you changed to fix a finding (typing the same criterion again in other words is not a change; an empty list when you changed none): ${JSON.stringify(planFindings)}`, REVISE_PACE), { label: 'plan-revise', phase: 'Plan', agentType: 'planner', schema: PLAN_SCHEMA })
     const halted = await takePlan(revised, 'plan-revise')
     if (halted) return { ...halted, findings: planFindings }
     // #819: the restored candidate replaces the reply only when it makes the skip below fire; a renumbered, reused or duplicated id,
@@ -1367,18 +1375,28 @@ ${RULES}`, { label: 'final-codex', phase: 'Final review', agentType: 'clerk', mo
 const finals = await parallel(groups.map((g, gi) => () => call(`${CTX}
 ${PLAN_REF} Acceptance criteria: ${ACS}.
 Final review${chunked ? ` of chunk ${gi + 1}/${groups.length}: tasks ${g.map(t => t.n).join(', ')} only (their files: ${g.map(t => t.file).join(', ')}); grade only these tasks` : ' of the whole delivery'}: git -C ${W} diff ${RANGE}${chunked ? ' restricted to the paths these tasks own' : ''}.${EXTRA_RANGES()} ${KNOW} Two axes: correctness (real defects with a concrete failing input) and conformance (each task and each acceptance criterion of kind code is met, with the test or command that shows it). Report Important or Critical findings only. Do not edit anything.`, { label: `final-${gi + 1}`, phase: 'Final review', agentType: 'reviewer', schema: FINDINGS })))
+if (finals.some(r => !r)) {
+  await codexP
+  return stop('final-review', { details: 'a final reviewer returned nothing', finals })
+}
+// #967: the integration review reads only the chunk verdicts, so it runs beside Codex. It counts as dead only where its reply is read:
+// a Codex stop leaves it unused, and still running unread, on purpose: waiting for it would cost wall time for nothing.
+const integP = chunked ? call(`${CTX}
+${PLAN_REF} Integration review. The delivery was reviewed in ${groups.length} chunks by task; their verdicts: ${JSON.stringify(finals)}. Read the full changed-file list (git -C ${W} diff --stat ${RANGE}) and the head tree as needed.${EXTRA_RANGES()} ${KNOW} Check the interfaces between chunks and grade every acceptance criterion: ${ACS}. Report Important or Critical findings only.`, { label: 'final-integration', phase: 'Final review', agentType: 'reviewer', schema: FINDINGS }, true) : null
+if (integP) integP.catch(() => {})
 const codexR = await codexP
-if (finals.some(r => !r)) return stop('final-review', { details: 'a final reviewer returned nothing', finals })
 let finalFindings = finals.flatMap(findingsOf)
 if (REVIEW_CODE) {
   if (!codexR || !codexR.available) return stop('codex-unavailable', { step: 'code', details: codexWhy(codexR), codex: codexR })
   finalFindings = finalFindings.concat(findingsOf(codexR).map(f => ({ ...f, source: 'codex' })))
   log(`codex review: ${findingsOf(codexR).length} blocking findings`)
 }
-if (chunked) {
-  const integ = await call(`${CTX}
-${PLAN_REF} Integration review. The delivery was reviewed in ${groups.length} chunks by task; their verdicts: ${JSON.stringify(finals)}. Read the full changed-file list (git -C ${W} diff --stat ${RANGE}) and the head tree as needed.${EXTRA_RANGES()} ${KNOW} Check the interfaces between chunks and grade every acceptance criterion: ${ACS}. Report Important or Critical findings only.`, { label: 'final-integration', phase: 'Final review', agentType: 'reviewer', schema: FINDINGS })
-  if (!integ) return stop('final-review', { details: 'the integration reviewer returned nothing' })
+if (integP) {
+  const integ = await integP
+  if (!integ) {
+    DEAD.push('final-integration')
+    return stop('final-review', { details: 'the integration reviewer returned nothing' })
+  }
   finalFindings = finalFindings.concat(findingsOf(integ))
 }
 // #924: what an earlier fix-wave-review stop left open joins the fresh findings, a repeat (same file and summary) once.
@@ -1450,10 +1468,10 @@ if (present(tip)) finalReviewed = { head: tip, ...branchSnap(), ...(sizedWhole ?
 phase('Verify')
 const VERIFY = {
   type: 'object',
-  properties: { head: FULL_SHA, clean: { type: 'boolean' }, results: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, status: { type: 'string', enum: ['pass', 'fail', 'skipped'] }, summary: { type: 'string' } }, required: ['id', 'status', 'summary'] } } },
+  properties: { head: FULL_SHA, clean: { type: 'boolean' }, results: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, status: { type: 'string', enum: ['pass', 'fail', 'skipped'] }, summary: { type: 'string' }, outside_diff: { type: 'boolean' } }, required: ['id', 'status', 'summary'] } } },
   required: ['head', 'clean', 'results'],
 }
-const verifyBodyFor = entries => `Run the project's declared verification once on the worktree head, in the foreground, each command with a Bash timeout of up to 60 minutes: ${JSON.stringify(entries)}. Run each argv with <worktree>/<its cwd> as working directory. If an entry has when_changed globs and none of the files changed (git -C ${W} diff --no-renames --name-only ${RANGE}, so a rename lists both paths) match, mark it skipped with its skip_reason. Return head (git -C ${W} rev-parse HEAD, the full sha), clean (git -C ${W} status --porcelain is empty, checked before and after the runs) and one result per id; for failures, summarize the failing tests or errors precisely. Do not change any file.
+const verifyBodyFor = entries => `Run the project's declared verification once on the worktree head, in the foreground, each command with a Bash timeout of up to 60 minutes: ${JSON.stringify(entries)}. Run each argv with <worktree>/<its cwd> as working directory. If an entry has when_changed globs and none of the files changed (git -C ${W} diff --no-renames --name-only ${RANGE}, so a rename lists both paths) match, mark it skipped with its skip_reason. Return head (git -C ${W} rev-parse HEAD, the full sha), clean (git -C ${W} status --porcelain is empty, checked before and after the runs) and one result per id; for failures, summarize the failing tests or errors precisely. On each failure also return outside_diff: true only when no failing test file and no erroring file is in that git diff --name-only list, else false. Do not change any file.
 ${RULES}`
 const verifyBody = verifyBodyFor(setup.verification)
 const verifyPrompt = `${CTX}\n${verifyBody}`
@@ -1497,7 +1515,34 @@ git -C ${W} diff --no-renames --name-only ${f.start_head} ${f.commit}
 Return its output lines as changed_paths. Run nothing else.
 ${RULES}`
 const wsAsk = ws => ` The fix changes only whitespace amounts and blank lines, in ${ws.changed_paths.map(p => p.trim()).join(', ')}. Also judge whether each of its whitespace changes is insignificant: outside every string, template, character and regex literal, heredoc and raw block, and in no construct where whitespace changes behaviour or output. Return whitespace_insignificant true only when you read every hunk and that holds, with whitespace_evidence naming each changed path and why it holds there; otherwise false, with whitespace_evidence naming the hunk where it matters.`
+// #972: a failure the clerk places wholly outside the branch's changed files is rerun once, the failed ids only, before any fix step.
+// The rerun is each failed id's whole command, never a selection of its tests: a test the branch made order-dependent passes alone, and
+// a selection that matches nothing passes too.
+// A result that passes there is a pass that keeps the first failure as flaky; one that fails again stays the first failure.
+// Each verification gets at most this one rerun, and its reply counts only at the same clean head.
+const flakySeen = []
+// True when the last verification's one rerun ran at the same clean head and a failed id did not pass there: the failure is not a flake.
+let rerunFailed = false
+const noteFlaky = rs => { for (const r of Array.isArray(rs) ? rs : []) if (isEntry(r) && present(r.flaky) && !flakySeen.some(f => f.id === r.id && f.summary === r.flaky)) flakySeen.push({ id: r.id, summary: r.flaky }) }
+const rerunOnce = async (v, n) => {
+  rerunFailed = false
+  if (!v || !v.clean || !Array.isArray(v.results)) return v
+  const fails = verifyProblems(v)
+  if (!fails.length || !fails.every(p => p.status === 'fail' && p.outside_diff === true && VERIFY_IDS.includes(p.id))) return v
+  const ids = fails.map(p => p.id)
+  log(`verify: ${ids.join(', ')} failed outside the branch's changed files; one rerun before any fix`)
+  const again = await call(`${CTX}\nThe verification at ${v.head} failed, outside the files this branch changed: ${JSON.stringify(fails.map(p => ({ id: p.id, summary: p.summary })))}. Rerun each failed command below once, whole and exactly as declared, and never a second time, whatever the outcome.\n${verifyBodyFor(setup.verification.filter(e => ids.includes(e.id)))}`, { label: `verify-rerun-${n}`, phase: 'Verify', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: VERIFY })
+  if (!complete(again, VERIFY) || !again.clean || !Array.isArray(again.results) || !sameSha(again.head, v.head)) return v
+  const passed = id => { const rs = again.results.filter(r => r.id === id); return rs.length === 1 && rs[0].status === 'pass' ? rs[0] : null }
+  rerunFailed = ids.some(id => !passed(id))
+  const results = v.results.map(r => (ids.includes(r.id) && passed(r.id) ? { id: r.id, status: 'pass', summary: passed(r.id).summary, flaky: r.summary } : r))
+  for (const r of results) if (ids.includes(r.id) && present(r.flaky)) log(`verify: flaky, ${r.id} failed and passed on the one rerun: ${r.flaky}`)
+  noteFlaky(results)
+  return { ...v, results }
+}
+const FIX_OR_UNRELATED = { ...IMPL, properties: { ...IMPL.properties, outside_diff: { type: 'array', items: { type: 'object', properties: { file: { type: 'string' }, why: { type: 'string' } }, required: ['file', 'why'] } }, unrelated: { type: 'object', properties: { test: { type: 'string' }, evidence: { type: 'string' } }, required: ['test', 'evidence'] } } }
 let verify = VERIFY_CACHED ? { head: verified.head, clean: true, results: verified.results } : null
+if (VERIFY_CACHED) noteFlaky(verified.results)
 if (!VERIFY_CACHED) {
 verify = await recall(() => call(verifyFirst, { label: 'verify', phase: 'Verify', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: withRenew(VERIFY) }), r => r.renew)
 if (verify) {
@@ -1505,26 +1550,35 @@ if (verify) {
   if (lost) return lost
   if (!complete(verify, VERIFY)) verify = null
 }
+verify = await rerunOnce(verify, 1)
 let vRounds = 0
 while (verify && verifyProblems(verify).length && vRounds < 2) {
   vRounds++
-  const fix = await call(`${CTX}\n${PLAN_REF} The project's verification failed: ${JSON.stringify(verifyProblems(verify))}. Find the cause in this branch's changes (git -C ${W} diff ${RANGE}), fix it with the smallest change, commit. Never weaken, skip or delete a test to make it pass. ${OWN_TESTS} ${COMMIT_SCOPE} ${IMPL_RETURN}\n${RULES}`, { label: `verify-fix-${vRounds}`, phase: 'Verify', agentType: 'implementer', model: 'sonnet', schema: IMPL })
+  const fix = await call(`${CTX}\n${PLAN_REF} The project's verification failed: ${JSON.stringify(verifyProblems(verify).map(p => ({ id: p.id, status: p.status, summary: p.summary })))}.${rerunFailed ? ' It failed again on the one rerun at the same head, so it is not flaky.' : ''} Find the cause in this branch's changes (git -C ${W} diff ${RANGE}), fix it with the smallest change, commit. Never weaken, skip or delete a test to make it pass. When what fails lies outside that diff, first establish with evidence why it fails here: this branch's change, or this delivery's environment (the worktree path, the branch name). Only with that cause shown may you edit a file outside the diff, and then return outside_diff: [{file, why}], one entry per such file with the cause. With no cause established (it fails without this branch${rerunFailed ? '' : ', or it is flaky'}), change and commit nothing and return status blocked with unrelated {test, evidence}, evidence being what you ran or read: establish it by reading, or by running the test, never by checking out another commit in the worktree. ${OWN_TESTS} ${COMMIT_SCOPE} ${IMPL_RETURN}\n${RULES}`, { label: `verify-fix-${vRounds}`, phase: 'Verify', agentType: 'implementer', model: 'sonnet', schema: FIX_OR_UNRELATED })
+  // #972: a failure for which the fix step can establish no cause here (the branch's change or the delivery's environment) is not edited
+  // green: the delivery stops naming the test, and nothing ships. A fix outside the diff with a stated cause goes on, flagged (outsideFixes).
+  if (fix && isEntry(fix.unrelated) && present(fix.unrelated.test) && present(fix.unrelated.evidence)) {
+    const stray = present(fix.commit) && present(fix.start_head) && !sameSha(fix.commit, fix.start_head) ? fix.commit : null
+    return stop('verify-unrelated', { details: `${String(fix.unrelated.test).slice(0, 120)} fails outside this branch's diff, so ${stray ? `it is not shipped (the fix step still committed ${stray}, unreviewed)` : 'no fix was made'}: ${fix.unrelated.evidence}`, unrelated: { test: fix.unrelated.test, evidence: fix.unrelated.evidence }, ...(stray ? { commit: stray } : {}), verify })
+  }
   if (!implDone(fix)) return stop('verify-fix', { verify, fix })
+  const outside = outsideOf(fix.outside_diff)
+  for (const o of outside) { if (!outsideFixes.some(x => x.file === o.file && x.why === o.why)) outsideFixes.push(o); log(`verify-fix-${vRounds}: edited ${o.file}, outside the branch's diff: ${o.why}`) }
   const pre = rerunIds(verify, fix)
   const ws = pre ? await call(wsCheckPrompt(fix), { label: `ws-check-${vRounds}`, phase: 'Verify', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: WS_CHECK }) : null
   const asked = pre && wsOnly(ws) ? pre : null
-  const fr = await call(`${CTX}\nReview this verification fix: ${span(fix)}; the failure it answers: ${JSON.stringify(verifyProblems(verify))}; notes: ${fix.notes}. Report Important or Critical defects only, above all a weakened, skipped or deleted test or check.${asked ? wsAsk(ws) : ''}`, { label: `verify-fix-review-${vRounds}`, phase: 'Verify', agentType: 'reviewer', schema: asked ? WS_REVIEW : FINDINGS })
+  const fr = await call(`${CTX}\nReview this verification fix: ${span(fix)}; the failure it answers: ${JSON.stringify(verifyProblems(verify))}; notes: ${fix.notes}. Report Important or Critical defects only, above all a weakened, skipped or deleted test or check.${outside.length ? ` It edits files outside the branch's diff, each for a stated cause: ${JSON.stringify(outside)}; a cause the code or the failure does not bear out is an Important defect.` : ''}${asked ? wsAsk(ws) : ''}`, { label: `verify-fix-review-${vRounds}`, phase: 'Verify', agentType: 'reviewer', schema: asked ? WS_REVIEW : FINDINGS })
   if (!fr || findingsOf(fr).length) return stop('verify-fix-review', { review: fr })
   const rerun = asked && attested(fr) ? asked : null
   const next = await call(rerun ? `${CTX}\nA whitespace-only fix followed the verification at ${verify.head}; the declared ids not listed below passed there and are carried forward, so run only the listed ones.\n${verifyBodyFor(setup.verification.filter(e => rerun.includes(e.id)))}` : verifyPrompt, { label: `verify-${vRounds + 1}`, phase: 'Verify', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: VERIFY })
   if (rerun && next && !sameSha(next.head, fix.commit)) return stop('verify', { verify: next, problems: [{ id: '?', summary: `the narrowed verification ran at ${next.head}, not at the whitespace-only fix ${fix.commit}, so no result was carried` }] })
-  verify = rerun && next && Array.isArray(next.results) ? carry(verify, next, rerun) : next
+  verify = await rerunOnce(rerun && next && Array.isArray(next.results) ? carry(verify, next, rerun) : next, vRounds + 1)
 }
 }
 if (verifyProblems(verify).length) return stop('verify', { verify, problems: verifyProblems(verify) })
 if (MODE === 'ready') {
   verified = { head: verify.head, results: verify.results, contract: VERIFY_CONTRACT, ...branchSnap() }
-  return stop('ready', { head: verify.head, branch: setup.branch, worktree: W, verify: verify.results, tasks: taskLog, ...(reordered.length ? { reordered } : {}), acceptance: plan.acceptance, fix_waves: fixWaves })
+  return stop('ready', { head: verify.head, branch: setup.branch, worktree: W, verify: verify.results, ...(flakySeen.length ? { flaky: flakySeen } : {}), ...(outsideFixes.length ? { outside_fixes: outsideFixes } : {}), tasks: taskLog, ...(reordered.length ? { reordered } : {}), acceptance: plan.acceptance, fix_waves: fixWaves })
 }
 
 // ---------------- Ship ----------------
@@ -1635,7 +1689,7 @@ const landBody = async () => {
   lockSha = expected
   const prR = await recall(() => call(`${CTX}
 ${RENEW_FIRST}
-Then open the pull request for this branch. Push the branch (git -C ${W} push origin ${setup.branch}). If an open PR with head ${setup.branch} already exists (a resumed delivery), reuse it; else open one against ${INT}. Title: a short summary of the issue. Body, plain prose, no single or double quotes, dollar signs, backticks or backslashes: sections Why, What changes, Acceptance (a table with one row per criterion: id, criterion, kind, and the test or command that shows it; criteria ${ACS}), Evidence (verification ${JSON.stringify(verify.results)}; ${taskLog.length} tasks reviewed; ${LANE === 'direct' ? 'direct-lane review' : 'final review ' + (chunked ? 'chunked' : 'whole')}${REVIEW_CODE ? ' plus the configured independent review' : ''}), Merge danger; then the line ${closesLine} as the last line, with no attribution or generated-by line. Never attach or link the plan or the spec. Return pr (number) and head (full sha of the pushed head).
+Then open the pull request for this branch. Push the branch (git -C ${W} push origin ${setup.branch}). If an open PR with head ${setup.branch} already exists (a resumed delivery), reuse it; else open one against ${INT}. Title: a short summary of the issue. Body, plain prose, no single or double quotes, dollar signs, backticks or backslashes: sections Why, What changes, Acceptance (a table with one row per criterion: id, criterion, kind, and the test or command that shows it; criteria ${ACS}), Evidence (verification ${JSON.stringify(verify.results)}${outsideFixes.length ? `; verification fixes outside the branch's diff, each with its cause: ${JSON.stringify(outsideFixes)}` : ''}; ${taskLog.length} tasks reviewed; ${LANE === 'direct' ? 'direct-lane review' : 'final review ' + (chunked ? 'chunked' : 'whole')}${REVIEW_CODE ? ' plus the configured independent review' : ''}), Merge danger; then the line ${closesLine} as the last line, with no attribution or generated-by line. Never attach or link the plan or the spec. Return pr (number) and head (full sha of the pushed head).
 Then, ${PROBE(W, INT)}
 Otherwise take the cross-host landing lock of the branch ${INT} for that PR at the verified head ${expected}: run alone and exactly: ${LAND_ACQUIRE(expected, true)}
 ${LOCK_RETURN} Return it as lock; when no PR was opened or reused, run neither the probe nor a lock command and return probe null and lock null. Then, only when lock's verdict is acquired, already_held or moved and the pushed head is ${expected}, wait ${CHECKS_WAIT('<the PR number>')} Return those fields as checks; otherwise run nothing more and return checks null.
@@ -1905,4 +1959,4 @@ try {
   if (landRelease && (landRelease.verdict === 'released' || landRelease.verdict === 'not_held')) lockHeld = false
   released = await unlock()
 }
-return finished.stage === 'done' ? { ...finished, chunked, syncs, verify: verify.results, ...released } : { ...finished, ...released }
+return finished.stage === 'done' ? { ...finished, chunked, syncs, verify: verify.results, ...(flakySeen.length ? { flaky: flakySeen } : {}), ...(outsideFixes.length ? { outside_fixes: outsideFixes } : {}), ...released } : { ...finished, ...released }

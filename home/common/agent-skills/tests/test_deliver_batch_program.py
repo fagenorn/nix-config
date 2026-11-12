@@ -954,6 +954,77 @@ def object_branch(schema):
     return schema
 
 
+class FlakyVerificationRowTest(unittest.TestCase):
+    """#972: a check the child saw fail and pass on its one rerun is named on the issue's row and in the log."""
+
+    FLAKY = [{"id": "build", "summary": "tests/http_client.test.ts > retries: timed out"}]
+
+    def test_a_landed_row_names_the_flaky_test(self):
+        out = run_full(children={"1": dict(ready(1), flaky=self.FLAKY)})
+        row = out["result"]["table"][0]
+        self.assertEqual((row["outcome"], row["flaky"]), ("landed", self.FLAKY))
+        self.assertIn("#1: flaky verification, passed on the one rerun: build: tests/http_client.test.ts > retries: timed out",
+                      out["logs"])
+
+    def test_a_row_without_a_flaky_check_carries_no_member(self):
+        out = run_full(children={"1": dict(ready(1), flaky=[{"id": "build"}, "x"])})
+        self.assertNotIn("flaky", out["result"]["table"][0])
+        self.assertNotIn("flaky", run_full()["result"]["table"][0])
+
+    OUT = [{"file": "tests/http_client.test.ts", "why": "the sentinel s-1 occurs in the worktree path"}]
+
+    def test_a_landed_row_and_its_pr_name_the_out_of_diff_fix_and_its_cause(self):
+        out = run_full(children={"1": dict(ready(1), outside_fixes=self.OUT)})
+        row = out["result"]["table"][0]
+        self.assertEqual((row["outcome"], row["outside_fixes"]), ("landed", self.OUT))
+        self.assertIn("#1: the verification fix edited outside the branch's diff: tests/http_client.test.ts: "
+                      "the sentinel s-1 occurs in the worktree path", out["logs"])
+        pr = [c["prompt"] for c in out["calls"] if c["label"] == "land-pr-1"][-1]
+        self.assertIn("verification fixes outside the branch's diff, each with its cause", pr)
+        self.assertIn("the sentinel s-1 occurs in the worktree path", pr)
+        for malformed in ([{"file": "a.ts"}, {"why": "w"}, {"file": "", "why": "w"}, "a.ts", None], "a.ts"):
+            with self.subTest(malformed=malformed):
+                bad = run_full(children={"1": dict(ready(1), outside_fixes=malformed)})
+                self.assertNotIn("outside_fixes", bad["result"]["table"][0])
+                self.assertNotIn("outside the branch's diff", [c["prompt"] for c in bad["calls"] if c["label"] == "land-pr-1"][-1])
+        mixed = run_full(children={"1": dict(ready(1), outside_fixes=[{"file": "a.ts"}] + self.OUT)})
+        self.assertEqual(mixed["result"]["table"][0]["outside_fixes"], self.OUT)
+        plain = run_full()
+        self.assertNotIn("outside_fixes", plain["result"]["table"][0])
+        self.assertNotIn("outside the branch's diff", [c["prompt"] for c in plain["calls"] if c["label"] == "land-pr-1"][-1])
+
+    REASON = "verify-unrelated: tests/http_client.test.ts > retries fails outside this branch's diff, so no fix was made: fails at origin/dev"
+    UNRELATED = {"test": "tests/http_client.test.ts > retries", "evidence": "fails at origin/dev"}
+
+    def test_an_unrelated_verification_failure_is_an_owner_action_and_is_not_relaunched(self):
+        stop = {"stage": "verify-unrelated", "reason": self.REASON, "unrelated": self.UNRELATED, "cont": reviewed(1)}
+        result, _, _ = run(children={"1": stop})
+        row = result["table"][0]
+        self.assertEqual((row["outcome"], row["stage"], row["reason"]), ("stopped", "verify-unrelated", self.REASON))
+        self.assertIsNone(result["relaunch"])
+        action = [a for a in result["owner_actions"] if a["issue"] == 1]
+        self.assertEqual(len(action), 1)
+        self.assertEqual({k: action[0][k] for k in ("reason", "test", "evidence", "claim", "holder")},
+                         dict(self.UNRELATED, reason="unrelated", claim="held", holder=HOLDER))
+        self.assertEqual(action[0]["cont"]["plan"], reviewed(1)["plan"])
+
+    def test_only_the_unrelated_issue_leaves_the_relaunch(self):
+        stop = {"stage": "verify-unrelated", "reason": self.REASON, "unrelated": self.UNRELATED, "cont": reviewed(1)}
+        other = {"stage": "verify", "reason": "verify: build: boom", "cont": reviewed(2)}
+        result, _, _ = run(args=dict(ARGS, issues=[1, 2]), children={"1": stop, "2": other})
+        self.assertEqual(result["relaunch"]["issues"], [2])
+        self.assertEqual(list(result["relaunch"]["conts"]), ["2"])
+        self.assertEqual([a["issue"] for a in result["owner_actions"] if a["reason"] == "unrelated"], [1])
+
+    def test_a_verify_unrelated_stop_that_names_no_test_stays_an_open_row(self):
+        for unrelated in (None, {"test": ""}, "t"):
+            with self.subTest(unrelated=unrelated):
+                stop = {"stage": "verify-unrelated", "reason": self.REASON, "unrelated": unrelated, "cont": reviewed(1)}
+                result, _, _ = run(children={"1": stop})
+                self.assertIn("1", result["relaunch"]["conts"])
+                self.assertEqual([a for a in result["owner_actions"] if a.get("reason") == "unrelated"], [])
+
+
 def run_child(args, replies=None, patch=None):
     node = shutil.which("node")
     if node is None:
@@ -4233,7 +4304,7 @@ class TrainTest(unittest.TestCase):
         self.assertNotIn("issue-1-x", prompt(calls, "train-sweep-1"))
         checks = prompt(calls, "train-checks-1-2")
         self.assertIn(f"at the car head {X2}", checks)
-        self.assertIn("25 minutes", checks)
+        self.assertIn("40 minutes after this step began", checks)
         self.assertNotIn("60 minutes", checks)
         for label in ("train-checks-1-1", "train-checks-1-2"):
             own = step_text(calls, label)
@@ -4334,7 +4405,8 @@ class TrainTest(unittest.TestCase):
         self.assertEqual(train_labels(calls), [])
         self.assertEqual([row(result, n)["outcome"] for n in (1, 2)], ["landed", "landed"])
 
-    def test_a_red_car_two_among_three_merges_car_one_and_lands_the_rest_serially(self):
+    def test_a_red_car_two_among_three_merges_car_one_and_lands_the_rest_after_it(self):
+        # #971: the two issues the train dropped land together, issue 3 riding behind issue 2's own landing.
         result, calls, _ = train_run(issues=(1, 2, 3), replies={"train-checks-1-2": {"state": "failed", "head": X2, "failing": ["ci"]}},
                                      patch={"land-pr-2": {"checks": {"state": "behind", "head": SHA}}})
         order = land_labels(calls)
@@ -4343,12 +4415,13 @@ class TrainTest(unittest.TestCase):
             "train-checks-1-1", "train-checks-1-2", "train-checks-1-3", "train-ready-1"])
         self.assertIn(f"gh pr merge 91 --repo owner/repo --merge --match-head-commit {X1} --delete-branch", prompt(calls, "train-merge-1"))
         self.assertEqual(order[order.index("train-merge-1") + 1:], [
-            "close-out-1", "train-sweep-2", "land-pr-2", "land-sync-2-1", "land-checks-2-2", "land-merge-2", "close-out-2",
-            "land-pr-3", "land-merge-3", "close-out-3"])
+            "close-out-1", "train-sweep-2", "land-pr-2", "train-pr-3", "train-build-2", "train-checks-2-1", "train-checks-2-2",
+            "train-ready-2", "train-merge-2", "close-out-2", "train-sweep-3", "close-out-3"])
         self.assertEqual([m["issue"] for m in members_of(calls, "train-ready-1")], [1])
+        self.assertEqual([m["issue"] for m in members_of(calls, "train-build-2")], [2, 3])
         self.assertEqual(row(result, 1), {"issue": 1, "outcome": "landed", "pr": 41, "train": 1, "car_pr": 91})
-        self.assertEqual(row(result, 2), {"issue": 2, "outcome": "landed", "pr": 42})
-        self.assertEqual(row(result, 3), {"issue": 3, "outcome": "landed", "pr": 43})
+        self.assertEqual(row(result, 2), {"issue": 2, "outcome": "landed", "pr": 42, "train": 2, "car_pr": 92})
+        self.assertEqual(row(result, 3), {"issue": 3, "outcome": "landed", "pr": 43, "train": 2, "car_pr": 92})
         self.assertEqual(lock_releases(calls), ["close-out-1"])
 
     def test_a_pending_or_wrong_head_or_undeclared_car_is_not_green(self):
@@ -4483,8 +4556,10 @@ class TrainTest(unittest.TestCase):
         self.assertEqual(order[order.index("train-build-1") + 1:order.index("train-merge-1")],
                          ["train-checks-1-1", "train-checks-1-2", "train-checks-1-1-more", "train-ready-1"])
         first, more = step_text(calls, "train-checks-1-1"), step_text(calls, "train-checks-1-1-more")
-        self.assertIn("6 minutes at most and stop waiting 6 minutes after this step began", more)
-        self.assertEqual(more, first.replace("25 minutes", "6 minutes"))
+        self.assertIn("Give each watch a Bash timeout of 6 minutes at most", more)
+        self.assertIn("or 6 minutes after this step began", more)
+        self.assertEqual(more, first.replace("Give each watch a Bash timeout of 15 minutes", "Give each watch a Bash timeout of 6 minutes")
+                         .replace("or 40 minutes after this step began", "or 6 minutes after this step began"))
         self.assertIn("gh pr merge 92 ", prompt(calls, "train-merge-1"))
         for n, pr in ((1, 41), (2, 42)):
             self.assertEqual(row(result, n), {"issue": n, "outcome": "landed", "pr": pr, "train": 1, "car_pr": 92})
@@ -5419,3 +5494,254 @@ class ResolveBeforeLockTrainTest(unittest.TestCase):
 
 def land_labels_calls(calls):
     return [c for c in calls if c["label"].startswith(("land-", "close-out-"))]
+
+
+# #971: car 2 of the first train is red, so the train lands issue 1 alone and drops issue 2.
+RED_CAR_TWO = {"state": "failed", "head": X2, "failing": ["ci"]}
+BEHIND_POLL = {"checks": {"state": "behind", "head": SHA}}
+JOIN_LOG_OF = "#{}: {} became ready while it waited for the land lock; they land with it as a train"
+OBSERVED_CHECKS_MIN = 31
+LOCK_IDLE_MIN = 45
+# Turns after which a child returns while land-pr-3 is held: later than everything the first two trains ran.
+AFTER_SECOND_TRAIN = 200
+
+
+def dropped_run(issues=(1, 2, 3), replies=None, patch=None, turns=None, delays=None):
+    """Issues 1 and 2 train together and car 2 is red; issue 3 (and any later one, unless `turns` says otherwise) becomes ready
+    before issue 2's own landing has the lock."""
+    issues = list(issues)
+    merged = {"setup": {"max_parallel": len(issues)}, **BEHIND, "land-pr-2": BEHIND_POLL, **(patch or {})}
+    return run_full(args={**ARGS, "issues": issues, "train": True}, replies={"train-checks-1-2": RED_CAR_TWO, **(replies or {})}, patch=merged,
+                    turns={**{f"{n}:ready": DURING_WAIT for n in issues[2:]}, **(turns or {})}, delays={"land-pr-2": LOCK_WAIT, **(delays or {})})
+
+
+def wait_of(text):
+    """What a train checks step states of its wait, in minutes: how long after a refresh the next one is due before a watch, the longest
+    watch, and the whole wait."""
+    found = re.search(r"before a later watch once (\d+) minutes or more have passed since the last refresh: .*? Give each watch a Bash timeout "
+                      r"of (\d+) minutes at most, .*? Stop waiting when no check is pending any more, or (\d+) minutes after this step began", text, re.S)
+    if not found:
+        raise AssertionError(f"no timed wait in: {text}")
+    return int(found[1]), int(found[2]), int(found[3])
+
+
+def builds_of(calls):
+    """The issues of every train that built cars, in order."""
+    return [[m["issue"] for m in members_of(calls, label)] for label in labels(calls) if label.startswith("train-build-")]
+
+
+class TrainPathTest(unittest.TestCase):
+    """#971: a dropped member takes joiners, the first checks wait covers the full suite, and the wait keeps the lock fresh."""
+
+    def test_a_dropped_member_that_reaches_the_lock_with_another_issue_ready_lands_it_as_a_train(self):
+        out = dropped_run()
+        result, calls = out["result"], out["calls"]
+        order = land_labels(calls)
+        # Train 1 landed issue 1 through car 1 and dropped issue 2, whose own landing then waited for the lock.
+        self.assertIn("gh pr merge 91 ", prompt(calls, "train-merge-1"))
+        self.assertLess(order.index("close-out-1"), order.index("land-pr-2"))
+        # Issue 3 was ready by the end of that wait: it never gets a landing of its own and rides a train behind issue 2.
+        self.assertEqual(join_logs(out), [JOIN_LOG_OF.format(2, "#3")])
+        self.assertEqual(builds_of(calls), [[1, 2], [2, 3]])
+        self.assertNotIn("land-pr-3", labels(calls))
+        self.assertEqual(order[order.index("land-pr-2"):], [
+            "land-pr-2", "train-pr-3", "train-build-2", "train-checks-2-1", "train-checks-2-2", "train-ready-2", "train-merge-2",
+            "close-out-2", "train-sweep-3", "close-out-3"])
+        # Two lock holds, each released once: train 1's by issue 1, train 2's by issue 2.
+        self.assertEqual(waited_acquires(calls), ["land-pr-1", "land-pr-2"])
+        self.assertEqual(land_release_shas(calls), [SHA, SHA])
+        self.assertEqual(lock_releases(calls, 2), ["close-out-2"])
+        self.assertEqual(row(result, 1), {"issue": 1, "outcome": "landed", "pr": 41, "train": 1, "car_pr": 91})
+        self.assertEqual(row(result, 2), {"issue": 2, "outcome": "landed", "pr": 42, "train": 2, "car_pr": 92})
+        self.assertEqual(row(result, 3), {"issue": 3, "outcome": "landed", "pr": 43, "train": 2, "car_pr": 92})
+        self.assertIsNone(result["relaunch"])
+
+    def test_a_dropped_member_takes_joiners_by_the_limits_of_a_lone_landing(self):
+        """The #936 rule, unchanged: up to two valid issues join, and a third lands in its own drain."""
+        out = dropped_run(issues=(1, 2, 3, 4, 5))
+        result, calls = out["result"], out["calls"]
+        self.assertEqual(join_logs(out), [JOIN_LOG_OF.format(2, "#3, #4")])
+        self.assertEqual(builds_of(calls), [[1, 2], [2, 3, 4]])
+        self.assertEqual(row(result, 5), {"issue": 5, "outcome": "landed", "pr": 45})
+        odd = ready(3, acceptance=[{"id": "AC1", "text": "works", "kind": "vibes"}])
+        out = run_full(args={**ARGS, "issues": [1, 2, 3, 4], "train": True}, replies={"train-checks-1-2": RED_CAR_TWO},
+                       patch={"setup": {"max_parallel": 4}, **BEHIND, "land-pr-2": BEHIND_POLL},
+                       children={"1": ready(1), "2": ready(2), "3": odd, "4": ready(4)},
+                       turns={"3:plan": DURING_WAIT, "4:plan": DURING_WAIT}, delays={"land-pr-2": LOCK_WAIT})
+        self.assertEqual(join_logs(out), [JOIN_LOG_OF.format(2, "#4")])
+        self.assertEqual(builds_of(out["calls"]), [[1, 2], [2, 4]])
+        self.assertEqual((row(out["result"], 3)["outcome"], row(out["result"], 3)["stage"]), ("stopped", "plan"))
+
+    def test_a_dropped_member_with_nothing_ready_lands_alone_as_before(self):
+        out = dropped_run(issues=(1, 2))
+        result, calls = out["result"], out["calls"]
+        self.assertEqual(join_logs(out), [])
+        self.assertEqual(builds_of(calls), [[1, 2]])
+        order = land_labels(calls)
+        self.assertEqual(order[order.index("land-pr-2"):], ["land-pr-2", "land-sync-2-1", "land-checks-2-2", "land-merge-2", "close-out-2"])
+        self.assertEqual(row(result, 2), {"issue": 2, "outcome": "landed", "pr": 42})
+
+    def test_a_member_dropped_from_train_after_train_still_ends_the_run(self):
+        # Every train's second car is red: train 1 drops issue 2, which leads train 2 and drops issue 3, which leads train 3 and drops issue 4.
+        red = {f"train-checks-{t}-2": RED_CAR_TWO for t in (2, 3)}
+        out = dropped_run(issues=(1, 2, 3, 4), replies=red, patch={"land-pr-3": BEHIND_POLL},
+                          turns={"4:ready": AFTER_SECOND_TRAIN}, delays={"land-pr-3": AFTER_SECOND_TRAIN + LOCK_WAIT})
+        result, calls = out["result"], out["calls"]
+        self.assertEqual(ready_during(out, 4), "land-pr-3")
+        self.assertEqual(join_logs(out), [JOIN_LOG_OF.format(2, "#3"), JOIN_LOG_OF.format(3, "#4")])
+        self.assertEqual(builds_of(calls), [[1, 2], [2, 3], [3, 4]])
+        # The chain ends by itself: the last issue dropped finds nothing left to join it and lands alone.
+        self.assertEqual(labels(calls).count("land-pr-4"), 1)
+        self.assertEqual([row(result, n)["outcome"] for n in (1, 2, 3, 4)], ["landed"] * 4)
+        self.assertEqual([row(result, n).get("train") for n in (1, 2, 3, 4)], [1, 2, 3, None])
+        self.assertEqual(land_release_shas(calls), [SHA] * 4)
+        self.assertIsNone(result["relaunch"])
+
+    def test_both_observed_trains_pass_within_the_first_wait(self):
+        """The first two real trains needed about 31 minutes of car checks: the first wait covers that with margin, in one step."""
+        _, calls, _ = train_run()
+        for label in ("train-checks-1-1", "train-checks-1-2"):
+            with self.subTest(label=label):
+                _, watch, whole = wait_of(step_text(calls, label))
+                self.assertGreaterEqual(whole, OBSERVED_CHECKS_MIN + 5)
+                self.assertLessEqual(watch, 60)  # the Bash tool's longest timeout
+        self.assertEqual([l for l in labels(calls) if l.startswith("train-checks-")], ["train-checks-1-1", "train-checks-1-2"])
+        # The further wait stays the fallback, once per train.
+        late = {"state": "pending", "head": X1, "pending": ["e2e"]}
+        _, calls, _ = train_run(replies={"train-checks-1-1": late})
+        self.assertEqual([l for l in labels(calls) if l.endswith("-more")], ["train-checks-1-1-more"])
+        self.assertEqual(wait_of(step_text(calls, "train-checks-1-1-more"))[1:], (6, 6))
+
+    def test_time_is_the_only_stop_of_a_checks_wait(self):
+        """A watch returns at once while a pull request has no check yet, and on a gh error: counting watches would end the wait early."""
+        late = {"state": "pending", "head": X1, "pending": ["e2e"]}
+        _, calls, _ = train_run(replies={"train-checks-1-1": late})
+        for label, minutes in (("train-checks-1-1", 40), ("train-checks-1-2", 40), ("train-checks-1-1-more", 6)):
+            with self.subTest(label=label):
+                own = step_text(calls, label)
+                self.assertIn("time is the only stop of this wait: read the clock with date +%s when this step begins and again before each watch", own)
+                self.assertIn(f"Stop waiting when no check is pending any more, or {minutes} minutes after this step began, whatever is still pending then", own)
+                self.assertIn("A watch that returns while a check is still pending, or that reports no check in the first 5 minutes of this step "
+                              "(later too when the forge requires a check), is run again once you have read the list again.", own)
+                for counted in ("round", "times at most", "watches at most", "at most twice"):
+                    self.assertNotIn(counted, own)
+                self.assertEqual(re.findall(r"\b\d+ (?:watches|rounds|times|calls)\b", own), [])
+
+    def test_a_watch_that_reports_no_check_is_pending_while_a_declared_check_is_missing(self):
+        """With no declared check, a pull request that still shows none after 5 minutes has none; with declared checks it is pending."""
+        declared = {"setup": {"max_parallel": 2, "required_checks": ["gate"]},
+                    **{f"train-checks-1-{i}": {"required": ["gate"], "passed": ["gate"]} for i in (1, 2)}}
+        _, calls, _ = train_run(patch=declared)
+        own = step_text(calls, "train-checks-1-1")
+        self.assertIn("or that reports no check (the declared checks are then pending), is run again once you have read the list again.", own)
+        self.assertNotIn("in the first 5 minutes of this step", own)
+        self.assertIn('as JSON: ["gate"]', own)
+
+    def test_a_checks_step_starts_a_watch_at_most_once_a_minute(self):
+        """A watch that returns at once (no check yet, a gh error) must not spin: the step's own one-minute wait absorbs it."""
+        late = {"state": "pending", "head": X1, "pending": ["e2e"]}
+        _, calls, _ = train_run(replies={"train-checks-1-1": late})
+        for label in ("train-checks-1-1", "train-checks-1-2", "train-checks-1-1-more"):
+            with self.subTest(label=label):
+                own = step_text(calls, label)
+                self.assertIn("Start a watch at most once a minute: when the last one started less than a minute ago, first run alone "
+                              "timeout 60 tail -f /dev/null, this step's own wait, which ends by itself with exit 124.", own)
+                self.assertNotIn("sleep", own)
+
+    def test_the_lock_is_refreshed_by_time_while_a_checks_step_waits(self):
+        """The lock is never idle for the takeover bound while a train waits for checks: every checks step, the further wait included,
+        refreshes it at the sha it is held at before its first watch and then by the clock, and reports what the refreshes answered."""
+        late = {f"train-checks-1-{i}": {"state": "pending", "head": head, "pending": ["e2e"]} for i, head in ((1, X1), (2, X2))}
+        _, calls, _ = train_run(replies=late)
+        waits = [l for l in labels(calls) if l.startswith("train-checks-")]
+        self.assertEqual(waits, ["train-checks-1-1", "train-checks-1-2", "train-checks-1-1-more", "train-checks-1-2-more"])
+        refresh = f"forge-claim land refresh --repo owner/repo --branch dev --sha {SHA} When it prints the verdict not_held the lock is lost"
+        for label in waits:
+            with self.subTest(label=label):
+                own = step_text(calls, label)
+                self.assertEqual(own.count("forge-claim land"), 1)
+                self.assertIn(f"run alone and exactly, with a Bash timeout of 5 minutes: {refresh}", own)
+                self.assertIn("Refresh it before the first watch, and before a later watch once 7 minutes or more have passed since the last refresh", own)
+                self.assertIn(f"takes over after {LOCK_IDLE_MIN} minutes without a refresh", own)
+                # The largest gap between two refreshes: a watch started just before the next was due, run to its timeout, then the
+                # refresh itself (5 minutes at most). It is well inside the takeover bound.
+                due, watch, _ = wait_of(own)
+                self.assertLessEqual(watch, 15)
+                self.assertLessEqual(due + watch + 5, 27)
+                self.assertLess(due + watch + 5, LOCK_IDLE_MIN - 15)
+                self.assertEqual(set(schema_of(calls, label)["properties"]["refresh"]["properties"]), {"last", "refreshed"})
+                self.assertIn("Also return refresh: last (the verdict the last refresh printed, or error when it printed none) and refreshed", own)
+        # The refreshed sha is the one the lock is held at: the sha the train merge re-checks.
+        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {SHA}\n", prompt(calls, "train-merge-1"))
+        # Without the refresh the two waits alone would outlast the bound.
+        first, more = (wait_of(step_text(calls, label))[2] for label in ("train-checks-1-1", "train-checks-1-1-more"))
+        self.assertGreater(first + more, LOCK_IDLE_MIN)
+
+    def test_a_checks_step_that_reports_no_refresh_is_logged(self):
+        quiet = {"state": "passed", "head": X1, "required": ["ci"], "passed": ["ci"]}
+        failing = dict(quiet, refresh={"last": "error", "refreshed": 0})
+        for name, reply, line in (("none", quiet, "train-checks-1-1: the step reported no refresh of the land lock"),
+                                  ("error", failing, "train-checks-1-1: the step reported no refresh of the land lock (the last answered error)")):
+            with self.subTest(name=name):
+                out = run_full(args=dict(ARGS, issues=[1, 2], train=True), replies={"train-checks-1-1": reply}, patch={"setup": {"max_parallel": 2}, **BEHIND})
+                self.assertEqual([l for l in out["logs"] if "reported no refresh" in l], [line])
+                self.assertEqual([row(out["result"], n).get("car_pr") for n in (1, 2)], [92, 92])
+        fine = run_full(args=dict(ARGS, issues=[1, 2], train=True), patch={"setup": {"max_parallel": 2}, **BEHIND})
+        self.assertEqual([l for l in fine["logs"] if "reported no refresh" in l], [])
+
+    def test_a_lock_lost_during_the_checks_wait_lands_every_member_serially(self):
+        """A refresh that answers not_held ends the wait: the train sweeps and falls back, its first landing waits for the lock again
+        and polls its own checks, and nobody is marked land-contended."""
+        lost = {"state": "failed", "head": X2, "details": "lock lost", "refresh": {"last": "not_held", "refreshed": 2}}
+        for name, replies in (("first wait", {"train-checks-1-2": lost}),
+                              ("further wait", {"train-checks-1-2": {"state": "pending", "head": X2, "pending": ["e2e"]}, "train-checks-1-2-more": lost})):
+            with self.subTest(name=name):
+                out = run_full(args=dict(ARGS, issues=[1, 2], train=True), replies=replies, patch={"setup": {"max_parallel": 2}, **BEHIND})
+                result, calls = out["result"], out["calls"]
+                order = land_labels(calls)
+                self.assertIn("train 1: the land lock was lost while the cars waited for their checks; its issues land serially", out["logs"])
+                self.assertIn("#1: the land lock was lost during the train; waiting for it again", out["logs"])
+                # Car 1 was green, and still nothing merges through the train: the lock it would merge under is gone.
+                self.assertNotIn("train-ready-1", order)
+                self.assertNotIn("train-merge-1", order)
+                tail = ["train-sweep-2", "land-lock-1-1", "land-checks-1-1", "land-merge-1", "close-out-1", "land-pr-2", "land-merge-2", "close-out-2"]
+                self.assertEqual(order[-len(tail):], tail)
+                relock = prompt(calls, "land-lock-1-1")
+                self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {SHA} --wait\n", relock)
+                self.assertIn("another landing took it over while this one waited for the checks of a landing train", relock)
+                self.assertEqual([row(result, n) for n in (1, 2)], [{"issue": n, "outcome": "landed", "pr": 40 + n} for n in (1, 2)])
+        # The step is told to stop at once and how to say so.
+        own = step_text(calls, "train-checks-1-2")
+        self.assertIn(f"stop waiting and answer state failed at once, with head {X2} and details lock lost", own)
+
+    def test_a_wait_for_the_lock_after_a_lost_train_that_runs_out_ends_only_the_first_landing(self):
+        lost = {"state": "failed", "head": X1, "details": "lock lost", "refresh": {"last": "not_held", "refreshed": 0}}
+        out = run_full(args=dict(ARGS, issues=[1, 2], train=True), replies={"train-checks-1-1": lost, **contended(1)},
+                       patch={"setup": {"max_parallel": 2}, **BEHIND})
+        result = out["result"]
+        self.assertEqual(row(result, 1)["outcome"], "land-contended")
+        self.assertEqual(row(result, 2), {"issue": 2, "outcome": "landed", "pr": 42})
+
+    def test_the_members_a_train_dropped_together_land_as_one_train_before_any_waiting_issue(self):
+        """Cars 2 and 3 are not green, so issues 2 and 3 are dropped together: issue 3 rides behind issue 2 at once, ahead of the waiting issue 4."""
+        late = {"state": "failed", "head": X2, "failing": ["ci"]}
+        out = run_full(args={**ARGS, "issues": [1, 2, 3, 4], "train": True}, replies={"train-checks-1-2": late},
+                       patch={"setup": {"max_parallel": 4}, **BEHIND, "land-pr-2": BEHIND_POLL},
+                       turns={"4:ready": DURING_WAIT}, delays={"land-pr-2": LOCK_WAIT})
+        result, calls = out["result"], out["calls"]
+        self.assertEqual(builds_of(calls), [[1, 2, 3], [2, 3, 4]])
+        self.assertIn("#2: #3 left the same train unlanded; it lands with it as a train", out["logs"])
+        self.assertEqual(join_logs(out), [JOIN_LOG_OF.format(2, "#4")])
+        self.assertNotIn("land-pr-3", labels(calls))
+        self.assertEqual([row(result, n).get("train") for n in (1, 2, 3, 4)], [1, 2, 2, 2])
+        self.assertEqual([row(result, n)["outcome"] for n in (1, 2, 3, 4)], ["landed"] * 4)
+        # The limit is the train's: with two issues waiting, only one seat is left behind the sibling.
+        out = run_full(args={**ARGS, "issues": [1, 2, 3, 4, 5], "train": True}, replies={"train-checks-1-2": late},
+                       patch={"setup": {"max_parallel": 5}, **BEHIND, "land-pr-2": BEHIND_POLL},
+                       turns={"4:ready": DURING_WAIT, "5:ready": DURING_WAIT}, delays={"land-pr-2": LOCK_WAIT})
+        self.assertEqual(builds_of(out["calls"]), [[1, 2, 3], [2, 3, 4]])
+        self.assertEqual(row(out["result"], 5), {"issue": 5, "outcome": "landed", "pr": 45})
+        # A dropped member whose landing takes no joiner (its head is current) leaves its sibling to land after it, as before.
+        out = run_full(args={**ARGS, "issues": [1, 2, 3], "train": True}, replies={"train-checks-1-2": late}, patch={"setup": {"max_parallel": 3}, **BEHIND})
+        self.assertEqual(builds_of(out["calls"]), [[1, 2, 3]])
+        self.assertEqual([row(out["result"], n) for n in (2, 3)], [{"issue": n, "outcome": "landed", "pr": 40 + n} for n in (2, 3)])

@@ -54,6 +54,7 @@ SIZED = dict(ARGS, review_sizing=True)
 FULL_RUBRIC = "a task whose test cannot fail, wrong or missing interfaces"
 CODEX_OWNS = "The Codex plan review running beside you owns code correctness"
 RULE_ID = "put the broken rule's id in the finding's rule)."
+PASS_REPLY = {"verdict": "pass", "findings": []}
 
 
 def refused(*errors):
@@ -110,12 +111,12 @@ def untyped(calls):
             if c.get("kind", "agent") == "agent" and c["agentType"] not in PROGRAM_AGENT_TYPES]
 
 
-def run_out(args=None, replies=None, patch=None):
-    """The harness's whole output: result, calls and the program's log lines."""
+def run_out(args=None, replies=None, patch=None, after=None):
+    """The harness's whole output: result, calls, the program's log lines and the call and reply events."""
     node = shutil.which("node")
     if node is None:
         raise AssertionError("node is not on PATH; the deliver-standard scenarios need it")
-    scenario = {"args": ARGS if args is None else args, "replies": replies or {}, "patch": patch or {}}
+    scenario = {"args": ARGS if args is None else args, "replies": replies or {}, "patch": patch or {}, "after": after or {}}
     done = subprocess.run([node, str(HARNESS), str(PROGRAM)], input=json.dumps(scenario),
                           capture_output=True, text=True, timeout=60, check=False)
     if done.returncode != 0:
@@ -1881,7 +1882,7 @@ class PlanTurnStructureTest(unittest.TestCase):
     PLANNERS = ("plan", "plan-revise", "plan-rules-revise", "plan-branch-revise")
     WRITE_ONCE = ("write the code map, plan.md and every task file as parallel Write calls in one message",
                   "a second message only if the output limit forces it", "then run any checks in one message")
-    REVISE = ("load plan.md, every task file and the code map with one command",
+    REVISE = ("first list /r/.git/worktrees/w/deliver-standard/*.md and load them all as parallel Read calls in one message, then fix",
               "fix the findings with Edit in place", "rewrite a whole file only when most of it changes",
               "leave each acceptance criterion's text unchanged unless fixing a finding requires changing it")
     SELF_CHECK = ("run every grep or deny gate a task prescribes against the text this plan requires and confirm it does not reject that text",
@@ -1911,6 +1912,15 @@ class PlanTurnStructureTest(unittest.TestCase):
                 self.assertIn(needle, text, label)
                 self.assertLess(text.index(needle), text.index("Plan this issue."), label)
             self.assertNotIn("parallel Write calls", text, label)
+            # #967: one cat of the directory overflows the Bash output cap.
+            for gone in ("cat ", "with one command"):
+                self.assertNotIn(gone, text[:text.index("Plan this issue.")], label)
+
+    def test_the_load_sentence_is_no_longer_than_the_one_command_it_replaced(self):
+        source = PROGRAM.read_text(encoding="utf-8")
+        edits = re.search(r"const PLAN_EDITS = `([^`]*)`", source).group(1)
+        self.assertNotIn("cat ", edits)
+        self.assertLessEqual(len(edits), 399)
 
     def test_only_the_planner_gets_the_self_check_and_the_reviewer_rubric_is_untouched(self):
         calls = self.calls()
@@ -2903,6 +2913,121 @@ class ReviewAndVerifyTest(unittest.TestCase):
                          ["verify-fix-1", "verify-fix-review-1", "verify-fix-2", "verify-fix-review-2"])
 
 
+class IntegrationBesideCodexTest(unittest.TestCase):
+    """#967: the integration review starts when the chunk reviewers return and is awaited with Codex; every outcome is as before."""
+
+    FOUR = {"plan": dict(PLAN, tasks=tasks(4))}
+    # The Codex reply is held until the integration review has been called: a run that waits for Codex first never ends.
+    HELD = {"final-codex": "final-integration"}
+    CHUNK = {"severity": "important", "summary": "chunk defect"}
+    CODEX = {"severity": "important", "summary": "codex defect"}
+    INTEG = {"severity": "critical", "summary": "seam defect"}
+
+    @staticmethod
+    def found(*findings, **extra):
+        return dict({"verdict": "findings", "findings": list(findings)}, **extra)
+
+    def both(self, replies=None, args=None):
+        """The same scenario with Codex held and not held: the two runs must not differ."""
+        scenario = dict(self.FOUR, **(replies or {}))
+        held, free = run_out(args, scenario, after=self.HELD), run_out(args, scenario)
+        self.assertEqual(held["result"], free["result"])
+        self.assertEqual(held["calls"], free["calls"])
+        self.assertEqual(held["logs"], free["logs"])
+        return held
+
+    def final_labels(self, out):
+        return [l for l in labels(out["calls"]) if l.startswith("final-")]
+
+    def test_the_integration_review_is_called_before_the_codex_reply_resolves(self):
+        out = self.both()
+        events = out["events"]
+        self.assertLess(events.index("reply final-2"), events.index("call final-integration"))
+        self.assertLess(events.index("call final-integration"), events.index("reply final-codex"))
+        self.assertEqual(self.final_labels(out), ["final-codex", "final-1", "final-2", "final-integration"])
+        self.assertIn(json.dumps([PASS_REPLY, PASS_REPLY], separators=(",", ":")), prompt(out["calls"], "final-integration"))
+
+    def test_both_passing_ships_with_no_fix_wave(self):
+        out = self.both()
+        self.assertEqual(out["result"]["stage"], "done")
+        self.assertNotIn("fix-wave", labels(out["calls"]))
+        self.assertIn("codex review: 0 blocking findings", out["logs"])
+
+    def test_codex_findings_alone_drive_the_fix_wave(self):
+        out = self.both({"final-codex": self.found(self.CODEX, available=True)})
+        self.assertIn(f"these final-review findings, each real defect with a regression test, then commit: "
+                      f"{json.dumps([dict(self.CODEX, source='codex')], separators=(',', ':'))}.", prompt(out["calls"], "fix-wave"))
+        self.assertIn("codex review: 1 blocking findings", out["logs"])
+        self.assertIn("final review: 1 blocking findings, fix wave 1", out["logs"])
+
+    def test_integration_findings_alone_drive_the_fix_wave(self):
+        out = self.both({"final-integration": self.found(self.INTEG)})
+        self.assertIn(f"then commit: {json.dumps([self.INTEG], separators=(',', ':'))}.", prompt(out["calls"], "fix-wave"))
+        self.assertIn("codex review: 0 blocking findings", out["logs"])
+
+    def test_the_fix_wave_gets_chunk_then_codex_then_integration_findings(self):
+        out = self.both({"final-2": self.found(self.CHUNK), "final-codex": self.found(self.CODEX, available=True),
+                         "final-integration": self.found(self.INTEG)})
+        order = [self.CHUNK, dict(self.CODEX, source="codex"), self.INTEG]
+        self.assertIn(f"then commit: {json.dumps(order, separators=(',', ':'))}.", prompt(out["calls"], "fix-wave"))
+        logs = out["logs"]
+        self.assertLess(logs.index("codex review: 1 blocking findings"), logs.index("final review: 3 blocking findings, fix wave 1"))
+
+    def test_an_unavailable_or_silent_codex_stops_and_the_integration_reply_is_unused(self):
+        for codex, why in (({"available": False, "verdict": "pass", "findings": []}, "unavailable"), (None, "silent")):
+            for integ in (PASS_REPLY, self.found(self.INTEG), None, "throw"):
+                with self.subTest(codex=why, integ=integ):
+                    out = self.both({"final-codex": codex, "final-integration": integ})
+                    result = out["result"]
+                    self.assertEqual((result["stage"], result["step"], result["codex"]), ("codex-unavailable", "code", codex))
+                    # Only a reply the program reads can be a dead agent.
+                    self.assertEqual(result.get("dead_agents"), None if codex else ["final-codex"])
+                    self.assertNotIn("fix-wave", labels(out["calls"]))
+                    self.assertFalse([l for l in out["logs"] if l.startswith("codex review:")])
+
+    def test_a_silent_integration_reviewer_still_stops_after_codex(self):
+        out = self.both({"final-integration": None, "final-codex": self.found(self.CODEX, available=True)})
+        result = out["result"]
+        self.assertEqual((result["stage"], result["details"]), ("final-review", "the integration reviewer returned nothing"))
+        self.assertEqual(result["dead_agents"], ["final-integration"])
+        self.assertIn("codex review: 1 blocking findings", out["logs"])
+
+    def test_a_throwing_integration_reviewer_fails_the_run(self):
+        scenario = dict(self.FOUR, **{"final-integration": "throw"})
+        for after in (self.HELD, None):
+            with self.subTest(after=after):
+                out = run_out(replies=scenario, after=after)
+                self.assertIsNone(out["result"])
+                self.assertIn("stub agent final-integration threw", out["error"])
+
+    def test_a_silent_chunk_reviewer_stops_before_the_integration_review(self):
+        out = run_out(replies=dict(self.FOUR, **{"final-2": None}))
+        result = out["result"]
+        self.assertEqual((result["stage"], result["details"]), ("final-review", "a final reviewer returned nothing"))
+        self.assertEqual(self.final_labels(out), ["final-codex", "final-1", "final-2"])
+        # Codex is still waited for, as before.
+        self.assertIn("reply final-codex", out["events"])
+
+    def test_a_silent_chunk_reviewer_still_awaits_a_throwing_codex(self):
+        # The stop waits for Codex: its throw fails the run instead of being dropped behind the stop.
+        out = run_out(replies=dict(self.FOUR, **{"final-2": None, "final-codex": "throw"}))
+        self.assertIsNone(out["result"])
+        self.assertIn("stub agent final-codex threw", out["error"])
+        self.assertEqual(self.final_labels(out), ["final-codex", "final-1", "final-2"])
+
+    def test_one_chunk_has_no_integration_review(self):
+        out = run_out(replies={"final-codex": self.found(self.CODEX, available=True)})
+        self.assertEqual(self.final_labels(out), ["final-codex", "final-1"])
+        self.assertIn("codex defect", prompt(out["calls"], "fix-wave"))
+
+    def test_no_configured_codex_still_runs_the_integration_review(self):
+        out = run_out(replies=dict(self.FOUR, **{"final-integration": self.found(self.INTEG)}),
+                      patch={"setup": {"review_state": {"code": "unsupported", "plan": "unsupported"}}})
+        self.assertEqual(self.final_labels(out), ["final-1", "final-2", "final-integration"])
+        self.assertIn(f"then commit: {json.dumps([self.INTEG], separators=(',', ':'))}.", prompt(out["calls"], "fix-wave"))
+        self.assertFalse([l for l in out["logs"] if l.startswith("codex review:")])
+
+
 TWO_IDS = [{"id": "lint", "argv": ["make", "lint"], "cwd": "."}, {"id": "test", "argv": ["make", "test"], "cwd": "."}]
 FULL = json.dumps(TWO_IDS, separators=(",", ":"))
 LINT_ONLY = json.dumps([TWO_IDS[0]], separators=(",", ":"))
@@ -3174,6 +3299,221 @@ class WhitespaceCarryForwardTest(unittest.TestCase):
         self.assertNotIn('"id":"test"', prompt(calls, "verify-3"))
         by_id = {r["id"]: r for r in result["verify"]}
         self.assertEqual((by_id["test"]["status"], by_id["test"]["carried_from"]), ("pass", SHA))
+
+
+class VerifyRerunTest(unittest.TestCase):
+    """#972: a failure outside the branch's changed files is rerun once before any fix step, and a fix step stays inside the diff."""
+
+    FLAKE = "tests/http_client.test.ts > retries: timed out"
+    OUTSIDE = {"head": SHA, "clean": True,
+               "results": [{"id": "build", "status": "fail", "summary": FLAKE, "outside_diff": True}]}
+    GREEN = {"head": SHA, "clean": True, "results": [{"id": "build", "status": "pass", "summary": "ok on the rerun"}]}
+    UNRELATED = {"status": "blocked", "start_head": SHA, "commit": SHA, "notes": "not this branch",
+                 "unrelated": {"test": "tests/http_client.test.ts > retries",
+                               "evidence": "the branch changes only admin/knip.json; the test fails the same way at origin/dev"}}
+
+    def test_a_failure_that_passes_the_one_rerun_proceeds_with_no_fix_step_and_names_the_flaky_test(self):
+        out = run_out(replies={"verify": self.OUTSIDE, "verify-rerun-1": self.GREEN})
+        result, names = out["result"], labels(out["calls"])
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual([l for l in names if l.startswith("verify")], ["verify", "verify-rerun-1"])
+        self.assertEqual(result["flaky"], [{"id": "build", "summary": self.FLAKE}])
+        self.assertEqual(result["verify"],
+                         [{"id": "build", "status": "pass", "summary": "ok on the rerun", "flaky": self.FLAKE}])
+        self.assertIn(f"verify: flaky, build failed and passed on the one rerun: {self.FLAKE}", out["logs"])
+
+    def test_a_ready_stop_and_the_ship_resumed_from_it_keep_the_flaky_test(self):
+        ready, _ = run(args=dict(ARGS, mode="ready"), replies={"verify": self.OUTSIDE, "verify-rerun-1": self.GREEN})
+        self.assertEqual((ready["stage"], ready["flaky"]), ("ready", [{"id": "build", "summary": self.FLAKE}]))
+        shipped, calls = run(args=dict(ARGS, cont=ready["cont"]), patch={"setup": {"head": SHA}})
+        self.assertEqual((shipped["stage"], shipped["flaky"]), ("done", [{"id": "build", "summary": self.FLAKE}]))
+        self.assertNotIn("verify", labels(calls))
+
+    def test_a_clean_verification_carries_no_flaky_member(self):
+        result, calls = run()
+        self.assertNotIn("flaky", result)
+        self.assertNotIn("verify-rerun-1", labels(calls))
+
+    def test_a_failure_that_fails_the_rerun_too_still_goes_to_the_fix_step_and_is_verified_again(self):
+        result, calls = run(replies={"verify": self.OUTSIDE, "verify-rerun-1": self.OUTSIDE})
+        self.assertEqual([l for l in labels(calls) if l.startswith("verify")],
+                         ["verify", "verify-rerun-1", "verify-fix-1", "verify-fix-review-1", "verify-2"])
+        self.assertIn(self.FLAKE, prompt(calls, "verify-fix-1"))
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("flaky", result)
+
+    def test_each_verification_is_rerun_at_most_once(self):
+        fail = {"verify": self.OUTSIDE, "verify-2": self.OUTSIDE, "verify-3": self.OUTSIDE}
+        reruns = {f"verify-rerun-{n}": self.OUTSIDE for n in (1, 2, 3)}
+        result, calls = run(replies=dict(fail, **reruns))
+        self.assertEqual(result["stage"], "verify")
+        self.assertEqual([l for l in labels(calls) if l.startswith("verify") and "review" not in l],
+                         ["verify", "verify-rerun-1", "verify-fix-1", "verify-2", "verify-rerun-2", "verify-fix-2",
+                          "verify-3", "verify-rerun-3"])
+
+    def test_the_rerun_asks_for_each_whole_command_and_never_a_selection_of_tests(self):
+        _, calls = run(replies={"verify": self.OUTSIDE, "verify-rerun-1": self.GREEN})
+        rerun = prompt(calls, "verify-rerun-1")
+        self.assertIn("Rerun each failed command below once, whole and exactly as declared, and never a second time, "
+                      "whatever the outcome.", rerun)
+        self.assertIn("Run the project's declared verification once on the worktree head", rerun)
+        for wording in ("select", "only its failing tests", "failing tests named", "else the whole command"):
+            self.assertNotIn(wording, rerun)
+
+    def test_a_fix_after_a_failed_rerun_is_told_it_is_not_flaky_and_gets_no_placement(self):
+        _, calls = run(replies={"verify": self.OUTSIDE, "verify-rerun-1": self.OUTSIDE})
+        fix = prompt(calls, "verify-fix-1")
+        self.assertIn('The project\'s verification failed: [{"id":"build","status":"fail","summary":"%s"}]. It failed again on '
+                      "the one rerun at the same head, so it is not flaky. Find the cause" % self.FLAKE, fix)
+        self.assertNotIn("outside_diff\":", fix)
+        self.assertNotIn("or it is flaky", fix)
+        self.assertIn("With no cause established (it fails without this branch), change and commit nothing", fix)
+
+    def test_a_fix_with_no_rerun_or_a_rerun_that_did_not_count_is_not_told_so(self):
+        for replies in ({"verify": VERIFY_RED}, {"verify": self.OUTSIDE, "verify-rerun-1": dict(self.GREEN, head=FIXED)},
+                        {"verify": self.OUTSIDE, "verify-rerun-1": None}):
+            with self.subTest(replies=replies):
+                _, calls = run(replies=replies)
+                fix = prompt(calls, "verify-fix-1")
+                self.assertNotIn("so it is not flaky", fix)
+                self.assertNotIn("outside_diff\":", fix)
+                self.assertIn("(it fails without this branch, or it is flaky)", fix)
+
+    def test_the_second_fix_is_told_only_of_its_own_verifications_rerun(self):
+        _, calls = run(replies={"verify": self.OUTSIDE, "verify-rerun-1": self.OUTSIDE, "verify-2": VERIFY_RED})
+        self.assertIn("so it is not flaky", prompt(calls, "verify-fix-1"))
+        self.assertNotIn("so it is not flaky", prompt(calls, "verify-fix-2"))
+
+    def test_a_failure_inside_the_diff_or_not_placed_is_not_rerun(self):
+        inside = {"id": "test", "status": "fail", "summary": "src/a.test.ts", "outside_diff": False}
+        outside = {"id": "lint", "status": "fail", "summary": "x", "outside_diff": True}
+        for results in ([dict(inside, id="build")], [{"id": "build", "status": "fail", "summary": "boom"}], [outside, inside]):
+            with self.subTest(results=results):
+                result, calls = run(replies={"verify": {"head": SHA, "clean": True, "results": results}},
+                                    patch={"setup": {"verification": TWO_IDS}} if len(results) == 2 else None)
+                self.assertNotIn("verify-rerun-1", labels(calls))
+                self.assertIn("verify-fix-1", labels(calls))
+
+    def test_the_rerun_names_only_the_failed_ids_and_keeps_the_passes(self):
+        first = {"head": SHA, "clean": True,
+                 "results": [{"id": "lint", "status": "pass", "summary": "ok"},
+                             {"id": "test", "status": "fail", "summary": self.FLAKE, "outside_diff": True}]}
+        again = {"head": SHA, "clean": True, "results": [{"id": "test", "status": "pass", "summary": "ok"}]}
+        result, calls = run(replies={"verify": first, "verify-rerun-1": again}, patch={"setup": {"verification": TWO_IDS}})
+        rerun = prompt(calls, "verify-rerun-1")
+        self.assertIn(json.dumps([TWO_IDS[1]], separators=(",", ":")), rerun)
+        self.assertNotIn(FULL, rerun)
+        self.assertIn(self.FLAKE, rerun)
+        self.assertEqual([c["agentType"] for c in calls if c["label"] == "verify-rerun-1"], ["clerk"])
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual({r["id"]: r["status"] for r in result["verify"]}, {"lint": "pass", "test": "pass"})
+        self.assertEqual(result["flaky"], [{"id": "test", "summary": self.FLAKE}])
+
+    def test_a_rerun_at_another_head_on_a_dirty_tree_or_silent_is_not_a_pass(self):
+        once = self.GREEN["results"][0]
+        for again in (dict(self.GREEN, head=FIXED), dict(self.GREEN, clean=False), None,
+                      {"head": SHA, "clean": True, "results": []},
+                      dict(self.GREEN, results=[dict(once, status="skipped")]), dict(self.GREEN, results=[once, once])):
+            with self.subTest(again=again):
+                result, calls = run(replies={"verify": self.OUTSIDE, "verify-rerun-1": again})
+                self.assertIn("verify-fix-1", labels(calls))
+                self.assertNotIn("flaky", result)
+
+    def test_the_verify_clerk_places_each_failure_against_the_changed_files(self):
+        _, calls = run()
+        self.assertIn("On each failure also return outside_diff: true only when no failing test file and no erroring file is "
+                      "in that git diff --name-only list, else false.", prompt(calls, "verify"))
+        self.assertIn("outside_diff", schema_of(calls, "verify")["properties"]["results"]["items"]["properties"])
+
+    def test_a_fix_step_reporting_an_unrelated_failure_stops_naming_the_test_with_no_commit(self):
+        result, calls = run(replies={"verify": VERIFY_RED, "verify-fix-1": self.UNRELATED})
+        self.assertEqual(result["stage"], "verify-unrelated")
+        self.assertIn("tests/http_client.test.ts > retries fails outside this branch's diff, so no fix was made",
+                      result["reason"])
+        self.assertEqual(result["unrelated"], self.UNRELATED["unrelated"])
+        self.assertNotIn("commit", result)
+        self.assertIn("cont", result)
+        self.assertEqual(labels(calls)[-1], "verify-fix-1")
+
+    def test_an_unrelated_report_that_committed_anyway_stops_too_and_names_the_commit(self):
+        result, calls = run(replies={"verify": VERIFY_RED, "verify-fix-1": dict(self.UNRELATED, status="done", commit=FIXED)})
+        self.assertEqual((result["stage"], result["commit"]), ("verify-unrelated", FIXED))
+        self.assertIn(f"the fix step still committed {FIXED}, unreviewed", result["details"])
+        self.assertEqual(labels(calls)[-1], "verify-fix-1")
+
+    def test_an_unrelated_report_without_a_test_or_evidence_is_a_plain_blocked_fix(self):
+        for unrelated in ({"test": "", "evidence": "x"}, {"test": "t", "evidence": ""}, "t"):
+            with self.subTest(unrelated=unrelated):
+                result, _ = run(replies={"verify": VERIFY_RED, "verify-fix-1": dict(self.UNRELATED, unrelated=unrelated)})
+                self.assertEqual(result["stage"], "verify-fix")
+
+    def test_the_fix_step_needs_a_cause_before_it_edits_outside_the_diff(self):
+        _, calls = run(replies={"verify": VERIFY_RED})
+        fix = prompt(calls, "verify-fix-1")
+        self.assertIn("When what fails lies outside that diff, first establish with evidence why it fails here: this branch's "
+                      "change, or this delivery's environment (the worktree path, the branch name). Only with that cause shown "
+                      "may you edit a file outside the diff, and then return outside_diff: [{file, why}]", fix)
+        self.assertIn("With no cause established (it fails without this branch, or it is flaky), change and commit nothing and "
+                      "return status blocked with unrelated {test, evidence}, evidence being what you ran or read: establish it by "
+                      "reading, or by running the test, never by checking out another commit in the worktree.", fix)
+        self.assertIn("Never weaken, skip or delete a test to make it pass.", fix)
+        properties = schema_of(calls, "verify-fix-1")["properties"]
+        self.assertEqual(properties["unrelated"]["required"], ["test", "evidence"])
+        self.assertEqual(properties["outside_diff"]["items"]["required"], ["file", "why"])
+
+    OUT = [{"file": "tests/http_client.test.ts", "why": "the sentinel s-1 occurs in the worktree path, so the sweep matches it"}]
+
+    def test_an_out_of_diff_fix_with_a_stated_cause_proceeds_and_is_flagged(self):
+        fixed = {"start_head": SHA, "commit": FIXED, "outside_diff": self.OUT}
+        out = run_out(replies={"verify": VERIFY_RED}, patch={"verify-fix-1": fixed})
+        result, calls = out["result"], out["calls"]
+        self.assertEqual((result["stage"], result["outside_fixes"]), ("done", self.OUT))
+        self.assertIn(f"verify-fix-1: edited tests/http_client.test.ts, outside the branch's diff: {self.OUT[0]['why']}",
+                      out["logs"])
+        review = prompt(calls, "verify-fix-review-1")
+        self.assertIn(self.OUT[0]["why"], review)
+        self.assertIn("a cause the code or the failure does not bear out is an Important defect", review)
+        self.assertIn("verification fixes outside the branch's diff, each with its cause", prompt(calls, "pr"))
+        self.assertIn(self.OUT[0]["why"], prompt(calls, "pr"))
+
+    def test_a_malformed_out_of_diff_entry_is_not_flagged(self):
+        bad = [{"file": "a.ts"}, {"why": "w"}, {"file": "", "why": "w"}, {"file": "a.ts", "why": ""}, "a.ts", None]
+        for reported, kept in ((bad + self.OUT, self.OUT), (bad, None), ("a.ts", None), ({"file": "a.ts", "why": "w"}, None)):
+            with self.subTest(reported=reported):
+                out = run_out(replies={"verify": VERIFY_RED},
+                              patch={"verify-fix-1": {"start_head": SHA, "commit": FIXED, "outside_diff": reported}})
+                self.assertEqual((out["result"]["stage"], out["result"].get("outside_fixes")), ("done", kept))
+                self.assertEqual(len([l for l in out["logs"] if "outside the branch's diff" in l]), len(kept or []))
+
+    def test_a_resume_that_finds_the_head_moved_keeps_the_out_of_diff_fix(self):
+        fixed = {"start_head": SHA, "commit": FIXED, "outside_diff": self.OUT}
+        ready, _ = run(args=dict(ARGS, mode="ready"), replies={"verify": VERIFY_RED, "verify-2": self.GREEN},
+                       patch={"verify-fix-1": fixed})
+        self.assertEqual(ready["cont"]["outside_fixes"], self.OUT)
+        self.assertNotIn("outside_fixes", ready["cont"]["verified"])
+        shipped, calls = run(args=dict(ARGS, cont=ready["cont"]), patch={"setup": {"head": FIXED}})
+        self.assertIn("verify", labels(calls))
+        self.assertNotIn("verify-fix-1", labels(calls))
+        self.assertEqual((shipped["stage"], shipped["outside_fixes"]), ("done", self.OUT))
+        self.assertIn(self.OUT[0]["why"], prompt(calls, "pr"))
+        stopped, _ = run(args=dict(ARGS, cont=ready["cont"]), replies={"verify": None}, patch={"setup": {"head": FIXED}})
+        self.assertEqual((stopped["stage"], stopped["cont"]["outside_fixes"]), ("verify", self.OUT))
+
+    def test_a_fix_inside_the_diff_is_not_flagged(self):
+        out = run_out(replies={"verify": VERIFY_RED})
+        self.assertNotIn("outside_fixes", out["result"])
+        self.assertNotIn("outside the branch's diff", prompt(out["calls"], "verify-fix-review-1"))
+        self.assertNotIn("outside the branch's diff", prompt(out["calls"], "pr"))
+
+    def test_a_ready_stop_and_the_ship_resumed_from_it_keep_the_out_of_diff_fix(self):
+        fixed = {"start_head": SHA, "commit": FIXED, "outside_diff": self.OUT}
+        ready, _ = run(args=dict(ARGS, mode="ready"), replies={"verify": VERIFY_RED, "verify-2": self.GREEN},
+                       patch={"verify-fix-1": fixed})
+        self.assertEqual((ready["stage"], ready["outside_fixes"]), ("ready", self.OUT))
+        shipped, calls = run(args=dict(ARGS, cont=ready["cont"]), patch={"setup": {"head": SHA}})
+        self.assertNotIn("verify", labels(calls))
+        self.assertEqual((shipped["stage"], shipped["outside_fixes"]), ("done", self.OUT))
+        self.assertIn(self.OUT[0]["why"], prompt(calls, "pr"))
 
 
 class ShipTest(unittest.TestCase):
@@ -6429,7 +6769,7 @@ CLERK, PLANNER, IMPL, REV, LITE = "clerk", "planner", "implementer", "reviewer",
 EITHER = frozenset({REV, LITE})
 EXPECTED = {stem: frozenset({kind}) if isinstance(kind, str) else kind for kind, stems in (
     (CLERK, ("setup", "acquire", "worktree", "renew-", "owner-answer", "plan-codex", "direct-codex", "final-codex", "diff-size", "amend",
-             "verify", "verify-", "ws-check-", "land-unlock", "land-push-", "land-lock-", "land-relock-", "pr", "checks-", "merge",
+             "verify", "verify-", "verify-rerun-", "ws-check-", "land-unlock", "land-push-", "land-lock-", "land-relock-", "pr", "checks-", "merge",
              "hold", "close-out")),
     (PLANNER, ("plan", "plan-revise", "plan-rules-revise", "plan-branch-revise")),
     (IMPL, ("direct-impl", "direct-fix", "impl-", "fix-", "fix-wave", "fix-wave-", "verify-fix-", "fix-ci", "sync-", "sync-resolve-",
@@ -6464,6 +6804,7 @@ SCENARIOS = (
     {"replies": {"plan": dict(PLAN, tasks=tasks(4)), "final-1": FINDING, "fix-wave-review": NARROWING}},
     {"args": dict(ARGS, review_sizing=True), "replies": {"plan": dict(PLAN, tasks=tasks(4))}},
     {"replies": {"verify": VERIFY_RED}},
+    {"replies": {"verify": VerifyRerunTest.OUTSIDE}},
     {"patch": {"hold": {"release": None}}},
     {"replies": {"checks-2": {"state": "passed", "head": FIX, "required": ["ci-tests"]}},
      "patch": {"pr": {"checks": RED}, "fix-ci": {"start_head": SHA, "commit": FIX}}},
@@ -6668,8 +7009,11 @@ class PlannerReadsTest(unittest.TestCase):
     NO_SUBAGENTS = "- Do not dispatch subagents unless this step says so."
     HARD_RULES = "Hard rules for this step"
     BATCH = "put every open question's Bash or Read call in the same message as the others"
+    PACE = "send at least four lookups in each exploration message and start writing by your twelfth message"
+    # #967: the review-findings revise checks every finding in one message instead.
+    REVISE_PACE = ("check every finding's claim in the first lookup message after the load below, one call per finding, "
+                   "and send at most two follow-up lookup messages before editing")
     PROCEDURE = (BATCH, "several tool calls per message, never one small lookup per turn",
-                 "send at least four lookups in each exploration message and start writing by your twelfth message",
                  "No subagent can be dispatched: the Agent tool does not exist in this step.")
 
     def test_no_prompt_grants_explore_and_every_ruled_prompt_keeps_the_rule(self):
@@ -6698,7 +7042,13 @@ class PlannerReadsTest(unittest.TestCase):
                 self.assertNotIn(self.BATCH, text, label)
                 continue
             self.assertTrue(text.startswith("Procedure for this step."), label)
-            for needle in self.PROCEDURE:
+            pace, other = (self.REVISE_PACE, self.PACE) if label == "plan-revise" else (self.PACE, self.REVISE_PACE)
+            self.assertNotIn(other, text, label)
+            self.assertNotIn("twelfth" if label == "plan-revise" else "follow-up lookup", text, label)
+            # The pace sits inside the one procedure sentence, between the batching rule and the subagent line.
+            self.assertIn(f"never one small lookup per turn), {pace}. No subagent can be dispatched", text, label)
+            self.assertLess(text.index(pace), text.index("This is a revision:" if label != "plan" else "Then write the code map"), label)
+            for needle in self.PROCEDURE + (pace,):
                 self.assertIn(needle, text, label)
                 # Before the task description, not after it.
                 self.assertLess(text.index(needle), text.index("Plan this issue."), label)

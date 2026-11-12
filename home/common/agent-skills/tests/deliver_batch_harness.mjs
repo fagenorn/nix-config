@@ -60,7 +60,7 @@ const DEFAULTS = [
   [/^train-sweep-/, () => ({ ok: true, closed: [], deleted: [] })],
   [/^train-pr-/, (l, p) => ({ pr: 40 + num(l), head: promptHead(p), renew: { verdict: 'renewed' } })],
   [/^train-build-/, (l, p) => ({ status: 'done', conflicted: false, worktree: '/tmp/t/land-train', notes: 'ok', cars: jsonAfter(p, 'The members, in order, as JSON: ').map((m, i) => ({ issue: m.issue, head: CAR(i + 1), pr: 91 + i })) })],
-  [/^train-checks-/, (l, p) => ({ state: 'passed', head: (p.match(/at the car head ([0-9a-f]{40})/) || [])[1], required: ['ci'], passed: ['ci'] })],
+  [/^train-checks-/, (l, p) => ({ state: 'passed', head: (p.match(/at the car head ([0-9a-f]{40})/) || [])[1], required: ['ci'], passed: ['ci'], refresh: { last: 'refreshed', refreshed: 1 } })],
   [/^train-ready-/, (l, p) => ({ members: jsonAfter(p, 'The members, in order, as JSON: ').map(m => ({ issue: m.issue, renew: { verdict: 'renewed' }, head: m.head, state: 'OPEN' })) })],
   [/^train-flip-/, (l, p) => ({ car: 'MERGED', prs: jsonAfter(p, 'The pull requests to read, as JSON: ').map(pr => ({ pr, state: 'MERGED' })) })],
   [/^train-merge-/, (l, p) => ({ lock: { verdict: 'already_held', lock_sha: SHA }, merged: true, notes: 'merged', prs: jsonAfter(p, 'The member pull requests, as JSON: ').map(pr => ({ pr, state: 'MERGED' })) })],

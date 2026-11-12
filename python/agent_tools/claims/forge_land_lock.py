@@ -1,4 +1,4 @@
-"""The cross-host land lock (issue 629): `forge-claim land acquire|release|status`.
+"""The cross-host land lock (issue 629): `forge-claim land acquire|release|status|refresh`.
 
 The lock serialises landings on one branch across hosts. Each action takes `--repo <owner/name>`,
 `--branch <name>` and `--sha <40 hex>`; `--wait` and `--release` exist on `acquire` only, as does
@@ -46,7 +46,8 @@ D4, the only idle takeover is `wait_acquire`'s, of an oid this process has itsel
 unchanged for `IDLE_AFTER` seconds (45 minutes) of `monotonic()`, counted from its first
 observation of that oid; nothing is persisted, so every `--wait` invocation starts a fresh watch.
 Every completed ref observation, a lost CAS's re-read and an observed absence included, restarts
-the watch when the oid differs. A holder runs a one-shot `acquire` with its sha right before the
+the watch when the oid differs, and so does a holder's refresh (D11). A one-shot `acquire` at the
+lock's own sha answers `already_held` and changes nothing, so it restarts no watch. A holder runs a one-shot `acquire` with its sha right before the
 merge and merges only when its verdict is `already_held` or `moved`, never on exit status alone:
 `acquired` also exits 0 and means the lock was lost and taken again, so the base may have moved and
 the holder resyncs first. A release holder merges only on `already_held` (ADR-claims-009).
@@ -115,6 +116,24 @@ D10, a swap that reported no failure whose read-back still shows the old lock is
 `READBACK_RETRIES` times, `READBACK_DELAY` seconds apart, before it is judged: the git refs API can lag
 a write (issue 816), so a ref that reaches the caller's sha answers `moved` or `acquired`, and only a
 read-back that stays on the old lock, or names a third sha at once, is `lost_to`.
+
+D11, `refresh` (issue 971) is how a holder whose lock stays at one sha through a long wait keeps a
+waiter from taking it over as idle. The lock cannot say so itself: its value is the holder's head,
+and a write of the same oid changes nothing. The holder therefore changes a second ref, the beat
+`refs/agent-locks/land-beat/<branch>`: `refresh --sha <sha>` answers `not_held` (exit 3, with
+`lock_sha`, `pr` and `by`) and writes nothing unless the lock is at `--sha`, and otherwise moves
+the beat one step: created at `--sha` when absent, else swapped to the first parent of its value
+(deleted when that is a root commit). The beat therefore repeats a value only after it has walked
+the whole first-parent history down to the root and begun again, so refreshes that fall between
+two polls of a waiter do not cancel out; a repeat would cost one refresh a waiter did not see,
+nothing more. The lock is read before the beat is written and the two are not one swap: a refresh
+that read the lock just before its holder released it still moves the beat, once, which can delay
+the idle takeover of the next holder's lock by one refresh and changes nothing else. It answers `refreshed` (exit 0) with `beat`, the new value (`null` when
+deleted), also when another refresh changed the beat first; an unapplied swap on an unchanged beat
+is a forge error. A waiter reads the beat in every poll that finds the lock held, and a beat that
+differs from the one it read before restarts its watch exactly as a changed lock does. No clock is
+read (D3): only a change counts, the beat's value means nothing, and the beat holds and releases
+nothing, so one that nobody deletes is harmless. A waiter that predates this rule ignores the beat.
 """
 import time
 from collections.abc import Collection
@@ -124,6 +143,7 @@ from agent_tools.claims import forge_markers as fm
 from agent_tools.system import forge_api
 
 LOCK_PREFIX = "refs/agent-locks/land/"
+BEAT_PREFIX = "refs/agent-locks/land-beat/"
 CREATE_ROUNDS = 3
 READBACK_RETRIES = 3
 READBACK_DELAY = 1.0
@@ -131,7 +151,7 @@ IDLE_AFTER = 2700
 POLL = 120
 BOUND = 3000
 FAILED_POLLS = 3
-ACTIONS = ("acquire", "release", "status")
+ACTIONS = ("acquire", "release", "status", "refresh")
 
 monotonic = time.monotonic
 sleep = time.sleep
@@ -164,6 +184,10 @@ class Outcome(NamedTuple):
 
 def lock_ref(branch: str) -> str:
     return LOCK_PREFIX + branch
+
+
+def beat_ref(branch: str) -> str:
+    return BEAT_PREFIX + branch
 
 
 def pick_pr(pulls: list[fm.Pull]) -> int | None:
@@ -329,6 +353,8 @@ def wait_acquire(args: Any, node: Callable[[], str],
     """
     start = monotonic()
     watch: list[Any] = [object(), None]  # [oid or None, first seen]; the sentinel matches nothing
+    unread = object()
+    beat: list[Any] = [unread]  # D11: the beat as last read, by a poll that found the lock held
     failures = 0
     last: Outcome | None = None
     waited_on: set[int] = set()  # D7: the pull requests seen holding the lock
@@ -339,6 +365,10 @@ def wait_acquire(args: Any, node: Callable[[], str],
 
     def idle(lock: str) -> bool:
         seen(lock)
+        now = fm.read_ref(args.repo, beat_ref(args.branch))
+        if beat[0] is not unread and beat[0] != now:
+            watch[1] = monotonic()  # D11: the holder refreshed its lock
+        beat[0] = now
         return monotonic() - watch[1] >= IDLE_AFTER
 
     while True:
@@ -456,6 +486,33 @@ def _release(args: Any) -> tuple[int, dict[str, Any]]:
     return 3, result(args, "not_held", lock_sha=after, pr=pr, by=holder(args.repo, pr))
 
 
+def _refresh(args: Any) -> tuple[int, dict[str, Any]]:
+    """D11: move the beat one step, only while the lock is at the caller's sha."""
+    lock = fm.read_ref(args.repo, lock_ref(args.branch))
+    if lock != args.sha:
+        pr = _pr_of(args.repo, args.branch, lock)
+        return 3, result(args, "not_held", lock_sha=lock, pr=pr, by=holder(args.repo, pr))
+    ref = beat_ref(args.branch)
+    beat = fm.read_ref(args.repo, ref)
+    failure = None
+    if beat is None:
+        fm.create_ref(args.repo, ref, args.sha)
+    else:
+        step = fm.commit_parent(args.repo, beat) or fm.ZERO_OID
+        failure = fm.cas_ref(args.repo, fm.repo_node_id(args.repo), ref, beat, step)
+    after = fm.read_ref(args.repo, ref)
+    for _ in range(READBACK_RETRIES):
+        if failure or after != beat:
+            break
+        sleep(READBACK_DELAY)  # an applied write whose read-back still shows the old beat (issue 816)
+        after = fm.read_ref(args.repo, ref)
+    if after == beat:
+        raise forge_api.ForgeError(failure.code if failure else "gh_failed",
+                                   "the beat write was not applied and the beat is unchanged",
+                                   transient=failure is not None and failure.transient)
+    return 0, result(args, "refreshed", lock_sha=lock, beat=after)
+
+
 def _status(args: Any) -> tuple[int, dict[str, Any]]:
     lock = fm.read_ref(args.repo, lock_ref(args.branch))
     if lock is None:
@@ -469,4 +526,4 @@ def run(args: Any, attempts: Attempts | None = None) -> tuple[int, dict[str, Any
     """Run the parsed action; a caller that retries `acquire` passes the same `attempts` each try."""
     if args.action == "acquire":
         return _acquire(args, attempts)
-    return {"release": _release, "status": _status}[args.action](args)
+    return {"release": _release, "status": _status, "refresh": _refresh}[args.action](args)
