@@ -27,6 +27,8 @@ export const meta = {
 // Every row that is not final and has something to say carries reason (#869): one line of at most REASON_MAX characters, the child's own stop reason
 // (its stage and the detail of its stop), else this program's stage and what the row carries. A detail the reason repeats is left out of the row.
 // An already-fixed row is final and reported in owner_actions with its commit; the batch closes nothing.
+// A no-changes row (#923: every task of the child's plan ended with no commit, so there is nothing to land) is final too, once its claim
+// is released, and reported in owner_actions: the owner closes the issue. A release that failed leaves the row stopped for a relaunch.
 // A closed issue whose claim this batch holds is released (at intake, or by the settle step after a stop with a cont
 // that is not post-merge) and its row is final with released; a release that failed leaves the row stopped for a relaunch.
 // A questions row is {issue, outcome: 'questions', lane?, questions, marker}: marker is the box prompt's
@@ -185,7 +187,7 @@ const RULES_FOR = (W, B) => `${BASE_RULES}
 
 // --- Batch state ---
 // The D9 final outcomes: an issue ending in one of these is not relaunched.
-const FINAL = ['landed', 'landed-held', 'closed', 'duplicate', 'needs-verification', 'parked', 'human-required', 'needs-design', 'claimed-elsewhere', 'stale-claim', 'already-fixed']
+const FINAL = ['landed', 'landed-held', 'closed', 'duplicate', 'needs-verification', 'parked', 'human-required', 'needs-design', 'claimed-elsewhere', 'stale-claim', 'already-fixed', 'no-changes']
 const FACTS = {}
 const rows = {}
 let breaker = null
@@ -1562,6 +1564,18 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `ask-${n}`, phase: 'Deliver', agentType:
       rows[n] = { issue: n, outcome: 'questions', lane: laneName, questions: r.needs_user, marker }
       return
     }
+    if (r.stage === 'no-changes') {
+      // #923: nothing to land and nothing a relaunch could add. Give the claim back; the owner closes the issue.
+      const rel = await ask(agent(`Issue #${n} of ${SLUG} (the git repository at ${REPO}) was delivered with no file change: every task of its plan ended with no commit, so there is nothing to land. Release the batch claim.
+Run alone and exactly: forge-claim release --repo ${SLUG} --issue ${n} --holder ${HOLDER} --reason skipped
+Return its verdict (released on exit 0, not_held (exit 3) when the claim is already gone, or error on any other exit) and any detail. ${FORGE_TIMEOUT} Run nothing else.
+${RULES_FOR(REPO, f.branch)}`, { label: `release-${n}`, phase: 'Deliver', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: RELEASE_SCHEMA }), `release-${n}`)
+      if (rel && (rel.verdict === 'released' || rel.verdict === 'not_held')) {
+        delete CONTS[n]
+        rows[n] = { issue: n, outcome: 'no-changes', released: rel.verdict === 'released', ...stopDetail(r) }
+      } else rows[n] = { issue: n, outcome: 'stopped', stage: 'release', detail: rel ? (rel.detail || rel.verdict) : `release-${n} returned nothing` }
+      return
+    }
     if (r.cont) {
       if (r.stage !== 'planned' && !postMerge(r) && !mergedReadopt(n, f)) {
         // A stop on an issue closed meanwhile: give the claim back and drop the cont; an open issue keeps both (#714).
@@ -1656,7 +1670,7 @@ for (const r of table) log(`#${r.issue}: ${r.outcome}${r.reason || r.detail ? ` 
 return {
   stage: breaker ? 'breaker' : 'done', batch_id: BATCH, table,
   questions: table.filter(r => r.outcome === 'questions').map(r => ({ issue: r.issue, questions: r.questions, marker: r.marker })),
-  owner_actions: [...table.filter(r => r.outcome === 'questions' && r.marker !== null && r.marker !== undefined).map(r => ({ issue: r.issue, reason: 'decision', comment_id: r.marker })), ...table.filter(r => r.outcome === 'already-fixed').map(r => ({ issue: r.issue, reason: 'already-fixed', commit: r.commit })), ...cycle.map(n => ({ issue: n, reason: 'cycle' })), ...LAND_OA],
+  owner_actions: [...table.filter(r => r.outcome === 'questions' && r.marker !== null && r.marker !== undefined).map(r => ({ issue: r.issue, reason: 'decision', comment_id: r.marker })), ...table.filter(r => r.outcome === 'already-fixed').map(r => ({ issue: r.issue, reason: 'already-fixed', commit: r.commit })), ...table.filter(r => r.outcome === 'no-changes').map(r => ({ issue: r.issue, reason: 'no-changes' })), ...cycle.map(n => ({ issue: n, reason: 'cycle' })), ...LAND_OA],
   relaunch: open.length ? relaunchArgs() : null,
   ...(breaker ? { breaker } : {}),
 }
