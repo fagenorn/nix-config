@@ -1232,6 +1232,15 @@ class QuestionViewTest(unittest.TestCase):
         self.assertEqual(entry(shown)["waiting"], 0)
         self.assertEqual(shown["inbox"]["open"], [])
 
+    def test_a_done_sprint_with_open_questions_waits_on_you_until_they_are_answered(self):
+        it = asked(reported(started(A), R, phase="done"))
+        shown = line(it, R + 4 * MIN)
+        self.assertEqual((entry(shown)["state"], entry(shown)["state_text"]),
+                         ("waiting", "waiting on you (2)"))
+        self.assertEqual(len(shown["inbox"]["open"]), 2)
+        shown = entry(line(answer_question(answer_question(it, 0), 1), R + 4 * MIN))
+        self.assertEqual((shown["state"], shown["state_text"]), ("done", "done"))
+
     def test_an_unregistered_projects_questions_are_not_shown(self):
         shown = derive_view([state("p00", 1)], sprints={
             A: dataclasses.replace(asked(started(A)), project_id="p09")})

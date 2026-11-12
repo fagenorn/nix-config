@@ -1450,9 +1450,9 @@ class PageQuestionTest(unittest.TestCase):
             "project_id": "owner/p00", "sprint_id": SID, "round": 41, "question": 0,
             "text": "use the reader\nnot the writer",
         })
-        # A sent answer leaves no draft behind when the item is shown open again.
+        # A sent answer leaves no draft behind when the item is shown open again (each row has its own field).
         self.assertEqual(
-            [n["value"] for n in nodes(reopened["inbox"]) if has_class(n, "words-text")], [""])
+            [n["value"] for n in nodes(reopened["inbox"]) if has_class(n, "words-text")], ["", ""])
         (blank,) = render([
             START, {"frame": frame([Q0, Q1])},
             {"type": {"class": "words-text", "text": "   "}},
@@ -1518,8 +1518,39 @@ class PageQuestionTest(unittest.TestCase):
         ])
         self.assertEqual(
             [n["value"] for n in nodes(typed["inbox"]) if has_class(n, "words-text")],
-            ["use the reader"],
+            ["use the reader", ""],
         )
+
+    def test_every_question_row_keeps_its_answer_controls_whoever_holds_the_keys(self) -> None:
+        Q1B = {**Q1, "blocker": True}
+        for shown in ([Q0, Q1B], [BRIEF_B, Q0, Q1B], [BRIEF_B, Q1B]):
+            with self.subTest(items=[i["key"] for i in shown]):
+                (snap,) = render([START, {"frame": frame(shown)}, {"snapshot": True}])
+                (row,) = [r for r in rows_of(snap) if "May the reader change?" in full(r)]
+                self.assertTrue([n for n in nodes(row) if has_class(n, "abox")])
+                self.assertEqual(len([n for n in nodes(row) if has_class(n, "words-text")]), 1)
+                self.assertEqual(len([n for n in nodes(row) if has_class(n, "ans-words")]), 1)
+                options = [n for n in nodes(row) if has_class(n, "opt")]
+                self.assertEqual(len(options), 2)
+                self.assertFalse(any(n["disabled"] for n in options))
+
+    def test_the_own_words_cannot_be_edited_while_the_answer_is_pending(self) -> None:
+        typed = {"type": {"class": "words-text", "text": "use the reader"}}
+        waiting, undone, sending, sent = render([
+            START, {"frame": frame([Q0, Q1])}, typed, {"click": "ans-words"}, {"snapshot": True},
+            {"click": "undo"}, {"snapshot": True},
+            {"hold": True}, {"click": "ans-words"}, {"clock": 5000}, {"snapshot": True},
+            {"release": {"status": 204, "text": ""}}, {"snapshot": True},
+        ])
+        for snap in (waiting, sending):
+            self.assertTrue(field(snap, "words-text")["disabled"])
+            self.assertTrue(field(snap, "ans-words")["disabled"])
+            self.assertEqual(field(snap, "words-text")["value"], "use the reader")
+        self.assertFalse(field(undone, "words-text")["disabled"])
+        self.assertFalse(field(undone, "ans-words")["disabled"])
+        (post,) = round_posts(sent)
+        self.assertEqual(posted(post)["text"], "use the reader")
+
 
 
 def checks(snap: dict) -> list:

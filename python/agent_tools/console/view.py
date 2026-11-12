@@ -192,7 +192,7 @@ report's issues or its `inbox` numbers, plus the sprint's open questions. Moveme
 else the brief's sent time), the report's time and the fold's `moved_ms`; `quiet_elapsed` is
 `now_ms` minus it, computed only for an approved brief and only when `now_ms` is not None (else 0).
 The state is the first that holds: the brief is not approved, `drafting` ("drafting the brief");
-the report's phase is `done`, `done`; `waiting` is above 0, `waiting` ("waiting on you (<n>)");
+the report's phase is `done` and no question is open, `done`; `waiting` is above 0, `waiting` ("waiting on you (<n>)");
 `quiet_elapsed` reaches `QUIET_AFTER_MS`, `quiet` ("quiet for <n> min \u2014 may be stuck"); the
 phase is `closing`, `closing`; no report, `starting`; else `on_track` ("on track").
 `status_at` is the report's own time, which the page words against its own clock.
@@ -559,7 +559,7 @@ def sprint_state(state: SprintState, now_ms: int | None, waiting: int) -> tuple[
     brief, report = state.brief, state.report
     if brief is None or brief.decision != APPROVED:
         return DRAFTING, DRAFTING_TEXT
-    if report is not None and report.phase == DONE:
+    if report is not None and report.phase == DONE and not open_questions(state):
         return DONE, DONE_TEXT
     if waiting:
         return WAITING, WAITING_TEXT.format(n=waiting)

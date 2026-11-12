@@ -894,7 +894,6 @@ const drafts = new Map();
 let fields = new Map();
 let lastView = null;
 let currentId = null;
-let heldDraft = null;
 function itemId(item) {
   return item.project_id + "#" + item.key;
 }
@@ -1349,8 +1348,11 @@ function wordsBox(item, state, box) {
     if (text.trim() === "") return;
     if (startWords(item, state, text)) redraw();
   });
-  box.appendChild(draftField(area, wordsKey(item), (value) => { send.disabled = value.trim() === ""; }));
-  send.disabled = area.value.trim() === "";
+  // The pending answer carries the text it was sent with, so the field is read-only until it is undone or settled.
+  const pending = !choosable(state);
+  box.appendChild(draftField(area, wordsKey(item), (value) => { send.disabled = pending || value.trim() === ""; }));
+  area.disabled = pending;
+  send.disabled = pending || area.value.trim() === "";
   box.appendChild(send);
 }
 function confirmBox(item, box, approve) {
@@ -1443,9 +1445,8 @@ function boxState(item) {
   if (!answerable(item)) return null;
   const state = answerState(item);
   if (check(item)) return state;
-  if (itemId(item) === currentId || state.phase !== "choosing") return state;
-  // The own-words field keeps its box (and its focus) when another item takes the keys.
-  return isQuestion(item) && (drafts.has(wordsKey(item)) || heldDraft === wordsKey(item)) ? state : null;
+  // A question has no tracker page to answer on, so every one keeps its box; the keys go to one item only.
+  return isQuestion(item) || itemId(item) === currentId || state.phase !== "choosing" ? state : null;
 }
 function leadItem(item) {
   const card = el("article", "card lead");
@@ -1548,7 +1549,6 @@ function renderInbox(view) {
   const held = active && active.dataset && active.dataset.draft !== undefined
     ? { key: active.dataset.draft, start: active.selectionStart, end: active.selectionEnd }
     : null;
-  heldDraft = held === null ? null : held.key;
   fields = new Map();
   const wasOpen = new Set();
   for (const fold of document.querySelectorAll("#inbox details[open]")) wasOpen.add(fold.dataset.key);
