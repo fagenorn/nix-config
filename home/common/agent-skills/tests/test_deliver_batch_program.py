@@ -728,6 +728,32 @@ class BreakerTest(unittest.TestCase):
         self.assertEqual(result["stage"], "done")
 
 
+class NoChangesTest(unittest.TestCase):
+    """#923: a child whose every task ended with no commit has nothing to land: the row is final, the claim is given back."""
+
+    CONT = {"setup": {"holder": HOLDER, "branch": "issue-1-x"}, "lane": "standard",
+            "done": [{"n": 1, "commit": SHA, "no_change": True}]}
+    STOP = {"stage": "no-changes", "reason": "no-changes: every task ended with no commit", "cont": CONT}
+
+    def test_a_no_changes_child_is_final_released_and_an_owner_action(self):
+        result, calls, _ = run(children={"1": self.STOP})
+        self.assertEqual(row(result, 1), {"issue": 1, "outcome": "no-changes", "released": True,
+                                          "reason": "no-changes: every task ended with no commit"})
+        self.assertEqual(result["owner_actions"], [{"issue": 1, "reason": "no-changes"}])
+        self.assertIsNone(result["relaunch"])
+        self.assertIn(f"forge-claim release --repo owner/repo --issue 1 --holder {HOLDER} --reason skipped", prompt(calls, "release-1"))
+        for label in labels(calls):
+            self.assertFalse(label.startswith(("settle-", "land-")), label)
+
+    def test_a_failed_release_keeps_the_row_open_with_its_cont(self):
+        for reply in (None, {"verdict": "error", "detail": "forge down"}):
+            with self.subTest(reply=reply):
+                result, _, _ = run(children={"1": self.STOP}, replies={"release-1": reply})
+                self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "release"))
+                self.assertEqual(result["owner_actions"], [])
+                self.assertEqual(result["relaunch"]["conts"], {"1": self.CONT})
+
+
 class ContTest(unittest.TestCase):
     def test_an_interrupted_task_resumes_through_its_forwarded_cont(self):
         cont = {"setup": {"holder": HOLDER, "branch": "issue-1-x"}, "lane": "direct", "plan": None,

@@ -1184,7 +1184,9 @@ for (let ti = 0; ti < plan.tasks.length; ti++) {
   const start = `${CTX}\n${PLAN_REF}${B ? `\nTask ${t.n} commits to the declared branch ${B.name} in the worktree ${TW} (base ${B.base}), not to ${setup.branch}: run this task's commands there (git -C ${TW}).` : ''}`
   const PUSH_HERE = B ? ` After each commit, push it alone with git -C ${TW} push origin ${B.name}.` : ''
   const halt = (stage, extra) => haltTask(t.n, stage, extra)
-  const implPrompt = `${first ? `${start}\n${RENEW_FIRST}\nThen implement` : `${start}\nImplement`} task ${t.n} (${t.title}) exactly as its task file ${t.file} specifies: write the failing test first and see it fail, implement, see it pass, run the task's focused test commands, then for each new test temporarily remove the code it pins and confirm it fails, restore, and commit only this task's files in the worktree. ${MAP_FIRST} ${FOCUSED} ${IMPL_RETURN}${PUSH_HERE} Return status blocked with notes if the task file is wrong or impossible, and blocked_on: the number of the later task of this plan it needs first, if that is why; when you name it, first undo every uncommitted edit you made, leaving the worktree as you found it.${waiting ? ` Task ${waiting.task} waits for task ${waiting.after} and may have left uncommitted edits: leave them as they are.` : ''}${moved ? ` Task ${moved.after}, which this task was blocked on, is done now.` : ''}${(CONT && CONT.partial === t.n) || moved ? `
+  const WAITS = waiting ? ` Task ${waiting.task} waits for task ${waiting.after} and may have left uncommitted edits: ` : ''
+  const KEEP_WAITING = waiting ? `${WAITS}leave them as they are.` : ''
+  const implPrompt = `${first ? `${start}\n${RENEW_FIRST}\nThen implement` : `${start}\nImplement`} task ${t.n} (${t.title}) exactly as its task file ${t.file} specifies: write the failing test first and see it fail, implement, see it pass, run the task's focused test commands, then for each new test temporarily remove the code it pins and confirm it fails, restore, and commit only this task's files in the worktree. ${MAP_FIRST} ${FOCUSED} ${IMPL_RETURN}${PUSH_HERE} Return status blocked with notes if the task file is wrong or impossible, and blocked_on: the number of the later task of this plan it needs first, if that is why; when you name it, first undo every uncommitted edit you made, leaving the worktree as you found it.${KEEP_WAITING}${moved ? ` Task ${moved.after}, which this task was blocked on, is done now.` : ''}${(CONT && CONT.partial === t.n) || moved ? `
 An earlier attempt at this task was cut off and may have left uncommitted edits or commits in the worktree (git -C ${TW} status, git -C ${TW} diff and git -C ${TW} log ${B ? `${B.base}..HEAD` : RANGE}). Inspect them: keep what matches the task file, finish or redo the rest, and make sure the failing-test-first and mutation checks still hold for the final result; start_head is ${moved ? 'HEAD as this attempt starts' : "the head before this task's first commit"}.` : ''}
 ${RULES}`
   const callImpl = () => call(implPrompt, { label: `impl-${t.n}`, phase: 'Tasks', agentType: 'implementer', model: 'sonnet', schema: first ? withRenew(IMPL) : IMPL })
@@ -1204,29 +1206,68 @@ ${RULES}`
     ti--
     continue
   }
-  const taskSpan = spanIn(TW, impl)
-  const reviewer = (t.risk === 'mechanical' || t.risk === 'low') ? 'reviewer-lite' : 'reviewer'
+  // #923: a task that ends with no new commit (its output is not a file change: an issue comment, a check that needs no edit) has no
+  // diff, and a review of the empty range head..head is refused as a missing diff boundary. Its first pass is a no-change check
+  // instead: a reviewer judges from the task file whether the task needs a tracked file changed (then it is not done, and the finding
+  // goes back to the implementer as any other) and confirms each required output itself. reviewer-lite reviews only a bounded diff,
+  // so every review without one runs on reviewer, whatever the task's risk. Once such a task does commit (a fix round), that diff gets
+  // the first pass a task diff always gets; a fix that answers with evidence and no commit is re-reviewed as a rebuttal, with no range.
+  // Whether a reply added a commit is never taken from its own start_head: it is read against a head the program holds. For the
+  // task, that is the head its worktree was accepted at: the tip this run tracks, or, for the task a stop left partial (the setup's
+  // head then already holds the cut-off attempt's commits), the last done task of that worktree, else the worktree's base. A reply
+  // whose commit is another head gets a diff review from the accepted head, whatever start it names (#923: a start above it would hide commits). For a fix, it is the head just reviewed.
+  const lastDone = taskLog.filter(d => (B ? d.branch === B.name : !present(d.branch))).pop()
+  const tracked = partial === t.n ? null : B ? branchTips[B.name] : tip
+  const accepted = present(tracked) ? tracked : lastDone && present(lastDone.commit) ? lastDone.commit : B ? B.base : setup.base_sha
+  // An honest reply starts at the accepted head and keeps its own spelling of it; any other start would hide the commits beneath it.
+  const taskStart = sameSha(impl.start_head, accepted) ? impl.start_head : accepted
+  const liteLane = t.risk === 'mechanical' || t.risk === 'low'
+  // False until the task's diff had its first pass; a task with no commit has none to review.
+  let diffReviewed = !sameSha(impl.commit, accepted)
   // reviewer-lite first-passes only a task whose declared lane is mechanical or low (its lane verification mode).
-  let review = await call(`${start}
-${reviewer === 'reviewer-lite' ? `lane: ${t.risk}. ` : ''}Review the diff of task ${t.n} only: ${taskSpan} (and the task file ${t.file} as its contract). ${KNOW} Report Important or Critical correctness defects and unmet task requirements only, each with a concrete failing input. No style notes. Do not edit anything.`, { label: `review-${t.n}`, phase: 'Tasks', agentType: reviewer, schema: FINDINGS })
+  let reviewer = liteLane && diffReviewed ? 'reviewer-lite' : 'reviewer'
+  const diffReview = (range, label, answers) => call(`${start}
+${reviewer === 'reviewer-lite' ? `lane: ${t.risk}. ` : ''}Review the diff of task ${t.n} only: ${range} (and the task file ${t.file} as its contract). ${KNOW} Report Important or Critical correctness defects and unmet task requirements only, each with a concrete failing input. No style notes. Do not edit anything.${answers ? ` The task first ended with no commit, and this diff answers these findings: ${JSON.stringify(answers)}; report any still unresolved.` : ''}`, { label, phase: 'Tasks', agentType: reviewer, schema: FINDINGS })
+  // Tracked files only: an untracked file (a build output, a tool's cache) is no edit of the task, and a waiting task's kept edits are not this task's.
+  const HEAD_UNMOVED = h => `First confirm that git -C ${TW} rev-parse HEAD prints ${h} and git -C ${TW} status --porcelain --untracked-files=no prints nothing: another head or an uncommitted change to a tracked file is a finding.${waiting ? `${WAITS}those are not a finding.` : ''}`
+  const CONFIRM = `with the task file's own verification commands or a read-only lookup (run a gh command as ${UNSET}gh ...)`
+  let review = diffReviewed ? await diffReview(`git -C ${TW} diff ${taskStart}..${impl.commit}`, `review-${t.n}`) : await call(`${start}
+Task ${t.n} ended with no new commit: the head of ${TW} is still ${impl.commit}. There is no diff to review and none is missing; do not ask for a range. Judge the task from its task file ${t.file} (the contract) and the implementer's report: notes: ${impl.notes}; checks run: ${JSON.stringify(Array.isArray(impl.tests) ? impl.tests : [])}. ${HEAD_UNMOVED(impl.commit)} Then decide two things. 1. Does the task file require a tracked file to be created, changed or deleted? If it does, the task is not done: report one Critical finding naming the files it requires. 2. If it requires none, is every output the task file asks for in place? Confirm each yourself, ${CONFIRM}; the implementer's word alone is not evidence, and an output you cannot confirm is a finding. Report Important or Critical findings only, each with what is missing. Do not edit anything.`, { label: `review-${t.n}`, phase: 'Tasks', agentType: 'reviewer', schema: FINDINGS })
   if (!review) return halt('task-review', { task: t, review: null })
   let rounds = 0
   while (findingsOf(review).length && rounds < 2) {
     rounds++
     const fix = await call(`${start}
-Fix these review findings for task ${t.n} (${t.file}) in the worktree, with a regression test for each real defect, then commit: ${JSON.stringify(findingsOf(review))}. If a finding is wrong, say so in notes with evidence instead of changing code. ${MAP_FIRST} ${FOCUSED} ${COMMIT_SCOPE} ${IMPL_RETURN}${PUSH_HERE}
+Fix these review findings for task ${t.n} (${t.file}) in the worktree, with a regression test for each real defect, then commit: ${JSON.stringify(findingsOf(review))}. If a finding is wrong, say so in notes with evidence instead of changing code. ${MAP_FIRST} ${FOCUSED} ${COMMIT_SCOPE} ${IMPL_RETURN}${PUSH_HERE}${KEEP_WAITING}
 ${RULES}`, { label: `fix-${t.n}-${rounds}`, phase: 'Tasks', agentType: 'implementer', model: 'sonnet', schema: IMPL })
     if (!implDone(fix)) return halt('task-fix', { task: t, impl: fix })
+    // The head the last review saw: the fix added a commit only when its commit is another one.
+    const reviewed = impl.commit
     impl = fix
-    review = await call(`${start}
-Re-review only these previously reported findings for task ${t.n} against the fix: ${spanIn(TW, fix)}; the implementer's notes: ${fix.notes}. Findings: ${JSON.stringify(findingsOf(review))}. Report any finding still unresolved and any new Important or Critical defect the fix introduced.`, { label: `rereview-${t.n}-${rounds}`, phase: 'Tasks', agentType: 'reviewer-lite', schema: FINDINGS })
+    const label = `rereview-${t.n}-${rounds}`
+    if (sameSha(fix.commit, reviewed)) {
+      review = await call(`${start}
+Re-review only these previously reported findings for task ${t.n} against the implementer's answer. The fix made no new commit (the head of ${TW} is still ${fix.commit}), so there is no fix diff to review and none is missing; do not ask for a range. The implementer's notes: ${fix.notes}. Findings: ${JSON.stringify(findingsOf(review))}. ${HEAD_UNMOVED(fix.commit)} Then check each answer yourself against the task file ${t.file}${diffReviewed ? `, the task's diff (git -C ${TW} diff ${taskStart}..${fix.commit})` : ''} and the evidence the notes name, ${CONFIRM}; a finding the evidence does not refute is still unresolved. Report any finding still unresolved. Do not edit anything.`, { label, phase: 'Tasks', agentType: 'reviewer', schema: FINDINGS })
+    } else if (!diffReviewed) {
+      reviewer = liteLane ? 'reviewer-lite' : 'reviewer'
+      review = await diffReview(`git -C ${TW} diff ${taskStart}..${fix.commit}`, label, findingsOf(review))
+      diffReviewed = true
+    } else {
+      review = await call(`${start}
+Re-review only these previously reported findings for task ${t.n} against the fix: git -C ${TW} diff ${reviewed}..${fix.commit}; the implementer's notes: ${fix.notes}. Findings: ${JSON.stringify(findingsOf(review))}. Report any finding still unresolved and any new Important or Critical defect the fix introduced.`, { label, phase: 'Tasks', agentType: 'reviewer-lite', schema: FINDINGS })
+    }
     if (!review) return halt('task-review', { task: t, review: null })
   }
   if (findingsOf(review).length) return halt('task-review', { task: t, review })
-  taskLog.push({ n: t.n, commit: impl.commit, review_rounds: rounds, reviewer, ...(B ? { branch: B.name } : {}) })
+  taskLog.push({ n: t.n, commit: impl.commit, review_rounds: rounds, reviewer, ...(B ? { branch: B.name } : {}), ...(diffReviewed ? {} : { no_change: true }) })
   if (B) branchTips[B.name] = impl.commit
   else tip = impl.commit
   if (partial === t.n) partial = undefined
+}
+// #923: when every task ended with no commit, the branch holds nothing to review, verify or land: the final review would get an
+// empty range and the pull request no commit. Read from the done record (no_change), which a resume carries, never from a head. The tasks' outputs are in place and recorded; the owner closes the issue.
+if (plan.tasks.length && plan.tasks.every(t => taskLog.some(d => d.n === t.n && d.no_change === true))) {
+  return stop('no-changes', { details: `every task ended with no commit: the branch ${setup.branch} holds nothing to review or land. The tasks' outputs are in place; close the issue by hand, or amend the plan if a file change was meant` })
 }
 
 // ---------------- Final review ----------------
