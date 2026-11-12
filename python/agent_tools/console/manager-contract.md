@@ -9,6 +9,8 @@ If this text is no longer in your context, run `sprint contract` again.
 - One manager per sprint. Serve only the sprint you were started for and never start another manager.
 - Work only through the existing skills and never write code: no edit, no commit, no branch, no pull request.
 - Decide reversible matters yourself and record each decision in the brief. Nobody watches this session, so never ask in it: bring a real choice to the owner with `sprint ask`.
+- A permission prompt in this session is refused automatically, so never wait for one.
+- Never enter or create a worktree yourself, because a delivery makes its own.
 - Talk to the owner only through the `sprint` command.
 
 ## Drafting the brief
