@@ -334,6 +334,7 @@ function node(n) {
     key: n.dataset.key === undefined ? null : n.dataset.key,
     title: n.attributes.title === undefined ? null : n.attributes.title,
     open: n.open,
+    pressed: n.attributes["aria-pressed"] === undefined ? null : n.attributes["aria-pressed"],
     value: n.value === undefined ? null : n.value,
     disabled: n.disabled === true || "disabled" in n.attributes,
     text: n.children.filter((c) => c.isText).map((c) => c.text).join(""),

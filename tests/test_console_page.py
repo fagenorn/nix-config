@@ -943,7 +943,13 @@ def has_class(n: dict, name: str) -> bool:
 
 
 def picked(snap: dict) -> list:
-    return [full(n) for n in nodes(snap["inbox"]) if has_class(n, "picked")]
+    """The option words of every `.picked` node: its `span.ot` child when it has one, else the node."""
+    found = []
+    for n in nodes(snap["inbox"]):
+        if has_class(n, "picked"):
+            words = [c for c in n["children"] if has_class(c, "ot")]
+            found.append(full(words[0]) if words else full(n))
+    return found
 
 
 def answers(snap: dict) -> list:
@@ -1677,6 +1683,69 @@ class PageCardTest(unittest.TestCase):
                     declared = [names for s, names in rules if s in mine]
                     for prop in ("background", "color", "border", "padding", "border-radius"):
                         self.assertTrue(any(prop in names for names in declared), prop)
+
+
+class PageOptionTest(unittest.TestCase):
+    @staticmethod
+    def three(chosen=None) -> dict:
+        return item("D", headline="Which database?", questions=[
+            {"question": "Which database?", "options": ["sqlite", "postgres", "mysql"],
+             "chosen": chosen, "recommended": "postgres"}])
+
+    @staticmethod
+    def options(snap: dict) -> list:
+        return [n for n in nodes(snap["inbox"]) if has_class(n, "opt")]
+
+    def test_each_option_is_a_button_with_its_key_badge_and_words(self) -> None:
+        (snap,) = render([START, {"frame": frame([self.three()])}, {"snapshot": True}])
+        opts = self.options(snap)
+        self.assertEqual(len(opts), 3)
+        for i, (opt, words) in enumerate(zip(opts, ["sqlite", "postgres", "mysql"])):
+            self.assertEqual(opt["tag"], "button")
+            self.assertEqual(opt["children"][0]["tag"], "kbd")
+            self.assertEqual(opt["children"][0]["text"], str(i + 1))
+            (ot,) = [c for c in opt["children"] if has_class(c, "ot")]
+            self.assertEqual(full(ot), words)
+            recs = [c for c in opt["children"] if has_class(c, "rec")]
+            if i == 1:
+                self.assertEqual([full(c) for c in recs], ["Recommended"])
+            else:
+                self.assertEqual(recs, [])
+        self.assertEqual([o["pressed"] for o in opts], ["false", "true", "false"])
+        self.assertEqual(picked(snap), ["postgres"])
+
+    def test_a_number_key_moves_the_pressed_option(self) -> None:
+        (snap,) = render([START, {"frame": frame([ANSWERABLE])}, {"key": "1"}, {"snapshot": True}])
+        opts = self.options(snap)
+        self.assertEqual([o["pressed"] for o in opts], ["true", "false"])
+        self.assertEqual(picked(snap), ["one"])
+        self.assertEqual([any(has_class(c, "rec") for c in o["children"]) for o in opts],
+                         [False, True])
+
+    def test_a_tracker_chosen_option_is_pressed_and_keeps_its_words(self) -> None:
+        (snap,) = render([START, {"frame": frame([self.three("sqlite")])}, {"snapshot": True}])
+        opts = self.options(snap)
+        self.assertEqual([o["pressed"] for o in opts], ["true", "false", "false"])
+        (ot,) = [c for c in opts[0]["children"] if has_class(c, "ot")]
+        self.assertEqual(full(ot), "chosen: sqlite")
+        self.assertEqual([any(has_class(c, "rec") for c in o["children"]) for o in opts],
+                         [False, True, False])
+
+    def test_option_rows_fill_the_width_and_mark_the_pick_beyond_colour(self) -> None:
+        text = PAGE.read_text(encoding="utf-8")
+        rules = []
+        for body in re.findall(r"(?s)<style>(.*?)</style>", text):
+            css = re.sub(r"(?s)/\*.*?\*/", "", body)
+            rules += [(" ".join(sel.split()), rule)
+                      for sel, rule in re.findall(r"([^{}]+)\{([^{}]*)\}", css)]
+        def declares(selector_test, declaration):
+            return any(selector_test(sel) and declaration in rule for sel, rule in rules)
+        self.assertTrue(declares(
+            lambda sel: any(t.endswith(".opt") for t in re.split(r"[\s,]+", sel)), "width: 100%"))
+        self.assertTrue(declares(lambda sel: ".opt.picked kbd" in sel, "background:"))
+        for sel, rule in rules:
+            if ".opt" in sel:
+                self.assertNotIn("var(--peach)", rule, sel)
 
 
 class PageDigestTest(unittest.TestCase):

@@ -76,7 +76,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .abox { flex-basis: 100%; margin-top: 6px; }
 .abox .meta { margin-top: 6px; }
 .abox .meta.now { color: var(--text); }
-.abox .opts { list-style: none; padding-left: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; margin-top: 4px; }
+.abox .opts { list-style: none; padding-left: 0; display: flex; flex-direction: column; align-items: stretch; gap: 2px; margin-top: 14px; }
 .opt, .send, .undo, .approve, .reply-send, .goal-open, .goal-send, .goal-cancel, .goal-project, .withdraw, .retry, .abox button[class^="ans-"] { display: inline-flex; align-items: baseline; gap: 8px; font: inherit; color: inherit; text-align: left; background: none; border: 1px solid var(--hair); border-radius: 8px; padding: 2px 10px; cursor: pointer; transition: background-color .16s; }
 .opt:hover:enabled, .send:hover:enabled, .undo:hover:enabled, .approve:hover:enabled, .reply-send:hover:enabled, .goal-open:hover:enabled, .goal-send:hover:enabled, .goal-cancel:hover:enabled, .goal-project:hover:enabled, .withdraw:hover:enabled, .retry:hover:enabled, .abox button[class^="ans-"]:hover:enabled { background: rgba(202, 211, 245, .05); }
 .opt:disabled, .send:disabled, .reply-send:disabled, .goal-send:disabled, .withdraw:disabled, .retry:disabled, .abox button[class^="ans-"]:disabled { cursor: default; }
@@ -85,8 +85,13 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .card .detail, .rest .detail, .done .detail { flex-basis: 100%; margin: 6px 0 0; padding: 6px 10px; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: .84375rem; color: var(--sub0); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; }
 .abox textarea, .abox input { display: block; width: 100%; max-width: 40rem; margin-top: 6px; padding: 4px 8px; font: inherit; color: var(--text); background: var(--mantle); border: 1px solid var(--s1); border-radius: 8px; }
 .abox textarea { min-height: 4.5rem; resize: vertical; }
-.opt kbd { font: inherit; color: var(--ov2); }
-.opt.picked, .goal-project.picked { color: var(--lav); border-color: var(--lav); }
+.opt { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; align-items: center; column-gap: 14px; width: 100%; padding: 9px 14px; border-radius: 10px; border: 1px solid transparent; }
+.opt .ot { font-size: 1.0625rem; line-height: 1.4; font-weight: 500; overflow-wrap: anywhere; }
+.opt kbd { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border: 1px solid var(--s2); border-radius: 6px; font: inherit; font-size: .75rem; font-weight: 600; color: var(--sub1); }
+.opt .rec { font-size: .75rem; font-weight: 600; color: var(--sub1); border: 1px solid var(--s2); border-radius: 999px; padding: 1px 8px; white-space: nowrap; }
+.opt.picked { border-color: var(--lav); background: rgba(183, 189, 248, .10); }
+.opt.picked kbd { background: var(--lav); border-color: var(--lav); color: var(--crust); }
+.goal-project.picked { color: var(--lav); border-color: var(--lav); }
 #goal { margin-top: 24px; max-width: 44rem; }
 .goal-box { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
 .goal-filter, .goal-text, .reply-text { width: 100%; font: inherit; color: var(--text); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; padding: 6px 10px; }
@@ -1146,7 +1151,9 @@ function answerBox(item, state, lead) {
       button.type = "button";
       if (!live) button.setAttribute("disabled", "");
       button.appendChild(el("kbd", "", String(oi + 1)));
-      button.appendChild(el("span", "", option === q.chosen ? "chosen: " + option : option));
+      button.setAttribute("aria-pressed", String(state.picks[qi] === oi));
+      button.appendChild(el("span", "ot", option === q.chosen ? "chosen: " + option : option));
+      if (option === q.recommended) button.appendChild(el("span", "rec", "Recommended"));
       button.addEventListener("click", () => {
         if (!choosable(state)) return;
         choose(state, qi, oi);
