@@ -20,7 +20,7 @@ from agent_tools.console.deliveries import (
 from agent_tools.console.event_log import Event
 from agent_tools.console.sessions import ENDED, SessionState
 from agent_tools.console.capacity import EMPTY
-from agent_tools.console.sprints import APPROVED, CHANGES, NONE, Brief, SprintState
+from agent_tools.console.sprints import APPROVED, CHANGES, NONE, Brief, Manager, SprintState
 from agent_tools.console.view import (
     ALL_OUT_SENTENCE,
     BRIEF_SENTENCE,
@@ -803,6 +803,87 @@ class BriefViewTest(unittest.TestCase):
                 self.assertEqual(view["statement"]["sentence"], expected)
 
 
+class ManagerViewTest(unittest.TestCase):
+    SID = "a" * 16
+    NAME = "p00 sprint " + "a" * 16
+
+    def shown(self, manager=None, now_ms=T0_MS, sessions=(), brief=False, **extra):
+        shown = dataclasses.replace(sprint(self.SID), manager=manager)
+        if brief:
+            shown = briefed(shown)
+        view = derive_view([state("p00", 1)], sessions=sessions, sprints={self.SID: shown},
+                           now_ms=now_ms, **extra)
+        return view["entries"][0]["sprints"][0]
+
+    def test_a_started_manager_shows_no_text_and_no_retry(self):
+        manager = Manager("started", T0, "work", self.NAME)
+        entry = self.shown(manager, T0_MS + 10 * 60_000,
+                           [session("m1", "working", name=self.NAME)])
+        self.assertEqual((entry["manager_state"], entry["manager_text"], entry["retry"],
+                          entry["manager_until"]), ("started", None, False, None))
+        self.assertEqual([s["session_id"] for s in entry["sessions"]], ["m1"])
+
+    def test_a_started_manager_that_never_appears_offers_retry(self):
+        manager = Manager("started", T0, "work", self.NAME)
+        early = self.shown(manager, T0_MS + 60_000)
+        self.assertEqual((early["manager_state"], early["retry"]), ("started", False))
+        late = self.shown(manager, T0_MS + 10 * 60_000)
+        self.assertEqual((late["manager_state"], late["manager_text"], late["retry"]),
+                         ("missing", "the manager is not running", True))
+        briefed_ = self.shown(manager, T0_MS + 10 * 60_000, brief=True)
+        self.assertEqual((briefed_["manager_state"], briefed_["retry"]), ("started", False))
+
+    def test_a_failed_start_shows_its_reason_and_retry(self):
+        entry = self.shown(Manager("failed", T0, reason="the directory is not trusted"))
+        self.assertEqual((entry["manager_state"], entry["manager_text"], entry["retry"]),
+                         ("failed", "could not start a manager: the directory is not trusted",
+                          True))
+
+    def test_waiting_on_quota_reads_until_the_earliest_reset(self):
+        until = "2026-11-13T00:00:00+00:00"
+        entry = self.shown(Manager("waiting", T0, until=until))
+        self.assertEqual((entry["manager_state"], entry["manager_text"],
+                          entry["manager_until"], entry["retry"]),
+                         ("waiting", "waiting on quota until", until, True))
+
+    def test_no_manager_after_two_minutes_offers_retry(self):
+        late = self.shown(None, T0_MS + 120_001)
+        self.assertEqual((late["manager_state"], late["retry"]), ("none", True))
+        self.assertEqual(self.shown(None, T0_MS)["retry"], False)
+        done = self.shown(None, T0_MS + 120_001, brief=True)
+        self.assertEqual((done["retry"], done["manager_text"]), (False, None))
+
+    def test_without_managers_every_sprint_says_not_available(self):
+        failed = Manager("failed", T0, reason="x")
+        entry = self.shown(failed, managers=False)
+        self.assertEqual((entry["manager_state"], entry["manager_text"], entry["retry"]),
+                         ("unavailable", "managers are not available on this host yet", False))
+        sprints = {self.SID: dataclasses.replace(sprint(self.SID), manager=failed)}
+        self.assertIs(derive_view([state("p00", 1)], sprints=sprints, managers=False)["managers"],
+                      False)
+        self.assertIs(derive_view([state("p00", 1)], sprints=sprints)["managers"], True)
+
+    def test_a_sprint_session_shows_inside_its_sprint_not_outside(self):
+        sessions = [session("m1", "working", name=self.NAME, seq=3),
+                    session("o1", "idle", seq=2),
+                    session("w1", "waiting_answer", name=self.NAME, seq=4)]
+        view = derive_view([state("p00", 1)], sessions=sessions,
+                           sprints={self.SID: sprint(self.SID)}, now_ms=T0_MS + 10 * 60_000)
+        project = view["entries"][0]
+        entry = project["sprints"][0]
+        self.assertEqual([(s["session_id"], s["state_text"]) for s in entry["sessions"]],
+                         [("w1", "waiting for an answer"), ("m1", "working")])
+        outside = project["outside_sprints"]
+        self.assertEqual([s["session_id"] for s in outside["sessions"]], ["o1"])
+        self.assertEqual((outside["working"], outside["waiting"], outside["summary"]),
+                         (0, 0, "1 idle"))
+        self.assertIsNone(entry["manager_text"])
+        permission = derive_view(
+            [state("p00", 1)], sessions=[session("p1", "waiting_permission", name=self.NAME)],
+            sprints={self.SID: sprint(self.SID)})["entries"][0]["sprints"][0]
+        self.assertEqual(permission["sessions"][0]["state_text"], "waiting for a permission")
+
+
 class SprintViewTest(unittest.TestCase):
     def test_a_sprint_shows_its_goal_state_and_age(self):
         view = derive_view([state("p00", 1)], sprints={"a" * 16: sprint("a" * 16)},
@@ -810,7 +891,8 @@ class SprintViewTest(unittest.TestCase):
         self.assertEqual(view["entries"][0]["sprints"], [{
             "type": "sprint", "sprint_id": "a" * 16, "goal": "make the importer resumable",
             "state": "drafting", "state_text": "drafting the brief", "stated_at": T0,
-            "age_text": "stated 3 min ago", "manager_text": "no manager has picked this up"}])
+            "age_text": "stated 3 min ago", "manager_text": "no manager has picked this up",
+            "manager_state": "none", "manager_until": None, "retry": True, "sessions": []}])
 
     def test_a_sprint_older_than_two_minutes_says_no_manager_has_picked_it_up(self):
         for now_ms, expected in ((None, None), (T0_MS, None), (T0_MS + 120_000, None),

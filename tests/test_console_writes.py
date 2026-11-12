@@ -367,7 +367,8 @@ class GoalRouteTest(Case):
             "type": "sprint", "sprint_id": payload["sprint_id"],
             "goal": "make the importer resumable", "state": "drafting",
             "state_text": "drafting the brief", "stated_at": at,
-            "age_text": "stated just now", "manager_text": None}])
+            "age_text": "stated just now", "manager_text": None, "manager_state": "none",
+            "manager_until": None, "retry": False, "sessions": []}])
         self.assertEqual(view_of(svc)["recent_projects"][0], "owner/p01")
 
     def test_an_unregistered_empty_or_over_long_goal_is_refused_and_appends_nothing(self):

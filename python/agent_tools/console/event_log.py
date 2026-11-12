@@ -18,6 +18,11 @@ the cutoff's, no `REPLACE`, no `INSERT OR ...`, and deletes only in
 cutoff to the clock minus `RETENTION` and removes the rows older than it except
 those of `KEPT_KINDS`, and returns how many. Sequence numbers are never reused.
 
+Three kinds record a sprint's manager (#888): `MANAGER_STARTED` (`manager.started`), `MANAGER_FAILED`
+(`manager.failed`) and `MANAGER_WAITING` (`manager.waiting`), each with the project in its project
+column. They are not in `KEPT_KINDS`: retention removes them like any other row, and a sprint whose
+manager rows are gone reads as having none.
+
 `EventLog.append` writes all its entries in one transaction under one `at`
 taken from the clock: a failure writes no row, rolls back the earlier entries of
 the same call and leaves the connection usable. An empty sequence returns `[]`
@@ -48,6 +53,9 @@ GOAL_WITHDRAWN = "goal.withdrawn"
 BRIEF_SENT = "brief.sent"
 BRIEF_APPROVED = "brief.approved"
 BRIEF_REPLIED = "brief.replied"
+MANAGER_STARTED = "manager.started"
+MANAGER_FAILED = "manager.failed"
+MANAGER_WAITING = "manager.waiting"
 # Rows of these kinds (the two goal kinds and the three brief kinds) are never
 # removed: not by the retention pass, not by a raw connection (the delete
 # trigger of schema 3 and 4).

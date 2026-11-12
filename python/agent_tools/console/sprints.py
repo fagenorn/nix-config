@@ -11,6 +11,13 @@ rows carry
 
 The log keeps all five indefinitely (`event_log.KEPT_KINDS`).
 
+Three more kinds record the sprint's manager (#888), none of them kept (`event_log.MANAGER_STARTED`,
+`MANAGER_FAILED`, `MANAGER_WAITING`; each with the project in its project column):
+
+    manager.started  {"sprint_id", "profile": <str>, "session_name": <str>}
+    manager.failed   {"sprint_id", "reason": <str>}
+    manager.waiting  {"sprint_id", "until": <str> | null}
+
 A sprint id is `secrets.token_hex(8)`: 16 lowercase hex characters (`SPRINT_ID`), the only form a
 request may name and the file name of the sprint's secret.
 
@@ -87,11 +94,15 @@ import re
 import secrets
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
+from datetime import datetime
 from pathlib import Path
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.console.event_log import (BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED,
-                                           GOAL_WITHDRAWN, Event)
+                                           GOAL_WITHDRAWN, MANAGER_FAILED, MANAGER_STARTED,
+                                           MANAGER_WAITING, Event)
+from agent_tools.console.manager import (FAILED_TEXT, MISSING_TEXT, UNAVAILABLE_TEXT,
+                                         WAITING_TEXT)
 
 MAX_GOAL_CHARS = 2000
 MAX_REPLY_CHARS = 2000
@@ -106,6 +117,11 @@ NO_MANAGER_AFTER_MS = 120_000
 DRAFTING = "drafting"
 DRAFTING_TEXT = "drafting the brief"
 NO_MANAGER_TEXT = "no manager has picked this up"
+STARTED = "started"
+FAILED = "failed"
+WAITING = "waiting"
+MISSING = "missing"
+UNAVAILABLE = "unavailable"
 SECRETS_DIR = "sprint-secrets"
 SPRINT_ID = re.compile(r"[0-9a-f]{16}")
 
@@ -144,6 +160,16 @@ class Brief:
 
 
 @dataclass(frozen=True)
+class Manager:
+    state: str
+    at: str
+    profile: str | None = None
+    session_name: str | None = None
+    reason: str | None = None
+    until: str | None = None
+
+
+@dataclass(frozen=True)
 class SprintState:
     sprint_id: str
     project_id: str
@@ -151,6 +177,7 @@ class SprintState:
     stated_seq: int
     stated_at: str
     brief: Brief | None = None
+    manager: Manager | None = None
 
     @property
     def state(self) -> str:
@@ -279,6 +306,23 @@ def _folded_brief(state: SprintState, event: Event) -> SprintState:
     return state
 
 
+def _folded_manager(state: SprintState, event: Event) -> SprintState:
+    payload = event.payload
+    if event.kind == MANAGER_STARTED:
+        profile, name = payload.get("profile"), payload.get("session_name")
+        if isinstance(profile, str) and isinstance(name, str):
+            return replace(state, manager=Manager(STARTED, event.at, profile, name))
+    elif event.kind == MANAGER_FAILED:
+        reason = payload.get("reason")
+        if isinstance(reason, str):
+            return replace(state, manager=Manager(FAILED, event.at, reason=reason))
+    elif event.kind == MANAGER_WAITING and "until" in payload:
+        until = payload["until"]
+        if until is None or isinstance(until, str):
+            return replace(state, manager=Manager(WAITING, event.at, until=until))
+    return state
+
+
 def sprint_states(events: Iterable[Event],
                   states: Mapping[str, SprintState] | None = None) -> dict[str, SprintState]:
     folded = dict(states or {})
@@ -295,6 +339,9 @@ def sprint_states(events: Iterable[Event],
             folded.pop(sprint_id, None)
         elif event.kind in (BRIEF_SENT, BRIEF_APPROVED, BRIEF_REPLIED) and sprint_id in folded:
             folded[sprint_id] = _folded_brief(folded[sprint_id], event)
+        elif event.kind in (MANAGER_STARTED, MANAGER_FAILED, MANAGER_WAITING) \
+                and sprint_id in folded:
+            folded[sprint_id] = _folded_manager(folded[sprint_id], event)
     return folded
 
 
@@ -317,6 +364,27 @@ def age_text(elapsed_ms: int) -> str:
         return f"stated {elapsed // _HOUR_MS} h ago"
     days = elapsed // _DAY_MS
     return "stated 1 day ago" if days == 1 else f"stated {days} days ago"
+
+
+def _ms(time: str) -> int:
+    return int(datetime.fromisoformat(time).timestamp() * 1000)
+
+
+def manager_status(state: SprintState, listed: bool, now_ms: int | None,
+                   managers: bool) -> tuple[str, str | None, bool]:
+    if not managers:
+        return UNAVAILABLE, UNAVAILABLE_TEXT, False
+    manager = state.manager
+    since = state.stated_at if manager is None or manager.state != STARTED else manager.at
+    overdue = (now_ms is not None and now_ms - _ms(since) > NO_MANAGER_AFTER_MS
+               and state.brief is None and not listed)
+    if manager is None:
+        return (NONE, NO_MANAGER_TEXT, True) if overdue else (NONE, None, False)
+    if manager.state == STARTED:
+        return (MISSING, MISSING_TEXT, True) if overdue else (STARTED, None, False)
+    if manager.state == FAILED:
+        return FAILED, f"{FAILED_TEXT}: {manager.reason}", True
+    return WAITING, WAITING_TEXT, True
 
 
 def new_sprint_id() -> str:
