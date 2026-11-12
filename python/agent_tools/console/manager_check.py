@@ -42,14 +42,20 @@ agent-console`), waits 10 seconds and reads the session registry up to three tim
 until each sprint's manager (`manager.session_name`) is listed. The registry is read fresh from the
 registry files and filtered by live process, never from the console's view, which replays sessions
 from the log and drops a missing one only after two polls: a manager killed by the restart cannot
-pass. The managers' background sessions are left running (no stop path is verified, and an idle
-background session uses no quota); the met output names them in `sessions` so the owner can stop them.
+pass. The met output names the managers it found in `sessions`.
 
-The test sprints are withdrawn whenever `start` finishes (the console is given up to 60 seconds to
-come back from the restart first); a 75 `waiting` finish withdraws nothing. A withdrawal counts as done on
-204 or 409 (already gone). When any withdrawal fails the outcome is kept in the state file, nothing else is
-written and the run is 75 `waiting` (`the test sprints are not withdrawn yet`); the next run retries the
-withdrawals and then finishes with that outcome. A finish whose sprints are withdrawn writes the
+Whenever `start` finishes (the console is given up to 60 seconds to come back from the restart
+first) it stops the test managers, then withdraws the test sprints; a 75 `waiting` finish does
+neither. Each manager listed in a fresh registry read under its name (`manager.session_name`) is
+stopped with `manager.stop_session`, which gives the stop the first eight characters of the
+session id and runs it under the session's own profile; every one is tried, and a manager not
+listed needs no stop. The stop comes first because a withdrawal does not end a manager's background
+session. When any stop fails the outcome is kept in the state file, nothing is withdrawn and the
+run is 75 `waiting` (`the test managers are not stopped yet: <the stop's one-line reason>`). A
+withdrawal counts as done on 204 or 409 (already gone). When any withdrawal fails the outcome is
+kept in the state file, nothing else is written and the run is 75 `waiting` (`the test sprints
+are not withdrawn yet`); the next run retries the stops and the withdrawals and then finishes
+with that outcome. A finish whose sprints are withdrawn writes the
 result file `{"status", "brief_seconds": {sprint id: int | null}}`, where a sprint's seconds are its
 brief's `waiting_since` minus the sprint's `stated_at`, both console timestamps, so they never
 depend on when the check looked, and removes the state file.
@@ -57,7 +63,7 @@ depend on when the check looked, and removes the state file.
 `timing` only reads the result file (a new run deletes the previous one, so it never reports an earlier run): absent is 75 `no_result`; any `brief_seconds` null or above
 `--deadline` is 1 `slow`; else 0 `met`, each with `brief_seconds`. It changes no file.
 
-The default `restart` and `registry` and the `clock` and `sleep` of `main` are seams for tests.
+The default `restart`, `registry` and `stop` and the `clock` and `sleep` of `main` are seams for tests.
 """
 
 from __future__ import annotations
@@ -89,6 +95,8 @@ GOALS = ("[verify #888 a] check that a stated goal starts a manager; withdraw me
          "[verify #888 b] check that a second manager on the same profile keeps its own sprint; "
          "withdraw me")
 NOT_RUNNING_TEXT = "the manager is not running after the restart"
+NOT_STOPPED_TEXT = "the test managers are not stopped yet"
+NOT_WITHDRAWN_TEXT = "the test sprints are not withdrawn yet"
 
 
 def _loopback_url(text: str) -> str:
@@ -220,7 +228,7 @@ def default_registry() -> dict:
     return sessions.read_session_registry(service.default_session_dirs())
 
 
-def _start(args, restart, registry, clock, sleep) -> int:
+def _start(args, restart, registry, stop, clock, sleep) -> int:
     state_file = args.state_file or _state_dir() / "checks" / "manager-start.json"
     result_file = args.result_file or _state_dir() / "checks" / "manager-start-result.json"
     token_file = args.token_file or _state_dir() / "page-token"
@@ -255,19 +263,31 @@ def _start(args, restart, registry, clock, sleep) -> int:
         _write_json(state_file, {"project": project, "sprints": [
             {"sprint_id": i, "stated_at": stated[i]} for i in ids], **more})
 
-    def settle(code, reason, seconds, listed=(), restarted=False):
-        """Withdraw the test sprints, then finish; sprints that stay open keep the state file."""
-        if restarted:
-            await_console()
-        if not withdraw(ids):
+    def close(code, reason, seconds, listed):
+        """Stop the test managers, then withdraw the sprints, then finish.
+
+        A manager that stays running or a sprint that stays open keeps the state file.
+        """
+        def keep(text):
             checkpoint(outcome={"code": code, "reason": reason, "seconds": seconds,
                                 "listed": list(listed)})
-            return pending()
+            return pending(text)
+
+        try:
+            manager.stop_listed([manager.session_name(project, i) for i in ids], registry, stop)
+        except Exception as error:
+            return keep(f"{NOT_STOPPED_TEXT}: {error}" if str(error) else NOT_STOPPED_TEXT)
+        if not withdraw(ids):
+            return keep(NOT_WITHDRAWN_TEXT)
         return _finish(code, reason, ids, seconds, list(listed), result_file, state_file)
 
-    def pending():
-        _print({"status": "waiting", "reason": "the test sprints are not withdrawn yet",
-                "sprints": [{"sprint_id": i} for i in ids]})
+    def settle(code, reason, seconds, listed=(), restarted=False):
+        if restarted:
+            await_console()
+        return close(code, reason, seconds, listed)
+
+    def pending(text):
+        _print({"status": "waiting", "reason": text, "sprints": [{"sprint_id": i} for i in ids]})
         return NOT_YET
 
     project = args.project
@@ -291,10 +311,7 @@ def _start(args, restart, registry, clock, sleep) -> int:
         if not read_token():
             return NOT_YET
         if outcome is not None:
-            if not withdraw(ids):
-                return pending()
-            return _finish(outcome[0], outcome[1], ids, outcome[2], outcome[3],
-                           result_file, state_file)
+            return close(outcome[0], outcome[1], outcome[2], outcome[3])
     if not state_file.exists() or unresolved:
         view = console.state()
         if view is None:
@@ -415,12 +432,13 @@ def _timing(args) -> int:
 def main(argv: list[str] | None = None, *,
          restart: Callable[[], None] = default_restart,
          registry: Callable[[], dict] = default_registry,
+         stop: Callable[[str, str], None] = manager.stop_session,
          clock: Callable[[], float] = time.time,
          sleep: Callable[[float], None] = time.sleep) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "timing":
         return _timing(args)
-    return _start(args, restart, registry, clock, sleep)
+    return _start(args, restart, registry, stop, clock, sleep)
 
 
 if __name__ == "__main__":
