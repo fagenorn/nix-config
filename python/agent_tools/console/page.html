@@ -64,11 +64,22 @@ ul { list-style: none; }
 .abox .meta { margin-top: 6px; }
 .abox .meta.now { color: var(--text); }
 .abox .opts { list-style: none; padding-left: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; margin-top: 4px; }
-.opt, .send, .undo { display: inline-flex; align-items: baseline; gap: 8px; font: inherit; color: inherit; text-align: left; background: none; border: 1px solid var(--hair); border-radius: 8px; padding: 2px 10px; cursor: pointer; transition: background-color .16s; }
-.opt:hover:enabled, .send:hover:enabled, .undo:hover:enabled { background: rgba(202, 211, 245, .05); }
-.opt:disabled, .send:disabled { cursor: default; }
+.opt, .send, .undo, .goal-open, .goal-send, .goal-cancel, .goal-project, .withdraw { display: inline-flex; align-items: baseline; gap: 8px; font: inherit; color: inherit; text-align: left; background: none; border: 1px solid var(--hair); border-radius: 8px; padding: 2px 10px; cursor: pointer; transition: background-color .16s; }
+.opt:hover:enabled, .send:hover:enabled, .undo:hover:enabled, .goal-open:hover:enabled, .goal-send:hover:enabled, .goal-cancel:hover:enabled, .goal-project:hover:enabled, .withdraw:hover:enabled { background: rgba(202, 211, 245, .05); }
+.opt:disabled, .send:disabled, .goal-send:disabled, .withdraw:disabled { cursor: default; }
 .opt kbd { font: inherit; color: var(--ov2); }
-.opt.picked { color: var(--lav); border-color: var(--lav); }
+.opt.picked, .goal-project.picked { color: var(--lav); border-color: var(--lav); }
+#goal { margin-top: 24px; max-width: 44rem; }
+.goal-box { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
+.goal-filter, .goal-text { width: 100%; font: inherit; color: var(--text); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; padding: 6px 10px; }
+.goal-text { min-height: 6em; resize: vertical; }
+.goal-projects { display: flex; flex-wrap: wrap; gap: 4px; }
+.goal-status:empty { display: none; }
+.goal-act { display: flex; gap: 8px; }
+.sprints { flex: 1 0 100%; padding: 0 0 0 16px; }
+.sprint { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; font-size: .8125rem; color: var(--sub0); }
+.sprint .goal-line { color: var(--text); overflow-wrap: anywhere; }
+.sprint .age, .sprint .manager { color: var(--ov2); }
 .act { flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin-top: 8px; font-size: .8125rem; color: var(--ov2); }
 .fail { color: var(--red); }
 .done-head { margin-top: 24px; font: 600 .875rem/1.4 var(--ui); color: var(--ov2); }
@@ -132,6 +143,7 @@ ul { list-style: none; }
 <div class="desk-grid">
 <main>
 <div class="statement" id="statement"></div>
+<section id="goal" aria-label="Goal"></section>
 <section id="promoted" aria-label="Capacity"></section>
 <section id="inbox" aria-label="Inbox"></section>
 <section id="digest" aria-label="Since you last looked"></section>
@@ -188,6 +200,61 @@ function untouchedDays(lastActivity) {
   const days = Math.floor((Date.now() - Date.parse(lastActivity)) / 86400000);
   return Number.isFinite(days) && days >= 1 ? days : 0;
 }
+const withdrawals = new Map();
+function fillSprint(item, entry, sprint) {
+  const state = withdrawals.get(sprint.sprint_id);
+  item.replaceChildren();
+  item.appendChild(el("span", "goal-line", sprint.goal));
+  item.appendChild(el("span", "sprint-state", sprint.state_text));
+  item.appendChild(el("span", "age", sprint.age_text));
+  if (sprint.manager_text !== null && sprint.manager_text !== undefined) {
+    item.appendChild(el("span", "manager", sprint.manager_text));
+  }
+  const button = actionButton("withdraw", "Withdraw", () => withdraw(item, entry, sprint));
+  if (state !== undefined && state.phase === "sending") button.setAttribute("disabled", "");
+  item.appendChild(button);
+  if (state !== undefined && state.phase === "failed") {
+    item.appendChild(el("span", "fail", "Could not withdraw: " + state.reason));
+  }
+}
+async function withdraw(item, entry, sprint) {
+  const id = sprint.sprint_id;
+  const current = withdrawals.get(id);
+  if (current !== undefined && current.phase === "sending") return;
+  const state = { phase: "sending", reason: "" };
+  withdrawals.set(id, state);
+  fillSprint(item, entry, sprint);
+  let reason = null;
+  try {
+    const response = await fetch("/api/withdraw", {
+      method: "POST",
+      headers: { "X-Console-Token": token, "Content-Type": "application/json" },
+      body: JSON.stringify({ project_id: entry.project_id, sprint_id: id }),
+    });
+    if (response.status !== 204) {
+      reason = (await response.text()).trim() || "HTTP " + response.status;
+    }
+  } catch (error) {
+    console.error(error);
+    reason = "the console did not answer";
+  }
+  if (withdrawals.get(id) !== state) return;
+  if (reason === null) withdrawals.delete(id);
+  else {
+    state.phase = "failed";
+    state.reason = reason;
+  }
+  fillSprint(item, entry, sprint);
+}
+function sprintList(entry) {
+  const list = el("ul", "sprints");
+  for (const sprint of entry.sprints) {
+    const item = el("li", "sprint");
+    fillSprint(item, entry, sprint);
+    list.appendChild(item);
+  }
+  return list;
+}
 function projectLine(entry) {
   const line = el("li", "line");
   line.appendChild(el("b", "", entry.project_id));
@@ -205,6 +272,7 @@ function projectLine(entry) {
   if (entry.outside_sprints.sessions.length > 0) {
     line.appendChild(outsideFold(entry.outside_sprints, "outside:" + entry.project_id));
   }
+  if (entry.sprints && entry.sprints.length > 0) line.appendChild(sprintList(entry));
   return line;
 }
 function renderStatement(view) {
@@ -548,6 +616,15 @@ function renderProjects(view) {
   }
   const list = el("ul");
   list.id = "list";
+  const live = new Set();
+  for (const entry of view.entries) {
+    for (const project of entry.type === "quiet_group" ? entry.projects : [entry]) {
+      for (const sprint of project.sprints || []) live.add(sprint.sprint_id);
+    }
+  }
+  for (const id of [...withdrawals.keys()]) {
+    if (!live.has(id)) withdrawals.delete(id);
+  }
   for (const entry of view.entries) {
     if (entry.type === "quiet_group") {
       const fold = el("details", "quietfold");
@@ -584,10 +661,140 @@ function renderUnmanaged(view) {
   }
   section.appendChild(list);
 }
+const MAX_GOAL = 2000;
+const draft = { open: false, filter: "", text: "", project: null, phase: "idle", reason: "" };
+let goalUi = null;
+let recentProjects = [];
+function goalMatches() {
+  const needle = draft.filter.toLowerCase();
+  return recentProjects.filter((id) => id.toLowerCase().includes(needle));
+}
+function chosenProject() {
+  const matches = goalMatches();
+  if (draft.project !== null && matches.includes(draft.project)) return draft.project;
+  return matches.length > 0 ? matches[0] : null;
+}
+function refreshGoalList() {
+  if (goalUi === null) return;
+  const chosen = chosenProject();
+  const items = goalMatches().map((id) => {
+    const button = actionButton(id === chosen ? "goal-project picked" : "goal-project", id, () => {
+      draft.project = id;
+      refreshGoalList();
+    });
+    const row = el("li");
+    row.appendChild(button);
+    return row;
+  });
+  goalUi.list.replaceChildren(...items);
+}
+function showGoalReason() {
+  if (goalUi === null) return;
+  goalUi.status.replaceChildren(
+    ...(draft.reason === "" ? [] : [el("p", "fail", "Could not send: " + draft.reason)]),
+  );
+}
+function closeGoal() {
+  if (draft.phase !== "sending") draft.reason = "";
+  draft.open = false;
+  goalUi = null;
+  renderGoal();
+}
+async function sendGoal() {
+  if (draft.phase === "sending") return;
+  const project = chosenProject();
+  draft.reason = "";
+  if (project === null) draft.reason = "choose a project";
+  else if (Array.from(draft.text.trim()).length > MAX_GOAL) {
+    draft.reason = "a goal is at most " + MAX_GOAL + " characters";
+  }
+  if (draft.reason !== "") {
+    showGoalReason();
+    return;
+  }
+  draft.phase = "sending";
+  showGoalReason();
+  if (goalUi !== null) goalUi.send.disabled = true;
+  let reason = null;
+  try {
+    const response = await fetch("/api/goal", {
+      method: "POST",
+      headers: { "X-Console-Token": token, "Content-Type": "application/json" },
+      body: JSON.stringify({ project_id: project, goal: draft.text }),
+    });
+    if (response.status !== 204) {
+      reason = (await response.text()).trim() || "HTTP " + response.status;
+    }
+  } catch (error) {
+    console.error(error);
+    reason = "the console did not answer";
+  }
+  draft.phase = "idle";
+  if (goalUi !== null) goalUi.send.disabled = false;
+  if (reason === null) {
+    draft.filter = "";
+    draft.text = "";
+    draft.project = null;
+    draft.reason = "";
+    if (draft.open) closeGoal();
+  } else {
+    draft.reason = reason;
+    showGoalReason();
+  }
+}
+function buildGoalBox(section) {
+  const box = el("div", "goal-box");
+  const filter = el("input", "goal-filter");
+  filter.setAttribute("type", "text");
+  filter.setAttribute("aria-label", "Filter projects");
+  filter.setAttribute("placeholder", "Filter projects");
+  filter.value = draft.filter;
+  filter.addEventListener("input", (event) => {
+    draft.filter = event.target.value;
+    refreshGoalList();
+  });
+  const list = el("ul", "goal-projects");
+  const text = el("textarea", "goal-text");
+  text.setAttribute("aria-label", "Goal");
+  text.setAttribute("placeholder", "What should the next sprint achieve?");
+  text.value = draft.text;
+  text.addEventListener("input", (event) => { draft.text = event.target.value; });
+  const status = el("div", "goal-status");
+  const send = actionButton("goal-send", "Send", sendGoal);
+  const act = el("div", "goal-act");
+  act.appendChild(send);
+  act.appendChild(actionButton("goal-cancel", "Cancel", closeGoal));
+  for (const part of [filter, list, text, status, act]) box.appendChild(part);
+  section.replaceChildren(box);
+  goalUi = { filter, list, text, status, send };
+  send.disabled = draft.phase === "sending";
+  refreshGoalList();
+  showGoalReason();
+}
+function openGoal() {
+  draft.open = true;
+  if (goalUi === null) buildGoalBox(document.getElementById("goal"));
+  goalUi.filter.focus();
+}
+const goalOpener = el("button", "goal-open", "State a goal");
+goalOpener.setAttribute("type", "button");
+goalOpener.setAttribute("aria-keyshortcuts", "g");
+goalOpener.addEventListener("click", openGoal);
+function renderGoal() {
+  const section = document.getElementById("goal");
+  if (draft.open) {
+    if (goalUi === null) buildGoalBox(section);
+    else refreshGoalList();
+  } else if (section.children.length !== 1 || section.children[0] !== goalOpener) {
+    section.replaceChildren(goalOpener);
+  }
+}
 function render(view) {
   const wasOpen = new Set();
   for (const fold of document.querySelectorAll("details[open]")) wasOpen.add(fold.dataset.key);
   renderStatement(view);
+  recentProjects = view.recent_projects || [];
+  renderGoal();
   renderCapacity(view);
   renderPromoted(view);
   renderInbox(view);
@@ -626,11 +833,19 @@ document.addEventListener("keydown", (event) => {
     if (undone) {
       event.preventDefault();
       redraw();
+    } else if (draft.open) {
+      event.preventDefault();
+      closeGoal();
     }
     return;
   }
   const focused = event.target && event.target.tagName;
-  if (focused === "A" || focused === "BUTTON" || focused === "SUMMARY") return;
+  if (["A", "BUTTON", "SUMMARY", "INPUT", "TEXTAREA", "SELECT"].includes(focused)) return;
+  if (event.key === "g") {
+    openGoal();
+    event.preventDefault();
+    return;
+  }
   const current = currentEntry(lastView.inbox.open);
   if (current === null) return;
   const { item, state } = current;
