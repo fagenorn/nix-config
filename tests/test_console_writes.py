@@ -6,6 +6,7 @@ import contextlib
 import io
 import json
 import re
+import sqlite3
 import stat
 import tempfile
 import time
@@ -15,19 +16,22 @@ from unittest import mock
 
 from agent_tools.console import console, digest, service, write_guard
 
-from agent_tools.console import answer
+from agent_tools.console import answer, sprints
 from agent_tools.system.forge_api import ForgeError
 from agent_tools.verification import verify_answer
 
 from . import console_test_support as support
 from .forge_world import ForgeWorld
 from .test_console_answer import ASK7 as CHECK_ITEM, C, ITEM, view_of
+from .test_console_stream import open_stream, next_frame
 from .test_console_tracker import Scripted
 from .test_forge_owner_action import ISSUE, SLUG, box_body, comment
 
 LOOK = "/api/looked"
 ANSWER = "/api/answer"
 CHECK = "/api/check-answer"
+GOAL = "/api/goal"
+WITHDRAW = "/api/withdraw"
 
 
 class Case(unittest.TestCase):
@@ -123,7 +127,8 @@ class WriteRouteTest(Case):
 
     def test_every_page_write_route_is_guarded(self):
         svc = self.start()
-        self.assertEqual(service.PAGE_WRITES, {"/api/looked", "/api/answer", "/api/check-answer"})
+        self.assertEqual(service.PAGE_WRITES,
+                         {"/api/looked", "/api/answer", "/api/check-answer", "/api/goal", "/api/withdraw"})
         for path in service.PAGE_WRITES:
             with self.subTest(path=path):
                 status, _, body = support.post_page(
@@ -307,6 +312,235 @@ class AnswerRouteTest(Case):
                 status, headers, _ = support.request(svc.address, method, ANSWER)
                 self.assertEqual(status, 405)
                 self.assertEqual(headers["Allow"], "POST")
+
+
+class GoalRouteTest(Case):
+    def open(self, **kwargs):
+        support.write_registry(self.registry, support.entries(2))
+        return self.start(**kwargs)
+
+    def headers(self, svc, **extra):
+        return self.own(svc, **{"Content-Type": "application/json", **extra})
+
+    def goal_body(self, project_id="owner/p01", goal="make the importer resumable"):
+        return json.dumps({"project_id": project_id, "goal": goal}).encode()
+
+    def withdraw_body(self, sprint_id, project_id="owner/p01"):
+        return json.dumps({"project_id": project_id, "sprint_id": sprint_id}).encode()
+
+    @property
+    def secrets_dir(self):
+        return self.store.parent / "sprint-secrets"
+
+    def sprints_of(self, svc, project_id):
+        entries = []
+        for entry in view_of(svc)["entries"]:
+            entries += entry["projects"] if entry["type"] == "quiet_group" else [entry]
+        (found,) = [e for e in entries if e["project_id"] == project_id]
+        return found["sprints"]
+
+    def post(self, svc, path, body, **extra):
+        return support.post_page(svc.address, path, self.headers(svc, **extra), body)
+
+    def refused(self, svc, path, body, status, text, **extra):
+        got = self.assert_unchanged(svc, lambda: self.post(svc, path, body, **extra))
+        self.assertEqual((got[0], got[2]), (status, text + b"\n"))
+        return got
+
+    def test_a_goal_from_the_page_appends_one_event_and_shows_a_sprint(self):
+        svc = self.open()
+        before = support.log_rows(self.store)
+        status, _, body = self.post(
+            svc, GOAL, self.goal_body(goal="  make the importer resumable  "))
+        self.assertEqual((status, body), (204, b""))
+        rows = support.log_rows(self.store)
+        self.assertEqual(rows[:len(before)], before)
+        self.assertEqual(len(rows), len(before) + 1)
+        _, at, kind, project, payload = rows[-1]
+        self.assertEqual((kind, project), ("goal.stated", "owner/p01"))
+        payload = json.loads(payload)
+        self.assertEqual(set(payload), {"goal", "sprint_id"})
+        self.assertEqual(payload["goal"], "make the importer resumable")
+        self.assertTrue(sprints.SPRINT_ID.fullmatch(payload["sprint_id"]))
+        self.assertEqual(self.sprints_of(svc, "owner/p01"), [{
+            "type": "sprint", "sprint_id": payload["sprint_id"],
+            "goal": "make the importer resumable", "state": "drafting",
+            "state_text": "drafting the brief", "stated_at": at,
+            "age_text": "stated just now", "manager_text": None}])
+        self.assertEqual(view_of(svc)["recent_projects"][0], "owner/p01")
+
+    def test_an_unregistered_empty_or_over_long_goal_is_refused_and_appends_nothing(self):
+        svc = self.open()
+        table = [
+            ("owner/zz", "a goal", b"this project is not registered"),
+            ("owner/p01", "", b"write the goal first"),
+            ("owner/p01", " \n\t ", b"write the goal first"),
+            ("owner/p01", "x" * 2001, b"a goal is at most 2000 characters"),
+            ("owner/zz", "", b"this project is not registered"),
+        ]
+        for project_id, goal, text in table:
+            with self.subTest(project_id=project_id, goal=goal[:5]):
+                got = self.refused(
+                    svc, GOAL, self.goal_body(project_id, goal), 409, text)
+                self.assertEqual(got[1]["Content-Type"].split(";")[0], "text/plain")
+        self.assertTrue(not self.secrets_dir.exists() or list(self.secrets_dir.iterdir()) == [])
+        status, _, body = self.post(svc, GOAL, self.goal_body(goal="é" * 2000))
+        self.assertEqual((status, body), (204, b""))
+
+    def test_a_goal_body_is_checked_before_it_is_read(self):
+        svc = self.open()
+        sid = svc.state_goal("owner/p01", "g")
+        cases = [
+            (GOAL, "bad goal", service.MAX_GOAL_BYTES, [
+                b"not json", b"[1]",
+                json.dumps({"project_id": "owner/p01", "goal": "g", "extra": 1}).encode(),
+                json.dumps({"project_id": "owner/p01", "goal": None}).encode(),
+                json.dumps({"project_id": "", "goal": "g"}).encode(),
+                b'{"project_id": "owner/p01", "project_id": "owner/p00", "goal": "g"}']),
+            (WITHDRAW, "bad withdraw", service.MAX_WITHDRAW_BYTES, [
+                b"not json", b"[1]",
+                json.dumps({"project_id": "owner/p01", "sprint_id": sid, "extra": 1}).encode(),
+                self.withdraw_body("../x"),
+                json.dumps({"project_id": "owner/p01"}).encode(),
+                json.dumps({"project_id": "", "sprint_id": sid}).encode(),
+                ('{"project_id": "owner/p01", "project_id": "owner/p00", "sprint_id": "%s"}'
+                 % sid).encode()]),
+        ]
+        for path, bad, limit, bodies in cases:
+            valid = self.goal_body() if path == GOAL else self.withdraw_body(sid)
+            with self.subTest(path=path, check="media"):
+                self.refused(svc, path, valid, 415, b"json only",
+                             **{"Content-Type": "text/plain"})
+            with self.subTest(path=path, check="chunked"):
+                self.refused(svc, path, valid, 411, b"length required",
+                             **{"Transfer-Encoding": "chunked"})
+            with self.subTest(path=path, check="too large"):
+                self.refused(svc, path, b"x" * (limit + 1), 413, b"too large")
+            for i, body in enumerate(bodies):
+                with self.subTest(path=path, bad=i):
+                    self.refused(svc, path, body, 400, bad.encode())
+        self.assertEqual([s["sprint_id"] for s in self.sprints_of(svc, "owner/p01")], [sid])
+
+    def test_a_goal_or_withdraw_without_the_token_or_from_another_origin_is_refused(self):
+        svc = self.open()
+        sid = svc.state_goal("owner/p01", "g")
+        own = self.headers(svc)
+        token = own["X-Console-Token"]
+        without = {k: v for k, v in own.items() if k != "X-Console-Token"}
+        no_origin = {k: v for k, v in own.items() if k != "Origin"}
+        table = [
+            ("no token", without, b"token refused", {}),
+            ("wrong token", {**own, "X-Console-Token": "A" * 43}, b"token refused", {}),
+            ("two tokens", {**own, "X-Console-Token": [token, token]}, b"token refused", {}),
+            ("other origin", {**own, "Origin": "http://example.test"}, b"origin refused", {}),
+            ("null origin", {**own, "Origin": "null"}, b"origin refused", {}),
+            ("no origin", no_origin, b"origin refused", {}),
+            ("foreign host", own, b"loopback only", {"host": "evil.test"}),
+        ]
+        for path, valid in ((GOAL, self.goal_body()), (WITHDRAW, self.withdraw_body(sid))):
+            for name, headers, text, kwargs in table:
+                with self.subTest(path=path, case=name):
+                    got = self.assert_unchanged(svc, lambda: support.post_page(
+                        svc.address, path, headers, valid, **kwargs))
+                    self.assertEqual((got[0], got[2]), (403, text + b"\n"))
+            with self.subTest(path=path, case="guard before body"):
+                got = self.assert_unchanged(svc, lambda: support.post_page(
+                    svc.address, path, without, b"x" * 100000))
+                self.assertEqual((got[0], got[2]), (403, b"token refused\n"))
+        self.assertEqual([s["sprint_id"] for s in self.sprints_of(svc, "owner/p01")], [sid])
+        self.assertTrue((self.secrets_dir / sid).exists())
+
+    def test_every_page_write_route_is_guarded_and_takes_only_post(self):
+        svc = self.open()
+        for path in (GOAL, WITHDRAW):
+            for method in ("GET", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"):
+                with self.subTest(path=path, method=method):
+                    status, headers, _ = support.request(svc.address, method, path)
+                    self.assertEqual(status, 405)
+                    self.assertEqual(headers["Allow"], "POST")
+
+    def test_a_withdrawal_appends_one_row_hides_the_sprint_and_removes_its_secret(self):
+        svc = self.open()
+        sid = svc.state_goal("owner/p01", "make the importer resumable")
+        for name, body in (("another project", self.withdraw_body(sid, "owner/p00")),
+                           ("unknown sprint", self.withdraw_body("f" * 16))):
+            with self.subTest(name):
+                self.refused(svc, WITHDRAW, body, 409, b"this sprint is not open")
+                self.assertEqual(
+                    [s["sprint_id"] for s in self.sprints_of(svc, "owner/p01")], [sid])
+                self.assertTrue((self.secrets_dir / sid).exists())
+        before = support.log_rows(self.store)
+        status, _, body = self.post(svc, WITHDRAW, self.withdraw_body(sid))
+        self.assertEqual((status, body), (204, b""))
+        rows = support.log_rows(self.store)
+        self.assertEqual(rows[:len(before)], before)
+        self.assertEqual(len(rows), len(before) + 1)
+        self.assertEqual(rows[-1][2:4], ("goal.withdrawn", "owner/p01"))
+        self.assertEqual(json.loads(rows[-1][4]),
+                         {"goal": "make the importer resumable", "sprint_id": sid})
+        self.assertEqual(self.sprints_of(svc, "owner/p01"), [])
+        self.assertFalse((self.secrets_dir / sid).exists())
+        sentences = [m["sentence"] for m in view_of(svc)["digest"]["recent"]]
+        self.assertIn("The goal for owner/p01 was withdrawn: make the importer resumable",
+                      sentences)
+        self.refused(svc, WITHDRAW, self.withdraw_body(sid), 409, b"this sprint is not open")
+
+    def test_a_stated_sprint_survives_a_restart_and_a_withdrawn_one_does_not(self):
+        svc = self.open()
+        kept = svc.state_goal("owner/p01", "make the importer resumable")
+        gone = svc.state_goal("owner/p01", "drop me")
+        svc.withdraw_goal("owner/p01", gone)
+        secret = (self.secrets_dir / kept).read_text()
+        before = self.sprints_of(svc, "owner/p01")
+        svc.close()
+        rows = support.log_rows(self.store)
+        second = self.start()
+        after = self.sprints_of(second, "owner/p01")
+        self.assertEqual([s["sprint_id"] for s in after], [kept])
+        self.assertEqual(after[0]["goal"], "make the importer resumable")
+        self.assertEqual(after[0]["stated_at"], before[0]["stated_at"])
+        self.assertEqual((self.secrets_dir / kept).read_text(), secret)
+        self.assertEqual([r for r in support.log_rows(self.store) if r[2].startswith("goal.")],
+                         [r for r in rows if r[2].startswith("goal.")])
+
+    def test_the_sprint_secret_is_owner_only_and_never_served(self):
+        svc = self.open()
+        response = open_stream(self, svc)
+        next_frame(response)
+        status, _, posted = self.post(svc, GOAL, self.goal_body())
+        self.assertEqual((status, posted), (204, b""))
+        frame = next_frame(response)
+        for _ in range(20):
+            if b"drafting the brief" in frame:
+                break
+            frame = next_frame(response)
+        self.assertIn(b"drafting the brief", frame)
+        (sid,) = [p.name for p in self.secrets_dir.iterdir()]
+        self.assertEqual(stat.S_IMODE((self.secrets_dir / sid).stat().st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(self.secrets_dir.stat().st_mode), 0o700)
+        secret = (self.secrets_dir / sid).read_text().strip()
+        self.assertRegex(secret, r"^[A-Za-z0-9_-]{43}$")
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            self.post(svc, GOAL, self.goal_body(goal="again"))
+            self.post(svc, WITHDRAW, self.withdraw_body(sid))
+        served = [posted, support.request(svc.address, "GET", "/")[2],
+                  support.request(svc.address, "GET", "/api/state")[2], svc.view_bytes, frame]
+        for blob in served:
+            self.assertNotIn(secret.encode(), blob)
+        self.assertNotIn(secret, err.getvalue())
+        for row in support.log_rows(self.store):
+            self.assertNotIn(secret, " ".join(map(str, row)))
+
+    def test_a_failed_append_leaves_no_secret(self):
+        svc = self.open()
+        err = io.StringIO()
+        with mock.patch.object(svc.log, "append", side_effect=sqlite3.OperationalError("boom")):
+            with contextlib.redirect_stderr(err):
+                status, _, body = self.post(svc, GOAL, self.goal_body())
+        self.assertEqual((status, body), (500, b"goal failed\n"))
+        self.assertIn("console: goal_failed OperationalError: boom", err.getvalue())
+        self.assertTrue(not self.secrets_dir.exists() or list(self.secrets_dir.iterdir()) == [])
 
 
 class TokenTest(Case):

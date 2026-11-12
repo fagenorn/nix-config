@@ -18,7 +18,7 @@ Anything waiting on the owner that the console asks them to act on, whatever its
 _Avoid_: ask, notification
 
 **Answered item**:
-An inbox item whose owner-action marker has every box ticked, on the tracker or from the page (ADR-console-010); for a verification prompt, the box it was answered with (ADR-console-011). A prompt with both boxes ticked is not answered. It reads answered, waiting for the agent to pick it up, is not counted, and leaves the list once its marker is no longer live.
+An inbox item whose owner-action marker has every box ticked, on the tracker or from the page (ADR-console-010); for a verification prompt, the box it was answered with (ADR-console-012). A prompt with both boxes ticked is not answered. It reads answered, waiting for the agent to pick it up, is not counted, and leaves the list once its marker is no longer live.
 _Avoid_: resolved item
 
 **Held work**:
@@ -30,8 +30,16 @@ When the console first saw an inbox item, kept in its event log because the trac
 _Avoid_: age
 
 **Quiet project**:
-A registered project with no open work and no live session. It renders as one line, and more than three of them fold into one group, "N quiet projects".
+A registered project with no open work, no live session and no open sprint. It renders as one line, and more than three of them fold into one group, "N quiet projects".
 _Avoid_: dormant project, idle project
+
+**Goal**:
+The sentence or two the owner states on the page for one registered project, kept in the console's log and never on the tracker (ADR-console-011).
+_Avoid_: task, request
+
+**Sprint**:
+One goal, later its issues and its outcome, in one project (#834), shown under its project with its state and age until it is withdrawn (ADR-console-011).
+_Avoid_: job, run
 
 **Session**:
 One running Claude Code process on this host, shown under the project of its working directory's main checkout, with one state: working, waiting for an answer, waiting for a permission, idle, or stopped on a usage limit (ADR-console-004).

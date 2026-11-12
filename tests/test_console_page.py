@@ -139,7 +139,10 @@ class PageTest(unittest.TestCase):
         literals = re.findall(
             r"\b(?:fetch|EventSource)\(\s*([\"'])([^\"']*)\1", self.text
         )
-        self.assertEqual({p for _, p in literals}, {"/api/stream", "/api/looked", "/api/answer", "/api/check-answer"})
+        self.assertEqual(
+            {p for _, p in literals},
+            {"/api/stream", "/api/looked", "/api/answer", "/api/check-answer", "/api/goal", "/api/withdraw"},
+        )
         self.assertEqual(
             len(re.findall(r"\b(?:fetch|EventSource)\(", self.text)), len(literals)
         )
@@ -147,7 +150,7 @@ class PageTest(unittest.TestCase):
     def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
         # A separate snapshot request can answer after a newer streamed frame
         # and render over it; the stream's first frame is already the snapshot.
-        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 3)
+        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 5)
         self.assertIsNotNone(
             re.search(r'fetch\("/api/looked",\s*\{\s*method:\s*"POST"', self.text)
         )
@@ -157,6 +160,10 @@ class PageTest(unittest.TestCase):
         self.assertIsNotNone(
             re.search(r'fetch\("/api/check-answer",\s*\{\s*method:\s*"POST"', self.text)
         )
+        for route in ("/api/goal", "/api/withdraw"):
+            self.assertIsNotNone(
+                re.search(rf'fetch\("{route}",\s*\{{\s*method:\s*"POST"', self.text)
+            )
         self.assertEqual(self.text.count("render(JSON.parse("), 1)
 
     def test_peach_marks_only_needs_you(self) -> None:
@@ -1231,3 +1238,244 @@ class PageDigestTest(unittest.TestCase):
         ])
         (fold,) = [n for n in nodes(snap["digest"]) if n["tag"] == "details"]
         self.assertTrue(fold["open"])
+
+
+GOAL_FRAME = {**view([]), "recent_projects": ["owner/zeta", "owner/alpha", "owner/beta"]}
+GOAL_TEXT = "make the importer resumable"
+GOAL_HEADERS = {"X-Console-Token": TOKEN, "Content-Type": "application/json"}
+SPRINT = {
+    "type": "sprint", "sprint_id": "a" * 16, "goal": GOAL_TEXT, "state": "drafting",
+    "state_text": "drafting the brief", "stated_at": "2026-11-12T10:00:00+00:00",
+    "age_text": "stated 3 min ago", "manager_text": "no manager has picked this up",
+}
+
+
+def goal_named(snap: dict, cls: str) -> list:
+    return [n for n in nodes(snap["goal"]) if has_class(n, cls)]
+
+
+def goal_names(snap: dict) -> list:
+    return [full(n) for n in goal_named(snap, "goal-project")]
+
+
+def goal_picked(snap: dict) -> list:
+    return [full(n) for n in goal_named(snap, "goal-project") if has_class(n, "picked")]
+
+
+def box_open(snap: dict) -> bool:
+    return goal_named(snap, "goal-box") != []
+
+
+def goals(snap: dict) -> list:
+    return [p for p in snap["posts"] if p["url"] == "/api/goal"]
+
+
+def goal_fail(snap: dict) -> list:
+    return [full(n) for n in goal_named(snap, "fail")]
+
+
+def with_sprints(sprints: list) -> dict:
+    return view([{**project(0, []), "sprints": sprints}])
+
+
+def sprint_lines(snap: dict) -> list:
+    return [n for n in nodes(snap["projects"]) if n["tag"] == "li" and has_class(n, "sprint")]
+
+
+class PageGoalTest(unittest.TestCase):
+    def test_g_opens_the_goal_field_and_filters_projects_most_recent_first(self) -> None:
+        closed, opened, upper, one = render([
+            START, {"frame": GOAL_FRAME}, {"snapshot": True}, {"key": "g"}, {"snapshot": True},
+            {"input": {"cls": "goal-filter", "value": "TA"}}, {"snapshot": True},
+            {"input": {"cls": "goal-filter", "value": "alpha"}}, {"snapshot": True},
+        ])
+        self.assertFalse(box_open(closed))
+        self.assertEqual([full(n) for n in goal_named(closed, "goal-open")], ["State a goal"])
+        self.assertTrue(box_open(opened))
+        self.assertEqual(goal_named(opened, "goal-open"), [])
+        self.assertEqual(goal_names(opened), ["owner/zeta", "owner/alpha", "owner/beta"])
+        self.assertEqual(goal_picked(opened), ["owner/zeta"])
+        self.assertEqual(opened["active"], "goal-filter")
+        self.assertIs(opened["key_prevented"], True)
+        (filter_node,) = goal_named(opened, "goal-filter")
+        self.assertIn(filter_node["value"], ("", None))
+        self.assertEqual(goal_names(upper), ["owner/zeta", "owner/beta"])
+        self.assertEqual(goal_names(one), ["owner/alpha"])
+        self.assertEqual(goal_picked(one), ["owner/alpha"])
+
+    def test_the_goal_field_opens_from_a_visible_button(self) -> None:
+        opened, closed = render([
+            START, {"frame": GOAL_FRAME}, {"click": "goal-open"}, {"snapshot": True},
+            {"key": "Escape"}, {"snapshot": True},
+        ])
+        self.assertTrue(box_open(opened))
+        self.assertEqual(goal_names(opened), ["owner/zeta", "owner/alpha", "owner/beta"])
+        self.assertEqual(opened["active"], "goal-filter")
+        self.assertEqual(goal_named(opened, "goal-open"), [])
+        self.assertFalse(box_open(closed))
+        self.assertEqual(len(goal_named(closed, "goal-open")), 1)
+
+    def test_a_sent_goal_posts_the_project_and_text_and_closes(self) -> None:
+        (snap,) = render([
+            START, {"frame": GOAL_FRAME}, {"key": "g"},
+            {"input": {"cls": "goal-filter", "value": "alpha"}},
+            {"input": {"cls": "goal-text", "value": GOAL_TEXT}},
+            {"click": "goal-send"}, {"snapshot": True},
+        ])
+        (post,) = goals(snap)
+        self.assertEqual(post["method"], "POST")
+        self.assertEqual(post["headers"], GOAL_HEADERS)
+        self.assertEqual(json.loads(post["body"]), {"project_id": "owner/alpha", "goal": GOAL_TEXT})
+        self.assertFalse(box_open(snap))
+        self.assertEqual(len(goal_named(snap, "goal-open")), 1)
+
+    def test_a_refused_goal_keeps_its_text_and_says_why(self) -> None:
+        for reply, reason in (
+            ({"respond": {"status": 409, "text": "this project is not registered\n"}},
+             "Could not send: this project is not registered"),
+            ({"fail_fetch": True}, "Could not send: the console did not answer"),
+        ):
+            with self.subTest(reason=reason):
+                (snap,) = render([
+                    START, {"frame": GOAL_FRAME}, {"key": "g"},
+                    {"input": {"cls": "goal-filter", "value": "alpha"}},
+                    {"input": {"cls": "goal-text", "value": GOAL_TEXT}},
+                    reply, {"click": "goal-send"}, {"snapshot": True},
+                ])
+                self.assertEqual(goal_fail(snap), [reason])
+                (text_node,) = goal_named(snap, "goal-text")
+                self.assertEqual(text_node["value"], GOAL_TEXT)
+                self.assertEqual(goal_picked(snap), ["owner/alpha"])
+                self.assertTrue(box_open(snap))
+
+    def test_local_refusals_send_nothing(self) -> None:
+        nothing, long = render([
+            START, {"frame": GOAL_FRAME}, {"key": "g"},
+            {"input": {"cls": "goal-filter", "value": "nomatch"}},
+            {"click": "goal-send"}, {"snapshot": True},
+            {"input": {"cls": "goal-filter", "value": ""}},
+            {"input": {"cls": "goal-text", "value": "x" * 2001}},
+            {"click": "goal-send"}, {"snapshot": True},
+        ])
+        self.assertEqual(goal_fail(nothing), ["Could not send: choose a project"])
+        self.assertEqual(
+            goal_fail(long), ["Could not send: a goal is at most 2000 characters"]
+        )
+        self.assertEqual(goals(nothing), [])
+        self.assertEqual(goals(long), [])
+
+    def test_a_frame_keeps_the_typed_goal_and_its_focus(self) -> None:
+        before, after = render([
+            START, {"frame": GOAL_FRAME}, {"key": "g"}, {"focus_on": "goal-text"},
+            {"input": {"cls": "goal-text", "value": "half a thought"}}, {"snapshot": True},
+            {"frame": {**GOAL_FRAME, "recent_projects": ["owner/new", "owner/zeta"]}},
+            {"snapshot": True},
+        ])
+        self.assertEqual(before["active"], "goal-text")
+        self.assertEqual(after["active"], "goal-text")
+        self.assertEqual(after["focus_count"], before["focus_count"])
+        (text_node,) = goal_named(after, "goal-text")
+        self.assertEqual(text_node["value"], "half a thought")
+        self.assertEqual(goal_names(after), ["owner/new", "owner/zeta"])
+
+    def test_keys_typed_in_the_goal_field_stay_there(self) -> None:
+        stay, snap = render([
+            START, {"frame": {**frame([ANSWERABLE]), "recent_projects": ["owner/alpha"]}},
+            {"key": "g", "target": "INPUT"}, {"snapshot": True},
+            {"key": "g"}, {"key": "1", "target": "TEXTAREA"},
+            {"key": "Enter", "target": "TEXTAREA"}, {"clock": 6000}, {"snapshot": True},
+        ])
+        self.assertFalse(box_open(stay))
+        self.assertIs(stay["key_prevented"], False)
+        self.assertEqual(answers(snap), [])
+        self.assertTrue(picked(snap)[-1].endswith("two"))
+
+    def test_escape_closes_the_goal_field_and_keeps_the_draft(self) -> None:
+        closed, reopened = render([
+            START, {"frame": GOAL_FRAME}, {"key": "g"},
+            {"input": {"cls": "goal-text", "value": "draft"}}, {"key": "Escape"},
+            {"snapshot": True}, {"key": "g"}, {"snapshot": True},
+        ])
+        self.assertFalse(box_open(closed))
+        (text_node,) = goal_named(reopened, "goal-text")
+        self.assertEqual(text_node["value"], "draft")
+
+    def test_a_sprint_line_reads_its_goal_state_age_and_the_honest_line(self) -> None:
+        (snap, bare) = render([
+            START, {"frame": with_sprints([SPRINT])}, {"snapshot": True},
+            {"frame": with_sprints([{**SPRINT, "manager_text": None}])}, {"snapshot": True},
+        ])
+        (line,) = sprint_lines(snap)
+        for expected in (GOAL_TEXT, "drafting the brief", "stated 3 min ago",
+                         "no manager has picked this up"):
+            self.assertIn(expected, full(line))
+        self.assertEqual(
+            len([n for n in nodes(line) if n["tag"] == "button" and has_class(n, "withdraw")]), 1
+        )
+        (bare_line,) = sprint_lines(bare)
+        self.assertEqual([n for n in nodes(bare_line) if has_class(n, "manager")], [])
+
+    def test_withdraw_posts_the_sprint_and_a_refusal_says_why(self) -> None:
+        (snap,) = render([
+            START, {"frame": with_sprints([SPRINT])},
+            {"respond": {"status": 409, "text": "this sprint is not open\n"}},
+            {"click": "withdraw"}, {"snapshot": True},
+        ])
+        (post,) = [p for p in snap["posts"] if p["url"] == "/api/withdraw"]
+        self.assertEqual(post["method"], "POST")
+        self.assertEqual(post["headers"], GOAL_HEADERS)
+        self.assertEqual(
+            json.loads(post["body"]), {"project_id": "owner/p00", "sprint_id": "a" * 16}
+        )
+        (line,) = sprint_lines(snap)
+        self.assertEqual(
+            [full(n) for n in nodes(line) if has_class(n, "fail")],
+            ["Could not withdraw: this sprint is not open"],
+        )
+
+
+class PageInFlightTest(unittest.TestCase):
+    def test_a_goal_edited_while_sending_survives_the_answer(self) -> None:
+        (snap,) = render([
+            START, {"frame": GOAL_FRAME}, {"key": "g"},
+            {"input": {"cls": "goal-filter", "value": "alpha"}},
+            {"input": {"cls": "goal-text", "value": GOAL_TEXT}},
+            {"hold": True}, {"click": "goal-send"},
+            {"input": {"cls": "goal-text", "value": GOAL_TEXT + " and then verifiable"}},
+            {"release": {"status": 204}}, {"snapshot": True},
+        ])
+        self.assertTrue(box_open(snap))
+        (text_node,) = goal_named(snap, "goal-text")
+        self.assertEqual(text_node["value"], GOAL_TEXT + " and then verifiable")
+        self.assertEqual(goal_fail(snap), [])
+
+    def test_a_goal_reopened_and_edited_while_sending_survives_the_answer(self) -> None:
+        closed, snap = render([
+            START, {"frame": GOAL_FRAME}, {"key": "g"},
+            {"input": {"cls": "goal-text", "value": GOAL_TEXT}},
+            {"hold": True}, {"click": "goal-send"}, {"key": "Escape"}, {"snapshot": True},
+            {"key": "g"}, {"input": {"cls": "goal-text", "value": "a second thought"}},
+            {"release": {"status": 204}}, {"snapshot": True},
+        ])
+        self.assertFalse(box_open(closed))
+        self.assertTrue(box_open(snap))
+        (text_node,) = goal_named(snap, "goal-text")
+        self.assertEqual(text_node["value"], "a second thought")
+
+    def test_a_withdrawal_failing_after_a_new_view_shows_on_the_visible_row(self) -> None:
+        sending, failed = render([
+            START, {"frame": with_sprints([SPRINT])}, {"hold": True}, {"click": "withdraw"},
+            {"frame": with_sprints([SPRINT])}, {"snapshot": True},
+            {"release": {"status": 409, "text": "this sprint is not open\n"}},
+            {"snapshot": True},
+        ])
+        (line,) = sprint_lines(sending)
+        (button,) = [n for n in nodes(line) if has_class(n, "withdraw")]
+        self.assertTrue(button["disabled"])
+        (line,) = sprint_lines(failed)
+        (button,) = [n for n in nodes(line) if has_class(n, "withdraw")]
+        self.assertFalse(button["disabled"])
+        self.assertEqual(
+            [full(n) for n in nodes(line) if has_class(n, "fail")],
+            ["Could not withdraw: this sprint is not open"],
+        )

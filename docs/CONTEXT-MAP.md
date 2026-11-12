@@ -44,6 +44,7 @@
 | Detaching word | Guard |
 | Digest | Console |
 | Fleet registry | Project contract |
+| Goal | Console |
 | Held issue | Verification |
 | Held work | Console |
 | Inbox item | Console |
@@ -78,6 +79,7 @@
 | ResolvedProject | Project contract |
 | Row check | Guard |
 | Session | Console |
+| Sprint | Console |
 | Stale claim | Claims |
 | Suite member | Delivery |
 | Transaction | Release |

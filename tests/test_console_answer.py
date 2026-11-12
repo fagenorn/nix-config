@@ -376,7 +376,8 @@ class CheckAnswerServiceTest(unittest.TestCase):
             ((SLUG, 12, C + 12, "approve"), {"version": LIVE12["version"], "note": None, "paid": False})])
 
     def test_a_paid_approval_is_excluded_from_any_multi_item_action(self):
-        self.assertEqual(service.PAGE_WRITES, {"/api/looked", "/api/answer", "/api/check-answer"})
+        self.assertEqual(service.PAGE_WRITES, {"/api/looked", "/api/answer", "/api/check-answer",
+                                               "/api/goal", "/api/withdraw"})
         keys = [PAID10["key"], LIVE12["key"]]
         single = {"project_id": P, "key": LIVE12["key"], "answer": "approve", "version": LIVE12["version"],
                   "confirm": "octo/widgets#12"}

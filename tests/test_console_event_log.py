@@ -125,7 +125,7 @@ class EventLogTest(unittest.TestCase):
         self.assertEqual(rows(self.store), [])
 
     def test_an_unknown_schema_version_is_refused(self):
-        for version in (7, 3):
+        for version in (7, 4):
             with self.subTest(version=version):
                 store = Path(self.tmp.name) / f"v{version}" / "events.sqlite3"
                 store.parent.mkdir(parents=True)
@@ -162,6 +162,29 @@ SCHEMA_1 = (
     """CREATE TRIGGER IF NOT EXISTS events_no_replace BEFORE INSERT ON events
         WHEN EXISTS (SELECT 1 FROM events WHERE seq = NEW.seq)
         BEGIN SELECT RAISE(ABORT, 'the console event log is append-only'); END""",
+)
+
+# The schema-2 store as the base build created it: schema 1 without its delete
+# trigger, then the retention cutoff and its triggers.
+SCHEMA_2 = (
+    SCHEMA_1[0],
+    SCHEMA_1[1],
+    SCHEMA_1[3],
+    """CREATE TABLE IF NOT EXISTS retention (
+        id INTEGER PRIMARY KEY CHECK (id = 1),
+        cutoff TEXT NOT NULL)""",
+    "INSERT INTO retention (id, cutoff) VALUES (1, '')",
+    """CREATE TRIGGER IF NOT EXISTS events_no_delete BEFORE DELETE ON events
+        WHEN NOT (OLD.at < coalesce((SELECT cutoff FROM retention WHERE id = 1), ''))
+        BEGIN SELECT RAISE(ABORT, 'the console event log is append-only'); END""",
+    """CREATE TRIGGER IF NOT EXISTS retention_no_delete BEFORE DELETE ON retention
+        BEGIN SELECT RAISE(ABORT, 'the console retention cutoff only moves forward'); END""",
+    """CREATE TRIGGER IF NOT EXISTS retention_no_rewind BEFORE UPDATE ON retention
+        WHEN NEW.id IS NOT OLD.id OR NEW.cutoff < OLD.cutoff
+        BEGIN SELECT RAISE(ABORT, 'the console retention cutoff only moves forward'); END""",
+    """CREATE TRIGGER IF NOT EXISTS retention_one_row BEFORE INSERT ON retention
+        WHEN EXISTS (SELECT 1 FROM retention)
+        BEGIN SELECT RAISE(ABORT, 'the console retention cutoff only moves forward'); END""",
 )
 
 
@@ -270,7 +293,7 @@ class RetentionTest(unittest.TestCase):
         connection.close()
         log = self.open()
         raw = self.raw()
-        self.assertEqual(raw.execute("PRAGMA user_version").fetchone()[0], 2)
+        self.assertEqual(raw.execute("PRAGMA user_version").fetchone()[0], 3)
         self.assertEqual(rows(self.store), [
             (1, "2026-01-01T00:00:00.000000+00:00", "a", "o/a", "{}"),
             (2, NOW, "b", "o/a", "{}"),
@@ -278,6 +301,64 @@ class RetentionTest(unittest.TestCase):
         with self.assertRaises(sqlite3.IntegrityError):
             raw.execute("DELETE FROM events")
         self.assertEqual(self.retain_at(log, NOW), 1)
+
+    def goal_rows(self):
+        log = self.open()
+        self.at(log, OLD, event_log.GOAL_STATED)
+        self.at(log, OLD, event_log.GOAL_WITHDRAWN)
+        self.at(log, OLD, "old")
+        return log
+
+    def test_a_pass_keeps_goal_rows_of_any_age(self):
+        log = self.goal_rows()
+        removed = self.retain_at(log, NOW)
+        self.assertEqual(removed, 1)
+        self.assertEqual([row[2] for row in rows(self.store)],
+                         ["goal.stated", "goal.withdrawn"])
+        self.assertEqual([e.kind for e in log.events()],
+                         ["goal.stated", "goal.withdrawn"])
+        self.assertEqual(event_log.KEPT_KINDS,
+                         frozenset({"goal.stated", "goal.withdrawn"}))
+
+    def test_a_raw_delete_of_a_goal_row_is_refused_after_a_pass(self):
+        log = self.goal_rows()
+        self.retain_at(log, NOW)
+        before = rows(self.store)
+        connection = self.raw()
+        for statement in ("DELETE FROM events WHERE kind = 'goal.stated'",
+                          "DELETE FROM events WHERE kind = 'goal.withdrawn'",
+                          "DELETE FROM events"):
+            with self.subTest(statement=statement):
+                with self.assertRaises(sqlite3.IntegrityError):
+                    connection.execute(statement)
+        self.assertEqual(rows(self.store), before)
+        self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 3)
+
+    def test_a_version_2_store_is_migrated_and_protects_goal_rows(self):
+        self.store.parent.mkdir(parents=True)
+        connection = sqlite3.connect(self.store)
+        for statement in SCHEMA_2:
+            connection.execute(statement)
+        connection.execute("PRAGMA user_version = 2")
+        connection.execute(
+            "INSERT INTO events (at, kind, project, payload) VALUES (?, ?, ?, ?)",
+            (OLD, "goal.stated", "o/a", '{"goal":"g","sprint_id":"aaaaaaaaaaaaaaaa"}'))
+        connection.execute(
+            "INSERT INTO events (at, kind, project, payload) VALUES (?, ?, ?, ?)",
+            (NOW, "b", "o/a", "{}"))
+        connection.commit()
+        connection.close()
+        log = self.open()
+        self.assertEqual(self.raw().execute("PRAGMA user_version").fetchone()[0], 3)
+        expected = [
+            (1, OLD, "goal.stated", "o/a", '{"goal":"g","sprint_id":"aaaaaaaaaaaaaaaa"}'),
+            (2, NOW, "b", "o/a", "{}"),
+        ]
+        self.assertEqual(rows(self.store), expected)
+        self.assertEqual(self.retain_at(log, NOW), 0)
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.raw().execute("DELETE FROM events WHERE kind = 'goal.stated'")
+        self.assertEqual(rows(self.store), expected)
 
     def test_a_failed_pass_deletes_nothing(self):
         log = self.three_rows()

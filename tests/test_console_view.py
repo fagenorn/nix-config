@@ -1,6 +1,8 @@
 """The console's view (#855): projection, registry diff, ordering and folding, encoding."""
 
+import json
 import unittest
+from datetime import datetime
 
 from agent_tools.claims import forge_markers as fm
 from agent_tools.console import inbox
@@ -16,6 +18,7 @@ from agent_tools.console.deliveries import (
 )
 from agent_tools.console.event_log import Event
 from agent_tools.console.sessions import ENDED, SessionState
+from agent_tools.console.sprints import SprintState
 from agent_tools.console.view import (
     CHOOSE_SENTENCE,
     INBOX_CHANGED,
@@ -713,3 +716,59 @@ class InboxHealthTest(unittest.TestCase):
                 self.assertEqual(health_change(health, "p", flag, read_at),
                                  expected)
         self.assertEqual(INBOX_HEALTH, "inbox.health")
+
+
+T0 = "2026-11-12T10:00:00.000000+00:00"
+T0_MS = int(datetime.fromisoformat(T0).timestamp() * 1000)
+
+
+def sprint(sid, pid="p00", seq=5, goal="make the importer resumable"):
+    return SprintState(sid, pid, goal, seq, T0)
+
+
+class SprintViewTest(unittest.TestCase):
+    def test_a_sprint_shows_its_goal_state_and_age(self):
+        view = derive_view([state("p00", 1)], sprints={"a" * 16: sprint("a" * 16)},
+                           now_ms=T0_MS + 3 * 60_000)
+        self.assertEqual(view["entries"][0]["sprints"], [{
+            "type": "sprint", "sprint_id": "a" * 16, "goal": "make the importer resumable",
+            "state": "drafting", "state_text": "drafting the brief", "stated_at": T0,
+            "age_text": "stated 3 min ago", "manager_text": "no manager has picked this up"}])
+
+    def test_a_sprint_older_than_two_minutes_says_no_manager_has_picked_it_up(self):
+        for now_ms, expected in ((None, None), (T0_MS, None), (T0_MS + 120_000, None),
+                                 (T0_MS + 120_001, "no manager has picked this up")):
+            with self.subTest(now_ms=now_ms):
+                view = derive_view([state("p00", 1)], sprints={"a" * 16: sprint("a" * 16)},
+                                   now_ms=now_ms)
+                shown = view["entries"][0]["sprints"][0]
+                self.assertEqual(shown["manager_text"], expected)
+                if now_ms is None:
+                    self.assertEqual(shown["age_text"], "stated just now")
+
+    def test_sprints_order_newest_first(self):
+        view = derive_view([state("p00", 1)], sprints={
+            "a" * 16: sprint("a" * 16, seq=5), "b" * 16: sprint("b" * 16, seq=9)})
+        self.assertEqual([s["sprint_id"] for s in view["entries"][0]["sprints"]],
+                         ["b" * 16, "a" * 16])
+
+    def test_sprints_of_an_unregistered_project_are_not_shown(self):
+        view = derive_view([state("p00", 1)], sprints={"b" * 16: sprint("b" * 16, pid="p09")})
+        self.assertNotIn("b" * 16, json.dumps(view))
+        self.assertEqual(view["entries"][0]["sprints"], [])
+        self.assertEqual(view["statement"], derive_view([state("p00", 1)])["statement"])
+
+    def test_a_project_with_a_sprint_is_never_quiet(self):
+        view = derive_view([state(f"p{i:02d}", i + 1) for i in range(5)],
+                           sprints={"a" * 16: sprint("a" * 16)})
+        first = view["entries"][0]
+        self.assertEqual(first["project_id"], "p00")
+        self.assertIs(first["quiet"], False)
+        self.assertEqual(len(first["sprints"]), 1)
+        self.assertEqual(view["entries"][-1]["type"], "quiet_group")
+        self.assertEqual(view["entries"][-1]["count"], 4)
+
+    def test_recent_projects_lists_registered_projects_newest_first(self):
+        view = derive_view([state("p00", 1), state("p01", 3), state("p02", 2), state("p03", 3)])
+        self.assertEqual(view["recent_projects"], ["p01", "p03", "p02", "p00"])
+        self.assertEqual(derive_view([])["recent_projects"], [])

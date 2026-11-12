@@ -7,17 +7,27 @@
 // document; target is the tag name of the focused element, default none),
 // {click: "<class>"} (the click listeners of the first attached element with
 // that class; none throws), {respond: {status, text}} (queues the answer of
-// the next /api/answer fetch, default 204 with no text) and {fail_fetch: true}
-// (the next /api/answer or /api/check-answer fetch rejects; both routes take
-// the queued replies). The key step also accepts editable: true, which gives
-// the target isContentEditable. The fake controls hold a value, a disabled
-// flag, a selection and focus: {type: {class, text}} focuses the first
-// attached element with that class, sets its value to the text (an INPUT
-// drops every CR and LF, a TEXTAREA turns CRLF and CR into LF), puts the
-// selection at the end and fires its input listeners; {append: {class, text}}
-// does the same on top of the current value. document.activeElement is the
-// focused element while it is still attached under the root, else null, so a
-// replaceChildren that detaches it drops focus as a browser does. The fake
+// the next fetch but /api/looked, default 204 with no text) and
+// {fail_fetch: true} (the next such fetch rejects; /api/answer and
+// /api/check-answer take the queued replies like the goal routes). {hold: true}
+// makes the next such fetch stay pending until a later {release: {status, text}}
+// answers the oldest held fetch (release with none held throws). The key step
+// also accepts editable: true, which gives the target isContentEditable. The
+// fake controls hold a value, a disabled flag, a selection and focus:
+// {type: {class, text}} focuses the first attached element with that class,
+// sets its value to the text (an INPUT drops every CR and LF, a TEXTAREA turns
+// CRLF and CR into LF), puts the selection at the end and fires its input
+// listeners; {append: {class, text}} does the same on top of the current
+// value. document.activeElement is the focused element while it is still
+// attached under the root, else null, so a replaceChildren that detaches it
+// drops focus as a browser does. The goal field adds {input: {cls, value}}
+// (the first attached element with that class gets .value, then its input
+// listeners run with {type: "input", target}; none throws) and
+// {focus_on: "<class>"} (calls .focus() on the first attached element with
+// that class; none throws; {focus: true} stays the window's focus).
+// Elem.focus() sets state.active and counts in state.focusCount; a key step
+// records in state.keyPrevented whether its event had preventDefault called
+// (null before any key step). A click step skips a disabled element. The fake
 // setTimeout/clearTimeout fire when a clock step reaches their due time. Each
 // step settles pending promises before the next.
 // Prints a JSON list of snapshots on stdout; any failure exits 1 with the
@@ -61,6 +71,8 @@ class Elem {
   }
   focus() {
     focusedElem = this;
+    state.active = this;
+    state.focusCount += 1;
   }
   setSelectionRange(start, end) {
     this.selectionStart = start;
@@ -179,7 +191,9 @@ for (const m of markup.matchAll(/<([a-zA-Z][a-zA-Z0-9]*)\b([^>]*?\bid="([^"]+)"[
 }
 
 const steps = JSON.parse(fs.readFileSync(0, "utf8"));
-const state = { focused: false, visibility: "visible", clock: null };
+const state = {
+  focused: false, visibility: "visible", clock: null, active: null, focusCount: 0, keyPrevented: null,
+};
 if (steps.length > 0 && "start" in steps[0]) {
   state.focused = steps[0].start.focused;
   state.clock = steps[0].start.clock;
@@ -204,19 +218,24 @@ function fire(target, name, extra) {
 const window = { addEventListener: listen("window") };
 const posts = [];
 const replies = [];
+const held = [];
 function fetch(url, options) {
   const post = {
     url, method: options.method, headers: options.headers, keepalive: options.keepalive,
   };
   if (options.body !== undefined) post.body = options.body;
   posts.push(post);
-  if (url !== "/api/answer" && url !== "/api/check-answer") return Promise.resolve({});
+  if (url === "/api/looked") return Promise.resolve({});
   const reply = replies.length > 0 ? replies.shift() : { status: 204, text: "" };
   if (reply.reject) return Promise.reject(new Error("the console did not answer"));
-  return Promise.resolve({
+  if (reply.hold) return new Promise((resolve) => held.push(resolve));
+  return Promise.resolve(answer(reply));
+}
+function answer(reply) {
+  return {
     status: reply.status, ok: reply.status >= 200 && reply.status < 300,
     text: () => Promise.resolve(reply.text),
-  });
+  };
 }
 
 const timers = new Map();
@@ -294,6 +313,8 @@ function node(n) {
     cls: n.className,
     key: n.dataset.key === undefined ? null : n.dataset.key,
     open: n.open,
+    value: n.value === undefined ? null : n.value,
+    disabled: n.disabled === true || "disabled" in n.attributes,
     text: n.children.filter((c) => c.isText).map((c) => c.text).join(""),
     value: n.tagName === "INPUT" || n.tagName === "TEXTAREA" ? n.value : null,
     selection: n.tagName === "INPUT" || n.tagName === "TEXTAREA" ? [n.selectionStart, n.selectionEnd] : null,
@@ -316,6 +337,13 @@ function typeInto(spec, append) {
   for (const fn of target.listeners.input || []) fn({ type: "input", target });
 }
 
+
+function byClass(cls) {
+  const found = attached(root).find((n) => n.className.split(/\s+/).includes(cls));
+  if (!found) throw new Error("no element with class " + cls);
+  return found;
+}
+
 const snapshots = [];
 async function run() {
   for (const step of steps) {
@@ -331,14 +359,15 @@ async function run() {
       state.clock = step.clock;
       runDueTimers();
     } else if ("key" in step) {
+      let prevented = false;
       fire("document", "keydown", {
         key: step.key, ctrlKey: !!step.ctrlKey, altKey: !!step.altKey, metaKey: !!step.metaKey,
-        shiftKey: false, repeat: false, preventDefault() {},
+        shiftKey: false, repeat: false, preventDefault() { prevented = true; },
         target: step.target === undefined ? null : { tagName: step.target, isContentEditable: step.editable === true },
       });
+      state.keyPrevented = prevented;
     } else if ("click" in step) {
-      const target = attached(root).find((n) => n.className.split(/\s+/).includes(step.click));
-      if (!target) throw new Error("no element with class " + step.click);
+      const target = byClass(step.click);
       if (target.disabled !== true) {
         for (const fn of target.listeners.click || []) fn({ type: "click", preventDefault() {} });
       }
@@ -346,10 +375,21 @@ async function run() {
       typeInto(step.type, false);
     } else if ("append" in step) {
       typeInto(step.append, true);
+    } else if ("input" in step) {
+      const target = byClass(step.input.cls);
+      target.value = step.input.value;
+      for (const fn of target.listeners.input || []) fn({ type: "input", target });
+    } else if ("focus_on" in step) {
+      byClass(step.focus_on).focus();
     } else if ("respond" in step) {
       replies.push(step.respond);
     } else if ("fail_fetch" in step) {
       replies.push({ reject: true });
+    } else if ("hold" in step) {
+      replies.push({ hold: true });
+    } else if ("release" in step) {
+      if (held.length === 0) throw new Error("no held fetch to release");
+      held.shift()(answer({ status: 204, text: "", ...step.release }));
     } else if (step.focus) {
       state.focused = true;
       fire("window", "focus");
@@ -370,6 +410,10 @@ async function run() {
         projects: node(byId("projects")),
         unmanaged: unmanaged ? node(unmanaged) : null,
         digest: byId("digest") ? node(byId("digest")) : null,
+        goal: byId("goal") ? node(byId("goal")) : null,
+        active: state.active && attached(root).includes(state.active) ? state.active.className : null,
+        focus_count: state.focusCount,
+        key_prevented: state.keyPrevented,
         posts: posts.slice(),
       });
     } else {

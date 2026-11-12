@@ -4,7 +4,8 @@ The store is one SQLite file. Its table is `events(seq INTEGER PRIMARY KEY
 AUTOINCREMENT, at TEXT NOT NULL, kind TEXT NOT NULL, project TEXT, payload TEXT
 NOT NULL)`. Triggers refuse every `UPDATE` of `events`, every `INSERT` that
 names an existing `seq` (which `INSERT OR REPLACE` would otherwise carry out
-without firing a delete trigger) and every deletion of a row that is not older
+without firing a delete trigger) and every deletion of a goal row (`KEPT_KINDS`,
+kept indefinitely per #838), whatever its age, or of a row that is not older
 than the retention cutoff, with "the console event log is append-only", so a
 raw connection cannot rewrite history either. The cutoff is the one row of
 `retention(id, cutoff)`: it starts empty, triggers let it only move forward and
@@ -14,8 +15,8 @@ the cutoff's, no `REPLACE`, no `INSERT OR ...`, and deletes only in
 `EventLog.retain`.
 
 `EventLog.retain` is the 90-day retention pass: in one transaction it moves the
-cutoff to the clock minus `RETENTION` and removes the rows older than it, and
-returns how many. Sequence numbers are never reused.
+cutoff to the clock minus `RETENTION` and removes the rows older than it except
+those of `KEPT_KINDS`, and returns how many. Sequence numbers are never reused.
 
 `EventLog.append` writes all its entries in one transaction under one `at`
 taken from the clock: a failure writes no row, rolls back the earlier entries of
@@ -24,9 +25,10 @@ and writes nothing. A payload is stored as canonical JSON (sorted keys, compact
 separators, non-ASCII kept, NaN refused), serialised before the transaction
 begins.
 
-`PRAGMA user_version` is `SCHEMA_VERSION` (2) once opened: version 0 is created
-as schema 2, version 1 is migrated to 2 in one transaction and keeps every row,
-and a file at any other version raises `EventLogError` and is not modified. The parent directory is created with mode 0700. The connection
+`PRAGMA user_version` is `SCHEMA_VERSION` (3) once opened: version 0 is created
+as schema 3, versions 1 and 2 are migrated to 3 in one transaction each and keep
+every row, and a file at any other version raises `EventLogError` and is not
+modified. The parent directory is created with mode 0700. The connection
 is shared across threads and every use of it holds one lock.
 """
 
@@ -38,8 +40,14 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 RETENTION = timedelta(days=90)
+
+GOAL_STATED = "goal.stated"
+GOAL_WITHDRAWN = "goal.withdrawn"
+# Rows of these kinds are never removed: not by the retention pass, not by a raw
+# connection (the schema-3 delete trigger).
+KEPT_KINDS = frozenset({GOAL_STATED, GOAL_WITHDRAWN})
 
 _APPEND_ONLY = "the console event log is append-only"
 
@@ -77,6 +85,19 @@ _RETENTION = (
     f"""CREATE TRIGGER IF NOT EXISTS retention_one_row BEFORE INSERT ON retention
         WHEN EXISTS (SELECT 1 FROM retention)
         BEGIN SELECT RAISE(ABORT, '{_RETENTION_ONLY_FORWARD}'); END""",
+)
+
+# What schema 3 adds to schema 2: the delete trigger also refuses every row of a
+# kept kind, whatever its age. Built from KEPT_KINDS so a later kept kind needs
+# no hand-edited SQL.
+_KEPT_LITERALS = ", ".join("'" + kind.replace("'", "''") + "'"
+                           for kind in sorted(KEPT_KINDS))
+_KEPT = (
+    "DROP TRIGGER events_no_delete",
+    f"""CREATE TRIGGER events_no_delete BEFORE DELETE ON events
+        WHEN OLD.kind IN ({_KEPT_LITERALS})
+            OR NOT (OLD.at < coalesce((SELECT cutoff FROM retention WHERE id = 1), ''))
+        BEGIN SELECT RAISE(ABORT, '{_APPEND_ONLY}'); END""",
 )
 
 
@@ -121,7 +142,9 @@ class EventLog:
         if version == SCHEMA_VERSION:
             return
         if version == 1:
-            self._transaction(self._migrate_to_2)
+            self._transaction(self._migrate_from_1)
+        elif version == 2:
+            self._transaction(self._migrate_from_2)
         elif version == 0:
             self._transaction(self._create_schema)
         else:
@@ -130,13 +153,18 @@ class EventLog:
                 f"this build reads {SCHEMA_VERSION}")
 
     def _create_schema(self) -> None:
-        for statement in _EVENTS + _RETENTION:
+        for statement in _EVENTS + _RETENTION + _KEPT:
             self._connection.execute(statement)
         self._connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
-    def _migrate_to_2(self) -> None:
+    def _migrate_from_1(self) -> None:
         self._connection.execute("DROP TRIGGER events_no_delete")
         for statement in _RETENTION:
+            self._connection.execute(statement)
+        self._migrate_from_2()
+
+    def _migrate_from_2(self) -> None:
+        for statement in _KEPT:
             self._connection.execute(statement)
         self._connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
@@ -180,8 +208,10 @@ class EventLog:
                 self._connection.execute(
                     "UPDATE retention SET cutoff = ? WHERE id = 1 AND cutoff < ?",
                     (cutoff, cutoff))
+                marks = ", ".join("?" * len(KEPT_KINDS))
                 return self._connection.execute(
-                    "DELETE FROM events WHERE at < ?", (cutoff,)).rowcount
+                    f"DELETE FROM events WHERE at < ? AND kind NOT IN ({marks})",
+                    (cutoff, *sorted(KEPT_KINDS))).rowcount
 
             return self._transaction(remove)
 
