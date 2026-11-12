@@ -34,7 +34,7 @@ const jsonAfter = (p, lead) => JSON.parse(p.slice(p.indexOf(lead) + lead.length)
 // Ordered: the first matching pattern wins. A default gets the label and the prompt.
 const DEFAULTS = [
   [/^setup$/, () => ({ ok: true, host: 'h1', slug: 'owner/repo', integration_branch: 'dev', default_branch: 'main', merge_strategy: 'merge', delete_branch: true, unset_env: [], max_parallel: 2, required_checks: null })],
-  [/^facts-/, l => ({ state: 'OPEN', labels: [], title: 't', branch: `issue-${num(l)}-x`, claim: { verdict: 'free', by: null }, merged_refs: [], open_pr: null, blockers: [], decision: { verdict: 'none', comment_id: null, questions: [], decisions: '' }, lane: 'standard', why: 'x' })],
+  [/^facts-/, l => ({ state: 'OPEN', labels: [], title: 't', branch: `issue-${num(l)}-x`, claim: { verdict: 'free', by: null }, merged_refs: [], open_pr: null, native: { verdict: 'read', blocked_by: [] }, blockers: [], decision: { verdict: 'none', comment_id: null, questions: [], decisions: '' }, lane: 'standard', why: 'x' })],
   [/^acquire-/, () => ({ verdict: 'acquired', comment_id: 7 })],
   [/^renew-/, () => ({ verdict: 'renewed' })],
   [/^release-/, () => ({ verdict: 'released' })],
