@@ -15,9 +15,9 @@ Event kinds read:
 - `brief.sent`, `brief.approved` (`event_log.BRIEF_SENT`, `BRIEF_APPROVED`, `sprints.py`): a
   manager's brief arrived, or the owner approved it. `brief.replied` says nothing.
 - `sprint.reported` (`event_log.SPRINT_REPORTED`, `sprints.py`): a manager's report of its sprint.
-  It speaks only when the sprint fold accepted it and the sprint had no report before or the
-  previous report's `phase` differs from the new one; a refused, ignored or phase-repeating
-  report says nothing.
+  It speaks only when the sprint fold accepted it and the sprint's shown state (`view.sprint_state`,
+  the open inbox items counted as the page counts them, never quiet: no clock is read) differs
+  from the one before the report; a refused, ignored or state-repeating report says nothing.
 
 Every other kind says nothing, `goal.stated` included, delivery runs (`delivery.seen`, `delivery.gone`)
 included: the console has no delivery moments yet, and #878 adds them from
@@ -49,7 +49,7 @@ session with no repository makes no moment.
     sprint_withdrawn The goal for <project_id> was withdrawn: <goal>
     brief_sent       A brief for <project_id> arrived, version <n>: <goal>
     brief_approved   The brief for <project_id> was approved, version <n>: <goal>
-    sprint_state     The sprint for <project_id> is now <PHASE_TEXT[phase]>: <goal>
+    sprint_state     The sprint for <project_id> is now <the sprint's shown state>: <goal>
 
 An inbox payload needs `project_id` (str), `issue` (int, not bool) and
 `question` (str). A withdrawal needs the event's project (str) and a payload `goal` (str); it
@@ -82,8 +82,9 @@ from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_SENT, GOAL_WITHDRAWN, SPRINT_REPORTED, Event)
 from agent_tools.console.sessions import (
     ENDED, GONE, HOOK, LIMIT, SEEN, WORKING, SessionState, session_states)
-from agent_tools.console.sprints import PHASE_TEXT, SprintState, sprint_states
-from agent_tools.console.view import INBOX_CHANGED, INBOX_SEEN, InboxRecord, inbox_records
+from agent_tools.console.sprints import SprintState, sprint_states
+from agent_tools.console.view import (
+    INBOX_CHANGED, INBOX_SEEN, InboxRecord, inbox_records, sprint_state, sprint_waiting)
 
 LOOKED = "page.looked"
 FIRST_VISIT = timedelta(hours=8)
@@ -189,16 +190,24 @@ def _brief_moment(event: Event) -> tuple[str, str] | None:
 
 
 def _report_moment(event: Event, before: Mapping[str, SprintState],
-                   after: Mapping[str, SprintState]) -> tuple[str, str] | None:
+                   after: Mapping[str, SprintState],
+                   records: Mapping[tuple[str, str], InboxRecord]) -> tuple[str, str] | None:
     sprint_id = event.payload.get("sprint_id")
     if not isinstance(sprint_id, str) or sprint_id not in after or sprint_id not in before:
         return None
-    old, new = before[sprint_id].report, after[sprint_id].report
-    if new is None or (old is not None and old.phase == new.phase):
+    old, new = before[sprint_id], after[sprint_id]
+    if new.report is None:
         return None
-    state = PHASE_TEXT[new.phase]
+    open_items = [r for r in records.values()
+                  if r.item.get("project_id") == new.project_id and not r.item.get("answered")]
+    waiting = sprint_waiting(new, open_items)
+    # The clock is not read here, so a sprint going quiet is never a change of state.
+    was = sprint_state(old, None, sprint_waiting(old, open_items))
+    now = sprint_state(new, None, waiting)
+    if was[0] == now[0]:
+        return None
     return (SPRINT_STATE_MOMENT,
-            f"The sprint for {event.project} is now {state}: {after[sprint_id].goal}")
+            f"The sprint for {event.project} is now {now[1]}: {new.goal}")
 
 
 def moments(
@@ -232,7 +241,7 @@ def moments(
                         f"The goal for {event.project} was withdrawn: {goal}")
         previous, folded = folded, sprint_states([event], folded)
         if event.kind == SPRINT_REPORTED:
-            said = _report_moment(event, previous, folded)
+            said = _report_moment(event, previous, folded, held)
         if said is not None:
             found.append(Moment(event.seq, event.at, said[0], said[1]))
     return found

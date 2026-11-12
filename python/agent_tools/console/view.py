@@ -456,7 +456,15 @@ def _effective_stages(state: SprintState) -> list[tuple[int, str, str]]:
     return rows
 
 
-def _sprint_state(state: SprintState, now_ms: int | None, waiting: int) -> tuple[str, str]:
+def sprint_waiting(state: SprintState, records: Iterable[InboxRecord]) -> int:
+    """How many of `records` (open items) wait on an issue the sprint's report names."""
+    report = state.report
+    named = set() if report is None else {issue for issue, _ in report.issues} | set(report.inbox)
+    return sum(r.item.get("issue") in named for r in records)
+
+
+def sprint_state(state: SprintState, now_ms: int | None, waiting: int) -> tuple[str, str]:
+    """The sprint's one shown state and its text; with `now_ms` None the sprint is never quiet."""
     brief, report = state.brief, state.report
     if brief is None or brief.decision != APPROVED:
         return DRAFTING, DRAFTING_TEXT
@@ -487,8 +495,7 @@ def _sprint_entry(state: SprintState, now_ms: int | None,
     elapsed = 0 if now_ms is None else now_ms - stated_ms
     report = state.report
     stages = [] if report is None else _effective_stages(state)
-    named = set() if report is None else {issue for issue, _ in report.issues} | set(report.inbox)
-    waiting = sum(r.item.get("issue") in named for r in records)
+    waiting = sprint_waiting(state, records)
     counts = {
         "landed": sum(stage == LANDED for _, stage, _ in stages),
         "in_delivery": sum(stage not in (LANDED, HELD, QUEUED) for _, stage, _ in stages),
@@ -496,7 +503,7 @@ def _sprint_entry(state: SprintState, now_ms: int | None,
         "held": sum(stage == HELD for _, stage, _ in stages),
         "total": len(stages),
     }
-    name, text = _sprint_state(state, now_ms, waiting)
+    name, text = sprint_state(state, now_ms, waiting)
     return {
         "type": "sprint",
         "sprint_id": state.sprint_id,

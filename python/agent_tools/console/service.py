@@ -1257,6 +1257,7 @@ class ConsoleService:
                 projects_dirs.append(projects)
         readings: dict[tuple[str, str], deliveries.DeliveryState] = {}
         runs: dict[Path, deliveries.RunFold] = {}
+        terminal: list[tuple[str, str]] = []
         for sid in sorted(scanned):
             listing = deliveries.run_journals(projects_dirs, sid)
             if isinstance(listing, deliveries.Unreadable):
@@ -1271,7 +1272,10 @@ class ConsoleService:
                 key = (sid, journal.parent.name)
                 path = str(journal)
                 final = deliveries.has_final_record(journal)
-                if final is True:
+                # A run that ended between two polls is read once more, so its close-out reaches the
+                # log as the run's last observation before the run leaves.
+                ended = final is True and journal in self._runs
+                if final is True and not ended:
                     self._reader.forget(journal)
                     self._unreadable.discard(path)
                     continue
@@ -1279,6 +1283,8 @@ class ConsoleService:
                 if known is not None and known.branch_pattern != pattern:
                     self._reader.forget(journal)
                 chunk = final if isinstance(final, deliveries.Unreadable) else self._reader.read(journal)
+                if ended:
+                    self._reader.forget(journal)
                 if isinstance(chunk, deliveries.Unreadable):
                     if key in folded:
                         readings[key] = folded[key]
@@ -1293,10 +1299,15 @@ class ConsoleService:
                 if fold is None or chunk.from_start or fold.branch_pattern != pattern:
                     fold = deliveries.RunFold(pattern)
                 fold.apply(chunk.records)
-                runs[journal] = fold
                 issues = fold.issues()
                 if issues:
                     readings[key] = deliveries.DeliveryState(sid, key[1], chunk.moved_ms, issues)
+                if ended:
+                    self._unreadable.discard(path)
+                    if issues:
+                        terminal.append(key)
+                else:
+                    runs[journal] = fold
         for journal in self._runs.keys() - runs.keys():
             self._reader.forget(journal)
         self._runs = runs
@@ -1305,8 +1316,10 @@ class ConsoleService:
                 repo = scanned[sid].repo
                 return project_for(repo, self._states)
 
-            appended = self.log.append(deliveries.delivery_changes(
-                self._deliveries, readings, scanned, project_of))
+            changes = deliveries.delivery_changes(self._deliveries, readings, scanned, project_of)
+            changes += [(deliveries.DELIVERY_GONE, project_of(sid), {"session_id": sid, "run_id": run})
+                        for sid, run in terminal]
+            appended = self.log.append(changes)
             if appended:
                 self._fold(appended)
             self._publish()

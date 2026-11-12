@@ -9,7 +9,7 @@ ADR-console-013 carried a manager's brief to the page and the owner's approval b
 
 ## Decision
 
-A manager uses `sprint report` to send its report. `POST /api/report` takes the sprint id, the sprint's secret and the report. Like `POST /api/brief` it is a manager write, not a page write: it carries no token, the sprint's secret takes the token's place, and any `Origin` is refused (ADR-console-008, ADR-console-013). It refuses in this order: the sprint is not open, then `secret refused`, then the brief not approved, then the first of the seven members that is missing or invalid, then a status line that names an issue number. A refusal records nothing, and the answer to a wrong secret is the one text `secret refused`.
+A manager uses `sprint report` to send its report. `POST /api/report` takes the sprint id, the sprint's secret and the report. Like `POST /api/brief` it is a manager write, not a page write: it carries no token, the sprint's secret takes the token's place, and any `Origin` is refused (ADR-console-008, ADR-console-013). It refuses in this order: the sprint is not open, then `secret refused`, then the brief not approved, then the members in order, the first that is missing or invalid; the status line is also refused when it names an issue number, as soon as it is found valid and before the phase and the members after it are read. A refusal records nothing, and the answer to a wrong secret is the one text `secret refused`.
 
 A report has seven members: the status line, the phase (`running`, `closing` or `done`), the milestone, the tracker link, the issues with their stages, the inbox items it raised (issue numbers) and the next step. A newer report replaces the one before it. Report rows (`sprint.reported`) are kept indefinitely and the store moves to schema 5 to protect them (ADR-console-009, #838 item 8).
 
@@ -17,13 +17,13 @@ A sprint has one state, the first that holds: no approved brief reads "drafting 
 
 Between reports an issue follows the run. The console folds the `delivery.seen` rows that came after the report into the newest observation of each reported issue, because a run leaves the live list as soon as its final record exists (ADR-console-005); the last stage is kept after the run leaves, until the next report clears it. A reported outcome (`landed` or `held`) is kept against any run. A run's close-out reads "closed out" until the manager reports landed or held, because a close-out held for verification looks the same as one that landed. The progress counts follow these effective stages. Waiting counts the open inbox items on the report's issues or its inbox list; held counts the issues the manager reports held, which is how a held verification shows in a sprint's progress (#837 item 6).
 
-The digest says one sentence only when the reported phase changes. Issue numbers, branches and session names appear only behind the "Detail" fold on the sprint's line, with the tracker link last (#833, #837 item 2).
+The digest says one sentence only when the sprint's shown state changes at a report, counting the open inbox items as the line does and never counting quiet, so a phase change under "waiting on you" says nothing. Issue numbers, branches and session names appear only behind the "Detail" fold on the sprint's line, with the tracker link last (#833, #837 item 2).
 
 ## Consequences
 
 - A done sprint stays shown until its goal is withdrawn.
 - A quiet sprint is not pinged yet: #837 item 3's ping is later work, and the line only says so.
-- A change to quiet or to waiting makes no digest sentence; only a change of the reported phase does.
+- A change to quiet makes no digest sentence, and an item that opens or is answered makes only its own inbox sentence; a report makes one only when the shown state it leaves differs from the one before it.
 - A close-out reads "closed out" until the manager's next report says landed or held.
 - A restart after 90 days without a report loses the older run observations (ADR-console-009, the `delivery.seen` rows are not kept), and the sprint shows the report's own stages.
 - A manager that holds the secret can report any stage it likes: loopback trust is the boundary (ADR-console-008).

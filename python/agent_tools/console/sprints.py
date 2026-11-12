@@ -176,7 +176,6 @@ CLOSING = "closing"
 CLOSING_TEXT = "closing"
 DONE = "done"
 DONE_TEXT = "done"
-PHASE_TEXT = {"running": ON_TRACK_TEXT, "closing": CLOSING_TEXT, "done": DONE_TEXT}
 SECRETS_DIR = "sprint-secrets"
 SPRINT_ID = re.compile(r"[0-9a-f]{16}")
 

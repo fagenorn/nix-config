@@ -471,6 +471,9 @@ class DocsTreeTest(unittest.TestCase):
                        "ADR-console-005", "ADR-console-008", "ADR-console-009",
                        "ADR-console-013", "#835", "#837", "#838", "#890"):
             self.assertIn(needle, adr)
+        self.assertIn("as soon as it is found valid and before the phase", adr)
+        self.assertNotIn("then a status line that names an issue number", adr)
+        self.assertNotIn("only when the reported phase changes", adr)
         self.assertIn("/api/report",
                       self.doc("docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md"))
         kept = self.doc("docs/areas/console/adr/009-events-are-kept-for-90-days.md")
