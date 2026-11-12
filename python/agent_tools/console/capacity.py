@@ -44,11 +44,14 @@ the reset of the window the refusal names (`binding`, else the first of "7d", "5
 and, when refused, the refusal reset (null when none is known, or when not out); `next_reset` the
 earliest reset still ahead.
 
-`capacity_view` returns `{"tight", "all_out", "resumes_at", "profiles": [<profile_capacity>]}` over
+`capacity_view` returns `{"tight", "all_out", "resumes_at", "no_reading", "profiles":
+[<profile_capacity>]}` over
 exactly the named profiles, sorted: the configured ones, so a profile removed with
 `claude-account rm` stops counting at once while its readings stay in the log and the fold. `tight`
-is true when exactly one profile has room (state "ok" or "reset") among at least two; `all_out` when there is a profile and
-every one is out; `resumes_at` the earliest `out_until` then, null when none is known.
+is true when exactly one profile has room (state "ok" or "reset") among at least two and every
+other profile is out, so a profile with no reading never makes it tight; `all_out` when there is a
+profile and every one is out; `resumes_at` the earliest `out_until` then, null when none is known;
+`no_reading` is "<n> with no reading yet" over the profiles in state "unknown", null when none.
 """
 
 import re
@@ -261,12 +264,15 @@ def capacity_view(profiles: Iterable[str], state: CapacityState, now: float) -> 
     names = sorted(set(profiles))
     entries = [profile_capacity(name, state.readings.get(name), now) for name in names]
     room = sum(entry["state"] in ("ok", "reset") for entry in entries)
+    unknown = sum(entry["state"] == "unknown" for entry in entries)
     all_out = bool(entries) and all(entry["state"] == "out" for entry in entries)
     until = [entry["out_until"] for entry in entries if entry["out_until"] is not None]
     return {
-        "tight": room == 1 and len(entries) >= 2,
+        "tight": len(entries) >= 2 and room == 1 and all(
+            entry["state"] == "out" for entry in entries if entry["state"] not in ("ok", "reset")),
         "all_out": all_out,
         "resumes_at": min(until) if all_out and until else None,
+        "no_reading": f"{unknown} with no reading yet" if unknown else None,
         "profiles": entries,
     }
 

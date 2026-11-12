@@ -74,7 +74,7 @@ A refusal because a window is used up, recorded with its window and reset (ADR-c
 _Avoid_: rate limit error
 
 **Capacity strip**:
-The top-bar line of each profile's share left and next reset. It reads "tight" when one profile has room among two or more, and is promoted into the statement when every profile is out (ADR-console-006).
+The top-bar line of each profile's share left and next reset. It reads "tight" when one profile has room among two or more while every other reads out, folds profiles with no reading into one note, and is promoted into the statement when every profile is out (ADR-console-006).
 _Avoid_: quota bar
 
 **Console service**:

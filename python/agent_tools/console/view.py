@@ -40,6 +40,7 @@ Wire format, one object:
     {"statement": {"inbox_items": <open items>, "headline": "<headline>",
                    "sentence": "<sentence>", "stale": <bool>},
      "capacity": {"tight": <bool>, "all_out": <bool>, "resumes_at": <ISO time> | null,
+                  "no_reading": "<n> with no reading yet" | null,
                   "profiles": [<profile capacity>, ...]},
      "inbox": {"open": [<inbox item>, ...], "answered": [<inbox item>, ...]},
      "project_count": <int>,
