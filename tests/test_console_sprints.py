@@ -1348,6 +1348,40 @@ def approved_rows():
     return [stated(1, "owner/p00", SID, "one"), sent(2, SID, 1, PARTS), approved(3, SID, 1)]
 
 
+class QuestionEndTest(unittest.TestCase):
+    DONE = {**REPORT, "phase": "done"}
+    CLOSE = {"summary": "Stopped early", "issues": [], "differently": "ask sooner"}
+
+    def folded(self, *rows):
+        return sprints.sprint_states([*approved_rows(), *rows])[SID]
+
+    def test_a_done_report_with_an_open_question_is_not_ended_until_it_is_answered(self):
+        state = self.folded(asked(4, SID, [QUESTION]), reported(5, SID, self.DONE))
+        self.assertIsNone(sprints.ended_at(state))
+        answered = self.folded(asked(4, SID, [QUESTION]), reported(5, SID, self.DONE),
+                               answer_row(6, SID, 4, 0, "files", "files"))
+        self.assertEqual(sprints.ended_at(answered), at(5))
+
+    def test_a_closed_or_stopped_sprint_takes_no_question_and_shows_none_open(self):
+        closing = [closed(5, SID, self.CLOSE)]
+        stopping = [stop_requested(5, SID), stopped(6, SID)]
+        for name, ending in (("closed", closing), ("stopped", stopping)):
+            rows = [asked(4, SID, [QUESTION]), *ending]
+            with self.subTest(name=name):
+                state = self.folded(*rows)
+                self.assertFalse(sprints.takes_questions(state))
+                self.assertEqual(sprints.open_questions(state), ())
+                later = self.folded(*rows, asked(8, SID, [SECOND], blocker=True),
+                                    answer_row(9, SID, 4, 0, "files", "files"))
+                self.assertEqual((later.questions, later.messages),
+                                 (state.questions, state.messages))
+                self.assertEqual(sprints.open_questions(later), ())
+
+    def test_an_ended_sprint_by_its_report_takes_no_new_round(self):
+        state = self.folded(reported(4, SID, self.DONE), asked(5, SID, [QUESTION]))
+        self.assertEqual(state.questions, ())
+
+
 def refusal(round_):
     with unittest.TestCase().assertRaises(sprints.Refused) as caught:
         sprints.checked_round(round_)

@@ -266,7 +266,9 @@ its `chosen` is null or one of the question's options: the question then keeps `
 `differs` is not trusted; the owner's own words, `chosen` null, always differ), and the sprint gains
 a `MESSAGE_ANSWER` message (`text` the answer, plus `question`, `round_id`, `chosen`). A second
 answer, or any other such row, changes nothing. `open_questions(state)` is the unanswered questions
-in `(round_id, index)` order and `round_open(state)` is true while there is one. An answer's inbox
+in `(round_id, index)` order, none once the sprint has `stopped_at` or a `closing`, and `round_open(state)` is true while there is one.
+`takes_questions(state)` is false once the sprint has `stopped_at`, a `closing` or has ended (`ended_at`); then
+a `questions.asked` or `question.answered` row changes nothing (the service refuses `ENDED`). An answer's inbox
 entry is `{"id", "kind": "answer", "version": null, "text": <the answer>, "at", "question":
 <question text>, "round": <int>, "chosen": <option text> | null}`; every other entry keeps its five
 keys.
@@ -317,7 +319,7 @@ an open sprint:
   retry due at once.
 
 `ended_at(state)` is every route to done, first match: `stopped_at` when set; `None` when `stop_at`
-is set (the sprint is stopping); `closing.at` when `closing` is set; `report.at` when the sprint is `STARTING` and the
+is set (the sprint is stopping); `closing.at` when `closing` is set; `report.at` when the sprint is `STARTING`, no question is open and the
 report's phase is `done` (the route that predates the closing report; a newer brief drops that
 done report when it is sent, so a replaced sprint is not ended again by the old report); else `None`. A sprint has ended when `ended_at` is not `None`.
 
@@ -964,12 +966,19 @@ def unreachable(state: SprintState) -> bool:
 
 
 def open_questions(state: SprintState) -> tuple[Question, ...]:
+    if state.stopped_at is not None or state.closing is not None:
+        return ()
     return tuple(sorted((question for question in state.questions if question.answer is None),
                         key=lambda question: (question.round_id, question.index)))
 
 
 def round_open(state: SprintState) -> bool:
     return bool(open_questions(state))
+
+
+def takes_questions(state: SprintState) -> bool:
+    """False once the sprint has stopped, is closed or has ended: it then asks and is asked no more."""
+    return state.stopped_at is None and state.closing is None and ended_at(state) is None
 
 
 def inbox_entry(message: Message) -> dict:
@@ -1052,6 +1061,8 @@ def _folded_message(state: SprintState, event: Event) -> SprintState:
 
 def _folded_question(state: SprintState, event: Event) -> SprintState:
     payload = event.payload
+    if not takes_questions(state):
+        return state
     if event.kind == QUESTIONS_ASKED:
         if state.state != STARTING:
             return state
@@ -1263,7 +1274,8 @@ def ended_at(state: SprintState) -> str | None:
         return None
     if state.closing is not None:
         return state.closing.at
-    if state.state == STARTING and state.report is not None and state.report.phase == DONE:
+    if (state.state == STARTING and state.report is not None and state.report.phase == DONE
+            and not open_questions(state)):
         return state.report.at
     return None
 

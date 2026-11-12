@@ -12,6 +12,7 @@ from agent_tools.console import manager, nudge, sessions, sprints, service
 from . import console_test_support as support
 from .test_console_answer import view_of
 from .test_console_messages import GOAL_TEXT, PARTS
+from .test_console_reports import REPORT
 from .test_console_writes import Case
 
 BRIEF = "/api/brief"
@@ -160,6 +161,28 @@ class QuestionRouteTest(Case):
             ("sqlite", Q0["question"], round_id, "sqlite"),
             (OWN_WORDS, Q1["question"], round_id, None)])
         self.assertEqual([m["id"] for m in sent], [first["seq"], second["seq"]])
+
+    def test_a_closed_sprint_takes_no_question_and_no_answer(self):
+        svc = self.open()
+        sid, round_id = self.asked(svc)
+        svc.send_closing(sid, self.secret(sid), {
+            "summary": "Stopped early", "issues": [], "differently": "ask sooner"})
+        ended = b"this sprint has ended\n"
+        got = self.assert_unchanged(
+            svc, lambda: self.reply(svc, self.answer_body(sid, round_id, 0, choice=0)))
+        self.assertEqual((got[0], got[2]), (409, ended))
+        got = self.assert_unchanged(
+            svc, lambda: self.ask(svc, sid, self.secret(sid), {**ROUND, "blocker": True}))
+        self.assertEqual((got[0], got[2]), (409, ended))
+        self.assertEqual(view_of(svc)["inbox"]["open"], [])
+
+    def test_a_done_report_with_a_question_open_leaves_the_sprint_messageable(self):
+        svc = self.open()
+        sid, round_id = self.asked(svc)
+        svc.send_report(sid, self.secret(sid), {**REPORT, "phase": "done"})
+        self.assertEqual(svc.send_message("owner/p01", sid, "still here") > 0, True)
+        self.assertEqual(
+            self.reply(svc, self.answer_body(sid, round_id, 0, choice=0))[0], 204)
 
     def test_an_answer_follows_the_page_write_rule(self):
         svc = self.open()

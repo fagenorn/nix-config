@@ -209,12 +209,14 @@ is `console: ask_refused <sprint_id> secret refused` and 403 `secret refused`, a
 exception is `console: ask_failed <Type>: <message>` and 500 `ask failed`; success is 200
 `application/json` `{"questions":<n>,"round":<id>}` (sorted keys, compact). `ask_questions(sprint_id,
 secret, round_)`, under the ingest lock, is `_manager_sprint` (`NOT_OPEN`, then `SecretRefused`),
-`Refused(NOT_STARTED)` unless the sprint's brief is approved, `sprints.checked_round`, then
+`Refused(NOT_STARTED)` unless the sprint's brief is approved, `Refused(ENDED)` unless
+`sprints.takes_questions` (a stopped, closed or ended sprint asks no more), `sprints.checked_round`, then
 `Refused(ROUND_OPEN)` when a question is open and the round is not a blocker; it appends exactly one
 `questions.asked` row `{"sprint_id", "goal", "blocker", "questions"}` (the checked round), folds,
 publishes and returns the row's `seq` (the round's id) and the question count; it nudges nobody.
 `answer_question(project_id, sprint_id, round_id, index, choice, text)`, under the lock, raises
-`Refused(NOT_OPEN)` unless the sprint is open and of that project, `UNKNOWN_QUESTION` unless
+`Refused(NOT_OPEN)` unless the sprint is open and of that project, `ENDED` unless
+`sprints.takes_questions`, `UNKNOWN_QUESTION` unless
 `(round_id, index)` is one of its questions, `ANSWERED_ALREADY` when it is answered, with a choice
 `NOT_AN_OPTION` unless it indexes an option, with text whatever `sprints.checked_message` refuses;
 the answer is the option or the text exactly, `chosen` the option or None, `differs` is `chosen`
@@ -2336,6 +2338,8 @@ class ConsoleService:
             sprint = self._manager_sprint(sprint_id, secret)
             if sprint.state != sprints.STARTING:
                 raise sprints.Refused(sprints.NOT_STARTED)
+            if not sprints.takes_questions(sprint):
+                raise sprints.Refused(sprints.ENDED)
             checked = sprints.checked_round(round_)
             if sprints.round_open(sprint) and not checked["blocker"]:
                 raise sprints.Refused(sprints.ROUND_OPEN)
@@ -2352,6 +2356,8 @@ class ConsoleService:
             sprint = self._sprints.get(sprint_id)
             if sprint is None or sprint.project_id != project_id:
                 raise sprints.Refused(sprints.NOT_OPEN)
+            if not sprints.takes_questions(sprint):
+                raise sprints.Refused(sprints.ENDED)
             asked = next((question for question in sprint.questions
                           if (question.round_id, question.index) == (round_id, index)), None)
             if asked is None:
