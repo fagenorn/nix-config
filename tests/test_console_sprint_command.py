@@ -230,6 +230,87 @@ class SprintCommandTest(Case):
         after = run_sprint("status", "--sprint", sid, "--port", self.port(svc), env=env)
         self.assertEqual(json.loads(after.stdout)["sprint_id"], sid)
 
+    def messaged(self, svc, sid, text="leave the importer's schema alone"):
+        """The id of one owner message, and the sprint's secret file."""
+        secret, _ = self.files(sid, PARTS)
+        return svc.send_message("owner/p01", sid, text), secret
+
+    def test_inbox_prints_the_unread_messages_once(self):
+        svc = self.open()
+        sid = self.goal(svc)
+        message, secret = self.messaged(svc, sid)
+        args = ("inbox", "--sprint", sid, "--secret-file", secret, "--port", self.port(svc))
+        first = run_sprint(*args)
+        self.assertEqual((first.returncode, first.stderr), (0, ""))
+        parsed = json.loads(first.stdout)
+        self.assertIsInstance(parsed["messages"][0].pop("at"), str)
+        self.assertEqual(parsed, {"messages": [{
+            "id": message, "kind": "text", "text": "leave the importer's schema alone",
+            "version": None}]})
+        self.assertEqual(len(first.stdout.splitlines()), 1)
+        second = run_sprint(*args)
+        self.assertEqual((second.returncode, second.stderr), (0, ""))
+        self.assertEqual(json.loads(second.stdout), {"messages": []})
+
+    def test_reply_records_under_its_message_and_without_the_secret_nothing(self):
+        svc = self.open()
+        sid = self.goal(svc)
+        message, secret = self.messaged(svc, sid)
+        port = self.port(svc)
+        got = run_sprint("reply", "--sprint", sid, "--secret-file", secret,
+                         "--message", str(message), "--reply-file", "-", "--port", port,
+                         stdin="kept the schema; moved the change to the reader\n")
+        self.assertEqual((got.returncode, got.stdout, got.stderr),
+                         (0, f"sprint: reply to message {message} sent\n", ""))
+        folded = svc._sprints[sid].messages[0]
+        self.assertEqual(folded.reply, "kept the schema; moved the change to the reader")
+        wrong = self.store.parent / "wrong-secret"
+        wrong.write_text("A" * 43 + "\n")
+        before = len(support.log_rows(self.store))
+        refused = self.assert_unchanged(svc, lambda: run_sprint(
+            "reply", "--sprint", sid, "--secret-file", wrong, "--message", str(message),
+            "--reply-file", "-", "--port", port, stdin="x"))
+        self.assertEqual((refused.returncode, refused.stdout, refused.stderr),
+                         (1, "", "sprint: refused 403: secret refused\n"))
+        self.assertEqual(len(support.log_rows(self.store)), before)
+        none = self.assert_unchanged(svc, lambda: run_sprint(
+            "reply", "--sprint", sid, "--message", str(message), "--reply-file", "-",
+            "--port", port, stdin="x"))
+        self.assertEqual((none.returncode, none.stdout), (2, ""))
+        self.assertIn("sprint: no secret", none.stderr)
+
+    def test_inbox_and_reply_take_the_identity_from_the_environment(self):
+        svc = self.open()
+        sid = self.goal(svc)
+        message, secret = self.messaged(svc, sid)
+        env = {manager.ID_ENV: sid, manager.SECRET_ENV: secret.read_text()}
+        port = self.port(svc)
+        got = run_sprint("inbox", "--port", port, env=env)
+        self.assertEqual((got.returncode, got.stderr), (0, ""))
+        self.assertEqual([m["id"] for m in json.loads(got.stdout)["messages"]], [message])
+        got = run_sprint("reply", "--message", str(message), "--reply-file", "-",
+                         "--port", port, env=env, stdin="done")
+        self.assertEqual((got.returncode, got.stdout, got.stderr),
+                         (0, f"sprint: reply to message {message} sent\n", ""))
+
+    def test_reply_refuses_a_bad_message_id_and_an_unreadable_file(self):
+        svc = self.open()
+        sid = self.goal(svc)
+        message, secret = self.messaged(svc, sid)
+        port = self.port(svc)
+        common = ("--sprint", sid, "--secret-file", secret, "--port", port)
+        cases = [
+            (("reply", *common, "--message", "0", "--reply-file", "-"), "usage:"),
+            (("reply", *common, "--message", "x", "--reply-file", "-"), "usage:"),
+            (("reply", *common, "--message", str(message), "--reply-file", "/nonexistent"),
+             "sprint: cannot read /nonexistent: "),
+        ]
+        for args, start in cases:
+            with self.subTest(args=args):
+                got = self.assert_unchanged(svc, lambda: run_sprint(*args, stdin="x"))
+                self.assertEqual((got.returncode, got.stdout), (2, ""))
+                self.assertTrue(got.stderr.startswith(start), got.stderr)
+
     def reports(self, svc, sid, report):
         """An approved sprint, its secret file and a report file holding `report`."""
         secret, _ = self.files(sid, PARTS)
@@ -321,6 +402,23 @@ class ManagerContractTest(unittest.TestCase):
         for forbidden in ("--secret-file", "CONSOLE_SPRINT_SECRET", "bindings."):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, text)
+
+
+    def test_the_contract_says_what_follows_an_approval(self):
+        text = CONTRACT.read_text(encoding="utf-8")
+        for needle in ("`sprint inbox`", "Start every turn",
+                       "`sprint reply --message <id> --reply-file -`", "`sprint contract`",
+                       "one tracker milestone", "`to-issues`", "`deliver-batch`",
+                       "`sprint report --report-file -`", "new brief", "approved"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, text)
+        self.assertNotIn("is not part of the contract yet", text)
+        after = text.partition("## After approval")[2]
+        self.assertTrue(after)
+        for needle in ("cut no issues", "`sprint status`", "`withdrawn`",
+                       "this sprint is not open", "secret refused", "no tracker action"):
+            with self.subTest(section=needle):
+                self.assertIn(needle, after)
 
 
 class CommandContractTest(unittest.TestCase):
