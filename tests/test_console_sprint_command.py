@@ -551,6 +551,14 @@ class SprintCommandTest(Case):
 
     SECTION = "## After a restart or a takeover\n\n1. When the console tells you that it restarted this session, or your first prompt says you take over a sprint whose manager is gone, run `sprint recap`, then `sprint inbox`, and act on what `sprint inbox` prints first.\n2. `sprint recap` prints the goal, the latest brief with its decision and the owner's reply, the last report and how many of the owner's messages are unread. The console keeps this record; nothing was handed over to you.\n3. The latest brief's decision comes before the last report, because a newer brief does not remove an older report:\n   - No brief: draft one, as Drafting the brief says.\n   - Decision `changes`: revise the brief from the reply `sprint recap` printed and send the new version, even when `sprint inbox` printed nothing, because that change request was read before the restart.\n   - Decision `none`: the brief waits for the owner; end your turn.\n   - Decision `approved`: the last report may describe an earlier version of the brief, so check its next step against the approved brief's parts before following it. Continue only the work the approved brief still includes and drop what it removed; follow After approval when there is no report or nothing is left.\n"
 
+    def test_the_contract_says_a_permission_prompt_is_refused_and_a_worktree_is_never_entered(self):
+        section = run_sprint("contract").stdout.split("\n## ", 2)[1]
+        self.assertTrue(section.startswith("Contract\n"), section)
+        self.assertIn("- A permission prompt in this session is refused automatically, so never "
+                      "wait for one.", section)
+        self.assertIn("- Never enter or create a worktree yourself, because a delivery makes its "
+                      "own.", section)
+
     def test_the_contract_says_what_follows_a_restart_or_a_takeover(self):
         text = CONTRACT.read_text(encoding="utf-8")
         _, found, rest = text.partition("## After a restart or a takeover")

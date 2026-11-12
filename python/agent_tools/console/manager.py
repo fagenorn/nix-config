@@ -31,7 +31,13 @@ Settings file. `claude --bg` hands the session to one supervisor per configurati
 and a supervisor that is already running may start the session with its own environment, not the
 launching client's. So `run_launch` writes the sprint's id and secret as `{"env": {...}}` to a
 per-sprint settings file (mode 0600, replaced on a retry) and passes `--settings <file>`; Claude
-Code applies a settings file's `env` to that session. Only the path is on argv.
+Code applies a settings file's `env` to that session. Only the path is on argv. The file holds
+two more members (ADR-console-021, #973): `"worktree": {"bgIsolation": "none"}`, because a manager
+writes no code and every delivery makes its own worktree, and one `PermissionRequest` command hook
+that prints the client's deny decision with `REFUSAL`, one fixed sentence, because nobody watches
+a manager's session (a plain `printf`, no interpreter start). `settings_document(env)` is that
+content and `write_settings(path, env)` writes it (mode 0600, atomically); the console writes it
+again before every wake of a stopped or removed session (`service._refresh_settings`).
 
 Runner. `run_launch` starts the command with no terminal (`stdin` and `stdout` to the null
 device, stderr to a temporary file, never a pipe, so a detached child that keeps the descriptors
@@ -67,6 +73,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -89,6 +96,10 @@ STOP_TIMEOUT = 60
 SHORT_ID_LENGTH = 8
 SETTINGS_SUFFIX = ".settings.json"
 LAUNCH_TOOLS = ("bash", "dirname", "mkdir", "chmod", "ln", "systemd-run")
+
+REFUSAL = ("Nobody watches this session, so the permission prompt was refused: do the step "
+           "another way that needs no permission, or bring the choice to the owner with "
+           "`sprint ask`.")
 
 UNAVAILABLE_TEXT = "managers are not available on this host yet"
 FAILED_TEXT = "could not start a manager"
@@ -218,17 +229,28 @@ def launcher_for(platform: str) -> Callable[[Launch], None] | None:
     return run_launch if supported(platform) else None
 
 
-def _write_settings(launch: Launch) -> None:
-    directory = launch.settings.parent
-    document = json.dumps({"env": dict(launch.env)})
+def settings_document(env: Mapping[str, str]) -> dict:
+    """The settings a manager's session runs under: its environment, no isolation guard, no prompts."""
+    refusal = json.dumps({"hookSpecificOutput": {
+        "hookEventName": "PermissionRequest",
+        "decision": {"behavior": "deny", "message": REFUSAL}}})
+    return {"env": dict(env),
+            "worktree": {"bgIsolation": "none"},
+            "hooks": {"PermissionRequest": [{"hooks": [{
+                "type": "command", "command": f"printf '%s\\n' {shlex.quote(refusal)}"}]}]}}
+
+
+def write_settings(path: Path, env: Mapping[str, str]) -> None:
+    """Replace the file at `path` with `settings_document(env)`; `LaunchFailed` when it cannot be written."""
+    document = json.dumps(settings_document(env))
     temporary = None
     try:
-        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         descriptor, temporary = tempfile.mkstemp(
-            dir=directory, prefix=".", suffix=".tmp")
+            dir=path.parent, prefix=".", suffix=".tmp")
         with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
             handle.write(document)
-        os.replace(temporary, launch.settings)
+        os.replace(temporary, path)
         temporary = None
     except OSError as error:
         raise LaunchFailed(
@@ -261,7 +283,7 @@ def run_launch(launch: Launch, *, platform: str = sys.platform, run=subprocess.r
     if not Path(launch.cwd).is_dir():
         raise fail(f"the project root {launch.cwd} is not a directory")
     try:
-        _write_settings(launch)
+        write_settings(launch.settings, launch.env)
     except LaunchFailed as error:
         raise fail(str(error)) from error
     env = client_environment(launch.profile, environ)
