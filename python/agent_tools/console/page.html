@@ -67,6 +67,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .card .meta { margin-top: 8px; font-size: .8125rem; color: var(--ov2); }
 .card .head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 0; font-size: .84375rem; color: var(--sub0); }
 .head .wait { margin-left: auto; }
+.head .sprint-goal { color: var(--text); overflow-wrap: anywhere; }
 .kind { display: inline-flex; gap: 7px; font-weight: 600; }
 .kind.needs { color: var(--peach); }
 .held { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--hair); font-size: .84375rem; color: var(--sub0); }
@@ -979,6 +980,7 @@ function metaLine(item, tag, cls) {
 function kindOf(item) {
   if (isBrief(item)) return ["Brief", "brief-icon"];
   if (item.reason === "decision") return ["Decision", "decision-icon"];
+  if (isQuestion(item)) return ["Question", "decision-icon"];
   if (item.reason === "conflict") return ["Conflict", "conflict-icon"];
   if (item.reason === "needs-label") return ["Label", "label-icon"];
   if (item.kind === "approval" || item.kind === "paid-approval") return ["Approval", "approval-icon"];
@@ -995,10 +997,12 @@ function headLine(item) {
   const line = el("p", "head meta");
   line.appendChild(kindWords(item));
   line.appendChild(el("span", "proj", item.project_id));
+  if (isQuestion(item)) line.appendChild(el("span", "sprint-goal", item.goal));
   line.appendChild(phrase("span", "wait", "waiting ", timeEl("since", item.waiting_since, "")));
   return line;
 }
 function heldLine(item) {
+  if (isQuestion(item)) return el("p", "held", "Blocks: " + item.blocks + (item.blocker ? " \u00b7 stops all work" : ""));
   const line = phrase("p", "held", holds(item));
   if (item.stale) {
     line.appendChild(el("span", "", " \u00b7 "));
@@ -1063,8 +1067,14 @@ let currentId = null;
 function itemId(item) {
   return item.project_id + "#" + item.key;
 }
+function isQuestion(item) {
+  return item.reason === "question";
+}
+function wordsKey(item) {
+  return itemId(item) + "\nwords";
+}
 function decision(item) {
-  return item.reason === "decision" && item.questions.length > 0 && !item.answered;
+  return (item.reason === "decision" || isQuestion(item)) && item.questions.length > 0 && !item.answered;
 }
 function check(item) {
   return (item.answers || []).length > 0 && !item.answered;
@@ -1157,10 +1167,18 @@ function begin(item, state, pending) {
   state.timer = setTimeout(() => fireAnswer(itemId(item)), UNDO_MS);
   return true;
 }
+function roundBody(item, answer) {
+  return { project_id: item.project_id, sprint_id: item.sprint_id, round: item.round, question: item.index, ...answer };
+}
 function start(item, state) {
   if (!choosable(state) || !picksComplete(item, state)) return false;
+  if (isQuestion(item)) return begin(item, state, { round: true, body: roundBody(item, { choice: state.picks[0] }) });
   const body = { project_id: state.project_id, key: state.key, choices: item.questions.map((_, i) => state.picks[i]) };
   return begin(item, state, { check: false, body });
+}
+function startWords(item, state, text) {
+  if (!choosable(state) || !isQuestion(item)) return false;
+  return begin(item, state, { round: true, body: roundBody(item, { text }) });
 }
 function startCheck(item, state, answer, extra) {
   if (!choosable(state) || !check(item)) return false;
@@ -1193,9 +1211,11 @@ async function sendAnswer(id, state, item) {
   try {
     const headers = { "X-Console-Token": token, "Content-Type": "application/json" };
     const body = JSON.stringify(state.pending.body);
-    const response = state.pending.check
-      ? await fetch("/api/check-answer", { method: "POST", headers, body })
-      : await fetch("/api/answer", { method: "POST", headers, body });
+    const response = state.pending.round
+      ? await fetch("/api/round-answer", { method: "POST", headers, body })
+      : state.pending.check
+        ? await fetch("/api/check-answer", { method: "POST", headers, body })
+        : await fetch("/api/answer", { method: "POST", headers, body });
     if (response.status !== 204) {
       reason = (await response.text()).trim() || "HTTP " + response.status;
     }
@@ -1209,7 +1229,7 @@ async function sendAnswer(id, state, item) {
     state.phase = "choosing";
     state.notice = "Note sent.";
   } else if (reason === null) {
-    dropDrafts(id, ["note", "confirm"]);
+    dropDrafts(id, ["note", "confirm", "words"]);
     state.phase = "sent";
   } else {
     state.phase = "failed";
@@ -1450,7 +1470,7 @@ function actionLine(item, state, lead) {
     if (!picksComplete(item, state)) send.setAttribute("disabled", "");
     act.appendChild(send);
   }
-  if (lead) act.appendChild(detailFold(item));
+  if (lead && !isQuestion(item)) act.appendChild(detailFold(item));
   return act;
 }
 const ANSWER_LABELS = {
@@ -1474,10 +1494,14 @@ function draftField(field, key, onInput) {
   fields.set(key, field);
   return field;
 }
-function noteBox(item, state, box) {
+function typedArea(cls, label) {
   const area = document.createElement("textarea");
-  area.className = "note-text";
-  area.setAttribute("aria-label", "Note");
+  area.className = cls;
+  area.setAttribute("aria-label", label);
+  return area;
+}
+function noteBox(item, state, box) {
+  const area = typedArea("note-text", "Note");
   const send = actionButton("ans-note", "Send note", () => {
     const text = area.value;
     if (text.trim() === "") return;
@@ -1486,6 +1510,20 @@ function noteBox(item, state, box) {
   box.appendChild(draftField(area, itemId(item) + "\nnote", (value) => { send.disabled = value.trim() === ""; }));
   send.disabled = area.value.trim() === "";
   return send;
+}
+function wordsBox(item, state, box) {
+  const area = typedArea("words-text", "Answer in your own words");
+  const send = actionButton("ans-words", "Send my words", () => {
+    const text = area.value;
+    if (text.trim() === "") return;
+    if (startWords(item, state, text)) redraw();
+  });
+  // The pending answer carries the text it was sent with, so the field is read-only until it is undone or settled.
+  const pending = !choosable(state);
+  box.appendChild(draftField(area, wordsKey(item), (value) => { send.disabled = pending || value.trim() === ""; }));
+  area.disabled = pending;
+  send.disabled = pending || area.value.trim() === "";
+  box.appendChild(send);
 }
 function confirmBox(item, box, approve) {
   box.appendChild(el("p", "meta", "Type " + item.confirm + " to approve."));
@@ -1568,7 +1606,8 @@ function answerBox(item, state, lead) {
     });
     box.appendChild(list);
   });
-  if (lead) box.appendChild(heldLine(item));
+  if (lead || isQuestion(item)) box.appendChild(heldLine(item));
+  if (isQuestion(item)) wordsBox(item, state, box);
   box.appendChild(actionLine(item, state, lead));
   return box;
 }
@@ -1576,7 +1615,8 @@ function boxState(item) {
   if (!answerable(item)) return null;
   const state = answerState(item);
   if (check(item)) return state;
-  return itemId(item) === currentId || state.phase !== "choosing" ? state : null;
+  // A question has no tracker page to answer on, so every one keeps its box; the keys go to one item only.
+  return isQuestion(item) || itemId(item) === currentId || state.phase !== "choosing" ? state : null;
 }
 function leadItem(item) {
   const card = el("article", "card lead");
@@ -1588,9 +1628,11 @@ function leadItem(item) {
   if (state === null) {
     appendDetail(card, item, true);
     card.appendChild(heldLine(item));
-    const act = el("div", "act");
-    act.appendChild(answerLink(item, "answer primary needs"));
-    card.appendChild(act);
+    if (!isQuestion(item)) {
+      const act = el("div", "act");
+      act.appendChild(answerLink(item, "answer primary needs"));
+      card.appendChild(act);
+    }
   } else card.appendChild(answerBox(item, state, true));
   return card;
 }
@@ -1599,7 +1641,7 @@ function itemLine(item) {
   const head = el("p", "row-head");
   head.appendChild(kindWords(item));
   head.appendChild(el("b", "", item.headline));
-  const lm = phrase("span", "lm", item.project_id + " \u00b7 " + holds(item));
+  const lm = phrase("span", "lm", item.project_id + " \u00b7 " + (isQuestion(item) ? item.goal : holds(item)));
   if (item.stale) {
     lm.appendChild(el("span", "", " \u00b7 "));
     lm.appendChild(phrase("span", "read-at", "read ", timeEl("ago", item.read_at, "")));
@@ -1610,9 +1652,11 @@ function itemLine(item) {
   const more = moreWords(item);
   if (more !== null) line.appendChild(more);
   const state = boxState(item);
-  if (state === null) appendDetail(line, item, true);
-  else line.appendChild(answerBox(item, state, false));
-  line.appendChild(answerLink(item));
+  if (state === null) {
+    appendDetail(line, item, true);
+    if (isQuestion(item)) line.appendChild(heldLine(item));
+  } else line.appendChild(answerBox(item, state, false));
+  if (!isQuestion(item)) line.appendChild(answerLink(item));
   return line;
 }
 function answeredLine(item) {
