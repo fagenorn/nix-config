@@ -7,6 +7,7 @@ import json
 import stat
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
@@ -14,8 +15,10 @@ from agent_tools.console import event_log, manager, sprints
 from agent_tools.console.deliveries import DELIVERY_GONE, DELIVERY_SEEN, IssueStage
 from agent_tools.console.event_log import (BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED,
                                            GOAL_WITHDRAWN, MANAGER_FAILED, MANAGER_STARTED,
-                                           MANAGER_WAITING, SPRINT_REPORTED, Event)
-from agent_tools.console.sprints import Observed, Report
+                                           MANAGER_STOP_FAILED, MANAGER_STOPPED,
+                                           MANAGER_WAITING, SPRINT_CLOSED,
+                                           SPRINT_STOP_REQUESTED, SPRINT_REPORTED, Event)
+from agent_tools.console.sprints import Closing, Observed, PendingStop, Report
 
 
 class ParseTest(unittest.TestCase):
@@ -567,6 +570,296 @@ class ReportFoldTest(unittest.TestCase):
                     self.assertEqual(
                         sprints.sprint_states(rows[cut:], sprints.sprint_states(rows[:cut])),
                         whole)
+
+
+CLOSING = {"summary": "The importer resumes after a crash.\nSecond line, see #12.",
+           "issues": [{"issue": 13, "stage": "dropped"}, {"issue": 12, "stage": "landed"}],
+           "differently": "Split the resume slice earlier."}
+
+
+def closed(seq, sprint_id, closing):
+    return Event(seq, at(seq), SPRINT_CLOSED, "owner/p00",
+                 {"sprint_id": sprint_id, "goal": "one", "closing": closing})
+
+
+def stop_requested(seq, sprint_id):
+    return Event(seq, at(seq), SPRINT_STOP_REQUESTED, "owner/p00",
+                 {"sprint_id": sprint_id, "goal": "one"})
+
+
+def stopped(seq, sprint_id):
+    return Event(seq, at(seq), MANAGER_STOPPED, "owner/p00", {"sprint_id": sprint_id})
+
+
+def stop_failed(seq, sprint_id, reason):
+    return Event(seq, at(seq), MANAGER_STOP_FAILED, "owner/p00",
+                 {"sprint_id": sprint_id, "reason": reason})
+
+
+class ClosingCheckTest(unittest.TestCase):
+    def test_the_first_invalid_member_is_named(self):
+        no_summary = "the closing report has no valid summary"
+        no_issues = "the closing report has no valid issues"
+        no_differently = "the closing report has no valid differently"
+        number = "the summary's first line names an issue number"
+        table = [
+            ("missing summary", {k: v for k, v in CLOSING.items() if k != "summary"}, no_summary),
+            ("blank summary", {**CLOSING, "summary": " \n "}, no_summary),
+            ("long summary", {**CLOSING, "summary": "x" * 4001}, no_summary),
+            ("long first line", {**CLOSING, "summary": "x" * 501}, no_summary),
+            ("summary not a string", {**CLOSING, "summary": 5}, no_summary),
+            ("issue number on the first line", {**CLOSING, "summary": "fixed #12"}, number),
+            ("building stage", {**CLOSING, "issues": [{"issue": 12, "stage": "building"}]},
+             no_issues),
+            ("issue twice", {**CLOSING, "issues": [{"issue": 12, "stage": "landed"},
+                                                   {"issue": 12, "stage": "dropped"}]}, no_issues),
+            ("issue zero", {**CLOSING, "issues": [{"issue": 0, "stage": "landed"}]}, no_issues),
+            ("issue true", {**CLOSING, "issues": [{"issue": True, "stage": "landed"}]},
+             no_issues),
+            ("extra issue key", {**CLOSING, "issues": [{"issue": 12, "stage": "landed",
+                                                        "x": 1}]}, no_issues),
+            ("issues not a list", {**CLOSING, "issues": "12"}, no_issues),
+            ("too many issues", {**CLOSING, "issues": [{"issue": n, "stage": "landed"}
+                                                       for n in range(1, 202)]}, no_issues),
+            ("blank differently", {**CLOSING, "differently": "  "}, no_differently),
+            ("missing differently", {k: v for k, v in CLOSING.items() if k != "differently"},
+             no_differently),
+            ("summary is checked before issues", {**CLOSING, "summary": "", "issues": 1},
+             no_summary),
+        ]
+        for name, closing, reason in table:
+            with self.subTest(name), self.assertRaises(sprints.Refused) as caught:
+                sprints.checked_closing(closing, [], True)
+            self.assertEqual(str(caught.exception), reason)
+        second = {**CLOSING, "summary": "It resumes.\nFixed #12 on the way."}
+        self.assertEqual(sprints.checked_closing(second, [], True)["summary"],
+                         "It resumes.\nFixed #12 on the way.")
+
+    def test_every_reported_issue_must_be_landed_held_or_dropped_unless_stopping(self):
+        def closing(*rows):
+            return {**CLOSING, "summary": "  Done.  ", "differently": " Nothing. ",
+                    "issues": [{"issue": n, "stage": stage} for n, stage in rows]}
+
+        with self.assertRaises(sprints.Refused) as caught:
+            sprints.checked_closing(closing((12, "landed")), [12, 13], False)
+        self.assertEqual(str(caught.exception),
+                         "an issue of this sprint is neither landed nor dropped")
+        for rows in (((13, "dropped"), (12, "landed")), ((13, "dropped"), (12, "held"))):
+            with self.subTest(rows=rows):
+                self.assertEqual(
+                    sprints.checked_closing(closing(*rows), [12, 13], False),
+                    {"summary": "Done.", "differently": "Nothing.",
+                     "issues": [{"issue": 12, "stage": rows[1][1]},
+                                {"issue": 13, "stage": "dropped"}]})
+        self.assertEqual(sprints.checked_closing(closing((12, "landed")), [12, 13], True)["issues"],
+                         [{"issue": 12, "stage": "landed"}])
+
+    def test_a_close_request_is_a_sprint_a_secret_and_a_closing(self):
+        body = json.dumps({"sprint_id": SID, "secret": "s", "closing": CLOSING}).encode()
+        self.assertEqual(sprints.parse_close_request(body), (SID, "s", CLOSING))
+        partial = json.dumps({"sprint_id": SID, "secret": "s",
+                              "closing": {"summary": "x"}}).encode()
+        self.assertEqual(sprints.parse_close_request(partial), (SID, "s", {"summary": "x"}))
+        for body in (
+                json.dumps({"sprint_id": SID, "secret": "s", "closing": CLOSING, "x": 1}).encode(),
+                json.dumps({"sprint_id": SID, "secret": "s",
+                            "closing": {**CLOSING, "x": 1}}).encode(),
+                json.dumps({"sprint_id": "nope", "secret": "s", "closing": CLOSING}).encode(),
+                json.dumps({"sprint_id": SID, "secret": 5, "closing": CLOSING}).encode(),
+                json.dumps({"sprint_id": SID, "secret": "s", "closing": [CLOSING]}).encode(),
+                b'{"sprint_id": "' + SID.encode() + b'", "secret": "s", "secret": "t",'
+                b' "closing": {}}'):
+            with self.subTest(body=body[:40]), self.assertRaises(ValueError):
+                sprints.parse_close_request(body)
+        good = b'{"project_id": "owner/p00", "sprint_id": "0123456789abcdef"}'
+        self.assertEqual(sprints.parse_stop(good), sprints.parse_withdraw(good))
+        for bad in (b'{"project_id": "owner/p00", "sprint_id": "nope"}',
+                    b'{"project_id": "owner/p00"}',
+                    b'{"project_id": "owner/p00", "sprint_id": "0123456789abcdef", "x": 1}'):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                sprints.parse_stop(bad)
+
+
+ONE_ISSUE = {**REPORT, "issues": [{"issue": 12, "stage": "building"}]}
+LANDED_12 = {**CLOSING, "issues": [{"issue": 12, "stage": "landed"}]}
+
+
+class ClosingFoldTest(unittest.TestCase):
+    def test_a_closing_applies_only_to_an_approved_or_stopping_sprint(self):
+        goal = stated(1, "owner/p00", SID, "one")
+        self.assertIsNone(sprints.sprint_states([goal, closed(2, SID, LANDED_12)])[SID].closing)
+        rows = [goal, sent(2, SID, 1, PARTS), approved(3, SID, 1), reported(4, SID, ONE_ISSUE)]
+        not_12 = {**CLOSING, "issues": [{"issue": 13, "stage": "landed"}]}
+        self.assertIsNone(sprints.sprint_states([*rows, closed(5, SID, not_12)])[SID].closing)
+        folded = sprints.sprint_states([*rows, closed(5, SID, LANDED_12)])
+        self.assertEqual(
+            folded[SID].closing,
+            Closing(at(5), LANDED_12["summary"], "The importer resumes after a crash.",
+                    ((12, "landed"),), LANDED_12["differently"]))
+        again = sprints.sprint_states([closed(6, SID, {**LANDED_12, "summary": "other"})], folded)
+        self.assertEqual(again, folded)
+        self.assertIsNone(sprints.sprint_states([*rows, closed(5, SID, 5)])[SID].closing)
+        other = "fedcba9876543210"
+        self.assertEqual(sprints.sprint_states([closed(6, other, LANDED_12)], folded), folded)
+        empty = {**CLOSING, "issues": []}
+        stopping = sprints.sprint_states([goal, stop_requested(2, SID), closed(3, SID, empty)])
+        self.assertEqual(stopping[SID].closing.issues, ())
+        self.assertEqual(stopping[SID].closing.at, at(3))
+
+
+class StopFoldTest(unittest.TestCase):
+    def test_a_stop_request_makes_one_stop_message(self):
+        goal = stated(1, "owner/p00", SID, "one")
+        state = sprints.sprint_states(
+            [goal, stop_requested(2, SID), stop_requested(3, SID)])[SID]
+        self.assertEqual(state.stop_at, at(2))
+        self.assertEqual(state.messages,
+                         (sprints.Message(2, "stop", at(2), None, sprints.STOP_TEXT),))
+        self.assertEqual(sprints.STOP_TEXT,
+                         "The owner stopped this sprint: finish what is mid-merge, start nothing "
+                         "new, and send your closing report with sprint close.")
+        rows = [goal, sent(2, SID, 1, PARTS), approved(3, SID, 1), reported(4, SID, ONE_ISSUE),
+                closed(5, SID, LANDED_12), stop_requested(6, SID)]
+        late = sprints.sprint_states(rows)[SID]
+        self.assertIsNone(late.stop_at)
+        self.assertEqual([m.kind for m in late.messages], ["approved"])
+        self.assertEqual(sprints.sprint_states([stop_requested(2, "fedcba9876543210")]), {})
+
+    def test_manager_stopped_rows_end_or_mark_a_stop(self):
+        goal = stated(1, "owner/p00", SID, "one")
+        stopping = [goal, stop_requested(2, SID)]
+
+        def state(*rows):
+            return sprints.sprint_states([*stopping, *rows])[SID]
+
+        failed = state(stop_failed(3, SID, "no such session"))
+        self.assertEqual((failed.stop_reason, failed.stop_failed_at, failed.stopped_at),
+                         ("no such session", at(3), None))
+        done = state(stop_failed(3, SID, "no such session"), stopped(4, SID))
+        self.assertEqual((done.stopped_at, done.stop_reason, done.stop_failed_at),
+                         (at(4), None, None))
+        after = sprints.sprint_states([stop_failed(5, SID, "late"), stopped(6, SID)],
+                                      sprints.sprint_states([*stopping, stopped(4, SID)]))
+        self.assertEqual((after[SID].stopped_at, after[SID].stop_reason), (at(4), None))
+        bare = sprints.sprint_states([goal, stopped(2, SID), stop_failed(3, SID, "x")])[SID]
+        self.assertEqual(bare, sprints.sprint_states([goal])[SID])
+        bad = state(Event(3, at(3), MANAGER_STOP_FAILED, "owner/p00",
+                          {"sprint_id": SID, "reason": 5}))
+        self.assertEqual((bad.stop_reason, bad.stop_failed_at), (None, None))
+        self.assertIsNone(state().manager)
+
+    def test_every_route_to_done_has_an_end_time(self):
+        head = BASE[:3]
+        done = {**REPORT, "phase": "done"}
+        both = {**CLOSING, "issues": [{"issue": 12, "stage": "landed"},
+                                      {"issue": 13, "stage": "landed"}]}
+
+        def ended(*rows):
+            return sprints.ended_at(sprints.sprint_states([*head, *rows])[SID])
+
+        self.assertEqual(ended(reported(4, SID, done)), at(4))
+        self.assertIsNone(ended(reported(4, SID, done), reported(5, SID, REPORT)))
+        self.assertEqual(ended(reported(4, SID, done), closed(5, SID, both)), at(5))
+        self.assertEqual(ended(reported(4, SID, REPORT), closed(5, SID, both)), at(5))
+        self.assertIsNone(ended(stop_requested(4, SID)))
+        self.assertIsNone(ended(stop_requested(4, SID), reported(5, SID, done)))
+        self.assertIsNone(ended(stop_requested(4, SID), reported(5, SID, done),
+                                closed(6, SID, both)))
+        self.assertEqual(ended(stop_requested(4, SID), reported(5, SID, done), stopped(6, SID)),
+                         at(6))
+        self.assertIsNone(sprints.ended_at(sprints.sprint_states(
+            [stated(1, "owner/p00", SID, "one")])[SID]))
+        done_first = [*head, reported(4, SID, done), stop_requested(5, SID)]
+        self.assertIsNone(sprints.sprint_states(done_first)[SID].stop_at)
+
+    def test_a_stop_is_due_after_ten_minutes_or_on_the_closing_and_retried_after_a_minute(self):
+        base = sprints.SprintState(SID, "owner/p00", "one", 1, at(1))
+        t = ms(2)
+        stopping = replace(base, stop_at=at(2))
+        self.assertFalse(sprints.stop_due(base, t + 10_000_000))
+        self.assertFalse(sprints.stop_due(stopping, t + 599_999))
+        self.assertTrue(sprints.stop_due(stopping, t + 600_000))
+        closing = Closing(at(3), "s", "s", (), "d")
+        with_closing = replace(stopping, closing=closing)
+        self.assertTrue(sprints.stop_due(with_closing, t + 1))
+        f = ms(4)
+        failed = replace(with_closing, stop_failed_at=at(4), stop_reason="x")
+        self.assertFalse(sprints.stop_due(failed, f + 59_999))
+        self.assertTrue(sprints.stop_due(failed, f + 60_000))
+        late = "2026-11-12T10:11:30.000000+00:00"
+        waited = replace(stopping, stop_failed_at=late)
+        self.assertFalse(sprints.stop_due(waited, t + 600_000))
+        late_ms = int(datetime.fromisoformat(late).timestamp() * 1000)
+        self.assertTrue(sprints.stop_due(waited, late_ms + 60_000))
+        self.assertFalse(sprints.stop_due(replace(with_closing, stopped_at=at(5)), t + 10_000_000))
+        self.assertEqual((sprints.STOP_WAIT_MS, sprints.STOP_RETRY_MS, sprints.STOP_SETTLE_MS,
+                          sprints.FINISHED_AFTER_MS),
+                         (600_000, 60_000, 30_000, 86_400_000))
+
+    def test_a_stopping_or_stopped_sprint_offers_no_retry(self):
+        t = at(1)
+        now = ms(1) + sprints.NO_MANAGER_AFTER_MS + 1
+        started = sprints.Manager("started", t, "work", "n")
+        failed = sprints.Manager("failed", t, reason="x")
+        base = sprints.SprintState(SID, "p00", "one", 1, t)
+        missing = ("missing", manager.MISSING_TEXT)
+        self.assertEqual(
+            sprints.manager_status(replace(base, manager=started), False, now, True),
+            (*missing, True))
+        self.assertEqual(
+            sprints.manager_status(replace(base, manager=started, stop_at=t), False, now, True),
+            (*missing, False))
+        self.assertFalse(sprints.manager_status(
+            replace(base, manager=started, stopped_at=t), False, now, True)[2])
+        self.assertTrue(sprints.manager_status(replace(base, manager=failed), False, now, True)[2])
+        self.assertFalse(sprints.manager_status(
+            replace(base, manager=failed, stop_at=t), False, now, True)[2])
+        self.assertFalse(sprints.manager_status(
+            replace(base, manager=failed, stopped_at=t), False, now, True)[2])
+
+
+class PendingStopTest(unittest.TestCase):
+    def test_a_withdrawal_pends_a_stop_until_one_succeeds(self):
+        pend = PendingStop(SID, "owner/p00", "one", at(2))
+        rows = [stated(1, "owner/p00", SID, "one"), withdrawn(2, "owner/p00", SID, "one")]
+        self.assertEqual(sprints.pending_stops(rows), {SID: pend})
+        failed = sprints.pending_stops([*rows, stop_failed(3, SID, "boom")])
+        self.assertEqual(failed, {SID: replace(pend, reason="boom", failed_at=at(3))})
+        self.assertEqual(sprints.pending_stops([*rows, stop_failed(3, SID, "boom"),
+                                                stopped(4, SID)]), {})
+        again = sprints.pending_stops([*rows, stop_failed(3, SID, "boom"),
+                                       withdrawn(4, "owner/p00", SID, "two")])
+        self.assertEqual(again, {SID: replace(pend, goal="two", at=at(4))})
+        other = "fedcba9876543210"
+        self.assertEqual(sprints.pending_stops([stop_failed(3, other, "x"), stopped(4, other)]),
+                         {})
+        noise = [Event(3, at(3), GOAL_WITHDRAWN, None, {"sprint_id": other, "goal": "x"}),
+                 Event(4, at(4), GOAL_WITHDRAWN, "owner/p00", {"sprint_id": other}),
+                 Event(5, at(5), GOAL_WITHDRAWN, "owner/p00", {"sprint_id": 5, "goal": "x"}),
+                 Event(6, at(6), MANAGER_STOP_FAILED, "owner/p00",
+                       {"sprint_id": SID, "reason": 5})]
+        self.assertEqual(sprints.pending_stops([*rows, *noise]), {SID: pend})
+        whole = sprints.pending_stops([*rows, stop_failed(3, SID, "boom"), stopped(4, SID),
+                                       withdrawn(5, "owner/p00", other, "x")])
+        events = [*rows, stop_failed(3, SID, "boom"), stopped(4, SID),
+                  withdrawn(5, "owner/p00", other, "x")]
+        for cut in range(len(events) + 1):
+            with self.subTest(cut=cut):
+                self.assertEqual(
+                    sprints.pending_stops(events[cut:], sprints.pending_stops(events[:cut])),
+                    whole)
+        self.assertTrue(sprints.pending_due(pend, ms(2)))
+        retried = replace(pend, failed_at=at(3))
+        self.assertFalse(sprints.pending_due(retried, ms(3) + 59_999))
+        self.assertTrue(sprints.pending_due(retried, ms(3) + 60_000))
+
+
+class ClosingTextTest(unittest.TestCase):
+    def test_the_closing_wording(self):
+        self.assertEqual(sprints.closing_text(2, 0, 0), "2 landed")
+        self.assertEqual(sprints.closing_text(1, 1, 1), "1 landed, 1 held for verification, 1 dropped")
+        self.assertEqual(sprints.closing_text(0, 0, 2), "0 landed, 2 dropped")
+        self.assertEqual(sprints.first_line("  \n first \nsecond"), "first")
 
 
 class ObservedFoldTest(unittest.TestCase):
