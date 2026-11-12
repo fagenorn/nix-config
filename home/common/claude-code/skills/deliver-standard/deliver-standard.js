@@ -566,6 +566,10 @@ let checksFixes = (CONT && CONT.checks_fixes) || 0
 let syncFixes = (CONT && CONT.sync_fixes) || 0
 // The verified head, results and verification contract of a ready stop; carried until a resume finds the head moved; its results are reused only under the same contract.
 let verified = (CONT && CONT.verified) || null
+// #972: the files outside the branch's diff a verification fix edited, each with the cause the fix step established. Carried in cont on its
+// own, not with the verified head: the edit stays on the branch when a resume finds the head moved, so the flag stays too.
+const outsideOf = xs => (Array.isArray(xs) ? xs : []).filter(x => isEntry(x) && present(x.file) && present(x.why)).map(x => ({ file: String(x.file), why: String(x.why).slice(0, REASON_MAX) }))
+const outsideFixes = outsideOf(CONT && CONT.outside_fixes)
 // The owner's binding decisions: distinct non-empty strings, from args, from cont and from the decision prompt read after the claim.
 let decisions = []
 const addDecision = text => { if (typeof text === 'string' && text.trim() && !decisions.includes(text)) decisions.push(text) }
@@ -575,7 +579,7 @@ addDecision(args.decisions)
 let amendApplied = false
 const stop = (stage, extra) => {
   const fr = SYNC_WINDOW.includes(stage) ? (finalReviewed = null) : finalReviewed
-  return { stage, ...extra, ...(stage === 'planned' || stage === 'ready' ? {} : { reason: stopReason(stage, extra || {}) }), ...(amendApplied ? { amended: true } : {}), ...deadOf(), cont: { setup, lane: LANE, plan, plan_reviewed: planReviewed, ...(plan && !planReviewed && planFindingsKept ? { plan_findings: planFindingsKept } : {}), ...(decisions.length ? { decisions } : {}), done: taskLog, ...(OWN_PR !== null ? { pr: OWN_PR } : {}), fix_waves: fixWaves, ...(carried.length ? { fix_findings: carried } : {}), ...(checksFixes ? { checks_fixes: checksFixes } : {}), ...(syncFixes ? { sync_fixes: syncFixes } : {}), ...(verified ? { verified } : {}), ...(fr ? { final_reviewed: fr } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}), ...(reordered.length ? { reordered } : {}) } }
+  return { stage, ...extra, ...(stage === 'planned' || stage === 'ready' ? {} : { reason: stopReason(stage, extra || {}) }), ...(amendApplied ? { amended: true } : {}), ...deadOf(), cont: { setup, lane: LANE, plan, plan_reviewed: planReviewed, ...(plan && !planReviewed && planFindingsKept ? { plan_findings: planFindingsKept } : {}), ...(decisions.length ? { decisions } : {}), done: taskLog, ...(OWN_PR !== null ? { pr: OWN_PR } : {}), fix_waves: fixWaves, ...(carried.length ? { fix_findings: carried } : {}), ...(checksFixes ? { checks_fixes: checksFixes } : {}), ...(syncFixes ? { sync_fixes: syncFixes } : {}), ...(verified ? { verified } : {}), ...(outsideFixes.length ? { outside_fixes: outsideFixes } : {}), ...(fr ? { final_reviewed: fr } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}), ...(reordered.length ? { reordered } : {}) } }
 }
 
 const haltTask = (n, stage, extra) => { const s = stop(stage, extra); return { ...s, cont: { ...s.cont, partial: n } } }
@@ -1498,19 +1502,25 @@ Return its output lines as changed_paths. Run nothing else.
 ${RULES}`
 const wsAsk = ws => ` The fix changes only whitespace amounts and blank lines, in ${ws.changed_paths.map(p => p.trim()).join(', ')}. Also judge whether each of its whitespace changes is insignificant: outside every string, template, character and regex literal, heredoc and raw block, and in no construct where whitespace changes behaviour or output. Return whitespace_insignificant true only when you read every hunk and that holds, with whitespace_evidence naming each changed path and why it holds there; otherwise false, with whitespace_evidence naming the hunk where it matters.`
 // #972: a failure the clerk places wholly outside the branch's changed files is rerun once, the failed ids only, before any fix step.
+// The rerun is each failed id's whole command, never a selection of its tests: a test the branch made order-dependent passes alone, and
+// a selection that matches nothing passes too.
 // A result that passes there is a pass that keeps the first failure as flaky; one that fails again stays the first failure.
 // Each verification gets at most this one rerun, and its reply counts only at the same clean head.
 const flakySeen = []
+// True when the last verification's one rerun ran at the same clean head and a failed id did not pass there: the failure is not a flake.
+let rerunFailed = false
 const noteFlaky = rs => { for (const r of Array.isArray(rs) ? rs : []) if (isEntry(r) && present(r.flaky) && !flakySeen.some(f => f.id === r.id && f.summary === r.flaky)) flakySeen.push({ id: r.id, summary: r.flaky }) }
 const rerunOnce = async (v, n) => {
+  rerunFailed = false
   if (!v || !v.clean || !Array.isArray(v.results)) return v
   const fails = verifyProblems(v)
   if (!fails.length || !fails.every(p => p.status === 'fail' && p.outside_diff === true && VERIFY_IDS.includes(p.id))) return v
   const ids = fails.map(p => p.id)
   log(`verify: ${ids.join(', ')} failed outside the branch's changed files; one rerun before any fix`)
-  const again = await call(`${CTX}\nThe verification at ${v.head} failed, outside the files this branch changed: ${JSON.stringify(fails.map(p => ({ id: p.id, summary: p.summary })))}. Rerun what failed once and never a second time, whatever the outcome: where a command's runner can select tests, run only its failing tests named above (same cwd and timeout), else the whole command. A result is pass only when everything that failed passes now.\n${verifyBodyFor(setup.verification.filter(e => ids.includes(e.id)))}`, { label: `verify-rerun-${n}`, phase: 'Verify', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: VERIFY })
+  const again = await call(`${CTX}\nThe verification at ${v.head} failed, outside the files this branch changed: ${JSON.stringify(fails.map(p => ({ id: p.id, summary: p.summary })))}. Rerun each failed command below once, whole and exactly as declared, and never a second time, whatever the outcome.\n${verifyBodyFor(setup.verification.filter(e => ids.includes(e.id)))}`, { label: `verify-rerun-${n}`, phase: 'Verify', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: VERIFY })
   if (!complete(again, VERIFY) || !again.clean || !Array.isArray(again.results) || !sameSha(again.head, v.head)) return v
   const passed = id => { const rs = again.results.filter(r => r.id === id); return rs.length === 1 && rs[0].status === 'pass' ? rs[0] : null }
+  rerunFailed = ids.some(id => !passed(id))
   const results = v.results.map(r => (ids.includes(r.id) && passed(r.id) ? { id: r.id, status: 'pass', summary: passed(r.id).summary, flaky: r.summary } : r))
   for (const r of results) if (ids.includes(r.id) && present(r.flaky)) log(`verify: flaky, ${r.id} failed and passed on the one rerun: ${r.flaky}`)
   noteFlaky(results)
@@ -1519,9 +1529,6 @@ const rerunOnce = async (v, n) => {
 const FIX_OR_UNRELATED = { ...IMPL, properties: { ...IMPL.properties, outside_diff: { type: 'array', items: { type: 'object', properties: { file: { type: 'string' }, why: { type: 'string' } }, required: ['file', 'why'] } }, unrelated: { type: 'object', properties: { test: { type: 'string' }, evidence: { type: 'string' } }, required: ['test', 'evidence'] } } }
 let verify = VERIFY_CACHED ? { head: verified.head, clean: true, results: verified.results } : null
 if (VERIFY_CACHED) noteFlaky(verified.results)
-// #972: the files outside the branch's diff a verification fix edited, each with the cause the fix step established.
-const outsideOf = xs => (Array.isArray(xs) ? xs : []).filter(x => isEntry(x) && present(x.file) && present(x.why)).map(x => ({ file: String(x.file), why: String(x.why).slice(0, REASON_MAX) }))
-const outsideFixes = VERIFY_CACHED ? outsideOf(verified.outside_fixes) : []
 if (!VERIFY_CACHED) {
 verify = await recall(() => call(verifyFirst, { label: 'verify', phase: 'Verify', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: withRenew(VERIFY) }), r => r.renew)
 if (verify) {
@@ -1533,7 +1540,7 @@ verify = await rerunOnce(verify, 1)
 let vRounds = 0
 while (verify && verifyProblems(verify).length && vRounds < 2) {
   vRounds++
-  const fix = await call(`${CTX}\n${PLAN_REF} The project's verification failed: ${JSON.stringify(verifyProblems(verify))}. Find the cause in this branch's changes (git -C ${W} diff ${RANGE}), fix it with the smallest change, commit. Never weaken, skip or delete a test to make it pass. When what fails lies outside that diff, first establish with evidence why it fails here: this branch's change, or this delivery's environment (the worktree path, the branch name). Only with that cause shown may you edit a file outside the diff, and then return outside_diff: [{file, why}], one entry per such file with the cause. With no cause established (it fails without this branch, or it is flaky), change and commit nothing and return status blocked with unrelated {test, evidence}, evidence being what you ran or read. ${OWN_TESTS} ${COMMIT_SCOPE} ${IMPL_RETURN}\n${RULES}`, { label: `verify-fix-${vRounds}`, phase: 'Verify', agentType: 'implementer', model: 'sonnet', schema: FIX_OR_UNRELATED })
+  const fix = await call(`${CTX}\n${PLAN_REF} The project's verification failed: ${JSON.stringify(verifyProblems(verify).map(p => ({ id: p.id, status: p.status, summary: p.summary })))}.${rerunFailed ? ' It failed again on the one rerun at the same head, so it is not flaky.' : ''} Find the cause in this branch's changes (git -C ${W} diff ${RANGE}), fix it with the smallest change, commit. Never weaken, skip or delete a test to make it pass. When what fails lies outside that diff, first establish with evidence why it fails here: this branch's change, or this delivery's environment (the worktree path, the branch name). Only with that cause shown may you edit a file outside the diff, and then return outside_diff: [{file, why}], one entry per such file with the cause. With no cause established (it fails without this branch${rerunFailed ? '' : ', or it is flaky'}), change and commit nothing and return status blocked with unrelated {test, evidence}, evidence being what you ran or read: establish it by reading, or by running the test, never by checking out another commit in the worktree. ${OWN_TESTS} ${COMMIT_SCOPE} ${IMPL_RETURN}\n${RULES}`, { label: `verify-fix-${vRounds}`, phase: 'Verify', agentType: 'implementer', model: 'sonnet', schema: FIX_OR_UNRELATED })
   // #972: a failure for which the fix step can establish no cause here (the branch's change or the delivery's environment) is not edited
   // green: the delivery stops naming the test, and nothing ships. A fix outside the diff with a stated cause goes on, flagged (outsideFixes).
   if (fix && isEntry(fix.unrelated) && present(fix.unrelated.test) && present(fix.unrelated.evidence)) {
@@ -1542,7 +1549,7 @@ while (verify && verifyProblems(verify).length && vRounds < 2) {
   }
   if (!implDone(fix)) return stop('verify-fix', { verify, fix })
   const outside = outsideOf(fix.outside_diff)
-  for (const o of outside) { outsideFixes.push(o); log(`verify-fix-${vRounds}: edited ${o.file}, outside the branch's diff: ${o.why}`) }
+  for (const o of outside) { if (!outsideFixes.some(x => x.file === o.file && x.why === o.why)) outsideFixes.push(o); log(`verify-fix-${vRounds}: edited ${o.file}, outside the branch's diff: ${o.why}`) }
   const pre = rerunIds(verify, fix)
   const ws = pre ? await call(wsCheckPrompt(fix), { label: `ws-check-${vRounds}`, phase: 'Verify', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: WS_CHECK }) : null
   const asked = pre && wsOnly(ws) ? pre : null
@@ -1556,7 +1563,7 @@ while (verify && verifyProblems(verify).length && vRounds < 2) {
 }
 if (verifyProblems(verify).length) return stop('verify', { verify, problems: verifyProblems(verify) })
 if (MODE === 'ready') {
-  verified = { head: verify.head, results: verify.results, contract: VERIFY_CONTRACT, ...(outsideFixes.length ? { outside_fixes: outsideFixes } : {}), ...branchSnap() }
+  verified = { head: verify.head, results: verify.results, contract: VERIFY_CONTRACT, ...branchSnap() }
   return stop('ready', { head: verify.head, branch: setup.branch, worktree: W, verify: verify.results, ...(flakySeen.length ? { flaky: flakySeen } : {}), ...(outsideFixes.length ? { outside_fixes: outsideFixes } : {}), tasks: taskLog, ...(reordered.length ? { reordered } : {}), acceptance: plan.acceptance, fix_waves: fixWaves })
 }
 

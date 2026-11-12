@@ -982,17 +982,47 @@ class FlakyVerificationRowTest(unittest.TestCase):
         pr = [c["prompt"] for c in out["calls"] if c["label"] == "land-pr-1"][-1]
         self.assertIn("verification fixes outside the branch's diff, each with its cause", pr)
         self.assertIn("the sentinel s-1 occurs in the worktree path", pr)
+        for malformed in ([{"file": "a.ts"}, {"why": "w"}, {"file": "", "why": "w"}, "a.ts", None], "a.ts"):
+            with self.subTest(malformed=malformed):
+                bad = run_full(children={"1": dict(ready(1), outside_fixes=malformed)})
+                self.assertNotIn("outside_fixes", bad["result"]["table"][0])
+                self.assertNotIn("outside the branch's diff", [c["prompt"] for c in bad["calls"] if c["label"] == "land-pr-1"][-1])
+        mixed = run_full(children={"1": dict(ready(1), outside_fixes=[{"file": "a.ts"}] + self.OUT)})
+        self.assertEqual(mixed["result"]["table"][0]["outside_fixes"], self.OUT)
         plain = run_full()
         self.assertNotIn("outside_fixes", plain["result"]["table"][0])
         self.assertNotIn("outside the branch's diff", [c["prompt"] for c in plain["calls"] if c["label"] == "land-pr-1"][-1])
 
-    def test_an_unrelated_verification_failure_is_a_stopped_row_with_its_reason_and_is_relaunched(self):
-        reason = "verify-unrelated: tests/http_client.test.ts > retries fails outside this branch's diff, so no fix was made: fails at origin/dev"
-        stop = {"stage": "verify-unrelated", "reason": reason, "cont": reviewed(1)}
+    REASON = "verify-unrelated: tests/http_client.test.ts > retries fails outside this branch's diff, so no fix was made: fails at origin/dev"
+    UNRELATED = {"test": "tests/http_client.test.ts > retries", "evidence": "fails at origin/dev"}
+
+    def test_an_unrelated_verification_failure_is_an_owner_action_and_is_not_relaunched(self):
+        stop = {"stage": "verify-unrelated", "reason": self.REASON, "unrelated": self.UNRELATED, "cont": reviewed(1)}
         result, _, _ = run(children={"1": stop})
         row = result["table"][0]
-        self.assertEqual((row["outcome"], row["stage"], row["reason"]), ("stopped", "verify-unrelated", reason))
-        self.assertIn("1", result["relaunch"]["conts"])
+        self.assertEqual((row["outcome"], row["stage"], row["reason"]), ("stopped", "verify-unrelated", self.REASON))
+        self.assertIsNone(result["relaunch"])
+        action = [a for a in result["owner_actions"] if a["issue"] == 1]
+        self.assertEqual(len(action), 1)
+        self.assertEqual({k: action[0][k] for k in ("reason", "test", "evidence", "claim", "holder")},
+                         dict(self.UNRELATED, reason="unrelated", claim="held", holder=HOLDER))
+        self.assertEqual(action[0]["cont"]["plan"], reviewed(1)["plan"])
+
+    def test_only_the_unrelated_issue_leaves_the_relaunch(self):
+        stop = {"stage": "verify-unrelated", "reason": self.REASON, "unrelated": self.UNRELATED, "cont": reviewed(1)}
+        other = {"stage": "verify", "reason": "verify: build: boom", "cont": reviewed(2)}
+        result, _, _ = run(args=dict(ARGS, issues=[1, 2]), children={"1": stop, "2": other})
+        self.assertEqual(result["relaunch"]["issues"], [2])
+        self.assertEqual(list(result["relaunch"]["conts"]), ["2"])
+        self.assertEqual([a["issue"] for a in result["owner_actions"] if a["reason"] == "unrelated"], [1])
+
+    def test_a_verify_unrelated_stop_that_names_no_test_stays_an_open_row(self):
+        for unrelated in (None, {"test": ""}, "t"):
+            with self.subTest(unrelated=unrelated):
+                stop = {"stage": "verify-unrelated", "reason": self.REASON, "unrelated": unrelated, "cont": reviewed(1)}
+                result, _, _ = run(children={"1": stop})
+                self.assertIn("1", result["relaunch"]["conts"])
+                self.assertEqual([a for a in result["owner_actions"] if a.get("reason") == "unrelated"], [])
 
 
 def run_child(args, replies=None, patch=None):

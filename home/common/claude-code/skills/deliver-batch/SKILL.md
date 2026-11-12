@@ -12,6 +12,6 @@ Run `program-copies --repo-root <checkout> --from <sibling deliver-standard skil
 Render what it returns by `stage`:
 - `args`: report `error` and stop.
 - `setup`: report `result` (the refusal, or null) with any `missing`, `invalid`, `holder`, and stop.
-- `done` or `breaker`: on `breaker`, report it first. Render `table` as one Markdown table (issue, outcome, PR, reason), then `questions` by issue and `owner_actions`.
+- `done` or `breaker`: on `breaker`, report it first. Render `table` as one Markdown table (issue, outcome, PR, reason), then any row's `flaky` and `outside_fixes`, `questions` by issue and `owner_actions`.
 
 Run a non-null `relaunch` as a new run, adding the user's answers as `decisions` `{"<issue>": answer}`, unless its args, `reasons` aside, equal the previous run's: then stop, reporting the open rows as awaiting the owner. Only a run cut off before returning resumes with `resumeFromRunId` and its original `args`.

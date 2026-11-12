@@ -3225,7 +3225,39 @@ class VerifyRerunTest(unittest.TestCase):
         self.assertEqual([l for l in labels(calls) if l.startswith("verify") and "review" not in l],
                          ["verify", "verify-rerun-1", "verify-fix-1", "verify-2", "verify-rerun-2", "verify-fix-2",
                           "verify-3", "verify-rerun-3"])
-        self.assertIn("Rerun what failed once and never a second time", prompt(calls, "verify-rerun-1"))
+
+    def test_the_rerun_asks_for_each_whole_command_and_never_a_selection_of_tests(self):
+        _, calls = run(replies={"verify": self.OUTSIDE, "verify-rerun-1": self.GREEN})
+        rerun = prompt(calls, "verify-rerun-1")
+        self.assertIn("Rerun each failed command below once, whole and exactly as declared, and never a second time, "
+                      "whatever the outcome.", rerun)
+        self.assertIn("Run the project's declared verification once on the worktree head", rerun)
+        for wording in ("select", "only its failing tests", "failing tests named", "else the whole command"):
+            self.assertNotIn(wording, rerun)
+
+    def test_a_fix_after_a_failed_rerun_is_told_it_is_not_flaky_and_gets_no_placement(self):
+        _, calls = run(replies={"verify": self.OUTSIDE, "verify-rerun-1": self.OUTSIDE})
+        fix = prompt(calls, "verify-fix-1")
+        self.assertIn('The project\'s verification failed: [{"id":"build","status":"fail","summary":"%s"}]. It failed again on '
+                      "the one rerun at the same head, so it is not flaky. Find the cause" % self.FLAKE, fix)
+        self.assertNotIn("outside_diff\":", fix)
+        self.assertNotIn("or it is flaky", fix)
+        self.assertIn("With no cause established (it fails without this branch), change and commit nothing", fix)
+
+    def test_a_fix_with_no_rerun_or_a_rerun_that_did_not_count_is_not_told_so(self):
+        for replies in ({"verify": VERIFY_RED}, {"verify": self.OUTSIDE, "verify-rerun-1": dict(self.GREEN, head=FIXED)},
+                        {"verify": self.OUTSIDE, "verify-rerun-1": None}):
+            with self.subTest(replies=replies):
+                _, calls = run(replies=replies)
+                fix = prompt(calls, "verify-fix-1")
+                self.assertNotIn("so it is not flaky", fix)
+                self.assertNotIn("outside_diff\":", fix)
+                self.assertIn("(it fails without this branch, or it is flaky)", fix)
+
+    def test_the_second_fix_is_told_only_of_its_own_verifications_rerun(self):
+        _, calls = run(replies={"verify": self.OUTSIDE, "verify-rerun-1": self.OUTSIDE, "verify-2": VERIFY_RED})
+        self.assertIn("so it is not flaky", prompt(calls, "verify-fix-1"))
+        self.assertNotIn("so it is not flaky", prompt(calls, "verify-fix-2"))
 
     def test_a_failure_inside_the_diff_or_not_placed_is_not_rerun(self):
         inside = {"id": "test", "status": "fail", "summary": "src/a.test.ts", "outside_diff": False}
@@ -3253,8 +3285,10 @@ class VerifyRerunTest(unittest.TestCase):
         self.assertEqual(result["flaky"], [{"id": "test", "summary": self.FLAKE}])
 
     def test_a_rerun_at_another_head_on_a_dirty_tree_or_silent_is_not_a_pass(self):
+        once = self.GREEN["results"][0]
         for again in (dict(self.GREEN, head=FIXED), dict(self.GREEN, clean=False), None,
-                      {"head": SHA, "clean": True, "results": []}):
+                      {"head": SHA, "clean": True, "results": []},
+                      dict(self.GREEN, results=[dict(once, status="skipped")]), dict(self.GREEN, results=[once, once])):
             with self.subTest(again=again):
                 result, calls = run(replies={"verify": self.OUTSIDE, "verify-rerun-1": again})
                 self.assertIn("verify-fix-1", labels(calls))
@@ -3295,7 +3329,8 @@ class VerifyRerunTest(unittest.TestCase):
                       "change, or this delivery's environment (the worktree path, the branch name). Only with that cause shown "
                       "may you edit a file outside the diff, and then return outside_diff: [{file, why}]", fix)
         self.assertIn("With no cause established (it fails without this branch, or it is flaky), change and commit nothing and "
-                      "return status blocked with unrelated {test, evidence}", fix)
+                      "return status blocked with unrelated {test, evidence}, evidence being what you ran or read: establish it by "
+                      "reading, or by running the test, never by checking out another commit in the worktree.", fix)
         self.assertIn("Never weaken, skip or delete a test to make it pass.", fix)
         properties = schema_of(calls, "verify-fix-1")["properties"]
         self.assertEqual(properties["unrelated"]["required"], ["test", "evidence"])
@@ -3315,6 +3350,29 @@ class VerifyRerunTest(unittest.TestCase):
         self.assertIn("a cause the code or the failure does not bear out is an Important defect", review)
         self.assertIn("verification fixes outside the branch's diff, each with its cause", prompt(calls, "pr"))
         self.assertIn(self.OUT[0]["why"], prompt(calls, "pr"))
+
+    def test_a_malformed_out_of_diff_entry_is_not_flagged(self):
+        bad = [{"file": "a.ts"}, {"why": "w"}, {"file": "", "why": "w"}, {"file": "a.ts", "why": ""}, "a.ts", None]
+        for reported, kept in ((bad + self.OUT, self.OUT), (bad, None), ("a.ts", None), ({"file": "a.ts", "why": "w"}, None)):
+            with self.subTest(reported=reported):
+                out = run_out(replies={"verify": VERIFY_RED},
+                              patch={"verify-fix-1": {"start_head": SHA, "commit": FIXED, "outside_diff": reported}})
+                self.assertEqual((out["result"]["stage"], out["result"].get("outside_fixes")), ("done", kept))
+                self.assertEqual(len([l for l in out["logs"] if "outside the branch's diff" in l]), len(kept or []))
+
+    def test_a_resume_that_finds_the_head_moved_keeps_the_out_of_diff_fix(self):
+        fixed = {"start_head": SHA, "commit": FIXED, "outside_diff": self.OUT}
+        ready, _ = run(args=dict(ARGS, mode="ready"), replies={"verify": VERIFY_RED, "verify-2": self.GREEN},
+                       patch={"verify-fix-1": fixed})
+        self.assertEqual(ready["cont"]["outside_fixes"], self.OUT)
+        self.assertNotIn("outside_fixes", ready["cont"]["verified"])
+        shipped, calls = run(args=dict(ARGS, cont=ready["cont"]), patch={"setup": {"head": FIXED}})
+        self.assertIn("verify", labels(calls))
+        self.assertNotIn("verify-fix-1", labels(calls))
+        self.assertEqual((shipped["stage"], shipped["outside_fixes"]), ("done", self.OUT))
+        self.assertIn(self.OUT[0]["why"], prompt(calls, "pr"))
+        stopped, _ = run(args=dict(ARGS, cont=ready["cont"]), replies={"verify": None}, patch={"setup": {"head": FIXED}})
+        self.assertEqual((stopped["stage"], stopped["cont"]["outside_fixes"]), ("verify", self.OUT))
 
     def test_a_fix_inside_the_diff_is_not_flagged(self):
         out = run_out(replies={"verify": VERIFY_RED})
