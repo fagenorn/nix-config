@@ -809,33 +809,60 @@ class FailingPingTest(KeepaliveCase):
 
     def test_a_ping_whose_headers_trickle_past_the_ping_timeout_is_cut_off_by_the_watchdog(self):
         def slow_headers(sock, head, body):
-            """A status line, then one header every 50 ms for 2 s: each read returns well inside
-            the socket timeout, and the fake clock never moves, so only the watchdog stops it."""
+            """A status line, then one header every 100 ms for 8 s or until the connection is cut:
+            the socket timeout is `TIMEOUT` and the fake clock never moves, so only the watchdog
+            stops it."""
             try:
                 sock.sendall(b"HTTP/1.1 200 OK\r\n")
-                for number in range(40):
-                    time.sleep(0.05)
+                for number in range(80):
+                    time.sleep(0.1)
                     sock.sendall(b"X-Slow-%d: 1\r\n" % number)
                 sock.sendall(b"Content-Type: application/json\r\nContent-Length: 2\r\n\r\n{}")
             except OSError:
                 pass
             return False
 
+        status_read = threading.Event()
+
+        class Response(http.client.HTTPResponse):
+            def _read_status(self):
+                try:
+                    return super()._read_status()
+                finally:
+                    status_read.set()
+
+        class Watchdog(threading.Timer):
+            """The real timer, its countdown held until the ping has read the status line, so it
+            always fires inside the headers however slowly the exchange got that far."""
+
+            def run(self):
+                status_read.wait(TIMEOUT)
+                super().run()
+
+        def connect(timeout):
+            connection = http.client.HTTPConnection("127.0.0.1", port, timeout=TIMEOUT)
+            connection.response_class = Response
+            return connection
+
         upstream = FakeUpstream(slow_headers)
         self.addCleanup(upstream.close)
         port = upstream.server.server_address[1]
-        self.keepalive = self.make(
-            lambda timeout: http.client.HTTPConnection("127.0.0.1", port, timeout=timeout))
+        self.keepalive = self.make(connect)
         self.busy_main()
         self.exchange(AGENT_P)
         [ping] = self.due(270)
-        with mock.patch.object(cache_keepalive, "PING_TIMEOUT", 0.3):
+        with mock.patch.object(cache_keepalive, "PING_TIMEOUT", 0.3), \
+                mock.patch.object(threading, "Timer", Watchdog):
             began = time.monotonic()
             self.keepalive.send(ping)
-            self.assertLess(time.monotonic() - began, 1.5)
+            self.assertLess(time.monotonic() - began, 4)
+        self.assertTrue(status_read.is_set())
         [line] = self.events("ping")
-        self.assertEqual((line["status"], line["outcome"], line["error"]),
-                         (200, "upstream_error", "ping exceeded 0.3 s"))
+        # The shut socket ends the header read either at end of file, which leaves the status
+        # already read, or, when a header lands after the shutdown, with a reset and no status.
+        self.assertIn(line["status"], (200, None))
+        self.assertEqual((line["outcome"], line["error"]),
+                         ("upstream_error", "ping exceeded 0.3 s"))
         self.assertNotIn("usage", line)
         self.assertEqual(self.ends(), [(self.handle(AGENT_P), "ping_failed", 1)])
         self.assertEqual(self.due(270), [])
