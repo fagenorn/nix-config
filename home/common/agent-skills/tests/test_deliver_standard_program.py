@@ -2882,6 +2882,39 @@ class ShipTest(unittest.TestCase):
         self.assertEqual(result["stage"], "sync-review")
         self.assertNotIn("merge", labels(calls))
 
+    def test_a_conflicted_sync_checks_for_markers_before_it_commits(self):
+        """#907: the sync step runs the marker check itself, and a reply that says it ran leaves the review prompt as it was."""
+        unchecked = "The merge was not checked for leftover conflict markers"
+        behind = {"pr": {"checks": {"state": "behind", "head": SHA}}}
+        conflicted = {"conflicted": True, "resolved_files": ["a.py"]}
+        result, calls = run(patch=dict(behind, **{"sync-1": dict(conflicted, markers_checked=True)}))
+        self.assertEqual(result["stage"], "done")
+        sync = prompt(calls, "sync-1")
+        self.assertRegex(sync, r"run git -C (\S+) diff --check HEAD and git -C \1 diff --check origin/\S+ before committing and remove each "
+                               r"leftover conflict marker both report \(same file and line\) in a file you resolved by hand; "
+                               r"every other line they report is content and stays")
+        self.assertIn("markers_checked (true when both checks ran)", sync)
+        self.assertLess(sync.index("diff --check HEAD"), sync.index("commit the merge"))
+        self.assertIn("markers_checked", sync)
+        self.assertNotIn(unchecked, prompt(calls, "sync-review-1"))
+        names = labels(calls)
+        for said in ({"markers_checked": False}, {}):
+            with self.subTest(said=said):
+                result, calls = run(patch=dict(behind, **{"sync-1": dict(conflicted, **said)}))
+                self.assertEqual(result["stage"], "done")
+                self.assertIn(unchecked, prompt(calls, "sync-review-1"))
+                self.assertEqual(labels(calls), names)
+
+    def test_a_surviving_sync_finding_stops_with_its_reason(self):
+        left = {"verdict": "findings", "findings": [{"severity": "important", "summary": "still lost"}]}
+        result, calls = run(replies={"sync-review-1": FINDING, "fix-sync-review-1": left},
+                            patch={"pr": {"checks": {"state": "behind", "head": SHA}},
+                                   "sync-1": {"conflicted": True, "merge_commit": "d" * 40},
+                                   "fix-sync-1": {"start_head": "d" * 40, "commit": "f" * 40}})
+        self.assertEqual(result["stage"], "sync-review")
+        self.assertIn("still lost", result["reason"])
+        self.assertEqual(labels(calls).count("land-unlock"), 1)
+
     def test_third_behind_is_contention(self):
         behind = {"state": "behind", "head": SHA}
         result, calls = run(replies={"checks-2": behind, "checks-3": behind}, patch={"pr": {"checks": behind}})
