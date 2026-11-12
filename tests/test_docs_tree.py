@@ -518,7 +518,8 @@ class DocsTreeTest(unittest.TestCase):
         for needle in ("/api/message", "/api/inbox", "/api/message-reply"):
             self.assertIn(needle, write)
         kept = self.doc("docs/areas/console/adr/009-events-are-kept-for-90-days.md")
-        for needle in ("sprint.messaged", "schema 6"):
+        for needle in ("sprint.messaged", "schema 6", "questions.asked",
+                       "question.answered", "schema 7"):
             self.assertIn(needle, kept)
 
     def test_the_console_delivery_decision_is_recorded(self):

@@ -5,7 +5,7 @@ AUTOINCREMENT, at TEXT NOT NULL, kind TEXT NOT NULL, project TEXT, payload TEXT
 NOT NULL)`. Triggers refuse every `UPDATE` of `events`, every `INSERT` that
 names an existing `seq` (which `INSERT OR REPLACE` would otherwise carry out
 without firing a delete trigger) and every deletion of a goal row, a brief row, a
-report row or a message row (`KEPT_KINDS`, kept indefinitely per #838, #887, #890 and #889), whatever
+report row, a message row or a question row (`KEPT_KINDS`, kept indefinitely per #838, #887, #890, #889 and #891), whatever
 its age, or of a row that is not older than the retention cutoff, with "the
 console event log is append-only", so a raw connection cannot rewrite history
 either. The cutoff is the one row of
@@ -24,6 +24,9 @@ Three kinds record what the owner says to a sprint and what comes of it (#889): 
 `KEPT_KINDS`; `SPRINT_NUDGED` (`sprint.nudged`, the record of an attempt to reach the manager) is
 not, and retention removes it like any other row.
 
+Two kinds record a manager's questions and the owner's answers (#891): `QUESTIONS_ASKED`
+(`questions.asked`) and `QUESTION_ANSWERED` (`question.answered`), both in `KEPT_KINDS`.
+
 Three kinds record a sprint's manager (#888): `MANAGER_STARTED` (`manager.started`), `MANAGER_FAILED`
 (`manager.failed`) and `MANAGER_WAITING` (`manager.waiting`), each with the project in its project
 column. They are not in `KEPT_KINDS`: retention removes them like any other row, and a sprint whose
@@ -36,8 +39,8 @@ and writes nothing. A payload is stored as canonical JSON (sorted keys, compact
 separators, non-ASCII kept, NaN refused), serialised before the transaction
 begins.
 
-`PRAGMA user_version` is `SCHEMA_VERSION` (6) once opened: version 0 is created
-as schema 6, versions 1, 2, 3, 4 and 5 are migrated to 6 in one transaction each and
+`PRAGMA user_version` is `SCHEMA_VERSION` (7) once opened: version 0 is created
+as schema 7, versions 1, 2, 3, 4, 5 and 6 are migrated to 7 in one transaction each and
 keep every row, and a file at any other version raises `EventLogError` and is not
 modified. The parent directory is created with mode 0700. The connection
 is shared across threads and every use of it holds one lock.
@@ -51,7 +54,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 RETENTION = timedelta(days=90)
 
 GOAL_STATED = "goal.stated"
@@ -67,14 +70,18 @@ SPRINT_MESSAGED = "sprint.messaged"
 SPRINT_READ = "sprint.read"
 SPRINT_ANSWERED = "sprint.answered"
 SPRINT_NUDGED = "sprint.nudged"
+QUESTIONS_ASKED = "questions.asked"
+QUESTION_ANSWERED = "question.answered"
 # Rows of these kinds (the two goal kinds, the three brief kinds, the report
-# kind and the three message kinds) are never removed: not by the retention pass,
-# not by a raw connection (the delete trigger of schema 3, 4, 5 and 6).
+# kind, the three message kinds and the two question kinds) are never removed:
+# not by the retention pass, not by a raw connection (the delete trigger of
+# schema 3, 4, 5, 6 and 7).
 # `SPRINT_NUDGED` is not among them.
 KEPT_KINDS = frozenset({GOAL_STATED, GOAL_WITHDRAWN,
                         BRIEF_SENT, BRIEF_APPROVED, BRIEF_REPLIED,
                         SPRINT_REPORTED,
-                        SPRINT_MESSAGED, SPRINT_READ, SPRINT_ANSWERED})
+                        SPRINT_MESSAGED, SPRINT_READ, SPRINT_ANSWERED,
+                        QUESTIONS_ASKED, QUESTION_ANSWERED})
 
 _APPEND_ONLY = "the console event log is append-only"
 
@@ -114,10 +121,10 @@ _RETENTION = (
         BEGIN SELECT RAISE(ABORT, '{_RETENTION_ONLY_FORWARD}'); END""",
 )
 
-# What schemas 3, 4, 5 and 6 add to schema 2: the delete trigger also refuses every row
+# What schemas 3, 4, 5, 6 and 7 add to schema 2: the delete trigger also refuses every row
 # of a kept kind, whatever its age. Built from KEPT_KINDS so a later kept kind
 # needs no hand-edited SQL, only a re-run on an existing store (schema 4 added the
-# brief kinds, schema 5 the report kind, schema 6 the message kinds).
+# brief kinds, schema 5 the report kind, schema 6 the message kinds, schema 7 the question kinds).
 _KEPT_LITERALS = ", ".join("'" + kind.replace("'", "''") + "'"
                            for kind in sorted(KEPT_KINDS))
 _KEPT = (
@@ -171,7 +178,7 @@ class EventLog:
             return
         if version == 1:
             self._transaction(self._migrate_from_1)
-        elif version in (2, 3, 4, 5):
+        elif version in (2, 3, 4, 5, 6):
             self._transaction(self._migrate_from_2)
         elif version == 0:
             self._transaction(self._create_schema)
