@@ -1,15 +1,16 @@
 """The console's sprints (#886, #887): a goal the owner states on the page, kept until it is withdrawn, and the brief a manager sends for it.
 
-Five event kinds carry a sprint (`event_log.GOAL_STATED`, `GOAL_WITHDRAWN`, `BRIEF_SENT`,
-`BRIEF_APPROVED`, `BRIEF_REPLIED`). All put the project id in the event's project column. A goal
-row carries `{"sprint_id": <id>, "goal": <text>}` (a withdrawal repeats the stated text); the brief
-rows carry
+Six event kinds carry a sprint (`event_log.GOAL_STATED`, `GOAL_WITHDRAWN`, `BRIEF_SENT`,
+`BRIEF_APPROVED`, `BRIEF_REPLIED`, `SPRINT_REPORTED`). All put the project id in the event's project
+column. A goal row carries `{"sprint_id": <id>, "goal": <text>}` (a withdrawal repeats the stated
+text); the brief and report rows carry
 
     brief.sent      {"sprint_id", "version": <int>, "goal": <str>, "brief": {<the five parts>}}
     brief.approved  {"sprint_id", "version": <int>, "goal": <str>}
     brief.replied   {"sprint_id", "version": <int>, "goal": <str>, "reply": <str>}
+    sprint.reported {"sprint_id", "goal": <str>, "report": {<the seven REPORT_MEMBERS>}}
 
-The log keeps all five indefinitely (`event_log.KEPT_KINDS`).
+The log keeps all six indefinitely (`event_log.KEPT_KINDS`).
 
 Three more kinds record the sprint's manager (#888), none of them kept (`event_log.MANAGER_STARTED`,
 `MANAGER_FAILED`, `MANAGER_WAITING`; each with the project in its project column):
@@ -85,7 +86,9 @@ folded brief's version (0 with none) and `brief` is a dict: the brief is then th
 decision `NONE` and no reply. `brief.approved` and `brief.replied` apply only when the sprint is
 open, has a brief, the version equals its version and its decision is `NONE`; approval sets
 `APPROVED`, a reply (a string) sets `CHANGES` and the reply. A sprint whose brief is `APPROVED` is
-`STARTING`, else `DRAFTING` (`SprintState.state`).
+`STARTING`, else `DRAFTING` (`SprintState.state`). `brief.approved` and `brief.replied`, when they
+apply, also set the brief's `decided_at` to the event's `at`; a `brief.sent` brief has `decided_at`
+`None`.
 
 The fold also keeps each open sprint's `Manager(state, at, profile, session_name, reason, until)`,
 `None` until a valid manager row arrives. A manager row changes only an open sprint (a row for a
@@ -103,9 +106,54 @@ function's three results.
 
 `withdrawn_ids(events, ids)` adds the `sprint_id` of every `goal.withdrawn` row with a string one.
 
-`age_text(elapsed_ms)` is `stated just now` under a minute, `stated <m> min ago` under an hour,
-`stated <h> h ago` under a day, else `stated 1 day ago` or `stated <d> days ago`; a negative count is
-0. The module reads no clock and no environment; only the secret helpers touch the filesystem.
+A report is what the approved sprint's manager says about the sprint. `parse_report_request(body)`
+reads the manager's body and returns `(sprint_id, secret, report)`:
+
+    {"sprint_id": "<16 lowercase hex>", "secret": "<string>",
+     "report": {"status": "<one line>", "phase": "running", "milestone": "<one line>",
+                "tracker_url": "https://<host>/<path>",
+                "issues": [{"issue": 12, "stage": "building"}, {"issue": 13, "stage": "landed"}],
+                "inbox": [12], "next": "<one line>"}}
+
+It accepts only a UTF-8 JSON object of exactly `sprint_id`, `secret` and `report`, a valid sprint
+id, a string secret and a `report` object whose keys are a subset of `REPORT_MEMBERS`; anything
+else, a repeated key, a NaN literal or nesting too deep is `ValueError`. A missing member is not (the
+service answers it with the member). `checked_report(report)` checks the members in `REPORT_MEMBERS`
+order and refuses with `Refused("the report has no valid <member>")` the first that is missing or
+invalid; right after a valid `status` it refuses `STATUS_NUMBER` when the stripped status matches
+`#` and a digit. `status`, `milestone` and `next` are a one-line text (a string, non-empty after stripping,
+no line break, at most `MAX_LINE_CHARS` code points after stripping); `phase` is one of
+`REPORT_PHASES`; `tracker_url` is a string of at most `MAX_LINE_CHARS` code points starting with
+`https://` whose every character is printable and not whitespace; `issues` is a list of at most
+`MAX_REPORT_ISSUES` objects of exactly `issue` (an int, not a bool, at least 1) and `stage` (one of
+`REPORT_STAGES`), no issue twice, possibly empty; `inbox` is a list of at most `MAX_REPORT_ISSUES`
+ints (not bools) of at least 1, possibly empty. It returns a new dict of the seven members: texts
+stripped, `issues` sorted by issue, `inbox` sorted without duplicates, `tracker_url` and `phase` as
+given.
+
+The fold keeps each open sprint's `Report(at, status, phase, milestone, tracker_url, issues, inbox,
+next_step)`. `sprint.reported` changes an open sprint only when its brief is approved (`STARTING`)
+and `checked_report` accepts a dict `report`; the report is then replaced (`at` is the event's `at`,
+`issues` a tuple of `(issue, stage)`, `inbox` a tuple, `next_step` the `next` member) and the
+sprint's observations are cleared. Every other report row changes nothing.
+
+Observations: a `delivery.seen` row carries no sprint id and is read as the delivery fold reads it
+(`deliveries.delivery_states` on that one row; a row that parses to nothing changes nothing). For
+every open sprint of the row's project that has a report, a run that moved after the report
+(`moved_ms` greater than the report's `at` in milliseconds) and carries a reported issue sets the
+sprint's `moved_ms` to the larger of the kept one and the run's, and each of the run's stages for a
+reported issue becomes that issue's `Observed(issue, moved_ms, session_id, run_id, stage)` when
+`(moved_ms, session_id, run_id)` is at least the kept one's. `delivery.gone` changes nothing: the
+last stage and movement outlive the run. `SprintState.observed` is ordered by issue. Folding `a + b`
+equals folding `b` onto the fold of `a`.
+
+`ago_text(elapsed_ms)` is `just now` under a minute, `<m> min ago` under an hour, `<h> h ago` under
+a day, else `1 day ago` or `<d> days ago`; a negative count is 0. `age_text(elapsed_ms)` is `stated `
+plus that. `progress_text(landed, total, in_delivery, queued, held)` is `<landed> of <total> landed`
+followed by `, <n> in delivery`, `, <n> queued` and `, <n> held` for each non-zero count, in that
+order. The view states and texts are the constants `ON_TRACK`, `WAITING`, `QUIET`, `CLOSING`,
+`DONE` and their `_TEXT`; `CLOSED_OUT` is the view's stage for a run's `done` (not a report stage).
+The module reads no clock and no environment; only the secret helpers touch the filesystem.
 """
 
 import json
@@ -118,11 +166,13 @@ from datetime import datetime
 from pathlib import Path
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
+from agent_tools.console import deliveries
+from agent_tools.console.deliveries import DELIVERY_SEEN
 from agent_tools.console.event_log import (BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED,
                                            GOAL_WITHDRAWN, MANAGER_FAILED, MANAGER_STARTED,
-                                           MANAGER_WAITING, Event)
-from agent_tools.console.manager import (FAILED_TEXT, MISSING_TEXT, UNAVAILABLE_TEXT,
-                                         WAITING_TEXT)
+                                           MANAGER_WAITING, SPRINT_REPORTED, Event)
+from agent_tools.console.manager import FAILED_TEXT, MISSING_TEXT, UNAVAILABLE_TEXT
+from agent_tools.console.manager import WAITING_TEXT as MANAGER_WAITING_TEXT
 
 MAX_GOAL_CHARS = 2000
 MAX_REPLY_CHARS = 2000
@@ -139,9 +189,27 @@ DRAFTING_TEXT = "drafting the brief"
 NO_MANAGER_TEXT = "no manager has picked this up"
 STARTED = "started"
 FAILED = "failed"
-WAITING = "waiting"
 MISSING = "missing"
 UNAVAILABLE = "unavailable"
+REPORT_MEMBERS = ("status", "phase", "milestone", "tracker_url", "issues", "inbox", "next")
+REPORT_PHASES = ("running", "closing", "done")
+LANDED = "landed"
+HELD = "held"
+REPORT_STAGES = ("queued", "planning", "plan review", "building", "final review", "verifying",
+                 "landing", "working", LANDED, HELD)
+CLOSED_OUT = "closed out"
+MAX_LINE_CHARS = 500
+MAX_REPORT_ISSUES = 200
+ON_TRACK = "on_track"
+ON_TRACK_TEXT = "on track"
+WAITING = "waiting"
+WAITING_TEXT = "waiting on you ({n})"
+QUIET = "quiet"
+QUIET_TEXT = "quiet for {minutes} min \u2014 may be stuck"
+CLOSING = "closing"
+CLOSING_TEXT = "closing"
+DONE = "done"
+DONE_TEXT = "done"
 SECRETS_DIR = "sprint-secrets"
 SPRINT_ID = re.compile(r"[0-9a-f]{16}")
 
@@ -151,6 +219,9 @@ TOO_LONG = "a goal is at most 2000 characters"
 NOT_OPEN = "this sprint is not open"
 SECRET_REFUSED = "secret refused"
 MISSING_PART = "the brief has no {part}"
+REPORT_MEMBER = "the report has no valid {member}"
+STATUS_NUMBER = "the status line names an issue number"
+NOT_STARTED = "this sprint's brief is not approved"
 NOT_WAITING = "this brief is not waiting for you"
 REPLACED = "a newer brief replaced this one"
 EMPTY_REPLY = "write the reply first"
@@ -180,6 +251,28 @@ class Brief:
     sent_at: str
     decision: str
     reply: str | None
+    decided_at: str | None = None
+
+
+@dataclass(frozen=True)
+class Report:
+    at: str
+    status: str
+    phase: str
+    milestone: str
+    tracker_url: str
+    issues: tuple[tuple[int, str], ...]
+    inbox: tuple[int, ...]
+    next_step: str
+
+
+@dataclass(frozen=True)
+class Observed:
+    issue: int
+    moved_ms: int
+    session_id: str
+    run_id: str
+    stage: deliveries.IssueStage
 
 
 @dataclass(frozen=True)
@@ -201,6 +294,9 @@ class SprintState:
     stated_at: str
     brief: Brief | None = None
     manager: Manager | None = None
+    report: Report | None = None
+    observed: tuple[Observed, ...] = ()
+    moved_ms: int | None = None
 
     @property
     def state(self) -> str:
@@ -264,6 +360,17 @@ def parse_brief_request(body: bytes) -> tuple[str, str, dict]:
     return sprint_id, value["secret"], brief
 
 
+def parse_report_request(body: bytes) -> tuple[str, str, dict]:
+    value = _object(body, {"sprint_id", "secret", "report"}, project=False)
+    sprint_id = _sprint_id(value["sprint_id"])
+    if not isinstance(value["secret"], str):
+        raise ValueError("secret must be a string")
+    report = value["report"]
+    if not isinstance(report, dict) or not set(report) <= set(REPORT_MEMBERS):
+        raise ValueError(f"report must be an object of {', '.join(REPORT_MEMBERS)}")
+    return sprint_id, value["secret"], report
+
+
 def parse_approve(body: bytes) -> tuple[str, str, int]:
     value = _object(body, {"project_id", "sprint_id", "version"})
     return value["project_id"], _sprint_id(value["sprint_id"]), _version(value["version"])
@@ -305,6 +412,50 @@ def checked_brief(brief: dict) -> dict:
     return checked
 
 
+def _line(value: object) -> bool:
+    return (isinstance(value, str) and bool(value.strip()) and "\n" not in value
+            and "\r" not in value and len(value.strip()) <= MAX_LINE_CHARS)
+
+
+def _number(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 1
+
+
+def _issue_row(row: object) -> bool:
+    return (isinstance(row, dict) and set(row) == {"issue", "stage"} and _number(row["issue"])
+            and row["stage"] in REPORT_STAGES)
+
+
+def _valid_report_member(member: str, value: object) -> bool:
+    if member in ("status", "milestone", "next"):
+        return _line(value)
+    if member == "phase":
+        return value in REPORT_PHASES
+    if member == "tracker_url":
+        return (isinstance(value, str) and value.startswith("https://")
+                and len(value) <= MAX_LINE_CHARS
+                and all(char.isprintable() and not char.isspace() for char in value))
+    if member == "issues":
+        return (isinstance(value, list) and len(value) <= MAX_REPORT_ISSUES
+                and all(_issue_row(row) for row in value)
+                and len({row["issue"] for row in value}) == len(value))
+    return isinstance(value, list) and len(value) <= MAX_REPORT_ISSUES and all(
+        _number(item) for item in value)
+
+
+def checked_report(report: dict) -> dict:
+    for member in REPORT_MEMBERS:
+        if not _valid_report_member(member, report.get(member)):
+            raise Refused(REPORT_MEMBER.format(member=member))
+        if member == "status" and re.search(r"#\d", report["status"].strip()):
+            raise Refused(STATUS_NUMBER)
+    return {"status": report["status"].strip(), "phase": report["phase"],
+            "milestone": report["milestone"].strip(), "tracker_url": report["tracker_url"],
+            "issues": sorted(({"issue": row["issue"], "stage": row["stage"]}
+                              for row in report["issues"]), key=lambda row: row["issue"]),
+            "inbox": sorted(set(report["inbox"])), "next": report["next"].strip()}
+
+
 def checked_reply(text: str) -> str:
     if not text.strip():
         raise Refused(EMPTY_REPLY)
@@ -322,15 +473,16 @@ def _folded_brief(state: SprintState, event: Event) -> SprintState:
     if event.kind == BRIEF_SENT:
         parts = payload.get("brief")
         if isinstance(parts, dict) and version > (brief.version if brief else 0):
-            return replace(state, brief=Brief(version, parts, event.at, NONE, None))
+            return replace(state, brief=Brief(version, parts, event.at, NONE, None, None))
         return state
     if brief is None or version != brief.version or brief.decision != NONE:
         return state
     if event.kind == BRIEF_APPROVED:
-        return replace(state, brief=replace(brief, decision=APPROVED))
+        return replace(state, brief=replace(brief, decision=APPROVED, decided_at=event.at))
     reply = payload.get("reply")
     if isinstance(reply, str):
-        return replace(state, brief=replace(brief, decision=CHANGES, reply=reply))
+        return replace(state,
+                       brief=replace(brief, decision=CHANGES, reply=reply, decided_at=event.at))
     return state
 
 
@@ -351,10 +503,53 @@ def _folded_manager(state: SprintState, event: Event) -> SprintState:
     return state
 
 
+def _folded_report(state: SprintState, event: Event) -> SprintState:
+    report = event.payload.get("report")
+    if state.state != STARTING or not isinstance(report, dict):
+        return state
+    try:
+        checked = checked_report(report)
+    except Refused:
+        return state
+    return replace(state, observed=(), moved_ms=None,
+                   report=Report(event.at, checked["status"], checked["phase"],
+                                 checked["milestone"], checked["tracker_url"],
+                                 tuple((row["issue"], row["stage"]) for row in checked["issues"]),
+                                 tuple(checked["inbox"]), checked["next"]))
+
+
+def _observed(folded: dict[str, SprintState], event: Event) -> None:
+    runs = deliveries.delivery_states([event])
+    for run in runs.values():
+        for sprint_id, state in folded.items():
+            report = state.report
+            if state.project_id != event.project or report is None:
+                continue
+            if run.moved_ms <= int(datetime.fromisoformat(report.at).timestamp() * 1000):
+                continue
+            reported = {issue for issue, _ in report.issues}
+            stages = [stage for stage in run.issues if stage.issue in reported]
+            if not stages:
+                continue
+            kept = {item.issue: item for item in state.observed}
+            for stage in stages:
+                old = kept.get(stage.issue)
+                if old is None or ((run.moved_ms, run.session_id, run.run_id)
+                                   >= (old.moved_ms, old.session_id, old.run_id)):
+                    kept[stage.issue] = Observed(stage.issue, run.moved_ms, run.session_id,
+                                                 run.run_id, stage)
+            folded[sprint_id] = replace(
+                state, moved_ms=max(state.moved_ms or 0, run.moved_ms),
+                observed=tuple(kept[issue] for issue in sorted(kept)))
+
+
 def sprint_states(events: Iterable[Event],
                   states: Mapping[str, SprintState] | None = None) -> dict[str, SprintState]:
     folded = dict(states or {})
     for event in events:
+        if event.kind == DELIVERY_SEEN:
+            _observed(folded, event)
+            continue
         sprint_id = event.payload.get("sprint_id")
         if not isinstance(sprint_id, str):
             continue
@@ -370,6 +565,8 @@ def sprint_states(events: Iterable[Event],
         elif event.kind in (MANAGER_STARTED, MANAGER_FAILED, MANAGER_WAITING) \
                 and sprint_id in folded:
             folded[sprint_id] = _folded_manager(folded[sprint_id], event)
+        elif event.kind == SPRINT_REPORTED and sprint_id in folded:
+            folded[sprint_id] = _folded_report(folded[sprint_id], event)
     return folded
 
 
@@ -382,16 +579,28 @@ def withdrawn_ids(events: Iterable[Event], ids: frozenset[str] = frozenset()) ->
     return frozenset(withdrawn)
 
 
-def age_text(elapsed_ms: int) -> str:
+def ago_text(elapsed_ms: int) -> str:
     elapsed = max(elapsed_ms, 0)
     if elapsed < _MINUTE_MS:
-        return "stated just now"
+        return "just now"
     if elapsed < _HOUR_MS:
-        return f"stated {elapsed // _MINUTE_MS} min ago"
+        return f"{elapsed // _MINUTE_MS} min ago"
     if elapsed < _DAY_MS:
-        return f"stated {elapsed // _HOUR_MS} h ago"
+        return f"{elapsed // _HOUR_MS} h ago"
     days = elapsed // _DAY_MS
-    return "stated 1 day ago" if days == 1 else f"stated {days} days ago"
+    return "1 day ago" if days == 1 else f"{days} days ago"
+
+
+def age_text(elapsed_ms: int) -> str:
+    return "stated " + ago_text(elapsed_ms)
+
+
+def progress_text(landed: int, total: int, in_delivery: int, queued: int, held: int) -> str:
+    text = f"{landed} of {total} landed"
+    for count, label in ((in_delivery, "in delivery"), (queued, "queued"), (held, "held")):
+        if count:
+            text += f", {count} {label}"
+    return text
 
 
 def _ms(time: str) -> int:
@@ -413,7 +622,7 @@ def manager_status(state: SprintState, listed: bool, now_ms: int | None,
     - No manager row: `none`, with `NO_MANAGER_TEXT` and retry when overdue, else no text, no retry.
     - `started`: `missing`, `MISSING_TEXT` and retry when overdue, else `started`, no text, no retry.
     - `failed`: `failed` and `"<FAILED_TEXT>: <reason>"`.
-    - `waiting`: `waiting` and `WAITING_TEXT`.
+    - `waiting`: `waiting` and `manager.WAITING_TEXT`.
 
     A `failed` or `waiting` manager offers retry only while the sprint has no listed session and no
     brief: a launch can fail after its detached session was already handed off, and a retry would
@@ -432,7 +641,7 @@ def manager_status(state: SprintState, listed: bool, now_ms: int | None,
     free = not listed and state.brief is None
     if manager.state == FAILED:
         return FAILED, f"{FAILED_TEXT}: {manager.reason}", free
-    return WAITING, WAITING_TEXT, free
+    return WAITING, MANAGER_WAITING_TEXT, free
 
 
 def new_sprint_id() -> str:

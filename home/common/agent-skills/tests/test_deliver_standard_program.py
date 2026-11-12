@@ -2869,7 +2869,7 @@ class ShipTest(unittest.TestCase):
 
     def test_conflicted_sync_is_rereviewed(self):
         _, calls = run(patch={"pr": {"checks": {"state": "behind", "head": SHA}},
-                              "sync-1": {"conflicted": True, "resolved_files": ["a.py"]}})
+                              "sync-1": ABORTED, "sync-resolve-1": {"conflicted": True, "resolved_files": ["a.py"]}})
         review = [c for c in calls if c["label"] == "sync-review-1"]
         self.assertEqual(review[0]["agentType"], "reviewer")
 
@@ -2877,10 +2877,44 @@ class ShipTest(unittest.TestCase):
         bad = {"verdict": "findings", "findings": [{"severity": "important", "summary": "lost"}]}
         result, calls = run(replies={"sync-review-1": bad, "fix-sync-review-1": bad},
                             patch={"pr": {"checks": {"state": "behind", "head": SHA}},
-                                   "sync-1": {"conflicted": True, "merge_commit": "d" * 40},
+                                   "sync-1": ABORTED, "sync-resolve-1": {"conflicted": True, "merge_commit": "d" * 40},
                                    "fix-sync-1": {"start_head": "d" * 40, "commit": "f" * 40}})
         self.assertEqual(result["stage"], "sync-review")
         self.assertNotIn("merge", labels(calls))
+
+    def test_a_conflicted_sync_checks_for_markers_before_it_commits(self):
+        """#907: the sync step runs the marker check itself, and a reply that says it ran leaves the review prompt as it was."""
+        unchecked = "The merge was not checked for leftover conflict markers"
+        behind = {"pr": {"checks": {"state": "behind", "head": SHA}}}
+        conflicted = {"conflicted": True, "resolved_files": ["a.py"]}
+        result, calls = run(patch=dict(behind, **{"sync-1": ABORTED, "sync-resolve-1": dict(conflicted, markers_checked=True)}))
+        self.assertEqual(result["stage"], "done")
+        self.assertNotIn("diff --check", prompt(calls, "sync-1"))
+        sync = prompt(calls, "sync-resolve-1")
+        self.assertRegex(sync, r"run git -C (\S+) diff --check HEAD and git -C \1 diff --check origin/\S+ before committing and remove each "
+                               r"leftover conflict marker both report \(same file and line\) in a file you resolved by hand; "
+                               r"every other line they report is content and stays")
+        self.assertIn("markers_checked (true when both checks ran)", sync)
+        self.assertLess(sync.index("diff --check HEAD"), sync.index("commit the merge"))
+        self.assertIn("markers_checked", sync)
+        self.assertNotIn(unchecked, prompt(calls, "sync-review-1"))
+        names = labels(calls)
+        for said in ({"markers_checked": False}, {}):
+            with self.subTest(said=said):
+                result, calls = run(patch=dict(behind, **{"sync-1": ABORTED, "sync-resolve-1": dict(conflicted, **said)}))
+                self.assertEqual(result["stage"], "done")
+                self.assertIn(unchecked, prompt(calls, "sync-review-1"))
+                self.assertEqual(labels(calls), names)
+
+    def test_a_surviving_sync_finding_stops_with_its_reason(self):
+        left = {"verdict": "findings", "findings": [{"severity": "important", "summary": "still lost"}]}
+        result, calls = run(replies={"sync-review-1": FINDING, "fix-sync-review-1": left},
+                            patch={"pr": {"checks": {"state": "behind", "head": SHA}},
+                                   "sync-1": ABORTED, "sync-resolve-1": {"conflicted": True, "merge_commit": "d" * 40},
+                                   "fix-sync-1": {"start_head": "d" * 40, "commit": "f" * 40}})
+        self.assertEqual(result["stage"], "sync-review")
+        self.assertIn("still lost", result["reason"])
+        self.assertEqual(labels(calls).count("land-unlock"), 1)
 
     def test_third_behind_is_contention(self):
         behind = {"state": "behind", "head": SHA}
@@ -2994,6 +3028,8 @@ class MergeRefusedBehindTest(unittest.TestCase):
 
 FIX = "f" * 40
 MERGE = "d" * 40
+# #913: a sync step whose merge conflicts aborts it and answers conflicted; the resolution is its own step, sync-resolve, outside the land lock.
+ABORTED = {"status": "conflicted", "conflicted": True, "notes": "a.py conflicts"}
 RED = {"state": "failed", "head": SHA, "failing": ["ci-tests"], "details": "FAIL test_cache: host-installed state"}
 FINDING = {"verdict": "findings", "findings": [{"severity": "important", "summary": "dropped the new call site"}]}
 # The cont every ship stop of the default fresh run carries (observed at the base commit of #801).
@@ -3277,6 +3313,216 @@ class LandWaitRetryTest(unittest.TestCase):
         self.assertEqual(self.waits(calls), [])
 
 
+class ConflictedSyncOutsideLockTest(unittest.TestCase):
+    """#913: a sync merge that conflicts is aborted under the land lock and resolved, tested, reviewed and fixed outside it; the
+    accepted head takes the lock again, waiting, and a clean merge never leaves it."""
+
+    BEHIND = {"pr": {"checks": {"state": "behind", "head": SHA}}}
+    RELEASE = "forge-claim land release --repo owner/repo --branch dev --sha "
+    M2 = "e" * 40
+
+    def ship(self, replies=None, **patch):
+        return run_out(replies=dict({"checks-2": {"state": "passed", "head": MERGE}}, **(replies or {})),
+                       patch={**self.BEHIND, "sync-1": ABORTED, "sync-resolve-1": {"merge_commit": MERGE}, **patch})
+
+    @staticmethod
+    def shipped(out):
+        names = labels(out["calls"])
+        return names[names.index("pr"):]
+
+    def test_a_conflict_is_aborted_released_resolved_and_the_lock_taken_again(self):
+        out = self.ship()
+        result, calls = out["result"], out["calls"]
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(self.shipped(out), ["pr", "sync-1", "land-unlock", "sync-resolve-1", "sync-review-1", "land-push-2",
+                                             "checks-2", "merge", "hold", "close-out"])
+        sync = prompt(calls, "sync-1")
+        self.assertIn("If it conflicts, do not resolve it: run git merge --abort inside /r/.wt/w-issue-9-x", sync)
+        self.assertIn("confirm no merge is left in progress", sync)
+        self.assertIn("conflicted", next(c for c in calls if c["label"] == "sync-1")["schema"]["properties"]["status"]["enum"])
+        # The first hold ends at the head it was taken at, before the resolution starts.
+        self.assertIn(f"{self.RELEASE}{SHA}\n", prompt(calls, "land-unlock"))
+        resolve = prompt(calls, "sync-resolve-1")
+        for text in ("the landing lock is not held while you work", "rev-parse -q --verify MERGE_HEAD", "merge origin/dev", "Do not push."):
+            self.assertIn(text, resolve)
+        # The accepted head is pushed, then the lock is taken at it with --wait and its checks are polled in the same call.
+        self.assertIn(f"at the head {MERGE}", prompt(calls, "land-push-2"))
+        checks = prompt(calls, "checks-2")
+        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {MERGE} --wait\n", checks)
+        self.assertIn("merge-base --is-ancestor origin/dev HEAD", checks)
+        merge = prompt(calls, "merge")
+        self.assertIn(f"--sha {MERGE}\n", merge)
+        self.assertIn("Only when lock's verdict is already_held or moved", merge)
+        self.assertIn(f"{self.RELEASE}{MERGE}", prompt(calls, "hold"))
+        self.assertNotIn("lock_unreleased", result)
+
+    def test_a_clean_merge_keeps_the_lock(self):
+        result, calls = run(replies={"checks-2": {"state": "passed", "head": MERGE}},
+                            patch=dict(self.BEHIND, **{"sync-1": {"merge_commit": MERGE}}))
+        self.assertEqual(result["stage"], "done")
+        names = labels(calls)
+        self.assertEqual(names[names.index("pr"):], ["pr", "sync-1", "land-push-2", "checks-2", "merge", "hold", "close-out"])
+        self.assertIn(f"Move the cross-host landing lock of the branch dev for PR #42 to the head {MERGE}", prompt(calls, "checks-2"))
+        self.assertNotIn(" --wait\n", prompt(calls, "checks-2"))
+
+    def test_behind_again_after_the_retake_a_clean_merge_stays_under_the_lock(self):
+        out = self.ship(replies={"checks-2": {"state": "behind", "head": MERGE, "lock": {"verdict": "acquired", "lock_sha": MERGE}},
+                                 "checks-3": {"state": "passed", "head": self.M2}},
+                        **{"sync-2": {"merge_commit": self.M2}})
+        self.assertEqual(out["result"]["stage"], "done")
+        self.assertEqual(self.shipped(out), ["pr", "sync-1", "land-unlock", "sync-resolve-1", "sync-review-1", "land-push-2", "checks-2",
+                                             "sync-2", "land-push-3", "checks-3", "merge", "hold", "close-out"])
+        again = prompt(out["calls"], "checks-3")
+        self.assertIn(f"--sha {self.M2}\n", again)
+        self.assertNotIn(" --wait\n", again)
+        self.assertIn(f"--match-head-commit {self.M2}", prompt(out["calls"], "merge"))
+
+    def test_behind_again_with_a_second_conflict_is_resolved_outside_the_lock_again(self):
+        second = {"sync-2": ABORTED, "sync-resolve-2": {"merge_commit": self.M2}}
+        out = self.ship(replies={"checks-2": {"state": "behind", "head": MERGE}, "checks-3": {"state": "passed", "head": self.M2}}, **second)
+        self.assertEqual(out["result"]["stage"], "done")
+        self.assertEqual(self.shipped(out), [
+            "pr", "sync-1", "land-unlock", "sync-resolve-1", "sync-review-1", "land-push-2", "checks-2",
+            "sync-2", "land-unlock", "sync-resolve-2", "sync-review-2", "land-push-3", "checks-3", "merge", "hold", "close-out"])
+        # Each hold is released once, at the head it was held at.
+        unlocks = [c["prompt"] for c in out["calls"] if c["label"] == "land-unlock"]
+        self.assertEqual([self.RELEASE + sha + "\n" in text for sha, text in zip((SHA, MERGE), unlocks)], [True, True])
+        self.assertIn(f"--sha {self.M2} --wait\n", prompt(out["calls"], "checks-3"))
+        # Behind once more: the sync bound ends the delivery with its own reason, and the third hold is released.
+        out = self.ship(replies={"checks-2": {"state": "behind", "head": MERGE}, "checks-3": {"state": "behind", "head": self.M2}}, **second)
+        self.assertEqual((out["result"]["stage"], out["result"]["syncs"]), ("sync-contention", 2))
+        names = labels(out["calls"])
+        self.assertNotIn("merge", names)
+        self.assertEqual(names.count("land-unlock"), 3)
+        self.assertIn(f"{self.RELEASE}{self.M2}\n", prompt(out["calls"], "land-unlock"))
+
+    def test_a_refused_retake_never_merges_and_holds_nothing(self):
+        for verdict in ("land-contended", "held_by", "lost_to"):
+            with self.subTest(verdict=verdict):
+                out = self.ship(replies={"checks-2": {"lock": {"verdict": verdict, "lock_sha": self.M2}},
+                                         **{f"land-relock-{k}": {"lock": {"verdict": "land-contended"}} for k in (1, 2, 3)}})
+                result, names = out["result"], labels(out["calls"])
+                # Only a wait that ran out is waited for again, as often as a first wait is (LAND_WAIT_RETRIES).
+                self.assertEqual([name for name in names if name.startswith("land-relock-")],
+                                 [f"land-relock-{k}" for k in (1, 2, 3)] if verdict == "land-contended" else [])
+                self.assertEqual((result["stage"], result["lock"]), ("land-contended", verdict))
+                self.assertNotIn("merge", names)
+                # The only release is the one before the resolution.
+                self.assertEqual(names.count("land-unlock"), 1)
+                self.assertLess(names.index("land-unlock"), names.index("sync-resolve-1"))
+                self.assertNotIn("lock_unreleased", result)
+
+    def test_a_retake_that_answers_acquired_still_merges_only_on_the_pre_merge_check(self):
+        retaken = {"state": "passed", "head": MERGE, "lock": {"verdict": "acquired", "lock_sha": MERGE, "waited_s": 1740, "waited_on": [2257]}}
+        out = self.ship(replies={"checks-2": retaken})
+        self.assertEqual(out["result"]["stage"], "done")
+        self.assertIn("checks-2: waited 29 min for the land lock of dev behind PR #2257", out["logs"])
+        out = self.ship(replies={"checks-2": retaken, "merge": {"merged": False, "notes": "held_by", "lock": {"verdict": "held_by"}}})
+        self.assertEqual(out["result"]["stage"], "land-contended")
+        self.assertNotIn("hold", labels(out["calls"]))
+
+    def test_a_lost_retake_releases_what_it_may_hold(self):
+        out = self.ship(replies={"checks-2": None})
+        self.assertEqual(out["result"]["stage"], "land-contended")
+        names = labels(out["calls"])
+        self.assertEqual(names.count("land-unlock"), 2)
+        # The waiting acquire may have taken the lock at the accepted head: the release names it as the second sha.
+        last = prompt(out["calls"], "land-unlock")
+        self.assertIn(f"When it prints not_held with lock_sha {MERGE}, run alone and exactly: {self.RELEASE}{MERGE}", last)
+        self.assertNotIn("merge", names)
+
+    def test_every_stop_outside_the_lock_releases_once_and_accepts_nothing(self):
+        stops = {
+            "the resolution is lost": ({"sync-resolve-1": None}, {}, "sync"),
+            "the resolution is blocked": ({}, {"sync-resolve-1": {"status": "blocked", "notes": "too tangled"}}, "sync"),
+            "the review is lost": ({"sync-review-1": None}, {}, "sync-review"),
+            "the fix is blocked": ({"sync-review-1": FINDING}, {"fix-sync-1": {"status": "blocked", "notes": "no"}}, "sync-fix"),
+            "the finding survives": ({"sync-review-1": FINDING, "fix-sync-review-1": FINDING},
+                                     {"fix-sync-1": {"start_head": MERGE, "commit": FIX}}, "sync-review"),
+            "the push is lost": ({"land-push-2": None}, {}, "push"),
+        }
+        for name, (replies, patch, stage) in stops.items():
+            with self.subTest(stop=name):
+                out = self.ship(replies=replies, **patch)
+                result, names = out["result"], labels(out["calls"])
+                self.assertEqual(result["stage"], stage)
+                self.assertEqual(names.count("land-unlock"), 1)
+                self.assertEqual(names[names.index("sync-1") + 1], "land-unlock")
+                for gone in ("checks-2", "merge", "hold"):
+                    self.assertNotIn(gone, names)
+                self.assertNotIn("lock_unreleased", result)
+
+    def test_a_release_that_failed_before_the_resolution_is_tried_again_at_the_stop(self):
+        out = self.ship(replies={"land-unlock": [{"verdict": "error", "detail": "boom"}, {"verdict": "released"}], "sync-review-1": None})
+        self.assertEqual(out["result"]["stage"], "sync-review")
+        unlocks = [c["prompt"] for c in out["calls"] if c["label"] == "land-unlock"]
+        self.assertEqual([f"{self.RELEASE}{SHA}\n" in text for text in unlocks], [True, True])
+        self.assertNotIn("lock_unreleased", out["result"])
+        # When that second release fails too, the result says so.
+        out = self.ship(replies={"land-unlock": {"verdict": "error", "detail": "boom"}, "sync-review-1": None})
+        self.assertEqual(out["result"]["lock_unreleased"]["sha"], SHA)
+
+    def test_a_sync_step_that_resolved_the_conflict_itself_is_released_and_reviewed(self):
+        out = run_out(replies={"checks-2": {"state": "passed", "head": MERGE}},
+                      patch=dict(self.BEHIND, **{"sync-1": {"conflicted": True, "merge_commit": MERGE}}))
+        self.assertEqual(out["result"]["stage"], "done")
+        self.assertEqual(self.shipped(out), ["pr", "sync-1", "land-unlock", "sync-review-1", "land-push-2", "checks-2",
+                                             "merge", "hold", "close-out"])
+        self.assertIn(f"--sha {MERGE} --wait\n", prompt(out["calls"], "checks-2"))
+
+    def test_a_resolution_that_says_it_merged_cleanly_is_reviewed_all_the_same(self):
+        clean = {"sync-resolve-1": {"conflicted": False, "merge_commit": MERGE}}
+        out = self.ship(**clean)
+        self.assertEqual(out["result"]["stage"], "done")
+        self.assertEqual(self.shipped(out), ["pr", "sync-1", "land-unlock", "sync-resolve-1", "sync-review-1", "land-push-2", "checks-2",
+                                             "merge", "hold", "close-out"])
+        self.assertIn(f"merge commit {MERGE}", prompt(out["calls"], "sync-review-1"))
+        self.assertIn(f"--sha {MERGE} --wait\n", prompt(out["calls"], "checks-2"))
+        out = self.ship(replies={"sync-review-1": FINDING, "fix-sync-review-1": FINDING},
+                        **clean, **{"fix-sync-1": {"start_head": MERGE, "commit": FIX}})
+        self.assertEqual(out["result"]["stage"], "sync-review")
+        self.assertNotIn("merge", labels(out["calls"]))
+
+    def test_a_retake_whose_wait_ran_out_waits_again_like_a_first_wait(self):
+        out_of_time = {"lock": {"verdict": "land-contended", "lock_sha": self.M2, "waited_s": 3600, "waited_on": [7]}}
+        out = self.ship(replies={"checks-2": out_of_time, "checks-3": {"state": "passed", "head": MERGE},
+                                 "land-relock-1": {"lock": {"verdict": "land-contended"}},
+                                 "land-relock-2": {"lock": {"verdict": "acquired", "lock_sha": MERGE, "waited_s": 900, "waited_on": [7, 9]}}})
+        result, calls = out["result"], out["calls"]
+        self.assertEqual(result["stage"], "done")
+        # A retried wait polled no checks: the next round polls them, under the lock, before the merge.
+        self.assertEqual(self.shipped(out), ["pr", "sync-1", "land-unlock", "sync-resolve-1", "sync-review-1", "land-push-2", "checks-2",
+                                             "land-relock-1", "land-relock-2", "checks-3", "merge", "hold", "close-out"])
+        again = next(c for c in calls if c["label"] == "land-relock-2")
+        self.assertEqual((again["agentType"], again["model"]), ("clerk", "sonnet"))
+        self.assertIn("forge-claim renew --repo owner/repo --issue 9", again["prompt"])
+        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {MERGE} --wait\n", again["prompt"])
+        self.assertNotIn("land acquire --repo", prompt(calls, "checks-3"))
+        self.assertIn(f"{self.RELEASE}{MERGE}", prompt(calls, "hold"))
+        self.assertEqual([line for line in out["logs"] if "waited" in line],
+                         ["checks-2: waited 60 min for the land lock of dev behind PR #7",
+                          "land-relock-2: waited 15 min for the land lock of dev behind PR #7, #9"])
+        # A lost claim ends the wait; a lost reply may hold the lock at the accepted head, which the stop's release covers.
+        out = self.ship(replies={"checks-2": out_of_time, "land-relock-1": {"renew": {"verdict": "not_held", "by": "h2/b1"}, "lock": None}})
+        self.assertEqual((out["result"]["stage"], out["result"]["at"]), ("claim-lost", "land-relock-1"))
+        self.assertEqual(labels(out["calls"]).count("land-unlock"), 1)
+        out = self.ship(replies={"checks-2": out_of_time, "land-relock-1": None})
+        self.assertEqual(out["result"]["stage"], "land-lock")
+        self.assertEqual(labels(out["calls"]).count("land-unlock"), 2)
+        self.assertIn(f"When it prints not_held with lock_sha {MERGE}, run alone and exactly: {self.RELEASE}{MERGE}",
+                      prompt(out["calls"], "land-unlock"))
+        self.assertNotIn("merge", labels(out["calls"]))
+
+    def test_a_long_first_wait_is_logged_with_its_holders(self):
+        def waits(**lock):
+            out = run_out(patch={"pr": {"lock": dict({"verdict": "acquired", "lock_sha": SHA}, **lock)}})
+            return [line for line in out["logs"] if "waited" in line]
+        self.assertEqual(waits(waited_s=1740, waited_on=[2218]), ["pr: waited 29 min for the land lock of dev behind PR #2218"])
+        self.assertEqual(waits(waited_s=240, waited_on=[2218]), [])
+        _, calls = run()
+        self.assertIn("lock_sha, by, detail, waited_s and waited_on from its output", prompt(calls, "pr"))
+
+
 class ShipFixWaveTest(unittest.TestCase):
     """#649 defect 2 and the sync-review decision: one bounded fix wave, then a stop with cont."""
 
@@ -3368,7 +3614,7 @@ class ShipFixWaveTest(unittest.TestCase):
         # The rerun answer belongs to the CI fix alone: a sync fix with no commit and no rebuttal stops as before.
         result, calls = run(replies={"sync-review-1": FINDING},
                             patch={"pr": {"checks": {"state": "behind", "head": SHA}},
-                                   "sync-1": {"conflicted": True, "merge_commit": MERGE},
+                                   "sync-1": ABORTED, "sync-resolve-1": {"conflicted": True, "merge_commit": MERGE},
                                    "fix-sync-1": {"start_head": MERGE, "commit": MERGE, "notes": ""}})
         self.assertEqual(result["stage"], "sync-fix")
         for gone in ("fix-sync-review-1", "checks-2", "merge"):
@@ -3390,12 +3636,12 @@ class ShipFixWaveTest(unittest.TestCase):
         result, calls = run(replies={"sync-review-1": FINDING,
                                      "checks-2": {"state": "passed", "head": FIX, "required": ["ci-tests"]}},
                             patch={"pr": {"checks": {"state": "behind", "head": SHA}},
-                                   "sync-1": {"conflicted": True, "merge_commit": MERGE, "resolved_files": ["a.py"]},
+                                   "sync-1": ABORTED, "sync-resolve-1": {"conflicted": True, "merge_commit": MERGE, "resolved_files": ["a.py"]},
                                    "fix-sync-1": {"start_head": MERGE, "commit": FIX}})
         self.assertEqual(result["stage"], "done")
         names = labels(calls)
         self.assertEqual(names[names.index("sync-1"):names.index("checks-2")],
-                         ["sync-1", "sync-review-1", "fix-sync-1", "fix-sync-review-1", "land-push-2"])
+                         ["sync-1", "land-unlock", "sync-resolve-1", "sync-review-1", "fix-sync-1", "fix-sync-review-1", "land-push-2"])
         fix = prompt(calls, "fix-sync-1")
         self.assertIn(MERGE, fix)
         self.assertIn("dropped the new call site", fix)
@@ -3406,7 +3652,7 @@ class ShipFixWaveTest(unittest.TestCase):
     def test_failed_sync_fix_stops(self):
         result, calls = run(replies={"sync-review-1": FINDING},
                             patch={"pr": {"checks": {"state": "behind", "head": SHA}},
-                                   "sync-1": {"conflicted": True, "merge_commit": MERGE},
+                                   "sync-1": ABORTED, "sync-resolve-1": {"conflicted": True, "merge_commit": MERGE},
                                    "fix-sync-1": {"status": "blocked", "notes": "no"}})
         self.assertEqual(result["stage"], "sync-fix")
         self.assertNotIn("merge", labels(calls))
@@ -3415,9 +3661,9 @@ class ShipFixWaveTest(unittest.TestCase):
         result, calls = run(replies={"sync-review-1": FINDING,
                                      "checks-2": {"state": "behind", "head": FIX}, "sync-review-2": FINDING},
                             patch={"pr": {"checks": {"state": "behind", "head": SHA}},
-                                   "sync-1": {"conflicted": True, "merge_commit": MERGE},
+                                   "sync-1": ABORTED, "sync-resolve-1": {"conflicted": True, "merge_commit": MERGE},
                                    "fix-sync-1": {"start_head": MERGE, "commit": FIX},
-                                   "sync-2": {"conflicted": True, "merge_commit": "e" * 40}})
+                                   "sync-2": ABORTED, "sync-resolve-2": {"conflicted": True, "merge_commit": "e" * 40}})
         self.assertEqual(result["stage"], "sync-review")
         self.assertEqual(result["cont"]["sync_fixes"], 1)
         self.assertNotIn("fix-sync-2", labels(calls))
@@ -3431,7 +3677,7 @@ class ShipFixWaveTest(unittest.TestCase):
         self.assertNotIn("merge", labels(calls))
         result, calls = run(replies={"sync-review-1": FINDING},
                             patch={"pr": {"checks": {"state": "behind", "head": SHA}},
-                                   "sync-1": {"conflicted": True, "merge_commit": MERGE},
+                                   "sync-1": ABORTED, "sync-resolve-1": {"conflicted": True, "merge_commit": MERGE},
                                    "fix-sync-1": {"start_head": other, "commit": FIX}})
         self.assertEqual(result["stage"], "sync-fix")
         self.assertNotIn("fix-sync-review-1", labels(calls))
@@ -3449,7 +3695,7 @@ class ShipFixWaveTest(unittest.TestCase):
         replies.update(review or {})
         return run(replies=replies,
                    patch={"pr": {"checks": {"state": "behind", "head": SHA}},
-                          "sync-1": {"conflicted": True, "merge_commit": MERGE},
+                          "sync-1": ABORTED, "sync-resolve-1": {"conflicted": True, "merge_commit": MERGE},
                           "fix-sync-1": dict({"start_head": MERGE, "commit": MERGE, "notes": "the call site is on line 12"}, **fix)})
 
     def test_a_sync_rebuttal_with_evidence_and_no_commit_is_adjudicated_by_the_reviewer(self):
@@ -4141,7 +4387,7 @@ class FinalReviewedResumeTest(unittest.TestCase):
     def sync_stop(self, replies, patch):
         stopped, _ = run(replies=replies,
                          patch=dict({"pr": {"checks": {"state": "behind", "head": SHA}}, "impl-1": {"commit": TIP},
-                                     "sync-1": {"conflicted": True, "merge_commit": MERGE}}, **patch))
+                                     "sync-1": ABORTED, "sync-resolve-1": {"conflicted": True, "merge_commit": MERGE}}, **patch))
         return stopped
 
     def test_a_stop_inside_the_sync_window_drops_the_marker_and_the_resume_reviews_again(self):
@@ -4504,7 +4750,7 @@ class FixCommitScopeTest(unittest.TestCase):
                            "patch": {"pr": {"checks": RED}, "fix-ci": ShipFixWaveTest.RERAN}}),
             (("fix-sync-1",), {"replies": {"sync-review-1": FINDING},
                                "patch": {"pr": {"checks": {"state": "behind", "head": SHA}},
-                                         "sync-1": {"conflicted": True, "merge_commit": MERGE, "resolved_files": ["a.py"]},
+                                         "sync-1": ABORTED, "sync-resolve-1": {"conflicted": True, "merge_commit": MERGE, "resolved_files": ["a.py"]},
                                          "fix-sync-1": {"start_head": MERGE, "commit": FIX}}}),
         )
         for wanted, scenario in scenarios:
@@ -5000,10 +5246,10 @@ CLERK, PLANNER, IMPL, REV, LITE = "clerk", "planner", "implementer", "reviewer",
 EITHER = frozenset({REV, LITE})
 EXPECTED = {stem: frozenset({kind}) if isinstance(kind, str) else kind for kind, stems in (
     (CLERK, ("setup", "acquire", "worktree", "renew-", "owner-answer", "plan-codex", "direct-codex", "final-codex", "diff-size", "amend",
-             "verify", "verify-", "ws-check-", "land-unlock", "land-push-", "land-lock-", "pr", "checks-", "merge",
+             "verify", "verify-", "ws-check-", "land-unlock", "land-push-", "land-lock-", "land-relock-", "pr", "checks-", "merge",
              "hold", "close-out")),
     (PLANNER, ("plan", "plan-revise", "plan-rules-revise", "plan-branch-revise")),
-    (IMPL, ("direct-impl", "direct-fix", "impl-", "fix-", "fix-wave", "fix-wave-", "verify-fix-", "fix-ci", "sync-",
+    (IMPL, ("direct-impl", "direct-fix", "impl-", "fix-", "fix-wave", "fix-wave-", "verify-fix-", "fix-ci", "sync-", "sync-resolve-",
             "fix-sync-")),
     (REV, ("plan-review", "plan-rules-review", "direct-review-full", "final-", "final-integration", "fix-wave-review",
            "fix-wave-review-", "verify-fix-review-", "fix-ci-review", "sync-review-", "fix-sync-review-")),
@@ -5015,7 +5261,7 @@ STEM_PATTERNS = (
     r"\b\w*[lL]abel = (['`])([a-z][a-z0-9-]*)",
     r"`, (`)([a-z][a-z0-9-]*)(?=\$\{|`)",
 )
-CONFLICT = {"sync-1": {"conflicted": True, "merge_commit": MERGE, "resolved_files": ["a.py"]},
+CONFLICT = {"sync-1": ABORTED, "sync-resolve-1": {"conflicted": True, "merge_commit": MERGE, "resolved_files": ["a.py"]},
             "fix-sync-1": {"start_head": MERGE, "commit": FIX}}
 VERIFY_RED = {"head": SHA, "clean": True, "results": [{"id": "build", "status": "fail", "summary": "boom"}]}
 NARROWING = {"verdict": "findings",
@@ -5040,6 +5286,10 @@ SCENARIOS = (
     {"replies": {"sync-review-1": FINDING, "checks-2": {"state": "passed", "head": FIX, "required": ["ci-tests"]}},
      "patch": dict(CONFLICT, pr={"checks": {"state": "behind", "head": SHA}})},
     {"patch": {"pr": {"lock": {"verdict": "land-contended", "lock_sha": "b" * 40}, "checks": None}}},
+    # #913: a retake whose wait ran out is waited for again in a land-relock step.
+    {"replies": {"checks-2": {"lock": {"verdict": "land-contended"}}, "checks-3": {"state": "passed", "head": MERGE}},
+     "patch": {"pr": {"checks": {"state": "behind", "head": SHA}}, "sync-1": ABORTED, "sync-resolve-1": {"merge_commit": MERGE},
+               "land-relock-1": {"lock": {"verdict": "acquired", "lock_sha": MERGE}}}},
     {"args": DIRECT, "replies": {"direct-review": BAD}},
     {"args": DIRECT, "replies": {"direct-review": {"verdict": "pass", "findings": [], "escalate": True}}},
     WS_SCENARIO,
@@ -5090,7 +5340,7 @@ class AgentTypeTest(unittest.TestCase):
 class ClerkModelTest(unittest.TestCase):
     """#803, #813: clerk_model (sonnet, the default, or haiku) is checked before any agent and sets the model of every clerk call except the lifecycle and setup steps, which stay on the default."""
 
-    ON_DEFAULT = {"setup", "worktree", "land-unlock", "land-push-", "land-lock-", "pr", "merge", "hold", "close-out"}
+    ON_DEFAULT = {"setup", "worktree", "land-unlock", "land-push-", "land-lock-", "land-relock-", "pr", "merge", "hold", "close-out"}
 
     def test_clerk_model_must_be_sonnet_or_haiku(self):
         for bad in ("opus", "Haiku", "", 1, None, True):
@@ -5297,7 +5547,7 @@ class PreCommitFocusTest(unittest.TestCase):
         ({"replies": {"checks-2": PASSED},
           "patch": {"pr": {"checks": RED}, "fix-ci": {"start_head": SHA, "commit": FIX}}}, {"fix-ci"}),
         ({"replies": {"sync-review-1": FINDING, "checks-2": PASSED},
-          "patch": dict(CONFLICT, pr={"checks": {"state": "behind", "head": SHA}})}, {"sync-1", "fix-sync-1"}),
+          "patch": dict(CONFLICT, pr={"checks": {"state": "behind", "head": SHA}})}, {"sync-1", "sync-resolve-1", "fix-sync-1"}),
         ({"args": DIRECT, "replies": {"direct-review": BAD}}, {"direct-impl", "direct-fix"}),
     )
     FAMILIES = frozenset().union(*(want for _, want in SCENARIOS))
@@ -5381,9 +5631,9 @@ class WholeTestFileTest(unittest.TestCase):
     def test_conflicted_sync_and_its_fix_run_whole_files(self):
         _, calls = run(replies={"sync-review-1": BAD},
                        patch={"pr": {"checks": {"state": "behind", "head": SHA}},
-                              "sync-1": {"conflicted": True, "merge_commit": "d" * 40},
+                              "sync-1": ABORTED, "sync-resolve-1": {"conflicted": True, "merge_commit": "d" * 40},
                               "fix-sync-1": {"start_head": "d" * 40, "commit": "f" * 40}})
-        self.assert_whole(prompt(calls, "sync-1"), "the files the merge changed against its first parent")
+        self.assert_whole(prompt(calls, "sync-resolve-1"), "the files the merge changed against its first parent")
         self.assert_whole(prompt(calls, "fix-sync-1"), "the files you changed")
 
     def test_task_loop_and_direct_lane_keep_the_focused_run(self):
@@ -5416,7 +5666,7 @@ class KeptObligationTest(unittest.TestCase):
         fix = {"start_head": "d" * 40, "commit": "d" * 40, "notes": "the finding is wrong because x"}
         _, calls = run(replies={"sync-review-1": BAD},
                        patch={"pr": {"checks": {"state": "behind", "head": SHA}},
-                              "sync-1": {"conflicted": True, "merge_commit": "d" * 40}, "fix-sync-1": fix})
+                              "sync-1": ABORTED, "sync-resolve-1": {"conflicted": True, "merge_commit": "d" * 40}, "fix-sync-1": fix})
         self.assertIn("never redo or rewrite the merge", prompt(calls, "fix-sync-1"))
         self.assertIn("Check each rebuttal against the code yourself", prompt(calls, "fix-sync-review-1"))
 

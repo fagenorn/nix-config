@@ -139,6 +139,7 @@ agent-workflow-tests *args:
     tests/test_runner_home.py \
     tests/test_verify_checks.py \
     tests/test_issue_branch.py \
+    tests/test_program_copies.py \
     tests/test_keepalive_end_turn_cap.py \
     tests/test_forge_markers.py \
     tests/test_forge_claim.py \
@@ -211,6 +212,7 @@ agent-workflow-tests *args:
     tests/test_console_answer.py \
     tests/test_console_sprints.py \
     tests/test_console_briefs.py \
+    tests/test_console_reports.py \
     tests/test_console_sprint_command.py \
     tests/test_console_manager.py \
     tests/test_console_manager_service.py \

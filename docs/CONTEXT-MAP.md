@@ -78,6 +78,7 @@
 | Receipt | Release |
 | Release profile | Release |
 | Removal | Project contract |
+| Report | Console |
 | ResolvedProject | Project contract |
 | Row check | Guard |
 | Session | Console |

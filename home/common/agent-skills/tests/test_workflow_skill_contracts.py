@@ -2050,6 +2050,27 @@ class BatchRoutingTest(unittest.TestCase):
         self.assertRegex(text, r"(?s)non-null `relaunch`.*?unless its args, `reasons` aside, equal the previous run.*?stop, reporting")
 
 
+class ProgramCopiesSkillTest(unittest.TestCase):
+    """#912: the delivery skills start their programs from the copies program-copies places."""
+
+    BATCH = REPO_ROOT / "home/common/claude-code/skills/deliver-batch/SKILL.md"
+    STANDARD = REPO_ROOT / "home/common/claude-code/skills/deliver-standard/SKILL.md"
+    PLACE = re.compile(r"`program-copies --repo-root <checkout> --from <[^<>`\n]+>`")
+    INSTALLED = re.compile(r"`scriptPath` `deliver-(?:batch|standard)\.js`")
+
+    def test_each_skill_places_its_programs_before_it_runs_one(self):
+        for path in (self.BATCH, self.STANDARD):
+            with self.subTest(skill=path.parent.name):
+                text = path.read_text(encoding="utf-8")
+                self.assertEqual(len(self.PLACE.findall(text)), 1)
+                self.assertGreater(text.index("`scriptPath`"), self.PLACE.search(text).end())
+                self.assertIsNone(self.INSTALLED.search(text))
+
+    def test_the_placing_command_is_a_command_table_row(self):
+        table = (REPO_ROOT / "lib/agent-tools.nix").read_text(encoding="utf-8")
+        self.assertIn('"program-copies" = "delivery.program_copies";', table)
+
+
 class CodexEntryRetirementTest(unittest.TestCase):
     """#687 AC1: no tracked file outside the artifact store names a retired Codex entry surface."""
 

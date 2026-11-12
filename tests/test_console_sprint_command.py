@@ -17,6 +17,7 @@ from agent_tools.console import manager, sprint
 from . import console_test_support as support
 from .test_console_answer import view_of
 from .test_console_briefs import APPROVE, JSON, PARTS, REPLY
+from .test_console_reports import REPORT
 from .test_console_writes import Case
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -224,6 +225,61 @@ class SprintCommandTest(Case):
         after = run_sprint("status", "--sprint", sid, "--port", self.port(svc), env=env)
         self.assertEqual(json.loads(after.stdout)["sprint_id"], sid)
 
+    def reports(self, svc, sid, report):
+        """An approved sprint, its secret file and a report file holding `report`."""
+        secret, _ = self.files(sid, PARTS)
+        svc.send_brief(sid, secret.read_text().strip(), PARTS)
+        svc.approve_brief("owner/p01", sid, 1)
+        path = self.store.parent / f"report-{sid}.json"
+        path.write_text(json.dumps(report))
+        return secret, path
+
+    def test_a_report_sent_with_the_secret_is_stored(self):
+        svc = self.open()
+        sid = self.goal(svc)
+        secret, path = self.reports(svc, sid, REPORT)
+        port = self.port(svc)
+        got = run_sprint("report", "--sprint", sid, "--secret-file", secret,
+                         "--report-file", path, "--port", port)
+        self.assertEqual((got.returncode, got.stdout, got.stderr),
+                         (0, "sprint: report sent\n", ""))
+        self.assertEqual(support.log_rows(self.store)[-1][2], "sprint.reported")
+        before = len(support.log_rows(self.store))
+        got = run_sprint("report", "--sprint", sid, "--secret-file", secret,
+                         "--report-file", "-", "--port", port, stdin=json.dumps(REPORT))
+        self.assertEqual((got.returncode, got.stdout, got.stderr),
+                         (0, "sprint: report sent\n", ""))
+        rows = support.log_rows(self.store)
+        self.assertEqual((len(rows), rows[-1][2]), (before + 1, "sprint.reported"))
+
+    def test_a_refused_report_exits_1_with_the_console_reason(self):
+        svc = self.open()
+        sid = self.goal(svc)
+        secret, path = self.reports(svc, sid, REPORT)
+        wrong = self.store.parent / "wrong-secret"
+        wrong.write_text("A" * 43 + "\n")
+        no_next = self.store.parent / "no-next.json"
+        no_next.write_text(json.dumps({k: v for k, v in REPORT.items() if k != "next"}))
+        port = self.port(svc)
+        cases = [
+            (wrong, path, "sprint: refused 403: secret refused\n"),
+            (secret, no_next, "sprint: refused 409: the report has no valid next\n"),
+        ]
+        for secret_file, report_file, text in cases:
+            with self.subTest(text=text):
+                got = self.assert_unchanged(svc, lambda: run_sprint(
+                    "report", "--sprint", sid, "--secret-file", secret_file,
+                    "--report-file", report_file, "--port", port))
+                self.assertEqual((got.returncode, got.stdout, got.stderr), (1, "", text))
+        array = self.store.parent / "array.json"
+        array.write_text("[]")
+        got = self.assert_unchanged(svc, lambda: run_sprint(
+            "report", "--sprint", sid, "--secret-file", secret, "--report-file", array,
+            "--port", port))
+        self.assertEqual((got.returncode, got.stdout), (2, ""))
+        self.assertTrue(got.stderr.startswith("sprint: cannot read "), got.stderr)
+        self.assertTrue(got.stderr.endswith("the report is not a JSON object\n"), got.stderr)
+
 
 class CommandContractTest(unittest.TestCase):
     def test_the_command_table_names_the_module_and_its_docstring_states_the_contract(self):
@@ -233,7 +289,8 @@ class CommandContractTest(unittest.TestCase):
         docstring = ast.get_docstring(ast.parse(source))
         for name in ("sprint brief", "sprint status", "--sprint", "--secret-file",
                      "--brief-file", "--port", "POST /api/brief", "GET /api/sprint-status",
-                     "exit 0", "exit 1", "exit 2", "printed nowhere"):
+                     "exit 0", "exit 1", "exit 2", "printed nowhere", "sprint report", "--report-file",
+                     "POST /api/report"):
             self.assertIn(name, docstring)
         self.assertEqual(sprint.build_parser().prog, "sprint")
 
