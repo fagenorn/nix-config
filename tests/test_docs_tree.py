@@ -372,7 +372,7 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("`python/agent_tools/console/**`", areas[0][3])
         for term in ("Console", "Inbox item", "Quiet project", "Answered item",
                      "Held work", "Waiting since", "Session", "Outside sprints",
-                     "Not yet managed", "Delivery run", "Goal", "Sprint"):
+                     "Not yet managed", "Delivery run", "Goal", "Sprint", "Brief"):
             self.assertIn([term, "Console"], cells)
         self.assertIn("- **Console → Claims**:", text)
 
@@ -419,13 +419,33 @@ class DocsTreeTest(unittest.TestCase):
         for needle in ("/api/goal", "/api/withdraw", "16384"):
             self.assertIn(needle, write)
         kept = self.doc("docs/areas/console/adr/009-events-are-kept-for-90-days.md")
-        for needle in ("goal.stated", "goal.withdrawn", "schema 3"):
+        for needle in ("goal.stated", "goal.withdrawn", "schema 4"):
             self.assertIn(needle, kept)
         self.assertIn("except goal rows",
                       self.doc("docs/areas/console/adr/001-the-console-truth-is-an-append-only-event-log.md"))
         context = self.doc("docs/areas/console/CONTEXT.md")
         for needle in ("**Sprint**", "**Goal**"):
             self.assertIn(needle, context)
+
+    def test_the_console_brief_decision_is_recorded(self):
+        path = "docs/areas/console/adr/012-a-managers-brief-is-approved-or-redirected-on-the-page.md"
+        first = (REPO_ROOT / path).read_text().splitlines()[0]
+        self.assertEqual(
+            first, "# ADR-console-012 — A manager's brief is approved or redirected on the page")
+        adr = self.doc(path)
+        for needle in ("sprint brief", "sprint status", "POST /api/brief", "GET /api/sprint-status",
+                       "POST /api/approve", "POST /api/reply", "ADR-console-008",
+                       "ADR-console-009", "ADR-console-011", "#834", "#835", "#836", "#887",
+                       "secret refused", "five seconds", "starting", "2000"):
+            self.assertIn(needle, adr)
+        write = self.doc("docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md")
+        for needle in ("/api/approve", "/api/reply", "/api/brief"):
+            self.assertIn(needle, write)
+        kept = self.doc("docs/areas/console/adr/009-events-are-kept-for-90-days.md")
+        for needle in ("brief.sent", "schema 4"):
+            self.assertIn(needle, kept)
+        self.assertIn("ADR-console-012",
+                      self.doc("docs/areas/console/adr/002-the-desk-page-design-rules.md"))
 
     def test_the_console_delivery_decision_is_recorded(self):
         path = "docs/areas/console/adr/005-in-flight-delivery-stage-is-read-from-run-journals.md"
