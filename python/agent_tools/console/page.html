@@ -214,7 +214,10 @@ function fillSprint(item, entry, sprint) {
   item.replaceChildren();
   item.appendChild(el("span", "goal-line", sprint.goal));
   item.appendChild(el("span", "sprint-state", sprint.state_text));
-  item.appendChild(el("span", "age", sprint.age_text));
+  const age = el("span", "age");
+  age.appendChild(el("span", "", "stated "));
+  age.appendChild(timeEl("ago", sprint.stated_at, ""));
+  item.appendChild(age);
   if (sprint.manager_text !== null && sprint.manager_text !== undefined) {
     item.appendChild(el("span", "manager", sprint.manager_text));
   }
@@ -277,8 +280,12 @@ function projectLine(entry) {
   }
   line.appendChild(el("span", "root", entry.root));
   if (entry.quiet) {
-    const days = untouchedDays(entry.last_activity);
-    if (days > 0) line.appendChild(el("span", "untouched", "untouched for " + days + (days === 1 ? " day" : " days")));
+    if (untouchedDays(entry.last_activity) > 0) {
+      const untouched = el("span", "untouched");
+      untouched.appendChild(el("span", "", "untouched for "));
+      untouched.appendChild(timeEl("since", entry.last_activity, ""));
+      line.appendChild(untouched);
+    }
   }
   if (entry.outside_sprints.sessions.length > 0) {
     line.appendChild(outsideFold(entry.outside_sprints, "outside:" + entry.project_id));
@@ -291,24 +298,70 @@ function renderStatement(view) {
   const h1 = el("h1", view.statement.inbox_items > 0 ? "needs" : "", view.statement.headline);
   const nodes = [h1, el("p", "sub", view.statement.sentence)];
   const cap = view.capacity;
-  if (cap && cap.all_out && cap.resumes_at) nodes.push(el("p", "sub", "Resumes at " + when(cap.resumes_at)));
+  if (cap && cap.all_out && cap.resumes_at) nodes.push(phrase("p", "sub", "Resumes ", timeEl("weekday", cap.resumes_at, "")));
   box.replaceChildren(...nodes);
 }
-function when(stamp) {
-  return new Date(stamp).toLocaleString();
+const TICK_MS = 30000;
+const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+function pad(n) {
+  return n < 10 ? "0" + n : String(n);
 }
-function outWords(p) {
-  return p.out_until === null || p.out_until === undefined ? "out, reset unknown" : "out until " + when(p.out_until);
+function ago(stamp) {
+  const ms = Date.now() - Date.parse(stamp);
+  if (ms < 60000) return "just now";
+  if (ms < 3600000) return Math.floor(ms / 60000) + " min ago";
+  if (ms < 86400000) return Math.floor(ms / 3600000) + " h ago";
+  if (ms < 172800000) return "yesterday";
+  return Math.floor(ms / 86400000) + " days ago";
 }
-function capacityWords(p) {
-  if (p.state === "unknown") return "no reading yet";
-  if (p.state === "out") return outWords(p);
-  if (p.state === "reset") return "reset, not yet used";
+function since(stamp) {
+  const ms = Date.now() - Date.parse(stamp);
+  if (ms < 60000) return "under a minute";
+  if (ms < 3600000) return Math.floor(ms / 60000) + " min";
+  if (ms < 86400000) return Math.floor(ms / 3600000) + " h";
+  const days = Math.floor(ms / 86400000);
+  return days === 1 ? "1 day" : days + " days";
+}
+function weekdayTime(stamp) {
+  const at = new Date(stamp);
+  return DAYS[at.getDay()] + " " + pad(at.getHours()) + ":" + pad(at.getMinutes());
+}
+function exact(stamp) {
+  const at = new Date(stamp);
+  return at.getFullYear() + "-" + pad(at.getMonth() + 1) + "-" + pad(at.getDate()) + " " + pad(at.getHours()) + ":" + pad(at.getMinutes());
+}
+function timeWords(form, stamp) {
+  if (!Number.isFinite(Date.parse(stamp))) return "unknown";
+  return form === "ago" ? ago(stamp) : form === "since" ? since(stamp) : weekdayTime(stamp);
+}
+function timeEl(form, stamp, cls) {
+  const node = el("time", cls, timeWords(form, stamp));
+  node.dataset.form = form;
+  node.dataset.stamp = stamp;
+  if (Number.isFinite(Date.parse(stamp))) {
+    node.setAttribute("title", exact(stamp));
+    node.setAttribute("datetime", stamp);
+  }
+  return node;
+}
+function phrase(tag, cls, ...parts) {
+  const node = el(tag, cls);
+  for (const part of parts) node.appendChild(typeof part === "string" ? el("span", "", part) : part);
+  return node;
+}
+function outWords(p, cls) {
+  if (p.out_until === null || p.out_until === undefined) return phrase("span", cls, "out, reset unknown");
+  return phrase("span", cls, "out until ", timeEl("weekday", p.out_until, ""));
+}
+function capacityWords(p, cls) {
+  if (p.state === "unknown") return phrase("span", cls, "no reading yet");
+  if (p.state === "out") return outWords(p, cls);
+  if (p.state === "reset") return phrase("span", cls, "reset, not yet used");
   const has = (v) => v !== null && v !== undefined;
-  let words = has(p.week_left) ? p.week_left + "% of the week left" : "week unknown";
-  if (has(p.five_hour_left)) words += " \u00b7 " + p.five_hour_left + "% of 5 hours";
-  if (has(p.next_reset)) words += " \u00b7 resets " + when(p.next_reset);
-  return words;
+  const parts = [has(p.week_left) ? p.week_left + "% of the week left" : "week unknown"];
+  if (has(p.five_hour_left)) parts.push(" \u00b7 " + p.five_hour_left + "% of 5 hours");
+  if (has(p.next_reset)) parts.push(" \u00b7 resets ", timeEl("weekday", p.next_reset, ""));
+  return phrase("span", cls, ...parts);
 }
 function renderCapacity(view) {
   const box = document.getElementById("capacity");
@@ -317,7 +370,7 @@ function renderCapacity(view) {
   for (const p of cap.profiles) {
     const span = el("span", "cap-p");
     span.appendChild(el("b", "", p.profile));
-    span.appendChild(el("span", p.state === "out" ? "cap-out" : "", capacityWords(p)));
+    span.appendChild(capacityWords(p, p.state === "out" ? "cap-out" : ""));
     nodes.push(span);
   }
   if (cap.tight) nodes.push(el("span", "cap-tight", "tight"));
@@ -329,7 +382,7 @@ function renderPromoted(view) {
   box.replaceChildren();
   if (!cap.all_out) return;
   const list = el("ul");
-  for (const p of cap.profiles) list.appendChild(el("li", "cap-out", p.profile + " " + outWords(p)));
+  for (const p of cap.profiles) list.appendChild(phrase("li", "cap-out", p.profile + " ", outWords(p, "")));
   box.appendChild(el("h2", "", "Capacity"));
   box.appendChild(list);
 }
@@ -342,10 +395,13 @@ function answerLink(item) {
   a.rel = "noreferrer";
   return a;
 }
-function metaLine(item) {
-  let text = "waiting since " + when(item.waiting_since) + " \u00b7 " + holds(item);
-  if (item.stale) text += " \u00b7 read at " + when(item.read_at);
-  return text;
+function metaLine(item, tag, cls) {
+  const line = phrase(tag, cls, "waiting ", timeEl("since", item.waiting_since, ""), " \u00b7 " + holds(item));
+  if (item.stale) {
+    line.appendChild(el("span", "", " \u00b7 "));
+    line.appendChild(phrase("span", "read-at", "read ", timeEl("ago", item.read_at, "")));
+  }
+  return line;
 }
 function appendDetail(node, item) {
   if (item.detail) node.appendChild(el("pre", "detail", item.detail));
@@ -643,7 +699,7 @@ function leadItem(item) {
   const state = boxState(item);
   if (state === null) appendDetail(card, item);
   else card.appendChild(answerBox(item, state));
-  card.appendChild(el("p", "meta", metaLine(item)));
+  card.appendChild(metaLine(item, "p", "meta"));
   const links = el("p", "meta");
   links.appendChild(answerLink(item));
   card.appendChild(links);
@@ -656,7 +712,7 @@ function itemLine(item) {
   const state = boxState(item);
   if (state === null) appendDetail(line, item);
   else line.appendChild(answerBox(item, state));
-  line.appendChild(el("span", "", metaLine(item)));
+  line.appendChild(metaLine(item, "span", ""));
   line.appendChild(answerLink(item));
   return line;
 }
@@ -707,7 +763,7 @@ function renderInbox(view) {
 }
 function momentLine(moment) {
   const line = el("li");
-  line.appendChild(el("span", "at", when(moment.at)));
+  line.appendChild(timeEl("ago", moment.at, "at"));
   line.appendChild(el("span", "", moment.sentence));
   return line;
 }
@@ -716,8 +772,9 @@ function renderDigest(view) {
   section.replaceChildren();
   const digest = view.digest;
   if (!digest) return;
-  const heading = digest.first_visit ? "In the last eight hours" : "Since you last looked, " + when(digest.since);
-  section.appendChild(el("h2", "digest-head", heading));
+  section.appendChild(digest.first_visit
+    ? el("h2", "digest-head", "In the last eight hours")
+    : phrase("h2", "digest-head", "Since you last looked, ", timeEl("ago", digest.since, "")));
   if (digest.recent.length === 0 && digest.earlier.length === 0) {
     section.appendChild(el("p", "empty", "Nothing changed."));
     return;
@@ -949,6 +1006,11 @@ function render(view) {
     if (wasOpen.has(fold.dataset.key)) fold.open = true;
   }
 }
+function tick() {
+  for (const t of document.querySelectorAll("time")) t.textContent = timeWords(t.dataset.form, t.dataset.stamp);
+  setTimeout(tick, TICK_MS);
+}
+setTimeout(tick, TICK_MS);
 const token = document.getElementById("console-token").content;
 const LOOK_MS = 5000;
 let heldSince = document.hasFocus() ? Date.now() : null;

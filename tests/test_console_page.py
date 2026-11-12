@@ -2,6 +2,7 @@
 
 import gzip
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -51,6 +52,8 @@ document.addEventListener = () => {};
 document.hasFocus = () => false;
 document.visibilityState = "visible";
 const fetch = () => Promise.resolve({});
+function setTimeout() { return 0; }
+function clearTimeout() {}
 const kept = {};
 class EventSource {
   addEventListener(name, fn) { kept[name] = fn; }
@@ -85,6 +88,7 @@ def render_page(view: dict) -> dict:
         done = subprocess.run(
             [node, str(path), "-", json.dumps(ids), json.dumps(view)],
             capture_output=True, text=True, timeout=30, check=False,
+            env={**os.environ, "TZ": "UTC"},
         )
     if done.returncode != 0:
         raise AssertionError(f"the page failed under node: {done.stderr}")
@@ -134,6 +138,9 @@ class PageTest(unittest.TestCase):
 
     def test_the_page_is_under_60_kb_compressed(self) -> None:
         self.assertLess(len(gzip.compress(self.data, 9)), 61440)
+
+    def test_the_page_formats_no_time_with_the_locale(self) -> None:
+        self.assertNotIn("toLocale", self.text)
 
     def test_the_page_requests_only_the_console_endpoints(self) -> None:
         literals = re.findall(
@@ -261,11 +268,11 @@ class PageTest(unittest.TestCase):
         self.assertEqual((h1["text"], h1["cls"]), ("2 things need you", "needs"))
         text = result["inbox"]["text"]
         for expected in ("Question X?", "Which database?", "Which port?",
-                         "chosen: postgres", "holds 3 issues", "waiting since ",
+                         "chosen: postgres", "holds 3 issues", "waiting ",
                          "The branch conflicts", "Merge conflict in flake.lock",
                          "Answered, waiting for the agent"):
             self.assertIn(expected, text)
-        self.assertEqual(text.count("read at "), 1)
+        self.assertEqual(len([n for n in walk(result["inbox"]) if n["cls"] == "read-at"]), 1)
         links = [(n["text"], n["href"], n["rel"])
                  for n in walk(result["inbox"]) if n["tag"] == "a"]
         self.assertEqual(links, [("Answer on the tracker", f"/{k}", "noreferrer")
@@ -309,8 +316,8 @@ class PageTest(unittest.TestCase):
         }
         done = next(n for n in walk(render_page(view)["inbox"]) if n["cls"] == "done")
         stale, fresh = done["children"]
-        self.assertIn("read at ", stale["text"])
-        self.assertNotIn("read at ", fresh["text"])
+        self.assertEqual([n["cls"] for n in walk(stale) if n["cls"] == "read-at"], ["read-at"])
+        self.assertEqual([n for n in walk(fresh) if n["cls"] == "read-at"], [])
 
     def test_an_empty_inbox_renders_no_item(self) -> None:
         view = {
@@ -351,6 +358,7 @@ def render(steps: list) -> list:
         capture_output=True,
         text=True,
         timeout=30,
+        env={**os.environ, "TZ": "UTC"},
     )
     if done.returncode != 0:
         raise AssertionError(done.stderr)
@@ -541,7 +549,7 @@ class PageRenderTest(unittest.TestCase):
         lines = {}
         for n in nodes(snap["projects"]):
             if "line" in n["cls"].split():
-                lines[text(n)] = n
+                lines[full(n)] = n
         by_project = {
             pid: next(t for t in lines if pid in t)
             for pid in ("owner/p00", "owner/p01", "owner/p02")
@@ -595,14 +603,14 @@ class CapacityPageTest(unittest.TestCase):
         result = render_page(full)
         self.assertIn("Capacity", result["promoted"]["text"])
         self.assertEqual(result["promoted"]["text"].count("out until"), 2)
-        self.assertIn("Resumes at", result["statement"]["text"])
+        self.assertIn("Resumes ", result["statement"]["text"])
         html = PAGE.read_text(encoding="utf-8")
         self.assertLess(html.index('id="promoted"'), html.index('id="inbox"'))
         partial = {**view([]), "capacity": capacity(
             out, all_out=False, resumes_at="2026-11-12T09:00:00+00:00")}
         shown = render_page(partial)
         self.assertEqual(shown["promoted"]["children"], [])
-        self.assertNotIn("Resumes at", shown["statement"]["text"])
+        self.assertNotIn("Resumes ", shown["statement"]["text"])
 
     def test_unknown_values_read_as_words_not_null_or_1970(self) -> None:
         profiles = [profile("a", "ok", five_hour_left=40), profile("b", "out")]
@@ -617,12 +625,130 @@ class CapacityPageTest(unittest.TestCase):
         self.assertEqual(promoted.count("out, reset unknown"), 2)
         for banned in ("null", "1970"):
             self.assertNotIn(banned, promoted)
-        self.assertNotIn("Resumes at", result["statement"]["text"])
+        self.assertNotIn("Resumes ", result["statement"]["text"])
 
     def test_a_view_without_capacity_still_renders(self) -> None:
         result = render_page(view([]))
         self.assertEqual(result["capacity"]["children"], [])
         self.assertEqual(result["promoted"]["children"], [])
+
+
+NOW_MS = 1794398400000
+RAW_TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}|\d{1,2}:\d{2}:\d{2}|\d{1,2}/\d{1,2}/\d{4}")
+
+
+def utc(offset_ms: int) -> str:
+    return datetime.fromtimestamp((NOW_MS - offset_ms) / 1000, timezone.utc).isoformat()
+
+
+def times(tree: dict) -> dict:
+    return {n["text"]: n["title"] for n in nodes(tree) if n["tag"] == "time"}
+
+
+class PageTimeTest(unittest.TestCase):
+    begin = {"start": {"focused": False, "clock": NOW_MS}}
+
+    def test_times_read_relative_and_resets_read_a_weekday_with_the_exact_time_in_the_title(self) -> None:
+        sprinted = {**project(0, []), "sprints": [{**SPRINT, "stated_at": "2026-11-11T11:57:00+00:00"}]}
+        quiet = {**project(1, [], quiet=True), "last_activity": "2026-11-08T11:00:00+00:00"}
+        first = view([sprinted, quiet])
+        first["inbox"]["open"] = [item(
+            "A", waiting_since="2026-11-11T09:00:00+00:00", stale=True,
+            read_at="2026-11-10T10:00:00+00:00")]
+        first["statement"]["inbox_items"] = 1
+        first["digest"] = {
+            "since": "2026-11-11T10:30:00+00:00", "first_visit": False,
+            "recent": [moment("2026-11-11T11:55:00+00:00", "Newest.")],
+            "earlier": [], "omitted": 0,
+        }
+        first["capacity"] = capacity([
+            profile("a", "ok", week_left=62, next_reset="2026-11-16T05:00:00+00:00"),
+            profile("b", "out", out_until="2026-11-13T09:30:00+00:00"),
+        ])
+        second = {**first, "capacity": capacity([
+            profile("a", "out", out_until="2026-11-13T09:30:00+00:00"),
+            profile("b", "out", out_until="2026-11-13T10:00:00+00:00"),
+        ], all_out=True, resumes_at="2026-11-13T09:30:00+00:00")}
+        one, two = render([
+            self.begin, {"frame": first}, {"snapshot": True},
+            {"frame": second}, {"snapshot": True},
+        ])
+        self.assertIn("waiting 3 h", full(one["inbox"]))
+        self.assertIn("read yesterday", full(one["inbox"]))
+        self.assertIn("Since you last looked, 1 h ago", full(one["digest"]))
+        self.assertIn("5 min ago", full(one["digest"]))
+        self.assertIn("resets Mon 05:00", full(one["capacity"]))
+        self.assertIn("out until Fri 09:30", full(one["capacity"]))
+        self.assertIn("stated 3 min ago", full(one["projects"]))
+        self.assertIn("untouched for 3 days", full(one["projects"]))
+        self.assertIn("Resumes Fri 09:30", full(two["statement"]))
+        self.assertIn("out until Fri 09:30", full(two["promoted"]))
+        seen = {}
+        for snap in (one, two):
+            for tree in snap.values():
+                if isinstance(tree, dict) and "children" in tree:
+                    seen.update(times(tree))
+                    for n in nodes(tree):
+                        self.assertIsNone(RAW_TIMESTAMP.search(n["text"]), n["text"])
+        expected = {
+            "3 h": "2026-11-11 09:00", "yesterday": "2026-11-10 10:00",
+            "1 h ago": "2026-11-11 10:30", "5 min ago": "2026-11-11 11:55",
+            "Mon 05:00": "2026-11-16 05:00", "Fri 09:30": "2026-11-13 09:30",
+            "3 min ago": "2026-11-11 11:57", "3 days": "2026-11-08 11:00",
+        }
+        for words, title in expected.items():
+            self.assertEqual(seen.get(words), title, words)
+
+    def test_ages_follow_the_thresholds(self) -> None:
+        second, minute, hour = 1000, 60000, 3600000
+        offsets = [-10 * second, 59 * second, 60 * second, 59 * minute, 60 * minute,
+                   23 * hour + 59 * minute, 24 * hour, 47 * hour + 59 * minute, 48 * hour, 72 * hour]
+        moments = [moment(utc(offset), f"M{n}.") for n, offset in enumerate(offsets)]
+        frame = view([])
+        frame["digest"] = {
+            "since": utc(hour), "first_visit": False,
+            "recent": moments[:5], "earlier": moments[5:], "omitted": 0,
+        }
+        (snap,) = render([self.begin, {"frame": frame}, {"snapshot": True}])
+        lines = [n for n in nodes(snap["digest"]) if n["tag"] == "li"]
+        words = [next(c["text"] for c in nodes(n) if c["tag"] == "time") for n in lines]
+        self.assertEqual(words, ["just now", "just now", "1 min ago", "59 min ago", "1 h ago",
+                                 "23 h ago", "yesterday", "yesterday", "2 days ago", "3 days ago"])
+
+    def test_ages_move_with_the_clock_without_a_new_frame(self) -> None:
+        frame = view([])
+        frame["inbox"]["open"] = [check_item(
+            "A", "manual-check", waiting_since="2026-11-11T11:50:00+00:00")]
+        frame["statement"]["inbox_items"] = 1
+        frame["digest"] = {
+            "since": "2026-11-11T11:00:00+00:00", "first_visit": False,
+            "recent": [moment("2026-11-11T11:59:30+00:00", "Newest.")],
+            "earlier": [moment("2026-11-11T10:00:00+00:00", "Older.")], "omitted": 0,
+        }
+        before, after = render([
+            self.begin, {"frame": frame}, {"open": "earlier"},
+            {"type": {"class": "note-text", "text": "half a note"}}, {"snapshot": True},
+            {"clock": NOW_MS + 3 * 3600 * 1000}, {"snapshot": True},
+        ])
+
+        def newest(snap: dict) -> dict:
+            (line,) = [n for n in nodes(snap["digest"]) if n["tag"] == "ul" and n["cls"] == "digest"]
+            return next(n for n in nodes(line) if n["tag"] == "time")
+
+        self.assertEqual((newest(before)["text"], newest(before)["title"]),
+                         ("just now", "2026-11-11 11:59"))
+        self.assertIn("waiting 10 min", full(before["inbox"]))
+        self.assertIn("Since you last looked, 1 h ago", full(before["digest"]))
+        self.assertEqual((newest(after)["text"], newest(after)["title"]),
+                         ("3 h ago", "2026-11-11 11:59"))
+        self.assertIn("waiting 3 h", full(after["inbox"]))
+        self.assertIn("Since you last looked, 4 h ago", full(after["digest"]))
+        (fold,) = [n for n in nodes(after["digest"]) if n["tag"] == "details"]
+        self.assertTrue(fold["open"])
+        (note,) = [n for n in nodes(after["inbox"]) if has_class(n, "note-text")]
+        self.assertEqual(note["value"], "half a note")
+        self.assertEqual(after["active"], "note-text")
+        self.assertEqual(after["posts"], before["posts"])
 
 
 if __name__ == "__main__":
@@ -1188,7 +1314,7 @@ class PageDigestTest(unittest.TestCase):
         (snap,) = render([{"frame": frame}, {"snapshot": True}])
         digest = snap["digest"]
         head = next(n for n in nodes(digest) if n["cls"] == "digest-head")
-        self.assertTrue(head["text"].startswith("Since you last looked, "))
+        self.assertTrue(full(head).startswith("Since you last looked, "))
         (lines,) = [n for n in nodes(digest) if n["tag"] == "ul" and n["cls"] == "digest"]
         shown = [text(n) for n in lines["children"]]
         self.assertEqual(len(shown), 2)
@@ -1402,7 +1528,8 @@ class PageGoalTest(unittest.TestCase):
 
     def test_a_sprint_line_reads_its_goal_state_age_and_the_honest_line(self) -> None:
         (snap, bare) = render([
-            START, {"frame": with_sprints([SPRINT])}, {"snapshot": True},
+            {"start": {"focused": False, "clock": 1794477780000}},
+            {"frame": with_sprints([SPRINT])}, {"snapshot": True},
             {"frame": with_sprints([{**SPRINT, "manager_text": None}])}, {"snapshot": True},
         ])
         (line,) = sprint_lines(snap)
