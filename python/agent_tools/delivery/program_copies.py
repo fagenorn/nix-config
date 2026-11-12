@@ -8,7 +8,9 @@ lead starts the programs from these copies.
 in `<dir>` (not recursive; a symlink, the directory itself or a file, is followed, so a Nix
 store link is copied by its content) to `<checkout>/.program-copies/<name>/<file>`. `<name>` is
 the last component of `--from` as given, not resolved: a resolved store path would name the
-hash. Directories are created with parents. The printed paths are built from `--repo-root`
+hash. A last component that is empty, `.` or `..` (as in `/skills/deliver-standard/sub/..`),
+or an existing `.program-copies` or `.program-copies/<name>` that is a symlink, is refused
+before anything is written: the copies are never placed outside `<checkout>/.program-copies/<name>`. Directories are created with parents. The printed paths are built from `--repo-root`
 as given.
 
 `--repo-root` must be the top level of a git working tree: `git -C <checkout> rev-parse
@@ -34,7 +36,8 @@ Success prints one JSON line mapping each copied file name to its absolute copy 
 Refusals write `{"error": {code, detail}}` to stderr. Exit 1: `not_a_checkout` (the git call
 fails, prints nothing, or prints another top level, as for a subdirectory or a `.git`
 directory; nothing is created), `no_programs` (`--from` is not a directory or holds no
-`*.js` file; nothing is created), `copy_failed` (an OSError reading or writing). Exit 2:
+`*.js` file; nothing is created), `unsafe_destination` (the destination rule above; nothing is written), `copy_failed` (an OSError
+reading or writing). Exit 2:
 `relative_path` (`--repo-root` or `--from` is not absolute).
 """
 
@@ -116,12 +119,24 @@ def _sync(target: Path, data: bytes) -> None:
     _replace(target, data)
 
 
+def _check_destination(root: Path, base: Path, target: Path) -> None:
+    """Refuse a destination that is not a plain directory chain inside the checkout."""
+    if target.name in ("", ".", ".."):
+        raise CopyRefusal("unsafe_destination", f"{target.name!r} is not a usable directory name", 1)
+    for part in (base, target):
+        if part.is_symlink():
+            raise CopyRefusal("unsafe_destination", f"{part} is a symlink", 1)
+    if target.resolve().parent.parent != root.resolve():
+        raise CopyRefusal("unsafe_destination", f"{target} is not directly under {base}", 1)
+
+
 def place(repo_root: Path, source: Path) -> dict[str, str]:
     """Copy `source`'s programs under `repo_root`; the file name -> absolute copy path."""
     root = checkout_root(repo_root)
     files = programs(source)
     base = root / COPY_DIR
     target = base / source.name
+    _check_destination(root, base, target)
     mapping: dict[str, str] = {}
     try:
         contents = [(f.name, f.read_bytes()) for f in files]

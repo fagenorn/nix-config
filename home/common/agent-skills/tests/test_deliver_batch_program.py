@@ -2950,6 +2950,23 @@ class StopReasonTest(unittest.TestCase):
         self.assertIn(f"#1: stopped ({CUT})", out["logs"])
         self.assertTrue(any(line.startswith("#1: child-1 threw: ") and LONG in line for line in out["logs"]), out["logs"])
 
+    def test_a_long_child_script_path_keeps_its_file_name(self):
+        FILE = "deliver-standard.js"
+        PATH = "/" + "d" * (300 - len(FILE) - 2) + "/" + FILE
+        self.assertEqual(len(PATH), 300)
+        THREW = "child program could not be loaded or threw: "
+        for label, message in (("short message", "Cannot load the script"), ("long message", "E" * 400)):
+            with self.subTest(label):
+                out = run_full(args=dict(ARGS, child_script=PATH), children={"1": {"throw": message}})
+                reason = row(out["result"], 1)["reason"]
+                self.assertLessEqual(len(reason), 300)
+                self.assertTrue(reason.startswith(THREW + message[:20]), reason)
+                self.assertIn(" (...d", reason)
+                self.assertTrue(reason.endswith(PATH[-100:] + ")"), reason)
+                self.assertTrue(reason.endswith(FILE + ")"), reason)
+                self.assertEqual(out["result"]["relaunch"]["reasons"], {"1": reason})
+                self.assertTrue(any(line.startswith("#1: child-1 threw: ") and message in line for line in out["logs"]), out["logs"])
+
     def test_every_stopped_row_has_a_bounded_one_line_reason(self):
         long = {"stage": "task", "reason": "task: " + "x\n" * 400, "cont": {"setup": {}}}
         rows = (

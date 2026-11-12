@@ -132,6 +132,36 @@ class ProgramCopiesTest(unittest.TestCase):
                 self.assertFalse((self.repo / ".program-copies").exists())
                 self.assertFalse((self.repo / "sub" / ".program-copies").exists())
 
+    def test_an_unsafe_destination_is_refused_before_anything_is_written(self):
+        (self.repo / "app.js").write_bytes(b"tracked")
+        outside = self.tmp / "outside"
+        outside.mkdir()
+        linked_base = self.tmp / "linked-base"
+        linked_base.mkdir()
+        linked_dir = self.tmp / "linked-dir"
+        linked_dir.mkdir()
+        (linked_dir / ".program-copies").mkdir()
+        (linked_dir / ".program-copies" / "deliver-standard").symlink_to(outside)
+        (linked_base / ".program-copies").symlink_to(outside)
+        for repo in (linked_base, linked_dir):
+            subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        cases = [
+            ("dot-dot name", self.repo, str(self.skill / "sub" / ".."), self.repo / "app.js"),
+            ("symlinked copy root", linked_base, str(self.skill), outside / "deliver-standard" / "a.js"),
+            ("symlinked copy directory", linked_dir, str(self.skill), outside / "a.js"),
+        ]
+        (self.skill / "sub").mkdir()
+        for label, repo, source, victim in cases:
+            with self.subTest(label):
+                done = run("--repo-root", str(repo), "--from", source)
+                self.assertEqual(done.returncode, 1, done.stderr)
+                self.assertEqual(json.loads(done.stderr)["error"]["code"], "unsafe_destination")
+                self.assertEqual(done.stdout, "")
+                self.assertNotEqual(victim.read_bytes() if victim.exists() else None, b"A1")
+        self.assertEqual((self.repo / "app.js").read_bytes(), b"tracked")
+        self.assertEqual(os.listdir(outside), [])
+        self.assertFalse((self.repo / ".program-copies").exists())
+
     def test_help_names_the_command(self):
         done = run("--help")
         self.assertEqual(done.returncode, 0)

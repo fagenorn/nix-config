@@ -426,14 +426,19 @@ const rowReason = r => {
   if (!said.length && r.outcome !== 'stopped') return ''
   return oneLine([r.stage, said.join('; ')].filter(nonEmpty).join(': ') || 'no detail')
 }
-// #912: a thrown child call's reason is the error's first line and the child script; the path is kept whole within REASON_MAX.
+// #912: a thrown child call's reason is the error's first line and the child script, one line within REASON_MAX. A script path too long to leave
+// MSG_MIN characters for the message is cut from its front ("..." then its ending), so the file name stays.
 const THREW = 'child program could not be loaded or threw: '
+const MSG_MIN = 24
 const threwReason = e => {
   const msg = e && typeof e.message === 'string' ? e.message : String(e)
   const first = msg.split('\n')[0].replace(/\s+/g, ' ').trim() || 'no message'
-  const tail = ` (${CHILD})`
+  const script = String(CHILD).replace(/\s+/g, ' ').trim()
+  const pathRoom = REASON_MAX - THREW.length - MSG_MIN - ' ()'.length
+  const shown = script.length > pathRoom ? `...${script.slice(-(pathRoom - 3))}` : script
+  const tail = ` (${shown})`
   const room = REASON_MAX - THREW.length - tail.length
-  return `${THREW}${first.length > room ? `${first.slice(0, Math.max(0, room - 3))}...` : first}${tail}`
+  return `${THREW}${first.length > room ? `${first.slice(0, room - 3)}...` : first}${tail}`
 }
 // An issue this run never got to deliver: its row keeps the previous run's reason beside its own.
 const UNTRIED = ['not-admitted', 'blocked', 'waits-verification']
