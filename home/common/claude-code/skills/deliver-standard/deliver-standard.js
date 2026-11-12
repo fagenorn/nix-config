@@ -51,6 +51,8 @@ export const meta = {
 // a release that call does not confirm gets one standalone release after close-out (#801). Every stop before the merge still releases it.
 // A sync merge that conflicts is aborted and the lock released: its resolution, review and fix wave run outside the lock, and the accepted
 // head takes it again with --wait in the next round's checks call (#913, at lockOut).
+// Before it asks for the lock, the pr call probes whether the integration branch merges cleanly into the head (#941, PROBE): a conflict found
+// there is resolved, reviewed and fixed first, holding and waiting for nothing, and the accepted head then takes the lock for the first time.
 //
 // FOLDS (#801): consecutive clerk steps with no program decision between them share one call. Folded: the lock release into the hold call,
 // the first poll into the pr call, a moved round's renew into its push call, and its lock move into its checks call. Kept separate, each with a program
@@ -91,7 +93,7 @@ if (!(CONT && CONT.setup && CONT.setup.holder)) {
 const CLAIMING = !CONT || !!CONT.claim_incomplete
 
 // forge-claim retries a transport error itself (#740), up to 150 s in a hanging outage, above the Bash tool's 120 s default.
-const FORGE_TIMEOUT = 'Give each forge-claim command a Bash timeout of 20 minutes (1200000 ms). Only a land acquire command that ends in --wait gets more: the flag takes no value, so write nothing after it, and the command itself can run for up to 60 minutes, so give it a Bash timeout of 60 minutes (3600000 ms). The reason for both: forge-claim retries a forge outage itself before it prints its one JSON line.'
+const FORGE_TIMEOUT = 'Give each forge-claim command a Bash timeout of 20 minutes (1200000 ms). Only a land acquire command that ends in --wait gets more: the flag takes no value, so write nothing after it, and the command itself waits for up to 50 minutes and then answers land-contended by itself, so give it a Bash timeout of 60 minutes (3600000 ms) and never run it in the background. The reason for both: forge-claim retries a forge outage itself before it prints its one JSON line.'
 const BASE_RULES = `
 Hard rules for this step (they override anything else you remember):
 - Work only in the worktree path you are given. Never commit in the shared checkout. Never git stash. Never sed -i (use python for edits).
@@ -848,6 +850,8 @@ const FOCUSED = `Run only the tests covering the files you changed, not the full
 // #787: whole test files after the task loop; one class missed a failing sibling test three times.
 const WHOLE = files => `run in full every test file among or covering ${files} (never a single test class) and any fast suite the project declares, not the declared verification; return tests: each command and its result`
 const FIX_TESTS = `Before returning, ${WHOLE('the files you changed')}. ${FMT}`
+// #941: what the resolution of a conflicted sync merge tests, the same text in deliver-batch.js: the files it resolved, not everything the merge brought in.
+const RESOLVE_SCOPE = 'the checks of the pull request cover everything else the merge brought in, so run no test for a file that merged cleanly'
 // A fix agent once committed a lock file a tool had generated beside its fix; every fix prompt carries this.
 const COMMIT_SCOPE = 'Before committing, read git status in the worktree you commit in and stage by path only the files the fix itself changed or created; never run git add -A, git commit -a or git add on a directory (the dot included); a lock file, a generated file or an untracked file the fix did not need is left unstaged and named in notes.'
 // #907: the conflicted-sync wording, the same text in deliver-batch.js. The marker check runs before the merge is committed, when HEAD is still the
@@ -1505,6 +1509,14 @@ const logWait = (label, lock) => {
   const on = Array.isArray(lock.waited_on) ? lock.waited_on : []
   log(`${label}: waited ${Math.round(lock.waited_s / 60)} min for the land lock of ${INT}${on.length ? ` behind PR ${on.map(p => `#${p}`).join(', ')}` : ''}`)
 }
+// #941: the probe a landing runs before it asks for the land lock, the same text in deliver-batch.js. git merge-tree --write-tree (git 2.38
+// or later) merges in memory: it writes no commit and touches neither the worktree nor the index, and its exit status alone says whether
+// the merge is clean (0, a head that is already current included) or conflicts (1). Any other exit proves nothing, so it reads as not
+// conflicted and the landing goes on as it did before the probe existed: the sync under the lock then finds the conflict (#913).
+const PROBE = (wt, int) => `before any lock command, probe whether ${int} merges cleanly into the pushed head, changing nothing: run git -C ${wt} fetch origin, then alone and exactly: git -C ${wt} merge-tree --write-tree --name-only --no-messages HEAD origin/${int}
+Only its exit status counts: 0 is a clean merge and 1 is a conflict, whose output names the conflicting files after its first line. It commits nothing and touches neither the worktree nor the index; never run git merge in this step. Return it as probe: conflicted (true only on exit 1), files (the conflicting files) and, on any other exit, conflicted false with the error in detail.
+When probe's conflicted is true, run no lock command and wait for no check: return lock null and checks null, because a later step resolves the conflict before the lock is asked for.`
+const PROBE_SCHEMA = { type: 'object', properties: { conflicted: { type: 'boolean' }, files: STRS, detail: { type: 'string' } }, required: ['conflicted'] }
 let PR = null
 let expected = verify.head
 let head = expected
@@ -1532,6 +1544,8 @@ let lockMaybe = null
 // answers behind when the integration branch moved meanwhile: the loop then syncs again, a clean merge under the lock and a conflicted one
 // outside it once more, within the sync bounds below (sync-contention, the merge refusal budget). A stop in between holds no lock.
 let lockOut = false
+// #941: true while lockOut stands for a conflict the probe found before the lock was ever asked for: the take is then the landing's first.
+let lockFirst = false
 let relocks = 0
 let retakes = 0
 const HOLDING = ['acquired', 'already_held', 'moved']
@@ -1574,10 +1588,15 @@ const landBody = async () => {
   const prR = await recall(() => call(`${CTX}
 ${RENEW_FIRST}
 Then open the pull request for this branch. Push the branch (git -C ${W} push origin ${setup.branch}). If an open PR with head ${setup.branch} already exists (a resumed delivery), reuse it; else open one against ${INT}. Title: a short summary of the issue. Body, plain prose, no single or double quotes, dollar signs, backticks or backslashes: sections Why, What changes, Acceptance (a table with one row per criterion: id, criterion, kind, and the test or command that shows it; criteria ${ACS}), Evidence (verification ${JSON.stringify(verify.results)}; ${taskLog.length} tasks reviewed; ${LANE === 'direct' ? 'direct-lane review' : 'final review ' + (chunked ? 'chunked' : 'whole')}${REVIEW_CODE ? ' plus the configured independent review' : ''}), Merge danger; then the line ${closesLine} as the last line, with no attribution or generated-by line. Never attach or link the plan or the spec. Return pr (number) and head (full sha of the pushed head).
-Then take the cross-host landing lock of the branch ${INT} for that PR at the verified head ${expected}: run alone and exactly: ${LAND_ACQUIRE(expected, true)}
-${LOCK_RETURN} Return it as lock; when no PR was opened or reused, run no lock command and return lock null. Then, only when lock's verdict is acquired, already_held or moved and the pushed head is ${expected}, wait ${CHECKS_WAIT('<the PR number>')} Return those fields as checks; otherwise run nothing more and return checks null.
-${RULES}`, { label: 'pr', phase: 'Ship', agentType: 'clerk', model: DEFAULT_CLERK_MODEL, effort: 'high', schema: withRenew(PR_SCHEMA, { lock: NULLABLE(LOCK_SCHEMA), checks: NULLABLE(CHECKS) }) }), r => r.renew)
+Then, ${PROBE(W, INT)}
+Otherwise take the cross-host landing lock of the branch ${INT} for that PR at the verified head ${expected}: run alone and exactly: ${LAND_ACQUIRE(expected, true)}
+${LOCK_RETURN} Return it as lock; when no PR was opened or reused, run neither the probe nor a lock command and return probe null and lock null. Then, only when lock's verdict is acquired, already_held or moved and the pushed head is ${expected}, wait ${CHECKS_WAIT('<the PR number>')} Return those fields as checks; otherwise run nothing more and return checks null.
+${RULES}`, { label: 'pr', phase: 'Ship', agentType: 'clerk', model: DEFAULT_CLERK_MODEL, effort: 'high', schema: withRenew(PR_SCHEMA, { probe: NULLABLE(PROBE_SCHEMA), lock: NULLABLE(LOCK_SCHEMA), checks: NULLABLE(CHECKS) }) }), r => r.renew)
   if (!prR) return stop('pr', { result: null })
+  // #941: the probe found a conflict, so the call ran no lock command: nothing is held and nothing was waited for. A reply that names a
+  // lock verdict all the same is read as before the probe existed (the sync under the lock finds the conflict, #913).
+  const early = isEntry(prR.probe) && prR.probe.conflicted === true && !prR.lock ? prR.probe : null
+  if (early) lockHeld = false
   // A renew that ended, or a refused lock, means the prompt ran no lock command that holds anything.
   if (prR.renew && prR.renew.verdict !== 'renewed') lockHeld = false
   let v = prR.lock ? prR.lock.verdict : null
@@ -1595,7 +1614,7 @@ ${RULES}`, { label: 'pr', phase: 'Ship', agentType: 'clerk', model: DEFAULT_CLER
   // #818: land-contended is the wait running out at the CLI's bound behind other landings, so the claim is renewed and the same acquire
   // waits again, LAND_WAIT_RETRIES times at most. Each call is marked as possibly holding the lock first, as the pr call is.
   let waited = false
-  for (let k = 1; v === 'land-contended' && k <= LAND_WAIT_RETRIES; k++) {
+  for (let k = 1; !early && v === 'land-contended' && k <= LAND_WAIT_RETRIES; k++) {
     waited = true
     lockHeld = true
     const lk = await recall(() => call(`${CTX}
@@ -1612,7 +1631,66 @@ ${RULES}`, { label: `land-lock-${k}`, phase: 'Ship', agentType: 'clerk', model: 
     const lost = renewed(lk.renew, `land-lock-${k}`)
     if (lost) return lost
   }
-  if (!HOLDING.includes(v)) return stop(refusal(v) ? 'land-contended' : 'land-lock', { pr: PR, lock: v })
+  // One sync merge of the integration branch into the branch; a row ends the landing, null goes on to the next round.
+  // #941: with early (the probe's reply), the pr call found the conflict before it asked for the lock, so no sync step runs and nothing is
+  // held or waited for: the resolution, its review and its fix wave are the same steps, and the next round pushes the accepted head and
+  // takes the lock for the first time, waiting. That merge is no answer to a behind poll, so it spends none of the sync-contention budget.
+  const syncRound = async early => {
+    if (!early && !raced) {
+      if (contended >= 2) return stop('sync-contention', { pr: PR, syncs })
+      contended++
+    }
+    raced = false
+    syncs++
+    const sy = early ? { status: 'conflicted', conflicted: true, notes: `the probe before the land lock found a conflict with ${INT}${(early.files || []).length ? ` in ${early.files.join(', ')}` : ''}` } : await call(`${CTX}
+The branch is behind ${INT}. Merge origin/${INT} into it in the worktree (git -C ${W} merge origin/${INT}). If it conflicts, do not resolve it: run git merge --abort inside ${W}, confirm no merge is left in progress (git -C ${W} rev-parse -q --verify MERGE_HEAD fails), and return status conflicted with conflicted true and the conflicting files in notes; a later step resolves it. ${FMT} Do not push. For a clean merge return conflicted false and merge_commit (full sha); status blocked with notes if the merge cannot be made.
+${RULES}`, { label: `sync-${syncs}`, phase: 'Ship', agentType: 'implementer', model: 'sonnet', schema: SYNC })
+    // A blocked answer that names a conflict is the aborted merge under another name.
+    const aborted = !!sy && (sy.status === 'conflicted' || (sy.status === 'blocked' && sy.conflicted === true))
+    // The reply that names the merge to land: the sync step's own, or the resolution's.
+    let merge = sy
+    // #913: a conflict is resolved outside the lock. A sync step that resolved it itself, against its prompt, is released and reviewed the same way.
+    if (aborted || (sy && sy.status === 'done' && sy.conflicted)) {
+      lockOut = true
+      lockFirst = !!early
+      // A release that failed stays marked held, so the release of the next stop tries it again.
+      if ((await unlock()).lock_unreleased) lockHeld = true
+      if (aborted) {
+        merge = await call(`${CTX}
+Merging origin/${INT} into the branch conflicts. Resolve it in the worktree; the landing lock is not held while you work. If a merge is in progress (git -C ${W} rev-parse -q --verify MERGE_HEAD succeeds), run git merge --abort inside ${W} first. Then git -C ${W} fetch origin and git -C ${W} merge origin/${INT}. If it conflicts, resolve each conflict keeping both sides' intent, ${MARKER_CHECK(W, INT)}, commit the merge, and ${WHOLE('the files you resolved by hand')}; ${RESOLVE_SCOPE}. ${FMT} Do not push. Return conflicted (false when the merge was clean this time; it is reviewed all the same), merge_commit (full sha), resolved_files and markers_checked (true when both checks ran); status blocked with notes if you cannot resolve it safely.
+${RULES}`, { label: `sync-resolve-${syncs}`, phase: 'Ship', agentType: 'implementer', model: 'sonnet', schema: SYNC })
+      }
+    }
+    if (!merge || merge.status !== 'done' || !present(merge.merge_commit)) return stop('sync', { pr: PR, sync: merge })
+    expected = merge.merge_commit
+    // A merge that conflicted is reviewed whatever its resolution says of itself: the sync step saw the conflict.
+    if (aborted || merge.conflicted) {
+      const sr = await call(`${CTX}
+Review the conflict resolution in merge commit ${merge.merge_commit}: git -C ${W} show --cc ${merge.merge_commit} and the resolved files ${JSON.stringify(merge.resolved_files || [])}; the tests run: ${JSON.stringify(merge.tests || [])}. Report Important or Critical defects only: a dropped change from either side, a broken merge of intent, a resolved file whose tests were not run.${merge.markers_checked === true ? '' : MARKERS_UNCHECKED}`, { label: `sync-review-${syncs}`, phase: 'Ship', agentType: 'reviewer', schema: FINDINGS })
+      if (!sr) return stop('sync-review', { pr: PR, review: sr })
+      if (findingsOf(sr).length) {
+        if (syncFixes >= 1) return stop('sync-review', { pr: PR, review: sr })
+        syncFixes++
+        const w = await shipFix({
+          label: `fix-sync-${syncs}`, reviewLabel: `fix-sync-review-${syncs}`,
+          rebuttal: true,
+          fixPrompt: `${CTX}\n${SYNC_FIX(W, merge.merge_commit, findingsOf(sr))} Do not push. ${FIX_TESTS} ${COMMIT_SCOPE} ${IMPL_RETURN}\n${RULES}`,
+          reviewPrompt: (fix, moved) => `${CTX}\n${SYNC_REREVIEW(W, merge.merge_commit, findingsOf(sr), fix, moved)}`,
+        })
+        if (!w.ok) return stop('sync-fix', { pr: PR, review: sr, fix: w.fix })
+        if (!w.review || findingsOf(w.review).length) return stop('sync-review', { pr: PR, review: w.review, sync_review: sr, fix: w.fix })
+        if (w.moved) expected = w.fix.commit
+      } else if (finalReviewed) {
+        finalReviewed = { ...finalReviewed, accepted: [...(finalReviewed.accepted || []), merge.merge_commit] }
+      }
+    }
+    return null
+  }
+  if (early) {
+    log(`${INT} conflicts with the head; resolving before the land lock is asked for`)
+    const stopped = await syncRound(early)
+    if (stopped) return stopped
+  } else if (!HOLDING.includes(v)) return stop(refusal(v) ? 'land-contended' : 'land-lock', { pr: PR, lock: v })
   for (;;) {
     round++
     // A sync merge, sync fix or CI fix moved the head: the push call renews and pushes it, then the checks call moves the lock to it before it waits (#801).
@@ -1632,6 +1710,11 @@ ${RULES}`, { label: `land-push-${round}`, phase: 'Ship', agentType: 'clerk', mod
       lockMaybe = expected
       // As for the pr call: the waiting acquire may take the lock before its reply is lost.
       if (retake) lockHeld = true
+      // #941: a first take holds nothing at an earlier head, so the accepted head is the one sha a release names.
+      if (retake && lockFirst) {
+        lockSha = expected
+        lockMaybe = null
+      }
     }
     // Round 1 reads the poll the pr call carried (its renew covered the claim), unless a retried wait took the lock, which polled no checks;
     // a moved round moves the lock then polls, one call; every other unmoved round polls on its own with a renew.
@@ -1640,7 +1723,7 @@ ${RULES}`, { label: `land-push-${round}`, phase: 'Ship', agentType: 'clerk', mod
     if (folded) ck = prR.checks || null
     else {
       ck = await recall(() => call(`${CTX}
-${moved ? `${retake ? `Take the cross-host landing lock of the branch ${INT} for PR #${PR} again, at the head ${expected}; it was released while a conflict was resolved` : `Move the cross-host landing lock of the branch ${INT} for PR #${PR} to the head ${expected}`}: run alone and exactly: ${LAND_ACQUIRE(expected, retake)}
+${moved ? `${retake && lockFirst ? `Take the cross-host landing lock of the branch ${INT} for PR #${PR} at the head ${expected}; a conflict with ${INT} was resolved before the lock was asked for` : retake ? `Take the cross-host landing lock of the branch ${INT} for PR #${PR} again, at the head ${expected}; it was released while a conflict was resolved` : `Move the cross-host landing lock of the branch ${INT} for PR #${PR} to the head ${expected}`}: run alone and exactly: ${LAND_ACQUIRE(expected, retake)}
 ${LOCK_RETURN} Return it as lock. Only when lock's verdict is acquired, already_held or moved, wait ${CHECKS_WAIT(PR)} Otherwise run nothing else and return only lock.` : `${RENEW_FIRST}\nThen wait ${CHECKS_WAIT(PR)}`}
 ${RULES}`, { label: `checks-${round}`, phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: moved ? { ...CHECKS, properties: { ...CHECKS.properties, lock: NULLABLE(LOCK_SCHEMA) }, required: ['lock'] } : withRenew(CHECKS) }), r => (moved ? null : r.renew))
       if (moved) {
@@ -1670,6 +1753,7 @@ ${RULES}`, { label: `land-relock-${relocks}`, phase: 'Ship', agentType: 'clerk',
           lockSha = expected
           lockMaybe = null
           lockOut = false
+          lockFirst = false
         } else if (mv === 'land-contended' || mv === 'held_by' || mv === 'lost_to') {
           lockMaybe = null
           // A refused retake holds nothing: the lock of the earlier head was released before the conflict was resolved.
@@ -1740,53 +1824,8 @@ ${RULES}`, { label: 'merge', phase: 'Ship', agentType: 'clerk', model: DEFAULT_C
       raced = true
       continue
     }
-    if (!raced) {
-      if (contended >= 2) return stop('sync-contention', { pr: PR, syncs })
-      contended++
-    }
-    raced = false
-    syncs++
-    const sy = await call(`${CTX}
-The branch is behind ${INT}. Merge origin/${INT} into it in the worktree (git -C ${W} merge origin/${INT}). If it conflicts, do not resolve it: run git merge --abort inside ${W}, confirm no merge is left in progress (git -C ${W} rev-parse -q --verify MERGE_HEAD fails), and return status conflicted with conflicted true and the conflicting files in notes; a later step resolves it. ${FMT} Do not push. For a clean merge return conflicted false and merge_commit (full sha); status blocked with notes if the merge cannot be made.
-${RULES}`, { label: `sync-${syncs}`, phase: 'Ship', agentType: 'implementer', model: 'sonnet', schema: SYNC })
-    // A blocked answer that names a conflict is the aborted merge under another name.
-    const aborted = !!sy && (sy.status === 'conflicted' || (sy.status === 'blocked' && sy.conflicted === true))
-    // The reply that names the merge to land: the sync step's own, or the resolution's.
-    let merge = sy
-    // #913: a conflict is resolved outside the lock. A sync step that resolved it itself, against its prompt, is released and reviewed the same way.
-    if (aborted || (sy && sy.status === 'done' && sy.conflicted)) {
-      lockOut = true
-      // A release that failed stays marked held, so the release of the next stop tries it again.
-      if ((await unlock()).lock_unreleased) lockHeld = true
-      if (aborted) {
-        merge = await call(`${CTX}
-Merging origin/${INT} into the branch conflicts. Resolve it in the worktree; the landing lock is not held while you work. If a merge is in progress (git -C ${W} rev-parse -q --verify MERGE_HEAD succeeds), run git merge --abort inside ${W} first. Then git -C ${W} fetch origin and git -C ${W} merge origin/${INT}. If it conflicts, resolve each conflict keeping both sides' intent, ${MARKER_CHECK(W, INT)}, commit the merge, and ${WHOLE('the files the merge changed against its first parent')}. ${FMT} Do not push. Return conflicted (false when the merge was clean this time; it is reviewed all the same), merge_commit (full sha), resolved_files and markers_checked (true when both checks ran); status blocked with notes if you cannot resolve it safely.
-${RULES}`, { label: `sync-resolve-${syncs}`, phase: 'Ship', agentType: 'implementer', model: 'sonnet', schema: SYNC })
-      }
-    }
-    if (!merge || merge.status !== 'done' || !present(merge.merge_commit)) return stop('sync', { pr: PR, sync: merge })
-    expected = merge.merge_commit
-    // A merge that conflicted is reviewed whatever its resolution says of itself: the sync step saw the conflict.
-    if (aborted || merge.conflicted) {
-      const sr = await call(`${CTX}
-Review the conflict resolution in merge commit ${merge.merge_commit}: git -C ${W} show --cc ${merge.merge_commit} and the resolved files ${JSON.stringify(merge.resolved_files || [])}; the tests run: ${JSON.stringify(merge.tests || [])}. Report Important or Critical defects only: a dropped change from either side, a broken merge of intent, a resolved file whose tests were not run.${merge.markers_checked === true ? '' : MARKERS_UNCHECKED}`, { label: `sync-review-${syncs}`, phase: 'Ship', agentType: 'reviewer', schema: FINDINGS })
-      if (!sr) return stop('sync-review', { pr: PR, review: sr })
-      if (findingsOf(sr).length) {
-        if (syncFixes >= 1) return stop('sync-review', { pr: PR, review: sr })
-        syncFixes++
-        const w = await shipFix({
-          label: `fix-sync-${syncs}`, reviewLabel: `fix-sync-review-${syncs}`,
-          rebuttal: true,
-          fixPrompt: `${CTX}\n${SYNC_FIX(W, merge.merge_commit, findingsOf(sr))} Do not push. ${FIX_TESTS} ${COMMIT_SCOPE} ${IMPL_RETURN}\n${RULES}`,
-          reviewPrompt: (fix, moved) => `${CTX}\n${SYNC_REREVIEW(W, merge.merge_commit, findingsOf(sr), fix, moved)}`,
-        })
-        if (!w.ok) return stop('sync-fix', { pr: PR, review: sr, fix: w.fix })
-        if (!w.review || findingsOf(w.review).length) return stop('sync-review', { pr: PR, review: w.review, sync_review: sr, fix: w.fix })
-        if (w.moved) expected = w.fix.commit
-      } else if (finalReviewed) {
-        finalReviewed = { ...finalReviewed, accepted: [...(finalReviewed.accepted || []), merge.merge_commit] }
-      }
-    }
+    const stopped = await syncRound(null)
+    if (stopped) return stopped
   }
 }
 let landed
