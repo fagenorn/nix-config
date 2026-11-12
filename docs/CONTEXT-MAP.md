@@ -102,3 +102,4 @@
 - **Hosts → Console**: the **Cache proxy** reports each **Limit reading** to the console.
 - **Console → Project contract**: the console's projects are the **Fleet registry**'s entries.
 - **Console → Claims**: an **Inbox item** from the tracker is a live **Owner-action marker**, read by the claims area's marker reader.
+- **Console → Verification**: an **Inbox item** of a held check is a live **Owner prompt**, answered through the runner's owner path.

@@ -15,6 +15,7 @@ Routes (every response carries `Cache-Control: no-store` and
     POST /api/readings 204, no body, the cache proxy's limit reading (below)
     POST /api/looked 204, no body, the page records that the owner looked (below)
     POST /api/answer 204, a JSON body, the page sends the owner's choice (below)
+    POST /api/check-answer 204, a JSON body, the page answers one verification prompt (below)
     POST /api/goal  204, a JSON body, the page states a goal (below)
     POST /api/withdraw 204, a JSON body, the page withdraws a goal (below)
     POST /api/approve 204, a JSON body, the page approves a brief (below)
@@ -23,8 +24,8 @@ Routes (every response carries `Cache-Control: no-store` and
     GET /api/sprint-status?sprint_id=<id> 200 application/json, what became of a brief (below)
     anything else   404
     other methods   405 with `Allow: GET` (`Allow: POST` on `/api/hooks`, `/api/readings`,
-                    `/api/looked`, `/api/answer`, `/api/goal`, `/api/withdraw`, `/api/approve`,
-                    `/api/reply` and `/api/brief`)
+                    `/api/looked`, `/api/answer`, `/api/check-answer`, `/api/goal`, `/api/withdraw`,
+                    `/api/approve`, `/api/reply` and `/api/brief`)
 
 Two kinds of write exist. The hook and reading routes append what the proxies and hooks observe:
 `POST /api/hooks` appends session observations, `POST /api/readings` the capacity kinds
@@ -44,8 +45,8 @@ is one stderr line `console: hook_unreadable <message>`; any other failure is
 ignored payload (an unknown event, a missing member) appends nothing. The
 route carries no token: it records observations and answers nothing (ADR-console-004).
 
-A page write (`PAGE_WRITES`, today `POST /api/looked`, `POST /api/answer`, `POST /api/goal`,
-`POST /api/withdraw`, `POST /api/approve` and `POST /api/reply`; ADR-console-008, ADR-console-010, ADR-console-011) is made by the desk page
+A page write (`PAGE_WRITES`, today `POST /api/looked`, `POST /api/answer`, `POST /api/check-answer`,
+`POST /api/goal`, `POST /api/withdraw`, `POST /api/approve` and `POST /api/reply`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
 alone and goes through one guard, `_page_write`, whatever its route. After the loopback `Host`
 check and before any body is read, exactly one `Origin` header must equal `http://<Host>` (else
 403 `text/plain` `origin refused`) and exactly one `X-Console-Token` header must equal the
@@ -63,8 +64,11 @@ line before it is translated: `answer.Refused` is `console: answer_refused <proj
 <reason>` and 409 with the reason; a `ForgeError` is `console: answer_tick_failed <project_id> <key>
 <code>: <detail>` (whitespace runs collapsed to one space; the detail is what `gh` wrote to stderr)
 and 502 `the tracker refused the tick: <error>`; any other exception is `console: answer_failed
-<Type>: <message>` and 500 `answer failed`. Success is an empty `204`. No refusal appends to the
-event log. `POST /api/goal` and `POST /api/withdraw` carry one JSON body each and run the same
+<Type>: <message>` and 500 `answer failed`. `POST /api/check-answer` (#863) runs the same body checks in the same order, with
+`answer.parse_check_request` as the parser, and calls `answer_check(project_id, key, answer, version,
+note, confirm)`; an `answer.Refused` or a `verify_answer.Refused` is the same stderr line and 409, and a
+`ForgeError` and any other exception are mapped as above. Success is an empty `204`. No refusal
+appends to the event log. `POST /api/goal` and `POST /api/withdraw` carry one JSON body each and run the same
 checks, in the same order and with the same statuses and texts as the answer route (one helper
 serves the three), with the limits `MAX_GOAL_BYTES` (16384) and `MAX_WITHDRAW_BYTES` (4096). A body
 `sprints.parse_goal` does not accept is 400 `bad goal`; `sprints.Refused` is one stderr line
@@ -214,6 +218,21 @@ the next read appends nothing. A tracker read that began before an answer finish
 item back to unanswered (each answer takes a generation; a read keeps the answered item when its
 own generation is older), and a read that began after it is authoritative.
 
+Verification answers (#863): `answer_check(project_id, key, answer, version, note, confirm)` answers one runner
+prompt of the inbox (a manual check, a verdict, an approval or a stale check) through `owner_path`
+(default `verify_answer.answer_prompt`; `owner_path(slug, issue, comment_id, answer, version=version,
+note=note, paid=paid)`, where `version` is the one the page sent, so the owner path refuses a prompt that
+changed since the owner read it), which runs outside the ingest lock. Under the lock, in order, it raises `answer.Refused`
+with `NOT_OPEN` when the project is not registered, no record exists, the item is answered or the
+item takes no answer; with `NOT_AN_ANSWER` when the word is not among the item's answers; with
+`CONFIRM` when the word is `approve` and `confirm` is not exactly the item's own `confirm` text (an
+item without one is never approved): every live or paid approval needs its typed confirmation; with
+`SENDING` while another answer to the same item runs. No request answers more than one item, and no
+multi-item route exists. A note posts the owner's text and leaves the item open; any other word marks
+the item answered at once, as `answer` does and with the same generation bookkeeping, when the record
+still exists, is unanswered and names the same comment. A failure of `owner_path` propagates and
+appends nothing.
+
 Goals (#886, ADR-console-011): `state_goal(project_id, goal)`, under the ingest lock, raises
 `sprints.Refused` with `UNREGISTERED` when the project is not in the folded states, then applies
 `sprints.checked_goal` (`EMPTY`, `TOO_LONG`); it then makes a new sprint id, creates the sprint's
@@ -300,6 +319,7 @@ from agent_tools.console.view import (
     project_for, project_states, read_states, registry_changes)
 from agent_tools.project_contract import agent_platform
 from agent_tools.system.forge_api import ForgeError
+from agent_tools.verification import verify_answer
 
 def _reduced(questions: list[dict]) -> list[tuple[str, list[str]]]:
     return [(q["question"], list(q["options"])) for q in questions]
@@ -324,8 +344,9 @@ APPROVE_PATH = "/api/approve"
 REPLY_PATH = "/api/reply"
 BRIEF_PATH = "/api/brief"
 STATUS_PATH = "/api/sprint-status"
+CHECK_PATH = "/api/check-answer"
 PAGE_WRITES: frozenset[str] = frozenset({
-    LOOKED_PATH, ANSWER_PATH, GOAL_PATH, WITHDRAW_PATH, APPROVE_PATH, REPLY_PATH})
+    LOOKED_PATH, ANSWER_PATH, CHECK_PATH, GOAL_PATH, WITHDRAW_PATH, APPROVE_PATH, REPLY_PATH})
 MAX_ANSWER_BYTES = 4096
 MAX_GOAL_BYTES = 16384
 MAX_WITHDRAW_BYTES = 4096
@@ -512,19 +533,25 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return None
         return self.rfile.read(int(length))
 
-    def _answer_request(self, console: "ConsoleService") -> bool:
+    def _answer_request(self, console: "ConsoleService", route: str = ANSWER_PATH) -> bool:
         """Read and carry out an answer; False when it was refused (already answered to the page)."""
         body = self._json_body(MAX_ANSWER_BYTES)
         if body is None:
             return False
         try:
-            project_id, key, choices = answer.parse_request(body)
+            if route == CHECK_PATH:
+                project_id, key, *rest = answer.parse_check_request(body)
+            else:
+                project_id, key, choices = answer.parse_request(body)
         except ValueError:
             self._refuse(400, "bad answer")
             return False
         try:
-            console.answer(project_id, key, choices)
-        except answer.Refused as error:
+            if route == CHECK_PATH:
+                console.answer_check(project_id, key, *rest)
+            else:
+                console.answer(project_id, key, choices)
+        except (answer.Refused, verify_answer.Refused) as error:
             print(f"console: answer_refused {project_id} {key} {error}", file=sys.stderr)
             self._refuse(409, str(error))
             return False
@@ -646,9 +673,9 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             self.headers.get_all(write_guard.TOKEN_HEADER) or [], console.page_token)
         if refusal is not None:
             return self._refuse(*refusal)
-        if route == ANSWER_PATH:
+        if route in (ANSWER_PATH, CHECK_PATH):
             self.close_connection = True
-            if not self._answer_request(console):
+            if not self._answer_request(console, route):
                 return
         elif route in (GOAL_PATH, WITHDRAW_PATH):
             self.close_connection = True
@@ -750,9 +777,11 @@ class ConsoleService:
                  log_clock: Callable[[], str] = utc_now,
                  token_path: Path | None = None,
                  sprint_secrets: Path | None = None,
-                 tick: Callable[[str, int, int, list[dict], list[int]], None] = answer.tick_on_tracker):
+                 tick: Callable[[str, int, int, list[dict], list[int]], None] = answer.tick_on_tracker,
+                 owner_path: Callable[..., None] = verify_answer.answer_prompt):
         self.registry = Path(registry)
         self._tick = tick
+        self._owner_path = owner_path
         self._sprint_secrets = (Path(store).with_name(sprints.SECRETS_DIR)
                                 if sprint_secrets is None else Path(sprint_secrets))
         self._sending: set[tuple[str, str]] = set()
@@ -971,6 +1000,43 @@ class ConsoleService:
                 if sent and not self._stop.is_set():
                     self._answer_generation += 1
                     self._mark_answered(slot, questions, choices)
+
+    def answer_check(self, project_id: str, key: str, answer_word: str, version: str,
+                     note: str | None = None, confirm: str | None = None) -> None:
+        """Answer one verification prompt through the owner path; see the module docstring."""
+        slot = (project_id, key)
+        with self._ingest:
+            record = self._inbox.get(slot) if project_id in self._states else None
+            item = record.item if record is not None else None
+            if item is None or item["answered"] or not item.get("answers", []):
+                raise answer.Refused(answer.NOT_OPEN)
+            if answer_word not in item["answers"]:
+                raise answer.Refused(answer.NOT_AN_ANSWER)
+            if answer_word == "approve" and (not item.get("confirm", "") or confirm != item["confirm"]):
+                raise answer.Refused(answer.CONFIRM)
+            if slot in self._sending:
+                raise answer.Refused(answer.SENDING)
+            self._sending.add(slot)
+        sent = False
+        try:
+            self._owner_path(item["repo"], item["issue"], item["comment_id"], answer_word,
+                             version=version, note=note, paid=bool(item.get("paid")))
+            sent = True
+        finally:
+            with self._ingest:
+                self._sending.discard(slot)
+                if sent and answer_word != "note" and not self._stop.is_set():
+                    self._answer_generation += 1
+                    self._mark_check_answered(slot, item["comment_id"])
+
+    def _mark_check_answered(self, slot: tuple[str, str], comment_id: int) -> None:
+        record = self._inbox.get(slot)
+        if record is None or record.item["answered"] or record.item["comment_id"] != comment_id:
+            return
+        appended = self.log.append([(INBOX_CHANGED, slot[0], {**record.item, "answered": True})])
+        self._fold(appended)
+        self._answered[slot] = self._answer_generation
+        self._publish()
 
     def state_goal(self, project_id: str, goal: str) -> str:
         """Append one `goal.stated` event for a registered project and return the new sprint id."""

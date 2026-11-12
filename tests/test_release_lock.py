@@ -264,7 +264,8 @@ class LockFailureTest(LockCase):
 
         self.world.respond_json("gh", ["api", f"repos/{SLUG}/commits/{OTHER}/pulls?per_page=100"], [])
         owner = SLUG.split("/")[0]
-        for listing in (f"pulls?state=closed&base=dev&sort=updated&direction=desc&per_page=100&page=1",
+        for listing in (f"pulls?state=open&base=dev&sort=updated&direction=desc&per_page=100&page=1",
+                        f"pulls?state=closed&base=dev&sort=updated&direction=desc&per_page=100&page=1",
                         f"pulls?state=all&head={owner}:dev&sort=updated&direction=desc&per_page=100"):
             self.world.respond_json("gh", ["api", f"repos/{SLUG}/{listing}"], [])
         _, result = rs.release(self.driver(Moved(self.world)), rs.candidate())

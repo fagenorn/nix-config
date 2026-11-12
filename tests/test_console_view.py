@@ -5,6 +5,9 @@ import json
 import unittest
 from datetime import datetime
 
+from agent_tools.claims import forge_markers as fm
+from agent_tools.console import inbox
+from agent_tools.console import view
 from agent_tools.console.deliveries import (
     DELIVERY_GONE,
     DELIVERY_SEEN,
@@ -563,6 +566,20 @@ class InboxStatementTest(unittest.TestCase):
                     "statement"]["sentence"]
                 self.assertEqual(sentence, expected)
 
+    def test_a_verify_item_says_it_can_be_answered_here(self):
+        check = {**item("p", "kv"), "reason": "verify-ask", "kind": "manual-check",
+                 "answers": ["passed", "failed", "note"]}
+        act = {**item("p", "ka"), "reason": "verify-act", "kind": "act", "answers": []}
+        decision = {**item("p", "kd"), "reason": "decision", "questions": [
+            {"question": "Which?", "options": ["a", "b"], "chosen": None, "recommended": None}]}
+        table = [("a manual check", [check], view.ANSWER_SENTENCE),
+                 ("a manual check and a decision", [check, decision], CHOOSE_SENTENCE),
+                 ("an act prompt alone", [act], NEEDS_SENTENCE)]
+        for name, items, expected in table:
+            with self.subTest(name):
+                sentence = derive_view([state("p", 1)], self.records(*items))["statement"]["sentence"]
+                self.assertEqual(sentence, expected)
+
     def test_open_items_are_ordered_by_held_work(self):
         items = [item("p", "a", held=1), item("p", "b", held=5),
                  item("p", "c", held=3), item("p", "d", held=3)]
@@ -603,6 +620,63 @@ class InboxStatementTest(unittest.TestCase):
         self.assertEqual(result["statement"]["inbox_items"], 0)
         self.assertEqual(result["inbox"], {"open": [], "answered": []})
         self.assertIs(result["statement"]["stale"], False)
+
+
+SLUG, OWNER_PROJECT = "octo/widgets", "owner/p00"
+HOLD = 'Held for verification.\n\n```verify\n{"checks": []}\n```'
+
+
+def owner_comment(cid, body):
+    return {"fullDatabaseId": str(cid), "body": body, "authorAssociation": "OWNER",
+            "updatedAt": "2026-11-10T09:00:00Z"}
+
+
+def ask_prompt(extra="Open the staging site.\n\n- [ ] Accept\n- [ ] Reject"):
+    return fm.render("owner-action", {"reason": "verify-ask", "block": "10.abc", "check": "0", "host": "mbp"},
+                     "AC1: the owner's answer is needed.", extra)
+
+
+def decision_prompt(extra):
+    return fm.render("owner-action", {"reason": "verify-decision", "block": "10.abc", "check": "0",
+                                      "on": "fail", "result": "55"}, "AC1 failed: the owner decides.", extra)
+
+
+def held_node(number, comments):
+    return {"__typename": "Issue", "number": number, "issueDependenciesSummary": {"blocking": 0},
+            "comments": {"totalCount": len(comments), "nodes": comments}}
+
+
+def inbox_view(node):
+    """What the page derives for one registered project whose tracker read returned `node`."""
+    items = inbox.items_from_node(OWNER_PROJECT, SLUG, node)
+    events = [event(1, REGISTERED, OWNER_PROJECT, {"root": "/srv/p00"})]
+    events += [Event(2 + n, f"t{2 + n}", kind, project, payload)
+               for n, (kind, project, payload) in enumerate(inbox_changes({}, OWNER_PROJECT, items))]
+    return derive_view(project_states(events).values(), inbox_records(events))
+
+
+class HeldVerificationViewTest(unittest.TestCase):
+    def test_a_held_issue_with_no_owner_prompt_yields_no_inbox_item(self):
+        def marker(kind, **fields):
+            return fm.render(kind, {"block": "10.abc", "check": "0", **fields}, "Recorded.")
+        quiet = [HOLD, marker("verify-due"), marker("verify-seen"), marker("verify-result", state="pass"),
+                 marker("verify-run"), ask_prompt()]
+        quiet_comments = [owner_comment(100 + n, body) for n, body in enumerate(quiet)]
+        quiet_comments.append(owner_comment(200, fm.end_body(105, "resolved")))
+        held = inbox_view(held_node(21, quiet_comments))
+        self.assertEqual(held["inbox"], {"open": [], "answered": []})
+        self.assertEqual(held["statement"]["inbox_items"], 0)
+        live = inbox_view(held_node(22, [*quiet_comments[:5], owner_comment(105, ask_prompt())]))
+        self.assertEqual([i["kind"] for i in live["inbox"]["open"]], ["manual-check"])
+        self.assertEqual(live["statement"]["inbox_items"], 1)
+
+    def test_a_prompt_with_both_boxes_ticked_stays_open_and_counted(self):
+        both = [owner_comment(300, ask_prompt("Open the staging site.\n\n- [x] Accept\n- [x] Reject")),
+                owner_comment(301, decision_prompt("- [x] Accept as passed\n- [x] Close as not verified"))]
+        result = inbox_view(held_node(23, both))
+        self.assertEqual([i["kind"] for i in result["inbox"]["open"]], ["manual-check", "verdict"])
+        self.assertEqual(result["inbox"]["answered"], [])
+        self.assertEqual(result["statement"]["inbox_items"], 2)
 
 
 class InboxHealthTest(unittest.TestCase):

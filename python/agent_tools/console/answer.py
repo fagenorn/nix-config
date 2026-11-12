@@ -30,6 +30,20 @@ long:
 and returns `(project_id, key, choices)`. It accepts only a UTF-8 JSON object with exactly the keys
 `project_id` and `key` (non-empty strings) and `choices` (a list of 1 to `forge_owner_action.MAX_ITEMS`
 integers, none a boolean, each at least 0); anything else, a repeated key included, raises `ValueError`.
+
+`parse_check_request(body)` reads the body of `POST /api/check-answer` (#863), the answer to one
+verification prompt of the runner, sent the same way and at most as long:
+
+    {"project_id": "<project id>", "key": "<inbox item key>", "answer": "<word>", "version": "<item version>",
+     "note": "<text>"?, "confirm": "<text>"?}
+
+and returns `(project_id, key, answer, version, note, confirm)`, where `note` and `confirm` are None when absent.
+It accepts only a UTF-8 JSON object whose keys include `project_id`, `key` and `answer` and lie within
+those five, so a key that is a list, or any further member, is refused: no body answers more than one
+item. `project_id`, `key` and `version` are non-empty strings and `answer` is one of `CHECK_ANSWERS`. `note` is present
+exactly when `answer` is `note`, a string that is not blank and has at most
+`verify_answer.MAX_NOTE_CHARS` characters; `confirm` is optional, a string of at most `MAX_CONFIRM_CHARS`
+characters. Anything else, a repeated key included, raises `ValueError`.
 """
 
 import json
@@ -39,6 +53,7 @@ from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_litera
 from agent_tools.claims import forge_markers as fm
 from agent_tools.claims import forge_owner_action as foa
 from agent_tools.system import forge_api
+from agent_tools.verification import verify_answer
 
 NOT_OPEN = "this is not an open decision prompt"
 CHOOSE = "choose one option under each question"
@@ -47,6 +62,10 @@ CLOSED = "the issue or pull request is closed"
 GONE = "the prompt is no longer open on the tracker"
 CHANGED = "the prompt changed on the tracker"
 ALREADY = "the prompt is already answered on the tracker"
+NOT_AN_ANSWER = "this item does not take that answer"
+CONFIRM = "type the issue reference exactly to approve this check"
+CHECK_ANSWERS = ("passed", "failed", "note", "approve", "keep", "drop")
+MAX_CONFIRM_CHARS = 200
 
 
 class Refused(Exception):
@@ -73,6 +92,33 @@ def parse_request(body: bytes) -> tuple[str, str, list[int]]:
             or any(isinstance(c, bool) or not isinstance(c, int) or c < 0 for c in choices)):
         raise ValueError("choices must be a list of non-negative integers, one per question")
     return project_id, key, choices
+
+
+def parse_check_request(body: bytes) -> tuple[str, str, str, str, str | None, str | None]:
+    try:
+        value = json.loads(body.decode("utf-8"), object_pairs_hook=reject_duplicate_keys,
+                           parse_constant=reject_nonfinite_literal)
+    except RecursionError as error:
+        raise ValueError("the answer is nested too deeply") from error
+    required = {"project_id", "key", "answer", "version"}
+    if not isinstance(value, dict) or not required <= set(value) <= required | {"note", "confirm"}:
+        raise ValueError("the answer must be an object of project_id, key, answer, version, note and confirm")
+    project_id, key, word = value["project_id"], value["key"], value["answer"]
+    version = value["version"]
+    for name, text in (("project_id", project_id), ("key", key), ("version", version)):
+        if not isinstance(text, str) or not text:
+            raise ValueError(f"{name} must be a non-empty string")
+    if word not in CHECK_ANSWERS:
+        raise ValueError("answer is not one of " + ", ".join(CHECK_ANSWERS))
+    note, confirm = value.get("note"), value.get("confirm")
+    if (word == "note") != ("note" in value):
+        raise ValueError("a note is given exactly when the answer is note")
+    if "note" in value and (not isinstance(note, str) or not note.strip()
+                            or len(note) > verify_answer.MAX_NOTE_CHARS):
+        raise ValueError(f"note must be a non-blank string of at most {verify_answer.MAX_NOTE_CHARS} characters")
+    if "confirm" in value and (not isinstance(confirm, str) or len(confirm) > MAX_CONFIRM_CHARS):
+        raise ValueError(f"confirm must be a string of at most {MAX_CONFIRM_CHARS} characters")
+    return project_id, key, word, version, note, confirm
 
 
 def tick_on_tracker(slug: str, issue: int, comment_id: int, questions: list[dict],

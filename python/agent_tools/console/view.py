@@ -60,7 +60,8 @@ project's tracker cannot be read, else "Nothing needs you". The sentence is `ALL
 when every profile is out of usage, else `STALE_SENTENCE` naming those projects when any is
 stale, else `BRIEF_SENTENCE` when any brief is open, else `CHOOSE_SENTENCE` when an open item is a
 decision with questions (the page can
-answer it), else `NEEDS_SENTENCE` when something is open, else the registered-project count. The
+answer it), else `ANSWER_SENTENCE` when an open item has answers (a verification prompt the page
+can answer), else `NEEDS_SENTENCE` when something is open, else the registered-project count. The
 all-out promotion never changes `inbox_items`, and the statement keeps exactly its four keys.
 `capacity` is the `capacity_view` the caller passes (`capacity.py` defines its members), else the
 empty capacity, the same bytes as `capacity_view` over no profile. `stale` is true
@@ -183,6 +184,7 @@ ALL_OUT_SENTENCE = "Everything resumes at the earliest reset; nothing is asked o
 NEEDS_SENTENCE = "Each one links to the tracker, where it is answered."
 BRIEF_SENTENCE = "Press Enter to approve the brief, or write a reply to ask for changes."
 CHOOSE_SENTENCE = "Choose an option with its number and press Enter, or answer on the tracker."
+ANSWER_SENTENCE = "Answer it here, or on the tracker."
 STALE_SENTENCE = ("The tracker could not be read for {projects}; "
                   "each item shows when it was last read.")
 INBOX_SEEN = "inbox.seen"
@@ -498,6 +500,8 @@ def derive_view(
         sentence = BRIEF_SENTENCE
     elif any(r.item["reason"] == "decision" and r.item["questions"] for r in open_items):
         sentence = CHOOSE_SENTENCE
+    elif any(r.item.get("answers") for r in open_items):
+        sentence = ANSWER_SENTENCE
     elif open_count:
         sentence = NEEDS_SENTENCE
     else:

@@ -8,26 +8,32 @@
 // {click: "<class>"} (the click listeners of the first attached element with
 // that class; none throws), {respond: {status, text}} (queues the answer of
 // the next fetch but /api/looked, default 204 with no text) and
-// {fail_fetch: true} (the next such fetch rejects). {hold: true} makes the next
-// such fetch stay pending until a later {release: {status, text}} answers the
-// oldest held fetch (release with none held throws). The goal field adds
-// {input: {cls, value}} (the first attached element with that class gets
-// .value, then its input listeners run with {type: "input", target}; none
-// throws) and {focus_on: "<class>"} (calls .focus() on the first attached
-// element with that class; none throws; {focus: true} stays the window's
-// focus). {select: {cls, start, end}} sets the selection of the first attached
-// element with that class (none throws); {input} also puts the caret at the end
-// of the value. Elem.focus() sets state.active and counts in state.focusCount;
-// removing a node (replaceChildren dropping it, appendChild moving it, the
-// textContent setter, Elem.remove()) clears state.active when it is that node
-// or inside its subtree, as a browser blurs a removed element, and
+// {fail_fetch: true} (the next such fetch rejects; /api/answer and
+// /api/check-answer take the queued replies like the goal routes). {hold: true}
+// makes the next such fetch stay pending until a later {release: {status, text}}
+// answers the oldest held fetch (release with none held throws). The key step
+// also accepts editable: true, which gives the target isContentEditable. The
+// fake controls hold a value, a disabled flag, a selection and focus:
+// {type: {class, text}} focuses the first attached element with that class,
+// sets its value to the text (an INPUT drops every CR and LF, a TEXTAREA turns
+// CRLF and CR into LF), puts the selection at the end and fires its input
+// listeners; {append: {class, text}} does the same on top of the current
+// value. The goal field adds {input: {cls, value}} (the first attached element
+// with that class gets .value, then its input listeners run with {type:
+// "input", target}; none throws) and {focus_on: "<class>"} (calls .focus() on
+// the first attached element with that class; none throws; {focus: true} stays
+// the window's focus). {select: {cls, start, end}} sets the selection of the
+// first attached element with that class (none throws); {input} also puts the
+// caret at the end of the value. Elem.focus() sets state.active and counts in
+// state.focusCount; removing a node (replaceChildren dropping it, appendChild
+// moving it, the textContent setter, Elem.remove()) clears state.active when it
+// is that node or inside its subtree, as a browser blurs a removed element, and
 // document.activeElement is state.active only while attached. A snapshot adds
 // field: {cls, value, start, end} of the attached active element when it has a
-// value, else null. A
-// key step records in state.keyPrevented whether its event had preventDefault
-// called (null before any key step). The fake setTimeout/clearTimeout fire
-// when a clock step reaches their due time. Each step settles pending
-// promises before the next.
+// value, else null. A key step records in state.keyPrevented whether its event
+// had preventDefault called (null before any key step). A click step skips a
+// disabled element. The fake setTimeout/clearTimeout fire when a clock step
+// reaches their due time. Each step settles pending promises before the next.
 // Prints a JSON list of snapshots on stdout; any failure exits 1 with the
 // error on stderr. A selector the fake DOM does not support throws, so a
 // test cannot pass on a stub.
@@ -60,14 +66,12 @@ class Elem {
     this.attributes = {};
     this.listeners = {};
     this.open = false;
-    this.children = [];
-    this.parentNode = null;
+    this.value = "";
+    this.disabled = false;
     this.selectionStart = 0;
     this.selectionEnd = 0;
-  }
-  setSelectionRange(start, end) {
-    this.selectionStart = start;
-    this.selectionEnd = end;
+    this.children = [];
+    this.parentNode = null;
   }
   remove() {
     if (!this.parentNode) return;
@@ -75,15 +79,20 @@ class Elem {
     this.parentNode.children = this.parentNode.children.filter((c) => c !== this);
     this.parentNode = null;
   }
-  focus() {
-    state.active = this;
-    state.focusCount += 1;
-  }
   addEventListener(name, fn) {
     (this.listeners[name] = this.listeners[name] || []).push(fn);
   }
   setAttribute(name, value) {
     this.attributes[name] = String(value);
+    if (name === "disabled") this.disabled = true;
+  }
+  focus() {
+    state.active = this;
+    state.focusCount += 1;
+  }
+  setSelectionRange(start, end) {
+    this.selectionStart = start;
+    this.selectionEnd = end;
   }
   get firstElementChild() {
     return this.children.find((c) => !c.isText) || null;
@@ -324,9 +333,27 @@ function node(n) {
     value: n.value === undefined ? null : n.value,
     disabled: n.disabled === true || "disabled" in n.attributes,
     text: n.children.filter((c) => c.isText).map((c) => c.text).join(""),
+    value: n.tagName === "INPUT" || n.tagName === "TEXTAREA" ? n.value : null,
+    selection: n.tagName === "INPUT" || n.tagName === "TEXTAREA" ? [n.selectionStart, n.selectionEnd] : null,
+    disabled: n.disabled === true,
+    focused: n === document.activeElement,
     children: n.children.filter((c) => !c.isText).map(node),
   };
 }
+
+function typeInto(spec, append) {
+  const target = attached(root).find((n) => n.className.split(/\s+/).includes(spec.class));
+  if (!target) throw new Error("no element with class " + spec.class);
+  const text = target.tagName === "INPUT"
+    ? spec.text.replace(/[\r\n]/g, "")
+    : spec.text.replace(/\r\n?/g, "\n");
+  target.focus();
+  target.value = append ? target.value + text : text;
+  target.selectionStart = target.value.length;
+  target.selectionEnd = target.value.length;
+  for (const fn of target.listeners.input || []) fn({ type: "input", target });
+}
+
 
 function byClass(cls) {
   const found = attached(root).find((n) => n.className.split(/\s+/).includes(cls));
@@ -353,12 +380,18 @@ async function run() {
       fire("document", "keydown", {
         key: step.key, ctrlKey: !!step.ctrlKey, altKey: !!step.altKey, metaKey: !!step.metaKey,
         shiftKey: false, repeat: false, preventDefault() { prevented = true; },
-        target: step.target === undefined ? null : { tagName: step.target },
+        target: step.target === undefined ? null : { tagName: step.target, isContentEditable: step.editable === true },
       });
       state.keyPrevented = prevented;
     } else if ("click" in step) {
       const target = byClass(step.click);
-      for (const fn of target.listeners.click || []) fn({ type: "click", preventDefault() {} });
+      if (target.disabled !== true) {
+        for (const fn of target.listeners.click || []) fn({ type: "click", preventDefault() {} });
+      }
+    } else if ("type" in step) {
+      typeInto(step.type, false);
+    } else if ("append" in step) {
+      typeInto(step.append, true);
     } else if ("input" in step) {
       const target = byClass(step.input.cls);
       target.value = step.input.value;
@@ -400,7 +433,7 @@ async function run() {
         digest: byId("digest") ? node(byId("digest")) : null,
         goal: byId("goal") ? node(byId("goal")) : null,
         active: state.active && attached(root).includes(state.active) ? state.active.className : null,
-        field: field === null || field.value === undefined ? null : {
+        field: field === null || (field.tagName !== "INPUT" && field.tagName !== "TEXTAREA") ? null : {
           cls: field.className, value: field.value, start: field.selectionStart,
           end: field.selectionEnd,
         },

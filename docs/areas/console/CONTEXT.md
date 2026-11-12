@@ -18,7 +18,7 @@ Anything waiting on the owner that the console asks them to act on, whatever its
 _Avoid_: ask, notification
 
 **Answered item**:
-An inbox item whose owner-action marker has every box ticked, on the tracker or from the page (ADR-console-010). It reads answered, waiting for the agent to pick it up, is not counted, and leaves the list once its marker is no longer live.
+An inbox item whose owner-action marker has every box ticked, on the tracker or from the page (ADR-console-010); for a verification prompt, the box it was answered with (ADR-console-012). A prompt with both boxes ticked is not answered. It reads answered, waiting for the agent to pick it up, is not counted, and leaves the list once its marker is no longer live.
 _Avoid_: resolved item
 
 **Held work**:
@@ -38,11 +38,11 @@ The sentence or two the owner states on the page for one registered project, kep
 _Avoid_: task, request
 
 **Brief**:
-The manager's answer to a goal: what done looks like, what is excluded, the slices, the risks and what it expects to ask. It waits in the inbox until the owner approves it, which starts the sprint, or answers it with a reply; a newer brief replaces it (ADR-console-012).
+The manager's answer to a goal: what done looks like, what is excluded, the slices, the risks and what it expects to ask. It waits in the inbox until the owner approves it, which starts the sprint, or answers it with a reply; a newer brief replaces it (ADR-console-013).
 _Avoid_: plan, proposal
 
 **Sprint**:
-One goal, later its issues and its outcome, in one project (#834), shown under its project with its state (drafting the brief, or starting once its brief is approved) and age until it is withdrawn (ADR-console-011, ADR-console-012).
+One goal, later its issues and its outcome, in one project (#834), shown under its project with its state (drafting the brief, or starting once its brief is approved) and age until it is withdrawn (ADR-console-011, ADR-console-013).
 _Avoid_: job, run
 
 **Session**:

@@ -18,16 +18,18 @@ from agent_tools.console import console, digest, service, write_guard
 
 from agent_tools.console import answer, sprints
 from agent_tools.system.forge_api import ForgeError
+from agent_tools.verification import verify_answer
 
 from . import console_test_support as support
 from .forge_world import ForgeWorld
-from .test_console_answer import C, ITEM, view_of
+from .test_console_answer import ASK7 as CHECK_ITEM, C, ITEM, view_of
 from .test_console_stream import open_stream, next_frame
 from .test_console_tracker import Scripted
 from .test_forge_owner_action import ISSUE, SLUG, box_body, comment
 
 LOOK = "/api/looked"
 ANSWER = "/api/answer"
+CHECK = "/api/check-answer"
 GOAL = "/api/goal"
 WITHDRAW = "/api/withdraw"
 
@@ -126,8 +128,8 @@ class WriteRouteTest(Case):
     def test_every_page_write_route_is_guarded(self):
         svc = self.start()
         self.assertEqual(service.PAGE_WRITES,
-                         {"/api/looked", "/api/answer", "/api/goal", "/api/withdraw",
-                          "/api/approve", "/api/reply"})
+                         {"/api/looked", "/api/answer", "/api/check-answer", "/api/goal",
+                          "/api/withdraw", "/api/approve", "/api/reply"})
         for path in service.PAGE_WRITES:
             with self.subTest(path=path):
                 status, _, body = support.post_page(
@@ -147,8 +149,9 @@ class WriteRouteTest(Case):
 class AnswerRouteTest(Case):
     def open(self, **kwargs):
         support.write_registry(self.registry, support.entries(1))
+        kwargs = {"tracker": Scripted([ITEM]), **kwargs}
         svc = service.ConsoleService(
-            self.store, self.registry, port=0, tracker=Scripted([ITEM]), tracker_seconds=3600,
+            self.store, self.registry, port=0, tracker_seconds=3600,
             slug_of=lambda root: SLUG, activity=lambda root: time.time(), session_dirs=lambda: [],
             profile_dirs=lambda: [], repo_of=lambda cwd: cwd,
             branch_pattern_of=lambda repo: "issue-<num>-<slug>", **kwargs)
@@ -156,6 +159,50 @@ class AnswerRouteTest(Case):
         svc.start()
         self.addCleanup(svc.close)
         return svc
+
+    def test_the_check_route_maps_refusals(self):
+        ask = CHECK_ITEM
+        word = {"project_id": "owner/p00", "key": ask["key"], "answer": "passed",
+                "version": ask["version"]}
+        calls = []
+
+        def owner_path(*args, **kwargs):
+            calls.append((args, kwargs))
+            if self.raises is not None:
+                raise self.raises
+
+        self.raises = None
+        svc = self.open(tracker=Scripted([ask]), owner_path=owner_path)
+        headers = self.headers(svc)
+        post = lambda body, hdrs=headers: support.post_page(
+            svc.address, CHECK, hdrs, json.dumps(body).encode() if not isinstance(body, bytes) else body)
+        table = [
+            ("bad word", post({**word, "answer": "maybe"}), 400, b"bad answer\n"),
+            ("no version", post({k: v for k, v in word.items() if k != "version"}), 400, b"bad answer\n"),
+            ("unknown key", post({**word, "key": "octo/widgets#99/1"}), 409,
+             answer.NOT_OPEN.encode() + b"\n"),
+            ("not json", post(json.dumps(word), self.headers(svc, **{"Content-Type": "text/plain"})), 415,
+             b"json only\n"),
+        ]
+        for name, got, status, text in table:
+            with self.subTest(name):
+                self.assertEqual((got[0], got[2]), (status, text))
+        self.assertEqual(calls, [])
+        for error, status, text, line in [
+                (verify_answer.Refused(verify_answer.ALREADY), 409, verify_answer.ALREADY.encode() + b"\n",
+                 f"console: answer_refused owner/p00 {ask['key']} {verify_answer.ALREADY}"),
+                (ForgeError("gh_failed", "HTTP 502"), 502, None, "gh_failed: HTTP 502")]:
+            with self.subTest(error=type(error).__name__):
+                self.raises = error
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    got = post(word)
+                self.assertEqual(got[0], status)
+                if text is not None:
+                    self.assertEqual(got[2], text)
+                self.assertIn(line, err.getvalue())
+        self.assertEqual(len(calls), 2)
+        self.assertEqual([i["key"] for i in view_of(svc)["inbox"]["open"]], [ask["key"]])
 
     def body(self, **over):
         return json.dumps(

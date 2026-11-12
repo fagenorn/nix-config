@@ -397,6 +397,21 @@ class RefTest(unittest.TestCase):
                          [fm.Pull(20, "closed", False, "main", "dev", OID_A, True),
                           fm.Pull(24, "open", False, "main", "dev", OID_A, True)])
 
+    def test_open_pulls_from_keeps_this_repositorys_open_branch_whatever_its_base_and_sha(self):
+        owner = SLUG.split("/")[0]
+
+        def item(number, sha, ref="dev", repo=SLUG, state="open", base="main"):
+            return {"number": number, "state": state, "merged_at": None,
+                    "base": {"ref": base, "repo": {"full_name": SLUG}},
+                    "head": {"ref": ref, "sha": sha, "repo": {"full_name": repo}}}
+        self.world.respond_json("gh", ["api", f"repos/{SLUG}/pulls?state=open&head={owner}:dev&per_page=100"],
+                                [item(20, OID_A), item(21, OID_B, base="next"),
+                                 item(22, OID_A, repo=f"{owner}/fork"), item(23, OID_A, ref="devel"),
+                                 item(24, OID_A, state="closed")])
+        self.assertEqual(fm.open_pulls_from(SLUG, "dev"),
+                         [fm.Pull(20, "open", False, "main", "dev", OID_A, True),
+                          fm.Pull(21, "open", False, "next", "dev", OID_B, True)])
+
     def test_default_branch(self):
         argv = ["api", f"repos/{SLUG}", "--jq", ".default_branch"]
         self.world.respond("gh", argv, stdout="main\n")
@@ -441,6 +456,40 @@ class RefTest(unittest.TestCase):
         self.closed_page(1, {"number": 1})
         with self.assertRaises(fm.ForgeError) as caught:
             fm.closed_pulls_headed(SLUG, "main", OID_A)
+        self.assertEqual(caught.exception.code, "payload_invalid")
+
+    def open_page(self, page, items):
+        self.world.respond_json("gh", ["api", f"repos/{SLUG}/pulls?state=open&base=dev&sort=updated"
+                                       f"&direction=desc&per_page=100&page={page}"], items)
+
+    @staticmethod
+    def open_item(number, sha, repo=SLUG, state="open", base="dev"):
+        return {"number": number, "state": state, "merged_at": None,
+                "base": {"ref": base, "repo": {"full_name": SLUG}},
+                "head": {"ref": f"sync-{number}", "sha": sha, "repo": {"full_name": repo}}}
+
+    def test_open_pulls_headed_keeps_this_repositorys_open_pull_requests_at_the_sha(self):
+        self.open_page(1, [self.open_item(30, OID_A), self.open_item(31, OID_B),
+                           self.open_item(32, OID_A, repo="mallory/widgets"),
+                           self.open_item(33, OID_A, state="closed"), self.open_item(34, OID_A, base="main")])
+        self.assertEqual(fm.open_pulls_headed(SLUG, "dev", OID_A),
+                         [fm.Pull(30, "open", False, "dev", "sync-30", OID_A, True)])
+
+    def test_open_pulls_headed_pages_until_a_short_page_or_the_bound(self):
+        full = [self.open_item(n, OID_B) for n in range(100, 200)]
+        self.open_page(1, full)
+        self.open_page(2, [self.open_item(5, OID_A)])
+        self.assertEqual([p.number for p in fm.open_pulls_headed(SLUG, "dev", OID_A)], [5])
+        for page in range(1, fm.OPEN_PAGES + 2):
+            self.open_page(page, [self.open_item(5, OID_A)] if page > fm.OPEN_PAGES else full)
+        self.assertEqual(fm.open_pulls_headed(SLUG, "dev", OID_A), [])  # beyond the bound: not found
+        pages = [a[1] for a in self.world.argvs("gh") if "state=open&base=dev" in a[1]]
+        self.assertEqual(len(pages) - 2, fm.OPEN_PAGES)
+
+    def test_open_pulls_headed_rejects_a_bad_payload(self):
+        self.open_page(1, {"number": 1})
+        with self.assertRaises(fm.ForgeError) as caught:
+            fm.open_pulls_headed(SLUG, "dev", OID_A)
         self.assertEqual(caught.exception.code, "payload_invalid")
 
     def test_closing_issues(self):

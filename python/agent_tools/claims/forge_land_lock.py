@@ -1,7 +1,8 @@
 """The cross-host land lock (issue 629): `forge-claim land acquire|release|status`.
 
 The lock serialises landings on one branch across hosts. Each action takes `--repo <owner/name>`,
-`--branch <name>` and `--sha <40 hex>`; `--wait` and `--release` exist on `acquire` only.
+`--branch <name>` and `--sha <40 hex>`; `--wait` and `--release` exist on `acquire` only, as does
+`--follow-head`, which needs both (a usage error otherwise).
 
 D1, the lock is the ref `refs/agent-locks/land/<branch>`, whose value is a pull-request head sha:
 created by REST `POST git/refs` (HTTP 422 means not created), moved and deleted by the
@@ -19,9 +20,17 @@ lock, found by head sha in the closed listing `GET pulls?state=closed&base=<bran
 at most 5 pages of 100), and only an open pull request whose head is the lock holds it: the lock
 is held while it is the head of an open pull request other than the caller's, and a pull request
 that merely contains the lock's sha (a branch stacked on the holder) never holds or moves it.
+For a commit on the default branch the commit lookup lists merged pull requests only (issue 905),
+so it leaves out an open pull request whose head is already there, as the head of every sync of
+the default branch back into the locked branch is. When the lookup lists no pull request headed
+at the lock, the open pull requests based on the branch are therefore read before the closed
+ones (`GET pulls?state=open&base=<branch>&sort=updated`, at most 5 pages of 100, matched by head
+sha), and a same-repository one headed at the lock holds it, whatever closed pull requests share
+that head or contain it; the closed listing is read only when none is found. A fork's pull
+request is never taken from this listing, and an open one beyond those pages is not seen.
 A release pull request (issue 875) is one whose head is the locked branch itself, in the same
 repository, at the lock: `_on_branch` counts it whatever its base, so every caller derives it as
-the holder with no flag. The commit lookup lists it while it is open; when neither listing above
+the holder with no flag. The commit lookup lists it while it is open; when no listing above
 has a pull request headed at the lock, one the lookup left out, open or closed, is found in `GET
 pulls?state=all&head=<owner>:<branch>&sort=updated` (one page of 100), so a live release lock is
 never judged by the merged pull requests that contain it. A fork's branch of the same name is
@@ -49,20 +58,40 @@ locked branch contains, in the same repository and whatever its head, never answ
 branch itself has reached that sha, so where this rule would move the lock it is taken over as
 `closed` instead and the caller, answered `acquired`, resyncs. That covers a published release
 whose lock the caller's pull request alone still contains, and a release whose head moved past
-its lock, which releases the old lock and acquires again.
+its lock, which releases the old lock and acquires again. A following release wait (D6) does that
+itself (issue 901): a poll that finds the lock held at `--sha` while the release pull request's
+head is another sha sends the D9 delete of `--sha`, exactly what `release --sha` does, and attempts
+again in the same poll, competing with every other waiter. It first reads the commit lookup of
+`--sha` (and, when that lists no such head, the open listing of D2) and leaves the lock alone when
+an open pull request other than the release has its head there: that one holds it. The answer is `acquired` or `already_held`, never `moved`, so nobody
+merges on a lock that changed hands without a resync.
 
 D6, `acquire` needs an open pull request whose head is the caller's sha with the branch as its
 base before any ref write, and otherwise answers `error` with `no_open_pr` (exit 2). `--wait`
 re-checks this before every attempt, the first included: a caller whose pull request no longer has
-`--sha` as its head stops with `no_open_pr` and never moves the lock. With `--release` the pull
+`--sha` as its head stops with `no_open_pr` and never moves the lock. When the commit lookup of
+`--sha` lists no such pull request, the open listing of D2 is read once for a same-repository one
+(issue 905: a head on the default branch), so the common path makes no extra call and `no_open_pr`
+is answered only after both reads. With `--release` the pull
 request needed is instead an open one whose head branch is `--branch` at `--sha`, in the same
 repository (never a fork's branch of that name), with the repository's default branch as its base;
-the default branch is read once per invocation (`GET repos/<slug>`).
+the default branch is read once per invocation (`GET repos/<slug>`). With `--follow-head` a
+waiting release follows its pull request instead (issue 901), because every landing ahead of it
+moves the release head: each poll of `--release --wait --follow-head` reads the open pull requests
+headed by `--branch` (`GET pulls?state=open&head=<owner>:<branch>`, one call in place of the commit
+lookup), keeps the same-repository one based on the default branch, and attempts the lock at that
+pull request's current head. `--sha` is then only the caller's starting belief, and `no_open_pr`
+means no such pull request is open. Without the flag nothing follows: a one-shot `--release`, and
+a `--release --wait` whose caller is bound to `--sha` (a resumed release), stop with `no_open_pr`
+when the head moved.
 
 D7, every call prints one JSON object on one stdout line with `command`, `action`, `repo`,
 `branch`, `sha`, `verdict`, `lock_sha`, `pr`, `by`, `took_over` (`null`, `"closed"` or `"idle"`)
-and `waited_s`. The `acquire` verdicts are `acquired`, `already_held` (the lock is already at
-`--sha`), `moved`, `held_by` and `lost_to`. Exit 0 is `acquired`, `already_held`, `moved`,
+and `waited_s`. `sha` is always `--sha` as given and `lock_sha` is where the lock is: a successful
+`acquire --release --wait --follow-head` adds `head_moved`, true when it took the lock at a head other than
+`--sha`, and the caller continues with `lock_sha` as its commit. The `acquire` verdicts are
+`acquired`, `already_held` (the lock is already at `--sha`, or at the followed head), `moved`,
+`held_by` and `lost_to`. Exit 0 is `acquired`, `already_held`, `moved`,
 `released` and every `status` verdict (`free`, `held_by`, `stale`); exit 3 is contention
 (`held_by`, `lost_to`, `land-contended`, and `not_held` on `release`); exit 1 a forge error; exit 2
 a usage error or `no_open_pr`.
@@ -183,16 +212,20 @@ def _on_branch(slug: str, sha: str, branch: str) -> list[fm.Pull]:
     plus the ones headed at it that the commit lookup did not list.
 
     The forge's commit lookup returns only open pull requests for a commit outside the default
-    branch, so a squash-merged, rebase-merged or closed holder is found by its head sha instead,
-    and only when no pull request already has that head: first among the closed pull requests on
-    `branch`, then, when none is found there, among the pull requests headed by `branch`, open
-    ones included, because the lookup can leave an open release pull request out.
+    branch and only merged ones for a commit on it, so a holder it left out is found by its head
+    sha instead, and only when no pull request already has that head: first among the open pull
+    requests on `branch` (a head on the default branch, issue 905), then among the closed ones (a
+    squash-merged, rebase-merged or closed holder), then, when none is found there, among the
+    pull requests headed by `branch`, open ones included, because the lookup can leave an open
+    release pull request out. Each listing is read only when the one before it found none.
     """
     pulls = [p for p in fm.commit_pulls(slug, sha) if p.base_ref == branch or _from_branch(p, branch)]
     if not any(p.head_sha == sha for p in pulls):
         known = {p.number for p in pulls}
-        closed = [p for p in fm.closed_pulls_headed(slug, branch, sha) if p.number not in known]
-        pulls += closed or [p for p in fm.pulls_from(slug, branch, sha) if p.number not in known]
+        for listing in (fm.open_pulls_headed, fm.closed_pulls_headed, fm.pulls_from):
+            headed = [p for p in listing(slug, branch, sha) if p.number not in known]
+            if headed:
+                return pulls + headed
     return pulls
 
 
@@ -286,7 +319,8 @@ def wait_acquire(args: Any, node: Callable[[], str],
 
     D6 holds at every attempt: `mine` is read inside every poll, the first included, so a failed
     read is a failed poll (issue 740), and a caller whose pull request no longer has its sha as
-    head stops with `no_open_pr`.
+    head stops with `no_open_pr`. The attempt is made at the head of `mine`, which is `--sha`
+    except for a following release, whose `eligible` follows its pull request (issue 901).
     """
     start = monotonic()
     watch: list[Any] = [object(), None]  # [oid or None, first seen]; the sentinel matches nothing
@@ -306,7 +340,17 @@ def wait_acquire(args: Any, node: Callable[[], str],
             mine = eligible()
             if not mine:
                 return _no_open_pr(args)
-            outcome = acquire_once(args.repo, args.branch, args.sha, mine, idle, node, seen)
+            sha = mine[0].head_sha
+            mine = [p for p in mine if p.head_sha == sha]
+            outcome = acquire_once(args.repo, args.branch, sha, mine, idle, node, seen)
+            if (outcome.verdict == "held_by" and outcome.lock_sha == args.sha != sha
+                    and not _headed_by_another(args, {m.number for m in mine})):
+                # D5: the release's own lock at the head it started from; release it, try again.
+                failure = fm.cas_ref(args.repo, node(), lock_ref(args.branch), args.sha, fm.ZERO_OID)
+                outcome = acquire_once(args.repo, args.branch, sha, mine, idle, node, seen)
+                if failure and outcome.verdict == "held_by" and outcome.lock_sha == args.sha:
+                    raise forge_api.ForgeError(failure.code, "compare-and-swap delete not applied and "
+                                               "the lock is unchanged", transient=failure.transient)
         except forge_api.ForgeError as error:
             failures += 1
             if error.code not in ("gh_failed", "gh_timeout") or failures >= FAILED_POLLS:
@@ -314,8 +358,10 @@ def wait_acquire(args: Any, node: Callable[[], str],
         else:
             failures = 0
             if outcome.verdict in ("acquired", "already_held", "moved"):
+                moved = {"head_moved": sha != args.sha} if _follows(args) else {}
                 return 0, result(args, outcome.verdict, lock_sha=outcome.lock_sha, pr=outcome.pr,
-                                 took_over=outcome.took_over, waited_s=int(monotonic() - start))
+                                 took_over=outcome.took_over, waited_s=int(monotonic() - start),
+                                 **moved)
             if outcome.lock_sha is not None:
                 last = outcome
         if monotonic() - start >= BOUND:
@@ -326,20 +372,43 @@ def wait_acquire(args: Any, node: Callable[[], str],
         sleep(min(POLL, start + BOUND - monotonic()))
 
 
+def _headed_by_another(args: Any, mine: Collection[int]) -> bool:
+    """D5: an open pull request outside `mine` has its head at `--sha`, so it holds a lock there.
+
+    Read as `_on_branch` reads it: the commit lookup, then the open listing of the branch when
+    the lookup lists no such head (a head on the default branch, issue 905)."""
+    heads = [p for p in fm.commit_pulls(args.repo, args.sha) if p.state == "open" and p.head_sha == args.sha]
+    heads = heads or fm.open_pulls_headed(args.repo, args.branch, args.sha)
+    return any(p.number not in mine for p in heads)
+
+
 def _no_open_pr(args: Any) -> tuple[int, dict[str, Any]]:
-    detail = (f"no open release pull request from {args.branch} has head {args.sha}" if args.release
-              else f"no open pull request on {args.branch} has head {args.sha}")
+    detail = (f"no open pull request on {args.branch} has head {args.sha}" if not args.release
+              else f"no open release pull request from {args.branch} into the default branch"
+              if _follows(args) else f"no open release pull request from {args.branch} has head {args.sha}")
     return 2, result(args, "error", error="no_open_pr", detail=detail)
 
 
+def _follows(args: Any) -> bool:
+    """D6: `--follow-head`; a caller that builds its own arguments (`release_lock`) never follows."""
+    return bool(getattr(args, "follow_head", False))
+
+
 def _acquire(args: Any, attempts: Attempts | None = None) -> tuple[int, dict[str, Any]]:
+    if _follows(args) and not (args.release and args.wait):
+        return 2, result(args, "error", error="usage", detail="--follow-head needs --release and --wait")
     default: list[str] = []
 
     def eligible() -> list[fm.Pull]:
-        opened = [p for p in fm.commit_pulls(args.repo, args.sha) if p.state == "open"]
-        if not args.release:
-            return [p for p in opened if p.base_ref == args.branch and p.head_sha == args.sha]
-        mine = [p for p in opened if _releases(p, args.branch, args.sha)]
+        if _follows(args):  # D6: a waiting release follows its pull request's head
+            mine = fm.open_pulls_from(args.repo, args.branch)
+        else:
+            opened = [p for p in fm.commit_pulls(args.repo, args.sha) if p.state == "open"]
+            if not args.release:
+                mine = [p for p in opened if p.base_ref == args.branch and p.head_sha == args.sha]
+                # D6: an open head on the default branch is not in the commit lookup (issue 905).
+                return mine or fm.open_pulls_headed(args.repo, args.branch, args.sha)
+            mine = [p for p in opened if _releases(p, args.branch, args.sha)]
         if mine and not default:
             default.append(fm.default_branch(args.repo))
         return [p for p in mine if p.base_ref == default[0]]

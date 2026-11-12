@@ -11,6 +11,17 @@ is in `forge_owner_action.TRUSTED` are parsed, `end` markers included. The reade
 marker text itself: the question is `marker_sentence`, the questions are `verified_questions`,
 `answered` is `answered`, the items are `marker_items`.
 
+A verification owner prompt (#863) is the other kind of item. It is a live `owner-action` marker
+that `verify_answer.is_runner_prompt` accepts (a `verify-*` reason carrying `block` and `check`), read
+only from comments whose `authorAssociation` is in `verify_answer.TRUSTED` (OWNER and MEMBER, narrower
+than the forge set): its liveness and `answered` are judged over the markers of those comments only
+(`runner_markers`), so a collaborator's `end` never hides it and a collaborator's prompt is never one.
+Its `kind` is `verify_answer.kind_of`, its `answers` are `verify_answer.ANSWERS[reason]`, `paid` is
+`verify_answer.is_paid`, and `confirm` is `<slug>#<issue>` for every approval, live or paid, else
+`""`. Its `detail` is the body after the sentence with the runner's own trailing answer boxes
+(`verify_answer.labels`) and the empty lines around them dropped; a checkbox-shaped line inside the
+ask text or the act fence stays. A held issue with no live runner prompt yields no item.
+
 A comment's id is `fullDatabaseId` (GitHub's `BigInt`, a decimal string) converted with `int`: the
 32-bit `databaseId` is not read, because comment ids already exceed 2^31-1. A node's type is its
 `__typename`: an `Issue` must carry `issueDependenciesSummary.blocking` (a non-negative integer) and
@@ -23,8 +34,14 @@ unexpected shape, a bad comment id or a missing or repeated cursor is `payload_i
 is sorted by `key` and holds only JSON-native values; every item is
 
     {"key": "<slug>#<issue>/<comment id>", "project_id", "repo", "issue", "comment_id", "url",
-     "reason", "question", "questions": [{"question", "options", "chosen", "recommended"}] (decision only),
-     "items": [str] (conflict and needs-label only), "answered", "held_work"}
+     "reason", "kind", "question", "detail", "questions": [{"question", "options", "chosen", "recommended"}]
+     (decision only), "items": [str] (conflict and needs-label only), "answers": [str], "paid": bool,
+     "confirm", "answered", "held_work"} and, for a verification prompt only, "version"
+
+For `decision`, `conflict` and `needs-label` the kind is the reason, `detail` and `confirm` are `""`,
+`answers` is `[]`, `paid` is false and there is no `version`. A verification prompt's `version` is
+`verify_answer.content_version` of its marker: the page returns it with an answer, and an answer to a
+prompt whose text or fields have changed since is refused.
 
 `url` is built from the slug, the issue and the comment id, never read from the answer.
 
@@ -36,7 +53,8 @@ activity is at most `ACTIVE_WITHIN` seconds old; an unreadable or offset-less ti
 """
 
 import os
-from collections.abc import Callable
+import re
+from collections.abc import Callable, Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -45,6 +63,7 @@ from agent_tools.claims import forge_markers as fm
 from agent_tools.claims import forge_owner_action as foa
 from agent_tools.claims import owner_actions
 from agent_tools.system import forge_api
+from agent_tools.verification import verify_answer
 
 MAX_CALLS = 4
 PAGE_SIZE = 25
@@ -131,13 +150,43 @@ def _item(project_id: str, slug: str, issue: int, held: int, marker: fm.Marker) 
         "key": item_key(slug, issue, marker.comment_id), "project_id": project_id, "repo": slug,
         "issue": issue, "comment_id": marker.comment_id,
         "url": f"https://github.com/{slug}/issues/{issue}#issuecomment-{marker.comment_id}",
-        "reason": reason, "question": foa.marker_sentence(marker),
+        "reason": reason, "kind": reason, "question": foa.marker_sentence(marker), "detail": "",
         "questions": ([{"question": q["question"], "options": list(q["options"]), "chosen": q["chosen"],
                         "recommended": rec}
                        for q, rec in zip(foa.verified_questions(marker), foa.recommended(marker))]
                       if decision else []),
-        "items": [] if decision else foa.marker_items(marker),
+        "items": [] if decision else foa.marker_items(marker), "answers": [], "paid": False, "confirm": "",
         "answered": foa.answered(marker), "held_work": held,
+    }
+
+
+def _detail(marker: fm.Marker) -> str:
+    """The body after the sentence, less the runner's own trailing answer boxes."""
+    lines = [line.removesuffix("\r") for line in marker.body.split("\n")[2:]]
+    while lines and not lines[-1]:
+        lines.pop()
+    boxes = re.compile(r"\s*[-*] \[[ xX]\] (?:" + "|".join(map(re.escape, verify_answer.labels(marker))) + r")\s*")
+    while lines and verify_answer.labels(marker) and boxes.fullmatch(lines[-1]):
+        lines.pop()
+    while lines and not lines[-1].strip():
+        lines.pop()
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    return "\n".join(lines)
+
+
+def _verify_item(project_id: str, slug: str, issue: int, held: int, marker: fm.Marker,
+                 runner_markers: Sequence[fm.Marker]) -> dict:
+    reason = marker.fields["reason"]
+    return {
+        "key": item_key(slug, issue, marker.comment_id), "project_id": project_id, "repo": slug,
+        "issue": issue, "comment_id": marker.comment_id,
+        "url": f"https://github.com/{slug}/issues/{issue}#issuecomment-{marker.comment_id}",
+        "reason": reason, "kind": verify_answer.kind_of(marker), "question": foa.marker_sentence(marker),
+        "detail": _detail(marker), "questions": [], "items": [], "answers": list(verify_answer.ANSWERS[reason]),
+        "paid": verify_answer.is_paid(marker), "confirm": f"{slug}#{issue}" if reason == "verify-approve" else "",
+        "answered": verify_answer.answered(marker, runner_markers), "held_work": held,
+        "version": verify_answer.content_version(marker),
     }
 
 
@@ -150,16 +199,25 @@ def items_from_node(project_id: str, slug: str, node: dict) -> list[dict]:
     if isinstance(number, bool) or not isinstance(number, int):
         raise _invalid("search node number is not an integer")
     markers = []
+    runner_markers = []
     for comment in _comments(node):
-        if comment.get("authorAssociation") not in foa.TRUSTED:
+        association = comment.get("authorAssociation")
+        if association not in foa.TRUSTED:
             continue
         marker = fm.parse({"id": _comment_id(comment.get("fullDatabaseId")), "body": comment.get("body"),
                            "updated_at": comment.get("updatedAt")})
-        if marker is not None:
-            markers.append(marker)
+        if marker is None:
+            continue
+        markers.append(marker)
+        if association in verify_answer.TRUSTED:
+            runner_markers.append(marker)
     markers.sort(key=lambda m: m.comment_id)
-    return [_item(project_id, slug, number, held, m) for m in markers
-            if m.kind == foa.KIND and m.fields.get("reason") in foa.REASONS and fm.is_live(m, markers)]
+    runner_markers.sort(key=lambda m: m.comment_id)
+    items = [_item(project_id, slug, number, held, m) for m in markers
+             if m.kind == foa.KIND and m.fields.get("reason") in foa.REASONS and fm.is_live(m, markers)]
+    items += [_verify_item(project_id, slug, number, held, m, runner_markers) for m in runner_markers
+              if m.kind == foa.KIND and verify_answer.is_runner_prompt(m) and fm.is_live(m, runner_markers)]
+    return sorted(items, key=lambda item: item["key"])
 
 
 def _page(answer: Any) -> tuple[list, bool, str | None, int]:
