@@ -11,8 +11,9 @@ Event kinds read:
   state changes.
 - `inbox.seen`, `inbox.changed` (`view.py`, `inbox.py`): an item appears or is
   answered.
+- `goal.withdrawn` (`event_log.GOAL_WITHDRAWN`, `sprints.py`): the owner withdrew a sprint's goal.
 
-Every other kind says nothing, delivery runs (`delivery.seen`, `delivery.gone`)
+Every other kind says nothing, `goal.stated` included, delivery runs (`delivery.seen`, `delivery.gone`)
 included: the console has no delivery moments yet, and #878 adds them from
 those rows. An event whose payload lacks a required member says nothing.
 
@@ -39,9 +40,11 @@ session with no repository makes no moment.
     limit_stop       <name> stopped on a usage limit in <where>.
     resumed          <name> resumed work in <where>.
     session_ended    <name> ended in <where>.
+    sprint_withdrawn The goal for <project_id> was withdrawn: <goal>
 
 An inbox payload needs `project_id` (str), `issue` (int, not bool) and
-`question` (str).
+`question` (str). A withdrawal needs the event's project (str) and a payload `goal` (str); it
+reads no state, the row carries the goal.
 
 The window (`window_start`, `keep`): moments strictly after the last look, so a
 moment exactly at the look is not shown; with no look stored (a first visit),
@@ -62,7 +65,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from agent_tools.console.event_log import Event
+from agent_tools.console.event_log import GOAL_WITHDRAWN, Event
 from agent_tools.console.sessions import (
     ENDED, GONE, HOOK, LIMIT, SEEN, WORKING, SessionState, session_states)
 from agent_tools.console.view import INBOX_CHANGED, INBOX_SEEN, InboxRecord, inbox_records
@@ -77,6 +80,7 @@ INBOX_ANSWERED = "inbox_answered"
 LIMIT_STOP = "limit_stop"
 RESUMED = "resumed"
 SESSION_ENDED = "session_ended"
+SPRINT_WITHDRAWN = "sprint_withdrawn"
 
 
 @dataclass(frozen=True)
@@ -175,6 +179,11 @@ def moments(
             before = held.get((event.project, key))
             held = inbox_records([event], held)
             said = _inbox_moment(event, before)
+        elif event.kind == GOAL_WITHDRAWN:
+            goal = payload.get("goal") if isinstance(payload, dict) else None
+            if isinstance(event.project, str) and isinstance(goal, str):
+                said = (SPRINT_WITHDRAWN,
+                        f"The goal for {event.project} was withdrawn: {goal}")
         if said is not None:
             found.append(Moment(event.seq, event.at, said[0], said[1]))
     return found

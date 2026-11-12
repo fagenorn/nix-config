@@ -30,8 +30,8 @@ folds to a read at the event's time, `ok` false to a failed read at `read_at`, a
 whose `ok` is not a bool is ignored, `project.unregistered` removes the project's health.
 Every inbox event also moves its registered project's last sequence and time.
 
-Ordering and folding: a project is active when `open_work > 0` or it has a
-listed session, and quiet otherwise. Each group is sorted by newest `last_seq` first, then `project_id`.
+Ordering and folding: a project is active when `open_work > 0`, it has a
+listed session or it has a shown sprint, and quiet otherwise. Each group is sorted by newest `last_seq` first, then `project_id`.
 The entries are the active projects, then the quiet projects, except that more
 than `FOLD_AFTER` quiet projects are replaced by one `quiet_group` entry.
 
@@ -45,6 +45,7 @@ Wire format, one object:
      "project_count": <int>,
      "entries": [<project entry> | <group entry>, ...],
      "unmanaged": [<unmanaged entry>, ...],
+     "recent_projects": ["<project id>", ...],
      "digest": <digest> | null}
 
 `digest` is what changed since the owner last looked (see `digest.py`):
@@ -69,11 +70,15 @@ most held work first, then `waiting_since`, then `key`; answered items are liste
 never counted, by `waiting_since` then `key`.
 
 A project entry is `{"type": "project", "project_id", "root", "quiet",
-"open_work", "last_activity", "outside_sprints": <line>}`; a group entry is
+"open_work", "last_activity", "sprints": [<sprint entry>, ...],
+"outside_sprints": <line>}`; a group entry is
 `{"type": "quiet_group", "label": "<n> quiet projects", "count": <n>,
 "projects": [<project entry>]}`. `project_count` counts registered projects
 only. `unmanaged` is always present, possibly empty, sorted by `root`.
 
+    <sprint entry> = {"type": "sprint", "sprint_id", "goal", "state": "drafting",
+                      "state_text": "drafting the brief", "stated_at": "<time>",
+                      "age_text": "<text>", "manager_text": "<text>" | null}
     <line> = {"label": "Outside sprints", "working": <int>, "waiting": <int>,
               "summary": "<text>", "sessions": [<session entry>, ...]}
     <session entry> = {"session_id", "name", "state", "state_text", "cwd",
@@ -98,6 +103,15 @@ session's id, newest `moved_ms` first, then `run_id`; each run's issues are orde
 caller (this module still reads no clock) and `None` counts as no time elapsed. The runs of an
 ended or unlisted session appear nowhere, and they change no count, summary, order or the
 statement. The word "stalled" is never written: a quiet run is only quiet.
+`sprints` (always present, possibly empty) are the open sprints `derive_view` is given whose
+`project_id` is that project, newest `stated_seq` first; a sprint of a project that is not
+registered appears nowhere and changes no count, order or statement. Every shown sprint is
+`drafting` (`state_text` "drafting the brief"); `age_text` is `age_text(elapsed)` and `manager_text`
+is "no manager has picked this up" once `elapsed` is over two minutes (`NO_MANAGER_AFTER_MS`), else
+null, where `elapsed` is `now_ms` minus the stated time (`None` counts as no time elapsed). A
+project with a shown sprint is never quiet and never folded into the quiet group.
+`recent_projects` is every registered project id, newest `last_seq` first, then `project_id`
+(always present, possibly empty); it derives from the states alone.
 `encode_view` writes sorted keys, compact separators, non-ASCII kept, NaN
 refused, no newline.
 """
@@ -105,6 +119,7 @@ refused, no newline.
 import json
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from datetime import datetime
 
 from agent_tools.console.capacity import EMPTY
 from agent_tools.console.deliveries import DeliveryState, moved_text, stage_text
@@ -118,6 +133,14 @@ from agent_tools.console.sessions import (
     WAITING_PERMISSION,
     WORKING,
     SessionState,
+)
+from agent_tools.console.sprints import (
+    DRAFTING,
+    DRAFTING_TEXT,
+    NO_MANAGER_AFTER_MS,
+    NO_MANAGER_TEXT,
+    SprintState,
+    age_text,
 )
 
 REGISTERED = "project.registered"
@@ -343,16 +366,33 @@ def _line(sessions: Iterable[SessionState],
     }
 
 
+def _sprint_entry(state: SprintState, now_ms: int | None) -> dict:
+    stated_ms = int(datetime.fromisoformat(state.stated_at).timestamp() * 1000)
+    elapsed = 0 if now_ms is None else now_ms - stated_ms
+    return {
+        "type": "sprint",
+        "sprint_id": state.sprint_id,
+        "goal": state.goal,
+        "state": DRAFTING,
+        "state_text": DRAFTING_TEXT,
+        "stated_at": state.stated_at,
+        "age_text": age_text(elapsed),
+        "manager_text": NO_MANAGER_TEXT if elapsed > NO_MANAGER_AFTER_MS else None,
+    }
+
+
 def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
                    deliveries: Mapping[str, Sequence[DeliveryState]],
-                   now_ms: int | None) -> dict:
+                   now_ms: int | None,
+                   sprints: Sequence[SprintState] = ()) -> dict:
     return {
         "type": "project",
         "project_id": state.project_id,
         "root": state.root,
-        "quiet": state.open_work == 0 and not sessions,
+        "quiet": state.open_work == 0 and not sessions and not sprints,
         "open_work": state.open_work,
         "last_activity": state.last_at,
+        "sprints": [_sprint_entry(s, now_ms) for s in sprints],
         "outside_sprints": _line(sessions, deliveries, now_ms),
     }
 
@@ -394,6 +434,7 @@ def derive_view(
     digest: Mapping | None = None,
     deliveries: Mapping[tuple[str, str], DeliveryState] | None = None,
     now_ms: int | None = None,
+    sprints: Mapping[str, SprintState] | None = None,
 ) -> dict:
     states = list(states)
     capacity = EMPTY if capacity is None else capacity
@@ -436,12 +477,20 @@ def derive_view(
         else:
             owned.setdefault(project_id, []).append(session)
 
+    drafted: dict[str, list[SprintState]] = {}
+    for sprint in sorted((sprints or {}).values(),
+                         key=lambda s: (-s.stated_seq, s.sprint_id)):
+        if sprint.project_id in registered:
+            drafted.setdefault(sprint.project_id, []).append(sprint)
+
     def is_active(state: ProjectState) -> bool:
-        return state.open_work > 0 or state.project_id in owned
+        return (state.open_work > 0 or state.project_id in owned
+                or state.project_id in drafted)
 
     active = _order(s for s in states if is_active(s))
     quiet = _order(s for s in states if not is_active(s))
-    entries = [_project_entry(s, owned.get(s.project_id, ()), runs, now_ms)
+    entries = [_project_entry(s, owned.get(s.project_id, ()), runs, now_ms,
+                              drafted.get(s.project_id, ()))
                for s in active]
     quiet_entries = [_project_entry(s, (), runs, now_ms) for s in quiet]
     if len(quiet_entries) <= FOLD_AFTER:
@@ -467,6 +516,7 @@ def derive_view(
             {"type": "unmanaged", "root": root, "label": UNMANAGED_LABEL,
              "outside_sprints": _line(unmanaged[root], runs, now_ms)}
             for root in sorted(unmanaged)],
+        "recent_projects": [s.project_id for s in _order(states)],
         "digest": dict(digest) if digest is not None else None,
     }
 

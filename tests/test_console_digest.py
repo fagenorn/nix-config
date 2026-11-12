@@ -8,8 +8,9 @@ from datetime import datetime
 from pathlib import Path
 
 from agent_tools.console.digest import (
-    EARLIER_MAX, FIRST_VISIT, LOOKED, SHOWN, Moment, digest, keep, last_looked, moments)
-from agent_tools.console.event_log import Event
+    EARLIER_MAX, FIRST_VISIT, LOOKED, SHOWN, SPRINT_WITHDRAWN, Moment, digest, keep, last_looked,
+    moments)
+from agent_tools.console.event_log import GOAL_STATED, GOAL_WITHDRAWN, Event
 from agent_tools.console.sessions import SessionState
 
 CASES = json.loads(
@@ -96,6 +97,16 @@ class DigestTest(unittest.TestCase):
                 Moment(3, at(1, 1), "k", "after")]
         self.assertEqual([m.sentence for m in keep(made, at(1))], ["after"])
         self.assertEqual([m.sentence for m in keep(made, "2026-11-11T12:01:00.000000+02:00")], ["after"])
+
+    def test_a_withdrawal_is_a_digest_moment(self):
+        goal = {"sprint_id": "a" * 16, "goal": "make the importer resumable"}
+        found = moments([
+            Event(1, at(1), GOAL_STATED, "owner/p00", goal),
+            Event(2, at(2), GOAL_WITHDRAWN, "owner/p00", goal),
+            Event(3, at(3), GOAL_WITHDRAWN, "owner/p00", {"sprint_id": "b" * 16}),
+            Event(4, at(4), GOAL_WITHDRAWN, None, {"sprint_id": "c" * 16, "goal": "g"})], {}, {})
+        self.assertEqual(found, [Moment(2, at(2), SPRINT_WITHDRAWN,
+                                        "The goal for owner/p00 was withdrawn: make the importer resumable")])
 
 
 if __name__ == "__main__":
