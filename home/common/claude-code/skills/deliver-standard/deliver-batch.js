@@ -1373,10 +1373,12 @@ const drain = async () => {
       const join = () => {
         const more = WAITING.filter(kindsOk).slice(0, TRAIN_MAX - 1)
         if (!more.length) return null
+        // The train is built and announced first: a throw here leaves every joiner in WAITING, for its own drain.
+        const built = trainOf([e, ...more])
+        log(`#${e.n}: ${more.map(m => `#${m.n}`).join(', ')} became ready while it waited for the land lock; they land with it as a train`)
         for (const m of more) WAITING.splice(WAITING.indexOf(m), 1)
         joined.push(...more)
-        log(`#${e.n}: ${more.map(m => `#${m.n}`).join(', ')} became ready while it waited for the land lock; they land with it as a train`)
-        T = trainOf([e, ...more])
+        T = built
         return T.train
       }
       const row = await land(e.n, e.ready, trainable && kindsOk(e) ? { join } : {})
