@@ -1,16 +1,25 @@
-"""The console's sprints (#886): a goal the owner states on the page, kept until it is withdrawn.
+"""The console's sprints (#886, #887): a goal the owner states on the page, kept until it is withdrawn, and the brief a manager sends for it.
 
-Two event kinds carry a sprint (`event_log.GOAL_STATED`, `event_log.GOAL_WITHDRAWN`). Both put the
-project id in the event's project column and carry the payload `{"sprint_id": <id>, "goal": <text>}`
-(a withdrawal repeats the stated text). The log keeps both indefinitely (`event_log.KEPT_KINDS`).
+Five event kinds carry a sprint (`event_log.GOAL_STATED`, `GOAL_WITHDRAWN`, `BRIEF_SENT`,
+`BRIEF_APPROVED`, `BRIEF_REPLIED`). All put the project id in the event's project column. A goal
+row carries `{"sprint_id": <id>, "goal": <text>}` (a withdrawal repeats the stated text); the brief
+rows carry
+
+    brief.sent      {"sprint_id", "version": <int>, "goal": <str>, "brief": {<the five parts>}}
+    brief.approved  {"sprint_id", "version": <int>, "goal": <str>}
+    brief.replied   {"sprint_id", "version": <int>, "goal": <str>, "reply": <str>}
+
+The log keeps all five indefinitely (`event_log.KEPT_KINDS`).
 
 A sprint id is `secrets.token_hex(8)`: 16 lowercase hex characters (`SPRINT_ID`), the only form a
 request may name and the file name of the sprint's secret.
 
 The sprint's secret is `secrets.token_urlsafe(32)` plus one newline in
 `<directory>/sprint-secrets/<sprint id>` (`SECRETS_DIR` beside the event log), the directory created
-0700 and the file created once, 0600, with `O_EXCL`. This slice never reads it back: it appears in
-no row, view, stream frame, answer or stderr line.
+0700 and the file created once, 0600, with `O_EXCL`. Only `read_secret(directory, sprint_id)` reads it back, for the service's
+check of a manager's secret: it validates the id (`ValueError` otherwise), returns the file text
+with one trailing newline removed and `None` when the file does not exist; any other `OSError`
+propagates. The secret appears in no row, view, stream frame, answer or stderr line.
 
 The goal is the sent text with `str.strip()` applied (`checked_goal`). The refusals, in the order the
 service applies them: `UNREGISTERED` (the service's check, not made here), `EMPTY` after stripping,
@@ -37,9 +46,39 @@ Registration events change nothing here: a goal row outlives the registration ro
 removes, and the view alone shows sprints only under registered projects. Folding `a + b` equals
 folding `b` onto the fold of `a`.
 
+A brief is the five `PARTS`: `done` a text, `excluded`, `slices`, `risks` and `asks` each a list of
+texts. `checked_brief(brief)` checks them in `PARTS` order and refuses with
+`Refused("the brief has no <part>")` the first that is missing, of the wrong type or empty after
+stripping; it returns a new dict of the five parts with every text stripped. `checked_reply(text)`
+keeps the text exactly and refuses `EMPTY_REPLY` when its strip is empty, then `REPLY_TOO_LONG` over
+`MAX_REPLY_CHARS` code points. `SecretRefused` (a `Refused`) is the service's refusal of a wrong
+secret; it maps to 403.
+
+`parse_brief_request(body)` reads the manager's body and returns `(sprint_id, secret, brief)`:
+
+    {"sprint_id": "<16 lowercase hex>", "secret": "<string>", "brief": {<any subset of PARTS>}}
+
+`parse_approve(body)` returns `(project_id, sprint_id, version)` and `parse_reply(body)` returns
+`(project_id, sprint_id, version, reply)` from the page's bodies:
+
+    {"project_id": "<project id>", "sprint_id": "<16 hex>", "version": <int >= 1, not a bool>}
+    ... plus "reply": "<string>" for a reply
+
+All three readers are as strict as the goal ones; an unknown brief key is a `ValueError`, a missing
+one is not (the service answers it with the part).
+
+The fold also keeps each open sprint's `Brief(version, parts, sent_at, decision, reply)`.
+`brief.sent` changes an open sprint only when `version` is an int (not a bool) greater than the
+folded brief's version (0 with none) and `brief` is a dict: the brief is then that version with
+decision `NONE` and no reply. `brief.approved` and `brief.replied` apply only when the sprint is
+open, has a brief, the version equals its version and its decision is `NONE`; approval sets
+`APPROVED`, a reply (a string) sets `CHANGES` and the reply. Every other row changes nothing. A
+sprint whose brief is `APPROVED` is `STARTING`, else `DRAFTING` (`SprintState.state`).
+`withdrawn_ids(events, ids)` adds the `sprint_id` of every `goal.withdrawn` row with a string one.
+
 `age_text(elapsed_ms)` is `stated just now` under a minute, `stated <m> min ago` under an hour,
 `stated <h> h ago` under a day, else `stated 1 day ago` or `stated <d> days ago`; a negative count is
-0. The module reads no clock and no environment; only the two secret helpers touch the filesystem.
+0. The module reads no clock and no environment; only the secret helpers touch the filesystem.
 """
 
 import json
@@ -47,13 +86,22 @@ import os
 import re
 import secrets
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
-from agent_tools.console.event_log import GOAL_STATED, GOAL_WITHDRAWN, Event
+from agent_tools.console.event_log import (BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED,
+                                           GOAL_WITHDRAWN, Event)
 
 MAX_GOAL_CHARS = 2000
+MAX_REPLY_CHARS = 2000
+PARTS = ("done", "excluded", "slices", "risks", "asks")
+NONE = "none"
+APPROVED = "approved"
+CHANGES = "changes"
+WITHDRAWN = "withdrawn"
+STARTING = "starting"
+STARTING_TEXT = "starting"
 NO_MANAGER_AFTER_MS = 120_000
 DRAFTING = "drafting"
 DRAFTING_TEXT = "drafting the brief"
@@ -65,6 +113,13 @@ UNREGISTERED = "this project is not registered"
 EMPTY = "write the goal first"
 TOO_LONG = "a goal is at most 2000 characters"
 NOT_OPEN = "this sprint is not open"
+SECRET_REFUSED = "secret refused"
+MISSING_PART = "the brief has no {part}"
+NOT_WAITING = "this brief is not waiting for you"
+REPLACED = "a newer brief replaced this one"
+EMPTY_REPLY = "write the reply first"
+REPLY_TOO_LONG = "a reply is at most 2000 characters"
+UNKNOWN = "this sprint is not known"
 
 _MINUTE_MS = 60_000
 _HOUR_MS = 3_600_000
@@ -75,6 +130,19 @@ class Refused(Exception):
     """The write was not made; `str(error)` is the one-line reason."""
 
 
+class SecretRefused(Refused):
+    """The sprint's secret was wrong; the service answers 403."""
+
+
+@dataclass(frozen=True)
+class Brief:
+    version: int
+    parts: dict
+    sent_at: str
+    decision: str
+    reply: str | None
+
+
 @dataclass(frozen=True)
 class SprintState:
     sprint_id: str
@@ -82,9 +150,16 @@ class SprintState:
     goal: str
     stated_seq: int
     stated_at: str
+    brief: Brief | None = None
+
+    @property
+    def state(self) -> str:
+        if self.brief is not None and self.brief.decision == APPROVED:
+            return STARTING
+        return DRAFTING
 
 
-def _object(body: bytes, keys: set[str]) -> dict:
+def _object(body: bytes, keys: set[str], project: bool = True) -> dict:
     try:
         value = json.loads(body.decode("utf-8"), object_pairs_hook=reject_duplicate_keys,
                            parse_constant=reject_nonfinite_literal)
@@ -92,9 +167,22 @@ def _object(body: bytes, keys: set[str]) -> dict:
         raise ValueError("the body is nested too deeply") from error
     if not isinstance(value, dict) or set(value) != keys:
         raise ValueError(f"the body must be an object of {', '.join(sorted(keys))}")
-    project_id = value["project_id"]
-    if not isinstance(project_id, str) or not project_id:
-        raise ValueError("project_id must be a non-empty string")
+    if project:
+        project_id = value["project_id"]
+        if not isinstance(project_id, str) or not project_id:
+            raise ValueError("project_id must be a non-empty string")
+    return value
+
+
+def _sprint_id(value: object) -> str:
+    if not isinstance(value, str) or SPRINT_ID.fullmatch(value) is None:
+        raise ValueError("sprint_id must be 16 lowercase hex characters")
+    return value
+
+
+def _version(value: object) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+        raise ValueError("version must be an integer of at least 1")
     return value
 
 
@@ -107,10 +195,31 @@ def parse_goal(body: bytes) -> tuple[str, str]:
 
 def parse_withdraw(body: bytes) -> tuple[str, str]:
     value = _object(body, {"project_id", "sprint_id"})
-    sprint_id = value["sprint_id"]
-    if not isinstance(sprint_id, str) or SPRINT_ID.fullmatch(sprint_id) is None:
-        raise ValueError("sprint_id must be 16 lowercase hex characters")
-    return value["project_id"], sprint_id
+    return value["project_id"], _sprint_id(value["sprint_id"])
+
+
+def parse_brief_request(body: bytes) -> tuple[str, str, dict]:
+    value = _object(body, {"sprint_id", "secret", "brief"}, project=False)
+    sprint_id = _sprint_id(value["sprint_id"])
+    if not isinstance(value["secret"], str):
+        raise ValueError("secret must be a string")
+    brief = value["brief"]
+    if not isinstance(brief, dict) or not set(brief) <= set(PARTS):
+        raise ValueError(f"brief must be an object of {', '.join(PARTS)}")
+    return sprint_id, value["secret"], brief
+
+
+def parse_approve(body: bytes) -> tuple[str, str, int]:
+    value = _object(body, {"project_id", "sprint_id", "version"})
+    return value["project_id"], _sprint_id(value["sprint_id"]), _version(value["version"])
+
+
+def parse_reply(body: bytes) -> tuple[str, str, int, str]:
+    value = _object(body, {"project_id", "sprint_id", "version", "reply"})
+    if not isinstance(value["reply"], str):
+        raise ValueError("reply must be a string")
+    return (value["project_id"], _sprint_id(value["sprint_id"]), _version(value["version"]),
+            value["reply"])
 
 
 def checked_goal(text: str) -> str:
@@ -120,6 +229,54 @@ def checked_goal(text: str) -> str:
     if len(goal) > MAX_GOAL_CHARS:
         raise Refused(TOO_LONG)
     return goal
+
+
+def _text(value: object) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def checked_brief(brief: dict) -> dict:
+    checked: dict = {}
+    for part in PARTS:
+        value = brief.get(part)
+        if part == "done":
+            if not _text(value):
+                raise Refused(MISSING_PART.format(part=part))
+            checked[part] = value.strip()
+        else:
+            if not isinstance(value, list) or not value or not all(_text(item) for item in value):
+                raise Refused(MISSING_PART.format(part=part))
+            checked[part] = [item.strip() for item in value]
+    return checked
+
+
+def checked_reply(text: str) -> str:
+    if not text.strip():
+        raise Refused(EMPTY_REPLY)
+    if len(text) > MAX_REPLY_CHARS:
+        raise Refused(REPLY_TOO_LONG)
+    return text
+
+
+def _folded_brief(state: SprintState, event: Event) -> SprintState:
+    payload = event.payload
+    version = payload.get("version")
+    if not isinstance(version, int) or isinstance(version, bool):
+        return state
+    brief = state.brief
+    if event.kind == BRIEF_SENT:
+        parts = payload.get("brief")
+        if isinstance(parts, dict) and version > (brief.version if brief else 0):
+            return replace(state, brief=Brief(version, parts, event.at, NONE, None))
+        return state
+    if brief is None or version != brief.version or brief.decision != NONE:
+        return state
+    if event.kind == BRIEF_APPROVED:
+        return replace(state, brief=replace(brief, decision=APPROVED))
+    reply = payload.get("reply")
+    if isinstance(reply, str):
+        return replace(state, brief=replace(brief, decision=CHANGES, reply=reply))
+    return state
 
 
 def sprint_states(events: Iterable[Event],
@@ -136,7 +293,18 @@ def sprint_states(events: Iterable[Event],
                                                 event.at)
         elif event.kind == GOAL_WITHDRAWN:
             folded.pop(sprint_id, None)
+        elif event.kind in (BRIEF_SENT, BRIEF_APPROVED, BRIEF_REPLIED) and sprint_id in folded:
+            folded[sprint_id] = _folded_brief(folded[sprint_id], event)
     return folded
+
+
+def withdrawn_ids(events: Iterable[Event], ids: frozenset[str] = frozenset()) -> frozenset[str]:
+    withdrawn = set(ids)
+    for event in events:
+        sprint_id = event.payload.get("sprint_id")
+        if event.kind == GOAL_WITHDRAWN and isinstance(sprint_id, str):
+            withdrawn.add(sprint_id)
+    return frozenset(withdrawn)
 
 
 def age_text(elapsed_ms: int) -> str:
@@ -174,3 +342,12 @@ def create_secret(directory: Path, sprint_id: str) -> Path:
 def remove_secret(directory: Path, sprint_id: str) -> None:
     _checked_id(sprint_id)
     (Path(directory) / sprint_id).unlink(missing_ok=True)
+
+
+def read_secret(directory: Path, sprint_id: str) -> str | None:
+    _checked_id(sprint_id)
+    try:
+        text = (Path(directory) / sprint_id).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    return text.removesuffix("\n")
