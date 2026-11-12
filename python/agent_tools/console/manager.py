@@ -8,7 +8,8 @@ the most `five_hour_left` (an unknown value counts below 0) wins, and among equa
 smallest name. With no room and `all_out` set, the answer is `Wait(resumes_at)`. Otherwise it is
 `bound`, unless `bound` is listed as `out`, when it is the smallest-named `unknown` profile (and
 `bound` again when none is). `bound_profile(root)` mirrors the launcher's `bound_account`: the
-account bound to the directory or the nearest bound parent in `bindings.tsv` of the accounts
+account bound to the directory's main checkout (a linked worktree reads its owner's binding,
+`sessions.main_checkout`) or the nearest bound parent in `bindings.tsv` of the accounts
 directory (`$CLAUDE_ACCOUNTS_DIR`, else `~/.claude-accounts`), else `default`.
 
 Command (Linux only; `launch_command` is None elsewhere and `launcher_for` gives None). The
@@ -51,7 +52,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from agent_tools.console.sessions import DEFAULT_PROFILE
+from agent_tools.console.sessions import DEFAULT_PROFILE, main_checkout
 
 SKILL = "manage-sprint"
 ID_ENV = "CONSOLE_SPRINT_ID"
@@ -142,7 +143,7 @@ def bound_profile(root: str, accounts_dir: Path | None = None) -> str:
         fields = line.split("\t")
         if len(fields) >= 2:
             bindings.setdefault(fields[0], fields[1])
-    start = Path(root)
+    start = Path(main_checkout(root) or root)
     for directory in (start, *start.parents):
         if str(directory) in bindings:
             return bindings[str(directory)]

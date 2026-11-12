@@ -230,6 +230,15 @@ class ManagerCheckTest(unittest.TestCase):
         self.assertEqual((code, out["reason"]), (1, "a brief reached another sprint's slot"))
         self.assertEqual(self.restarts, [])
 
+    def test_a_second_brief_version_with_no_other_brief_is_not_met_at_once(self):
+        views = [view(both(), [brief(A, "10:02:00", version=2)])]
+        code, out = self.start(views, resume=True)
+        self.assertEqual((code, out["reason"]), (1, "a brief reached another sprint's slot"))
+        self.assertEqual(out["brief_seconds"], [120, None])
+        self.assertEqual(self.restarts, [])
+        self.assertEqual(len(self.posted("/api/withdraw")), 2)
+        self.assertEqual(self.result(), {A: 120, B: None})
+
     def test_timing_reads_the_console_times_and_fails_a_late_brief(self):
         def timing(*args):
             out = io.StringIO()

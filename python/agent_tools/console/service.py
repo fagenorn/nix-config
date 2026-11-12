@@ -266,7 +266,7 @@ reserved, and, from `sprints.manager_status`, `HAS_MANAGER` when the manager is 
 otherwise when no retry is offered; else it reserves the sprint before the lock is released and
 dispatches, so a second retry that arrives while the first is queued or running is refused
 `LAUNCHING`. `start_manager(sprint_id)` reserves (returning when it cannot) and launches in the
-calling thread. `_launch_reserved`, under the lock, drops the reservation and returns when the sprint
+calling thread. `_launch_reserved`, under the lock, drops its own attempt's reservation (each reservation is one token, so a finished attempt never frees a later retry's) and returns when the sprint
 is no longer open or its manager reads `started` (a stale or duplicate job never starts a second
 manager); a missing secret appends `manager.failed` ("the sprint's secret is missing"); the profile
 is chosen by `manager.choose_profile` over `capacity.capacity_view` of the profile directories read
@@ -846,7 +846,7 @@ class ConsoleService:
         self._launcher = launcher
         self._bound_profile_of = bound_profile_of
         self._dispatch = self._on_new_thread if dispatch is None else dispatch
-        self._launching: set[str] = set()
+        self._launching: dict[str, object] = {}
         self._tick = tick
         self._owner_path = owner_path
         self._sprint_secrets = (Path(store).with_name(sprints.SECRETS_DIR)
@@ -1122,7 +1122,7 @@ class ConsoleService:
                 raise
             self._apply(appended)
             if self._launcher is not None:
-                self._launching.add(sprint_id)
+                self._launching[sprint_id] = object()
         if self._launcher is not None:
             self._dispatch_launch(sprint_id)
         return sprint_id
@@ -1132,12 +1132,19 @@ class ConsoleService:
 
     def _dispatch_launch(self, sprint_id: str) -> None:
         """Hand a reserved sprint's launch to the dispatcher; a dispatch that fails frees the reservation."""
+        with self._ingest:
+            token = self._launching.get(sprint_id)
         try:
             self._dispatch(lambda: self._launch_reserved(sprint_id))
         except BaseException:
             with self._ingest:
-                self._launching.discard(sprint_id)
+                self._release(sprint_id, token)
             raise
+
+    def _release(self, sprint_id: str, token: object) -> None:
+        """Under the ingest lock: end the reservation `token` names; a later attempt's stays."""
+        if token is not None and self._launching.get(sprint_id) is token:
+            del self._launching[sprint_id]
 
     def _manager_listed(self, sprint: sprints.SprintState) -> bool:
         """Whether a listed session of the sprint's project carries the sprint's manager name."""
@@ -1157,7 +1164,7 @@ class ConsoleService:
             if (self._launcher is None or sprint_id not in self._sprints
                     or sprint_id in self._launching):
                 return
-            self._launching.add(sprint_id)
+            self._launching[sprint_id] = object()
         self._launch_reserved(sprint_id)
 
     def retry_manager(self, project_id: str, sprint_id: str) -> None:
@@ -1174,14 +1181,18 @@ class ConsoleService:
             if not retry:
                 raise sprints.Refused(
                     sprints.HAS_MANAGER if state == sprints.STARTED else sprints.TOO_SOON)
-            self._launching.add(sprint_id)
+            self._launching[sprint_id] = object()
         self._dispatch_launch(sprint_id)
 
     def _launch_reserved(self, sprint_id: str) -> None:
         """Start the reserved sprint's manager and record the outcome; the reservation ends here."""
+        with self._ingest:
+            token = self._launching.get(sprint_id)
+        if token is None:
+            return
         try:
             with self._ingest:
-                launch = self._prepared_launch(sprint_id)
+                launch = self._prepared_launch(sprint_id, token)
             if launch is None:
                 return
             reason = None
@@ -1190,57 +1201,57 @@ class ConsoleService:
             except Exception as error:
                 reason = (str(error) if isinstance(error, manager.LaunchFailed)
                           else f"{type(error).__name__}: {error}")
-            self._record_launch(launch, reason)
+            self._record_launch(launch, reason, token)
         finally:
             with self._ingest:
-                self._launching.discard(sprint_id)
+                self._release(sprint_id, token)
 
-    def _prepared_launch(self, sprint_id: str) -> manager.Launch | None:
+    def _prepared_launch(self, sprint_id: str, token: object) -> manager.Launch | None:
         """Under the ingest lock: the launch to run, or None after dropping the reservation."""
         sprint = self._sprints.get(sprint_id)
         if sprint is None or self._manager_state(sprint)[0] == sprints.STARTED:
-            self._launching.discard(sprint_id)
+            self._release(sprint_id, token)
             return None
         project_id = sprint.project_id
         secret = sprints.read_secret(self._sprint_secrets, sprint_id)
         if secret is None:
             self._append_manager(MANAGER_FAILED, project_id, {
-                "sprint_id": sprint_id, "reason": "the sprint's secret is missing"})
+                "sprint_id": sprint_id, "reason": "the sprint's secret is missing"}, token)
             return None
         project = self._states.get(project_id)
         if project is None:
-            self._launching.discard(sprint_id)
+            self._release(sprint_id, token)
             return None
         choice = manager.choose_profile(
             capacity.capacity_view(self._read_profiles(), self._capacity, self._clock()),
             self._bound_profile_of(project.root))
         if isinstance(choice, manager.Wait):
             self._append_manager(MANAGER_WAITING, project_id, {
-                "sprint_id": sprint_id, "until": choice.until})
+                "sprint_id": sprint_id, "until": choice.until}, token)
             return None
         return manager.new_launch(sprint_id, project_id, sprint.goal, project.root, choice,
                                   secret, self._sprint_secrets)
 
-    def _append_manager(self, kind: str, project_id: str, payload: dict) -> None:
-        """Under the ingest lock: append one manager row, drop the reservation and publish."""
-        self._launching.discard(payload["sprint_id"])
+    def _append_manager(self, kind: str, project_id: str, payload: dict, token: object) -> None:
+        """Under the ingest lock: append one manager row, release the attempt's hold, publish."""
+        self._release(payload["sprint_id"], token)
         self._apply(self.log.append([(kind, project_id, payload)]))
 
-    def _record_launch(self, launch: manager.Launch, reason: str | None) -> None:
+    def _record_launch(self, launch: manager.Launch, reason: str | None, token: object) -> None:
         secret = launch.env[manager.SECRET_ENV]
         with self._ingest:
-            self._launching.discard(launch.sprint_id)
+            self._release(launch.sprint_id, token)
             if self._stop.is_set():
                 return
             if reason is None:
                 self._append_manager(MANAGER_STARTED, launch.project_id, {
                     "sprint_id": launch.sprint_id, "profile": launch.profile,
-                    "session_name": launch.session_name})
+                    "session_name": launch.session_name}, token)
                 return
             if secret:
                 reason = reason.replace(secret, "<secret>")
             self._append_manager(MANAGER_FAILED, launch.project_id, {
-                "sprint_id": launch.sprint_id, "reason": reason})
+                "sprint_id": launch.sprint_id, "reason": reason}, token)
             print(f"console: manager_failed {launch.sprint_id} {reason}", file=sys.stderr)
 
     def withdraw_goal(self, project_id: str, sprint_id: str) -> None:

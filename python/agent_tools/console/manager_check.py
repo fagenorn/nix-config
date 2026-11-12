@@ -27,7 +27,8 @@ and the hold's expiry bounds the wait. Without a state file: a console that does
 
 Not met (exit 1, `{"status": "not_met", "reason": ..., "brief_seconds": [...]}`) only for a
 functional failure: a sprint that is gone (`the sprint is gone`), a `failed` or `missing` manager
-(its `manager_text`), a brief at a version other than 1 (`a brief reached another sprint's slot`),
+(its `manager_text`), a brief at a version other than 1, seen on any poll even before the other sprint has a brief
+(`a brief reached another sprint's slot`),
 a console that refuses a goal, a failed restart (`restart failed: <error>`), or a manager not
 listed after the restart (`the manager is not running after the restart`). A slow brief is never
 not met here.
@@ -302,10 +303,11 @@ def _start(args, restart, registry, clock, sleep) -> int:
             items = {item.get("key"): item for item in (view.get("inbox") or {}).get("open") or []
                      if isinstance(item, dict)}
             briefs = {i: items.get("brief/" + i) for i in ids}
+            seconds = {i: _seconds(briefs[i].get("waiting_since"), stated[i]) if briefs[i] else None
+                       for i in ids}
+            if any(briefs[i] and briefs[i].get("version") != 1 for i in ids):
+                return finish(1, "a brief reached another sprint's slot", seconds)
             if all(briefs.values()):
-                seconds = {i: _seconds(briefs[i].get("waiting_since"), stated[i]) for i in ids}
-                if any(briefs[i].get("version") != 1 for i in ids):
-                    return finish(1, "a brief reached another sprint's slot", seconds)
                 break
         if clock() - run_start >= args.budget:
             _print({"status": "waiting", "sprints": [

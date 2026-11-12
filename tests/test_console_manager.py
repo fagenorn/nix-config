@@ -266,6 +266,20 @@ class ProfileTest(unittest.TestCase):
             with mock.patch.dict(os.environ, {"CLAUDE_ACCOUNTS_DIR": str(d)}):
                 self.assertEqual(manager.bound_profile("/srv/p01"), "work")
 
+    def test_a_linked_worktree_reads_its_main_checkouts_binding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(os.path.realpath(tmp))
+            main, worktree = d / "src" / "repo", d / "work" / "topic"
+            admin = main / ".git" / "worktrees" / "topic"
+            admin.mkdir(parents=True)
+            (admin / "commondir").write_text("../..\n")
+            worktree.mkdir(parents=True)
+            (worktree / ".git").write_text(f"gitdir: {admin}\n")
+            (d / "bindings.tsv").write_text(f"{main}\twork\n")
+            self.assertEqual(manager.bound_profile(str(worktree), d), "work")
+            self.assertEqual(manager.bound_profile(str(main), d), "work")
+            self.assertEqual(manager.bound_profile(str(d / "work"), d), "default")
+
 
 if __name__ == "__main__":
     unittest.main()

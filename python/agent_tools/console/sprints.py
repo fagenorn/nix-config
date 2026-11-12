@@ -412,8 +412,12 @@ def manager_status(state: SprintState, listed: bool, now_ms: int | None,
       manager and the stated time (`stated_at`) otherwise.
     - No manager row: `none`, with `NO_MANAGER_TEXT` and retry when overdue, else no text, no retry.
     - `started`: `missing`, `MISSING_TEXT` and retry when overdue, else `started`, no text, no retry.
-    - `failed`: `failed`, `"<FAILED_TEXT>: <reason>"` and retry.
-    - `waiting`: `waiting`, `WAITING_TEXT` and retry.
+    - `failed`: `failed` and `"<FAILED_TEXT>: <reason>"`.
+    - `waiting`: `waiting` and `WAITING_TEXT`.
+
+    A `failed` or `waiting` manager offers retry only while the sprint has no listed session and no
+    brief: a launch can fail after its detached session was already handed off, and a retry would
+    then start a second manager for the sprint.
     """
     if not managers:
         return UNAVAILABLE, UNAVAILABLE_TEXT, False
@@ -425,9 +429,10 @@ def manager_status(state: SprintState, listed: bool, now_ms: int | None,
         return (NONE, NO_MANAGER_TEXT, True) if overdue else (NONE, None, False)
     if manager.state == STARTED:
         return (MISSING, MISSING_TEXT, True) if overdue else (STARTED, None, False)
+    free = not listed and state.brief is None
     if manager.state == FAILED:
-        return FAILED, f"{FAILED_TEXT}: {manager.reason}", True
-    return WAITING, WAITING_TEXT, True
+        return FAILED, f"{FAILED_TEXT}: {manager.reason}", free
+    return WAITING, WAITING_TEXT, free
 
 
 def new_sprint_id() -> str:

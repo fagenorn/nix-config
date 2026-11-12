@@ -200,6 +200,38 @@ class ManagerServiceTest(Case):
         status, _, body = self.retry(svc, sid)
         self.assertEqual((status, body), (409, b"this sprint has a manager\n"))
 
+    def test_a_finished_attempt_never_frees_a_later_retrys_reservation(self):
+        queue = support.Queued()
+        launches = support.Launches(fail=["x", None, None])
+        svc = self.start(launcher=launches, dispatch=queue)
+        sid = self.state(svc)
+        record = svc._record_launch
+
+        def record_then_retry_in_the_gap(launch, reason, token):
+            record(launch, reason, token)
+            svc.retry_manager("owner/p01", sid)
+
+        with mock.patch.object(svc, "_record_launch", record_then_retry_in_the_gap):
+            with contextlib.redirect_stderr(io.StringIO()):
+                queue.run_next()
+        self.assertEqual(len(queue.jobs), 1)
+        status, _, body = self.retry(svc, sid)
+        self.assertEqual((status, body), (409, b"a manager is starting for this sprint\n"))
+        self.assertEqual(len(queue.jobs), 1)
+        queue.run_next()
+        self.assertEqual(len(launches.calls), 2)
+
+    def test_a_launch_that_raised_past_the_recording_still_frees_the_reservation(self):
+        launches = support.Launches()
+        queue = support.Queued()
+        svc = self.start(launcher=launches, dispatch=queue)
+        sid = self.state(svc)
+        with mock.patch.object(svc, "_prepared_launch", side_effect=RuntimeError("boom")):
+            with self.assertRaises(RuntimeError):
+                queue.run_next()
+        svc.start_manager(sid)
+        self.assertEqual(len(launches.calls), 1)
+
     def test_a_launch_is_rechecked_when_it_runs(self):
         launches = support.Launches()
         svc = self.start(launcher=launches)
