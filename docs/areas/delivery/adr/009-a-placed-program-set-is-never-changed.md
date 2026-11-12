@@ -26,5 +26,6 @@ ADR-delivery-008 placed the delivery programs under one directory per checkout a
 
 - The sets kept in a checkout are bounded by the program versions placed there within a day.
 - A batch that outlives 24 hours with no placement of its version in that time can lose its child program; its row then names the load failure and the path.
-- The `*.js` files the earlier layout placed directly in `<skill dir name>/` are no longer written or removed: a batch launched from them before this change keeps both programs unchanged, and the files stay until deleted by hand.
+- The `*.js` files the earlier layout placed directly in `<skill dir name>/` are no longer written, and a placement removes each once its modification time is more than 24 hours old. A batch launched from them before this change keeps both programs unchanged while they are younger; a caller that still names a flat path fails to load it after a day instead of running an old program.
+- A flat file's modification time is when its content last changed, not its last use: a batch running from flat files that last changed more than a day before the first new placement loses its child program at that placement.
 - This replaces the ADR-delivery-008 consequence that a running batch reads the newer child.

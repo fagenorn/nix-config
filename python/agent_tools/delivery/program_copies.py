@@ -46,9 +46,12 @@ directory under `.program-copies/<name>` whose modification time is more than 24
 is removed; a failure to remove one is ignored. The set just placed is never removed. A
 batch runs about four hours and every launch stamps its set, so a set a running batch uses
 was stamped less than 24 hours ago, while the sets kept are bounded by the versions placed
-within a day. Anything else in that directory is left alone, including the `*.js` files an
-earlier version of this command placed directly in it: a batch launched from those keeps
-them, and no placement changes them any more.
+within a day. The regular `*.js` files an earlier version of this command placed directly
+in that directory are never written again and are removed by the same rule, modification
+time more than 24 hours old: a batch launched from them keeps them while they are younger,
+and a caller that still names such a path then fails to load it instead of running an old
+program. Their modification time is when their content last changed, not their last use.
+Anything else in that directory is left alone.
 
 Success prints one JSON line mapping each copied file name to its absolute copy path.
 Refusals write `{"error": {code, detail}}` to stderr. Exit 1: `not_a_checkout` (the git call
@@ -184,21 +187,26 @@ def _place_set(directory: Path, contents: list[tuple[str, bytes]]) -> None:
 
 
 def _prune(target: Path, keep: Path) -> None:
-    """Remove the sets and temporary directories under `target` last used over a day ago, never `keep`."""
+    """Remove what lies under `target` with a modification time over a day old, never `keep`:
+    the sets, the temporary directories and the flat `*.js` files of the earlier layout."""
     cutoff = time.time() - KEEP_SECONDS
     try:
         entries = list(target.iterdir())
     except OSError:
         return
     for entry in entries:
-        if entry.name == keep.name or not (SET_NAME.match(entry.name) or entry.name.startswith(TEMP_PREFIX)):
+        directory = bool(SET_NAME.match(entry.name)) or entry.name.startswith(TEMP_PREFIX)
+        if entry.name == keep.name or not (directory or entry.name.endswith(".js")):
             continue
         try:
-            if entry.is_symlink() or not entry.is_dir() or entry.stat().st_mtime >= cutoff:
+            if entry.is_symlink() or entry.lstat().st_mtime >= cutoff:
                 continue
+            if directory and entry.is_dir():
+                shutil.rmtree(entry, ignore_errors=True)
+            elif not directory and entry.is_file():
+                entry.unlink()
         except OSError:
             continue
-        shutil.rmtree(entry, ignore_errors=True)
 
 
 def _check_destination(root: Path, base: Path, target: Path, *extra: Path) -> None:

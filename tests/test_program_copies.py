@@ -151,13 +151,15 @@ class ProgramCopiesTest(unittest.TestCase):
         flat.write_bytes(b"flat")
         note = self.copies / "notes"
         note.mkdir()
+        (self.copies / "README").write_bytes(b"kept")
         for path, age in ((old, day + 600), (recent, 4 * 60 * 60), (long_ago, 3 * day), (stale, day + 600),
-                          (flat, 3 * day), (note, 3 * day)):
+                          (flat, 3 * day), (note, 3 * day), (self.copies / "README", 3 * day)):
             os.utime(path, (now - age, now - age))
         self.change("a.js", b"A4")
         _, current = self.placed()
         self.assertEqual(self.sets(), sorted([recent.name, current.name, "notes"]))
-        self.assertEqual(flat.read_bytes(), b"flat")
+        self.assertFalse(flat.exists())
+        self.assertEqual((self.copies / "README").read_bytes(), b"kept")
         self.change("a.js", b"A2")
         os.utime(recent, (now - 3 * day, now - 3 * day))
         _, back = self.placed()
@@ -174,15 +176,27 @@ class ProgramCopiesTest(unittest.TestCase):
         self.assertEqual(done.stdout, "")
         self.assertEqual((directory / "a.js").read_bytes(), b"edited")
 
-    def test_flat_copies_of_the_earlier_layout_are_left_as_they_are(self):
-        """A batch launched from `.program-copies/<name>/<file>` before issue 981 keeps its programs."""
+    def flat_copies(self, age):
+        """The earlier layout's copies, `.program-copies/<name>/<file>`, last changed `age` seconds ago."""
         self.copies.mkdir(parents=True)
-        (self.copies / "a.js").write_bytes(b"A0")
-        (self.copies / "b.js").write_bytes(b"B0")
-        before = self.snapshot(self.copies)
+        then = time.time() - age
+        for name, data in (("a.js", b"A0"), ("b.js", b"B0")):
+            (self.copies / name).write_bytes(data)
+            os.utime(self.copies / name, (then, then))
+        return self.snapshot(self.copies)
+
+    def test_flat_copies_of_the_earlier_layout_younger_than_a_day_are_left_as_they_are(self):
+        """A batch launched from the flat copies before issue 981 keeps its programs."""
+        before = self.flat_copies(23 * 60 * 60)
         _, directory = self.placed()
         self.assertEqual(directory.parent, self.copies)
         self.assertEqual(self.snapshot(self.copies), before)
+
+    def test_flat_copies_of_the_earlier_layout_older_than_a_day_are_removed(self):
+        """A caller that still names a flat path fails to load it instead of running an old program."""
+        self.flat_copies(25 * 60 * 60)
+        _, directory = self.placed()
+        self.assertEqual(os.listdir(self.copies), [directory.name])
 
     def test_a_copy_outlives_its_installed_program(self):
         mapping, _ = self.placed()
