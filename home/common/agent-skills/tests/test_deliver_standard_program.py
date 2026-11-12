@@ -1883,7 +1883,7 @@ class PlanTurnStructureTest(unittest.TestCase):
                   "a second message only if the output limit forces it", "then run any checks in one message")
     REVISE = ("load plan.md, every task file and the code map with one command",
               "fix the findings with Edit in place", "rewrite a whole file only when most of it changes",
-              "leave each acceptance criterion's text unchanged unless a finding names it")
+              "leave each acceptance criterion's text unchanged unless fixing a finding requires changing it")
     SELF_CHECK = ("run every grep or deny gate a task prescribes against the text this plan requires and confirm it does not reject that text",
                   "for each invariant, threshold and decision a task states, name the test case that fails when that one rule is removed; one with no such case needs a test",
                   "list for each new test or doc the CI workflow test list, the generated index and the project gate that must also change")
@@ -2062,13 +2062,43 @@ class RulesRereviewSkipTest(unittest.TestCase):
                 self.kept_whole(plan, self.retyped(plan, criteria_edited=["AC2"]), review=self.naming(**finding))
 
     def test_a_criterion_the_reply_lists_as_edited_keeps_the_reply_whole_and_the_rules_rereview_runs(self):
-        # The finding names no id (the second criterion), but the planner lists AC2 as a row it changed; ids compare without case.
+        # The finding names no id (the second criterion), but the planner lists AC2 as a text it changed; ids compare without case.
         plan = with_criteria(EVIDENCE)
         for listed in ("AC2", "ac2"):
             with self.subTest(listed=listed):
                 result = self.kept_whole(plan, self.retyped(plan, criteria_edited=[listed]),
                                          review=self.naming("the second criterion names no deploy"))
                 self.assertNotIn("criteria_edited", result["cont"]["plan"])
+
+    def test_a_text_rewritten_to_fix_a_finding_and_listed_reaches_the_final_review(self):
+        """#951: the question is about the text, the member restored, so a text-only fix is listed and kept."""
+        plan = with_criteria(EVIDENCE)
+        fixed = dict(plan, acceptance=[plan["acceptance"][0], dict(EVIDENCE, text=self.REWORDED)])
+        replies = {"plan": plan, "plan-review": self.naming("the second criterion names no deploy window")}
+        out = run_out(replies=dict(replies, **{"plan-revise": dict(fixed, criteria_edited=["AC2"])}), patch=self.OPEN)
+        self.assertEqual(labels(out["calls"]).count("plan-rules-review"), 1)
+        self.assertEqual(out["result"]["acceptance"], fixed["acceptance"])
+        self.assertIn(self.REWORDED, prompt(out["calls"], "final-1"))
+        stopped = self.kept_whole(plan, dict(fixed, criteria_edited=["AC2"]), review=replies["plan-review"])
+        self.assertEqual(stopped["cont"]["plan"]["acceptance"][1]["text"], self.REWORDED)
+
+    def test_a_text_typed_again_with_an_empty_list_is_restored_and_the_rules_rereview_is_skipped(self):
+        plan = with_criteria(EVIDENCE)
+        retyped = dict(plan, acceptance=[plan["acceptance"][0], dict(EVIDENCE, text="deployed to the host")], criteria_edited=[])
+        out = run_out(replies={"plan": plan, "plan-revise": retyped, "plan-review": self.naming("the second criterion names no deploy window"),
+                               "plan-rules-review": self.LEFT}, patch=self.OPEN)
+        self.assertNotIn("plan-rules-review", labels(out["calls"]))
+        self.assertEqual(len([line for line in out["logs"] if self.SKIPPED in line]), 1)
+        self.assertEqual(out["result"]["acceptance"], plan["acceptance"])
+        self.assertNotIn("deployed to the host", prompt(out["calls"], "final-1"))
+
+    def test_a_rule_finding_keeps_the_revised_text_whatever_the_list_says(self):
+        """A finding that names a rule restores nothing: the rules re-review judges the text the revise returned."""
+        plan = with_criteria(EVIDENCE)
+        for name, review, more in (("claude", PlanRulesTest.RULE_FINDING, {}),
+                                   ("codex", self.BARE, {"plan-codex": {"available": True, **PlanRulesTest.RULE_FINDING}})):
+            with self.subTest(source=name):
+                self.kept_whole(plan, self.retyped(plan, criteria_edited=[]), review=review, **more)
 
     def test_the_edited_list_survives_a_branch_revise_after_the_revise(self):
         # The plan-revise reply names its branch wrongly, so the branch revise's reply (not asked for the list) replaces it.
@@ -2099,8 +2129,9 @@ class RulesRereviewSkipTest(unittest.TestCase):
 
     def test_the_revise_asks_which_criteria_it_edited(self):
         out = run_out(replies={"plan": PLAN, "plan-revise": PLAN, "plan-review": self.BARE}, patch=self.OPEN)
-        self.assertIn("criteria_edited: the ids of the criteria whose row in plan.md's acceptance section you changed in this revision "
-                      "(an empty list when you changed none): ", prompt(out["calls"], "plan-revise"))
+        self.assertIn("criteria_edited: the ids of the criteria whose text you changed to fix a finding (typing the same criterion "
+                      "again in other words is not a change; an empty list when you changed none): ", prompt(out["calls"], "plan-revise"))
+        self.assertNotIn("plan.md's acceptance section", prompt(out["calls"], "plan-revise"))
         self.assertNotIn("wording you changed", prompt(out["calls"], "plan-revise"))
         self.assertNotIn("criteria_edited", prompt(out["calls"], "plan"))
         self.assertEqual(schema_of(out["calls"], "plan-revise")["properties"]["criteria_edited"]["items"]["type"], "string")
@@ -5175,7 +5206,7 @@ class FixDiffFindingTest(unittest.TestCase):
                 self.assertEqual(waves(calls), ThirdFixWaveTest.THREE[:4])
                 second = prompt(calls, "fix-wave-2")
                 self.assertIn("leak ", second)
-                self.assertIn("They follow the fix of these first-round findings (one not marked narrowing is a defect in a file "
+                self.assertIn("They follow the fix of these first-round findings (any not marked narrowing is a defect in a file "
                               "the previous fix wave changed): ", second)
                 self.assertNotIn("They narrow", second)
                 self.assertEqual(len([line for line in out["logs"] if "are in files fix wave 1 changed; they get the next wave" in line]), 1)

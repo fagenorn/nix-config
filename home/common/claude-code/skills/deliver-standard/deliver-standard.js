@@ -841,7 +841,7 @@ const PLAN_SELF_CHECK = `Also before you return: run every grep or deny gate a t
 // No subagent grant: the Agent tool does not exist inside a workflow agent.
 const PLAN_LOOKUPS = `Procedure for this step. Look things up in rounds: put every open question's Bash or Read call in the same message as the others (several tool calls per message, never one small lookup per turn), send at least four lookups in each exploration message and start writing by your twelfth message. No subagent can be dispatched: the Agent tool does not exist in this step. Check against the tree yourself every path and symbol you write into a task.`
 const PLAN_WRITES = `Then write the code map, plan.md and every task file as parallel Write calls in one message (a second message only if the output limit forces it), then run any checks in one message.`
-const PLAN_EDITS = `This is a revision: first load plan.md, every task file and the code map with one command (cat ${setup.plan_dir}/*.md), then fix the findings with Edit in place, the independent Edit calls in one message; rewrite a whole file only when most of it changes; leave each acceptance criterion's text unchanged unless a finding names it. Then run any checks in one message.`
+const PLAN_EDITS = `This is a revision: first load plan.md, every task file and the code map with one command (cat ${setup.plan_dir}/*.md), then fix the findings with Edit in place, the independent Edit calls in one message; rewrite a whole file only when most of it changes; leave each acceptance criterion's text unchanged unless fixing a finding requires changing it. Then run any checks in one message.`
 const FACTS = present(setup.details) ? `\nSetup facts: ${setup.details}` : ''
 const KIND_GUIDE = `kind code if a test or command in this repo can show it, evidence if it needs a deploy, an activation or observation over time, human if only the user can judge, note if a decision makes a post-deploy reading the orchestrator's own observation or not a hold (no verify member, no script and no metric, R9 of ~/.agents/standards/acceptance-planning.md)`
 // #746 trial: only this plan step asks for test cases; writing-plans keeps full test code for its other callers until the trial reports.
@@ -1100,9 +1100,10 @@ Re-check only the acceptance criteria of the revised plan at ${plan.plan_root} a
 const ruleFacts = p => canon(p.acceptance.map(a => [a.id, a.text === undefined ? null : a.text, a.kind, a.metric === true, a.verify === undefined ? null : a.verify]))
 // #819: the criterion text lives only in the issue and the planner's reply (plan.md maps ids, it holds no text), and a planner retypes
 // every criterion it returns. The candidate gives each criterion that existed before and that the revise does not list as edited
-// (ids compared without case) its earlier text; the caller takes it whole or not at all. #951: the revise is asked for the criteria
-// whose row in plan.md's acceptance section it changed, so an empty list says the section is untouched, and a finding that names a
-// criterion no longer keeps its retyped text (in 6 of 9 measured re-reviews that was the only blocker, with no wording changed).
+// (ids compared without case) its earlier text; the caller takes it whole or not at all. #951: the revise is asked about the member
+// that is restored, the criterion's text (plan.md's rows hold none), and for a change made to fix a finding, not a retyping; a text
+// rewritten to fix a finding is listed and so kept. A finding that names a criterion no longer keeps its retyped text (in 6 of 9
+// measured re-reviews that was the only blocker, with no wording changed).
 const keepUnlistedText = (before, after, edited) => after.map(a => {
   const was = a && typeof a.id === 'string' && a.id ? before.find(b => b && b.id === a.id) : null
   if (!was || typeof was.text !== 'string' || was.text === a.text || edited.includes(a.id.toLowerCase())) return a
@@ -1156,7 +1157,7 @@ Review the implementation plan at ${plan.plan_root} (and its task files) against
   if (planFindings.length) {
     log(`plan review: ${planFindings.length} blocking findings, revising once`)
     const reviewedFacts = ruleFacts(plan), reviewedCriteria = plan.acceptance
-    const revised = await call(planPrompt(`\n${MAP_FIRST} A reviewer found these defects in your plan at ${plan.plan_root}; fix them in place and return the full result again, with criteria_edited: the ids of the criteria whose row in plan.md's acceptance section you changed in this revision (an empty list when you changed none): ${JSON.stringify(planFindings)}`), { label: 'plan-revise', phase: 'Plan', agentType: 'planner', schema: PLAN_SCHEMA })
+    const revised = await call(planPrompt(`\n${MAP_FIRST} A reviewer found these defects in your plan at ${plan.plan_root}; fix them in place and return the full result again, with criteria_edited: the ids of the criteria whose text you changed to fix a finding (typing the same criterion again in other words is not a change; an empty list when you changed none): ${JSON.stringify(planFindings)}`), { label: 'plan-revise', phase: 'Plan', agentType: 'planner', schema: PLAN_SCHEMA })
     const halted = await takePlan(revised, 'plan-revise')
     if (halted) return { ...halted, findings: planFindings }
     // #819: the restored candidate replaces the reply only when it makes the skip below fire; a renumbered, reused or duplicated id,
@@ -1398,7 +1399,7 @@ if (finalFindings.length) {
     const rvLabel = k === 1 ? 'fix-wave-review' : `fix-wave-review-${k}`
     log(`final review: ${waveFindings.length} blocking findings, fix wave ${k}`)
     fixWaves++
-    const fw = await call(`${CTX}\n${PLAN_REF} Fix these final-review findings, each real defect with a regression test, then commit: ${JSON.stringify(waveFindings)}.${k === 1 && fromStop.length ? ` The last ${fromStop.length} were left open by an earlier run's fix waves and may repeat the ones before them: check each against the current head, and explain one that no longer holds in notes; when you commit nothing, return commit equal to start_head.` : ''}${k >= 2 ? ` They ${regressions ? 'follow the fix of' : 'narrow'} these first-round findings${regressions ? ' (one not marked narrowing is a defect in a file the previous fix wave changed)' : ''}: ${JSON.stringify(finalFindings)}.` : ''}${k === 3 ? ' Fix the class of defect: enumerate every path of the same kind as each reported one and close them all, not only the reported instance.' : ''} If a finding is wrong, explain with evidence in notes. ${FIX_TESTS} ${COMMIT_SCOPE} ${hasBranches ? IMPL_RETURN_AT(W) : IMPL_RETURN} Also return changed_files: the output lines of ${CHANGED_CMD('<start_head>..<commit>')}, run alone after your last commit.${hasBranches ? ` A finding on a declared branch is fixed in that branch's worktree and pushed with its push form. Return branch_heads: one {name, head} per declared branch (${declared(plan).map(b => b.name).join(', ')}), head being git -C <its worktree> rev-parse HEAD after your last commit.` : ''}\n${RULES}`, { label: fwLabel, phase: 'Final review', agentType: 'implementer', model: 'sonnet', schema: withChanged(hasBranches ? FIX_WAVE_IMPL : IMPL) })
+    const fw = await call(`${CTX}\n${PLAN_REF} Fix these final-review findings, each real defect with a regression test, then commit: ${JSON.stringify(waveFindings)}.${k === 1 && fromStop.length ? ` The last ${fromStop.length} were left open by an earlier run's fix waves and may repeat the ones before them: check each against the current head, and explain one that no longer holds in notes; when you commit nothing, return commit equal to start_head.` : ''}${k >= 2 ? ` They ${regressions ? 'follow the fix of' : 'narrow'} these first-round findings${regressions ? ' (any not marked narrowing is a defect in a file the previous fix wave changed)' : ''}: ${JSON.stringify(finalFindings)}.` : ''}${k === 3 ? ' Fix the class of defect: enumerate every path of the same kind as each reported one and close them all, not only the reported instance.' : ''} If a finding is wrong, explain with evidence in notes. ${FIX_TESTS} ${COMMIT_SCOPE} ${hasBranches ? IMPL_RETURN_AT(W) : IMPL_RETURN} Also return changed_files: the output lines of ${CHANGED_CMD('<start_head>..<commit>')}, run alone after your last commit.${hasBranches ? ` A finding on a declared branch is fixed in that branch's worktree and pushed with its push form. Return branch_heads: one {name, head} per declared branch (${declared(plan).map(b => b.name).join(', ')}), head being git -C <its worktree> rev-parse HEAD after your last commit.` : ''}\n${RULES}`, { label: fwLabel, phase: 'Final review', agentType: 'implementer', model: 'sonnet', schema: withChanged(hasBranches ? FIX_WAVE_IMPL : IMPL) })
     // The carried findings outlive only a wave that gave no reply: one that answered and failed has had them, and the resume's fresh review decides.
     const spent = details => {
       if (fw && carried.length) { log(`fix-wave: ${carried.length} carried finding(s) dropped after a wave that answered and failed`); carried = [] }
@@ -1421,7 +1422,7 @@ if (finalFindings.length) {
     carried = []
     const next = findingsOf(rv)
     if (!next.length) break
-    const inFix = idle ? [] : changedBy(fw).filter(p => changedBy(rv).includes(p))
+    const inFix = changedBy(fw).filter(p => changedBy(rv).includes(p))
     const fresh = next.filter(f => f.relation !== 'narrowing')
     const narrow = fresh.every(f => fileOf(f) && inFix.includes(fileOf(f)))
     // A wave that committed nothing earns no further wave: what its re-review still holds stops.
