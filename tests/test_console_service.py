@@ -1143,6 +1143,31 @@ class DeliveryTest(Case):
         second = self.start(session_poll_seconds=3600, clock=lambda: self.now)
         self.assertEqual(self.sprint_of(second), shown)
 
+    def test_a_run_that_completes_while_the_console_is_down_leaves_its_close_out_on_the_sprint(self):
+        sid = self.svc.state_goal("owner/p00", "make the importer resumable")
+        secret = sprints.read_secret(self.store.with_name(sprints.SECRETS_DIR), sid)
+        self.svc.send_brief(sid, secret, PARTS)
+        self.svc.approve_brief("owner/p00", sid, 1)
+        self.svc.send_report(sid, secret, {
+            "status": "one slice is queued", "phase": "running", "milestone": "Importer resumes",
+            "tracker_url": "https://github.com/owner/p00/milestone/3",
+            "issues": [{"issue": 858, "stage": "queued"}], "inbox": [],
+            "next": "start the resume slice"})
+        self.write(10)
+        self.svc.poll_deliveries()
+        self.assertEqual(self.sprint_of(self.svc)["issues"][0]["stage"], "building")
+        self.svc.close()
+        self.now += 60
+        self.write(len(self.lines), 10, "a")
+        record = self.root / "projects/-srv-p00" / self.sid / "workflows/wf_t1.json"
+        record.parent.mkdir(parents=True)
+        record.write_text("{}")
+        second = self.start(session_poll_seconds=3600, clock=lambda: self.now)
+        second.poll_deliveries()
+        self.assertEqual(len(self.rows("delivery.gone")), 1)
+        self.assertEqual(self.sprint_of(second)["issues"], [
+            {"issue": 858, "stage": "closed out", "stage_text": "closed out"}])
+
     def test_an_unchanged_journal_appends_nothing(self):
         self.write(10)
         for _ in range(3):

@@ -1272,9 +1272,10 @@ class ConsoleService:
                 key = (sid, journal.parent.name)
                 path = str(journal)
                 final = deliveries.has_final_record(journal)
-                # A run that ended between two polls is read once more, so its close-out reaches the
-                # log as the run's last observation before the run leaves.
-                ended = final is True and journal in self._runs
+                # A run that ended between two polls, or while the console was down (the log still
+                # holds it), is read once more, so its close-out reaches the log as the run's last
+                # observation before the run leaves.
+                ended = final is True and (journal in self._runs or key in folded)
                 if final is True and not ended:
                     self._reader.forget(journal)
                     self._unreadable.discard(path)
