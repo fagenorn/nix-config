@@ -201,8 +201,11 @@ function untouchedDays(lastActivity) {
   return Number.isFinite(days) && days >= 1 ? days : 0;
 }
 const withdrawals = new Map();
+const latestSprints = new Map();
 function fillSprint(item, entry, sprint) {
   const state = withdrawals.get(sprint.sprint_id);
+  latestSprints.set(sprint.sprint_id, { entry, sprint });
+  item.dataset.sprintId = sprint.sprint_id;
   item.replaceChildren();
   item.appendChild(el("span", "goal-line", sprint.goal));
   item.appendChild(el("span", "sprint-state", sprint.state_text));
@@ -244,7 +247,10 @@ async function withdraw(item, entry, sprint) {
     state.phase = "failed";
     state.reason = reason;
   }
-  fillSprint(item, entry, sprint);
+  const latest = latestSprints.get(id);
+  for (const row of document.querySelectorAll("li.sprint")) {
+    if (row.dataset.sprintId === id) fillSprint(row, latest.entry, latest.sprint);
+  }
 }
 function sprintList(entry) {
   const list = el("ul", "sprints");
@@ -625,6 +631,9 @@ function renderProjects(view) {
   for (const id of [...withdrawals.keys()]) {
     if (!live.has(id)) withdrawals.delete(id);
   }
+  for (const id of [...latestSprints.keys()]) {
+    if (!live.has(id)) latestSprints.delete(id);
+  }
   for (const entry of view.entries) {
     if (entry.type === "quiet_group") {
       const fold = el("details", "quietfold");
@@ -662,7 +671,7 @@ function renderUnmanaged(view) {
   section.appendChild(list);
 }
 const MAX_GOAL = 2000;
-const draft = { open: false, filter: "", text: "", project: null, phase: "idle", reason: "" };
+const draft = { open: false, filter: "", text: "", project: null, phase: "idle", reason: "", rev: 0 };
 let goalUi = null;
 let recentProjects = [];
 function goalMatches() {
@@ -680,6 +689,7 @@ function refreshGoalList() {
   const items = goalMatches().map((id) => {
     const button = actionButton(id === chosen ? "goal-project picked" : "goal-project", id, () => {
       draft.project = id;
+      draft.rev += 1;
       refreshGoalList();
     });
     const row = el("li");
@@ -713,6 +723,7 @@ async function sendGoal() {
     return;
   }
   draft.phase = "sending";
+  const sentRev = draft.rev;
   showGoalReason();
   if (goalUi !== null) goalUi.send.disabled = true;
   let reason = null;
@@ -732,11 +743,13 @@ async function sendGoal() {
   draft.phase = "idle";
   if (goalUi !== null) goalUi.send.disabled = false;
   if (reason === null) {
-    draft.filter = "";
-    draft.text = "";
-    draft.project = null;
     draft.reason = "";
-    if (draft.open) closeGoal();
+    if (draft.rev === sentRev) {
+      draft.filter = "";
+      draft.text = "";
+      draft.project = null;
+      if (draft.open) closeGoal();
+    } else showGoalReason();
   } else {
     draft.reason = reason;
     showGoalReason();
@@ -751,6 +764,7 @@ function buildGoalBox(section) {
   filter.value = draft.filter;
   filter.addEventListener("input", (event) => {
     draft.filter = event.target.value;
+    draft.rev += 1;
     refreshGoalList();
   });
   const list = el("ul", "goal-projects");
@@ -758,7 +772,10 @@ function buildGoalBox(section) {
   text.setAttribute("aria-label", "Goal");
   text.setAttribute("placeholder", "What should the next sprint achieve?");
   text.value = draft.text;
-  text.addEventListener("input", (event) => { draft.text = event.target.value; });
+  text.addEventListener("input", (event) => {
+    draft.text = event.target.value;
+    draft.rev += 1;
+  });
   const status = el("div", "goal-status");
   const send = actionButton("goal-send", "Send", sendGoal);
   const act = el("div", "goal-act");

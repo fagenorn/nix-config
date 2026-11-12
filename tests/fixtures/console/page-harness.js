@@ -8,7 +8,9 @@
 // {click: "<class>"} (the click listeners of the first attached element with
 // that class; none throws), {respond: {status, text}} (queues the answer of
 // the next fetch but /api/looked, default 204 with no text) and
-// {fail_fetch: true} (the next such fetch rejects). The goal field adds
+// {fail_fetch: true} (the next such fetch rejects). {hold: true} makes the next
+// such fetch stay pending until a later {release: {status, text}} answers the
+// oldest held fetch (release with none held throws). The goal field adds
 // {input: {cls, value}} (the first attached element with that class gets
 // .value, then its input listeners run with {type: "input", target}; none
 // throws) and {focus_on: "<class>"} (calls .focus() on the first attached
@@ -194,6 +196,7 @@ function fire(target, name, extra) {
 const window = { addEventListener: listen("window") };
 const posts = [];
 const replies = [];
+const held = [];
 function fetch(url, options) {
   const post = {
     url, method: options.method, headers: options.headers, keepalive: options.keepalive,
@@ -203,10 +206,14 @@ function fetch(url, options) {
   if (url === "/api/looked") return Promise.resolve({});
   const reply = replies.length > 0 ? replies.shift() : { status: 204, text: "" };
   if (reply.reject) return Promise.reject(new Error("the console did not answer"));
-  return Promise.resolve({
+  if (reply.hold) return new Promise((resolve) => held.push(resolve));
+  return Promise.resolve(answer(reply));
+}
+function answer(reply) {
+  return {
     status: reply.status, ok: reply.status >= 200 && reply.status < 300,
     text: () => Promise.resolve(reply.text),
-  });
+  };
 }
 
 const timers = new Map();
@@ -326,6 +333,11 @@ async function run() {
       replies.push(step.respond);
     } else if ("fail_fetch" in step) {
       replies.push({ reject: true });
+    } else if ("hold" in step) {
+      replies.push({ hold: true });
+    } else if ("release" in step) {
+      if (held.length === 0) throw new Error("no held fetch to release");
+      held.shift()(answer({ status: 204, text: "", ...step.release }));
     } else if (step.focus) {
       state.focused = true;
       fire("window", "focus");

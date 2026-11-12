@@ -1158,3 +1158,50 @@ class PageGoalTest(unittest.TestCase):
             [full(n) for n in nodes(line) if has_class(n, "fail")],
             ["Could not withdraw: this sprint is not open"],
         )
+
+
+class PageInFlightTest(unittest.TestCase):
+    def test_a_goal_edited_while_sending_survives_the_answer(self) -> None:
+        (snap,) = render([
+            START, {"frame": GOAL_FRAME}, {"key": "g"},
+            {"input": {"cls": "goal-filter", "value": "alpha"}},
+            {"input": {"cls": "goal-text", "value": GOAL_TEXT}},
+            {"hold": True}, {"click": "goal-send"},
+            {"input": {"cls": "goal-text", "value": GOAL_TEXT + " and then verifiable"}},
+            {"release": {"status": 204}}, {"snapshot": True},
+        ])
+        self.assertTrue(box_open(snap))
+        (text_node,) = goal_named(snap, "goal-text")
+        self.assertEqual(text_node["value"], GOAL_TEXT + " and then verifiable")
+        self.assertEqual(goal_fail(snap), [])
+
+    def test_a_goal_reopened_and_edited_while_sending_survives_the_answer(self) -> None:
+        closed, snap = render([
+            START, {"frame": GOAL_FRAME}, {"key": "g"},
+            {"input": {"cls": "goal-text", "value": GOAL_TEXT}},
+            {"hold": True}, {"click": "goal-send"}, {"key": "Escape"}, {"snapshot": True},
+            {"key": "g"}, {"input": {"cls": "goal-text", "value": "a second thought"}},
+            {"release": {"status": 204}}, {"snapshot": True},
+        ])
+        self.assertFalse(box_open(closed))
+        self.assertTrue(box_open(snap))
+        (text_node,) = goal_named(snap, "goal-text")
+        self.assertEqual(text_node["value"], "a second thought")
+
+    def test_a_withdrawal_failing_after_a_new_view_shows_on_the_visible_row(self) -> None:
+        sending, failed = render([
+            START, {"frame": with_sprints([SPRINT])}, {"hold": True}, {"click": "withdraw"},
+            {"frame": with_sprints([SPRINT])}, {"snapshot": True},
+            {"release": {"status": 409, "text": "this sprint is not open\n"}},
+            {"snapshot": True},
+        ])
+        (line,) = sprint_lines(sending)
+        (button,) = [n for n in nodes(line) if has_class(n, "withdraw")]
+        self.assertTrue(button["disabled"])
+        (line,) = sprint_lines(failed)
+        (button,) = [n for n in nodes(line) if has_class(n, "withdraw")]
+        self.assertFalse(button["disabled"])
+        self.assertEqual(
+            [full(n) for n in nodes(line) if has_class(n, "fail")],
+            ["Could not withdraw: this sprint is not open"],
+        )
