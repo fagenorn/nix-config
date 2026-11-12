@@ -41,7 +41,7 @@ const document = {
   createElement: (tag) => new Node(tag),
   getElementById(id) {
     if (!ids.has(id)) return null;
-    if (id === "quiet-icon") {
+    if (id.endsWith("-icon")) {
       return {content: {firstElementChild: {cloneNode: () => new Node("svg")}}};
     }
     if (!(id in ELEMENTS)) ELEMENTS[id] = new Node("div");
@@ -1565,6 +1565,118 @@ class PageInboxGlanceTest(unittest.TestCase):
         self.assertFalse(fold["open"])
         self.assertIn("Show the check", visible_text(closed["inbox"]))
         self.assertIn("/srv/p00/deploy.sh", visible_text(opened["inbox"]))
+
+
+class PageCardTest(unittest.TestCase):
+    def test_the_first_open_item_is_one_card_for_each_kind(self) -> None:
+        cases = [
+            ([ANSWERABLE], "Decision", "owner/p00", "Which host?", "Send answer", True),
+            ([BRIEF], "Brief", "owner/p01", "owner/p01 brief, version 2", "Approve", True),
+            ([check_item("M", "manual-check")], "Check", "owner/p00", "Question M?", "Passed", False),
+            ([check_item("L", "approval")], "Approval", "owner/p00", "Question L?", "Approve", False),
+        ]
+        for open_items, word, project, heading, label, enter in cases:
+            with self.subTest(kind=word):
+                (snap,) = render([START, {"frame": frame(open_items)}, {"snapshot": True}])
+                card = snap["inbox"]["children"][0]
+                self.assertEqual(card["tag"], "article")
+                self.assertTrue(has_class(card, "card") and has_class(card, "lead"))
+                self.assertEqual([n for n in nodes(snap["inbox"]) if has_class(n, "lead")], [card])
+                (head,) = [n for n in nodes(card) if n["tag"] == "h2" and has_class(n, "q")]
+                self.assertEqual(full(head), heading)
+                (top,) = [n for n in nodes(card) if n["tag"] == "p" and has_class(n, "head")]
+                (kind,) = [n for n in nodes(top) if has_class(n, "kind")]
+                self.assertEqual(full(kind), word)
+                self.assertIn("svg", [c["tag"] for c in kind["children"]])
+                self.assertIn(project, full(top))
+                self.assertIn("waiting ", full(top))
+                primaries = [n for n in nodes(card) if has_class(n, "primary")]
+                self.assertEqual(len(primaries), 1)
+                self.assertEqual(primaries[0]["tag"], "button")
+                self.assertEqual(primaries[0]["text"], label)
+                self.assertEqual([full(c) for c in primaries[0]["children"] if c["tag"] == "kbd"],
+                                 ["Enter"] if enter else [])
+
+    def test_the_lead_card_holds_its_held_work_under_the_options_and_its_link_under_detail(self) -> None:
+        lead = item("A", held_work=3, headline="Which host?", questions=ANSWERABLE["questions"])
+        (snap,) = render([START, {"frame": frame([lead])}, {"snapshot": True}])
+        card = snap["inbox"]["children"][0]
+        flat = nodes(card)
+        opts = next(i for i, n in enumerate(flat) if has_class(n, "opts"))
+        held = next(i for i, n in enumerate(flat) if has_class(n, "held"))
+        primary = next(i for i, n in enumerate(flat) if has_class(n, "primary"))
+        self.assertLess(opts, held)
+        self.assertLess(held, primary)
+        self.assertEqual(full(flat[held]), "holds 3 issues")
+        (link,) = [n for n in flat if n["tag"] == "a"]
+        self.assertTrue(has_class(link, "answer"))
+        (fold,) = [n for n in flat if n["tag"] == "details"]
+        self.assertEqual(fold["key"], "detail:owner/p00#A")
+        self.assertIn(id(link), {id(n) for n in nodes(fold)})
+        (summary,) = [c for c in fold["children"] if c["tag"] == "summary"]
+        self.assertEqual(full(summary), "Detail")
+        self.assertNotIn("Answer on the tracker", visible_text(card))
+
+    def test_a_card_without_a_page_answer_makes_its_tracker_link_primary(self) -> None:
+        conflict = item("K", reason="conflict", items=["Rebase onto main."],
+                        waiting_since="2026-11-10T07:00:00+00:00")
+        (snap,) = render([START, {"frame": frame([conflict, ANSWERABLE])}, {"snapshot": True}])
+        card = snap["inbox"]["children"][0]
+        (kind,) = [n for n in nodes(card) if has_class(n, "kind")]
+        self.assertEqual(full(kind), "Conflict")
+        (primary,) = [n for n in nodes(card) if has_class(n, "primary")]
+        self.assertEqual(primary["tag"], "a")
+        self.assertTrue(has_class(primary, "answer"))
+        self.assertEqual(primary["text"], "Answer on the tracker")
+        self.assertEqual([n for n in nodes(card) if n["key"] == "detail:owner/p00#K"], [])
+        entered = [n for n in nodes(snap["inbox"]) if n["tag"] == "button"
+                   and any(c["tag"] == "kbd" and full(c) == "Enter" for c in n["children"])]
+        self.assertEqual([n["text"] for n in entered], ["Send answer"])
+        self.assertFalse(has_class(entered[0], "primary"))
+
+    def test_with_a_brief_waiting_the_brief_is_the_one_raised_card(self) -> None:
+        (snap,) = render([START, {"frame": frame([BRIEF, ANSWERABLE])}, {"snapshot": True}])
+        leads = [n for n in nodes(snap["inbox"]) if has_class(n, "lead")]
+        self.assertEqual(len(leads), 1)
+        self.assertTrue(has_class(leads[0], "brief"))
+        articles = [n for n in nodes(snap["inbox"]) if n["tag"] == "article"]
+        self.assertTrue(articles)
+        self.assertTrue(all(has_class(n, "brief") for n in articles))
+
+    def test_the_primary_style_outranks_the_button_base_rules(self) -> None:
+        text = PAGE.read_text(encoding="utf-8")
+        rules = []
+        for body in re.findall(r"(?s)<style>(.*?)</style>", text):
+            css = re.sub(r"(?s)/\*.*?\*/", "", body)
+            for selectors, rule in re.findall(r"([^{}]+)\{([^{}]*)\}", css):
+                names = [d.partition(":")[0].strip() for d in rule.split(";") if d.strip()]
+                for selector in selectors.split(","):
+                    rules.append((" ".join(selector.split()), names))
+
+        def spec(selector: str) -> tuple:
+            selector = re.sub(r"::[\w-]+", "", selector)
+            b = len(re.findall(r"\[[^\]]*\]", selector))
+            rest = re.sub(r"\[[^\]]*\]", "", selector)
+            a = len(re.findall(r"#[\w-]+", rest))
+            rest = re.sub(r"#[\w-]+", "", rest)
+            b += len(re.findall(r"\.[\w-]+", rest)) + len(re.findall(r":[\w-]+", rest))
+            c = sum(1 for t in re.split(r"[\s>+~]+", rest) if t[:1].isalpha())
+            return (a, b, c)
+
+        self.assertEqual(spec('.abox button[class^="ans-"]'), (0, 2, 1))
+        self.assertEqual(spec(".act .primary.needs:hover:enabled"), (0, 5, 0))
+        for state in ("", ":hover:enabled", ":disabled"):
+            with self.subTest(state=state):
+                mine = [s for s, names in rules if s.endswith(".primary.needs" + state) and "background" in names]
+                bases = (".send", ".approve", ".answer", 'button[class^="ans-"]')
+                rivals = [s for s, _ in rules if any(s.endswith(base + state) for base in bases)]
+                self.assertTrue(mine)
+                self.assertTrue(rivals)
+                self.assertGreater(min(spec(s) for s in mine), max(spec(s) for s in rivals))
+                if state == "":
+                    declared = [names for s, names in rules if s in mine]
+                    for prop in ("background", "color", "border", "padding", "border-radius"):
+                        self.assertTrue(any(prop in names for names in declared), prop)
 
 
 class PageDigestTest(unittest.TestCase):
