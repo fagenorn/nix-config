@@ -1,0 +1,7 @@
+#!/bin/sh
+# Verify check for issue 970: the console host checks leave no test manager's session record.
+# Runs each host check (manager start, owner message, bring-back) on this project's own state and
+# result files, one per run, then reads every profile's full session listing and reports not met
+# when a record named for a test sprint is still listed.
+# Exit 0 met, 1 not met, 75 not yet. Run from the repository root at the block's commit.
+PYTHONPATH=python exec python3 -m agent_tools.console.cleanup_check "$@"
