@@ -507,6 +507,7 @@ RUN = {
     "quiet": False,
     "moved_text": "moved 3 min ago",
     "summary": "2 issues in delivery: 1 building, 1 plan review, moved 3 min ago",
+    "moved_at": "2026-11-11T11:57:00+00:00",
     "issues": [
         {"issue": 856, "stage": "building", "stage_text": "building task 3 of 5"},
         {"issue": 857, "stage": "plan review", "stage_text": "plan review"},
@@ -533,12 +534,13 @@ class PageRenderTest(unittest.TestCase):
 
     def test_a_sessions_deliveries_render_their_stage_in_plain_words(self) -> None:
         entry = project(0, [session("s1", "working", "working", deliveries=[RUN])])
-        (snap,) = render([{"frame": view([entry])}, {"open": "line:owner/p00"},
+        (snap,) = render([{"start": {"focused": False, "clock": NOW_MS}},
+                          {"frame": view([entry])}, {"open": "line:owner/p00"},
                           {"snapshot": True}])
         (runs,) = [n for n in nodes(snap["projects"]) if "runs" in n["cls"].split()]
         (run,) = [n for n in nodes(snap["projects"]) if "run" in n["cls"].split()]
         self.assertEqual(
-            [c["text"] for c in run["children"]],
+            [full(c) for c in run["children"]],
             ["#856", "building task 3 of 5", "#857", "plan review", "moved 3 min ago"],
         )
         (moved,) = [n for n in nodes(run) if "moved" in n["cls"].split()]
@@ -547,16 +549,18 @@ class PageRenderTest(unittest.TestCase):
         self.assertEqual([c["children"] for c in runs["children"]][0], run["children"])
 
     def test_a_quiet_run_says_quiet_and_never_stalled(self) -> None:
-        quiet = dict(RUN, quiet=True, moved_text="quiet for 22 min")
+        quiet = dict(RUN, quiet=True, moved_text="quiet for 22 min",
+                     moved_at="2026-11-11T11:38:00+00:00")
         entry = project(0, [session("s1", "working", "working", deliveries=[quiet])])
-        (snap,) = render([{"frame": view([entry])}, {"open": "line:owner/p00"},
+        (snap,) = render([{"start": {"focused": False, "clock": NOW_MS}},
+                          {"frame": view([entry])}, {"open": "line:owner/p00"},
                           {"snapshot": True}])
         (moved,) = [
             n
             for n in nodes(snap["projects"])
             if {"moved", "quiet"} <= set(n["cls"].split())
         ]
-        self.assertEqual(moved["text"], "quiet for 22 min")
+        self.assertEqual(full(moved), "quiet for 22 min")
         self.assertNotIn("stalled", text(snap["projects"]).lower())
 
     def test_a_session_without_deliveries_renders_no_runs(self) -> None:
@@ -783,6 +787,35 @@ class PageTimeTest(unittest.TestCase):
         }
         for words, title in expected.items():
             self.assertEqual(seen.get(words), title, words)
+
+    def test_a_delivery_age_reads_from_its_movement_time_and_moves_with_the_clock(self) -> None:
+        moving = {**RUN, "moved_at": "2026-11-11T11:57:00+00:00"}
+        quiet = {**RUN, "run_id": "wf_q", "quiet": True, "moved_text": "quiet for 22 min",
+                 "summary": "No issue in delivery yet, quiet for 22 min", "issues": [],
+                 "moved_at": "2026-11-11T11:38:00+00:00"}
+        entry = project(0, [session("s1", "working", "working", deliveries=[moving, quiet])])
+        entry["outside_sprints"]["summary"] = "1 working"
+        before, after = render([
+            self.begin, {"frame": view([entry])}, {"open": "line:owner/p00"}, {"snapshot": True},
+            {"clock": NOW_MS + 3 * 3600 * 1000}, {"snapshot": True},
+        ])
+        sums = [n for n in nodes(before["projects"]) if has_class(n, "run-sum")]
+        self.assertEqual(
+            [full(n) for n in sums],
+            ["2 issues in delivery: 1 building, 1 plan review, moved 3 min ago",
+             "No issue in delivery yet, quiet for 22 min"])
+        self.assertEqual([[(t["text"], t["title"]) for t in nodes(n) if t["tag"] == "time"]
+                          for n in sums],
+                         [[("3 min ago", "2026-11-11 11:57")], [("22 min", "2026-11-11 11:38")]])
+        moved = [n for n in nodes(before["projects"]) if has_class(n, "moved")]
+        self.assertEqual([[(t["text"], t["title"]) for t in nodes(n) if t["tag"] == "time"]
+                          for n in moved],
+                         [[("3 min ago", "2026-11-11 11:57")], [("22 min", "2026-11-11 11:38")]])
+        sums = [n for n in nodes(after["projects"]) if has_class(n, "run-sum")]
+        self.assertEqual(
+            [full(n) for n in sums],
+            ["2 issues in delivery: 1 building, 1 plan review, moved 3 h ago",
+             "No issue in delivery yet, quiet for 3 h"])
 
     def test_ages_follow_the_thresholds(self) -> None:
         second, minute, hour = 1000, 60000, 3600000
@@ -1446,6 +1479,44 @@ class PageInboxGlanceTest(unittest.TestCase):
         self.assertIn("chosen: postgres", full(fold))
         self.assertIn("Answer on the tracker", full(fold))
 
+    def test_an_answered_multi_question_item_keeps_its_count_in_the_closed_line(self) -> None:
+        done = item("Z", answered=True, headline="Which database?", more_questions=2,
+                    answered_at="2026-11-11T10:00:00+00:00",
+                    questions=[q("Which database?", ["sqlite", "postgres"]),
+                               q("Which port?", ["80", "8080"]), q("Which host?", ["one", "two"])])
+        one = item("Y", answered=True, headline="Which cache?", more_questions=1,
+                   answered_at="2026-11-11T10:00:00+00:00",
+                   questions=[q("Which cache?", ["redis", "memcached"]),
+                              q("Which size?", ["s", "m"])])
+        (snap,) = render([
+            {"start": {"focused": False, "clock": NOW_MS}},
+            {"frame": frame([], answered=[done, one])}, {"snapshot": True},
+        ])
+        rows = [n for n in nodes(snap["inbox"]) if n["tag"] == "summary"]
+        self.assertEqual(
+            [[full(c) for c in r["children"]] for r in rows],
+            [["Which database?", "and 2 more questions", "answered 2 h ago, waiting for the agent"],
+             ["Which cache?", "and 1 more question", "answered 2 h ago, waiting for the agent"]])
+
+    def test_a_conflict_or_needs_label_item_shows_no_issue_number_until_opened(self) -> None:
+        conflict = item(
+            "C", issue=9, reason="conflict", headline="Landing stopped on a merge conflict.",
+            items=["PR #14 of issue #9 conflicts with main a second time in one landing, so the "
+                   "merge was aborted. Resolve the conflict on the branch, then relaunch the batch."])
+        label = item(
+            "L", issue=11, reason="needs-label", headline="A check needs a label.",
+            items=["PR #15 of issue #11 needs the label deploy, which only the owner applies; "
+                   "the failing checks: build."])
+        closed, opened = render([
+            START, {"frame": frame([conflict, label])}, {"snapshot": True},
+            {"open": "items:owner/p00#C"}, {"open": "items:owner/p00#L"}, {"snapshot": True},
+        ])
+        self.assertIsNone(re.search(r"#\d", visible_text(closed["inbox"])))
+        self.assertIn("Landing stopped on a merge conflict.", visible_text(closed["inbox"]))
+        shown = visible_text(opened["inbox"])
+        self.assertIn("PR #14 of issue #9 conflicts", shown)
+        self.assertIn("PR #15 of issue #11 needs the label", shown)
+
     def test_an_open_answered_line_survives_a_key_redraw(self) -> None:
         done = item("Z", answered=True, headline="Which database?")
         (snap,) = render([
@@ -1898,12 +1969,13 @@ class PageGlanceTest(unittest.TestCase):
         ran = {**RUN, "summary": "2 issues in delivery: 1 building, 1 plan review, moved 3 min ago"}
         entry = project(0, [session("s1", "working", "working", deliveries=[ran])])
         entry["outside_sprints"]["summary"] = "1 working"
-        (snap,) = render([{"frame": view([entry])}, {"snapshot": True}])
+        (snap,) = render([{"start": {"focused": False, "clock": NOW_MS}},
+                          {"frame": view([entry])}, {"snapshot": True}])
         (fold,) = [n for n in nodes(snap["projects"]) if n["key"] == "line:owner/p00"]
         self.assertFalse(fold["open"])
         (summary,) = [c for c in fold["children"] if c["tag"] == "summary"]
         self.assertEqual(
-            [n["text"] for n in visible(summary) if n["text"]],
+            [full(c) for c in summary["children"] if full(c)],
             ["owner/p00", "1 working",
              "2 issues in delivery: 1 building, 1 plan review, moved 3 min ago"],
         )

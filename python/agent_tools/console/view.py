@@ -95,7 +95,7 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
     <session entry> = {"session_id", "name", "state", "state_text", "cwd",
                        "deliveries": [<delivery entry>, ...]}
     <delivery entry> = {"run_id", "quiet": <bool>, "moved_text": "<text>",
-                        "summary": "<one sentence>",
+                        "summary": "<one sentence>", "moved_at": "<ISO time>",
                         "issues": [{"issue": <int>, "stage", "stage_text"}, ...]}
     <unmanaged entry> = {"type": "unmanaged", "root": "<repo>", "name": "<name>",
                          "label": "Not yet managed", "outside_sprints": <line>}
@@ -114,7 +114,8 @@ session's id, newest `moved_ms` first, then `run_id`; each run's issues are orde
 `quiet` and `moved_text` come from `moved_text(now_ms - moved_ms)`; `summary` is the run as one
 sentence, `run_summary(issues, moved_text)`: "<n> issue(s) in delivery: <count> <stage>, ...,
 <moved_text>" with the stages in a fixed order and no issue number, or "No issue in delivery yet,
-<moved_text>" with none. An unmanaged entry's `name` is the last segment of its `root` (the root
+<moved_text>" with none; `moved_at` is the journal's last movement as an ISO UTC time, which lets
+the page age the sentence's end itself. An unmanaged entry's `name` is the last segment of its `root` (the root
 itself when it has none). `now_ms` is injected by the
 caller (this module still reads no clock) and `None` counts as no time elapsed. The runs of an
 ended or unlisted session appear nowhere, and they change no count, summary, order or the
@@ -135,7 +136,7 @@ refused, no newline.
 import json
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import PurePosixPath
 
 from agent_tools.console.capacity import EMPTY
@@ -362,6 +363,7 @@ def _delivery_entry(state: DeliveryState, now_ms: int | None) -> dict:
         "quiet": quiet,
         "moved_text": text,
         "summary": run_summary(state.issues, text),
+        "moved_at": datetime.fromtimestamp(state.moved_ms / 1000, timezone.utc).isoformat(),
         "issues": [
             {"issue": i.issue, "stage": i.stage, "stage_text": stage_text(i)}
             for i in sorted(state.issues, key=lambda i: i.issue)

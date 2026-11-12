@@ -394,9 +394,11 @@ class DeliveryViewTest(unittest.TestCase):
         self.assertEqual(by_id["s1"]["deliveries"], [
             {"run_id": "wf_b", "quiet": False, "moved_text": "moved just now",
              "summary": "1 issue in delivery: 1 queued, moved just now",
+             "moved_at": "1970-01-01T00:00:02+00:00",
              "issues": [{"issue": 860, "stage": "queued", "stage_text": "queued"}]},
             {"run_id": "wf_a", "quiet": False, "moved_text": "moved just now",
              "summary": "2 issues in delivery: 1 building, 1 plan review, moved just now",
+             "moved_at": "1970-01-01T00:00:01+00:00",
              "issues": [
                  {"issue": 856, "stage": "building", "stage_text": "building task 3 of 5"},
                  {"issue": 857, "stage": "plan review", "stage_text": "plan review"}]},

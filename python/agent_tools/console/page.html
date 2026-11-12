@@ -185,6 +185,16 @@ function el(tag, cls, text) {
 function quietIcon() {
   return document.getElementById("quiet-icon").content.firstElementChild.cloneNode(true);
 }
+function movedWords(run, cls) {
+  if (!Number.isFinite(Date.parse(run.moved_at))) return el("span", cls, run.moved_text);
+  return run.quiet ? phrase("span", cls, "quiet for ", timeEl("since", run.moved_at, ""))
+                   : phrase("span", cls, "moved ", timeEl("ago", run.moved_at, ""));
+}
+function runSummary(run) {
+  // The view's sentence ends with its moved text; the page swaps that end for a time it keeps current.
+  const tail = run.summary.endsWith(run.moved_text) ? run.moved_text.length : 0;
+  return phrase("span", "run-sum", run.summary.slice(0, run.summary.length - tail), movedWords(run, ""));
+}
 function lineFold(key, nameNode, words, outside, root) {
   const fold = el("details");
   fold.dataset.key = key;
@@ -193,7 +203,7 @@ function lineFold(key, nameNode, words, outside, root) {
   for (const word of words) summary.appendChild(word);
   if (outside.sessions.length > 0) summary.appendChild(el("span", "", outside.summary));
   for (const session of outside.sessions) {
-    for (const run of session.deliveries || []) summary.appendChild(el("span", "run-sum", run.summary));
+    for (const run of session.deliveries || []) summary.appendChild(runSummary(run));
   }
   fold.appendChild(summary);
   fold.appendChild(el("span", "root", root));
@@ -214,7 +224,7 @@ function lineFold(key, nameNode, words, outside, root) {
           item.appendChild(el("span", "issue", "#" + issue.issue));
           item.appendChild(el("span", "stage", issue.stage_text));
         }
-        item.appendChild(el("span", run.quiet ? "moved quiet" : "moved", run.moved_text));
+        item.appendChild(movedWords(run, run.quiet ? "moved quiet" : "moved"));
         runList.appendChild(item);
       }
       row.appendChild(runList);
@@ -429,9 +439,9 @@ function moreWords(item) {
   if (!(item.more_questions > 0)) return null;
   return el("span", "more", item.more_questions === 1 ? "and 1 more question" : "and " + item.more_questions + " more questions");
 }
-function checkFold(item, words) {
+function checkFold(item, words, prefix) {
   const fold = el("details", "check-more");
-  fold.dataset.key = "check:" + itemId(item);
+  fold.dataset.key = (prefix || "check") + ":" + itemId(item);
   fold.appendChild(el("summary", "", words));
   return fold;
 }
@@ -459,7 +469,11 @@ function appendDetail(node, item, folded) {
   } else if (item.items.length > 0) {
     const list = el("ul", "opts");
     for (const entry of item.items) list.appendChild(el("li", "", entry));
-    node.appendChild(list);
+    if (folded) {
+      const fold = checkFold(item, "Show the details", "items");
+      fold.appendChild(list);
+      node.appendChild(fold);
+    } else node.appendChild(list);
   }
 }
 const UNDO_MS = 5000;
@@ -771,6 +785,8 @@ function answeredLine(item) {
   fold.dataset.key = "answered:" + itemId(item);
   const summary = el("summary");
   summary.appendChild(el("b", "", item.headline));
+  const more = moreWords(item);
+  if (more !== null) summary.appendChild(more);
   summary.appendChild(phrase("span", "when", "answered ", timeEl("ago", item.answered_at || item.waiting_since, ""), ", waiting for the agent"));
   fold.appendChild(summary);
   fold.appendChild(metaLine(item, "p", "meta"));
