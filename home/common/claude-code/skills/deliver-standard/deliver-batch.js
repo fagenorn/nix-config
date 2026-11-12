@@ -1165,23 +1165,33 @@ ${RULES}`, `land-merge-${n}`, { ...lifecycleClerk, schema: withRenew(LAND_MERGE_
 // Rows stay per issue, with the issue's own PR; the row of an issue whose commits the car merged also carries train and car_pr.
 // Invariants. The lock is the first landing's: taken once at H1, never moved by the train, released once by that landing (its close-out, or its
 // wrapper on any other exit). Nothing merges unless every car up to g is green at its exact head. A train never writes to an issue branch and
-// never reads a merge commit. Each issue joins at most one train per run: an issue a train did not land goes to land() in the same drain, never
-// back to WAITING. Any surprise before the merge step (a dead, thrown or malformed step, a conflict, a red or late car) sweeps and falls back to
+// never reads a merge commit. An issue a train did not land never goes back to WAITING: it lands in the same drain through landOne, the
+// ordinary landing start, so the issues waiting when its own lock wait ends ride a train behind it (#971; the #936 rule, unchanged). An issue
+// therefore rides at most TRAIN_RIDES trains per run, one as a later member and then one it leads, and every such train takes at least one
+// issue out of WAITING, which only a child's ready return fills, so the chain of trains ends. Any surprise before the merge step (a dead, thrown or malformed step, a conflict, a red or late car) sweeps and falls back to
 // land(), and so does a merge the forge or the guard refused as behind once a read shows the car still open (the first landing then resyncs
 // and moves the lock as any behind landing does); any other surprise in the merge step stops its members, because the car may be merged.
 const TRAIN_MAX = 3
-// forge_land_lock.py lets another host take over a lock it watched unchanged for IDLE_AFTER, 45 minutes, and a train's lock never changes.
-// The one long wait of a train, its car checks, is therefore bounded below that: TRAIN_CHECKS_WAIT_MIN, plus TRAIN_CHECKS_MORE_MIN once
-// per train when a car is still pending with no failed check at the first cap (#822: a late car is nearly finished CI). The lock cannot be
-// re-asserted (only a changed sha restarts a waiter's watch), so the two waits, 31 minutes, leave 14 of the 45 for everything else that
-// runs before the lock changes: train-pr, train-build, train-ready and train-merge (about five minutes in the first real train) and, when
-// the train falls back (late cars, or a merge refused as behind), the sweep, the forge read and the first landing's resync, since the lock
-// first moves only when that resync pushes a new head. Past that bound nothing unsafe happens, but the train is wasted: a waiter that took
-// the lock over makes train-merge's acquire answer something other than already_held, so nothing merges, and a fallen-back first landing's
-// lock move is refused; the rows end land-contended.
+// forge_land_lock.py lets another host take over a lock it watched unchanged for IDLE_AFTER, 45 minutes, and a train's lock never changes:
+// an acquire at the same sha answers already_held and restarts no waiter's watch. The one long wait of a train is its car checks:
+// TRAIN_CHECKS_WAIT_MIN, plus TRAIN_CHECKS_MORE_MIN once per train when a car is still pending with no failed check at the first cap
+// (#822: a late car is nearly finished CI). #971: the first two real trains needed about 31 minutes of checks, so the first wait is 40 and
+// the further wait stays the fallback. The two waits, 46 minutes, are longer than the idle bound, so every checks step refreshes the lock
+// (forge-claim land refresh, D11 of forge_land_lock.py: it changes a second ref the waiters read, which restarts their watch) at the
+// start of each round of its wait, and a round is TRAIN_REFRESH_MIN at most. The lock is then idle for one round plus the turn around it,
+// about 10 minutes, while a checks step waits; before the first refresh for land-pr's behind poll, train-pr and train-build, and after the
+// last for at most one round, train-ready and train-merge (about five minutes in all in the first real train, so some 15 at worst); and,
+// when the train falls back (late cars, or a merge refused as behind), for the sweep, the forge read and the first landing's resync, since
+// the lock first moves only when that resync pushes a new head. Past the bound nothing unsafe happens, but the train is wasted: a waiter
+// that took the lock over makes train-merge's acquire answer something other than already_held, so nothing merges, and a fallen-back first
+// landing's lock move is refused; the rows end land-contended.
 const LOCK_IDLE_MIN = 45
-const TRAIN_CHECKS_WAIT_MIN = 25
+const TRAIN_CHECKS_WAIT_MIN = 40
 const TRAIN_CHECKS_MORE_MIN = 6
+const TRAIN_REFRESH_MIN = 8
+const LAND_REFRESH = sha => `forge-claim land refresh --repo ${SLUG} --branch ${INT} --sha ${sha}`
+// The trains one issue may ride in a run: one as a later member and, when that train did not land it, one it leads (see the invariants above).
+const TRAIN_RIDES = 2
 // The forge marks the member PRs merged by itself after the car merge, and that can lag. No step sleeps: the program asks a read-only
 // train-flip step again while a member still reads OPEN, this many times at most, and each call's own duration is the wait.
 const TRAIN_FLIP_CALLS = 8
@@ -1234,8 +1244,9 @@ ${RULES_FOR(REPO, '<branch>')}`, `train-sweep-${sweepNo}`, { ...TRAIN_LIFECYCLE,
 
 // One train over `cands` (two or three ready issues, in order): `train` is what the first candidate's landing calls at its handover, `tag`
 // marks that landing's row, and `rest`, run once that landing ended, resolves the row of every other candidate.
-const trainOf = cands => {
+const trainOf = (cands, joined) => {
   const t = ++trainNo
+  for (const e of cands) e.rides = (e.rides || 0) + 1
   const first = cands[0]
   // The head the first landing holds the lock at when it hands over: its ready head, or the reviewed head of a conflict it resolved before
   // it asked for the lock (#941). The later members ride at their ready heads.
@@ -1324,12 +1335,18 @@ ${RULES_FOR('<the scratch worktree>', '<car>')}`, `train-build-${t}`, { agentTyp
       }
       if (!cars.length) return await fallBack(bd ? `no car was built (${bd.notes || bd.status})` : `train-build-${t} returned nothing`)
 
-      // 4. Every car's checks, in parallel, each bounded below the lock's idle takeover and read-only (gh alone: no fetch, no git). 5. The longest green prefix.
-      const checks = (i, min, label) => () => { const c = cars[i]; return trainCall(`Wait for every check of the pull request #${c.pr} of ${SLUG} (the git repository at ${REPO}), car ${i + 1} of a landing train into ${INT}, at the car head ${c.head}, required or not. Change nothing.
+      // 4. Every car's checks, in parallel, each bounded, read-only on the car (gh alone: no fetch, no git) and waited for in rounds, the
+      // lock refreshed at the start of each (#971). 5. The longest green prefix.
+      const checks = (i, min, label) => () => {
+        const c = cars[i]
+        const round = Math.min(min, TRAIN_REFRESH_MIN)
+        const rounds = Math.ceil(min / round)
+        return trainCall(`Wait for every check of the pull request #${c.pr} of ${SLUG} (the git repository at ${REPO}), car ${i + 1} of a landing train into ${INT}, at the car head ${c.head}, required or not. Change nothing but the lock refresh of step 3.
 1. Read ${UNSET}gh pr view ${c.pr} --repo ${SLUG} --json headRefOid,state. head is its headRefOid. When head is not ${c.head} or the state is not OPEN, answer state failed at once with head and what you read in details.
 2. Run no git command in this step: the cars' checks are read side by side, and a fetch in the shared checkout would collide with theirs. Whether the car is behind ${INT} is not read here; the merge itself refuses a car that is. When a read of this step fails (a gh error, not a failing check), read once more; when it fails again answer state pending with head ${c.head} and the error in details, never failed.
-${CHECKS_TAIL(c.pr, `(give the watch a Bash timeout of ${min} minutes at most and stop waiting ${min} minutes after this step began, whatever is still pending then: the train holds the land lock, which another host takes over after ${LOCK_IDLE_MIN} idle minutes)`)}
-${RULES_FOR(REPO, carName(i + 1))}`, label, { ...TRAIN_LIFECYCLE, schema: LAND_CHECKS_SCHEMA }) }
+${CHECKS_TAIL(c.pr, `(wait in rounds, ${rounds} at most. Begin each round by refreshing the land lock the train holds, which another host takes over after ${LOCK_IDLE_MIN} minutes without a refresh: run alone and exactly, with a Bash timeout of 5 minutes: ${LAND_REFRESH(H1)} and go on whatever it prints. Then run the watch with a Bash timeout of ${round} minutes at most; the round ends when the watch returns or its timeout cuts it off. Stop waiting when no check is pending, or after round ${rounds}, ${min} minutes after this step began, whatever is still pending then)`)}
+${RULES_FOR(REPO, carName(i + 1))}`, label, { ...TRAIN_LIFECYCLE, schema: LAND_CHECKS_SCHEMA })
+      }
       const cks = await parallel(cars.map((c, i) => checks(i, TRAIN_CHECKS_WAIT_MIN, `train-checks-${t}-${i + 1}`)))
       const prefix = () => { let k = 0; while (k < cars.length && green(cks[k], cars[k])) k++; return k }
       // Still running at the cap with no failed check: not red, only late.
@@ -1454,51 +1471,54 @@ ${RULES_FOR(REPO, carName(members.length))}`, `train-merge-${t}`, { ...TRAIN_LIF
     if (carsMaybe) await trainSweep(SETUP.delete_branch ? [...(firstMerged ? [first] : []), ...closeOuts.map(m => m.e)].map(e => e.ready.branch) : [])
     for (const e of cands.slice(1)) if (settled[e.n]) e.resolve(settled[e.n])
     for (const m of closeOuts) m.e.resolve(tag(await land(m.e.n, m.e.ready, { mergedPr: m.pr })))
-    // Every other candidate lands serially, here and now: it never waits for another train.
-    for (const e of cands.slice(1)) if (!settled[e.n] && !closeOuts.some(m => m.e === e)) e.resolve(await land(e.n, e.ready))
+    // Every other candidate lands serially, here and now, through the ordinary landing start: it never goes back to WAITING, and the
+    // issues waiting when its lock wait ends land with it as a train (#971).
+    for (const e of cands.slice(1)) if (!settled[e.n] && !closeOuts.some(m => m.e === e)) await landOne(e, joined)
   }
   return { train, tag, rest }
 }
 // A train of issues that waited together. The first landing owns the lock: it takes it, the train runs inside it, and it releases it on every exit.
-const runTrain = async cands => {
-  const T = trainOf(cands)
+const runTrain = async (cands, joined) => {
+  const T = trainOf(cands, joined)
   cands[0].resolve(T.tag(await land(cands[0].n, cands[0].ready, { train: T.train })))
   await T.rest()
 }
 
 const kindsOk = e => Array.isArray(e.ready.acceptance) && e.ready.acceptance.every(a => a && ACCEPT_KINDS.includes(a.kind))
+// The ordinary landing start of an issue that lands alone: one its drain took alone (#936) or one a train did not land (#971). Its landing
+// asks join once, when its lock wait ended with a behind first poll: the issues waiting then (they became ready during that wait) leave
+// WAITING and ride a train behind it, under the lock it already holds at its ready head (at its reviewed head, when it resolved a conflict
+// before it asked for the lock, #941). `joined` collects the issues that left WAITING that way in this drain, for the drain's catch.
+const landOne = async (e, joined) => {
+  let T = null
+  const join = () => {
+    const more = WAITING.filter(kindsOk).slice(0, TRAIN_MAX - 1)
+    if (!more.length) return null
+    // The train is built and announced first: a throw here leaves every joiner in WAITING, for its own drain.
+    const built = trainOf([e, ...more], joined)
+    log(`#${e.n}: ${more.map(m => `#${m.n}`).join(', ')} became ready while it waited for the land lock; they land with it as a train`)
+    for (const m of more) WAITING.splice(WAITING.indexOf(m), 1)
+    joined.push(...more)
+    T = built
+    return T.train
+  }
+  // The indirect merge needs the cars' commits in the integration branch's history, so only the merge strategy trains.
+  const joins = SETUP.merge_strategy === 'merge' && kindsOk(e) && (e.rides || 0) < TRAIN_RIDES
+  const row = await land(e.n, e.ready, joins ? { join } : {})
+  e.resolve(T ? T.tag(row) : row)
+  if (T) await T.rest()
+}
 const drain = async () => {
   if (!WAITING.length) return // an earlier drain took this entry
   if (carsMaybe) await trainSweep()
   const take = WAITING.splice(0, TRAIN_MAX)
   const joined = [] // #936: the issues that left WAITING to join a landing of this drain
   try {
-    // The indirect merge needs the cars' commits in the integration branch's history, so only the merge strategy trains.
-    const trainable = SETUP.merge_strategy === 'merge'
-    const cands = trainable ? take.filter(kindsOk) : []
+    const cands = SETUP.merge_strategy === 'merge' ? take.filter(kindsOk) : []
     const trains = cands.length >= 2
-    if (trains) await runTrain(cands)
-    for (const e of take) {
-      if (trains && cands.includes(e)) continue
-      // #936: this issue lands alone. Its landing asks join once, when its lock wait ended with a behind first poll: the issues waiting
-      // then (they became ready during that wait) leave WAITING and ride a train behind it, under the lock it already holds at its ready head
-      // (at its reviewed head, when it resolved a conflict before it asked for the lock, #941).
-      let T = null
-      const join = () => {
-        const more = WAITING.filter(kindsOk).slice(0, TRAIN_MAX - 1)
-        if (!more.length) return null
-        // The train is built and announced first: a throw here leaves every joiner in WAITING, for its own drain.
-        const built = trainOf([e, ...more])
-        log(`#${e.n}: ${more.map(m => `#${m.n}`).join(', ')} became ready while it waited for the land lock; they land with it as a train`)
-        for (const m of more) WAITING.splice(WAITING.indexOf(m), 1)
-        joined.push(...more)
-        T = built
-        return T.train
-      }
-      const row = await land(e.n, e.ready, trainable && kindsOk(e) ? { join } : {})
-      e.resolve(T ? T.tag(row) : row)
-      if (T) await T.rest()
-    }
+    if (trains) await runTrain(cands, joined)
+    // #936: every other issue lands alone, through landOne.
+    for (const e of take) if (!(trains && cands.includes(e))) await landOne(e, joined)
   } catch (err) {
     // land() never throws and releases its own lock; a row already resolved keeps its value.
     for (const e of [...take, ...joined]) e.resolve({ issue: e.n, outcome: 'stopped', stage: 'land', detail: String((err && err.message) || err) })
