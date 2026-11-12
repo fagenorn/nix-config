@@ -2778,3 +2778,136 @@ class PageBriefTest(unittest.TestCase):
         self.assertEqual([n for n in nodes(plain["inbox"]) if n["tag"] == "textarea"], [])
         (field,) = [n for n in nodes(brief["inbox"]) if n["tag"] == "textarea"]
         self.assertEqual(field["cls"], "reply-text")
+
+
+def style_rules(block: str) -> list:
+    """(selector, {property: value}) for every rule in a block of CSS without nested blocks."""
+    css = re.sub(r"(?s)/\*.*?\*/", "", block)
+    rules = []
+    for selectors, body in re.findall(r"([^{}]+)\{([^{}]*)\}", css):
+        decls = {}
+        for decl in body.split(";"):
+            name, _, value = decl.partition(":")
+            if name.strip():
+                decls[name.strip()] = value.strip()
+        for selector in selectors.split(","):
+            rules.append((" ".join(selector.split()), decls))
+    return rules
+
+
+def media_block(style: str, query: str) -> str:
+    opener = "@media " + query + " {"
+    if opener not in style:
+        return ""
+    start = style.index(opener) + len(opener)
+    depth, at = 1, start
+    while depth:
+        depth += {"{": 1, "}": -1}.get(style[at], 0)
+        at += 1
+    return style[start:at - 1]
+
+
+class PageAnsweredRowTest(unittest.TestCase):
+    def test_an_answered_row_clips_its_question_to_one_line(self) -> None:
+        text = PAGE.read_text(encoding="utf-8")
+        (body,) = re.findall(r"(?s)<style>(.*?)</style>", text)
+        top = re.sub(r"(?s)@media[^{]*\{.*?\}\s*\}", "", body)
+        rules = style_rules(top)
+        clip = {}
+        for selector, decls in rules:
+            if selector == ".done-item summary > b":
+                clip.update(decls)
+        self.assertEqual(
+            {k: clip.get(k) for k in ("white-space", "overflow", "text-overflow", "min-width")},
+            {"white-space": "nowrap", "overflow": "hidden", "text-overflow": "ellipsis",
+             "min-width": "0"})
+        summary = {}
+        for selector, decls in rules:
+            if selector == ".done-item summary":
+                summary.update(decls)
+        self.assertEqual(summary.get("flex-wrap"), "nowrap")
+        done = item("Z", answered=True, headline="Which database?",
+                    answered_at="2026-11-11T10:00:00+00:00",
+                    questions=[{"question": "Which database?", "options": ["sqlite", "postgres"],
+                                "chosen": "postgres", "recommended": None}])
+        closed, opened = render([
+            {"start": {"focused": False, "clock": NOW_MS}}, {"frame": frame([], answered=[done])},
+            {"snapshot": True}, {"open": "answered:owner/p00#Z"}, {"snapshot": True},
+        ])
+        (ul,) = [n for n in nodes(closed["inbox"]) if n["tag"] == "ul" and has_class(n, "done")]
+        (row,) = ul["children"]
+        (summary_node,) = [n for n in nodes(row) if n["tag"] == "summary"]
+        first = summary_node["children"][0]
+        self.assertEqual((first["tag"], first["text"]), ("b", "Which database?"))
+        self.assertNotIn("postgres", visible_text(row))
+        self.assertIn("chosen: postgres", visible_text(opened["inbox"]))
+
+
+class PageKeyStripTest(unittest.TestCase):
+    def test_the_key_strip_lists_only_the_keys_that_act_on_the_current_item(self) -> None:
+        one = item("O", questions=[{"question": "Go?", "options": ["yes"], "chosen": None,
+                                    "recommended": "yes"}])
+        rows = [
+            ("decision", [START, {"frame": frame([ANSWERABLE])}, {"snapshot": True}],
+             ["1", "2", "Enter"], ("choose", "send answer")),
+            ("one option", [START, {"frame": frame([one])}, {"snapshot": True}],
+             ["1", "Enter"], ("choose", "send answer")),
+            ("ten options", [START, {"frame": frame([item("T", questions=[
+                {"question": "Which?", "options": [str(i) for i in range(10)],
+                 "chosen": None, "recommended": None}])])}, {"snapshot": True}],
+             ["1", "9", "Enter"], ("choose",)),
+            ("check", [START, {"frame": frame([check_item("M", "manual-check")])},
+                       {"snapshot": True}], None, ()),
+            ("empty", [START, {"frame": frame([])}, {"snapshot": True}], None, ()),
+            ("answered only", [START, {"frame": frame([], answered=[item("Z", answered=True)])},
+                               {"snapshot": True}], None, ()),
+            ("waiting", [START, {"frame": frame([ANSWERABLE])}, {"key": "Enter"},
+                         {"snapshot": True}], ["Esc"], ("undo",)),
+            ("check waiting", [START, {"frame": frame([check_item("M", "manual-check")])},
+                               {"click": "ans-passed"}, {"snapshot": True}], ["Esc"], ("undo",)),
+            ("gone while waiting", [START, {"frame": frame([ANSWERABLE])}, {"key": "Enter"},
+                                    {"clock": 2000}, {"frame": frame([])},
+                                    {"snapshot": True}], None, ()),
+            ("brief", [START, {"frame": frame([BRIEF])}, {"snapshot": True}],
+             ["Enter"], ("approve",)),
+        ]
+        for name, steps, expected, words in rows:
+            with self.subTest(row=name):
+                snap = render(steps)[-1]
+                strips = [n for n in nodes(snap["inbox"]) if has_class(n, "keys")]
+                if expected is None:
+                    self.assertEqual(strips, [])
+                    continue
+                (strip,) = strips
+                self.assertIs(snap["inbox"]["children"][-1], strip)
+                self.assertEqual([n["text"] for n in nodes(strip) if n["tag"] == "kbd"], expected)
+                for word in words:
+                    self.assertIn(word, full(strip))
+
+
+class PageStandingRulesTest(unittest.TestCase):
+    def setUp(self) -> None:
+        text = PAGE.read_text(encoding="utf-8")
+        (self.style,) = re.findall(r"(?s)<style>(.*?)</style>", text)
+
+    def test_motion_is_off_under_reduced_motion(self) -> None:
+        block = media_block(self.style, "(prefers-reduced-motion: reduce)")
+        declared = {name for _, decls in style_rules(block) for name in decls}
+        self.assertLessEqual({"transition-duration", "animation-duration"}, declared)
+
+    def test_the_lead_card_narrows_under_900(self) -> None:
+        horizontal = []
+        for selector, decls in style_rules(media_block(self.style, "(max-width: 900px)")):
+            if selector != ".card.lead":
+                continue
+            parts = decls.get("padding", "").split()
+            if len(parts) == 4:
+                horizontal += [parts[1], parts[3]]
+            elif parts:
+                horizontal.append(parts[0] if len(parts) == 1 else parts[1])
+            for name in ("padding-left", "padding-right", "padding-inline"):
+                horizontal += decls.get(name, "").split()
+        self.assertTrue(horizontal)
+        for value in horizontal:
+            self.assertRegex(value, r"^\d+(\.\d+)?px$")
+            self.assertLessEqual(float(value[:-2]), 16)

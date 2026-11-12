@@ -74,7 +74,12 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .row-head .lm { font-size: .84375rem; color: var(--sub0); }
 .row-head .lw { margin-left: auto; font-size: .84375rem; color: var(--sub0); white-space: nowrap; }
 .done-item { flex: 1 0 100%; }
+.keys { margin-top: 18px; display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: .8125rem; color: var(--ov2); }
+.keys span { display: inline-flex; align-items: center; gap: 6px; }
 .done-item summary, .check-more summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; cursor: pointer; list-style: none; padding: 4px 12px; margin: 0 -12px; border-radius: 10px; font-size: .875rem; color: var(--ov2); transition: background-color .16s; }
+.done-item summary { flex-wrap: nowrap; }
+.done-item summary > b { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.done-item summary > span { flex: none; white-space: nowrap; }
 .done-item summary::-webkit-details-marker, .check-more summary::-webkit-details-marker { display: none; }
 .done-item summary:hover, .check-more summary:hover { background: rgba(202, 211, 245, .05); }
 .done-item > :not(summary) { margin-top: 4px; }
@@ -183,6 +188,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
   .desk-grid { grid-template-columns: minmax(0, 1fr) 400px; column-gap: 56px; }
 }
 @media (max-width: 900px) {
+  .card.lead { margin: 0 -8px; padding: 20px 16px; }
   .desk-grid { grid-template-columns: minmax(0, 1fr); padding: 32px 16px 56px; }
   .top-in { padding: 10px 16px; gap: 10px 16px; }
   .side { margin-top: 48px; }
@@ -194,6 +200,9 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
   .statement h1 { font-size: 2rem; }
   .top-in { flex-wrap: wrap; }
   .cap { margin-left: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .001ms !important; animation-delay: 0s !important; transition-duration: .001ms !important; }
 }
 </style>
 </head>
@@ -1245,6 +1254,31 @@ function dropBriefState(id, state, briefs) {
   }
   if (!sending(state)) answers.delete(id);
 }
+function keyStrip(current, open) {
+  if (open.length === 0) return null;
+  const entries = [];
+  const entry = (keys, word) => {
+    const span = el("span");
+    for (const key of keys) span.appendChild(key);
+    span.appendChild(el("span", "", word));
+    entries.push(span);
+  };
+  if (current !== null && isBrief(current.item)) {
+    entry([el("kbd", "", "Enter")], " approve");
+  } else if (current !== null) {
+    const questions = current.item.questions;
+    const n = Math.min(9, questions[Math.min(current.state.q, questions.length - 1)].options.length);
+    entry(n > 1 ? [el("kbd", "", "1"), el("span", "", "\u2013"), el("kbd", "", String(n))] : [el("kbd", "", "1")], " choose");
+    entry([el("kbd", "", "Enter")], " send answer");
+  }
+  if (open.some((item) => { const s = answers.get(stateId(item)); return s !== undefined && s.phase === "waiting"; })) {
+    entry([el("kbd", "", "Esc")], " undo");
+  }
+  if (entries.length === 0) return null;
+  const strip = el("p", "keys");
+  for (const e of entries) strip.appendChild(e);
+  return strip;
+}
 function renderInbox(view) {
   const fresh = view !== lastView;
   lastView = view;
@@ -1295,6 +1329,8 @@ function renderInbox(view) {
     for (const item of answered) done.appendChild(answeredLine(item));
     section.appendChild(done);
   }
+  const strip = keyStrip(current, open);
+  if (strip !== null) section.appendChild(strip);
   for (const fold of document.querySelectorAll("#inbox details")) {
     if (wasOpen.has(fold.dataset.key)) fold.open = true;
   }
