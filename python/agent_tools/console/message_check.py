@@ -50,24 +50,36 @@ The finish (any met or not met outcome, and the `not_deployed` one) runs in this
 stops the test manager: the registry is read fresh and each listed session named
 `manager.session_name(project, sprint_id)` is stopped with `claude-account run stop <id>` under
 its own profile (`manager.stop_session`, which gives the stop the first eight characters of the
-session id, the only id it accepts); a manager not listed needs no stop. The stop comes before the
-withdrawal so the check leaves nothing running whatever the console does: a withdrawal appends
-`goal.withdrawn`, drops the secret and then stops the manager's session itself (ADR-console-018),
-which finds nothing listed after this stop. A failed stop
-keeps the outcome in the state file and the run is 75 `{"status": "waiting", "reason": "the test
-manager is not stopped yet: <the stop's one-line reason>", "sprint_id"}`; the next run retries from
-the stop. Second it withdraws the sprint (204 or 409 is done); otherwise the outcome stays in the state file and the
-run is 75 `waiting` (`the test sprint is not withdrawn yet`) and the next run retries from the
-stop. Third it writes the result file `{"status": "met" | "not_met", "reason"?, "read_seconds":
-int | null}`, removes the state file and prints the outcome: met `{"read_seconds", "status"}`,
-not met `{"read_seconds", "reason", "status"}`. The `not_deployed` finish writes no result file.
+session id, the only id it accepts); a manager not listed needs no stop. Each stopped session's id
+and profile is recorded in the state file's `stopped`, because the fresh registry stops listing a
+session once it is stopped. The stop comes before the withdrawal so the check leaves nothing
+running whatever the console does: a withdrawal appends `goal.withdrawn`, drops the secret and then
+stops the manager's session itself (ADR-console-018), which finds nothing listed after this stop.
+A failed stop keeps the outcome (and any stop that succeeded) in the state file and the run is 75
+`{"status": "waiting", "reason": "the test manager is not stopped yet: <the stop's one-line
+reason>", "sprint_id"}`; the next run retries from the stop. Second it removes each recorded
+session with `claude-account run rm <short id>` under its own profile (`manager.remove_session`).
+A failed removal keeps the outcome and `stopped` and the run is 75 `waiting` (`the test manager's
+session is not removed yet: <reason>`); the next run removes the recorded sessions, even ones the
+registry no longer lists, does not remove one twice, then withdraws and finishes with the kept
+outcome. Before each stop and each removal the outcome and `stopped` are written to the state
+file, and a call that could end past `max(manager.FINISH_LIMIT, budget + manager.FINISH_SECONDS)`
+seconds of the run (590 with the default budget) is left to the next run (75 with
+`manager.OUT_OF_TIME_TEXT` as the reason), because verify-pending kills a run after 600 seconds.
+Third it withdraws the sprint (204 or 409 is done); otherwise the outcome stays in the state file
+and the run is 75 `waiting` (`the test sprint is not withdrawn yet`) and the next run retries from
+the stop. Fourth it writes the result file `{"status": "met" | "not_met", "reason"?,
+"read_seconds": int | null, "cleared": {"project", "names", "profiles"}}` (`cleared` is the
+project, the test sprint's session name and the stopped sessions' profiles), removes the state file
+and prints the outcome: met `{"read_seconds", "status"}`, not met `{"read_seconds", "reason",
+"status"}`. The `not_deployed` finish writes no result file.
 
 `timing` only reads the result file (a new run deletes the previous one, so it never reports an
 earlier run): an absent or unreadable file is 75 `no_result`; `read_seconds` null or above
 `--deadline` is 1 `{"read_seconds", "reason": "slow", "status": "not_met"}`; else 0 `{"read_seconds",
 "status": "met"}`. It changes no file.
 
-The `registry`, `stop`, `clock` and `sleep` of `main` are seams for tests.
+The registry, stop, remove, clock and sleep of `main` are seams for tests.
 """
 
 from __future__ import annotations
@@ -104,6 +116,7 @@ GOAL = ("[verify #889] check that an approval reaches the manager: brief one sli
         "have read the approval answer it with sprint reply and end your turn; cut no issues and "
         "deliver nothing; withdraw me")
 NOT_STOPPED_TEXT = "the test manager is not stopped yet"
+NOT_REMOVED_TEXT = "the test manager's session is not removed yet"
 NOT_WITHDRAWN_TEXT = "the test sprint is not withdrawn yet"
 
 
@@ -129,7 +142,7 @@ def _result_file(args) -> Path:
     return args.result_file or _state_dir() / "checks" / "owner-message-result.json"
 
 
-def _start(args, registry, stop, clock, sleep) -> int:
+def _start(args, registry, stop, remove, clock, sleep) -> int:
     state_file = args.state_file or _state_dir() / "checks" / "owner-message.json"
     result_file = _result_file(args)
     token_file = args.token_file or _state_dir() / "page-token"
@@ -158,21 +171,30 @@ def _start(args, registry, stop, clock, sleep) -> int:
                 return view
             sleep(5)
 
-    def stop_manager() -> None:
-        manager.stop_listed([manager.session_name(project, state["sprint_id"])], registry, stop)
-
     def settle(code: int, reason: str | None, seconds: int | None) -> int:
-        """Stop the test manager, withdraw the sprint, then record and print the outcome."""
+        """Stop the test manager, remove its session, withdraw the sprint, then record the outcome."""
         sprint_id = state.get("sprint_id")
+        stopped = state.setdefault("stopped", [])
         outcome = {"code": code, "reason": reason, "seconds": seconds}
+        guard = manager.finish_guard(clock, run_start, args.budget,
+                                     lambda: checkpoint(outcome=outcome))
         if sprint_id is not None:
             try:
-                stop_manager()
+                manager.stop_listed([manager.session_name(project, sprint_id)], registry, stop,
+                                    stopped, guard)
             except Exception as error:
                 checkpoint(outcome=outcome)
                 waiting = f"{NOT_STOPPED_TEXT}: {error}" if str(error) else NOT_STOPPED_TEXT
                 _print({"status": "waiting", "reason": waiting, "sprint_id": sprint_id})
                 return NOT_YET
+            try:
+                manager.remove_stopped(stopped, remove, guard)
+            except Exception as error:
+                checkpoint(outcome=outcome)
+                waiting = f"{NOT_REMOVED_TEXT}: {error}" if str(error) else NOT_REMOVED_TEXT
+                _print({"status": "waiting", "reason": waiting, "sprint_id": sprint_id})
+                return NOT_YET
+            checkpoint(outcome=outcome)
             status, _ = console.post("/api/withdraw",
                                      {"project_id": project, "sprint_id": sprint_id})
             if status not in (204, 409):
@@ -184,11 +206,14 @@ def _start(args, registry, stop, clock, sleep) -> int:
         if code == NOT_YET:
             _print({"status": "not_deployed"})
             return NOT_YET
+        cleared = {"project": project,
+                   "names": [manager.session_name(project, sprint_id)] if sprint_id else [],
+                   "profiles": sorted({entry["profile"] for entry in stopped})}
         if code == 0:
             document = {"status": "met", "read_seconds": seconds}
         else:
             document = {"status": "not_met", "reason": reason, "read_seconds": seconds}
-        _write_json(result_file, document)
+        _write_json(result_file, {**document, "cleared": cleared})
         _print(document)
         return code
 
@@ -308,12 +333,13 @@ def _timing(args) -> int:
 def main(argv: list[str] | None = None, *,
          registry: Callable[[], dict] = default_registry,
          stop: Callable[[str, str], None] = manager.stop_session,
+         remove: Callable[[str, str], None] = manager.remove_session,
          clock: Callable[[], float] = time.time,
          sleep: Callable[[float], None] = time.sleep) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "timing":
         return _timing(args)
-    return _start(args, registry, stop, clock, sleep)
+    return _start(args, registry, stop, remove, clock, sleep)
 
 
 if __name__ == "__main__":

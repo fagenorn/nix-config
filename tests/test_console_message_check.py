@@ -26,6 +26,7 @@ SID = "a" * 16
 STATED = "2026-11-12T10:00:00+00:00"
 APPROVED_AT = "2026-11-12T10:05:00+00:00"
 T0 = datetime.fromisoformat(STATED).timestamp()
+NAME = manager.session_name("owner/p01", SID)
 LISTED = {"s-1": Observation("s-1", "/srv/p01", 1, "idle", None,
                              manager.session_name("owner/p01", SID), None, "work")}
 
@@ -104,12 +105,21 @@ class MessageCheckTest(unittest.TestCase):
         self.token_file = self.dir / "token"
         self.token_file.write_text("tok\n")
         self.failing_stops = 0
+        self.failing_removes = 0
+        self.stop_seconds = 0
 
     def stop(self, session_id, profile):
         self.events.append(("stop", session_id, profile))
+        self.time.now += self.stop_seconds
         if self.failing_stops:
             self.failing_stops -= 1
             raise StopFailed("the stop failed")
+
+    def remove(self, session_id, profile):
+        self.events.append(("remove", session_id, profile))
+        if self.failing_removes:
+            self.failing_removes -= 1
+            raise manager.RemoveFailed("the removal failed")
 
     def run_check(self, views, *, saved=None, url=None, statuses=None, budget="600",
                   registry=None, now=T0, command="start"):
@@ -126,7 +136,7 @@ class MessageCheckTest(unittest.TestCase):
                 [command, "--project", "owner/p01", "--url", url, "--state-file",
                  str(self.state_file), "--result-file", str(self.result_file),
                  "--token-file", str(self.token_file), "--budget", budget],
-                registry=registry or Registry(LISTED), stop=self.stop,
+                registry=registry or Registry(LISTED), stop=self.stop, remove=self.remove,
                 clock=self.time.clock, sleep=self.time.sleep)
         return code, json.loads(out.getvalue())
 
@@ -149,7 +159,7 @@ class MessageCheckTest(unittest.TestCase):
         """The views of a fresh run: nothing yet, then the new sprint, then `tail`."""
         return [view(sprint=False), view(), *tail]
 
-    def test_an_approval_read_is_met_and_the_manager_is_stopped_before_the_withdrawal(self):
+    def test_a_met_finish_stops_then_removes_then_withdraws(self):
         code, out = self.run_check(self.stated_views(
             view(brief=1), view(messages=[approval()]),
             view(messages=[approval("read", later(40))])))
@@ -160,12 +170,76 @@ class MessageCheckTest(unittest.TestCase):
         self.assertEqual(self.posts("/api/withdraw"),
                          [{"project_id": "owner/p01", "sprint_id": SID}])
         stop = self.events.index(("stop", "s-1", "work"))
+        removed = self.events.index(("remove", "s-1", "work"))
         withdrawn = next(i for i, e in enumerate(self.events) if e[:2] == ("post", "/api/withdraw"))
         self.assertEqual(self.events[stop - 1], ("get", "/api/state"))
-        self.assertLess(stop, withdrawn)
-        self.assertEqual(json.loads(self.result_file.read_text()),
-                         {"read_seconds": 40, "status": "met"})
+        self.assertLess(stop, removed)
+        self.assertLess(removed, withdrawn)
+        self.assertEqual([e for e in self.events if e[0] == "remove"], [("remove", "s-1", "work")])
+        self.assertEqual(json.loads(self.result_file.read_text()), {
+            "read_seconds": 40, "status": "met",
+            "cleared": {"project": "owner/p01", "names": [NAME], "profiles": ["work"]}})
         self.assertFalse(self.state_file.exists())
+
+    def test_a_not_met_finish_removes_before_it_withdraws(self):
+        code, _ = self.run_check(self.stated_views(
+            view(messages=[approval()], reach="manager not reachable")))
+        self.assertEqual(code, 1)
+        stop = self.events.index(("stop", "s-1", "work"))
+        removed = self.events.index(("remove", "s-1", "work"))
+        withdrawn = next(i for i, e in enumerate(self.events) if e[:2] == ("post", "/api/withdraw"))
+        self.assertLess(stop, removed)
+        self.assertLess(removed, withdrawn)
+
+    def test_a_failed_removal_keeps_the_outcome_and_the_next_run_removes_the_recorded_session(self):
+        self.failing_removes = 1
+        code, out = self.run_check(self.stated_views(
+            view(brief=1), view(messages=[approval()]),
+            view(messages=[approval("read", later(40))])))
+        self.assertEqual((code, out), (75, {
+            "reason": "the test manager's session is not removed yet: the removal failed",
+            "sprint_id": SID, "status": "waiting"}))
+        self.assertEqual(self.posts("/api/withdraw"), [])
+        self.assertFalse(self.result_file.exists())
+        saved = json.loads(self.state_file.read_text())
+        self.assertEqual(saved["outcome"], {"code": 0, "reason": None, "seconds": 40})
+        self.assertEqual(saved["stopped"], [{"session_id": "s-1", "profile": "work"}])
+        code, out = self.run_check([view(messages=[approval("read", later(40))])],
+                                   registry=Registry({}))
+        self.assertEqual((code, out), (0, {"read_seconds": 40, "status": "met"}))
+        self.assertEqual([e for e in self.events if e[0] == "stop"], [])
+        self.assertEqual([e for e in self.events if e[0] == "remove"], [("remove", "s-1", "work")])
+        removed = self.events.index(("remove", "s-1", "work"))
+        withdrawn = next(i for i, e in enumerate(self.events) if e[:2] == ("post", "/api/withdraw"))
+        self.assertLess(removed, withdrawn)
+        self.assertEqual(len(self.posts("/api/withdraw")), 1)
+        self.assertEqual(self.posts("/api/goal"), [])
+        self.assertFalse(self.state_file.exists())
+        self.assertEqual(json.loads(self.result_file.read_text())["cleared"],
+                         {"project": "owner/p01", "names": [NAME], "profiles": ["work"]})
+
+    def test_a_removal_with_no_time_left_is_left_to_the_next_run_with_the_stop_recorded(self):
+        self.stop_seconds = 600
+        code, out = self.run_check(self.stated_views(
+            view(brief=1), view(messages=[approval()]),
+            view(messages=[approval("read", later(40))])))
+        self.assertEqual((code, out), (75, {
+            "reason": "the test manager's session is not removed yet: "
+                      + manager.OUT_OF_TIME_TEXT,
+            "sprint_id": SID, "status": "waiting"}))
+        self.assertEqual([e for e in self.events if e[0] == "stop"], [("stop", "s-1", "work")])
+        self.assertEqual([e for e in self.events if e[0] == "remove"], [])
+        self.assertEqual(self.posts("/api/withdraw"), [])
+        self.assertFalse(self.result_file.exists())
+        saved = json.loads(self.state_file.read_text())
+        self.assertEqual(saved["outcome"], {"code": 0, "reason": None, "seconds": 40})
+        self.assertEqual(saved["stopped"], [{"session_id": "s-1", "profile": "work"}])
+        self.stop_seconds = 0
+        code, out = self.run_check([view(messages=[approval("read", later(40))])],
+                                   registry=Registry({}))
+        self.assertEqual((code, out), (0, {"read_seconds": 40, "status": "met"}))
+        self.assertEqual([e for e in self.events if e[0] == "remove"], [("remove", "s-1", "work")])
+        self.assertEqual(len(self.posts("/api/withdraw")), 1)
 
     def test_a_replaced_version_answered_409_is_followed_by_approving_the_new_one(self):
         code, out = self.run_check(
@@ -274,21 +348,26 @@ class MessageCheckTest(unittest.TestCase):
             "reason": "the test manager is not stopped yet: the stop failed", "sprint_id": SID,
             "status": "waiting"}))
         self.assertEqual(self.posts("/api/withdraw"), [])
+        self.assertEqual([e for e in self.events if e[0] == "remove"], [])
         self.assertTrue(self.state_file.exists())
         code, out = self.run_check([view(messages=[approval("read", later(40))])])
         self.assertEqual((code, out), (0, {"read_seconds": 40, "status": "met"}))
         self.assertIn(("stop", "s-1", "work"), self.events)
+        self.assertIn(("remove", "s-1", "work"), self.events)
         self.assertEqual(len(self.posts("/api/withdraw")), 1)
         self.assertEqual(self.posts("/api/goal"), [])
         self.assertFalse(self.state_file.exists())
 
-    def test_a_manager_not_listed_is_not_stopped(self):
+    def test_a_manager_not_listed_is_neither_stopped_nor_removed(self):
         code, out = self.run_check(
             self.stated_views(view(messages=[approval("read", later(40))])),
             registry=Registry({}))
         self.assertEqual((code, out["read_seconds"]), (0, 40))
         self.assertEqual([e for e in self.events if e[0] == "stop"], [])
+        self.assertEqual([e for e in self.events if e[0] == "remove"], [])
         self.assertEqual(len(self.posts("/api/withdraw")), 1)
+        self.assertEqual(json.loads(self.result_file.read_text())["cleared"],
+                         {"project": "owner/p01", "names": [NAME], "profiles": []})
 
     def test_timing_without_a_result_is_not_yet(self):
         self.assertEqual(self.timing(), (75, {"status": "no_result"}))
