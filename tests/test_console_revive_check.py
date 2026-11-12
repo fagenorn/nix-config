@@ -28,6 +28,10 @@ SID = "a" * 16
 STATED = "2026-11-12T10:00:00+00:00"
 T0 = datetime.fromisoformat(STATED).timestamp()
 NAME = manager.session_name("owner/p01", SID)
+OLD = "b" * 16
+LEGACY = {"project": "owner/p01", "sprint_id": OLD, "phase": "successor",
+          "approved_versions": [1], "first_session": "s-0", "first_profile": "work",
+          "stopped_at": T0, "back_seconds": 120, "removed_at": T0 + 200}
 
 
 def listed(session_id):
@@ -37,10 +41,16 @@ def listed(session_id):
 GONE = {}
 
 
+def old_listed():
+    return {"s-0": Observation("s-0", "/srv/p01", 1, "idle", None,
+                               manager.session_name("owner/p01", OLD), None, "work")}
+
+
 def view(*, sprint=True, state="on_track", status=None, text=None, brief=None, managers=True,
-         manager_state="started"):
+         manager_state="started", messages=None, reach_text=None):
     row = {"sprint_id": SID, "goal": GOAL, "stated_at": STATED, "state": state, "status": status,
-           "manager_state": manager_state, "manager_text": text}
+           "manager_state": manager_state, "manager_text": text,
+           "messages": messages or [], "reach_text": reach_text}
     items = [] if brief is None else [{"key": "brief/" + SID, "version": brief,
                                        "waiting_since": STATED}]
     return {"managers": managers,
@@ -68,6 +78,12 @@ def steps(*mappings):
     return [(None, m) for m in mappings]
 
 
+def text(state):
+    return {"id": 9, "kind": "text", "text": revive_check.MESSAGE, "state": state}
+
+
+READ = view(messages=[text("read")])
+SENT = view(messages=[text("sent")])
 SCRIPT = [view(sprint=False), view(state="drafting", brief=1), view(state="drafting", brief=1),
           view()]
 
@@ -98,10 +114,10 @@ class ReviveCheckTest(unittest.TestCase):
         self.removals.append(session_id)
 
     def run_check(self, views, readings, *, saved=None, url=None, budget="2000", now=None,
-                  command="start", token=True):
+                  command="start", token=True, statuses=None):
         self.events = []
         if url is None:
-            url = serve(self, views, self.events)
+            url = serve(self, views, self.events, statuses)
         if saved is not None:
             self.state_file.parent.mkdir(parents=True, exist_ok=True)
             self.state_file.write_text(json.dumps(saved))
@@ -147,23 +163,34 @@ class ReviveCheckTest(unittest.TestCase):
         self.assertIn("agent_tools.console.revive_check", text)
         self.assertEqual(committed_mode(WRAPPER), "100755")
 
-    def test_a_full_run_states_approves_stops_waits_removes_and_finds_a_successor(self):
-        code, out = self.run_check(SCRIPT, [
+    def test_the_removed_session_back_under_the_sprints_name_reading_a_message_is_met(self):
+        code, out = self.run_check(SCRIPT + [SENT, READ], [
             (None, listed("s-1")), (None, GONE), (130, listed("s-1")), (None, GONE),
-            (None, listed("s-2"))])
-        self.assertEqual((code, out), (0, {"back_seconds": 130, "status": "met",
-                                           "successor": True}))
-        self.assertEqual(self.paths(), ["/api/goal", "/api/approve", "/api/withdraw"])
+            (None, listed("s-1"))])
+        self.assertEqual((code, out), (0, {"after_removal": "same", "back_seconds": 130,
+                                           "status": "met"}))
+        self.assertEqual(self.paths(),
+                         ["/api/goal", "/api/approve", "/api/message", "/api/withdraw"])
         self.assertEqual(self.posts("/api/approve"),
                          [{"project_id": "owner/p01", "sprint_id": SID, "version": 1}])
-        self.assertEqual(self.stops(), ["s-1", "s-2"])
+        self.assertEqual(self.posts("/api/message"), [
+            {"project_id": "owner/p01", "sprint_id": SID, "text": revive_check.MESSAGE}])
         self.assertEqual(self.removals, ["s-1"])
         self.assertIn(("remove", "s-1", "work"), self.events)
         self.assertFalse(self.state_file.exists())
         self.assertEqual(self.result(), {"back_seconds": 130, "status": "met"})
 
+    def test_a_new_manager_under_the_sprints_name_reading_a_message_is_met(self):
+        code, out = self.run_check(SCRIPT + [SENT, READ], [
+            (None, listed("s-1")), (None, GONE), (130, listed("s-1")), (None, GONE),
+            (None, listed("s-2"))])
+        self.assertEqual((code, out), (0, {"after_removal": "new", "back_seconds": 130,
+                                           "status": "met"}))
+        self.assertEqual(len(self.posts("/api/message")), 1)
+        self.assertEqual(self.stops(), ["s-1", "s-2"])
+
     def test_a_slow_return_still_meets_start(self):
-        code, out = self.run_check(SCRIPT, [
+        code, out = self.run_check(SCRIPT + [READ], [
             (None, listed("s-1")), (181, listed("s-1")), (None, GONE), (None, listed("s-2"))])
         self.assertEqual((code, out["back_seconds"], out["status"]), (0, 181, "met"))
 
@@ -202,26 +229,58 @@ class ReviveCheckTest(unittest.TestCase):
         self.assertEqual((code, out["phase"], out["status"]), (75, "stop", "waiting"))
         self.assertEqual(self.stops(), [])
         self.assertEqual(json.loads(self.state_file.read_text())["stopped_at"], None)
-        code, out = self.run_check([view()], [
+        code, out = self.run_check([view(), READ], [
             (None, listed("s-1")), (130, listed("s-1")), (None, GONE), (None, listed("s-2"))],
             now=self.time.now + 900, budget="300")
         self.assertEqual((code, out["back_seconds"], out["status"]), (0, 130, "met"))
         self.assertEqual(self.timing(), (0, {"back_seconds": 130, "status": "met"}))
 
-    def test_no_successor_within_the_limit_is_not_met(self):
+    def test_no_manager_under_the_sprints_name_within_the_limit_is_not_met(self):
         code, out = self.run_check(SCRIPT, [
             (None, listed("s-1")), (20, listed("s-1")), (None, GONE)])
-        self.assertEqual((code, out["status"], out["back_seconds"]), (1, "not_met", 20))
-        self.assertEqual(out["reason"], "no new manager within 900 s of the removal")
+        self.assertEqual((code, out["status"], out["back_seconds"], out["reason"]), (
+            1, "not_met", 20, "no manager under the sprint's name within 900 s of the removal"))
         self.assertEqual(self.removals, ["s-1"])
         self.assertEqual(self.result()["back_seconds"], 20)
+        self.assertEqual(self.posts("/api/message"), [])
 
-    def test_a_successor_listed_after_the_successor_limit_is_not_met(self):
+    def test_a_manager_listed_after_the_relist_limit_is_not_met(self):
         code, out = self.run_check(SCRIPT, [
             (None, listed("s-1")), (None, GONE), (130, listed("s-1")), (None, GONE),
             (1100, listed("s-2"))])
         self.assertEqual((code, out["status"], out["back_seconds"]), (1, "not_met", 130))
-        self.assertEqual(out["reason"], "no new manager within 900 s of the removal")
+        self.assertEqual(
+            out["reason"], "no manager under the sprint's name within 900 s of the removal")
+
+    def test_a_message_left_unread_past_the_limit_is_not_met(self):
+        code, out = self.run_check(SCRIPT + [SENT], [
+            (None, listed("s-1")), (None, GONE), (130, listed("s-1")), (None, GONE),
+            (None, listed("s-1"))])
+        self.assertEqual((code, out["reason"]), (1, "the message was not read within 600 s"))
+        self.assertEqual(len(self.posts("/api/message")), 1)
+        self.assertEqual(len(self.posts("/api/withdraw")), 1)
+
+    def test_an_unreachable_manager_is_not_met(self):
+        code, out = self.run_check(
+            SCRIPT + [view(messages=[text("sent")], reach_text="manager not reachable")], [
+                (None, listed("s-1")), (None, GONE), (130, listed("s-1")), (None, GONE),
+                (None, listed("s-2"))])
+        self.assertEqual((code, out["reason"]), (1, "manager not reachable"))
+
+    def test_a_refused_message_is_not_met(self):
+        code, out = self.run_check(SCRIPT + [READ], [
+            (None, listed("s-1")), (None, GONE), (130, listed("s-1")), (None, GONE),
+            (None, listed("s-2"))], statuses={"/api/message": [409]})
+        self.assertEqual((code, out["reason"]), (1, "the console refused the message: 409"))
+
+    def test_an_unanswered_message_post_is_sent_again_on_the_next_poll(self):
+        code, out = self.run_check(SCRIPT + [READ], [
+            (None, listed("s-1")), (None, GONE), (130, listed("s-1")), (None, GONE),
+            (None, listed("s-2"))], statuses={"/api/message": ["drop", 204]})
+        self.assertEqual((code, out), (0, {"after_removal": "new", "back_seconds": 130,
+                                           "status": "met"}))
+        self.assertEqual(self.posts("/api/message"), [
+            {"project_id": "owner/p01", "sprint_id": SID, "text": revive_check.MESSAGE}] * 2)
 
     def test_a_stalled_sprint_is_not_met(self):
         code, out = self.run_check(
@@ -236,20 +295,21 @@ class ReviveCheckTest(unittest.TestCase):
         code, out = self.run_check(SCRIPT[:3] + [view(sprint=False)], steps(GONE))
         self.assertEqual((code, out["reason"]), (1, "the sprint is gone"))
 
-    def test_the_removed_session_coming_back_is_not_met(self):
-        code, out = self.run_check(SCRIPT, [
-            (None, listed("s-1")), (10, listed("s-1")), (None, GONE), (None, listed("s-1"))])
-        self.assertEqual((code, out["status"], out["reason"]),
-                         (1, "not_met", "the removed session came back"))
-
     def test_a_spent_budget_keeps_the_state_and_the_next_run_resumes_the_phase(self):
         code, out = self.run_check(SCRIPT, [(None, listed("s-1")), (None, GONE)], budget="40")
         self.assertEqual((code, out), (75, {"phase": "back", "sprint_id": SID,
                                             "status": "waiting"}))
         self.assertEqual(json.loads(self.state_file.read_text())["phase"], "back")
-        code, out = self.run_check([view()], [
-            (20, listed("s-1")), (None, GONE), (None, listed("s-2"))], now=self.stop_time + 40)
-        self.assertEqual((code, out["status"], out["successor"]), (0, "met", True))
+        code, out = self.run_check([SENT], [
+            (20, listed("s-1")), (None, GONE), (None, listed("s-1"))],
+            now=self.stop_time + 40, budget="12")
+        self.assertEqual((code, out), (75, {"phase": "read", "sprint_id": SID,
+                                            "status": "waiting"}))
+        self.assertIsNotNone(json.loads(self.state_file.read_text())["messaged_at"])
+        self.assertEqual(len(self.posts("/api/message")), 1)
+        code, out = self.run_check([READ], [(None, listed("s-1"))])
+        self.assertEqual((code, out["status"], out["after_removal"]), (0, "met", "same"))
+        self.assertEqual(self.posts("/api/message"), [])
         self.assertEqual(self.posts("/api/goal"), [])
         self.assertEqual(self.posts("/api/approve"), [])
         self.assertEqual(self.removals, ["s-1"])
@@ -259,20 +319,53 @@ class ReviveCheckTest(unittest.TestCase):
         self.failing = {"s-2": 1}
         readings = [(None, listed("s-1")), (20, listed("s-1")), (None, GONE),
                     (None, listed("s-2"))]
-        code, out = self.run_check(SCRIPT, readings)
+        code, out = self.run_check(SCRIPT + [READ], readings)
         self.assertEqual((code, out), (75, {
             "reason": "the test manager is not stopped yet: the stop failed", "sprint_id": SID,
             "status": "waiting"}))
         self.assertEqual(self.posts("/api/withdraw"), [])
         self.assertTrue(self.state_file.exists())
         self.assertFalse(self.result_file.exists())
-        code, out = self.run_check([view()], [(None, listed("s-2"))])
-        self.assertEqual((code, out), (0, {"back_seconds": 20, "status": "met",
-                                           "successor": True}))
+        code, out = self.run_check([READ], [(None, listed("s-2"))])
+        self.assertEqual((code, out), (0, {"after_removal": "new", "back_seconds": 20,
+                                           "status": "met"}))
         self.assertEqual(self.stops(), ["s-2"])
         self.assertEqual(len(self.posts("/api/withdraw")), 1)
         self.assertEqual(self.paths(), ["/api/withdraw"])
         self.assertFalse(self.state_file.exists())
+
+    def discarded_run(self, saved):
+        self.result_file.parent.mkdir(parents=True, exist_ok=True)
+        self.result_file.write_text(json.dumps({"back_seconds": 120, "status": "met"}))
+        code, out = self.run_check(SCRIPT + [SENT, READ], [(None, GONE),
+            (None, listed("s-1")), (None, GONE), (130, listed("s-1")), (None, GONE),
+            (None, listed("s-1"))], saved=saved)
+        self.assertEqual((code, out), (0, {"after_removal": "same", "back_seconds": 130,
+                                           "status": "met"}))
+        self.assertEqual(self.paths(), ["/api/withdraw", "/api/goal", "/api/approve",
+                                        "/api/message", "/api/withdraw"])
+        self.assertEqual(self.posts("/api/withdraw")[0],
+                         {"project_id": "owner/p01", "sprint_id": OLD})
+        self.assertEqual(len(self.posts("/api/message")), 1)
+        self.assertEqual(self.result(), {"back_seconds": 130, "status": "met"})
+        self.assertFalse(self.state_file.exists())
+
+    def test_a_saved_success_of_the_previous_check_is_discarded_and_a_fresh_check_runs(self):
+        self.discarded_run({**LEGACY, "outcome": {"code": 0, "reason": None}})
+
+    def test_a_saved_successor_phase_of_the_previous_check_is_discarded_and_a_fresh_check_runs(
+            self):
+        self.discarded_run(LEGACY)
+
+    def test_a_failed_cleanup_of_the_previous_checks_state_is_not_yet_and_keeps_it(self):
+        self.failing = {"s-0": 1}
+        code, out = self.run_check([view()], [(None, old_listed())], saved=LEGACY)
+        self.assertEqual((code, out), (75, {
+            "reason": "the test manager is not stopped yet: the stop failed", "sprint_id": OLD,
+            "status": "waiting"}))
+        self.assertEqual(self.stops(), ["s-0"])
+        self.assertEqual(self.paths(), [])
+        self.assertEqual(json.loads(self.state_file.read_text()), LEGACY)
 
     def test_preconditions_post_nothing(self):
         with socket.socket() as probe:

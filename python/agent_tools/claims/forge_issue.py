@@ -6,7 +6,9 @@ edges go through the forge's dependencies endpoints instead of prose.
 [--blocks <n>]...` files the issue and links it; `link --repo <owner/name> --issue <n>
 [--blocked-by <n>]... [--blocks <n>]...` adds the edges an existing issue lacks (and needs at
 least one edge). `--blocked-by <n>` records that the issue is blocked by #n, `--blocks <n>` that
-#n is blocked by the issue.
+#n is blocked by the issue. `read --repo <owner/name> --issue <n>` posts nothing: it prints both
+lists of the issue as they stand (`read`, exit 0), with `missing_*` and `unexpected_*` empty, and
+is the read a caller that orders work by blockers uses, since an edge `link` added is in no body.
 
 D1, identity on the wire: every link posts `issue_id=<database id>` of the blocker, read from
 `repos/<owner/name>/issues/<n>` (`.id`), never an issue number, which the dependencies endpoint
@@ -38,7 +40,7 @@ sorted `<owner>/<name>#<n>` references (the owner and name come from each entry'
 `repository_url` after `/repos/`; null when no read-back happened); `missing_*` are the requested
 numbers of `--repo` whose database id is absent from the read-back, sorted; `unexpected_*` are the
 references of read-back entries whose id was not requested, sorted (always empty for `link`).
-Exit 0 is `created` or `linked`, exit 1 a forge error (`verdict: "error"`, `error` the
+Exit 0 is `created`, `linked` or `read`, exit 1 a forge error (`verdict: "error"`, `error` the
 `ForgeError` code, `detail`) or `links_differ`, exit 2 usage (`error: "usage"`; a repeated number,
 `--issue` among its own edges, an empty title, an unreadable body file or a malformed flag, always
 before any `gh` call), and `-h`/`--help` prints argparse help and exits 0. Every `gh` child runs
@@ -117,11 +119,16 @@ def _parser() -> argparse.ArgumentParser:
             sub.add_argument("--label", dest="labels", action="append", default=[], type=_label)
         else:
             sub.add_argument("--issue", required=True, type=_number)
+    reading = commands.add_parser("read")
+    reading.add_argument("--repo", required=True, type=_repo)
+    reading.add_argument("--issue", required=True, type=_number)
     return parser
 
 
 def _parse(argv: list[str]) -> argparse.Namespace:
     args = _parser().parse_args(argv)
+    if args.command == "read":
+        return args
     numbers = args.blocked_by + args.blocks
     if len(set(numbers)) != len(numbers):
         raise UsageError("an issue number is repeated within or across --blocked-by and --blocks")
@@ -243,13 +250,24 @@ def _link(args, state: dict) -> tuple[dict, int]:
     return _read_back(args, issue, ids, exact=False)
 
 
+def _read(args, state: dict) -> tuple[dict, int]:
+    issue = state["issue"] = args.issue
+    database_id(args.repo, issue)  # proves --issue is this repository's issue, not a transfer's redirect
+    by = sorted(entries(args.repo, issue, "blocked_by").values())
+    blocking = sorted(entries(args.repo, issue, "blocking").values())
+    return result("read", args.repo, issue, "read", by, blocking, [], [], [], []), OK
+
+
+COMMANDS = {"create": _create, "link": _link, "read": _read}
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     state: dict = {"issue": None}
-    command = argv[0] if argv and argv[0] in ("create", "link") else None
+    command = argv[0] if argv and argv[0] in COMMANDS else None
     try:
         args = _parse(argv)
-        out, code = (_create if args.command == "create" else _link)(args, state)
+        out, code = COMMANDS[args.command](args, state)
     except SystemExit as stop:
         return stop.code if isinstance(stop.code, int) else OK
     except UsageError as error:

@@ -17,13 +17,21 @@ by session name (the tool's recipient accepts a peer session name) and is delive
 last non-empty stdout line is exactly `SENT`.
 
     wake: systemd-run --user --scope --quiet --collect --description=agent manager <name> --
-          claude-account run --resume <session id> --bg "<NUDGE_TEXT>"
+          claude-account run --resume <session id> --bg [--name <name> --settings <file>]
+          "<NUDGE_TEXT>"
 
 The wake resumes by session id inside a transient user scope, so a supervisor it starts outlives
 the console unit (ADR-console-015). `--resume <id> --bg` wakes a stopped session in place under
 the same id, but starts a copy of a session that is running; the caller must therefore use the
 wake only for a session the session listing does not show (issue #831). A wake with no session id
 raises `NudgeFailed(UNKNOWN_SESSION)` and runs nothing.
+
+`Nudge.settings` is the sprint's settings file path, or None for a bare wake. With a path the argv
+carries `--name <session name> --settings <path>` right after `--bg` and before the sentence (the
+sentence stays last); the relay ignores it. `--resume <id> --bg` with name and settings restores
+both under the same id only when the session's record is gone; on a session whose record exists
+the client keeps the saved options and starts a copy. The caller therefore passes `settings` only
+for a session the full listing does not show (issue #949).
 
     revive: the wake command with `RESTART_TEXT` in place of `NUDGE_TEXT`
 
@@ -40,6 +48,18 @@ seconds (a command that exceeds them has its whole process group killed, `run_in
 every program a nudge runs by name on `PATH`. `nudger_for(platform)` is `run_nudge` on Linux and
 None elsewhere.
 
+Full listing. `read_full_listing(profile, cwd)` runs `claude-account run agents --json --all` (the
+command `listing_command()`) in the project root with no terminal, in its own session, stdout and
+stderr to temporary files, in `manager.client_environment(profile, environ)`, within
+`LISTING_TIMEOUT` (30) seconds, and returns the `sessionId` of every entry of the JSON array that
+is an object with a non-empty string `sessionId`, whatever its `kind` or `state` (a completed
+background session is listed too); other entries are skipped. `full_lister_for(platform)` is
+`read_full_listing` on Linux and None elsewhere. Its failures are `ListingUnreadable` with a
+one-line reason: `the project root <cwd> is not a directory` (nothing run),
+`claude-account is not installed`, `the listing did not return within 30 s`, the last non-empty
+stderr line of a listing that failed else `the listing exited <n>`, or `the listing is not a JSON
+array`.
+
 Failures are `NudgeFailed` with a one-line reason: the host is not Linux
 (`manager.UNAVAILABLE_TEXT`), `the manager's session is not known`, `the project root <cwd> is not
 a directory`, `<program> is not installed`, `the nudge did not return within <n> s`, the last
@@ -50,6 +70,7 @@ non-empty stderr line of a nudge that failed, `the nudge exited <n>`, or, for a 
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import signal
 import subprocess
@@ -74,10 +95,15 @@ SENT_MARK = "SENT"
 NUDGE_TOOLS = ("claude-account", "systemd-run")
 UNKNOWN_SESSION = "the manager's session is not known"
 UNCONFIRMED_TEXT = "the relay did not confirm the message"
+LISTING_TIMEOUT = 30
 
 
 class NudgeFailed(Exception):
     """The manager was not nudged; `str` is the one-line reason."""
+
+
+class ListingUnreadable(Exception):
+    """The full session listing could not be read; `str` is the one-line reason."""
 
 
 @dataclass(frozen=True)
@@ -88,6 +114,7 @@ class Nudge:
     session_id: str | None
     profile: str
     cwd: str
+    settings: str | None = None
 
 
 def relay_prompt(session_name: str) -> str:
@@ -104,9 +131,11 @@ def nudge_command(nudge: Nudge, platform: str) -> list[str] | None:
         return ["claude-account", "run", "-p", "--allowedTools", "SendMessage",
                 "--no-session-persistence", relay_prompt(nudge.session_name)]
     text = RESTART_TEXT if nudge.route == REVIVE else NUDGE_TEXT
+    flags = (["--name", nudge.session_name, "--settings", nudge.settings]
+             if nudge.settings is not None else [])
     return ["systemd-run", "--user", "--scope", "--quiet", "--collect",
             f"--description=agent manager {nudge.session_name}", "--",
-            "claude-account", "run", "--resume", nudge.session_id, "--bg", text]
+            "claude-account", "run", "--resume", nudge.session_id, "--bg", *flags, text]
 
 
 def _last_line(text: str) -> str | None:
@@ -162,6 +191,47 @@ def run_nudge(nudge: Nudge, *, platform: str = sys.platform, run=run_in_own_grou
         raise NudgeFailed(_last_line(stderr) or f"the nudge exited {result.returncode}")
     if relay and _last_line(stdout) != SENT_MARK:
         raise NudgeFailed(UNCONFIRMED_TEXT)
+
+
+def listing_command() -> list[str]:
+    return ["claude-account", "run", "agents", "--json", "--all"]
+
+
+def read_full_listing(profile: str, cwd: str, *, run=run_in_own_group,
+                      environ: Mapping[str, str] = os.environ) -> frozenset[str]:
+    if not Path(cwd).is_dir():
+        raise ListingUnreadable(f"the project root {cwd} is not a directory")
+    argv = listing_command()
+    env = manager.client_environment(profile, environ)
+    with tempfile.TemporaryFile() as out, tempfile.TemporaryFile() as err:
+        try:
+            result = run(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL, stdout=out,
+                         stderr=err, start_new_session=True, timeout=LISTING_TIMEOUT,
+                         check=False)
+        except FileNotFoundError:
+            raise ListingUnreadable(f"{argv[0]} is not installed") from None
+        except subprocess.TimeoutExpired:
+            raise ListingUnreadable(
+                f"the listing did not return within {LISTING_TIMEOUT} s") from None
+        out.seek(0)
+        stdout = out.read()
+        err.seek(0)
+        stderr = err.read().decode("utf-8", errors="replace")
+    if result.returncode != 0:
+        raise ListingUnreadable(_last_line(stderr) or f"the listing exited {result.returncode}")
+    try:
+        entries = json.loads(stdout.decode("utf-8"))
+    except ValueError:  # UnicodeDecodeError and JSONDecodeError are both ValueErrors
+        entries = None
+    if not isinstance(entries, list):
+        raise ListingUnreadable("the listing is not a JSON array")
+    return frozenset(entry["sessionId"] for entry in entries
+                     if isinstance(entry, dict) and isinstance(entry.get("sessionId"), str)
+                     and entry["sessionId"])
+
+
+def full_lister_for(platform: str) -> Callable[[str, str], frozenset[str]] | None:
+    return read_full_listing if manager.supported(platform) else None
 
 
 def nudger_for(platform: str) -> Callable[[Nudge], None] | None:
