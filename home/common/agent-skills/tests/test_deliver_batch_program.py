@@ -954,6 +954,47 @@ def object_branch(schema):
     return schema
 
 
+class FlakyVerificationRowTest(unittest.TestCase):
+    """#972: a check the child saw fail and pass on its one rerun is named on the issue's row and in the log."""
+
+    FLAKY = [{"id": "build", "summary": "tests/http_client.test.ts > retries: timed out"}]
+
+    def test_a_landed_row_names_the_flaky_test(self):
+        out = run_full(children={"1": dict(ready(1), flaky=self.FLAKY)})
+        row = out["result"]["table"][0]
+        self.assertEqual((row["outcome"], row["flaky"]), ("landed", self.FLAKY))
+        self.assertIn("#1: flaky verification, passed on the one rerun: build: tests/http_client.test.ts > retries: timed out",
+                      out["logs"])
+
+    def test_a_row_without_a_flaky_check_carries_no_member(self):
+        out = run_full(children={"1": dict(ready(1), flaky=[{"id": "build"}, "x"])})
+        self.assertNotIn("flaky", out["result"]["table"][0])
+        self.assertNotIn("flaky", run_full()["result"]["table"][0])
+
+    OUT = [{"file": "tests/http_client.test.ts", "why": "the sentinel s-1 occurs in the worktree path"}]
+
+    def test_a_landed_row_and_its_pr_name_the_out_of_diff_fix_and_its_cause(self):
+        out = run_full(children={"1": dict(ready(1), outside_fixes=self.OUT)})
+        row = out["result"]["table"][0]
+        self.assertEqual((row["outcome"], row["outside_fixes"]), ("landed", self.OUT))
+        self.assertIn("#1: the verification fix edited outside the branch's diff: tests/http_client.test.ts: "
+                      "the sentinel s-1 occurs in the worktree path", out["logs"])
+        pr = [c["prompt"] for c in out["calls"] if c["label"] == "land-pr-1"][-1]
+        self.assertIn("verification fixes outside the branch's diff, each with its cause", pr)
+        self.assertIn("the sentinel s-1 occurs in the worktree path", pr)
+        plain = run_full()
+        self.assertNotIn("outside_fixes", plain["result"]["table"][0])
+        self.assertNotIn("outside the branch's diff", [c["prompt"] for c in plain["calls"] if c["label"] == "land-pr-1"][-1])
+
+    def test_an_unrelated_verification_failure_is_a_stopped_row_with_its_reason_and_is_relaunched(self):
+        reason = "verify-unrelated: tests/http_client.test.ts > retries fails outside this branch's diff, so no fix was made: fails at origin/dev"
+        stop = {"stage": "verify-unrelated", "reason": reason, "cont": reviewed(1)}
+        result, _, _ = run(children={"1": stop})
+        row = result["table"][0]
+        self.assertEqual((row["outcome"], row["stage"], row["reason"]), ("stopped", "verify-unrelated", reason))
+        self.assertIn("1", result["relaunch"]["conts"])
+
+
 def run_child(args, replies=None, patch=None):
     node = shutil.which("node")
     if node is None:

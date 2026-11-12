@@ -16,7 +16,7 @@ export const meta = {
 // holder is <host>/<batch_id> or <host>/session-<session_id>), decisions (owner answers to a
 // needs_user stop; decisions also come from a fully ticked decision prompt read after the claim), spec (path of an approved design spec), mode (plan: stop after the plan
 // review with { stage: 'planned', plan, cont }; ready: stop after verify with { stage: 'ready',
-// head, branch, worktree, verify, tasks, acceptance, fix_waves, cont } and no PR, keeping the claim;
+// head, branch, worktree, verify, flaky? (#972: [{id, summary}], each check that failed outside the branch's changed files and passed on its one rerun), outside_fixes? (#972: [{file, why}], each file outside the branch's diff a verification fix edited, with the cause it established; a done result carries both too), tasks, acceptance, fix_waves, cont } and no PR, keeping the claim;
 // ship, the default: merge. A ready cont resumed in ship skips the final review and verify when
 // the head is unchanged and the tree clean), lane (standard, the default, or direct: no planner, one
 // implementer following the deliver-direct skill, one fresh reviewer and at most one fix round; a cont keeps
@@ -1450,10 +1450,10 @@ if (present(tip)) finalReviewed = { head: tip, ...branchSnap(), ...(sizedWhole ?
 phase('Verify')
 const VERIFY = {
   type: 'object',
-  properties: { head: FULL_SHA, clean: { type: 'boolean' }, results: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, status: { type: 'string', enum: ['pass', 'fail', 'skipped'] }, summary: { type: 'string' } }, required: ['id', 'status', 'summary'] } } },
+  properties: { head: FULL_SHA, clean: { type: 'boolean' }, results: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, status: { type: 'string', enum: ['pass', 'fail', 'skipped'] }, summary: { type: 'string' }, outside_diff: { type: 'boolean' } }, required: ['id', 'status', 'summary'] } } },
   required: ['head', 'clean', 'results'],
 }
-const verifyBodyFor = entries => `Run the project's declared verification once on the worktree head, in the foreground, each command with a Bash timeout of up to 60 minutes: ${JSON.stringify(entries)}. Run each argv with <worktree>/<its cwd> as working directory. If an entry has when_changed globs and none of the files changed (git -C ${W} diff --no-renames --name-only ${RANGE}, so a rename lists both paths) match, mark it skipped with its skip_reason. Return head (git -C ${W} rev-parse HEAD, the full sha), clean (git -C ${W} status --porcelain is empty, checked before and after the runs) and one result per id; for failures, summarize the failing tests or errors precisely. Do not change any file.
+const verifyBodyFor = entries => `Run the project's declared verification once on the worktree head, in the foreground, each command with a Bash timeout of up to 60 minutes: ${JSON.stringify(entries)}. Run each argv with <worktree>/<its cwd> as working directory. If an entry has when_changed globs and none of the files changed (git -C ${W} diff --no-renames --name-only ${RANGE}, so a rename lists both paths) match, mark it skipped with its skip_reason. Return head (git -C ${W} rev-parse HEAD, the full sha), clean (git -C ${W} status --porcelain is empty, checked before and after the runs) and one result per id; for failures, summarize the failing tests or errors precisely. On each failure also return outside_diff: true only when no failing test file and no erroring file is in that git diff --name-only list, else false. Do not change any file.
 ${RULES}`
 const verifyBody = verifyBodyFor(setup.verification)
 const verifyPrompt = `${CTX}\n${verifyBody}`
@@ -1497,7 +1497,31 @@ git -C ${W} diff --no-renames --name-only ${f.start_head} ${f.commit}
 Return its output lines as changed_paths. Run nothing else.
 ${RULES}`
 const wsAsk = ws => ` The fix changes only whitespace amounts and blank lines, in ${ws.changed_paths.map(p => p.trim()).join(', ')}. Also judge whether each of its whitespace changes is insignificant: outside every string, template, character and regex literal, heredoc and raw block, and in no construct where whitespace changes behaviour or output. Return whitespace_insignificant true only when you read every hunk and that holds, with whitespace_evidence naming each changed path and why it holds there; otherwise false, with whitespace_evidence naming the hunk where it matters.`
+// #972: a failure the clerk places wholly outside the branch's changed files is rerun once, the failed ids only, before any fix step.
+// A result that passes there is a pass that keeps the first failure as flaky; one that fails again stays the first failure.
+// Each verification gets at most this one rerun, and its reply counts only at the same clean head.
+const flakySeen = []
+const noteFlaky = rs => { for (const r of Array.isArray(rs) ? rs : []) if (isEntry(r) && present(r.flaky) && !flakySeen.some(f => f.id === r.id && f.summary === r.flaky)) flakySeen.push({ id: r.id, summary: r.flaky }) }
+const rerunOnce = async (v, n) => {
+  if (!v || !v.clean || !Array.isArray(v.results)) return v
+  const fails = verifyProblems(v)
+  if (!fails.length || !fails.every(p => p.status === 'fail' && p.outside_diff === true && VERIFY_IDS.includes(p.id))) return v
+  const ids = fails.map(p => p.id)
+  log(`verify: ${ids.join(', ')} failed outside the branch's changed files; one rerun before any fix`)
+  const again = await call(`${CTX}\nThe verification at ${v.head} failed, outside the files this branch changed: ${JSON.stringify(fails.map(p => ({ id: p.id, summary: p.summary })))}. Rerun what failed once and never a second time, whatever the outcome: where a command's runner can select tests, run only its failing tests named above (same cwd and timeout), else the whole command. A result is pass only when everything that failed passes now.\n${verifyBodyFor(setup.verification.filter(e => ids.includes(e.id)))}`, { label: `verify-rerun-${n}`, phase: 'Verify', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: VERIFY })
+  if (!complete(again, VERIFY) || !again.clean || !Array.isArray(again.results) || !sameSha(again.head, v.head)) return v
+  const passed = id => { const rs = again.results.filter(r => r.id === id); return rs.length === 1 && rs[0].status === 'pass' ? rs[0] : null }
+  const results = v.results.map(r => (ids.includes(r.id) && passed(r.id) ? { id: r.id, status: 'pass', summary: passed(r.id).summary, flaky: r.summary } : r))
+  for (const r of results) if (ids.includes(r.id) && present(r.flaky)) log(`verify: flaky, ${r.id} failed and passed on the one rerun: ${r.flaky}`)
+  noteFlaky(results)
+  return { ...v, results }
+}
+const FIX_OR_UNRELATED = { ...IMPL, properties: { ...IMPL.properties, outside_diff: { type: 'array', items: { type: 'object', properties: { file: { type: 'string' }, why: { type: 'string' } }, required: ['file', 'why'] } }, unrelated: { type: 'object', properties: { test: { type: 'string' }, evidence: { type: 'string' } }, required: ['test', 'evidence'] } } }
 let verify = VERIFY_CACHED ? { head: verified.head, clean: true, results: verified.results } : null
+if (VERIFY_CACHED) noteFlaky(verified.results)
+// #972: the files outside the branch's diff a verification fix edited, each with the cause the fix step established.
+const outsideOf = xs => (Array.isArray(xs) ? xs : []).filter(x => isEntry(x) && present(x.file) && present(x.why)).map(x => ({ file: String(x.file), why: String(x.why).slice(0, REASON_MAX) }))
+const outsideFixes = VERIFY_CACHED ? outsideOf(verified.outside_fixes) : []
 if (!VERIFY_CACHED) {
 verify = await recall(() => call(verifyFirst, { label: 'verify', phase: 'Verify', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: withRenew(VERIFY) }), r => r.renew)
 if (verify) {
@@ -1505,26 +1529,35 @@ if (verify) {
   if (lost) return lost
   if (!complete(verify, VERIFY)) verify = null
 }
+verify = await rerunOnce(verify, 1)
 let vRounds = 0
 while (verify && verifyProblems(verify).length && vRounds < 2) {
   vRounds++
-  const fix = await call(`${CTX}\n${PLAN_REF} The project's verification failed: ${JSON.stringify(verifyProblems(verify))}. Find the cause in this branch's changes (git -C ${W} diff ${RANGE}), fix it with the smallest change, commit. Never weaken, skip or delete a test to make it pass. ${OWN_TESTS} ${COMMIT_SCOPE} ${IMPL_RETURN}\n${RULES}`, { label: `verify-fix-${vRounds}`, phase: 'Verify', agentType: 'implementer', model: 'sonnet', schema: IMPL })
+  const fix = await call(`${CTX}\n${PLAN_REF} The project's verification failed: ${JSON.stringify(verifyProblems(verify))}. Find the cause in this branch's changes (git -C ${W} diff ${RANGE}), fix it with the smallest change, commit. Never weaken, skip or delete a test to make it pass. When what fails lies outside that diff, first establish with evidence why it fails here: this branch's change, or this delivery's environment (the worktree path, the branch name). Only with that cause shown may you edit a file outside the diff, and then return outside_diff: [{file, why}], one entry per such file with the cause. With no cause established (it fails without this branch, or it is flaky), change and commit nothing and return status blocked with unrelated {test, evidence}, evidence being what you ran or read. ${OWN_TESTS} ${COMMIT_SCOPE} ${IMPL_RETURN}\n${RULES}`, { label: `verify-fix-${vRounds}`, phase: 'Verify', agentType: 'implementer', model: 'sonnet', schema: FIX_OR_UNRELATED })
+  // #972: a failure for which the fix step can establish no cause here (the branch's change or the delivery's environment) is not edited
+  // green: the delivery stops naming the test, and nothing ships. A fix outside the diff with a stated cause goes on, flagged (outsideFixes).
+  if (fix && isEntry(fix.unrelated) && present(fix.unrelated.test) && present(fix.unrelated.evidence)) {
+    const stray = present(fix.commit) && present(fix.start_head) && !sameSha(fix.commit, fix.start_head) ? fix.commit : null
+    return stop('verify-unrelated', { details: `${String(fix.unrelated.test).slice(0, 120)} fails outside this branch's diff, so ${stray ? `it is not shipped (the fix step still committed ${stray}, unreviewed)` : 'no fix was made'}: ${fix.unrelated.evidence}`, unrelated: { test: fix.unrelated.test, evidence: fix.unrelated.evidence }, ...(stray ? { commit: stray } : {}), verify })
+  }
   if (!implDone(fix)) return stop('verify-fix', { verify, fix })
+  const outside = outsideOf(fix.outside_diff)
+  for (const o of outside) { outsideFixes.push(o); log(`verify-fix-${vRounds}: edited ${o.file}, outside the branch's diff: ${o.why}`) }
   const pre = rerunIds(verify, fix)
   const ws = pre ? await call(wsCheckPrompt(fix), { label: `ws-check-${vRounds}`, phase: 'Verify', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: WS_CHECK }) : null
   const asked = pre && wsOnly(ws) ? pre : null
-  const fr = await call(`${CTX}\nReview this verification fix: ${span(fix)}; the failure it answers: ${JSON.stringify(verifyProblems(verify))}; notes: ${fix.notes}. Report Important or Critical defects only, above all a weakened, skipped or deleted test or check.${asked ? wsAsk(ws) : ''}`, { label: `verify-fix-review-${vRounds}`, phase: 'Verify', agentType: 'reviewer', schema: asked ? WS_REVIEW : FINDINGS })
+  const fr = await call(`${CTX}\nReview this verification fix: ${span(fix)}; the failure it answers: ${JSON.stringify(verifyProblems(verify))}; notes: ${fix.notes}. Report Important or Critical defects only, above all a weakened, skipped or deleted test or check.${outside.length ? ` It edits files outside the branch's diff, each for a stated cause: ${JSON.stringify(outside)}; a cause the code or the failure does not bear out is an Important defect.` : ''}${asked ? wsAsk(ws) : ''}`, { label: `verify-fix-review-${vRounds}`, phase: 'Verify', agentType: 'reviewer', schema: asked ? WS_REVIEW : FINDINGS })
   if (!fr || findingsOf(fr).length) return stop('verify-fix-review', { review: fr })
   const rerun = asked && attested(fr) ? asked : null
   const next = await call(rerun ? `${CTX}\nA whitespace-only fix followed the verification at ${verify.head}; the declared ids not listed below passed there and are carried forward, so run only the listed ones.\n${verifyBodyFor(setup.verification.filter(e => rerun.includes(e.id)))}` : verifyPrompt, { label: `verify-${vRounds + 1}`, phase: 'Verify', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: VERIFY })
   if (rerun && next && !sameSha(next.head, fix.commit)) return stop('verify', { verify: next, problems: [{ id: '?', summary: `the narrowed verification ran at ${next.head}, not at the whitespace-only fix ${fix.commit}, so no result was carried` }] })
-  verify = rerun && next && Array.isArray(next.results) ? carry(verify, next, rerun) : next
+  verify = await rerunOnce(rerun && next && Array.isArray(next.results) ? carry(verify, next, rerun) : next, vRounds + 1)
 }
 }
 if (verifyProblems(verify).length) return stop('verify', { verify, problems: verifyProblems(verify) })
 if (MODE === 'ready') {
-  verified = { head: verify.head, results: verify.results, contract: VERIFY_CONTRACT, ...branchSnap() }
-  return stop('ready', { head: verify.head, branch: setup.branch, worktree: W, verify: verify.results, tasks: taskLog, ...(reordered.length ? { reordered } : {}), acceptance: plan.acceptance, fix_waves: fixWaves })
+  verified = { head: verify.head, results: verify.results, contract: VERIFY_CONTRACT, ...(outsideFixes.length ? { outside_fixes: outsideFixes } : {}), ...branchSnap() }
+  return stop('ready', { head: verify.head, branch: setup.branch, worktree: W, verify: verify.results, ...(flakySeen.length ? { flaky: flakySeen } : {}), ...(outsideFixes.length ? { outside_fixes: outsideFixes } : {}), tasks: taskLog, ...(reordered.length ? { reordered } : {}), acceptance: plan.acceptance, fix_waves: fixWaves })
 }
 
 // ---------------- Ship ----------------
@@ -1635,7 +1668,7 @@ const landBody = async () => {
   lockSha = expected
   const prR = await recall(() => call(`${CTX}
 ${RENEW_FIRST}
-Then open the pull request for this branch. Push the branch (git -C ${W} push origin ${setup.branch}). If an open PR with head ${setup.branch} already exists (a resumed delivery), reuse it; else open one against ${INT}. Title: a short summary of the issue. Body, plain prose, no single or double quotes, dollar signs, backticks or backslashes: sections Why, What changes, Acceptance (a table with one row per criterion: id, criterion, kind, and the test or command that shows it; criteria ${ACS}), Evidence (verification ${JSON.stringify(verify.results)}; ${taskLog.length} tasks reviewed; ${LANE === 'direct' ? 'direct-lane review' : 'final review ' + (chunked ? 'chunked' : 'whole')}${REVIEW_CODE ? ' plus the configured independent review' : ''}), Merge danger; then the line ${closesLine} as the last line, with no attribution or generated-by line. Never attach or link the plan or the spec. Return pr (number) and head (full sha of the pushed head).
+Then open the pull request for this branch. Push the branch (git -C ${W} push origin ${setup.branch}). If an open PR with head ${setup.branch} already exists (a resumed delivery), reuse it; else open one against ${INT}. Title: a short summary of the issue. Body, plain prose, no single or double quotes, dollar signs, backticks or backslashes: sections Why, What changes, Acceptance (a table with one row per criterion: id, criterion, kind, and the test or command that shows it; criteria ${ACS}), Evidence (verification ${JSON.stringify(verify.results)}${outsideFixes.length ? `; verification fixes outside the branch's diff, each with its cause: ${JSON.stringify(outsideFixes)}` : ''}; ${taskLog.length} tasks reviewed; ${LANE === 'direct' ? 'direct-lane review' : 'final review ' + (chunked ? 'chunked' : 'whole')}${REVIEW_CODE ? ' plus the configured independent review' : ''}), Merge danger; then the line ${closesLine} as the last line, with no attribution or generated-by line. Never attach or link the plan or the spec. Return pr (number) and head (full sha of the pushed head).
 Then, ${PROBE(W, INT)}
 Otherwise take the cross-host landing lock of the branch ${INT} for that PR at the verified head ${expected}: run alone and exactly: ${LAND_ACQUIRE(expected, true)}
 ${LOCK_RETURN} Return it as lock; when no PR was opened or reused, run neither the probe nor a lock command and return probe null and lock null. Then, only when lock's verdict is acquired, already_held or moved and the pushed head is ${expected}, wait ${CHECKS_WAIT('<the PR number>')} Return those fields as checks; otherwise run nothing more and return checks null.
@@ -1905,4 +1938,4 @@ try {
   if (landRelease && (landRelease.verdict === 'released' || landRelease.verdict === 'not_held')) lockHeld = false
   released = await unlock()
 }
-return finished.stage === 'done' ? { ...finished, chunked, syncs, verify: verify.results, ...released } : { ...finished, ...released }
+return finished.stage === 'done' ? { ...finished, chunked, syncs, verify: verify.results, ...(flakySeen.length ? { flaky: flakySeen } : {}), ...(outsideFixes.length ? { outside_fixes: outsideFixes } : {}), ...released } : { ...finished, ...released }

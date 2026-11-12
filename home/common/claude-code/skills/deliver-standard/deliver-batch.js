@@ -26,6 +26,7 @@ export const meta = {
 // Result: { stage: args|setup|done|breaker, batch_id, table, questions, owner_actions, relaunch }.
 // Every row that is not final and has something to say carries reason (#869): one line of at most REASON_MAX characters, the child's own stop reason
 // (its stage and the detail of its stop), else this program's stage and what the row carries. A detail the reason repeats is left out of the row.
+// A row whose child saw a verification check fail and pass on its one rerun carries flaky ([{id, summary}], #972), whatever its outcome: the lead files the flaky test. A row whose child's verification fix edited a file outside the branch's diff carries outside_fixes ([{file, why}]) the same way.
 // An already-fixed row is final and reported in owner_actions with its commit; the batch closes nothing.
 // A no-changes row (#923: every task of the child's plan ended with no commit, so there is nothing to land) is final too, once its claim
 // is released, and reported in owner_actions: the owner closes the issue. A release that failed leaves the row stopped for a relaunch.
@@ -500,6 +501,8 @@ const UNTRIED = ['not-admitted', 'blocked', 'waits-verification']
 const POST_MERGE = ['hold', 'close-out', 'code-unmet']
 const postMerge = r => !!r.pr || POST_MERGE.includes(r.stage)
 const READY = {}
+const FLAKY = {} // #972: by issue, the checks its child saw fail and pass on the one rerun
+const OUTSIDE = {} // #972: by issue, the files outside the branch's diff its child's verification fix edited, each with its cause
 const readyOf = n => READY[n]
 // The child's whole input (D1): the batch args, the mode (plan or ready), the issue's cont, its lane, the owner's answer and the review_sizing (#747) and clerk_model (#803) settings, nothing else.
 const childArgs = (n, lane, mode) => {
@@ -637,7 +640,7 @@ const PR_OPEN = (n, ready, expected) => {
   return `Then open the pull request of issue #${n} of ${SLUG} (the git repository at ${REPO}) from the branch ${ready.branch} (worktree ${ready.worktree}) into ${INT}, or re-adopt the open one, so that its body is exactly the text below.
 1. Push the branch: git -C ${ready.worktree} push origin ${ready.branch}.
 2. If an open PR with head ${ready.branch} exists (a re-run), reuse it: write the body to a file under a fresh directory made with mktemp -d and run ${UNSET}gh pr edit <pr> --repo ${SLUG} --body-file <that file>. Never reuse or edit a PR whose head is another branch, even when it references this issue; leave it untouched. Otherwise open one with the create form above. Title: a short summary of the issue.
-Body, plain prose, no single or double quotes, dollar signs, backticks or backslashes: sections Why, What changes, Acceptance (a table with one row per criterion: id, criterion, kind, and the test or command that shows it; criteria ${ACS}), Evidence (verification ${JSON.stringify(ready.verify || [])}; ${(ready.tasks || []).length} tasks reviewed; the last line of the Evidence section is exactly: Accepted head: ${expected}), Merge danger; then the line ${closesLine} as the last line of the body, with no attribution or generated-by line. Never attach or link the plan or the spec.
+Body, plain prose, no single or double quotes, dollar signs, backticks or backslashes: sections Why, What changes, Acceptance (a table with one row per criterion: id, criterion, kind, and the test or command that shows it; criteria ${ACS}), Evidence (verification ${JSON.stringify(ready.verify || [])}${OUTSIDE[n] ? `; verification fixes outside the branch's diff, each with its cause: ${JSON.stringify(OUTSIDE[n])}` : ''}; ${(ready.tasks || []).length} tasks reviewed; the last line of the Evidence section is exactly: Accepted head: ${expected}), Merge danger; then the line ${closesLine} as the last line of the body, with no attribution or generated-by line. Never attach or link the plan or the spec.
 Return pr (number) and head (the full sha of the pushed head).`
 }
 // The wait and the grading of a checks poll (its steps 3 and 4), shared by a landing's poll and a train car's (#822); `wait` is the bound of the watch.
@@ -1678,6 +1681,10 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
 
     if (r === null || r === undefined) { rows[n] = { issue: n, outcome: 'stopped', detail: threw || `child-${n} returned nothing` }; return }
     if (r.cont) CONTS[n] = r.cont
+    const flaky = (Array.isArray(r.flaky) ? r.flaky : []).filter(x => isObj(x) && nonEmpty(x.id) && nonEmpty(x.summary)).slice(0, FINDINGS_MAX).map(x => ({ id: oneLine(x.id), summary: oneLine(x.summary) }))
+    if (flaky.length) { FLAKY[n] = flaky; log(`#${n}: flaky verification, passed on the one rerun: ${flaky.map(x => `${x.id}: ${x.summary}`).join('; ')}`) }
+    const outside = (Array.isArray(r.outside_fixes) ? r.outside_fixes : []).filter(x => isObj(x) && nonEmpty(x.file) && nonEmpty(x.why)).slice(0, FINDINGS_MAX).map(x => ({ file: oneLine(x.file), why: oneLine(x.why) }))
+    if (outside.length) { OUTSIDE[n] = outside; log(`#${n}: the verification fix edited outside the branch's diff: ${outside.map(x => `${x.file}: ${x.why}`).join('; ')}`) }
     if (terminalChild(r)) { rows[n] = { issue: n, outcome: 'stopped', stage: r.stage, dead_agents: r.dead_agents, ...stopDetail(r) }; return }
     if (r.stage === 'done') {
       // A re-adopted merged landing: the child closed it out (claim released, worktree and branch removed). End the landing markers the merge resolved.
@@ -1786,7 +1793,7 @@ await parallel(toDeliver.map(n => async () => {
 // --- Result: one table, in ISSUES order ---
 const reasons = {}
 const table = ISSUES.map(n => {
-  const r = rows[n] || { issue: n, outcome: 'stopped', detail: 'no result' }
+  const r = { ...(rows[n] || { issue: n, outcome: 'stopped', detail: 'no result' }), ...(FLAKY[n] ? { flaky: FLAKY[n] } : {}), ...(OUTSIDE[n] ? { outside_fixes: OUTSIDE[n] } : {}) }
   if (FINAL.includes(r.outcome)) return r
   const untried = UNTRIED.includes(r.outcome)
   const mine = rowReason(r)
