@@ -14,7 +14,7 @@ from datetime import datetime
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
-from agent_tools.console import manager_check
+from agent_tools.console import manager, manager_check
 from agent_tools.console.manager import StopFailed
 from agent_tools.console.manager_check import GOALS
 from agent_tools.console.sessions import Observation
@@ -121,12 +121,23 @@ class ManagerCheckTest(unittest.TestCase):
         self.restarts = []
         self.stops = []
         self.failing_stops = 0
+        self.calls = []
+        self.failing_removes = set()
+        self.stop_seconds = 0
 
     def stop(self, session_id, profile):
         self.stops.append((session_id, profile, len(self.posted("/api/withdraw"))))
+        self.calls.append(("stop", session_id, profile, len(self.posted("/api/withdraw"))))
+        self.time.now += self.stop_seconds
         if self.failing_stops:
             self.failing_stops -= 1
             raise StopFailed(f"No job matching {session_id}")
+
+    def remove(self, session_id, profile):
+        self.calls.append(("remove", session_id, profile, len(self.posted("/api/withdraw"))))
+        if session_id in self.failing_removes:
+            self.failing_removes.discard(session_id)
+            raise manager.RemoveFailed(f"cannot remove {session_id}")
 
     def start(self, views, *, resume=False, at=T0, registry=None, budget="30", url=None,
               withdraws=()):
@@ -145,6 +156,7 @@ class ManagerCheckTest(unittest.TestCase):
                  str(self.state_file), "--result-file", str(self.result_file),
                  "--token-file", str(self.token_file), "--budget", budget],
                 restart=lambda: self.restarts.append(1), registry=self.registry, stop=self.stop,
+                remove=self.remove,
                 clock=self.time.clock, sleep=self.time.sleep)
         return code, json.loads(out.getvalue())
 
@@ -254,6 +266,69 @@ class ManagerCheckTest(unittest.TestCase):
         self.assertEqual(len(self.restarts), 1)
         self.assertFalse(self.state_file.exists())
         self.assertEqual(self.result(), {A: 120, B: 180})
+
+    def test_the_finish_stops_both_then_removes_both_before_it_withdraws(self):
+        briefs = view(both(), [brief(A, "10:02:00"), brief(B, "10:03:00")])
+        code, out = self.start([briefs], resume=True, registry=Registry({1: obs(A), 2: obs(B)}))
+        self.assertEqual(code, 0)
+        self.assertEqual(self.calls, [("stop", A, "default", 0), ("stop", B, "default", 0),
+                                      ("remove", A, "default", 0), ("remove", B, "default", 0)])
+        self.assertEqual(len(self.posted("/api/withdraw")), 2)
+        self.assertEqual(json.loads(self.result_file.read_text())["cleared"], {
+            "project": "owner/p01", "names": [NAMES[A], NAMES[B]], "profiles": ["default"]})
+
+    def test_a_not_met_finish_removes_the_stopped_manager_before_it_withdraws(self):
+        code, _ = self.start([view(both(manager_state="failed", manager_text="x"))],
+                             resume=True, registry=Registry({1: obs(A)}))
+        self.assertEqual(code, 1)
+        self.assertEqual(self.calls, [("stop", A, "default", 0), ("remove", A, "default", 0)])
+        self.assertEqual(len(self.posted("/api/withdraw")), 2)
+
+    def test_a_failed_removal_keeps_the_outcome_and_the_next_run_removes_only_what_is_left(self):
+        briefs = view(both(), [brief(A, "10:02:00"), brief(B, "10:03:00")])
+        self.failing_removes = {A}
+        code, out = self.start([briefs], resume=True, registry=Registry({1: obs(A), 2: obs(B)}))
+        self.assertEqual((code, out), (75, {
+            "reason": "the test managers' sessions are not removed yet: cannot remove " + A,
+            "sprints": [{"sprint_id": A}, {"sprint_id": B}], "status": "waiting"}))
+        self.assertEqual(self.posted("/api/withdraw"), [])
+        self.assertFalse(self.result_file.exists())
+        saved = json.loads(self.state_file.read_text())
+        self.assertEqual(saved["stopped"], [
+            {"session_id": A, "profile": "default"},
+            {"session_id": B, "profile": "default", "removed": True}])
+        self.assertEqual(saved["outcome"]["code"], 0)
+        self.calls.clear()
+        code, out = self.start([briefs], url=self.url, registry=Registry({}))
+        self.assertEqual((code, out["status"]), (0, "met"))
+        self.assertEqual(self.calls, [("remove", A, "default", 0)])
+        self.assertEqual(len(self.posted("/api/withdraw")), 2)
+        self.assertEqual(len(self.restarts), 1)
+        self.assertFalse(self.state_file.exists())
+        self.assertEqual(self.result(), {A: 120, B: 180})
+
+    def test_a_finish_cut_short_after_one_stop_keeps_it_and_the_next_run_completes_the_cleanup(self):
+        briefs = view(both(), [brief(A, "10:02:00"), brief(B, "10:03:00")])
+        self.stop_seconds = 600
+        code, out = self.start([briefs], resume=True, registry=Registry({1: obs(A), 2: obs(B)}))
+        self.assertEqual((code, out), (75, {
+            "reason": "the test managers are not stopped yet: " + manager.OUT_OF_TIME_TEXT,
+            "sprints": [{"sprint_id": A}, {"sprint_id": B}], "status": "waiting"}))
+        self.assertEqual(self.calls, [("stop", A, "default", 0)])
+        self.assertEqual(self.posted("/api/withdraw"), [])
+        self.assertFalse(self.result_file.exists())
+        saved = json.loads(self.state_file.read_text())
+        self.assertEqual(saved["stopped"], [{"session_id": A, "profile": "default"}])
+        self.assertEqual(saved["outcome"]["code"], 0)
+        self.calls.clear()
+        self.stop_seconds = 0
+        code, out = self.start([briefs], url=self.url, registry=Registry({1: obs(B)}))
+        self.assertEqual((code, out["status"]), (0, "met"))
+        self.assertEqual(self.calls, [("stop", B, "default", 0), ("remove", A, "default", 0),
+                                      ("remove", B, "default", 0)])
+        self.assertEqual(len(self.posted("/api/withdraw")), 2)
+        self.assertEqual(len(self.restarts), 1)
+        self.assertFalse(self.state_file.exists())
 
     def test_a_not_met_finish_stops_the_listed_managers_before_it_withdraws(self):
         code, out = self.start([view(both(manager_state="failed", manager_text="x"))],

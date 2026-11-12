@@ -45,25 +45,39 @@ from the log and drops a missing one only after two polls: a manager killed by t
 pass. The met output names the managers it found in `sessions`.
 
 Whenever `start` finishes (the console is given up to 60 seconds to come back from the restart
-first) it stops the test managers, then withdraws the test sprints; a 75 `waiting` finish does
-neither. Each manager listed in a fresh registry read under its name (`manager.session_name`) is
-stopped with `manager.stop_session`, which gives the stop the first eight characters of the
-session id and runs it under the session's own profile; every one is tried, and a manager not
-listed needs no stop. The stop comes first so the check leaves nothing running whatever the
-console's own stop of a withdrawn sprint does (ADR-console-018), which then finds nothing listed. When any stop fails the outcome is kept in the state file, nothing is withdrawn and the
-run is 75 `waiting` (`the test managers are not stopped yet: <the stop's one-line reason>`). A
-withdrawal counts as done on 204 or 409 (already gone). When any withdrawal fails the outcome is
-kept in the state file, nothing else is written and the run is 75 `waiting` (`the test sprints
-are not withdrawn yet`); the next run retries the stops and the withdrawals and then finishes
-with that outcome. A finish whose sprints are withdrawn writes the
-result file `{"status", "brief_seconds": {sprint id: int | null}}`, where a sprint's seconds are its
+first) it stops the test managers, removes their sessions, then withdraws the test sprints; a 75
+`waiting` finish does none of them. Each manager listed in a fresh registry read under its name
+(`manager.session_name`) is stopped with `manager.stop_session`, which gives the stop the first
+eight characters of the session id and runs it under the session's own profile; every one is
+tried, and a manager not listed needs no stop. Each stopped session's id and profile is recorded in
+the state file's `stopped`, because the fresh registry stops listing a session once it is stopped.
+The stop comes first so the check leaves nothing running whatever the console's own stop of a
+withdrawn sprint does (ADR-console-018), which then finds nothing listed. When any stop fails the
+outcome (and any stop that succeeded) is kept in the state file, nothing is withdrawn and the run is
+75 `waiting` (`the test managers are not stopped yet: <the stop's one-line reason>`). Second it
+removes each recorded session with `manager.remove_session` (`claude-account run rm <short id>`)
+under its own profile. A failed removal keeps the outcome and `stopped`, withdraws nothing and the
+run is 75 `waiting` (`the test managers' sessions are not removed yet: <reason>`); the next run
+removes the recorded sessions not yet removed, although the registry no longer lists them, then
+withdraws and finishes with the kept outcome. Before each stop and each removal the outcome and
+`stopped` are written to the state file, and a call that could end past
+`max(manager.FINISH_LIMIT, budget + manager.FINISH_SECONDS)` seconds of the run (590 with the
+default budget) is left to the next run (75 with `manager.OUT_OF_TIME_TEXT` in the reason), because
+verify-pending kills a run after 600 seconds; the next run stops what is still listed, removes every
+recorded unremoved session and finishes with the kept outcome. Third a withdrawal counts as done on
+204 or 409 (already gone). When any withdrawal fails the outcome is kept in the state file, nothing
+else is written and the run is 75 `waiting` (`the test sprints are not withdrawn yet`); the next
+run retries the stops, the removals and the withdrawals and then finishes with that outcome. A
+finish whose sprints are withdrawn writes the result file `{"status", "brief_seconds": {sprint id:
+int | null}, "cleared": {"project", "names", "profiles"}}`, where a sprint's seconds are its
 brief's `waiting_since` minus the sprint's `stated_at`, both console timestamps, so they never
-depend on when the check looked, and removes the state file.
+depend on when the check looked, and `cleared` is the project, the test managers' session names and
+the sorted profiles of the stopped sessions; it removes the state file.
 
 `timing` only reads the result file (a new run deletes the previous one, so it never reports an earlier run): absent is 75 `no_result`; any `brief_seconds` null or above
 `--deadline` is 1 `slow`; else 0 `met`, each with `brief_seconds`. It changes no file.
 
-The default `restart`, `registry` and `stop` and the `clock` and `sleep` of `main` are seams for tests.
+The default `restart`, `registry`, `stop` and `remove` and the `clock` and `sleep` of `main` are seams for tests.
 """
 
 from __future__ import annotations
@@ -96,6 +110,7 @@ GOALS = ("[verify #888 a] check that a stated goal starts a manager; withdraw me
          "withdraw me")
 NOT_RUNNING_TEXT = "the manager is not running after the restart"
 NOT_STOPPED_TEXT = "the test managers are not stopped yet"
+NOT_REMOVED_TEXT = "the test managers' sessions are not removed yet"
 NOT_WITHDRAWN_TEXT = "the test sprints are not withdrawn yet"
 
 
@@ -228,7 +243,7 @@ def default_registry() -> dict:
     return sessions.read_session_registry(service.default_session_dirs())
 
 
-def _start(args, restart, registry, stop, clock, sleep) -> int:
+def _start(args, restart, registry, stop, remove, clock, sleep) -> int:
     state_file = args.state_file or _state_dir() / "checks" / "manager-start.json"
     result_file = args.result_file or _state_dir() / "checks" / "manager-start-result.json"
     token_file = args.token_file or _state_dir() / "page-token"
@@ -261,25 +276,38 @@ def _start(args, restart, registry, stop, clock, sleep) -> int:
 
     def checkpoint(**more) -> None:
         _write_json(state_file, {"project": project, "sprints": [
-            {"sprint_id": i, "stated_at": stated[i]} for i in ids], **more})
+            {"sprint_id": i, "stated_at": stated[i]} for i in ids], "stopped": stopped, **more})
 
     def close(code, reason, seconds, listed):
-        """Stop the test managers, then withdraw the sprints, then finish.
+        """Stop the test managers, remove their sessions, withdraw the sprints, then finish.
 
-        A manager that stays running or a sprint that stays open keeps the state file.
+        A manager that stays running, a session that stays or a sprint that stays open keeps the
+        state file.
         """
+        kept = {"code": code, "reason": reason, "seconds": seconds, "listed": list(listed)}
+
         def keep(text):
-            checkpoint(outcome={"code": code, "reason": reason, "seconds": seconds,
-                                "listed": list(listed)})
+            checkpoint(outcome=kept)
             return pending(text)
 
+        guard = manager.finish_guard(clock, run_start, args.budget,
+                                     lambda: checkpoint(outcome=kept))
         try:
-            manager.stop_listed([manager.session_name(project, i) for i in ids], registry, stop)
+            manager.stop_listed([manager.session_name(project, i) for i in ids], registry, stop,
+                                stopped, guard)
         except Exception as error:
             return keep(f"{NOT_STOPPED_TEXT}: {error}" if str(error) else NOT_STOPPED_TEXT)
+        try:
+            manager.remove_stopped(stopped, remove, guard)
+        except Exception as error:
+            return keep(f"{NOT_REMOVED_TEXT}: {error}" if str(error) else NOT_REMOVED_TEXT)
+        checkpoint(outcome=kept)
         if not withdraw(ids):
             return keep(NOT_WITHDRAWN_TEXT)
-        return _finish(code, reason, ids, seconds, list(listed), result_file, state_file)
+        cleared = {"project": project,
+                   "names": [manager.session_name(project, i) for i in ids],
+                   "profiles": sorted({entry["profile"] for entry in stopped})}
+        return _finish(code, reason, ids, seconds, list(listed), result_file, state_file, cleared)
 
     def settle(code, reason, seconds, listed=(), restarted=False):
         if restarted:
@@ -293,6 +321,7 @@ def _start(args, restart, registry, stop, clock, sleep) -> int:
     project = args.project
     ids: list[str] = []
     stated: dict[str, str] = {}
+    stopped: list[dict] = []
     unresolved = False
     if state_file.exists():
         try:
@@ -300,6 +329,10 @@ def _start(args, restart, registry, stop, clock, sleep) -> int:
             project = saved["project"]
             stated = {row["sprint_id"]: row["stated_at"] for row in saved["sprints"]}
             ids = [row["sprint_id"] for row in saved["sprints"]]
+            stopped.extend(
+                {"session_id": row["session_id"], "profile": row["profile"],
+                 **({"removed": True} if row.get("removed") else {})}
+                for row in saved.get("stopped", []))
             outcome = saved.get("outcome")
             unresolved = bool(saved.get("unresolved"))
             if outcome is not None:
@@ -399,9 +432,9 @@ def _start(args, restart, registry, stop, clock, sleep) -> int:
     return finish(0, None, seconds, names)
 
 
-def _finish(code, reason, ids, seconds, listed, result_file, state_file) -> int:
+def _finish(code, reason, ids, seconds, listed, result_file, state_file, cleared) -> int:
     status = "met" if code == 0 else "not_met"
-    _write_json(result_file, {"status": status, "brief_seconds": seconds})
+    _write_json(result_file, {"status": status, "brief_seconds": seconds, "cleared": cleared})
     state_file.unlink(missing_ok=True)
     output = {"status": status, "brief_seconds": [seconds[i] for i in ids]}
     if code == 0:
@@ -433,12 +466,13 @@ def main(argv: list[str] | None = None, *,
          restart: Callable[[], None] = default_restart,
          registry: Callable[[], dict] = default_registry,
          stop: Callable[[str, str], None] = manager.stop_session,
+         remove: Callable[[str, str], None] = manager.remove_session,
          clock: Callable[[], float] = time.time,
          sleep: Callable[[float], None] = time.sleep) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "timing":
         return _timing(args)
-    return _start(args, restart, registry, stop, clock, sleep)
+    return _start(args, restart, registry, stop, remove, clock, sleep)
 
 
 if __name__ == "__main__":

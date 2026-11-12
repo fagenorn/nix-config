@@ -154,6 +154,13 @@ class NudgeCommandTest(unittest.TestCase):
         self.assertIs(True, kwargs["start_new_session"])
         self.assertEqual(30, kwargs["timeout"])
 
+    def test_the_full_entries_keep_each_sessions_name(self):
+        run = self.listing(json.dumps([{"sessionId": "a", "name": "n a"}, "junk",
+                                       {"name": "no id"}]))
+        environ = {"HOME": "/h", "PATH": "/bin"}
+        entries = nudge_module.read_full_entries("work", self.root, run=run, environ=environ)
+        self.assertEqual([{"sessionId": "a", "name": "n a"}, {"name": "no id"}], entries)
+
     def test_an_unreadable_full_listing_raises_one_line_reasons(self):
         cases = [
             ("the listing is not a JSON array", self.root, dict(stdout="not json")),

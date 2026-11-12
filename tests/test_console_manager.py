@@ -2,6 +2,7 @@
 
 Run: just agent-workflow-tests
 """
+import inspect
 import json
 import os
 import shutil
@@ -14,7 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from agent_tools.console import manager
+from agent_tools.console import manager, revive_check
 from agent_tools.console.sessions import Observation
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -413,6 +414,181 @@ class StopTest(unittest.TestCase):
             manager.stop_listed(["n"], lambda: registry, stop)
         self.assertEqual(stopped, ["s-1", "s-2", "s-3"])
         self.assertEqual(str(raised.exception), "no s-1")
+
+    def test_the_removal_names_the_first_eight_characters_under_the_sessions_profile(self):
+        calls = []
+
+        def run(argv, **kwargs):
+            calls.append((argv, kwargs))
+            return SimpleNamespace(returncode=0)
+
+        environ = {"HOME": "/home/u", "PATH": "/bin", "CONSOLE_SPRINT_SECRET": "s"}
+        manager.remove_session(self.FULL, "work", run=run, environ=environ)
+        argv, kwargs = calls[0]
+        self.assertEqual(argv, ["claude-account", "run", "rm", "01234567"])
+        self.assertEqual(kwargs["env"]["CLAUDE_ACCOUNT"], "work")
+        self.assertNotIn("CONSOLE_SPRINT_SECRET", kwargs["env"])
+        self.assertIs(kwargs["stdin"], subprocess.DEVNULL)
+        self.assertEqual(kwargs["timeout"], 60)
+
+    def test_a_failed_removal_raises_its_one_line_reason(self):
+        def failing(argv, **kwargs):
+            kwargs["stderr"].write(b"first\nno such session\n\n")
+            return SimpleNamespace(returncode=1)
+
+        def silent(argv, **kwargs):
+            return SimpleNamespace(returncode=3)
+
+        def missing(argv, **kwargs):
+            raise FileNotFoundError
+
+        def slow(argv, **kwargs):
+            raise subprocess.TimeoutExpired(argv, 60)
+
+        self.assertTrue(issubclass(manager.RemoveFailed, manager.StopFailed))
+        cases = ((failing, "no such session"), (silent, "the removal exited 3"),
+                 (missing, "claude-account is not installed"),
+                 (slow, "the removal did not return within 60 s"))
+        for stand_in, reason in cases:
+            with self.subTest(reason):
+                with self.assertRaises(manager.RemoveFailed) as raised:
+                    manager.remove_session(self.FULL, "work", run=stand_in, environ={})
+                self.assertEqual(str(raised.exception), reason)
+
+    def test_a_stop_is_recorded_once_and_a_failed_one_not_at_all(self):
+        registry = {
+            1: Observation("s-a", "/srv", 1, "idle", None, "n", None, "work"),
+            2: Observation("s-b", "/srv", 1, "idle", None, "n", None, None),
+            3: Observation("s-c", "/srv", 1, "idle", None, "n", None, "work")}
+
+        def stop(session_id, profile):
+            if session_id == "s-c":
+                raise manager.StopFailed("no s-c")
+
+        stopped = [{"session_id": "s-a", "profile": "work"}]
+        with self.assertRaises(manager.StopFailed) as raised:
+            manager.stop_listed(["n"], lambda: registry, stop, stopped)
+        self.assertEqual(str(raised.exception), "no s-c")
+        self.assertEqual(stopped, [{"session_id": "s-a", "profile": "work"},
+                                   {"session_id": "s-b", "profile": "default"}])
+
+    def test_a_removed_entry_does_not_hide_a_new_stop_of_the_same_id(self):
+        registry = {1: Observation("s-a", "/srv", 1, "idle", None, "n", None, "work")}
+        stopped = [{"session_id": "s-a", "profile": "work", "removed": True}]
+        manager.stop_listed(["n"], lambda: registry, lambda session_id, profile: None, stopped)
+        self.assertEqual(stopped, [{"session_id": "s-a", "profile": "work", "removed": True},
+                                   {"session_id": "s-a", "profile": "work"}])
+
+    def test_a_retry_that_stops_the_same_id_under_another_profile_records_it_too(self):
+        registry = {1: Observation("s-a", "/srv", 1, "idle", None, "n", None, "p2")}
+        stopped = [{"session_id": "s-a", "profile": "work"}]
+        manager.stop_listed(["n"], lambda: registry, lambda session_id, profile: None, stopped)
+        self.assertEqual(stopped, [{"session_id": "s-a", "profile": "work"},
+                                   {"session_id": "s-a", "profile": "p2"}])
+        calls = []
+        manager.remove_stopped(stopped, lambda session_id, profile: calls.append(profile))
+        self.assertEqual(calls, ["work", "p2"])
+
+    def test_every_unremoved_session_is_removed_and_a_failure_is_kept_for_the_retry(self):
+        stopped = [{"session_id": "s-a", "profile": "work", "removed": True},
+                   {"session_id": "s-b", "profile": "work"},
+                   {"session_id": "s-c", "profile": "default"},
+                   {"session_id": "s-d", "profile": "work"}]
+        calls = []
+
+        def remove(session_id, profile):
+            calls.append((session_id, profile))
+            if session_id == "s-c":
+                raise manager.RemoveFailed("no s-c")
+
+        with self.assertRaises(manager.RemoveFailed) as raised:
+            manager.remove_stopped(stopped, remove)
+        self.assertEqual(str(raised.exception), "no s-c")
+        self.assertEqual(calls, [("s-b", "work"), ("s-c", "default"), ("s-d", "work")])
+        self.assertEqual([entry.get("removed") for entry in stopped], [True, True, None, True])
+        calls.clear()
+        self.assertIsNone(manager.remove_stopped(
+            stopped, lambda session_id, profile: calls.append((session_id, profile))))
+        self.assertEqual(calls, [("s-c", "default")])
+
+    def test_the_revive_check_removes_through_the_shared_removal(self):
+        default = inspect.signature(revive_check.main).parameters["remove"].default
+        self.assertIs(default, manager.remove_session)
+        self.assertFalse(hasattr(revive_check, "default_remove"))
+
+    def test_before_runs_ahead_of_each_stop_and_removal_and_its_exception_ends_the_loop(self):
+        registry = {1: Observation("s-a", "/srv", 1, "idle", None, "n", None, "work"),
+                    2: Observation("s-b", "/srv", 1, "idle", None, "n", None, "work")}
+        calls = []
+        stopped = []
+
+        def stop(session_id, profile):
+            calls.append(("stop", session_id))
+
+        def remove(session_id, profile):
+            calls.append(("remove", session_id))
+
+        def before():
+            calls.append(("before", len(stopped)))
+            if len(calls) > 2:
+                raise manager.OutOfTime(manager.OUT_OF_TIME_TEXT)
+
+        self.assertFalse(issubclass(manager.OutOfTime, manager.StopFailed))
+        with self.assertRaises(manager.OutOfTime):
+            manager.stop_listed(["n"], lambda: registry, stop, stopped, before)
+        self.assertEqual(calls, [("before", 0), ("stop", "s-a"), ("before", 1)])
+        self.assertEqual(stopped, [{"session_id": "s-a", "profile": "work"}])
+
+        calls.clear()
+        entries = [{"session_id": "s-a", "profile": "work"},
+                   {"session_id": "s-b", "profile": "work"}]
+
+        def second_refuses():
+            calls.append(("before",))
+            if len(calls) > 2:
+                raise manager.OutOfTime(manager.OUT_OF_TIME_TEXT)
+
+        with self.assertRaises(manager.OutOfTime):
+            manager.remove_stopped(entries, remove, second_refuses)
+        self.assertEqual(calls, [("before",), ("remove", "s-a"), ("before",)])
+        self.assertIs(entries[0]["removed"], True)
+        self.assertNotIn("removed", entries[1])
+
+    def test_the_finish_guard_saves_then_refuses_a_call_that_could_outlast_the_run(self):
+        now = [1530.0]
+        saves = []
+        guard = manager.finish_guard(lambda: now[0], 1000.0, 540, lambda: saves.append(now[0]))
+        self.assertEqual(manager.FINISH_LIMIT, 590)
+        self.assertIsNone(guard())
+        self.assertEqual(saves, [1530.0])
+        now[0] = 1531.0
+        with self.assertRaises(manager.OutOfTime) as raised:
+            guard()
+        self.assertEqual(str(raised.exception), manager.OUT_OF_TIME_TEXT)
+        self.assertEqual(saves, [1530.0, 1531.0])
+        wide = manager.finish_guard(lambda: now[0], 1000.0, 2000, lambda: None)
+        now[0] = 2990.0
+        self.assertIsNone(wide())
+        now[0] = 2991.0
+        with self.assertRaises(manager.OutOfTime):
+            wide()
+
+    def test_mark_removed_marks_the_open_entry_or_records_a_removed_one(self):
+        stopped = [{"session_id": "s-a", "profile": "work", "removed": True},
+                   {"session_id": "s-a", "profile": "work"}]
+        manager.mark_removed(stopped, "s-a", "work")
+        manager.mark_removed(stopped, "s-b", "p2")
+        self.assertEqual(stopped, [
+            {"session_id": "s-a", "profile": "work", "removed": True},
+            {"session_id": "s-a", "profile": "work", "removed": True},
+            {"session_id": "s-b", "profile": "p2", "removed": True}])
+
+    def test_mark_removed_does_not_mark_the_same_id_under_another_profile(self):
+        stopped = [{"session_id": "s-a", "profile": "work"}]
+        manager.mark_removed(stopped, "s-a", "p2")
+        self.assertEqual(stopped, [
+            {"session_id": "s-a", "profile": "work"},
+            {"session_id": "s-a", "profile": "p2", "removed": True}])
 
 
 if __name__ == "__main__":

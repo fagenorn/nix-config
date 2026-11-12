@@ -58,12 +58,13 @@ seconds (a command that exceeds them has its whole process group killed, `run_in
 every program a nudge runs by name on `PATH`. `nudger_for(platform)` is `run_nudge` on Linux and
 None elsewhere.
 
-Full listing. `read_full_listing(profile, cwd)` runs `claude-account run agents --json --all` (the
+Full listing. `read_full_entries(profile, cwd)` and `read_full_listing(profile, cwd)` run `claude-account run agents --json --all` (the
 command `listing_command()`) in the project root with no terminal, in its own session, stdout and
 stderr to temporary files, in `manager.client_environment(profile, environ)`, within
-`LISTING_TIMEOUT` (30) seconds, and returns the `sessionId` of every entry of the JSON array that
-is an object with a non-empty string `sessionId`, whatever its `kind` or `state` (a completed
-background session is listed too); other entries are skipped. `full_lister_for(platform)` is
+`LISTING_TIMEOUT` (30) seconds. `read_full_entries` returns every entry of the JSON array that is
+an object, in order; `read_full_listing` returns the `sessionId` of every such entry with a
+non-empty string `sessionId`, whatever its `kind` or `state` (a completed background session is
+listed too); other entries are skipped. `full_lister_for(platform)` is
 `read_full_listing` on Linux and None elsewhere. Its failures are `ListingUnreadable` with a
 one-line reason: `the project root <cwd> is not a directory` (nothing run),
 `claude-account is not installed`, `the listing did not return within 30 s`, the last non-empty
@@ -211,8 +212,8 @@ def listing_command() -> list[str]:
     return ["claude-account", "run", "agents", "--json", "--all"]
 
 
-def read_full_listing(profile: str, cwd: str, *, run=run_in_own_group,
-                      environ: Mapping[str, str] = os.environ) -> frozenset[str]:
+def read_full_entries(profile: str, cwd: str, *, run=run_in_own_group,
+                      environ: Mapping[str, str] = os.environ) -> list[dict]:
     if not Path(cwd).is_dir():
         raise ListingUnreadable(f"the project root {cwd} is not a directory")
     argv = listing_command()
@@ -239,9 +240,14 @@ def read_full_listing(profile: str, cwd: str, *, run=run_in_own_group,
         entries = None
     if not isinstance(entries, list):
         raise ListingUnreadable("the listing is not a JSON array")
+    return [entry for entry in entries if isinstance(entry, dict)]
+
+
+def read_full_listing(profile: str, cwd: str, *, run=run_in_own_group,
+                      environ: Mapping[str, str] = os.environ) -> frozenset[str]:
+    entries = read_full_entries(profile, cwd, run=run, environ=environ)
     return frozenset(entry["sessionId"] for entry in entries
-                     if isinstance(entry, dict) and isinstance(entry.get("sessionId"), str)
-                     and entry["sessionId"])
+                     if isinstance(entry.get("sessionId"), str) and entry["sessionId"])
 
 
 def full_lister_for(platform: str) -> Callable[[str, str], frozenset[str]] | None:
