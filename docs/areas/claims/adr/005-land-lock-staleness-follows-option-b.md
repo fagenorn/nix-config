@@ -9,7 +9,7 @@ A holder that dies mid-landing leaves a lock at a head that never merges. Readin
 
 ## Decision
 
-A one-shot `status` or `acquire` treats only the lock of a merged or closed pull request as stale, takes only that over, and reads no event timestamps. Only `acquire --wait` takes over a held lock, after watching the same oid unchanged for 45 minutes on its own monotonic clock, counted from its first observation of that oid. No wall clock is read and nothing is persisted, so every `--wait` invocation starts a fresh watch. Every completed ref observation feeds the watch, so an interrupted watch restarts when the oid changes. `--wait` attempts every 120 seconds up to 3600 seconds and then answers `land-contended`.
+A one-shot `status` or `acquire` treats only the lock of a merged or closed pull request as stale, takes only that over, and reads no event timestamps. Only `acquire --wait` takes over a held lock, after watching the same oid unchanged for 45 minutes on its own monotonic clock, counted from its first observation of that oid. No wall clock is read and nothing is persisted, so every `--wait` invocation starts a fresh watch. Every completed ref observation feeds the watch, so an interrupted watch restarts when the oid changes. `--wait` attempts every 120 seconds up to 3000 seconds and then answers `land-contended` (3600 seconds until issue 941: one invocation must end by itself inside a 60-minute Bash call).
 
 ## Consequences
 

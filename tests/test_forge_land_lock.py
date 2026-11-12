@@ -1321,11 +1321,17 @@ class WaitTest(Base):
         clock = FakeClock(self.move_once(2400, C))  # the holder moves its lock: the watch restarts at 2400
         code, out = self.wait(clock)
         self.assertEqual((code, out["verdict"], out["waited_s"], out["lock_sha"], out["pr"]),
-                         (3, "land-contended", 3600, C, 12))
-        self.assertEqual(clock.slept, [120] * 30)
-        self.assertEqual(len(self.attempts()), 31)
+                         (3, "land-contended", 3000, C, 12))
+        self.assertEqual(clock.slept, [120] * 25)
+        self.assertEqual(len(self.attempts()), 26)
         self.assertEqual(self.cas_calls(), [])
         self.assertEqual(self.world.refs(), {REF: C})
+
+    def test_a_wait_ends_by_itself_inside_a_sixty_minute_bash_call(self):
+        """Issue 941: the wait answers land-contended with ten minutes to spare, and can still complete an idle watch."""
+        self.assertEqual(land_lock.BOUND, 3000)
+        self.assertLessEqual(land_lock.BOUND + 5 * land_lock.POLL, 3600)
+        self.assertGreaterEqual(land_lock.BOUND, land_lock.IDLE_AFTER + 2 * land_lock.POLL)
 
     def test_a_wait_reports_the_pull_requests_it_waited_on(self):
         """Issue 913: the holders seen while polling, in order, whether the wait succeeds or gives up."""
@@ -1362,9 +1368,9 @@ class WaitTest(Base):
         self.assertEqual(self.world.refs(), {REF: A})
 
     def test_a_moved_oid_restarts_the_watch(self):
-        clock = FakeClock(self.move_once(600, C))
+        clock = FakeClock(self.move_once(120, C))
         code, out = self.wait(clock)
-        self.assertEqual((code, out["verdict"], out["took_over"], out["waited_s"]), (0, "acquired", "idle", 3360))
+        self.assertEqual((code, out["verdict"], out["took_over"], out["waited_s"]), (0, "acquired", "idle", 2880))
         self.assertEqual([[a[-3], a[-1]] for a in self.cas_calls()], [[f"before={C}", f"after={A}"]])
 
     def test_a_release_while_waiting_is_acquired_by_create(self):
@@ -1401,7 +1407,8 @@ class WaitTest(Base):
                 raise fm.ForgeError("gh_failed", "boom")  # two failed polls, then one that answers
             return real(*args)
         clock = FakeClock()
-        with mock.patch.object(fm, "create_ref", flaky):
+        # The failed polls delay the watch, so the takeover is set early enough to fit the wait's bound.
+        with mock.patch.object(fm, "create_ref", flaky), mock.patch.object(land_lock, "IDLE_AFTER", 1800):
             code, out = self.wait(clock)
         self.assertEqual((code, out["verdict"], out["took_over"]), (0, "acquired", "idle"))
         self.assertGreater(len(clock.slept), 3)
@@ -1418,7 +1425,7 @@ class WaitTest(Base):
         clock = FakeClock(self.move_once(2880, B))  # ... and B comes back
         with mock.patch.object(fm, "cas_ref", racing_cas):
             code, out = self.wait(clock)
-        self.assertEqual((code, out["verdict"], out["lock_sha"], out["waited_s"]), (3, "land-contended", B, 3600))
+        self.assertEqual((code, out["verdict"], out["lock_sha"], out["waited_s"]), (3, "land-contended", B, 3000))
         self.assertEqual(len(self.cas_calls()), 1)  # 2760 lost to C; B seen anew at 2880 needs until 5580
         self.assertEqual(self.world.refs(), {REF: B})
 
@@ -1434,7 +1441,7 @@ class WaitTest(Base):
         with mock.patch.object(fm, "read_ref", read):
             code, out = self.wait(clock)
         self.assertEqual((code, out["verdict"], out["lock_sha"]), (3, "land-contended", B))
-        self.assertEqual(self.cas_calls(), [])  # B's watch restarted at 1200: 3900 > 3600
+        self.assertEqual(self.cas_calls(), [])  # B's watch restarted at 1200: 3900 > 3000
 
     def test_unchanged_cas_failures_exit_on_the_third_poll(self):
         for failure in ("gh_failed", "gh_timeout"):
