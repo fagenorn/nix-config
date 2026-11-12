@@ -890,8 +890,7 @@ class LastLookedTest(Case):
         svc.ingest_hook(support.hook_body("failed turn on a usage limit"))
         recent = digest_of(svc)["recent"]
         self.assertEqual([m["kind"] for m in recent], ["limit_stop"])
-        self.assertTrue(recent[0]["sentence"].endswith("stopped on a usage limit in owner/p00."),
-                        recent[0]["sentence"])
+        self.assertEqual(recent[0]["sentence"], "A session in owner/p00 stopped on a usage limit.")
 
     def test_the_clock_alone_keeps_the_view_bytes(self):
         now = [T0]

@@ -1,10 +1,13 @@
 """The console's view (#855): projection, registry diff, ordering and folding, encoding."""
 
 import json
+import re
 import unittest
 from datetime import datetime
 
 from agent_tools.claims import forge_markers as fm
+from agent_tools.claims import forge_owner_action as foa
+from agent_tools.console import digest
 from agent_tools.console import inbox
 from agent_tools.console import view
 from agent_tools.console.deliveries import (
@@ -504,6 +507,26 @@ class InboxFoldTest(unittest.TestCase):
         self.assertEqual(record.updated_at, "t2")
         self.assertIs(record.item["answered"], True)
 
+    def test_answered_at_is_when_the_item_was_answered_not_its_last_change(self):
+        open_ = item("p", "k")
+        answered = {**open_, "answered": True}
+        later = {**answered, "held_work": 3}
+        e1 = Event(1, "t1", INBOX_SEEN, "p", open_)
+        e2 = Event(2, "t2", INBOX_CHANGED, "p", answered)
+        e3 = Event(3, "t3", INBOX_CHANGED, "p", later)
+        e4 = Event(4, "t4", INBOX_CHANGED, "p", {**later, "answered": False})
+        s1 = Event(1, "t9", INBOX_SEEN, "p", answered)
+        one = inbox_records([e1, e2, e3])
+        split = inbox_records([e3], inbox_records([e1, e2]))
+        reopened = inbox_records([e1, e2, e3, e4])
+        first_seen = inbox_records([s1])
+        self.assertEqual(one[("p", "k")].answered_at, "t2")
+        self.assertEqual(one[("p", "k")].updated_at, "t3")
+        self.assertEqual(split[("p", "k")].answered_at, "t2")
+        self.assertIsNone(reopened[("p", "k")].answered_at)
+        self.assertEqual(first_seen[("p", "k")].answered_at, "t9")
+        self.assertIsNone(inbox_records([e1])[("p", "k")].answered_at)
+
     def test_gone_and_unregistered_drop_items(self):
         a, b = item("p", "ka"), item("q", "kb")
         events = [
@@ -561,8 +584,60 @@ class InboxStatementTest(unittest.TestCase):
         self.assertEqual([e["key"] for e in result["inbox"]["answered"]], ["kd"])
         self.assertEqual(result["inbox"]["answered"][0]["type"], "inbox_item")
         self.assertEqual(result["inbox"]["open"][0], {
-            **open_item, "type": "inbox_item", "waiting_since": "t1",
-            "stale": False, "read_at": "u1"})
+            **{k: v for k, v in open_item.items() if k != "question"},
+            "type": "inbox_item", "waiting_since": "t1", "stale": False, "read_at": "u1",
+            "headline": "Which one?", "more_questions": 0, "answered_at": None})
+
+    def test_an_items_headline_is_its_first_question_with_a_count(self):
+        boiler = foa.SENTENCES["decision"]
+
+        def q(text):
+            return {"question": text, "options": ["a", "b"], "chosen": None,
+                    "recommended": None}
+
+        def decision(key, questions):
+            return {**item("p", key), "reason": "decision", "question": boiler,
+                    "questions": questions}
+
+        three = decision("k3", [q("Which database?"), q("Which port?"), q("Which host?")])
+        one = decision("k1", [q("Which cache?")])
+        unread = decision("k0", [])
+        conflict = {**item("p", "kc"), "reason": "conflict", "items": ["x"],
+                    "question": "Landing stopped on a second merge conflict."}
+        opened = derive_view([state("p", 1)], self.records(three, one, unread, conflict))[
+            "inbox"]["open"]
+        by_key = {entry["key"]: entry for entry in opened}
+        self.assertEqual(
+            {k: (e["headline"], e["more_questions"]) for k, e in by_key.items()},
+            {"k3": ("Which database?", 2), "k1": ("Which cache?", 0),
+             "k0": (view.UNREAD_DECISION, 0),
+             "kc": ("Landing stopped on a second merge conflict.", 0)})
+        for entry in by_key.values():
+            self.assertNotIn("question", entry)
+
+    def test_the_decision_boilerplate_is_nowhere_in_the_view(self):
+        boiler = foa.SENTENCES["decision"]
+        asked = {"question": "Which one?", "options": ["a", "b"], "chosen": None,
+                 "recommended": None}
+        base = {**item("p", "kd"), "reason": "decision", "question": boiler,
+                "questions": [asked]}
+        events = [
+            Event(1, "2026-11-11T10:00:00+00:00", INBOX_SEEN, "p", base),
+            Event(2, "2026-11-11T10:01:00+00:00", INBOX_SEEN, "p",
+                  {**base, "key": "kd2", "answered": True})]
+        made = digest.digest(digest.moments(events, {}, {}), None,
+                             datetime.fromisoformat("2026-11-11T12:00:00+00:00"))
+        result = derive_view([state("p", 1)], inbox_records(events), digest=made)
+        self.assertEqual(len(result["digest"]["recent"]), 2)
+        self.assertNotIn(boiler.encode(), encode_view(result))
+        self.assertIsNone(re.search(r"#\d", json.dumps(result["digest"])))
+
+    def test_an_answered_item_carries_when_it_was_answered(self):
+        records = {("p", "ko"): InboxRecord(item("p", "ko"), "t1", "u1"),
+                   ("p", "kd"): InboxRecord(item("p", "kd", answered=True), "t1", "u3", "u2")}
+        result = derive_view([state("p", 1)], records)["inbox"]
+        self.assertEqual(result["answered"][0]["answered_at"], "u2")
+        self.assertIsNone(result["open"][0]["answered_at"])
 
     def test_the_headline_counts_open_items(self):
         table = [(0, "Nothing needs you"), (1, "1 thing needs you"),

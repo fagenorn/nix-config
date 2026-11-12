@@ -20,8 +20,12 @@ the unmanaged entry for its `repo`. Sessions never touch the statement or
 
 Inbox events name a project and carry the tracker's owner-action items. `inbox.seen`
 (payload: an item, with its `key`) records the item with `waiting_since` and
-`updated_at` both the event's time; `inbox.changed` (payload: the item) replaces the item and
-`updated_at` but keeps `waiting_since` (an unknown key is treated as seen); `inbox.gone`
+`updated_at` both the event's time, and `answered_at` the event's time when the item is
+answered, else null; `inbox.changed` (payload: the item) replaces the item and
+`updated_at` but keeps `waiting_since` (an unknown key is treated as seen); its `answered_at`
+is the event's time when the new item is answered and the old one was not, the old
+`answered_at` when both are answered, null when the new item is not answered, so it moves only
+when the item turns answered and a later change of any other member keeps it; `inbox.gone`
 (payload `{"key"}`) removes the item; `project.unregistered` removes every item of that
 project; an inbox event whose payload has no string `key` is ignored. `inbox.health`
 (payload `{"ok": true}` or `{"ok": false, "read_at": <time of the last good read> | null}`)
@@ -64,12 +68,17 @@ can answer), else `NEEDS_SENTENCE` when something is open, else the registered-p
 all-out promotion never changes `inbox_items`, and the statement keeps exactly its four keys.
 `capacity` is the `capacity_view` the caller passes (`capacity.py` defines its members), else the
 empty capacity, the same bytes as `capacity_view` over no profile. `stale` is true
-when any registered project's last read failed. An inbox item is the stored item plus
-`{"type": "inbox_item", "waiting_since", "stale", "read_at"}`: `stale` is that project's
-failed read, `read_at` the time of its last good read (the item's last update when the read
-time is unknown). Only items of registered projects are shown. Open items are sorted by
-most held work first, then `waiting_since`, then `key`; answered items are listed apart,
-never counted, by `waiting_since` then `key`.
+when any registered project's last read failed. An inbox item is every stored member
+except `question`, plus `{"type": "inbox_item", "waiting_since", "stale", "read_at",
+"headline", "more_questions", "answered_at"}`: `stale` is that project's failed read, `read_at`
+the time of its last good read (the item's last update when the read time is unknown),
+`headline` and `more_questions` come from `item_headline` (the first question of an item that
+has questions and the count of the others; `UNREAD_DECISION` for a decision with none; else
+the stored `question`), and `answered_at` is the record's (null while open). The stored
+`question` is no wire member (a decision's is a fixed sentence). Only items of
+registered projects are shown. Open items are sorted by most held work first, then
+`waiting_since`, then `key`; answered items are listed apart, never counted, by
+`waiting_since` then `key`.
 
 A project entry is `{"type": "project", "project_id", "root", "quiet",
 "open_work", "last_activity", "sprints": [<sprint entry>, ...],
@@ -175,6 +184,7 @@ CHOOSE_SENTENCE = "Choose an option with its number and press Enter, or answer o
 ANSWER_SENTENCE = "Answer it here, or on the tracker."
 STALE_SENTENCE = ("The tracker could not be read for {projects}; "
                   "each item shows when it was last read.")
+UNREAD_DECISION = "A decision waits on the tracker, but its questions could not be read."
 INBOX_SEEN = "inbox.seen"
 INBOX_CHANGED = "inbox.changed"
 INBOX_GONE = "inbox.gone"
@@ -215,6 +225,7 @@ class InboxRecord:
     item: dict
     waiting_since: str
     updated_at: str
+    answered_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -244,10 +255,19 @@ def inbox_records(
         if event.kind == INBOX_GONE:
             result.pop(key, None)
         elif event.kind == INBOX_CHANGED and key in result:
+            record = result[key]
+            if event.payload.get("answered") is not True:
+                answered_at = None
+            elif record.item.get("answered") is True:
+                answered_at = record.answered_at
+            else:
+                answered_at = event.at
             result[key] = replace(
-                result[key], item=event.payload, updated_at=event.at)
+                record, item=event.payload, updated_at=event.at, answered_at=answered_at)
         else:
-            result[key] = InboxRecord(event.payload, event.at, event.at)
+            answered = event.payload.get("answered") is True
+            result[key] = InboxRecord(
+                event.payload, event.at, event.at, event.at if answered else None)
     return result
 
 
@@ -419,15 +439,26 @@ def _sentence(count: int) -> str:
     return f"{count} registered {noun}, and nothing is waiting on you."
 
 
+def item_headline(item: Mapping) -> tuple[str, int]:
+    questions = item.get("questions")
+    if questions:
+        return questions[0]["question"], len(questions) - 1
+    if item.get("reason") == "decision":
+        return UNREAD_DECISION, 0
+    return item.get("question", ""), 0
+
+
 def _inbox_entry(record: InboxRecord,
                  health: Mapping[str, ReadState]) -> dict:
     known = health.get(record.item["project_id"])
     stale = known is not None and not known.ok
     read_at = known.read_at if known is not None and known.read_at is not None \
         else record.updated_at
-    return {**record.item, "type": "inbox_item",
-            "waiting_since": record.waiting_since,
-            "stale": stale, "read_at": read_at}
+    headline, more = item_headline(record.item)
+    return {**{k: v for k, v in record.item.items() if k != "question"},
+            "type": "inbox_item", "waiting_since": record.waiting_since,
+            "stale": stale, "read_at": read_at, "headline": headline,
+            "more_questions": more, "answered_at": record.answered_at}
 
 
 def _headline(open_count: int, stale: bool, all_out: bool) -> str:

@@ -7,6 +7,7 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 
+from agent_tools.claims import forge_owner_action as foa
 from agent_tools.console.digest import (
     EARLIER_MAX, FIRST_VISIT, LOOKED, SHOWN, SPRINT_WITHDRAWN, Moment, digest, keep, last_looked,
     moments)
@@ -89,8 +90,48 @@ class DigestTest(unittest.TestCase):
                       {"session_id": "s1", "cwd": "/srv/p00", "repo": "/srv/p00", "state": "working"})
         found = moments([event], sessions, {})
         self.assertEqual([(m.kind, m.sentence) for m in found],
-                         [("resumed", "deliver resumed work in owner/p00.")])
+                         [("resumed", "A session in owner/p00 resumed work.")])
         self.assertEqual(sessions, {"s1": before})
+
+    def test_an_inbox_moment_names_no_issue_and_heads_a_decision_by_its_question(self):
+        def asked(text):
+            return {"question": text, "options": ["a", "b"], "chosen": None,
+                    "recommended": None}
+
+        payload = {"key": "k", "project_id": "owner/p00", "issue": 7, "reason": "decision",
+                   "question": foa.SENTENCES["decision"],
+                   "questions": [asked("Which database?"), asked("Which port?")],
+                   "answered": False}
+        events = [Event(1, at(5), "inbox.seen", "owner/p00", payload),
+                  Event(2, at(6), "inbox.changed", "owner/p00", {**payload, "answered": True})]
+        self.assertEqual([m.sentence for m in moments(events, {}, {})],
+                         ["owner/p00 needs you: Which database?",
+                          "owner/p00 was answered: Which database?"])
+
+    def test_a_session_moment_names_no_session_and_no_path(self):
+        def seen(seq, project, sid, repo, name):
+            return Event(seq, at(seq), "session.seen", project,
+                         {"session_id": sid, "cwd": repo, "repo": repo, "state": "working",
+                          "name": name})
+
+        def stopped(seq, project, sid, repo):
+            return Event(seq, at(seq), "session.hook", project,
+                         {"event": "StopFailure", "session_id": sid, "cwd": repo, "repo": repo,
+                          "error": "rate_limit"})
+
+        events = [
+            seen(1, "owner/p00", "aaaaaaaa-1111", "/srv/p00", "deliver"),
+            stopped(2, "owner/p00", "aaaaaaaa-1111", "/srv/p00"),
+            seen(3, None, "cccccccc-3333", "/srv/elsewhere", "stray-session"),
+            stopped(4, None, "cccccccc-3333", "/srv/elsewhere"),
+            Event(5, at(5), "session.gone", None, {"session_id": "cccccccc-3333"})]
+        said = [m.sentence for m in moments(events, {}, {})]
+        self.assertEqual(said, ["A session in owner/p00 stopped on a usage limit.",
+                                "A session in elsewhere stopped on a usage limit.",
+                                "A session in elsewhere ended."])
+        for sentence in said:
+            for leaked in ("deliver", "stray-session", "aaaaaaaa", "cccccccc", "/srv"):
+                self.assertNotIn(leaked, sentence)
 
     def test_keep_drops_moments_at_or_before_the_start(self):
         made = [Moment(1, at(0), "k", "before"), Moment(2, at(1), "k", "at"),

@@ -156,14 +156,14 @@
     ]
    ],
    "recent": [
-    "bbbbbbbb ended in owner/p00.",
-    "deliver ended in owner/p00.",
-    "deliver resumed work in owner/p00.",
-    "deliver stopped on a usage limit in owner/p00.",
-    "owner/p00 #8 was answered."
+    "A session in owner/p00 ended.",
+    "A session in owner/p00 ended.",
+    "A session in owner/p00 resumed work.",
+    "A session in owner/p00 stopped on a usage limit.",
+    "owner/p00 was answered: Merge it?"
    ],
    "earlier": [
-    "owner/p00 #7 needs you: Which database?"
+    "owner/p00 needs you: Which database?"
    ],
    "omitted": 0
   },
@@ -303,7 +303,7 @@
     ]
    ],
    "recent": [
-    "deliver ended in owner/p00."
+    "A session in owner/p00 ended."
    ],
    "earlier": [],
    "omitted": 0
@@ -342,7 +342,7 @@
     ]
    ],
    "recent": [
-    "owner/p00 #5 was answered."
+    "owner/p00 was answered: Done?"
    ],
    "earlier": [],
    "omitted": 0
@@ -421,7 +421,7 @@
     ]
    ],
    "recent": [
-    "owner/p00 #6 was answered."
+    "owner/p00 was answered: Already?"
    ],
    "earlier": [],
    "omitted": 0
