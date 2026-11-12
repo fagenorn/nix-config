@@ -372,7 +372,7 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("`python/agent_tools/console/**`", areas[0][3])
         for term in ("Console", "Inbox item", "Quiet project", "Answered item",
                      "Held work", "Waiting since", "Session", "Outside sprints",
-                     "Not yet managed", "Delivery run"):
+                     "Not yet managed", "Delivery run", "Goal", "Sprint"):
             self.assertIn([term, "Console"], cells)
         self.assertIn("- **Console → Claims**:", text)
 
@@ -388,7 +388,7 @@ class DocsTreeTest(unittest.TestCase):
             self.assertIn(needle, adr)
         context = self.doc("docs/areas/console/CONTEXT.md")
         for needle in (
-            "A registered project with no open work and no live session",
+            "A registered project with no open work, no live session and no open sprint",
             "A session waiting in its terminal is not one",
         ):
             self.assertIn(needle, context)
@@ -405,6 +405,27 @@ class DocsTreeTest(unittest.TestCase):
         write = self.doc("docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md")
         for needle in ("/api/answer", "4096"):
             self.assertIn(needle, write)
+
+    def test_the_console_goal_decision_is_recorded(self):
+        path = "docs/areas/console/adr/011-a-goal-stated-on-the-page-becomes-a-sprint.md"
+        first = (REPO_ROOT / path).read_text().splitlines()[0]
+        self.assertEqual(first, "# ADR-console-011 — A goal stated on the page becomes a sprint")
+        adr = self.doc(path)
+        for needle in ("POST /api/goal", "POST /api/withdraw", "ADR-console-008",
+                       "ADR-console-009", "#834", "#838", "#886", "2000", "sprint-secrets",
+                       "never on the tracker", "indefinitely", "no manager has picked this up"):
+            self.assertIn(needle, adr)
+        write = self.doc("docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md")
+        for needle in ("/api/goal", "/api/withdraw", "16384"):
+            self.assertIn(needle, write)
+        kept = self.doc("docs/areas/console/adr/009-events-are-kept-for-90-days.md")
+        for needle in ("goal.stated", "goal.withdrawn", "schema 3"):
+            self.assertIn(needle, kept)
+        self.assertIn("except goal rows",
+                      self.doc("docs/areas/console/adr/001-the-console-truth-is-an-append-only-event-log.md"))
+        context = self.doc("docs/areas/console/CONTEXT.md")
+        for needle in ("**Sprint**", "**Goal**"):
+            self.assertIn(needle, context)
 
     def test_the_console_delivery_decision_is_recorded(self):
         path = "docs/areas/console/adr/005-in-flight-delivery-stage-is-read-from-run-journals.md"

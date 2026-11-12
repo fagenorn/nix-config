@@ -15,9 +15,11 @@ Routes (every response carries `Cache-Control: no-store` and
     POST /api/readings 204, no body, the cache proxy's limit reading (below)
     POST /api/looked 204, no body, the page records that the owner looked (below)
     POST /api/answer 204, a JSON body, the page sends the owner's choice (below)
+    POST /api/goal  204, a JSON body, the page states a goal (below)
+    POST /api/withdraw 204, a JSON body, the page withdraws a goal (below)
     anything else   404
     other methods   405 with `Allow: GET` (`Allow: POST` on `/api/hooks`, `/api/readings`,
-                    `/api/looked` and `/api/answer`)
+                    `/api/looked`, `/api/answer`, `/api/goal` and `/api/withdraw`)
 
 Two kinds of write exist. The hook and reading routes append what the proxies and hooks observe:
 `POST /api/hooks` appends session observations, `POST /api/readings` the capacity kinds
@@ -37,8 +39,8 @@ is one stderr line `console: hook_unreadable <message>`; any other failure is
 ignored payload (an unknown event, a missing member) appends nothing. The
 route carries no token: it records observations and answers nothing (ADR-console-004).
 
-A page write (`PAGE_WRITES`, today `POST /api/looked` and `POST /api/answer`; ADR-console-008,
-ADR-console-010) is made by the desk page
+A page write (`PAGE_WRITES`, today `POST /api/looked`, `POST /api/answer`, `POST /api/goal` and
+`POST /api/withdraw`; ADR-console-008, ADR-console-010, ADR-console-011) is made by the desk page
 alone and goes through one guard, `_page_write`, whatever its route. After the loopback `Host`
 check and before any body is read, exactly one `Origin` header must equal `http://<Host>` (else
 403 `text/plain` `origin refused`) and exactly one `X-Console-Token` header must equal the
@@ -57,7 +59,15 @@ line before it is translated: `answer.Refused` is `console: answer_refused <proj
 <code>: <detail>` (whitespace runs collapsed to one space; the detail is what `gh` wrote to stderr)
 and 502 `the tracker refused the tick: <error>`; any other exception is `console: answer_failed
 <Type>: <message>` and 500 `answer failed`. Success is an empty `204`. No refusal appends to the
-event log. The token is created once in
+event log. `POST /api/goal` and `POST /api/withdraw` carry one JSON body each and run the same
+checks, in the same order and with the same statuses and texts as the answer route (one helper
+serves the three), with the limits `MAX_GOAL_BYTES` (16384) and `MAX_WITHDRAW_BYTES` (4096). A body
+`sprints.parse_goal` does not accept is 400 `bad goal`; `sprints.Refused` is one stderr line
+`console: goal_refused <reason>` and 409 with the reason; any other exception is `console:
+goal_failed <Type>: <message>` and 500 `goal failed`; success is an empty `204`. The withdraw route
+is the same with `bad withdraw`, `console: withdraw_refused <reason>`, `console: withdraw_failed
+<Type>: <message>` and 500 `withdraw failed`. No refusal appends a row, publishes or creates a
+secret file. The token is created once in
 `page-token` beside the event log and reaches a client only inside `GET /`, where it replaces
 the slot in the page's `console-token` meta tag.
 
@@ -160,6 +170,21 @@ the next read appends nothing. A tracker read that began before an answer finish
 item back to unanswered (each answer takes a generation; a read keeps the answered item when its
 own generation is older), and a read that began after it is authoritative.
 
+Goals (#886, ADR-console-011): `state_goal(project_id, goal)`, under the ingest lock, raises
+`sprints.Refused` with `UNREGISTERED` when the project is not in the folded states, then applies
+`sprints.checked_goal` (`EMPTY`, `TOO_LONG`); it then makes a new sprint id, creates the sprint's
+secret (`sprints.create_secret`) in `sprint-secrets/` beside the event log (`sprint_secrets`, like
+`page-token`), appends exactly one `goal.stated` row `{"sprint_id", "goal"}` (the stripped goal),
+removing the secret and re-raising when the append fails, then folds and publishes; it returns the
+id. `withdraw_goal(project_id, sprint_id)`, under the lock, raises `Refused(NOT_OPEN)` unless the
+folded sprint exists and belongs to that project (registration is not checked: a sprint of a project
+that left the registry is hidden, and withdrawing it is harmless), appends exactly one
+`goal.withdrawn` row carrying the stated goal, folds and publishes, then removes the secret; a
+failure to remove is one stderr line `console: sprint_secret_unremoved <sprint_id> <Type>:
+<message>` and the withdrawal still succeeds. The sprints are folded at construction and in `_fold`
+(`sprints.sprint_states`) and handed to `derive_view`; `retain()` re-folds nothing, because goal rows
+are never removed. The secret's value appears in no answer, view, stream frame, row or stderr line.
+
 Retention (ADR-console-009): construction runs one retention pass (`EventLog.retain`) after
 opening the log and before reading its events, and `RETENTION_THREAD`, started by `start()`, calls
 `retain()` every `retention_seconds` (`RETENTION_SECONDS`, one day). A pass that removed rows
@@ -198,7 +223,7 @@ unreadable, again only after it read successfully in between) and `console: jour
 Construction order: bind the server (an `OSError` propagates and nothing else is
 opened); load or create the page token (a `write_guard.TokenError` propagates: the service does
 not start); open the event log; run one retention pass; fold the projects, the sessions, the inbox,
-the read health and the deliveries, then the last look and the digest moments, from it; publish
+the read health, the deliveries and the sprints, then the last look and the digest moments, from it; publish
 the view; sample the registry's signature; `refresh()`; `poll_sessions()`; `poll_deliveries()`. The
 absent set starts empty, so a restart drops a session only after two polls miss
 it. On any failure after the bind, what was opened is closed and the exception
@@ -219,8 +244,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from agent_tools.claims import owner_actions
-from agent_tools.console import answer, capacity, deliveries, digest, inbox, sessions, write_guard
-from agent_tools.console.event_log import Event, EventLog, utc_now
+from agent_tools.console import (
+    answer, capacity, deliveries, digest, inbox, sessions, sprints, write_guard)
+from agent_tools.console.event_log import GOAL_STATED, GOAL_WITHDRAWN, Event, EventLog, utc_now
 from agent_tools.console.view import (
     INBOX_CHANGED, ReadState, derive_view, encode_view, health_change, inbox_changes, inbox_records,
     project_for, project_states, read_states, registry_changes)
@@ -244,8 +270,12 @@ WATCH_THREAD = "console-registry-watch"
 HOOK_PATH = "/api/hooks"
 LOOKED_PATH = "/api/looked"
 ANSWER_PATH = "/api/answer"
-PAGE_WRITES: frozenset[str] = frozenset({LOOKED_PATH, ANSWER_PATH})
+GOAL_PATH = "/api/goal"
+WITHDRAW_PATH = "/api/withdraw"
+PAGE_WRITES: frozenset[str] = frozenset({LOOKED_PATH, ANSWER_PATH, GOAL_PATH, WITHDRAW_PATH})
 MAX_ANSWER_BYTES = 4096
+MAX_GOAL_BYTES = 16384
+MAX_WITHDRAW_BYTES = 4096
 MAX_HOOK_BYTES = 8 * 1024 * 1024
 READINGS_PATH = "/api/readings"
 MAX_READING_BYTES = 64 * 1024
@@ -406,24 +436,31 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         except Exception as error:
             print(f"console: {name}_failed {type(error).__name__}: {error}", file=sys.stderr)
 
-    def _answer_request(self, console: "ConsoleService") -> bool:
-        """Read and carry out an answer; False when it was refused (already answered to the page)."""
+    def _json_body(self, limit: int) -> bytes | None:
+        """Read the body of a JSON page write; None when it was refused (already answered)."""
         if self.headers.get("Transfer-Encoding") is not None:
             self._refuse(411, "length required")
-            return False
+            return None
         media = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
         if media != "application/json":
             self._refuse(415, "json only")
-            return False
+            return None
         length = self.headers.get("Content-Length", "")
         if not (length.isascii() and length.isdigit()):
             self._refuse(411, "length required")
-            return False
-        if int(length) > MAX_ANSWER_BYTES:
+            return None
+        if int(length) > limit:
             self._refuse(413, "too large")
+            return None
+        return self.rfile.read(int(length))
+
+    def _answer_request(self, console: "ConsoleService") -> bool:
+        """Read and carry out an answer; False when it was refused (already answered to the page)."""
+        body = self._json_body(MAX_ANSWER_BYTES)
+        if body is None:
             return False
         try:
-            project_id, key, choices = answer.parse_request(self.rfile.read(int(length)))
+            project_id, key, choices = answer.parse_request(body)
         except ValueError:
             self._refuse(400, "bad answer")
             return False
@@ -445,6 +482,35 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return False
         return True
 
+    def _goal_request(self, console: "ConsoleService", route: str) -> bool:
+        """Read and carry out a goal or a withdrawal; False when it was refused."""
+        name = "goal" if route == GOAL_PATH else "withdraw"
+        body = self._json_body(MAX_GOAL_BYTES if route == GOAL_PATH else MAX_WITHDRAW_BYTES)
+        if body is None:
+            return False
+        try:
+            if route == GOAL_PATH:
+                project_id, goal = sprints.parse_goal(body)
+            else:
+                project_id, sprint_id = sprints.parse_withdraw(body)
+        except ValueError:
+            self._refuse(400, f"bad {name}")
+            return False
+        try:
+            if route == GOAL_PATH:
+                console.state_goal(project_id, goal)
+            else:
+                console.withdraw_goal(project_id, sprint_id)
+        except sprints.Refused as error:
+            print(f"console: {name}_refused {error}", file=sys.stderr)
+            self._refuse(409, str(error))
+            return False
+        except Exception as error:
+            print(f"console: {name}_failed {type(error).__name__}: {error}", file=sys.stderr)
+            self._refuse(500, f"{name} failed")
+            return False
+        return True
+
     def _page_write(self, route: str):
         console = self.server.console
         refusal = write_guard.refusal(
@@ -455,6 +521,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         if route == ANSWER_PATH:
             self.close_connection = True
             if not self._answer_request(console):
+                return
+        elif route in (GOAL_PATH, WITHDRAW_PATH):
+            self.close_connection = True
+            if not self._goal_request(console, route):
                 return
         else:
             if (self.headers.get("Content-Length", "0") != "0"
@@ -544,9 +614,12 @@ class ConsoleService:
                  digest_seconds: float = DIGEST_SECONDS,
                  log_clock: Callable[[], str] = utc_now,
                  token_path: Path | None = None,
+                 sprint_secrets: Path | None = None,
                  tick: Callable[[str, int, int, list[dict], list[int]], None] = answer.tick_on_tracker):
         self.registry = Path(registry)
         self._tick = tick
+        self._sprint_secrets = (Path(store).with_name(sprints.SECRETS_DIR)
+                                if sprint_secrets is None else Path(sprint_secrets))
         self._sending: set[tuple[str, str]] = set()
         self._answered: dict[tuple[str, str], int] = {}
         self._answer_generation = 0
@@ -605,6 +678,7 @@ class ConsoleService:
             self._capacity = capacity.capacity_state(events)
             self._derive_digest(events)
             self._deliveries = deliveries.delivery_states(events)
+            self._sprints = sprints.sprint_states(events)
             self._publish()
             self._signature = signature(self.registry)
             self.refresh()
@@ -667,7 +741,7 @@ class ConsoleService:
         view = encode_view(derive_view(
             self._states.values(), self._inbox, self._health,
             sessions=self._sessions.values(), deliveries=self._deliveries,
-            now_ms=int(self._clock() * 1000),
+            now_ms=int(self._clock() * 1000), sprints=self._sprints,
             digest=digest.digest(self._moments, self._looked, self._now()),
             capacity=capacity.capacity_view(self._profiles, self._capacity, self._clock())))
         with self._published:
@@ -761,6 +835,38 @@ class ConsoleService:
                 if sent and not self._stop.is_set():
                     self._answer_generation += 1
                     self._mark_answered(slot, questions, choices)
+
+    def state_goal(self, project_id: str, goal: str) -> str:
+        """Append one `goal.stated` event for a registered project and return the new sprint id."""
+        with self._ingest:
+            if project_id not in self._states:
+                raise sprints.Refused(sprints.UNREGISTERED)
+            goal = sprints.checked_goal(goal)
+            sprint_id = sprints.new_sprint_id()
+            sprints.create_secret(self._sprint_secrets, sprint_id)
+            try:
+                appended = self.log.append(
+                    [(GOAL_STATED, project_id, {"sprint_id": sprint_id, "goal": goal})])
+            except BaseException:
+                sprints.remove_secret(self._sprint_secrets, sprint_id)
+                raise
+            self._apply(appended)
+            return sprint_id
+
+    def withdraw_goal(self, project_id: str, sprint_id: str) -> None:
+        """Append one `goal.withdrawn` event for an open sprint of that project, then drop its secret."""
+        with self._ingest:
+            sprint = self._sprints.get(sprint_id)
+            if sprint is None or sprint.project_id != project_id:
+                raise sprints.Refused(sprints.NOT_OPEN)
+            appended = self.log.append(
+                [(GOAL_WITHDRAWN, project_id, {"sprint_id": sprint_id, "goal": sprint.goal})])
+            self._apply(appended)
+            try:
+                sprints.remove_secret(self._sprint_secrets, sprint_id)
+            except Exception as error:
+                print(f"console: sprint_secret_unremoved {sprint_id} "
+                      f"{type(error).__name__}: {error}", file=sys.stderr)
 
     def _mark_answered(self, slot: tuple[str, str], questions: list[dict], choices: list[int]) -> None:
         record = self._inbox.get(slot)
@@ -899,6 +1005,7 @@ class ConsoleService:
         self._health = read_states(appended, self._health)
         self._capacity = capacity.capacity_state(appended, self._capacity)
         self._deliveries = deliveries.delivery_states(appended, self._deliveries)
+        self._sprints = sprints.sprint_states(appended, self._sprints)
         self._moments = digest.keep([*self._moments, *new],
                                     digest.window_start(self._looked, self._now()))
 
