@@ -436,7 +436,7 @@ it; `send_closing` on a sprint with `stop_at` does the same for that sprint at o
 a sprint without `stop_at` stops nothing. `_stop_session(sprint_id)`, under the lock, drops the
 reservation and returns unless the sprint has `stop_at` and not `stopped_at`; off the lock, without
 a stopper it makes no listing and no call (a success); with one it reads `listing()` once and, when
-no listed session carries the manager's name and the sprint's last launch or nudge (`_settled`, epoch
+no listed session carries the manager's name and the sprint's last launch, nudge or wake (`_settled`, epoch
 ms, set under the lock when a reservation ends and, at construction, for every sprint still to be stopped, so a restart keeps the window) ended less than `sprints.STOP_SETTLE_MS` ago, defers
 (a session just made may not be listed yet); else `manager.stop_listed([name], ..., stopper)`. Under
 the lock again, unless the service is stopping, a deferral appends nothing, a success appends one
@@ -466,7 +466,7 @@ nothing, when the sprint was withdrawn or stopped having work during the listing
 the nudger with the `revive` route and appends `manager.woken {sprint_id, goal, session_id, ok[, reason][, back]}` while the
 sprint is open and the service not stopping; a failure also prints `console: wake_failed <sprint_id>
 <reason>`, and `back` is true when the wake succeeded and the manager was listed or seen (a newer
-`manager_seen_seq`) while the command ran. A takeover job reads the listing off the lock (one that
+`manager_seen_seq`) while the command ran; the reservation's end after a wake was sent, or one that could not start, also sets `_settled`, so a stop that waited out the wake defers for the resumed session. A takeover job reads the listing off the lock (one that
 raises ends the reservation and appends nothing), then launches only while the sprint is open,
 neither the fresh listing nor the folded sessions show the manager and `_revive_step` is still a
 takeover; otherwise it appends nothing. A launch is a takeover when it was reserved by the bring-back
@@ -2140,6 +2140,7 @@ class ConsoleService:
             reason = f"the wake could not start: {type(error).__name__}: {error}"
             with self._ingest:
                 self._nudging.discard(sprint_id)
+                self._settled[sprint_id] = int(self._clock() * 1000)
                 self._record_wake(sprint_id, False, reason, False)
 
     def _record_wake(self, sprint_id: str, ok: bool, reason: str | None, back: bool) -> None:
@@ -2193,6 +2194,7 @@ class ConsoleService:
                       else f"{type(error).__name__}: {error}")
         with self._ingest:
             self._nudging.discard(sprint_id)
+            self._settled[sprint_id] = int(self._clock() * 1000)
             sprint = self._sprints.get(sprint_id)
             back = (reason is None and sprint is not None
                     and (self._manager_listed(sprint) or sprint.manager_seen_seq != seen_before))
