@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import capacity, console, manager, sprints
+from agent_tools.console import capacity, console, manager, nudge, sprints
 from agent_tools.console.event_log import GOAL_STATED, EventLog
 
 from . import console_test_support as support
@@ -335,6 +335,19 @@ class ManagerServiceTest(Case):
                 contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(console.main(["--port", "0"]), 1)
         self.assertIs(recorded["launcher"], manager.launcher_for(sys.platform))
+
+    def test_main_passes_the_platform_nudger(self):
+        recorded = {}
+
+        class Stub:
+            def __init__(self, *args, **kwargs):
+                recorded.update(kwargs)
+                raise OSError("x")
+
+        with mock.patch("agent_tools.console.console.service.ConsoleService", Stub), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(console.main(["--port", "0"]), 1)
+        self.assertIs(recorded["nudger"], nudge.nudger_for(sys.platform))
 
     def test_a_launch_never_holds_the_ingest_lock(self):
         alive = []

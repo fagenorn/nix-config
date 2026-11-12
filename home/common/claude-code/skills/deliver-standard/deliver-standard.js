@@ -33,7 +33,7 @@ export const meta = {
 // A fresh run re-adopts an existing branch or worktree (never resetting it) and stops `dirty` when it holds uncommitted changes.
 //
 // RESUME: every stop from the claim on returns { stage, ..., cont }, where cont is
-// { setup, lane, plan (declared branches, when any, as [{name, worktree, base, head, current, toplevel, common_dir, clean}]), plan_reviewed, plan_findings?, decisions?, done, pr? (a batch-built close-out cont: the PR the batch merged), fix_waves, checks_fixes?, sync_fixes?, verified?, final_reviewed?, partial?, reordered? (#896: [{task, after, notes}], each a blocked task moved once to just after the later task it named; cont.plan.tasks is already in that order), claim_incomplete? }. Passing it back as args.cont
+// { setup, lane, plan (declared branches, when any, as [{name, worktree, base, head, current, toplevel, common_dir, clean}]), plan_reviewed, plan_findings?, decisions?, done, pr? (a batch-built close-out cont: the PR the batch merged), fix_waves, fix_findings? (#924: the findings a fix-wave-review stop left open, bounded; the resume's first fix wave gets them with what its fresh final review raises), checks_fixes?, sync_fixes?, verified?, final_reviewed?, partial?, reordered? (#896: [{task, after, notes}], each a blocked task moved once to just after the later task it named; cont.plan.tasks is already in that order), claim_incomplete? }. Passing it back as args.cont
 // re-adopts the claimed worktree (setup re-checks it and refuses a dirty tree
 // unless cont.partial names the task that left the edits), reuses cont.plan
 // (reviewing it first unless plan_reviewed; a plan-review stop keeps the revised plan with plan_findings { rules, findings, rounds }, and the resume reads the owner's answer and, when every finding left names a rule and none has source codex, runs one rules-only revise of it whatever triggered the full revise (#823), dropping the plan once rounds reach two; any other finding left has spent the plan's one full revise, so the resume plans again), skips the tasks in cont.done, then
@@ -514,6 +514,14 @@ let partial = CONT && CONT.partial !== undefined ? CONT.partial : undefined
 let reordered = CONT && Array.isArray(CONT.reordered) ? CONT.reordered.filter(r => r && Number.isInteger(r.task) && Number.isInteger(r.after)) : []
 // Fix waves already spent, carried through a resume; declared before stop() because early failures call it.
 let fixWaves = (CONT && CONT.fix_waves) || 0
+// #924: the findings a fix-wave-review stop left open, kept in cont.fix_findings until a resume's first fix wave has taken them.
+// Bounded on the way out and on the way in (at most CARRY_MAX findings, each text capped), so a cont cannot grow from stop to stop.
+const CARRY_MAX = 10
+const clip = v => (v.length > REASON_MAX ? `${v.slice(0, REASON_MAX - 3)}...` : v)
+const carryOf = list => (Array.isArray(list) ? list : []).filter(f => isEntry(f) && typeof f.summary === 'string' && f.summary.trim() && f.severity !== 'minor').slice(0, CARRY_MAX)
+  .map(f => ({ severity: f.severity === 'critical' ? 'critical' : 'important', ...(typeof f.file === 'string' && f.file ? { file: clip(f.file) } : {}), summary: clip(f.summary), ...(typeof f.failing_input === 'string' && f.failing_input ? { failing_input: clip(f.failing_input) } : {}) }))
+const findingKey = f => `${typeof f.file === 'string' ? f.file : ''}\n${clip(String(f.summary)).toLowerCase().replace(/\s+/g, ' ').trim()}`
+let carried = carryOf(CONT && CONT.fix_findings)
 // The head the final review and its fix waves passed at ({ head, accepted? }), carried so a resume on it skips the review.
 let finalReviewed = (CONT && CONT.final_reviewed) || null
 // The stages between a sync merge and its acceptance: a stop there must not carry a marker over the unreviewed merge.
@@ -532,7 +540,7 @@ addDecision(args.decisions)
 let amendApplied = false
 const stop = (stage, extra) => {
   const fr = SYNC_WINDOW.includes(stage) ? (finalReviewed = null) : finalReviewed
-  return { stage, ...extra, ...(stage === 'planned' || stage === 'ready' ? {} : { reason: stopReason(stage, extra || {}) }), ...(amendApplied ? { amended: true } : {}), ...deadOf(), cont: { setup, lane: LANE, plan, plan_reviewed: planReviewed, ...(plan && !planReviewed && planFindingsKept ? { plan_findings: planFindingsKept } : {}), ...(decisions.length ? { decisions } : {}), done: taskLog, ...(OWN_PR !== null ? { pr: OWN_PR } : {}), fix_waves: fixWaves, ...(checksFixes ? { checks_fixes: checksFixes } : {}), ...(syncFixes ? { sync_fixes: syncFixes } : {}), ...(verified ? { verified } : {}), ...(fr ? { final_reviewed: fr } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}), ...(reordered.length ? { reordered } : {}) } }
+  return { stage, ...extra, ...(stage === 'planned' || stage === 'ready' ? {} : { reason: stopReason(stage, extra || {}) }), ...(amendApplied ? { amended: true } : {}), ...deadOf(), cont: { setup, lane: LANE, plan, plan_reviewed: planReviewed, ...(plan && !planReviewed && planFindingsKept ? { plan_findings: planFindingsKept } : {}), ...(decisions.length ? { decisions } : {}), done: taskLog, ...(OWN_PR !== null ? { pr: OWN_PR } : {}), fix_waves: fixWaves, ...(carried.length ? { fix_findings: carried } : {}), ...(checksFixes ? { checks_fixes: checksFixes } : {}), ...(syncFixes ? { sync_fixes: syncFixes } : {}), ...(verified ? { verified } : {}), ...(fr ? { final_reviewed: fr } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}), ...(reordered.length ? { reordered } : {}) } }
 }
 
 const haltTask = (n, stage, extra) => { const s = stop(stage, extra); return { ...s, cont: { ...s.cont, partial: n } } }
@@ -1176,7 +1184,9 @@ for (let ti = 0; ti < plan.tasks.length; ti++) {
   const start = `${CTX}\n${PLAN_REF}${B ? `\nTask ${t.n} commits to the declared branch ${B.name} in the worktree ${TW} (base ${B.base}), not to ${setup.branch}: run this task's commands there (git -C ${TW}).` : ''}`
   const PUSH_HERE = B ? ` After each commit, push it alone with git -C ${TW} push origin ${B.name}.` : ''
   const halt = (stage, extra) => haltTask(t.n, stage, extra)
-  const implPrompt = `${first ? `${start}\n${RENEW_FIRST}\nThen implement` : `${start}\nImplement`} task ${t.n} (${t.title}) exactly as its task file ${t.file} specifies: write the failing test first and see it fail, implement, see it pass, run the task's focused test commands, then for each new test temporarily remove the code it pins and confirm it fails, restore, and commit only this task's files in the worktree. ${MAP_FIRST} ${FOCUSED} ${IMPL_RETURN}${PUSH_HERE} Return status blocked with notes if the task file is wrong or impossible, and blocked_on: the number of the later task of this plan it needs first, if that is why; when you name it, first undo every uncommitted edit you made, leaving the worktree as you found it.${waiting ? ` Task ${waiting.task} waits for task ${waiting.after} and may have left uncommitted edits: leave them as they are.` : ''}${moved ? ` Task ${moved.after}, which this task was blocked on, is done now.` : ''}${(CONT && CONT.partial === t.n) || moved ? `
+  const WAITS = waiting ? ` Task ${waiting.task} waits for task ${waiting.after} and may have left uncommitted edits: ` : ''
+  const KEEP_WAITING = waiting ? `${WAITS}leave them as they are.` : ''
+  const implPrompt = `${first ? `${start}\n${RENEW_FIRST}\nThen implement` : `${start}\nImplement`} task ${t.n} (${t.title}) exactly as its task file ${t.file} specifies: write the failing test first and see it fail, implement, see it pass, run the task's focused test commands, then for each new test temporarily remove the code it pins and confirm it fails, restore, and commit only this task's files in the worktree. ${MAP_FIRST} ${FOCUSED} ${IMPL_RETURN}${PUSH_HERE} Return status blocked with notes if the task file is wrong or impossible, and blocked_on: the number of the later task of this plan it needs first, if that is why; when you name it, first undo every uncommitted edit you made, leaving the worktree as you found it.${KEEP_WAITING}${moved ? ` Task ${moved.after}, which this task was blocked on, is done now.` : ''}${(CONT && CONT.partial === t.n) || moved ? `
 An earlier attempt at this task was cut off and may have left uncommitted edits or commits in the worktree (git -C ${TW} status, git -C ${TW} diff and git -C ${TW} log ${B ? `${B.base}..HEAD` : RANGE}). Inspect them: keep what matches the task file, finish or redo the rest, and make sure the failing-test-first and mutation checks still hold for the final result; start_head is ${moved ? 'HEAD as this attempt starts' : "the head before this task's first commit"}.` : ''}
 ${RULES}`
   const callImpl = () => call(implPrompt, { label: `impl-${t.n}`, phase: 'Tasks', agentType: 'implementer', model: 'sonnet', schema: first ? withRenew(IMPL) : IMPL })
@@ -1196,29 +1206,68 @@ ${RULES}`
     ti--
     continue
   }
-  const taskSpan = spanIn(TW, impl)
-  const reviewer = (t.risk === 'mechanical' || t.risk === 'low') ? 'reviewer-lite' : 'reviewer'
+  // #923: a task that ends with no new commit (its output is not a file change: an issue comment, a check that needs no edit) has no
+  // diff, and a review of the empty range head..head is refused as a missing diff boundary. Its first pass is a no-change check
+  // instead: a reviewer judges from the task file whether the task needs a tracked file changed (then it is not done, and the finding
+  // goes back to the implementer as any other) and confirms each required output itself. reviewer-lite reviews only a bounded diff,
+  // so every review without one runs on reviewer, whatever the task's risk. Once such a task does commit (a fix round), that diff gets
+  // the first pass a task diff always gets; a fix that answers with evidence and no commit is re-reviewed as a rebuttal, with no range.
+  // Whether a reply added a commit is never taken from its own start_head: it is read against a head the program holds. For the
+  // task, that is the head its worktree was accepted at: the tip this run tracks, or, for the task a stop left partial (the setup's
+  // head then already holds the cut-off attempt's commits), the last done task of that worktree, else the worktree's base. A reply
+  // whose commit is another head gets a diff review from the accepted head, whatever start it names (#923: a start above it would hide commits). For a fix, it is the head just reviewed.
+  const lastDone = taskLog.filter(d => (B ? d.branch === B.name : !present(d.branch))).pop()
+  const tracked = partial === t.n ? null : B ? branchTips[B.name] : tip
+  const accepted = present(tracked) ? tracked : lastDone && present(lastDone.commit) ? lastDone.commit : B ? B.base : setup.base_sha
+  // An honest reply starts at the accepted head and keeps its own spelling of it; any other start would hide the commits beneath it.
+  const taskStart = sameSha(impl.start_head, accepted) ? impl.start_head : accepted
+  const liteLane = t.risk === 'mechanical' || t.risk === 'low'
+  // False until the task's diff had its first pass; a task with no commit has none to review.
+  let diffReviewed = !sameSha(impl.commit, accepted)
   // reviewer-lite first-passes only a task whose declared lane is mechanical or low (its lane verification mode).
-  let review = await call(`${start}
-${reviewer === 'reviewer-lite' ? `lane: ${t.risk}. ` : ''}Review the diff of task ${t.n} only: ${taskSpan} (and the task file ${t.file} as its contract). ${KNOW} Report Important or Critical correctness defects and unmet task requirements only, each with a concrete failing input. No style notes. Do not edit anything.`, { label: `review-${t.n}`, phase: 'Tasks', agentType: reviewer, schema: FINDINGS })
+  let reviewer = liteLane && diffReviewed ? 'reviewer-lite' : 'reviewer'
+  const diffReview = (range, label, answers) => call(`${start}
+${reviewer === 'reviewer-lite' ? `lane: ${t.risk}. ` : ''}Review the diff of task ${t.n} only: ${range} (and the task file ${t.file} as its contract). ${KNOW} Report Important or Critical correctness defects and unmet task requirements only, each with a concrete failing input. No style notes. Do not edit anything.${answers ? ` The task first ended with no commit, and this diff answers these findings: ${JSON.stringify(answers)}; report any still unresolved.` : ''}`, { label, phase: 'Tasks', agentType: reviewer, schema: FINDINGS })
+  // Tracked files only: an untracked file (a build output, a tool's cache) is no edit of the task, and a waiting task's kept edits are not this task's.
+  const HEAD_UNMOVED = h => `First confirm that git -C ${TW} rev-parse HEAD prints ${h} and git -C ${TW} status --porcelain --untracked-files=no prints nothing: another head or an uncommitted change to a tracked file is a finding.${waiting ? `${WAITS}those are not a finding.` : ''}`
+  const CONFIRM = `with the task file's own verification commands or a read-only lookup (run a gh command as ${UNSET}gh ...)`
+  let review = diffReviewed ? await diffReview(`git -C ${TW} diff ${taskStart}..${impl.commit}`, `review-${t.n}`) : await call(`${start}
+Task ${t.n} ended with no new commit: the head of ${TW} is still ${impl.commit}. There is no diff to review and none is missing; do not ask for a range. Judge the task from its task file ${t.file} (the contract) and the implementer's report: notes: ${impl.notes}; checks run: ${JSON.stringify(Array.isArray(impl.tests) ? impl.tests : [])}. ${HEAD_UNMOVED(impl.commit)} Then decide two things. 1. Does the task file require a tracked file to be created, changed or deleted? If it does, the task is not done: report one Critical finding naming the files it requires. 2. If it requires none, is every output the task file asks for in place? Confirm each yourself, ${CONFIRM}; the implementer's word alone is not evidence, and an output you cannot confirm is a finding. Report Important or Critical findings only, each with what is missing. Do not edit anything.`, { label: `review-${t.n}`, phase: 'Tasks', agentType: 'reviewer', schema: FINDINGS })
   if (!review) return halt('task-review', { task: t, review: null })
   let rounds = 0
   while (findingsOf(review).length && rounds < 2) {
     rounds++
     const fix = await call(`${start}
-Fix these review findings for task ${t.n} (${t.file}) in the worktree, with a regression test for each real defect, then commit: ${JSON.stringify(findingsOf(review))}. If a finding is wrong, say so in notes with evidence instead of changing code. ${MAP_FIRST} ${FOCUSED} ${COMMIT_SCOPE} ${IMPL_RETURN}${PUSH_HERE}
+Fix these review findings for task ${t.n} (${t.file}) in the worktree, with a regression test for each real defect, then commit: ${JSON.stringify(findingsOf(review))}. If a finding is wrong, say so in notes with evidence instead of changing code. ${MAP_FIRST} ${FOCUSED} ${COMMIT_SCOPE} ${IMPL_RETURN}${PUSH_HERE}${KEEP_WAITING}
 ${RULES}`, { label: `fix-${t.n}-${rounds}`, phase: 'Tasks', agentType: 'implementer', model: 'sonnet', schema: IMPL })
     if (!implDone(fix)) return halt('task-fix', { task: t, impl: fix })
+    // The head the last review saw: the fix added a commit only when its commit is another one.
+    const reviewed = impl.commit
     impl = fix
-    review = await call(`${start}
-Re-review only these previously reported findings for task ${t.n} against the fix: ${spanIn(TW, fix)}; the implementer's notes: ${fix.notes}. Findings: ${JSON.stringify(findingsOf(review))}. Report any finding still unresolved and any new Important or Critical defect the fix introduced.`, { label: `rereview-${t.n}-${rounds}`, phase: 'Tasks', agentType: 'reviewer-lite', schema: FINDINGS })
+    const label = `rereview-${t.n}-${rounds}`
+    if (sameSha(fix.commit, reviewed)) {
+      review = await call(`${start}
+Re-review only these previously reported findings for task ${t.n} against the implementer's answer. The fix made no new commit (the head of ${TW} is still ${fix.commit}), so there is no fix diff to review and none is missing; do not ask for a range. The implementer's notes: ${fix.notes}. Findings: ${JSON.stringify(findingsOf(review))}. ${HEAD_UNMOVED(fix.commit)} Then check each answer yourself against the task file ${t.file}${diffReviewed ? `, the task's diff (git -C ${TW} diff ${taskStart}..${fix.commit})` : ''} and the evidence the notes name, ${CONFIRM}; a finding the evidence does not refute is still unresolved. Report any finding still unresolved. Do not edit anything.`, { label, phase: 'Tasks', agentType: 'reviewer', schema: FINDINGS })
+    } else if (!diffReviewed) {
+      reviewer = liteLane ? 'reviewer-lite' : 'reviewer'
+      review = await diffReview(`git -C ${TW} diff ${taskStart}..${fix.commit}`, label, findingsOf(review))
+      diffReviewed = true
+    } else {
+      review = await call(`${start}
+Re-review only these previously reported findings for task ${t.n} against the fix: git -C ${TW} diff ${reviewed}..${fix.commit}; the implementer's notes: ${fix.notes}. Findings: ${JSON.stringify(findingsOf(review))}. Report any finding still unresolved and any new Important or Critical defect the fix introduced.`, { label, phase: 'Tasks', agentType: 'reviewer-lite', schema: FINDINGS })
+    }
     if (!review) return halt('task-review', { task: t, review: null })
   }
   if (findingsOf(review).length) return halt('task-review', { task: t, review })
-  taskLog.push({ n: t.n, commit: impl.commit, review_rounds: rounds, reviewer, ...(B ? { branch: B.name } : {}) })
+  taskLog.push({ n: t.n, commit: impl.commit, review_rounds: rounds, reviewer, ...(B ? { branch: B.name } : {}), ...(diffReviewed ? {} : { no_change: true }) })
   if (B) branchTips[B.name] = impl.commit
   else tip = impl.commit
   if (partial === t.n) partial = undefined
+}
+// #923: when every task ended with no commit, the branch holds nothing to review, verify or land: the final review would get an
+// empty range and the pull request no commit. Read from the done record (no_change), which a resume carries, never from a head. The tasks' outputs are in place and recorded; the owner closes the issue.
+if (plan.tasks.length && plan.tasks.every(t => taskLog.some(d => d.n === t.n && d.no_change === true))) {
+  return stop('no-changes', { details: `every task ended with no commit: the branch ${setup.branch} holds nothing to review or land. The tasks' outputs are in place; close the issue by hand, or amend the plan if a file change was meant` })
 }
 
 // ---------------- Final review ----------------
@@ -1281,30 +1330,55 @@ ${PLAN_REF} Integration review. The delivery was reviewed in ${groups.length} ch
   if (!integ) return stop('final-review', { details: 'the integration reviewer returned nothing' })
   finalFindings = finalFindings.concat(findingsOf(integ))
 }
+// #924: what an earlier fix-wave-review stop left open joins the fresh findings, a repeat (same file and summary) once.
+const fromStop = carried.filter(c => !finalFindings.some(f => findingKey(f) === findingKey(c)))
+if (fromStop.length) log(`final review: ${fromStop.length} finding(s) carried from the earlier fix-wave-review stop`)
+finalFindings = finalFindings.concat(fromStop)
 if (finalFindings.length) {
-  // At most two waves: the second runs only when the first re-review's findings all narrow the first round (same kind of defect on another path); a new kind stops.
+  // At most MAX_WAVES waves. The second runs only when the first re-review's findings all narrow the first round (same kind of defect on
+  // another path); a new kind stops. The third (#924) runs only when the second re-review's findings all narrow, all are important
+  // (none critical, none without a severity) and they are no more than the first re-review left.
+  const MAX_WAVES = 3
   let waveFindings = finalFindings
+  let afterFirst = 0
   const hasBranches = declared(plan).length > 0
-  for (let k = 1; k <= 2; k++) {
+  for (let k = 1; k <= MAX_WAVES; k++) {
     const fwLabel = k === 1 ? 'fix-wave' : `fix-wave-${k}`
     const rvLabel = k === 1 ? 'fix-wave-review' : `fix-wave-review-${k}`
     log(`final review: ${waveFindings.length} blocking findings, fix wave ${k}`)
     fixWaves++
-    const fw = await call(`${CTX}\n${PLAN_REF} Fix these final-review findings, each real defect with a regression test, then commit: ${JSON.stringify(waveFindings)}.${k === 2 ? ` They narrow these first-round findings: ${JSON.stringify(finalFindings)}.` : ''} If a finding is wrong, explain with evidence in notes. ${FIX_TESTS} ${COMMIT_SCOPE} ${hasBranches ? IMPL_RETURN_AT(W) : IMPL_RETURN}${hasBranches ? ` A finding on a declared branch is fixed in that branch's worktree and pushed with its push form. Return branch_heads: one {name, head} per declared branch (${declared(plan).map(b => b.name).join(', ')}), head being git -C <its worktree> rev-parse HEAD after your last commit.` : ''}\n${RULES}`, { label: fwLabel, phase: 'Final review', agentType: 'implementer', model: 'sonnet', schema: hasBranches ? FIX_WAVE_IMPL : IMPL })
-    if (!implDone(fw)) return stop('fix-wave', { fw, finalFindings: waveFindings, fix_waves: fixWaves })
+    const fw = await call(`${CTX}\n${PLAN_REF} Fix these final-review findings, each real defect with a regression test, then commit: ${JSON.stringify(waveFindings)}.${k === 1 && fromStop.length ? ` The last ${fromStop.length} were left open by an earlier run's fix waves and may repeat the ones before them: check each against the current head, and explain one that no longer holds in notes; when you commit nothing, return commit equal to start_head.` : ''}${k >= 2 ? ` They narrow these first-round findings: ${JSON.stringify(finalFindings)}.` : ''}${k === 3 ? ' Fix the class of defect: enumerate every path of the same kind as each reported one and close them all, not only the reported instance.' : ''} If a finding is wrong, explain with evidence in notes. ${FIX_TESTS} ${COMMIT_SCOPE} ${hasBranches ? IMPL_RETURN_AT(W) : IMPL_RETURN}${hasBranches ? ` A finding on a declared branch is fixed in that branch's worktree and pushed with its push form. Return branch_heads: one {name, head} per declared branch (${declared(plan).map(b => b.name).join(', ')}), head being git -C <its worktree> rev-parse HEAD after your last commit.` : ''}\n${RULES}`, { label: fwLabel, phase: 'Final review', agentType: 'implementer', model: 'sonnet', schema: hasBranches ? FIX_WAVE_IMPL : IMPL })
+    // The carried findings outlive only a wave that gave no reply: one that answered and failed has had them, and the resume's fresh review decides.
+    const spent = details => {
+      if (fw && carried.length) { log(`fix-wave: ${carried.length} carried finding(s) dropped after a wave that answered and failed`); carried = [] }
+      return stop('fix-wave', { fw, finalFindings: waveFindings, fix_waves: fixWaves, ...(details ? { details } : {}) })
+    }
+    if (!implDone(fw)) return spent()
     const collected = []
     for (const b of declared(plan)) {
       const h = headOf(fw.branch_heads, b.name)
-      if (!h) return stop('fix-wave', { fw, finalFindings: waveFindings, fix_waves: fixWaves, details: `no head for the declared branch ${b.name}` })
+      if (!h) return spent(`no head for the declared branch ${b.name}`)
       if (!sameSha(h, branchTips[b.name])) collected.push(`git -C ${b.worktree} diff ${branchTips[b.name]}..${h}`)
       branchTips[b.name] = h
     }
     tip = fw.commit
-    const rv = await call(`${CTX}\nRe-review these findings against the fix (${span(fw)}${collected.length ? ` and ${collected.join(' and ')}` : ''}); notes: ${fw.notes}. Findings: ${JSON.stringify(waveFindings)}. Report any still unresolved and any new Important or Critical defect, setting relation on each finding you still report: narrowing when it is the same kind of defect as one above, reached on another path, input or call site; else new. Unsure is new.`, { label: rvLabel, phase: 'Final review', agentType: 'reviewer', schema: FINDINGS })
+    // A wave that had carried findings and committed nothing found them closed already: its re-review reads the head, with no diff range.
+    const idle = k === 1 && fromStop.length > 0 && sameSha(fw.commit, fw.start_head) && !collected.length
+    if (!idle) carried = []
+    const rv = await call(`${CTX}\nRe-review these findings against ${idle ? `the current head of ${W}${hasBranches ? ` and of each declared branch's worktree (${declared(plan).map(b => `${b.name} in ${b.worktree}`).join(', ')})` : ''} (the fix wave committed nothing, so there is no diff to read). Nothing changed since these were raised, so each finding stands unless the code at the head shows it does not hold. The notes are the implementer's claims: check each against the code and never clear a finding on the notes alone` : `the fix (${span(fw)}${collected.length ? ` and ${collected.join(' and ')}` : ''})`}; notes: ${fw.notes}. Findings: ${JSON.stringify(waveFindings)}.${k === 1 && fromStop.length && !idle ? ` The last ${fromStop.length} were left open by an earlier run and may repeat the ones before them: check each against the head, not only the diff.` : ''} Report any still unresolved and any new Important or Critical defect, setting relation on each finding you still report: narrowing when it is the same kind of defect as one above, reached on another path, input or call site; else new. Unsure is new.`, { label: rvLabel, phase: 'Final review', agentType: 'reviewer', schema: FINDINGS })
     if (!rv) return stop('fix-wave-review', { rv, fix_waves: fixWaves })
+    carried = []
     const next = findingsOf(rv)
     if (!next.length) break
-    if (k === 2 || next.some(f => f.relation !== 'narrowing')) return stop('fix-wave-review', { rv, fix_waves: fixWaves })
+    const narrow = next.every(f => f.relation === 'narrowing')
+    // A wave that committed nothing earns no further wave: what its re-review still holds stops.
+    const again = k === 1 ? narrow && !idle : k === 2 && narrow && next.every(f => f.severity === 'important') && next.length <= afterFirst
+    if (!again) {
+      carried = carryOf(next)
+      if (carried.length < next.length) log(`fix-wave-review: ${next.length - carried.length} of ${next.length} open finding(s) not carried in cont`)
+      return stop('fix-wave-review', { rv, fix_waves: fixWaves })
+    }
+    if (k === 1) afterFirst = next.length
     waveFindings = next
   }
 }

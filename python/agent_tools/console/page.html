@@ -88,9 +88,9 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .abox .meta { margin-top: 6px; }
 .abox .meta.now { color: var(--text); }
 .abox .opts { list-style: none; padding-left: 0; display: flex; flex-direction: column; align-items: stretch; gap: 2px; margin-top: 14px; }
-.opt, .send, .undo, .approve, .reply-send, .goal-open, .goal-send, .goal-cancel, .goal-project, .withdraw, .retry, .abox button[class^="ans-"] { display: inline-flex; align-items: baseline; gap: 8px; font: inherit; color: inherit; text-align: left; background: none; border: 1px solid var(--hair); border-radius: 8px; padding: 2px 10px; cursor: pointer; transition: background-color .16s; }
-.opt:hover:enabled, .send:hover:enabled, .undo:hover:enabled, .approve:hover:enabled, .reply-send:hover:enabled, .goal-open:hover:enabled, .goal-send:hover:enabled, .goal-cancel:hover:enabled, .goal-project:hover:enabled, .withdraw:hover:enabled, .retry:hover:enabled, .abox button[class^="ans-"]:hover:enabled { background: rgba(202, 211, 245, .05); }
-.opt:disabled, .send:disabled, .reply-send:disabled, .goal-send:disabled, .withdraw:disabled, .retry:disabled, .abox button[class^="ans-"]:disabled { cursor: default; }
+.opt, .send, .undo, .approve, .reply-send, .goal-open, .goal-send, .goal-cancel, .goal-project, .withdraw, .retry, .tell-send, .abox button[class^="ans-"] { display: inline-flex; align-items: baseline; gap: 8px; font: inherit; color: inherit; text-align: left; background: none; border: 1px solid var(--hair); border-radius: 8px; padding: 2px 10px; cursor: pointer; transition: background-color .16s; }
+.opt:hover:enabled, .send:hover:enabled, .undo:hover:enabled, .approve:hover:enabled, .reply-send:hover:enabled, .goal-open:hover:enabled, .goal-send:hover:enabled, .goal-cancel:hover:enabled, .goal-project:hover:enabled, .withdraw:hover:enabled, .retry:hover:enabled, .tell-send:hover:enabled, .abox button[class^="ans-"]:hover:enabled { background: rgba(202, 211, 245, .05); }
+.opt:disabled, .send:disabled, .reply-send:disabled, .goal-send:disabled, .withdraw:disabled, .retry:disabled, .tell-send:disabled, .abox button[class^="ans-"]:disabled { cursor: default; }
 .abox button[class^="ans-"]:disabled { color: var(--ov2); }
 .abox .detail { margin-top: 6px; padding: 6px 10px; max-height: 24rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: .84375rem; color: var(--sub0); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; }
 .card .detail, .rest .detail, .done .detail { flex-basis: 100%; margin: 6px 0 0; padding: 6px 10px; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: .84375rem; color: var(--sub0); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; }
@@ -127,6 +127,14 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .sprint-detail .tracker { color: var(--lav); text-underline-offset: 3px; }
 .sprint-sessions { flex: 1 0 100%; list-style: none; padding: 0 0 0 16px; }
 .sprint-session { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; }
+.sprint-messages { flex: 1 0 100%; list-style: none; padding: 0 0 0 16px; }
+.sprint-messages li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 10px; color: var(--sub0); }
+.message-state, .message-reply { color: var(--ov2); }
+.message-reply { flex: 1 0 100%; padding-left: 16px; color: var(--sub0); overflow-wrap: anywhere; }
+.unreachable { color: var(--ov2); }
+.sprint-tell { flex: 1 0 100%; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
+.sprint-tell label { color: var(--ov2); }
+.tell { width: 100%; max-width: 40rem; min-height: 3.5rem; resize: vertical; font: inherit; color: var(--text); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; padding: 4px 8px; }
 .act { flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin-top: 8px; font-size: .8125rem; color: var(--ov2); }
 .fail { color: var(--red); }
 .lead .act { margin-top: 14px; align-items: center; gap: 8px; font-size: .9375rem; }
@@ -323,6 +331,49 @@ function sprintDetail(sprint) {
 const withdrawals = new Map();
 const retries = new Map();
 const latestSprints = new Map();
+const tellDrafts = new Map();
+const tells = new Map();
+function messageLabel(message) {
+  if (message.kind === "approved") return "Approved version " + message.version;
+  if (message.kind === "changes") return "Asked for changes to version " + message.version + ": " + message.text;
+  return message.text;
+}
+function messageList(messages) {
+  const list = el("ul", "sprint-messages");
+  for (const message of messages) {
+    const row = el("li", "message");
+    row.appendChild(el("span", "message-text", messageLabel(message)));
+    row.appendChild(el("span", "message-state", message.state_text));
+    if (typeof message.reply === "string") {
+      row.appendChild(el("p", "message-reply", "Manager: " + message.reply));
+    }
+    list.appendChild(row);
+  }
+  return list;
+}
+function tellBox(item, entry, sprint) {
+  const id = sprint.sprint_id;
+  const state = tells.get(id);
+  const box = el("div", "sprint-tell");
+  const label = el("label", "tell-label");
+  label.appendChild(el("span", "", "Tell the manager"));
+  const area = el("textarea", "tell");
+  area.dataset.tell = id;
+  const draft = tellDrafts.get(id);
+  if (draft !== undefined) area.value = draft.value;
+  area.addEventListener("input", () => {
+    tellDrafts.set(id, { value: area.value, start: area.selectionStart, end: area.selectionEnd });
+  });
+  label.appendChild(area);
+  box.appendChild(label);
+  const send = actionButton("tell-send", "Send", () => tell(item, entry, sprint));
+  if (state !== undefined && state.phase === "sending") send.setAttribute("disabled", "");
+  box.appendChild(send);
+  if (state !== undefined && state.phase === "failed") {
+    box.appendChild(el("span", "fail", "Could not send: " + state.reason));
+  }
+  return box;
+}
 function fillSprint(item, entry, sprint) {
   const state = withdrawals.get(sprint.sprint_id);
   latestSprints.set(sprint.sprint_id, { entry, sprint });
@@ -381,6 +432,50 @@ function fillSprint(item, entry, sprint) {
       list.appendChild(row);
     }
     item.appendChild(list);
+  }
+  const messages = sprint.messages || [];
+  if (messages.length > 0) item.appendChild(messageList(messages));
+  if (typeof sprint.reach_text === "string") {
+    item.appendChild(el("span", "unreachable", sprint.reach_text));
+  }
+  item.appendChild(tellBox(item, entry, sprint));
+}
+async function tell(item, entry, sprint) {
+  const id = sprint.sprint_id;
+  const current = tells.get(id);
+  if (current !== undefined && current.phase === "sending") return;
+  const draft = tellDrafts.get(id);
+  const text = draft === undefined ? "" : draft.value;
+  const state = { phase: "sending", reason: "" };
+  tells.set(id, state);
+  fillSprint(item, entry, sprint);
+  let reason = null;
+  try {
+    const response = await fetch("/api/message", {
+      method: "POST",
+      headers: { "X-Console-Token": token, "Content-Type": "application/json" },
+      body: JSON.stringify({ project_id: entry.project_id, sprint_id: id, text }),
+    });
+    if (response.status !== 204) {
+      reason = (await response.text()).trim() || "HTTP " + response.status;
+    }
+  } catch (error) {
+    console.error(error);
+    reason = "the console did not answer";
+  }
+  if (tells.get(id) !== state) return;
+  if (reason === null) {
+    tells.delete(id);
+    const typed = tellDrafts.get(id);
+    if (typed !== undefined && typed.value === text) tellDrafts.delete(id);
+  } else {
+    state.phase = "failed";
+    state.reason = reason;
+  }
+  const latest = latestSprints.get(id);
+  if (latest === undefined) return;
+  for (const row of document.querySelectorAll("li.sprint")) {
+    if (row.dataset.sprintId === id) fillSprint(row, latest.entry, latest.sprint);
   }
 }
 async function withdraw(item, entry, sprint) {
@@ -1378,6 +1473,11 @@ function renderProjects(view) {
   const section = document.getElementById("projects");
   const heading = el("h2", "", "Projects ");
   heading.appendChild(el("span", "", String(view.project_count)));
+  const active = document.activeElement;
+  const heldTell = active && active.tagName === "TEXTAREA" && active.dataset
+    && active.dataset.tell !== undefined
+    ? { id: active.dataset.tell, start: active.selectionStart, end: active.selectionEnd }
+    : null;
   section.replaceChildren(heading);
   if (view.project_count === 0) {
     section.appendChild(el("p", "empty", "No project is registered yet."));
@@ -1404,6 +1504,12 @@ function renderProjects(view) {
   for (const id of [...latestSprints.keys()]) {
     if (!live.has(id)) latestSprints.delete(id);
   }
+  for (const id of [...tells.keys()]) {
+    if (!live.has(id)) tells.delete(id);
+  }
+  for (const id of [...tellDrafts.keys()]) {
+    if (!live.has(id)) tellDrafts.delete(id);
+  }
   for (const entry of view.entries) {
     if (entry.type === "quiet_group") {
       const fold = el("details", "quietfold");
@@ -1423,6 +1529,14 @@ function renderProjects(view) {
     }
   }
   section.appendChild(list);
+  if (heldTell !== null) {
+    const again = Array.from(document.querySelectorAll("textarea.tell"))
+      .find((area) => area.dataset.tell === heldTell.id);
+    if (again !== undefined) {
+      again.focus();
+      again.setSelectionRange(heldTell.start, heldTell.end);
+    }
+  }
 }
 function renderUnmanaged(view) {
   const section = document.getElementById("unmanaged");

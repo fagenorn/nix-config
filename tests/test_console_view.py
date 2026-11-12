@@ -20,6 +20,7 @@ from agent_tools.console.deliveries import (
     delivery_states,
     seen_payload,
 )
+from agent_tools.console import event_log
 from agent_tools.console.event_log import Event
 from agent_tools.console.sessions import ENDED, SessionState
 from agent_tools.console.capacity import EMPTY
@@ -32,6 +33,7 @@ from agent_tools.console.sprints import (
     Observed,
     Report,
     SprintState,
+    sprint_states,
 )
 from agent_tools.console.view import (
     ALL_OUT_SENTENCE,
@@ -1172,7 +1174,7 @@ class SprintViewTest(unittest.TestCase):
             "manager_state": "none", "manager_until": None, "retry": True,
             "progress": None, "progress_text": None, "status": None, "status_at": None,
             "next": None, "milestone": None, "tracker_url": None, "issues": [], "waiting": 0,
-            "sessions": []}])
+            "sessions": [], "messages": [], "reach_text": None}])
 
     def test_a_sprint_older_than_two_minutes_says_no_manager_has_picked_it_up(self):
         for now_ms, expected in ((None, None), (T0_MS, None), (T0_MS + 120_000, None),
@@ -1211,3 +1213,97 @@ class SprintViewTest(unittest.TestCase):
         view = derive_view([state("p00", 1), state("p01", 3), state("p02", 2), state("p03", 3)])
         self.assertEqual(view["recent_projects"], ["p01", "p03", "p02", "p00"])
         self.assertEqual(derive_view([])["recent_projects"], [])
+
+
+MESSAGE_SID = "a" * 16
+
+
+def message_at(seq):
+    return f"2026-11-12T10:{seq:02d}:00.000000+00:00"
+
+
+def message_row(seq, kind, payload):
+    return Event(seq, message_at(seq), kind, "p00", {"sprint_id": MESSAGE_SID, **payload})
+
+
+def message_rows(*more):
+    rows = [message_row(1, event_log.GOAL_STATED, {"goal": "make the importer resumable"}),
+            message_row(2, event_log.MANAGER_STARTED, {"profile": "work", "session_name": "m"})]
+    return [*rows, *more]
+
+
+def messaged_row(seq, text):
+    return message_row(seq, event_log.SPRINT_MESSAGED, {"goal": "g", "text": text})
+
+
+def nudged_row(seq, through, ok):
+    payload = {"through": through, "route": "relay", "ok": ok}
+    if not ok:
+        payload["reason"] = "no route"
+    return message_row(seq, event_log.SPRINT_NUDGED, payload)
+
+
+def message_entry(rows):
+    folded = sprint_states(rows)
+    return derive_view([state("p00", 1)], sprints=folded,
+                       now_ms=T0_MS)["entries"][0]["sprints"][0]
+
+
+class SprintMessageViewTest(unittest.TestCase):
+    TEXT = "leave the importer's schema alone"
+
+    def test_a_messages_state_moves_from_sent_to_delivered_to_read(self):
+        sent_row = messaged_row(3, self.TEXT)
+        base = {"id": 3, "kind": "text", "version": None, "text": self.TEXT,
+                "at": message_at(3)}
+        entry = message_entry(message_rows(sent_row))
+        self.assertEqual(entry["messages"], [{
+            **base, "state": "sent", "state_text": "sent", "read_at": None, "reply": None,
+            "reply_at": None}])
+        self.assertIsNone(entry["reach_text"])
+        entry = message_entry(message_rows(sent_row, nudged_row(4, 3, True)))
+        self.assertEqual(entry["messages"][0]["state"], "delivered")
+        self.assertEqual(entry["messages"][0]["state_text"], "delivered")
+        entry = message_entry(message_rows(
+            sent_row, nudged_row(4, 3, True),
+            message_row(5, event_log.SPRINT_READ, {"through": 3})))
+        self.assertEqual(entry["messages"][0]["state"], "read")
+        self.assertEqual(entry["messages"][0]["state_text"], "read")
+        self.assertEqual(entry["messages"][0]["read_at"], message_at(5))
+
+    def test_two_failed_nudges_show_manager_not_reachable_and_keep_the_messages(self):
+        plain = message_entry(message_rows(messaged_row(3, self.TEXT)))
+        one = message_entry(message_rows(messaged_row(3, self.TEXT), nudged_row(4, 3, False)))
+        self.assertIsNone(one["reach_text"])
+        two = message_entry(message_rows(
+            messaged_row(3, self.TEXT), nudged_row(4, 3, False), nudged_row(5, 3, False)))
+        self.assertEqual(two["reach_text"], "manager not reachable")
+        self.assertEqual([(m["id"], m["state"]) for m in two["messages"]], [(3, "sent")])
+        self.assertEqual(two["retry"], plain["retry"])
+
+    def test_a_reply_shows_under_its_message(self):
+        entry = message_entry(message_rows(
+            messaged_row(3, self.TEXT),
+            message_row(4, event_log.SPRINT_ANSWERED,
+                        {"message": 3, "reply": "kept the schema"})))
+        self.assertEqual((entry["messages"][0]["reply"], entry["messages"][0]["reply_at"]),
+                         ("kept the schema", message_at(4)))
+
+    def test_an_approval_and_a_change_request_are_listed_as_messages(self):
+        parts = {"done": "d", "excluded": ["x"], "slices": ["a"], "risks": ["r"], "asks": ["q"]}
+        brief = {"goal": "g", "brief": parts}
+        entry = message_entry(message_rows(
+            message_row(3, event_log.BRIEF_SENT, {"version": 1, **brief}),
+            message_row(4, event_log.BRIEF_REPLIED,
+                        {"version": 1, "goal": "g", "reply": "smaller slices"}),
+            message_row(5, event_log.BRIEF_SENT, {"version": 2, **brief}),
+            message_row(6, event_log.BRIEF_APPROVED, {"version": 2, "goal": "g"})))
+        self.assertEqual([(m["id"], m["kind"], m["version"], m["text"])
+                          for m in entry["messages"]],
+                         [(4, "changes", 1, "smaller slices"), (6, "approved", 2, None)])
+
+    def test_only_the_ten_newest_messages_are_shown(self):
+        rows = message_rows(*(messaged_row(seq, f"note {seq}") for seq in range(3, 15)))
+        entry = message_entry(rows)
+        self.assertEqual(view.SHOWN_MESSAGES, 10)
+        self.assertEqual([m["id"] for m in entry["messages"]], list(range(5, 15)))

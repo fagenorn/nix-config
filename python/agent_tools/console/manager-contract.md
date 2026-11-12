@@ -23,4 +23,19 @@ If this text is no longer in your context, run `sprint contract` again.
    - `asks`: a list of texts, what you expect to ask the owner.
 4. Send it with `sprint brief --brief-file -`, the JSON on standard input. It prints `sprint: brief version <n> sent`.
 5. Refused with `the brief has no <part>`: fix that part and send again. Refused with `secret refused` or `this sprint is not open`, or the console unreachable: say so in one line and stop.
-6. End your turn. `sprint status` tells what became of the brief; what follows approval is not part of the contract yet.
+6. End your turn. The owner's answer arrives as a message: read it with `sprint inbox` at the start of your next turn.
+
+## Every turn
+
+1. Start every turn with `sprint inbox`. It prints the owner's unread messages in order, each once: an approval of a brief version, a change request with the owner's words, or free text. Act on each one before anything else.
+2. Answer each message you acted on with `sprint reply --message <id> --reply-file -`, the text on standard input saying what you changed, or that you changed nothing and why.
+3. If this text is no longer in your context, run `sprint contract` again before going on.
+
+## After approval
+
+1. The goal can narrow this section: when it says to cut no issues or to deliver nothing, answer the approval with `sprint reply` and end your turn.
+2. Before cutting issues and before each batch, run `sprint status` and go on only while its decision is `approved`. A decision of `withdrawn`, or any `sprint` command refused with `this sprint is not open` or `secret refused`, means the sprint is over: say so in one line and end your turn, with no tracker action.
+3. Cut the approved brief's slices into issues under one tracker milestone with the `to-issues` skill, in the brief's order.
+4. Deliver them with the `deliver-batch` skill.
+5. Send `sprint report --report-file -` after each batch and on any change of state.
+6. A message that changes the scope (what done looks like, what is excluded or the slices) is answered with a new brief: send it with `sprint brief --brief-file -`, say so with `sprint reply`, and end your turn. Continue only once `sprint status` says the new version is approved.

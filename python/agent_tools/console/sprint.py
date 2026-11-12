@@ -2,6 +2,8 @@
 
     sprint brief [--sprint <id>] [--secret-file <path>] --brief-file <path | -> [--port N]
     sprint report [--sprint <id>] [--secret-file <path>] --report-file <path | -> [--port N]
+    sprint inbox [--sprint <id>] [--secret-file <path>] [--port N]
+    sprint reply [--sprint <id>] [--secret-file <path>] --message <id> --reply-file <path | -> [--port N]
     sprint status [--sprint <id>] [--port N]
     sprint contract
 
@@ -11,7 +13,7 @@ the manager session it starts; without `--secret-file` the secret is `$CONSOLE_S
 (one trailing newline is removed, as from the file). A flag always wins over the environment. No id is stderr
 `sprint: no sprint id: pass --sprint or set CONSOLE_SPRINT_ID`, an id from the environment that
 is not a sprint id is stderr `sprint: CONSOLE_SPRINT_ID is not a sprint id (16 lowercase hex
-characters)`, and, for `brief` and `report`, no secret is stderr `sprint: no secret: pass --secret-file or set
+characters)`, and, for `brief`, `report`, `inbox` and `reply`, no secret is stderr `sprint: no secret: pass --secret-file or set
 CONSOLE_SPRINT_SECRET`; each is exit 2 with no request sent. `--port` is the console's loopback
 port (0-65535; default 27184); the command only ever talks to 127.0.0.1.
 
@@ -26,6 +28,18 @@ a JSON object, and sends `POST /api/report` with `{"sprint_id", "secret", "repor
 On success it prints `sprint: report sent` and exit 0. The command validates no member of the
 report: the console decides, in one place.
 
+`sprint inbox` reads the secret the same way and sends `POST /api/inbox` with
+`{"sprint_id", "secret"}`, no `Origin`. It prints the console's answer as one line of JSON,
+`{"messages": [{"id", "kind", "version", "text", "at"}, ...]}`: the owner's messages the manager has
+not read, in id order, each once, and exit 0. An inbox with nothing unread is `{"messages": []}`.
+
+`sprint reply` reads the secret the same way and the reply from `--reply-file` (`-` reads stdin) as
+UTF-8 text with one trailing newline removed, and sends `POST /api/message-reply` with
+`{"sprint_id", "secret", "message", "reply"}`, no `Origin`. `--message` is the id of a message
+`sprint inbox` printed: an integer of at least 1, else exit 2. On success it prints
+`sprint: reply to message <id> sent` and exit 0. The command validates nothing about a message or a
+reply beyond reading it: the console decides, in one place.
+
 `sprint status` sends `GET /api/sprint-status?sprint_id=<id>` and prints the console's answer as one
 line of JSON, `{"decision", "reply", "sprint_id", "version"}`, and exit 0. `decision` is `none`
 (no answer yet), `approved`, `changes` (the owner's exact words are `reply`) or `withdrawn`.
@@ -37,7 +51,7 @@ run it first (ADR-console-015).
 
 Any other HTTP status is stderr `sprint: refused <status>: <text>` (the console's reason) and
 exit 1. A console that cannot be reached is stderr
-`sprint: console unreachable on 127.0.0.1:<port>: <error>` and exit 1. A secret, brief or report file
+`sprint: console unreachable on 127.0.0.1:<port>: <error>` and exit 1. A secret, brief, report or reply file
 that cannot be read, or a brief or report that is not a JSON object, is stderr `sprint: cannot read <path>:
 <reason>` and exit 2, with no request sent; bad arguments are exit 2. The secret is printed nowhere.
 """
@@ -74,11 +88,23 @@ def sprint_id(text: str) -> str:
     return text
 
 
+def message_id(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        value = 0
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a message id (an integer of at least 1)")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="sprint", description=__doc__.splitlines()[0])
     commands = parser.add_subparsers(dest="command", required=True)
     for name, text in (("brief", "send the sprint's brief to the console"),
                        ("report", "send the sprint's report to the console"),
+                       ("inbox", "print the owner's unread messages to the sprint"),
+                       ("reply", "answer one of the owner's messages"),
                        ("status", "print the owner's answer to the sprint's brief")):
         each = commands.add_parser(name, help=text)
         each.add_argument("--sprint", type=sprint_id, default=None,
@@ -89,8 +115,14 @@ def build_parser() -> argparse.ArgumentParser:
             each.add_argument("--secret-file", type=Path, default=None,
                               help="the file holding the sprint's secret "
                                    f"(default: ${manager.SECRET_ENV})")
-            each.add_argument(f"--{name}-file", required=True,
-                              help=f"the {name} as a JSON object; - reads stdin")
+            if name in ("brief", "report"):
+                each.add_argument(f"--{name}-file", required=True,
+                                  help=f"the {name} as a JSON object; - reads stdin")
+        if name == "reply":
+            each.add_argument("--message", type=message_id, required=True,
+                              help="the id of the message being answered")
+            each.add_argument("--reply-file", required=True,
+                              help="the reply as text; - reads stdin")
     commands.add_parser("contract", help="print the manager's contract")
     return parser
 
@@ -100,6 +132,15 @@ def read_secret(path: Path) -> str:
         return path.read_text().removesuffix("\n")
     except (OSError, UnicodeDecodeError) as error:
         raise Unreadable(f"sprint: cannot read {path}: {error}") from error
+
+
+def read_text(name: str) -> str:
+    """The reply text, stdin for `-`, with one trailing newline removed."""
+    try:
+        text = sys.stdin.read() if name == "-" else Path(name).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as error:
+        raise Unreadable(f"sprint: cannot read {name}: {error}") from error
+    return text.removesuffix("\n")
 
 
 def read_object(name: str, what: str) -> dict:
@@ -173,6 +214,21 @@ def send_report(args: argparse.Namespace, sprint: str) -> str:
     return "sprint: report sent"
 
 
+def read_inbox(args: argparse.Namespace, sprint: str) -> str:
+    secret = resolve_secret(args)
+    body = json.dumps({"sprint_id": sprint, "secret": secret}).encode()
+    return ask(args.port, "POST", service.INBOX_PATH, body)
+
+
+def send_reply(args: argparse.Namespace, sprint: str) -> str:
+    secret = resolve_secret(args)
+    reply = read_text(args.reply_file)
+    body = json.dumps({"sprint_id": sprint, "secret": secret, "message": args.message,
+                       "reply": reply}).encode()
+    ask(args.port, "POST", service.MESSAGE_REPLY_PATH, body)
+    return f"sprint: reply to message {args.message} sent"
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "contract":
@@ -184,6 +240,10 @@ def main(argv: list[str] | None = None) -> int:
             line = send_brief(args, sprint)
         elif args.command == "report":
             line = send_report(args, sprint)
+        elif args.command == "inbox":
+            line = read_inbox(args, sprint)
+        elif args.command == "reply":
+            line = send_reply(args, sprint)
         else:
             line = ask(args.port, "GET", f"{service.STATUS_PATH}?sprint_id={sprint}")
     except Unreadable as error:
