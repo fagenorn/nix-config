@@ -460,6 +460,32 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("ADR-console-013",
                       self.doc("docs/areas/console/adr/002-the-desk-page-design-rules.md"))
 
+    def test_the_console_report_decision_is_recorded(self):
+        path = "docs/areas/console/adr/014-a-managers-report-becomes-the-sprints-line.md"
+        first = (REPO_ROOT / path).read_text().splitlines()[0]
+        self.assertEqual(
+            first, "# ADR-console-014 — A manager's report becomes the sprint's line")
+        adr = self.doc(path)
+        for needle in ("sprint report", "POST /api/report", "secret refused", "waiting on you",
+                       "may be stuck", "fifteen minutes", "Detail", "closed out",
+                       "ADR-console-005", "ADR-console-008", "ADR-console-009",
+                       "ADR-console-013", "#835", "#837", "#838", "#890"):
+            self.assertIn(needle, adr)
+        self.assertIn("as soon as it is found valid and before the phase", adr)
+        self.assertNotIn("then a status line that names an issue number", adr)
+        self.assertNotIn("only when the reported phase changes", adr)
+        self.assertIn("/api/report",
+                      self.doc("docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md"))
+        kept = self.doc("docs/areas/console/adr/009-events-are-kept-for-90-days.md")
+        for needle in ("sprint.reported", "schema 5"):
+            self.assertIn(needle, kept)
+        context = self.doc("docs/areas/console/CONTEXT.md")
+        for needle in ("**Manager**", "**Report**"):
+            self.assertIn(needle, context)
+        context_map = self.doc("docs/CONTEXT-MAP.md")
+        for needle in ("| Manager | Console |", "| Report | Console |"):
+            self.assertIn(needle, context_map)
+
     def test_the_console_delivery_decision_is_recorded(self):
         path = "docs/areas/console/adr/005-in-flight-delivery-stage-is-read-from-run-journals.md"
         first = (REPO_ROOT / path).read_text().splitlines()[0]
