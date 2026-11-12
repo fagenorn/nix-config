@@ -11,6 +11,7 @@ const program = readFileSync(process.argv[2], 'utf8')
 const scenario = JSON.parse(readFileSync(0, 'utf8'))
 const SHA = 'a'.repeat(40)
 const PASS = { verdict: 'pass', findings: [] }
+const TASK_COMMIT = n => (n === 1 ? 'c0ffee' : `c0ffee${n}`)
 const DONE = { status: 'done', start_head: 'b0', commit: 'c0ffee', tests: ['t'], mutation_checked: true, notes: 'ok' }
 const SETUP = {
   ok: true, host: 'h1', slug: 'owner/repo', integration_branch: 'dev', default_branch: 'main',
@@ -66,10 +67,11 @@ const DEFAULTS = [
   [/^ws-check-/, { whitespace_exit: 1, changed_paths: ['src/a.js'] }],
   [/^verify-fix-/, DONE],
   [/^verify/, { head: SHA, clean: true, results: [{ id: 'build', status: 'pass', summary: 'ok' }], renew: { verdict: 'renewed' } }],
-  // #923: a task fix round commits on top of the head just reviewed; a fix at that same head is a rebuttal.
-  [/^fix-\d+-1$/, { ...DONE, start_head: 'c0ffee', commit: 'f1c0de' }],
+  // #923: honest heads. Task n starts at the head task n-1 left (the base for task 1) and commits its own; a task fix round commits on
+  // top of the head just reviewed, and a fix at that same head is a rebuttal.
+  [/^fix-\d+-1$/, (prompt, label) => ({ ...DONE, start_head: TASK_COMMIT(+label.split('-')[1]), commit: 'f1c0de' })],
   [/^fix-\d+-2$/, { ...DONE, start_head: 'f1c0de', commit: 'f2c0de' }],
-  [/^impl-/, { ...DONE, renew: { verdict: 'renewed' } }],
+  [/^impl-/, (prompt, label) => { const n = +label.split('-')[1]; return { ...DONE, start_head: n === 1 ? SHA : TASK_COMMIT(n - 1), commit: TASK_COMMIT(n), renew: { verdict: 'renewed' } } }],
   [/^(impl|fix)-|^fix-wave$/, DONE],
   [/^pr$/, { pr: 42, head: SHA, renew: { verdict: 'renewed' }, lock: { verdict: 'already_held', lock_sha: SHA }, checks: { state: 'passed', head: SHA, required: ['ci'] } }],
   [/^checks-/, { state: 'passed', head: SHA, required: ['ci'], renew: { verdict: 'renewed' }, lock: { verdict: 'already_held', lock_sha: SHA } }],
@@ -82,7 +84,7 @@ const NESTED = [[/^(owner-answer|verify)$/, ['renew']], [/^setup$/, ['holder', '
 const defaultOf = (label, prompt, over = {}) => {
   const hit = DEFAULTS.find(([re]) => re.test(label))
   if (!hit) throw new Error(`no stub reply for agent label ${label}`)
-  const base = typeof hit[1] === 'function' ? hit[1](prompt) : hit[1]
+  const base = typeof hit[1] === 'function' ? hit[1](prompt, label) : hit[1]
   // A fresh setup's holder follows the explicit reply's own host.
   return label === 'setup' && HOLDER_ID(prompt) && 'host' in over ? { ...base, ...holderOf(over.host, prompt) } : base
 }

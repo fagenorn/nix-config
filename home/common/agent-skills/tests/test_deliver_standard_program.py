@@ -2304,7 +2304,8 @@ class BlockedOnLaterTaskTest(unittest.TestCase):
         # A blocked attempt that committed sits before task 6's commits: the retry's span starts at its own start.
         self.assertIn("start_head is HEAD as this attempt starts.", retry)
         self.assertNotIn("the head before this task's first commit", retry)
-        self.assertIn("git -C /r/.wt/w-issue-9-x diff b5..c5", prompt(calls, "review-5"))
+        # #923: the range starts at the head the task before it (task 6) left, not at the start the reply names.
+        self.assertIn("git -C /r/.wt/w-issue-9-x diff c0ffee6..c5", prompt(calls, "review-5"))
         self.assertEqual(result["reordered"], [{"task": 5, "after": 6, "notes": self.NEEDS_6["notes"]}])
         ready, _, _ = self.go(dict(ARGS, mode="ready"), **{"impl-5": [self.NEEDS_6, self.DONE_5]})
         self.assertEqual((ready["stage"], ready["reordered"]), ("ready", result["reordered"]))
@@ -2539,7 +2540,7 @@ class NoCommitTaskTest(unittest.TestCase):
 
     def test_a_fix_that_answers_a_normal_task_with_no_commit_is_reviewed_as_a_rebuttal(self):
         # The head just reviewed decides, whatever start_head the fix reports.
-        for start in ("c0ffee", "b0"):
+        for start in ("c0ffee", SHA):
             with self.subTest(start=start):
                 result, calls = run(replies={"review-1": TASK_FINDING},
                                     patch={"fix-1-1": {"start_head": start, "commit": "c0ffee", "notes": "the finding is wrong: see a.py:3"}})
@@ -2547,7 +2548,7 @@ class NoCommitTaskTest(unittest.TestCase):
                 self.assert_no_empty_range(calls)
                 again = self.call_of(calls, "rereview-1-1")
                 self.assertEqual(again["agentType"], "reviewer")
-                self.assertIn(f"the task's diff (git -C {self.WT} diff b0..c0ffee)", again["prompt"])
+                self.assertIn(f"the task's diff (git -C {self.WT} diff {SHA}..c0ffee)", again["prompt"])
                 self.assertIn("The implementer's notes: the finding is wrong: see a.py:3.", again["prompt"])
 
     def test_a_fix_that_commits_is_a_scoped_rereview_whatever_start_head_it_reports(self):
@@ -2592,6 +2593,27 @@ class NoCommitTaskTest(unittest.TestCase):
         self.assertEqual(first["cont"]["partial"], 1)
         _, calls = run(args=dict(ARGS, cont=first["cont"]), patch={"impl-1": moved})
         self.assertIn(f"Review the diff of task 1 only: git -C {self.WT} diff {SHA}..d1 (and", prompt(calls, "review-1"))
+
+    def test_a_reply_that_starts_above_the_accepted_head_is_reviewed_from_the_accepted_head(self):
+        """The implementer commits A then B and reports A..B: the review covers the accepted head..B, so A is not hidden."""
+        result, calls = run(replies={"plan": dict(PLAN, tasks=tasks(2))}, patch={"impl-2": {"start_head": "a1", "commit": "b2"}})
+        self.assertEqual(result["stage"], "done")
+        self.assertIn(f"Review the diff of task 2 only: git -C {self.WT} diff c0ffee..b2 (and", prompt(calls, "review-2"))
+        self.assertNotIn("a1", prompt(calls, "review-2"))
+        # An honest reply keeps its own spelling of the accepted head.
+        _, calls = run(replies={"plan": dict(PLAN, tasks=tasks(2))}, patch={"impl-2": {"start_head": "C0FFEE", "commit": "b2"}})
+        self.assertIn(f"git -C {self.WT} diff C0FFEE..b2 (and", prompt(calls, "review-2"))
+
+    def test_a_rebuttal_after_a_cut_off_commit_names_the_task_diff_from_the_accepted_head(self):
+        stopped, _ = self.go(replies={"review-2": None})
+        result, calls = run(args=dict(ARGS, cont=stopped["cont"]), replies={"review-2": TASK_FINDING},
+                            patch={"impl-2": {"start_head": "d1", "commit": "d1"}, "fix-2-1": {"start_head": "d1", "commit": "d1"}})
+        self.assertEqual(result["stage"], "done")
+        self.assert_no_empty_range(calls)
+        self.assertIn(f"git -C {self.WT} diff c0ffee..d1 (and", prompt(calls, "review-2"))
+        again = self.call_of(calls, "rereview-2-1")
+        self.assertEqual(again["agentType"], "reviewer")
+        self.assertIn(f"the task's diff (git -C {self.WT} diff c0ffee..d1)", again["prompt"])
 
     def test_a_resume_at_a_task_no_stop_left_partial_reads_the_head_the_setup_found(self):
         cont = {"setup": {"ok": True, "worktree": self.WT, "branch": "issue-9-x", "plan_dir": "/g"},
@@ -2654,7 +2676,7 @@ class NoCommitTaskTest(unittest.TestCase):
                 impl = prompt(calls, "impl-1")
                 head = impl[:impl.index("\nFirst renew the claim")]
                 self.assertEqual(prompt(calls, "review-1"), f"{head}\n{lane}Review the diff of task 1 only: "
-                                 f"git -C {self.WT} diff b0..c0ffee (and the task file /g/task-1.md as its contract). {KNOW_TEXT} "
+                                 f"git -C {self.WT} diff {SHA}..c0ffee (and the task file /g/task-1.md as its contract). {KNOW_TEXT} "
                                  "Report Important or Critical correctness defects and unmet task requirements only, each with a "
                                  "concrete failing input. No style notes. Do not edit anything.")
                 self.assertEqual(prompt(calls, "rereview-1-1"), f"{head}\nRe-review only these previously reported findings for "
@@ -5463,7 +5485,7 @@ class DeclaredBranchTest(unittest.TestCase):
             self.assertNotIn(BR_PUSH, prompt(calls, label))
 
     def test_a_declared_branch_task_runs_in_its_worktree(self):
-        one, two, three = "1" * 40, "2" * 40, "3" * 40
+        one, two, three = BR["head"], "2" * 40, "3" * 40
         result, calls = run(replies={"plan": bplan(), "review-2": TASK_FINDING},
                             patch={"impl-2": {"start_head": one, "commit": two},
                                    "fix-2-1": {"start_head": two, "commit": three}})
@@ -5480,7 +5502,7 @@ class DeclaredBranchTest(unittest.TestCase):
         self.assertIn(f"git -C /r/.wt/cand diff {one}..{two}", prompt(calls, "review-2"))
         self.assertIn(f"git -C /r/.wt/cand diff {two}..{three}", prompt(calls, "rereview-2-1"))
         self.assertNotIn("commits to the declared branch", prompt(calls, "impl-1"))
-        self.assertIn("git -C /r/.wt/w-issue-9-x diff b0..c0ffee", prompt(calls, "review-1"))
+        self.assertIn(f"git -C /r/.wt/w-issue-9-x diff {SHA}..c0ffee", prompt(calls, "review-1"))
         self.assertEqual(result["tasks"][1], {"n": 2, "commit": three, "review_rounds": 1,
                                               "reviewer": "reviewer", "branch": "cand"})
         self.assertNotIn("branch", result["tasks"][0])

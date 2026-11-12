@@ -1215,15 +1215,15 @@ ${RULES}`
   // Whether a reply added a commit is never taken from its own start_head: it is read against a head the program holds. For the
   // task, that is the head its worktree was accepted at: the tip this run tracks, or, for the task a stop left partial (the setup's
   // head then already holds the cut-off attempt's commits), the last done task of that worktree, else the worktree's base. A reply
-  // that claims no commit at another head gets a diff review from the accepted head. For a fix, it is the head just reviewed.
+  // whose commit is another head gets a diff review from the accepted head, whatever start it names (#923: a start above it would hide commits). For a fix, it is the head just reviewed.
   const lastDone = taskLog.filter(d => (B ? d.branch === B.name : !present(d.branch))).pop()
   const tracked = partial === t.n ? null : B ? branchTips[B.name] : tip
   const accepted = present(tracked) ? tracked : lastDone && present(lastDone.commit) ? lastDone.commit : B ? B.base : setup.base_sha
-  const claimsNone = sameSha(impl.start_head, impl.commit)
-  const taskStart = claimsNone ? accepted : impl.start_head
+  // An honest reply starts at the accepted head and keeps its own spelling of it; any other start would hide the commits beneath it.
+  const taskStart = sameSha(impl.start_head, accepted) ? impl.start_head : accepted
   const liteLane = t.risk === 'mechanical' || t.risk === 'low'
   // False until the task's diff had its first pass; a task with no commit has none to review.
-  let diffReviewed = !(claimsNone && sameSha(impl.commit, accepted))
+  let diffReviewed = !sameSha(impl.commit, accepted)
   // reviewer-lite first-passes only a task whose declared lane is mechanical or low (its lane verification mode).
   let reviewer = liteLane && diffReviewed ? 'reviewer-lite' : 'reviewer'
   const diffReview = (range, label, answers) => call(`${start}
@@ -1231,7 +1231,7 @@ ${reviewer === 'reviewer-lite' ? `lane: ${t.risk}. ` : ''}Review the diff of tas
   // Tracked files only: an untracked file (a build output, a tool's cache) is no edit of the task, and a waiting task's kept edits are not this task's.
   const HEAD_UNMOVED = h => `First confirm that git -C ${TW} rev-parse HEAD prints ${h} and git -C ${TW} status --porcelain --untracked-files=no prints nothing: another head or an uncommitted change to a tracked file is a finding.${waiting ? `${WAITS}those are not a finding.` : ''}`
   const CONFIRM = `with the task file's own verification commands or a read-only lookup (run a gh command as ${UNSET}gh ...)`
-  let review = diffReviewed ? await diffReview(claimsNone ? `git -C ${TW} diff ${accepted}..${impl.commit}` : spanIn(TW, impl), `review-${t.n}`) : await call(`${start}
+  let review = diffReviewed ? await diffReview(`git -C ${TW} diff ${taskStart}..${impl.commit}`, `review-${t.n}`) : await call(`${start}
 Task ${t.n} ended with no new commit: the head of ${TW} is still ${impl.commit}. There is no diff to review and none is missing; do not ask for a range. Judge the task from its task file ${t.file} (the contract) and the implementer's report: notes: ${impl.notes}; checks run: ${JSON.stringify(Array.isArray(impl.tests) ? impl.tests : [])}. ${HEAD_UNMOVED(impl.commit)} Then decide two things. 1. Does the task file require a tracked file to be created, changed or deleted? If it does, the task is not done: report one Critical finding naming the files it requires. 2. If it requires none, is every output the task file asks for in place? Confirm each yourself, ${CONFIRM}; the implementer's word alone is not evidence, and an output you cannot confirm is a finding. Report Important or Critical findings only, each with what is missing. Do not edit anything.`, { label: `review-${t.n}`, phase: 'Tasks', agentType: 'reviewer', schema: FINDINGS })
   if (!review) return halt('task-review', { task: t, review: null })
   let rounds = 0
