@@ -334,6 +334,62 @@ class NudgeServiceTest(MessageRouteTest):
         ((_, row),) = self.nudged()
         self.assertEqual((row["route"], row["ok"]), ("wake", True))
 
+    def stopped_with_full_listing(self, outcome):
+        """A restarted service whose manager is unlisted; `outcome` is what its full listing gives."""
+        first = self.begin()
+        sid = self.running(first)
+        first.close()
+        log = EventLog(self.store, clock=self.log_clock)
+        log.append([("session.seen", "owner/p01", {
+            "session_id": "s-1", "cwd": "/srv/p01", "repo": "/srv/p01", "state": "idle",
+            "name": self.name(sid)})])
+        log.close()
+        self.listed.clear()
+        self.full_calls = []
+
+        def full(profile, cwd):
+            self.full_calls.append((profile, cwd))
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        svc = self.begin(full_listing=full)
+        return svc, sid
+
+    def test_an_owners_message_wakes_a_session_absent_from_the_full_listing_with_its_name_and_settings(self):
+        svc, sid = self.stopped_with_full_listing(frozenset())
+        path = str(manager.settings_path(svc._sprint_secrets, sid))
+        svc.send_message("owner/p01", sid, TEXT)
+        self.queued.run_next()
+        self.assertEqual(self.nudges, [nudge.Nudge(
+            sid, "wake", self.name(sid), "s-1", "work", "/srv/p01", path)])
+        self.assertEqual(
+            nudge.nudge_command(self.nudges[0], "linux")[-6:],
+            ["--bg", "--name", self.name(sid), "--settings", path, nudge.NUDGE_TEXT])
+        ((_, row),) = self.nudged()
+        self.assertEqual((row["route"], row["ok"], "listing_failed" in row), ("wake", True, False))
+        self.assertEqual(self.full_calls, [("work", "/srv/p01")])
+
+    def test_an_unreadable_full_listing_gives_the_bare_wake_and_records_why(self):
+        svc, sid = self.stopped_with_full_listing(
+            nudge.ListingUnreadable("the listing is not a JSON array"))
+        svc.send_message("owner/p01", sid, TEXT)
+        self.queued.run_next()
+        self.assertEqual(self.nudges, [nudge.Nudge(
+            sid, "wake", self.name(sid), "s-1", "work", "/srv/p01")])
+        ((_, row),) = self.nudged()
+        self.assertTrue(row["ok"])
+        self.assertEqual(row["listing_failed"], "the listing is not a JSON array")
+
+    def test_a_relay_never_reads_the_full_listing(self):
+        calls = []
+        svc = self.begin(full_listing=lambda profile, cwd: calls.append((profile, cwd)) or set())
+        sid = self.running(svc)
+        svc.send_message("owner/p01", sid, TEXT)
+        self.queued.run_next()
+        self.assertEqual([n.route for n in self.nudges], ["relay"])
+        self.assertEqual(calls, [])
+
     def stopped_and_overdue(self):
         """A restarted service whose sprint's manager row is started, unlisted, briefless and overdue."""
         first = self.begin()

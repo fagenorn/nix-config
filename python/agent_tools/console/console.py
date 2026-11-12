@@ -21,7 +21,10 @@ says managers are not available on this host yet.
 
 It is also given `nudge.nudger_for(sys.platform)`: on Linux a message the owner leaves a sprint with a
 running manager is relayed to it (or its stopped session is woken in place) by one fixed sentence
-(`agent_tools.console.nudge`); elsewhere there is no nudger and no nudge is made.
+(`agent_tools.console.nudge`); elsewhere there is no nudger and no nudge is made. It is given
+`nudge.full_lister_for(sys.platform)` too (#949): before a wake the service reads the manager
+profile's full session listing, and a wake of a session it no longer shows passes the sprint's
+session name and settings file again; elsewhere every wake is bare.
 
 Last, it is given `manager.stopper_for(sys.platform)` (#892): on Linux the owner's stop of a sprint
 ends its manager's background session (`manager.stop_session`); elsewhere there is no stopper and a
@@ -64,7 +67,8 @@ def main(argv: list[str] | None = None) -> int:
         console = service.ConsoleService(
             service.default_store(), service.default_registry(), port=args.port,
             tracker=inbox.read_items, launcher=manager.launcher_for(sys.platform),
-            nudger=nudge.nudger_for(sys.platform), stopper=manager.stopper_for(sys.platform))
+            nudger=nudge.nudger_for(sys.platform), stopper=manager.stopper_for(sys.platform),
+            full_listing=nudge.full_lister_for(sys.platform))
     except TokenError as error:
         print(f"console: page token unusable: {error}", file=sys.stderr)
         return 1

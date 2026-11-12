@@ -401,7 +401,18 @@ failure is `console: renudge_failed <Type>: <message>`), reserves under the lock
 unreserved sprint with a started manager, `failed_nudges < sprints.UNREACHABLE_AFTER`, an unread
 message with no `delivered_at` whose `at` is at least `sprints.RENUDGE_AFTER_MS` before
 `self._clock()` and a `last_nudge_at` that is None or as old, and dispatches each after the lock
-(row times are compared as epoch milliseconds). The nudger and the listing are never called with the
+(row times are compared as epoch milliseconds). The WAKE route (#949) first asks the `full_listing`
+seam (`nudge.full_lister_for(sys.platform)`, called `full_listing(profile, cwd)` with the manager row's
+profile and the project's root; None means every wake is bare and no read is made) which sessions the
+profile's full listing shows, stopped ones included: `_wake_settings` gives `Nudge.settings` None
+(bare: no `--name`, no `--settings`) for a session the listing shows, and the sprint's settings file
+(`manager.settings_path` in the sprint secrets directory) for one it does not show, because its
+record was removed and the client would otherwise resume it under another name without its settings.
+A listing that raises is a bare wake whose row carries `"listing_failed": <reason>` (a
+`nudge.ListingUnreadable`'s text, else `<Type>: <message>`) and one stderr line `console:
+listing_failed <sprint_id> <reason>`; the wake is still sent and `ok` is its own outcome. The full
+listing is read only on the wake routes, never for a relay or when the running listing shows the
+manager. The nudger, the listing and the full listing are never called with the
 ingest lock held, and no `Nudge`, row or stderr line carries the owner's text. No nudge is made while the
 sprint's session stop is reserved (`_stopping`) or once the sprint has `stopped_at` (a wake would resume
 the stopped manager), and `send_message` refuses `Refused(ENDED)` (409 `this sprint has ended`) a
@@ -460,7 +471,9 @@ no job; `WAKE` reserves the sprint in `_nudging` and queues `_revive_wake`; `TAK
 `_launching` with a `_TakeoverReservation` and queues the launch. A wake dispatch that raises frees
 the reservation and appends one failed `manager.woken` row ("the wake could not start: ..."). The
 wake job, off the lock, reads a fresh `listing()` and sends no wake when it shows the manager's name
-(it sets `_last_listed` instead and appends nothing); it then decides again under the lock
+(it sets `_last_listed` instead and appends nothing); it then reads the full listing as the nudges'
+WAKE route does (`_wake_settings`, off the lock, so `Nudge.settings` and the row's `listing_failed`
+follow the same rule, #949) and decides again under the lock
 (`_wake_due`: open, manager not listed, `_revive_step` still `WAKE`) and sends no wake, appending
 nothing, when the sprint was withdrawn or stopped having work during the listing; otherwise it calls
 the nudger with the `revive` route and appends `manager.woken {sprint_id, goal, session_id, ok[, reason][, back]}` while the
@@ -533,7 +546,7 @@ import sys
 import os
 import threading
 import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qsl
@@ -1259,9 +1272,11 @@ class ConsoleService:
                  dispatch: Callable[[Callable[[], None]], None] | None = None,
                  nudger: Callable[[nudge.Nudge], None] | None = None,
                  listing: Callable[[], Mapping[str, sessions.Observation]] | None = None,
-                 stopper: Callable[[str, str], None] | None = None):
+                 stopper: Callable[[str, str], None] | None = None,
+                 full_listing: Callable[[str, str], Collection[str]] | None = None):
         self.registry = Path(registry)
         self._nudger = nudger
+        self._full_listing = full_listing
         self._stopper = stopper
         self._stopping: set[str] = set()
         self._pending: dict[str, sprints.PendingStop] = {}
@@ -1889,8 +1904,29 @@ class ConsoleService:
                 self._settled[sprint_id] = int(self._clock() * 1000)
                 self._record_nudge(sprint_id, None, None, reason)
 
+    def _wake_settings(self, sprint_id: str, session_id: str, profile: str,
+                       cwd: str) -> tuple[str | None, str | None]:
+        """Off the ingest lock: the settings path a wake of `session_id` must carry, and why it is unknown.
+
+        The profile's full listing (stopped sessions included) shows the session: the wake is bare
+        `(None, None)`. It does not: the record was removed, so the wake passes the sprint's name and
+        settings file again, `(path, None)`. No seam, or a listing that cannot be read, is a bare wake
+        (a copy is the worse failure); an unreadable one also returns its reason.
+        """
+        if self._full_listing is None:
+            return None, None
+        try:
+            shown = self._full_listing(profile, cwd)
+        except nudge.ListingUnreadable as error:
+            return None, str(error)
+        except Exception as error:
+            return None, f"{type(error).__name__}: {error}"
+        if session_id in shown:
+            return None, None
+        return str(manager.settings_path(self._sprint_secrets, sprint_id)), None
+
     def _record_nudge(self, sprint_id: str, through: int | None, route: str | None,
-                      reason: str | None) -> None:
+                      reason: str | None, listing_failed: str | None = None) -> None:
         """Under the ingest lock: append one `sprint.nudged` row for the open sprint and fold it."""
         sprint = self._sprints.get(sprint_id)
         if sprint is None or self._stop.is_set():
@@ -1904,9 +1940,13 @@ class ConsoleService:
                    "ok": reason is None}
         if reason is not None:
             payload["reason"] = reason
+        if listing_failed is not None:
+            payload["listing_failed"] = listing_failed
         self._apply(self.log.append([(SPRINT_NUDGED, sprint.project_id, payload)]))
         if reason is not None:
             print(f"console: nudge_failed {sprint_id} {reason}", file=sys.stderr)
+        if listing_failed is not None:
+            print(f"console: listing_failed {sprint_id} {listing_failed}", file=sys.stderr)
 
     def _nudge(self, sprint_id: str) -> None:
         """Tell the sprint's manager to read its inbox, then record the attempt; the reservation ends here."""
@@ -1921,7 +1961,7 @@ class ConsoleService:
             through = unread[-1].message_id
             name = manager.session_name(sprint.project_id, sprint_id)
             profile, known, cwd = sprint.manager.profile, sprint.manager_session, project.root
-        route, reason = None, None
+        route, reason, listing_failed = None, None, None
         try:
             listed = sorted(o.session_id for o in self._listing().values() if o.name == name)
             if listed:
@@ -1929,7 +1969,8 @@ class ConsoleService:
                 self._nudger(nudge.Nudge(sprint_id, route, name, listed[0], profile, cwd))
             elif known is not None:
                 route = nudge.WAKE
-                self._nudger(nudge.Nudge(sprint_id, route, name, known, profile, cwd))
+                settings, listing_failed = self._wake_settings(sprint_id, known, profile, cwd)
+                self._nudger(nudge.Nudge(sprint_id, route, name, known, profile, cwd, settings))
             else:
                 reason = nudge.UNKNOWN_SESSION
         except Exception as error:
@@ -1941,7 +1982,7 @@ class ConsoleService:
             self._settled[sprint_id] = int(self._clock() * 1000)
             wanted = sprint_id in self._nudge_again
             self._nudge_again.discard(sprint_id)
-            self._record_nudge(sprint_id, through, route, reason)
+            self._record_nudge(sprint_id, through, route, reason, listing_failed)
             found = self._nudgeable(sprint_id)
             if wanted and found is not None and found[1][-1].message_id > through \
                     and not self._stop.is_set():
@@ -2143,7 +2184,8 @@ class ConsoleService:
                 self._settled[sprint_id] = int(self._clock() * 1000)
                 self._record_wake(sprint_id, False, reason, False)
 
-    def _record_wake(self, sprint_id: str, ok: bool, reason: str | None, back: bool) -> None:
+    def _record_wake(self, sprint_id: str, ok: bool, reason: str | None, back: bool,
+                     listing_failed: str | None = None) -> None:
         """Under the ingest lock: append one `manager.woken` row for the open sprint and fold it."""
         sprint = self._sprints.get(sprint_id)
         if sprint is None or self._stop.is_set():
@@ -2154,9 +2196,13 @@ class ConsoleService:
             payload["reason"] = reason
         if back:
             payload["back"] = True
+        if listing_failed is not None:
+            payload["listing_failed"] = listing_failed
         self._apply(self.log.append([(MANAGER_WOKEN, sprint.project_id, payload)]))
         if not ok:
             print(f"console: wake_failed {sprint_id} {reason}", file=sys.stderr)
+        if listing_failed is not None:
+            print(f"console: listing_failed {sprint_id} {listing_failed}", file=sys.stderr)
 
     def _wake_due(self, sprint_id: str) -> sprints.SprintState | None:
         """Under the ingest lock: the open sprint when a wake of its manager is still the step."""
@@ -2177,18 +2223,20 @@ class ConsoleService:
             name = manager.session_name(sprint.project_id, sprint_id)
             session_id, profile, root = sprint.manager_session, sprint.manager.profile, project.root
             seen_before = sprint.manager_seen_seq
-        reason = None
+        reason, listing_failed = None, None
         try:
             if any(o.name == name for o in self._listing().values()):
                 with self._ingest:
                     self._last_listed[sprint_id] = int(self._clock() * 1000)
                     self._nudging.discard(sprint_id)
                 return
+            settings, listing_failed = self._wake_settings(sprint_id, session_id, profile, root)
             with self._ingest:
                 if self._wake_due(sprint_id) is None:
                     self._nudging.discard(sprint_id)
                     return
-            self._nudger(nudge.Nudge(sprint_id, nudge.REVIVE, name, session_id, profile, root))
+            self._nudger(nudge.Nudge(
+                sprint_id, nudge.REVIVE, name, session_id, profile, root, settings))
         except Exception as error:
             reason = (str(error) if isinstance(error, nudge.NudgeFailed)
                       else f"{type(error).__name__}: {error}")
@@ -2198,7 +2246,7 @@ class ConsoleService:
             sprint = self._sprints.get(sprint_id)
             back = (reason is None and sprint is not None
                     and (self._manager_listed(sprint) or sprint.manager_seen_seq != seen_before))
-            self._record_wake(sprint_id, reason is None, reason, back)
+            self._record_wake(sprint_id, reason is None, reason, back, listing_failed)
 
     def read_inbox(self, sprint_id: str, secret: str) -> list[dict]:
         """The unread messages in id order; the same locked section records them as read."""
