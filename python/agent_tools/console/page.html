@@ -77,9 +77,17 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .rest > li.row { display: block; padding: 12px 0; }
 .rest > li.row + li.row { border-top: 1px solid var(--hair); }
 .row-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; width: 100%; margin: 0; }
-.row-head b { font-size: 1rem; font-weight: 500; color: var(--text); }
+.row-head b { min-width: 0; font-size: 1rem; font-weight: 500; color: var(--text); overflow-wrap: anywhere; }
 .row-head .lm { font-size: .84375rem; color: var(--sub0); }
 .row-head .lw { margin-left: auto; font-size: .84375rem; color: var(--sub0); white-space: nowrap; }
+.brief-row { display: block; padding: 12px 0; }
+.card.lead + .brief-row, .card.lead + .rest { margin-top: 12px; }
+.brief-row + .brief-row, .brief-row + .rest > li.row:first-child { border-top: 1px solid var(--hair); }
+.brief-row + .rest { margin-top: 0; }
+.brief-row > summary { cursor: pointer; list-style: none; padding: 4px 12px; margin: 0 -12px; border-radius: 10px; transition: background-color .16s; }
+.brief-row > summary::-webkit-details-marker { display: none; }
+.brief-row > summary:hover { background: rgba(202, 211, 245, .05); }
+.brief-row > .card { margin-top: 6px; }
 .done-item { flex: 1 0 100%; min-width: 0; }
 .keys { margin-top: 18px; display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: .8125rem; color: var(--ov2); }
 .keys span { display: inline-flex; align-items: center; gap: 6px; }
@@ -95,9 +103,9 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .abox .meta { margin-top: 6px; }
 .abox .meta.now { color: var(--text); }
 .abox .opts { list-style: none; padding-left: 0; display: flex; flex-direction: column; align-items: stretch; gap: 2px; margin-top: 14px; }
-.opt, .send, .undo, .approve, .reply-send, .goal-send, .goal-cancel, .goal-project, .give-goal, .withdraw, .retry, .stop, .stop-confirm, .stop-cancel, .try-again, .stall-withdraw, .tell-send, .abox button[class^="ans-"] { display: inline-flex; align-items: baseline; gap: 8px; font: inherit; color: inherit; text-align: left; background: none; border: 1px solid var(--hair); border-radius: 8px; padding: 2px 10px; cursor: pointer; transition: background-color .16s; }
-.opt:hover:enabled, .send:hover:enabled, .undo:hover:enabled, .approve:hover:enabled, .reply-send:hover:enabled, .goal-send:hover:enabled, .goal-cancel:hover:enabled, .goal-project:hover:enabled, .give-goal:hover:enabled, .withdraw:hover:enabled, .retry:hover:enabled, .stop:hover:enabled, .stop-confirm:hover:enabled, .stop-cancel:hover:enabled, .try-again:hover:enabled, .stall-withdraw:hover:enabled, .tell-send:hover:enabled, .abox button[class^="ans-"]:hover:enabled { background: rgba(202, 211, 245, .05); }
-.opt:disabled, .send:disabled, .reply-send:disabled, .goal-send:disabled, .give-goal:disabled, .withdraw:disabled, .retry:disabled, .stop:disabled, .stop-confirm:disabled, .stop-cancel:disabled, .try-again:disabled, .stall-withdraw:disabled, .tell-send:disabled, .abox button[class^="ans-"]:disabled { cursor: default; }
+.opt, .send, .undo, .approve, .reply-send, .goal-send, .goal-cancel, .goal-project, .give-goal, .withdraw, .retry, .stop, .stop-confirm, .stop-cancel, .try-again, .stall-withdraw, .tell-open, .tell-send, .abox button[class^="ans-"] { display: inline-flex; align-items: baseline; gap: 8px; font: inherit; color: inherit; text-align: left; background: none; border: 1px solid var(--hair); border-radius: 8px; padding: 2px 10px; cursor: pointer; transition: background-color .16s; }
+.opt:hover:enabled, .send:hover:enabled, .undo:hover:enabled, .approve:hover:enabled, .reply-send:hover:enabled, .goal-send:hover:enabled, .goal-cancel:hover:enabled, .goal-project:hover:enabled, .give-goal:hover:enabled, .withdraw:hover:enabled, .retry:hover:enabled, .stop:hover:enabled, .stop-confirm:hover:enabled, .stop-cancel:hover:enabled, .try-again:hover:enabled, .stall-withdraw:hover:enabled, .tell-open:hover:enabled, .tell-send:hover:enabled, .abox button[class^="ans-"]:hover:enabled { background: rgba(202, 211, 245, .05); }
+.opt:disabled, .send:disabled, .reply-send:disabled, .goal-send:disabled, .give-goal:disabled, .withdraw:disabled, .retry:disabled, .stop:disabled, .stop-confirm:disabled, .stop-cancel:disabled, .try-again:disabled, .stall-withdraw:disabled, .tell-open:disabled, .tell-send:disabled, .abox button[class^="ans-"]:disabled { cursor: default; }
 .abox button[class^="ans-"]:disabled { color: var(--ov2); }
 .abox .detail { margin-top: 6px; padding: 6px 10px; max-height: 24rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: .84375rem; color: var(--sub0); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; }
 .card .detail, .rest .detail, .done .detail { flex-basis: 100%; margin: 6px 0 0; padding: 6px 10px; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: .84375rem; color: var(--sub0); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; }
@@ -115,6 +123,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .goal-in:hover { border-color: var(--s1); }
 .goal-in:focus-within { border-color: var(--lav); }
 .goal-in .goal-text { flex: 1 1 auto; min-width: 0; height: 38px; padding: 8px 0; font: inherit; line-height: 22px; color: var(--text); background: none; border: 0; border-radius: 0; resize: none; overflow: hidden; }
+.goal-in .goal-text:focus-visible { outline: none; }
 .goal-in .goal-text::placeholder { color: var(--ov2); }
 .goal-key { margin-top: 9px; }
 .goal-bar.open .goal-in { background: var(--base); border-color: var(--lav); }
@@ -167,6 +176,11 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .unreachable { color: var(--ov2); }
 .sprint-tell { flex: 1 0 100%; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
 .sprint-tell label { color: var(--ov2); }
+.sprint-acts { flex: 1 0 100%; display: flex; flex-wrap: wrap; align-items: flex-start; gap: 4px 10px; }
+.sprint-acts .sprint-tell { flex: 1 1 auto; }
+.sprint-more { margin-left: auto; font-size: .8125rem; }
+.sprint-more summary { cursor: pointer; list-style: none; padding: 4px 12px; border-radius: 8px; color: var(--sub1); }
+.sprint-more summary::-webkit-details-marker { display: none; }
 .tell { width: 100%; max-width: 40rem; min-height: 3.5rem; resize: vertical; font: inherit; color: var(--text); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; padding: 4px 8px; }
 .act { flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin-top: 8px; font-size: .8125rem; color: var(--ov2); }
 .fail, .stop-fail, .unstopped { color: var(--red); }
@@ -409,6 +423,8 @@ function sprintDetail(sprint) {
     link.href = sprint.tracker_url;
     fold.appendChild(link);
   }
+  const older = (sprint.messages || []).slice(0, -1);
+  if (older.length > 0) fold.appendChild(messageList(older));
   return fold;
 }
 const SPRINT_LOOKS = new Map([
@@ -439,6 +455,8 @@ const retries = new Map();
 const latestSprints = new Map();
 const tellDrafts = new Map();
 const tells = new Map();
+const tellOpen = new Set();
+let sprintRedraw = 0;
 function messageLabel(message) {
   if (message.kind === "approved") return "Approved version " + message.version;
   if (message.kind === "changes") return "Asked for changes to version " + message.version + ": " + message.text;
@@ -457,18 +475,58 @@ function messageList(messages) {
   }
   return list;
 }
+function refillRows(id) {
+  const latest = latestSprints.get(id);
+  if (latest === undefined) return;
+  for (const row of document.querySelectorAll("li.sprint")) {
+    if (row.dataset.sprintId === id) fillSprint(row, latest.entry, latest.sprint);
+  }
+}
+function tellField(id) {
+  return Array.from(document.querySelectorAll("textarea.tell")).find((area) => area.dataset.tell === id);
+}
+function openTell(id) {
+  tellOpen.add(id);
+  refillRows(id);
+  const area = tellField(id);
+  if (area !== undefined) area.focus();
+}
+function closeTell(id, focusOpener) {
+  tellOpen.delete(id);
+  refillRows(id);
+  if (!focusOpener) return;
+  const opener = Array.from(document.querySelectorAll("button.tell-open"))
+    .find((button) => button.dataset.tellOpen === id);
+  if (opener !== undefined) opener.focus();
+}
 function tellBox(item, entry, sprint) {
   const id = sprint.sprint_id;
   const state = tells.get(id);
+  const draft = tellDrafts.get(id);
+  if (!tellOpen.has(id) && (draft === undefined || draft.value === "") && state === undefined) {
+    const opener = actionButton("tell-open", "Tell the manager", () => openTell(id));
+    opener.dataset.tellOpen = id;
+    return opener;
+  }
   const box = el("div", "sprint-tell");
   const label = el("label", "tell-label");
   label.appendChild(el("span", "", "Tell the manager"));
   const area = el("textarea", "tell");
   area.dataset.tell = id;
-  const draft = tellDrafts.get(id);
   if (draft !== undefined) area.value = draft.value;
   area.addEventListener("input", () => {
     tellDrafts.set(id, { value: area.value, start: area.selectionStart, end: area.selectionEnd });
+  });
+  area.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape" || event.ctrlKey || event.altKey || event.metaKey || event.shiftKey) return;
+    if (area.value === "") closeTell(id, true);
+  });
+  area.addEventListener("blur", (event) => {
+    if (sprintRedraw > 0 || area.value !== "") return;
+    for (let n = event.relatedTarget; n; n = n.parentNode) {
+      if (n === item) return;
+    }
+    closeTell(id, false);
   });
   label.appendChild(area);
   box.appendChild(label);
@@ -481,11 +539,23 @@ function tellBox(item, entry, sprint) {
   return box;
 }
 function fillSprint(item, entry, sprint) {
+  sprintRedraw += 1;
+  try {
+    drawSprint(item, entry, sprint);
+  } finally {
+    sprintRedraw -= 1;
+  }
+}
+function drawSprint(item, entry, sprint) {
   const state = withdrawals.get(sprint.sprint_id);
   latestSprints.set(sprint.sprint_id, { entry, sprint });
   item.dataset.sprintId = sprint.sprint_id;
   const before = Array.from(item.children).find((c) => c.className === "sprint-detail");
   const wasOpen = before !== undefined && before.open === true;
+  const acts = Array.from(item.children).find((c) => c.className === "sprint-acts");
+  const moreBefore = acts === undefined ? undefined
+    : Array.from(acts.children).find((c) => c.className === "sprint-more");
+  const moreWasOpen = moreBefore !== undefined && moreBefore.open === true;
   item.replaceChildren();
   const look = sprintLook(sprint);
   const head = el("div", "sp-head");
@@ -548,15 +618,13 @@ function fillSprint(item, entry, sprint) {
   if (sprint.retry === true && retrying !== undefined && retrying.phase === "failed") {
     item.appendChild(el("span", "fail", "Could not retry: " + retrying.reason));
   }
-  const button = actionButton("withdraw", "Withdraw", () => withdraw(item, entry, sprint));
-  if (state !== undefined && state.phase === "sending") button.setAttribute("disabled", "");
-  item.appendChild(button);
-  if (sprint.stoppable === true) stopControls(item, entry, sprint);
+  const messages = sprint.messages || [];
+  const stopButton = sprint.stoppable === true ? stopControls(item, entry, sprint) : null;
   if (typeof sprint.stop_text === "string") {
     item.appendChild(el("span", "stop-fail", sprint.stop_text));
   }
   const hasClosing = closing !== null && typeof closing === "object";
-  if (typeof sprint.status === "string" || hasClosing || (sprint.sessions || []).length > 0) {
+  if (typeof sprint.status === "string" || hasClosing || (sprint.sessions || []).length > 0 || messages.length > 1) {
     const fold = sprintDetail(sprint);
     if (wasOpen) fold.open = true;
     item.appendChild(fold);
@@ -564,24 +632,36 @@ function fillSprint(item, entry, sprint) {
   if (state !== undefined && state.phase === "failed") {
     item.appendChild(el("span", "fail", "Could not withdraw: " + state.reason));
   }
-  const messages = sprint.messages || [];
-  if (messages.length > 0) item.appendChild(messageList(messages));
+  if (messages.length > 0) item.appendChild(messageList(messages.slice(-1)));
   if (typeof sprint.reach_text === "string") {
     item.appendChild(el("span", "unreachable", sprint.reach_text));
   }
+  const controls = el("div", "sprint-acts");
   if (typeof sprint.ended_at !== "string" && sprint.state !== "stopped") {
-    item.appendChild(tellBox(item, entry, sprint));
+    controls.appendChild(tellBox(item, entry, sprint));
   }
+  const more = el("details", "sprint-more");
+  more.dataset.key = "more:" + sprint.sprint_id;
+  if (moreWasOpen) more.open = true;
+  more.appendChild(el("summary", "", "More"));
+  if (stopButton !== null) more.appendChild(stopButton);
+  const button = actionButton("withdraw", "Withdraw", () => withdraw(item, entry, sprint));
+  if (state !== undefined && state.phase === "sending") button.setAttribute("disabled", "");
+  more.appendChild(button);
+  controls.appendChild(more);
+  item.appendChild(controls);
 }
 function stopControls(item, entry, sprint) {
   const id = sprint.sprint_id;
   const state = stops.get(id);
   const asking = state !== undefined && (state.phase === "confirming" || state.phase === "sending");
+  // The Stop button sits under "More" beside Withdraw; the confirmation it opens stays on the sprint's line.
+  let button = null;
   if (!asking) {
-    item.appendChild(actionButton("stop", "Stop", () => {
+    button = actionButton("stop", "Stop", () => {
       stops.set(id, { phase: "confirming", reason: "" });
-      refillSprint(id);
-    }));
+      refillRows(id);
+    });
   } else {
     item.appendChild(el("span", "stop-ask",
       "Stop this sprint? The manager finishes what is mid-merge, starts nothing new and reports."));
@@ -590,7 +670,7 @@ function stopControls(item, entry, sprint) {
     item.appendChild(confirm);
     const cancel = actionButton("stop-cancel", "Cancel", () => {
       stops.delete(id);
-      refillSprint(id);
+      refillRows(id);
     });
     if (state.phase === "sending") cancel.setAttribute("disabled", "");
     item.appendChild(cancel);
@@ -598,13 +678,7 @@ function stopControls(item, entry, sprint) {
   if (state !== undefined && state.phase === "failed") {
     item.appendChild(el("span", "fail", "Could not stop: " + state.reason));
   }
-}
-function refillSprint(id) {
-  const latest = latestSprints.get(id);
-  if (latest === undefined) return;
-  for (const row of document.querySelectorAll("li.sprint")) {
-    if (row.dataset.sprintId === id) fillSprint(row, latest.entry, latest.sprint);
-  }
+  return button;
 }
 async function stop(item, entry, sprint) {
   const id = sprint.sprint_id;
@@ -612,7 +686,7 @@ async function stop(item, entry, sprint) {
   if (current === undefined || current.phase !== "confirming") return;
   const state = { phase: "sending", reason: "" };
   stops.set(id, state);
-  refillSprint(id);
+  refillRows(id);
   let reason = null;
   try {
     const response = await fetch("/api/stop", {
@@ -633,7 +707,7 @@ async function stop(item, entry, sprint) {
     state.phase = "failed";
     state.reason = reason;
   }
-  refillSprint(id);
+  refillRows(id);
 }
 async function tell(item, entry, sprint) {
   const id = sprint.sprint_id;
@@ -662,7 +736,10 @@ async function tell(item, entry, sprint) {
   if (reason === null) {
     tells.delete(id);
     const typed = tellDrafts.get(id);
-    if (typed !== undefined && typed.value === text) tellDrafts.delete(id);
+    if (typed !== undefined && typed.value === text) {
+      tellDrafts.delete(id);
+      tellOpen.delete(id);
+    }
   } else {
     state.phase = "failed";
     state.reason = reason;
@@ -1348,8 +1425,16 @@ function briefRecord(sprintId) {
     const parts = el("div", "parts");
     const act = el("div", "act");
     const field = el("textarea", "reply-text");
-    field.setAttribute("aria-label", "Reply");
-    rec = { card, top, head, goal, parts, act, field, status: el("p", "act"), item: null };
+    field.setAttribute("placeholder", "Or say what to change\u2026");
+    field.setAttribute("aria-label", "Or say what to change");
+    const row = el("details", "row brief-row");
+    row.dataset.key = "brief:" + sprintId;
+    const rowHead = el("summary", "row-head");
+    row.appendChild(rowHead);
+    rec = {
+      card, top, head, goal, parts, act, field, status: el("p", "act"), item: null,
+      row, rowHead, seen: null,
+    };
     rec.send = actionButton("reply-send", "Ask for changes", () => sendReply(rec));
     const box = el("div", "reply");
     for (const part of [field, rec.send, rec.status]) box.appendChild(part);
@@ -1369,10 +1454,24 @@ function drawBrief(rec, item, lead) {
   const parts = item.brief;
   rec.item = item;
   rec.card.className = lead ? "card brief lead" : "card brief";
-  rec.top.replaceChildren(
-    kindWords(item), el("span", "proj", item.project_id),
-    phrase("span", "wait", "waiting ", timeEl("since", item.waiting_since, "")),
-  );
+  if (lead) {
+    rec.top.replaceChildren(
+      kindWords(item), el("span", "proj", item.project_id),
+      phrase("span", "wait", "waiting ", timeEl("since", item.waiting_since, "")),
+    );
+    rec.seen = null;
+  } else {
+    rec.top.replaceChildren();
+    rec.rowHead.replaceChildren(
+      kindWords(item), el("b", "", item.goal), el("span", "lm", item.project_id),
+      phrase("span", "lw", "waiting ", timeEl("since", item.waiting_since, "")),
+    );
+    // A row opens itself once per change of its approval or reply phase; the owner's own open or close stands between.
+    const pair = state.phase + "/" + state.reply.phase;
+    const busy = state.phase !== "choosing" || ["sending", "failed", "sent"].includes(state.reply.phase);
+    if (busy && pair !== rec.seen) rec.row.open = true;
+    rec.seen = pair;
+  }
   rec.head.textContent = item.project_id + " brief, version " + item.version;
   rec.goal.textContent = item.goal;
   rec.parts.replaceChildren(
@@ -1415,10 +1514,17 @@ function placeBriefCards(section, briefs) {
     const busy = [...answers.values()].some((s) => s.kind === "brief" && s.sprint_id === id && sending(s));
     if (!open.has(id) && !busy) briefCards.delete(id);
   }
+  // Moving a focused node blurs it in a browser, so the field is put back.
+  const active = document.activeElement;
+  const field = [...briefCards.values()].some((rec) => rec.field === active) ? active : null;
+  const from = field === null ? 0 : field.selectionStart;
+  const to = field === null ? 0 : field.selectionEnd;
   const wanted = briefs.map((item, i) => {
     const rec = briefRecord(item.sprint_id);
     drawBrief(rec, item, i === 0);
-    return rec.card;
+    if (i === 0) return rec.card;
+    if (rec.card.parentNode !== rec.row) rec.row.appendChild(rec.card);
+    return rec.row;
   });
   const keep = new Set(wanted);
   const kept = Array.from(section.children).filter((child) => {
@@ -1426,17 +1532,15 @@ function placeBriefCards(section, briefs) {
     child.remove();
     return false;
   });
-  if (kept.every((card, i) => card === wanted[i])) {
-    for (const card of wanted.slice(kept.length)) section.appendChild(card);
-    return;
+  if (kept.every((node, i) => node === wanted[i])) {
+    for (const node of wanted.slice(kept.length)) section.appendChild(node);
+  } else {
+    for (const node of wanted) section.appendChild(node);
   }
-  // Moving a focused node blurs it in a browser, so the field is put back.
-  const active = document.activeElement;
-  const field = [...briefCards.values()].some((rec) => rec.field === active) ? active : null;
-  const from = field === null ? 0 : field.selectionStart;
-  const to = field === null ? 0 : field.selectionEnd;
-  for (const card of wanted) section.appendChild(card);
   if (field !== null && field !== document.activeElement) {
+    for (const rec of briefCards.values()) {
+      if (rec.field === field && rec.card.parentNode === rec.row) rec.row.open = true;
+    }
     field.focus();
     field.setSelectionRange(from, to);
   }
@@ -1827,6 +1931,14 @@ function workCount(view) {
     + (projects === 1 ? " project" : " projects");
 }
 function renderProjects(view) {
+  sprintRedraw += 1;
+  try {
+    drawProjects(view);
+  } finally {
+    sprintRedraw -= 1;
+  }
+}
+function drawProjects(view) {
   const section = document.getElementById("projects");
   const heading = el("h2", "sec-h", "Work");
   const worked = workCount(view);
@@ -1875,6 +1987,9 @@ function renderProjects(view) {
   }
   for (const id of [...tellDrafts.keys()]) {
     if (!live.has(id)) tellDrafts.delete(id);
+  }
+  for (const id of [...tellOpen]) {
+    if (!live.has(id)) tellOpen.delete(id);
   }
   for (const entry of view.entries) {
     if (entry.type === "quiet_group") {

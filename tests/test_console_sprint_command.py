@@ -524,6 +524,31 @@ class SprintCommandTest(Case):
         self.assertEqual((got.returncode, got.stdout), (2, ""))
         self.assertTrue(got.stderr.startswith("sprint: cannot read -:"), got.stderr)
 
+    def printed_examples(self):
+        """The example report and the example closing report, as the contract prints them."""
+        text = run_sprint("contract").stdout
+        reporting = text.partition("## Reporting")[2].partition("\n## ")[0]
+        ending = text.partition("## Ending")[2]
+        pattern = r"```json\n(.*?)\n\s*```"
+        return (re.search(pattern, reporting, re.S).group(1),
+                re.search(pattern, ending, re.S).group(1), re.findall(pattern, text, re.S))
+
+    def test_the_printed_examples_are_accepted_as_printed(self):
+        report, closing, blocks = self.printed_examples()
+        self.assertEqual(len(blocks), 2)
+        svc = self.open()
+        sid = self.goal(svc)
+        secret, _ = self.reports(svc, sid, REPORT)
+        port = self.port(svc)
+        got = run_sprint("report", "--sprint", sid, "--secret-file", secret,
+                         "--report-file", "-", "--port", port, stdin=report)
+        self.assertEqual((got.returncode, got.stdout, got.stderr),
+                         (0, "sprint: report sent\n", ""))
+        got = run_sprint("close", "--sprint", sid, "--secret-file", secret,
+                         "--closing-file", "-", "--port", port, stdin=closing)
+        self.assertEqual((got.returncode, got.stdout, got.stderr),
+                         (0, "sprint: closing report sent\n", ""))
+
     SECTION = "## After a restart or a takeover\n\n1. When the console tells you that it restarted this session, or your first prompt says you take over a sprint whose manager is gone, run `sprint recap`, then `sprint inbox`, and act on what `sprint inbox` prints first.\n2. `sprint recap` prints the goal, the latest brief with its decision and the owner's reply, the last report and how many of the owner's messages are unread. The console keeps this record; nothing was handed over to you.\n3. The latest brief's decision comes before the last report, because a newer brief does not remove an older report:\n   - No brief: draft one, as Drafting the brief says.\n   - Decision `changes`: revise the brief from the reply `sprint recap` printed and send the new version, even when `sprint inbox` printed nothing, because that change request was read before the restart.\n   - Decision `none`: the brief waits for the owner; end your turn.\n   - Decision `approved`: the last report may describe an earlier version of the brief, so check its next step against the approved brief's parts before following it. Continue only the work the approved brief still includes and drop what it removed; follow After approval when there is no report or nothing is left.\n"
 
     def test_the_contract_says_what_follows_a_restart_or_a_takeover(self):
@@ -734,6 +759,29 @@ class ManagerContractTest(unittest.TestCase):
             with self.subTest(needle=needle):
                 self.assertIn(needle, after)
         self.assertNotIn("what went differently", after)
+
+    def test_the_contract_and_the_help_name_every_member_the_console_requires(self):
+        text = run_sprint("contract").stdout
+        reporting = text.partition("## Reporting")[2].partition("\n## ")[0]
+        ending = text.partition("## Ending")[2]
+        for command, section, members in (
+                ("report", reporting, sprints.REPORT_MEMBERS),
+                ("close", ending, sprints.CLOSING_MEMBERS)):
+            helped = run_sprint(command, "--help").stdout
+            for member in members:
+                for where, shown in (("contract", section), ("help", helped)):
+                    with self.subTest(command=command, member=member, where=where):
+                        self.assertIn(f"`{member}`" if where == "contract" else f"{member}:",
+                                      shown)
+        limit = f"{sprints.MAX_LINE_CHARS} characters"
+        for where, shown in (("contract", ending), ("help", run_sprint("close", "--help").stdout)):
+            with self.subTest(where=where, limit=limit):
+                self.assertIn(f"first line is at most {limit}", " ".join(shown.split()))
+        for phase in sprints.REPORT_PHASES:
+            self.assertIn(f"`{phase}`", reporting)
+            self.assertIn(phase, run_sprint("report", "--help").stdout)
+        for stage in sprints.REPORT_STAGES:
+            self.assertIn(stage, run_sprint("report", "--help").stdout)
 
 
 class CommandContractTest(unittest.TestCase):
