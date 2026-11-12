@@ -56,7 +56,8 @@ def view(*, sprint=True, state="started", text=None, messages=(), reach=None, br
 
 def serve(test, views, events, statuses=None):
     """A stub console: `views` are served in turn (the last repeats); every request is appended to
-    `events`; `statuses` maps a path to the statuses its POSTs take in turn (default 204)."""
+    `events`; `statuses` maps a path to the statuses its POSTs take in turn (default 204; "drop" closes the
+    connection unanswered)."""
     remaining, scripted = list(views), {k: list(v) for k, v in (statuses or {}).items()}
 
     class Handler(BaseHTTPRequestHandler):
@@ -75,6 +76,9 @@ def serve(test, views, events, statuses=None):
             events.append(("post", self.path, body, dict(self.headers)))
             queue = scripted.get(self.path)
             status = queue.pop(0) if queue else 204
+            if status == "drop":
+                self.close_connection = True
+                return
             self.send_response(status)
             self.send_header("Content-Length", "0")
             self.end_headers()
@@ -178,6 +182,24 @@ class MessageCheckTest(unittest.TestCase):
             statuses={"/api/approve": [409]})
         self.assertEqual(len(self.posts("/api/approve")), 1)
         self.assertEqual((code, out["read_seconds"]), (0, 25))
+
+    def test_an_approval_the_console_never_answered_is_sent_again_not_called_refused(self):
+        code, out = self.run_check(
+            self.stated_views(view(brief=1), view(brief=1), view(messages=[approval()]),
+                              view(messages=[approval("read", later(35))])),
+            statuses={"/api/approve": ["drop"]})
+        self.assertEqual([post["version"] for post in self.posts("/api/approve")], [1, 1])
+        self.assertEqual((code, out["read_seconds"]), (0, 35))
+
+    def test_an_approval_never_answered_is_not_recorded_so_a_resumed_run_sends_it_again(self):
+        code, _ = self.run_check(self.stated_views(view(brief=1)), budget="5",
+                                 statuses={"/api/approve": ["drop"]})
+        self.assertEqual(code, 75)
+        self.assertEqual(json.loads(self.state_file.read_text())["approved_versions"], [])
+        code, out = self.run_check(
+            [view(brief=1), view(messages=[approval("read", later(40))])])
+        self.assertEqual((code, out["read_seconds"]), (0, 40))
+        self.assertEqual([post["version"] for post in self.posts("/api/approve")], [1])
 
     def test_a_version_still_waiting_after_its_409_is_not_met(self):
         code, out = self.run_check(self.stated_views(view(brief=1)),

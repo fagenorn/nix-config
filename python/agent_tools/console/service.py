@@ -314,10 +314,11 @@ sprint (`_launching`, changed only under the ingest lock) in the critical sectio
 `goal.stated` and dispatches `_launch_reserved(sprint_id)` after releasing it. `retry_manager(
 project_id, sprint_id)`, under the lock, raises `Refused` with `manager.UNAVAILABLE_TEXT` without a
 launcher, `NOT_OPEN` unless the sprint is open and of that project, `LAUNCHING` while the sprint is
-reserved, and, from `sprints.manager_status`, `HAS_MANAGER` when the manager is started and `TOO_SOON`
+reserved for a launch or a nudge (`_nudging`; the two never overlap, so a wake never resumes the manager a
+retry replaces), and, from `sprints.manager_status`, `HAS_MANAGER` when the manager is started and `TOO_SOON`
 otherwise when no retry is offered; else it reserves the sprint before the lock is released and
 dispatches, so a second retry that arrives while the first is queued or running is refused
-`LAUNCHING`. `start_manager(sprint_id)` reserves (returning when it cannot) and launches in the
+`LAUNCHING`. `start_manager(sprint_id)` reserves (returning when it cannot, a nudge reservation included) and launches in the
 calling thread. `_launch_reserved`, under the lock, drops its own attempt's reservation (each reservation is one token, so a finished attempt never frees a later retry's) and returns when the sprint
 is no longer open or its manager reads `started` (a stale or duplicate job never starts a second
 manager), and a launch a retry reserved also returns when the sprint no longer offers retry (the
@@ -336,8 +337,8 @@ Nudges (#889): the service takes `nudger` (`nudge.nudger_for(sys.platform)` from
 means no nudge is ever made, no reservation, row or listing read) and `listing` (default: read
 `sessions.read_session_registry(self._session_dirs())` when called). After `send_message`,
 `approve_brief` and `reply_brief` append, still under the ingest lock, the sprint is reserved for a
-nudge (`_nudging`) when there is a nudger, the sprint is open, its manager row is `started` and
-`sprints.unread(sprint)` is non-empty; a sprint already reserved is marked in `_nudge_again`
+nudge (`_nudging`) when there is a nudger, the sprint is open, its manager row is `started`, no
+launch is reserved for it (`_launching`) and `sprints.unread(sprint)` is non-empty; a sprint already reserved is marked in `_nudge_again`
 instead. The job is dispatched through `self._dispatch` after the lock is released. A dispatch that
 raises is a failed nudge, never the caller's failure (the message is already stored): the
 reservation is freed and, while the sprint is open, one `sprint.nudged {sprint_id, through, route:
@@ -1378,7 +1379,7 @@ class ConsoleService:
         """Reserve the sprint's launch and run it in this thread; nothing when it cannot be reserved."""
         with self._ingest:
             if (self._launcher is None or sprint_id not in self._sprints
-                    or sprint_id in self._launching):
+                    or sprint_id in self._launching or sprint_id in self._nudging):
                 return
             self._launching[sprint_id] = object()
         self._launch_reserved(sprint_id)
@@ -1391,7 +1392,7 @@ class ConsoleService:
             sprint = self._sprints.get(sprint_id)
             if sprint is None or sprint.project_id != project_id:
                 raise sprints.Refused(sprints.NOT_OPEN)
-            if sprint_id in self._launching:
+            if sprint_id in self._launching or sprint_id in self._nudging:
                 raise sprints.Refused(sprints.LAUNCHING)
             state, _, retry = self._manager_state(sprint)
             if not retry:
@@ -1580,9 +1581,12 @@ class ConsoleService:
         return appended[-1].seq
 
     def _nudgeable(self, sprint_id: str) -> tuple[sprints.SprintState, tuple[sprints.Message, ...]] | None:
-        """Under the ingest lock: the open sprint and its unread messages when its manager can be nudged."""
+        """Under the ingest lock: the open sprint and its unread messages when its manager can be nudged.
+
+        A sprint with a launch reserved is not nudgeable: a wake would resume the manager the launch replaces.
+        """
         sprint = self._sprints.get(sprint_id)
-        if sprint is None or sprint.manager is None or sprint.manager.state != sprints.STARTED:
+        if sprint is None or sprint_id in self._launching or sprint.manager is None or sprint.manager.state != sprints.STARTED:
             return None
         unread = sprints.unread(sprint)
         return (sprint, unread) if unread else None

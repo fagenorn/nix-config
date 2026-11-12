@@ -25,16 +25,17 @@ goal and continues from what it records.
 It polls the view every 10 seconds (`POLL_SECONDS`), every 2 seconds (`READ_POLL_SECONDS`) once an
 approval message exists, up to `--budget`. The approval is read from the view only: the sprint's
 earliest message of kind `approved`; the HTTP status of `/api/approve` never records one. With no
-approval message and an open `brief/<sprint id>` item at a version not in `approved_versions`, the
-version is added to that list in the state file and then `POST /api/approve` is sent
-`{"project_id", "sprint_id", "version"}`: 204 or 409 continue the polling (409 means the version
-was replaced, already decided or asked to change, and the next poll reads which), any other status
-is not met (`the console refused the approval: <status> <text>`), no answer continues. An open
-brief at a version already in `approved_versions` with no approval message is not met (`the console
-refused the approval of version <v>`): the console still shows it waiting after it answered. So a
-replaced version is followed by an approval of the new one, and no version is approved twice,
-across runs too. With the approval message, `state` `read` is met with `read_seconds` the console's
-`read_at` minus its `at`; `reach_text` not null is not met (`manager not reachable`); otherwise the
+approval message and an open `brief/<sprint id>` item at a version not in `approved_versions`,
+`POST /api/approve` is sent `{"project_id", "sprint_id", "version"}`: 204 or 409 continue the
+polling (409 means the version was replaced, already decided or asked to change, and the next poll
+reads which) and only then is the version added to that list in the state file, any other status
+is not met (`the console refused the approval: <status> <text>`), no answer continues without
+recording the version (an attempt the console never confirmed is not a refusal: the next poll or
+run sends it again). An open brief at a version already in `approved_versions` with no approval
+message is not met (`the console refused the approval of version <v>`): the console still shows it
+waiting after it answered. So a replaced version is followed by an approval of the new one, and no
+version the console answered is approved twice, across runs too. With the approval message, `state` `read` is met with `read_seconds` the
+console's `read_at` minus its `at`; `reach_text` not null is not met (`manager not reachable`); otherwise the
 polling continues. An unread approval is never a failure however long ago it was sent: `start` has
 no time bound of its own, so a budget spent while it is unread is 75 `{"status": "waiting",
 "phase": "read", "sprint_id"}` and the hold's expiry bounds the wait. A slow read is never not met
@@ -307,13 +308,14 @@ def _start(args, registry, stop, clock, sleep) -> int:
                     if version in approved:
                         return settle(1, f"the console refused the approval of version {version}",
                                       None)
-                    approved.append(version)
-                    checkpoint(approved_versions=approved)
                     status, text = console.post("/api/approve", {
                         "project_id": project, "sprint_id": sprint_id, "version": version})
                     if status not in (None, 204, 409):
                         return settle(1, f"the console refused the approval: {status} {text}",
                                       None)
+                    if status is not None:
+                        approved.append(version)
+                        checkpoint(approved_versions=approved)
         sleep(pause)
 
 

@@ -252,6 +252,32 @@ class SprintCommandTest(Case):
         self.assertEqual((second.returncode, second.stderr), (0, ""))
         self.assertEqual(json.loads(second.stdout), {"messages": []})
 
+    def test_inbox_prints_an_approval_a_change_request_and_a_text_each_once_in_order(self):
+        svc = self.open()
+        sid = self.goal(svc)
+        secret, _ = self.files(sid, PARTS)
+        token = secret.read_text().strip()
+        first = svc.send_message("owner/p01", sid, "start with the reader")
+        svc.send_brief(sid, token, PARTS)
+        svc.reply_brief("owner/p01", sid, 1, "smaller slices")
+        svc.send_brief(sid, token, PARTS)
+        svc.approve_brief("owner/p01", sid, 2)
+        last = svc.send_message("owner/p01", sid, "and keep the tests")
+        args = ("inbox", "--sprint", sid, "--secret-file", secret, "--port", self.port(svc))
+        got = run_sprint(*args)
+        self.assertEqual((got.returncode, got.stderr), (0, ""))
+        messages = json.loads(got.stdout)["messages"]
+        ids = [row[0] for row in support.log_rows(self.store)
+               if row[2] in ("sprint.messaged", "brief.replied", "brief.approved")]
+        self.assertEqual([m["id"] for m in messages], ids)
+        self.assertEqual((ids[0], ids[-1]), (first, last))
+        self.assertEqual(
+            [(m["kind"], m["version"], m["text"]) for m in messages],
+            [("text", None, "start with the reader"), ("changes", 1, "smaller slices"),
+             ("approved", 2, None), ("text", None, "and keep the tests")])
+        again = run_sprint(*args)
+        self.assertEqual((again.returncode, json.loads(again.stdout)), (0, {"messages": []}))
+
     def test_reply_records_under_its_message_and_without_the_secret_nothing(self):
         svc = self.open()
         sid = self.goal(svc)

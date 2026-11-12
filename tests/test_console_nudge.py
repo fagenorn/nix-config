@@ -3,12 +3,15 @@
 Run: just agent-workflow-tests
 """
 import dataclasses
+import os
 import subprocess
 import tempfile
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
-from agent_tools.console import manager
+from agent_tools.console import manager, nudge as nudge_module
 from agent_tools.console.nudge import (NUDGE_TEXT, RELAY, WAKE, Nudge, NudgeFailed, nudge_command,
                                        nudger_for, run_nudge)
 
@@ -134,6 +137,32 @@ class NudgeCommandTest(unittest.TestCase):
             self.assertEqual(self.root, kwargs["cwd"])
             self.assertEqual(timeout, kwargs["timeout"])
             self.assertIs(False, kwargs["check"])
+
+    def test_a_timed_out_nudge_leaves_no_process_of_its_group_running(self):
+        home = Path(self.root) / "home"
+        (home / ".agents" / "bin").mkdir(parents=True)
+        pidfile = Path(self.root) / "child.pid"
+        wrapper = home / ".agents" / "bin" / "claude-account"
+        wrapper.write_text(f"#!/bin/sh\nsleep 60 &\necho $! > {pidfile}\nwait\n")
+        wrapper.chmod(0o755)
+        environ = {"HOME": str(home), "PATH": os.environ["PATH"]}
+        with mock.patch.object(nudge_module, "RELAY_TIMEOUT", 2):
+            with self.assertRaises(NudgeFailed) as raised:
+                run_nudge(self.nudge(RELAY), platform="linux", environ=environ)
+        self.assertEqual("the nudge did not return within 2 s", str(raised.exception))
+        child = int(pidfile.read_text())
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and self.alive(child):
+            time.sleep(0.01)
+        self.assertFalse(self.alive(child))
+
+    @staticmethod
+    def alive(pid):
+        try:
+            with open(f"/proc/{pid}/stat") as stat:
+                return stat.read().rsplit(")", 1)[1].split()[0] != "Z"
+        except FileNotFoundError:
+            return False
 
     def test_nudger_for_is_linux_only(self):
         self.assertIs(run_nudge, nudger_for("linux"))

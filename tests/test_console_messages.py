@@ -334,6 +334,41 @@ class NudgeServiceTest(MessageRouteTest):
         ((_, row),) = self.nudged()
         self.assertEqual((row["route"], row["ok"]), ("wake", True))
 
+    def stopped_and_overdue(self):
+        """A restarted service whose sprint's manager row is started, unlisted, briefless and overdue."""
+        first = self.begin()
+        sid = self.running(first)
+        first.close()
+        log = EventLog(self.store, clock=self.log_clock)
+        log.append([("session.seen", "owner/p01", {
+            "session_id": "s-1", "cwd": "/srv/p01", "repo": "/srv/p01", "state": sessions.ENDED,
+            "name": self.name(sid)})])
+        log.close()
+        self.listed.clear()
+        self.now[0] += 600
+        return self.begin(), sid
+
+    def test_a_retry_is_refused_while_a_wake_is_reserved(self):
+        svc, sid = self.stopped_and_overdue()
+        svc.send_message("owner/p01", sid, TEXT)
+        self.assertEqual(len(self.queued.jobs), 1)
+        with self.assertRaises(sprints.Refused) as refused:
+            svc.retry_manager("owner/p01", sid)
+        self.assertEqual(str(refused.exception), sprints.LAUNCHING)
+        self.queued.run_next()
+        self.assertEqual([n.route for n in self.nudges], ["wake"])
+        self.assertEqual(self.queued.jobs, [])
+
+    def test_a_message_is_not_nudged_while_a_retry_is_reserved(self):
+        svc, sid = self.stopped_and_overdue()
+        svc.retry_manager("owner/p01", sid)
+        self.assertEqual(len(self.queued.jobs), 1)
+        svc.send_message("owner/p01", sid, TEXT)
+        self.assertEqual(len(self.queued.jobs), 1)
+        self.queued.run_next()
+        self.assertEqual(self.nudges, [])
+        self.assertEqual(self.queued.jobs, [])
+
     def test_an_unknown_session_fails_the_nudge_without_calling_the_nudger(self):
         svc = self.begin()
         sid = svc.state_goal("owner/p01", GOAL_TEXT)
