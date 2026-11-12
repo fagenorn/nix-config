@@ -123,8 +123,12 @@ and a write of the same oid changes nothing. The holder therefore changes a seco
 `refs/agent-locks/land-beat/<branch>`: `refresh --sha <sha>` answers `not_held` (exit 3, with
 `lock_sha`, `pr` and `by`) and writes nothing unless the lock is at `--sha`, and otherwise moves
 the beat one step: created at `--sha` when absent, else swapped to the first parent of its value
-(deleted when that is a root commit), so two refreshes in a row never bring back the value a
-waiter read last. It answers `refreshed` (exit 0) with `beat`, the new value (`null` when
+(deleted when that is a root commit). The beat therefore repeats a value only after it has walked
+the whole first-parent history down to the root and begun again, so refreshes that fall between
+two polls of a waiter do not cancel out; a repeat would cost one refresh a waiter did not see,
+nothing more. The lock is read before the beat is written and the two are not one swap: a refresh
+that read the lock just before its holder released it still moves the beat, once, which can delay
+the idle takeover of the next holder's lock by one refresh and changes nothing else. It answers `refreshed` (exit 0) with `beat`, the new value (`null` when
 deleted), also when another refresh changed the beat first; an unapplied swap on an unchanged beat
 is a forge error. A waiter reads the beat in every poll that finds the lock held, and a beat that
 differs from the one it read before restarts its watch exactly as a changed lock does. No clock is

@@ -1562,7 +1562,7 @@ class RefreshTest(Base):
                 self.answers.append(run(*argv))
         return FakeClock(on_sleep)
 
-    def test_refresh_moves_the_beat_one_step_and_never_brings_a_value_back(self):
+    def test_refresh_moves_the_beat_one_step_down_the_first_parent_history(self):
         self.parents(B, C, D)
         seen = []
         for expected in (B, C, D, None):
@@ -1570,8 +1570,11 @@ class RefreshTest(Base):
             self.assertEqual((code, out["verdict"], out["lock_sha"], out["beat"]), (0, "refreshed", B, expected))
             self.assertEqual(self.world.refs(), {REF: B, **({BEAT: expected} if expected else {})})
             seen.append(expected)
-        # No two refreshes in a row, and no refresh after the next, show a waiter the same beat.
+        # No value repeats before the walk reaches the root: refreshes between two polls of a waiter do not cancel out.
         self.assertEqual(len(set(seen)), len(seen))
+        # Past the root the walk begins again, at the caller's sha.
+        code, out = run(*land("refresh", B))
+        self.assertEqual((code, out["beat"]), (0, B))
         self.assertEqual([[a[-3], a[-1]] for a in self.cas_calls()],
                          [[f"before={B}", f"after={C}"], [f"before={C}", f"after={D}"], [f"before={D}", f"after={fm.ZERO_OID}"]])
 
@@ -1593,15 +1596,16 @@ class RefreshTest(Base):
         self.assertEqual((code, out["verdict"], out["error"]), (1, "error", "gh_failed"))
         self.assertEqual(self.world.refs(), {REF: B, BEAT: B})
 
-    def test_a_lock_refreshed_every_eight_minutes_is_never_taken_over_as_idle(self):
-        """The train's checks wait: a refresh at the start of each 8-minute round, for a whole wait
-        of the waiter, 50 minutes, which is longer than the train's 40 plus 6."""
+    def test_a_lock_refreshed_at_the_largest_gap_of_a_train_wait_is_never_taken_over_as_idle(self):
+        """The train's checks wait refreshes at gaps of 22 minutes at most (a refresh due after 7,
+        behind a 15-minute watch), here for a whole wait of the waiter, 50 minutes, which is longer
+        than the train's 40 plus 6."""
         self.parents(B, C, D, E, A)
-        clock = self.holder_every(480, *land("refresh", B))
+        clock = self.holder_every(1320, *land("refresh", B))
         code, out = self.wait(clock)
         self.assertEqual((code, out["verdict"], out["waited_s"], out["lock_sha"], out["pr"]),
                          (3, "land-contended", 3000, B, 12))
-        self.assertEqual([(c, o["verdict"]) for c, o in self.answers], [(0, "refreshed")] * 6)
+        self.assertEqual([(c, o["verdict"]) for c, o in self.answers], [(0, "refreshed")] * 2)
         self.assertEqual(self.world.refs()[REF], B)
         self.assertEqual([a for a in self.cas_calls() if f"name={REF}" in a], [])
 
