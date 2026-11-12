@@ -2032,25 +2032,37 @@ class RulesRereviewSkipTest(unittest.TestCase):
                 names = labels(out["calls"])
                 self.assertNotIn("plan-rules-review", names)
                 self.assertEqual(len([line for line in out["logs"] if self.SKIPPED in line]), 1)
-                self.assertEqual(len([line for line in out["logs"] if "kept the earlier text of 3 criteria" in line]), 1)
+                self.assertEqual(len([line for line in out["logs"] if "kept the earlier text of 3 criteria the revise does not list as edited" in line]), 1)
                 self.assertIn("impl-1", names)
                 self.assertEqual(out["result"]["acceptance"], plan["acceptance"])
                 later = prompt(out["calls"], "final-1") + prompt(out["calls"], "close-out")
                 self.assertNotIn("retyped", later)
 
-    def test_a_criterion_a_finding_names_keeps_the_reply_whole_and_the_rules_rereview_runs(self):
+    NAMING = (("summary", {"summary": "the wording of AC2: names no deploy"}),
+              ("lower case", {"summary": "criterion ac2 has no task"}),
+              ("failing_input", {"summary": "a criterion has no task", "failing_input": "(AC2)"}),
+              ("ac", {"summary": "no task", "ac": "AC2"}))
+
+    def test_a_criterion_a_finding_names_is_restored_like_any_other_and_skips(self):
+        """#951: a finding that names a criterion says nothing about its row; only the revise's list keeps a retyped text."""
         plan = with_criteria(EVIDENCE)
-        rows = (("summary", self.naming("the wording of AC2: names no deploy")),
-                ("lower case", self.naming("criterion ac2 has no task")),
-                ("failing_input", self.naming("a criterion has no task", failing_input="(AC2)")),
-                ("ac", self.naming("no task", ac="AC2")))
-        for name, review in rows:
+        for name, finding in self.NAMING:
             with self.subTest(named_in=name):
-                # AC2, named, takes the reply's text, so the skip cannot fire and nothing is restored: no half-restored plan.
-                self.kept_whole(plan, self.retyped(plan, criteria_edited=[]), review=review)
+                result, names, skipped = self.go(plan, self.retyped(plan, criteria_edited=[]), review=self.naming(**finding))
+                self.assertNotIn("plan-rules-review", names)
+                self.assertEqual(len(skipped), 1)
+                self.assertIn("impl-1", names)
+                self.assertEqual(result["acceptance"], plan["acceptance"])
+
+    def test_a_named_criterion_the_revise_lists_keeps_the_reply_whole_and_the_rules_rereview_runs(self):
+        plan = with_criteria(EVIDENCE)
+        for name, finding in self.NAMING:
+            with self.subTest(named_in=name):
+                # AC2, listed, takes the reply's text, so the skip cannot fire and nothing is restored: no half-restored plan.
+                self.kept_whole(plan, self.retyped(plan, criteria_edited=["AC2"]), review=self.naming(**finding))
 
     def test_a_criterion_the_reply_lists_as_edited_keeps_the_reply_whole_and_the_rules_rereview_runs(self):
-        # The finding names no id (the second criterion), but the planner declares that it reworded AC2; ids compare without case.
+        # The finding names no id (the second criterion), but the planner lists AC2 as a row it changed; ids compare without case.
         plan = with_criteria(EVIDENCE)
         for listed in ("AC2", "ac2"):
             with self.subTest(listed=listed):
@@ -2087,7 +2099,9 @@ class RulesRereviewSkipTest(unittest.TestCase):
 
     def test_the_revise_asks_which_criteria_it_edited(self):
         out = run_out(replies={"plan": PLAN, "plan-revise": PLAN, "plan-review": self.BARE}, patch=self.OPEN)
-        self.assertIn("criteria_edited: the ids of the criteria whose wording you changed in this revision", prompt(out["calls"], "plan-revise"))
+        self.assertIn("criteria_edited: the ids of the criteria whose row in plan.md's acceptance section you changed in this revision "
+                      "(an empty list when you changed none): ", prompt(out["calls"], "plan-revise"))
+        self.assertNotIn("wording you changed", prompt(out["calls"], "plan-revise"))
         self.assertNotIn("criteria_edited", prompt(out["calls"], "plan"))
         self.assertEqual(schema_of(out["calls"], "plan-revise")["properties"]["criteria_edited"]["items"]["type"], "string")
 
