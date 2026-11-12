@@ -3491,6 +3491,17 @@ ROW_BODY = ("parts", "approve", "reply-text", "reply-send")
 
 
 class PageBriefRowTest(unittest.TestCase):
+    def test_the_brief_row_head_keeps_the_shared_flex_layout(self) -> None:
+        # The harness applies no CSS: a rule on the summary that is more specific
+        # than .row-head must not take its flex row (gap, wait at the right) away.
+        style = re.findall(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"))[0]
+        rules = style_rules(style)
+        self.assertEqual(
+            [d["display"] for s, d in rules if s == ".row-head" and "display" in d], ["flex"])
+        for selector, decls in rules:
+            if selector == ".brief-row > summary":
+                self.assertEqual(decls.get("display", "flex"), "flex", selector)
+
     def test_a_later_brief_is_one_row_until_opened(self) -> None:
         closed, opened, promoted = render([
             START, {"frame": frame([BRIEF, BRIEF_B, ANSWERABLE])}, {"snapshot": True},
