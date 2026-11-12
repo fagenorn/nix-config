@@ -1055,6 +1055,86 @@ def open_item(pid, key, issue, answered=False):
     return InboxRecord({**item(pid, key, answered=answered), "issue": issue}, "t1", "u1")
 
 
+NAME = "p00 sprint " + A
+U = "2026-11-13T09:30:00+00:00"
+
+
+def with_manager(s, profile="work", state="started"):
+    return dataclasses.replace(s, manager=Manager(state, T0, profile, NAME))
+
+
+def out(profile="work"):
+    return {"tight": False, "all_out": False, "resumes_at": None, "no_reading": None,
+            "profiles": [{"profile": profile, "state": "out", "week_left": 0,
+                          "five_hour_left": None, "next_reset": None, "out_until": U,
+                          "read_at": T0}]}
+
+
+class SprintQuotaViewTest(unittest.TestCase):
+    def test_state_waiting_on_quota_replaces_starting_on_track_and_quiet(self):
+        cases = ((with_manager(started(A)), T0_MS + 5 * MIN),
+                 (with_manager(reported(started(A), R)), R + 4 * MIN),
+                 (with_manager(reported(started(A), R)), R + 16 * MIN))
+        for it, now in cases:
+            with self.subTest(now=now):
+                shown = entry(line(it, now, capacity=out()))
+                self.assertEqual((shown["state"], shown["state_text"], shown["state_until"]),
+                                 ("quota", "waiting on quota until", U))
+
+    def test_quota_never_replaces_waiting_closing_done_or_drafting(self):
+        records = {("p00", "k1"): open_item("p00", "k1", 12)}
+        waiting = reported(started(A), R, issues=((12, "building"),))
+        closing = with_manager(reported(started(A), R, phase="closing"))
+        cases = (
+            ("waiting", with_manager(waiting), R + 4 * MIN, records),
+            ("closing", closing, R + MIN, None),
+            ("quiet", closing, R + 20 * MIN, None),
+            ("done", with_manager(reported(started(A), R, phase="done")), R + MIN, None),
+            ("drafting", with_manager(sprint(A)), R + MIN, None),
+            ("stopping", dataclasses.replace(with_manager(started(A)), stop_at=T0), R + MIN, None),
+        )
+        for expected, it, now, recs in cases:
+            with self.subTest(expected=expected, now=now):
+                shown = entry(line(it, now, recs, capacity=out()))
+                self.assertEqual(shown["state"], expected)
+                self.assertIsNone(shown["state_until"])
+
+    def test_only_the_managers_own_out_profile_makes_it_wait(self):
+        it = with_manager(reported(started(A), R))
+        for label, sprint_state, extra in (
+                ("other profile", it, {"capacity": out("home")}),
+                ("failed manager", with_manager(reported(started(A), R), state="failed"),
+                 {"capacity": out()}),
+                ("no capacity", it, {})):
+            with self.subTest(label):
+                shown = entry(line(sprint_state, R + 4 * MIN, **extra))
+                self.assertEqual(shown["state"], "on_track")
+                self.assertIsNone(shown["state_until"])
+
+    def test_a_manager_that_stopped_making_progress_is_one_inbox_item(self):
+        stopped = dataclasses.replace(with_manager(reported(started(A), R)),
+                                      no_progress_at=iso(R + 30 * MIN))
+        shown = line(stopped, R + 31 * MIN)
+        expected = {"type": "inbox_item", "reason": "progress", "key": "progress/" + A,
+                    "project_id": "p00", "sprint_id": A, "goal": "make the importer resumable",
+                    "headline": "the manager has stopped making progress on "
+                                "make the importer resumable",
+                    "last_status": "two slices are building", "answered": False,
+                    "waiting_since": iso(R + 30 * MIN)}
+        self.assertEqual(shown["inbox"]["open"], [expected])
+        self.assertEqual(shown["statement"]["inbox_items"], 1)
+        self.assertEqual(shown["statement"]["headline"], "1 thing needs you")
+        self.assertEqual(shown["statement"]["sentence"], view.PROGRESS_SENTENCE)
+        self.assertEqual(view.PROGRESS_SENTENCE,
+                         "Tell the manager to continue, or withdraw the sprint.")
+        bare = dataclasses.replace(with_manager(started(A)), no_progress_at=iso(R))
+        self.assertIsNone(line(bare, R + MIN)["inbox"]["open"][0]["last_status"])
+        both = dataclasses.replace(stopped, stalled="r", stalled_at=iso(R + 40 * MIN))
+        shown = line(both, R + 41 * MIN)
+        self.assertEqual([i["reason"] for i in shown["inbox"]["open"]], ["manager", "progress"])
+        self.assertEqual(shown["statement"]["sentence"], view.MANAGER_SENTENCE)
+
+
 class SprintReportViewTest(unittest.TestCase):
     def test_the_line_counts_landed_in_delivery_queued_and_held(self):
         it = reported(started(A), R, issues=SEVEN)
@@ -1401,7 +1481,8 @@ class SprintViewTest(unittest.TestCase):
             "progress": None, "progress_text": None, "status": None, "status_at": None,
             "next": None, "milestone": None, "tracker_url": None, "issues": [], "waiting": 0,
             "sessions": [], "messages": [], "reach_text": None,
-            "stoppable": True, "ended_at": None, "stop_text": None, "closing": None}])
+            "stoppable": True, "ended_at": None, "stop_text": None, "closing": None,
+            "state_until": None}])
 
     def test_a_sprint_older_than_two_minutes_says_no_manager_has_picked_it_up(self):
         for now_ms, expected in ((None, None), (T0_MS, None), (T0_MS + 120_000, None),
