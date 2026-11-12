@@ -86,8 +86,9 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
     <session entry> = {"session_id", "name", "state", "state_text", "cwd",
                        "deliveries": [<delivery entry>, ...]}
     <delivery entry> = {"run_id", "quiet": <bool>, "moved_text": "<text>",
+                        "summary": "<one sentence>",
                         "issues": [{"issue": <int>, "stage", "stage_text"}, ...]}
-    <unmanaged entry> = {"type": "unmanaged", "root": "<repo>",
+    <unmanaged entry> = {"type": "unmanaged", "root": "<repo>", "name": "<name>",
                          "label": "Not yet managed", "outside_sprints": <line>}
 
 `working` counts working sessions and `waiting` counts those waiting for an
@@ -101,7 +102,11 @@ characters of its id.
 `deliveries` (always present, possibly empty) are the in-flight workflow runs of that listed
 session, from the delivery states `derive_view` is given: the states whose `session_id` equals the
 session's id, newest `moved_ms` first, then `run_id`; each run's issues are ordered by number.
-`quiet` and `moved_text` come from `moved_text(now_ms - moved_ms)`; `now_ms` is injected by the
+`quiet` and `moved_text` come from `moved_text(now_ms - moved_ms)`; `summary` is the run as one
+sentence, `run_summary(issues, moved_text)`: "<n> issue(s) in delivery: <count> <stage>, ...,
+<moved_text>" with the stages in a fixed order and no issue number, or "No issue in delivery yet,
+<moved_text>" with none. An unmanaged entry's `name` is the last segment of its `root` (the root
+itself when it has none). `now_ms` is injected by the
 caller (this module still reads no clock) and `None` counts as no time elapsed. The runs of an
 ended or unlisted session appear nowhere, and they change no count, summary, order or the
 statement. The word "stalled" is never written: a quiet run is only quiet.
@@ -122,9 +127,10 @@ import json
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
+from pathlib import PurePosixPath
 
 from agent_tools.console.capacity import EMPTY
-from agent_tools.console.deliveries import DeliveryState, moved_text, stage_text
+from agent_tools.console.deliveries import DeliveryState, moved_text, run_summary, stage_text
 from agent_tools.console.event_log import Event
 from agent_tools.console.sessions import (
     ENDED,
@@ -324,12 +330,18 @@ def project_for(repo: str, states: Mapping[str, ProjectState]) -> str | None:
     return min(matches) if matches else None
 
 
+def repo_name(root: str) -> str:
+    """A repository's name: the last segment of its path, or the path itself when it has none."""
+    return PurePosixPath(root).name or root
+
+
 def _delivery_entry(state: DeliveryState, now_ms: int | None) -> dict:
     quiet, text = moved_text(0 if now_ms is None else now_ms - state.moved_ms)
     return {
         "run_id": state.run_id,
         "quiet": quiet,
         "moved_text": text,
+        "summary": run_summary(state.issues, text),
         "issues": [
             {"issue": i.issue, "stage": i.stage, "stage_text": stage_text(i)}
             for i in sorted(state.issues, key=lambda i: i.issue)
@@ -518,7 +530,8 @@ def derive_view(
         "project_count": len(states),
         "entries": entries,
         "unmanaged": [
-            {"type": "unmanaged", "root": root, "label": UNMANAGED_LABEL,
+            {"type": "unmanaged", "root": root, "name": repo_name(root),
+             "label": UNMANAGED_LABEL,
              "outside_sprints": _line(unmanaged[root], runs, now_ms)}
             for root in sorted(unmanaged)],
         "recent_projects": [s.project_id for s in _order(states)],

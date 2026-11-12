@@ -245,7 +245,7 @@ class SessionViewTest(unittest.TestCase):
         s9 = session("s9", "waiting_answer", repo="/srv/elsewhere")
         view = derive_view([state("p00", 1)], sessions=[s9])
         self.assertEqual(view["unmanaged"], [{
-            "type": "unmanaged", "root": "/srv/elsewhere",
+            "type": "unmanaged", "root": "/srv/elsewhere", "name": "elsewhere",
             "label": "Not yet managed",
             "outside_sprints": {
                 "label": "Outside sprints", "working": 0, "waiting": 1,
@@ -258,6 +258,14 @@ class SessionViewTest(unittest.TestCase):
         self.assertEqual(view["statement"], self.NO_SESSION_STATEMENT)
         self.assertEqual(view["project_count"], 1)
         self.assertEqual(view["entries"][0]["outside_sprints"]["sessions"], [])
+
+    def test_an_unmanaged_repository_is_named_by_its_last_path_segment(self):
+        sessions = [session("s1", "idle", repo="/srv/elsewhere"),
+                    session("s2", "idle", repo="/")]
+        unmanaged = derive_view([], sessions=sessions)["unmanaged"]
+        self.assertEqual([(u["root"], u["name"]) for u in unmanaged],
+                         [("/", "/"), ("/srv/elsewhere", "elsewhere")])
+        self.assertEqual(view.repo_name("/srv/elsewhere/"), "elsewhere")
 
     def test_unmanaged_repositories_are_sorted_by_root(self):
         view = derive_view([], sessions=[session("s1", "idle", repo="/srv/b"),
@@ -382,8 +390,10 @@ class DeliveryViewTest(unittest.TestCase):
         by_id = {s["session_id"]: s for s in session_entries(view)}
         self.assertEqual(by_id["s1"]["deliveries"], [
             {"run_id": "wf_b", "quiet": False, "moved_text": "moved just now",
+             "summary": "1 issue in delivery: 1 queued, moved just now",
              "issues": [{"issue": 860, "stage": "queued", "stage_text": "queued"}]},
             {"run_id": "wf_a", "quiet": False, "moved_text": "moved just now",
+             "summary": "2 issues in delivery: 1 building, 1 plan review, moved just now",
              "issues": [
                  {"issue": 856, "stage": "building", "stage_text": "building task 3 of 5"},
                  {"issue": 857, "stage": "plan review", "stage_text": "plan review"}]},
@@ -392,6 +402,29 @@ class DeliveryViewTest(unittest.TestCase):
         plain = derive_view([state("p00", 1)], sessions=sessions)
         self.assertEqual(view["entries"][0]["outside_sprints"]["summary"],
                          plain["entries"][0]["outside_sprints"]["summary"])
+
+    def test_a_delivery_run_is_one_sentence_of_counts_by_stage(self):
+        moved = 1_000_000_000_000
+        table = [
+            ((IssueStage(1, "landing"), IssueStage(2, "working"),
+              IssueStage(3, "working"), IssueStage(4, "queued")), 16 * 60_000,
+             "4 issues in delivery: 1 landing, 2 working, 1 queued, quiet for 16 min"),
+            ((IssueStage(856, "building", 3, 5),), 0,
+             "1 issue in delivery: 1 building, moved just now"),
+            ((IssueStage(5, "planning"), IssueStage(6, "done"),
+              IssueStage(7, "plan review")), 120_000,
+             "3 issues in delivery: 1 done, 1 plan review, 1 planning, moved 2 min ago"),
+            ((), 0, "No issue in delivery yet, moved just now"),
+        ]
+        for issues, elapsed, expected in table:
+            with self.subTest(expected=expected):
+                view = derive_view(
+                    [state("p00", 1)], sessions=[session("s1", "working")],
+                    deliveries=run("s1", "wf_1", moved, *issues),
+                    now_ms=moved + elapsed)
+                summary = session_entries(view)[0]["deliveries"][0]["summary"]
+                self.assertEqual(summary, expected)
+                self.assertNotIn("#", summary)
 
     def test_runs_of_an_ended_or_unlisted_session_are_not_shown(self):
         deliveries = {**run("s3", "wf_1", 1, IssueStage(1, "building")),
