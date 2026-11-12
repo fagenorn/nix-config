@@ -1999,6 +1999,121 @@ class RulesRereviewSkipTest(unittest.TestCase):
                 self.assertNotIn("impl-1", names)
                 self.assertEqual(skipped, [])
 
+    REWORDED = "p95 latency stays under 200 ms for a week after the deploy"
+
+    def naming(self, summary, **more):
+        return {"verdict": "findings", "findings": [{"severity": "important", "summary": summary, **more}]}
+
+    @staticmethod
+    def retyped(plan, **top):
+        """The planner's reply after a revise: every criterion's text typed again, differently."""
+        return dict(plan, acceptance=[dict(a, text=a["text"] + ", retyped") for a in plan["acceptance"]], **top)
+
+    def kept_whole(self, plan, reply, **more):
+        """The rules re-review runs and the plan kept is the reply exactly, less criteria_edited."""
+        result, names, skipped = self.go(plan, reply, **more)
+        self.assertEqual(names.count("plan-rules-review"), 1)
+        self.assertEqual(skipped, [])
+        self.assertEqual(result["stage"], "plan-review")
+        final = more.get("plan-branch-revise", reply)
+        self.assertEqual(result["cont"]["plan"], {k: v for k, v in final.items() if k != "criteria_edited"})
+        return result
+
+    def test_a_retyped_text_no_finding_names_keeps_the_earlier_text_and_skips(self):
+        """The planner retypes every criterion in its reply though it reworded none: the earlier text stands."""
+        plan = with_criteria(EVIDENCE, HUMAN)
+        # AC10 and BAC2 are other words, not AC1 or AC2.
+        for name, review in (("bare", self.BARE), ("other ids", self.naming("AC10 and BAC2 have no task", file="/g/task-1.md"))):
+            with self.subTest(findings=name):
+                out = run_out(replies={"plan": plan, "plan-revise": self.retyped(plan, criteria_edited=[]), "plan-review": review,
+                                       "plan-rules-review": self.LEFT}, patch=self.OPEN)
+                names = labels(out["calls"])
+                self.assertNotIn("plan-rules-review", names)
+                self.assertEqual(len([line for line in out["logs"] if self.SKIPPED in line]), 1)
+                self.assertEqual(len([line for line in out["logs"] if "kept the earlier text of 3 criteria" in line]), 1)
+                self.assertIn("impl-1", names)
+                self.assertEqual(out["result"]["acceptance"], plan["acceptance"])
+                later = prompt(out["calls"], "final-1") + prompt(out["calls"], "close-out")
+                self.assertNotIn("retyped", later)
+
+    def test_a_criterion_a_finding_names_keeps_the_reply_whole_and_the_rules_rereview_runs(self):
+        plan = with_criteria(EVIDENCE)
+        rows = (("summary", self.naming("the wording of AC2: names no deploy")),
+                ("lower case", self.naming("criterion ac2 has no task")),
+                ("failing_input", self.naming("a criterion has no task", failing_input="(AC2)")),
+                ("ac", self.naming("no task", ac="AC2")))
+        for name, review in rows:
+            with self.subTest(named_in=name):
+                # AC2, named, takes the reply's text, so the skip cannot fire and nothing is restored: no half-restored plan.
+                self.kept_whole(plan, self.retyped(plan, criteria_edited=[]), review=review)
+
+    def test_a_criterion_the_reply_lists_as_edited_keeps_the_reply_whole_and_the_rules_rereview_runs(self):
+        # The finding names no id (the second criterion), but the planner declares that it reworded AC2; ids compare without case.
+        plan = with_criteria(EVIDENCE)
+        for listed in ("AC2", "ac2"):
+            with self.subTest(listed=listed):
+                result = self.kept_whole(plan, self.retyped(plan, criteria_edited=[listed]),
+                                         review=self.naming("the second criterion names no deploy"))
+                self.assertNotIn("criteria_edited", result["cont"]["plan"])
+
+    def test_the_edited_list_survives_a_branch_revise_after_the_revise(self):
+        # The plan-revise reply names its branch wrongly, so the branch revise's reply (not asked for the list) replaces it.
+        plan = bplan(acceptance=with_criteria(EVIDENCE)["acceptance"])
+        fixed = self.retyped(plan)
+        for name, more in (("absent", {}), ("empty", {"criteria_edited": []})):
+            with self.subTest(branch_revise_list=name):
+                revised = self.retyped(bplan(task_branch="other", acceptance=plan["acceptance"]), criteria_edited=["AC2"])
+                self.kept_whole(plan, revised, **{"plan-branch-revise": dict(fixed, **more)})
+        with self.subTest(branch_revise_list="another id"):
+            revised = self.retyped(bplan(task_branch="other", acceptance=plan["acceptance"]), criteria_edited=[])
+            self.kept_whole(plan, revised, **{"plan-branch-revise": dict(fixed, criteria_edited=["AC1"])})
+        with self.subTest(branch_revise_list="none edited"):
+            revised = self.retyped(bplan(task_branch="other", acceptance=plan["acceptance"]), criteria_edited=[])
+            result, names, skipped = self.go(plan, revised, **{"plan-branch-revise": fixed})
+            self.assertLess(names.index("plan-revise"), names.index("plan-branch-revise"))
+            self.assertNotIn("plan-rules-review", names)
+            self.assertEqual(len(skipped), 1)
+            self.assertEqual(result["acceptance"], plan["acceptance"])
+
+    def test_an_empty_edited_list_restores_and_an_absent_one_is_unknown(self):
+        plan = with_criteria(EVIDENCE)
+        result, names, skipped = self.go(plan, self.retyped(plan, criteria_edited=[]))
+        self.assertNotIn("plan-rules-review", names)
+        self.assertEqual(len(skipped), 1)
+        self.assertEqual(result["acceptance"], plan["acceptance"])
+        self.kept_whole(plan, self.retyped(plan))
+
+    def test_the_revise_asks_which_criteria_it_edited(self):
+        out = run_out(replies={"plan": PLAN, "plan-revise": PLAN, "plan-review": self.BARE}, patch=self.OPEN)
+        self.assertIn("criteria_edited: the ids of the criteria whose wording you changed in this revision", prompt(out["calls"], "plan-revise"))
+        self.assertNotIn("criteria_edited", prompt(out["calls"], "plan"))
+        self.assertEqual(schema_of(out["calls"], "plan-revise")["properties"]["criteria_edited"]["items"]["type"], "string")
+
+    def test_a_restore_that_would_not_reach_the_skip_leaves_the_reply_untouched(self):
+        """Restoring by id is wrong once an id means another criterion, so any other change keeps the reply as returned."""
+        plan = with_criteria(EVIDENCE)
+        code = PLAN["acceptance"][0]
+        moved = criterion(EVIDENCE, id="AC3", verify_ac="AC3", text="deployed, retyped")
+        rows = (
+            ("changed verify", [dict(code, text="works, retyped"), criterion(EVIDENCE, text=self.REWORDED, verify_host="h2")]),
+            # AC1 split into AC1 and AC2; the old AC2 is now AC3.
+            ("renumbered", [dict(code, text="parses"), {"id": "AC2", "text": "prints", "kind": "code"}, moved]),
+            ("reused id, changed kind", [dict(code, text="works, retyped"), {"id": "AC2", "text": "prints", "kind": "code"}]),
+            ("duplicate ids", [dict(code, text="parses"), dict(code, text="prints"), criterion(EVIDENCE, text="deployed, retyped")]),
+            ("added", [dict(code, text="works, retyped"), criterion(EVIDENCE, text="deployed, retyped"), HUMAN]),
+        )
+        for name, acceptance in rows:
+            with self.subTest(change=name):
+                self.kept_whole(plan, dict(PLAN, acceptance=acceptance, criteria_edited=[]))
+
+    def test_criteria_edited_never_reaches_the_kept_plan(self):
+        # Any planner reply may carry the member; none keeps it in the plan a stop or a cont holds.
+        plan = with_criteria(HUMAN)
+        listed = dict(plan, criteria_edited=["AC1"])
+        result, _ = run(replies={"plan": listed, "plan-revise": listed, "plan-rules-revise": listed,
+                                 "plan-review": PlanRulesTest.RULE_FINDING, "plan-rules-review": PlanRulesTest.RULE_FINDING})
+        self.assertEqual((result["stage"], result["cont"]["plan"]), ("plan-review", plan))
+
     def test_a_revision_that_planrules_refuses_still_runs_the_rules_rereview(self):
         # No trigger has a rule and the revise changes no id, kind, metric or verify, but it drops a lint: planRules hits R4.
         result, names, skipped = self.go(with_criteria(EVIDENCE), with_criteria(criterion(EVIDENCE, lint=None)))
@@ -2154,6 +2269,160 @@ class TaskTest(unittest.TestCase):
         standard = [c for c in calls if c["label"] == "review-1"][0]
         self.assertEqual(standard["agentType"], "reviewer")
         self.assertNotIn("lane:", standard["prompt"])
+
+
+def blocked(notes="no", **more):
+    return dict({"status": "blocked", "notes": notes}, **more)
+
+
+def task_steps(calls):
+    return [label for label in labels(calls) if label.startswith(("impl-", "review-"))]
+
+
+class BlockedOnLaterTaskTest(unittest.TestCase):
+    """#896: a task blocked on a later task of its plan runs just after that task, once."""
+
+    SIX = {"plan": dict(PLAN, tasks=tasks(6))}
+    NEEDS_6 = blocked("Task 5 cannot be finished as written because it depends on Task 6", blocked_on=6)
+    DONE_5 = {"status": "done", "start_head": "b5", "commit": "c5", "notes": "ok"}
+
+    def go(self, args=None, **replies):
+        out = run_out(args, dict(self.SIX, **replies))
+        return out["result"], out["calls"], out["logs"]
+
+    def test_the_named_later_task_runs_first_and_the_delivery_continues(self):
+        result, calls, logs = self.go(**{"impl-5": [self.NEEDS_6, self.DONE_5]})
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(task_steps(calls), ["impl-1", "review-1", "impl-2", "review-2", "impl-3", "review-3", "impl-4", "review-4",
+                                             "impl-5", "impl-6", "review-6", "impl-5", "review-5"])
+        self.assertIn("task 5 is blocked on task 6: moved to run just after it, once (order 1, 2, 3, 4, 6, 5)", logs)
+        self.assertEqual([c["label"] for c in calls if c["agentType"] == "planner"], ["plan"])
+        ahead, retry = prompt(calls, "impl-6"), prompt(calls, "impl-5")
+        self.assertIn("Task 5 waits for task 6 and may have left uncommitted edits: leave them as they are.", ahead)
+        self.assertIn("Task 6, which this task was blocked on, is done now.", retry)
+        self.assertIn("uncommitted edits or commits in the worktree", retry)
+        # A blocked attempt that committed sits before task 6's commits: the retry's span starts at its own start.
+        self.assertIn("start_head is HEAD as this attempt starts.", retry)
+        self.assertNotIn("the head before this task's first commit", retry)
+        self.assertIn("git -C /r/.wt/w-issue-9-x diff b5..c5", prompt(calls, "review-5"))
+        self.assertEqual(result["reordered"], [{"task": 5, "after": 6, "notes": self.NEEDS_6["notes"]}])
+        ready, _, _ = self.go(dict(ARGS, mode="ready"), **{"impl-5": [self.NEEDS_6, self.DONE_5]})
+        self.assertEqual((ready["stage"], ready["reordered"]), ("ready", result["reordered"]))
+        plain, _, _ = self.go()
+        self.assertNotIn("reordered", plain)
+
+    def test_the_stop_reason_survives_long_notes(self):
+        long = blocked("x" * 900, blocked_on=6)
+        result, _, _ = self.go(**{"impl-5": [self.NEEDS_6, long]})
+        self.assertTrue(result["reason"].startswith("task: task 5 blocked again after it was moved behind task 6; task 5 blocked: xxx"),
+                        result["reason"])
+        self.assertEqual(len(result["reason"]), 300)
+        result, _, _ = self.go(**{"impl-5": blocked("x" * 900, blocked_on=2)})
+        self.assertTrue(result["reason"].startswith("task: task 5 not moved: task 2 is not a later unfinished task of the plan; task 5 blocked: xxx"),
+                        result["reason"])
+
+    def test_a_new_plan_drops_the_record_of_the_old_one(self):
+        setup = {"ok": True, "worktree": "/r/.wt/w-issue-9-x", "branch": "issue-9-x", "plan_dir": "/g"}
+        cont = {"setup": setup, "plan": None, "plan_reviewed": False, "done": [], "reordered": [{"task": 1, "after": 2, "notes": "old"}]}
+        replies = {"plan": dict(PLAN, tasks=tasks(2)), "impl-1": [blocked("needs 2", blocked_on=2), self.DONE_5]}
+        result, calls = run(args=dict(ARGS, cont=cont), replies=replies)
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(task_steps(calls), ["impl-1", "impl-2", "review-2", "impl-1", "review-1"])
+        first = [c["prompt"] for c in calls if c["label"] == "impl-1"][0]
+        self.assertNotIn("was blocked on", first)
+        self.assertEqual(result["reordered"], [{"task": 1, "after": 2, "notes": "needs 2"}])
+
+    def test_the_implementer_is_asked_for_the_task_number_not_for_prose(self):
+        _, calls, _ = self.go()
+        for label in ("impl-1", "impl-6"):
+            self.assertEqual(schema_of(calls, label)["properties"]["blocked_on"], {"type": "integer"})
+            self.assertIn("blocked_on: the number of the later task of this plan it needs first, if that is why; when you name it, "
+                          "first undo every uncommitted edit you made, leaving the worktree as you found it.", prompt(calls, label))
+            self.assertNotIn("waits for task", prompt(calls, label))
+            self.assertNotIn("was blocked on", prompt(calls, label))
+            self.assertNotIn("uncommitted edits", prompt(calls, label))
+
+    def test_a_second_block_of_the_moved_task_stops_with_the_reason(self):
+        for again in (self.NEEDS_6, blocked("still impossible")):
+            with self.subTest(again=again):
+                result, calls, _ = self.go(**{"impl-5": [self.NEEDS_6, again]})
+                self.assertEqual((result["stage"], result["task"]["n"], result["cont"]["partial"]), ("task", 5, 5))
+                self.assertIn("blocked again after it was moved behind task 6", result["reason"])
+                self.assertEqual(labels(calls).count("impl-5"), 2)
+                self.assertEqual(labels(calls).count("impl-6"), 1)
+                self.assertEqual([d["n"] for d in result["cont"]["done"]], [1, 2, 3, 4, 6])
+
+    def test_a_block_that_names_no_later_task_stops_as_before(self):
+        result, calls, _ = self.go(**{"impl-5": blocked("the task file is wrong")})
+        self.assertEqual(result["reason"], "task: task 5 blocked: the task file is wrong")
+        self.assertEqual((result["cont"]["partial"], result["cont"]["plan"]["tasks"]), (5, tasks(6)))
+        self.assertNotIn("reordered", result["cont"])
+        self.assertNotIn("impl-6", labels(calls))
+
+    def test_a_block_on_an_earlier_done_or_unknown_task_stops(self):
+        for named in (4, 5, 9, 0):
+            with self.subTest(named=named):
+                result, calls, _ = self.go(**{"impl-5": blocked("needs it", blocked_on=named)})
+                self.assertEqual((result["stage"], result["cont"]["partial"]), ("task", 5))
+                self.assertIn(f"not moved: task {named} is not a later unfinished task of the plan", result["reason"])
+                self.assertNotIn("reordered", result["cont"])
+                self.assertNotIn("impl-6", labels(calls))
+        for wrong in ("6", 6.5, None):
+            with self.subTest(wrong=wrong):
+                result, calls, _ = self.go(**{"impl-5": blocked("needs it", blocked_on=wrong)})
+                self.assertEqual(result["reason"], "task: task 5 blocked: needs it")
+                self.assertNotIn("impl-6", labels(calls))
+
+    def test_a_named_task_in_another_worktree_stops(self):
+        def plan(on_branch):
+            return dict(bplan(), tasks=[dict(t, **({"branch": "cand"} if t["n"] in on_branch else {})) for t in tasks(6)])
+        result, calls = run(replies={"plan": plan({6}), "impl-5": self.NEEDS_6})
+        self.assertEqual((result["stage"], result["cont"]["partial"]), ("task", 5))
+        self.assertIn("not moved: task 6 commits in another worktree", result["reason"])
+        self.assertNotIn("impl-6", labels(calls))
+        result, calls = run(replies={"plan": plan({5, 6}), "impl-5": [self.NEEDS_6, self.DONE_5]})
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(task_steps(calls)[-4:], ["impl-6", "review-6", "impl-5", "review-5"])
+
+    def test_the_tasks_between_keep_their_order(self):
+        result, calls, _ = self.go(**{"impl-3": [blocked("needs 5", blocked_on=5), self.DONE_5]})
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual([step for step in labels(calls) if step.startswith("impl-")],
+                         ["impl-1", "impl-2", "impl-3", "impl-4", "impl-5", "impl-3", "impl-6"])
+
+    def test_a_block_while_a_moved_task_waits_stops(self):
+        result, calls, _ = self.go(**{"impl-4": blocked("needs 6", blocked_on=6), "impl-5": blocked("needs 4", blocked_on=4)})
+        self.assertEqual((result["stage"], result["task"]["n"], result["cont"]["partial"]), ("task", 5, 5))
+        self.assertIn("not moved behind task 4: task 4 still waits for task 6", result["reason"])
+        self.assertNotIn("impl-6", labels(calls))
+        self.assertEqual([t["n"] for t in result["cont"]["plan"]["tasks"]], [1, 2, 3, 5, 6, 4])
+
+    def test_a_stop_after_the_move_keeps_the_order_and_reruns_no_done_task(self):
+        stopped, _, _ = self.go(**{"impl-5": self.NEEDS_6, "impl-6": None})
+        cont = stopped["cont"]
+        self.assertEqual((stopped["stage"], cont["partial"]), ("task", 6))
+        self.assertEqual([t["n"] for t in cont["plan"]["tasks"]], [1, 2, 3, 4, 6, 5])
+        self.assertEqual(cont["reordered"], [{"task": 5, "after": 6, "notes": self.NEEDS_6["notes"]}])
+        self.assertEqual([d["n"] for d in cont["done"]], [1, 2, 3, 4])
+        result, calls = run(args=dict(ARGS, cont=cont), patch={"setup": {"dirty": True}})
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(task_steps(calls), ["impl-6", "review-6", "impl-5", "review-5"])
+        self.assertIn("Task 5 waits for task 6", prompt(calls, "impl-6"))
+        self.assertIn("start_head is the head before this task's first commit.", prompt(calls, "impl-6"))
+        self.assertIn("start_head is HEAD as this attempt starts.", prompt(calls, "impl-5"))
+        # The moved task's one repair is spent across the relaunch too.
+        again, calls = run(args=dict(ARGS, cont=cont), replies={"impl-5": self.NEEDS_6})
+        self.assertEqual((again["stage"], again["cont"]["partial"]), ("task", 5))
+        self.assertIn("blocked again after it was moved behind task 6", again["reason"])
+        self.assertEqual(labels(calls).count("impl-6"), 1)
+        self.assertEqual(again["cont"]["reordered"], cont["reordered"])
+
+    def test_a_later_stop_carries_the_record_and_no_partial(self):
+        result, _, _ = self.go(**{"impl-5": [self.NEEDS_6, self.DONE_5], "verify": None})
+        self.assertEqual(result["stage"], "verify")
+        self.assertNotIn("partial", result["cont"])
+        self.assertEqual([(r["task"], r["after"]) for r in result["cont"]["reordered"]], [(5, 6)])
+        self.assertEqual([d["n"] for d in result["cont"]["done"]], [1, 2, 3, 4, 6, 5])
 
 
 class ResumeTest(unittest.TestCase):

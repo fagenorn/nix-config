@@ -33,7 +33,7 @@ export const meta = {
 // A fresh run re-adopts an existing branch or worktree (never resetting it) and stops `dirty` when it holds uncommitted changes.
 //
 // RESUME: every stop from the claim on returns { stage, ..., cont }, where cont is
-// { setup, lane, plan (declared branches, when any, as [{name, worktree, base, head, current, toplevel, common_dir, clean}]), plan_reviewed, plan_findings?, decisions?, done, pr? (a batch-built close-out cont: the PR the batch merged), fix_waves, checks_fixes?, sync_fixes?, verified?, final_reviewed?, partial?, claim_incomplete? }. Passing it back as args.cont
+// { setup, lane, plan (declared branches, when any, as [{name, worktree, base, head, current, toplevel, common_dir, clean}]), plan_reviewed, plan_findings?, decisions?, done, pr? (a batch-built close-out cont: the PR the batch merged), fix_waves, checks_fixes?, sync_fixes?, verified?, final_reviewed?, partial?, reordered? (#896: [{task, after, notes}], each a blocked task moved once to just after the later task it named; cont.plan.tasks is already in that order), claim_incomplete? }. Passing it back as args.cont
 // re-adopts the claimed worktree (setup re-checks it and refuses a dirty tree
 // unless cont.partial names the task that left the edits), reuses cont.plan
 // (reviewing it first unless plan_reviewed; a plan-review stop keeps the revised plan with plan_findings { rules, findings, rounds }, and the resume reads the owner's answer and, when every finding left names a rule and none has source codex, runs one rules-only revise of it whatever triggered the full revise (#823), dropping the plan once rounds reach two; any other finding left has spent the plan's one full revise, so the resume plans again), skips the tasks in cont.done, then
@@ -125,7 +125,7 @@ const CODEX = {
 const SIZE_SCHEMA = { type: 'object', properties: { measured: { type: 'boolean' }, changed_lines: { type: 'integer', minimum: 0 } }, required: ['measured'] }
 const IMPL = {
   type: 'object',
-  properties: { status: { type: 'string', enum: ['done', 'blocked'] }, start_head: { type: 'string' }, commit: { type: 'string' }, tests: { type: 'array', items: { type: 'string' } }, mutation_checked: { type: 'boolean' }, notes: { type: 'string' } },
+  properties: { status: { type: 'string', enum: ['done', 'blocked'] }, start_head: { type: 'string' }, commit: { type: 'string' }, tests: { type: 'array', items: { type: 'string' } }, mutation_checked: { type: 'boolean' }, notes: { type: 'string' }, blocked_on: { type: 'integer' } },
   required: ['status', 'notes'],
 }
 const IMPL_RETURN = 'Return start_head (git rev-parse HEAD before you change anything) and commit (the full sha of HEAD after your last commit).'
@@ -281,6 +281,8 @@ const stopReason = (stage, x) => {
   if (Array.isArray(x.branch_problems)) say(`branch problems: ${x.branch_problems.join('; ')}`)
   else if (own(x, 'invalid')) say(`the ${x.step} reply is not a well-formed plan`)
   if (Array.isArray(x.needs_user)) say(`${x.needs_user.length} question(s) for the owner`)
+  // #896: why a blocked task was not moved, ahead of the implementer's notes so the cap cuts the notes.
+  if (present(x.order)) say(`${task}${x.order}`)
   for (const k of ['impl', 'fix', 'fw']) {
     if (own(x, k) && !implDone(x[k])) say(isEntry(x[k]) ? `${task}${[x[k].status, x[k].notes].filter(present).join(': ') || 'the implementer gave no status'}` : `${task}the implementer returned nothing`)
   }
@@ -506,6 +508,8 @@ const taskLog = CONT && CONT.done ? CONT.done.slice() : []
 let claimIncomplete = !!(CONT && CONT.claim_incomplete) || CLAIM_TAKEN
 // A partial task's edits stay claimed through any stop until that task is done.
 let partial = CONT && CONT.partial !== undefined ? CONT.partial : undefined
+// #896: the blocked tasks this delivery moved behind the later task each named, one move per task; dropped with the plan they reorder.
+let reordered = CONT && Array.isArray(CONT.reordered) ? CONT.reordered.filter(r => r && Number.isInteger(r.task) && Number.isInteger(r.after)) : []
 // Fix waves already spent, carried through a resume; declared before stop() because early failures call it.
 let fixWaves = (CONT && CONT.fix_waves) || 0
 // The head the final review and its fix waves passed at ({ head, accepted? }), carried so a resume on it skips the review.
@@ -526,7 +530,7 @@ addDecision(args.decisions)
 let amendApplied = false
 const stop = (stage, extra) => {
   const fr = SYNC_WINDOW.includes(stage) ? (finalReviewed = null) : finalReviewed
-  return { stage, ...extra, ...(stage === 'planned' || stage === 'ready' ? {} : { reason: stopReason(stage, extra || {}) }), ...(amendApplied ? { amended: true } : {}), ...deadOf(), cont: { setup, lane: LANE, plan, plan_reviewed: planReviewed, ...(plan && !planReviewed && planFindingsKept ? { plan_findings: planFindingsKept } : {}), ...(decisions.length ? { decisions } : {}), done: taskLog, ...(OWN_PR !== null ? { pr: OWN_PR } : {}), fix_waves: fixWaves, ...(checksFixes ? { checks_fixes: checksFixes } : {}), ...(syncFixes ? { sync_fixes: syncFixes } : {}), ...(verified ? { verified } : {}), ...(fr ? { final_reviewed: fr } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}) } }
+  return { stage, ...extra, ...(stage === 'planned' || stage === 'ready' ? {} : { reason: stopReason(stage, extra || {}) }), ...(amendApplied ? { amended: true } : {}), ...deadOf(), cont: { setup, lane: LANE, plan, plan_reviewed: planReviewed, ...(plan && !planReviewed && planFindingsKept ? { plan_findings: planFindingsKept } : {}), ...(decisions.length ? { decisions } : {}), done: taskLog, ...(OWN_PR !== null ? { pr: OWN_PR } : {}), fix_waves: fixWaves, ...(checksFixes ? { checks_fixes: checksFixes } : {}), ...(syncFixes ? { sync_fixes: syncFixes } : {}), ...(verified ? { verified } : {}), ...(fr ? { final_reviewed: fr } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}), ...(reordered.length ? { reordered } : {}) } }
 }
 
 const haltTask = (n, stage, extra) => { const s = stop(stage, extra); return { ...s, cont: { ...s.cont, partial: n } } }
@@ -644,7 +648,7 @@ Return issue_state (OPEN or CLOSED, read back from the tracker), branch_deleted,
 ${RULES_FOR(W || '<worktree>')}`, { label: 'close-out', phase: 'Ship', agentType: 'clerk', model: DEFAULT_CLERK_MODEL, effort: 'low', schema: { type: 'object', properties: { issue_state: { type: 'string' }, branch_deleted: { type: 'boolean' }, released: { type: 'boolean' }, decision_ended: { type: 'boolean' }, notes_posted: { type: 'boolean' }, notes: { type: 'string' } }, required: ['issue_state', 'notes'] } })
   const want = noHold ? 'CLOSED' : held.issue_state
   if (!co || co.issue_state !== want || co.decision_ended !== true || co.released !== true || (notes.length && co.notes_posted !== true)) return stop('close-out', { pr: PR, close_out: co, expected_issue_state: want })
-  return { stage: 'done', pr: PR, merged: true, merge_commit: mergeCommit, close_out: co, hold: held, tasks: taskLog, acceptance, fix_waves: fixWaves }
+  return { stage: 'done', pr: PR, merged: true, merge_commit: mergeCommit, close_out: co, hold: held, tasks: taskLog, ...(reordered.length ? { reordered } : {}), acceptance, fix_waves: fixWaves }
 }
 
 if (CONT && setup.merged_pr) {
@@ -737,6 +741,8 @@ const PLAN_SCHEMA = {
     plan_root: { type: 'string' },
     acceptance: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, text: { type: 'string' }, kind: { type: 'string', enum: ['code', 'evidence', 'human', 'note'] }, verify: { type: 'object' }, lint: { type: 'object', properties: { ok: { type: 'boolean' }, errors: { type: 'array', items: { type: 'object', properties: { field: { type: 'string' }, code: { type: 'string' }, message: { type: 'string' } } } } } }, metric: { type: 'boolean' } }, required: ['id', 'text', 'kind'] } },
     scripts: STRS,
+    // #819: on a revise, the ids of the criteria whose wording the planner changed; never kept in the plan.
+    criteria_edited: STRS,
     tasks: { type: 'array', items: { type: 'object', properties: { n: { type: 'integer' }, title: { type: 'string' }, file: { type: 'string' }, risk: { type: 'string', enum: ['mechanical', 'low', 'standard', 'security'] }, branch: { type: 'string' } }, required: ['n', 'title', 'file', 'risk'] } },
     branches: { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, worktree: { type: 'string' }, base: { type: 'string' }, head: FULL_SHA, current: { type: 'string' }, toplevel: { type: 'string' }, common_dir: { type: 'string' }, clean: { type: 'boolean' } }, required: ['name', 'worktree', 'base', 'head', 'current', 'toplevel', 'common_dir', 'clean'] } },
   },
@@ -802,6 +808,8 @@ Plan this issue. Read the issue (gh issue view ${ISSUE} --repo ${SLUG} --json ti
 ${RULES}`
 // A planner reply is either questions (the plan is dropped so a resume plans again with decisions) or a well-formed plan.
 // #869: a well-formed plan refused only for its declared branches gets one revise in place first, so a naming fault does not cost the whole plan.
+// #819: the accepted reply's criteria_edited, taken off the plan so it reaches no cont and no stop.
+let planEdited
 const takePlan = async (p, label) => {
   if (wellFormed(p) && branchProblems(p).length) {
     const faults = branchProblems(p)
@@ -809,12 +817,15 @@ const takePlan = async (p, label) => {
     label = 'plan-branch-revise'
     p = await call(planPrompt(`\nYour plan at ${p.plan_root} declares its branches wrongly; fix only these problems in place, change nothing else, and return the full result again: ${JSON.stringify(faults)}`), { label: 'plan-branch-revise', phase: 'Plan', agentType: 'planner', schema: PLAN_SCHEMA })
   }
+  reordered = []
   if (p && p.status === 'needs_user') { plan = null; planReviewed = false; return stop('plan', { needs_user: p.questions }) }
   // A failed revision may have half-edited the files on disk, so the plan is dropped and a resume plans again.
   if (!wellFormed(p)) { plan = null; planReviewed = false; return stop('plan', { step: label, invalid: p }) }
   const bad = branchProblems(p)
   if (bad.length) { plan = null; planReviewed = false; return stop('plan', { step: label, invalid: p, branch_problems: bad }) }
-  plan = p
+  const { criteria_edited: listed, ...rest } = p
+  plan = rest
+  planEdited = listed
   return null
 }
 
@@ -1021,6 +1032,17 @@ Re-check only the acceptance criteria of the revised plan at ${plan.plan_root} a
 }
 // #819: the members of a criterion the rules judge (its wording among them), key order aside; a revise that leaves them as reviewed needs no rules re-review.
 const ruleFacts = p => canon(p.acceptance.map(a => [a.id, a.text === undefined ? null : a.text, a.kind, a.metric === true, a.verify === undefined ? null : a.verify]))
+// #819: a finding names a criterion by its ac member, or by the id standing as a whole word (AC1 is not in AC10) in its summary, failing_input or file.
+const wholeWord = id => new RegExp('(^|[^A-Za-z0-9_])' + id.replace(/[^A-Za-z0-9_]/g, c => '\\' + c) + '($|[^A-Za-z0-9_])', 'i')
+const namesCriterion = (f, id) => !!f && (f.ac === id || [f.summary, f.failing_input, f.file].some(t => typeof t === 'string' && wholeWord(id).test(t)))
+// #819: the criterion text lives only in the issue and the planner's reply (plan.md maps ids, it holds no text), and a planner retypes
+// every criterion it returns. The candidate gives each criterion that existed before, that no finding names and that the revise does
+// not list as edited (ids compared without case) its earlier text; the caller takes it whole or not at all.
+const keepUnnamedText = (before, after, findings, edited) => after.map(a => {
+  const was = a && typeof a.id === 'string' && a.id ? before.find(b => b && b.id === a.id) : null
+  if (!was || typeof was.text !== 'string' || was.text === a.text || edited.includes(a.id.toLowerCase()) || findings.some(f => namesCriterion(f, a.id))) return a
+  return { ...a, text: was.text }
+})
 // One targeted planner call fixing only the given findings, then the program's rule check and the rules re-review (D4-D6).
 // Its findings all carry a rule, so its re-review always runs.
 const rulesRevise = async findings => {
@@ -1068,10 +1090,22 @@ Review the implementation plan at ${plan.plan_root} (and its task files) against
   }
   if (planFindings.length) {
     log(`plan review: ${planFindings.length} blocking findings, revising once`)
-    const reviewedFacts = ruleFacts(plan)
-    const revised = await call(planPrompt(`\n${MAP_FIRST} A reviewer found these defects in your plan at ${plan.plan_root}; fix them in place and return the full result again: ${JSON.stringify(planFindings)}`), { label: 'plan-revise', phase: 'Plan', agentType: 'planner', schema: PLAN_SCHEMA })
+    const reviewedFacts = ruleFacts(plan), reviewedCriteria = plan.acceptance
+    const revised = await call(planPrompt(`\n${MAP_FIRST} A reviewer found these defects in your plan at ${plan.plan_root}; fix them in place and return the full result again, with criteria_edited: the ids of the criteria whose wording you changed in this revision: ${JSON.stringify(planFindings)}`), { label: 'plan-revise', phase: 'Plan', agentType: 'planner', schema: PLAN_SCHEMA })
     const halted = await takePlan(revised, 'plan-revise')
     if (halted) return { ...halted, findings: planFindings }
+    // #819: the restored candidate replaces the reply only when it makes the skip below fire; a renumbered, reused or duplicated id,
+    // or any other change, leaves the reply exactly as returned. A plan-revise reply with no criteria_edited is unknown: no restore.
+    // A branch revise that takePlan ran after it adds its own list to the plan-revise reply's.
+    if (Array.isArray(revised.criteria_edited) && !planFindings.some(f => present(f.rule))) {
+      const edited = [revised.criteria_edited, planEdited].flatMap(l => (Array.isArray(l) ? l : [])).filter(x => typeof x === 'string').map(x => x.toLowerCase())
+      const candidate = { ...plan, acceptance: keepUnnamedText(reviewedCriteria, plan.acceptance, planFindings, edited) }
+      const restored = candidate.acceptance.filter((a, i) => a !== plan.acceptance[i]).length
+      if (restored && !planRules(candidate).length && ruleFacts(candidate) === reviewedFacts) {
+        log(`plan-revise: kept the earlier text of ${restored} criteria no finding names and the revise does not list as edited`)
+        plan = candidate
+      }
+    }
     const still = planRules(plan)
     // #819: no trigger named a rule, the program's rule check is clean and no criterion's id, text, kind, metric or verify changed.
     const sameRules = !planFindings.some(f => present(f.rule)) && !still.length && ruleFacts(plan) === reviewedFacts
@@ -1098,8 +1132,31 @@ if (MODE === 'plan') return stop('planned', { plan })
 // ---------------- Tasks ----------------
 phase('Tasks')
 let tasksRenewed = false
-for (const t of plan.tasks) {
-  if (taskLog.some(d => d.n === t.n)) continue
+const taskDone = n => taskLog.some(d => d.n === n)
+const worktreeOf = t => { const b = typeof t.branch === 'string' ? declared(plan).find(d => d.name === t.branch) : null; return b ? b.worktree : W }
+// #896: a blocked task that names a later task of the plan (blocked_on) is moved once to just after it, so every other task keeps its
+// place. A plan declares no dependencies between tasks, only their order and each task's branch, so the move is refused, and the task
+// stops with why, when the task was moved before, another moved task still waits, or the named task is not a later unfinished one or commits
+// in another worktree. A task that needed the moved one blocks in its turn and stops there. No done task runs again.
+const reorder = (i, impl) => {
+  const t = plan.tasks[i]
+  if (!impl || impl.status !== 'blocked') return {}
+  const was = reordered.find(r => r.task === t.n)
+  if (was) return { why: `blocked again after it was moved behind task ${was.after}` }
+  if (!Number.isInteger(impl.blocked_on)) return {}
+  const k = impl.blocked_on
+  const waits = reordered.find(r => !taskDone(r.task))
+  if (waits) return { why: `not moved behind task ${k}: task ${waits.task} still waits for task ${waits.after}` }
+  const at = plan.tasks.findIndex((o, j) => j > i && o.n === k)
+  if (at < 0 || taskDone(k)) return { why: `not moved: task ${k} is not a later unfinished task of the plan` }
+  if (worktreeOf(plan.tasks[at]) !== worktreeOf(t)) return { why: `not moved: task ${k} commits in another worktree` }
+  return { order: [...plan.tasks.slice(0, i), ...plan.tasks.slice(i + 1, at + 1), t, ...plan.tasks.slice(at + 1)], after: k }
+}
+for (let ti = 0; ti < plan.tasks.length; ti++) {
+  const t = plan.tasks[ti]
+  if (taskDone(t.n)) continue
+  const moved = reordered.find(r => r.task === t.n)
+  const waiting = reordered.find(r => r.task !== t.n && !taskDone(r.task))
   const first = !tasksRenewed
   tasksRenewed = true
   const B = typeof t.branch === 'string' ? declared(plan).find(b => b.name === t.branch) || null : null
@@ -1107,8 +1164,8 @@ for (const t of plan.tasks) {
   const start = `${CTX}\n${PLAN_REF}${B ? `\nTask ${t.n} commits to the declared branch ${B.name} in the worktree ${TW} (base ${B.base}), not to ${setup.branch}: run this task's commands there (git -C ${TW}).` : ''}`
   const PUSH_HERE = B ? ` After each commit, push it alone with git -C ${TW} push origin ${B.name}.` : ''
   const halt = (stage, extra) => haltTask(t.n, stage, extra)
-  const implPrompt = `${first ? `${start}\n${RENEW_FIRST}\nThen implement` : `${start}\nImplement`} task ${t.n} (${t.title}) exactly as its task file ${t.file} specifies: write the failing test first and see it fail, implement, see it pass, run the task's focused test commands, then for each new test temporarily remove the code it pins and confirm it fails, restore, and commit only this task's files in the worktree. ${MAP_FIRST} ${FOCUSED} ${IMPL_RETURN}${PUSH_HERE} Return status blocked with notes if the task file is wrong or impossible.${CONT && CONT.partial === t.n ? `
-An earlier attempt at this task was cut off and may have left uncommitted edits or commits in the worktree (git -C ${TW} status, git -C ${TW} diff and git -C ${TW} log ${B ? `${B.base}..HEAD` : RANGE}). Inspect them: keep what matches the task file, finish or redo the rest, and make sure the failing-test-first and mutation checks still hold for the final result; start_head is the head before this task's first commit.` : ''}
+  const implPrompt = `${first ? `${start}\n${RENEW_FIRST}\nThen implement` : `${start}\nImplement`} task ${t.n} (${t.title}) exactly as its task file ${t.file} specifies: write the failing test first and see it fail, implement, see it pass, run the task's focused test commands, then for each new test temporarily remove the code it pins and confirm it fails, restore, and commit only this task's files in the worktree. ${MAP_FIRST} ${FOCUSED} ${IMPL_RETURN}${PUSH_HERE} Return status blocked with notes if the task file is wrong or impossible, and blocked_on: the number of the later task of this plan it needs first, if that is why; when you name it, first undo every uncommitted edit you made, leaving the worktree as you found it.${waiting ? ` Task ${waiting.task} waits for task ${waiting.after} and may have left uncommitted edits: leave them as they are.` : ''}${moved ? ` Task ${moved.after}, which this task was blocked on, is done now.` : ''}${(CONT && CONT.partial === t.n) || moved ? `
+An earlier attempt at this task was cut off and may have left uncommitted edits or commits in the worktree (git -C ${TW} status, git -C ${TW} diff and git -C ${TW} log ${B ? `${B.base}..HEAD` : RANGE}). Inspect them: keep what matches the task file, finish or redo the rest, and make sure the failing-test-first and mutation checks still hold for the final result; start_head is ${moved ? 'HEAD as this attempt starts' : "the head before this task's first commit"}.` : ''}
 ${RULES}`
   const callImpl = () => call(implPrompt, { label: `impl-${t.n}`, phase: 'Tasks', agentType: 'implementer', model: 'sonnet', schema: first ? withRenew(IMPL) : IMPL })
   let impl = first ? await recall(callImpl, r => r.renew) : await callImpl()
@@ -1116,7 +1173,17 @@ ${RULES}`
     const lost = renewed(impl.renew, 'tasks')
     if (lost) return lost
   }
-  if (!implDone(impl)) return halt('task', { task: t, impl })
+  if (!implDone(impl)) {
+    const fix = reorder(ti, impl)
+    if (!fix.order) return halt('task', { task: t, impl, ...(fix.why ? { order: fix.why } : {}) })
+    plan = { ...plan, tasks: fix.order }
+    reordered = [...reordered, { task: t.n, after: fix.after, notes: typeof impl.notes === 'string' ? impl.notes.slice(0, REASON_MAX) : '' }]
+    // Its edits, if any, stay claimed while the tasks before it run.
+    partial = t.n
+    log(`task ${t.n} is blocked on task ${fix.after}: moved to run just after it, once (order ${plan.tasks.map(o => o.n).join(', ')})`)
+    ti--
+    continue
+  }
   const taskSpan = spanIn(TW, impl)
   const reviewer = (t.risk === 'mechanical' || t.risk === 'low') ? 'reviewer-lite' : 'reviewer'
   // reviewer-lite first-passes only a task whose declared lane is mechanical or low (its lane verification mode).
@@ -1311,7 +1378,7 @@ while (verify && verifyProblems(verify).length && vRounds < 2) {
 if (verifyProblems(verify).length) return stop('verify', { verify, problems: verifyProblems(verify) })
 if (MODE === 'ready') {
   verified = { head: verify.head, results: verify.results, contract: VERIFY_CONTRACT, ...branchSnap() }
-  return stop('ready', { head: verify.head, branch: setup.branch, worktree: W, verify: verify.results, tasks: taskLog, acceptance: plan.acceptance, fix_waves: fixWaves })
+  return stop('ready', { head: verify.head, branch: setup.branch, worktree: W, verify: verify.results, tasks: taskLog, ...(reordered.length ? { reordered } : {}), acceptance: plan.acceptance, fix_waves: fixWaves })
 }
 
 // ---------------- Ship ----------------

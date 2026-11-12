@@ -68,3 +68,7 @@ _Avoid_: rate limit error
 **Capacity strip**:
 The top-bar line of each profile's share left and next reset. It reads "tight" when one profile has room among two or more, and is promoted into the statement when every profile is out (ADR-console-006).
 _Avoid_: quota bar
+
+**Console service**:
+The user service that runs the console on each host. On Linux the systemd unit retries without limit, three seconds apart (`RestartSec`, and `StartLimitIntervalSec = 0` in place of systemd's default start limit), so a console that cannot bind its port because another process holds it keeps retrying and serves within one interval of the port being freed, with no manual restart (#884); launchd's `KeepAlive` does the same on macOS.
+_Avoid_: daemon
