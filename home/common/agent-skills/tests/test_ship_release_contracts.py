@@ -178,7 +178,9 @@ class ShipReleaseContractsTest(unittest.TestCase):
                      # Issue 901: only a new release follows the head; a resumed one is bound to
                      # its commit. A moved head means notes and version are written again.
                      "resume form drops `--follow-head` and `<commit>` is the release's `commit`.",
-                     "On `head_moved`, redo Phases 1–2 with its `lock_sha` as `<commit>`.",
+                     # The followed head arrived during the wait: without a fetch it is a bad revision.
+                     "On `head_moved`, `git fetch origin`, then redo Phases 1–2 with its "
+                     "`lock_sha` as `<commit>`.",
                      "`no_open_pr` goes on to the preview, or in resume form before the merge "
                      "is reported with an `abandon` offer.",
                      "The confirmation stop and a `release_busy` stop keep the lock, and the run "
