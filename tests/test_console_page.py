@@ -3191,6 +3191,22 @@ class PageSprintEndTest(unittest.TestCase):
             json.loads(post["body"]), {"project_id": "owner/p00", "sprint_id": "a" * 16}
         )
 
+    def test_stop_sits_under_more_beside_withdraw_and_its_question_on_the_line(self) -> None:
+        idle, asked = render([
+            START, {"frame": with_sprints([{**SPRINT, "stoppable": True}])}, {"snapshot": True},
+            {"click": "stop"}, {"snapshot": True},
+        ])
+        (line,) = sprint_lines(idle)
+        (more,) = of_class(line, "details", "sprint-more")
+        self.assertEqual(len(of_class(more, "button", "stop")), 1)
+        self.assertEqual(len(of_class(more, "button", "withdraw")), 1)
+        self.assertEqual(len(of_class(line, "button", "stop")), 1)
+        (line,) = sprint_lines(asked)
+        (more,) = of_class(line, "details", "sprint-more")
+        self.assertEqual(of_class(more, "span", "stop-ask"), [])
+        self.assertEqual(of_class(more, "button", "stop-confirm"), [])
+        self.assertEqual(len(of_class(line, "button", "stop-confirm")), 1)
+
     def test_cancel_sends_nothing_and_restores_stop(self) -> None:
         (snap,) = render([
             START, {"frame": with_sprints([{**SPRINT, "stoppable": True}])},
