@@ -1,0 +1,6 @@
+#!/bin/sh
+# Verify checks for issue 888: a stated goal starts a manager that briefs and survives a restart.
+# Subcommands: `start` (gating: states two goals, waits for both briefs, restarts the console,
+# requires both managers listed) and `timing` (observe: reads the brief times `start` recorded).
+# Exit 0 met, 1 not met, 75 not yet. Run from the repository root at the block's commit.
+PYTHONPATH=python exec python3 -m agent_tools.console.manager_check "$@"
