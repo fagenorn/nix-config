@@ -457,8 +457,9 @@ class DocsTreeTest(unittest.TestCase):
         kept = self.doc("docs/areas/console/adr/009-events-are-kept-for-90-days.md")
         for needle in ("brief.sent", "schema 4"):
             self.assertIn(needle, kept)
-        self.assertIn("ADR-console-013",
-                      self.doc("docs/areas/console/adr/002-the-desk-page-design-rules.md"))
+        rules = self.doc("docs/areas/console/adr/002-the-desk-page-design-rules.md")
+        for needle in ("ADR-console-013", 'its label and "None"'):
+            self.assertIn(needle, rules)
 
     def test_the_console_report_decision_is_recorded(self):
         path = "docs/areas/console/adr/014-a-managers-report-becomes-the-sprints-line.md"

@@ -1649,6 +1649,37 @@ class PageBriefTest(unittest.TestCase):
             at = found + len(needle)
         self.assertIn("Which host?", full(snap["inbox"]))
 
+    def test_an_empty_list_part_reads_its_label_and_none(self) -> None:
+        empty = {**BRIEF, "brief": {**BRIEF["brief"], "excluded": [], "risks": [], "asks": []}}
+        shown, approved = render([
+            START, {"frame": frame([empty])}, {"snapshot": True}, {"key": "Enter"},
+            {"clock": 5000}, {"snapshot": True},
+        ])
+        card = shown["inbox"]["children"][0]
+        self.assertTrue(has_class(card, "brief"))
+
+        def after(label: str) -> dict:
+            (found,) = [
+                (n, i) for n in nodes(card) for i, c in enumerate(n["children"])
+                if has_class(c, "meta") and c["text"] == label
+            ]
+            parent, at = found
+            return parent["children"][at + 1]
+
+        for label in ("Excluded", "Risks", "What I expect to ask"):
+            with self.subTest(label=label):
+                following = after(label)
+                self.assertEqual(following["tag"], "p")
+                self.assertEqual(full(following), "None")
+        slices = after("Slices")
+        self.assertEqual(slices["tag"], "ul")
+        self.assertEqual([full(li) for li in slices["children"]], ["checkpoint", "resume"])
+        self.assertEqual([n for n in nodes(card) if n["tag"] == "ul" and n["children"] == []], [])
+        (post,) = approvals(approved)
+        self.assertEqual(posted(post), {
+            "project_id": "owner/p01", "sprint_id": "a" * 16, "version": 2,
+        })
+
     def test_enter_approves_after_five_seconds(self) -> None:
         early, late = render([
             START, {"frame": frame([BRIEF, ANSWERABLE])}, {"key": "Enter"}, {"clock": 4999},

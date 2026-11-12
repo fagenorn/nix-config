@@ -702,6 +702,7 @@ function briefRecord(sprintId) {
   return rec;
 }
 function listPart(label, texts) {
+  if (texts.length === 0) return [el("p", "meta", label), el("p", "", "None")];
   const list = el("ul");
   for (const text of texts) list.appendChild(el("li", "", text));
   return [el("p", "meta", label), list];
