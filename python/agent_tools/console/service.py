@@ -26,12 +26,13 @@ Routes (every response carries `Cache-Control: no-store` and
     POST /api/report 200 application/json, a manager sends a sprint's report (below)
     POST /api/inbox 200 application/json, a manager reads a sprint's unread messages (below)
     POST /api/message-reply 200 application/json, a manager answers one message (below)
+    POST /api/recap 200 application/json, a manager reads what it needs to pick a sprint up (below)
     GET /api/sprint-status?sprint_id=<id> 200 application/json, what became of a brief (below)
     anything else   404
     other methods   405 with `Allow: GET` (`Allow: POST` on `/api/hooks`, `/api/readings`,
                     `/api/looked`, `/api/answer`, `/api/check-answer`, `/api/goal`, `/api/withdraw`,
                     `/api/approve`, `/api/reply`, `/api/retry-manager`, `/api/message`, `/api/brief`, `/api/report`,
-                    `/api/inbox` and `/api/message-reply`)
+                    `/api/inbox`, `/api/message-reply` and `/api/recap`)
 
 Two kinds of write exist. The hook and reading routes append what the proxies and hooks observe:
 `POST /api/hooks` appends session observations, `POST /api/readings` the capacity kinds
@@ -172,6 +173,22 @@ message_id, reply)`, under the lock, is `_manager_sprint`, `Refused(UNKNOWN_MESS
 `sprint.answered` row `{"sprint_id", "message", "reply"}` with the reply exactly as sent; it
 answers 200 `{"at": <row at>}`. Every refusal appends and publishes nothing, and neither the
 secret nor the owner's text appears in a stderr line.
+
+Recap (#893): `POST /api/recap` is a manager write dispatched like `/api/inbox`, before `PAGE_WRITES`:
+`_checked_length(MAX_RECAP_BYTES)` (4096; any `Origin` is 403 `origin refused`, a media type that
+is not `application/json` 415 `json only`, a bad length 411 and one over the limit 413), a body
+`sprints.parse_inbox_request` does not accept is 400 `bad recap`, a `sprints.SecretRefused` is
+`console: recap_refused <sprint_id> secret refused` and 403 `secret refused`, any other
+`sprints.Refused` the same prefix with the reason and 409, any other exception `console:
+recap_failed <Type>: <message>` and 500 `recap failed`. `recap(sprint_id, secret)` runs under the
+ingest lock and is `_manager_sprint` (`NOT_OPEN`, then `SecretRefused`) and a read: it appends
+nothing, publishes nothing and marks nothing read. It answers 200 `application/json`,
+`json.dumps(recap, sort_keys=True, separators=(",", ":"))` of `{"sprint_id", "goal", "brief",
+"report", "unread"}`: `brief` is null until a brief is sent, else `{"version", "decision" ("none",
+"approved" or "changes"), "reply" (the owner's words, or null), "parts"}` of the latest version;
+`report` is null until a report is sent, else the last report `{"at", "status", "phase",
+"milestone", "tracker_url", "issues": [{"issue", "stage"}, ...], "inbox", "next"}`, which a newer
+brief does not remove; `unread` is the number of the owner's messages not yet read.
 
 Reports (#890): `POST /api/report` is a manager write like the brief's: no token, the sprint's secret
 in its place. After the loopback `Host` check it runs `_checked_length(MAX_REPORT_BYTES)`, 65536
@@ -477,8 +494,10 @@ MAX_GOAL_BYTES = 16384
 MAX_WITHDRAW_BYTES = 4096
 MAX_BRIEF_BYTES = 32768
 MAX_REPORT_BYTES = 65536
+RECAP_PATH = "/api/recap"
 MANAGER_WRITES: frozenset[str] = frozenset({BRIEF_PATH, REPORT_PATH, INBOX_PATH,
-                                            MESSAGE_REPLY_PATH})
+                                            MESSAGE_REPLY_PATH, RECAP_PATH})
+MAX_RECAP_BYTES = 4096
 MAX_MESSAGE_BYTES = 16384
 MAX_INBOX_BYTES = 4096
 MAX_MESSAGE_REPLY_BYTES = 16384
@@ -623,6 +642,8 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return self._inbox_request()
         if route == MESSAGE_REPLY_PATH:
             return self._message_reply_request()
+        if route == RECAP_PATH:
+            return self._recap_request()
         if route in PAGE_WRITES:
             return self._page_write(route)
         if route not in POST_LIMITS:
@@ -807,6 +828,30 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return self._refuse(500, "inbox failed")
         self._send(200, "application/json", json.dumps(
             {"messages": entries}, sort_keys=True, separators=(",", ":")).encode())
+
+    def _recap_request(self):
+        """The manager's route: the sprint's record, read with the sprint's secret."""
+        length = self._checked_length(MAX_RECAP_BYTES)
+        if length is None:
+            return
+        self.close_connection = True
+        try:
+            sprint_id, secret = sprints.parse_inbox_request(self.rfile.read(length))
+        except ValueError:
+            return self._refuse(400, "bad recap")
+        try:
+            recap = self.server.console.recap(sprint_id, secret)
+        except sprints.SecretRefused:
+            print(f"console: recap_refused {sprint_id} {sprints.SECRET_REFUSED}", file=sys.stderr)
+            return self._refuse(403, sprints.SECRET_REFUSED)
+        except sprints.Refused as error:
+            print(f"console: recap_refused {sprint_id} {error}", file=sys.stderr)
+            return self._refuse(409, str(error))
+        except Exception as error:
+            print(f"console: recap_failed {type(error).__name__}: {error}", file=sys.stderr)
+            return self._refuse(500, "recap failed")
+        self._send(200, "application/json", json.dumps(
+            recap, sort_keys=True, separators=(",", ":")).encode())
 
     def _message_reply_request(self):
         """The manager's route: an answer to one message, sent with the sprint's secret."""
@@ -1707,6 +1752,24 @@ class ConsoleService:
                 "sprint_id": sprint_id, "through": unread[-1].message_id})])
             self._apply(appended)
             return [sprints.inbox_entry(message) for message in unread]
+
+    def recap(self, sprint_id: str, secret: str) -> dict:
+        """What a manager needs to pick the sprint up; a read that appends and marks nothing."""
+        with self._ingest:
+            sprint = self._manager_sprint(sprint_id, secret)
+            brief, report = sprint.brief, sprint.report
+            return {
+                "sprint_id": sprint_id,
+                "goal": sprint.goal,
+                "brief": None if brief is None else {
+                    "version": brief.version, "decision": brief.decision,
+                    "reply": brief.reply, "parts": brief.parts},
+                "report": None if report is None else {
+                    "at": report.at, "status": report.status, "phase": report.phase,
+                    "milestone": report.milestone, "tracker_url": report.tracker_url,
+                    "issues": [{"issue": issue, "stage": stage} for issue, stage in report.issues],
+                    "inbox": list(report.inbox), "next": report.next_step},
+                "unread": len(sprints.unread(sprint))}
 
     def answer_message(self, sprint_id: str, secret: str, message_id: int, reply: str) -> str:
         """Append one `sprint.answered` event under a message of the sprint; its at."""
