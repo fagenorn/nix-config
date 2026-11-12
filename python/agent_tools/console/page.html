@@ -234,7 +234,7 @@ function fillSprint(item, entry, sprint) {
     if (retrying !== undefined && retrying.phase === "sending") again.setAttribute("disabled", "");
     item.appendChild(again);
   }
-  if (retrying !== undefined && retrying.phase === "failed") {
+  if (sprint.retry === true && retrying !== undefined && retrying.phase === "failed") {
     item.appendChild(el("span", "fail", "Could not retry: " + retrying.reason));
   }
   const button = actionButton("withdraw", "Withdraw", () => withdraw(item, entry, sprint));
@@ -1058,10 +1058,17 @@ function renderProjects(view) {
   const list = el("ul");
   list.id = "list";
   const live = new Set();
+  const retryable = new Set();
   for (const entry of view.entries) {
     for (const project of entry.type === "quiet_group" ? entry.projects : [entry]) {
-      for (const sprint of project.sprints || []) live.add(sprint.sprint_id);
+      for (const sprint of project.sprints || []) {
+        live.add(sprint.sprint_id);
+        if (sprint.retry === true) retryable.add(sprint.sprint_id);
+      }
     }
+  }
+  for (const id of [...retries.keys()]) {
+    if (!retryable.has(id)) retries.delete(id);
   }
   for (const id of [...withdrawals.keys()]) {
     if (!live.has(id)) withdrawals.delete(id);

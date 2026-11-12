@@ -1464,6 +1464,43 @@ class PageManagerTest(unittest.TestCase):
             ["Could not retry: this sprint has a manager"],
         )
 
+    def test_a_refused_retry_message_goes_once_the_manager_has_started(self) -> None:
+        failed, started, missing_again, gone, back = render([
+            START,
+            {"frame": with_sprints([{
+                **SPRINT, "manager_state": "missing",
+                "manager_text": "the manager is not running", "retry": True,
+            }])},
+            {"respond": {"status": 409, "text": "this sprint has a manager\n"}},
+            {"click": "retry"}, {"snapshot": True},
+            {"frame": with_sprints([
+                {**SPRINT, "manager_state": "started", "manager_text": None, "retry": False}
+            ])},
+            {"snapshot": True},
+            {"frame": with_sprints([{
+                **SPRINT, "manager_state": "missing",
+                "manager_text": "the manager is not running", "retry": True,
+            }])},
+            {"snapshot": True},
+            {"frame": with_sprints([])},
+            {"snapshot": True},
+            {"frame": with_sprints([{
+                **SPRINT, "manager_state": "missing",
+                "manager_text": "the manager is not running", "retry": True,
+            }])},
+            {"snapshot": True},
+        ])
+
+        def fails(snap: dict) -> list:
+            (line,) = sprint_lines(snap)
+            return [full(n) for n in nodes(line) if has_class(n, "fail")]
+
+        self.assertEqual(fails(failed), ["Could not retry: this sprint has a manager"])
+        self.assertEqual(fails(started), [])
+        self.assertEqual(fails(missing_again), [])
+        self.assertEqual(sprint_lines(gone), [])
+        self.assertEqual(fails(back), [])
+
     def test_a_sprint_without_retry_has_no_retry_button(self) -> None:
         started, unavailable = render([
             START,
