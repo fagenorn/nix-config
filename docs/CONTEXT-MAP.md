@@ -27,6 +27,7 @@
 | Base policy | Guard |
 | Blocking edge | Claims |
 | Cache proxy | Hosts |
+| Brief | Console |
 | Candidate | Release |
 | Capacity strip | Console |
 | Check | Verification |

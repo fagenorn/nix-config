@@ -14,7 +14,7 @@ The per-host loopback service and its one page that say whether the owner is nee
 _Avoid_: dashboard, lead console
 
 **Inbox item**:
-Anything waiting on the owner that the console asks them to act on, whatever its source. The console's statement counts the open ones, "N things need you"; with none and a readable tracker it reads "Nothing needs you". A session waiting in its terminal is not one: it is answered there (ADR-console-004).
+Anything waiting on the owner that the console asks them to act on, whatever its source; a manager's brief is one. The console's statement counts the open ones, "N things need you"; with none and a readable tracker it reads "Nothing needs you". A session waiting in its terminal is not one: it is answered there (ADR-console-004).
 _Avoid_: ask, notification
 
 **Answered item**:
@@ -37,8 +37,12 @@ _Avoid_: dormant project, idle project
 The sentence or two the owner states on the page for one registered project, kept in the console's log and never on the tracker (ADR-console-011).
 _Avoid_: task, request
 
+**Brief**:
+The manager's answer to a goal: what done looks like, what is excluded, the slices, the risks and what it expects to ask. It waits in the inbox until the owner approves it, which starts the sprint, or answers it with a reply; a newer brief replaces it (ADR-console-013).
+_Avoid_: plan, proposal
+
 **Sprint**:
-One goal, later its issues and its outcome, in one project (#834), shown under its project with its state and age until it is withdrawn (ADR-console-011).
+One goal, later its issues and its outcome, in one project (#834), shown under its project with its state (drafting the brief, or starting once its brief is approved) and age until it is withdrawn (ADR-console-011, ADR-console-013).
 _Avoid_: job, run
 
 **Session**:
