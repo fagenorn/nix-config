@@ -214,6 +214,7 @@ agent-workflow-tests *args:
     tests/test_console_answer.py \
     tests/test_console_sprints.py \
     tests/test_console_revive.py \
+    tests/test_console_idle.py \
     tests/test_console_briefs.py \
     tests/test_console_messages.py \
     tests/test_console_questions.py \
@@ -223,6 +224,7 @@ agent-workflow-tests *args:
     tests/test_console_manager_service.py \
     tests/test_console_stops.py \
     tests/test_console_revive_service.py \
+    tests/test_console_idle_service.py \
     tests/test_console_nudge.py \
     tests/test_console_deliveries.py \
     tests/test_console_units.py \

@@ -59,6 +59,27 @@ class NudgeCommandTest(unittest.TestCase):
             'The owner left you a message on the console. Run "sprint inbox" now and act on '
             "what it returns.", NUDGE_TEXT)
 
+    def test_the_continue_command_relays_the_idle_sentence_to_the_session_by_name(self):
+        it = Nudge(SID, nudge_module.CONTINUE, NAME, "s-1", "work", "/r")
+        argv = nudge_command(it, "linux")
+        prompt = ('Use the SendMessage tool exactly once, to the peer session named "' + NAME
+                  + '", with this message and nothing else: ' + nudge_module.CONTINUE_TEXT
+                  + " Then print SENT on its own line if the tool reported the message sent "
+                    "or accepted, otherwise print FAILED.")
+        self.assertEqual(
+            ["claude-account", "run", "-p", "--allowedTools", "SendMessage",
+             "--no-session-persistence", prompt], argv)
+        self.assertIn(nudge_module.CONTINUE_TEXT, argv[-1])
+        self.assertNotIn(NUDGE_TEXT, argv[-1])
+        self.assertIn('"' + NAME + '"', argv[-1])
+
+    def test_the_idle_sentence_is_fixed_and_names_recap_then_inbox(self):
+        text = nudge_module.CONTINUE_TEXT
+        self.assertEqual(
+            'The console found you idle while your sprint has work. Run "sprint recap", then '
+            '"sprint inbox", and go on with the next step.', text)
+        self.assertLess(text.index("sprint recap"), text.index("sprint inbox"))
+
     def test_the_wake_command_resumes_the_session_in_place_in_its_own_scope(self):
         self.assertEqual(
             ["systemd-run", "--user", "--scope", "--quiet", "--collect",
@@ -192,6 +213,16 @@ class NudgeCommandTest(unittest.TestCase):
                 self.assertNotIn(dropped, env)
             for value in env.values():
                 self.assertNotIn(NUDGE_TEXT, value)
+        with self.subTest(route=nudge_module.CONTINUE):
+            run = self.fake(stdout="SENT\n")
+            run_nudge(self.nudge(nudge_module.CONTINUE), platform="linux", run=run,
+                      environ=environ)
+            argv, kwargs = run.calls[0]
+            self.assertEqual([argv[-1]], [part for part in argv if "sprint" in part])
+            self.assertEqual(nudge_module.relay_prompt(NAME, nudge_module.CONTINUE_TEXT), argv[-1])
+            self.assertNotIn(NUDGE_TEXT, argv[-1])
+            for value in kwargs["env"].values():
+                self.assertNotIn(nudge_module.CONTINUE_TEXT, value)
         with self.subTest(route=REVIVE):
             run = self.fake()
             run_nudge(self.nudge(REVIVE), platform="linux", run=run, environ=environ)
@@ -212,6 +243,16 @@ class NudgeCommandTest(unittest.TestCase):
             run_nudge(self.nudge(RELAY), platform="linux", environ={},
                       run=self.fake(stdout="FAILED\n"))
         self.assertEqual("the relay did not confirm the message", str(raised.exception))
+
+    def test_a_continue_relay_is_delivered_only_when_it_prints_sent(self):
+        run = self.fake(stdout="SENT\n")
+        run_nudge(self.nudge(nudge_module.CONTINUE, session_id=None), platform="linux",
+                  environ={}, run=run)
+        self.assertEqual(nudge_module.RELAY_TIMEOUT, run.calls[0][1]["timeout"])
+        with self.assertRaises(NudgeFailed) as raised:
+            run_nudge(self.nudge(nudge_module.CONTINUE), platform="linux", environ={},
+                      run=self.fake(stdout="FAILED\n"))
+        self.assertEqual(nudge_module.UNCONFIRMED_TEXT, str(raised.exception))
 
     def test_failures_are_one_line_reasons(self):
         def reason(nudge, platform="linux", **fake):

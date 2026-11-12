@@ -119,6 +119,28 @@ valid `manager.failed` that is a takeover appends `Revival(at, TAKEOVER, False, 
 `stalled` with its reason and keeps `stalled_at`. `revive` (which this module does not import)
 reads these fields to decide the next step.
 
+The idle rows (#929) record the nudges of a manager that sat idle with work left
+(`event_log.MANAGER_NUDGED`, `MANAGER_NO_PROGRESS`, `SPRINT_CONTINUED`, none kept, each with the
+project in its project column):
+
+    manager.nudged      {"sprint_id", "goal": <str>, "session_id": <str>, "ok": <bool>,
+                         "reason"?: <str>, "resumed"?: true}
+    manager.no_progress {"sprint_id", "goal": <str>, "status": <str> | null}
+    sprint.continued    {"sprint_id", "goal": <str>}
+
+`SprintState` keeps `idle_nudges` (0), `idle_nudged_at` and `no_progress_at` (both `None`). Each row
+changes only an open sprint. A `manager.nudged` with a bool `ok` and a string `session_id` adds one
+to `idle_nudges` and sets `idle_nudged_at` to the row's `at`; any other such row changes nothing. A
+`manager.no_progress` sets `no_progress_at` to the row's `at` when it is `None` (a repeat keeps the
+first). A `sprint.continued` with `no_progress_at` set clears it and sets `idle_nudges` to 0, and
+changes nothing otherwise. A `sprint.reported` row that is accepted also sets `idle_nudges` to 0 and
+`no_progress_at` to `None` and keeps `idle_nudged_at`: the spacing is about nudges. The new
+constants are `QUOTA` (a view state), `QUOTA_TEXT` (the manager's waiting text, `waiting on quota
+until`), `NO_PROGRESS_TEXT` (`the manager has stopped making progress on {goal}`) and `NOT_STUCK`
+(the service's refusal of a continue with no item open). `parse_continue(body)` reads the owner's
+continue write, exactly `parse_withdraw`'s shape and refusals, and returns `(project_id,
+sprint_id)`. `idle` (which this module does not import) reads these fields.
+
 `manager_status(state, listed, now_ms, managers)` turns a sprint's manager into the view's
 `(manager_state, manager_text, retry)`; its docstring holds the rules.
 
@@ -355,10 +377,11 @@ from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_litera
 from agent_tools.console import deliveries
 from agent_tools.console.deliveries import DELIVERY_SEEN
 from agent_tools.console.event_log import (BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED,
-                                           GOAL_WITHDRAWN, MANAGER_FAILED, MANAGER_STALLED,
-                                           MANAGER_STARTED, MANAGER_STOP_FAILED, MANAGER_STOPPED,
-                                           MANAGER_WAITING, MANAGER_WOKEN, QUESTION_ANSWERED,
-                                           QUESTIONS_ASKED, SPRINT_ANSWERED, SPRINT_CLOSED,
+                                           GOAL_WITHDRAWN, MANAGER_FAILED, MANAGER_NO_PROGRESS,
+                                           MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED,
+                                           MANAGER_STOP_FAILED, MANAGER_STOPPED, MANAGER_WAITING,
+                                           MANAGER_WOKEN, QUESTION_ANSWERED, QUESTIONS_ASKED,
+                                           SPRINT_ANSWERED, SPRINT_CLOSED, SPRINT_CONTINUED,
                                            SPRINT_MESSAGED, SPRINT_NUDGED, SPRINT_READ,
                                            SPRINT_REPORTED, SPRINT_STOP_REQUESTED, Event)
 from agent_tools.console.manager import FAILED_TEXT, MISSING_TEXT, UNAVAILABLE_TEXT
@@ -388,6 +411,10 @@ WAKE = "wake"
 TAKEOVER = "takeover"
 STALLED = "stalled"
 STALLED_TEXT = "managers keep failing"
+QUOTA = "quota"
+QUOTA_TEXT = MANAGER_WAITING_TEXT
+NO_PROGRESS_TEXT = "the manager has stopped making progress on {goal}"
+NOT_STUCK = "this sprint's manager is not waiting for you"
 REPORT_MEMBERS = ("status", "phase", "milestone", "tracker_url", "issues", "inbox", "next")
 REPORT_PHASES = ("running", "closing", "done")
 LANDED = "landed"
@@ -622,6 +649,9 @@ class SprintState:
     revivals: tuple[Revival, ...] = ()
     stalled: str | None = None
     stalled_at: str | None = None
+    idle_nudges: int = 0
+    idle_nudged_at: str | None = None
+    no_progress_at: str | None = None
 
     @property
     def state(self) -> str:
@@ -674,6 +704,11 @@ def parse_withdraw(body: bytes) -> tuple[str, str]:
 
 
 def parse_retry(body: bytes) -> tuple[str, str]:
+    value = _object(body, {"project_id", "sprint_id"})
+    return value["project_id"], _sprint_id(value["sprint_id"])
+
+
+def parse_continue(body: bytes) -> tuple[str, str]:
     value = _object(body, {"project_id", "sprint_id"})
     return value["project_id"], _sprint_id(value["sprint_id"])
 
@@ -1153,6 +1188,19 @@ def _folded_manager(state: SprintState, event: Event) -> SprintState:
     return state
 
 
+def _folded_idle(state: SprintState, event: Event) -> SprintState:
+    if event.kind == MANAGER_NUDGED:
+        if isinstance(event.payload.get("ok"), bool) \
+                and isinstance(event.payload.get("session_id"), str):
+            return replace(state, idle_nudges=state.idle_nudges + 1, idle_nudged_at=event.at)
+    elif event.kind == MANAGER_NO_PROGRESS:
+        if state.no_progress_at is None:
+            return replace(state, no_progress_at=event.at)
+    elif state.no_progress_at is not None:
+        return replace(state, no_progress_at=None, idle_nudges=0)
+    return state
+
+
 def _folded_report(state: SprintState, event: Event) -> SprintState:
     report = event.payload.get("report")
     if state.state != STARTING or not isinstance(report, dict):
@@ -1161,7 +1209,7 @@ def _folded_report(state: SprintState, event: Event) -> SprintState:
         checked = checked_report(report)
     except Refused:
         return state
-    return replace(state, observed=(), moved_ms=None,
+    return replace(state, observed=(), moved_ms=None, idle_nudges=0, no_progress_at=None,
                    report=Report(event.at, checked["status"], checked["phase"],
                                  checked["milestone"], checked["tracker_url"],
                                  tuple((row["issue"], row["stage"]) for row in checked["issues"]),
@@ -1258,6 +1306,9 @@ def sprint_states(events: Iterable[Event],
         elif event.kind in (MANAGER_STARTED, MANAGER_FAILED, MANAGER_WAITING, MANAGER_WOKEN,
                             MANAGER_STALLED) and sprint_id in folded:
             folded[sprint_id] = _folded_manager(folded[sprint_id], event)
+        elif event.kind in (MANAGER_NUDGED, MANAGER_NO_PROGRESS, SPRINT_CONTINUED) \
+                and sprint_id in folded:
+            folded[sprint_id] = _folded_idle(folded[sprint_id], event)
         elif event.kind == SPRINT_REPORTED and sprint_id in folded:
             folded[sprint_id] = _folded_report(folded[sprint_id], event)
         elif event.kind in (SPRINT_MESSAGED, SPRINT_READ, SPRINT_ANSWERED, SPRINT_NUDGED) \
