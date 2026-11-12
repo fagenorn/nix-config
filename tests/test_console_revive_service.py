@@ -202,6 +202,25 @@ class ReviveServiceTest(ReviveCase):
                     svc.retry_manager("owner/p01", sid)
                 self.assertEqual(str(refused.exception), sprints.HAS_MANAGER)
 
+    def test_a_wake_is_not_sent_when_the_sprint_stops_having_work_during_the_listing(self):
+        for name in ("closing", "done", "withdrawn"):
+            with self.subTest(name):
+                self.setUp()
+                changes = []
+                svc = self.begin(listing=lambda: (changes and changes[0](), dict(self.listed))[1])
+                sid = self.on_track(svc)
+                self.gone(svc)
+                self.reserve(svc, 120)
+                if name == "withdrawn":
+                    changes.append(lambda: svc.withdraw_goal("owner/p01", sid))
+                else:
+                    changes.append(lambda: svc.send_report(
+                        sid, self.secret(sid), {**REPORT, "phase": name}))
+                self.drain()
+                self.assertEqual(self.revives(), [])
+                self.assertEqual(self.rows("manager.woken"), [])
+                self.assertEqual(svc._nudging, set())
+
     def test_a_wake_that_cannot_start_is_a_failed_wake_and_frees_the_reservation(self):
         broken = []
 
@@ -267,6 +286,25 @@ class ReviveServiceTest(ReviveCase):
         self.tick(svc, 361)
         self.assertEqual(len(self.launches.calls), 2)
         self.assertEqual(len(self.revives()), 2)
+
+    def test_a_manager_polled_while_its_launcher_returns_keeps_its_session(self):
+        svc = self.begin(launcher=self.launched_and_seen)
+        self.svc_under_test = svc
+        sid = self.on_track(svc)
+        self.gone(svc)
+        self.outcomes[:] = ["No conversation found", "No conversation found"]
+        for seconds in (120, 240, 360):
+            self.tick(svc, seconds)
+        self.assertEqual(len(self.launches.calls), 2)
+        self.assertGreater(self.rows("manager.started")[-1]["seen_after"], 0)
+        self.assertEqual(svc._sprints[sid].manager_session, "s-2")
+
+    def launched_and_seen(self, launch):
+        self.launches(launch)
+        if launch.takeover:
+            self.append(self.svc_under_test, [("session.seen", "owner/p01", {
+                "session_id": "s-2", "cwd": "/srv/p01", "repo": "/srv/p01", "state": "idle",
+                "name": launch.session_name})])
 
     def test_a_wake_that_never_comes_back_counts_as_failed(self):
         svc = self.begin()

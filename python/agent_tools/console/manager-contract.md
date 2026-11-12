@@ -39,7 +39,7 @@ If this text is no longer in your context, run `sprint contract` again.
    - No brief: draft one, as Drafting the brief says.
    - Decision `changes`: revise the brief from the reply `sprint recap` printed and send the new version, even when `sprint inbox` printed nothing, because that change request was read before the restart.
    - Decision `none`: the brief waits for the owner; end your turn.
-   - Decision `approved`: continue from the last report's next step, or follow After approval when there is no report.
+   - Decision `approved`: the last report may describe an earlier version of the brief, so check its next step against the approved brief's parts before following it. Continue only the work the approved brief still includes and drop what it removed; follow After approval when there is no report or nothing is left.
 
 ## After approval
 

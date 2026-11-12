@@ -16,7 +16,8 @@ Three more kinds record the sprint's manager (#888), none of them kept (`event_l
 `MANAGER_FAILED`, `MANAGER_WAITING`; each with the project in its project column), and two record
 its bring-back (#893; `event_log.MANAGER_WOKEN`, `MANAGER_STALLED`, not kept either):
 
-    manager.started  {"sprint_id", "profile": <str>, "session_name": <str>, "takeover"?: true}
+    manager.started  {"sprint_id", "profile": <str>, "session_name": <str>, "seen_after"?: <int>,
+                      "takeover"?: true}
     manager.failed   {"sprint_id", "reason": <str>, "takeover"?: true}
     manager.waiting  {"sprint_id", "until": <str> | null, "takeover"?: true}
     manager.woken    {"sprint_id", "session_id": <str>, "ok": <bool>, "reason"?: <str>,
@@ -200,9 +201,12 @@ A `session.seen` row carries no sprint id: when its string `name` fully matches
 `<project> sprint <16 lowercase hex>` (`manager.session_name`), the sprint is open, the name's
 project and the row's project column both equal the sprint's, the row's string `session_id` becomes
 the sprint's `manager_session` (the latest row wins) and the row's `seq` becomes its
-`manager_seen_seq`; the same row sets `back` on the last revival when that is a `WAKE` not yet back.
+`manager_seen_seq`; the same row sets `back` on the last revival when that is a `WAKE` not yet back
+and clears `stalled` and `stalled_at`, since a manager listed again is no longer stalled.
 A valid `manager.started` row clears `manager_session`, since the session it named belonged to the
-manager that row replaces.
+manager that row replaces, unless the row's int `seen_after` (the `manager_seen_seq` the sprint had
+when the launch began) is below the seq of the latest seen row: that row was written while the
+launcher was still returning, so it names the new manager and is kept.
 
 `message_state(message)` is `READ` when `read_at` is set, else `DELIVERED` when `delivered_at` is,
 else `SENT`; `unread(state)` is the messages without `read_at`, in id order; `unreachable(state)` is
@@ -714,7 +718,8 @@ def _folded_session(folded: dict[str, SprintState], event: Event) -> None:
         if revivals and revivals[-1].how == WAKE and not revivals[-1].back:
             revivals = (*revivals[:-1], replace(revivals[-1], back=True))
         folded[state.sprint_id] = replace(state, manager_session=session_id,
-                                          manager_seen_seq=event.seq, revivals=revivals)
+                                          manager_seen_seq=event.seq, revivals=revivals,
+                                          stalled=None, stalled_at=None)
 
 
 def _folded_manager(state: SprintState, event: Event) -> SprintState:
@@ -724,9 +729,13 @@ def _folded_manager(state: SprintState, event: Event) -> SprintState:
         profile, name = payload.get("profile"), payload.get("session_name")
         if isinstance(profile, str) and isinstance(name, str):
             revivals = state.revivals + ((Revival(event.at, TAKEOVER, True),) if takeover else ())
+            seen_after = payload.get("seen_after")
+            current = (_id(seen_after) and state.manager_seen_seq is not None
+                       and state.manager_seen_seq > seen_after)
             return replace(state, manager=Manager(STARTED, event.at, profile, name,
                                                   takeover=takeover),
-                           manager_session=None, revivals=revivals, stalled=None, stalled_at=None)
+                           manager_session=state.manager_session if current else None,
+                           revivals=revivals, stalled=None, stalled_at=None)
     elif event.kind == MANAGER_FAILED:
         reason = payload.get("reason")
         if isinstance(reason, str):

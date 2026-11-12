@@ -393,8 +393,10 @@ no job; `WAKE` reserves the sprint in `_nudging` and queues `_revive_wake`; `TAK
 `_launching` with a `_TakeoverReservation` and queues the launch. A wake dispatch that raises frees
 the reservation and appends one failed `manager.woken` row ("the wake could not start: ..."). The
 wake job, off the lock, reads a fresh `listing()` and sends no wake when it shows the manager's name
-(it sets `_last_listed` instead and appends nothing); otherwise it calls the nudger with the `revive`
-route and appends `manager.woken {sprint_id, goal, session_id, ok[, reason][, back]}` while the
+(it sets `_last_listed` instead and appends nothing); it then decides again under the lock
+(`_wake_due`: open, manager not listed, `_revive_step` still `WAKE`) and sends no wake, appending
+nothing, when the sprint was withdrawn or stopped having work during the listing; otherwise it calls
+the nudger with the `revive` route and appends `manager.woken {sprint_id, goal, session_id, ok[, reason][, back]}` while the
 sprint is open and the service not stopping; a failure also prints `console: wake_failed <sprint_id>
 <reason>`, and `back` is true when the wake succeeded and the manager was listed or seen (a newer
 `manager_seen_seq`) while the command ran. A takeover job reads the listing off the lock (one that
@@ -403,7 +405,9 @@ neither the fresh listing nor the folded sessions show the manager and `_revive_
 takeover; otherwise it appends nothing. A launch is a takeover when it was reserved by the bring-back
 or is a retry of a stalled sprint or of a manager row that is a takeover; every manager row it writes
 (`manager.started`, `manager.failed` including the missing-secret one, `manager.waiting`) carries
-`"takeover": true` and `"goal"`, and the launch uses `manager.new_launch(..., takeover=True)`. The
+`"takeover": true` and `"goal"`, every `manager.started` carries `"seen_after"` (the sprint's
+`manager_seen_seq` when the launch was prepared, 0 if none) so the fold keeps a session seen while the
+launcher returned, and the launch uses `manager.new_launch(..., takeover=True)`. The
 nudger, launcher and listing are never called with the ingest lock held; the owner's text and the
 secret appear in no new row or stderr line.
 
@@ -1557,7 +1561,8 @@ class ConsoleService:
                 "sprint_id": sprint_id, "until": choice.until, **marks}, token)
             return None
         return manager.new_launch(sprint_id, project_id, sprint.goal, project.root, choice,
-                                  secret, self._sprint_secrets, takeover=takeover)
+                                  secret, self._sprint_secrets, takeover=takeover,
+                                  seen_after=sprint.manager_seen_seq or 0)
 
     def _append_manager(self, kind: str, project_id: str, payload: dict, token: object) -> None:
         """Under the ingest lock: append one manager row, release the attempt's hold, publish."""
@@ -1578,7 +1583,8 @@ class ConsoleService:
             if reason is None:
                 self._append_manager(MANAGER_STARTED, launch.project_id, {
                     "sprint_id": launch.sprint_id, "profile": launch.profile,
-                    "session_name": launch.session_name, **marks}, token)
+                    "session_name": launch.session_name, "seen_after": launch.seen_after,
+                    **marks}, token)
                 return
             if secret:
                 reason = reason.replace(secret, "<secret>")
@@ -1878,14 +1884,20 @@ class ConsoleService:
         if not ok:
             print(f"console: wake_failed {sprint_id} {reason}", file=sys.stderr)
 
+    def _wake_due(self, sprint_id: str) -> sprints.SprintState | None:
+        """Under the ingest lock: the open sprint when a wake of its manager is still the step."""
+        sprint = self._sprints.get(sprint_id)
+        if (sprint is None or sprint.manager is None or self._manager_listed(sprint)
+                or self._revive_step(sprint, int(self._clock() * 1000)) != sprints.WAKE):
+            return None
+        return sprint
+
     def _revive_wake(self, sprint_id: str) -> None:
         """Resume the sprint's stopped manager in place, then record the attempt; the reservation ends here."""
         with self._ingest:
-            sprint = self._sprints.get(sprint_id)
+            sprint = self._wake_due(sprint_id)
             project = None if sprint is None else self._states.get(sprint.project_id)
-            if (sprint is None or project is None or sprint.manager is None
-                    or self._manager_listed(sprint)
-                    or self._revive_step(sprint, int(self._clock() * 1000)) != sprints.WAKE):
+            if sprint is None or project is None:
                 self._nudging.discard(sprint_id)
                 return
             name = manager.session_name(sprint.project_id, sprint_id)
@@ -1898,6 +1910,10 @@ class ConsoleService:
                     self._last_listed[sprint_id] = int(self._clock() * 1000)
                     self._nudging.discard(sprint_id)
                 return
+            with self._ingest:
+                if self._wake_due(sprint_id) is None:
+                    self._nudging.discard(sprint_id)
+                    return
             self._nudger(nudge.Nudge(sprint_id, nudge.REVIVE, name, session_id, profile, root))
         except Exception as error:
             reason = (str(error) if isinstance(error, nudge.NudgeFailed)

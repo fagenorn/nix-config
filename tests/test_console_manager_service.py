@@ -110,7 +110,7 @@ class ManagerServiceTest(Case):
         _, _, kind, project, payload = support.log_rows(self.store)[-1]
         self.assertEqual((kind, project, json.loads(payload)), (
             "manager.started", "owner/p01",
-            {"profile": "work", "session_name": name, "sprint_id": sid}))
+            {"profile": "work", "session_name": name, "sprint_id": sid, "seen_after": 0}))
         self.assertEqual(self.sprint(svc, sid)["manager_state"], "started")
 
     def test_the_launch_uses_the_profile_with_most_weekly_allowance(self):

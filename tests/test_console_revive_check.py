@@ -176,6 +176,12 @@ class ReviveCheckTest(unittest.TestCase):
         self.assertEqual(len(self.posts("/api/withdraw")), 1)
         self.assertFalse(self.state_file.exists())
 
+    def test_a_session_listed_again_after_the_return_limit_is_not_met(self):
+        code, out = self.run_check(SCRIPT, [(None, listed("s-1")), (700, listed("s-1"))])
+        self.assertEqual((code, out["status"], out["back_seconds"]), (1, "not_met", None))
+        self.assertEqual(out["reason"], "the manager did not come back within 600 s of the stop")
+        self.assertEqual(self.removals, [])
+
     def test_the_return_limit_holds_across_resumed_runs(self):
         code, out = self.run_check(SCRIPT, [(None, listed("s-1")), (300, GONE)], budget="250")
         self.assertEqual((code, out["phase"], out["status"]), (75, "back", "waiting"))
@@ -209,6 +215,13 @@ class ReviveCheckTest(unittest.TestCase):
         self.assertEqual(out["reason"], "no new manager within 900 s of the removal")
         self.assertEqual(self.removals, ["s-1"])
         self.assertEqual(self.result()["back_seconds"], 20)
+
+    def test_a_successor_listed_after_the_successor_limit_is_not_met(self):
+        code, out = self.run_check(SCRIPT, [
+            (None, listed("s-1")), (None, GONE), (130, listed("s-1")), (None, GONE),
+            (1100, listed("s-2"))])
+        self.assertEqual((code, out["status"], out["back_seconds"]), (1, "not_met", 130))
+        self.assertEqual(out["reason"], "no new manager within 900 s of the removal")
 
     def test_a_stalled_sprint_is_not_met(self):
         code, out = self.run_check(

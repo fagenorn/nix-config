@@ -482,6 +482,17 @@ class RevivalFoldTest(unittest.TestCase):
         self.assertEqual(state.revivals[-1], sprints.Revival(at(5), "takeover", True))
         self.assertIs(state.manager.takeover, True)
 
+    def test_a_seen_manager_session_clears_a_stall(self):
+        name = "p00 sprint " + SID
+        seen = Event(4, at(4), "session.seen", "p00",
+                     {"session_id": "s-1", "name": name, "cwd": "/x", "repo": None,
+                      "state": "idle"})
+        state = self.fold(self.started(2), self.stalled(3, reason="r"), seen)
+        self.assertEqual((state.stalled, state.stalled_at, state.manager_session),
+                         (None, None, "s-1"))
+        state = self.fold(self.started(2), seen, self.stalled(5, reason="again"))
+        self.assertEqual((state.stalled, state.stalled_at), ("again", at(5)))
+
     def test_a_stall_row_sets_the_reason_and_its_time(self):
         state = self.fold(self.started(2), self.stalled(3, reason="r"))
         self.assertEqual((state.stalled, state.stalled_at), ("r", at(3)))
@@ -898,6 +909,35 @@ class MessageFoldTest(unittest.TestCase):
                       {"session_id": "s-2", "name": name, "cwd": "/x", "repo": None,
                        "state": "idle"})
         self.assertEqual(sprints.sprint_states([*rows, later])[SID].manager_session, "s-2")
+
+    def test_a_session_seen_while_the_launcher_returned_is_kept_by_its_started_row(self):
+        name = manager.session_name("owner/p01", SID)
+
+        def seen(seq, session_id):
+            return Event(seq, at(seq), "session.seen", "owner/p01",
+                         {"session_id": session_id, "name": name, "cwd": "/x", "repo": None,
+                          "state": "idle"})
+
+        def started(seq, seen_after):
+            return managed(seq, SID, MANAGER_STARTED, profile="work", session_name=name,
+                           seen_after=seen_after)
+
+        goal = stated(1, "owner/p01", SID, "one")
+        first = sprints.sprint_states([goal, seen(2, "s-1"), started(3, 1)])[SID]
+        self.assertEqual((first.manager_session, first.manager_seen_seq), ("s-1", 2))
+        replaced = sprints.sprint_states([goal, seen(2, "s-1"), started(3, 0), seen(4, "s-2"),
+                                          started(5, 2)])[SID]
+        self.assertEqual(replaced.manager_session, "s-2")
+        old = sprints.sprint_states([goal, seen(2, "s-1"), started(3, 2)])[SID]
+        self.assertIsNone(old.manager_session)
+        for seen_after in (None, "2", True):
+            with self.subTest(seen_after=seen_after):
+                row = managed(3, SID, MANAGER_STARTED, profile="work", session_name=name)
+                if seen_after is not None:
+                    row = managed(3, SID, MANAGER_STARTED, profile="work", session_name=name,
+                                  seen_after=seen_after)
+                self.assertIsNone(
+                    sprints.sprint_states([goal, seen(2, "s-1"), row])[SID].manager_session)
 
     def test_malformed_message_rows_change_nothing(self):
         base = message_rows()

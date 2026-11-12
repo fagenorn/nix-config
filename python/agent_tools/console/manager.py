@@ -114,6 +114,7 @@ class Launch:
     settings: Path
     env: Mapping[str, str] = field(repr=False)
     takeover: bool = False
+    seen_after: int = 0
 
 
 @dataclass(frozen=True)
@@ -134,13 +135,15 @@ def remove_settings(directory: Path, sprint_id: str) -> None:
 
 
 def new_launch(sprint_id: str, project_id: str, goal: str, root: str, profile: str,
-               secret: str, settings_dir: Path, takeover: bool = False) -> Launch:
+               secret: str, settings_dir: Path, takeover: bool = False,
+               seen_after: int = 0) -> Launch:
     return Launch(
         sprint_id=sprint_id, project_id=project_id, cwd=root, profile=profile,
         session_name=session_name(project_id, sprint_id),
         prompt=(TAKEOVER_LEAD if takeover else PROMPT_LEAD) + goal,
         settings=settings_path(settings_dir, sprint_id),
-        env={ID_ENV: sprint_id, SECRET_ENV: secret}, takeover=takeover)
+        env={ID_ENV: sprint_id, SECRET_ENV: secret}, takeover=takeover,
+        seen_after=seen_after)
 
 
 def choose_profile(capacity: Mapping, bound: str) -> str | Wait:

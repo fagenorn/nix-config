@@ -1361,6 +1361,18 @@ class ReviveViewTest(unittest.TestCase):
         self.assertEqual((entry["manager_state"], entry["manager_text"], entry["retry"]),
                          ("stalled", "managers keep failing: r", True))
 
+    def test_a_stalled_manager_seen_again_leaves_no_stall_item_and_reads_started(self):
+        seen = self.row(4, "session.seen", session_id="s-1", cwd="/x", repo=None, state="idle",
+                        name="p00 sprint " + self.SID)
+        started = self.row(2, event_log.MANAGER_STARTED, sprint_id=self.SID, profile="work",
+                           session_name="p00 sprint " + self.SID)
+        folded = sprint_states([self.stated(), started, self.stalled(), seen])
+        shown = derive_view([state("p00", 1)], sprints=folded)
+        self.assertEqual(shown["inbox"]["open"], [])
+        self.assertEqual(shown["statement"]["inbox_items"], 0)
+        entry = shown["entries"][0]["sprints"][0]
+        self.assertEqual((entry["manager_state"], entry["retry"]), ("started", False))
+
     def test_stall_items_follow_briefs_and_precede_tracker_items(self):
         a, b, c = "a" * 16, "b" * 16, "c" * 16
         stall = dataclasses.replace

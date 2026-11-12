@@ -325,11 +325,11 @@ def _start(args, registry, stop, remove, clock, sleep) -> int:
             returned = any(o.name == name() and o.session_id == state["first_session"]
                            for o in registry().values())
             now = clock()
+            if now - state["stopped_at"] > RETURN_LIMIT:
+                return settle(1, NO_RETURN_TEXT)
             if returned:
                 checkpoint(phase="remove", back_seconds=int(now - state["stopped_at"]))
                 advanced = True
-            elif now - state["stopped_at"] > RETURN_LIMIT:
-                return settle(1, NO_RETURN_TEXT)
         elif phase == "remove":
             try:
                 manager.stop_listed([name()], registry, stop)
@@ -344,10 +344,10 @@ def _start(args, registry, stop, remove, clock, sleep) -> int:
             now = clock()
             if state["first_session"] in ids:
                 return settle(1, CAME_BACK_TEXT)
-            if ids:
-                return settle(0, None)
             if now - state["removed_at"] > SUCCESSOR_LIMIT:
                 return settle(1, NO_SUCCESSOR_TEXT)
+            if ids:
+                return settle(0, None)
         if clock() - run_start >= args.budget:
             _print({"phase": state["phase"], "sprint_id": sprint_id, "status": "waiting"})
             return NOT_YET
