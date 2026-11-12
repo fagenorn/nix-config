@@ -22,7 +22,10 @@ unit and a restart of it does not end it:
 The name is `<project> sprint <sprint id>`. The prompt is one argv element, `PROMPT_LEAD` (`You
 are the manager of one sprint, started by the console. Run "sprint contract" first and follow
 what it prints. The goal: `) followed by the goal verbatim; `sprint contract` prints the manager's
-contract, a document of this package. The secret is on no argv element.
+contract, a document of this package. The secret is on no argv element. A takeover launch (a
+sprint whose manager is gone and has work, `Launch.takeover`) carries `TAKEOVER_LEAD` instead (`You
+take over one sprint whose manager is gone, started by the console. Run "sprint contract" first,
+then "sprint recap", and follow what they print. The goal: `) followed by the goal verbatim.
 
 Settings file. `claude --bg` hands the session to one supervisor per configuration directory,
 and a supervisor that is already running may start the session with its own environment, not the
@@ -72,6 +75,9 @@ from agent_tools.console.sessions import DEFAULT_PROFILE, main_checkout
 
 PROMPT_LEAD = ("You are the manager of one sprint, started by the console. "
                'Run "sprint contract" first and follow what it prints. The goal: ')
+TAKEOVER_LEAD = ("You take over one sprint whose manager is gone, started by the console. "
+                 'Run "sprint contract" first, then "sprint recap", and follow what they print. '
+                 "The goal: ")
 ID_ENV = "CONSOLE_SPRINT_ID"
 SECRET_ENV = "CONSOLE_SPRINT_SECRET"
 ACCOUNT_ENV = "CLAUDE_ACCOUNT"
@@ -107,6 +113,8 @@ class Launch:
     prompt: str
     settings: Path
     env: Mapping[str, str] = field(repr=False)
+    takeover: bool = False
+    seen_after: int = 0
 
 
 @dataclass(frozen=True)
@@ -127,12 +135,15 @@ def remove_settings(directory: Path, sprint_id: str) -> None:
 
 
 def new_launch(sprint_id: str, project_id: str, goal: str, root: str, profile: str,
-               secret: str, settings_dir: Path) -> Launch:
+               secret: str, settings_dir: Path, takeover: bool = False,
+               seen_after: int = 0) -> Launch:
     return Launch(
         sprint_id=sprint_id, project_id=project_id, cwd=root, profile=profile,
-        session_name=session_name(project_id, sprint_id), prompt=PROMPT_LEAD + goal,
+        session_name=session_name(project_id, sprint_id),
+        prompt=(TAKEOVER_LEAD if takeover else PROMPT_LEAD) + goal,
         settings=settings_path(settings_dir, sprint_id),
-        env={ID_ENV: sprint_id, SECRET_ENV: secret})
+        env={ID_ENV: sprint_id, SECRET_ENV: secret}, takeover=takeover,
+        seen_after=seen_after)
 
 
 def choose_profile(capacity: Mapping, bound: str) -> str | Wait:

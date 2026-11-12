@@ -12,8 +12,8 @@ from agent_tools.console.digest import (
     BRIEF_APPROVED_MOMENT, BRIEF_SENT_MOMENT, EARLIER_MAX, FIRST_VISIT, LOOKED, SHOWN,
     SPRINT_STATE_MOMENT, SPRINT_WITHDRAWN, Moment, digest, keep, last_looked, moments)
 from agent_tools.console.event_log import (
-    BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, SPRINT_REPORTED,
-    Event)
+    BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
+    MANAGER_STALLED, MANAGER_STARTED, MANAGER_WOKEN, SPRINT_REPORTED, Event)
 from agent_tools.console.sessions import SessionState
 from agent_tools.console.sprints import sprint_states
 from agent_tools.console.view import InboxRecord
@@ -137,6 +137,34 @@ class DigestTest(unittest.TestCase):
             for leaked in ("deliver", "stray-session", "aaaaaaaa", "cccccccc", "/srv"):
                 self.assertNotIn(leaked, sentence)
 
+    def test_a_session_named_for_a_sprint_adds_no_moment(self):
+        manager = "owner/p00 sprint 0123456789abcdef"
+
+        def seen(seq, sid, state="working", **named):
+            return Event(seq, at(seq), "session.seen", "owner/p00" if seq == 1 else None,
+                         {"session_id": sid, "cwd": "/srv/p00", "repo": "/srv/p00",
+                          "state": state, **named})
+
+        def gone(seq, sid):
+            return Event(seq, at(seq), "session.gone", None, {"session_id": sid})
+
+        events = [
+            seen(1, "m1", name=manager),
+            Event(2, at(2), "session.hook", "owner/p00",
+                  {"event": "StopFailure", "session_id": "m1", "cwd": "/srv/p00",
+                   "repo": "/srv/p00", "error": "rate_limit"}),
+            seen(3, "m1"),
+            gone(4, "m1"),
+            seen(5, "n1", name="owner/p00 sprint 0123"), gone(6, "n1"),
+            seen(7, "w1", name="deliver"), gone(8, "w1"),
+            seen(9, "u1"), gone(10, "u1"),
+            seen(11, "x1", name=manager + " extra"), gone(12, "x1")]
+        found = moments(events, {}, {})
+        ended = "A session in p00 ended."
+        self.assertEqual([(m.seq, m.kind, m.sentence) for m in found],
+                         [(6, "session_ended", ended), (8, "session_ended", ended),
+                          (10, "session_ended", ended), (12, "session_ended", ended)])
+
     def test_keep_drops_moments_at_or_before_the_start(self):
         made = [Moment(1, at(0), "k", "before"), Moment(2, at(1), "k", "at"),
                 Moment(3, at(1, 1), "k", "after")]
@@ -172,6 +200,38 @@ class DigestTest(unittest.TestCase):
                    "A brief for owner/p00 arrived, version 2: make the importer resumable"),
             Moment(5, at(5), BRIEF_APPROVED_MOMENT,
                    "The brief for owner/p00 was approved, version 2: make the importer resumable")])
+
+    def test_a_wake_that_ran_and_a_takeover_that_started_each_say_one_sentence(self):
+        sid = "a" * 16
+        rows = [
+            Event(1, at(1), GOAL_STATED, "owner/p00", {"sprint_id": sid, "goal": "g"}),
+            Event(2, at(2), MANAGER_STARTED, "owner/p00", {
+                "sprint_id": sid, "profile": "work", "session_name": "n"}),
+            Event(3, at(3), MANAGER_WOKEN, "owner/p00", {
+                "sprint_id": sid, "ok": True, "goal": "g", "session_id": "s-1"}),
+            Event(4, at(4), MANAGER_STARTED, "owner/p00", {
+                "sprint_id": sid, "takeover": True, "goal": "g", "profile": "work",
+                "session_name": "n"})]
+        self.assertEqual([(m.kind, m.sentence) for m in moments(rows, {}, {})][-2:], [
+            ("manager_restarted", "The manager of g was restarted"),
+            ("manager_takeover", "A new manager took over g")])
+
+    def test_failed_bring_backs_and_a_stall_say_nothing(self):
+        sid = "a" * 16
+        rows = [
+            Event(1, at(1), GOAL_STATED, "owner/p00", {"sprint_id": sid, "goal": "g"}),
+            Event(2, at(2), MANAGER_STARTED, "owner/p00", {
+                "sprint_id": sid, "profile": "work", "session_name": "n", "goal": "g"})]
+        self.assertEqual(moments(rows, {}, {}), [])
+        rows += [
+            Event(3, at(3), MANAGER_WOKEN, "owner/p00", {
+                "sprint_id": sid, "ok": False, "goal": "g", "session_id": "s-1",
+                "reason": "r"}),
+            Event(4, at(4), MANAGER_FAILED, "owner/p00", {
+                "sprint_id": sid, "takeover": True, "goal": "g", "reason": "r"}),
+            Event(5, at(5), MANAGER_STALLED, "owner/p00", {
+                "sprint_id": sid, "goal": "g", "reason": "r"})]
+        self.assertEqual(moments(rows, {}, {}), [])
 
     def test_a_sprint_state_sentence_only_when_the_reported_state_changes(self):
         sid, goal = "a" * 16, "make the importer resumable"

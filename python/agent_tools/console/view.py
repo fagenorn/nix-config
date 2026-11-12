@@ -64,7 +64,8 @@ see below), else
 `ALL_OUT_HEADLINE` when every profile is out of usage, else `STALE_HEADLINE` when a registered
 project's tracker cannot be read, else "Nothing needs you". The sentence is `ALL_OUT_SENTENCE`
 when every profile is out of usage, else `STALE_SENTENCE` naming those projects when any is
-stale, else `BRIEF_SENTENCE` when any brief is open, else `CHOOSE_SENTENCE` when an open item is a
+stale, else `BRIEF_SENTENCE` when any brief is open, else `MANAGER_SENTENCE` when a sprint is
+stalled, else `CHOOSE_SENTENCE` when an open item is a
 decision with questions (the page can
 answer it), else `ANSWER_SENTENCE` when an open item has answers (a verification prompt the page
 can answer), else `NEEDS_SENTENCE` when something is open, else the registered-project count. The
@@ -91,6 +92,17 @@ counts in `inbox_items` and the headline. Its entry is
      "sprint_id", "goal", "version": <int>, "brief": {"done", "excluded", "slices", "risks",
      "asks"}, "answered": false, "waiting_since": "<time the brief was sent>"}
 
+A stalled sprint (a shown sprint whose `stalled` is not None, `sprints.py`) is one entry of
+`inbox.open`, after the briefs and before every tracker item, ordered by `waiting_since` then
+`sprint_id`, and counts in `inbox_items` and the headline. Its entry is
+
+    {"type": "inbox_item", "reason": "manager", "key": "manager/<sprint id>", "project_id",
+     "sprint_id", "goal", "headline": "managers keep failing on <goal>", "last_reason": <str>,
+     "answered": false, "waiting_since": "<time the sprint stalled>"}
+
+`MANAGER_SENTENCE` says what the page offers. The sentence precedence is all out, stale, briefs, stalls,
+then the existing ones. A restart or a takeover adds no item, only a stall does.
+
 `BRIEF_SENTENCE` ("Press Enter to approve the brief, or write a reply to ask for changes.") says
 what the page offers. An approved or changes-asked brief is no inbox item; only registered
 projects' briefs appear, as for sprints.
@@ -107,7 +119,7 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
                                | "closing" | "done",
                       "state_text": "<text>", "stated_at", "age_text", "manager_text": <text> | null,
                       "manager_state": "none" | "started" | "missing" | "failed" | "waiting"
-                                       | "unavailable",
+                                       | "stalled" | "unavailable",
                       "manager_until": "<time>" | null, "retry": <bool>,
                       "progress": {"landed", "in_delivery", "queued", "held", "total"} | null,
                       "progress_text": "<text>" | null,
@@ -284,6 +296,7 @@ ALL_OUT_HEADLINE = "Every profile is out of usage"
 ALL_OUT_SENTENCE = "Everything resumes at the earliest reset; nothing is asked of you."
 NEEDS_SENTENCE = "Each one links to the tracker, where it is answered."
 BRIEF_SENTENCE = "Press Enter to approve the brief, or write a reply to ask for changes."
+MANAGER_SENTENCE = "Try again to start a new manager, or withdraw the sprint."
 CHOOSE_SENTENCE = "Choose an option with its number and press Enter, or answer on the tracker."
 ANSWER_SENTENCE = "Answer it here, or on the tracker."
 STALE_SENTENCE = ("The tracker could not be read for {projects}; "
@@ -675,6 +688,13 @@ def _brief_entry(sprint: SprintState) -> dict:
             "answered": False, "waiting_since": brief.sent_at}
 
 
+def _stall_entry(sprint: SprintState) -> dict:
+    return {"type": "inbox_item", "reason": "manager", "key": f"manager/{sprint.sprint_id}",
+            "project_id": sprint.project_id, "sprint_id": sprint.sprint_id, "goal": sprint.goal,
+            "headline": f"managers keep failing on {sprint.goal}", "last_reason": sprint.stalled,
+            "answered": False, "waiting_since": sprint.stalled_at}
+
+
 def _headline(open_count: int, stale: bool, all_out: bool) -> str:
     if open_count == 1:
         return "1 thing needs you"
@@ -721,7 +741,9 @@ def derive_view(
     briefs = sorted((s for group in drafted.values() for s in group
                      if s.brief is not None and s.brief.decision == NONE),
                     key=lambda s: (s.brief.sent_at, s.sprint_id))
-    open_count = len(briefs) + len(open_items)
+    stalls = sorted((s for group in drafted.values() for s in group if s.stalled is not None),
+                    key=lambda s: (s.stalled_at, s.sprint_id))
+    open_count = len(briefs) + len(stalls) + len(open_items)
     all_out = bool(capacity["all_out"])
     if all_out:
         sentence = ALL_OUT_SENTENCE
@@ -729,6 +751,8 @@ def derive_view(
         sentence = STALE_SENTENCE.format(projects=", ".join(stale_projects))
     elif briefs:
         sentence = BRIEF_SENTENCE
+    elif stalls:
+        sentence = MANAGER_SENTENCE
     elif any(r.item["reason"] == "decision" and r.item["questions"] for r in open_items):
         sentence = CHOOSE_SENTENCE
     elif any(r.item.get("answers") for r in open_items):
@@ -789,7 +813,7 @@ def derive_view(
                       "headline": _headline(open_count, bool(stale_projects), all_out),
                       "sentence": sentence, "stale": bool(stale_projects)},
         "capacity": capacity,
-        "inbox": {"open": [_brief_entry(s) for s in briefs]
+        "inbox": {"open": [_brief_entry(s) for s in briefs] + [_stall_entry(s) for s in stalls]
                           + [_inbox_entry(r, health) for r in open_items],
                   "answered": [_inbox_entry(r, health) for r in answered]},
         "project_count": len(states),
