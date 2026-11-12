@@ -574,6 +574,27 @@ class WithdrawStopTest(StopServiceTest):
         self.assertEqual(self.stops, [(FIRST, "work")])
         self.assertEqual(self.rows("manager.stopped"), [{"sprint_id": sid}])
 
+    def test_a_poll_between_the_launch_record_and_its_settle_does_not_lose_the_stop(self):
+        svc = self.begin(launcher=self.withdrawing_launch(False))
+        self.svc = svc
+        record = svc._record_launch
+
+        def recorded(*args):
+            record(*args)
+            svc.finish_stops()
+
+        svc._record_launch = recorded
+        sid = svc.state_goal("owner/p01", GOAL_TEXT)
+        self.assertEqual(self.stops, [])
+        self.assertEqual(self.rows("manager.stopped"), [])
+        self.now[0] = T0 + 10
+        self.listed[FIRST] = sessions.Observation(
+            FIRST, "/srv/p01", 1, "idle", None, manager.session_name("owner/p01", sid), None,
+            "work")
+        svc.finish_stops()
+        self.assertEqual(self.stops, [(FIRST, "work")])
+        self.assertEqual(self.rows("manager.stopped"), [{"sprint_id": sid}])
+
     def test_a_session_listed_late_after_a_launch_is_still_stopped(self):
         svc = self.begin(launcher=self.withdrawing_launch(False))
         self.svc = svc

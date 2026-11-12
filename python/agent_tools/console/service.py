@@ -1590,6 +1590,7 @@ class ConsoleService:
     def _record_launch(self, launch: manager.Launch, reason: str | None, token: object) -> None:
         secret = launch.env[manager.SECRET_ENV]
         with self._ingest:
+            self._settled[launch.sprint_id] = int(self._clock() * 1000)
             self._release(launch.sprint_id, token)
             if launch.sprint_id not in self._sprints:
                 self._drop_sprint_files(launch.sprint_id)
