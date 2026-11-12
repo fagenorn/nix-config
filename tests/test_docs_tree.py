@@ -406,6 +406,19 @@ class DocsTreeTest(unittest.TestCase):
         for needle in ("/api/answer", "4096"):
             self.assertIn(needle, write)
 
+    def test_the_console_owner_prompt_decision_is_recorded(self):
+        path = "docs/areas/console/adr/012-the-page-answers-owner-prompts-through-the-runners-owner-path.md"
+        first = (REPO_ROOT / path).read_text().splitlines()[0]
+        self.assertEqual(
+            first, "# ADR-console-012 — The page answers owner prompts through the runner's owner path")
+        adr = self.doc(path)
+        for needle in ("POST /api/check-answer", "ADR-console-010", "ADR-verification-009", "#836",
+                       "#837", "#863", "typed confirmation", "no multi-item action", "kept"):
+            self.assertIn(needle, adr)
+        self.assertNotIn(
+            "Nothing is typed",
+            self.doc("docs/areas/console/adr/002-the-desk-page-design-rules.md"))
+
     def test_the_console_goal_decision_is_recorded(self):
         path = "docs/areas/console/adr/011-a-goal-stated-on-the-page-becomes-a-sprint.md"
         first = (REPO_ROOT / path).read_text().splitlines()[0]
