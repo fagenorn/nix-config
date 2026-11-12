@@ -8,8 +8,10 @@ Result read. Each host check writes a result file whose `"cleared"` member is
 `{"project": str, "names": [str], "profiles": [str]}`: the project it ran for, the session names of
 the test managers it stopped and removed, and the profiles it stopped them in. A result is fresh
 when its file parses as a JSON object whose `cleared` is an object with `project` equal to the
-requested project, a list `names` and a list `profiles`. An absent, unreadable, old-shape or
-other-project result is not fresh.
+requested project, a nonempty list `names` of nonempty strings and a list `profiles`. An absent,
+unreadable, old-shape or other-project result is not fresh, and neither is one that cleared no test
+sprint (a check whose goal creation failed): with no name to look for, a listing proves nothing, so
+the check runs again.
 
 Files. The checks dir defaults to `manager_check._state_dir() / "checks" / "cleanup"`, apart from
 the default files other verify holds of these checks use. Under it, `project_dir(checks_dir,
@@ -79,7 +81,8 @@ def _fresh_cleared(result_file: Path, project: str) -> dict | None:
         return None
     cleared = document.get("cleared") if isinstance(document, dict) else None
     if (isinstance(cleared, dict) and cleared.get("project") == project
-            and isinstance(cleared.get("names"), list)
+            and isinstance(cleared.get("names"), list) and cleared["names"]
+            and all(isinstance(n, str) and n for n in cleared["names"])
             and isinstance(cleared.get("profiles"), list)):
         return cleared
     return None

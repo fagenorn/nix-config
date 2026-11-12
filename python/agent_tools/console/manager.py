@@ -64,12 +64,14 @@ of a sprint (#892) uses it through the console service.
 `remove_session(session_id, profile)` runs `claude-account run rm <short id>` under the session's
 own profile within `REMOVE_TIMEOUT` seconds, and its failures are `RemoveFailed` (a `StopFailed`)
 with the four reasons. `stop_listed(..., stopped)` appends each stop that succeeded as
-`{"session_id", "profile"}` unless an unremoved entry for that id is already there.
+`{"session_id", "profile"}` unless an unremoved entry for that id under that profile is already
+there (a retry that stops the same id under another profile records it too).
 `remove_stopped(stopped, remove)` removes each entry not marked `"removed": true`, marks each
 success, tries every one and raises the first failure. `mark_removed` marks a removal made outside
-`remove_stopped`. Both loops call an optional `before()` ahead of each call and let its exception
-end the loop; `finish_guard(clock, run_start, budget, save)` is that `before` for a check's finish:
-it saves the check's state, then raises `OutOfTime` when one more 60-second call could end past
+`remove_stopped`, matching the entry by id and profile. Both loops call an optional `before()`
+ahead of each call and let its exception end the loop; `finish_guard(clock, run_start, budget,
+save)` is that `before` for a check's finish: it saves the check's state, then raises
+`OutOfTime` when one more 60-second call could end past
 `max(FINISH_LIMIT, budget + FINISH_SECONDS)` seconds of the run (590 with the default budget of
 540), because verify-pending kills a run after 600. The verify checks use these to remove the
 record of each test manager they stopped. The console's own withdrawal removes nothing
@@ -364,7 +366,8 @@ def stop_listed(names, registry: Callable[[], Mapping],
                 failure = failure or error
                 continue
             if stopped is not None and not any(
-                    entry["session_id"] == observation.session_id and not entry.get("removed")
+                    entry["session_id"] == observation.session_id
+                    and entry["profile"] == profile and not entry.get("removed")
                     for entry in stopped):
                 stopped.append({"session_id": observation.session_id, "profile": profile})
     if failure is not None:
@@ -391,7 +394,8 @@ def remove_stopped(stopped: list, remove: Callable[[str, str], None],
 
 def mark_removed(stopped: list, session_id: str, profile: str) -> None:
     for entry in stopped:
-        if entry["session_id"] == session_id and not entry.get("removed"):
+        if (entry["session_id"] == session_id and entry["profile"] == profile
+                and not entry.get("removed")):
             entry["removed"] = True
             return
     stopped.append({"session_id": session_id, "profile": profile, "removed": True})

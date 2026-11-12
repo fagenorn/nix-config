@@ -81,6 +81,19 @@ class CleanupCheckTest(unittest.TestCase):
         self.assertEqual(("console.message_check", PROJECT, self.pdir / "owner-message.json",
                           self.pdir / "owner-message-result.json"), self.runs[-1])
 
+    def test_a_result_that_cleared_no_sprint_name_is_run_again(self):
+        # a failed goal creation leaves a met-shaped result with no test sprint to look for
+        for bad in ([], [""], ["p sprint a", 7], [None]):
+            with self.subTest(names=bad):
+                self.runs.clear()
+                self.all_fresh()
+                self.fresh("owner-message", bad, ["work"])
+                self.assertEqual(
+                    (75, {"check": "owner-message", "check_exit": 0, "status": "waiting"}),
+                    self.check())
+                self.assertEqual(["console.message_check"], [run[0] for run in self.runs])
+                self.assertEqual([], self.read)
+
     def test_a_result_written_for_another_project_is_run_again(self):
         self.all_fresh()
         self.fresh("manager-start", ["q sprint a"], ["work"], project="owner/p02")

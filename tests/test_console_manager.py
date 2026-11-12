@@ -453,6 +453,16 @@ class StopTest(unittest.TestCase):
         self.assertEqual(stopped, [{"session_id": "s-a", "profile": "work", "removed": True},
                                    {"session_id": "s-a", "profile": "work"}])
 
+    def test_a_retry_that_stops_the_same_id_under_another_profile_records_it_too(self):
+        registry = {1: Observation("s-a", "/srv", 1, "idle", None, "n", None, "p2")}
+        stopped = [{"session_id": "s-a", "profile": "work"}]
+        manager.stop_listed(["n"], lambda: registry, lambda session_id, profile: None, stopped)
+        self.assertEqual(stopped, [{"session_id": "s-a", "profile": "work"},
+                                   {"session_id": "s-a", "profile": "p2"}])
+        calls = []
+        manager.remove_stopped(stopped, lambda session_id, profile: calls.append(profile))
+        self.assertEqual(calls, ["work", "p2"])
+
     def test_every_unremoved_session_is_removed_and_a_failure_is_kept_for_the_retry(self):
         stopped = [{"session_id": "s-a", "profile": "work", "removed": True},
                    {"session_id": "s-b", "profile": "work"},
@@ -546,6 +556,13 @@ class StopTest(unittest.TestCase):
             {"session_id": "s-a", "profile": "work", "removed": True},
             {"session_id": "s-a", "profile": "work", "removed": True},
             {"session_id": "s-b", "profile": "p2", "removed": True}])
+
+    def test_mark_removed_does_not_mark_the_same_id_under_another_profile(self):
+        stopped = [{"session_id": "s-a", "profile": "work"}]
+        manager.mark_removed(stopped, "s-a", "p2")
+        self.assertEqual(stopped, [
+            {"session_id": "s-a", "profile": "work"},
+            {"session_id": "s-a", "profile": "p2", "removed": True}])
 
 
 if __name__ == "__main__":
