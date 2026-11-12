@@ -14,7 +14,7 @@ The correctness review of a delivery range; the calling controller runs its own 
 
 A diff range (`<left>...<right>` or `<left>..<right>`) and the worktree, and when the caller gives them, the plan path (routing context only) and the acceptance criteria. In the worktree, resolve `<head-sha>` with `git rev-parse <right>` and `<base-sha>` with `git merge-base <left> <right>` for a three-dot range or `git rev-parse <left>` for a two-dot one; an unresolvable range stops before packet construction.
 
-Further ranges the caller names as `git -C <worktree> diff <base>...<branch>` (a plan's declared branches) are each resolved in their own worktree the same way and reviewed after the delivery range, each with its own size pre-flight and slices.
+Further ranges the caller names as `git -C <worktree> diff <base>...<branch>` (a plan's declared branches) are each resolved in their own worktree the same way and reviewed with the delivery range, each with its own size pre-flight and slices.
 
 ## Size pre-flight
 
@@ -41,7 +41,7 @@ The budget is 20 product files, compared strictly: `changed_files > 20` gives ea
 
 **No measurement**: an absent helper, a non-zero exit, unparseable output, or a selected path containing a newline (it has no unambiguous one-per-line form in item 6) yields no measurement, never a failure. Dispatch as an under-budget range and report `unmeasured`. Never drop such a path from a slice instead.
 
-Scoping adds no failure class. Slices are dispatched one at a time in slice order; the scope reaches the controller only inside `raw_summary` (see `## Disposition`).
+Scoping adds no failure class; the scope reaches the controller only inside `raw_summary` (see `## Disposition`).
 
 ## Packet
 
@@ -78,10 +78,10 @@ Exactly three sections `Critical` / `Important` / `Minor` (must-fix-before-merge
 
 Map each validated slice result with reviewer identity `Codex`: `Critical` findings as `critical`, `Important` as `important`, `Minor` as `minor`. Return exactly one object to the calling controller by this rule (an unsliced or unmeasured review is one slice):
 
-1. Slices run one at a time in slice order: the delivery range's first, then each further range's.
+1. All slices run together, as background jobs of one shell command that waits for them all (retries likewise); slice order is the delivery range's, then each further range's.
 2. `findings` is every completed slice's mapped findings concatenated in slice order, each unmodified.
 3. `verdict` is `pass` only when every slice ran and none reported a `Critical` or `Important` finding; otherwise `findings` (`Minor` findings alone never make it `findings`).
-4. `available` is `false` when any slice fails its retry (capacity, runtime, payload or schema): later slices still run, and the completed slices' findings stay in `findings`.
+4. `available` is `false` when any slice fails its retry (capacity, runtime, payload or schema): the completed slices' findings stay in `findings`.
 5. `raw_summary` is the scope disclosure: the scope line, exactly one of `scope: full`, `scope: unmeasured` or `scope: <K> slices over <M> product files`; then `base <base-sha> head <head-sha>`; then, for a sliced review only, one line per dispatched slice `slice <i>: scoped to <N> of <M> product files; <assessment>` in slice order, a failed slice's line giving its failure class and verbatim message, then `failed slices: <i>[, <j>]` when any failed. Each further range adds a block after it, opened by `range <worktree> <base>...<branch>` and followed by its own such lines.
 
 The raw transcript stays out of the repository, plan, issue, PR and commits.
