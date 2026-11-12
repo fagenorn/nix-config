@@ -353,6 +353,34 @@ class NudgeServiceTest(MessageRouteTest):
         svc, sid = self.stopped_with_full_listing(frozenset())
         self.assert_message_wake_rewrites_settings(svc, sid)
 
+    def test_a_wake_of_a_sprint_whose_secret_is_missing_is_not_sent(self):
+        svc, sid = self.stopped_with_full_listing(frozenset())
+        path = manager.settings_path(svc._sprint_secrets, sid)
+        path.write_text(json.dumps({"env": {"CONSOLE_SPRINT_ID": sid}}))
+        (svc._sprint_secrets / sid).unlink()
+        svc.send_message("owner/p01", sid, TEXT)
+        self.queued.run_next()
+        self.assertEqual(self.nudges, [])
+        ((_, row),) = self.nudged()
+        self.assertFalse(row["ok"])
+        self.assertEqual(row["reason"], "the sprint's secret is missing")
+
+    def test_a_sprint_withdrawn_during_the_wake_leaves_no_settings_file_and_sends_no_wake(self):
+        svc, sid = self.stopped_with_full_listing(frozenset())
+        path = manager.settings_path(svc._sprint_secrets, sid)
+        path.write_text(json.dumps({"env": {"CONSOLE_SPRINT_ID": sid}}))
+
+        def withdrawn(profile, cwd):
+            svc.withdraw_goal("owner/p01", sid)
+            return frozenset()
+
+        svc._full_listing = withdrawn
+        svc.send_message("owner/p01", sid, TEXT)
+        self.queued.run_next()
+        self.assertEqual(self.nudges, [])
+        self.assertFalse(path.exists())
+        self.assertFalse((svc._sprint_secrets / sid).exists())
+
     def stopped_with_full_listing(self, outcome):
         """A restarted service whose manager is unlisted; `outcome` is what its full listing gives."""
         first = self.begin()

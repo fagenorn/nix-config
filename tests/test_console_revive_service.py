@@ -250,6 +250,21 @@ class ReviveServiceTest(ReviveCase):
         self.assertTrue(row["reason"].startswith("cannot write the manager's settings: "))
         self.assertNotIn(self.secret(sid), row["reason"])
 
+    def test_a_wake_of_a_sprint_whose_secret_is_missing_is_not_sent(self):
+        svc = self.begin()
+        sid = self.on_track(svc)
+        path = self.env_only(svc, sid)
+        before = path.read_text()
+        (svc._sprint_secrets / sid).unlink()
+        self.tick(svc, 0)
+        self.gone(svc)
+        self.tick(svc, 120)
+        self.assertEqual(self.revives(), [])
+        (row,) = self.rows("manager.woken")
+        self.assertFalse(row["ok"])
+        self.assertEqual(row["reason"], "the sprint's secret is missing")
+        self.assertEqual(path.read_text(), before)
+
     def test_an_unreadable_full_listing_gives_the_bare_wake_and_records_why(self):
         for error, reason in (
                 (nudge.ListingUnreadable("the listing exited 1"), "the listing exited 1"),

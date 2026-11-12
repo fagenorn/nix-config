@@ -445,8 +445,8 @@ A listing that raises is a bare wake whose row carries `"listing_failed": <reaso
 listing_failed <sprint_id> <reason>`; the wake is still sent and `ok` is its own outcome. Before every wake or revive, bare or not,
 `_refresh_settings` writes the sprint's settings file again with `manager.write_settings` from the stored
 secret (ADR-console-021), so a sprint started before that decision gets the isolation and permission members;
-a file that cannot be written is a failed wake with the write's reason, and a missing secret leaves the file
-as it is. The full
+the refresh runs under the ingest lock so a withdrawal cannot fall inside it; a file that cannot be written, a
+missing secret and a sprint no longer open are each a failed wake (no wake is sent) with that reason. The full
 listing is read only on the wake routes, never for a relay or when the running listing shows the
 manager. The nudger, the listing and the full listing are never called with the
 ingest lock held, and no `Nudge`, row or stderr line carries the owner's text. No nudge is made while the
@@ -2134,20 +2134,25 @@ class ConsoleService:
         return str(manager.settings_path(self._sprint_secrets, sprint_id)), None
 
     def _refresh_settings(self, sprint_id: str) -> None:
-        """Off the ingest lock: write the sprint's manager settings file again before a wake (ADR-console-021).
+        """Write the sprint's manager settings file again before a wake (ADR-console-021).
 
-        The content is what a launch writes, from the sprint's stored secret. A missing secret leaves the
-        file as it is; a file that cannot be written raises `NudgeFailed` with the write's reason, which
-        fails the wake.
+        The content is what a launch writes, from the sprint's stored secret. It runs under the ingest lock,
+        as `withdraw_goal` removes the secret and the file, so a withdrawal can never fall between the read
+        and the write and leave a file holding the secret. `NudgeFailed` when the sprint is no longer open,
+        when its secret is missing (the wake is not sent without the isolation and permission members) or when
+        the file cannot be written (the write's reason).
         """
-        secret = sprints.read_secret(self._sprint_secrets, sprint_id)
-        if secret is None:
-            return
-        try:
-            manager.write_settings(manager.settings_path(self._sprint_secrets, sprint_id),
-                                   {manager.ID_ENV: sprint_id, manager.SECRET_ENV: secret})
-        except manager.LaunchFailed as error:
-            raise nudge.NudgeFailed(str(error)) from error
+        with self._ingest:
+            if sprint_id not in self._sprints:
+                raise nudge.NudgeFailed("the sprint is no longer open")
+            secret = sprints.read_secret(self._sprint_secrets, sprint_id)
+            if secret is None:
+                raise nudge.NudgeFailed("the sprint's secret is missing")
+            try:
+                manager.write_settings(manager.settings_path(self._sprint_secrets, sprint_id),
+                                       {manager.ID_ENV: sprint_id, manager.SECRET_ENV: secret})
+            except manager.LaunchFailed as error:
+                raise nudge.NudgeFailed(str(error)) from error
 
     def _record_nudge(self, sprint_id: str, through: int | None, route: str | None,
                       reason: str | None, listing_failed: str | None = None) -> None:
