@@ -2798,6 +2798,99 @@ class PageGlanceTest(unittest.TestCase):
         self.assertEqual(len([n for n in nodes(summary) if has_class(n, "run-sum")]), 1)
 
 
+class PageSideColumnTest(unittest.TestCase):
+    def test_the_work_heading_counts_sprints_and_their_projects(self) -> None:
+        none = view([project(0, []), project(1, [], quiet=True, ago=timedelta(days=3))])
+        one = with_sprints([SPRINT])
+        several = view([
+            {**project(0, []), "sprints": [SPRINT, {**REPORTED, "sprint_id": "b" * 16}]},
+            {**project(1, []), "sprints": [{**SPRINT, "sprint_id": "c" * 16}]},
+            project(2, [], quiet=True, ago=timedelta(days=3)),
+        ])
+        snaps = render([
+            START, {"frame": none}, {"snapshot": True}, {"frame": one}, {"snapshot": True},
+            {"frame": several}, {"snapshot": True},
+        ])
+        counts = []
+        for snap in snaps:
+            (h2,) = [n for n in nodes(snap["projects"]) if n["tag"] == "h2"]
+            self.assertEqual(h2["text"], "Work")
+            counts.append([full(c) for c in h2["children"]])
+        self.assertEqual(counts, [[], ["1 sprint across 1 project"], ["3 sprints across 2 projects"]])
+
+    def test_give_it_a_goal_opens_the_goal_field_with_that_project_chosen(self) -> None:
+        frame = {
+            **view([project(1, [], quiet=True, ago=timedelta(days=3)),
+                    project(2, [], quiet=True, ago=timedelta(days=5))]),
+            "recent_projects": ["owner/p02", "owner/p01"],
+        }
+        before, opened, sent = render([
+            START, {"frame": frame}, {"snapshot": True}, {"click": "give-goal"}, {"snapshot": True},
+            {"input": {"cls": "goal-text", "value": GOAL_TEXT}}, {"click": "goal-send"},
+            {"snapshot": True},
+        ])
+        self.assertFalse(box_open(before))
+        self.assertEqual(
+            [(n["tag"], full(n)) for n in nodes(before["projects"]) if has_class(n, "give-goal")],
+            [("button", "Give it a goal")] * 2,
+        )
+        for n in nodes(before["projects"]):
+            if n["tag"] == "summary":
+                self.assertEqual([m for m in nodes(n) if has_class(m, "give-goal")], [])
+        self.assertTrue(box_open(opened))
+        self.assertEqual(goal_picked(opened), ["owner/p01"])
+        self.assertEqual(opened["active"], "goal-text")
+        (post,) = goals(sent)
+        self.assertEqual(json.loads(post["body"]), {"project_id": "owner/p01", "goal": GOAL_TEXT})
+        self.assertEqual(post["headers"], GOAL_HEADERS)
+
+    def test_give_it_a_goal_keeps_the_typed_goal_and_clears_the_filter(self) -> None:
+        frame = {
+            **view([project(1, [], quiet=True, ago=timedelta(days=3)),
+                    project(2, [], quiet=True, ago=timedelta(days=5))]),
+            "recent_projects": ["owner/p02", "owner/p01"],
+        }
+        (snap,) = render([
+            START, {"frame": frame}, {"key": "g"},
+            {"input": {"cls": "goal-filter", "value": "p02"}},
+            {"input": {"cls": "goal-text", "value": "draft"}},
+            {"click": "give-goal"}, {"snapshot": True},
+        ])
+        self.assertEqual(goal_picked(snap), ["owner/p01"])
+        (f,) = goal_named(snap, "goal-filter")
+        self.assertEqual(f["value"], "")
+        (t,) = goal_named(snap, "goal-text")
+        self.assertEqual(t["value"], "draft")
+        self.assertEqual(snap["active"], "goal-text")
+
+    def test_every_quiet_project_offers_a_goal_even_when_folded(self) -> None:
+        group = {"type": "quiet_group", "label": "4 quiet projects", "count": 4,
+                 "projects": [project(n, [], quiet=True) for n in range(2, 6)]}
+        frame = view([{**project(0, []), "sprints": [SPRINT]}, group], count=5)
+        (snap,) = render([START, {"frame": frame}, {"snapshot": True}])
+        buttons = [n for n in nodes(snap["projects"]) if has_class(n, "give-goal")]
+        self.assertEqual(len(buttons), 4)
+        (folded,) = [n for n in nodes(snap["projects"]) if n["key"] == "quiet"]
+        self.assertEqual([n for n in nodes(folded) if has_class(n, "give-goal")], buttons)
+        (busy,) = [n for n in nodes(snap["projects"])
+                   if n["tag"] == "li" and any(m["key"] == "line:owner/p00" for m in nodes(n))]
+        self.assertEqual([n for n in nodes(busy) if has_class(n, "give-goal")], [])
+
+    def test_a_project_is_a_block_headed_by_its_name(self) -> None:
+        (snap,) = render([START, {"frame": view([project(0, []), project(1, [])])},
+                          {"snapshot": True}])
+        (fold,) = [n for n in nodes(snap["projects"]) if n["key"] == "line:owner/p00"]
+        (summary,) = [c for c in fold["children"] if c["tag"] == "summary"]
+        name = summary["children"][0]
+        self.assertEqual((name["tag"], name["cls"], name["text"]), ("h3", "pname", "owner/p00"))
+        style = re.findall(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"))[0]
+        rules = style_rules(style)
+        self.assertTrue([d for s, d in rules
+                         if s == "#list > li.line + li.line"
+                         and "var(--hair)" in d.get("border-top", "")])
+        self.assertTrue([d for s, d in rules
+                         if s == ".pname" and d.get("font-weight") == "600"])
+
 
 BRIEF = {
     "type": "inbox_item", "reason": "brief", "key": "brief/" + "a" * 16,

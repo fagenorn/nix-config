@@ -89,9 +89,9 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .abox .meta { margin-top: 6px; }
 .abox .meta.now { color: var(--text); }
 .abox .opts { list-style: none; padding-left: 0; display: flex; flex-direction: column; align-items: stretch; gap: 2px; margin-top: 14px; }
-.opt, .send, .undo, .approve, .reply-send, .goal-open, .goal-send, .goal-cancel, .goal-project, .withdraw, .retry, .tell-send, .abox button[class^="ans-"] { display: inline-flex; align-items: baseline; gap: 8px; font: inherit; color: inherit; text-align: left; background: none; border: 1px solid var(--hair); border-radius: 8px; padding: 2px 10px; cursor: pointer; transition: background-color .16s; }
-.opt:hover:enabled, .send:hover:enabled, .undo:hover:enabled, .approve:hover:enabled, .reply-send:hover:enabled, .goal-open:hover:enabled, .goal-send:hover:enabled, .goal-cancel:hover:enabled, .goal-project:hover:enabled, .withdraw:hover:enabled, .retry:hover:enabled, .tell-send:hover:enabled, .abox button[class^="ans-"]:hover:enabled { background: rgba(202, 211, 245, .05); }
-.opt:disabled, .send:disabled, .reply-send:disabled, .goal-send:disabled, .withdraw:disabled, .retry:disabled, .tell-send:disabled, .abox button[class^="ans-"]:disabled { cursor: default; }
+.opt, .send, .undo, .approve, .reply-send, .goal-open, .goal-send, .goal-cancel, .goal-project, .give-goal, .withdraw, .retry, .tell-send, .abox button[class^="ans-"] { display: inline-flex; align-items: baseline; gap: 8px; font: inherit; color: inherit; text-align: left; background: none; border: 1px solid var(--hair); border-radius: 8px; padding: 2px 10px; cursor: pointer; transition: background-color .16s; }
+.opt:hover:enabled, .send:hover:enabled, .undo:hover:enabled, .approve:hover:enabled, .reply-send:hover:enabled, .goal-open:hover:enabled, .goal-send:hover:enabled, .goal-cancel:hover:enabled, .goal-project:hover:enabled, .give-goal:hover:enabled, .withdraw:hover:enabled, .retry:hover:enabled, .tell-send:hover:enabled, .abox button[class^="ans-"]:hover:enabled { background: rgba(202, 211, 245, .05); }
+.opt:disabled, .send:disabled, .reply-send:disabled, .goal-send:disabled, .give-goal:disabled, .withdraw:disabled, .retry:disabled, .tell-send:disabled, .abox button[class^="ans-"]:disabled { cursor: default; }
 .abox button[class^="ans-"]:disabled { color: var(--ov2); }
 .abox .detail { margin-top: 6px; padding: 6px 10px; max-height: 24rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: .84375rem; color: var(--sub0); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; }
 .card .detail, .rest .detail, .done .detail { flex-basis: 100%; margin: 6px 0 0; padding: 6px 10px; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: .84375rem; color: var(--sub0); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; }
@@ -180,9 +180,15 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 #list { margin-top: 12px; }
 .line { padding: 5px 0; font-size: .875rem; color: var(--ov2); }
 .line b { font-weight: 600; color: var(--sub0); }
+.pname { margin: 0; font-size: .9375rem; line-height: 1.4; font-weight: 600; color: var(--text); }
+#list > li.line + li.line { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--hair); }
 .line summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; cursor: pointer; list-style: none; padding: 4px 12px; margin: 0 -12px; border-radius: 10px; transition: background-color .16s; }
 .line summary::-webkit-details-marker { display: none; }
 .line summary:hover { background: rgba(202, 211, 245, .05); }
+.line summary > .sess-sum, .line summary > .run-sum { flex-basis: 100%; }
+.line.quiet { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.line.quiet > details { flex: 1 1 auto; min-width: 0; }
+.give-goal { margin-left: auto; font-size: .8125rem; color: var(--sub1); }
 .run-sum { font-size: .8125rem; color: var(--sub0); }
 .line .root { display: block; margin-top: 4px; font-size: .8125rem; color: var(--ov2); overflow-wrap: anywhere; }
 .line .qw { display: inline-flex; align-items: baseline; gap: 6px; }
@@ -288,7 +294,7 @@ function lineFold(key, nameNode, words, outside, root) {
   const summary = el("summary");
   summary.appendChild(nameNode);
   for (const word of words) summary.appendChild(word);
-  if (outside.sessions.length > 0) summary.appendChild(el("span", "", outside.summary));
+  if (outside.sessions.length > 0) summary.appendChild(el("span", "sess-sum", outside.summary));
   for (const session of outside.sessions) {
     for (const run of session.deliveries || []) summary.appendChild(runSummary(run));
   }
@@ -621,7 +627,7 @@ function sprintList(entry) {
   return list;
 }
 function projectLine(entry) {
-  const line = el("li", "line");
+  const line = el("li", entry.quiet ? "line quiet" : "line");
   const words = [];
   if (entry.quiet) {
     const quiet = el("span", "qw");
@@ -635,8 +641,11 @@ function projectLine(entry) {
       words.push(untouched);
     }
   }
-  line.appendChild(lineFold("line:" + entry.project_id, el("b", "", entry.project_id), words,
+  line.appendChild(lineFold("line:" + entry.project_id, el("h3", "pname", entry.project_id), words,
                             entry.outside_sprints, entry.root));
+  if (entry.quiet) {
+    line.appendChild(actionButton("give-goal", "Give it a goal", () => openGoalFor(entry.project_id)));
+  }
   if (entry.sprints && entry.sprints.length > 0) line.appendChild(sprintList(entry));
   return line;
 }
@@ -1538,10 +1547,25 @@ function renderDigest(view) {
   fold.appendChild(more);
   section.appendChild(fold);
 }
+function workCount(view) {
+  let sprints = 0;
+  let projects = 0;
+  for (const entry of view.entries) {
+    for (const one of entry.type === "quiet_group" ? entry.projects : [entry]) {
+      const n = one.sprints ? one.sprints.length : 0;
+      sprints += n;
+      if (n > 0) projects += 1;
+    }
+  }
+  if (sprints === 0) return "";
+  return sprints + (sprints === 1 ? " sprint" : " sprints") + " across " + projects
+    + (projects === 1 ? " project" : " projects");
+}
 function renderProjects(view) {
   const section = document.getElementById("projects");
-  const heading = el("h2", "", "Projects ");
-  heading.appendChild(el("span", "", String(view.project_count)));
+  const heading = el("h2", "", "Work");
+  const worked = workCount(view);
+  if (worked !== "") heading.appendChild(el("span", "", worked));
   const active = document.activeElement;
   const heldTell = active && active.tagName === "TEXTAREA" && active.dataset
     && active.dataset.tell !== undefined
@@ -1614,7 +1638,7 @@ function renderUnmanaged(view) {
   const list = el("ul");
   for (const entry of view.unmanaged) {
     const line = el("li", "line");
-    line.appendChild(lineFold("line:" + entry.root, el("b", "", entry.name),
+    line.appendChild(lineFold("line:" + entry.root, el("h3", "pname", entry.name),
                               [el("span", "", entry.label)], entry.outside_sprints, entry.root));
     list.appendChild(line);
   }
@@ -1748,6 +1772,18 @@ function openGoal() {
   draft.open = true;
   if (goalUi === null) buildGoalBox(document.getElementById("goal"));
   goalUi.filter.focus();
+}
+function openGoalFor(projectId) {
+  draft.filter = "";
+  draft.project = projectId;
+  goalEdited();
+  draft.open = true;
+  if (goalUi === null) buildGoalBox(document.getElementById("goal"));
+  else {
+    goalUi.filter.value = "";
+    refreshGoalList();
+  }
+  goalUi.text.focus();
 }
 const goalOpener = el("button", "goal-open", "State a goal");
 goalOpener.setAttribute("type", "button");
