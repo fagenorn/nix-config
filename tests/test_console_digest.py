@@ -8,9 +8,10 @@ from datetime import datetime
 from pathlib import Path
 
 from agent_tools.console.digest import (
-    EARLIER_MAX, FIRST_VISIT, LOOKED, SHOWN, SPRINT_WITHDRAWN, Moment, digest, keep, last_looked,
-    moments)
-from agent_tools.console.event_log import GOAL_STATED, GOAL_WITHDRAWN, Event
+    BRIEF_APPROVED_MOMENT, BRIEF_SENT_MOMENT, EARLIER_MAX, FIRST_VISIT, LOOKED, SHOWN,
+    SPRINT_WITHDRAWN, Moment, digest, keep, last_looked, moments)
+from agent_tools.console.event_log import (
+    BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, Event)
 from agent_tools.console.sessions import SessionState
 
 CASES = json.loads(
@@ -107,6 +108,26 @@ class DigestTest(unittest.TestCase):
             Event(4, at(4), GOAL_WITHDRAWN, None, {"sprint_id": "c" * 16, "goal": "g"})], {}, {})
         self.assertEqual(found, [Moment(2, at(2), SPRINT_WITHDRAWN,
                                         "The goal for owner/p00 was withdrawn: make the importer resumable")])
+
+    def test_a_brief_arriving_and_approved_are_moments(self):
+        sid, goal = "a" * 16, "make the importer resumable"
+        row = {"sprint_id": sid, "goal": goal}
+        found = moments([
+            Event(1, at(1), GOAL_STATED, "owner/p00", row),
+            Event(2, at(2), BRIEF_SENT, "owner/p00", {**row, "version": 1, "brief": {}}),
+            Event(3, at(3), BRIEF_REPLIED, "owner/p00", {**row, "version": 1, "reply": "smaller"}),
+            Event(4, at(4), BRIEF_SENT, "owner/p00", {**row, "version": 2, "brief": {}}),
+            Event(5, at(5), BRIEF_APPROVED, "owner/p00", {**row, "version": 2}),
+            Event(6, at(6), BRIEF_SENT, "owner/p00", {**row, "version": True, "brief": {}}),
+            Event(7, at(7), BRIEF_SENT, "owner/p00", {"sprint_id": sid, "version": 3}),
+            Event(8, at(8), BRIEF_SENT, None, {**row, "version": 3, "brief": {}})], {}, {})
+        self.assertEqual(found, [
+            Moment(2, at(2), BRIEF_SENT_MOMENT,
+                   "A brief for owner/p00 arrived, version 1: make the importer resumable"),
+            Moment(4, at(4), BRIEF_SENT_MOMENT,
+                   "A brief for owner/p00 arrived, version 2: make the importer resumable"),
+            Moment(5, at(5), BRIEF_APPROVED_MOMENT,
+                   "The brief for owner/p00 was approved, version 2: make the importer resumable")])
 
 
 if __name__ == "__main__":

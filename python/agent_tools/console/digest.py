@@ -12,6 +12,8 @@ Event kinds read:
 - `inbox.seen`, `inbox.changed` (`view.py`, `inbox.py`): an item appears or is
   answered.
 - `goal.withdrawn` (`event_log.GOAL_WITHDRAWN`, `sprints.py`): the owner withdrew a sprint's goal.
+- `brief.sent`, `brief.approved` (`event_log.BRIEF_SENT`, `BRIEF_APPROVED`, `sprints.py`): a
+  manager's brief arrived, or the owner approved it. `brief.replied` says nothing.
 
 Every other kind says nothing, `goal.stated` included, delivery runs (`delivery.seen`, `delivery.gone`)
 included: the console has no delivery moments yet, and #878 adds them from
@@ -41,10 +43,13 @@ session with no repository makes no moment.
     resumed          <name> resumed work in <where>.
     session_ended    <name> ended in <where>.
     sprint_withdrawn The goal for <project_id> was withdrawn: <goal>
+    brief_sent       A brief for <project_id> arrived, version <n>: <goal>
+    brief_approved   The brief for <project_id> was approved, version <n>: <goal>
 
 An inbox payload needs `project_id` (str), `issue` (int, not bool) and
 `question` (str). A withdrawal needs the event's project (str) and a payload `goal` (str); it
-reads no state, the row carries the goal.
+reads no state, the row carries the goal. A brief event makes a moment only when its project is a
+`str`, its payload `version` an `int` (not a bool) and `goal` a `str`; it reads no state either.
 
 The window (`window_start`, `keep`): moments strictly after the last look, so a
 moment exactly at the look is not shown; with no look stored (a first visit),
@@ -65,7 +70,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
-from agent_tools.console.event_log import GOAL_WITHDRAWN, Event
+from agent_tools.console.event_log import BRIEF_APPROVED, BRIEF_SENT, GOAL_WITHDRAWN, Event
 from agent_tools.console.sessions import (
     ENDED, GONE, HOOK, LIMIT, SEEN, WORKING, SessionState, session_states)
 from agent_tools.console.view import INBOX_CHANGED, INBOX_SEEN, InboxRecord, inbox_records
@@ -81,6 +86,8 @@ LIMIT_STOP = "limit_stop"
 RESUMED = "resumed"
 SESSION_ENDED = "session_ended"
 SPRINT_WITHDRAWN = "sprint_withdrawn"
+BRIEF_SENT_MOMENT = "brief_sent"
+BRIEF_APPROVED_MOMENT = "brief_approved"
 
 
 @dataclass(frozen=True)
@@ -158,6 +165,18 @@ def _inbox_moment(event: Event, before: InboxRecord | None) -> tuple[str, str] |
     return None
 
 
+def _brief_moment(event: Event) -> tuple[str, str] | None:
+    version, goal = event.payload.get("version"), event.payload.get("goal")
+    if (not isinstance(event.project, str) or not isinstance(version, int)
+            or isinstance(version, bool) or not isinstance(goal, str)):
+        return None
+    if event.kind == BRIEF_SENT:
+        return (BRIEF_SENT_MOMENT,
+                f"A brief for {event.project} arrived, version {version}: {goal}")
+    return (BRIEF_APPROVED_MOMENT,
+            f"The brief for {event.project} was approved, version {version}: {goal}")
+
+
 def moments(
     events: Iterable[Event],
     sessions: Mapping[str, SessionState],
@@ -179,6 +198,8 @@ def moments(
             before = held.get((event.project, key))
             held = inbox_records([event], held)
             said = _inbox_moment(event, before)
+        elif event.kind in (BRIEF_SENT, BRIEF_APPROVED):
+            said = _brief_moment(event)
         elif event.kind == GOAL_WITHDRAWN:
             goal = payload.get("goal") if isinstance(payload, dict) else None
             if isinstance(event.project, str) and isinstance(goal, str):

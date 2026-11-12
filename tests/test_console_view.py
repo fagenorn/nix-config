@@ -1,5 +1,6 @@
 """The console's view (#855): projection, registry diff, ordering and folding, encoding."""
 
+import dataclasses
 import json
 import unittest
 from datetime import datetime
@@ -15,8 +16,11 @@ from agent_tools.console.deliveries import (
 )
 from agent_tools.console.event_log import Event
 from agent_tools.console.sessions import ENDED, SessionState
-from agent_tools.console.sprints import SprintState
+from agent_tools.console.capacity import EMPTY
+from agent_tools.console.sprints import APPROVED, CHANGES, NONE, Brief, SprintState
 from agent_tools.console.view import (
+    ALL_OUT_SENTENCE,
+    BRIEF_SENTENCE,
     CHOOSE_SENTENCE,
     INBOX_CHANGED,
     INBOX_GONE,
@@ -650,6 +654,79 @@ T0_MS = int(datetime.fromisoformat(T0).timestamp() * 1000)
 
 def sprint(sid, pid="p00", seq=5, goal="make the importer resumable"):
     return SprintState(sid, pid, goal, seq, T0)
+
+
+PARTS = {"done": "ship it", "excluded": ["x"], "slices": ["a"], "risks": ["r"], "asks": ["q"]}
+
+
+def briefed(sprint, version=1, decision=NONE, reply=None, at="t9"):
+    return dataclasses.replace(sprint, brief=Brief(version, PARTS, at, decision, reply))
+
+
+class BriefViewTest(unittest.TestCase):
+    def test_a_waiting_brief_is_one_open_item_counted_in_the_statement(self):
+        sid = "a" * 16
+        view = derive_view([state("p00", 1)], sprints={sid: briefed(sprint(sid), version=2)})
+        self.assertEqual(view["inbox"]["open"], [{
+            "type": "inbox_item", "reason": "brief", "key": "brief/" + sid,
+            "project_id": "p00", "sprint_id": sid, "goal": "make the importer resumable",
+            "version": 2, "brief": PARTS, "answered": False, "waiting_since": "t9"}])
+        self.assertEqual(view["statement"]["inbox_items"], 1)
+        self.assertEqual(view["statement"]["headline"], "1 thing needs you")
+        self.assertEqual(view["statement"]["sentence"], BRIEF_SENTENCE)
+
+    def test_briefs_lead_the_tracker_items(self):
+        a, b = "a" * 16, "b" * 16
+        records = {("p00", "k1"): InboxRecord(item("p00", "k1", held=9), "t1", "u1")}
+        view = derive_view([state("p00", 1)], records, sprints={
+            a: briefed(sprint(a), at="t7"), b: briefed(sprint(b), at="t5")})
+        self.assertEqual([e["key"] for e in view["inbox"]["open"]],
+                         ["brief/" + b, "brief/" + a, "k1"])
+        self.assertEqual(view["statement"]["inbox_items"], 3)
+
+    def test_a_decided_or_unregistered_brief_is_no_item(self):
+        a, b, c = "a" * 16, "b" * 16, "c" * 16
+        view = derive_view([state("p00", 1)], sprints={
+            a: briefed(sprint(a), decision=APPROVED),
+            b: briefed(sprint(b), decision=CHANGES, reply="shrink it"),
+            c: briefed(sprint(c, pid="p09"))})
+        self.assertEqual(view["inbox"]["open"], [])
+        self.assertEqual(view["statement"], derive_view([state("p00", 1)])["statement"])
+
+    def test_an_approved_brief_makes_the_sprint_starting(self):
+        sid = "a" * 16
+        for decision, name, text in ((APPROVED, "starting", "starting"),
+                                     (NONE, "drafting", "drafting the brief")):
+            with self.subTest(decision=decision):
+                view = derive_view([state("p00", 1)], sprints={
+                    sid: briefed(sprint(sid), decision=decision)})
+                shown = view["entries"][0]["sprints"][0]
+                self.assertEqual((shown["state"], shown["state_text"]), (name, text))
+
+    def test_a_sprint_with_a_brief_never_says_no_manager(self):
+        a, b = "a" * 16, "b" * 16
+        view = derive_view([state("p00", 1)], sprints={a: briefed(sprint(a, seq=6)),
+                                                       b: sprint(b, seq=5)},
+                           now_ms=T0_MS + 10 * 60_000)
+        shown = {s["sprint_id"]: s["manager_text"] for s in view["entries"][0]["sprints"]}
+        self.assertEqual(shown, {a: None, b: "no manager has picked this up"})
+
+    def test_the_brief_sentence_yields_only_to_all_out_and_stale(self):
+        sid = "a" * 16
+        sprints = {sid: briefed(sprint(sid))}
+        decision = {**item("p00", "kd"), "reason": "decision", "questions": [
+            {"question": "Which?", "options": ["a", "b"], "chosen": None, "recommended": None}]}
+        records = {("p00", "kd"): InboxRecord(decision, "t1", "u1")}
+        stale = STALE_SENTENCE.format(projects="p00")
+        table = [
+            ("a decision item", {"records": records}, BRIEF_SENTENCE),
+            ("a stale project", {"health": {"p00": ReadState(False, None)}}, stale),
+            ("every profile out", {"capacity": {**EMPTY, "all_out": True}}, ALL_OUT_SENTENCE),
+        ]
+        for name, extra, expected in table:
+            with self.subTest(name):
+                view = derive_view([state("p00", 1)], sprints=sprints, **extra)
+                self.assertEqual(view["statement"]["sentence"], expected)
 
 
 class SprintViewTest(unittest.TestCase):
