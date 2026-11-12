@@ -1262,7 +1262,8 @@ class LandTest(unittest.TestCase):
     def test_a_rejected_resolution_is_conflict_without_an_owner_action(self):
         result, calls, _ = run(patch=BEHIND, replies={
             "land-sync-1-1": {"status": "done", "conflicted": True, "head": B, "merge_commit": B, "notes": "ok"},
-            "land-sync-review-1-1": {"verdict": "findings", "findings": [{"severity": "important", "summary": "dropped a change"}]}})
+            "land-sync-review-1-1": {"verdict": "findings", "findings": [{"severity": "important", "summary": "dropped a change"}]},
+            "land-sync-rereview-1-1": {"verdict": "findings", "findings": [{"severity": "important", "summary": "dropped a change"}]}})
         self.assertEqual(row(result, 1)["outcome"], "conflict")
         for label in ("land-ask-1", "release-1"):
             self.assertNotIn(label, labels(calls))
@@ -1981,6 +1982,135 @@ def blocked_by(*issues):
     return {"blockers": [{"issue": b, "state": "OPEN"} for b in issues]}
 
 
+class SyncFixRoundTest(unittest.TestCase):
+    """#907: a conflicted sync merge checks for conflict markers itself, and a sync-review finding gets one fix round and one
+    re-review before the landing ends as conflict."""
+
+    FIXED = "f" * 40
+    CONFLICTED = {"status": "done", "conflicted": True, "head": B, "merge_commit": B, "resolved_files": ["x.py"],
+                  "markers_checked": True, "tests": ["t"], "notes": "removed one marker"}
+    FOUND = {"verdict": "findings", "findings": [{"severity": "important", "summary": "dropped a sentence dev added"},
+                                                 {"severity": "minor", "summary": "style"}]}
+    LEFT = {"verdict": "findings", "findings": [{"severity": "important", "summary": "the sentence is still missing"}]}
+    UNCHECKED = "The merge was not checked for leftover conflict markers"
+
+    def land(self, **replies):
+        return run(patch=BEHIND, replies=dict({"land-sync-1-1": self.CONFLICTED}, **replies))
+
+    def test_the_sync_checks_the_merged_tree_for_markers_before_it_commits(self):
+        result, calls, _ = self.land()
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+        sync = prompt(calls, "land-sync-1-1")
+        self.assertIn("run git -C /r/.wt/w-issue-1-x diff --check HEAD before committing and remove every leftover conflict marker", sync)
+        self.assertIn("markers_checked", sync)
+        self.assertLess(sync.index("diff --check HEAD"), sync.index("commit the merge"))
+        self.assertIn("markers_checked", next(c for c in calls if c["label"] == "land-sync-1-1")["schema"]["properties"])
+        self.assertNotIn(self.UNCHECKED, prompt(calls, "land-sync-review-1-1"))
+        self.assertEqual(land_labels(calls), ["land-pr-1", "land-sync-1-1", "land-sync-review-1-1", "land-record-1-1",
+                                                  "land-merge-1", "close-out-1"])
+
+    def test_a_resolution_whose_marker_check_did_not_run_is_reviewed_for_markers_in_the_same_call(self):
+        for said in ({"markers_checked": False}, {}):
+            with self.subTest(said=said):
+                reply = dict({k: v for k, v in self.CONFLICTED.items() if k != "markers_checked"}, **said)
+                result, calls, _ = self.land(**{"land-sync-1-1": reply})
+                self.assertEqual(row(result, 1)["outcome"], "landed")
+                self.assertIn(self.UNCHECKED, prompt(calls, "land-sync-review-1-1"))
+                self.assertEqual(labels(calls), labels(self.land()[1]))
+
+    def test_a_finding_is_fixed_rereviewed_and_landed_at_the_fix(self):
+        result, calls, _ = self.land(**{"land-sync-review-1-1": self.FOUND})
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+        self.assertEqual(land_labels(calls), [
+            "land-pr-1", "land-sync-1-1", "land-sync-review-1-1", "land-sync-fix-1-1", "land-sync-rereview-1-1",
+            "land-record-1-1", "land-merge-1", "close-out-1"])
+        fix = next(c for c in calls if c["label"] == "land-sync-fix-1-1")
+        self.assertEqual((fix["agentType"], fix["model"]), ("implementer", "sonnet"))
+        for text in ("dropped a sentence dev added", f"merge commit {B}", "never redo or rewrite the merge",
+                     "stage by path only the files the fix itself changed or created",
+                     "git -C /r/.wt/w-issue-1-x push origin issue-1-x"):
+            self.assertIn(text, fix["prompt"])
+        self.assertNotIn("style", fix["prompt"])
+        again = next(c for c in calls if c["label"] == "land-sync-rereview-1-1")
+        self.assertEqual(again["agentType"], "reviewer-lite")
+        self.assertIn(f"diff {B}..{self.FIXED}", again["prompt"])
+        self.assertIn("dropped a sentence dev added", again["prompt"])
+        # The lock moves to the fix through the record step, its checks are waited for there, and the merge names it.
+        record = prompt(calls, "land-record-1-1")
+        self.assertIn(f"changed to {self.FIXED}", record)
+        self.assertIn(f"--sha {self.FIXED}", record)
+        self.assertIn("wait for every check", record)
+        self.assertIn(f"--match-head-commit {self.FIXED}", prompt(calls, "land-merge-1"))
+        self.assertIn(f"--sha {self.FIXED}", prompt(calls, "close-out-1"))
+        self.assertNotIn("land-unlock-1", labels(calls))
+
+    def test_a_finding_that_survives_the_fix_round_ends_conflict_with_its_reason(self):
+        result, calls, _ = self.land(**{"land-sync-review-1-1": self.FOUND, "land-sync-rereview-1-1": self.LEFT})
+        got = row(result, 1)
+        self.assertEqual((got["outcome"], got["reason"]), ("conflict", "review finding: the sentence is still missing"))
+        ls = labels(calls)
+        for gone in ("land-record-1-1", "land-merge-1", "land-ask-1", "release-1", "land-sync-fix-1-2"):
+            self.assertNotIn(gone, ls)
+        self.assertEqual((ls.count("land-sync-fix-1-1"), ls.count("land-sync-rereview-1-1"), ls.count("land-unlock-1")), (1, 1, 1))
+        # The lock never moved during the round: it is released at the head it was held at before the resync.
+        self.assertIn(f"forge-claim land release --repo owner/repo --branch dev --sha {SHA}\n", prompt(calls, "land-unlock-1"))
+
+    def test_a_fix_round_that_does_not_finish_ends_conflict_without_a_rereview(self):
+        fixes = {"nothing": None, "blocked": {"status": "blocked", "notes": "no"},
+                 "started elsewhere": {"status": "done", "start_head": "e" * 40, "commit": self.FIXED, "notes": "ok"},
+                 "no commit and no evidence": {"status": "done", "start_head": B, "commit": B, "notes": ""}}
+        for name, fix in fixes.items():
+            with self.subTest(fix=name):
+                result, calls, _ = self.land(**{"land-sync-review-1-1": self.FOUND, "land-sync-fix-1-1": fix})
+                got = row(result, 1)
+                self.assertEqual((got["outcome"], got["reason"]),
+                                 ("conflict", "the sync fix round did not finish; review finding: dropped a sentence dev added"))
+                ls = labels(calls)
+                for gone in ("land-sync-rereview-1-1", "land-record-1-1", "land-merge-1"):
+                    self.assertNotIn(gone, ls)
+                self.assertEqual(ls.count("land-unlock-1"), 1)
+
+    def test_a_lost_rereview_ends_conflict(self):
+        result, calls, _ = self.land(**{"land-sync-review-1-1": self.FOUND, "land-sync-rereview-1-1": None})
+        got = row(result, 1)
+        self.assertEqual((got["outcome"], got["reason"]),
+                         ("conflict", "the sync re-review returned nothing; review finding: dropped a sentence dev added"))
+        self.assertEqual(labels(calls).count("land-unlock-1"), 1)
+
+    def test_a_rebuttal_with_evidence_is_adjudicated_and_lands_at_the_merge(self):
+        rebuttal = {"status": "done", "start_head": B, "commit": B, "notes": "the sentence is on line 12"}
+        result, calls, _ = self.land(**{"land-sync-review-1-1": self.FOUND, "land-sync-fix-1-1": rebuttal})
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+        again = prompt(calls, "land-sync-rereview-1-1")
+        self.assertIn("the rebuttal (no new commit) of", again)
+        self.assertIn("Check each rebuttal against the code yourself", again)
+        self.assertIn(f"--match-head-commit {B}", prompt(calls, "land-merge-1"))
+
+    def test_the_fix_round_spends_no_resync(self):
+        # MAX_SYNCS is two: were the round a resync, the behind answer after it would end land-contended.
+        c = "c" * 40
+        result, calls, _ = self.land(**{
+            "land-sync-review-1-1": self.FOUND,
+            "land-record-1-1": {"ok": True, "head": self.FIXED, "checks": {"state": "behind", "head": self.FIXED}},
+            "land-sync-1-2": {"status": "done", "conflicted": False, "head": c, "notes": "ok"}})
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+        self.assertIn(f"--match-head-commit {c}", prompt(calls, "land-merge-1"))
+
+    def test_a_merge_without_conflicts_runs_no_extra_step(self):
+        clean = {"status": "done", "conflicted": False, "head": B, "notes": "ok"}
+        result, calls, _ = self.land(**{"land-sync-1-1": clean})
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+        self.assertEqual(land_labels(calls), ["land-pr-1", "land-sync-1-1", "land-record-1-1", "land-merge-1", "close-out-1"])
+
+    def test_both_programs_carry_the_same_wording(self):
+        names = ("MARKER_CHECK", "MARKERS_UNCHECKED", "SYNC_FIX", "SYNC_REREVIEW", "COMMIT_SCOPE")
+        lines = lambda path: {line.split(" ", 2)[1]: line for line in path.read_text(encoding="utf-8").splitlines()
+                              if line.startswith(tuple(f"const {name} = " for name in names))}
+        batch, standard = lines(PROGRAM), lines(PROGRAM.with_name("deliver-standard.js"))
+        self.assertEqual(sorted(batch), sorted(names))
+        self.assertEqual(batch, standard)
+
+
 class DependencyTest(unittest.TestCase):
     def test_a_blocker_chain_releases_each_dependent_only_on_closed(self):
         result, calls, _ = run(args=dict(ARGS, issues=[1, 2, 3]),
@@ -2499,13 +2629,14 @@ class SourceTest(unittest.TestCase):
         self.assertNotIn("deliver-batch.js", text)
 
 
-CLERK, IMPL, REV = "clerk", "implementer", "reviewer"
+CLERK, IMPL, REV, REV_LITE = "clerk", "implementer", "reviewer", "reviewer-lite"
 EXPECTED = {stem: frozenset({kind}) for kind, stems in (
     (CLERK, ("setup", "facts-", "release-", "acquire-", "readopt-", "recover-end-", "ask-", "settle-",
              "land-unlock-", "land-ask-", "land-lock-", "land-record-", "land-status-", "land-pr-", "land-checks-", "land-merge-", "close-out-",
              "train-sweep-", "train-pr-", "train-checks-", "train-ready-", "train-merge-", "train-flip-")),
-    (IMPL, ("land-sync-", "land-fix-", "train-build-")),
+    (IMPL, ("land-sync-", "land-sync-fix-", "land-fix-", "train-build-")),
     (REV, ("land-sync-review-", "land-fix-review-")),
+    (REV_LITE, ("land-sync-rereview-",)),
 ) for stem in stems}
 STEM_PATTERNS = (
     r"\b(?:label|reviewLabel): (['`])([a-z][a-z0-9-]*)",
@@ -2525,6 +2656,10 @@ SCENARIOS = (
     {"patch": BEHIND,
      "replies": {"land-sync-1-1": {"status": "done", "conflicted": True, "head": B, "merge_commit": B,
                                    "resolved_files": ["x.py"], "tests": ["t"], "notes": "ok"}}},
+    # #907: a sync-review finding reaches the fix round and its re-review.
+    {"patch": BEHIND,
+     "replies": {"land-sync-1-1": {"status": "done", "conflicted": True, "head": B, "merge_commit": B, "notes": "ok"},
+                 "land-sync-review-1-1": {"verdict": "findings", "findings": [{"severity": "important", "summary": "dropped"}]}}},
     {"patch": BEHIND,
      "replies": {"land-sync-1-1": {"status": "done", "conflicted": False, "head": B, "merge_commit": B, "notes": "ok"},
                  "land-record-1-1": {"ok": True, "head": B, "lock": {"verdict": "lost_to", "lock_sha": SHA, "by": HOLDER}},
@@ -2842,7 +2977,8 @@ class StopReasonTest(unittest.TestCase):
         """A row that is not final says why in reason, whatever member held it; a final row has none."""
         red = {"state": "failed", "head": SHA, "failing": ["ci"], "details": "FAIL test_cache"}
         rejected = {"land-sync-1-1": {"status": "done", "conflicted": True, "head": "b" * 40, "merge_commit": "b" * 40, "notes": "ok"},
-                    "land-sync-review-1-1": {"verdict": "findings", "findings": [{"severity": "important", "summary": "dropped a change"}]}}
+                    "land-sync-review-1-1": {"verdict": "findings", "findings": [{"severity": "important", "summary": "dropped a change"}]},
+                    "land-sync-rereview-1-1": {"verdict": "findings", "findings": [{"severity": "important", "summary": "dropped a change"}]}}
         rows = (
             ("ci-failed", {"patch": {"land-pr-1": {"checks": red}}, "replies": {"land-fix-1": None}},
              "the fix round did not finish; failing checks ci"),

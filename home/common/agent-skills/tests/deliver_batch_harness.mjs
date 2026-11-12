@@ -21,6 +21,7 @@ const program = readFileSync(process.argv[2], 'utf8')
 const scenario = JSON.parse(readFileSync(0, 'utf8'))
 const SHA = 'a'.repeat(40)
 const PASS = { verdict: 'pass', findings: [] }
+const SYNC_FIXED = 'f'.repeat(40)
 const DONE = { status: 'done', start_head: 'b0', commit: 'c0ffee', tests: ['t'], notes: 'ok' }
 const AC = [{ id: 'AC1', text: 'works', kind: 'code' }]
 const promptHead = p => (p.match(/Accepted head: ([0-9a-f]+)/) || [])[1] || SHA
@@ -39,7 +40,9 @@ const DEFAULTS = [
   [/^(ask|land-ask)-/, () => ({ verdict: 'posted', comment_id: 99 })],
   [/^recover-end-/, () => ({ verdict: 'ended' })],
   [/^readopt-/, l => ({ ok: true, worktree: `/r/.wt/w-issue-${num(l)}-x`, branch: `issue-${num(l)}-x`, head: SHA, acceptance: AC })],
-  [/^land-sync-review-|^land-fix-review-/, () => PASS],
+  [/^land-sync-review-|^land-sync-rereview-|^land-fix-review-/, () => PASS],
+  // #907: a sync fix defaults to one commit, SYNC_FIXED, on top of the merge commit its prompt names.
+  [/^land-sync-fix-/, (l, p) => ({ ...DONE, start_head: (p.match(/merge commit ([0-9a-f]{40})/) || [])[1], commit: SYNC_FIXED })],
   [/^land-record-/, (l, p) => { const head = promptHead(p); return { ok: true, head, lock: { verdict: 'moved', lock_sha: head }, checks: { state: 'passed', head, required: ['ci'], passed: ['ci'] } } }],
   [/^land-sync-/, () => ({ status: 'current', conflicted: false, head: SHA, notes: 'ok' })],
   [/^land-pr-/, (l, p) => ({ pr: 40 + num(l), head: SHA, renew: { verdict: 'renewed' }, lock: { verdict: 'already_held', lock_sha: SHA }, checks: { state: 'passed', head: promptHead(p), required: ['ci'], passed: ['ci'] } })],
