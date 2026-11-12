@@ -33,7 +33,7 @@ export const meta = {
 // A fresh run re-adopts an existing branch or worktree (never resetting it) and stops `dirty` when it holds uncommitted changes.
 //
 // RESUME: every stop from the claim on returns { stage, ..., cont }, where cont is
-// { setup, lane, plan (declared branches, when any, as [{name, worktree, base, head, current, toplevel, common_dir, clean}]), plan_reviewed, plan_findings?, decisions?, done, pr? (a batch-built close-out cont: the PR the batch merged), fix_waves, checks_fixes?, sync_fixes?, verified?, final_reviewed?, partial?, reordered? (#896: [{task, after, notes}], each a blocked task moved once to just after the later task it named; cont.plan.tasks is already in that order), claim_incomplete? }. Passing it back as args.cont
+// { setup, lane, plan (declared branches, when any, as [{name, worktree, base, head, current, toplevel, common_dir, clean}]), plan_reviewed, plan_findings?, decisions?, done, pr? (a batch-built close-out cont: the PR the batch merged), fix_waves, fix_findings? (#924: the findings a fix-wave-review stop left open, bounded; the resume's first fix wave gets them with what its fresh final review raises), checks_fixes?, sync_fixes?, verified?, final_reviewed?, partial?, reordered? (#896: [{task, after, notes}], each a blocked task moved once to just after the later task it named; cont.plan.tasks is already in that order), claim_incomplete? }. Passing it back as args.cont
 // re-adopts the claimed worktree (setup re-checks it and refuses a dirty tree
 // unless cont.partial names the task that left the edits), reuses cont.plan
 // (reviewing it first unless plan_reviewed; a plan-review stop keeps the revised plan with plan_findings { rules, findings, rounds }, and the resume reads the owner's answer and, when every finding left names a rule and none has source codex, runs one rules-only revise of it whatever triggered the full revise (#823), dropping the plan once rounds reach two; any other finding left has spent the plan's one full revise, so the resume plans again), skips the tasks in cont.done, then
@@ -514,6 +514,14 @@ let partial = CONT && CONT.partial !== undefined ? CONT.partial : undefined
 let reordered = CONT && Array.isArray(CONT.reordered) ? CONT.reordered.filter(r => r && Number.isInteger(r.task) && Number.isInteger(r.after)) : []
 // Fix waves already spent, carried through a resume; declared before stop() because early failures call it.
 let fixWaves = (CONT && CONT.fix_waves) || 0
+// #924: the findings a fix-wave-review stop left open, kept in cont.fix_findings until a resume's first fix wave has taken them.
+// Bounded on the way out and on the way in (at most CARRY_MAX findings, each text capped), so a cont cannot grow from stop to stop.
+const CARRY_MAX = 10
+const clip = v => (v.length > REASON_MAX ? `${v.slice(0, REASON_MAX - 3)}...` : v)
+const carryOf = list => (Array.isArray(list) ? list : []).filter(f => isEntry(f) && typeof f.summary === 'string' && f.summary.trim() && f.severity !== 'minor').slice(0, CARRY_MAX)
+  .map(f => ({ severity: f.severity === 'critical' ? 'critical' : 'important', ...(typeof f.file === 'string' && f.file ? { file: clip(f.file) } : {}), summary: clip(f.summary), ...(typeof f.failing_input === 'string' && f.failing_input ? { failing_input: clip(f.failing_input) } : {}) }))
+const findingKey = f => `${typeof f.file === 'string' ? f.file : ''}\n${clip(String(f.summary)).toLowerCase().replace(/\s+/g, ' ').trim()}`
+let carried = carryOf(CONT && CONT.fix_findings)
 // The head the final review and its fix waves passed at ({ head, accepted? }), carried so a resume on it skips the review.
 let finalReviewed = (CONT && CONT.final_reviewed) || null
 // The stages between a sync merge and its acceptance: a stop there must not carry a marker over the unreviewed merge.
@@ -532,7 +540,7 @@ addDecision(args.decisions)
 let amendApplied = false
 const stop = (stage, extra) => {
   const fr = SYNC_WINDOW.includes(stage) ? (finalReviewed = null) : finalReviewed
-  return { stage, ...extra, ...(stage === 'planned' || stage === 'ready' ? {} : { reason: stopReason(stage, extra || {}) }), ...(amendApplied ? { amended: true } : {}), ...deadOf(), cont: { setup, lane: LANE, plan, plan_reviewed: planReviewed, ...(plan && !planReviewed && planFindingsKept ? { plan_findings: planFindingsKept } : {}), ...(decisions.length ? { decisions } : {}), done: taskLog, ...(OWN_PR !== null ? { pr: OWN_PR } : {}), fix_waves: fixWaves, ...(checksFixes ? { checks_fixes: checksFixes } : {}), ...(syncFixes ? { sync_fixes: syncFixes } : {}), ...(verified ? { verified } : {}), ...(fr ? { final_reviewed: fr } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}), ...(reordered.length ? { reordered } : {}) } }
+  return { stage, ...extra, ...(stage === 'planned' || stage === 'ready' ? {} : { reason: stopReason(stage, extra || {}) }), ...(amendApplied ? { amended: true } : {}), ...deadOf(), cont: { setup, lane: LANE, plan, plan_reviewed: planReviewed, ...(plan && !planReviewed && planFindingsKept ? { plan_findings: planFindingsKept } : {}), ...(decisions.length ? { decisions } : {}), done: taskLog, ...(OWN_PR !== null ? { pr: OWN_PR } : {}), fix_waves: fixWaves, ...(carried.length ? { fix_findings: carried } : {}), ...(checksFixes ? { checks_fixes: checksFixes } : {}), ...(syncFixes ? { sync_fixes: syncFixes } : {}), ...(verified ? { verified } : {}), ...(fr ? { final_reviewed: fr } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}), ...(reordered.length ? { reordered } : {}) } }
 }
 
 const haltTask = (n, stage, extra) => { const s = stop(stage, extra); return { ...s, cont: { ...s.cont, partial: n } } }
@@ -1281,30 +1289,55 @@ ${PLAN_REF} Integration review. The delivery was reviewed in ${groups.length} ch
   if (!integ) return stop('final-review', { details: 'the integration reviewer returned nothing' })
   finalFindings = finalFindings.concat(findingsOf(integ))
 }
+// #924: what an earlier fix-wave-review stop left open joins the fresh findings, a repeat (same file and summary) once.
+const fromStop = carried.filter(c => !finalFindings.some(f => findingKey(f) === findingKey(c)))
+if (fromStop.length) log(`final review: ${fromStop.length} finding(s) carried from the earlier fix-wave-review stop`)
+finalFindings = finalFindings.concat(fromStop)
 if (finalFindings.length) {
-  // At most two waves: the second runs only when the first re-review's findings all narrow the first round (same kind of defect on another path); a new kind stops.
+  // At most MAX_WAVES waves. The second runs only when the first re-review's findings all narrow the first round (same kind of defect on
+  // another path); a new kind stops. The third (#924) runs only when the second re-review's findings all narrow, all are important
+  // (none critical, none without a severity) and they are no more than the first re-review left.
+  const MAX_WAVES = 3
   let waveFindings = finalFindings
+  let afterFirst = 0
   const hasBranches = declared(plan).length > 0
-  for (let k = 1; k <= 2; k++) {
+  for (let k = 1; k <= MAX_WAVES; k++) {
     const fwLabel = k === 1 ? 'fix-wave' : `fix-wave-${k}`
     const rvLabel = k === 1 ? 'fix-wave-review' : `fix-wave-review-${k}`
     log(`final review: ${waveFindings.length} blocking findings, fix wave ${k}`)
     fixWaves++
-    const fw = await call(`${CTX}\n${PLAN_REF} Fix these final-review findings, each real defect with a regression test, then commit: ${JSON.stringify(waveFindings)}.${k === 2 ? ` They narrow these first-round findings: ${JSON.stringify(finalFindings)}.` : ''} If a finding is wrong, explain with evidence in notes. ${FIX_TESTS} ${COMMIT_SCOPE} ${hasBranches ? IMPL_RETURN_AT(W) : IMPL_RETURN}${hasBranches ? ` A finding on a declared branch is fixed in that branch's worktree and pushed with its push form. Return branch_heads: one {name, head} per declared branch (${declared(plan).map(b => b.name).join(', ')}), head being git -C <its worktree> rev-parse HEAD after your last commit.` : ''}\n${RULES}`, { label: fwLabel, phase: 'Final review', agentType: 'implementer', model: 'sonnet', schema: hasBranches ? FIX_WAVE_IMPL : IMPL })
-    if (!implDone(fw)) return stop('fix-wave', { fw, finalFindings: waveFindings, fix_waves: fixWaves })
+    const fw = await call(`${CTX}\n${PLAN_REF} Fix these final-review findings, each real defect with a regression test, then commit: ${JSON.stringify(waveFindings)}.${k === 1 && fromStop.length ? ` The last ${fromStop.length} were left open by an earlier run's fix waves and may repeat the ones before them: check each against the current head, and explain one that no longer holds in notes; when you commit nothing, return commit equal to start_head.` : ''}${k >= 2 ? ` They narrow these first-round findings: ${JSON.stringify(finalFindings)}.` : ''}${k === 3 ? ' Fix the class of defect: enumerate every path of the same kind as each reported one and close them all, not only the reported instance.' : ''} If a finding is wrong, explain with evidence in notes. ${FIX_TESTS} ${COMMIT_SCOPE} ${hasBranches ? IMPL_RETURN_AT(W) : IMPL_RETURN}${hasBranches ? ` A finding on a declared branch is fixed in that branch's worktree and pushed with its push form. Return branch_heads: one {name, head} per declared branch (${declared(plan).map(b => b.name).join(', ')}), head being git -C <its worktree> rev-parse HEAD after your last commit.` : ''}\n${RULES}`, { label: fwLabel, phase: 'Final review', agentType: 'implementer', model: 'sonnet', schema: hasBranches ? FIX_WAVE_IMPL : IMPL })
+    // The carried findings outlive only a wave that gave no reply: one that answered and failed has had them, and the resume's fresh review decides.
+    const spent = details => {
+      if (fw && carried.length) { log(`fix-wave: ${carried.length} carried finding(s) dropped after a wave that answered and failed`); carried = [] }
+      return stop('fix-wave', { fw, finalFindings: waveFindings, fix_waves: fixWaves, ...(details ? { details } : {}) })
+    }
+    if (!implDone(fw)) return spent()
     const collected = []
     for (const b of declared(plan)) {
       const h = headOf(fw.branch_heads, b.name)
-      if (!h) return stop('fix-wave', { fw, finalFindings: waveFindings, fix_waves: fixWaves, details: `no head for the declared branch ${b.name}` })
+      if (!h) return spent(`no head for the declared branch ${b.name}`)
       if (!sameSha(h, branchTips[b.name])) collected.push(`git -C ${b.worktree} diff ${branchTips[b.name]}..${h}`)
       branchTips[b.name] = h
     }
     tip = fw.commit
-    const rv = await call(`${CTX}\nRe-review these findings against the fix (${span(fw)}${collected.length ? ` and ${collected.join(' and ')}` : ''}); notes: ${fw.notes}. Findings: ${JSON.stringify(waveFindings)}. Report any still unresolved and any new Important or Critical defect, setting relation on each finding you still report: narrowing when it is the same kind of defect as one above, reached on another path, input or call site; else new. Unsure is new.`, { label: rvLabel, phase: 'Final review', agentType: 'reviewer', schema: FINDINGS })
+    // A wave that had carried findings and committed nothing found them closed already: its re-review reads the head, with no diff range.
+    const idle = k === 1 && fromStop.length > 0 && sameSha(fw.commit, fw.start_head) && !collected.length
+    if (!idle) carried = []
+    const rv = await call(`${CTX}\nRe-review these findings against ${idle ? `the current head of ${W}${hasBranches ? ` and of each declared branch's worktree (${declared(plan).map(b => `${b.name} in ${b.worktree}`).join(', ')})` : ''} (the fix wave committed nothing, so there is no diff to read). Nothing changed since these were raised, so each finding stands unless the code at the head shows it does not hold. The notes are the implementer's claims: check each against the code and never clear a finding on the notes alone` : `the fix (${span(fw)}${collected.length ? ` and ${collected.join(' and ')}` : ''})`}; notes: ${fw.notes}. Findings: ${JSON.stringify(waveFindings)}.${k === 1 && fromStop.length && !idle ? ` The last ${fromStop.length} were left open by an earlier run and may repeat the ones before them: check each against the head, not only the diff.` : ''} Report any still unresolved and any new Important or Critical defect, setting relation on each finding you still report: narrowing when it is the same kind of defect as one above, reached on another path, input or call site; else new. Unsure is new.`, { label: rvLabel, phase: 'Final review', agentType: 'reviewer', schema: FINDINGS })
     if (!rv) return stop('fix-wave-review', { rv, fix_waves: fixWaves })
+    carried = []
     const next = findingsOf(rv)
     if (!next.length) break
-    if (k === 2 || next.some(f => f.relation !== 'narrowing')) return stop('fix-wave-review', { rv, fix_waves: fixWaves })
+    const narrow = next.every(f => f.relation === 'narrowing')
+    // A wave that committed nothing earns no further wave: what its re-review still holds stops.
+    const again = k === 1 ? narrow && !idle : k === 2 && narrow && next.every(f => f.severity === 'important') && next.length <= afterFirst
+    if (!again) {
+      carried = carryOf(next)
+      if (carried.length < next.length) log(`fix-wave-review: ${next.length - carried.length} of ${next.length} open finding(s) not carried in cont`)
+      return stop('fix-wave-review', { rv, fix_waves: fixWaves })
+    }
+    if (k === 1) afterFirst = next.length
     waveFindings = next
   }
 }
