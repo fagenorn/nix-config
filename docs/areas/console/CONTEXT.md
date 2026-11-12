@@ -42,7 +42,7 @@ The manager's answer to a goal: what done looks like, what is excluded, the slic
 _Avoid_: plan, proposal
 
 **Manager**:
-The one agent a sprint has: it writes the brief and the reports and never writes code (#835). The console starts it as a background Claude Code session in the project's root, under the profile with the most weekly allowance left, drafts the brief under the contract `sprint contract` prints and shows it inside its sprint with its state (ADR-console-015). It reads the owner's messages with `sprint inbox` at the start of every turn, and after approval its contract tells it to end the turn before any tracker action once the sprint is no longer open (ADR-console-016). A manager gone two minutes while its sprint has work is woken in place or replaced (ADR-console-017).
+The one agent a sprint has: it writes the brief and the reports and never writes code (#835). The console starts it as a background Claude Code session in the project's root, under the profile with the most weekly allowance left, drafts the brief under the contract `sprint contract` prints and shows it inside its sprint with its state (ADR-console-015). It reads the owner's messages with `sprint inbox` at the start of every turn, and after approval its contract tells it to end the turn before any tracker action once the sprint is no longer open (ADR-console-016). A manager gone two minutes while its sprint has work is woken in place or replaced (ADR-console-017). A manager idle five minutes while its sprint has work is told to go on, and waits out its account's quota (ADR-console-020).
 _Avoid_: owner, worker, agent, bot
 
 **Message**:
@@ -54,7 +54,7 @@ The questions a manager sends at once with `sprint ask`: each says what it block
 _Avoid_: poll, survey
 
 **Nudge**:
-The console's one fixed sentence telling a manager to read its inbox, by relay to a running manager or by waking a stopped one in place; it never carries the owner's words (ADR-console-016).
+The console's one fixed sentence telling a manager to read its inbox, by relay to a running manager or by waking a stopped one in place; it never carries the owner's words (ADR-console-016). One other fixed sentence tells an idle manager to run `sprint recap` and `sprint inbox` and go on, at most one every ten minutes and three without a report (ADR-console-020).
 _Avoid_: ping, notification
 
 **Bring-back**:
@@ -66,7 +66,7 @@ The manager's fixed-shape account after each batch and on any change of state: a
 _Avoid_: update, log
 
 **Sprint**:
-One goal, later its issues and its outcome, in one project (#834), shown under its project as one line with its state (drafting the brief, starting, on track, waiting on you, quiet and may be stuck, closing, done, stopping or stopped by you), its progress and its manager's status; its manager session is listed inside it, and a manager that failed to start or is missing offers a retry. An ended sprint folds into its project's Finished sprints a day after it ends (ADR-console-011, ADR-console-013, ADR-console-014, ADR-console-015, ADR-console-018).
+One goal, later its issues and its outcome, in one project (#834), shown under its project as one line with its state (drafting the brief, starting, on track, waiting on you, waiting on quota until <time>, quiet and may be stuck, closing, done, stopping or stopped by you), its progress and its manager's status; its manager session is listed inside it, and a manager that failed to start or is missing offers a retry. An ended sprint folds into its project's Finished sprints a day after it ends (ADR-console-011, ADR-console-013, ADR-console-014, ADR-console-015, ADR-console-018).
 _Avoid_: job, run
 
 **Session**:
