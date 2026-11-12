@@ -332,8 +332,8 @@ sprint (`_launching`, changed only under the ingest lock) in the critical sectio
 project_id, sprint_id)`, under the lock, raises `Refused` with `manager.UNAVAILABLE_TEXT` without a
 launcher, `NOT_OPEN` unless the sprint is open and of that project, `LAUNCHING` while the sprint is
 reserved for a launch or a nudge (`_nudging`; the two never overlap, so a wake never resumes the manager a
-retry replaces), and, from `sprints.manager_status`, `HAS_MANAGER` when the manager is started and `TOO_SOON`
-otherwise when no retry is offered; else it reserves the sprint before the lock is released and
+retry replaces), and, from `sprints.manager_status`, `HAS_MANAGER` when the manager is started or stalled and `TOO_SOON`
+otherwise when no retry is offered (a stalled sprint, and a takeover's failed or waiting manager, offer retry: "try again"); else it reserves the sprint before the lock is released and
 dispatches, so a second retry that arrives while the first is queued or running is refused
 `LAUNCHING`. `start_manager(sprint_id)` reserves (returning when it cannot, a nudge reservation included) and launches in the
 calling thread. `_launch_reserved`, under the lock, drops its own attempt's reservation (each reservation is one token, so a finished attempt never frees a later retry's) and returns when the sprint
@@ -378,6 +378,34 @@ message with no `delivered_at` whose `at` is at least `sprints.RENUDGE_AFTER_MS`
 `self._clock()` and a `last_nudge_at` that is None or as old, and dispatches each after the lock
 (row times are compared as epoch milliseconds). The nudger and the listing are never called with the
 ingest lock held, and no `Nudge`, row or stderr line carries the owner's text.
+
+Bring-back (#893, ADR-console-017): a sprint's manager that is gone while the sprint has work is woken
+or replaced. `revive()`, called by `_poll_loop` after `renudge()` (a failure is `console:
+revive_failed <Type>: <message>`) and returning at once without a launcher, runs under the ingest lock
+over each open sprint: a manager listed (`_manager_listed`) sets `_last_listed[sprint_id]` to now and
+the sprint is skipped, as is a sprint reserved for a launch or a nudge. `_revive_step(sprint, now)` is
+the one decision, `revive.next_step` over the sprint, `view.sprint_waiting` of its project's open
+inbox records, the time the manager was last listed (in memory, starting at the service's
+construction, so a restarted console waits two minutes first), `now` and whether there is a nudger;
+`revive()`, `_revive_wake` and a takeover's `_prepared_launch` all call it, so a queued job is
+decided again when it runs. `STALL` appends one `manager.stalled {sprint_id, goal, reason}` row and
+no job; `WAKE` reserves the sprint in `_nudging` and queues `_revive_wake`; `TAKEOVER` reserves it in
+`_launching` with a `_TakeoverReservation` and queues the launch. A wake dispatch that raises frees
+the reservation and appends one failed `manager.woken` row ("the wake could not start: ..."). The
+wake job, off the lock, reads a fresh `listing()` and sends no wake when it shows the manager's name
+(it sets `_last_listed` instead and appends nothing); otherwise it calls the nudger with the `revive`
+route and appends `manager.woken {sprint_id, goal, session_id, ok[, reason][, back]}` while the
+sprint is open and the service not stopping; a failure also prints `console: wake_failed <sprint_id>
+<reason>`, and `back` is true when the wake succeeded and the manager was listed or seen (a newer
+`manager_seen_seq`) while the command ran. A takeover job reads the listing off the lock (one that
+raises ends the reservation and appends nothing), then launches only while the sprint is open,
+neither the fresh listing nor the folded sessions show the manager and `_revive_step` is still a
+takeover; otherwise it appends nothing. A launch is a takeover when it was reserved by the bring-back
+or is a retry of a stalled sprint or of a manager row that is a takeover; every manager row it writes
+(`manager.started`, `manager.failed` including the missing-secret one, `manager.waiting`) carries
+`"takeover": true` and `"goal"`, and the launch uses `manager.new_launch(..., takeover=True)`. The
+nudger, launcher and listing are never called with the ingest lock held; the owner's text and the
+secret appear in no new row or stderr line.
 
 Retention (ADR-console-009): construction runs one retention pass (`EventLog.retain`) after
 opening the log and before reading its events, and `RETENTION_THREAD`, started by `start()`, calls
@@ -441,14 +469,15 @@ from urllib.parse import parse_qsl
 
 from agent_tools.claims import owner_actions
 from agent_tools.console import (
-    answer, capacity, deliveries, digest, inbox, manager, nudge, sessions, sprints, write_guard)
+    answer, capacity, deliveries, digest, inbox, manager, nudge, revive, sessions, sprints,
+    write_guard)
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
-    MANAGER_STARTED, MANAGER_WAITING, SPRINT_ANSWERED, SPRINT_MESSAGED, SPRINT_NUDGED,
+    MANAGER_STALLED, MANAGER_STARTED, MANAGER_WAITING, MANAGER_WOKEN, SPRINT_ANSWERED, SPRINT_MESSAGED, SPRINT_NUDGED,
     SPRINT_READ, SPRINT_REPORTED, Event, EventLog, utc_now)
 from agent_tools.console.view import (
     INBOX_CHANGED, ReadState, derive_view, encode_view, health_change, inbox_changes, inbox_records,
-    project_for, project_states, read_states, registry_changes)
+    project_for, project_states, read_states, registry_changes, sprint_waiting)
 from agent_tools.project_contract import agent_platform
 from agent_tools.system.forge_api import ForgeError
 from agent_tools.verification import verify_answer
@@ -1073,6 +1102,10 @@ class _RetryReservation:
     """A launch reservation made by a retry: it runs only while the sprint still offers retry."""
 
 
+class _TakeoverReservation:
+    """A launch reservation made by the bring-back: it runs only while the takeover is still decided."""
+
+
 class ConsoleService:
     def __init__(self, store: Path, registry: Path, *, port: int = DEFAULT_PORT,
                  poll_seconds: float = POLL_SECONDS,
@@ -1109,6 +1142,7 @@ class ConsoleService:
         self._bound_profile_of = bound_profile_of
         self._dispatch = self._on_new_thread if dispatch is None else dispatch
         self._launching: dict[str, object] = {}
+        self._last_listed: dict[str, int] = {}
         self._tick = tick
         self._owner_path = owner_path
         self._sprint_secrets = (Path(store).with_name(sprints.SECRETS_DIR)
@@ -1137,6 +1171,7 @@ class ConsoleService:
         self._patterns: dict[str, str] = {}
         self._activity = activity
         self._clock = clock
+        self._revive_since_ms = int(clock() * 1000)
         self._retention_seconds = retention_seconds
         self._digest_seconds = digest_seconds
         self._retention_thread: threading.Thread | None = None
@@ -1442,7 +1477,8 @@ class ConsoleService:
             state, _, retry = self._manager_state(sprint)
             if not retry:
                 raise sprints.Refused(
-                    sprints.HAS_MANAGER if state == sprints.STARTED else sprints.TOO_SOON)
+                    sprints.HAS_MANAGER if state in (sprints.STARTED, sprints.STALLED)
+                    else sprints.TOO_SOON)
             self._launching[sprint_id] = _RetryReservation()
         self._dispatch_launch(sprint_id)
 
@@ -1453,8 +1489,16 @@ class ConsoleService:
         if token is None:
             return
         try:
+            listed = None
+            if isinstance(token, _TakeoverReservation):
+                try:
+                    listed = self._listing()
+                except Exception as error:
+                    print(f"console: revive_failed {type(error).__name__}: {error}",
+                          file=sys.stderr)
+                    return
             with self._ingest:
-                launch = self._prepared_launch(sprint_id, token)
+                launch = self._prepared_launch(sprint_id, token, listed)
             if launch is None:
                 return
             reason = None
@@ -1468,18 +1512,38 @@ class ConsoleService:
             with self._ingest:
                 self._release(sprint_id, token)
 
-    def _prepared_launch(self, sprint_id: str, token: object) -> manager.Launch | None:
+    def _prepared_launch(self, sprint_id: str, token: object,
+                         listed: Mapping[str, sessions.Observation] | None = None
+                         ) -> manager.Launch | None:
         """Under the ingest lock: the launch to run, or None after dropping the reservation."""
         sprint = self._sprints.get(sprint_id)
-        if (sprint is None or self._manager_state(sprint)[0] == sprints.STARTED
+        if sprint is None:
+            self._release(sprint_id, token)
+            return None
+        if isinstance(token, _TakeoverReservation):
+            now = int(self._clock() * 1000)
+            name = manager.session_name(sprint.project_id, sprint_id)
+            shown = any(o.name == name for o in (listed or {}).values())
+            if shown:
+                self._last_listed[sprint_id] = now
+            if (shown or self._manager_listed(sprint)
+                    or self._revive_step(sprint, now) != sprints.TAKEOVER):
+                self._release(sprint_id, token)
+                return None
+        elif (self._manager_state(sprint)[0] == sprints.STARTED
                 or (isinstance(token, _RetryReservation) and not self._manager_state(sprint)[2])):
             self._release(sprint_id, token)
             return None
+        takeover = isinstance(token, _TakeoverReservation) or (
+            isinstance(token, _RetryReservation)
+            and (sprint.stalled is not None
+                 or (sprint.manager is not None and sprint.manager.takeover)))
+        marks = {"takeover": True, "goal": sprint.goal} if takeover else {}
         project_id = sprint.project_id
         secret = sprints.read_secret(self._sprint_secrets, sprint_id)
         if secret is None:
             self._append_manager(MANAGER_FAILED, project_id, {
-                "sprint_id": sprint_id, "reason": "the sprint's secret is missing"}, token)
+                "sprint_id": sprint_id, "reason": "the sprint's secret is missing", **marks}, token)
             return None
         project = self._states.get(project_id)
         if project is None:
@@ -1490,10 +1554,10 @@ class ConsoleService:
             self._bound_profile_of(project.root))
         if isinstance(choice, manager.Wait):
             self._append_manager(MANAGER_WAITING, project_id, {
-                "sprint_id": sprint_id, "until": choice.until}, token)
+                "sprint_id": sprint_id, "until": choice.until, **marks}, token)
             return None
         return manager.new_launch(sprint_id, project_id, sprint.goal, project.root, choice,
-                                  secret, self._sprint_secrets)
+                                  secret, self._sprint_secrets, takeover=takeover)
 
     def _append_manager(self, kind: str, project_id: str, payload: dict, token: object) -> None:
         """Under the ingest lock: append one manager row, release the attempt's hold, publish."""
@@ -1509,15 +1573,17 @@ class ConsoleService:
                 return
             if self._stop.is_set():
                 return
+            marks = ({"takeover": True, "goal": self._sprints[launch.sprint_id].goal}
+                     if launch.takeover else {})
             if reason is None:
                 self._append_manager(MANAGER_STARTED, launch.project_id, {
                     "sprint_id": launch.sprint_id, "profile": launch.profile,
-                    "session_name": launch.session_name}, token)
+                    "session_name": launch.session_name, **marks}, token)
                 return
             if secret:
                 reason = reason.replace(secret, "<secret>")
             self._append_manager(MANAGER_FAILED, launch.project_id, {
-                "sprint_id": launch.sprint_id, "reason": reason}, token)
+                "sprint_id": launch.sprint_id, "reason": reason, **marks}, token)
             print(f"console: manager_failed {launch.sprint_id} {reason}", file=sys.stderr)
 
     def withdraw_goal(self, project_id: str, sprint_id: str) -> None:
@@ -1741,6 +1807,108 @@ class ConsoleService:
         for sprint_id in due:
             self._dispatch_nudge(sprint_id)
 
+    def _revive_step(self, sprint: sprints.SprintState, now: int) -> str | None:
+        """Under the ingest lock: the one bring-back decision for the sprint at `now` (milliseconds)."""
+        records = [r for r in self._inbox.values()
+                   if r.item.get("project_id") == sprint.project_id and not r.item["answered"]]
+        return revive.next_step(
+            sprint, sprint_waiting(sprint, records),
+            self._last_listed.get(sprint.sprint_id, self._revive_since_ms), now,
+            self._nudger is not None)
+
+    def revive(self) -> None:
+        """Bring back each manager that is gone while its sprint has work (#893)."""
+        if self._launcher is None:
+            return
+        jobs: list[tuple[str, str]] = []
+        with self._ingest:
+            if self._stop.is_set():
+                return
+            now = int(self._clock() * 1000)
+            for sprint_id in [key for key in self._last_listed if key not in self._sprints]:
+                del self._last_listed[sprint_id]
+            for sprint_id, sprint in list(self._sprints.items()):
+                if self._manager_listed(sprint):
+                    self._last_listed[sprint_id] = now
+                    continue
+                if sprint_id in self._launching or sprint_id in self._nudging:
+                    continue
+                step = self._revive_step(sprint, now)
+                if step == revive.STALL:
+                    self._apply(self.log.append([(MANAGER_STALLED, sprint.project_id, {
+                        "sprint_id": sprint_id, "goal": sprint.goal,
+                        "reason": revive.stall_reason(sprint)})]))
+                elif step == sprints.WAKE:
+                    self._nudging.add(sprint_id)
+                    jobs.append((step, sprint_id))
+                elif step == sprints.TAKEOVER:
+                    self._launching[sprint_id] = _TakeoverReservation()
+                    jobs.append((step, sprint_id))
+        for step, sprint_id in jobs:
+            try:
+                if step == sprints.WAKE:
+                    self._dispatch_wake(sprint_id)
+                else:
+                    self._dispatch_launch(sprint_id)
+            except Exception as error:
+                print(f"console: revive_failed {type(error).__name__}: {error}", file=sys.stderr)
+
+    def _dispatch_wake(self, sprint_id: str) -> None:
+        """Hand a reserved sprint's wake to the dispatcher; one that cannot start is a failed wake."""
+        try:
+            self._dispatch(lambda: self._revive_wake(sprint_id))
+        except Exception as error:
+            reason = f"the wake could not start: {type(error).__name__}: {error}"
+            with self._ingest:
+                self._nudging.discard(sprint_id)
+                self._record_wake(sprint_id, False, reason, False)
+
+    def _record_wake(self, sprint_id: str, ok: bool, reason: str | None, back: bool) -> None:
+        """Under the ingest lock: append one `manager.woken` row for the open sprint and fold it."""
+        sprint = self._sprints.get(sprint_id)
+        if sprint is None or self._stop.is_set():
+            return
+        payload = {"sprint_id": sprint_id, "goal": sprint.goal,
+                   "session_id": sprint.manager_session or "", "ok": ok}
+        if reason is not None:
+            payload["reason"] = reason
+        if back:
+            payload["back"] = True
+        self._apply(self.log.append([(MANAGER_WOKEN, sprint.project_id, payload)]))
+        if not ok:
+            print(f"console: wake_failed {sprint_id} {reason}", file=sys.stderr)
+
+    def _revive_wake(self, sprint_id: str) -> None:
+        """Resume the sprint's stopped manager in place, then record the attempt; the reservation ends here."""
+        with self._ingest:
+            sprint = self._sprints.get(sprint_id)
+            project = None if sprint is None else self._states.get(sprint.project_id)
+            if (sprint is None or project is None or sprint.manager is None
+                    or self._manager_listed(sprint)
+                    or self._revive_step(sprint, int(self._clock() * 1000)) != sprints.WAKE):
+                self._nudging.discard(sprint_id)
+                return
+            name = manager.session_name(sprint.project_id, sprint_id)
+            session_id, profile, root = sprint.manager_session, sprint.manager.profile, project.root
+            seen_before = sprint.manager_seen_seq
+        reason = None
+        try:
+            if any(o.name == name for o in self._listing().values()):
+                with self._ingest:
+                    self._last_listed[sprint_id] = int(self._clock() * 1000)
+                    self._nudging.discard(sprint_id)
+                return
+            self._nudger(nudge.Nudge(sprint_id, nudge.REVIVE, name, session_id, profile, root))
+        except Exception as error:
+            reason = (str(error) if isinstance(error, nudge.NudgeFailed)
+                      else f"{type(error).__name__}: {error}")
+        with self._ingest:
+            self._nudging.discard(sprint_id)
+            sprint = self._sprints.get(sprint_id)
+            back = (reason is None and sprint is not None
+                    and (self._manager_listed(sprint) or sprint.manager_seen_seq != seen_before))
+            self._record_wake(sprint_id, reason is None, reason, back)
+
     def read_inbox(self, sprint_id: str, secret: str) -> list[dict]:
         """The unread messages in id order; the same locked section records them as read."""
         with self._ingest:
@@ -1946,6 +2114,11 @@ class ConsoleService:
                 self.renudge()
             except Exception as error:
                 print(f"console: renudge_failed {type(error).__name__}: {error}",
+                      file=sys.stderr)
+            try:
+                self.revive()
+            except Exception as error:
+                print(f"console: revive_failed {type(error).__name__}: {error}",
                       file=sys.stderr)
 
     def _fold(self, appended: list[Event]) -> None:
