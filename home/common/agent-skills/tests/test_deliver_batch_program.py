@@ -5550,11 +5550,32 @@ class TrainPathTest(unittest.TestCase):
                 own = step_text(calls, label)
                 self.assertIn("time is the only stop of this wait: read the clock with date +%s when this step begins and again before each watch", own)
                 self.assertIn(f"Stop waiting when no check is pending any more, or {minutes} minutes after this step began, whatever is still pending then", own)
-                self.assertIn("A watch that returns while a check is still pending, or that reports no check in the first 5 minutes of this step, "
-                              "is run again once you have read the list again", own)
-                for counted in ("round", "times at most", "watches at most", "at most once", "at most twice"):
+                self.assertIn("A watch that returns while a check is still pending, or that reports no check in the first 5 minutes of this step "
+                              "(later too when the forge requires a check), is run again once you have read the list again.", own)
+                for counted in ("round", "times at most", "watches at most", "at most twice"):
                     self.assertNotIn(counted, own)
                 self.assertEqual(re.findall(r"\b\d+ (?:watches|rounds|times|calls)\b", own), [])
+
+    def test_a_watch_that_reports_no_check_is_pending_while_a_declared_check_is_missing(self):
+        """With no declared check, a pull request that still shows none after 5 minutes has none; with declared checks it is pending."""
+        declared = {"setup": {"max_parallel": 2, "required_checks": ["gate"]},
+                    **{f"train-checks-1-{i}": {"required": ["gate"], "passed": ["gate"]} for i in (1, 2)}}
+        _, calls, _ = train_run(patch=declared)
+        own = step_text(calls, "train-checks-1-1")
+        self.assertIn("or that reports no check (the declared checks are then pending), is run again once you have read the list again.", own)
+        self.assertNotIn("in the first 5 minutes of this step", own)
+        self.assertIn('as JSON: ["gate"]', own)
+
+    def test_a_checks_step_starts_a_watch_at_most_once_a_minute(self):
+        """A watch that returns at once (no check yet, a gh error) must not spin: the step's own one-minute wait absorbs it."""
+        late = {"state": "pending", "head": X1, "pending": ["e2e"]}
+        _, calls, _ = train_run(replies={"train-checks-1-1": late})
+        for label in ("train-checks-1-1", "train-checks-1-2", "train-checks-1-1-more"):
+            with self.subTest(label=label):
+                own = step_text(calls, label)
+                self.assertIn("Start a watch at most once a minute: when the last one started less than a minute ago, first run alone "
+                              "timeout 60 tail -f /dev/null, this step's own wait, which ends by itself with exit 124.", own)
+                self.assertNotIn("sleep", own)
 
     def test_the_lock_is_refreshed_by_time_while_a_checks_step_waits(self):
         """The lock is never idle for the takeover bound while a train waits for checks: every checks step, the further wait included,

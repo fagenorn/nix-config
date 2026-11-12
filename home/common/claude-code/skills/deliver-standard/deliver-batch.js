@@ -1183,8 +1183,8 @@ ${RULES}`, `land-merge-${n}`, { ...lifecycleClerk, schema: withRenew(LAND_MERGE_
 // wrapper on any other exit). Nothing merges unless every car up to g is green at its exact head. A train never writes to an issue branch and
 // never reads a merge commit. An issue a train did not land never goes back to WAITING: it lands in the same drain through landOne, the
 // ordinary landing start, so the other issues its train dropped, and then the issues waiting when its own lock wait ends, ride a train behind
-// it (#971; the #936 rule and limits). The chain of trains ends by itself: only a later member is ever dropped, an issue is a later member
-// once, and every further train takes an issue out of the dropped ones or out of WAITING, which only a child's ready return fills. Any surprise before the merge step (a dead, thrown or malformed step, a conflict, a red or late car) sweeps and falls back to
+// it (#971; the #936 rule and limits). The chain of trains ends by itself: only a later member is ever dropped, so each train's
+// leader leaves the pool (the dropped issues and WAITING, which only a child's ready return fills) for good, and the pool shrinks with every train. Any surprise before the merge step (a dead, thrown or malformed step, a conflict, a red or late car) sweeps and falls back to
 // land(), and so does a merge the forge or the guard refused as behind once a read shows the car still open (the first landing then resyncs
 // and moves the lock as any behind landing does); any other surprise in the merge step stops its members, because the car may be merged.
 const TRAIN_MAX = 3
@@ -1365,7 +1365,7 @@ ${RULES_FOR('<the scratch worktree>', '<car>')}`, `train-build-${t}`, { agentTyp
         const ck = await trainCall(`Wait for every check of the pull request #${c.pr} of ${SLUG} (the git repository at ${REPO}), car ${i + 1} of a landing train into ${INT}, at the car head ${c.head}, required or not. Change nothing but the lock refresh of step 3.
 1. Read ${UNSET}gh pr view ${c.pr} --repo ${SLUG} --json headRefOid,state. head is its headRefOid. When head is not ${c.head} or the state is not OPEN, answer state failed at once with head and what you read in details.
 2. Run no git command in this step: the cars' checks are read side by side, and a fetch in the shared checkout would collide with theirs. Whether the car is behind ${INT} is not read here; the merge itself refuses a car that is. When a read of this step fails (a gh error, not a failing check), read once more; when it fails again answer state pending with head ${c.head} and the error in details, never failed.
-${CHECKS_TAIL(c.pr, `(time is the only stop of this wait: read the clock with date +%s when this step begins and again before each watch. The train holds the land lock, which another host takes over after ${LOCK_IDLE_MIN} minutes without a refresh. Refresh it before the first watch, and before a later watch once ${TRAIN_REFRESH_SKIP_MIN} minutes or more have passed since the last refresh: run alone and exactly, with a Bash timeout of 5 minutes: ${LAND_REFRESH(H1)} When it prints the verdict not_held the lock is lost: stop waiting and answer state failed at once, with head ${c.head} and details lock lost. On any other answer go on. Give each watch a Bash timeout of ${Math.min(min, TRAIN_REFRESH_MIN)} minutes at most, and less when less time is left. A watch that returns while a check is still pending, or that reports no check in the first ${Math.min(min, TRAIN_NO_CHECKS_MIN)} minutes of this step, is run again once you have read the list again; that read is the only pause. Stop waiting when no check is pending any more, or ${min} minutes after this step began, whatever is still pending then)`)}
+${CHECKS_TAIL(c.pr, `(time is the only stop of this wait: read the clock with date +%s when this step begins and again before each watch. The train holds the land lock, which another host takes over after ${LOCK_IDLE_MIN} minutes without a refresh. Refresh it before the first watch, and before a later watch once ${TRAIN_REFRESH_SKIP_MIN} minutes or more have passed since the last refresh: run alone and exactly, with a Bash timeout of 5 minutes: ${LAND_REFRESH(H1)} When it prints the verdict not_held the lock is lost: stop waiting and answer state failed at once, with head ${c.head} and details lock lost. On any other answer go on. Give each watch a Bash timeout of ${Math.min(min, TRAIN_REFRESH_MIN)} minutes at most, and less when less time is left. A watch that returns while a check is still pending, or that reports no check ${DECLARED.length ? '(the declared checks are then pending)' : `in the first ${Math.min(min, TRAIN_NO_CHECKS_MIN)} minutes of this step (later too when the forge requires a check)`}, is run again once you have read the list again. Start a watch at most once a minute: when the last one started less than a minute ago, first run alone timeout 60 tail -f /dev/null, this step's own wait, which ends by itself with exit 124. Stop waiting when no check is pending any more, or ${min} minutes after this step began, whatever is still pending then)`)}
 Also return refresh: last (the verdict the last refresh printed, or error when it printed none) and refreshed (how many of your refreshes printed refreshed).
 ${RULES_FOR(REPO, carName(i + 1))}`, label, { ...TRAIN_LIFECYCLE, schema: TRAIN_CHECKS_SCHEMA })
         // The program sees the refreshes: a step that reports none is logged, and one that lost the lock ends the train (below).
@@ -1505,7 +1505,10 @@ ${RULES_FOR(REPO, carName(members.length))}`, `train-merge-${t}`, { ...TRAIN_LIF
     const dropped = cands.slice(1).filter(e => !settled[e.n] && !closeOuts.some(m => m.e === e))
     while (dropped.length) {
       const e = dropped.shift()
-      for (const m of await landOne(e, joined, dropped)) dropped.splice(dropped.indexOf(m), 1)
+      for (const m of await landOne(e, joined, dropped)) {
+        const at = dropped.indexOf(m)
+        if (at >= 0) dropped.splice(at, 1)
+      }
     }
   }
   return { train, tag, rest }
