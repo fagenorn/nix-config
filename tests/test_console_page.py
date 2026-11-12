@@ -1374,6 +1374,11 @@ class PageInboxGlanceTest(unittest.TestCase):
         self.assertIn("owner/p00", full(meta))
         self.assertIsNone(re.search(r"item\.question(?!s)", PAGE.read_text(encoding="utf-8")))
 
+    def test_a_single_question_is_its_headline_and_has_no_label_above_its_options(self) -> None:
+        only = item("S", headline="Which cache?", questions=[q("Which cache?", ["redis", "memcached"])])
+        (snap,) = render([START, {"frame": frame([only])}, {"snapshot": True}])
+        self.assertEqual(full(snap["inbox"]).count("Which cache?"), 1)
+
     def test_an_answered_item_is_one_closed_line_until_opened(self) -> None:
         done = item("Z", answered=True, headline="Which database?",
                     answered_at="2026-11-11T10:00:00+00:00",
