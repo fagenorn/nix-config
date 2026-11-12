@@ -2001,9 +2001,10 @@ class SyncFixRoundTest(unittest.TestCase):
         result, calls, _ = self.land()
         self.assertEqual(row(result, 1)["outcome"], "landed")
         sync = prompt(calls, "land-sync-1-1")
-        self.assertIn("run git -C /r/.wt/w-issue-1-x diff --check HEAD before committing and remove each leftover conflict marker it reports "
-                      "in a file you resolved by hand, unless origin/dev's version of that file has the line; every other line it reports "
-                      "is content and stays", sync)
+        self.assertIn("run git -C /r/.wt/w-issue-1-x diff --check HEAD and git -C /r/.wt/w-issue-1-x diff --check origin/dev before committing "
+                      "and remove each leftover conflict marker both report (same file and line) in a file you resolved by hand; "
+                      "every other line they report is content and stays", sync)
+        self.assertIn("markers_checked (true when both checks ran)", sync)
         self.assertIn("markers_checked", sync)
         self.assertLess(sync.index("diff --check HEAD"), sync.index("commit the merge"))
         self.assertIn("markers_checked", next(c for c in calls if c["label"] == "land-sync-1-1")["schema"]["properties"])
