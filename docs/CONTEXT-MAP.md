@@ -61,8 +61,10 @@
 | Limit stop | Console |
 | Manager | Console |
 | Marker | Claims |
+| Message | Console |
 | Migration | Project contract |
 | Not yet managed | Console |
+| Nudge | Console |
 | Outside sprints | Console |
 | Owner prompt | Verification |
 | Owner-action marker | Claims |
