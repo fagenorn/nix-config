@@ -25,6 +25,8 @@ DEFAULT = "stable"  # the repository's default branch; BRANCH is the locked inte
 FROM_BRANCH = ["api", f"repos/{SLUG}/pulls?state=all&head={OWNER}:{BRANCH}&sort=updated&direction=desc&per_page=100"]
 DEFAULT_READ = ["api", f"repos/{SLUG}", "--jq", ".default_branch"]
 OPEN_FROM = ["api", f"repos/{SLUG}/pulls?state=open&head={OWNER}:{BRANCH}&per_page=100"]
+OPEN_BASED = ["api", f"repos/{SLUG}/pulls?state=open&base={BRANCH}&sort=updated&direction=desc&per_page=100&page=1"]
+CLOSED_BASED = ["api", f"repos/{SLUG}/pulls?state=closed&base={BRANCH}&sort=updated&direction=desc&per_page=100&page=1"]
 
 
 def pull(number, state="open", merged=False, base=BRANCH, sha=A):
@@ -37,6 +39,14 @@ def release_pull(number, state="open", merged=False, base=DEFAULT, sha=A, head_r
     return {"number": number, "state": state, "merged_at": T0 if merged else None,
             "base": {"ref": base, "repo": {"full_name": SLUG}},
             "head": {"ref": BRANCH, "sha": sha, "repo": {"full_name": head_repo} if head_repo else None}}
+
+
+def sync_pull(number, state="open", merged=False, sha=A, head_repo=SLUG):
+    """A sync pull request (issue 905): based on the locked branch, its head a commit that is
+    already on the default branch, so the commit lookup never lists it."""
+    return {"number": number, "state": state, "merged_at": T0 if merged else None,
+            "base": {"ref": BRANCH, "repo": {"full_name": SLUG}},
+            "head": {"ref": f"sync-{DEFAULT}-into-{BRANCH}", "sha": sha, "repo": {"full_name": head_repo}}}
 
 
 def land(action, sha, *extra):
@@ -74,13 +84,13 @@ class Base(unittest.TestCase):
 
     def lock(self, sha=None, **kwargs):
         self.world.ref_store(SLUG, {REF: sha} if sha else {}, **kwargs)
-        self.closed, self.from_branch, self.open_from = [], {}, {}
+        self.closed, self.from_branch, self.open_from, self.open_based = [], {}, {}, {}
         self.respond_closed()
 
     def respond_closed(self):
-        self.world.respond_json("gh", [
-            "api", f"repos/{SLUG}/pulls?state=closed&base={BRANCH}&sort=updated&direction=desc&per_page=100&page=1"],
-            [p for p in self.closed if p["head"]["ref"] != BRANCH])  # no lander is headed by BRANCH
+        self.world.respond_json("gh", CLOSED_BASED,
+                                [p for p in self.closed if p["head"]["ref"] != BRANCH])  # no lander is headed by BRANCH
+        self.world.respond_json("gh", OPEN_BASED, list(self.open_based.values()))
         self.world.respond_json("gh", FROM_BRANCH, list(self.from_branch.values()))
         self.world.respond_json("gh", OPEN_FROM, list(self.open_from.values()))
 
@@ -90,7 +100,6 @@ class Base(unittest.TestCase):
         closed ones; `by_commit` is a merge commit into the default branch, which lists them too."""
         self.world.respond_json("gh", ["api", f"repos/{SLUG}/commits/{sha}/pulls?per_page=100"],
                                 [p for p in prs if by_commit or p["state"] == "open"])
-        self.closed = [p for p in self.closed if p not in prs] + [p for p in prs if p["state"] != "open"]
         self.from_branch.update({p["number"]: p for p in prs if p["head"]["ref"] == BRANCH
                                  and (p["head"].get("repo") or {}).get("full_name") == SLUG})
         for p in prs:  # the open listing of the branch's own pull requests, forks included
@@ -98,6 +107,19 @@ class Base(unittest.TestCase):
                 self.open_from[p["number"]] = p
             else:
                 self.open_from.pop(p["number"], None)
+        self.based(*prs)
+
+    def based(self, *prs):
+        """Register `prs` in the open and closed listings of BRANCH only. Alone, it is what the
+        forge shows of a pull request whose head is on the default branch (issue 905): the commit
+        lookup of that head never lists it."""
+        for p in prs:
+            self.closed = [c for c in self.closed if c["number"] != p["number"]]
+            self.open_based.pop(p["number"], None)
+            if p["state"] != "open":
+                self.closed.append(p)
+            elif p["base"]["ref"] == BRANCH:
+                self.open_based[p["number"]] = p
         self.respond_closed()
         for p in prs:
             self.closing(p["number"])
@@ -631,6 +653,7 @@ class DocstringTest(unittest.TestCase):
                        "a `--release --wait` whose caller is bound to `--sha` (a resumed release), stop with "
                        "`no_open_pr` when the head moved",
                        "leaves the lock alone when an open pull request other than the release has its head there",
+                       "(and, when that lists no such head, the open listing of D2)",
                        "attempts the lock at that pull request's current head",
                        "`no_open_pr` means no such pull request is open",
                        "adds `head_moved`, true when it took the lock at a head other than `--sha`",
@@ -639,6 +662,180 @@ class DocstringTest(unittest.TestCase):
                        "The answer is `acquired` or `already_held`, never `moved`",
                        "A release holder merges only on `already_held` (ADR-claims-009)"):
             self.assertIn(phrase, doc)
+
+
+    def test_the_module_docstring_states_the_default_branch_head(self):
+        doc = " ".join(land_lock.__doc__.split())
+        for phrase in ("For a commit on the default branch the commit lookup lists merged pull requests only "
+                       "(issue 905)",
+                       "When the lookup lists no pull request headed at the lock, the open pull requests based "
+                       "on the branch are therefore read before the closed ones",
+                       "`GET pulls?state=open&base=<branch>&sort=updated`, at most 5 pages of 100",
+                       "the closed listing is read only when none is found",
+                       "A fork's pull request is never taken from this listing, and an open one beyond those "
+                       "pages is not seen",
+                       "When the commit lookup of `--sha` lists no such pull request, the open listing of D2 is "
+                       "read once for a same-repository one",
+                       "so the common path makes no extra call"):
+            self.assertIn(phrase, doc)
+        self.assertEqual(fm.OPEN_PAGES, 5)
+
+
+class SyncHolderTest(Base):
+    """Issue 905: sync pull request 30 is open on BRANCH with head A, a commit on the default
+    branch. The commit lookup of A lists only merged release 9, whose head was D."""
+
+    def world_with(self, lock_sha=None, sync=None):
+        self.lock(lock_sha)
+        self.pulls(A, release_pull(9, state="closed", merged=True, sha=D), by_commit=True)
+        self.pulls(B, pull(11, sha=B))
+        self.based(sync_pull(30) if sync is None else sync)
+
+    def wait(self, clock, sha):
+        with mock.patch.object(land_lock, "monotonic", clock.monotonic), \
+                mock.patch.object(land_lock, "sleep", clock.sleep):
+            return run(*land("acquire", sha, "--wait"))
+
+    def test_the_sync_pull_request_acquires_a_free_lock_in_three_calls(self):
+        self.world_with()
+        code, out = run(*land("acquire", A))
+        self.assertEqual((code, out["verdict"], out["lock_sha"], out["pr"]), (0, "acquired", A, 30))
+        self.assertEqual(self.world.refs(), {REF: A})
+        # The commit lookup, the open listing, the create.
+        self.assertEqual((len(self.reads(OPEN_BASED)), len(self.world.argvs("gh"))), (1, 3))
+        code, out = run(*land("acquire", A))
+        self.assertEqual((code, out["verdict"], out["pr"]), (0, "already_held", 30))
+
+    def test_the_sync_pull_request_acquires_with_wait(self):
+        self.world_with()
+        code, out = self.wait(FakeClock(), A)
+        self.assertEqual((code, out["verdict"], out["lock_sha"], out["pr"], out["waited_s"]),
+                         (0, "acquired", A, 30, 0))
+
+    def test_a_waiting_sync_pull_request_takes_the_lock_a_lander_releases(self):
+        self.world_with(B)
+        clock = FakeClock(lambda elapsed: self.world.set_ref(REF, None) if elapsed == 240 else None)
+        code, out = self.wait(clock, A)
+        self.assertEqual((code, out["verdict"], out["pr"], out["waited_s"]), (0, "acquired", 30, 240))
+
+    def test_status_and_a_lander_see_the_sync_pull_request_as_the_holder(self):
+        self.world_with(A)
+        self.closing(30, 7)
+        self.world.comment_store(SLUG, 7, [{"id": 5, "updated_at": T0, "created_at": T0, "body": fm.render(
+            "claim", {"issue": "7", "holder": OTHER}, f"Claimed by {OTHER}.")}])
+        code, out = run(*land("status", B))
+        self.assertEqual((code, out["verdict"], out["lock_sha"], out["pr"], out["by"]), (0, "held_by", A, 30, OTHER))
+        code, out = run(*land("acquire", B))
+        self.assertEqual((code, out["verdict"], out["lock_sha"], out["pr"], out["by"]), (3, "held_by", A, 30, OTHER))
+        self.assertEqual(self.cas_calls(), [])
+        self.assertEqual(self.world.refs(), {REF: A})
+        self.assertEqual(self.reads(CLOSED_BASED), [])  # the open listing answered first
+
+    def test_a_lander_poll_behind_the_sync_pull_request_makes_five_forge_calls(self):
+        self.world_with(A)
+        mine = fm.commit_pulls(SLUG, B)
+        outcome = land_lock.acquire_once(SLUG, BRANCH, B, mine, lambda _: False, lambda: "R_kgDOtest")
+        self.assertEqual((outcome.verdict, outcome.lock_sha, outcome.pr), ("held_by", A, 30))
+        # Eligibility, create, ref read, commit lookup of the lock, open listing.
+        self.assertEqual((len(self.reads(OPEN_BASED)), len(self.world.argvs("gh"))), (1, 5))
+
+    def test_a_waiting_lander_is_held_off_then_acquires_when_the_sync_releases(self):
+        self.world_with(A)
+
+        def released(elapsed):
+            if elapsed == 240:
+                self.assertEqual(self.cas_calls(), [])  # two polls behind the sync, never a takeover
+                self.assertEqual(run(*land("release", A))[1]["verdict"], "released")
+        code, out = self.wait(FakeClock(released), B)
+        self.assertEqual((code, out["verdict"], out["took_over"], out["pr"], out["waited_s"]),
+                         (0, "acquired", None, 11, 240))
+
+    def test_a_waiting_lander_that_gives_up_names_the_sync_pull_request(self):
+        self.world_with(A)
+        with mock.patch.object(land_lock, "IDLE_AFTER", land_lock.BOUND + 1):
+            code, out = self.wait(FakeClock(), B)
+        self.assertEqual((code, out["verdict"], out["lock_sha"], out["pr"]), (3, "land-contended", A, 30))
+        self.assertEqual(self.cas_calls(), [])
+
+    def test_the_sync_pull_request_releases_its_lock(self):
+        self.world_with(A)
+        code, out = run(*land("release", A))
+        self.assertEqual((code, out["verdict"]), (0, "released"))
+        self.assertEqual(self.world.refs(), {})
+        self.world.set_ref(REF, A)
+        code, out = run(*land("release", B))  # a lander's wrong release names the sync as the holder
+        self.assertEqual((code, out["verdict"], out["lock_sha"], out["pr"]), (3, "not_held", A, 30))
+
+    def test_a_merged_or_closed_sync_lock_is_stale_and_taken_over(self):
+        for merged in (True, False):
+            with self.subTest(merged=merged):
+                self.world.reset()
+                self.world_with(A, sync_pull(30, state="closed", merged=merged))
+                code, out = run(*land("status", B))
+                self.assertEqual((code, out["verdict"], out["pr"]), (0, "stale", 30))
+                code, out = run(*land("acquire", B))
+                self.assertEqual((code, out["verdict"], out["took_over"], out["pr"]), (0, "acquired", "closed", 11))
+                self.assertEqual(self.world.refs(), {REF: B})
+
+    def test_an_open_sync_holds_although_a_closed_one_had_the_same_head(self):
+        self.world_with(A)
+        self.based(sync_pull(29, state="closed"))
+        code, out = run(*land("status", B))
+        self.assertEqual((code, out["verdict"], out["pr"]), (0, "held_by", 30))
+        code, out = run(*land("acquire", B))
+        self.assertEqual((code, out["verdict"], out["pr"]), (3, "held_by", 30))
+        self.assertEqual(self.cas_calls(), [])
+
+    def test_a_fork_pull_request_with_that_head_never_takes_or_holds_the_lock(self):
+        self.world_with(sync=sync_pull(30, head_repo="mallory/widgets"))
+        for extra in ((), ("--wait",)):
+            code, out = run(*land("acquire", A, *extra))
+            self.assertEqual((code, out["verdict"], out["error"]), (2, "error", "no_open_pr"))
+        self.assertEqual(self.writes(), [])
+        self.world.set_ref(REF, A)
+        code, out = run(*land("status", B))
+        self.assertEqual((code, out["verdict"], out["pr"]), (0, "stale", 9))
+        code, out = run(*land("acquire", B))
+        self.assertEqual((code, out["verdict"], out["took_over"]), (0, "acquired", "closed"))
+
+    def test_a_pull_request_on_another_base_or_at_another_head_is_not_eligible(self):
+        other_base = {**sync_pull(30), "base": {"ref": "other", "repo": {"full_name": SLUG}}}
+        for name, pr in (("another base", other_base), ("another head", sync_pull(30, sha=C)),
+                         ("closed", sync_pull(30, state="closed", merged=True))):
+            with self.subTest(name):
+                self.world.reset()
+                self.world_with(sync=pr)
+                code, out = run(*land("acquire", A))
+                self.assertEqual((code, out["verdict"], out["error"]), (2, "error", "no_open_pr"))
+                self.assertEqual(self.writes(), [])
+
+    def test_the_open_listing_is_read_only_when_the_lookup_lists_no_head(self):
+        """The cost of the fallback: nothing behind a listed head, one read before the closed listing."""
+        self.lock(B)
+        self.pulls(A, pull(11, sha=A))
+        self.pulls(B, pull(12, state="closed", merged=True, sha=B), by_commit=True)
+        run(*land("acquire", A))
+        self.assertEqual((self.reads(OPEN_BASED), self.reads(CLOSED_BASED)), ([], []))
+        self.world.reset()
+        self.lock(B)
+        self.pulls(A, pull(11, sha=A))
+        self.pulls(B, pull(12, state="closed", merged=True, sha=B))  # squash-merged: the lookup lists nothing
+        code, out = run(*land("acquire", A))
+        self.assertEqual((code, out["verdict"], out["took_over"]), (0, "acquired", "closed"))
+        self.assertEqual((len(self.reads(OPEN_BASED)), len(self.reads(CLOSED_BASED)), len(self.reads(FROM_BRANCH))),
+                         (1, 1, 0))
+
+    def test_a_release_is_unaffected(self):
+        """A release head is the integration tip, outside the default branch: the lookup lists it."""
+        self.lock()
+        self.world.respond("gh", DEFAULT_READ, stdout=DEFAULT + "\n")
+        self.pulls(A, release_pull(20))
+        code, out = run(*land("acquire", A, "--release"))
+        self.assertEqual((code, out["verdict"], out["pr"]), (0, "acquired", 20))
+        self.pulls(B, pull(11, sha=B))
+        code, out = run(*land("acquire", B))
+        self.assertEqual((code, out["verdict"], out["pr"]), (3, "held_by", 20))
+        self.assertEqual(self.reads(OPEN_BASED), [])
 
 
 class ReleaseHolderTest(Base):
@@ -1000,6 +1197,18 @@ class ReleaseWaitTest(Base):
         self.assertEqual((code, out["verdict"], out["took_over"], out["waited_s"]), (0, "acquired", "idle", 2760))
         self.assertEqual(len(self.cas_calls()), 1)  # the idle takeover only, never a delete
 
+    def test_a_lock_at_the_starting_sha_that_an_open_sync_pull_request_heads_is_left_alone(self):
+        """Issue 905: sync 30 is headed at --sha and only the open listing shows it."""
+        self.lock(A)
+        self.world.respond("gh", DEFAULT_READ, stdout=DEFAULT + "\n")
+        self.pulls(C, release_pull(20, sha=C))
+        self.pulls(A, release_pull(20, sha=C))
+        self.based(sync_pull(30))
+        clock = FakeClock()
+        code, out = self.wait(clock, A, "--release", "--follow-head")
+        self.assertEqual((code, out["verdict"], out["took_over"], out["waited_s"]), (0, "acquired", "idle", 2760))
+        self.assertEqual(len(self.cas_calls()), 1)  # the idle takeover only, never a delete
+
     def test_a_waiting_release_never_deletes_a_lock_at_another_sha(self):
         """The lock of live lander 12 is not at --sha: the moved release only waits behind it."""
         clock, code, out = self.release_wait(
@@ -1036,6 +1245,19 @@ class ReleaseWaitTest(Base):
         self.assertNotIn("head_moved", out)
         self.assertEqual(self.reads(OPEN_FROM), [])
 
+    def test_a_waiting_lander_behind_a_live_holder_makes_four_forge_calls_a_poll(self):
+        """Through `--wait` and its own eligibility read: the open listing of issue 905 is never
+        read while the commit lookup lists the caller's pull request."""
+        self.lock(A)
+        self.pulls(B, pull(11, sha=B))
+        self.pulls(A, pull(12, sha=A))
+        clock = FakeClock(lambda elapsed: self.world.set_ref(REF, None) if elapsed == 240 else None)
+        code, out = self.wait(clock, B)
+        self.assertEqual((code, out["verdict"], out["waited_s"]), (0, "acquired", 240))
+        # Two polls behind the holder (eligibility, create, ref read, lookup of the lock), then
+        # eligibility and the create that takes the released lock.
+        self.assertEqual((len(self.world.argvs("gh")), self.reads(OPEN_BASED)), (4 + 4 + 2, []))
+
     def test_a_lander_poll_behind_a_live_holder_makes_four_forge_calls(self):
         """The waiter's cost per poll is the same behind a lander and behind a release."""
         for holder in (pull(12, sha=A), release_pull(20)):
@@ -1047,6 +1269,7 @@ class ReleaseWaitTest(Base):
                 land_lock.acquire_once(SLUG, BRANCH, B, [p for p in fm.commit_pulls(SLUG, B)],
                                        lambda _: False, lambda: "R_kgDOtest")
                 self.assertEqual(len(self.world.argvs("gh")), 4)
+                self.assertEqual(self.reads(OPEN_BASED), [])  # issue 905: no fallback on this path
 
 
 class FakeClock:
