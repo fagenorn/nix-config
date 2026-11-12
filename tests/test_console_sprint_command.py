@@ -21,6 +21,7 @@ from agent_tools.console import manager, sprint, sprints
 from . import console_test_support as support
 from .test_console_answer import view_of
 from .test_console_briefs import APPROVE, JSON, PARTS, REPLY
+from .test_console_questions import Q0, Q1, ROUND_ANSWER
 from .test_console_reports import CHECKED, CLOSING, REPORT
 from .test_console_writes import Case
 
@@ -392,6 +393,110 @@ class SprintCommandTest(Case):
         self.assertTrue(got.stderr.startswith("sprint: cannot read "), got.stderr)
         self.assertTrue(got.stderr.endswith("the report is not a JSON object\n"), got.stderr)
 
+    def asking(self, svc, sid, round_=None):
+        """An approved sprint, its secret file and a round file holding `round_`."""
+        self.sent(svc, sid)
+        got = self.page(svc, APPROVE, {"project_id": "owner/p01", "sprint_id": sid, "version": 1})
+        self.assertEqual(got[0], 204)
+        path = self.store.parent / f"round-{sid}.json"
+        path.write_text(json.dumps(round_ if round_ is not None else {"questions": [Q0, Q1]}))
+        return self.store.parent / "sprint-secrets" / sid, path
+
+    def asked_rows(self):
+        return [row for row in support.log_rows(self.store) if row[2] == "questions.asked"]
+
+    def test_ask_sends_a_round_that_becomes_one_open_item_per_question(self):
+        svc = self.open()
+        sid = self.goal(svc)
+        secret, path = self.asking(svc, sid)
+        got = run_sprint("ask", "--sprint", sid, "--secret-file", secret, "--round-file", path,
+                         "--port", self.port(svc))
+        self.assertEqual((got.returncode, got.stderr), (0, ""))
+        (row,) = self.asked_rows()
+        self.assertEqual(got.stdout, f"sprint: round {row[0]} sent, 2 questions\n")
+        opened = view_of(svc)["inbox"]["open"]
+        self.assertEqual([i["reason"] for i in opened], ["question", "question"])
+        self.assertEqual([i["questions"][0]["recommended"] for i in opened], ["files", "no"])
+
+    def test_ask_refusals_exit_1_with_the_console_reason(self):
+        svc = self.open()
+        sid = self.goal(svc)
+        secret, path = self.asking(svc, sid, {"questions": [{**Q0, "options": ["sqlite"]}]})
+        port = self.port(svc)
+        common = ("--sprint", sid, "--secret-file", secret, "--port", port)
+        got = self.assert_unchanged(svc, lambda: run_sprint(
+            "ask", *common, "--round-file", path))
+        self.assertEqual((got.returncode, got.stdout, got.stderr), (
+            1, "", "sprint: refused 409: question 1 needs two to four options\n"))
+        plain = self.store.parent / "plain.json"
+        plain.write_text(json.dumps({"questions": [Q0]}))
+        blocker = self.store.parent / "blocker.json"
+        blocker.write_text(json.dumps({"questions": [Q0], "blocker": True}))
+        first = run_sprint("ask", *common, "--round-file", plain)
+        self.assertEqual((first.returncode, first.stderr), (0, ""))
+        got = self.assert_unchanged(svc, lambda: run_sprint(
+            "ask", *common, "--round-file", plain))
+        self.assertEqual((got.returncode, got.stdout, got.stderr), (
+            1, "", "sprint: refused 409: a round of questions is already open\n"))
+        second = run_sprint("ask", *common, "--round-file", blocker)
+        self.assertEqual((second.returncode, second.stderr), (0, ""))
+        wrong = self.store.parent / "wrong-secret"
+        wrong.write_text("A" * 43 + "\n")
+        got = self.assert_unchanged(svc, lambda: run_sprint(
+            "ask", "--sprint", sid, "--secret-file", wrong, "--round-file", plain,
+            "--port", port))
+        self.assertEqual((got.returncode, got.stdout, got.stderr), (
+            1, "", "sprint: refused 403: secret refused\n"))
+        self.assertNotIn(secret.read_text().strip(), got.stdout + got.stderr)
+
+    def test_ask_bad_input_exits_2_and_sends_nothing(self):
+        svc = self.open()
+        sid = self.goal(svc)
+        secret, _ = self.asking(svc, sid)
+        array = self.store.parent / "array.json"
+        array.write_text("[1]")
+        missing = self.store.parent / "no-such-round.json"
+        for name in (array, missing):
+            with self.subTest(round=name.name):
+                got = self.assert_unchanged(svc, lambda: run_sprint(
+                    "ask", "--sprint", sid, "--secret-file", secret, "--round-file", name,
+                    "--port", self.port(svc)))
+                self.assertEqual((got.returncode, got.stdout), (2, ""))
+                self.assertTrue(got.stderr.startswith("sprint: cannot read"), got.stderr)
+        self.assertEqual(self.asked_rows(), [])
+
+    def test_ask_reads_the_round_from_stdin_and_the_identity_from_the_environment(self):
+        svc = self.open()
+        sid = self.goal(svc)
+        secret, _ = self.asking(svc, sid)
+        env = {manager.ID_ENV: sid, manager.SECRET_ENV: secret.read_text()}
+        got = run_sprint("ask", "--round-file", "-", "--port", self.port(svc), env=env,
+                         stdin=json.dumps({"questions": [Q0]}))
+        self.assertEqual((got.returncode, got.stderr), (0, ""))
+        (row,) = self.asked_rows()
+        self.assertEqual(got.stdout, f"sprint: round {row[0]} sent, 1 question\n")
+
+    def test_inbox_prints_an_answer_with_its_question(self):
+        svc = self.open()
+        sid = self.goal(svc)
+        secret, path = self.asking(svc, sid)
+        port = self.port(svc)
+        self.assertEqual(run_sprint("ask", "--sprint", sid, "--secret-file", secret,
+                                    "--round-file", path, "--port", port).returncode, 0)
+        (row,) = self.asked_rows()
+        got = self.page(svc, ROUND_ANSWER, {"project_id": "owner/p01", "sprint_id": sid,
+                                            "round": row[0], "question": 0, "choice": 0})
+        self.assertEqual(got[0], 204)
+        got = run_sprint("inbox", "--sprint", sid, "--secret-file", secret, "--port", port)
+        self.assertEqual((got.returncode, got.stderr), (0, ""))
+        self.assertEqual(len(got.stdout.splitlines()), 1)
+        last = json.loads(got.stdout)["messages"][-1]
+        self.assertIsInstance(last.pop("at"), str)
+        self.assertIsInstance(last.pop("id"), int)
+        self.assertEqual(last, {
+            "chosen": "sqlite", "kind": "answer", "question": "Which store keeps the checkpoints?",
+            "round": row[0], "text": "sqlite", "version": None})
+
     def test_close_sends_the_closing_report_and_a_refusal_exits_1(self):
         svc = self.open()
         sid = self.goal(svc)
@@ -418,6 +523,31 @@ class SprintCommandTest(Case):
             "--port", port, stdin="[]"))
         self.assertEqual((got.returncode, got.stdout), (2, ""))
         self.assertTrue(got.stderr.startswith("sprint: cannot read -:"), got.stderr)
+
+    def printed_examples(self):
+        """The example report and the example closing report, as the contract prints them."""
+        text = run_sprint("contract").stdout
+        reporting = text.partition("## Reporting")[2].partition("\n## ")[0]
+        ending = text.partition("## Ending")[2]
+        pattern = r"```json\n(.*?)\n\s*```"
+        return (re.search(pattern, reporting, re.S).group(1),
+                re.search(pattern, ending, re.S).group(1), re.findall(pattern, text, re.S))
+
+    def test_the_printed_examples_are_accepted_as_printed(self):
+        report, closing, blocks = self.printed_examples()
+        self.assertEqual(len(blocks), 2)
+        svc = self.open()
+        sid = self.goal(svc)
+        secret, _ = self.reports(svc, sid, REPORT)
+        port = self.port(svc)
+        got = run_sprint("report", "--sprint", sid, "--secret-file", secret,
+                         "--report-file", "-", "--port", port, stdin=report)
+        self.assertEqual((got.returncode, got.stdout, got.stderr),
+                         (0, "sprint: report sent\n", ""))
+        got = run_sprint("close", "--sprint", sid, "--secret-file", secret,
+                         "--closing-file", "-", "--port", port, stdin=closing)
+        self.assertEqual((got.returncode, got.stdout, got.stderr),
+                         (0, "sprint: closing report sent\n", ""))
 
     SECTION = "## After a restart or a takeover\n\n1. When the console tells you that it restarted this session, or your first prompt says you take over a sprint whose manager is gone, run `sprint recap`, then `sprint inbox`, and act on what `sprint inbox` prints first.\n2. `sprint recap` prints the goal, the latest brief with its decision and the owner's reply, the last report and how many of the owner's messages are unread. The console keeps this record; nothing was handed over to you.\n3. The latest brief's decision comes before the last report, because a newer brief does not remove an older report:\n   - No brief: draft one, as Drafting the brief says.\n   - Decision `changes`: revise the brief from the reply `sprint recap` printed and send the new version, even when `sprint inbox` printed nothing, because that change request was read before the restart.\n   - Decision `none`: the brief waits for the owner; end your turn.\n   - Decision `approved`: the last report may describe an earlier version of the brief, so check its next step against the approved brief's parts before following it. Continue only the work the approved brief still includes and drop what it removed; follow After approval when there is no report or nothing is left.\n"
 
@@ -590,6 +720,16 @@ class ManagerContractTest(unittest.TestCase):
             with self.subTest(forbidden=forbidden):
                 self.assertNotIn(forbidden, text)
 
+    def test_the_contract_brings_real_choices_in_one_round(self):
+        text = CONTRACT.read_text(encoding="utf-8")
+        questions = text.partition("## Questions")[2].partition("\n## ")[0]
+        self.assertTrue(questions)
+        for needle in ("`sprint ask --round-file -`", "reversible", "may I proceed", "one round",
+                       "two to four", "`blocks`", "`recommended`", '`"blocker": true`',
+                       "a round of questions is already open", "kind `answer`"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, questions)
+        self.assertIn("`answer`", text.partition("## Every turn")[2].partition("\n## ")[0])
 
     def test_the_contract_says_what_follows_an_approval(self):
         text = CONTRACT.read_text(encoding="utf-8")
@@ -620,6 +760,29 @@ class ManagerContractTest(unittest.TestCase):
                 self.assertIn(needle, after)
         self.assertNotIn("what went differently", after)
 
+    def test_the_contract_and_the_help_name_every_member_the_console_requires(self):
+        text = run_sprint("contract").stdout
+        reporting = text.partition("## Reporting")[2].partition("\n## ")[0]
+        ending = text.partition("## Ending")[2]
+        for command, section, members in (
+                ("report", reporting, sprints.REPORT_MEMBERS),
+                ("close", ending, sprints.CLOSING_MEMBERS)):
+            helped = run_sprint(command, "--help").stdout
+            for member in members:
+                for where, shown in (("contract", section), ("help", helped)):
+                    with self.subTest(command=command, member=member, where=where):
+                        self.assertIn(f"`{member}`" if where == "contract" else f"{member}:",
+                                      shown)
+        limit = f"{sprints.MAX_LINE_CHARS} characters"
+        for where, shown in (("contract", ending), ("help", run_sprint("close", "--help").stdout)):
+            with self.subTest(where=where, limit=limit):
+                self.assertIn(f"first line is at most {limit}", " ".join(shown.split()))
+        for phase in sprints.REPORT_PHASES:
+            self.assertIn(f"`{phase}`", reporting)
+            self.assertIn(phase, run_sprint("report", "--help").stdout)
+        for stage in sprints.REPORT_STAGES:
+            self.assertIn(stage, run_sprint("report", "--help").stdout)
+
 
 class CommandContractTest(unittest.TestCase):
     def test_the_command_table_names_the_module_and_its_docstring_states_the_contract(self):
@@ -630,7 +793,8 @@ class CommandContractTest(unittest.TestCase):
         for name in ("sprint brief", "sprint status", "--sprint", "--secret-file",
                      "--brief-file", "--port", "POST /api/brief", "GET /api/sprint-status",
                      "exit 0", "exit 1", "exit 2", "printed nowhere", "sprint report", "--report-file",
-                     "POST /api/report", "sprint contract"):
+                     "POST /api/report", "sprint contract", "sprint ask", "--round-file",
+                     "POST /api/ask", "chosen", "round or reply file"):
             self.assertIn(name, docstring)
         self.assertEqual(sprint.build_parser().prog, "sprint")
 

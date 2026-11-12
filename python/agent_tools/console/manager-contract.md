@@ -8,7 +8,7 @@ If this text is no longer in your context, run `sprint contract` again.
 
 - One manager per sprint. Serve only the sprint you were started for and never start another manager.
 - Work only through the existing skills and never write code: no edit, no commit, no branch, no pull request.
-- Decide reversible matters yourself and record each decision in the brief. Nobody watches this session, so never ask in it.
+- Decide reversible matters yourself and record each decision in the brief. Nobody watches this session, so never ask in it: bring a real choice to the owner with `sprint ask`.
 - Talk to the owner only through the `sprint` command.
 
 ## Drafting the brief
@@ -27,7 +27,7 @@ If this text is no longer in your context, run `sprint contract` again.
 
 ## Every turn
 
-1. Start every turn with `sprint inbox`. It prints the owner's unread messages in order, each once: an approval of a brief version, a change request with the owner's words, free text, or a `stop`. Act on each one before anything else.
+1. Start every turn with `sprint inbox`. It prints the owner's unread messages in order, each once: an approval of a brief version, a change request with the owner's words, the owner's answer to one of your questions (kind `answer`), free text, or a `stop`. Act on each one before anything else.
 2. Answer each message you acted on with `sprint reply --message <id> --reply-file -`, the text on standard input saying what you changed, or that you changed nothing and why.
 3. If this text is no longer in your context, run `sprint contract` again before going on.
 
@@ -47,16 +47,56 @@ If this text is no longer in your context, run `sprint contract` again.
 2. Before cutting issues and before each batch, run `sprint status` and go on only while its decision is `approved`. A decision of `withdrawn`, or any `sprint` command refused with `this sprint is not open` or `secret refused`, means the sprint is over: say so in one line and end your turn, with no tracker action.
 3. Cut the approved brief's slices into issues under one tracker milestone with the `to-issues` skill, in the brief's order.
 4. Deliver them with the `deliver-batch` skill.
-5. Send `sprint report --report-file -` after each batch and on any change of state.
+5. Send `sprint report --report-file -` after each batch and on any change of state, as Reporting says.
 6. A message that changes the scope (what done looks like, what is excluded or the slices) is answered with a new brief: send it with `sprint brief --brief-file -`, say so with `sprint reply`, and end your turn. Continue only once `sprint status` says the new version is approved.
+
+## Reporting
+
+`sprint report --report-file -` takes one JSON object of seven members, all required, on standard input. The console refuses a report with `the report has no valid <member>` at the first member that is missing or wrong, so check these before the first send:
+
+- `status`: one line, at most 500 characters, saying how the sprint is going. It names no issue number: a `#` followed by a digit is refused.
+- `phase`: where the sprint is, one of `running`, `closing` or `done`.
+- `milestone`: one line, the tracker milestone the sprint's issues are under.
+- `tracker_url`: the milestone's link, one word starting with `https://`.
+- `issues`: a list of every issue of the sprint, each `{"issue": <number>, "stage": <stage>}`, no issue twice; empty before any is cut. A stage is one of `queued`, `planning`, `plan review`, `building`, `final review`, `verifying`, `landing`, `working`, `landed` or `held`.
+- `inbox`: a list of the numbers of the issues waiting on the owner; empty when none is.
+- `next`: one line, what you do next.
+
+```json
+{"status": "two slices are building and one has landed",
+ "phase": "running",
+ "milestone": "Importer resumes after a crash",
+ "tracker_url": "https://github.com/example/importer/milestone/3",
+ "issues": [{"issue": 12, "stage": "building"}, {"issue": 13, "stage": "landed"}],
+ "inbox": [12],
+ "next": "start the resume slice when 12 lands"}
+```
+
+## Questions
+
+1. Decide every reversible matter inside the approved brief yourself, and answer a delivery's "may I proceed" yourself.
+2. Bring every real choice, one only the owner can make, in one round: collect the questions and send them together with `sprint ask --round-file -`, a JSON object on standard input, `{"questions": [{"question": ..., "blocks": ..., "options": [...], "recommended": ...}]}`:
+   - `question`: the choice in a sentence or two.
+   - `blocks`: one line, what waits behind the answer.
+   - `options`: two to four one-line options.
+   - `recommended`: the exact text of the option you recommend.
+   It prints `sprint: round <id> sent, <n> questions`.
+3. A sprint has one open round at a time: until every question of it is answered, another round is refused with `a round of questions is already open`. Only a question that stops all work goes out as a further round, with `"blocker": true` beside `questions`.
+4. Go on with whatever no open question blocks. Each answer arrives in `sprint inbox` as a message of kind `answer` carrying the question, the chosen option or the owner's own words: act on it and answer it with `sprint reply` like any message.
 
 ## Ending
 
 1. Close the sprint when every issue has landed (held for verification counts as landed) or been dropped: send `sprint close --closing-file -`, one JSON object on standard input:
    `{"summary": <text>, "issues": [{"issue": <number>, "stage": "landed" | "held" | "dropped"}], "differently": <text>}`
-   - `summary`: what the sprint did. Its first line is one plain sentence with no issue number: the owner reads that line on the page.
+   - `summary`: what the sprint did, at most 4000 characters. Its first line is at most 500 characters and is one plain sentence with no issue number (a `#` followed by a digit is refused): the owner reads that line on the page. A longer first line is refused even when the whole summary is within 4000 characters.
    - `issues`: every issue of the sprint, each with its outcome. An issue you gave up on is listed with the stage `dropped`; leaving it out is not dropping it.
-   - `differently`: what you would do differently next time.
+   - `differently`: what you would do differently next time, at most 4000 characters.
+
+   ```json
+   {"summary": "The importer resumes after a crash.\nSlice 12 landed, slice 13 is held for verification and slice 14 was dropped.",
+    "issues": [{"issue": 12, "stage": "landed"}, {"issue": 13, "stage": "held"}, {"issue": 14, "stage": "dropped"}],
+    "differently": "I would cut the checkpoint slice smaller."}
+   ```
 2. Refused with `an issue of this sprint is neither landed nor dropped`: an issue of your latest report has no outcome in the closing report. Settle the missing issues' outcome first, then send the closing report again.
 3. A message of kind `stop` means the owner stopped the sprint: finish what is mid-merge, start nothing new, send the closing report listing every unfinished issue as `dropped`, and end your turn.
 4. After a closing report, end your turn and take no tracker action.

@@ -42,7 +42,10 @@ export const meta = {
 // A questions row is {issue, outcome: 'questions', lane?, questions, marker}: marker is the box prompt's
 // comment id when an unattended run posted it, null when nothing was posted (a session-launched run
 // returns the questions to its session). A session-launched conflict or needs-label row carries
-// owner_ask: {reason, items} (what the marker would have held) and nothing is posted for it. The batch
+// owner_ask: {reason, items} (what the marker would have held) and nothing is posted for it.
+// A conflict row is a merge with the integration branch that was not resolved (the resolution blocked, or one landing conflicted too often).
+// A sync-review row (#955) is a resolved merge whose review did not pass: a finding survived the one fix round, or the review, the fix or the
+// re-review was lost. Its reason names the finding and the unaccepted fix commit; it is open, and relaunched, exactly as a conflict row is. The batch
 // never reads or ends a decision prompt outside its land close-out: the child reads the answer itself.
 // The lead runs a non-null relaunch as a NEW run, never with resumeFromRunId (D1): the new run
 // re-reads the tracker (an owner reply, a closed blocker, a released lock) and every side effect
@@ -821,7 +824,16 @@ ${RULES}`, rlabel, { phase: 'Land', agentType: 'implementer', model: 'sonnet', s
       const rv = await call(`Issue #${n} of ${SLUG}, worktree ${W}, branch ${B}.
 Review the conflict resolution in merge commit ${mc}: git -C ${W} show --cc ${mc} and the resolved files ${JSON.stringify(merge.resolved_files || [])}; the tests run: ${JSON.stringify(merge.tests || [])}. Report Important or Critical defects only: a dropped change from either side, a broken merge of intent, a resolved file whose tests were not run.${merge.markers_checked === true ? '' : MARKERS_UNCHECKED} Do not edit anything.
 ${RULES}`, `land-sync-review-${n}-${c.syncReview}`, { agentType: 'reviewer', schema: FINDINGS })
-      if (!rv) return out('conflict', { review: rv })
+      // #955: from here on the merge is resolved, so a landing that ends is a sync-review row, never a conflict one: what is left is the
+      // review of the resolution. Its reason leads with what ended it, then the pushed and unaccepted fix commit, then the finding left
+      // open (its file and summary), so the cap of the table's reason cuts the summary last. Like every other open row it posts no owner
+      // action, keeps the claim and the cont, and a relaunch sends the issue through its child's review (no code reads either outcome).
+      const syncStop = (what, finding, fix, extra) => {
+        const commit = fix && nonEmpty(fix.commit) && !sameSha(fix.commit, head) ? `unaccepted fix commit ${fix.commit}` : ''
+        const left = isObj(finding) && nonEmpty(finding.summary) ? `finding ${nonEmpty(finding.file) ? `${finding.file}: ` : ''}${finding.summary}` : ''
+        return out('sync-review', { ...extra, reason: [`sync-review of merge ${mc}: ${what}`, commit, left].filter(Boolean).join('; ') })
+      }
+      if (!rv) return syncStop('the sync review returned nothing', null, null, { review: rv })
       const found = findingsOf(rv)
       if (found.length) {
         // #907: one fix round per reviewed merge. It is no resync, so it spends neither MAX_SYNCS nor MERGE_REFUSAL_RETRIES, and like the
@@ -831,17 +843,18 @@ ${RULES}`, `land-sync-review-${n}-${c.syncReview}`, { agentType: 'reviewer', sch
 ${SYNC_FIX(W, mc, found)} Then push (git -C ${W} push origin ${B}); before pushing, ${WHOLE('the files you changed')}. ${COMMIT_SCOPE} ${IMPL_RETURN}
 ${RULES}`, `land-sync-fix-${n}-${c.syncReview}`, { agentType: 'implementer', model: 'sonnet', schema: IMPL })
         // As shipFix in deliver-standard.js: the fix starts at the reviewed merge, no commit is accepted only as a rebuttal with evidence, and a
-        // full reviewer re-reviews either. A conflict row from here on names the fix reply: its commit is pushed and unaccepted.
+        // full reviewer re-reviews either. A sync-review row from here on names the fix reply: its commit is pushed and unaccepted.
         const tried = fix ? { fix: { commit: fix.commit, notes: fix.notes } } : {}
         const moved = !!fix && !sameSha(fix.commit, head)
         if (!fix || fix.status !== 'done' || !fix.commit || !sameSha(fix.start_head, head) || (!moved && !nonEmpty(fix.notes))) {
-          return out('conflict', { review: rv, detail: 'the sync fix round did not finish', ...tried })
+          return syncStop('the sync fix round did not finish', found[0], fix, { review: rv, ...tried })
         }
         const rr = await call(`Issue #${n} of ${SLUG}, worktree ${W}, branch ${B}.
 ${SYNC_REREVIEW(W, mc, found, fix, moved)}
 ${RULES}`, `land-sync-rereview-${n}-${c.syncReview}`, { agentType: 'reviewer', schema: FINDINGS })
-        if (!rr) return out('conflict', { review: rv, detail: 'the sync re-review returned nothing', ...tried })
-        if (findingsOf(rr).length) return out('conflict', { review: { ...rr, findings: findingsOf(rr) }, sync_review: rv, ...tried })
+        if (!rr) return syncStop('the sync re-review returned nothing', found[0], fix, { review: rv, ...tried })
+        const leftOpen = findingsOf(rr)
+        if (leftOpen.length) return syncStop(`${leftOpen.length === 1 ? 'a finding' : `${leftOpen.length} findings`} survived the fix round${moved ? '' : ' (a rebuttal, no fix commit)'}`, leftOpen[0], fix, { review: { ...rr, findings: leftOpen }, sync_review: rv, ...tried })
         if (moved) head = fix.commit
       }
     }

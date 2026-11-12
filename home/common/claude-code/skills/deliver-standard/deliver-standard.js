@@ -140,6 +140,8 @@ const STRS = { type: 'array', items: { type: 'string' } }
 const FULL_SHA = { type: 'string', pattern: '^[0-9a-f]{40}$' }
 const BRANCH_HEADS = { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, head: FULL_SHA, current: { type: 'string' }, toplevel: { type: 'string' }, common_dir: { type: 'string' } }, required: ['name', 'head'] } }
 const FIX_WAVE_IMPL = { ...IMPL, properties: { ...IMPL.properties, branch_heads: BRANCH_HEADS } }
+// #950: a final-review fix wave and its re-review each also return the files the wave's commits changed in the issue worktree.
+const withChanged = schema => ({ ...schema, properties: { ...schema.properties, changed_files: STRS } })
 const normSha = x => x.trim().toLowerCase()
 const sameSha = (a, b) => {
   if (typeof a !== 'string' || typeof b !== 'string') return false
@@ -542,6 +544,14 @@ const fileOf = f => {
   for (const r of roots) if (r && p.startsWith(`${r}/`)) { p = p.slice(r.length + 1); break }
   return p.replace(/^(?:\.\/)+/, '').trim()
 }
+// #950: the files a fix wave's commits changed, for admitting a new finding in one of them to the next wave. The program reads no
+// repository, so the list is the output of one command it words itself over the range it holds (git diff --no-renames --name-only
+// <start_head>..<commit> in the issue worktree, a rename listing both paths), asked of the two steps that already read that range: the
+// wave's implementer and its re-reviewer. A file counts only when both list it, so neither one's word admits a wave alone; a missing
+// list, an idle wave and a commit on a declared branch count nothing. A wrong list can only earn a wave that MAX_WAVES bounds and a
+// re-review follows; it clears no finding.
+const CHANGED_CMD = range => `git -C ${W} diff --no-renames --name-only ${range}`
+const changedBy = r => (r && Array.isArray(r.changed_files) ? r.changed_files : []).map(file => fileOf({ file })).filter(Boolean)
 const divergingOf = left => {
   if (fixWaves < FIX_WAVES_BOUND) return null
   const hit = left.map(fileOf).find(f => f && CARRIED_AT_START.map(fileOf).includes(f))
@@ -831,7 +841,7 @@ const PLAN_SELF_CHECK = `Also before you return: run every grep or deny gate a t
 // No subagent grant: the Agent tool does not exist inside a workflow agent.
 const PLAN_LOOKUPS = `Procedure for this step. Look things up in rounds: put every open question's Bash or Read call in the same message as the others (several tool calls per message, never one small lookup per turn), send at least four lookups in each exploration message and start writing by your twelfth message. No subagent can be dispatched: the Agent tool does not exist in this step. Check against the tree yourself every path and symbol you write into a task.`
 const PLAN_WRITES = `Then write the code map, plan.md and every task file as parallel Write calls in one message (a second message only if the output limit forces it), then run any checks in one message.`
-const PLAN_EDITS = `This is a revision: first load plan.md, every task file and the code map with one command (cat ${setup.plan_dir}/*.md), then fix the findings with Edit in place, the independent Edit calls in one message; rewrite a whole file only when most of it changes; leave each acceptance criterion's text unchanged unless a finding names it. Then run any checks in one message.`
+const PLAN_EDITS = `This is a revision: first load plan.md, every task file and the code map with one command (cat ${setup.plan_dir}/*.md), then fix the findings with Edit in place, the independent Edit calls in one message; rewrite a whole file only when most of it changes; leave each acceptance criterion's text unchanged unless fixing a finding requires changing it. Then run any checks in one message.`
 const FACTS = present(setup.details) ? `\nSetup facts: ${setup.details}` : ''
 const KIND_GUIDE = `kind code if a test or command in this repo can show it, evidence if it needs a deploy, an activation or observation over time, human if only the user can judge, note if a decision makes a post-deploy reading the orchestrator's own observation or not a hold (no verify member, no script and no metric, R9 of ~/.agents/standards/acceptance-planning.md)`
 // #746 trial: only this plan step asks for test cases; writing-plans keeps full test code for its other callers until the trial reports.
@@ -1088,15 +1098,15 @@ Re-check only the acceptance criteria of the revised plan at ${plan.plan_root} a
 }
 // #819: the members of a criterion the rules judge (its wording among them), key order aside; a revise that leaves them as reviewed needs no rules re-review.
 const ruleFacts = p => canon(p.acceptance.map(a => [a.id, a.text === undefined ? null : a.text, a.kind, a.metric === true, a.verify === undefined ? null : a.verify]))
-// #819: a finding names a criterion by its ac member, or by the id standing as a whole word (AC1 is not in AC10) in its summary, failing_input or file.
-const wholeWord = id => new RegExp('(^|[^A-Za-z0-9_])' + id.replace(/[^A-Za-z0-9_]/g, c => '\\' + c) + '($|[^A-Za-z0-9_])', 'i')
-const namesCriterion = (f, id) => !!f && (f.ac === id || [f.summary, f.failing_input, f.file].some(t => typeof t === 'string' && wholeWord(id).test(t)))
 // #819: the criterion text lives only in the issue and the planner's reply (plan.md maps ids, it holds no text), and a planner retypes
-// every criterion it returns. The candidate gives each criterion that existed before, that no finding names and that the revise does
-// not list as edited (ids compared without case) its earlier text; the caller takes it whole or not at all.
-const keepUnnamedText = (before, after, findings, edited) => after.map(a => {
+// every criterion it returns. The candidate gives each criterion that existed before and that the revise does not list as edited
+// (ids compared without case) its earlier text; the caller takes it whole or not at all. #951: the revise is asked about the member
+// that is restored, the criterion's text (plan.md's rows hold none), and for a change made to fix a finding, not a retyping; a text
+// rewritten to fix a finding is listed and so kept. A finding that names a criterion no longer keeps its retyped text (in 6 of 9
+// measured re-reviews that was the only blocker, with no wording changed).
+const keepUnlistedText = (before, after, edited) => after.map(a => {
   const was = a && typeof a.id === 'string' && a.id ? before.find(b => b && b.id === a.id) : null
-  if (!was || typeof was.text !== 'string' || was.text === a.text || edited.includes(a.id.toLowerCase()) || findings.some(f => namesCriterion(f, a.id))) return a
+  if (!was || typeof was.text !== 'string' || was.text === a.text || edited.includes(a.id.toLowerCase())) return a
   return { ...a, text: was.text }
 })
 // One targeted planner call fixing only the given findings, then the program's rule check and the rules re-review (D4-D6).
@@ -1147,7 +1157,7 @@ Review the implementation plan at ${plan.plan_root} (and its task files) against
   if (planFindings.length) {
     log(`plan review: ${planFindings.length} blocking findings, revising once`)
     const reviewedFacts = ruleFacts(plan), reviewedCriteria = plan.acceptance
-    const revised = await call(planPrompt(`\n${MAP_FIRST} A reviewer found these defects in your plan at ${plan.plan_root}; fix them in place and return the full result again, with criteria_edited: the ids of the criteria whose wording you changed in this revision: ${JSON.stringify(planFindings)}`), { label: 'plan-revise', phase: 'Plan', agentType: 'planner', schema: PLAN_SCHEMA })
+    const revised = await call(planPrompt(`\n${MAP_FIRST} A reviewer found these defects in your plan at ${plan.plan_root}; fix them in place and return the full result again, with criteria_edited: the ids of the criteria whose text you changed to fix a finding (typing the same criterion again in other words is not a change; an empty list when you changed none): ${JSON.stringify(planFindings)}`), { label: 'plan-revise', phase: 'Plan', agentType: 'planner', schema: PLAN_SCHEMA })
     const halted = await takePlan(revised, 'plan-revise')
     if (halted) return { ...halted, findings: planFindings }
     // #819: the restored candidate replaces the reply only when it makes the skip below fire; a renumbered, reused or duplicated id,
@@ -1155,10 +1165,10 @@ Review the implementation plan at ${plan.plan_root} (and its task files) against
     // A branch revise that takePlan ran after it adds its own list to the plan-revise reply's.
     if (Array.isArray(revised.criteria_edited) && !planFindings.some(f => present(f.rule))) {
       const edited = [revised.criteria_edited, planEdited].flatMap(l => (Array.isArray(l) ? l : [])).filter(x => typeof x === 'string').map(x => x.toLowerCase())
-      const candidate = { ...plan, acceptance: keepUnnamedText(reviewedCriteria, plan.acceptance, planFindings, edited) }
+      const candidate = { ...plan, acceptance: keepUnlistedText(reviewedCriteria, plan.acceptance, edited) }
       const restored = candidate.acceptance.filter((a, i) => a !== plan.acceptance[i]).length
       if (restored && !planRules(candidate).length && ruleFacts(candidate) === reviewedFacts) {
-        log(`plan-revise: kept the earlier text of ${restored} criteria no finding names and the revise does not list as edited`)
+        log(`plan-revise: kept the earlier text of ${restored} criteria the revise does not list as edited`)
         plan = candidate
       }
     }
@@ -1376,17 +1386,20 @@ finalFindings = finalFindings.concat(fromStop)
 if (finalFindings.length) {
   // At most MAX_WAVES waves. The second runs only when the first re-review's findings all narrow the first round (same kind of defect on
   // another path); a new kind stops. The third (#924) runs only when the second re-review's findings all narrow, all are important
-  // (none critical, none without a severity) and they are no more than the first re-review left.
+  // (none critical, none without a severity) and they are no more than the first re-review left. #950: a finding that is not marked
+  // narrowing (new, or with no relation: unknown is new) counts as narrowing in both admissions when its file is one the wave just
+  // re-reviewed changed, a regression inside the fix's own diff; with no file, or in a file the fix left alone, it stops as before.
   const MAX_WAVES = 3
   let waveFindings = finalFindings
   let afterFirst = 0
+  let regressions = 0
   const hasBranches = declared(plan).length > 0
   for (let k = 1; k <= MAX_WAVES; k++) {
     const fwLabel = k === 1 ? 'fix-wave' : `fix-wave-${k}`
     const rvLabel = k === 1 ? 'fix-wave-review' : `fix-wave-review-${k}`
     log(`final review: ${waveFindings.length} blocking findings, fix wave ${k}`)
     fixWaves++
-    const fw = await call(`${CTX}\n${PLAN_REF} Fix these final-review findings, each real defect with a regression test, then commit: ${JSON.stringify(waveFindings)}.${k === 1 && fromStop.length ? ` The last ${fromStop.length} were left open by an earlier run's fix waves and may repeat the ones before them: check each against the current head, and explain one that no longer holds in notes; when you commit nothing, return commit equal to start_head.` : ''}${k >= 2 ? ` They narrow these first-round findings: ${JSON.stringify(finalFindings)}.` : ''}${k === 3 ? ' Fix the class of defect: enumerate every path of the same kind as each reported one and close them all, not only the reported instance.' : ''} If a finding is wrong, explain with evidence in notes. ${FIX_TESTS} ${COMMIT_SCOPE} ${hasBranches ? IMPL_RETURN_AT(W) : IMPL_RETURN}${hasBranches ? ` A finding on a declared branch is fixed in that branch's worktree and pushed with its push form. Return branch_heads: one {name, head} per declared branch (${declared(plan).map(b => b.name).join(', ')}), head being git -C <its worktree> rev-parse HEAD after your last commit.` : ''}\n${RULES}`, { label: fwLabel, phase: 'Final review', agentType: 'implementer', model: 'sonnet', schema: hasBranches ? FIX_WAVE_IMPL : IMPL })
+    const fw = await call(`${CTX}\n${PLAN_REF} Fix these final-review findings, each real defect with a regression test, then commit: ${JSON.stringify(waveFindings)}.${k === 1 && fromStop.length ? ` The last ${fromStop.length} were left open by an earlier run's fix waves and may repeat the ones before them: check each against the current head, and explain one that no longer holds in notes; when you commit nothing, return commit equal to start_head.` : ''}${k >= 2 ? ` They ${regressions ? 'follow the fix of' : 'narrow'} these first-round findings${regressions ? ' (any not marked narrowing is a defect in a file the previous fix wave changed)' : ''}: ${JSON.stringify(finalFindings)}.` : ''}${k === 3 ? ' Fix the class of defect: enumerate every path of the same kind as each reported one and close them all, not only the reported instance.' : ''} If a finding is wrong, explain with evidence in notes. ${FIX_TESTS} ${COMMIT_SCOPE} ${hasBranches ? IMPL_RETURN_AT(W) : IMPL_RETURN} Also return changed_files: the output lines of ${CHANGED_CMD('<start_head>..<commit>')}, run alone after your last commit.${hasBranches ? ` A finding on a declared branch is fixed in that branch's worktree and pushed with its push form. Return branch_heads: one {name, head} per declared branch (${declared(plan).map(b => b.name).join(', ')}), head being git -C <its worktree> rev-parse HEAD after your last commit.` : ''}\n${RULES}`, { label: fwLabel, phase: 'Final review', agentType: 'implementer', model: 'sonnet', schema: withChanged(hasBranches ? FIX_WAVE_IMPL : IMPL) })
     // The carried findings outlive only a wave that gave no reply: one that answered and failed has had them, and the resume's fresh review decides.
     const spent = details => {
       if (fw && carried.length) { log(`fix-wave: ${carried.length} carried finding(s) dropped after a wave that answered and failed`); carried = [] }
@@ -1404,12 +1417,14 @@ if (finalFindings.length) {
     // A wave that had carried findings and committed nothing found them closed already: its re-review reads the head, with no diff range.
     const idle = k === 1 && fromStop.length > 0 && sameSha(fw.commit, fw.start_head) && !collected.length
     if (!idle) carried = []
-    const rv = await call(`${CTX}\nRe-review these findings against ${idle ? `the current head of ${W}${hasBranches ? ` and of each declared branch's worktree (${declared(plan).map(b => `${b.name} in ${b.worktree}`).join(', ')})` : ''} (the fix wave committed nothing, so there is no diff to read). Nothing changed since these were raised, so each finding stands unless the code at the head shows it does not hold. The notes are the implementer's claims: check each against the code and never clear a finding on the notes alone` : `the fix (${span(fw)}${collected.length ? ` and ${collected.join(' and ')}` : ''})`}; notes: ${fw.notes}. Findings: ${JSON.stringify(waveFindings)}.${k === 1 && fromStop.length && !idle ? ` The last ${fromStop.length} were left open by an earlier run and may repeat the ones before them: check each against the head, not only the diff.` : ''} Report any still unresolved and any new Important or Critical defect, setting relation on each finding you still report: narrowing when it is the same kind of defect as one above, reached on another path, input or call site; else new. Unsure is new.`, { label: rvLabel, phase: 'Final review', agentType: 'reviewer', schema: FINDINGS })
+    const rv = await call(`${CTX}\nRe-review these findings against ${idle ? `the current head of ${W}${hasBranches ? ` and of each declared branch's worktree (${declared(plan).map(b => `${b.name} in ${b.worktree}`).join(', ')})` : ''} (the fix wave committed nothing, so there is no diff to read). Nothing changed since these were raised, so each finding stands unless the code at the head shows it does not hold. The notes are the implementer's claims: check each against the code and never clear a finding on the notes alone` : `the fix (${span(fw)}${collected.length ? ` and ${collected.join(' and ')}` : ''})`}; notes: ${fw.notes}. Findings: ${JSON.stringify(waveFindings)}.${k === 1 && fromStop.length && !idle ? ` The last ${fromStop.length} were left open by an earlier run and may repeat the ones before them: check each against the head, not only the diff.` : ''} Report any still unresolved and any new Important or Critical defect, setting relation on each finding you still report: narrowing when it is the same kind of defect as one above, reached on another path, input or call site; else new. Unsure is new.${idle ? '' : ` Also return changed_files: the output lines of ${CHANGED_CMD(`${fw.start_head}..${fw.commit}`)}, run alone.`}`, { label: rvLabel, phase: 'Final review', agentType: 'reviewer', schema: withChanged(FINDINGS) })
     if (!rv) return stop('fix-wave-review', { rv, fix_waves: fixWaves })
     carried = []
     const next = findingsOf(rv)
     if (!next.length) break
-    const narrow = next.every(f => f.relation === 'narrowing')
+    const inFix = changedBy(fw).filter(p => changedBy(rv).includes(p))
+    const fresh = next.filter(f => f.relation !== 'narrowing')
+    const narrow = fresh.every(f => fileOf(f) && inFix.includes(fileOf(f)))
     // A wave that committed nothing earns no further wave: what its re-review still holds stops.
     const again = k === 1 ? narrow && !idle : k === 2 && narrow && next.every(f => f.severity === 'important') && next.length <= afterFirst
     if (!again) {
@@ -1420,6 +1435,8 @@ if (finalFindings.length) {
       return stop('fix-wave-review', { rv, fix_waves: fixWaves, ...(diverging ? { diverging } : {}) })
     }
     if (k === 1) afterFirst = next.length
+    regressions = fresh.length
+    if (fresh.length) log(`fix-wave-review: ${fresh.length} finding(s) not marked narrowing are in files fix wave ${k} changed; they get the next wave`)
     waveFindings = next
   }
 }

@@ -268,7 +268,7 @@ class PageTest(unittest.TestCase):
             {p for _, p in literals},
             {"/api/stream", "/api/looked", "/api/answer", "/api/check-answer", "/api/goal",
              "/api/withdraw", "/api/retry-manager", "/api/approve", "/api/reply",
-             "/api/message", "/api/stop"},
+             "/api/message", "/api/stop", "/api/round-answer"},
         )
         self.assertEqual(
             len(re.findall(r"\b(?:fetch|EventSource)\(", self.text)), len(literals)
@@ -277,7 +277,7 @@ class PageTest(unittest.TestCase):
     def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
         # A separate snapshot request can answer after a newer streamed frame
         # and render over it; the stream's first frame is already the snapshot.
-        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 12)
+        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 13)
         self.assertIsNotNone(
             re.search(r'fetch\("/api/looked",\s*\{\s*method:\s*"POST"', self.text)
         )
@@ -288,7 +288,7 @@ class PageTest(unittest.TestCase):
             re.search(r'fetch\("/api/check-answer",\s*\{\s*method:\s*"POST"', self.text)
         )
         for route in ("/api/goal", "/api/withdraw", "/api/retry-manager", "/api/approve",
-                      "/api/reply", "/api/message", "/api/stop"):
+                      "/api/reply", "/api/message", "/api/stop", "/api/round-answer"):
             self.assertIsNotNone(
                 re.search(rf'fetch\("{route}",\s*\{{\s*method:\s*"POST"', self.text)
             )
@@ -1361,6 +1361,196 @@ class PageAnswerTest(unittest.TestCase):
                          {"project_id": "owner/p00", "key": "A", "choices": [0]})
         self.assertEqual(posted(two),
                          {"project_id": "owner/p00", "key": "B", "choices": [1]})
+
+
+SID = "a" * 16
+
+
+def question(index, text, options, recommended, **fields):
+    base = {"type": "inbox_item", "reason": "question",
+            "key": f"question/{SID}/41/{index}", "project_id": "owner/p00", "sprint_id": SID,
+            "goal": "make the importer resumable", "round": 41, "index": index,
+            "blocker": False, "blocks": "the resume slice", "headline": text,
+            "more_questions": 0,
+            "questions": [{"question": text, "options": options, "chosen": None,
+                           "recommended": recommended}],
+            "items": [], "answers": [], "answered": False,
+            "waiting_since": "2026-11-10T08:00:00+00:00"}
+    base.update(fields)
+    return base
+
+
+Q0 = question(0, "Which store keeps the checkpoints?", ["sqlite", "files", "redis"], "files")
+Q1 = question(1, "May the reader change?", ["yes", "no"], "no", blocks="the reader slice")
+
+
+def round_posts(snap: dict) -> list:
+    return [p for p in snap["posts"] if p["url"] == "/api/round-answer"]
+
+
+def rows_of(snap: dict) -> list:
+    return [n for n in nodes(snap["inbox"]) if has_class(n, "row")]
+
+
+def held_texts(node: dict) -> list:
+    return [full(n) for n in nodes(node) if has_class(n, "held")]
+
+
+class PageQuestionTest(unittest.TestCase):
+    def test_a_question_opens_with_its_recommendation_and_shows_the_project_and_the_sprint(self) -> None:
+        (snap,) = render([START, {"frame": frame([Q0, Q1])}, {"snapshot": True}])
+        self.assertTrue(picked(snap)[0].endswith("files"))
+        (lead,) = [n for n in nodes(snap["inbox"]) if has_class(n, "lead")]
+        text = full(lead)
+        for word in ("Question", "owner/p00", "make the importer resumable",
+                     "Which store keeps the checkpoints?", "Blocks: the resume slice"):
+            self.assertIn(word, text)
+        self.assertTrue([n for n in nodes(lead) if has_class(n, "sprint-goal")])
+        tree = render_page(frame([Q0, Q1]))["inbox"]
+        self.assertEqual([n["href"] for n in walk(tree) if n.get("href")], [])
+        self.assertNotIn("Answer on the tracker", full(tree))
+
+    def test_enter_twice_sends_both_recommendations(self) -> None:
+        early, late = render([
+            START, {"frame": frame([Q0, Q1])}, {"key": "Enter"}, {"key": "Enter"},
+            {"clock": 4999}, {"snapshot": True}, {"clock": 5000}, {"snapshot": True},
+        ])
+        self.assertEqual(round_posts(early), [])
+        self.assertIn(WAIT_TEXT, full(early["inbox"]))
+        sent = round_posts(late)
+        self.assertEqual([posted(p) for p in sent], [
+            {"project_id": "owner/p00", "sprint_id": SID, "round": 41, "question": 0, "choice": 1},
+            {"project_id": "owner/p00", "sprint_id": SID, "round": 41, "question": 1, "choice": 1},
+        ])
+        for post in sent:
+            self.assertEqual(post["method"], "POST")
+            self.assertEqual(post["headers"],
+                             {"X-Console-Token": TOKEN, "Content-Type": "application/json"})
+        self.assertEqual(answers(late), [])
+
+    def test_a_number_key_picks_another_option(self) -> None:
+        (snap,) = render([
+            START, {"frame": frame([Q0, Q1])}, {"key": "1"}, {"key": "Enter"},
+            {"clock": 5000}, {"snapshot": True},
+        ])
+        (post,) = round_posts(snap)
+        self.assertEqual(posted(post), {
+            "project_id": "owner/p00", "sprint_id": SID, "round": 41, "question": 0, "choice": 0,
+        })
+
+    def test_own_words_are_sent_verbatim_instead_of_a_choice(self) -> None:
+        snap, reopened = render([
+            START, {"frame": frame([Q0, Q1])},
+            {"type": {"class": "words-text", "text": "use the reader\nnot the writer"}},
+            {"click": "ans-words"}, {"clock": 5000}, {"snapshot": True},
+            {"frame": frame([Q0, Q1])}, {"snapshot": True},
+        ])
+        (post,) = round_posts(snap)
+        self.assertEqual(posted(post), {
+            "project_id": "owner/p00", "sprint_id": SID, "round": 41, "question": 0,
+            "text": "use the reader\nnot the writer",
+        })
+        # A sent answer leaves no draft behind when the item is shown open again (each row has its own field).
+        self.assertEqual(
+            [n["value"] for n in nodes(reopened["inbox"]) if has_class(n, "words-text")], ["", ""])
+        (blank,) = render([
+            START, {"frame": frame([Q0, Q1])},
+            {"type": {"class": "words-text", "text": "   "}},
+            {"click": "ans-words"}, {"clock": 5000}, {"snapshot": True},
+        ])
+        self.assertEqual(round_posts(blank), [])
+
+    def test_a_refused_answer_says_why_and_keeps_the_pick(self) -> None:
+        (snap,) = render([
+            START, {"frame": frame([Q0, Q1])},
+            {"respond": {"status": 409, "text": "this question is already answered"}},
+            {"key": "Enter"}, {"clock": 5000}, {"snapshot": True},
+        ])
+        self.assertIn("Could not send: this question is already answered", full(snap["inbox"]))
+        self.assertTrue(picked(snap)[0].endswith("files"))
+        (sent,) = render([
+            START, {"frame": frame([Q0, Q1])}, {"key": "Enter"}, {"clock": 5000},
+            {"snapshot": True},
+        ])
+        self.assertIn(SENT_TEXT, full(sent["inbox"]))
+
+    def test_a_blocker_reads_stops_all_work_wherever_it_is_drawn(self) -> None:
+        Q1B = {**Q1, "blocker": True}
+        stops = "Blocks: the reader slice \u00b7 stops all work"
+        (lead,) = render([START, {"frame": frame([Q1B])}, {"snapshot": True}])
+        self.assertIn(stops, full(lead["inbox"]))
+        (behind,) = render([START, {"frame": frame([Q0, Q1B])}, {"snapshot": True}])
+        (row,) = [r for r in rows_of(behind) if "May the reader change?" in full(r)]
+        self.assertEqual(held_texts(row), [stops])
+        (briefed,) = render([START, {"frame": frame([BRIEF_B, Q0, Q1B])}, {"snapshot": True}])
+        (row0,) = [r for r in rows_of(briefed) if "Which store keeps" in full(r)]
+        (row1,) = [r for r in rows_of(briefed) if "May the reader change?" in full(r)]
+        self.assertEqual(held_texts(row0), ["Blocks: the resume slice"])
+        self.assertEqual(held_texts(row1), [stops])
+        (boxed,) = render([
+            START, {"frame": frame([Q0, Q1B])}, {"key": "Enter"}, {"snapshot": True},
+        ])
+        (row,) = [r for r in rows_of(boxed) if "May the reader change?" in full(r)]
+        self.assertTrue([n for n in nodes(row) if has_class(n, "abox")])
+        self.assertEqual(held_texts(row), [stops])
+
+    def test_own_words_survive_a_brief_taking_the_keyboard(self) -> None:
+        before, after = render([
+            START, {"frame": frame([Q0, Q1])},
+            {"type": {"class": "words-text", "text": "use the reader"}}, {"snapshot": True},
+            {"frame": frame([BRIEF_B, Q0, Q1])}, {"snapshot": True},
+        ])
+        for snap in (before, after):
+            self.assertEqual(snap["active"], "words-text")
+            self.assertEqual(snap["field"], {
+                "cls": "words-text", "value": "use the reader", "start": 14, "end": 14,
+            })
+        self.assertEqual(len(brief_cards(after)), 1)
+        (focused,) = render([
+            START, {"frame": frame([Q0, Q1])}, {"focus_on": "words-text"},
+            {"frame": frame([BRIEF_B, Q0, Q1])}, {"snapshot": True},
+        ])
+        self.assertEqual(focused["active"], "words-text")
+        (typed,) = render([
+            START, {"frame": frame([Q0, Q1])},
+            {"type": {"class": "words-text", "text": "use the reader"}},
+            {"focus_on": "ans-words"}, {"frame": frame([BRIEF_B, Q0, Q1])}, {"snapshot": True},
+        ])
+        self.assertEqual(
+            [n["value"] for n in nodes(typed["inbox"]) if has_class(n, "words-text")],
+            ["use the reader", ""],
+        )
+
+    def test_every_question_row_keeps_its_answer_controls_whoever_holds_the_keys(self) -> None:
+        Q1B = {**Q1, "blocker": True}
+        for shown in ([Q0, Q1B], [BRIEF_B, Q0, Q1B], [BRIEF_B, Q1B]):
+            with self.subTest(items=[i["key"] for i in shown]):
+                (snap,) = render([START, {"frame": frame(shown)}, {"snapshot": True}])
+                (row,) = [r for r in rows_of(snap) if "May the reader change?" in full(r)]
+                self.assertTrue([n for n in nodes(row) if has_class(n, "abox")])
+                self.assertEqual(len([n for n in nodes(row) if has_class(n, "words-text")]), 1)
+                self.assertEqual(len([n for n in nodes(row) if has_class(n, "ans-words")]), 1)
+                options = [n for n in nodes(row) if has_class(n, "opt")]
+                self.assertEqual(len(options), 2)
+                self.assertFalse(any(n["disabled"] for n in options))
+
+    def test_the_own_words_cannot_be_edited_while_the_answer_is_pending(self) -> None:
+        typed = {"type": {"class": "words-text", "text": "use the reader"}}
+        waiting, undone, sending, sent = render([
+            START, {"frame": frame([Q0, Q1])}, typed, {"click": "ans-words"}, {"snapshot": True},
+            {"click": "undo"}, {"snapshot": True},
+            {"hold": True}, {"click": "ans-words"}, {"clock": 5000}, {"snapshot": True},
+            {"release": {"status": 204, "text": ""}}, {"snapshot": True},
+        ])
+        for snap in (waiting, sending):
+            self.assertTrue(field(snap, "words-text")["disabled"])
+            self.assertTrue(field(snap, "ans-words")["disabled"])
+            self.assertEqual(field(snap, "words-text")["value"], "use the reader")
+        self.assertFalse(field(undone, "words-text")["disabled"])
+        self.assertFalse(field(undone, "ans-words")["disabled"])
+        (post,) = round_posts(sent)
+        self.assertEqual(posted(post)["text"], "use the reader")
+
 
 
 def checks(snap: dict) -> list:
@@ -2496,7 +2686,7 @@ class PageMessageTest(unittest.TestCase):
 
     def test_tell_the_manager_posts_the_text_with_the_token_and_keeps_it_on_refusal(self) -> None:
         refused, after = render([
-            START, {"frame": with_sprints([SPRINT])},
+            START, {"frame": with_sprints([SPRINT])}, {"click": "tell-open"},
             {"type": {"class": "tell", "text": TELL_TEXT}},
             {"respond": {"status": 409, "text": "this sprint is not open\n"}},
             {"click": "tell-send"}, {"snapshot": True},
@@ -2516,7 +2706,7 @@ class PageMessageTest(unittest.TestCase):
 
     def test_an_unanswered_send_keeps_the_text(self) -> None:
         (snap,) = render([
-            START, {"frame": with_sprints([SPRINT])},
+            START, {"frame": with_sprints([SPRINT])}, {"click": "tell-open"},
             {"type": {"class": "tell", "text": TELL_TEXT}},
             {"fail_fetch": True}, {"click": "tell-send"}, {"snapshot": True},
         ])
@@ -2525,20 +2715,26 @@ class PageMessageTest(unittest.TestCase):
                          ["Could not send: the console did not answer"])
         self.assertEqual(tell_field(snap)["value"], TELL_TEXT)
 
-    def test_a_sent_message_clears_the_field(self) -> None:
+    def test_a_sent_message_closes_the_field(self) -> None:
         (snap,) = render([
-            START, {"frame": with_sprints([SPRINT])},
+            START, {"frame": with_sprints([SPRINT])}, {"click": "tell-open"},
             {"type": {"class": "tell", "text": TELL_TEXT}},
             {"click": "tell-send"}, {"snapshot": True},
         ])
-        self.assertEqual(tell_field(snap)["value"], "")
         (line,) = sprint_lines(snap)
+        self.assertEqual([n for n in nodes(snap["projects"]) if has_class(n, "tell")], [])
+        self.assertEqual(
+            len([n for n in nodes(line) if n["tag"] == "button" and has_class(n, "tell-open")]), 1
+        )
+        (post,) = [p for p in snap["posts"] if p["url"] == "/api/message"]
+        self.assertEqual(json.loads(post["body"]), {
+            "project_id": "owner/p00", "sprint_id": "a" * 16, "text": TELL_TEXT})
         self.assertEqual([n for n in nodes(line) if has_class(n, "fail")], [])
 
     def test_a_typed_message_keeps_its_focus_and_selection_across_frames(self) -> None:
         sent = message_entry(3, "text", "delivered")
         before, after, more = render([
-            START, {"frame": with_sprints([SPRINT])},
+            START, {"frame": with_sprints([SPRINT])}, {"click": "tell-open"},
             {"type": {"class": "tell", "text": TELL_TEXT}},
             {"select": {"cls": "tell", "start": 6, "end": 9}}, {"snapshot": True},
             {"frame": with_sprints([{**SPRINT, "messages": [sent], "reach_text": None}])},
@@ -2554,12 +2750,150 @@ class PageMessageTest(unittest.TestCase):
         self.assertTrue(tell_field(more)["value"].endswith("!"))
 
     def test_a_sprint_no_longer_listed_restores_no_focus(self) -> None:
-        (gone,) = render([
-            START, {"frame": with_sprints([SPRINT])},
+        gone, back = render([
+            START, {"frame": with_sprints([SPRINT])}, {"click": "tell-open"},
             {"type": {"class": "tell", "text": TELL_TEXT}},
             {"frame": with_sprints([])}, {"snapshot": True},
+            {"frame": with_sprints([SPRINT])}, {"snapshot": True},
         ])
         self.assertIsNone(gone["active"])
+        self.assertEqual([n for n in nodes(back["projects"]) if has_class(n, "tell")], [])
+
+
+MORE_KEY = "more:" + "a" * 16
+DETAIL_KEY = "sprint:" + "a" * 16
+
+
+def in_line(line: dict, tag: str, cls: str) -> list:
+    return [n for n in visible(line) if n["tag"] == tag and has_class(n, cls)]
+
+
+def more_fold(line: dict) -> dict:
+    (found,) = [n for n in nodes(line) if n["tag"] == "details" and n["key"] == MORE_KEY]
+    return found
+
+
+class PageSprintControlsTest(unittest.TestCase):
+    def test_a_sprint_shows_tell_the_manager_and_more_until_used(self) -> None:
+        bare, telling, more = render([
+            START, {"frame": with_sprints([SPRINT])}, {"snapshot": True},
+            {"click": "tell-open"}, {"snapshot": True},
+            {"open": MORE_KEY}, {"snapshot": True},
+        ])
+        (line,) = sprint_lines(bare)
+        self.assertEqual([n for n in visible(line) if n["tag"] == "textarea"], [])
+        self.assertEqual([n for n in visible(line) if has_class(n, "withdraw")], [])
+        (opener,) = in_line(line, "button", "tell-open")
+        self.assertEqual(full(opener), "Tell the manager")
+        fold = more_fold(line)
+        self.assertFalse(fold["open"])
+        (summary,) = [c for c in fold["children"] if c["tag"] == "summary"]
+        self.assertEqual(full(summary), "More")
+        self.assertEqual(telling["active"], "tell")
+        (line,) = sprint_lines(telling)
+        (field,) = in_line(line, "textarea", "tell")
+        self.assertTrue(field["focused"])
+        (send,) = in_line(line, "button", "tell-send")
+        self.assertEqual(full(send), "Send")
+        self.assertEqual(in_line(line, "button", "tell-open"), [])
+        (line,) = sprint_lines(more)
+        (withdraw,) = in_line(line, "button", "withdraw")
+        self.assertEqual(full(withdraw), "Withdraw")
+
+    def test_escape_or_leaving_an_empty_field_closes_it(self) -> None:
+        escaped, left, within = render([
+            START, {"frame": with_sprints([SPRINT])}, {"click": "tell-open"},
+            {"key": "Escape", "on": "tell"}, {"snapshot": True},
+            {"click": "tell-open"}, {"blur_on": "tell"}, {"snapshot": True},
+            {"click": "tell-open"}, {"blur_on": "tell", "to": "tell-send"}, {"snapshot": True},
+        ])
+        for snap in (escaped, left):
+            (line,) = sprint_lines(snap)
+            self.assertEqual(in_line(line, "textarea", "tell"), [])
+            self.assertEqual(len(in_line(line, "button", "tell-open")), 1)
+        self.assertEqual(escaped["active"], "tell-open")
+        (line,) = sprint_lines(within)
+        self.assertEqual(len(in_line(line, "textarea", "tell")), 1)
+
+    def test_a_draft_keeps_the_field_open(self) -> None:
+        streamed, left, escaped, again = render([
+            START, {"frame": with_sprints([SPRINT])}, {"click": "tell-open"},
+            {"frame": with_sprints([SPRINT])}, {"snapshot": True},
+            {"type": {"class": "tell", "text": TELL_TEXT}},
+            {"blur_on": "tell"}, {"snapshot": True},
+            {"key": "Escape", "on": "tell"}, {"snapshot": True},
+            {"frame": with_sprints([SPRINT])}, {"snapshot": True},
+        ])
+        self.assertTrue(tell_field(streamed)["focused"])
+        self.assertEqual(streamed["active"], "tell")
+        for snap in (left, escaped, again):
+            self.assertEqual(tell_field(snap)["value"], TELL_TEXT)
+
+    def test_more_keeps_withdraw_and_its_failure_shows_closed(self) -> None:
+        refusal = {"status": 409, "text": "this sprint is not open\n"}
+        sending, streamed, failed = render([
+            START, {"frame": with_sprints([SPRINT])}, {"open": MORE_KEY}, {"hold": True},
+            {"click": "withdraw"}, {"snapshot": True},
+            {"frame": with_sprints([SPRINT])}, {"snapshot": True},
+            {"release": refusal}, {"snapshot": True},
+        ])
+        for snap in (sending, streamed, failed):
+            (line,) = sprint_lines(snap)
+            self.assertTrue(more_fold(line)["open"])
+        for snap, disabled in ((sending, True), (streamed, True), (failed, False)):
+            (line,) = sprint_lines(snap)
+            (withdraw,) = in_line(line, "button", "withdraw")
+            self.assertEqual(withdraw["disabled"], disabled)
+        closed, failed = render([
+            START, {"frame": with_sprints([SPRINT])}, {"open": MORE_KEY}, {"hold": True},
+            {"click": "withdraw"}, {"close": MORE_KEY},
+            {"frame": with_sprints([SPRINT])}, {"snapshot": True},
+            {"release": refusal}, {"snapshot": True},
+        ])
+        for snap in (closed, failed):
+            (line,) = sprint_lines(snap)
+            self.assertFalse(more_fold(line)["open"])
+        self.assertIn("Could not withdraw: this sprint is not open", visible_text(line))
+
+    def test_a_failed_manager_start_and_its_retry_need_no_opening(self) -> None:
+        reason = "could not start a manager: the directory is not trusted"
+        (snap,) = render([
+            START,
+            {"frame": with_sprints([
+                {**SPRINT, "manager_state": "failed", "manager_text": reason, "retry": True}
+            ])},
+            {"respond": {"status": 409, "text": "this sprint has a manager\n"}},
+            {"click": "retry"}, {"snapshot": True},
+        ])
+        (line,) = sprint_lines(snap)
+        self.assertIn(reason, visible_text(line))
+        (again,) = in_line(line, "button", "retry")
+        self.assertFalse(again["disabled"])
+        self.assertIn("Could not retry: this sprint has a manager", visible_text(line))
+        self.assertEqual(in_line(line, "button", "withdraw"), [])
+        self.assertEqual([n for n in visible(line) if n["tag"] == "textarea"], [])
+
+    def test_the_newest_message_shows_and_the_rest_sit_in_detail(self) -> None:
+        many = {**SPRINT, "messages": PageMessageTest.messages(None), "reach_text": None}
+        one = {**SPRINT, "messages": [message_entry(3, "text", "sent")], "reach_text": None}
+        closed, opened, single = render([
+            START, {"frame": with_sprints([many])}, {"snapshot": True},
+            {"open": DETAIL_KEY}, {"snapshot": True},
+            {"frame": with_sprints([one])}, {"snapshot": True},
+        ])
+        (line,) = sprint_lines(closed)
+        shown = visible_text(line)
+        self.assertIn("a third note", shown)
+        self.assertIn("Manager: " + REPLY_TEXT, shown)
+        self.assertNotIn(TELL_TEXT, shown)
+        self.assertNotIn("Approved version 2", shown)
+        (line,) = sprint_lines(opened)
+        shown = visible_text(line)
+        self.assertIn(TELL_TEXT, shown)
+        self.assertIn("Approved version 2", shown)
+        (line,) = sprint_lines(single)
+        self.assertIn(TELL_TEXT, visible_text(line))
+        self.assertEqual([n for n in nodes(line) if n["key"] == DETAIL_KEY], [])
 
 
 STALL = {
@@ -2857,6 +3191,22 @@ class PageSprintEndTest(unittest.TestCase):
             json.loads(post["body"]), {"project_id": "owner/p00", "sprint_id": "a" * 16}
         )
 
+    def test_stop_sits_under_more_beside_withdraw_and_its_question_on_the_line(self) -> None:
+        idle, asked = render([
+            START, {"frame": with_sprints([{**SPRINT, "stoppable": True}])}, {"snapshot": True},
+            {"click": "stop"}, {"snapshot": True},
+        ])
+        (line,) = sprint_lines(idle)
+        (more,) = of_class(line, "details", "sprint-more")
+        self.assertEqual(len(of_class(more, "button", "stop")), 1)
+        self.assertEqual(len(of_class(more, "button", "withdraw")), 1)
+        self.assertEqual(len(of_class(line, "button", "stop")), 1)
+        (line,) = sprint_lines(asked)
+        (more,) = of_class(line, "details", "sprint-more")
+        self.assertEqual(of_class(more, "span", "stop-ask"), [])
+        self.assertEqual(of_class(more, "button", "stop-confirm"), [])
+        self.assertEqual(len(of_class(line, "button", "stop-confirm")), 1)
+
     def test_cancel_sends_nothing_and_restores_stop(self) -> None:
         (snap,) = render([
             START, {"frame": with_sprints([{**SPRINT, "stoppable": True}])},
@@ -2952,7 +3302,9 @@ class PageSprintEndTest(unittest.TestCase):
         for sprint, boxes in ((ended, 0), (stopped, 0), (SPRINT, 1)):
             with self.subTest(state=sprint["state"], ended=sprint.get("ended_at")):
                 (snap,) = render([START, {"frame": with_sprints([sprint])}, {"snapshot": True}])
-                self.assertEqual(len(of_class(snap["projects"], "div", "sprint-tell")), boxes)
+                offered = (of_class(snap["projects"], "div", "sprint-tell")
+                           + of_class(snap["projects"], "button", "tell-open"))
+                self.assertEqual(len(offered), boxes)
 
     def test_an_unstopped_manager_is_shown_under_the_statement(self) -> None:
         text = "The manager of a withdrawn goal could not be stopped: boom; trying again"
@@ -3394,6 +3746,7 @@ BRIEF_B = {
     **BRIEF, "key": "brief/" + "b" * 16, "sprint_id": "b" * 16, "version": 1,
     "waiting_since": stamp(timedelta(minutes=8)),
 }
+KEY_B = "brief:" + "b" * 16
 APPROVING_TEXT = "Approving in five seconds."
 APPROVED_TEXT = "Approved, the sprint is starting"
 REPLIED_TEXT = "Reply sent, waiting for a new brief"
@@ -3638,6 +3991,10 @@ class PageBriefTest(unittest.TestCase):
         self.assertEqual(
             [n["value"] for n in nodes(second) if has_class(n, "reply-text")], ["abcdef"]
         )
+        (row,) = [n for n in nodes(snap["inbox"]) if n["tag"] == "details" and n["key"] == KEY_B]
+        self.assertTrue(row["open"])
+        self.assertIn(second, nodes(row))
+        self.assertEqual(sum(1 for n in nodes(row) if has_class(n, "kind")), 1)
         self.assertNotIn(
             "abcdef", [n["value"] for n in nodes(first) if has_class(n, "reply-text")]
         )
@@ -3657,6 +4014,175 @@ class PageBriefTest(unittest.TestCase):
         self.assertEqual([n for n in nodes(plain["inbox"]) if n["tag"] == "textarea"], [])
         (field,) = [n for n in nodes(brief["inbox"]) if n["tag"] == "textarea"]
         self.assertEqual(field["cls"], "reply-text")
+
+
+def brief_row(snap: dict, key: str = KEY_B) -> dict:
+    (row,) = [n for n in nodes(snap["inbox"]) if n["tag"] == "details" and n["key"] == key]
+    return row
+
+
+def has_any(tree: dict, names: tuple) -> bool:
+    return any(has_class(n, name) for n in visible(tree) for name in names)
+
+
+ROW_BODY = ("parts", "approve", "reply-text", "reply-send")
+
+
+class PageBriefRowTest(unittest.TestCase):
+    def test_the_brief_row_head_keeps_the_shared_flex_layout(self) -> None:
+        # The harness applies no CSS: a rule on the summary that is more specific
+        # than .row-head must not take its flex row (gap, wait at the right) away.
+        style = re.findall(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"))[0]
+        rules = style_rules(style)
+        self.assertEqual(
+            [d["display"] for s, d in rules if s == ".row-head" and "display" in d], ["flex"])
+        for selector, decls in rules:
+            if selector == ".brief-row > summary":
+                self.assertEqual(decls.get("display", "flex"), "flex", selector)
+
+    def test_a_collapsed_row_title_wraps_a_long_unbroken_goal(self) -> None:
+        # A goal with a long unbroken token (a filename) sits in a flex item <b>; without
+        # overflow-wrap the row grows past a 480px viewport, as .brief .goal-line already avoids.
+        style = re.findall(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"))[0]
+        merged: dict = {}
+        for selector, decls in style_rules(style):
+            if selector == ".row-head b":
+                merged.update(decls)
+        self.assertEqual(merged.get("overflow-wrap"), "anywhere")
+
+    def test_a_later_brief_is_one_row_until_opened(self) -> None:
+        closed, opened, promoted = render([
+            START, {"frame": frame([BRIEF, BRIEF_B, ANSWERABLE])}, {"snapshot": True},
+            {"open": KEY_B}, {"snapshot": True},
+            {"frame": frame([BRIEF_B])}, {"snapshot": True},
+        ])
+        kids = closed["inbox"]["children"]
+        self.assertEqual(kids[0]["tag"], "article")
+        for name in ("card", "brief", "lead"):
+            self.assertTrue(has_class(kids[0], name))
+        self.assertEqual((kids[1]["tag"], kids[1]["key"]), ("details", KEY_B))
+        self.assertTrue(has_class(kids[1], "row") and has_class(kids[1], "brief-row"))
+        self.assertFalse(kids[1]["open"])
+        self.assertEqual(kids[2]["tag"], "ul")
+        self.assertTrue(has_class(kids[2], "rest"))
+        row = brief_row(closed)
+        self.assertFalse(has_any(row, ROW_BODY))
+        summary = row["children"][0]
+        self.assertEqual(summary["tag"], "summary")
+        self.assertEqual(
+            [(c["tag"], c["cls"].split()[0] if c["cls"] else "") for c in summary["children"]],
+            [("span", "kind"), ("b", ""), ("span", "lm"), ("span", "lw")])
+        texts = [full(c) for c in summary["children"]]
+        self.assertEqual(texts[:3], ["Brief", GOAL_TEXT, "owner/p01"])
+        self.assertTrue(texts[3].startswith("waiting "))
+        self.assertIn("svg", [c["tag"] for c in summary["children"][0]["children"]])
+
+        row = brief_row(opened)
+        self.assertTrue(row["open"])
+        shown = visible(row)
+        self.assertEqual(sum(1 for n in shown if has_class(n, "approve")), 1)
+        self.assertEqual(sum(1 for n in shown if has_class(n, "primary")), 0)
+        self.assertEqual(sum(1 for n in shown if has_class(n, "reply-text")), 1)
+        self.assertEqual(sum(1 for n in shown if has_class(n, "reply-send")), 1)
+        text = visible_text(row)
+        self.assertIn("owner/p01 brief, version 1", text)
+        for label in LABELS:
+            self.assertIn(label, text)
+        self.assertEqual(sum(1 for n in nodes(row) if has_class(n, "kind")), 1)
+
+        first = promoted["inbox"]["children"][0]
+        self.assertEqual(first["tag"], "article")
+        self.assertTrue(has_class(first, "lead") and has_class(first, "brief"))
+        self.assertIn("owner/p01 brief, version 1", full(first))
+        self.assertFalse(any(has_class(n, "brief-row") for n in nodes(promoted["inbox"])))
+
+    def test_a_reply_in_a_later_brief_survives_frames_and_closing(self) -> None:
+        both = {"frame": frame([BRIEF, BRIEF_B])}
+        typed, closed, reopened = render([
+            START, both, {"open": KEY_B},
+            {"focus_on": "reply-text", "in": KEY_B},
+            {"input": {"cls": "reply-text", "value": "smaller slices"}, "in": KEY_B},
+            both, {"snapshot": True},
+            {"close": KEY_B}, both, {"snapshot": True},
+            {"open": KEY_B}, {"snapshot": True},
+        ])
+        self.assertEqual(typed["active"], "reply-text")
+        self.assertEqual(typed["field"]["value"], "smaller slices")
+        for snap in (typed, closed, reopened):
+            row = brief_row(snap)
+            self.assertEqual(reply_fields(dict(inbox=row)), ["smaller slices"])
+            lead = snap["inbox"]["children"][0]
+            self.assertEqual(reply_fields(dict(inbox=lead)), [""])
+        self.assertFalse(brief_row(closed)["open"])
+        self.assertEqual(
+            [n["value"] for n in visible(brief_row(reopened)) if has_class(n, "reply-text")],
+            ["smaller slices"])
+        self.assertEqual(replies(reopened), [])
+
+    def test_a_later_brief_opens_itself_once_per_approval_step(self) -> None:
+        both = {"frame": frame([BRIEF, BRIEF_B])}
+        waiting, closed, approved, closed_again = render([
+            START, both, {"key": "Enter"}, {"key": "Enter"}, {"snapshot": True},
+            {"close": KEY_B}, both, {"snapshot": True},
+            {"clock": 5000}, {"snapshot": True},
+            {"close": KEY_B}, both, {"snapshot": True},
+        ])
+        row = brief_row(waiting)
+        self.assertTrue(row["open"])
+        self.assertIn(APPROVING_TEXT, visible_text(row))
+        self.assertEqual(approvals(waiting), [])
+        row = brief_row(closed)
+        self.assertFalse(row["open"])
+        self.assertNotIn(APPROVING_TEXT, visible_text(row))
+        row = brief_row(approved)
+        self.assertTrue(row["open"])
+        self.assertIn(APPROVED_TEXT, visible_text(row))
+        self.assertFalse(brief_row(closed_again)["open"])
+
+    def test_the_brief_reply_field_carries_a_hint_and_a_name(self) -> None:
+        (snap,) = render([START, {"frame": frame([BRIEF])}, {"snapshot": True}])
+        (field,) = [n for n in nodes(snap["inbox"]) if has_class(n, "reply-text")]
+        self.assertEqual(field["placeholder"], "Or say what to change\u2026")
+        self.assertEqual(field["label"], "Or say what to change")
+
+    def test_the_first_row_sits_one_row_gap_below_the_card(self) -> None:
+        text = PAGE.read_text(encoding="utf-8")
+        (body,) = re.findall(r"(?s)<style>(.*?)</style>", text)
+        top = re.sub(r"(?s)@media[^{]*\{.*?\}\s*\}", "", body)
+        rules = style_rules(top)
+
+        def decls(selector: str) -> dict:
+            merged: dict = {}
+            for sel, found in rules:
+                if sel == selector:
+                    merged.update(found)
+            return merged
+
+        self.assertEqual(decls(".brief-row").get("padding"), decls(".rest > li.row")["padding"])
+        self.assertEqual(decls(".brief-row").get("padding"), "12px 0")
+        self.assertEqual(decls(".card.lead + .brief-row").get("margin-top"), "12px")
+        self.assertEqual(decls(".card.lead + .rest").get("margin-top"), "12px")
+        self.assertIn("var(--hair)", decls(".brief-row + .brief-row").get("border-top", ""))
+
+    def test_a_closed_brief_row_stays_closed_after_its_reply_is_sent(self) -> None:
+        both = {"frame": frame([BRIEF, BRIEF_B])}
+        sent, closed = render([
+            START, both, {"open": KEY_B},
+            {"input": {"cls": "reply-text", "value": "smaller slices"}, "in": KEY_B},
+            {"respond": {"status": 204}},
+            {"click": "reply-send", "in": KEY_B}, {"snapshot": True},
+            {"close": KEY_B}, both, {"snapshot": True},
+        ])
+        (post,) = replies(sent)
+        self.assertEqual(posted(post), {
+            "project_id": "owner/p01", "sprint_id": "b" * 16, "version": 1,
+            "reply": "smaller slices"})
+        row = brief_row(sent)
+        self.assertTrue(row["open"])
+        self.assertIn(REPLIED_TEXT, visible_text(row))
+        row = brief_row(closed)
+        self.assertFalse(row["open"])
+        self.assertFalse(has_any(row, ROW_BODY))
 
 
 def style_rules(block: str) -> list:
@@ -3807,6 +4333,16 @@ class PageStandingRulesTest(unittest.TestCase):
         block = media_block(self.style, "(prefers-reduced-motion: reduce)")
         declared = {name for _, decls in style_rules(block) for name in decls}
         self.assertLessEqual({"transition-duration", "animation-duration"}, declared)
+
+    def test_the_goal_field_shows_one_border_in_focus(self) -> None:
+        top = re.sub(r"(?s)@media[^{]*\{.*?\}\s*\}", "", self.style)
+        rules = style_rules(top)
+        self.assertTrue([
+            d for s, d in rules
+            if s == ".goal-in .goal-text:focus-visible" and d.get("outline") in ("none", "0")])
+        self.assertTrue([
+            d for s, d in rules
+            if s == ".goal-in:focus-within" and d.get("border-color") == "var(--lav)"])
 
     def test_the_lead_card_narrows_under_900(self) -> None:
         horizontal = []
