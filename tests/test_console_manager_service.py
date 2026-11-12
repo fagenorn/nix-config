@@ -349,6 +349,19 @@ class ManagerServiceTest(Case):
             self.assertEqual(console.main(["--port", "0"]), 1)
         self.assertIs(recorded["nudger"], nudge.nudger_for(sys.platform))
 
+    def test_main_passes_the_platform_full_lister(self):
+        recorded = {}
+
+        class Stub:
+            def __init__(self, *args, **kwargs):
+                recorded.update(kwargs)
+                raise OSError("x")
+
+        with mock.patch("agent_tools.console.console.service.ConsoleService", Stub), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(console.main(["--port", "0"]), 1)
+        self.assertIs(recorded["full_listing"], nudge.full_lister_for(sys.platform))
+
     def test_a_launch_never_holds_the_ingest_lock(self):
         alive = []
         holder = {}

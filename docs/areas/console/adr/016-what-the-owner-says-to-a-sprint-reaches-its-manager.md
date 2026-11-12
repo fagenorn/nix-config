@@ -1,7 +1,7 @@
 # ADR-console-016 — What the owner says to a sprint reaches its manager
 
 - **Status:** accepted
-- **Decided in:** #831, #834, #835, #889
+- **Decided in:** #831, #834, #835, #889, #949
 
 ## Context
 
@@ -13,7 +13,7 @@ ADR-console-013 carried a manager's brief to the page and the owner's approval o
 
 **The manager reads, the nudge only points.** `sprint inbox` returns every unread message in id order, once, and in the same locked section records that they were read. `sprint reply --message <id> --reply-file <path | ->` sends what the manager changed, kept exactly as `sprint status` keeps a reply (non-empty, at most 2000 characters); a later reply to the same message replaces the shown one, and every row is kept. The nudge is one fixed sentence that tells the manager to run `sprint inbox`; it carries none of the owner's text, so the owner's words travel only through the inbox, which authenticates with the sprint's secret.
 
-**The route rule.** At nudge time the console reads a fresh, process-validated session listing. A session named `<project id> sprint <sprint id>` that is listed is running and gets a relay: a short `claude -p` session on the manager's profile that sends the sentence to that session by name through `SendMessage` and succeeds only when it exits 0 and prints `SENT`. Otherwise the session id learned from `session.seen` rows is woken in place with `claude-account run --resume <id> --bg <sentence>` inside the `systemd-run --user --scope` of ADR-console-015, never for a listed session, because `--resume --bg` on a running session copies it. With neither, the nudge fails without a command. A nudge is sent only while the sprint's manager row is `started` and the host has a nudger, which is Linux; otherwise the message waits and the manager reads it at the start of its first turn.
+**The route rule.** At nudge time the console reads a fresh, process-validated session listing. A session named `<project id> sprint <sprint id>` that is listed is running and gets a relay: a short `claude -p` session on the manager's profile that sends the sentence to that session by name through `SendMessage` and succeeds only when it exits 0 and prints `SENT`. Otherwise the session id learned from `session.seen` rows is woken in place with `claude-account run --resume <id> --bg <sentence>` inside the `systemd-run --user --scope` of ADR-console-015, never for a listed session, because `--resume --bg` on a running session copies it. Before that wake the console reads the manager profile's full session listing (`claude agents --json --all`, stopped sessions included): a session it shows is woken bare, and one it does not show, because its record was removed, is woken with the sprint's session name and settings file passed again (`--name <name> --settings <file>`), since the client would otherwise resume it under another name without its settings. A listing the console cannot read gives the bare wake, because a copy is the worse failure, and the reason is recorded on the row as `listing_failed`. With neither, the nudge fails without a command. A nudge is sent only while the sprint's manager row is `started` and the host has a nudger, which is Linux; otherwise the message waits and the manager reads it at the start of its first turn.
 
 **Re-nudge and unreachable.** A stored message nudges at once. The session poll re-nudges a started sprint that has an unread message never delivered, at least a minute old, with no nudge in the last minute and fewer than two failures in a row. Two failed nudges in a row make the sprint read "manager not reachable" with its messages kept; a successful nudge or a read resets the count, and no automatic nudge follows two failures until a new message.
 
@@ -28,5 +28,6 @@ ADR-console-013 carried a manager's brief to the page and the owner's approval o
 - ADR-console-013's "Nothing is pushed to the manager yet" no longer holds: a stored message reaches a started manager without its asking.
 - A sprint more than 90 days old may lose its `session.seen` rows, and so its session id, and its nudge rows on restart: a wake then fails, and two failures read manager not reachable. The messages stay.
 - A relay costs one short print-mode session on the manager's profile.
+- A manager whose session record was removed comes back under its name with its secret, not as an unnamed session without its settings.
 - macOS sends no nudge: a message waits as sent until the manager's next turn reads it.
 - A verification check that states a real goal must stop its test manager before withdrawing the sprint, because a withdrawal removes the secret and does not end the session.

@@ -151,6 +151,68 @@ class ReviveServiceTest(ReviveCase):
         self.assertEqual(len(self.revives()), 1)
         self.assertEqual(len(self.rows("manager.woken")), 1)
 
+    def full_wake(self, outcome, *, listed_at_wake=False):
+        """A sprint gone two minutes whose wake job has run with `outcome` as the full listing."""
+        self.full_calls = []
+
+        def full(profile, cwd):
+            self.full_calls.append((profile, cwd, self.svc._ingest.locked()))
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+
+        self.svc = svc = self.begin(full_listing=full)
+        sid = self.on_track(svc)
+        self.tick(svc, 0)
+        self.full_calls.clear()
+        self.gone(svc)
+        self.reserve(svc, 120)
+        if listed_at_wake:
+            self.listed_now(sid)
+        self.drain()
+        return svc, sid
+
+    def test_a_wake_of_a_session_the_full_listing_shows_carries_no_name_or_settings(self):
+        _, sid = self.full_wake(frozenset({"s-1"}))
+        self.assertEqual(self.revives(), [nudge.Nudge(
+            sid, "revive", self.name(sid), "s-1", "work", "/srv/p01")])
+        argv = nudge.nudge_command(self.revives()[0], "linux")
+        self.assertNotIn("--name", argv)
+        self.assertNotIn("--settings", argv)
+        self.assertEqual(self.rows("manager.woken"), [
+            {"sprint_id": sid, "goal": GOAL, "session_id": "s-1", "ok": True}])
+        self.assertEqual(self.full_calls, [("work", "/srv/p01", False)])
+
+    def test_a_wake_of_a_session_absent_from_the_full_listing_carries_the_sprints_name_and_settings(self):
+        svc, sid = self.full_wake(frozenset({"other"}))
+        path = str(manager.settings_path(svc._sprint_secrets, sid))
+        self.assertEqual(self.revives(), [nudge.Nudge(
+            sid, "revive", self.name(sid), "s-1", "work", "/srv/p01", path)])
+        self.assertEqual(
+            nudge.nudge_command(self.revives()[0], "linux")[-6:],
+            ["--bg", "--name", self.name(sid), "--settings", path, nudge.RESTART_TEXT])
+        self.assertEqual(self.rows("manager.woken"), [
+            {"sprint_id": sid, "goal": GOAL, "session_id": "s-1", "ok": True}])
+
+    def test_an_unreadable_full_listing_gives_the_bare_wake_and_records_why(self):
+        for error, reason in (
+                (nudge.ListingUnreadable("the listing exited 1"), "the listing exited 1"),
+                (RuntimeError("boom"), "RuntimeError: boom")):
+            with self.subTest(reason=reason):
+                self.setUp()
+                _, sid = self.full_wake(error)
+                self.assertEqual(self.revives(), [nudge.Nudge(
+                    sid, "revive", self.name(sid), "s-1", "work", "/srv/p01")])
+                self.assertEqual(self.rows("manager.woken"), [
+                    {"sprint_id": sid, "goal": GOAL, "session_id": "s-1", "ok": True,
+                     "listing_failed": reason}])
+                self.assertIn(f"console: listing_failed {sid} {reason}", self.stderr.getvalue())
+
+    def test_the_full_listing_is_not_read_when_the_running_listing_shows_the_manager(self):
+        self.full_wake(frozenset(), listed_at_wake=True)
+        self.assertEqual(self.revives(), [])
+        self.assertEqual(self.full_calls, [])
+
     def test_a_listed_manager_is_never_woken(self):
         svc = self.begin()
         self.on_track(svc)
