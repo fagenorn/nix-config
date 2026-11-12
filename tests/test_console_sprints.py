@@ -883,5 +883,207 @@ class MessageFoldTest(unittest.TestCase):
                          (2, "manager not reachable", 60_000, "this message is not known"))
 
 
+QUESTION = {"question": "Which store keeps the checkpoints?", "blocks": "the resume slice",
+            "options": ["sqlite", "files"], "recommended": "files"}
+SECOND = {"question": "Does the reader change?", "blocks": "the importer",
+          "options": ["yes", "no"], "recommended": "no"}
+
+
+def asked(seq, sprint_id, questions, **extra):
+    return Event(seq, at(seq), event_log.QUESTIONS_ASKED, "owner/p00",
+                 {"sprint_id": sprint_id, "goal": "one", "blocker": False,
+                  "questions": questions, **extra})
+
+
+def answer_row(seq, sprint_id, round_id, index, answer, chosen, question="q", recommended="files"):
+    return Event(seq, at(seq), event_log.QUESTION_ANSWERED, "owner/p00",
+                 {"sprint_id": sprint_id, "goal": "one", "round": round_id, "index": index,
+                  "question": question, "answer": answer, "chosen": chosen,
+                  "recommended": recommended, "differs": False})
+
+
+def approved_rows():
+    return [stated(1, "owner/p00", SID, "one"), sent(2, SID, 1, PARTS), approved(3, SID, 1)]
+
+
+def refusal(round_):
+    with unittest.TestCase().assertRaises(sprints.Refused) as caught:
+        sprints.checked_round(round_)
+    return str(caught.exception)
+
+
+class RoundCheckTest(unittest.TestCase):
+    def test_a_question_needs_two_to_four_options_and_a_recommendation(self):
+        def with_(**changes):
+            return {"questions": [{**QUESTION, **changes}]}
+
+        self.assertEqual(refusal(with_(options=["sqlite"])),
+                         "question 1 needs two to four options")
+        self.assertEqual(refusal(with_(options=["a", "b", "c", "d", "e"], recommended="a")),
+                         "question 1 needs two to four options")
+        missing = {key: value for key, value in QUESTION.items() if key != "recommended"}
+        self.assertEqual(refusal({"questions": [missing]}),
+                         "question 1 recommends none of its options")
+        self.assertEqual(refusal(with_(recommended="redis")),
+                         "question 1 recommends none of its options")
+        self.assertEqual(refusal({"questions": [QUESTION, {**QUESTION, "options": ["a"]}]}),
+                         "question 2 needs two to four options")
+        four = sprints.checked_round(with_(options=["a", "b", "c", "d"], recommended="d"))
+        self.assertEqual(four["questions"][0]["options"], ["a", "b", "c", "d"])
+
+    def test_a_checked_round_is_stripped_and_names_the_first_bad_member(self):
+        loose = {"question": " Which store keeps the checkpoints? ", "blocks": " the resume slice ",
+                 "options": [" sqlite ", "files "], "recommended": " files"}
+        self.assertEqual(
+            sprints.checked_round({"questions": [loose]}),
+            {"blocker": False, "questions": [QUESTION]})
+        self.assertIs(sprints.checked_round({"questions": [QUESTION], "blocker": True})["blocker"],
+                      True)
+        self.assertEqual(refusal({"questions": []}), "the round has no questions")
+        self.assertEqual(refusal({}), "the round has no questions")
+        self.assertEqual(refusal({"questions": [QUESTION] * 11}),
+                         "a round has at most 10 questions")
+        self.assertEqual(len(sprints.checked_round({"questions": [QUESTION] * 10})["questions"]),
+                         10)
+        self.assertEqual(refusal({"questions": [QUESTION], "blocker": "yes"}),
+                         "the round's blocker is not true or false")
+        shape = "question 1 is not an object of question, blocks, options and recommended"
+        self.assertEqual(refusal({"questions": [{**QUESTION, "why": "x"}]}), shape)
+        self.assertEqual(refusal({"questions": ["text"]}), shape)
+        self.assertEqual(refusal({"questions": [{**QUESTION, "options": ["a\nb", "c"]}]}),
+                         "question 1 has no valid options")
+        self.assertEqual(refusal({"questions": [{**QUESTION, "blocks": ""}]}),
+                         "question 1 has no valid blocks")
+        self.assertEqual(refusal({"questions": [{**QUESTION, "question": "q" * 1001}]}),
+                         "question 1 has no valid question")
+        self.assertEqual(refusal({"questions": [{**QUESTION, "question": " "}]}),
+                         "question 1 has no valid question")
+        self.assertEqual(
+            sprints.checked_round({"questions": [{**QUESTION, "question": "q" * 1000}]})
+            ["questions"][0]["question"], "q" * 1000)
+        self.assertEqual(refusal({"questions": [{**QUESTION, "options": ["a", " a"],
+                                                 "recommended": "a"}]}),
+                         "question 1 offers one option twice")
+
+
+ROUND = {"questions": [QUESTION]}
+
+
+class RoundParseTest(unittest.TestCase):
+    def test_ask_and_answer_bodies(self):
+        def ask(**changes):
+            return json.dumps({"sprint_id": SID, "secret": "s3cret", "round": ROUND,
+                               **changes}).encode()
+
+        self.assertEqual(sprints.parse_ask_request(ask()), (SID, "s3cret", ROUND))
+        withheld = json.dumps({"sprint_id": SID, "secret": "s3cret"}).encode()
+        for body in (withheld, ask(round=[]), ask(round={**ROUND, "why": 1}), ask(sprint_id="ABC"),
+                     ask(secret=5), ask(extra=1),
+                     b'{"sprint_id": "' + SID.encode() + b'", "secret": "a", "secret": "b", '
+                     b'"round": {}}'):
+            with self.subTest(body=body[:50]), self.assertRaises(ValueError):
+                sprints.parse_ask_request(body)
+
+        def answer(**changes):
+            value = {"project_id": "owner/p01", "sprint_id": SID, "round": 41, "question": 0,
+                     "choice": 1, **changes}
+            return json.dumps({k: v for k, v in value.items() if v is not ...}).encode()
+
+        self.assertEqual(sprints.parse_round_answer(answer()),
+                         ("owner/p01", SID, 41, 0, 1, None))
+        self.assertEqual(
+            sprints.parse_round_answer(answer(question=1, choice=..., text="use the reader")),
+            ("owner/p01", SID, 41, 1, None, "use the reader"))
+        for body in (answer(text="x"), answer(choice=...), answer(round=0), answer(round=True),
+                     answer(question=-1), answer(choice=True), answer(choice=-1),
+                     answer(choice=..., text=5), answer(extra=1), answer(sprint_id="ABC"),
+                     answer(project_id=""), b"[1]", b"\xff", b"[" * 100000,
+                     b'{"project_id": "a", "project_id": "b", "sprint_id": "%s", "round": 1, '
+                     b'"question": 0, "choice": 0}' % SID.encode(),
+                     b'{"project_id": "a", "sprint_id": "%s", "round": NaN, "question": 0, '
+                     b'"choice": 0}' % SID.encode()):
+            with self.subTest(body=body[:60]), self.assertRaises(ValueError):
+                sprints.parse_round_answer(body)
+
+
+def question_state(events):
+    return sprints.sprint_states([*approved_rows(), *events])[SID]
+
+
+class QuestionFoldTest(unittest.TestCase):
+    def test_rounds_and_answers_fold_into_questions_and_messages(self):
+        opened = question_state([asked(41, SID, [QUESTION, SECOND])])
+        self.assertEqual(
+            [(q.round_id, q.index, q.question, q.blocker, q.at) for q in
+             sprints.open_questions(opened)],
+            [(41, 0, "Which store keeps the checkpoints?", False, at(41)),
+             (41, 1, "Does the reader change?", False, at(41))])
+        self.assertTrue(sprints.round_open(opened))
+        self.assertEqual(opened.questions[0].options, ("sqlite", "files"))
+        self.assertEqual(opened.questions[0].recommended, "files")
+        rows = [asked(41, SID, [QUESTION, SECOND]),
+                answer_row(42, SID, 41, 0, "sqlite", "sqlite",
+                           question="Which store keeps the checkpoints?"),
+                answer_row(43, SID, 41, 1, "use the reader", None)]
+        state = question_state(rows)
+        self.assertEqual(sprints.open_questions(state), ())
+        self.assertFalse(sprints.round_open(state))
+        first, second = state.questions
+        self.assertEqual((first.answer, first.chosen, first.differs, first.answered_at),
+                         ("sqlite", "sqlite", True, at(42)))
+        self.assertEqual((second.answer, second.chosen, second.differs),
+                         ("use the reader", None, True))
+        again = question_state([*rows, answer_row(44, SID, 41, 0, "files", "files")])
+        self.assertEqual(again, state)
+        self.assertEqual([(m.kind, m.text) for m in state.messages[-2:]],
+                         [("answer", "sqlite"), ("answer", "use the reader")])
+        self.assertEqual(
+            sprints.inbox_entry(state.messages[-2]),
+            {"id": 42, "kind": "answer", "version": None, "text": "sqlite", "at": at(42),
+             "question": "Which store keeps the checkpoints?", "round": 41, "chosen": "sqlite"})
+        kept = question_state([asked(41, SID, [QUESTION]),
+                               answer_row(42, SID, 41, 0, "files", "files")])
+        self.assertIs(kept.questions[0].differs, False)
+
+    def test_a_round_before_approval_or_malformed_changes_nothing(self):
+        early = [stated(1, "owner/p00", SID, "one"), sent(2, SID, 1, PARTS),
+                 asked(3, SID, [QUESTION])]
+        self.assertEqual(sprints.sprint_states(early)[SID].questions, ())
+        base = [asked(41, SID, [QUESTION])]
+        before = question_state(base)
+        no_questions = asked(50, SID, [QUESTION])
+        del no_questions.payload["questions"]
+        for row in (asked(50, SID, [{**QUESTION, "options": ["sqlite"]}]), no_questions,
+                    answer_row(50, SID, 99, 0, "x", None), answer_row(50, SID, 41, 5, "x", None),
+                    answer_row(50, SID, 41, 0, "x", "redis"),
+                    answer_row(50, SID, True, 0, "x", None),
+                    answer_row(50, SID, 41, True, "x", None),
+                    answer_row(50, SID, 41, 0, 5, None),
+                    asked(50, "fedcba9876543210", [QUESTION])):
+            with self.subTest(row=row.payload):
+                self.assertEqual(question_state([*base, row]), before)
+
+    def test_question_folding_in_two_parts_equals_folding_at_once(self):
+        events = [*approved_rows(), asked(41, SID, [QUESTION, SECOND]),
+                  answer_row(42, SID, 41, 0, "sqlite", "sqlite"),
+                  answer_row(43, SID, 41, 1, "own words", None)]
+        whole = sprints.sprint_states(events)
+        for cut in range(len(events) + 1):
+            with self.subTest(cut=cut):
+                self.assertEqual(
+                    sprints.sprint_states(events[cut:], sprints.sprint_states(events[:cut])),
+                    whole)
+
+    def test_a_withdrawn_sprint_keeps_no_questions(self):
+        events = [*approved_rows(), asked(41, SID, [QUESTION]),
+                  withdrawn(42, "owner/p00", SID, "one"), asked(43, SID, [QUESTION])]
+        self.assertEqual(sprints.sprint_states(events), {})
+
+    def test_other_inbox_entries_keep_their_five_keys(self):
+        state = question_state([])
+        self.assertEqual(set(sprints.inbox_entry(state.messages[0])),
+                         {"id", "kind", "version", "text", "at"})
+
+
 if __name__ == "__main__":
     unittest.main()
