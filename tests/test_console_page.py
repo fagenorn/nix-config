@@ -277,7 +277,7 @@ class PageTest(unittest.TestCase):
     def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
         # A separate snapshot request can answer after a newer streamed frame
         # and render over it; the stream's first frame is already the snapshot.
-        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 9)
+        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 11)
         self.assertIsNotNone(
             re.search(r'fetch\("/api/looked",\s*\{\s*method:\s*"POST"', self.text)
         )
@@ -2562,6 +2562,15 @@ class PageMessageTest(unittest.TestCase):
         self.assertIsNone(gone["active"])
 
 
+STALL = {
+    "type": "inbox_item", "reason": "manager", "key": "manager/" + "a" * 16,
+    "project_id": "owner/p00", "sprint_id": "a" * 16, "goal": "make the importer resumable",
+    "headline": "managers keep failing on make the importer resumable",
+    "last_reason": "the manager was gone again", "answered": False,
+    "waiting_since": "2026-11-10T08:00:00+00:00",
+}
+
+
 class PageManagerTest(unittest.TestCase):
     def test_a_failed_manager_shows_its_reason_and_retry_posts(self) -> None:
         reason = "could not start a manager: the directory is not trusted"
@@ -2588,6 +2597,39 @@ class PageManagerTest(unittest.TestCase):
             [full(n) for n in nodes(line) if has_class(n, "fail")],
             ["Could not retry: this sprint has a manager"],
         )
+
+    def test_a_stall_card_shows_its_headline_reason_and_try_again_posts_the_retry(self) -> None:
+        (snap,) = render([
+            START, {"frame": frame([STALL])},
+            {"respond": {"status": 409, "text": "this sprint has a manager\n"}},
+            {"click": "try-again"}, {"snapshot": True},
+        ])
+        (card,) = [n for n in nodes(snap["inbox"]) if has_class(n, "stall")]
+        self.assertEqual(card["tag"], "article")
+        self.assertTrue(has_class(card, "card"))
+        self.assertIn("managers keep failing on make the importer resumable", full(card))
+        self.assertEqual([full(n) for n in nodes(card) if has_class(n, "reason")],
+                         ["the manager was gone again"])
+        (post,) = [p for p in snap["posts"] if p["url"] == "/api/retry-manager"]
+        self.assertEqual(post["method"], "POST")
+        self.assertEqual(post["headers"], GOAL_HEADERS)
+        self.assertEqual(json.loads(post["body"]),
+                         {"project_id": "owner/p00", "sprint_id": "a" * 16})
+        self.assertEqual([full(n) for n in nodes(card) if has_class(n, "fail")],
+                         ["Could not try again: this sprint has a manager"])
+        self.assertEqual([full(n) for n in nodes(card) if n["tag"] == "button"],
+                         ["Try again", "Withdraw"])
+
+    def test_a_stall_card_withdraw_posts_the_withdrawal(self) -> None:
+        (snap,) = render([
+            START, {"frame": frame([STALL])}, {"click": "stall-withdraw"}, {"snapshot": True},
+        ])
+        (post,) = [p for p in snap["posts"] if p["url"] == "/api/withdraw"]
+        self.assertEqual(post["headers"], GOAL_HEADERS)
+        self.assertEqual(json.loads(post["body"]),
+                         {"project_id": "owner/p00", "sprint_id": "a" * 16})
+        self.assertEqual(
+            [p["url"] for p in snap["posts"] if p["url"] == "/api/retry-manager"], [])
 
     def test_a_refused_retry_message_goes_once_the_manager_has_started(self) -> None:
         failed, started, missing_again, gone, back = render([

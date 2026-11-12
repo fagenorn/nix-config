@@ -16,12 +16,12 @@ from io import StringIO
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import manager, sprint
+from agent_tools.console import manager, sprint, sprints
 
 from . import console_test_support as support
 from .test_console_answer import view_of
 from .test_console_briefs import APPROVE, JSON, PARTS, REPLY
-from .test_console_reports import REPORT
+from .test_console_reports import CHECKED, REPORT
 from .test_console_writes import Case
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -391,6 +391,140 @@ class SprintCommandTest(Case):
         self.assertEqual((got.returncode, got.stdout), (2, ""))
         self.assertTrue(got.stderr.startswith("sprint: cannot read "), got.stderr)
         self.assertTrue(got.stderr.endswith("the report is not a JSON object\n"), got.stderr)
+
+    SECTION = "## After a restart or a takeover\n\n1. When the console tells you that it restarted this session, or your first prompt says you take over a sprint whose manager is gone, run `sprint recap`, then `sprint inbox`, and act on what `sprint inbox` prints first.\n2. `sprint recap` prints the goal, the latest brief with its decision and the owner's reply, the last report and how many of the owner's messages are unread. The console keeps this record; nothing was handed over to you.\n3. The latest brief's decision comes before the last report, because a newer brief does not remove an older report:\n   - No brief: draft one, as Drafting the brief says.\n   - Decision `changes`: revise the brief from the reply `sprint recap` printed and send the new version, even when `sprint inbox` printed nothing, because that change request was read before the restart.\n   - Decision `none`: the brief waits for the owner; end your turn.\n   - Decision `approved`: the last report may describe an earlier version of the brief, so check its next step against the approved brief's parts before following it. Continue only the work the approved brief still includes and drop what it removed; follow After approval when there is no report or nothing is left.\n"
+
+    def test_the_contract_says_what_follows_a_restart_or_a_takeover(self):
+        text = CONTRACT.read_text(encoding="utf-8")
+        _, found, rest = text.partition("## After a restart or a takeover")
+        self.assertTrue(found)
+        section = (found + rest).split("\n## ", 1)[0]
+        self.assertEqual(section.rstrip("\n") + "\n", self.SECTION)
+        self.assertLess(section.index("`sprint recap`"), section.index("`sprint inbox`"))
+        self.assertLess(section.index("Decision `changes`"), section.index("Decision `approved`"))
+
+
+class RecapTest(Case):
+    RECAP = "/api/recap"
+
+    def open(self):
+        support.write_registry(self.registry, support.entries(2))
+        return self.start()
+
+    def secret(self, sid):
+        return (self.store.parent / "sprint-secrets" / sid).read_text().removesuffix("\n")
+
+    def post(self, svc, body, headers=JSON):
+        return support.post_page(svc.address, self.RECAP,
+                                 headers, json.dumps(body).encode() if isinstance(body, dict) else body)
+
+    def asked(self, svc, sid, secret, **headers):
+        return self.post(svc, {"sprint_id": sid, "secret": secret}, {**JSON, **headers})
+
+    def goal(self, svc):
+        return svc.state_goal("owner/p01", "make the importer resumable")
+
+    def test_recap_answers_the_goal_brief_decision_last_report_and_unread_count(self):
+        svc = self.open()
+        sid = self.goal(svc)
+        secret = self.secret(sid)
+        svc.send_brief(sid, secret, PARTS)
+        svc.approve_brief("owner/p01", sid, 1)
+        at = svc.send_report(sid, secret, REPORT)
+        svc.send_message("owner/p01", sid, "hello")
+        self.assertEqual(svc.recap(sid, secret), {
+            "sprint_id": sid, "goal": "make the importer resumable",
+            "brief": {"version": 1, "decision": "approved", "reply": None, "parts": PARTS},
+            "report": {"at": at, "status": REPORT["status"], "phase": REPORT["phase"],
+                       "milestone": REPORT["milestone"], "tracker_url": REPORT["tracker_url"],
+                       "issues": CHECKED["issues"], "inbox": REPORT["inbox"],
+                       "next": REPORT["next"]},
+            "unread": 2})
+
+    def test_recap_of_a_sprint_without_brief_or_report_is_nulls_and_zero(self):
+        svc = self.open()
+        sid = self.goal(svc)
+        self.assertEqual(svc.recap(sid, self.secret(sid)), {
+            "sprint_id": sid, "goal": "make the importer resumable", "brief": None,
+            "report": None, "unread": 0})
+
+    def test_recap_of_a_changed_newer_brief_shows_the_reply_beside_the_old_report(self):
+        svc = self.open()
+        sid = self.goal(svc)
+        secret = self.secret(sid)
+        svc.send_brief(sid, secret, PARTS)
+        svc.approve_brief("owner/p01", sid, 1)
+        at = svc.send_report(sid, secret, REPORT)
+        svc.send_brief(sid, secret, PARTS)
+        svc.reply_brief("owner/p01", sid, 2, "split the importer")
+        svc.read_inbox(sid, secret)
+        got = svc.recap(sid, secret)
+        self.assertEqual(got["brief"], {"version": 2, "decision": "changes",
+                                        "reply": "split the importer", "parts": PARTS})
+        self.assertEqual(got["report"]["at"], at)
+        self.assertEqual(got["unread"], 0)
+
+    def test_recap_reads_nothing_as_read_and_appends_nothing(self):
+        svc = self.open()
+        sid = self.goal(svc)
+        secret = self.secret(sid)
+        svc.send_brief(sid, secret, PARTS)
+        svc.approve_brief("owner/p01", sid, 1)
+        svc.send_message("owner/p01", sid, "hello")
+        self.assert_unchanged(svc, lambda: svc.recap(sid, secret))
+        self.assertEqual([m["kind"] for m in svc.read_inbox(sid, secret)],
+                         ["approved", "text"])
+
+    def test_recap_is_refused_without_the_secret(self):
+        svc = self.open()
+        sid = self.goal(svc)
+        with self.assertRaises(sprints.SecretRefused):
+            svc.recap(sid, "wrong")
+        got = self.assert_unchanged(svc, lambda: self.asked(svc, sid, "wrong"))
+        self.assertEqual((got[0], got[2]), (403, b"secret refused\n"))
+        wrong = self.store.parent / "wrong-secret"
+        wrong.write_text("wrong")
+        got = self.assert_unchanged(svc, lambda: run_sprint(
+            "recap", "--sprint", sid, "--secret-file", wrong, "--port", svc.address[1]))
+        self.assertEqual((got.returncode, got.stdout, got.stderr),
+                         (1, "", "sprint: refused 403: secret refused\n"))
+
+    def test_recap_of_a_withdrawn_sprint_is_refused_409(self):
+        svc = self.open()
+        sid = self.goal(svc)
+        secret = self.secret(sid)
+        svc.withdraw_goal("owner/p01", sid)
+        got = self.assert_unchanged(svc, lambda: self.asked(svc, sid, secret))
+        self.assertEqual((got[0], got[2]), (409, b"this sprint is not open\n"))
+
+    def test_the_recap_route_refuses_an_origin_and_a_bad_body(self):
+        svc = self.open()
+        sid = self.goal(svc)
+        secret = self.secret(sid)
+        origin = {"Origin": f"http://127.0.0.1:{svc.address[1]}"}
+        got = self.assert_unchanged(svc, lambda: self.asked(svc, sid, secret, **origin))
+        self.assertEqual((got[0], got[2]), (403, b"origin refused\n"))
+        got = self.assert_unchanged(svc, lambda: self.post(svc, {"sprint_id": sid}))
+        self.assertEqual((got[0], got[2]), (400, b"bad recap\n"))
+
+    def test_sprint_recap_prints_the_consoles_answer(self):
+        svc = self.open()
+        sid = self.goal(svc)
+        secret = self.secret(sid)
+        svc.send_brief(sid, secret, PARTS)
+        got = run_sprint("recap", "--port", svc.address[1], env={
+            manager.ID_ENV: sid, manager.SECRET_ENV: secret})
+        self.assertEqual((got.returncode, got.stderr), (0, ""))
+        self.assertEqual(len(got.stdout.splitlines()), 1)
+        self.assertEqual(json.loads(got.stdout), svc.recap(sid, secret))
+
+    def test_sprint_recap_without_a_secret_exits_2_and_sends_nothing(self):
+        svc = self.open()
+        sid = self.goal(svc)
+        got = self.assert_unchanged(svc, lambda: run_sprint(
+            "recap", "--sprint", sid, "--port", svc.address[1]))
+        self.assertEqual((got.returncode, got.stdout, got.stderr), (2, "", (
+            "sprint: no secret: pass --secret-file or set CONSOLE_SPRINT_SECRET\n")))
 
 
 class ManagerContractTest(unittest.TestCase):

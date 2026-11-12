@@ -94,9 +94,9 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .abox .meta { margin-top: 6px; }
 .abox .meta.now { color: var(--text); }
 .abox .opts { list-style: none; padding-left: 0; display: flex; flex-direction: column; align-items: stretch; gap: 2px; margin-top: 14px; }
-.opt, .send, .undo, .approve, .reply-send, .goal-send, .goal-cancel, .goal-project, .give-goal, .withdraw, .retry, .tell-send, .abox button[class^="ans-"] { display: inline-flex; align-items: baseline; gap: 8px; font: inherit; color: inherit; text-align: left; background: none; border: 1px solid var(--hair); border-radius: 8px; padding: 2px 10px; cursor: pointer; transition: background-color .16s; }
-.opt:hover:enabled, .send:hover:enabled, .undo:hover:enabled, .approve:hover:enabled, .reply-send:hover:enabled, .goal-send:hover:enabled, .goal-cancel:hover:enabled, .goal-project:hover:enabled, .give-goal:hover:enabled, .withdraw:hover:enabled, .retry:hover:enabled, .tell-send:hover:enabled, .abox button[class^="ans-"]:hover:enabled { background: rgba(202, 211, 245, .05); }
-.opt:disabled, .send:disabled, .reply-send:disabled, .goal-send:disabled, .give-goal:disabled, .withdraw:disabled, .retry:disabled, .tell-send:disabled, .abox button[class^="ans-"]:disabled { cursor: default; }
+.opt, .send, .undo, .approve, .reply-send, .goal-send, .goal-cancel, .goal-project, .give-goal, .withdraw, .retry, .try-again, .stall-withdraw, .tell-send, .abox button[class^="ans-"] { display: inline-flex; align-items: baseline; gap: 8px; font: inherit; color: inherit; text-align: left; background: none; border: 1px solid var(--hair); border-radius: 8px; padding: 2px 10px; cursor: pointer; transition: background-color .16s; }
+.opt:hover:enabled, .send:hover:enabled, .undo:hover:enabled, .approve:hover:enabled, .reply-send:hover:enabled, .goal-send:hover:enabled, .goal-cancel:hover:enabled, .goal-project:hover:enabled, .give-goal:hover:enabled, .withdraw:hover:enabled, .retry:hover:enabled, .try-again:hover:enabled, .stall-withdraw:hover:enabled, .tell-send:hover:enabled, .abox button[class^="ans-"]:hover:enabled { background: rgba(202, 211, 245, .05); }
+.opt:disabled, .send:disabled, .reply-send:disabled, .goal-send:disabled, .give-goal:disabled, .withdraw:disabled, .retry:disabled, .try-again:disabled, .stall-withdraw:disabled, .tell-send:disabled, .abox button[class^="ans-"]:disabled { cursor: default; }
 .abox button[class^="ans-"]:disabled { color: var(--ov2); }
 .abox .detail { margin-top: 6px; padding: 6px 10px; max-height: 24rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: .84375rem; color: var(--sub0); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; }
 .card .detail, .rest .detail, .done .detail { flex-basis: 100%; margin: 6px 0 0; padding: 6px 10px; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: .84375rem; color: var(--sub0); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; }
@@ -636,6 +636,66 @@ async function retry(item, entry, sprint) {
   for (const row of document.querySelectorAll("li.sprint")) {
     if (row.dataset.sprintId === id) fillSprint(row, latest.entry, latest.sprint);
   }
+}
+const stallPosts = new Map();
+function isStall(item) {
+  return item.reason === "manager";
+}
+async function stallPost(item, kind, failure, send) {
+  const key = kind + "\n" + item.sprint_id;
+  const current = stallPosts.get(key);
+  if (current !== undefined && current.phase === "sending") return;
+  const state = { phase: "sending", reason: "", failure };
+  stallPosts.set(key, state);
+  redraw();
+  let reason = null;
+  try {
+    const response = await send();
+    if (response.status !== 204) {
+      reason = (await response.text()).trim() || "HTTP " + response.status;
+    }
+  } catch (error) {
+    console.error(error);
+    reason = "the console did not answer";
+  }
+  if (stallPosts.get(key) !== state) return;
+  if (reason === null) stallPosts.delete(key);
+  else {
+    state.phase = "failed";
+    state.reason = reason;
+  }
+  redraw();
+}
+function stallHeaders() {
+  return { "X-Console-Token": token, "Content-Type": "application/json" };
+}
+function stallBody(item) {
+  return JSON.stringify({ project_id: item.project_id, sprint_id: item.sprint_id });
+}
+function stallCard(item) {
+  const card = el("article", "card stall");
+  card.appendChild(el("p", "q", item.headline));
+  card.appendChild(el("span", "reason", item.last_reason));
+  const again = stallPosts.get("again\n" + item.sprint_id);
+  const away = stallPosts.get("withdraw\n" + item.sprint_id);
+  const retry = actionButton("try-again", "Try again",
+    () => stallPost(item, "again", "Could not try again: ", () => fetch("/api/retry-manager", {
+      method: "POST", headers: stallHeaders(), body: stallBody(item),
+    })));
+  if (again !== undefined && again.phase === "sending") retry.setAttribute("disabled", "");
+  card.appendChild(retry);
+  const withdrawn = actionButton("stall-withdraw", "Withdraw",
+    () => stallPost(item, "withdraw", "Could not withdraw: ", () => fetch("/api/withdraw", {
+      method: "POST", headers: stallHeaders(), body: stallBody(item),
+    })));
+  if (away !== undefined && away.phase === "sending") withdrawn.setAttribute("disabled", "");
+  card.appendChild(withdrawn);
+  for (const state of [again, away]) {
+    if (state !== undefined && state.phase === "failed") {
+      card.appendChild(el("span", "fail", state.failure + state.reason));
+    }
+  }
+  return card;
 }
 function sprintList(entry) {
   const list = el("ul", "sprints");
@@ -1510,7 +1570,12 @@ function renderInbox(view) {
   for (const fold of document.querySelectorAll("#inbox details[open]")) wasOpen.add(fold.dataset.key);
   const open = view.inbox.open;
   const briefs = open.filter(isBrief);
-  const tracked = open.filter((item) => !isBrief(item));
+  const stalls = open.filter(isStall);
+  const tracked = open.filter((item) => !isBrief(item) && !isStall(item));
+  for (const [key, state] of [...stallPosts]) {
+    const id = key.split("\n")[1];
+    if (state.phase !== "sending" && !stalls.some((item) => item.sprint_id === id)) stallPosts.delete(key);
+  }
   const present = new Set(open.map(stateId));
   // A frame that shows a sent item open again supersedes the page's own "sent"; a redraw of the same view does not.
   const reopened = new Set(fresh ? tracked.filter(answerable).map(itemId) : []);
@@ -1534,6 +1599,7 @@ function renderInbox(view) {
   const current = currentEntry(open);
   currentId = current === null ? null : itemId(current.item);
   placeBriefCards(section, briefs);
+  for (const item of stalls) section.appendChild(stallCard(item));
   if (briefs.length === 0 && tracked.length > 0) section.appendChild(leadItem(tracked[0]));
   const rows = briefs.length === 0 ? tracked.slice(1) : tracked;
   if (rows.length > 0) {

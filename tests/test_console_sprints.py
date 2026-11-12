@@ -409,6 +409,110 @@ class ManagerStatusTest(unittest.TestCase):
                 self.assertEqual(sprints.manager_status(state, listed, now, managers), expected)
 
 
+class RevivalFoldTest(unittest.TestCase):
+    NAME = "p00 sprint " + SID
+
+    def listed(self, seq, name=None):
+        return Event(seq, at(seq), "session.seen", "p00",
+                     {"session_id": "s-1", "cwd": "/r", "repo": "/r", "state": "idle",
+                      "name": name or self.NAME})
+
+    def started(self, seq, **payload):
+        return managed(seq, SID, MANAGER_STARTED, profile="work", session_name=self.NAME,
+                       **payload)
+
+    def woken(self, seq, **payload):
+        return managed(seq, SID, event_log.MANAGER_WOKEN,
+                       **{"session_id": "s-1", "ok": True, "goal": "one", **payload})
+
+    def stalled(self, seq, **payload):
+        return managed(seq, SID, event_log.MANAGER_STALLED, **{"reason": "r", "goal": "one",
+                                                                **payload})
+
+    def fold(self, *rows):
+        return sprints.sprint_states([stated(1, "p00", SID, "one"), *rows])[SID]
+
+    def test_a_wake_row_is_one_revival_and_a_later_manager_sighting_marks_it_back(self):
+        base = [self.started(2), self.listed(3)]
+        state = self.fold(*base, self.woken(4))
+        self.assertEqual(state.revivals, (sprints.Revival(at(4), "wake", True),))
+        state = self.fold(*base, self.woken(4), self.listed(5))
+        self.assertIs(state.revivals[-1].back, True)
+        self.assertEqual(len(state.revivals), 1)
+
+    def test_a_failed_wake_keeps_its_reason(self):
+        state = self.fold(self.woken(2, ok=False, reason="No conversation found"))
+        self.assertEqual(state.revivals,
+                         (sprints.Revival(at(2), "wake", False, "No conversation found"),))
+
+    def test_a_wake_row_that_says_back_is_back_without_a_later_sighting(self):
+        rows = [self.started(2), self.listed(3), self.woken(4, back=True)]
+        state = self.fold(*rows)
+        self.assertIs(state.revivals[-1].back, True)
+        self.assertEqual(sprints.sprint_states(rows, sprints.sprint_states([stated(
+            1, "p00", SID, "one")])), {SID: state})
+
+    def test_a_manager_sighting_records_its_seq(self):
+        state = self.fold(self.started(2), self.listed(3))
+        self.assertEqual(state.manager_seen_seq, 3)
+        other = self.listed(4, "p00 sprint fedcba9876543210")
+        self.assertEqual(sprints.sprint_states([other], {SID: state})[SID].manager_seen_seq, 3)
+
+    def test_a_takeover_wait_row_marks_the_manager_and_adds_no_revival(self):
+        state = self.fold(self.started(2), managed(3, SID, MANAGER_WAITING, until=at(5),
+                                                   takeover=True, goal="one"))
+        self.assertEqual(state.manager.state, "waiting")
+        self.assertIs(state.manager.takeover, True)
+        self.assertEqual(state.revivals, ())
+        state = self.fold(self.started(2), managed(3, SID, MANAGER_WAITING, until=at(5)))
+        self.assertIs(state.manager.takeover, False)
+
+    def test_a_takeover_start_and_failure_are_revivals_and_a_start_clears_a_stall(self):
+        state = self.fold(self.started(2), self.stalled(3, reason="x"),
+                          managed(4, SID, MANAGER_FAILED, reason="boom", takeover=True))
+        self.assertEqual(state.stalled, "boom")
+        self.assertEqual(state.stalled_at, at(3))
+        self.assertIs(state.manager.takeover, True)
+        self.assertEqual(state.revivals[-1], sprints.Revival(at(4), "takeover", False, "boom"))
+        state = self.fold(self.started(2), self.stalled(3, reason="x"),
+                          managed(4, SID, MANAGER_FAILED, reason="boom", takeover=True),
+                          self.started(5, takeover=True))
+        self.assertIsNone(state.stalled)
+        self.assertIsNone(state.stalled_at)
+        self.assertEqual(state.revivals[-1], sprints.Revival(at(5), "takeover", True))
+        self.assertIs(state.manager.takeover, True)
+
+    def test_a_seen_manager_session_clears_a_stall(self):
+        name = "p00 sprint " + SID
+        seen = Event(4, at(4), "session.seen", "p00",
+                     {"session_id": "s-1", "name": name, "cwd": "/x", "repo": None,
+                      "state": "idle"})
+        state = self.fold(self.started(2), self.stalled(3, reason="r"), seen)
+        self.assertEqual((state.stalled, state.stalled_at, state.manager_session),
+                         (None, None, "s-1"))
+        state = self.fold(self.started(2), seen, self.stalled(5, reason="again"))
+        self.assertEqual((state.stalled, state.stalled_at), ("again", at(5)))
+
+    def test_a_stall_row_sets_the_reason_and_its_time(self):
+        state = self.fold(self.started(2), self.stalled(3, reason="r"))
+        self.assertEqual((state.stalled, state.stalled_at), ("r", at(3)))
+
+    def test_malformed_revival_rows_change_nothing(self):
+        base = [self.started(2), self.listed(3)]
+        other = "fedcba9876543210"
+        bad = {"woken without a session": managed(4, SID, event_log.MANAGER_WOKEN, ok=True),
+               "woken with a text ok": self.woken(4, ok="yes"),
+               "woken with a text back": self.woken(4, back="yes"),
+               "stalled with a number": self.stalled(4, reason=3),
+               "woken for another sprint": managed(4, other, event_log.MANAGER_WOKEN,
+                                                   session_id="s-1", ok=True),
+               "stalled for another sprint": managed(4, other, event_log.MANAGER_STALLED,
+                                                     reason="r")}
+        for name, row in bad.items():
+            with self.subTest(name):
+                self.assertEqual(self.fold(*base, row), self.fold(*base))
+
+
 class DocumentedTest(unittest.TestCase):
     def test_the_manager_rules_are_written_where_the_view_points(self):
         self.assertTrue((sprints.manager_status.__doc__ or "").strip())
@@ -805,6 +909,35 @@ class MessageFoldTest(unittest.TestCase):
                       {"session_id": "s-2", "name": name, "cwd": "/x", "repo": None,
                        "state": "idle"})
         self.assertEqual(sprints.sprint_states([*rows, later])[SID].manager_session, "s-2")
+
+    def test_a_session_seen_while_the_launcher_returned_is_kept_by_its_started_row(self):
+        name = manager.session_name("owner/p01", SID)
+
+        def seen(seq, session_id):
+            return Event(seq, at(seq), "session.seen", "owner/p01",
+                         {"session_id": session_id, "name": name, "cwd": "/x", "repo": None,
+                          "state": "idle"})
+
+        def started(seq, seen_after):
+            return managed(seq, SID, MANAGER_STARTED, profile="work", session_name=name,
+                           seen_after=seen_after)
+
+        goal = stated(1, "owner/p01", SID, "one")
+        first = sprints.sprint_states([goal, seen(2, "s-1"), started(3, 1)])[SID]
+        self.assertEqual((first.manager_session, first.manager_seen_seq), ("s-1", 2))
+        replaced = sprints.sprint_states([goal, seen(2, "s-1"), started(3, 0), seen(4, "s-2"),
+                                          started(5, 2)])[SID]
+        self.assertEqual(replaced.manager_session, "s-2")
+        old = sprints.sprint_states([goal, seen(2, "s-1"), started(3, 2)])[SID]
+        self.assertIsNone(old.manager_session)
+        for seen_after in (None, "2", True):
+            with self.subTest(seen_after=seen_after):
+                row = managed(3, SID, MANAGER_STARTED, profile="work", session_name=name)
+                if seen_after is not None:
+                    row = managed(3, SID, MANAGER_STARTED, profile="work", session_name=name,
+                                  seen_after=seen_after)
+                self.assertIsNone(
+                    sprints.sprint_states([goal, seen(2, "s-1"), row])[SID].manager_session)
 
     def test_malformed_message_rows_change_nothing(self):
         base = message_rows()

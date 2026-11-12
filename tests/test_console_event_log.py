@@ -323,6 +323,9 @@ class RetentionTest(unittest.TestCase):
             "sprint.reported",
             "sprint.messaged", "sprint.read", "sprint.answered"}))
         self.assertNotIn("sprint.nudged", event_log.KEPT_KINDS)
+        self.assertEqual(event_log.MANAGER_WOKEN, "manager.woken")
+        self.assertNotIn("manager.woken", event_log.KEPT_KINDS)
+        self.assertNotIn("manager.stalled", event_log.KEPT_KINDS)
 
     def test_a_raw_delete_of_a_goal_row_is_refused_after_a_pass(self):
         log = self.goal_rows()
