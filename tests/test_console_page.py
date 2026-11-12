@@ -2825,7 +2825,13 @@ class PageAnsweredRowTest(unittest.TestCase):
         for selector, decls in rules:
             if selector == ".done-item summary":
                 summary.update(decls)
-        self.assertEqual(summary.get("flex-wrap"), "nowrap")
+        # The row's tail (the "more" words and the "when" phrase) must wrap under the
+        # clipped question instead of squeezing it to nothing or spilling past the edge.
+        self.assertEqual(summary.get("flex-wrap"), "wrap")
+        for selector, decls in rules:
+            if selector == ".done-item summary > span":
+                self.assertNotIn(decls.get("flex"), ("none", "0 0 auto"))
+                self.assertNotEqual(decls.get("white-space"), "nowrap")
         done = item("Z", answered=True, headline="Which database?",
                     answered_at="2026-11-11T10:00:00+00:00",
                     questions=[{"question": "Which database?", "options": ["sqlite", "postgres"],
