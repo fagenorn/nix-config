@@ -14,6 +14,7 @@ from pathlib import Path
 
 from agent_tools.console import digest as console_digest
 from agent_tools.console.event_log import Event
+from agent_tools.console.sprints import MAX_REPORT_ISSUES
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PAGE = REPO_ROOT / "python/agent_tools/console/page.html"
@@ -2445,9 +2446,9 @@ class PageSprintReportTest(unittest.TestCase):
             {"frame": with_sprints([quiet])}, {"snapshot": True},
         ])
         (line,) = sprint_lines(snap)
-        for expected in ("on track", "3 of 7 landed, 2 in delivery, 2 queued",
-                         "two slices are building", "4 min ago"):
+        for expected in ("on track", "3 of 7", "two slices are building", "4 min ago"):
             self.assertIn(expected, top_text(line))
+        self.assertIn("3 of 7 landed, 2 in delivery, 2 queued", full(detail(line)))
         (line,) = sprint_lines(stuck)
         self.assertIn("quiet for 16 min — may be stuck", top_text(line))
         self.assertNotIn("stalled", top_text(line).lower())
@@ -2476,6 +2477,161 @@ class PageSprintReportTest(unittest.TestCase):
         self.assertEqual(detail_nodes(line), [])
         for cls in ("sprint-detail", "progress", "status"):
             self.assertEqual([n for n in nodes(line) if has_class(n, cls)], [])
+
+
+class PageSprintGlanceTest(unittest.TestCase):
+    def test_a_reported_sprint_shows_one_pip_per_issue_by_stage_group(self) -> None:
+        staged = {**REPORTED,
+                  "progress": {"landed": 1, "in_delivery": 2, "queued": 1, "held": 1, "total": 5},
+                  "progress_text": "1 of 5 landed, 2 in delivery, 1 queued, 1 held",
+                  "issues": [
+                      {"issue": 11, "stage": "landed", "stage_text": "landed"},
+                      {"issue": 12, "stage": "building", "stage_text": "building task 2 of 4"},
+                      {"issue": 13, "stage": "held", "stage_text": "held"},
+                      {"issue": 14, "stage": "queued", "stage_text": "queued"},
+                      {"issue": 15, "stage": "closed out", "stage_text": "closed out"}]}
+        empty = {**REPORTED,
+                 "progress": {"landed": 0, "in_delivery": 0, "queued": 0, "held": 0, "total": 0},
+                 "progress_text": "0 of 0 landed", "issues": []}
+        first, second, third = render([
+            START, {"frame": with_sprints([staged])}, {"snapshot": True},
+            {"frame": with_sprints([SPRINT])}, {"snapshot": True},
+            {"frame": with_sprints([empty])}, {"snapshot": True},
+        ])
+        (line,) = sprint_lines(first)
+        (pips,) = [n for n in top(line) if has_class(n, "pips")]
+        self.assertEqual([c["cls"] for c in pips["children"]],
+                         ["pip pip-landed", "pip pip-delivery", "pip pip-held", "pip pip-queued",
+                          "pip pip-delivery"])
+        self.assertEqual(pips["title"], staged["progress_text"])
+        self.assertEqual([full(n) for n in top(line) if has_class(n, "pip-count")], ["1 of 5"])
+        (mark,) = [n for n in top(line) if has_class(n, "sic")]
+        self.assertEqual([c["tag"] for c in mark["children"]], ["svg"])
+        self.assertIn("1 of 5 landed, 2 in delivery, 1 queued, 1 held", full(detail(line)))
+        for snap in (second, third):
+            (line,) = sprint_lines(snap)
+            for cls in ("pips", "pip", "pip-count"):
+                self.assertEqual([n for n in nodes(line) if has_class(n, cls)], [])
+            self.assertEqual(len([n for n in nodes(line) if has_class(n, "sic")]), 1)
+
+    def test_pip_marks_differ_beyond_colour(self) -> None:
+        style = re.findall(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"))[0]
+        rules = style_rules(style)
+        normalised = []
+        for group in ("landed", "delivery", "held", "queued"):
+            found = [d for selector, d in rules if selector == ".pip.pip-" + group]
+            self.assertEqual(len(found), 1, group)
+            normalised.append({k: re.sub(r"var\(--[\w-]+\)|#[0-9a-fA-F]{3,8}", "C", v)
+                               for k, v in found[0].items()})
+        for i, left in enumerate(normalised):
+            for right in normalised[i + 1:]:
+                self.assertNotEqual(left, right)
+        for selector, decls in rules:
+            if ".pip" in selector:
+                for value in decls.values():
+                    self.assertNotIn("var(--peach)", value)
+
+    def test_only_a_sprint_waiting_on_the_owner_reads_as_needs_you(self) -> None:
+        cases = [
+            ("drafting", "drafting the brief", "none", "sic-lines", "st-dim"),
+            ("starting", "starting", "started", "sic-play", "st-go"),
+            ("on_track", "on track", "started", "sic-play", "st-go"),
+            ("waiting", "waiting on you (2)", "started", "sic-pause", "needs"),
+            ("quiet", "quiet for 16 min — may be stuck", "started", "sic-dashed", "st-wait"),
+            ("closing", "closing", "started", "sic-closing", "st-go"),
+            ("done", "done", "started", "sic-tick", "st-dim"),
+            ("drafting", "drafting the brief", "waiting", "sic-clock", "st-wait"),
+        ]
+        sprints = [{**REPORTED, "state": s, "state_text": t, "manager_state": m,
+                    "manager_text": None if m != "waiting" else "waiting on quota until",
+                    "manager_until": None if m != "waiting" else "2026-11-13T00:00:00+00:00"}
+                   for s, t, m, _, _ in cases]
+        steps = [START]
+        for sprint in sprints:
+            steps += [{"frame": with_sprints([sprint])}, {"snapshot": True}]
+        snaps = render(steps)
+        for (s, t, m, icon_class, tone), snap in zip(cases, snaps):
+            with self.subTest(state=s, manager=m):
+                (line,) = sprint_lines(snap)
+                (words,) = [n for n in top(line) if has_class(n, "sprint-state")]
+                self.assertEqual(full(words), t)
+                self.assertIs(has_class(words, "needs"), s == "waiting")
+                self.assertTrue(has_class(words, tone))
+                (mark,) = [n for n in top(line) if has_class(n, "sic")]
+                self.assertTrue(has_class(mark, icon_class))
+                self.assertTrue(has_class(mark, tone))
+                self.assertIs(has_class(mark, "needs"), s == "waiting")
+        style = re.findall(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"))[0]
+        rules = style_rules(style)
+        for marker, colour in ((".sprint-state.needs", "var(--peach)"), (".st-go", "var(--green)"),
+                               (".st-wait", "var(--yellow)"), (".st-dim", "var(--ov2)")):
+            self.assertTrue(any(marker in selector and decls.get("color") == colour
+                                for selector, decls in rules), marker)
+
+    def test_a_manager_session_reads_as_words_until_the_detail_opens(self) -> None:
+        name = "owner/p00 sprint " + "a" * 16
+        managed = {**SPRINT, "sessions": [{"session_id": "s1", "name": name, "state": "working",
+                                            "state_text": "working", "cwd": "/srv/p00",
+                                            "deliveries": []}]}
+        idle = {**managed, "sessions": [{**managed["sessions"][0], "state": "idle",
+                                         "state_text": "idle"}]}
+        closed, opened, later = render([
+            START, {"frame": with_sprints([managed])}, {"snapshot": True},
+            {"open": "sprint:" + "a" * 16}, {"snapshot": True},
+            {"frame": with_sprints([idle])}, {"snapshot": True},
+        ])
+        (line,) = sprint_lines(closed)
+        self.assertNotIn(name, visible_text(line))
+        self.assertNotIn("/srv", visible_text(line))
+        words = [n for n in top(line) if has_class(n, "manager-now")]
+        self.assertEqual([full(n) for n in words], ["manager working"])
+        self.assertTrue(has_class(words[0], "s-working"))
+        self.assertFalse(detail(line)["open"])
+        (line,) = sprint_lines(opened)
+        self.assertIn(name, visible_text(line))
+        (row,) = [n for n in nodes(detail(line)) if has_class(n, "sprint-session")]
+        self.assertIn(name, full(row))
+        (line,) = sprint_lines(later)
+        self.assertTrue(detail(line)["open"])
+        self.assertEqual([full(n) for n in top(line) if has_class(n, "manager-now")],
+                         ["manager idle"])
+
+    def test_a_full_report_keeps_every_pip_and_wraps_them(self) -> None:
+        full_report = {
+            **REPORTED,
+            "progress": {"landed": 0, "in_delivery": 0, "queued": MAX_REPORT_ISSUES, "held": 0,
+                         "total": MAX_REPORT_ISSUES},
+            "progress_text": f"0 of {MAX_REPORT_ISSUES} landed, {MAX_REPORT_ISSUES} queued",
+            "issues": [{"issue": n, "stage": "queued", "stage_text": "queued"}
+                       for n in range(1, MAX_REPORT_ISSUES + 1)]}
+        style = re.findall(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"))[0]
+        rules = style_rules(style)
+        (snap,) = render([START, {"frame": with_sprints([full_report])}, {"snapshot": True}])
+        (line,) = sprint_lines(snap)
+        (pips,) = [n for n in top(line) if has_class(n, "pips")]
+        self.assertEqual(len([c for c in pips["children"] if has_class(c, "pip")]),
+                         MAX_REPORT_ISSUES)
+        self.assertEqual([full(n) for n in top(line) if has_class(n, "pip-count")],
+                         [f"0 of {MAX_REPORT_ISSUES}"])
+        self.assertTrue(any(s == ".pips" and d.get("flex-wrap") == "wrap" for s, d in rules))
+        for selector, decls in rules:
+            if selector in (".sp-prog", ".pips"):
+                self.assertNotEqual(decls.get("white-space"), "nowrap", selector)
+        grids = [d["grid-template-columns"] for s, d in rules
+                 if s == ".sp-head" and "grid-template-columns" in d]
+        self.assertGreaterEqual(len(grids), 1)
+        for value in grids:
+            found = re.match(r"^16px minmax\(0, 1fr\) fit-content\((\d+)%\)$", value)
+            self.assertIsNotNone(found, value)
+            self.assertLessEqual(int(found.group(1)), 50)
+
+    def test_an_unknown_sprint_state_fails_loud(self) -> None:
+        for state, manager in (("bogus", "started"), ("constructor", "started"),
+                               ("bogus", "waiting")):
+            sprint = {**REPORTED, "state": state, "state_text": state, "manager_state": manager}
+            with self.subTest(state=state, manager=manager):
+                with self.assertRaisesRegex(AssertionError, "unknown sprint state"):
+                    render([START, {"frame": with_sprints([sprint])}])
 
 
 class PageInFlightTest(unittest.TestCase):
@@ -2572,6 +2728,9 @@ def glance_sample() -> dict:
               "cwd": "/srv/p00/.worktrees/fix"}
     entry = project(0, [worker])
     entry["outside_sprints"]["summary"] = "1 working"
+    entry["sprints"] = [{**REPORTED, "sessions": [
+        {"session_id": "dddddddd-4444", "name": "manager-session", "state": "working",
+         "state_text": "working", "cwd": "/srv/p00", "deliveries": []}]}]
     quiet = {"type": "quiet_group", "label": "4 quiet projects", "count": 4,
              "projects": [project(n, [], quiet=True) for n in range(2, 6)]}
     stray = {**unmanaged_entry([session("stray-session", "idle", "idle")]), "name": "elsewhere"}
@@ -2599,7 +2758,7 @@ class PageGlanceTest(unittest.TestCase):
         self.assertEqual(len(sample["digest"]["recent"]) + len(sample["digest"]["earlier"]), 6)
         closed, opened = render([
             START, {"frame": sample}, {"snapshot": True},
-            {"open": "line:owner/p00"}, {"snapshot": True},
+            {"open": "line:owner/p00"}, {"open": "sprint:" + "a" * 16}, {"snapshot": True},
         ])
         sections = ("statement", "inbox", "projects", "unmanaged", "digest", "capacity",
                     "promoted", "goal")
@@ -2609,7 +2768,7 @@ class PageGlanceTest(unittest.TestCase):
                 self.assertNotIn("/srv", shown)
                 self.assertIsNone(re.search(r"(^|\s)/[\w.-]+/", shown))
                 for leaked in ("fixer-session", "stray-session", "aaaaaaaa", "cccccccc", BOILER,
-                               "Delivery waits for the owner"):
+                               "Delivery waits for the owner", "manager-session", "dddddddd"):
                     self.assertNotIn(leaked, shown)
                 self.assertIsNone(re.search(r"#\d", shown))
                 self.assertIsNone(re.search(r"\d{4}-\d{2}-\d{2}", shown))
@@ -2617,8 +2776,9 @@ class PageGlanceTest(unittest.TestCase):
         self.assertIn("Not yet managed", visible_text(closed["unmanaged"]))
         self.assertIn("A session in elsewhere ended.", visible_text(closed["digest"]))
         self.assertIn("Review and approve", visible_text(closed["inbox"]))
+        self.assertIn("manager working", visible_text(closed["projects"]))
         shown = visible_text(opened["projects"])
-        for wanted in ("/srv/p00", "fixer-session", "#856"):
+        for wanted in ("/srv/p00", "fixer-session", "#856", "manager-session"):
             self.assertIn(wanted, shown)
 
     def test_a_project_line_is_its_name_and_its_run_sentences(self) -> None:
@@ -2637,6 +2797,99 @@ class PageGlanceTest(unittest.TestCase):
         )
         self.assertEqual(len([n for n in nodes(summary) if has_class(n, "run-sum")]), 1)
 
+
+class PageSideColumnTest(unittest.TestCase):
+    def test_the_work_heading_counts_sprints_and_their_projects(self) -> None:
+        none = view([project(0, []), project(1, [], quiet=True, ago=timedelta(days=3))])
+        one = with_sprints([SPRINT])
+        several = view([
+            {**project(0, []), "sprints": [SPRINT, {**REPORTED, "sprint_id": "b" * 16}]},
+            {**project(1, []), "sprints": [{**SPRINT, "sprint_id": "c" * 16}]},
+            project(2, [], quiet=True, ago=timedelta(days=3)),
+        ])
+        snaps = render([
+            START, {"frame": none}, {"snapshot": True}, {"frame": one}, {"snapshot": True},
+            {"frame": several}, {"snapshot": True},
+        ])
+        counts = []
+        for snap in snaps:
+            (h2,) = [n for n in nodes(snap["projects"]) if n["tag"] == "h2"]
+            self.assertEqual(h2["text"], "Work")
+            counts.append([full(c) for c in h2["children"]])
+        self.assertEqual(counts, [[], ["1 sprint across 1 project"], ["3 sprints across 2 projects"]])
+
+    def test_give_it_a_goal_opens_the_goal_field_with_that_project_chosen(self) -> None:
+        frame = {
+            **view([project(1, [], quiet=True, ago=timedelta(days=3)),
+                    project(2, [], quiet=True, ago=timedelta(days=5))]),
+            "recent_projects": ["owner/p02", "owner/p01"],
+        }
+        before, opened, sent = render([
+            START, {"frame": frame}, {"snapshot": True}, {"click": "give-goal"}, {"snapshot": True},
+            {"input": {"cls": "goal-text", "value": GOAL_TEXT}}, {"click": "goal-send"},
+            {"snapshot": True},
+        ])
+        self.assertFalse(box_open(before))
+        self.assertEqual(
+            [(n["tag"], full(n)) for n in nodes(before["projects"]) if has_class(n, "give-goal")],
+            [("button", "Give it a goal")] * 2,
+        )
+        for n in nodes(before["projects"]):
+            if n["tag"] == "summary":
+                self.assertEqual([m for m in nodes(n) if has_class(m, "give-goal")], [])
+        self.assertTrue(box_open(opened))
+        self.assertEqual(goal_picked(opened), ["owner/p01"])
+        self.assertEqual(opened["active"], "goal-text")
+        (post,) = goals(sent)
+        self.assertEqual(json.loads(post["body"]), {"project_id": "owner/p01", "goal": GOAL_TEXT})
+        self.assertEqual(post["headers"], GOAL_HEADERS)
+
+    def test_give_it_a_goal_keeps_the_typed_goal_and_clears_the_filter(self) -> None:
+        frame = {
+            **view([project(1, [], quiet=True, ago=timedelta(days=3)),
+                    project(2, [], quiet=True, ago=timedelta(days=5))]),
+            "recent_projects": ["owner/p02", "owner/p01"],
+        }
+        (snap,) = render([
+            START, {"frame": frame}, {"key": "g"},
+            {"input": {"cls": "goal-filter", "value": "p02"}},
+            {"input": {"cls": "goal-text", "value": "draft"}},
+            {"click": "give-goal"}, {"snapshot": True},
+        ])
+        self.assertEqual(goal_picked(snap), ["owner/p01"])
+        (f,) = goal_named(snap, "goal-filter")
+        self.assertEqual(f["value"], "")
+        (t,) = goal_named(snap, "goal-text")
+        self.assertEqual(t["value"], "draft")
+        self.assertEqual(snap["active"], "goal-text")
+
+    def test_every_quiet_project_offers_a_goal_even_when_folded(self) -> None:
+        group = {"type": "quiet_group", "label": "4 quiet projects", "count": 4,
+                 "projects": [project(n, [], quiet=True) for n in range(2, 6)]}
+        frame = view([{**project(0, []), "sprints": [SPRINT]}, group], count=5)
+        (snap,) = render([START, {"frame": frame}, {"snapshot": True}])
+        buttons = [n for n in nodes(snap["projects"]) if has_class(n, "give-goal")]
+        self.assertEqual(len(buttons), 4)
+        (folded,) = [n for n in nodes(snap["projects"]) if n["key"] == "quiet"]
+        self.assertEqual([n for n in nodes(folded) if has_class(n, "give-goal")], buttons)
+        (busy,) = [n for n in nodes(snap["projects"])
+                   if n["tag"] == "li" and any(m["key"] == "line:owner/p00" for m in nodes(n))]
+        self.assertEqual([n for n in nodes(busy) if has_class(n, "give-goal")], [])
+
+    def test_a_project_is_a_block_headed_by_its_name(self) -> None:
+        (snap,) = render([START, {"frame": view([project(0, []), project(1, [])])},
+                          {"snapshot": True}])
+        (fold,) = [n for n in nodes(snap["projects"]) if n["key"] == "line:owner/p00"]
+        (summary,) = [c for c in fold["children"] if c["tag"] == "summary"]
+        name = summary["children"][0]
+        self.assertEqual((name["tag"], name["cls"], name["text"]), ("h3", "pname", "owner/p00"))
+        style = re.findall(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"))[0]
+        rules = style_rules(style)
+        self.assertTrue([d for s, d in rules
+                         if s == "#list > li.line + li.line"
+                         and "var(--hair)" in d.get("border-top", "")])
+        self.assertTrue([d for s, d in rules
+                         if s == ".pname" and d.get("font-weight") == "600"])
 
 
 BRIEF = {

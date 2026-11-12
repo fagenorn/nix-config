@@ -31,6 +31,7 @@ ul { list-style: none; }
 :focus-visible { outline: 2px solid var(--lav); outline-offset: 2px; border-radius: 6px; }
 kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; padding: 0 5px; font: 600 .71875rem/1 var(--ui); color: var(--sub0); border: 1px solid var(--s2); border-radius: 5px; }
 .ic { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; align-self: center; }
+.ic .f { fill: currentColor; stroke: none; }
 
 .top { position: sticky; top: 0; z-index: 10; background: var(--base); border-bottom: 1px solid var(--hair); }
 .top-in { max-width: 1360px; margin: 0 auto; padding: 8px 48px; display: flex; align-items: center; gap: 28px; min-height: 56px; }
@@ -88,9 +89,9 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .abox .meta { margin-top: 6px; }
 .abox .meta.now { color: var(--text); }
 .abox .opts { list-style: none; padding-left: 0; display: flex; flex-direction: column; align-items: stretch; gap: 2px; margin-top: 14px; }
-.opt, .send, .undo, .approve, .reply-send, .goal-open, .goal-send, .goal-cancel, .goal-project, .withdraw, .retry, .tell-send, .abox button[class^="ans-"] { display: inline-flex; align-items: baseline; gap: 8px; font: inherit; color: inherit; text-align: left; background: none; border: 1px solid var(--hair); border-radius: 8px; padding: 2px 10px; cursor: pointer; transition: background-color .16s; }
-.opt:hover:enabled, .send:hover:enabled, .undo:hover:enabled, .approve:hover:enabled, .reply-send:hover:enabled, .goal-open:hover:enabled, .goal-send:hover:enabled, .goal-cancel:hover:enabled, .goal-project:hover:enabled, .withdraw:hover:enabled, .retry:hover:enabled, .tell-send:hover:enabled, .abox button[class^="ans-"]:hover:enabled { background: rgba(202, 211, 245, .05); }
-.opt:disabled, .send:disabled, .reply-send:disabled, .goal-send:disabled, .withdraw:disabled, .retry:disabled, .tell-send:disabled, .abox button[class^="ans-"]:disabled { cursor: default; }
+.opt, .send, .undo, .approve, .reply-send, .goal-open, .goal-send, .goal-cancel, .goal-project, .give-goal, .withdraw, .retry, .tell-send, .abox button[class^="ans-"] { display: inline-flex; align-items: baseline; gap: 8px; font: inherit; color: inherit; text-align: left; background: none; border: 1px solid var(--hair); border-radius: 8px; padding: 2px 10px; cursor: pointer; transition: background-color .16s; }
+.opt:hover:enabled, .send:hover:enabled, .undo:hover:enabled, .approve:hover:enabled, .reply-send:hover:enabled, .goal-open:hover:enabled, .goal-send:hover:enabled, .goal-cancel:hover:enabled, .goal-project:hover:enabled, .give-goal:hover:enabled, .withdraw:hover:enabled, .retry:hover:enabled, .tell-send:hover:enabled, .abox button[class^="ans-"]:hover:enabled { background: rgba(202, 211, 245, .05); }
+.opt:disabled, .send:disabled, .reply-send:disabled, .goal-send:disabled, .give-goal:disabled, .withdraw:disabled, .retry:disabled, .tell-send:disabled, .abox button[class^="ans-"]:disabled { cursor: default; }
 .abox button[class^="ans-"]:disabled { color: var(--ov2); }
 .abox .detail { margin-top: 6px; padding: 6px 10px; max-height: 24rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: .84375rem; color: var(--sub0); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; }
 .card .detail, .rest .detail, .done .detail { flex-basis: 100%; margin: 6px 0 0; padding: 6px 10px; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: .84375rem; color: var(--sub0); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; }
@@ -116,9 +117,24 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .goal-act { display: flex; gap: 8px; }
 .sprints { flex: 1 0 100%; padding: 0 0 0 16px; }
 .sprint { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; font-size: .8125rem; color: var(--sub0); }
-.sprint .goal-line { color: var(--text); overflow-wrap: anywhere; }
+.sprint .goal-line { color: var(--text); font-weight: 500; overflow-wrap: anywhere; }
 .sprint .age, .sprint .manager, .sprint .until, .sprint .status-age { color: var(--ov2); }
-.sprint .progress::before { content: "\2014  "; }
+.sp-head { flex: 1 0 100%; display: grid; grid-template-columns: 16px minmax(0, 1fr) fit-content(40%); column-gap: 12px; row-gap: 2px; align-items: start; }
+.sp-status { grid-column: 2 / -1; display: flex; flex-wrap: wrap; gap: 0 8px; }
+.sp-prog { display: flex; align-items: flex-start; justify-content: flex-end; gap: 8px; min-width: 0; font-size: .8125rem; color: var(--sub0); }
+.pips { display: flex; flex-wrap: wrap; gap: 4px; min-width: 0; padding-top: 3px; }
+.pip-count { flex: none; white-space: nowrap; }
+.pip { display: block; width: 9px; height: 9px; border-radius: 2px; flex: none; }
+.pip.pip-landed { background: var(--sub0); }
+.pip.pip-delivery { border: 1.5px solid var(--green); background: var(--green); box-shadow: inset 0 0 0 1.5px var(--base); }
+.pip.pip-queued { border: 1.5px solid var(--s2); }
+.pip.pip-held { background: linear-gradient(90deg, var(--yellow) 0 3.5px, transparent 3.5px 5.5px, var(--yellow) 5.5px 9px); border-radius: 1.5px; }
+.sprint-state { font-weight: 600; }
+.st-go { color: var(--green); }
+.st-wait { color: var(--yellow); }
+.st-dim { color: var(--ov2); }
+.sprint-state.needs, .sic.needs { color: var(--peach); }
+.sic { display: flex; align-self: start; padding-top: 2px; }
 .sprint-detail { flex: 1 0 100%; font-size: .8125rem; }
 .sprint-detail summary { cursor: pointer; color: var(--ov2); }
 .sprint-detail ul { margin-top: 2px; padding: 0 0 0 16px; }
@@ -164,9 +180,15 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 #list { margin-top: 12px; }
 .line { padding: 5px 0; font-size: .875rem; color: var(--ov2); }
 .line b { font-weight: 600; color: var(--sub0); }
+.pname { margin: 0; font-size: .9375rem; line-height: 1.4; font-weight: 600; color: var(--text); }
+#list > li.line + li.line { margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--hair); }
 .line summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; cursor: pointer; list-style: none; padding: 4px 12px; margin: 0 -12px; border-radius: 10px; transition: background-color .16s; }
 .line summary::-webkit-details-marker { display: none; }
 .line summary:hover { background: rgba(202, 211, 245, .05); }
+.line summary > .sess-sum, .line summary > .run-sum { flex-basis: 100%; }
+.line.quiet { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; }
+.line.quiet > details { flex: 1 1 auto; min-width: 0; }
+.give-goal { margin-left: auto; font-size: .8125rem; color: var(--sub1); }
 .run-sum { font-size: .8125rem; color: var(--sub0); }
 .line .root { display: block; margin-top: 4px; font-size: .8125rem; color: var(--ov2); overflow-wrap: anywhere; }
 .line .qw { display: inline-flex; align-items: baseline; gap: 6px; }
@@ -235,6 +257,12 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 <template id="check-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.8"/><path d="M5.4 8.2l1.8 1.8 3.4-3.7"/></svg></template>
 <template id="approval-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><circle cx="5.4" cy="10.6" r="2.6"/><path d="M7.3 8.7L13 3M10.4 5.6l1.9 1.9"/></svg></template>
 <template id="conflict-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 3.5l7 9M11.5 3.5l-7 9"/></svg></template>
+<template id="play-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path class="f" d="M5 3.2v9.6a.6.6 0 0 0 .9.5l7.4-4.8a.6.6 0 0 0 0-1L5.9 2.7a.6.6 0 0 0-.9.5z"/></svg></template>
+<template id="pause-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><rect class="f" x="3.5" y="3" width="3.2" height="10" rx="1"/><rect class="f" x="9.3" y="3" width="3.2" height="10" rx="1"/></svg></template>
+<template id="clock-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.8"/><path d="M8 4.8V8l2.2 1.5"/></svg></template>
+<template id="dashed-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.8" stroke-dasharray="2.1 2.5"/><circle class="f" cx="8" cy="8" r="1.3"/></svg></template>
+<template id="tick-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.6l3.2 3.1L13 4.4"/></svg></template>
+<template id="lines-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 4.5h10M3 8h10M3 11.5h6"/></svg></template>
 <template id="label-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 3.5h5.2l5.8 5.8-4.2 4.2-6.8-6.8z"/><circle cx="5.4" cy="6.2" r=".9"/></svg></template>
 <script>
 "use strict";
@@ -266,7 +294,7 @@ function lineFold(key, nameNode, words, outside, root) {
   const summary = el("summary");
   summary.appendChild(nameNode);
   for (const word of words) summary.appendChild(word);
-  if (outside.sessions.length > 0) summary.appendChild(el("span", "", outside.summary));
+  if (outside.sessions.length > 0) summary.appendChild(el("span", "sess-sum", outside.summary));
   for (const session of outside.sessions) {
     for (const run of session.deliveries || []) summary.appendChild(runSummary(run));
   }
@@ -308,14 +336,30 @@ function sprintDetail(sprint) {
   const fold = el("details", "sprint-detail");
   fold.dataset.key = "sprint:" + sprint.sprint_id;
   fold.appendChild(el("summary", "", "Detail"));
-  const list = el("ul", "sprint-issues");
-  for (const issue of sprint.issues || []) {
-    const row = el("li");
-    row.appendChild(el("span", "issue", "#" + issue.issue));
-    row.appendChild(el("span", "stage", issue.stage_text));
-    list.appendChild(row);
+  if (typeof sprint.progress_text === "string") {
+    fold.appendChild(el("p", "progress", sprint.progress_text));
   }
-  fold.appendChild(list);
+  if (typeof sprint.status === "string") {
+    const list = el("ul", "sprint-issues");
+    for (const issue of sprint.issues || []) {
+      const row = el("li");
+      row.appendChild(el("span", "issue", "#" + issue.issue));
+      row.appendChild(el("span", "stage", issue.stage_text));
+      list.appendChild(row);
+    }
+    fold.appendChild(list);
+  }
+  const sessions = sprint.sessions || [];
+  if (sessions.length > 0) {
+    const list = el("ul", "sprint-sessions");
+    for (const session of sessions) {
+      const row = el("li", "sprint-session");
+      row.appendChild(el("span", "", session.name));
+      row.appendChild(el("span", "s-" + session.state, session.state_text));
+      list.appendChild(row);
+    }
+    fold.appendChild(list);
+  }
   if (typeof sprint.next === "string") fold.appendChild(el("p", "next", "Next: " + sprint.next));
   if (typeof sprint.milestone === "string") {
     fold.appendChild(el("p", "milestone", "Milestone: " + sprint.milestone));
@@ -327,6 +371,26 @@ function sprintDetail(sprint) {
     fold.appendChild(link);
   }
   return fold;
+}
+const SPRINT_LOOKS = new Map([
+  ["drafting", { icon: "lines-icon", mark: "sic-lines", tone: "st-dim" }],
+  ["starting", { icon: "play-icon", mark: "sic-play", tone: "st-go" }],
+  ["on_track", { icon: "play-icon", mark: "sic-play", tone: "st-go" }],
+  ["waiting", { icon: "pause-icon", mark: "sic-pause", tone: "needs" }],
+  ["quiet", { icon: "dashed-icon", mark: "sic-dashed", tone: "st-wait" }],
+  ["closing", { icon: "check-icon", mark: "sic-closing", tone: "st-go" }],
+  ["done", { icon: "tick-icon", mark: "sic-tick", tone: "st-dim" }],
+]);
+function sprintLook(sprint) {
+  const look = SPRINT_LOOKS.get(sprint.state);
+  if (look === undefined) throw new Error("unknown sprint state " + JSON.stringify(sprint.state));
+  if (sprint.state !== "waiting" && sprint.manager_state === "waiting") {
+    return { icon: "clock-icon", mark: "sic-clock", tone: "st-wait" };
+  }
+  return look;
+}
+function pipGroup(stage) {
+  return stage === "landed" || stage === "held" || stage === "queued" ? stage : "delivery";
 }
 const withdrawals = new Map();
 const retries = new Map();
@@ -381,21 +445,43 @@ function fillSprint(item, entry, sprint) {
   const before = Array.from(item.children).find((c) => c.className === "sprint-detail");
   const wasOpen = before !== undefined && before.open === true;
   item.replaceChildren();
-  item.appendChild(el("span", "goal-line", sprint.goal));
-  item.appendChild(el("span", "sprint-state", sprint.state_text));
-  if (typeof sprint.progress_text === "string") {
-    item.appendChild(el("span", "progress", sprint.progress_text));
-  }
-  if (typeof sprint.status === "string") {
-    item.appendChild(el("span", "status", sprint.status));
-    if (typeof sprint.status_at === "string") {
-      item.appendChild(timeEl("ago", sprint.status_at, "status-age"));
+  const look = sprintLook(sprint);
+  const head = el("div", "sp-head");
+  const mark = el("span", "sic " + look.mark + " " + look.tone);
+  mark.appendChild(icon(look.icon));
+  head.appendChild(mark);
+  head.appendChild(el("span", "goal-line", sprint.goal));
+  const progress = sprint.progress;
+  if (progress !== null && typeof progress === "object" && progress.total > 0) {
+    const prog = el("span", "sp-prog");
+    const pips = el("span", "pips");
+    pips.setAttribute("role", "img");
+    pips.setAttribute("aria-label", sprint.progress_text);
+    pips.setAttribute("title", sprint.progress_text);
+    for (const issue of sprint.issues || []) {
+      pips.appendChild(el("i", "pip pip-" + pipGroup(issue.stage)));
     }
+    prog.appendChild(pips);
+    prog.appendChild(el("span", "pip-count", progress.landed + " of " + progress.total));
+    head.appendChild(prog);
+  }
+  const words = el("p", "sp-status");
+  words.appendChild(el("span", "sprint-state " + look.tone, sprint.state_text));
+  if (typeof sprint.status === "string") {
+    words.appendChild(el("span", "status", sprint.status));
+    if (typeof sprint.status_at === "string") {
+      words.appendChild(timeEl("ago", sprint.status_at, "status-age"));
+    }
+  }
+  for (const session of sprint.sessions || []) {
+    words.appendChild(el("span", "manager-now s-" + session.state, "manager " + session.state_text));
   }
   const age = el("span", "age");
   age.appendChild(el("span", "", "stated "));
   age.appendChild(timeEl("ago", sprint.stated_at, ""));
-  item.appendChild(age);
+  words.appendChild(age);
+  head.appendChild(words);
+  item.appendChild(head);
   if (sprint.manager_text !== null && sprint.manager_text !== undefined) {
     item.appendChild(el("span", "manager", sprint.manager_text));
   }
@@ -414,24 +500,13 @@ function fillSprint(item, entry, sprint) {
   const button = actionButton("withdraw", "Withdraw", () => withdraw(item, entry, sprint));
   if (state !== undefined && state.phase === "sending") button.setAttribute("disabled", "");
   item.appendChild(button);
-  if (typeof sprint.status === "string") {
+  if (typeof sprint.status === "string" || (sprint.sessions || []).length > 0) {
     const fold = sprintDetail(sprint);
     if (wasOpen) fold.open = true;
     item.appendChild(fold);
   }
   if (state !== undefined && state.phase === "failed") {
     item.appendChild(el("span", "fail", "Could not withdraw: " + state.reason));
-  }
-  const sessions = sprint.sessions || [];
-  if (sessions.length > 0) {
-    const list = el("ul", "sprint-sessions");
-    for (const session of sessions) {
-      const row = el("li", "sprint-session");
-      row.appendChild(el("span", "", session.name));
-      row.appendChild(el("span", "s-" + session.state, session.state_text));
-      list.appendChild(row);
-    }
-    item.appendChild(list);
   }
   const messages = sprint.messages || [];
   if (messages.length > 0) item.appendChild(messageList(messages));
@@ -552,7 +627,7 @@ function sprintList(entry) {
   return list;
 }
 function projectLine(entry) {
-  const line = el("li", "line");
+  const line = el("li", entry.quiet ? "line quiet" : "line");
   const words = [];
   if (entry.quiet) {
     const quiet = el("span", "qw");
@@ -566,8 +641,11 @@ function projectLine(entry) {
       words.push(untouched);
     }
   }
-  line.appendChild(lineFold("line:" + entry.project_id, el("b", "", entry.project_id), words,
+  line.appendChild(lineFold("line:" + entry.project_id, el("h3", "pname", entry.project_id), words,
                             entry.outside_sprints, entry.root));
+  if (entry.quiet) {
+    line.appendChild(actionButton("give-goal", "Give it a goal", () => openGoalFor(entry.project_id)));
+  }
   if (entry.sprints && entry.sprints.length > 0) line.appendChild(sprintList(entry));
   return line;
 }
@@ -1469,10 +1547,25 @@ function renderDigest(view) {
   fold.appendChild(more);
   section.appendChild(fold);
 }
+function workCount(view) {
+  let sprints = 0;
+  let projects = 0;
+  for (const entry of view.entries) {
+    for (const one of entry.type === "quiet_group" ? entry.projects : [entry]) {
+      const n = one.sprints ? one.sprints.length : 0;
+      sprints += n;
+      if (n > 0) projects += 1;
+    }
+  }
+  if (sprints === 0) return "";
+  return sprints + (sprints === 1 ? " sprint" : " sprints") + " across " + projects
+    + (projects === 1 ? " project" : " projects");
+}
 function renderProjects(view) {
   const section = document.getElementById("projects");
-  const heading = el("h2", "", "Projects ");
-  heading.appendChild(el("span", "", String(view.project_count)));
+  const heading = el("h2", "", "Work");
+  const worked = workCount(view);
+  if (worked !== "") heading.appendChild(el("span", "", worked));
   const active = document.activeElement;
   const heldTell = active && active.tagName === "TEXTAREA" && active.dataset
     && active.dataset.tell !== undefined
@@ -1545,7 +1638,7 @@ function renderUnmanaged(view) {
   const list = el("ul");
   for (const entry of view.unmanaged) {
     const line = el("li", "line");
-    line.appendChild(lineFold("line:" + entry.root, el("b", "", entry.name),
+    line.appendChild(lineFold("line:" + entry.root, el("h3", "pname", entry.name),
                               [el("span", "", entry.label)], entry.outside_sprints, entry.root));
     list.appendChild(line);
   }
@@ -1679,6 +1772,18 @@ function openGoal() {
   draft.open = true;
   if (goalUi === null) buildGoalBox(document.getElementById("goal"));
   goalUi.filter.focus();
+}
+function openGoalFor(projectId) {
+  draft.filter = "";
+  draft.project = projectId;
+  goalEdited();
+  draft.open = true;
+  if (goalUi === null) buildGoalBox(document.getElementById("goal"));
+  else {
+    goalUi.filter.value = "";
+    refreshGoalList();
+  }
+  goalUi.text.focus();
 }
 const goalOpener = el("button", "goal-open", "State a goal");
 goalOpener.setAttribute("type", "button");
