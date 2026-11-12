@@ -529,11 +529,14 @@ let carried = carryOf(CONT && CONT.fix_findings)
 // diverging: { file, waves }: more waves on that file are not expected to close it, so the owner decides the design. A first run carries no
 // findings in, so it is never marked; neither is a resume whose open findings are all in other files.
 const FIX_WAVES_BOUND = 4
-const CARRIED_FILES = carried.map(f => f.file).filter(f => typeof f === 'string' && f)
+// Reviewers name one file as path, ./path, path:line, path:line-line or path:line:column: files are compared, and the marker names the file,
+// without the surrounding whitespace, a leading ./ and that trailing position; nothing else is folded, case included.
+const fileOf = f => (typeof f.file === 'string' ? f.file.trim().replace(/:\d+(?:[-:]\d+)?$/, '').replace(/^(?:\.\/)+/, '').trim() : '')
+const CARRIED_FILES = carried.map(fileOf).filter(Boolean)
 const divergingOf = left => {
   if (fixWaves < FIX_WAVES_BOUND) return null
-  const hit = left.find(f => typeof f.file === 'string' && CARRIED_FILES.includes(f.file))
-  return hit ? { file: hit.file, waves: fixWaves } : null
+  const hit = left.map(fileOf).find(f => f && CARRIED_FILES.includes(f))
+  return hit ? { file: hit, waves: fixWaves } : null
 }
 // The head the final review and its fix waves passed at ({ head, accepted? }), carried so a resume on it skips the review.
 let finalReviewed = (CONT && CONT.final_reviewed) || null

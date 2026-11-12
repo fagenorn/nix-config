@@ -4850,6 +4850,27 @@ class FixWavesConvergeTest(unittest.TestCase):
                 self.assertEqual(result["reason"], "fix-wave-review: 1 finding(s): race in steal")
                 self.assertEqual([f["summary"] for f in result["cont"]["fix_findings"]], ["race in steal"])
 
+    def test_a_position_or_a_leading_dot_slash_names_the_same_file(self):
+        path = "src/claim.py"
+        forms = (path, f"{path}:328", f"{path}:328-337", f"{path}:328:12", f"./{path}", f" ./{path}:9 ")
+        for carried_as in forms:
+            for left_as in forms:
+                with self.subTest(carried=carried_as, left=left_as):
+                    cont = self.stopped(fix_findings=[{"severity": "important", "file": carried_as, "summary": "race in adopt"}])
+                    result, _ = run(args=dict(ARGS, cont=cont), replies={"fix-wave-review": self.left(left_as)})
+                    self.assertEqual(result["diverging"], {"file": path, "waves": 4})
+                    self.assertIn(f"do not converge on {path} after 4 waves;", result["reason"])
+                    # The cont keeps the finding as the reviewer wrote it.
+                    self.assertEqual(result["cont"]["fix_findings"][0]["file"], left_as)
+
+    def test_other_differences_between_paths_are_different_files(self):
+        cont = self.stopped(fix_findings=[{"severity": "important", "file": "src/claim.py:328-337", "summary": "race in adopt"}])
+        for other in ("src/Claim.py", "claim.py", "src/claim.py.bak", "src/claim.pyc:3", "src/claim.py:fn", "../src/claim.py"):
+            with self.subTest(other=other):
+                result, _ = run(args=dict(ARGS, cont=cont), replies={"fix-wave-review": self.left(other)})
+                self.assertEqual(result["stage"], "fix-wave-review")
+                self.assertNotIn("diverging", result)
+
     def test_one_shared_file_among_several_is_named(self):
         rv = self.left("lock.py", "stale lock")
         rv["findings"].append({"severity": "critical", "file": "claim.py", "summary": "race in steal", "relation": "new"})
