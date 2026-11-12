@@ -14,8 +14,9 @@ from agent_tools.console.digest import (
     moments)
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
-    MANAGER_STALLED, MANAGER_STARTED, MANAGER_WOKEN, QUESTION_ANSWERED, SPRINT_CLOSED,
-    SPRINT_REPORTED, SPRINT_STOP_REQUESTED, Event)
+    MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_WOKEN,
+    QUESTION_ANSWERED, SPRINT_CLOSED, SPRINT_CONTINUED, SPRINT_NUDGED, SPRINT_REPORTED,
+    SPRINT_STOP_REQUESTED, Event)
 from agent_tools.console.sessions import SessionState
 from agent_tools.console.sprints import sprint_states
 from agent_tools.console.view import InboxRecord
@@ -217,6 +218,61 @@ class DigestTest(unittest.TestCase):
         self.assertEqual([(m.kind, m.sentence) for m in moments(rows, {}, {})][-2:], [
             ("manager_restarted", "The manager of g was restarted"),
             ("manager_takeover", "A new manager took over g")])
+
+    def test_an_idle_nudge_says_nothing_and_a_resume_after_the_quota_reset_says_one_sentence(self):
+        sid = "a" * 16
+        nudged = {"sprint_id": sid, "goal": "g", "session_id": "s-1"}
+        rows = [
+            Event(1, at(1), GOAL_STATED, "owner/p00", {"sprint_id": sid, "goal": "g"}),
+            Event(2, at(2), MANAGER_STARTED, "owner/p00", {
+                "sprint_id": sid, "profile": "work", "session_name": "n"}),
+            Event(3, at(3), MANAGER_NUDGED, "owner/p00", {**nudged, "ok": True}),
+            Event(4, at(4), MANAGER_NUDGED, "owner/p00", {
+                **nudged, "ok": False, "reason": "r", "resumed": True}),
+            Event(5, at(5), MANAGER_NUDGED, "owner/p00", {**nudged, "ok": True, "resumed": True})]
+        self.assertEqual([(m.kind, m.sentence) for m in moments(rows, {}, {})], [
+            ("quota_resumed", "g resumed after the quota reset")])
+
+    def test_a_wake_after_the_quota_reset_says_resumed_not_restarted(self):
+        sid = "a" * 16
+        woken = {"sprint_id": sid, "ok": True, "goal": "g", "session_id": "s-1"}
+        rows = [
+            Event(1, at(1), GOAL_STATED, "owner/p00", {"sprint_id": sid, "goal": "g"}),
+            Event(2, at(2), MANAGER_STARTED, "owner/p00", {
+                "sprint_id": sid, "profile": "work", "session_name": "n"}),
+            Event(3, at(3), MANAGER_WOKEN, "owner/p00", {**woken, "resumed": True})]
+        self.assertEqual([(m.kind, m.sentence) for m in moments(rows, {}, {})], [
+            ("quota_resumed", "g resumed after the quota reset")])
+        rows[2] = Event(3, at(3), MANAGER_WOKEN, "owner/p00", woken)
+        self.assertEqual([(m.kind, m.sentence) for m in moments(rows, {}, {})], [
+            ("manager_restarted", "The manager of g was restarted")])
+
+    def test_a_held_message_sent_after_the_quota_reset_says_resumed_once(self):
+        sid = "a" * 16
+        sent = {"sprint_id": sid, "through": 1, "route": "relay"}
+        rows = [
+            Event(1, at(1), GOAL_STATED, "owner/p00", {"sprint_id": sid, "goal": "g"}),
+            Event(2, at(2), MANAGER_STARTED, "owner/p00", {
+                "sprint_id": sid, "profile": "work", "session_name": "n"}),
+            Event(3, at(3), SPRINT_NUDGED, "owner/p00", {**sent, "ok": True}),
+            Event(4, at(4), SPRINT_NUDGED, "owner/p00", {
+                **sent, "ok": False, "reason": "r", "resumed": True}),
+            Event(5, at(5), SPRINT_NUDGED, "owner/p00", {**sent, "ok": True, "resumed": True}),
+            Event(6, at(6), SPRINT_NUDGED, "owner/p00", {
+                **sent, "sprint_id": "b" * 16, "ok": True, "resumed": True})]
+        self.assertEqual([(m.kind, m.sentence) for m in moments(rows, {}, {})], [
+            ("quota_resumed", "g resumed after the quota reset")])
+
+    def test_no_progress_and_continue_say_nothing(self):
+        sid = "a" * 16
+        rows = [
+            Event(1, at(1), GOAL_STATED, "owner/p00", {"sprint_id": sid, "goal": "g"}),
+            Event(2, at(2), MANAGER_STARTED, "owner/p00", {
+                "sprint_id": sid, "profile": "work", "session_name": "n"}),
+            Event(3, at(3), MANAGER_NO_PROGRESS, "owner/p00", {
+                "sprint_id": sid, "goal": "g", "status": None}),
+            Event(4, at(4), SPRINT_CONTINUED, "owner/p00", {"sprint_id": sid, "goal": "g"})]
+        self.assertEqual(moments(rows, {}, {}), [])
 
     def test_failed_bring_backs_and_a_stall_say_nothing(self):
         sid = "a" * 16
