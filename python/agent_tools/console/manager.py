@@ -61,6 +61,19 @@ session whose name is in `names` (profile `default` when the record has none), a
 even after a failure, then raises the first `StopFailed`; a name not listed needs no stop.
 `stopper_for(platform)` is `stop_session` where `supported(platform)`, else None: the owner's stop
 of a sprint (#892) uses it through the console service.
+`remove_session(session_id, profile)` runs `claude-account run rm <short id>` under the session's
+own profile within `REMOVE_TIMEOUT` seconds, and its failures are `RemoveFailed` (a `StopFailed`)
+with the four reasons. `stop_listed(..., stopped)` appends each stop that succeeded as
+`{"session_id", "profile"}` unless an unremoved entry for that id is already there.
+`remove_stopped(stopped, remove)` removes each entry not marked `"removed": true`, marks each
+success, tries every one and raises the first failure. `mark_removed` marks a removal made outside
+`remove_stopped`. Both loops call an optional `before()` ahead of each call and let its exception
+end the loop; `finish_guard(clock, run_start, budget, save)` is that `before` for a check's finish:
+it saves the check's state, then raises `OutOfTime` when one more 60-second call could end past
+`max(FINISH_LIMIT, budget + FINISH_SECONDS)` seconds of the run (590 with the default budget of
+540), because verify-pending kills a run after 600. The verify checks use these to remove the
+record of each test manager they stopped. The console's own withdrawal removes nothing
+(ADR-console-018).
 """
 
 from __future__ import annotations
@@ -86,10 +99,14 @@ SECRET_ENV = "CONSOLE_SPRINT_SECRET"
 ACCOUNT_ENV = "CLAUDE_ACCOUNT"
 LAUNCH_TIMEOUT = 60
 STOP_TIMEOUT = 60
+REMOVE_TIMEOUT = 60
+FINISH_LIMIT = 590
+FINISH_SECONDS = 50
 SHORT_ID_LENGTH = 8
 SETTINGS_SUFFIX = ".settings.json"
 LAUNCH_TOOLS = ("bash", "dirname", "mkdir", "chmod", "ln", "systemd-run")
 
+OUT_OF_TIME_TEXT = "this run has no time left for the next stop or removal"
 UNAVAILABLE_TEXT = "managers are not available on this host yet"
 FAILED_TEXT = "could not start a manager"
 WAITING_TEXT = "waiting on quota until"
@@ -104,6 +121,14 @@ class LaunchFailed(Exception):
 
 class StopFailed(Exception):
     """A manager's background session could not be stopped; `str` is the one-line reason."""
+
+
+class RemoveFailed(StopFailed):
+    """A stopped session's record could not be removed; `str` is the one-line reason."""
+
+
+class OutOfTime(Exception):
+    """A run has no time left for the next stop or removal (not a `StopFailed`)."""
 
 
 @dataclass(frozen=True)
@@ -304,15 +329,80 @@ def stop_session(session_id: str, profile: str, *, run=subprocess.run,
         raise StopFailed(lines[-1] if lines else f"the stop exited {result.returncode}")
 
 
+def remove_session(session_id: str, profile: str, *, run=subprocess.run,
+                   environ: Mapping[str, str] = os.environ) -> None:
+    argv = ["claude-account", "run", "rm", short_id(session_id)]
+    with tempfile.TemporaryFile() as err:
+        try:
+            result = run(argv, env=client_environment(profile, environ),
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err,
+                         timeout=REMOVE_TIMEOUT, check=False)
+        except FileNotFoundError:
+            raise RemoveFailed(f"{argv[0]} is not installed") from None
+        except subprocess.TimeoutExpired:
+            raise RemoveFailed(f"the removal did not return within {REMOVE_TIMEOUT} s") from None
+        err.seek(0)
+        stderr = err.read().decode("utf-8", errors="replace")
+    if result.returncode != 0:
+        lines = [line.strip() for line in stderr.splitlines() if line.strip()]
+        raise RemoveFailed(lines[-1] if lines else f"the removal exited {result.returncode}")
+
+
 def stop_listed(names, registry: Callable[[], Mapping],
-                stop: Callable[[str, str], None]) -> None:
+                stop: Callable[[str, str], None], stopped: list | None = None,
+                before: Callable[[], None] | None = None) -> None:
     wanted = set(names)
     failure = None
     for observation in registry().values():
         if observation.name in wanted:
+            profile = observation.profile or DEFAULT_PROFILE
+            if before is not None:
+                before()
             try:
-                stop(observation.session_id, observation.profile or DEFAULT_PROFILE)
+                stop(observation.session_id, profile)
             except StopFailed as error:
                 failure = failure or error
+                continue
+            if stopped is not None and not any(
+                    entry["session_id"] == observation.session_id and not entry.get("removed")
+                    for entry in stopped):
+                stopped.append({"session_id": observation.session_id, "profile": profile})
     if failure is not None:
         raise failure
+
+
+def remove_stopped(stopped: list, remove: Callable[[str, str], None],
+                   before: Callable[[], None] | None = None) -> None:
+    failure = None
+    for entry in stopped:
+        if entry.get("removed"):
+            continue
+        if before is not None:
+            before()
+        try:
+            remove(entry["session_id"], entry["profile"])
+        except StopFailed as error:
+            failure = failure or error
+            continue
+        entry["removed"] = True
+    if failure is not None:
+        raise failure
+
+
+def mark_removed(stopped: list, session_id: str, profile: str) -> None:
+    for entry in stopped:
+        if entry["session_id"] == session_id and not entry.get("removed"):
+            entry["removed"] = True
+            return
+    stopped.append({"session_id": session_id, "profile": profile, "removed": True})
+
+
+def finish_guard(clock: Callable[[], float], run_start: float, budget: float,
+                 save: Callable[[], None]) -> Callable[[], None]:
+    def before() -> None:
+        save()
+        limit = max(FINISH_LIMIT, budget + FINISH_SECONDS)
+        if clock() - run_start + max(STOP_TIMEOUT, REMOVE_TIMEOUT) > limit:
+            raise OutOfTime(OUT_OF_TIME_TEXT)
+
+    return before

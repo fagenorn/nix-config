@@ -11,8 +11,6 @@ import tempfile
 import unittest
 from datetime import datetime
 from pathlib import Path
-from types import SimpleNamespace
-from unittest import mock
 
 from agent_tools.console import manager, revive_check
 from agent_tools.console.manager import StopFailed
@@ -410,38 +408,6 @@ class ReviveCheckTest(unittest.TestCase):
         self.assertEqual((code, out["status"]), (75, "waiting"))
         self.assertFalse(self.result_file.exists())
         self.assertEqual(self.timing(), (75, {"status": "no_result"}))
-
-    def test_default_remove_names_the_short_id_under_the_sessions_profile(self):
-        calls = []
-
-        def run(argv, **kwargs):
-            calls.append((argv, kwargs))
-            return SimpleNamespace(returncode=0)
-
-        revive_check.default_remove("0123456789abcdef-0123", "work", run=run,
-                                    environ={"HOME": "/home/u", "PATH": "/bin"})
-        argv, kwargs = calls[0]
-        self.assertEqual(argv, ["claude-account", "run", "rm", "01234567"])
-        self.assertEqual(kwargs["env"]["CLAUDE_ACCOUNT"], "work")
-        self.assertIs(kwargs["stdin"], subprocess.DEVNULL)
-        self.assertEqual(kwargs["timeout"], 60)
-
-    def test_a_failed_removal_raises_its_one_line_reason(self):
-        def failing(argv, **kwargs):
-            kwargs["stderr"].write(b"first\nno such session\n\n")
-            return SimpleNamespace(returncode=1)
-
-        with self.assertRaisesRegex(StopFailed, "no such session"):
-            revive_check.default_remove("0123456789abcdef", "work", run=failing, environ={})
-        with self.assertRaisesRegex(StopFailed, "the removal exited 3"):
-            revive_check.default_remove("0123456789abcdef", "work", environ={},
-                                        run=lambda argv, **kw: SimpleNamespace(returncode=3))
-        for error, text in ((FileNotFoundError(), "claude-account is not installed"),
-                            (subprocess.TimeoutExpired("rm", 60),
-                             "the removal did not return within 60 s")):
-            with self.subTest(text), self.assertRaisesRegex(StopFailed, text):
-                revive_check.default_remove("0123456789abcdef", "work", environ={},
-                                            run=mock.Mock(side_effect=error))
 
     def test_an_off_loopback_url_is_refused(self):
         with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as raised:

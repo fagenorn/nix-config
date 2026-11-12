@@ -86,22 +86,18 @@ Third it writes the result file `{"back_seconds": int | null, "status": "met" | 
 `back_seconds` null or above `--deadline` is 1 `{"back_seconds", "reason": "slow", "status":
 "not_met"}`; else 0 `{"back_seconds", "status": "met"}`. It changes no file.
 
-`default_remove` runs `claude-account run rm <first eight characters of the id>` under the
-session's profile (`manager.client_environment`), within 60 seconds, raising `manager.StopFailed`
-with its one-line reason. The `registry`, `stop`, `remove`, `clock` and `sleep` of `main` are
-seams for tests.
+The default `remove` is `manager.remove_session`, which runs `claude-account run rm <first eight
+characters of the id>` under the session's profile within 60 seconds. The `registry`, `stop`,
+`remove`, `clock` and `sleep` of `main` are seams for tests.
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
-import subprocess
 import sys
-import tempfile
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable
 from pathlib import Path
 
 from agent_tools.console import manager
@@ -128,7 +124,6 @@ STOP_WINDOW = DEFAULT_DEADLINE + 2 * POLL_SECONDS
 RETURN_LIMIT = 600
 RELIST_LIMIT = 900
 READ_LIMIT = 600
-REMOVE_TIMEOUT = 60
 GOAL = ("[verify #893] check that a gone manager is brought back: brief one slice; once "
         "approved, send one report with phase running, no issues and next set to wait for the "
         "owner, then end your turn; cut no issues and deliver nothing; withdraw me")
@@ -157,26 +152,6 @@ def build_parser() -> argparse.ArgumentParser:
     timing.add_argument("--deadline", type=_positive, default=DEFAULT_DEADLINE,
                         help="the slowest return allowed, in seconds (default: %(default)s)")
     return parser
-
-
-def default_remove(session_id: str, profile: str, *, run=subprocess.run,
-                   environ: Mapping[str, str] = os.environ) -> None:
-    argv = ["claude-account", "run", "rm", manager.short_id(session_id)]
-    with tempfile.TemporaryFile() as err:
-        try:
-            result = run(argv, env=manager.client_environment(profile, environ),
-                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=err,
-                         timeout=REMOVE_TIMEOUT, check=False)
-        except FileNotFoundError:
-            raise manager.StopFailed(f"{argv[0]} is not installed") from None
-        except subprocess.TimeoutExpired:
-            raise manager.StopFailed(
-                f"the removal did not return within {REMOVE_TIMEOUT} s") from None
-        err.seek(0)
-        stderr = err.read().decode("utf-8", errors="replace")
-    if result.returncode != 0:
-        lines = [line.strip() for line in stderr.splitlines() if line.strip()]
-        raise manager.StopFailed(lines[-1] if lines else f"the removal exited {result.returncode}")
 
 
 def _result_file(args) -> Path:
@@ -416,7 +391,7 @@ def _timing(args) -> int:
 def main(argv: list[str] | None = None, *,
          registry: Callable[[], dict] = default_registry,
          stop: Callable[[str, str], None] = manager.stop_session,
-         remove: Callable[[str, str], None] = default_remove,
+         remove: Callable[[str, str], None] = manager.remove_session,
          clock: Callable[[], float] = time.time,
          sleep: Callable[[float], None] = time.sleep) -> int:
     args = build_parser().parse_args(argv)
