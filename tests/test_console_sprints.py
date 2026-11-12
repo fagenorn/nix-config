@@ -7,11 +7,14 @@ import json
 import stat
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 from agent_tools.console import sprints
+from agent_tools.console.deliveries import DELIVERY_GONE, DELIVERY_SEEN, IssueStage
 from agent_tools.console.event_log import (BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED,
-                                           GOAL_WITHDRAWN, Event)
+                                           GOAL_WITHDRAWN, SPRINT_REPORTED, Event)
+from agent_tools.console.sprints import Observed, Report
 
 
 class ParseTest(unittest.TestCase):
@@ -220,7 +223,7 @@ class BriefFoldTest(unittest.TestCase):
         self.assertEqual(state.brief, sprints.Brief(1, PARTS, at(2), "none", None))
         self.assertEqual(state.state, "drafting")
         state = sprints.sprint_states([goal, sent(2, SID, 1, PARTS), approved(3, SID, 1)])[SID]
-        self.assertEqual(state.brief, sprints.Brief(1, PARTS, at(2), "approved", None))
+        self.assertEqual(state.brief, sprints.Brief(1, PARTS, at(2), "approved", None, at(3)))
         self.assertEqual(state.state, "starting")
         self.assertIsNone(sprints.sprint_states([goal])[SID].brief)
         self.assertEqual(sprints.sprint_states([goal])[SID].state, "drafting")
@@ -233,13 +236,13 @@ class BriefFoldTest(unittest.TestCase):
             return sprints.sprint_states([goal, *events])[SID].brief
 
         first = [sent(2, SID, 1, PARTS), replied(3, SID, 1, "no")]
-        self.assertEqual(brief(first), sprints.Brief(1, PARTS, at(2), "changes", "no"))
+        self.assertEqual(brief(first), sprints.Brief(1, PARTS, at(2), "changes", "no", at(3)))
         second = [*first, sent(4, SID, 2, two)]
         self.assertEqual(brief(second), sprints.Brief(2, two, at(4), "none", None))
         self.assertEqual(brief([*second, approved(5, SID, 1)]), brief(second))
         self.assertEqual(brief([*second, sent(5, SID, 2, PARTS)]), brief(second))
         decided = [*second, approved(5, SID, 2)]
-        self.assertEqual(brief(decided), sprints.Brief(2, two, at(4), "approved", None))
+        self.assertEqual(brief(decided), sprints.Brief(2, two, at(4), "approved", None, at(5)))
         self.assertEqual(brief([*decided, replied(6, SID, 2, "late")]), brief(decided))
         self.assertEqual(brief([*decided, approved(6, SID, 2)]), brief(decided))
 
@@ -272,6 +275,192 @@ class BriefFoldTest(unittest.TestCase):
                     whole)
 
 
+URL = "https://github.com/owner/p00/milestone/3"
+REPORT = {"status": "two slices are building", "phase": "running", "milestone": "Importer resumes",
+          "tracker_url": URL,
+          "issues": [{"issue": 12, "stage": "building"}, {"issue": 13, "stage": "landed"}],
+          "inbox": [12], "next": "start the resume slice"}
+
+
+def reported(seq, sprint_id, report):
+    return Event(seq, at(seq), SPRINT_REPORTED, "o/a",
+                 {"sprint_id": sprint_id, "goal": "g", "report": report})
+
+
+class ReportParseTest(unittest.TestCase):
+    def test_a_report_request_is_a_sprint_a_secret_and_a_report(self):
+        body = json.dumps({"sprint_id": SID, "secret": "s", "report": REPORT}).encode()
+        self.assertEqual(sprints.parse_report_request(body), (SID, "s", REPORT))
+
+        def bodies(**changes):
+            return json.dumps({"sprint_id": SID, "secret": "s", "report": REPORT,
+                               **changes}).encode()
+
+        for bad in (bodies(extra=1),
+                    json.dumps({"sprint_id": SID, "secret": "s"}).encode(),
+                    bodies(sprint_id="ABC"), bodies(secret=5), bodies(report=[]),
+                    bodies(report={**REPORT, "colour": "red"}),
+                    b'{"sprint_id": "' + SID.encode() + b'", "secret": "a", "secret": "b", '
+                    b'"report": {}}',
+                    b'{"sprint_id": "' + SID.encode() + b'", "secret": "s", "report": NaN}'):
+            with self.subTest(body=bad[:60]):
+                with self.assertRaises(ValueError):
+                    sprints.parse_report_request(bad)
+
+    def test_the_first_invalid_member_is_named(self):
+        for member in sprints.REPORT_MEMBERS:
+            with self.subTest(missing=member):
+                report = {k: v for k, v in REPORT.items() if k != member}
+                with self.assertRaises(sprints.Refused) as caught:
+                    sprints.checked_report(report)
+                self.assertEqual(str(caught.exception), f"the report has no valid {member}")
+        many = [{"issue": n, "stage": "queued"} for n in range(1, 202)]
+        table = (("status", ""), ("status", "   "), ("status", "a\nb"), ("status", "x" * 501),
+                 ("status", 5), ("phase", "paused"), ("milestone", ""),
+                 ("tracker_url", "http://h/m"), ("tracker_url", "https://h/a b"),
+                 ("tracker_url", ""), ("issues", {}),
+                 ("issues", [{"issue": 0, "stage": "queued"}]),
+                 ("issues", [{"issue": True, "stage": "queued"}]),
+                 ("issues", [{"issue": 1, "stage": "stuck"}]),
+                 ("issues", [{"issue": 1, "stage": "queued", "x": 1}]),
+                 ("issues", [{"issue": 1, "stage": "queued"}, {"issue": 1, "stage": "held"}]),
+                 ("issues", many), ("inbox", [0]), ("inbox", [True]), ("inbox", "1"),
+                 ("inbox", list(range(1, 202))), ("next", ""))
+        for member, value in table:
+            with self.subTest(member=member, value=str(value)[:30]):
+                with self.assertRaises(sprints.Refused) as caught:
+                    sprints.checked_report({**REPORT, member: value})
+                self.assertEqual(str(caught.exception), f"the report has no valid {member}")
+        with self.assertRaises(sprints.Refused) as caught:
+            sprints.checked_report({**REPORT, "phase": "paused", "next": ""})
+        self.assertEqual(str(caught.exception), "the report has no valid phase")
+
+    def test_a_status_naming_an_issue_number_is_refused(self):
+        for status in ("#12 is building", "building #3"):
+            with self.subTest(status=status):
+                with self.assertRaises(sprints.Refused) as caught:
+                    sprints.checked_report({**REPORT, "status": status})
+                self.assertEqual(str(caught.exception), sprints.STATUS_NUMBER)
+        for status in ("building 12 of 20", "the C# port"):
+            with self.subTest(status=status):
+                self.assertEqual(sprints.checked_report({**REPORT, "status": status})["status"],
+                                 status)
+        with self.assertRaises(sprints.Refused) as caught:
+            sprints.checked_report({**REPORT, "status": "#1", "phase": "paused"})
+        self.assertEqual(str(caught.exception), sprints.STATUS_NUMBER)
+
+    def test_a_checked_report_is_stripped_and_sorted(self):
+        report = {**REPORT, "status": " a ", "milestone": " m ", "next": " n ",
+                  "issues": [{"issue": 5, "stage": "queued"}, {"issue": 2, "stage": "held"}],
+                  "inbox": [4, 1, 4]}
+        self.assertEqual(
+            sprints.checked_report(report),
+            {"status": "a", "phase": "running", "milestone": "m", "tracker_url": URL,
+             "issues": [{"issue": 2, "stage": "held"}, {"issue": 5, "stage": "queued"}],
+             "inbox": [1, 4], "next": "n"})
+
+
+def ms(seq):
+    return int(datetime.fromisoformat(at(seq)).timestamp() * 1000)
+
+
+def seen(seq, run_id, moved_ms, issues, project="owner/p00", session_id="s1"):
+    return Event(seq, at(seq), DELIVERY_SEEN, project,
+                 {"session_id": session_id, "run_id": run_id, "moved_ms": moved_ms,
+                  "issues": [{"issue": n, "stage": s, "task": None, "tasks": None}
+                             for n, s in issues]})
+
+
+def gone(seq, run_id):
+    return Event(seq, at(seq), DELIVERY_GONE, "owner/p00", {"session_id": "s1", "run_id": run_id})
+
+
+BASE = [stated(1, "owner/p00", SID, "one"), sent(2, SID, 1, PARTS), approved(3, SID, 1),
+        reported(4, SID, REPORT)]
+OBSERVED_ROWS = BASE + [seen(5, "wf_a", ms(4) + 60_000, ((12, "final review"), (99, "queued"))),
+                        gone(6, "wf_a"),
+                        seen(7, "wf_b", ms(4) + 30_000, ((12, "building"),)),
+                        seen(8, "wf_a", ms(4) + 90_000, ((12, "done"),)),
+                        reported(9, SID, REPORT)]
+
+
+class ReportFoldTest(unittest.TestCase):
+    def test_a_report_applies_only_to_an_approved_sprint(self):
+        rows = [stated(1, "owner/p00", SID, "one"), reported(2, SID, REPORT)]
+        self.assertIsNone(sprints.sprint_states(rows)[SID].report)
+        rows += [sent(3, SID, 1, PARTS), reported(4, SID, REPORT)]
+        self.assertIsNone(sprints.sprint_states(rows)[SID].report)
+        rows += [approved(5, SID, 1), reported(6, SID, REPORT)]
+        expected = Report(at(6), "two slices are building", "running", "Importer resumes", URL,
+                          ((12, "building"), (13, "landed")), (12,), "start the resume slice")
+        self.assertEqual(sprints.sprint_states(rows)[SID].report, expected)
+        other = "fedcba9876543210"
+        rows += [reported(7, other, REPORT), withdrawn(8, "owner/p00", other, "x"),
+                 reported(9, other, REPORT)]
+        folded = sprints.sprint_states(rows)
+        self.assertEqual(set(folded), {SID})
+        for bad in ({k: v for k, v in REPORT.items() if k != "next"}, [REPORT]):
+            with self.subTest(bad=str(bad)[:30]):
+                self.assertEqual(
+                    sprints.sprint_states([reported(7, SID, bad)], folded)[SID].report, expected)
+
+    def test_a_later_report_replaces_the_earlier(self):
+        rows = BASE[:3] + [reported(4, SID, REPORT), reported(5, SID, {**REPORT, "phase": "closing"})]
+        report = sprints.sprint_states(rows)[SID].report
+        self.assertEqual((report.at, report.phase), (at(5), "closing"))
+
+    def test_a_decision_records_its_time(self):
+        goal = stated(1, "owner/p00", SID, "one")
+        self.assertIsNone(sprints.sprint_states([goal, sent(2, SID, 1, PARTS)])[SID].brief.decided_at)
+        decided = sprints.sprint_states([goal, sent(2, SID, 1, PARTS), approved(5, SID, 1)])
+        self.assertEqual(decided[SID].brief.decided_at, at(5))
+        replied_state = sprints.sprint_states([goal, sent(2, SID, 1, PARTS),
+                                               replied(4, SID, 1, "no")])
+        self.assertEqual(replied_state[SID].brief.decided_at, at(4))
+
+    def test_report_folding_in_two_parts_equals_folding_at_once(self):
+        for rows in (BASE[:3] + [reported(4, SID, REPORT)], OBSERVED_ROWS):
+            whole = sprints.sprint_states(rows)
+            for cut in range(len(rows) + 1):
+                with self.subTest(rows=len(rows), cut=cut):
+                    self.assertEqual(
+                        sprints.sprint_states(rows[cut:], sprints.sprint_states(rows[:cut])),
+                        whole)
+
+
+class ObservedFoldTest(unittest.TestCase):
+    def test_a_run_seen_after_the_report_is_kept_until_the_next_report(self):
+        def fold(count):
+            state = sprints.sprint_states(OBSERVED_ROWS[:count])[SID]
+            return state.observed, state.moved_ms
+
+        self.assertEqual(fold(4), ((), None))
+        first = Observed(12, ms(4) + 60_000, "s1", "wf_a", IssueStage(12, "final review"))
+        self.assertEqual(fold(5), ((first,), ms(4) + 60_000))
+        self.assertEqual(fold(6), ((first,), ms(4) + 60_000))
+        self.assertEqual(fold(7), ((first,), ms(4) + 60_000))
+        observed, moved = fold(8)
+        self.assertEqual(observed[0].stage, IssueStage(12, "done"))
+        self.assertEqual((len(observed), moved), (1, ms(4) + 90_000))
+        self.assertEqual(fold(9), ((), None))
+        tied = sprints.sprint_states(BASE + [seen(5, "wf_a", ms(4) + 60_000, ((12, "building"),)),
+                                             seen(6, "wf_a", ms(4) + 60_000, ((12, "verifying"),))])
+        self.assertEqual(tied[SID].observed[0].stage, IssueStage(12, "verifying"))
+
+    def test_only_runs_of_the_sprints_project_that_moved_after_the_report_count(self):
+        late = {**seen(5, "wf_a", ms(4) + 60_000, ((12, "building"),)).payload}
+        malformed = Event(5, at(5), DELIVERY_SEEN, "owner/p00", {**late, "moved_ms": "x"})
+        for row in (seen(5, "wf_a", ms(4) + 60_000, ((12, "building"),), project="owner/p01"),
+                    seen(5, "wf_a", ms(4), ((12, "building"),)),
+                    seen(5, "wf_a", ms(4) + 60_000, ((99, "building"),)), malformed):
+            with self.subTest(row=row.payload):
+                state = sprints.sprint_states(BASE + [row])[SID]
+                self.assertEqual((state.observed, state.moved_ms), ((), None))
+        early = BASE[:3] + [seen(4, "wf_a", ms(3) + 1, ((12, "building"),)), reported(5, SID, REPORT)]
+        state = sprints.sprint_states(early)[SID]
+        self.assertEqual((state.observed, state.moved_ms), ((), None))
+
+
 class WithdrawnTest(unittest.TestCase):
     def test_withdrawn_ids(self):
         a, b = "aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb"
@@ -292,6 +481,19 @@ class AgeTest(unittest.TestCase):
                               (172_800_000, "stated 2 days ago")):
             with self.subTest(elapsed=elapsed):
                 self.assertEqual(sprints.age_text(elapsed), text)
+
+    def test_the_ago_and_progress_wording(self):
+        for elapsed, text in ((-5, "just now"), (0, "just now"), (59_999, "just now"),
+                              (60_000, "1 min ago"), (3_599_999, "59 min ago"),
+                              (3_600_000, "1 h ago"), (86_400_000, "1 day ago"),
+                              (172_800_000, "2 days ago")):
+            with self.subTest(elapsed=elapsed):
+                self.assertEqual(sprints.ago_text(elapsed), text)
+        self.assertEqual(sprints.progress_text(3, 7, 2, 2, 0),
+                         "3 of 7 landed, 2 in delivery, 2 queued")
+        self.assertEqual(sprints.progress_text(0, 0, 0, 0, 0), "0 of 0 landed")
+        self.assertEqual(sprints.progress_text(1, 4, 0, 0, 3), "1 of 4 landed, 3 held")
+        self.assertEqual(sprints.QUIET_TEXT.format(minutes=16), "quiet for 16 min \u2014 may be stuck")
 
 
 class SecretTest(unittest.TestCase):

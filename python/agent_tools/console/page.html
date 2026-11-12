@@ -88,7 +88,14 @@ ul { list-style: none; }
 .sprints { flex: 1 0 100%; padding: 0 0 0 16px; }
 .sprint { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; font-size: .8125rem; color: var(--sub0); }
 .sprint .goal-line { color: var(--text); overflow-wrap: anywhere; }
-.sprint .age, .sprint .manager { color: var(--ov2); }
+.sprint .age, .sprint .manager, .sprint .status-age { color: var(--ov2); }
+.sprint .progress::before { content: "\2014  "; }
+.sprint-detail { flex: 1 0 100%; font-size: .8125rem; }
+.sprint-detail summary { cursor: pointer; color: var(--ov2); }
+.sprint-detail ul { margin-top: 2px; padding: 0 0 0 16px; }
+.sprint-detail li { display: flex; flex-wrap: wrap; gap: 0 10px; color: var(--sub0); }
+.sprint-detail p { color: var(--sub0); }
+.sprint-detail .tracker { color: var(--lav); text-underline-offset: 3px; }
 .act { flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin-top: 8px; font-size: .8125rem; color: var(--ov2); }
 .fail { color: var(--red); }
 .done-head { margin-top: 24px; font: 600 .875rem/1.4 var(--ui); color: var(--ov2); }
@@ -209,15 +216,50 @@ function untouchedDays(lastActivity) {
   const days = Math.floor((Date.now() - Date.parse(lastActivity)) / 86400000);
   return Number.isFinite(days) && days >= 1 ? days : 0;
 }
+function sprintDetail(sprint) {
+  const fold = el("details", "sprint-detail");
+  fold.dataset.key = "sprint:" + sprint.sprint_id;
+  fold.appendChild(el("summary", "", "Detail"));
+  const list = el("ul", "sprint-issues");
+  for (const issue of sprint.issues || []) {
+    const row = el("li");
+    row.appendChild(el("span", "issue", "#" + issue.issue));
+    row.appendChild(el("span", "stage", issue.stage_text));
+    list.appendChild(row);
+  }
+  fold.appendChild(list);
+  if (typeof sprint.next === "string") fold.appendChild(el("p", "next", "Next: " + sprint.next));
+  if (typeof sprint.milestone === "string") {
+    fold.appendChild(el("p", "milestone", "Milestone: " + sprint.milestone));
+  }
+  if (typeof sprint.tracker_url === "string" && sprint.tracker_url.startsWith("https:")) {
+    const link = el("a", "tracker", "Open on the tracker");
+    link.rel = "noreferrer";
+    link.href = sprint.tracker_url;
+    fold.appendChild(link);
+  }
+  return fold;
+}
 const withdrawals = new Map();
 const latestSprints = new Map();
 function fillSprint(item, entry, sprint) {
   const state = withdrawals.get(sprint.sprint_id);
   latestSprints.set(sprint.sprint_id, { entry, sprint });
   item.dataset.sprintId = sprint.sprint_id;
+  const before = Array.from(item.children).find((c) => c.className === "sprint-detail");
+  const wasOpen = before !== undefined && before.open === true;
   item.replaceChildren();
   item.appendChild(el("span", "goal-line", sprint.goal));
   item.appendChild(el("span", "sprint-state", sprint.state_text));
+  if (typeof sprint.progress_text === "string") {
+    item.appendChild(el("span", "progress", sprint.progress_text));
+  }
+  if (typeof sprint.status === "string") {
+    item.appendChild(el("span", "status", sprint.status));
+    if (typeof sprint.status_age_text === "string") {
+      item.appendChild(el("span", "status-age", sprint.status_age_text));
+    }
+  }
   item.appendChild(el("span", "age", sprint.age_text));
   if (sprint.manager_text !== null && sprint.manager_text !== undefined) {
     item.appendChild(el("span", "manager", sprint.manager_text));
@@ -225,6 +267,11 @@ function fillSprint(item, entry, sprint) {
   const button = actionButton("withdraw", "Withdraw", () => withdraw(item, entry, sprint));
   if (state !== undefined && state.phase === "sending") button.setAttribute("disabled", "");
   item.appendChild(button);
+  if (typeof sprint.status === "string") {
+    const fold = sprintDetail(sprint);
+    if (wasOpen) fold.open = true;
+    item.appendChild(fold);
+  }
   if (state !== undefined && state.phase === "failed") {
     item.appendChild(el("span", "fail", "Could not withdraw: " + state.reason));
   }
