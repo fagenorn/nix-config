@@ -21,13 +21,17 @@ Routes (every response carries `Cache-Control: no-store` and
     POST /api/approve 204, a JSON body, the page approves a brief (below)
     POST /api/reply 204, a JSON body, the page asks a brief for changes (below)
     POST /api/retry-manager 204, a JSON body, the page starts a sprint's manager again (below)
+    POST /api/message 204, a JSON body, the page sends the owner's message to a sprint (below)
     POST /api/brief 200 application/json, a manager sends a sprint's brief (below)
     POST /api/report 200 application/json, a manager sends a sprint's report (below)
+    POST /api/inbox 200 application/json, a manager reads a sprint's unread messages (below)
+    POST /api/message-reply 200 application/json, a manager answers one message (below)
     GET /api/sprint-status?sprint_id=<id> 200 application/json, what became of a brief (below)
     anything else   404
     other methods   405 with `Allow: GET` (`Allow: POST` on `/api/hooks`, `/api/readings`,
                     `/api/looked`, `/api/answer`, `/api/check-answer`, `/api/goal`, `/api/withdraw`,
-                    `/api/approve`, `/api/reply`, `/api/retry-manager`, `/api/brief` and `/api/report`)
+                    `/api/approve`, `/api/reply`, `/api/retry-manager`, `/api/message`, `/api/brief`, `/api/report`,
+                    `/api/inbox` and `/api/message-reply`)
 
 Two kinds of write exist. The hook and reading routes append what the proxies and hooks observe:
 `POST /api/hooks` appends session observations, `POST /api/readings` the capacity kinds
@@ -48,8 +52,8 @@ ignored payload (an unknown event, a missing member) appends nothing. The
 route carries no token: it records observations and answers nothing (ADR-console-004).
 
 A page write (`PAGE_WRITES`, today `POST /api/looked`, `POST /api/answer`, `POST /api/check-answer`,
-`POST /api/goal`, `POST /api/withdraw`, `POST /api/approve`, `POST /api/reply` and
-`POST /api/retry-manager`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
+`POST /api/goal`, `POST /api/withdraw`, `POST /api/approve`, `POST /api/reply`,
+`POST /api/retry-manager` and `POST /api/message`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
 alone and goes through one guard, `_page_write`, whatever its route. After the loopback `Host`
 check and before any body is read, exactly one `Origin` header must equal `http://<Host>` (else
 403 `text/plain` `origin refused`) and exactly one `X-Console-Token` header must equal the
@@ -88,7 +92,11 @@ with the reason; any other exception is `console: approve_failed <Type>: <messag
 empty `204`. `POST /api/retry-manager` (#888) runs the same checks once more with `MAX_RETRY_BYTES`
 (4096) and `sprints.parse_retry`: 400 `bad retry`, `sprints.Refused` is one stderr line `console:
 retry_refused <reason>` and 409 with the reason, any other exception is `console: retry_failed
-<Type>: <message>` and 500 `retry failed`; success is an empty `204`. The token is created once in
+<Type>: <message>` and 500 `retry failed`; success is an empty `204`. `POST /api/message` (#889)
+runs the same checks with `MAX_MESSAGE_BYTES` (16384) and `sprints.parse_message`: 400 `bad
+message`, `sprints.Refused` is one stderr line `console: message_refused <reason>` and 409 with
+the reason, any other exception is `console: message_failed <Type>: <message>` and 500 `message
+failed`; success is an empty `204`. The token is created once in
 `page-token` beside the event log and reaches a client only inside `GET /`, where it replaces
 the slot in the page's `console-token` meta tag.
 
@@ -139,6 +147,31 @@ under the lock, is `{"sprint_id", "decision", "version", "reply"}`: `none`, `app
 for an open sprint (`reply` only with `changes`), `withdrawn` for an id in `_withdrawn` (the
 `sprints.withdrawn_ids` fold of the log, kept beside the sprints), else `Refused(UNKNOWN)`. The
 secret, presented or stored, appears in no stderr line, answer, view or row.
+
+Messages (#889): `send_message(project_id, sprint_id, text)`, under the ingest lock, raises
+`Refused(NOT_OPEN)` unless the sprint is open and belongs to that project, then applies
+`sprints.checked_message`; it appends exactly one `sprint.messaged` row `{"sprint_id", "goal",
+"text"}` with the text exactly as sent, folds and publishes, and returns the row's `seq`, the
+message's id. An approval and a change request need no new code to become messages: the fold makes
+them of the `brief.approved` and `brief.replied` rows. `POST /api/inbox` and `POST
+/api/message-reply` are manager writes dispatched like `/api/brief`, before `PAGE_WRITES`:
+`_checked_length(MAX_INBOX_BYTES)` (4096) or `_checked_length(MAX_MESSAGE_REPLY_BYTES)` (16384),
+a body the parser does not accept is 400 `bad inbox` or `bad message reply`, a
+`sprints.SecretRefused` is `console: inbox_refused <sprint_id> secret refused` or `console:
+message_reply_refused <sprint_id> secret refused` and 403 `secret refused`, any other
+`sprints.Refused` the same prefix with the reason and 409, any other exception `console:
+inbox_failed <Type>: <message>` or `console: message_reply_failed <Type>: <message>` and 500
+`inbox failed` or `message reply failed`. `read_inbox(sprint_id, secret)`, under the lock, is
+`_manager_sprint` (`NOT_OPEN`, then `SecretRefused`), then `sprints.unread`; when that is not
+empty it appends exactly one `sprint.read` row `{"sprint_id", "through": <last id>}` in the same
+locked section and answers 200 `application/json` `{"messages": [...]}` of `sprints.inbox_entry`
+dicts in id order, as `json.dumps(answer, sort_keys=True, separators=(",", ":"))`; a second call
+with nothing new appends nothing and answers `{"messages":[]}`. `answer_message(sprint_id, secret,
+message_id, reply)`, under the lock, is `_manager_sprint`, `Refused(UNKNOWN_MESSAGE)` unless
+`message_id` is one of the sprint's messages, `sprints.checked_reply`, then exactly one
+`sprint.answered` row `{"sprint_id", "message", "reply"}` with the reply exactly as sent; it
+answers 200 `{"at": <row at>}`. Every refusal appends and publishes nothing, and neither the
+secret nor the owner's text appears in a stderr line.
 
 Reports (#890): `POST /api/report` is a manager write like the brief's: no token, the sprint's secret
 in its place. After the loopback `Host` check it runs `_checked_length(MAX_REPORT_BYTES)`, 65536
@@ -364,7 +397,8 @@ from agent_tools.console import (
     answer, capacity, deliveries, digest, inbox, manager, sessions, sprints, write_guard)
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
-    MANAGER_STARTED, MANAGER_WAITING, SPRINT_REPORTED, Event, EventLog, utc_now)
+    MANAGER_STARTED, MANAGER_WAITING, SPRINT_ANSWERED, SPRINT_MESSAGED, SPRINT_READ,
+    SPRINT_REPORTED, Event, EventLog, utc_now)
 from agent_tools.console.view import (
     INBOX_CHANGED, ReadState, derive_view, encode_view, health_change, inbox_changes, inbox_records,
     project_for, project_states, read_states, registry_changes)
@@ -397,16 +431,23 @@ RETRY_PATH = "/api/retry-manager"
 BRIEF_PATH = "/api/brief"
 REPORT_PATH = "/api/report"
 STATUS_PATH = "/api/sprint-status"
+MESSAGE_PATH = "/api/message"
+INBOX_PATH = "/api/inbox"
+MESSAGE_REPLY_PATH = "/api/message-reply"
 CHECK_PATH = "/api/check-answer"
 PAGE_WRITES: frozenset[str] = frozenset({
     LOOKED_PATH, ANSWER_PATH, CHECK_PATH, GOAL_PATH, WITHDRAW_PATH, APPROVE_PATH, REPLY_PATH,
-    RETRY_PATH})
+    RETRY_PATH, MESSAGE_PATH})
 MAX_ANSWER_BYTES = 4096
 MAX_GOAL_BYTES = 16384
 MAX_WITHDRAW_BYTES = 4096
 MAX_BRIEF_BYTES = 32768
 MAX_REPORT_BYTES = 65536
-MANAGER_WRITES: frozenset[str] = frozenset({BRIEF_PATH, REPORT_PATH})
+MANAGER_WRITES: frozenset[str] = frozenset({BRIEF_PATH, REPORT_PATH, INBOX_PATH,
+                                            MESSAGE_REPLY_PATH})
+MAX_MESSAGE_BYTES = 16384
+MAX_INBOX_BYTES = 4096
+MAX_MESSAGE_REPLY_BYTES = 16384
 MAX_APPROVE_BYTES = 4096
 MAX_REPLY_BYTES = 16384
 MAX_RETRY_BYTES = 4096
@@ -544,6 +585,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return self._brief_request()
         if route == REPORT_PATH:
             return self._report_request()
+        if route == INBOX_PATH:
+            return self._inbox_request()
+        if route == MESSAGE_REPLY_PATH:
+            return self._message_reply_request()
         if route in PAGE_WRITES:
             return self._page_write(route)
         if route not in POST_LIMITS:
@@ -705,6 +750,78 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return self._refuse(500, "report failed")
         self._send(200, "application/json", json.dumps({"at": at}, separators=(",", ":")).encode())
 
+    def _inbox_request(self):
+        """The manager's route: the unread messages, read with the sprint's secret."""
+        length = self._checked_length(MAX_INBOX_BYTES)
+        if length is None:
+            return
+        self.close_connection = True
+        try:
+            sprint_id, secret = sprints.parse_inbox_request(self.rfile.read(length))
+        except ValueError:
+            return self._refuse(400, "bad inbox")
+        try:
+            entries = self.server.console.read_inbox(sprint_id, secret)
+        except sprints.SecretRefused:
+            print(f"console: inbox_refused {sprint_id} {sprints.SECRET_REFUSED}", file=sys.stderr)
+            return self._refuse(403, sprints.SECRET_REFUSED)
+        except sprints.Refused as error:
+            print(f"console: inbox_refused {sprint_id} {error}", file=sys.stderr)
+            return self._refuse(409, str(error))
+        except Exception as error:
+            print(f"console: inbox_failed {type(error).__name__}: {error}", file=sys.stderr)
+            return self._refuse(500, "inbox failed")
+        self._send(200, "application/json", json.dumps(
+            {"messages": entries}, sort_keys=True, separators=(",", ":")).encode())
+
+    def _message_reply_request(self):
+        """The manager's route: an answer to one message, sent with the sprint's secret."""
+        length = self._checked_length(MAX_MESSAGE_REPLY_BYTES)
+        if length is None:
+            return
+        self.close_connection = True
+        try:
+            sprint_id, secret, message, reply = sprints.parse_message_reply_request(
+                self.rfile.read(length))
+        except ValueError:
+            return self._refuse(400, "bad message reply")
+        try:
+            at = self.server.console.answer_message(sprint_id, secret, message, reply)
+        except sprints.SecretRefused:
+            print(f"console: message_reply_refused {sprint_id} {sprints.SECRET_REFUSED}",
+                  file=sys.stderr)
+            return self._refuse(403, sprints.SECRET_REFUSED)
+        except sprints.Refused as error:
+            print(f"console: message_reply_refused {sprint_id} {error}", file=sys.stderr)
+            return self._refuse(409, str(error))
+        except Exception as error:
+            print(f"console: message_reply_failed {type(error).__name__}: {error}",
+                  file=sys.stderr)
+            return self._refuse(500, "message reply failed")
+        self._send(200, "application/json", json.dumps({"at": at}, separators=(",", ":")).encode())
+
+    def _message_request(self, console: "ConsoleService") -> bool:
+        """Read and carry out an owner's message; False when it was refused."""
+        body = self._json_body(MAX_MESSAGE_BYTES)
+        if body is None:
+            return False
+        try:
+            parsed = sprints.parse_message(body)
+        except ValueError:
+            self._refuse(400, "bad message")
+            return False
+        try:
+            console.send_message(*parsed)
+        except sprints.Refused as error:
+            print(f"console: message_refused {error}", file=sys.stderr)
+            self._refuse(409, str(error))
+            return False
+        except Exception as error:
+            print(f"console: message_failed {type(error).__name__}: {error}", file=sys.stderr)
+            self._refuse(500, "message failed")
+            return False
+        return True
+
     def _decision_request(self, console: "ConsoleService", route: str) -> bool:
         """Read and carry out an approval or a reply; False when it was refused."""
         name = "approve" if route == APPROVE_PATH else "reply"
@@ -794,6 +911,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         elif route == RETRY_PATH:
             self.close_connection = True
             if not self._retry_request(console):
+                return
+        elif route == MESSAGE_PATH:
+            self.close_connection = True
+            if not self._message_request(console):
                 return
         else:
             if (self.headers.get("Content-Length", "0") != "0"
@@ -1395,6 +1516,42 @@ class ConsoleService:
                 "sprint_id": sprint_id, "version": version, "goal": sprint.goal,
                 "reply": reply})])
             self._apply(appended)
+
+    def send_message(self, project_id: str, sprint_id: str, text: str) -> int:
+        """Append one `sprint.messaged` event with the owner's text exactly as sent; its id."""
+        with self._ingest:
+            sprint = self._sprints.get(sprint_id)
+            if sprint is None or sprint.project_id != project_id:
+                raise sprints.Refused(sprints.NOT_OPEN)
+            sprints.checked_message(text)
+            appended = self.log.append([(SPRINT_MESSAGED, project_id, {
+                "sprint_id": sprint_id, "goal": sprint.goal, "text": text})])
+            self._apply(appended)
+            return appended[-1].seq
+
+    def read_inbox(self, sprint_id: str, secret: str) -> list[dict]:
+        """The unread messages in id order; the same locked section records them as read."""
+        with self._ingest:
+            sprint = self._manager_sprint(sprint_id, secret)
+            unread = sprints.unread(sprint)
+            if not unread:
+                return []
+            appended = self.log.append([(SPRINT_READ, sprint.project_id, {
+                "sprint_id": sprint_id, "through": unread[-1].message_id})])
+            self._apply(appended)
+            return [sprints.inbox_entry(message) for message in unread]
+
+    def answer_message(self, sprint_id: str, secret: str, message_id: int, reply: str) -> str:
+        """Append one `sprint.answered` event under a message of the sprint; its at."""
+        with self._ingest:
+            sprint = self._manager_sprint(sprint_id, secret)
+            if all(message.message_id != message_id for message in sprint.messages):
+                raise sprints.Refused(sprints.UNKNOWN_MESSAGE)
+            sprints.checked_reply(reply)
+            appended = self.log.append([(SPRINT_ANSWERED, sprint.project_id, {
+                "sprint_id": sprint_id, "message": message_id, "reply": reply})])
+            self._apply(appended)
+            return appended[-1].at
 
     def sprint_status(self, sprint_id: str) -> dict:
         """What became of a sprint's brief: its decision, version and the reply asking for changes."""
