@@ -420,6 +420,16 @@ class DocsTreeTest(unittest.TestCase):
             "Nothing is typed",
             self.doc("docs/areas/console/adr/002-the-desk-page-design-rules.md"))
 
+    def test_console_adr_017_records_how_a_sprint_ends(self):
+        path = "docs/areas/console/adr/017-a-sprint-ends-with-a-closing-report-or-the-owners-stop.md"
+        first = (REPO_ROOT / path).read_text().splitlines()[0]
+        self.assertEqual(
+            first, "# ADR-console-017 — A sprint ends with a closing report or the owner's stop")
+        adr = self.doc(path)
+        for needle in ("POST /api/close", "POST /api/stop", "ADR-console-014", "ADR-console-016",
+                       "#834", "#928", "ten minutes", "schema 7", "manager.stopped"):
+            self.assertIn(needle, adr)
+
     def test_the_console_goal_decision_is_recorded(self):
         path = "docs/areas/console/adr/011-a-goal-stated-on-the-page-becomes-a-sprint.md"
         first = (REPO_ROOT / path).read_text().splitlines()[0]

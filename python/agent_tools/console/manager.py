@@ -44,8 +44,9 @@ not Linux (`UNAVAILABLE_TEXT`), `the project root <root> is not a directory`, `c
 manager's settings: <reason>`, `<program> is not installed`, `the launch did not return within
 <n> s`, the last non-empty stderr line of a launch that failed, or `the launch exited <n>`.
 
-Stopping. A withdrawal only appends `goal.withdrawn`: it does not end the manager's background
-session, so a check that states a real goal stops its test manager first (ADR-console-016).
+Stopping. A withdrawal appends `goal.withdrawn` and the console then stops the manager's background
+session (ADR-console-017), so a check that states a real goal still stops its test manager first and
+the withdrawal's own stop finds nothing listed (ADR-console-016).
 `stop_session(session_id, profile)` runs `claude-account run stop <short id>` under the session's own
 profile (`client_environment`), within `STOP_TIMEOUT` seconds. The short id is the first eight
 characters of the session id (`short_id`): the stop command accepts only the id the session listing

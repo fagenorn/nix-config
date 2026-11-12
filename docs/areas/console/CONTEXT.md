@@ -54,11 +54,11 @@ The console's one fixed sentence telling a manager to read its inbox, by relay t
 _Avoid_: ping, notification
 
 **Report**:
-The manager's fixed-shape account after each batch and on any change of state: a status line, each issue's stage or outcome, the inbox items it raised, the next step and the milestone (ADR-console-014).
+The manager's fixed-shape account after each batch and on any change of state: a status line, each issue's stage or outcome, the inbox items it raised, the next step and the milestone; the closing report ends the sprint (ADR-console-014, ADR-console-017).
 _Avoid_: update, log
 
 **Sprint**:
-One goal, later its issues and its outcome, in one project (#834), shown under its project as one line with its state (drafting the brief, starting, on track, waiting on you, quiet and may be stuck, closing or done), its progress and its manager's status until it is withdrawn; its manager session is listed inside it, and a manager that failed to start or is missing offers a retry (ADR-console-011, ADR-console-013, ADR-console-014, ADR-console-015).
+One goal, later its issues and its outcome, in one project (#834), shown under its project as one line with its state (drafting the brief, starting, on track, waiting on you, quiet and may be stuck, closing, done, stopping or stopped by you), its progress and its manager's status; its manager session is listed inside it, and a manager that failed to start or is missing offers a retry. An ended sprint folds into its project's Finished sprints a day after it ends (ADR-console-011, ADR-console-013, ADR-console-014, ADR-console-015, ADR-console-017).
 _Avoid_: job, run
 
 **Session**:

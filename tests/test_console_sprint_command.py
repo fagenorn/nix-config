@@ -474,6 +474,18 @@ class ManagerContractTest(unittest.TestCase):
                 self.assertIn(needle, after)
 
 
+    def test_the_contract_says_how_a_sprint_ends(self):
+        text = CONTRACT.read_text(encoding="utf-8")
+        after = text.partition("## Ending")[2]
+        self.assertTrue(after)
+        for needle in ("`sprint close --closing-file -`", '"summary"', '"differently"',
+                       '"landed"', '"held"', '"dropped"', "mid-merge", "start nothing new",
+                       "`stop`", "an issue of this sprint is neither landed nor dropped",
+                       "no tracker action"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, after)
+
+
 class CommandContractTest(unittest.TestCase):
     def test_the_command_table_names_the_module_and_its_docstring_states_the_contract(self):
         table = (REPO_ROOT / "lib/agent-tools.nix").read_text()
