@@ -24,15 +24,19 @@ from agent_tools.console import event_log
 from agent_tools.console.event_log import Event
 from agent_tools.console.sessions import ENDED, SessionState
 from agent_tools.console.capacity import EMPTY
+from agent_tools.console.manager import session_name
 from agent_tools.console.sprints import (
     APPROVED,
     CHANGES,
     NONE,
     Brief,
+    Closing,
     Manager,
     Observed,
+    PendingStop,
     Report,
     SprintState,
+    first_line,
     sprint_states,
 )
 from agent_tools.console.view import (
@@ -1163,6 +1167,143 @@ class SprintReportViewTest(unittest.TestCase):
                          {"landed": 1, "in_delivery": 1, "queued": 0, "held": 1, "total": 3})
 
 
+DAY = 24 * 60 * MIN
+SUMMARY = "Importer resumes after a crash\nwith detail"
+
+
+def closed(state, at_ms, issues, summary=SUMMARY):
+    return dataclasses.replace(state, closing=Closing(
+        iso(at_ms), summary.strip(), first_line(summary), tuple(issues), "cut smaller slices"))
+
+
+def stopped(state, stop_ms, stopped_ms=None):
+    return dataclasses.replace(
+        state, stop_at=iso(stop_ms),
+        stopped_at=None if stopped_ms is None else iso(stopped_ms))
+
+
+class SprintEndViewTest(unittest.TestCase):
+    def test_a_closed_sprint_reads_done_with_what_landed(self):
+        it = reported(started(A), R, issues=((12, "building"), (13, "queued"), (14, "held")))
+        C = R + 5 * MIN
+        it = closed(it, C, ((12, "landed"), (13, "dropped"), (14, "held")))
+        shown = entry(line(it, C + MIN))
+        self.assertEqual((shown["state"], shown["state_text"]), ("done", "done"))
+        self.assertEqual(shown["closing"], {
+            "at": iso(C), "summary": SUMMARY, "first_line": "Importer resumes after a crash",
+            "differently": "cut smaller slices", "landed": [12], "held": [14], "dropped": [13],
+            "counts_text": "1 landed, 1 held for verification, 1 dropped"})
+        self.assertIs(shown["stoppable"], False)
+        self.assertEqual(shown["ended_at"], iso(C))
+        self.assertIsNone(shown["stop_text"])
+
+    def test_a_done_sprint_folds_into_finished_sprints_after_24_hours(self):
+        C = R + 5 * MIN
+        it = closed(reported(started(A), R), C, ((12, "landed"),))
+        before = line(it, C + DAY - 1)
+        self.assertEqual([s["sprint_id"] for s in before["entries"][0]["sprints"]], [A])
+        self.assertIsNone(before["entries"][0]["finished_sprints"])
+        after = line(it, C + DAY)
+        project = after["entries"][0]
+        self.assertEqual(project["sprints"], [])
+        self.assertEqual(project["finished_sprints"]["label"], "Finished sprints")
+        self.assertEqual(project["finished_sprints"]["count"], 1)
+        self.assertEqual([s["sprint_id"] for s in project["finished_sprints"]["sprints"]], [A])
+        self.assertIs(project["quiet"], True)
+        unclocked = line(it, None)["entries"][0]
+        self.assertEqual([s["sprint_id"] for s in unclocked["sprints"]], [A])
+        self.assertIsNone(unclocked["finished_sprints"])
+
+    def test_a_finished_sprint_keeps_its_manager_session_and_drops_its_brief(self):
+        C = R + 5 * MIN
+        manager = session("m1", "idle", name=session_name("p00", A))
+        it = closed(reported(started(A), R), C, ((12, "landed"),))
+        project = line(it, C + DAY, sessions=[manager])["entries"][0]
+        finished = project["finished_sprints"]["sprints"][0]
+        self.assertEqual([s["session_id"] for s in finished["sessions"]], ["m1"])
+        self.assertEqual(project["outside_sprints"]["sessions"], [])
+        self.assertIs(project["quiet"], True)
+        waiting = stopped(briefed(started(A)), C, C + MIN)
+        self.assertEqual(len(line(waiting, C + MIN + DAY - 1)["inbox"]["open"]), 1)
+        gone = line(waiting, C + MIN + DAY)
+        self.assertEqual(gone["inbox"]["open"], [])
+        self.assertEqual(gone["statement"]["inbox_items"], 0)
+
+    def test_a_stopped_sprint_reads_stopped_by_you_and_keeps_its_report(self):
+        S = R + 2 * MIN
+        plain = stopped(reported(started(A), R), S, S + MIN)
+        shown = entry(line(plain, S + 2 * MIN))
+        self.assertEqual((shown["state"], shown["state_text"]), ("stopped", "stopped by you"))
+        self.assertIsNone(shown["closing"])
+        self.assertEqual(shown["ended_at"], iso(S + MIN))
+        with_closing = closed(plain, S + MIN, ((12, "landed"),))
+        shown = entry(line(with_closing, S + 2 * MIN))
+        self.assertEqual((shown["state"], shown["state_text"]), ("stopped", "stopped by you"))
+        self.assertEqual(shown["closing"]["first_line"], "Importer resumes after a crash")
+        stopping = stopped(reported(started(A), R), S)
+        shown = entry(line(stopping, S + 2 * MIN))
+        self.assertEqual((shown["state"], shown["state_text"]), ("stopping", "stopping"))
+        self.assertIsNone(shown["stop_text"])
+        self.assertIsNone(shown["ended_at"])
+        failed = dataclasses.replace(stopping, stop_reason="boom")
+        shown = entry(line(failed, S + 2 * MIN))
+        self.assertEqual(shown["stop_text"], "could not stop the manager: boom; trying again")
+        done = dataclasses.replace(plain, stop_reason="boom")
+        self.assertIsNone(entry(line(done, S + 2 * MIN))["stop_text"])
+        self.assertEqual(entry(line(plain, S + MIN + DAY - 1))["state"], "stopped")
+        folded = line(plain, S + MIN + DAY)["entries"][0]
+        self.assertEqual(folded["sprints"], [])
+        self.assertEqual(folded["finished_sprints"]["sprints"][0]["state"], "stopped")
+
+    def test_a_sprint_done_by_its_report_folds_too(self):
+        done = reported(started(A), R, phase="done")
+        shown = entry(line(done, R + MIN))
+        self.assertEqual((shown["state"], shown["ended_at"], shown["closing"]),
+                         ("done", iso(R), None))
+        self.assertEqual([s["sprint_id"] for s in line(done, R + DAY - 1)["entries"][0]["sprints"]],
+                         [A])
+        folded = line(done, R + DAY)["entries"][0]
+        self.assertEqual(folded["sprints"], [])
+        self.assertEqual([s["sprint_id"] for s in folded["finished_sprints"]["sprints"]], [A])
+        R2 = R + 10 * MIN
+        again = reported(done, R2, phase="running")
+        shown = entry(line(again, R2 + 2 * DAY))
+        self.assertEqual(shown["ended_at"], None)
+        later = closed(done, R + 3 * MIN, ((12, "landed"),))
+        self.assertEqual(entry(line(later, R + 4 * MIN))["ended_at"], iso(R + 3 * MIN))
+
+    def test_stop_is_offered_only_before_a_sprint_ends_or_stops(self):
+        C = R + 5 * MIN
+        cases = {
+            "drafting": (briefed(sprint(A)), True),
+            "on track": (reported(started(A), R), True),
+            "closed": (closed(reported(started(A), R), C, ((12, "landed"),)), False),
+            "done by report": (reported(started(A), R, phase="done"), False),
+            "stopping": (stopped(reported(started(A), R), C), False),
+            "stopped": (stopped(reported(started(A), R), C, C + MIN), False),
+        }
+        for name, (it, expected) in cases.items():
+            with self.subTest(name):
+                self.assertIs(entry(line(it, C + 2 * MIN))["stoppable"], expected)
+
+    def test_unstopped_withdrawn_managers_are_listed(self):
+        goal = "make the importer resumable"
+        pending = {
+            "b" * 16: PendingStop("b" * 16, "p00", goal, T0, "boom", T0),
+            "a" * 16: PendingStop("a" * 16, "p00", goal, T0, "late", iso(T0_MS + MIN)),
+            "c" * 16: PendingStop("c" * 16, "p00", goal, T0),
+            "d" * 16: PendingStop("d" * 16, "p09", goal, T0, "boom", T0),
+            "e" * 16: PendingStop("e" * 16, "p00", goal, T0, "zzz", T0)}
+        view = derive_view([state("p00", 1)], pending=pending)
+        self.assertEqual(view["unstopped"], [
+            {"project_id": "p00", "sprint_id": sid, "goal": goal, "failed_at": at,
+             "text": f"The manager of a withdrawn goal could not be stopped: {reason}; "
+                     "trying again"}
+            for sid, reason, at in (("b" * 16, "boom", T0), ("e" * 16, "zzz", T0),
+                                    ("a" * 16, "late", iso(T0_MS + MIN)))])
+        self.assertEqual(derive_view([state("p00", 1)])["unstopped"], [])
+
+
 class SprintViewTest(unittest.TestCase):
     def test_a_sprint_shows_its_goal_state_and_age(self):
         view = derive_view([state("p00", 1)], sprints={"a" * 16: sprint("a" * 16)},
@@ -1174,7 +1315,8 @@ class SprintViewTest(unittest.TestCase):
             "manager_state": "none", "manager_until": None, "retry": True,
             "progress": None, "progress_text": None, "status": None, "status_at": None,
             "next": None, "milestone": None, "tracker_url": None, "issues": [], "waiting": 0,
-            "sessions": [], "messages": [], "reach_text": None}])
+            "sessions": [], "messages": [], "reach_text": None,
+            "stoppable": True, "ended_at": None, "stop_text": None, "closing": None}])
 
     def test_a_sprint_older_than_two_minutes_says_no_manager_has_picked_it_up(self):
         for now_ms, expected in ((None, None), (T0_MS, None), (T0_MS + 120_000, None),

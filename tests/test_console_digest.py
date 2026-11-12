@@ -10,10 +10,11 @@ from pathlib import Path
 from agent_tools.claims import forge_owner_action as foa
 from agent_tools.console.digest import (
     BRIEF_APPROVED_MOMENT, BRIEF_SENT_MOMENT, EARLIER_MAX, FIRST_VISIT, LOOKED, SHOWN,
-    SPRINT_STATE_MOMENT, SPRINT_WITHDRAWN, Moment, digest, keep, last_looked, moments)
+    SPRINT_DONE_MOMENT, SPRINT_STATE_MOMENT, SPRINT_WITHDRAWN, Moment, digest, keep, last_looked,
+    moments)
 from agent_tools.console.event_log import (
-    BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, SPRINT_REPORTED,
-    Event)
+    BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, SPRINT_CLOSED,
+    SPRINT_REPORTED, SPRINT_STOP_REQUESTED, Event)
 from agent_tools.console.sessions import SessionState
 from agent_tools.console.sprints import sprint_states
 from agent_tools.console.view import InboxRecord
@@ -208,6 +209,43 @@ class DigestTest(unittest.TestCase):
             moment(4, "on track"), moment(6, "closing"), moment(8, "done")])
         self.assertEqual(said(moments(rows[4:], {}, {}, sprints=sprint_states(rows[:4]))), [
             moment(6, "closing"), moment(8, "done")])
+
+    def test_a_closing_report_is_a_moment_with_its_first_line(self):
+        goal = "make the importer resumable"
+        brief = {"done": "d", "excluded": ["x"], "slices": ["a"], "risks": ["r"], "asks": ["q"]}
+        report = {"status": "one slice is building", "phase": "running",
+                  "milestone": "Importer resumes",
+                  "tracker_url": "https://github.com/owner/p00/milestone/3",
+                  "issues": [{"issue": 12, "stage": "building"}], "inbox": [],
+                  "next": "start the resume slice"}
+
+        def closing(seq, sid, issue, summary):
+            return Event(seq, at(seq), SPRINT_CLOSED, "owner/p00", {
+                "sprint_id": sid, "goal": goal, "closing": {
+                    "summary": summary, "issues": [{"issue": issue, "stage": "landed"}],
+                    "differently": "cut smaller slices"}})
+
+        def opened(seq, sid):
+            row = {"sprint_id": sid, "goal": goal}
+            return [Event(seq, at(seq), GOAL_STATED, "owner/p00", row),
+                    Event(seq + 1, at(seq + 1), BRIEF_SENT, "owner/p00",
+                          {**row, "version": 1, "brief": brief}),
+                    Event(seq + 2, at(seq + 2), BRIEF_APPROVED, "owner/p00",
+                          {**row, "version": 1}),
+                    Event(seq + 3, at(seq + 3), SPRINT_REPORTED, "owner/p00",
+                          {**row, "report": report})]
+
+        a, b, c = "a" * 16, "b" * 16, "c" * 16
+        rows = (opened(1, a) + opened(5, b) + opened(9, c) + [
+            closing(13, a, 12, "Importer resumes after a crash\nmore"),
+            closing(14, a, 12, "Second closing"),
+            closing(15, c, 13, "Does not cover the reported issue"),
+            Event(16, at(16), SPRINT_STOP_REQUESTED, "owner/p00", {"sprint_id": b, "goal": goal}),
+            closing(17, b, 12, "Stopped early")])
+        found = [m for m in moments(rows, {}, {}) if m.kind == SPRINT_DONE_MOMENT]
+        self.assertEqual(found, [Moment(
+            13, at(13), SPRINT_DONE_MOMENT,
+            "The sprint for owner/p00 is done: Importer resumes after a crash")])
 
     def test_a_sprint_sentence_follows_the_shown_state_not_the_phase(self):
         sid, goal = "a" * 16, "make the importer resumable"
