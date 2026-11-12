@@ -218,6 +218,7 @@ agent-workflow-tests *args:
     tests/test_console_sprint_command.py \
     tests/test_console_manager.py \
     tests/test_console_manager_service.py \
+    tests/test_console_stops.py \
     tests/test_console_nudge.py \
     tests/test_console_deliveries.py \
     tests/test_console_units.py \

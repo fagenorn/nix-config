@@ -55,6 +55,8 @@ within <n> s`, the last non-empty stderr line, or `the stop exited <n>`. `stop_l
 registry, stop)` reads `registry()` fresh and calls `stop(session_id, profile)` for each listed
 session whose name is in `names` (profile `default` when the record has none), attempts every one
 even after a failure, then raises the first `StopFailed`; a name not listed needs no stop.
+`stopper_for(platform)` is `stop_session` where `supported(platform)`, else None: the owner's stop
+of a sprint (#892) uses it through the console service.
 """
 
 from __future__ import annotations
@@ -184,6 +186,10 @@ def launch_command(launch: Launch, platform: str) -> list[str] | None:
             f"--description=agent manager {launch.session_name}", "--",
             "claude-account", "run", "--bg", "--name", launch.session_name,
             "--settings", str(launch.settings), launch.prompt]
+
+
+def stopper_for(platform: str) -> Callable[[str, str], None] | None:
+    return stop_session if supported(platform) else None
 
 
 def launcher_for(platform: str) -> Callable[[Launch], None] | None:

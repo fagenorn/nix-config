@@ -130,7 +130,7 @@ class WriteRouteTest(Case):
         self.assertEqual(service.PAGE_WRITES,
                          {"/api/looked", "/api/answer", "/api/check-answer", "/api/goal",
                           "/api/withdraw", "/api/approve", "/api/reply",
-                          "/api/retry-manager", "/api/message"})
+                          "/api/retry-manager", "/api/message", "/api/stop"})
         for path in service.PAGE_WRITES:
             with self.subTest(path=path):
                 status, _, body = support.post_page(
