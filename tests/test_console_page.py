@@ -141,7 +141,8 @@ class PageTest(unittest.TestCase):
         )
         self.assertEqual(
             {p for _, p in literals},
-            {"/api/stream", "/api/looked", "/api/answer", "/api/goal", "/api/withdraw"},
+            {"/api/stream", "/api/looked", "/api/answer", "/api/goal", "/api/withdraw",
+             "/api/approve", "/api/reply"},
         )
         self.assertEqual(
             len(re.findall(r"\b(?:fetch|EventSource)\(", self.text)), len(literals)
@@ -150,14 +151,14 @@ class PageTest(unittest.TestCase):
     def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
         # A separate snapshot request can answer after a newer streamed frame
         # and render over it; the stream's first frame is already the snapshot.
-        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 4)
+        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 6)
         self.assertIsNotNone(
             re.search(r'fetch\("/api/looked",\s*\{\s*method:\s*"POST"', self.text)
         )
         self.assertIsNotNone(
             re.search(r'fetch\("/api/answer",\s*\{\s*method:\s*"POST"', self.text)
         )
-        for route in ("/api/goal", "/api/withdraw"):
+        for route in ("/api/goal", "/api/withdraw", "/api/approve", "/api/reply"):
             self.assertIsNotNone(
                 re.search(rf'fetch\("{route}",\s*\{{\s*method:\s*"POST"', self.text)
             )
@@ -322,12 +323,6 @@ class PageTest(unittest.TestCase):
         self.assertNotIn("Answered, waiting for the agent", result["inbox"]["text"])
         h1 = next(n for n in walk(result["statement"]) if n["tag"] == "h1")
         self.assertEqual(h1["cls"], "")
-
-    def test_no_reply_in_the_owners_own_words_is_offered(self) -> None:
-        for needle in ("<textarea", "contenteditable", 'createElement("input")',
-                       'createElement("textarea")'):
-            with self.subTest(needle=needle):
-                self.assertNotIn(needle, self.text)
 
     def test_the_tracker_link_is_the_only_href(self) -> None:
         self.assertEqual(len(re.findall(r"\.href\s*=", self.text)), 1)
@@ -1205,3 +1200,216 @@ class PageInFlightTest(unittest.TestCase):
             [full(n) for n in nodes(line) if has_class(n, "fail")],
             ["Could not withdraw: this sprint is not open"],
         )
+
+
+BRIEF = {
+    "type": "inbox_item", "reason": "brief", "key": "brief/" + "a" * 16,
+    "project_id": "owner/p01", "sprint_id": "a" * 16, "goal": GOAL_TEXT, "version": 2,
+    "brief": {
+        "done": "the importer resumes", "excluded": ["no new formats"],
+        "slices": ["checkpoint", "resume"], "risks": ["partial writes"],
+        "asks": ["which store?"],
+    },
+    "answered": False, "waiting_since": stamp(timedelta(minutes=3)),
+}
+BRIEF_V1 = {**BRIEF, "version": 1, "waiting_since": stamp(timedelta(minutes=9))}
+BRIEF_B = {
+    **BRIEF, "key": "brief/" + "b" * 16, "sprint_id": "b" * 16, "version": 1,
+    "waiting_since": stamp(timedelta(minutes=8)),
+}
+APPROVING_TEXT = "Approving in five seconds."
+APPROVED_TEXT = "Approved, the sprint is starting"
+REPLIED_TEXT = "Reply sent, waiting for a new brief"
+LABELS = ("What done looks like", "Excluded", "Slices", "Risks", "What I expect to ask")
+
+
+def approvals(snap: dict) -> list:
+    return [p for p in snap["posts"] if p["url"] == "/api/approve"]
+
+
+def replies(snap: dict) -> list:
+    return [p for p in snap["posts"] if p["url"] == "/api/reply"]
+
+
+def brief_cards(snap: dict) -> list:
+    return [n for n in nodes(snap["inbox"]) if has_class(n, "brief")]
+
+
+def fails(snap: dict) -> list:
+    return [full(n) for n in nodes(snap["inbox"]) if has_class(n, "fail")]
+
+
+class PageBriefTest(unittest.TestCase):
+    def test_a_brief_opens_in_place_with_its_goal_above_and_its_version(self) -> None:
+        (snap,) = render([
+            START, {"frame": frame([BRIEF, ANSWERABLE])}, {"snapshot": True},
+        ])
+        first = snap["inbox"]["children"][0]
+        self.assertEqual(first["tag"], "article")
+        self.assertTrue(has_class(first, "brief"))
+        words = full(first)
+        self.assertIn("owner/p01 brief, version 2", words)
+        at = 0
+        for needle in (GOAL_TEXT, LABELS[0], "the importer resumes", LABELS[1], "no new formats",
+                       LABELS[2], "checkpoint", "resume", LABELS[3], "partial writes",
+                       LABELS[4], "which store?"):
+            found = words.find(needle, at)
+            self.assertGreaterEqual(found, 0, needle)
+            at = found + len(needle)
+        self.assertIn("Which host?", full(snap["inbox"]))
+
+    def test_enter_approves_after_five_seconds(self) -> None:
+        early, late = render([
+            START, {"frame": frame([BRIEF, ANSWERABLE])}, {"key": "Enter"}, {"clock": 4999},
+            {"snapshot": True}, {"clock": 5000}, {"snapshot": True},
+        ])
+        self.assertEqual(approvals(early), [])
+        self.assertIn(APPROVING_TEXT, full(early["inbox"]))
+        (post,) = approvals(late)
+        self.assertEqual(post["headers"], GOAL_HEADERS)
+        self.assertEqual(posted(post), {
+            "project_id": "owner/p01", "sprint_id": "a" * 16, "version": 2,
+        })
+        self.assertIn(APPROVED_TEXT, full(late["inbox"]))
+        self.assertEqual(answers(late), [])
+
+    def test_escape_or_undo_cancels_an_approval(self) -> None:
+        for cancel in ({"key": "Escape"}, {"click": "undo"}):
+            with self.subTest(cancel=cancel):
+                (snap,) = render([
+                    START, {"frame": frame([BRIEF])}, {"key": "Enter"}, {"clock": 3000},
+                    cancel, {"clock": 20000}, {"snapshot": True},
+                ])
+                self.assertEqual(approvals(snap), [])
+
+    def test_a_refused_approval_says_why_and_stays_approvable(self) -> None:
+        refused, again = render([
+            START, {"frame": frame([BRIEF])},
+            {"respond": {"status": 409, "text": "a newer brief replaced this one\n"}},
+            {"key": "Enter"}, {"clock": 5000}, {"snapshot": True},
+            {"key": "Enter"}, {"clock": 10000}, {"snapshot": True},
+        ])
+        self.assertEqual(fails(refused), ["Could not send: a newer brief replaced this one"])
+        self.assertEqual(len(approvals(refused)), 1)
+        self.assertEqual(len(approvals(again)), 2)
+
+    def test_a_newer_brief_during_the_undo_cancels_the_approval(self) -> None:
+        mid, later, last = render([
+            START, {"frame": frame([BRIEF_V1])}, {"key": "Enter"}, {"clock": 2000},
+            {"frame": frame([BRIEF])}, {"clock": 5000}, {"snapshot": True},
+            {"clock": 20000}, {"snapshot": True},
+            {"key": "Enter"}, {"clock": 25000}, {"snapshot": True},
+        ])
+        note = "A newer brief replaced version 1; nothing was approved."
+        for snap in (mid, later):
+            self.assertEqual(approvals(snap), [])
+            words = full(snap["inbox"])
+            self.assertIn("owner/p01 brief, version 2", words)
+            self.assertIn(note, words)
+            self.assertEqual(count(snap, "approve"), 1)
+        (post,) = approvals(last)
+        self.assertEqual(posted(post), {
+            "project_id": "owner/p01", "sprint_id": "a" * 16, "version": 2,
+        })
+        self.assertNotIn(note, full(last["inbox"]))
+
+    def test_a_response_for_an_older_brief_never_marks_the_newer_one(self) -> None:
+        for release in ({"status": 409, "text": "a newer brief replaced this one\n"},
+                        {"status": 204}):
+            with self.subTest(approve=release["status"]):
+                held, done = render([
+                    START, {"frame": frame([BRIEF_V1])}, {"key": "Enter"}, {"hold": True},
+                    {"clock": 5000}, {"frame": frame([BRIEF])}, {"release": release},
+                    {"snapshot": True}, {"key": "Enter"}, {"clock": 10000}, {"snapshot": True},
+                ])
+                (post,) = approvals(held)
+                self.assertEqual(posted(post)["version"], 1)
+                words = full(held["inbox"])
+                for text in ("Could not send", APPROVED_TEXT, "Approving"):
+                    self.assertNotIn(text, words)
+                self.assertEqual(count(held, "approve"), 1)
+                self.assertEqual([posted(p)["version"] for p in approvals(done)], [1, 2])
+        (snap,) = render([
+            START, {"frame": frame([BRIEF_V1])},
+            {"input": {"cls": "reply-text", "value": "redo"}}, {"hold": True},
+            {"click": "reply-send"}, {"frame": frame([BRIEF])},
+            {"release": {"status": 204}}, {"snapshot": True},
+        ])
+        (post,) = replies(snap)
+        self.assertEqual(posted(post)["version"], 1)
+        self.assertNotIn(REPLIED_TEXT, full(snap["inbox"]))
+
+    def test_a_reply_posts_the_owners_exact_words(self) -> None:
+        (snap,) = render([
+            START, {"frame": frame([BRIEF])},
+            {"input": {"cls": "reply-text", "value": "Drop slice 2.\nKeep the rest. "}},
+            {"click": "reply-send"}, {"snapshot": True},
+        ])
+        (post,) = replies(snap)
+        self.assertEqual(post["headers"], GOAL_HEADERS)
+        self.assertEqual(posted(post), {
+            "project_id": "owner/p01", "sprint_id": "a" * 16, "version": 2,
+            "reply": "Drop slice 2.\nKeep the rest. ",
+        })
+        self.assertIn(REPLIED_TEXT, full(snap["inbox"]))
+
+    def test_an_empty_reply_sends_nothing_and_says_why(self) -> None:
+        (snap,) = render([
+            START, {"frame": frame([BRIEF])},
+            {"input": {"cls": "reply-text", "value": "  \n"}}, {"click": "reply-send"},
+            {"snapshot": True},
+        ])
+        self.assertEqual(replies(snap), [])
+        self.assertIn("Could not send: write the reply first", fails(snap))
+
+    def test_a_typed_reply_keeps_its_focus_across_frames(self) -> None:
+        before, after = render([
+            START, {"frame": frame([BRIEF])}, {"focus_on": "reply-text"},
+            {"input": {"cls": "reply-text", "value": "keep slice 1"}}, {"snapshot": True},
+            {"frame": frame([BRIEF])}, {"frame": frame([BRIEF, ANSWERABLE])},
+            {"frame": frame([{**BRIEF, "version": 3}])}, {"snapshot": True},
+        ])
+        for snap in (before, after):
+            self.assertEqual(snap["active"], "reply-text")
+            self.assertEqual(snap["field"], {
+                "cls": "reply-text", "value": "keep slice 1", "start": 12, "end": 12,
+            })
+        self.assertEqual(after["focus_count"], before["focus_count"])
+
+    def test_a_reply_field_keeps_focus_and_selection_when_its_card_moves(self) -> None:
+        moved = {**BRIEF_B, "version": 2, "waiting_since": stamp(timedelta(minutes=1))}
+        (snap,) = render([
+            START, {"frame": frame([BRIEF_B, BRIEF])}, {"focus_on": "reply-text"},
+            {"input": {"cls": "reply-text", "value": "abcdef"}},
+            {"select": {"cls": "reply-text", "start": 2, "end": 4}},
+            {"frame": frame([BRIEF, moved])}, {"snapshot": True},
+        ])
+        self.assertEqual(snap["active"], "reply-text")
+        self.assertEqual(snap["field"], {
+            "cls": "reply-text", "value": "abcdef", "start": 2, "end": 4,
+        })
+        first, second = brief_cards(snap)
+        self.assertIn("owner/p01 brief, version 2", full(first))
+        self.assertIn("owner/p01 brief, version 2", full(second))
+        self.assertEqual(
+            [n["value"] for n in nodes(second) if has_class(n, "reply-text")], ["abcdef"]
+        )
+        self.assertNotIn(
+            "abcdef", [n["value"] for n in nodes(first) if has_class(n, "reply-text")]
+        )
+
+    def test_enter_in_the_reply_field_does_not_approve(self) -> None:
+        (snap,) = render([
+            START, {"frame": frame([BRIEF])}, {"key": "Enter", "target": "TEXTAREA"},
+            {"clock": 20000}, {"snapshot": True},
+        ])
+        self.assertEqual(approvals(snap), [])
+
+    def test_only_a_brief_offers_a_reply_field(self) -> None:
+        plain, brief = render([
+            START, {"frame": frame([ANSWERABLE])}, {"snapshot": True},
+            {"frame": frame([BRIEF])}, {"snapshot": True},
+        ])
+        self.assertEqual([n for n in nodes(plain["inbox"]) if n["tag"] == "textarea"], [])
+        (field,) = [n for n in nodes(brief["inbox"]) if n["tag"] == "textarea"]
+        self.assertEqual(field["cls"], "reply-text")

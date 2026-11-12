@@ -15,7 +15,15 @@
 // .value, then its input listeners run with {type: "input", target}; none
 // throws) and {focus_on: "<class>"} (calls .focus() on the first attached
 // element with that class; none throws; {focus: true} stays the window's
-// focus). Elem.focus() sets state.active and counts in state.focusCount; a
+// focus). {select: {cls, start, end}} sets the selection of the first attached
+// element with that class (none throws); {input} also puts the caret at the end
+// of the value. Elem.focus() sets state.active and counts in state.focusCount;
+// removing a node (replaceChildren dropping it, appendChild moving it, the
+// textContent setter, Elem.remove()) clears state.active when it is that node
+// or inside its subtree, as a browser blurs a removed element, and
+// document.activeElement is state.active only while attached. A snapshot adds
+// field: {cls, value, start, end} of the attached active element when it has a
+// value, else null. A
 // key step records in state.keyPrevented whether its event had preventDefault
 // called (null before any key step). The fake setTimeout/clearTimeout fire
 // when a clock step reaches their due time. Each step settles pending
@@ -34,6 +42,15 @@ class Text {
   }
 }
 
+function loseFocus(removed) {
+  for (let n = state.active; n; n = n.parentNode) {
+    if (n === removed) {
+      state.active = null;
+      return;
+    }
+  }
+}
+
 class Elem {
   constructor(tag) {
     this.tagName = tag.toUpperCase();
@@ -44,6 +61,18 @@ class Elem {
     this.listeners = {};
     this.open = false;
     this.children = [];
+    this.parentNode = null;
+    this.selectionStart = 0;
+    this.selectionEnd = 0;
+  }
+  setSelectionRange(start, end) {
+    this.selectionStart = start;
+    this.selectionEnd = end;
+  }
+  remove() {
+    if (!this.parentNode) return;
+    loseFocus(this);
+    this.parentNode.children = this.parentNode.children.filter((c) => c !== this);
     this.parentNode = null;
   }
   focus() {
@@ -61,6 +90,7 @@ class Elem {
   }
   _adopt(node) {
     if (node.parentNode) {
+      loseFocus(node);
       node.parentNode.children = node.parentNode.children.filter((c) => c !== node);
     }
     node.parentNode = this;
@@ -71,7 +101,10 @@ class Elem {
     return node;
   }
   replaceChildren(...nodes) {
-    for (const old of this.children) old.parentNode = null;
+    for (const old of this.children) {
+      loseFocus(old);
+      old.parentNode = null;
+    }
     this.children = [];
     for (const node of nodes) this.appendChild(node);
   }
@@ -245,6 +278,9 @@ const settle = async () => {
 const document = {
   addEventListener: listen("document"),
   hasFocus: () => state.focused,
+  get activeElement() {
+    return state.active && attached(root).includes(state.active) ? state.active : null;
+  },
   get visibilityState() {
     return state.visibility;
   },
@@ -326,7 +362,10 @@ async function run() {
     } else if ("input" in step) {
       const target = byClass(step.input.cls);
       target.value = step.input.value;
+      target.selectionStart = target.selectionEnd = target.value.length;
       for (const fn of target.listeners.input || []) fn({ type: "input", target });
+    } else if ("select" in step) {
+      byClass(step.select.cls).setSelectionRange(step.select.start, step.select.end);
     } else if ("focus_on" in step) {
       byClass(step.focus_on).focus();
     } else if ("respond" in step) {
@@ -352,6 +391,7 @@ async function run() {
     } else if (step.snapshot) {
       const byId = (id) => root.children.find((n) => n.id === id) || null;
       const unmanaged = byId("unmanaged");
+      const field = document.activeElement;
       snapshots.push({
         inbox: byId("inbox") ? node(byId("inbox")) : null,
         statement: byId("statement") ? node(byId("statement")) : null,
@@ -360,6 +400,10 @@ async function run() {
         digest: byId("digest") ? node(byId("digest")) : null,
         goal: byId("goal") ? node(byId("goal")) : null,
         active: state.active && attached(root).includes(state.active) ? state.active.className : null,
+        field: field === null || field.value === undefined ? null : {
+          cls: field.className, value: field.value, start: field.selectionStart,
+          end: field.selectionEnd,
+        },
         focus_count: state.focusCount,
         key_prevented: state.keyPrevented,
         posts: posts.slice(),
