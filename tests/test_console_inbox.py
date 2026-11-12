@@ -65,7 +65,8 @@ def read(*pages, **kwargs):
 def expected(issue, comment_id, reason, **fields):
     return {"key": f"{SLUG}#{issue}/{comment_id}", "project_id": PROJECT, "repo": SLUG, "issue": issue,
             "comment_id": comment_id, "url": f"https://github.com/{SLUG}/issues/{issue}#issuecomment-{comment_id}",
-            "reason": reason, "question": foa.SENTENCES[reason], "questions": [], "items": [],
+            "reason": reason, "kind": reason, "question": foa.SENTENCES.get(reason), "detail": "",
+            "questions": [], "items": [], "answers": [], "paid": False, "confirm": "",
             "answered": False, **fields}
 
 
@@ -127,6 +128,119 @@ class NoItemTest(unittest.TestCase):
         for name, comments in table.items():
             with self.subTest(name):
                 self.assertEqual(read(page([issue_node(7, comments)])), [])
+
+
+ASK_TEXT = "Open the staging site and confirm the login works."
+SENTENCES = {"verify-ask": "AC1: the owner's answer is needed.",
+             "verify-approve": "AC1 has live effects: tick the box to run it once on mbp.",
+             "verify-act": "AC1 needs the owner to act on mbp; the runner then checks it.",
+             "verify-decision": "AC1 failed: the owner decides.",
+             "verify-stale-check": "AC1 waits on eleven-m5, which last reported never."}
+ACT_TEXT = "```\nopen the dock\n```\n\nThen: probe deployed_includes"
+ASK_BOXES = "- [ ] Accept\n- [ ] Reject"
+DECISION_BOXES = "- [ ] Accept as passed\n- [ ] Close as not verified"
+
+
+def verify_body(reason, fields, sentence, extra):
+    return fm.render("owner-action", {"reason": reason, "block": "10.abc", "check": "0", **fields}, sentence, extra)
+
+
+def ask(extra=f"{ASK_TEXT}\n\n{ASK_BOXES}"):
+    return verify_body("verify-ask", {"host": "mbp"}, SENTENCES["verify-ask"], extra)
+
+
+def approve(effects="live", extra='Command: ["just", "smoke"]\n\n- [ ] Run it'):
+    return verify_body("verify-approve", {"host": "mbp", "effects": effects, "round": "1", "run": "d1"},
+                       SENTENCES["verify-approve"], extra)
+
+
+def act():
+    return verify_body("verify-act", {"host": "mbp"}, SENTENCES["verify-act"], ACT_TEXT)
+
+
+def decision(extra=DECISION_BOXES):
+    return verify_body("verify-decision", {"on": "fail", "result": "55"}, SENTENCES["verify-decision"], extra)
+
+
+def stale():
+    return verify_body("verify-stale-check", {"host": "eleven-m5", "cause": "silent", "last": "never"},
+                       SENTENCES["verify-stale-check"], "- [ ] Accept without eleven-m5")
+
+
+class VerifyPromptTableTest(unittest.TestCase):
+    def test_each_owner_prompt_kind_becomes_an_inbox_item(self):
+        rows = [  # issue, body, reason, then (kind, answers, paid, confirm, detail, answered)
+            (11, ask(), "verify-ask", ("manual-check", ["passed", "failed", "note"], False, "", ASK_TEXT, False)),
+            (12, approve(), "verify-approve",
+             ("approval", ["approve"], False, "octo/widgets#12", 'Command: ["just", "smoke"]', False)),
+            (13, approve("paid"), "verify-approve",
+             ("paid-approval", ["approve"], True, "octo/widgets#13", 'Command: ["just", "smoke"]', False)),
+            (14, act(), "verify-act", ("act", [], False, "", ACT_TEXT, False)),
+            (15, decision(), "verify-decision", ("verdict", ["passed", "failed"], False, "", "", False)),
+            (16, stale(), "verify-stale-check", ("stale-check", ["keep", "drop"], False, "", "", False)),
+        ]
+        nodes = [issue_node(n, [comment_node(C1 + n, body)]) for n, body, _, _ in rows]
+        items = read(page(nodes))
+        self.assertEqual(len(items), len(rows))
+        for item, (n, body, reason, want) in zip(items, rows):
+            with self.subTest(reason=reason, issue=n):
+                kind, answers, paid, confirm, detail, answered = want
+                self.assertEqual(item, expected(n, C1 + n, reason, kind=kind, answers=answers, paid=paid,
+                                                confirm=confirm, detail=detail, answered=answered,
+                                                question=SENTENCES[reason], held_work=1))
+        self.assertEqual(json.loads(json.dumps(items)), items)
+
+    def one(self, *comments):
+        return read(page([issue_node(7, list(comments))]))
+
+    def test_a_ticked_or_consumed_prompt_reads_answered(self):
+        ticked = ask(f"{ASK_TEXT}\n\n- [x] Accept\n- [ ] Reject")
+        self.assertIs(self.one(comment_node(C1, ticked))[0]["answered"], True)
+        run = fm.render("verify-run", {"block": "10.abc", "check": "0", "consumed": str(C1)}, "Consumed.")
+        items = self.one(comment_node(C1, approve()), comment_node(C1 + 1, run))
+        self.assertEqual([(i["kind"], i["answered"]) for i in items], [("approval", True)])
+        self.assertIs(self.one(comment_node(C1, act()))[0]["answered"], False)
+
+    def test_a_prompt_with_both_boxes_ticked_stays_open(self):
+        both_ask = ask(f"{ASK_TEXT}\n\n- [x] Accept\n- [x] Reject")
+        both_decision = decision("- [x] Accept as passed\n- [x] Close as not verified")
+        items = self.one(comment_node(C1, both_ask), comment_node(C1 + 1, both_decision))
+        self.assertEqual([(i["kind"], i["answered"], i["detail"]) for i in items],
+                         [("manual-check", False, ASK_TEXT), ("verdict", False, "")])
+
+    def test_detail_keeps_checkbox_lines_that_are_not_the_runners_boxes(self):
+        text = "Open the staging site.\n- [ ] Check the dock too"
+        body = ask(f"{text}\n\n- [ ] Accept\n- [ ] Reject")
+        self.assertEqual(self.one(comment_node(C1, body))[0]["detail"], text)
+        fenced = "```\n- [ ] Restart the service\nopen the dock\n```\n\nThen: probe deployed_includes"
+        body = verify_body("verify-act", {"host": "mbp"}, SENTENCES["verify-act"], fenced)
+        self.assertEqual(self.one(comment_node(C1, body))[0]["detail"], fenced)
+        next_to = ask(f"\n{text}\n- [ ] Accept now\n- [ ] Accept\n- [ ] Reject")
+        self.assertEqual(self.one(comment_node(C1, next_to))[0]["detail"], f"{text}\n- [ ] Accept now")
+
+    def test_a_carriage_return_does_not_reach_the_detail(self):
+        body = ask(f"{ASK_TEXT}\r\n\r\n- [ ] Accept\r\n- [ ] Reject\r\n")
+        self.assertEqual(self.one(comment_node(C1, body))[0]["detail"], ASK_TEXT)
+
+
+class NoVerifyItemTest(unittest.TestCase):
+    def test_prompts_that_do_not_need_the_owner_raise_no_item(self):
+        no_block = fm.render("owner-action", {"reason": "verify-ask", "check": "0"}, "x.", ASK_BOXES)
+        other = fm.render("verify-result", {"block": "10.abc", "check": "0", "state": "pass"}, "Passed.")
+        table = {
+            "ended": [comment_node(C1, ask()), comment_node(C1 + 1, fm.end_body(C1, "resolved"))],
+            "collaborator prompt": [comment_node(C1, ask(), "COLLABORATOR")],
+            "no block field": [comment_node(C1, no_block)],
+            "other verify kind": [comment_node(C1, other)],
+        }
+        for name, comments in table.items():
+            with self.subTest(name):
+                self.assertEqual(read(page([issue_node(7, comments)])), [])
+
+    def test_a_collaborators_end_does_not_hide_an_owners_prompt(self):
+        comments = [comment_node(C1, ask()), comment_node(C1 + 1, fm.end_body(C1, "answered"), "COLLABORATOR")]
+        items = read(page([issue_node(7, comments)]))
+        self.assertEqual([i["kind"] for i in items], ["manual-check"])
 
 
 class ReadTest(unittest.TestCase):
