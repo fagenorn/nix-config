@@ -29,6 +29,14 @@ export const meta = {
 // An already-fixed row is final and reported in owner_actions with its commit; the batch closes nothing.
 // A no-changes row (#923: every task of the child's plan ended with no commit, so there is nothing to land) is final too, once its claim
 // is released, and reported in owner_actions: the owner closes the issue. A release that failed leaves the row stopped for a relaunch.
+// A not-converging row (#940: the child stopped at fix-wave-review marked diverging, its fix waves spent across runs not closing the
+// findings in one file) is final and reported in owner_actions with the file, the waves, the worktree, the branch, the PR when one exists,
+// the findings left open, the claim holder and the child's cont (slimmed as a relaunch cont is): the owner decides the design, then the
+// owner or a finisher takes the work over, or a relaunch with that cont in conts resumes it. The worktree and the branch are left as they
+// are and the claim stays held: a released claim would leave nothing on the tracker, and a later batch would plan the issue afresh on
+// the diverged branch with its wave count at zero. A held claim fails closed: a later batch under another holder sees claimed-elsewhere,
+// and after 24h idle the status command posts a stale-claim owner action; a claim never lapses on its own, so the owner or the finisher
+// releases it with the holder the entry names. An issue closed meanwhile is settled as closed first, as any stop with a cont is.
 // A closed issue whose claim this batch holds is released (at intake, or by the settle step after a stop with a cont
 // that is not post-merge) and its row is final with released; a release that failed leaves the row stopped for a relaunch.
 // A questions row is {issue, outcome: 'questions', lane?, questions, marker}: marker is the box prompt's
@@ -187,7 +195,7 @@ const RULES_FOR = (W, B) => `${BASE_RULES}
 
 // --- Batch state ---
 // The D9 final outcomes: an issue ending in one of these is not relaunched.
-const FINAL = ['landed', 'landed-held', 'closed', 'duplicate', 'needs-verification', 'parked', 'human-required', 'needs-design', 'claimed-elsewhere', 'stale-claim', 'already-fixed', 'no-changes']
+const FINAL = ['landed', 'landed-held', 'closed', 'duplicate', 'needs-verification', 'parked', 'human-required', 'needs-design', 'claimed-elsewhere', 'stale-claim', 'already-fixed', 'no-changes', 'not-converging']
 const FACTS = {}
 const rows = {}
 let breaker = null
@@ -416,6 +424,7 @@ const childReason = r => {
 const stopDetail = r => ({ ...(r.stage === 'codex-unavailable' && typeof r.details === 'string' && r.details ? { detail: r.details } : {}), ...(childReason(r) ? { reason: childReason(r) } : {}) })
 // #869: why an open row is open, in one bounded line: the child's reason when it gave one, else the row's own stage and what it carries; '' when it carries nothing.
 const REASON_MAX = 300
+const FINDINGS_MAX = 10
 const oneLine = s => { const t = String(s).replace(/\s+/g, ' ').trim(); return t.length > REASON_MAX ? `${t.slice(0, REASON_MAX - 3)}...` : t }
 const rowReason = r => {
   if (nonEmpty(r.reason)) return oneLine(r.reason)
@@ -473,6 +482,7 @@ const enqueue = (branch, fn) => {
   return run
 }
 const LAND_OA = [] // owner-actions the landings posted
+const DIVERGING = {} // #940: by issue, what a not-converging row's owner action carries for whoever takes the work over
 const SEV = { type: 'string', enum: ['critical', 'important', 'minor'] }
 const FINDINGS = {
   type: 'object',
@@ -1626,6 +1636,25 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `settle-${n}`, phase: 'Deliver', agentTy
           rows[n] = { issue: n, outcome: 'closed', stage: r.stage, released: st.release === 'released' }
           return
         }
+        if (r.stage === 'fix-wave-review' && isObj(r.diverging) && isObj(r.cont) && !(st && st.state === 'CLOSED')) {
+          // #940: more fix waves are not expected to close this, so no relaunch. The worktree, the branch and the claim stay as they are
+          // (see the header); a closed issue whose release failed stays stopped instead, so that a relaunch releases it.
+          const s = isObj(r.cont.setup) ? r.cont.setup : {}
+          const pr = [r.cont.pr, r.pr].find(v => isPosInt(v))
+          const wt = [s.worktree_path, s.worktree].find(nonEmpty)
+          const taken = {
+            ...(nonEmpty(r.diverging.file) ? { file: oneLine(r.diverging.file) } : {}), ...(isPosInt(r.diverging.waves) ? { waves: r.diverging.waves } : {}),
+            ...(wt ? { worktree: oneLine(wt) } : {}), ...(nonEmpty(s.branch) ? { branch: oneLine(s.branch) } : {}),
+            ...(pr ? { pr } : {}),
+          }
+          // The child bounds the findings it carries (their count and each text); the same bounds are applied again here, in the entry and in its cont.
+          const findings = (Array.isArray(r.cont.fix_findings) ? r.cont.fix_findings : []).filter(isObj).slice(0, FINDINGS_MAX)
+            .map(x => Object.fromEntries(['severity', 'file', 'summary', 'failing_input'].filter(k => nonEmpty(x[k])).map(k => [k, oneLine(x[k])])))
+          DIVERGING[n] = { ...taken, claim: 'held', holder: HOLDER, findings, cont: { ...r.cont, ...(findings.length ? { fix_findings: findings } : {}) } }
+          delete CONTS[n]
+          rows[n] = { issue: n, outcome: 'not-converging', stage: r.stage, ...taken, ...stopDetail(r) }
+          return
+        }
       }
       rows[n] = { issue: n, outcome: 'stopped', stage: r.stage, ...stopDetail(r) }
       return
@@ -1707,7 +1736,7 @@ for (const r of table) log(`#${r.issue}: ${r.outcome}${r.reason || r.detail ? ` 
 return {
   stage: breaker ? 'breaker' : 'done', batch_id: BATCH, table,
   questions: table.filter(r => r.outcome === 'questions').map(r => ({ issue: r.issue, questions: r.questions, marker: r.marker })),
-  owner_actions: [...table.filter(r => r.outcome === 'questions' && r.marker !== null && r.marker !== undefined).map(r => ({ issue: r.issue, reason: 'decision', comment_id: r.marker })), ...table.filter(r => r.outcome === 'already-fixed').map(r => ({ issue: r.issue, reason: 'already-fixed', commit: r.commit })), ...table.filter(r => r.outcome === 'no-changes').map(r => ({ issue: r.issue, reason: 'no-changes' })), ...cycle.map(n => ({ issue: n, reason: 'cycle' })), ...LAND_OA],
+  owner_actions: [...table.filter(r => r.outcome === 'questions' && r.marker !== null && r.marker !== undefined).map(r => ({ issue: r.issue, reason: 'decision', comment_id: r.marker })), ...table.filter(r => r.outcome === 'already-fixed').map(r => ({ issue: r.issue, reason: 'already-fixed', commit: r.commit })), ...table.filter(r => r.outcome === 'no-changes').map(r => ({ issue: r.issue, reason: 'no-changes' })), ...table.filter(r => r.outcome === 'not-converging').map(r => ({ issue: r.issue, reason: 'not-converging', ...DIVERGING[r.issue], cont: slimCont(DIVERGING[r.issue].cont) })), ...cycle.map(n => ({ issue: n, reason: 'cycle' })), ...LAND_OA],
   relaunch: open.length ? relaunchArgs() : null,
   ...(breaker ? { breaker } : {}),
 }
