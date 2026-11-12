@@ -234,7 +234,7 @@ class QuestionRouteTest(Case):
         self.assertEqual([row["differs"] for row in self.rows("question.answered")],
                          [True, False])
         said = [m["sentence"] for m in view_of(svc)["digest"]["recent"]]
-        self.assertIn("An answer for owner/p01 went against the recommendation, files: "
+        self.assertIn("An answer for owner/p01: You chose 'sqlite' over the recommended 'files': "
                       "Which store keeps the checkpoints?", said)
         self.assertEqual([s for s in said if "May the reader change?" in s], [])
 

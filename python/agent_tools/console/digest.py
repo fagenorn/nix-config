@@ -67,7 +67,7 @@ repository makes no moment. No sentence names an issue, a session or a path.
     brief_sent       A brief for <project_id> arrived, version <n>: <goal>
     brief_approved   The brief for <project_id> was approved, version <n>: <goal>
     sprint_state     The sprint for <project_id> is now <the sprint's shown state>: <goal>
-    answer_differs   An answer for <project_id> went against the recommendation, <recommended>: <question>
+    answer_differs   An answer for <project_id>: You chose '<answer>' over the recommended '<recommended>': <question>
     sprint_done      The sprint for <project_id> is done: <the closing report's first line>
     manager_restarted The manager of <goal> was restarted
     manager_takeover A new manager took over <goal>
@@ -76,8 +76,9 @@ An inbox payload needs `project_id` (str), `issue` (int, not bool) and
 `question` (str). A withdrawal needs the event's project (str) and a payload `goal` (str); it
 reads no state, the row carries the goal. A brief event makes a moment only when its project is a
 `str`, its payload `version` an `int` (not a bool) and `goal` a `str`; it reads no state either.
-An answer event makes a moment only when its project is a `str`, its payload `question` and
-`recommended` are `str` and `differs` is `True`; it reads no state either.
+An answer event makes a moment only when its project is a `str`, its payload `question`, `answer` and
+`recommended` are `str` and `differs` is `True`; it reads no state either. `<answer>` is the option the
+owner chose or, for an answer in the owner's own words, those words.
 A restart needs the event's project (str), a payload `goal` (str) and `ok` exactly true; a takeover
 needs the event's project (str), a payload `goal` (str) and `takeover` exactly true; neither reads state.
 A sprint report is judged against the folded sprints before it
@@ -224,11 +225,13 @@ def _brief_moment(event: Event) -> tuple[str, str] | None:
 
 def _answer_moment(event: Event) -> tuple[str, str] | None:
     question, recommended = event.payload.get("question"), event.payload.get("recommended")
+    answer = event.payload.get("answer")
     if (not isinstance(event.project, str) or not isinstance(question, str)
-            or not isinstance(recommended, str) or event.payload.get("differs") is not True):
+            or not isinstance(answer, str) or not isinstance(recommended, str)
+            or event.payload.get("differs") is not True):
         return None
-    return (ANSWER_DIFFERS, f"An answer for {event.project} went against the recommendation, "
-                            f"{recommended}: {question}")
+    return (ANSWER_DIFFERS, f"An answer for {event.project}: You chose '{answer}' over the "
+                            f"recommended '{recommended}': {question}")
 
 
 def _manager_moment(event: Event) -> tuple[str, str] | None:
