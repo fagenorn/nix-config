@@ -287,11 +287,13 @@ dispatches, so a second retry that arrives while the first is queued or running 
 `LAUNCHING`. `start_manager(sprint_id)` reserves (returning when it cannot) and launches in the
 calling thread. `_launch_reserved`, under the lock, drops its own attempt's reservation (each reservation is one token, so a finished attempt never frees a later retry's) and returns when the sprint
 is no longer open or its manager reads `started` (a stale or duplicate job never starts a second
-manager); a missing secret appends `manager.failed` ("the sprint's secret is missing"); the profile
+manager), and a launch a retry reserved also returns when the sprint no longer offers retry (the
+failed manager registered or briefed meanwhile); a missing secret appends `manager.failed` ("the sprint's secret is missing"); the profile
 is chosen by `manager.choose_profile` over `capacity.capacity_view` of the profile directories read
 at that moment (`_read_profiles`, never the last poll's) and the project's bound profile, and
 `Wait` appends `manager.waiting`. Otherwise the launcher is called outside the lock, and then,
-under it and unless the service is stopping, `manager.started {sprint_id, profile, session_name}`
+under it, a sprint that was withdrawn meanwhile has its secret and settings file removed again and
+no row appended, and otherwise, unless the service is stopping, `manager.started {sprint_id, profile, session_name}`
 or `manager.failed {sprint_id, reason}` is appended (the reason of a `LaunchFailed`, else `<Type>:
 <message>`, the secret shown as `<secret>`), a failure is one stderr line `console: manager_failed
 <sprint_id> <reason>`, and the view is published. `withdraw_goal` also removes the manager's
@@ -867,6 +869,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
     do_PUT = do_DELETE = do_PATCH = do_HEAD = do_OPTIONS = _refuse_method
 
 
+class _RetryReservation:
+    """A launch reservation made by a retry: it runs only while the sprint still offers retry."""
+
+
 class ConsoleService:
     def __init__(self, store: Path, registry: Path, *, port: int = DEFAULT_PORT,
                  poll_seconds: float = POLL_SECONDS,
@@ -1229,7 +1235,7 @@ class ConsoleService:
             if not retry:
                 raise sprints.Refused(
                     sprints.HAS_MANAGER if state == sprints.STARTED else sprints.TOO_SOON)
-            self._launching[sprint_id] = object()
+            self._launching[sprint_id] = _RetryReservation()
         self._dispatch_launch(sprint_id)
 
     def _launch_reserved(self, sprint_id: str) -> None:
@@ -1257,7 +1263,8 @@ class ConsoleService:
     def _prepared_launch(self, sprint_id: str, token: object) -> manager.Launch | None:
         """Under the ingest lock: the launch to run, or None after dropping the reservation."""
         sprint = self._sprints.get(sprint_id)
-        if sprint is None or self._manager_state(sprint)[0] == sprints.STARTED:
+        if (sprint is None or self._manager_state(sprint)[0] == sprints.STARTED
+                or (isinstance(token, _RetryReservation) and not self._manager_state(sprint)[2])):
             self._release(sprint_id, token)
             return None
         project_id = sprint.project_id
@@ -1289,6 +1296,9 @@ class ConsoleService:
         secret = launch.env[manager.SECRET_ENV]
         with self._ingest:
             self._release(launch.sprint_id, token)
+            if launch.sprint_id not in self._sprints:
+                self._drop_sprint_files(launch.sprint_id)
+                return
             if self._stop.is_set():
                 return
             if reason is None:
@@ -1311,12 +1321,16 @@ class ConsoleService:
             appended = self.log.append(
                 [(GOAL_WITHDRAWN, project_id, {"sprint_id": sprint_id, "goal": sprint.goal})])
             self._apply(appended)
-            for remove in (sprints.remove_secret, manager.remove_settings):
-                try:
-                    remove(self._sprint_secrets, sprint_id)
-                except Exception as error:
-                    print(f"console: sprint_secret_unremoved {sprint_id} "
-                          f"{type(error).__name__}: {error}", file=sys.stderr)
+            self._drop_sprint_files(sprint_id)
+
+    def _drop_sprint_files(self, sprint_id: str) -> None:
+        """Remove a sprint's secret and its manager's settings file; a failure is logged, not raised."""
+        for remove in (sprints.remove_secret, manager.remove_settings):
+            try:
+                remove(self._sprint_secrets, sprint_id)
+            except Exception as error:
+                print(f"console: sprint_secret_unremoved {sprint_id} "
+                      f"{type(error).__name__}: {error}", file=sys.stderr)
 
     def send_brief(self, sprint_id: str, secret: str, brief: dict) -> int:
         """Append one `brief.sent` event for an open sprint whose secret is presented; its version."""

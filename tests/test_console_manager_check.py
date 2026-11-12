@@ -50,13 +50,20 @@ def both(**over):
     return [sprint(A, GOALS[0], **over), sprint(B, GOALS[1], **over)]
 
 
-def serve(test, views):
-    """A stub console: `views` are served in turn (the last repeats); POSTs are recorded."""
-    posts, remaining = [], list(views)
+def serve(test, views, withdraws=()):
+    """A stub console: `views` are served in turn (the last repeats, None is a 503); POSTs are
+    recorded and each withdraw takes the next of `withdraws` as its status (else 204)."""
+    posts, remaining, statuses = [], list(views), list(withdraws)
 
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self):
-            data = json.dumps(remaining.pop(0) if len(remaining) > 1 else remaining[0]).encode()
+            body = remaining.pop(0) if len(remaining) > 1 else remaining[0]
+            if body is None:
+                self.send_response(503)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
+            data = json.dumps(body).encode()
             self.send_response(200)
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
@@ -65,7 +72,9 @@ def serve(test, views):
         def do_POST(self):
             size = int(self.headers.get("Content-Length", "0"))
             posts.append((self.path, dict(self.headers), json.loads(self.rfile.read(size))))
-            self.send_response(204)
+            status = statuses.pop(0) if posts[-1][0] == "/api/withdraw" and statuses else 204
+            self.send_response(status)
+            self.send_header("Content-Length", "0")
             self.end_headers()
 
         def log_message(self, *args):
@@ -110,9 +119,10 @@ class ManagerCheckTest(unittest.TestCase):
         self.token_file.write_text("tok\n")
         self.restarts = []
 
-    def start(self, views, *, resume=False, at=T0, registry=None, budget="30", url=None):
+    def start(self, views, *, resume=False, at=T0, registry=None, budget="30", url=None,
+              withdraws=()):
         if url is None:
-            url, self.posts = serve(self, views)
+            url, self.posts = serve(self, views, withdraws)
         if resume:
             self.state_file.parent.mkdir(parents=True, exist_ok=True)
             self.state_file.write_text(json.dumps({"project": "owner/p01", "sprints": [
@@ -257,6 +267,50 @@ class ManagerCheckTest(unittest.TestCase):
         self.assertEqual(timing()[1]["status"], "met")
         self.result_file.write_text(json.dumps({"status": "met", "brief_seconds": {A: 120, B: None}}))
         self.assertEqual(timing()[0], 1)
+
+    def test_a_console_that_drops_its_view_after_the_goals_keeps_the_run_recoverable(self):
+        code, out = self.start([view([]), None])
+        self.assertEqual((code, out), (75, {"status": "not_running"}))
+        self.assertEqual(len(self.posted("/api/goal")), 2)
+        self.assertEqual(self.posted("/api/withdraw"), [])
+        self.assertTrue(self.state_file.exists())
+        code, out = self.start([view(both())])
+        self.assertEqual((code, out["status"]), (75, "waiting"))
+        self.assertEqual(self.posted("/api/goal"), [])
+        saved = json.loads(self.state_file.read_text())
+        self.assertEqual([row["sprint_id"] for row in saved["sprints"]], [A, B])
+
+    def test_a_goal_missing_after_a_crash_is_stated_alone_on_the_next_run(self):
+        self.state_file.parent.mkdir(parents=True, exist_ok=True)
+        self.state_file.write_text(json.dumps(
+            {"project": "owner/p01", "sprints": [], "unresolved": True}))
+        first = view([sprint(A, GOALS[0])])
+        code, out = self.start([first, view(both())])
+        self.assertEqual((code, out["status"]), (75, "waiting"))
+        self.assertEqual([post[2]["goal"] for post in self.posted("/api/goal")], [GOALS[1]])
+
+    def test_sprints_that_cannot_be_withdrawn_keep_the_run_until_they_are(self):
+        failing = [sprint(A, GOALS[0], manager_state="failed", manager_text="x"),
+                   sprint(B, GOALS[1])]
+        code, out = self.start([view(failing)], resume=True, withdraws=[500, 500])
+        self.assertEqual((code, out["status"]), (75, "waiting"))
+        self.assertTrue(self.state_file.exists())
+        self.assertFalse(self.result_file.exists())
+        code, out = self.start([view(failing)], resume=False, url=self.url)
+        self.assertEqual((code, out["status"], out["reason"]), (1, "not_met", "x"))
+        self.assertFalse(self.state_file.exists())
+        self.assertEqual(self.result(), {A: None, B: None})
+
+    def test_a_new_run_discards_the_previous_result(self):
+        self.result_file.parent.mkdir(parents=True, exist_ok=True)
+        self.result_file.write_text(json.dumps({"status": "met", "brief_seconds": {A: 1, B: 2}}))
+        code, out = self.start([view([]), view(both())])
+        self.assertEqual((code, out["status"]), (75, "waiting"))
+        self.assertFalse(self.result_file.exists())
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            timing = manager_check.main(["timing", "--result-file", str(self.result_file)])
+        self.assertEqual((timing, json.loads(out.getvalue())), (75, {"status": "no_result"}))
 
     def test_the_wrapper_is_executable_in_the_index(self):
         listed = subprocess.run(["git", "ls-files", "-s", WRAPPER], cwd=ROOT,

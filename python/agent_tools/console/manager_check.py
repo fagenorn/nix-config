@@ -15,7 +15,11 @@ stdout line of JSON with sorted keys; exit 0 met, 1 not met, 75 not yet, 2 a bad
 chosen from one capacity view land on the same profile, the shared-supervisor case. It writes each
 sprint's id and the console's own `stated_at` to the state file (parents created 0700) and waits for
 both managers' briefs (`brief/<sprint id>` open inbox items) every 10 seconds, up to the budget.
-Whenever a state file exists `start` states no goal: it resumes those sprints. verify-pending runs a
+Whenever a state file exists `start` states no goal: it resumes those sprints. A fresh run deletes the
+previous result file and writes the state file `{"unresolved": true}` before its first goal; if the console's
+view stays unavailable for 60 seconds after the goals (or a goal's POST finds the console down) the run is 75
+`not_running` with that file kept, and the next run reads the view and takes the sprints it finds by their goal
+text, stating only a goal that has none. verify-pending runs a
 `live` check once per approval and kills a run after 600 seconds, so one approved run is built to
 finish in the expected case; a run that spends its budget keeps its state file and answers 75
 `{"status": "waiting", "sprints": [{"sprint_id", "manager_state", "manager_until"}]}`, and the next
@@ -42,12 +46,15 @@ pass. The managers' background sessions are left running (no stop path is verifi
 background session uses no quota); the met output names them in `sessions` so the owner can stop them.
 
 The test sprints are withdrawn whenever `start` finishes (the console is given up to 60 seconds to
-come back from the restart first); a 75 `waiting` finish withdraws nothing. Every finish writes the
+come back from the restart first); a 75 `waiting` finish withdraws nothing. A withdrawal counts as done on
+204 or 409 (already gone). When any withdrawal fails the outcome is kept in the state file, nothing else is
+written and the run is 75 `waiting` (`the test sprints are not withdrawn yet`); the next run retries the
+withdrawals and then finishes with that outcome. A finish whose sprints are withdrawn writes the
 result file `{"status", "brief_seconds": {sprint id: int | null}}`, where a sprint's seconds are its
 brief's `waiting_since` minus the sprint's `stated_at`, both console timestamps, so they never
 depend on when the check looked, and removes the state file.
 
-`timing` only reads the result file: absent is 75 `no_result`; any `brief_seconds` null or above
+`timing` only reads the result file (a new run deletes the previous one, so it never reports an earlier run): absent is 75 `no_result`; any `brief_seconds` null or above
 `--deadline` is 1 `slow`; else 0 `met`, each with `brief_seconds`. It changes no file.
 
 The default `restart` and `registry` and the `clock` and `sleep` of `main` are seams for tests.
@@ -228,19 +235,67 @@ def _start(args, restart, registry, clock, sleep) -> int:
             return False
         return True
 
+    def withdraw(sprint_ids) -> bool:
+        """Withdraw each sprint; true when every one is withdrawn or already gone."""
+        done = True
+        for sprint_id in sprint_ids:
+            status, _ = console.post("/api/withdraw", {"project_id": project, "sprint_id": sprint_id})
+            done = done and status in (204, 409)
+        return done
+
+    def await_console() -> dict | None:
+        deadline = clock() + RETURN_SECONDS
+        while True:
+            view = console.state()
+            if view is not None or clock() >= deadline:
+                return view
+            sleep(5)
+
+    def checkpoint(**more) -> None:
+        _write_json(state_file, {"project": project, "sprints": [
+            {"sprint_id": i, "stated_at": stated[i]} for i in ids], **more})
+
+    def settle(code, reason, seconds, listed=(), restarted=False):
+        """Withdraw the test sprints, then finish; sprints that stay open keep the state file."""
+        if restarted:
+            await_console()
+        if not withdraw(ids):
+            checkpoint(outcome={"code": code, "reason": reason, "seconds": seconds,
+                                "listed": list(listed)})
+            return pending()
+        return _finish(code, reason, ids, seconds, list(listed), result_file, state_file)
+
+    def pending():
+        _print({"status": "waiting", "reason": "the test sprints are not withdrawn yet",
+                "sprints": [{"sprint_id": i} for i in ids]})
+        return NOT_YET
+
     project = args.project
+    ids: list[str] = []
+    stated: dict[str, str] = {}
+    unresolved = False
     if state_file.exists():
         try:
             saved = json.loads(state_file.read_text(encoding="utf-8"))
             project = saved["project"]
             stated = {row["sprint_id"]: row["stated_at"] for row in saved["sprints"]}
             ids = [row["sprint_id"] for row in saved["sprints"]]
+            outcome = saved.get("outcome")
+            unresolved = bool(saved.get("unresolved"))
+            if outcome is not None:
+                outcome = (outcome["code"], outcome["reason"], outcome["seconds"],
+                           outcome["listed"])
         except (OSError, ValueError, KeyError, TypeError):
             _print({"status": "bad_state_file", "path": str(state_file)})
             return 1
         if not read_token():
             return NOT_YET
-    else:
+        if outcome is not None:
+            if not withdraw(ids):
+                return pending()
+            return _finish(outcome[0], outcome[1], ids, outcome[2], outcome[3],
+                           result_file, state_file)
+    if not state_file.exists() or unresolved:
         view = console.state()
         if view is None:
             _print({"status": "not_running"})
@@ -253,38 +308,32 @@ def _start(args, restart, registry, clock, sleep) -> int:
             return 1
         if not read_token():
             return NOT_YET
+        if not unresolved:
+            result_file.unlink(missing_ok=True)
+            _write_json(state_file, {"project": project, "sprints": [], "unresolved": True})
         refused = None
         for goal in GOALS:
+            if unresolved and _newest_with_goal(view, project, goal):
+                continue
             status, text = console.post("/api/goal", {"project_id": project, "goal": goal})
             if status != 204:
                 refused = (status, text)
                 break
-        view = console.state() or {}
+        view = await_console()
+        if view is None or (refused is not None and refused[0] is None):
+            _print({"status": "not_running"})
+            return NOT_YET
         rows = [_newest_with_goal(view, project, goal) for goal in GOALS]
         ids = [row["sprint_id"] for row in rows if row]
         stated = {row["sprint_id"]: row.get("stated_at") for row in rows if row}
         if refused is not None or len(ids) != len(GOALS):
-            for sprint_id in ids:
-                console.post("/api/withdraw", {"project_id": project, "sprint_id": sprint_id})
-            if refused is not None and refused[0] is None:
-                _print({"status": "not_running"})
-                return NOT_YET
             reason = (f"the console refused a goal: {refused[0]} {refused[1]}" if refused
                       else "the sprint is gone")
-            return _finish(1, reason, ids, {i: None for i in ids}, [], result_file, state_file)
-        _write_json(state_file, {"project": project, "sprints": [
-            {"sprint_id": i, "stated_at": stated[i]} for i in ids]})
-
-    def withdraw(sprint_ids) -> None:
-        for sprint_id in sprint_ids:
-            console.post("/api/withdraw", {"project_id": project, "sprint_id": sprint_id})
+            return settle(1, reason, {i: None for i in ids})
+        checkpoint()
 
     def finish(code, reason, seconds, listed=()):
-        deadline = clock() + RETURN_SECONDS
-        while console.state() is None and clock() < deadline:
-            sleep(5)
-        withdraw(ids)
-        return _finish(code, reason, ids, seconds, list(listed), result_file, state_file)
+        return settle(code, reason, seconds, listed, restarted=True)
 
     latest: dict[str, dict] = {}
     while True:
@@ -293,9 +342,7 @@ def _start(args, restart, registry, clock, sleep) -> int:
             latest = _project_sprints(view, project)
             missing = [i for i in ids if i not in latest]
             if missing:
-                withdraw([i for i in ids if i in latest])
-                return _finish(1, "the sprint is gone", ids, {i: None for i in ids}, [],
-                               result_file, state_file)
+                return settle(1, "the sprint is gone", {i: None for i in ids})
             for sprint_id in ids:
                 row = latest[sprint_id]
                 if row.get("manager_state") in ("failed", "missing"):

@@ -18,6 +18,7 @@ from agent_tools.console.event_log import GOAL_STATED, EventLog
 
 from . import console_test_support as support
 from .test_console_answer import view_of
+from .test_console_briefs import PARTS
 from .test_console_writes import Case
 
 GOAL = "/api/goal"
@@ -243,6 +244,38 @@ class ManagerServiceTest(Case):
         svc.start_manager(sid)
         self.assertEqual(len(launches.calls), 1)
         self.assertEqual(support.log_rows(self.store), rows)
+
+    def test_a_reserved_retry_does_not_launch_once_the_failed_manager_briefed(self):
+        queue = support.Queued()
+        launches = support.Launches(fail=["x", None])
+        svc = self.start(launcher=launches, dispatch=queue)
+        sid = self.state(svc)
+        with contextlib.redirect_stderr(io.StringIO()):
+            queue.run_next()
+        self.assertEqual(self.sprint(svc, sid)["manager_state"], "failed")
+        self.assertEqual(self.retry(svc, sid)[0], 204)
+        svc.send_brief(sid, self.secret(sid), PARTS)
+        sprint = self.sprint(svc, sid)
+        self.assertEqual((sprint["manager_state"], sprint["retry"]), ("failed", False))
+        rows = support.log_rows(self.store)
+        queue.run_next()
+        self.assertEqual(len(launches.calls), 1)
+        self.assertEqual(support.log_rows(self.store), rows)
+        self.assertEqual(self.retry(svc, sid)[0], 409)
+
+    def test_a_goal_withdrawn_while_its_launch_is_in_flight_leaves_no_settings(self):
+        holder = {}
+
+        def launcher(launch):
+            holder["svc"].withdraw_goal("owner/p01", launch.sprint_id)
+            launch.settings.write_text("{}")
+
+        svc = holder["svc"] = self.start(launcher=launcher)
+        sid = self.state(svc)
+        secrets = self.store.parent / "sprint-secrets"
+        self.assertEqual(sorted(p.name for p in secrets.iterdir()), [])
+        self.assertEqual([r[2] for r in self.manager_rows()], [])
+        self.assertEqual(svc.sprint_status(sid)["decision"], "withdrawn")
 
     def test_retry_refusals_append_nothing(self):
         now = [NOW + 60]
