@@ -116,7 +116,15 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
                       "tracker_url": "<url>" | null,
                       "issues": [{"issue": <int>, "stage": "<stage>", "stage_text": "<text>"}, ...],
                       "waiting": <int>,
-                      "sessions": [<session entry>, ...]}
+                      "sessions": [<session entry>, ...],
+                      "messages": [<message entry>, ...],
+                      "reach_text": "manager not reachable" | null}
+    <message entry> = {"id": <int>, "kind": "approved" | "changes" | "text",
+                       "version": <int> | null, "text": <str> | null, "at": "<time>",
+                       "state": "sent" | "delivered" | "read",
+                       "state_text": "sent" | "delivered" | "read",
+                       "read_at": "<time>" | null, "reply": <str> | null,
+                       "reply_at": "<time>" | null}
     <line> = {"label": "Outside sprints", "working": <int>, "waiting": <int>,
               "summary": "<text>", "sessions": [<session entry>, ...]}
     <session entry> = {"session_id", "name", "state", "state_text", "cwd",
@@ -184,6 +192,10 @@ sprint_id)` is one of that sprint's `sessions` (ordered and shaped as in the lin
 project's `outside_sprints`, and is counted in none of its numbers or its summary; inside a sprint
 a session waiting for an answer or a permission reads "waiting for an answer" or "waiting for a
 permission".
+`messages` are the `SHOWN_MESSAGES` (10) newest of the sprint's messages (`SprintState.messages`),
+oldest first; `state` and `state_text` are `sprints.message_state` (the page adds no colour to
+them). `reach_text` is `UNREACHABLE_TEXT` once `sprints.unreachable` holds, else null; it never
+changes `retry` and never hides a message.
 `recent_projects` is every registered project id, newest `last_seq` first, then `project_id`
 (always present, possibly empty); it derives from the states alone.
 `encode_view` writes sorted keys, compact separators, non-ASCII kept, NaN
@@ -238,12 +250,17 @@ from agent_tools.console.sprints import (
     STARTING_TEXT,
     WAITING,
     WAITING_TEXT,
+    UNREACHABLE_TEXT,
+    Message,
     SprintState,
     age_text,
     manager_status,
+    message_state,
     progress_text,
+    unreachable,
 )
 
+SHOWN_MESSAGES = 10
 REGISTERED = "project.registered"
 UNREGISTERED = "project.unregistered"
 FOLD_AFTER = 3
@@ -544,6 +561,13 @@ def sprint_state(state: SprintState, now_ms: int | None, waiting: int) -> tuple[
     return ON_TRACK, ON_TRACK_TEXT
 
 
+def _message_entry(message: Message) -> dict:
+    shown = message_state(message)
+    return {"id": message.message_id, "kind": message.kind, "version": message.version,
+            "text": message.text, "at": message.at, "state": shown, "state_text": shown,
+            "read_at": message.read_at, "reply": message.reply, "reply_at": message.reply_at}
+
+
 def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
                   sessions: Sequence[SessionState],
                   deliveries: Mapping[str, Sequence[DeliveryState]],
@@ -589,6 +613,8 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
         "waiting": waiting,
         "sessions": [_session_entry(s, deliveries, now_ms, _SPRINT_STATE_TEXT)
                      for s in _ordered(sessions)],
+        "messages": [_message_entry(m) for m in state.messages[-SHOWN_MESSAGES:]],
+        "reach_text": UNREACHABLE_TEXT if unreachable(state) else None,
     }
 
 
