@@ -3399,8 +3399,12 @@ class ConflictedSyncOutsideLockTest(unittest.TestCase):
     def test_a_refused_retake_never_merges_and_holds_nothing(self):
         for verdict in ("land-contended", "held_by", "lost_to"):
             with self.subTest(verdict=verdict):
-                out = self.ship(replies={"checks-2": {"lock": {"verdict": verdict, "lock_sha": self.M2}}})
+                out = self.ship(replies={"checks-2": {"lock": {"verdict": verdict, "lock_sha": self.M2}},
+                                         **{f"land-relock-{k}": {"lock": {"verdict": "land-contended"}} for k in (1, 2, 3)}})
                 result, names = out["result"], labels(out["calls"])
+                # Only a wait that ran out is waited for again, as often as a first wait is (LAND_WAIT_RETRIES).
+                self.assertEqual([name for name in names if name.startswith("land-relock-")],
+                                 [f"land-relock-{k}" for k in (1, 2, 3)] if verdict == "land-contended" else [])
                 self.assertEqual((result["stage"], result["lock"]), ("land-contended", verdict))
                 self.assertNotIn("merge", names)
                 # The only release is the one before the resolution.
@@ -3466,12 +3470,48 @@ class ConflictedSyncOutsideLockTest(unittest.TestCase):
                                              "merge", "hold", "close-out"])
         self.assertIn(f"--sha {MERGE} --wait\n", prompt(out["calls"], "checks-2"))
 
-    def test_a_resolution_that_merged_cleanly_after_all_needs_no_review(self):
-        out = self.ship(**{"sync-resolve-1": {"conflicted": False, "merge_commit": MERGE}})
+    def test_a_resolution_that_says_it_merged_cleanly_is_reviewed_all_the_same(self):
+        clean = {"sync-resolve-1": {"conflicted": False, "merge_commit": MERGE}}
+        out = self.ship(**clean)
         self.assertEqual(out["result"]["stage"], "done")
-        self.assertEqual(self.shipped(out), ["pr", "sync-1", "land-unlock", "sync-resolve-1", "land-push-2", "checks-2",
+        self.assertEqual(self.shipped(out), ["pr", "sync-1", "land-unlock", "sync-resolve-1", "sync-review-1", "land-push-2", "checks-2",
                                              "merge", "hold", "close-out"])
+        self.assertIn(f"merge commit {MERGE}", prompt(out["calls"], "sync-review-1"))
         self.assertIn(f"--sha {MERGE} --wait\n", prompt(out["calls"], "checks-2"))
+        out = self.ship(replies={"sync-review-1": FINDING, "fix-sync-review-1": FINDING},
+                        **clean, **{"fix-sync-1": {"start_head": MERGE, "commit": FIX}})
+        self.assertEqual(out["result"]["stage"], "sync-review")
+        self.assertNotIn("merge", labels(out["calls"]))
+
+    def test_a_retake_whose_wait_ran_out_waits_again_like_a_first_wait(self):
+        out_of_time = {"lock": {"verdict": "land-contended", "lock_sha": self.M2, "waited_s": 3600, "waited_on": [7]}}
+        out = self.ship(replies={"checks-2": out_of_time, "checks-3": {"state": "passed", "head": MERGE},
+                                 "land-relock-1": {"lock": {"verdict": "land-contended"}},
+                                 "land-relock-2": {"lock": {"verdict": "acquired", "lock_sha": MERGE, "waited_s": 900, "waited_on": [7, 9]}}})
+        result, calls = out["result"], out["calls"]
+        self.assertEqual(result["stage"], "done")
+        # A retried wait polled no checks: the next round polls them, under the lock, before the merge.
+        self.assertEqual(self.shipped(out), ["pr", "sync-1", "land-unlock", "sync-resolve-1", "sync-review-1", "land-push-2", "checks-2",
+                                             "land-relock-1", "land-relock-2", "checks-3", "merge", "hold", "close-out"])
+        again = next(c for c in calls if c["label"] == "land-relock-2")
+        self.assertEqual((again["agentType"], again["model"]), ("clerk", "sonnet"))
+        self.assertIn("forge-claim renew --repo owner/repo --issue 9", again["prompt"])
+        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {MERGE} --wait\n", again["prompt"])
+        self.assertNotIn("land acquire --repo", prompt(calls, "checks-3"))
+        self.assertIn(f"{self.RELEASE}{MERGE}", prompt(calls, "hold"))
+        self.assertEqual([line for line in out["logs"] if "waited" in line],
+                         ["checks-2: waited 60 min for the land lock of dev behind PR #7",
+                          "land-relock-2: waited 15 min for the land lock of dev behind PR #7, #9"])
+        # A lost claim ends the wait; a lost reply may hold the lock at the accepted head, which the stop's release covers.
+        out = self.ship(replies={"checks-2": out_of_time, "land-relock-1": {"renew": {"verdict": "not_held", "by": "h2/b1"}, "lock": None}})
+        self.assertEqual((out["result"]["stage"], out["result"]["at"]), ("claim-lost", "land-relock-1"))
+        self.assertEqual(labels(out["calls"]).count("land-unlock"), 1)
+        out = self.ship(replies={"checks-2": out_of_time, "land-relock-1": None})
+        self.assertEqual(out["result"]["stage"], "land-lock")
+        self.assertEqual(labels(out["calls"]).count("land-unlock"), 2)
+        self.assertIn(f"When it prints not_held with lock_sha {MERGE}, run alone and exactly: {self.RELEASE}{MERGE}",
+                      prompt(out["calls"], "land-unlock"))
+        self.assertNotIn("merge", labels(out["calls"]))
 
     def test_a_long_first_wait_is_logged_with_its_holders(self):
         def waits(**lock):
@@ -5206,7 +5246,7 @@ CLERK, PLANNER, IMPL, REV, LITE = "clerk", "planner", "implementer", "reviewer",
 EITHER = frozenset({REV, LITE})
 EXPECTED = {stem: frozenset({kind}) if isinstance(kind, str) else kind for kind, stems in (
     (CLERK, ("setup", "acquire", "worktree", "renew-", "owner-answer", "plan-codex", "direct-codex", "final-codex", "diff-size", "amend",
-             "verify", "verify-", "ws-check-", "land-unlock", "land-push-", "land-lock-", "pr", "checks-", "merge",
+             "verify", "verify-", "ws-check-", "land-unlock", "land-push-", "land-lock-", "land-relock-", "pr", "checks-", "merge",
              "hold", "close-out")),
     (PLANNER, ("plan", "plan-revise", "plan-rules-revise", "plan-branch-revise")),
     (IMPL, ("direct-impl", "direct-fix", "impl-", "fix-", "fix-wave", "fix-wave-", "verify-fix-", "fix-ci", "sync-", "sync-resolve-",
@@ -5246,6 +5286,10 @@ SCENARIOS = (
     {"replies": {"sync-review-1": FINDING, "checks-2": {"state": "passed", "head": FIX, "required": ["ci-tests"]}},
      "patch": dict(CONFLICT, pr={"checks": {"state": "behind", "head": SHA}})},
     {"patch": {"pr": {"lock": {"verdict": "land-contended", "lock_sha": "b" * 40}, "checks": None}}},
+    # #913: a retake whose wait ran out is waited for again in a land-relock step.
+    {"replies": {"checks-2": {"lock": {"verdict": "land-contended"}}, "checks-3": {"state": "passed", "head": MERGE}},
+     "patch": {"pr": {"checks": {"state": "behind", "head": SHA}}, "sync-1": ABORTED, "sync-resolve-1": {"merge_commit": MERGE},
+               "land-relock-1": {"lock": {"verdict": "acquired", "lock_sha": MERGE}}}},
     {"args": DIRECT, "replies": {"direct-review": BAD}},
     {"args": DIRECT, "replies": {"direct-review": {"verdict": "pass", "findings": [], "escalate": True}}},
     WS_SCENARIO,
@@ -5296,7 +5340,7 @@ class AgentTypeTest(unittest.TestCase):
 class ClerkModelTest(unittest.TestCase):
     """#803, #813: clerk_model (sonnet, the default, or haiku) is checked before any agent and sets the model of every clerk call except the lifecycle and setup steps, which stay on the default."""
 
-    ON_DEFAULT = {"setup", "worktree", "land-unlock", "land-push-", "land-lock-", "pr", "merge", "hold", "close-out"}
+    ON_DEFAULT = {"setup", "worktree", "land-unlock", "land-push-", "land-lock-", "land-relock-", "pr", "merge", "hold", "close-out"}
 
     def test_clerk_model_must_be_sonnet_or_haiku(self):
         for bad in ("opus", "Haiku", "", 1, None, True):

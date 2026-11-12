@@ -1286,7 +1286,7 @@ class LandTest(unittest.TestCase):
             self.assertNotIn(gone, ls)
         ask = prompt(calls, "land-ask-1")
         self.assertIn(f"--holder {HOLDER} --reason conflict --items-file", ask)
-        self.assertIn("conflicts with dev again, after 2 resolved conflicts in one landing", ask)
+        self.assertIn("conflicts with dev again, after 2 earlier conflicts in one landing, so the landing stopped and accepted no merge", ask)
         self.assertIn({"issue": 1, "reason": "conflict", "comment_id": 99}, result["owner_actions"])
         # Two releases before a resolution, and the wrapper's: the third hold, taken at the second resolution, ends at that head.
         self.assertEqual(ls.count("land-unlock-1"), 3)
@@ -2224,7 +2224,11 @@ class ConflictedSyncOutsideLockTest(unittest.TestCase):
         for verdict in ("land-contended", "held_by", "lost_to"):
             with self.subTest(verdict=verdict):
                 result, calls, _ = run(patch=BEHIND, replies={"land-sync-1-1": ABORTED, "land-record-1-1": {
-                    "ok": True, "head": B, "lock": {"verdict": verdict, "lock_sha": C, "by": "h2/b9"}, "checks": None}})
+                    "ok": True, "head": B, "lock": {"verdict": verdict, "lock_sha": C, "by": "h2/b9"}, "checks": None},
+                    **{f"land-relock-1-{k}": {"lock": {"verdict": "land-contended", "lock_sha": C}} for k in (1, 2, 3)}})
+                # Only a wait that ran out is waited for again, as often as a first wait is (LAND_WAIT_RETRIES).
+                self.assertEqual([label for label in labels(calls) if label.startswith("land-relock-")],
+                                 [f"land-relock-1-{k}" for k in (1, 2, 3)] if verdict == "land-contended" else [])
                 got = row(result, 1)
                 self.assertEqual((got["outcome"], got["reason"]),
                                  ("land-contended", f"the land lock was not taken again at the reviewed head {B} ({verdict})"))
@@ -2302,12 +2306,106 @@ class ConflictedSyncOutsideLockTest(unittest.TestCase):
         self.assertEqual(row(result, 1)["outcome"], "conflict")
         self.assertNotIn("land-merge-1", labels(calls))
 
-    def test_a_resolution_that_merged_cleanly_after_all_needs_no_review(self):
-        out = self.land(**{"land-sync-resolve-1-1": {"status": "done", "conflicted": False, "head": B, "notes": "dev moved"}})
+    def test_a_resolution_that_says_it_merged_cleanly_is_reviewed_all_the_same(self):
+        clean = {"land-sync-resolve-1-1": {"status": "done", "conflicted": False, "head": B, "notes": "dev moved"}}
+        out = self.land(**clean)
         self.assertEqual(row(out["result"], 1)["outcome"], "landed")
         self.assertEqual(land_labels(out["calls"]), ["land-pr-1", "land-sync-1-1", "land-unlock-1", "land-sync-resolve-1-1",
-                                                     "land-record-1-1", "land-merge-1", "close-out-1"])
+                                                     "land-sync-review-1-1", "land-record-1-1", "land-merge-1", "close-out-1"])
+        self.assertIn(f"merge commit {B}", prompt(out["calls"], "land-sync-review-1-1"))
         self.assertIn(f"--sha {B} --wait\n", prompt(out["calls"], "land-record-1-1"))
+        out = self.land(**clean, **{"land-sync-review-1-1": self.FOUND, "land-sync-rereview-1-1": self.FOUND})
+        self.assertEqual(row(out["result"], 1)["outcome"], "conflict")
+        self.assertNotIn("land-merge-1", labels(out["calls"]))
+
+    def test_a_resolution_whose_head_is_not_its_reviewed_merge_commit_never_lands(self):
+        for name, replies in {
+            "resolved outside the lock": {"land-sync-1-1": ABORTED, "land-sync-resolve-1-1": {
+                "status": "done", "conflicted": True, "head": C, "merge_commit": B, "notes": "ok"}},
+            "resolved by the sync step": {"land-sync-1-1": {"status": "done", "conflicted": True, "head": C, "merge_commit": B, "notes": "ok"}},
+        }.items():
+            with self.subTest(case=name):
+                result, calls, _ = run(patch=BEHIND, replies=replies)
+                got = row(result, 1)
+                self.assertEqual((got["outcome"], got["stage"]), ("stopped", "land-sync"))
+                self.assertEqual(got["reason"], f"land-sync: the resolution names the head {C} and the merge commit {B}: only a reviewed merge commit lands")
+                ls = labels(calls)
+                for gone in ("land-sync-review-1-1", "land-record-1-1", "land-merge-1"):
+                    self.assertNotIn(gone, ls)
+                self.assertEqual(ls.count("land-unlock-1"), 1)
+        # An abbreviated merge commit of the same head is the same commit.
+        out = self.land(**{"land-sync-resolve-1-1": {"status": "done", "conflicted": True, "head": B, "merge_commit": B[:12], "notes": "ok"}})
+        self.assertEqual(row(out["result"], 1)["outcome"], "landed")
+
+    def test_a_retake_whose_wait_ran_out_waits_again_like_a_first_wait(self):
+        out_of_time = {"ok": True, "head": B, "lock": {"verdict": "land-contended", "lock_sha": C, "waited_s": 3600, "waited_on": [7]}, "checks": None}
+        out = self.land(**{"land-record-1-1": out_of_time,
+                           "land-relock-1-1": {"lock": {"verdict": "land-contended", "lock_sha": C}},
+                           "land-relock-1-2": {"lock": {"verdict": "acquired", "lock_sha": B, "waited_s": 900, "waited_on": [7, 9]}},
+                           "land-checks-1-2": {"state": "passed", "head": B, "required": ["ci"], "passed": ["ci"]}})
+        result, calls = out["result"], out["calls"]
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+        # A retried wait polled no checks: the loop polls them itself, under the lock, before the merge.
+        self.assertEqual(land_labels(calls), ["land-pr-1", "land-sync-1-1", "land-unlock-1", "land-sync-resolve-1-1", "land-sync-review-1-1",
+                                              "land-record-1-1", "land-relock-1-1", "land-relock-1-2", "land-checks-1-2", "land-merge-1",
+                                              "close-out-1"])
+        again = next(c for c in calls if c["label"] == "land-relock-1-2")
+        self.assertEqual((again["agentType"], again["model"]), ("clerk", "sonnet"))
+        self.assertIn("forge-claim renew --repo owner/repo --issue 1", again["prompt"])
+        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {B} --wait\n", again["prompt"])
+        self.assertIn(f"{self.RELEASE}{B}\n", prompt(calls, "close-out-1"))
+        self.assertEqual([line for line in out["logs"] if "waited" in line],
+                         ["land-record-1-1: waited 60 min for the land lock of dev behind PR #7",
+                          "land-relock-1-2: waited 15 min for the land lock of dev behind PR #7, #9"])
+        # A lost claim ends the wait; a lost reply may hold the lock at the reviewed head, which the wrapper releases.
+        out = self.land(**{"land-record-1-1": out_of_time, "land-relock-1-1": {"renew": {"verdict": "not_held", "by": "h2/b9"}, "lock": None}})
+        self.assertEqual(row(out["result"], 1)["outcome"], "claim-lost")
+        self.assertEqual(labels(out["calls"]).count("land-unlock-1"), 1)
+        out = self.land(**{"land-record-1-1": out_of_time, "land-relock-1-1": None})
+        self.assertEqual((row(out["result"], 1)["outcome"], row(out["result"], 1)["stage"]), ("stopped", "land-lock"))
+        self.assertEqual(labels(out["calls"]).count("land-unlock-1"), 2)
+        self.assertIn(f"{self.RELEASE}{B}\n", prompt(out["calls"], "land-unlock-1"))
+        self.assertNotIn("land-merge-1", labels(out["calls"]))
+
+    FAILED = {"verdict": "error", "detail": "boom"}
+
+    def unlocks(self, out):
+        return [c["prompt"] for c in out["calls"] if c["label"] == "land-unlock-1"]
+
+    def test_a_release_that_failed_before_the_resolution_is_tried_again_at_the_stop(self):
+        for name, first in {"an error": self.FAILED, "a lost reply": None, "a dead agent": "throw"}.items():
+            with self.subTest(release=name):
+                out = self.land(**{"land-unlock-1": [first, {"verdict": "released"}], "land-sync-review-1-1": None})
+                dead = name == "a dead agent"  # the landing ends where the agent died; the resolution never starts
+                self.assertEqual(row(out["result"], 1)["outcome"], "stopped" if dead else "conflict")
+                self.assertEqual("land-sync-resolve-1-1" in labels(out["calls"]), not dead)
+                # Both releases name the sha the lock is held at: the head it was taken at.
+                self.assertEqual([f"{self.RELEASE}{SHA}\n" in text for text in self.unlocks(out)], [True, True])
+                self.assertNotIn("land-merge-1", labels(out["calls"]))
+
+    def test_after_a_failed_release_a_lost_retake_releases_the_earlier_sha_then_the_reviewed_head(self):
+        out = self.land(**{"land-unlock-1": [self.FAILED, {"verdict": "released"}], "land-record-1-1": None})
+        self.assertEqual((row(out["result"], 1)["outcome"], row(out["result"], 1)["stage"]), ("stopped", "land-record"))
+        first, last = self.unlocks(out)
+        self.assertIn(f"{self.RELEASE}{SHA}\n", last)
+        self.assertIn(f"When it prints not_held with lock_sha {B}, run alone and exactly: {self.RELEASE}{B}", last)
+        self.assertNotIn("When it prints not_held", first)
+
+    def test_after_a_failed_release_the_retake_outcomes_keep_the_right_sha(self):
+        failed = {"land-unlock-1": [self.FAILED, {"verdict": "released"}]}
+        # The retake moves the lock that was never released: the landing goes on and the close-out releases the reviewed head.
+        out = self.land(**failed, **{"land-record-1-1": {"ok": True, "head": B, "lock": {"verdict": "moved", "lock_sha": B}}})
+        self.assertEqual(row(out["result"], 1)["outcome"], "landed")
+        self.assertEqual(len(self.unlocks(out)), 1)
+        self.assertIn(f"{self.RELEASE}{B}\n", prompt(out["calls"], "close-out-1"))
+        # The record step refused before any lock command: the earlier sha is still marked held and is released again.
+        out = self.land(**failed, **{"land-record-1-1": {"ok": False, "head": C, "detail": "the head moved", "lock": None, "checks": None}})
+        self.assertEqual((row(out["result"], 1)["outcome"], row(out["result"], 1)["stage"]), ("stopped", "land-record"))
+        self.assertEqual([f"{self.RELEASE}{SHA}\n" in text for text in self.unlocks(out)], [True, True])
+        # Another landing holds the lock: nothing of this landing's is left to release.
+        out = self.land(**failed, **{"land-record-1-1": {"ok": True, "head": B, "lock": {"verdict": "held_by", "lock_sha": C}, "checks": None}})
+        self.assertEqual(row(out["result"], 1)["outcome"], "land-contended")
+        self.assertEqual(len(self.unlocks(out)), 1)
 
 
 class LockWaitLogTest(unittest.TestCase):
@@ -2341,13 +2439,16 @@ class LockWaitLogTest(unittest.TestCase):
                                            "land-lock-1-1: waited 8 min for the land lock of dev behind PR #7, #9"])
 
     def test_both_programs_carry_the_same_lock_return_and_wait_log(self):
-        names = ("LOCK_RETURN", "LOCK_WAIT_LOG_S", "logWait")
-        child = PROGRAM.with_name("deliver-standard.js").read_text(encoding="utf-8")
-        text = PROGRAM.read_text(encoding="utf-8")
-        for name in names:
-            with self.subTest(name=name):
-                line = next(line for line in text.splitlines() if line.startswith(f"const {name} = "))
-                self.assertIn(line + "\n", child)
+        def copies(path):
+            text = path.read_text(encoding="utf-8")
+            lines = {name: next(line for line in text.splitlines() if line.startswith(f"const {name} = "))
+                     for name in ("LOCK_RETURN", "LOCK_WAIT_LOG_S")}
+            start = text.index("const logWait = ")
+            return dict(lines, logWait=text[start:text.index("\n}\n", start) + 3])
+        batch = copies(PROGRAM)
+        self.assertEqual(batch["logWait"].count("\n"), 5)
+        self.assertIn("behind PR", batch["logWait"])
+        self.assertEqual(batch, copies(PROGRAM.with_name("deliver-standard.js")))
 
 
 class DependencyTest(unittest.TestCase):
@@ -2871,7 +2972,7 @@ class SourceTest(unittest.TestCase):
 CLERK, IMPL, REV = "clerk", "implementer", "reviewer"
 EXPECTED = {stem: frozenset({kind}) for kind, stems in (
     (CLERK, ("setup", "facts-", "release-", "acquire-", "readopt-", "recover-end-", "ask-", "settle-",
-             "land-unlock-", "land-ask-", "land-lock-", "land-record-", "land-status-", "land-pr-", "land-checks-", "land-merge-", "close-out-",
+             "land-unlock-", "land-ask-", "land-lock-", "land-relock-", "land-record-", "land-status-", "land-pr-", "land-checks-", "land-merge-", "close-out-",
              "train-sweep-", "train-pr-", "train-checks-", "train-ready-", "train-merge-", "train-flip-")),
     (IMPL, ("land-sync-", "land-sync-resolve-", "land-sync-fix-", "land-fix-", "train-build-")),
     (REV, ("land-sync-review-", "land-sync-rereview-", "land-fix-review-")),
@@ -2894,6 +2995,11 @@ SCENARIOS = (
     {"patch": BEHIND,
      "replies": {"land-sync-1-1": ABORTED, "land-sync-resolve-1-1": {"status": "done", "conflicted": True, "head": B, "merge_commit": B,
                                    "resolved_files": ["x.py"], "tests": ["t"], "notes": "ok"}}},
+    # #913: a retake whose wait ran out is waited for again in a land-relock step.
+    {"patch": BEHIND,
+     "replies": {"land-sync-1-1": ABORTED,
+                 "land-record-1-1": {"ok": True, "head": B, "lock": {"verdict": "land-contended"}, "checks": None},
+                 "land-checks-1-2": {"state": "passed", "head": B, "required": ["ci"], "passed": ["ci"]}}},
     # #907: a sync-review finding reaches the fix round and its re-review.
     {"patch": BEHIND,
      "replies": {"land-sync-1-1": ABORTED, "land-sync-resolve-1-1": {"status": "done", "conflicted": True, "head": B, "merge_commit": B, "notes": "ok"},
@@ -2958,7 +3064,7 @@ class AgentTypeTest(unittest.TestCase):
 class ClerkModelTest(unittest.TestCase):
     """#803, #813: clerk_model is checked, sets the model of every clerk call except the setup and lifecycle steps, which stay on the default, and is passed to every child and the relaunch only when haiku."""
 
-    ON_DEFAULT = {"setup", "land-unlock-", "land-lock-", "land-pr-", "land-merge-", "land-record-", "land-checks-", "close-out-",
+    ON_DEFAULT = {"setup", "land-unlock-", "land-lock-", "land-relock-", "land-pr-", "land-merge-", "land-record-", "land-checks-", "close-out-",
                   "train-sweep-", "train-pr-", "train-checks-", "train-merge-"}
 
     def test_clerk_model_must_be_sonnet_or_haiku(self):

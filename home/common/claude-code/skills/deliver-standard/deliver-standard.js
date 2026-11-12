@@ -21,7 +21,7 @@ export const meta = {
 // the head is unchanged and the tree clean), lane (standard, the default, or direct: no planner, one
 // implementer following the deliver-direct skill, one fresh reviewer and at most one fix round; a cont keeps
 // its lane and no direct plan mode exists), cont (the `cont` object of an earlier stop, passed
-// back unchanged to resume; see RESUME below), review_sizing (boolean, default off, #747: sized Claude reviews; an argument only, never kept in cont, so a resume passes it again), clerk_model (sonnet, the default, or haiku, #803: the model of every clerk call except the setup steps (setup, worktree) and the steps that emit a lifecycle verb (land-push, pr, land-lock, merge, land-unlock, hold), which stay on sonnet, #813; an argument only, never kept in cont, so a resume passes it again), amend (#811: on a resume of a standard-lane cont with a plan, a non-empty list of {file, find, replace} edits of files in cont.setup.plan_dir, file relative to it or absolute under it; a clerk applies them all or none with plan-amend before the next task and records each under Amendments in plan.md; an argument only, never kept in cont, and an applied edit sent again is skipped).
+// back unchanged to resume; see RESUME below), review_sizing (boolean, default off, #747: sized Claude reviews; an argument only, never kept in cont, so a resume passes it again), clerk_model (sonnet, the default, or haiku, #803: the model of every clerk call except the setup steps (setup, worktree) and the steps that emit a lifecycle verb (land-push, pr, land-lock, land-relock, merge, land-unlock, hold), which stay on sonnet, #813; an argument only, never kept in cont, so a resume passes it again), amend (#811: on a resume of a standard-lane cont with a plan, a non-empty list of {file, find, replace} edits of files in cont.setup.plan_dir, file relative to it or absolute under it; a clerk applies them all or none with plan-amend before the next task and records each under Amendments in plan.md; an argument only, never kept in cont, and an applied edit sent again is skipped).
 // Every policy value comes from the project contract that setup resolves; this
 // file carries no project literal and defaults no policy value.
 //
@@ -1446,6 +1446,7 @@ let lockMaybe = null
 // answers behind when the integration branch moved meanwhile: the loop then syncs again, a clean merge under the lock and a conflicted one
 // outside it once more, within the sync bounds below (sync-contention, the merge refusal budget). A stop in between holds no lock.
 let lockOut = false
+let relocks = 0
 let retakes = 0
 const HOLDING = ['acquired', 'already_held', 'moved']
 // Releases the last held sha once; {} when nothing was held or it was released, else lock_unreleased (and a fresh dead_agents) for the result to carry. Never throws.
@@ -1557,8 +1558,28 @@ ${moved ? `${retake ? `Take the cross-host landing lock of the branch ${INT} for
 ${LOCK_RETURN} Return it as lock. Only when lock's verdict is acquired, already_held or moved, wait ${CHECKS_WAIT(PR)} Otherwise run nothing else and return only lock.` : `${RENEW_FIRST}\nThen wait ${CHECKS_WAIT(PR)}`}
 ${RULES}`, { label: `checks-${round}`, phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: moved ? { ...CHECKS, properties: { ...CHECKS.properties, lock: NULLABLE(LOCK_SCHEMA) }, required: ['lock'] } : withRenew(CHECKS) }), r => (moved ? null : r.renew))
       if (moved) {
-        const mv = ck && ck.lock ? ck.lock.verdict : null
+        let mv = ck && ck.lock ? ck.lock.verdict : null
         if (ck) logWait(`checks-${round}`, ck.lock)
+        // #913: the retake's wait ran out behind other landings, so another holder has the lock: renew the claim and wait again,
+        // LAND_WAIT_RETRIES times at most, as the first wait does. Each call is marked as possibly holding the lock first.
+        let relocked = false
+        for (let k = 1; retake && mv === 'land-contended' && k <= LAND_WAIT_RETRIES; k++) {
+          relocks++
+          lockHeld = true
+          const lk = await recall(() => call(`${CTX}
+${RENEW_FIRST}
+Then take the cross-host landing lock of the branch ${INT} again for PR #${PR} at the head ${expected}; an earlier wait for it ran out behind other landings. Run alone and exactly: ${LAND_ACQUIRE(expected, true)}
+${LOCK_RETURN} Return it as lock. Run nothing else.
+${RULES}`, { label: `land-relock-${relocks}`, phase: 'Ship', agentType: 'clerk', model: DEFAULT_CLERK_MODEL, effort: 'low', schema: withRenew({ type: 'object', properties: {} }, { lock: NULLABLE(LOCK_SCHEMA) }) }), r => r.renew)
+          if (!lk) return stop('land-lock', { pr: PR, lock: null })
+          if (lk.renew && lk.renew.verdict !== 'renewed') lockHeld = false
+          mv = lk.lock ? lk.lock.verdict : null
+          logWait(`land-relock-${relocks}`, lk.lock)
+          if (refusal(mv)) lockHeld = false
+          const lost = renewed(lk.renew, `land-relock-${relocks}`)
+          if (lost) return lost
+          relocked = true
+        }
         if (HOLDING.includes(mv)) {
           lockSha = expected
           lockMaybe = null
@@ -1569,6 +1590,8 @@ ${RULES}`, { label: `checks-${round}`, phase: 'Ship', agentType: 'clerk', model:
           if (retake) lockHeld = false
         }
         if (!HOLDING.includes(mv)) return stop('land-contended', { pr: PR, lock: mv })
+        // A retried wait polled no checks: the next round polls them, with the lock at the head.
+        if (relocked) continue
       } else {
         const lost = ck ? renewed(ck.renew, `checks-${round}`) : null
         if (lost) return lost
@@ -1651,13 +1674,14 @@ ${RULES}`, { label: `sync-${syncs}`, phase: 'Ship', agentType: 'implementer', mo
       if ((await unlock()).lock_unreleased) lockHeld = true
       if (aborted) {
         merge = await call(`${CTX}
-Merging origin/${INT} into the branch conflicts. Resolve it in the worktree; the landing lock is not held while you work. If a merge is in progress (git -C ${W} rev-parse -q --verify MERGE_HEAD succeeds), run git merge --abort inside ${W} first. Then git -C ${W} fetch origin and git -C ${W} merge origin/${INT}. If it conflicts, resolve each conflict keeping both sides' intent, ${MARKER_CHECK(W, INT)}, commit the merge, and ${WHOLE('the files the merge changed against its first parent')}. ${FMT} Do not push. Return conflicted (false when the merge was clean after all), merge_commit (full sha), resolved_files and markers_checked (true when both checks ran); status blocked with notes if you cannot resolve it safely.
+Merging origin/${INT} into the branch conflicts. Resolve it in the worktree; the landing lock is not held while you work. If a merge is in progress (git -C ${W} rev-parse -q --verify MERGE_HEAD succeeds), run git merge --abort inside ${W} first. Then git -C ${W} fetch origin and git -C ${W} merge origin/${INT}. If it conflicts, resolve each conflict keeping both sides' intent, ${MARKER_CHECK(W, INT)}, commit the merge, and ${WHOLE('the files the merge changed against its first parent')}. ${FMT} Do not push. Return conflicted (false when the merge was clean this time; it is reviewed all the same), merge_commit (full sha), resolved_files and markers_checked (true when both checks ran); status blocked with notes if you cannot resolve it safely.
 ${RULES}`, { label: `sync-resolve-${syncs}`, phase: 'Ship', agentType: 'implementer', model: 'sonnet', schema: SYNC })
       }
     }
     if (!merge || merge.status !== 'done' || !present(merge.merge_commit)) return stop('sync', { pr: PR, sync: merge })
     expected = merge.merge_commit
-    if (merge.conflicted) {
+    // A merge that conflicted is reviewed whatever its resolution says of itself: the sync step saw the conflict.
+    if (aborted || merge.conflicted) {
       const sr = await call(`${CTX}
 Review the conflict resolution in merge commit ${merge.merge_commit}: git -C ${W} show --cc ${merge.merge_commit} and the resolved files ${JSON.stringify(merge.resolved_files || [])}; the tests run: ${JSON.stringify(merge.tests || [])}. Report Important or Critical defects only: a dropped change from either side, a broken merge of intent, a resolved file whose tests were not run.${merge.markers_checked === true ? '' : MARKERS_UNCHECKED}`, { label: `sync-review-${syncs}`, phase: 'Ship', agentType: 'reviewer', schema: FINDINGS })
       if (!sr) return stop('sync-review', { pr: PR, review: sr })
