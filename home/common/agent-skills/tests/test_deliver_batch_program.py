@@ -347,7 +347,8 @@ FIXED = {"commit": "f" * 40, "evidence": "git grep -F 'boom' finds nothing at or
 
 
 FACTS_NO_LANE = {"state": "OPEN", "labels": [], "title": "t", "branch": "issue-1-x",
-                 "claim": {"verdict": "free", "by": None}, "merged_refs": [], "open_pr": None, "blockers": [],
+                 "claim": {"verdict": "free", "by": None}, "merged_refs": [], "open_pr": None,
+                 "native": {"verdict": "read", "blocked_by": []}, "blockers": [],
                  "decision": {"verdict": "none", "comment_id": None, "questions": []}}
 UNACCEPTED = {"ok": False, "reason": "unaccepted"}
 NO_LANE = "facts-1 returned no lane"
@@ -2129,6 +2130,11 @@ class LandOrderTest(unittest.TestCase):
         self.assertLess(ls.index("land-pr-1"), ls.index("land-unlock-1"))
 
 
+def native(*issues):
+    """forge-issue read's answer naming these issues of the repository as native blockers."""
+    return {"verdict": "read", "blocked_by": [f"owner/repo#{n}" for n in issues]}
+
+
 def blocked_by(*issues):
     return {"blockers": [{"issue": b, "state": "OPEN"} for b in issues]}
 
@@ -2652,6 +2658,44 @@ class DependencyTest(unittest.TestCase):
         self.assertLess(ls.index("close-out-1"), ls.index("acquire-2"))
         self.assertLess(ls.index("close-out-2"), ls.index("acquire-3"))
         self.assertEqual([row(result, n)["outcome"] for n in (1, 2, 3)], ["landed"] * 3)
+
+    def test_a_blocker_only_the_tracker_names_makes_the_dependent_wait(self):
+        """An edge added with forge-issue link is absent from the body's list, and here from the reply's states (#944 ahead of #891)."""
+        result, calls, _ = run(args=dict(ARGS, issues=[2, 1]),
+                               patch={"facts-1": {"native": native(50, 2), "blockers": [{"issue": 50, "state": "CLOSED"}]}})
+        ls = labels(calls)
+        self.assertLess(ls.index("close-out-2"), ls.index("acquire-1"))
+        self.assertEqual([row(result, n)["outcome"] for n in (1, 2)], ["landed"] * 2)
+
+    def test_an_outside_native_blocker_the_reply_gives_no_state_blocks(self):
+        result, calls, _ = run(patch={"facts-1": {"native": native(50)}})
+        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["blocker"]), ("blocked", 50))
+        self.assertNotIn("acquire-1", labels(calls))
+
+    def test_a_closed_native_blocker_and_another_repository_s_issue_do_not_block(self):
+        facts = {"native": {"verdict": "read", "blocked_by": ["Owner/Repo#50", "other/repo#2"]},
+                 "blockers": [{"issue": 50, "state": "closed"}]}
+        result, calls, _ = run(args=dict(ARGS, issues=[1, 2]), patch={"facts-1": facts})
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+        ls = labels(calls)
+        self.assertLess(ls.index("acquire-1"), ls.index("close-out-2"))
+
+    def test_a_reply_without_the_native_read_stops_the_issue_unclaimed(self):
+        for bad in (None, {"verdict": "error"}, {"verdict": "read"}, {"verdict": "linked", "blocked_by": []}):
+            with self.subTest(native=bad):
+                facts = dict(FACTS_NO_LANE, lane="standard", native=bad, blockers=[{"issue": 50, "state": "CLOSED"}])
+                if bad is None:
+                    del facts["native"]
+                result, calls, _ = run(replies={"facts-1": facts})
+                self.assertEqual(row(result, 1),
+                                 {"issue": 1, "outcome": "stopped", "reason": "facts-1 did not read the native blockers"})
+                self.assertNotIn("acquire-1", labels(calls))
+
+    def test_the_facts_step_names_the_native_read_and_requires_its_answer(self):
+        _, calls, _ = run()
+        call = next(c for c in calls if c["label"] == "facts-1")
+        self.assertIn("run alone and exactly forge-issue read --repo owner/repo --issue 1 and return", call["prompt"])
+        self.assertLessEqual({"native", "blockers"}, set(call["schema"]["required"]))
 
     def test_a_merged_but_open_blocker_does_not_release(self):
         acceptance = [{"id": "AC1", "text": "works", "kind": "code"}, {"id": "AC2", "text": "live", "kind": "evidence"}]

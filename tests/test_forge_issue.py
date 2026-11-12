@@ -275,6 +275,35 @@ class LinkTest(Base):
                          (1, "links_differ", NEW, [688]))
 
 
+class ReadTest(Base):
+    def setUp(self):
+        super().setUp()
+        self.world.respond_json("gh", get(NEW), CHILD)
+
+    def test_read_prints_both_lists_and_posts_nothing(self):
+        self.lists(NEW, [B2, B1], [DOWN])
+        code, out = run("read", "--repo", SLUG, "--issue", str(NEW))
+        self.assertEqual(out, {"command": "read", "repo": SLUG, "issue": NEW, "verdict": "read",
+                               "blocked_by": [ref(B1), ref(B2)], "blocks": [ref(DOWN)], "missing_blocked_by": [],
+                               "missing_blocks": [], "unexpected_blocked_by": [], "unexpected_blocks": [],
+                               "error": None, "detail": None})
+        self.assertEqual((code, self.posts()), (0, []))
+
+    def test_read_of_an_issue_without_edges_prints_empty_lists(self):
+        self.lists(NEW, [], [])
+        code, out = run("read", "--repo", SLUG, "--issue", str(NEW))
+        self.assertEqual((code, out["verdict"], out["blocked_by"], out["blocks"]), (0, "read", [], []))
+
+    def test_a_failed_listing_is_an_error_and_never_an_empty_list(self):
+        self.world.respond_json("gh", listing(NEW, "blocked_by"), [{"not": "a page"}])
+        code, out = run("read", "--repo", SLUG, "--issue", str(NEW))
+        self.assertEqual((code, out["verdict"], out["error"], out["blocked_by"]), (1, "error", "payload_invalid", None))
+
+    def test_read_of_a_pull_request_is_an_error(self):
+        code, out = run("read", "--repo", SLUG, "--issue", str(PR["number"]))
+        self.assertEqual((code, out["verdict"], out["error"]), (1, "error", "not_an_issue"))
+
+
 class UsageTest(Base):
     def test_usage_errors_exit_2_and_call_no_gh(self):
         body = str(self.body_file)
@@ -290,6 +319,8 @@ class UsageTest(Base):
             ["create", "--repo", SLUG, "--body-file", body],
             ["link", "--repo", SLUG, "--issue", str(NEW)],
             ["link", "--repo", SLUG, "--issue", str(NEW), "--blocked-by", str(NEW)],
+            ["read", "--repo", SLUG],
+            ["read", "--repo", SLUG, "--issue", str(NEW), "--blocked-by", "555"],
             base + ["--label", "instruction-budget-raise"],
             base + ["--label", "Instruction-Budget-Raise"],
             base + ["--label", " instruction-budget-raise "],
@@ -299,7 +330,7 @@ class UsageTest(Base):
             with self.subTest(argv=argv):
                 code, out = run(*argv)
                 self.assertEqual((code, out["verdict"], out["error"]), (2, "error", "usage"))
-                self.assertEqual(out["command"], argv[0] if argv and argv[0] in ("create", "link") else None)
+                self.assertEqual(out["command"], argv[0] if argv and argv[0] in ("create", "link", "read") else None)
         self.assertEqual(self.world.argvs("gh"), [])
 
 
