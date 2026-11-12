@@ -506,7 +506,7 @@ async function sendAnswer(id, state, item) {
   redraw();
 }
 function startApproval(item, state) {
-  if (!choosable(state)) return false;
+  if (!choosable(state) || state.reply.phase === "sending") return false;
   const id = briefId(item);
   state.phase = "waiting";
   state.reason = "";
@@ -560,6 +560,12 @@ async function sendReply(rec) {
   const state = briefState(item);
   const reply = state.reply;
   if (reply.phase === "sending") return;
+  if (state.phase === "sending") {
+    reply.phase = "failed";
+    reply.reason = "the approval is already on its way";
+    redraw();
+    return;
+  }
   const sent = rec.field.value;
   replaced.delete(state.sprint_id);
   if (sent.trim() === "") {
@@ -568,6 +574,7 @@ async function sendReply(rec) {
     redraw();
     return;
   }
+  undo(state);
   reply.phase = "sending";
   reply.reason = "";
   reply.text = sent;
@@ -592,7 +599,7 @@ async function sendReply(rec) {
   if (answers.get(id) !== state) return;
   if (reason === null) {
     reply.phase = "sent";
-    if (rec.field.value === sent) rec.field.value = "";
+    if (rec.item.version === state.version && rec.field.value === sent) rec.field.value = "";
   } else {
     reply.phase = "failed";
     reply.reason = reason;

@@ -15,7 +15,7 @@ The console checks that the parent issue or pull request is still open, re-reads
 
 The console then appends one `inbox.changed` marking the item answered, so it leaves the count at once and leaves the list when the marker is no longer live. A read that began before an answer does not reopen it.
 
-The marker may name a recommended option in `rec=<n1>.<n2>...`, one index per question, written from the planner's recommendation, which is only a hint: a recommendation that matches none of the question's options is dropped by the poster (that question records `0`) and never blocks the prompt; the page opens with the recommended option selected. The keys go to the first answerable decision item wherever it sits, and a pending send keeps its Undo wherever the list moves it. No free-text reply is offered.
+The marker may name a recommended option in `rec=<n1>.<n2>...`, one index per question, written from the planner's recommendation, which is only a hint: a recommendation that matches none of the question's options is dropped by the poster (that question records `0`) and never blocks the prompt; the page opens with the recommended option selected. The keys go to the first answerable decision item wherever it sits, unless a brief is waiting, which takes them first (ADR-console-012), and a pending send keeps its Undo wherever the list moves it. No free-text reply is offered.
 
 ## Consequences
 

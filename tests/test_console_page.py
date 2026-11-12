@@ -1239,6 +1239,10 @@ def fails(snap: dict) -> list:
     return [full(n) for n in nodes(snap["inbox"]) if has_class(n, "fail")]
 
 
+def reply_fields(snap: dict) -> list:
+    return [n["value"] for n in nodes(snap["inbox"]) if has_class(n, "reply-text")]
+
+
 class PageBriefTest(unittest.TestCase):
     def test_a_brief_opens_in_place_with_its_goal_above_and_its_version(self) -> None:
         (snap,) = render([
@@ -1338,6 +1342,38 @@ class PageBriefTest(unittest.TestCase):
         (post,) = replies(snap)
         self.assertEqual(posted(post)["version"], 1)
         self.assertNotIn(REPLIED_TEXT, full(snap["inbox"]))
+        self.assertEqual(reply_fields(snap), ["redo"])
+
+    def test_a_reply_cancels_a_pending_approval(self) -> None:
+        (snap,) = render([
+            START, {"frame": frame([BRIEF])}, {"key": "Enter"}, {"clock": 2000},
+            {"input": {"cls": "reply-text", "value": "Drop slice 2"}}, {"hold": True},
+            {"click": "reply-send"}, {"clock": 20000}, {"snapshot": True},
+        ])
+        self.assertEqual(approvals(snap), [])
+        self.assertEqual(len(replies(snap)), 1)
+        self.assertNotIn(APPROVING_TEXT, full(snap["inbox"]))
+
+    def test_no_approval_starts_while_a_reply_is_sending(self) -> None:
+        (snap,) = render([
+            START, {"frame": frame([BRIEF])},
+            {"input": {"cls": "reply-text", "value": "Drop slice 2"}}, {"hold": True},
+            {"click": "reply-send"}, {"key": "Enter"}, {"clock": 20000}, {"snapshot": True},
+        ])
+        self.assertEqual(approvals(snap), [])
+        self.assertEqual(len(replies(snap)), 1)
+        self.assertNotIn(APPROVING_TEXT, full(snap["inbox"]))
+
+    def test_no_reply_goes_out_while_an_approval_is_sending(self) -> None:
+        (snap,) = render([
+            START, {"frame": frame([BRIEF])}, {"key": "Enter"}, {"hold": True},
+            {"clock": 5000},
+            {"input": {"cls": "reply-text", "value": "Drop slice 2"}},
+            {"click": "reply-send"}, {"snapshot": True},
+        ])
+        self.assertEqual(len(approvals(snap)), 1)
+        self.assertEqual(replies(snap), [])
+        self.assertEqual(reply_fields(snap), ["Drop slice 2"])
 
     def test_a_reply_posts_the_owners_exact_words(self) -> None:
         (snap,) = render([

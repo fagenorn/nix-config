@@ -19,6 +19,8 @@ A brief has five parts: what done looks like, what is excluded, the slices, the 
 
 A waiting brief is an inbox item. The page opens it with the goal above it, its version, and the five parts. `POST /api/approve` and `POST /api/reply` are page writes under ADR-console-008, each carrying the version the owner acted on. Enter starts the same undo as a decision prompt (ADR-console-010), five seconds in which Escape or Undo cancels it, and then approves; the reply field asks for changes instead. Each action is bound to the version shown when the owner acted, so a newer brief makes a late action refuse with the reason, and a newer version cancels an approval that is still waiting. A reply is kept exactly as typed, at most 2000 characters, and is what `sprint status` returns.
 
+A waiting brief sits above every tracker item in the inbox, whatever their held work, and takes the keys before any decision prompt: Enter starts its approval. This narrows the key routing of ADR-console-002 and ADR-console-010, which still govern the decision prompts beneath it. A brief carries no "Answer on the tracker" link, since there is no tracker item to answer. Asking for changes cancels an approval that is still waiting, and neither action starts while the other is being sent, so the two opposing decisions are never both sent.
+
 Approving makes the sprint "starting". The digest says "A brief for <project> arrived, version <n>: <goal>" and "The brief for <project> was approved, version <n>: <goal>"; a reply adds no sentence.
 
 Brief rows (`brief.sent`, `brief.approved`, `brief.replied`) are kept indefinitely like goal rows, and the store moves to schema 4 to protect them (ADR-console-009).
