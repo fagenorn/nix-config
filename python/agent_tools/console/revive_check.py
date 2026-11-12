@@ -34,7 +34,11 @@ run, polls the view every 5 seconds (`POLL_SECONDS`) and ends 75 `{"phase", "spr
 - `stop`: the registry is read fresh and the listed session named
   `manager.session_name(project, sprint id)` is `first_session`; it is stopped with
   `stop(session_id, profile)` and `stopped_at` is `clock()`. A failed stop, or no such session,
-  is tried again on the next poll.
+  is tried again on the next poll. The stop waits for a run with `STOP_WINDOW` (190) seconds of
+  budget left (`DEFAULT_DEADLINE` plus two polls), so the return is polled within the run that
+  stopped the manager and `back_seconds` is not the gap to the next scheduled run; a run short of
+  it ends 75 in phase `stop` and the next run stops the manager at its start. A `--budget` below
+  `STOP_WINDOW` stops at once, as no run could ever have the window.
 - `back`: wait until the registry lists that name with `first_session`; `back_seconds` is
   `int(clock() - stopped_at)`.
 - `remove`: stop the listed session, then `remove(first_session, first_profile)` (claude-account
@@ -106,6 +110,7 @@ DEFAULT_BUDGET = 540
 DEFAULT_DEADLINE = 180
 POLL_SECONDS = 5
 RETURN_SECONDS = 60
+STOP_WINDOW = DEFAULT_DEADLINE + 2 * POLL_SECONDS
 RETURN_LIMIT = 600
 SUCCESSOR_LIMIT = 900
 REMOVE_TIMEOUT = 60
@@ -304,7 +309,8 @@ def _start(args, registry, stop, remove, clock, sleep) -> int:
                     checkpoint(phase="stop")
                     advanced = True
         elif phase == "stop":
-            found = [o for o in registry().values() if o.name == name()]
+            room = args.budget < STOP_WINDOW or args.budget - (clock() - run_start) >= STOP_WINDOW
+            found = [o for o in registry().values() if o.name == name()] if room else []
             if found:
                 profile = found[0].profile or DEFAULT_PROFILE
                 try:

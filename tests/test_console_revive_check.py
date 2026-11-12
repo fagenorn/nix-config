@@ -177,7 +177,7 @@ class ReviveCheckTest(unittest.TestCase):
         self.assertFalse(self.state_file.exists())
 
     def test_the_return_limit_holds_across_resumed_runs(self):
-        code, out = self.run_check(SCRIPT, [(None, listed("s-1")), (300, GONE)], budget="200")
+        code, out = self.run_check(SCRIPT, [(None, listed("s-1")), (300, GONE)], budget="250")
         self.assertEqual((code, out["phase"], out["status"]), (75, "back", "waiting"))
         saved = json.loads(self.state_file.read_text())
         self.assertEqual(saved["stopped_at"], self.stop_time)
@@ -189,6 +189,18 @@ class ReviveCheckTest(unittest.TestCase):
         self.assertEqual(self.posts("/api/goal"), [])
         self.assertEqual(posted, 1)
         self.assertFalse(self.state_file.exists())
+
+    def test_a_late_on_track_stops_nothing_so_the_return_time_is_not_the_next_runs_gap(self):
+        late = [view(state="drafting", brief=1)] * 26 + [view()]
+        code, out = self.run_check([view(sprint=False), *late], steps(listed("s-1")), budget="300")
+        self.assertEqual((code, out["phase"], out["status"]), (75, "stop", "waiting"))
+        self.assertEqual(self.stops(), [])
+        self.assertEqual(json.loads(self.state_file.read_text())["stopped_at"], None)
+        code, out = self.run_check([view()], [
+            (None, listed("s-1")), (130, listed("s-1")), (None, GONE), (None, listed("s-2"))],
+            now=self.time.now + 900, budget="300")
+        self.assertEqual((code, out["back_seconds"], out["status"]), (0, 130, "met"))
+        self.assertEqual(self.timing(), (0, {"back_seconds": 130, "status": "met"}))
 
     def test_no_successor_within_the_limit_is_not_met(self):
         code, out = self.run_check(SCRIPT, [
