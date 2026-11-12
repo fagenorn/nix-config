@@ -7,6 +7,7 @@ import tempfile
 import time
 from pathlib import Path
 
+from agent_tools.console import manager as console_manager
 from agent_tools.console import service as console_service
 from agent_tools.console import sessions as console_sessions
 
@@ -130,9 +131,38 @@ def hook_body(name, **overrides):
     raise KeyError(name)
 
 
+class Launches:
+    """A `launcher` stand-in: records each launch; `fail` is consumed per call (a str is a failure)."""
+
+    def __init__(self, fail=None):
+        self.calls = []
+        self.fail = list(fail or [])
+
+    def __call__(self, launch):
+        self.calls.append(launch)
+        reason = self.fail.pop(0) if self.fail else None
+        if reason is not None:
+            raise console_manager.LaunchFailed(reason)
+
+
+class Queued:
+    """A `dispatch` stand-in: holds each job until `run_next` runs the oldest."""
+
+    def __init__(self):
+        self.jobs = []
+
+    def __call__(self, job):
+        self.jobs.append(job)
+
+    def run_next(self):
+        self.jobs.pop(0)()
+
+
 def service(test, store, registry, session_dirs=(), repo_of=lambda cwd: cwd, profile_dirs=(),
             **kwargs):
     kwargs.setdefault("branch_pattern_of", lambda repo: "issue-<num>-<slug>")
+    kwargs.setdefault("dispatch", lambda job: job())
+    kwargs.setdefault("bound_profile_of", lambda root: "default")
     svc = console_service.ConsoleService(
         store, registry, port=0, session_dirs=lambda: list(session_dirs),
         profile_dirs=lambda: list(profile_dirs), repo_of=repo_of, **kwargs)

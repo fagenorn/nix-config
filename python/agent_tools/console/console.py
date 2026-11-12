@@ -14,6 +14,10 @@ SIGTERM or SIGINT closes the service and exits 0. A port that cannot be bound is
 used (a schema version this build does not read, a database error) is stderr
 `console: event log unusable: <error>` and exit 1; a page token that cannot be read or is malformed is
 stderr `console: page token unusable: <error>` and exit 1. A bad argument is exit 2.
+
+The service is given `manager.launcher_for(sys.platform)`: on Linux a stated goal starts that
+sprint's manager (`agent_tools.console.manager`), elsewhere there is no launcher and every sprint
+says managers are not available on this host yet.
 """
 
 from __future__ import annotations
@@ -24,7 +28,7 @@ import sqlite3
 import sys
 import threading
 
-from agent_tools.console import inbox, service
+from agent_tools.console import inbox, manager, service
 from agent_tools.console.event_log import EventLogError
 from agent_tools.console.write_guard import TokenError
 
@@ -51,7 +55,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         console = service.ConsoleService(
             service.default_store(), service.default_registry(), port=args.port,
-            tracker=inbox.read_items)
+            tracker=inbox.read_items, launcher=manager.launcher_for(sys.platform))
     except TokenError as error:
         print(f"console: page token unusable: {error}", file=sys.stderr)
         return 1

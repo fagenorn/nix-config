@@ -42,6 +42,10 @@ be empty so the service can give the plain reason:
 
     {"project_id": "<project id>", "sprint_id": "<16 lowercase hex>"}
 
+`parse_retry(body)` reads the body of the manager retry write, the same shape as the withdraw's, and
+returns `(project_id, sprint_id)`. `HAS_MANAGER`, `LAUNCHING` and `TOO_SOON` are the service's
+retry refusals.
+
 Both accept only a UTF-8 JSON object with exactly those keys; anything else, a repeated key, a
 NaN or Infinity literal or nesting too deep to parse raises `ValueError`.
 
@@ -152,6 +156,9 @@ REPLACED = "a newer brief replaced this one"
 EMPTY_REPLY = "write the reply first"
 REPLY_TOO_LONG = "a reply is at most 2000 characters"
 UNKNOWN = "this sprint is not known"
+HAS_MANAGER = "this sprint has a manager"
+LAUNCHING = "a manager is starting for this sprint"
+TOO_SOON = "retry is offered two minutes after the goal"
 
 _MINUTE_MS = 60_000
 _HOUR_MS = 3_600_000
@@ -237,6 +244,11 @@ def parse_goal(body: bytes) -> tuple[str, str]:
 
 
 def parse_withdraw(body: bytes) -> tuple[str, str]:
+    value = _object(body, {"project_id", "sprint_id"})
+    return value["project_id"], _sprint_id(value["sprint_id"])
+
+
+def parse_retry(body: bytes) -> tuple[str, str]:
     value = _object(body, {"project_id", "sprint_id"})
     return value["project_id"], _sprint_id(value["sprint_id"])
 

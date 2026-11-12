@@ -212,6 +212,7 @@ agent-workflow-tests *args:
     tests/test_console_briefs.py \
     tests/test_console_sprint_command.py \
     tests/test_console_manager.py \
+    tests/test_console_manager_service.py \
     tests/test_console_deliveries.py \
     tests/test_console_units.py \
     home/common/agent-skills/tests/test_deliver_standard_program.py \
