@@ -481,9 +481,10 @@ class ManagerContractTest(unittest.TestCase):
         for needle in ("`sprint close --closing-file -`", '"summary"', '"differently"',
                        '"landed"', '"held"', '"dropped"', "mid-merge", "start nothing new",
                        "`stop`", "an issue of this sprint is neither landed nor dropped",
-                       "no tracker action"):
+                       "no tracker action", "what you would do differently"):
             with self.subTest(needle=needle):
                 self.assertIn(needle, after)
+        self.assertNotIn("what went differently", after)
 
 
 class CommandContractTest(unittest.TestCase):

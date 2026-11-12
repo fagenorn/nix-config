@@ -46,7 +46,7 @@ If this text is no longer in your context, run `sprint contract` again.
    `{"summary": <text>, "issues": [{"issue": <number>, "stage": "landed" | "held" | "dropped"}], "differently": <text>}`
    - `summary`: what the sprint did. Its first line is one plain sentence with no issue number: the owner reads that line on the page.
    - `issues`: every issue of the sprint, each with its outcome. An issue you gave up on is listed with the stage `dropped`; leaving it out is not dropping it.
-   - `differently`: what went differently from the brief.
+   - `differently`: what you would do differently next time.
 2. Refused with `an issue of this sprint is neither landed nor dropped`: an issue of your latest report has no outcome in the closing report. Settle the missing issues' outcome first, then send the closing report again.
 3. A message of kind `stop` means the owner stopped the sprint: finish what is mid-merge, start nothing new, send the closing report listing every unfinished issue as `dropped`, and end your turn.
 4. After a closing report, end your turn and take no tracker action.

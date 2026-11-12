@@ -629,30 +629,28 @@ class ClosingCheckTest(unittest.TestCase):
         ]
         for name, closing, reason in table:
             with self.subTest(name), self.assertRaises(sprints.Refused) as caught:
-                sprints.checked_closing(closing, [], True)
+                sprints.checked_closing(closing, [])
             self.assertEqual(str(caught.exception), reason)
         second = {**CLOSING, "summary": "It resumes.\nFixed #12 on the way."}
-        self.assertEqual(sprints.checked_closing(second, [], True)["summary"],
+        self.assertEqual(sprints.checked_closing(second, [])["summary"],
                          "It resumes.\nFixed #12 on the way.")
 
-    def test_every_reported_issue_must_be_landed_held_or_dropped_unless_stopping(self):
+    def test_every_reported_issue_must_be_landed_held_or_dropped_even_when_stopping(self):
         def closing(*rows):
             return {**CLOSING, "summary": "  Done.  ", "differently": " Nothing. ",
                     "issues": [{"issue": n, "stage": stage} for n, stage in rows]}
 
         with self.assertRaises(sprints.Refused) as caught:
-            sprints.checked_closing(closing((12, "landed")), [12, 13], False)
+            sprints.checked_closing(closing((12, "landed")), [12, 13])
         self.assertEqual(str(caught.exception),
                          "an issue of this sprint is neither landed nor dropped")
         for rows in (((13, "dropped"), (12, "landed")), ((13, "dropped"), (12, "held"))):
             with self.subTest(rows=rows):
                 self.assertEqual(
-                    sprints.checked_closing(closing(*rows), [12, 13], False),
+                    sprints.checked_closing(closing(*rows), [12, 13]),
                     {"summary": "Done.", "differently": "Nothing.",
                      "issues": [{"issue": 12, "stage": rows[1][1]},
                                 {"issue": 13, "stage": "dropped"}]})
-        self.assertEqual(sprints.checked_closing(closing((12, "landed")), [12, 13], True)["issues"],
-                         [{"issue": 12, "stage": "landed"}])
 
     def test_a_close_request_is_a_sprint_a_secret_and_a_closing(self):
         body = json.dumps({"sprint_id": SID, "secret": "s", "closing": CLOSING}).encode()
@@ -705,6 +703,16 @@ class ClosingFoldTest(unittest.TestCase):
         stopping = sprints.sprint_states([goal, stop_requested(2, SID), closed(3, SID, empty)])
         self.assertEqual(stopping[SID].closing.issues, ())
         self.assertEqual(stopping[SID].closing.at, at(3))
+
+    def test_a_stopping_sprint_still_needs_every_reported_issue_in_its_closing(self):
+        goal = stated(1, "owner/p00", SID, "one")
+        rows = [goal, sent(2, SID, 1, PARTS), approved(3, SID, 1), reported(4, SID, ONE_ISSUE),
+                stop_requested(5, SID)]
+        empty = {**CLOSING, "issues": []}
+        self.assertIsNone(sprints.sprint_states([*rows, closed(6, SID, empty)])[SID].closing)
+        dropped = {**CLOSING, "issues": [{"issue": 12, "stage": "dropped"}]}
+        state = sprints.sprint_states([*rows, closed(6, SID, dropped)])[SID]
+        self.assertEqual(state.closing.issues, ((12, "dropped"),))
 
 
 class StopFoldTest(unittest.TestCase):
@@ -759,6 +767,9 @@ class StopFoldTest(unittest.TestCase):
 
         self.assertEqual(ended(reported(4, SID, done)), at(4))
         self.assertIsNone(ended(reported(4, SID, done), reported(5, SID, REPORT)))
+        self.assertIsNone(ended(reported(4, SID, done), sent(5, SID, 2, PARTS)))
+        self.assertEqual(ended(reported(4, SID, done), sent(5, SID, 2, PARTS), approved(6, SID, 2)),
+                         at(4))
         self.assertEqual(ended(reported(4, SID, done), closed(5, SID, both)), at(5))
         self.assertEqual(ended(reported(4, SID, REPORT), closed(5, SID, both)), at(5))
         self.assertIsNone(ended(stop_requested(4, SID)))

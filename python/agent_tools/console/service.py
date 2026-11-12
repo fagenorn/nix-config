@@ -204,7 +204,7 @@ which under the ingest lock refuses in this order, appending and publishing noth
 `Refused(NOT_OPEN)` or `SecretRefused` (`_manager_sprint`), `Refused(ENDED)` when the sprint has a
 closing or `stopped_at`, `Refused(NOT_STARTED)` unless the sprint is `STARTING` or has `stop_at`,
 then whatever `sprints.checked_closing` refuses, given the issue numbers of the sprint's latest
-report and `stopping` true once `stop_at` is set. It appends exactly one `sprint.closed` row
+report (a stopping sprint is held to the same coverage rule). It appends exactly one `sprint.closed` row
 `{"sprint_id", "goal", "closing"}` with the checked closing, folds and publishes, and returns the
 row's `at`. A `sprints.SecretRefused` is one stderr line `console: close_refused <sprint_id> secret
 refused` and 403 `secret refused`; any other `sprints.Refused` is `console: close_refused
@@ -420,7 +420,7 @@ a sprint without `stop_at` stops nothing. `_stop_session(sprint_id)`, under the 
 reservation and returns unless the sprint has `stop_at` and not `stopped_at`; off the lock, without
 a stopper it makes no listing and no call (a success); with one it reads `listing()` once and, when
 no listed session carries the manager's name and the sprint's last launch or nudge (`_settled`, epoch
-ms, set under the lock when a reservation ends) ended less than `sprints.STOP_SETTLE_MS` ago, defers
+ms, set under the lock when a reservation ends and, at construction, for every sprint still to be stopped, so a restart keeps the window) ended less than `sprints.STOP_SETTLE_MS` ago, defers
 (a session just made may not be listed yet); else `manager.stop_listed([name], ..., stopper)`. Under
 the lock again, unless the service is stopping, a deferral appends nothing, a success appends one
 `manager.stopped {sprint_id}` and a failure one `manager.stop_failed {sprint_id, reason}` (a
@@ -1258,6 +1258,7 @@ class ConsoleService:
             self._sprints = sprints.sprint_states(events)
             self._withdrawn = sprints.withdrawn_ids(events)
             self._pending = sprints.pending_stops(events)
+            self._settle_stops()
             self._publish()
             self._signature = signature(self.registry)
             self.refresh()
@@ -1674,8 +1675,7 @@ class ConsoleService:
             if sprint.state != sprints.STARTING and sprint.stop_at is None:
                 raise sprints.Refused(sprints.NOT_STARTED)
             reported = [issue for issue, _ in sprint.report.issues] if sprint.report else []
-            checked = sprints.checked_closing(closing, reported,
-                                              stopping=sprint.stop_at is not None)
+            checked = sprints.checked_closing(closing, reported)
             appended = self.log.append([(SPRINT_CLOSED, sprint.project_id, {
                 "sprint_id": sprint_id, "goal": sprint.goal, "closing": checked})])
             self._apply(appended)
@@ -1874,6 +1874,15 @@ class ConsoleService:
             reserved = self._reserve_nudge(sprint_id)
         if reserved:
             self._dispatch_nudge(sprint_id)
+
+    def _settle_stops(self) -> None:
+        """Start the settle window of every session still to be stopped: a restart loses `_settled`."""
+        now = int(self._clock() * 1000)
+        for sprint_id, sprint in self._sprints.items():
+            if sprint.stop_at is not None and sprint.stopped_at is None:
+                self._settled[sprint_id] = now
+        for sprint_id in self._pending:
+            self._settled[sprint_id] = now
 
     def _reserve_stop(self, sprint_id: str) -> bool:
         """Under the ingest lock: reserve the sprint's session stop unless a launch, nudge or stop holds it."""

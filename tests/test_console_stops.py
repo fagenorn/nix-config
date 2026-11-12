@@ -143,8 +143,15 @@ class StopServiceTest(Case):
         sid = self.running(svc)
         svc.send_report(sid, self.secret(sid), REPORT)
         self.stop(svc, sid)
+        with self.assertRaises(sprints.Refused) as caught:
+            svc.send_closing(sid, self.secret(sid), {
+                "summary": "Stopped early", "issues": [], "differently": "ask sooner"})
+        self.assertEqual(str(caught.exception), sprints.NOT_ENDED)
+        self.assertEqual(self.rows("sprint.closed"), [])
+        self.assertEqual(self.stops, [])
         svc.send_closing(sid, self.secret(sid), {
-            "summary": "Stopped early", "issues": [], "differently": "ask sooner"})
+            "summary": "Stopped early", "differently": "ask sooner",
+            "issues": [{"issue": 12, "stage": "dropped"}, {"issue": 13, "stage": "landed"}]})
         self.assertEqual(self.stops, [(FIRST, "work")])
         self.now[0] = T0 + 700
         svc.finish_stops()
@@ -561,6 +568,25 @@ class WithdrawStopTest(StopServiceTest):
         self.assertEqual(len(self.stops), 1)
         self.assertEqual(len(self.rows("manager.stopped")), 1)
         self.assertEqual(self.unstopped(svc), [])
+
+    def test_a_restart_after_a_withdrawal_keeps_the_grace_for_a_session_not_yet_listed(self):
+        sid = "0123456789abcdef"
+        log = EventLog(self.store, clock=self.log_clock)
+        log.append([("goal.stated", "owner/p01", {"sprint_id": sid, "goal": GOAL_TEXT})])
+        log.append([("goal.withdrawn", "owner/p01", {"sprint_id": sid, "goal": GOAL_TEXT})])
+        log.close()
+        self.now[0] = T0 + 5
+        svc = self.begin()
+        svc.finish_stops()
+        self.assertEqual(self.stops, [])
+        self.assertEqual(self.rows("manager.stopped"), [])
+        self.now[0] = T0 + 10
+        self.listed[FIRST] = sessions.Observation(
+            FIRST, "/srv/p01", 1, "idle", None, manager.session_name("owner/p01", sid), None,
+            "work")
+        svc.finish_stops()
+        self.assertEqual(self.stops, [(FIRST, "work")])
+        self.assertEqual(self.rows("manager.stopped"), [{"sprint_id": sid}])
 
     def test_a_withdrawal_during_a_launch_stops_the_session_the_launch_made(self):
         svc = self.begin(launcher=self.withdrawing_launch(True))

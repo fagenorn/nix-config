@@ -211,13 +211,13 @@ UTF-8 JSON object of exactly `sprint_id`, `secret` and `closing`, a valid sprint
 and a `closing` object whose keys are a subset of `CLOSING_MEMBERS`; anything else is `ValueError`.
 `parse_stop(body)` reads the owner's body, exactly `parse_withdraw`'s shape.
 
-`checked_closing(closing, reported, stopping)` refuses with `Refused(...)` at the first failure, in
+`checked_closing(closing, reported)` refuses with `Refused(...)` at the first failure, in
 this order. `summary` is a string whose strip is non-empty and at most `MAX_CLOSING_CHARS` code
 points and whose `first_line` is at most `MAX_LINE_CHARS`, else `CLOSING_MEMBER` for `summary`; the
 first line matching `#` and a digit is `SUMMARY_NUMBER`. `issues` is a list of at most
 `MAX_REPORT_ISSUES` objects of exactly `issue` (an int, not a bool, at least 1) and `stage` (one of
 `CLOSING_STAGES`), no issue twice, possibly empty, else `CLOSING_MEMBER` for `issues`.
-`differently` is like `summary` without the first-line rules. Unless `stopping`, every number of
+`differently` is like `summary` without the first-line rules. Every number of
 `reported` must be an `issue` of the closing (landed, held or dropped), else `NOT_ENDED`. It returns
 `{"summary", "issues" (sorted by issue, new dicts), "differently"}` with the texts stripped.
 `first_line(summary)` is the first line of `summary.strip()`, itself stripped.
@@ -232,7 +232,7 @@ an open sprint:
   changes nothing.
 - `sprint.closed` applies when `closing` and `stopped_at` are `None`, the `closing` payload is a dict,
   the sprint is `STARTING` or has `stop_at`, and `checked_closing` accepts it with `reported` the
-  issue numbers of the sprint's report (none without one) and `stopping` true once `stop_at` is set.
+  issue numbers of the sprint's report (none without one); a stopping sprint is held to the same coverage rule.
 - `manager.stopped` and `manager.stop_failed` (neither is a manager row) apply only when `stop_at`
   is set and `stopped_at` is `None`: `manager.stopped` sets `stopped_at` and clears `stop_reason` and
   `stop_failed_at`; `manager.stop_failed` with a string `reason` sets `stop_reason` and
@@ -241,9 +241,9 @@ an open sprint:
   retry due at once.
 
 `ended_at(state)` is every route to done, first match: `stopped_at` when set; `None` when `stop_at`
-is set (the sprint is stopping); `closing.at` when `closing` is set; `report.at` when the report's
-phase is `done` (the route that predates the closing report); else `None`. A sprint has ended when
-`ended_at` is not `None`.
+is set (the sprint is stopping); `closing.at` when `closing` is set; `report.at` when the sprint is `STARTING` and the
+report's phase is `done` (the route that predates the closing report; a newer brief awaiting
+approval hides it); else `None`. A sprint has ended when `ended_at` is not `None`.
 
 `stop_due(state, now_ms)` is true when `stop_at` is set, `stopped_at` is `None`, the closing is set
 or `STOP_WAIT_MS` have passed since `stop_at`, and `stop_failed_at` is `None` or `STOP_RETRY_MS` have
@@ -699,7 +699,7 @@ def _closing_text_ok(value: object) -> bool:
             and len(value.strip()) <= MAX_CLOSING_CHARS)
 
 
-def checked_closing(closing: dict, reported: Iterable[int], stopping: bool) -> dict:
+def checked_closing(closing: dict, reported: Iterable[int]) -> dict:
     summary, issues = closing.get("summary"), closing.get("issues")
     if not _closing_text_ok(summary) or len(first_line(summary)) > MAX_LINE_CHARS:
         raise Refused(CLOSING_MEMBER.format(member="summary"))
@@ -714,7 +714,7 @@ def checked_closing(closing: dict, reported: Iterable[int], stopping: bool) -> d
     differently = closing.get("differently")
     if not _closing_text_ok(differently):
         raise Refused(CLOSING_MEMBER.format(member="differently"))
-    if not stopping and not set(reported) <= {row["issue"] for row in issues}:
+    if not set(reported) <= {row["issue"] for row in issues}:
         raise Refused(NOT_ENDED)
     return {"summary": summary.strip(),
             "issues": sorted(({"issue": row["issue"], "stage": row["stage"]} for row in issues),
@@ -878,13 +878,12 @@ def _folded_stop_request(state: SprintState, event: Event) -> SprintState:
 
 def _folded_closing(state: SprintState, event: Event) -> SprintState:
     closing = event.payload.get("closing")
-    stopping = state.stop_at is not None
     if (state.closing is not None or state.stopped_at is not None or not isinstance(closing, dict)
-            or not (state.state == STARTING or stopping)):
+            or not (state.state == STARTING or state.stop_at is not None)):
         return state
     reported = [issue for issue, _ in state.report.issues] if state.report else []
     try:
-        checked = checked_closing(closing, reported, stopping)
+        checked = checked_closing(closing, reported)
     except Refused:
         return state
     return replace(state, closing=Closing(
@@ -974,7 +973,7 @@ def ended_at(state: SprintState) -> str | None:
         return None
     if state.closing is not None:
         return state.closing.at
-    if state.report is not None and state.report.phase == DONE:
+    if state.state == STARTING and state.report is not None and state.report.phase == DONE:
         return state.report.at
     return None
 
