@@ -444,3 +444,41 @@ class ReviveServiceTest(ReviveCase):
         with mock.patch.object(service.ConsoleService, "revive", lambda self: called.set()):
             self.begin(session_poll_seconds=0.05)
             self.assertTrue(called.wait(10))
+
+
+class ReviveViewServiceTest(ReviveCase):
+    def live(self, svc):
+        return json.loads(svc.view_bytes)
+
+    def test_a_stalled_sprint_shows_one_inbox_item_in_the_live_view(self):
+        svc = self.begin()
+        sid = self.on_track(svc)
+        self.gone(svc)
+        for seconds in (120, 240, 360):
+            self.tick(svc, seconds)
+            self.seen(svc, sid)
+            self.gone(svc)
+        self.tick(svc, 480)
+        live = self.live(svc)
+        (stall,) = [i for i in live["inbox"]["open"] if i["reason"] == "manager"]
+        self.assertEqual(stall["headline"], "managers keep failing on " + GOAL)
+        self.assertEqual(stall["last_reason"], revive.GONE_AGAIN_TEXT)
+        self.assertEqual(live["statement"]["inbox_items"], 1)
+        (shown,) = [sp for e in live["entries"] if e["project_id"] == "owner/p01"
+                    for sp in e["sprints"]]
+        self.assertEqual((shown["manager_state"], shown["retry"]), ("stalled", True))
+        svc.retry_manager("owner/p01", sid)
+        self.drain()
+        live = self.live(svc)
+        self.assertEqual([i for i in live["inbox"]["open"] if i["reason"] == "manager"], [])
+        self.assertEqual(live["statement"]["inbox_items"], 0)
+
+    def test_a_restart_adds_one_digest_sentence_and_no_inbox_item_in_the_live_view(self):
+        svc = self.begin()
+        self.on_track(svc)
+        self.gone(svc)
+        self.tick(svc, 120)
+        live = self.live(svc)
+        said = [m["sentence"] for m in live["digest"]["recent"]]
+        self.assertEqual(said.count("The manager of " + GOAL + " was restarted"), 1)
+        self.assertEqual([i for i in live["inbox"]["open"] if i["reason"] == "manager"], [])
