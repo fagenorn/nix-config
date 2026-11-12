@@ -160,6 +160,44 @@ class PageTest(unittest.TestCase):
         (size,) = re.findall(r"font-size: ([\d.]+)rem", statement)
         self.assertLess(float(size), 2.375)
 
+    def test_the_top_bar_fits_480_wide(self) -> None:
+        style = self.text[self.text.index("<style>"):self.text.index("</style>")]
+        base, at = "", 0
+        for found in re.finditer(r"@media [^{]+\{", style):
+            if found.start() < at:
+                continue
+            base += style[at:found.start()]
+            depth, at = 1, found.end()
+            while depth:
+                depth += {"{": 1, "}": -1}.get(style[at], 0)
+                at += 1
+        base += style[at:]
+        phone = style_rules(media_block(style, "(max-width: 480px)"))
+        narrow = style_rules(media_block(style, "(max-width: 900px)")) + phone
+        rules = style_rules(base) + narrow
+        self.assertTrue(any(s == ".top-in" and d.get("flex-wrap") == "wrap" for s, d in phone))
+        self.assertTrue(any(s == ".goal-bar" and d.get("flex") == "1 0 100%" for s, d in narrow))
+        self.assertTrue(any(
+            s == ".goal-box" and d.get("width") == "min(600px, calc(100vw - 32px))"
+            for s, d in style_rules(base)
+        ))
+
+        def fits(value: str) -> bool:
+            if value in ("auto", "0") or value.endswith("%") or "100vw" in value:
+                return True
+            found = re.fullmatch(r"([\d.]+)(px|rem)", value)
+            return bool(found) and float(found.group(1)) * (16 if found.group(2) == "rem" else 1) <= 448
+
+        for selector, decls in rules:
+            if not selector.split()[0].startswith((".top", ".brand", ".conn", ".goal-", "#goal", ".cap", ".meter")):
+                continue
+            values = [decls[n] for n in ("width", "min-width", "flex-basis") if n in decls]
+            parts = decls.get("flex", "").split()
+            if len(parts) == 3:
+                values.append(parts[2])
+            for value in values:
+                self.assertTrue(fits(value), selector + " sets " + value)
+
     def test_the_page_formats_no_time_with_the_locale(self) -> None:
         self.assertNotIn("toLocale", self.text)
 
@@ -1916,6 +1954,21 @@ def sprint_lines(snap: dict) -> list:
 
 
 class PageGoalTest(unittest.TestCase):
+    def test_the_goal_field_sits_in_the_top_bar(self) -> None:
+        html = PAGE.read_text(encoding="utf-8")
+        header = html[html.index('<header class="top">'):html.index("</header>")]
+        main = html[html.index("<main>"):html.index("</main>")]
+        (snap,) = render([START, {"frame": GOAL_FRAME}, {"snapshot": True}])
+        self.assertIn('id="goal"', header)
+        self.assertNotIn('id="goal"', main)
+        self.assertNotIn("goal-open", html)
+        self.assertNotIn("State a goal", html)
+        (field,) = goal_named(snap, "goal-text")
+        self.assertEqual(field["tag"], "textarea")
+        self.assertEqual(field["placeholder"], "Tell a manager what you want next\u2026")
+        self.assertEqual([full(n) for n in nodes(snap["goal"]) if n["tag"] == "kbd"], ["g"])
+        self.assertFalse(box_open(snap))
+
     def test_g_opens_the_goal_field_and_filters_projects_most_recent_first(self) -> None:
         closed, opened, upper, one = render([
             START, {"frame": GOAL_FRAME}, {"snapshot": True}, {"key": "g"}, {"snapshot": True},
@@ -1923,12 +1976,11 @@ class PageGoalTest(unittest.TestCase):
             {"input": {"cls": "goal-filter", "value": "alpha"}}, {"snapshot": True},
         ])
         self.assertFalse(box_open(closed))
-        self.assertEqual([full(n) for n in goal_named(closed, "goal-open")], ["State a goal"])
+        self.assertEqual(len(goal_named(closed, "goal-text")), 1)
         self.assertTrue(box_open(opened))
-        self.assertEqual(goal_named(opened, "goal-open"), [])
         self.assertEqual(goal_names(opened), ["owner/zeta", "owner/alpha", "owner/beta"])
         self.assertEqual(goal_picked(opened), ["owner/zeta"])
-        self.assertEqual(opened["active"], "goal-filter")
+        self.assertEqual(opened["active"], "goal-text")
         self.assertIs(opened["key_prevented"], True)
         (filter_node,) = goal_named(opened, "goal-filter")
         self.assertIn(filter_node["value"], ("", None))
@@ -1936,17 +1988,17 @@ class PageGoalTest(unittest.TestCase):
         self.assertEqual(goal_names(one), ["owner/alpha"])
         self.assertEqual(goal_picked(one), ["owner/alpha"])
 
-    def test_the_goal_field_opens_from_a_visible_button(self) -> None:
+    def test_focusing_the_goal_field_opens_the_project_choice(self) -> None:
         opened, closed = render([
-            START, {"frame": GOAL_FRAME}, {"click": "goal-open"}, {"snapshot": True},
+            START, {"frame": GOAL_FRAME}, {"focus_on": "goal-text"}, {"snapshot": True},
             {"key": "Escape"}, {"snapshot": True},
         ])
         self.assertTrue(box_open(opened))
         self.assertEqual(goal_names(opened), ["owner/zeta", "owner/alpha", "owner/beta"])
-        self.assertEqual(opened["active"], "goal-filter")
-        self.assertEqual(goal_named(opened, "goal-open"), [])
+        self.assertEqual(opened["active"], "goal-text")
         self.assertFalse(box_open(closed))
-        self.assertEqual(len(goal_named(closed, "goal-open")), 1)
+        self.assertIsNone(closed["active"])
+        self.assertEqual(len(goal_named(closed, "goal-text")), 1)
 
     def test_a_sent_goal_posts_the_project_and_text_and_closes(self) -> None:
         (snap,) = render([
@@ -1960,7 +2012,8 @@ class PageGoalTest(unittest.TestCase):
         self.assertEqual(post["headers"], GOAL_HEADERS)
         self.assertEqual(json.loads(post["body"]), {"project_id": "owner/alpha", "goal": GOAL_TEXT})
         self.assertFalse(box_open(snap))
-        self.assertEqual(len(goal_named(snap, "goal-open")), 1)
+        (field,) = goal_named(snap, "goal-text")
+        self.assertEqual(field["value"], "")
 
     def test_a_refused_goal_keeps_its_text_and_says_why(self) -> None:
         for reply, reason in (
@@ -2085,6 +2138,8 @@ class PageGoalTest(unittest.TestCase):
             {"snapshot": True}, {"key": "g"}, {"snapshot": True},
         ])
         self.assertFalse(box_open(closed))
+        self.assertIsNone(closed["active"])
+        self.assertEqual(len(goal_named(closed, "goal-text")), 1)
         (text_node,) = goal_named(reopened, "goal-text")
         self.assertEqual(text_node["value"], "draft")
 

@@ -89,8 +89,8 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .abox .meta { margin-top: 6px; }
 .abox .meta.now { color: var(--text); }
 .abox .opts { list-style: none; padding-left: 0; display: flex; flex-direction: column; align-items: stretch; gap: 2px; margin-top: 14px; }
-.opt, .send, .undo, .approve, .reply-send, .goal-open, .goal-send, .goal-cancel, .goal-project, .give-goal, .withdraw, .retry, .tell-send, .abox button[class^="ans-"] { display: inline-flex; align-items: baseline; gap: 8px; font: inherit; color: inherit; text-align: left; background: none; border: 1px solid var(--hair); border-radius: 8px; padding: 2px 10px; cursor: pointer; transition: background-color .16s; }
-.opt:hover:enabled, .send:hover:enabled, .undo:hover:enabled, .approve:hover:enabled, .reply-send:hover:enabled, .goal-open:hover:enabled, .goal-send:hover:enabled, .goal-cancel:hover:enabled, .goal-project:hover:enabled, .give-goal:hover:enabled, .withdraw:hover:enabled, .retry:hover:enabled, .tell-send:hover:enabled, .abox button[class^="ans-"]:hover:enabled { background: rgba(202, 211, 245, .05); }
+.opt, .send, .undo, .approve, .reply-send, .goal-send, .goal-cancel, .goal-project, .give-goal, .withdraw, .retry, .tell-send, .abox button[class^="ans-"] { display: inline-flex; align-items: baseline; gap: 8px; font: inherit; color: inherit; text-align: left; background: none; border: 1px solid var(--hair); border-radius: 8px; padding: 2px 10px; cursor: pointer; transition: background-color .16s; }
+.opt:hover:enabled, .send:hover:enabled, .undo:hover:enabled, .approve:hover:enabled, .reply-send:hover:enabled, .goal-send:hover:enabled, .goal-cancel:hover:enabled, .goal-project:hover:enabled, .give-goal:hover:enabled, .withdraw:hover:enabled, .retry:hover:enabled, .tell-send:hover:enabled, .abox button[class^="ans-"]:hover:enabled { background: rgba(202, 211, 245, .05); }
 .opt:disabled, .send:disabled, .reply-send:disabled, .goal-send:disabled, .give-goal:disabled, .withdraw:disabled, .retry:disabled, .tell-send:disabled, .abox button[class^="ans-"]:disabled { cursor: default; }
 .abox button[class^="ans-"]:disabled { color: var(--ov2); }
 .abox .detail { margin-top: 6px; padding: 6px 10px; max-height: 24rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: .84375rem; color: var(--sub0); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; }
@@ -104,10 +104,18 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .opt.picked { border-color: var(--lav); background: rgba(183, 189, 248, .10); }
 .opt.picked kbd { background: var(--lav); border-color: var(--lav); color: var(--crust); }
 .goal-project.picked { color: var(--lav); border-color: var(--lav); }
-#goal { margin-top: 24px; max-width: 44rem; }
-.goal-box { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
-.goal-filter, .goal-text, .reply-text { width: 100%; font: inherit; color: var(--text); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; padding: 6px 10px; }
-.goal-text, .reply-text { min-height: 6em; resize: vertical; }
+.goal-bar { position: relative; flex: 0 1 440px; min-width: 12rem; }
+.goal-in { display: flex; align-items: flex-start; gap: 10px; padding: 0 10px 0 12px; background: var(--mantle); border: 1px solid var(--s0); border-radius: 12px; transition: border-color .16s; }
+.goal-in:hover { border-color: var(--s1); }
+.goal-in:focus-within { border-color: var(--lav); }
+.goal-in .goal-text { flex: 1 1 auto; min-width: 0; height: 38px; padding: 8px 0; font: inherit; line-height: 22px; color: var(--text); background: none; border: 0; border-radius: 0; resize: none; overflow: hidden; }
+.goal-in .goal-text::placeholder { color: var(--ov2); }
+.goal-key { margin-top: 9px; }
+.goal-bar.open .goal-in { background: var(--base); border-color: var(--lav); }
+.goal-bar.open .goal-text { height: 82px; overflow: auto; }
+.goal-box { position: absolute; top: calc(100% + 6px); left: 0; z-index: 20; display: flex; flex-direction: column; align-items: flex-start; gap: 8px; width: min(600px, calc(100vw - 32px)); padding: 12px; background: var(--base); border: 1px solid var(--lav); border-radius: 12px; box-shadow: 0 28px 48px -24px rgba(8, 9, 16, .9); }
+.goal-filter, .reply-text { width: 100%; font: inherit; color: var(--text); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; padding: 6px 10px; }
+.reply-text { min-height: 6em; resize: vertical; }
 .brief .goal-line { margin-top: 6px; font-size: 1.0625rem; overflow-wrap: anywhere; }
 .brief .parts p { margin-top: 10px; }
 .brief .parts ul { margin-top: 4px; padding-left: 18px; list-style: disc; color: var(--sub0); font-size: .84375rem; }
@@ -220,7 +228,8 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 @media (max-width: 900px) {
   .card.lead { margin: 0 -8px; padding: 20px 16px; }
   .desk-grid { grid-template-columns: minmax(0, 1fr); padding: 32px 16px 56px; }
-  .top-in { padding: 10px 16px; gap: 10px 16px; }
+  .top-in { padding: 10px 16px; gap: 10px 16px; flex-wrap: wrap; }
+  .goal-bar { order: 3; flex: 1 0 100%; }
   .side { margin-top: 48px; }
   .statement h1 { font-size: 2.375rem; letter-spacing: -.022em; }
   .statement .sub { font-size: 1rem; }
@@ -237,11 +246,10 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 </style>
 </head>
 <body>
-<header class="top"><div class="top-in"><span class="brand">Console</span><span class="cap" id="capacity"></span><span class="conn" id="conn" role="status">Reconnecting…</span></div></header>
+<header class="top"><div class="top-in"><span class="brand">Console</span><div class="goal-bar" id="goal" role="group" aria-label="Goal"></div><span class="cap" id="capacity"></span><span class="conn" id="conn" role="status">Reconnecting…</span></div></header>
 <div class="desk-grid">
 <main>
 <div class="statement" id="statement"></div>
-<section id="goal" aria-label="Goal"></section>
 <section id="promoted" aria-label="Capacity"></section>
 <section id="inbox" aria-label="Inbox"></section>
 <section id="digest" aria-label="Since you last looked"></section>
@@ -1687,8 +1695,8 @@ function goalEdited() {
 function closeGoal() {
   if (draft.phase !== "sending") draft.reason = "";
   draft.open = false;
-  goalUi = null;
   renderGoal();
+  goalText.blur();
 }
 async function sendGoal() {
   if (draft.phase === "sending") return;
@@ -1727,6 +1735,7 @@ async function sendGoal() {
     if (draft.rev === sentRev) {
       draft.filter = "";
       draft.text = "";
+      goalText.value = "";
       draft.project = null;
       if (draft.open) closeGoal();
     } else showGoalReason();
@@ -1735,7 +1744,27 @@ async function sendGoal() {
     showGoalReason();
   }
 }
-function buildGoalBox(section) {
+const goalText = el("textarea", "goal-text");
+goalText.setAttribute("rows", "1");
+goalText.setAttribute("placeholder", "Tell a manager what you want next\u2026");
+goalText.setAttribute("aria-label", "Tell a manager what you want next");
+goalText.setAttribute("aria-keyshortcuts", "g");
+goalText.addEventListener("input", (event) => {
+  draft.text = event.target.value;
+  goalEdited();
+});
+goalText.addEventListener("focus", () => {
+  if (!draft.open) {
+    draft.open = true;
+    renderGoal();
+  }
+});
+const goalIn = el("div", "goal-in");
+goalIn.appendChild(goalText);
+goalIn.appendChild(el("kbd", "goal-key", "g"));
+document.getElementById("goal").appendChild(goalIn);
+let goalPanel = null;
+function buildGoalBox() {
   const box = el("div", "goal-box");
   const filter = el("input", "goal-filter");
   filter.setAttribute("type", "text");
@@ -1748,54 +1777,44 @@ function buildGoalBox(section) {
     refreshGoalList();
   });
   const list = el("ul", "goal-projects");
-  const text = el("textarea", "goal-text");
-  text.setAttribute("aria-label", "Goal");
-  text.setAttribute("placeholder", "What should the next sprint achieve?");
-  text.value = draft.text;
-  text.addEventListener("input", (event) => {
-    draft.text = event.target.value;
-    goalEdited();
-  });
   const status = el("div", "goal-status");
   const send = actionButton("goal-send", "Send", sendGoal);
   const act = el("div", "goal-act");
   act.appendChild(send);
   act.appendChild(actionButton("goal-cancel", "Cancel", closeGoal));
-  for (const part of [filter, list, text, status, act]) box.appendChild(part);
-  section.replaceChildren(box);
-  goalUi = { filter, list, text, status, send };
+  for (const part of [filter, list, status, act]) box.appendChild(part);
+  goalPanel = box;
+  goalUi = { filter, list, status, send };
   send.disabled = draft.phase === "sending";
   refreshGoalList();
   showGoalReason();
+  return box;
 }
 function openGoal() {
   draft.open = true;
-  if (goalUi === null) buildGoalBox(document.getElementById("goal"));
-  goalUi.filter.focus();
+  renderGoal();
+  goalText.focus();
 }
 function openGoalFor(projectId) {
   draft.filter = "";
   draft.project = projectId;
   goalEdited();
   draft.open = true;
-  if (goalUi === null) buildGoalBox(document.getElementById("goal"));
-  else {
-    goalUi.filter.value = "";
-    refreshGoalList();
-  }
-  goalUi.text.focus();
+  renderGoal();
+  goalUi.filter.value = "";
+  refreshGoalList();
+  goalText.focus();
 }
-const goalOpener = el("button", "goal-open", "State a goal");
-goalOpener.setAttribute("type", "button");
-goalOpener.setAttribute("aria-keyshortcuts", "g");
-goalOpener.addEventListener("click", openGoal);
 function renderGoal() {
-  const section = document.getElementById("goal");
+  const bar = document.getElementById("goal");
+  bar.className = draft.open ? "goal-bar open" : "goal-bar";
   if (draft.open) {
-    if (goalUi === null) buildGoalBox(section);
+    if (goalPanel === null) bar.appendChild(buildGoalBox());
     else refreshGoalList();
-  } else if (section.children.length !== 1 || section.children[0] !== goalOpener) {
-    section.replaceChildren(goalOpener);
+  } else if (goalPanel !== null) {
+    goalPanel.remove();
+    goalPanel = null;
+    goalUi = null;
   }
 }
 function render(view) {

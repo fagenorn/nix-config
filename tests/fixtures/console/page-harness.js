@@ -24,8 +24,10 @@
 // the first attached element with that class; none throws; {focus: true} stays
 // the window's focus). {select: {cls, start, end}} sets the selection of the
 // first attached element with that class (none throws); {input} also puts the
-// caret at the end of the value. Elem.focus() sets state.active and counts in
-// state.focusCount; removing a node (replaceChildren dropping it, appendChild
+// caret at the end of the value. Elem.focus() sets state.active, counts in
+// state.focusCount and, only when the element was not already active, fires its
+// own focus listeners with {type: "focus", target}; Elem.blur() clears
+// state.active when it is that element and fires nothing; removing a node (replaceChildren dropping it, appendChild
 // moving it, the textContent setter, Elem.remove()) clears state.active when it
 // is that node or inside its subtree, as a browser blurs a removed element, and
 // document.activeElement is state.active only while attached. A snapshot adds
@@ -36,7 +38,8 @@
 // reaches their due time. Each step settles pending promises before the next. A snapshot holds the trees
 // of the inbox, statement, projects, unmanaged, digest, goal, capacity and
 // promoted sections; every serialized node carries its title attribute (null
-// when unset), which is where a time element keeps its exact local time.
+// when unset), which is where a time element keeps its exact local time, and
+// its placeholder attribute (null when unset).
 // Prints a JSON list of snapshots on stdout; any failure exits 1 with the
 // error on stderr. A selector the fake DOM does not support throws, so a
 // test cannot pass on a stub.
@@ -90,8 +93,13 @@ class Elem {
     if (name === "disabled") this.disabled = true;
   }
   focus() {
+    const was = state.active === this;
     state.active = this;
     state.focusCount += 1;
+    if (!was) for (const fn of this.listeners.focus || []) fn({ type: "focus", target: this });
+  }
+  blur() {
+    if (state.active === this) state.active = null;
   }
   setSelectionRange(start, end) {
     this.selectionStart = start;
@@ -333,6 +341,7 @@ function node(n) {
     cls: n.className,
     key: n.dataset.key === undefined ? null : n.dataset.key,
     title: n.attributes.title === undefined ? null : n.attributes.title,
+    placeholder: n.attributes.placeholder === undefined ? null : n.attributes.placeholder,
     open: n.open,
     pressed: n.attributes["aria-pressed"] === undefined ? null : n.attributes["aria-pressed"],
     value: n.value === undefined ? null : n.value,
