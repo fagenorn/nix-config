@@ -5184,6 +5184,64 @@ class DirectLaneTest(unittest.TestCase):
         self.assertIn("acceptance with one entry per criterion id", prompt(calls, "direct-review-full"))
         self.assertIn("acceptance", schema_of(calls, "direct-review-full")["properties"])
 
+    # #935: a criterion restating the declared verification had no evidence before verify and stopped the delivery.
+    UNGRADED = {"verdict": "pass", "findings": [], "acceptance": [{"id": "AC1", "met": False, "evidence": ""}]}
+    OLD_FIX = ("Fix these review findings in the worktree, with a regression test for each real defect, then commit: %s. "
+               "If a finding is wrong, say so in notes with evidence instead of changing code. Run only the tests covering the files you changed")
+    FIX_FINDINGS = re.compile(r"then commit: (\[.*?\])\. If a finding is wrong")
+
+    def test_the_implementer_keeps_the_declared_verification_out_of_the_criteria(self):
+        _, calls = run(args=DIRECT)
+        self.assertIn("Do not write the declared verification commands as an acceptance criterion: the verify step gates on them.",
+                      prompt(calls, "direct-impl"))
+
+    def test_only_ungraded_criteria_ask_the_fix_round_for_their_evidence(self):
+        result, calls = run(args=DIRECT, replies={"direct-review": self.UNGRADED})
+        self.assertEqual(result["stage"], "done")
+        fix = prompt(calls, "direct-fix")
+        for needle in ("Acceptance criterion AC1", "run the command it names", "its exit status and its last lines",
+                       "The focused-tests-only rule does not apply to a command a criterion names"):
+            self.assertIn(needle, fix)
+        self.assertNotIn("Run only the tests covering the files you changed", fix)
+        self.assertNotIn("Fix these review findings", fix)
+        rereview = prompt(calls, "direct-rereview")
+        self.assertIn("the implementer's notes: ", rereview)
+        self.assertIn("the notes carry the evidence produced for each", rereview)
+        names = labels(calls)
+        self.assertLess(names.index("direct-rereview"), names.index("verify"))
+
+    def test_a_real_finding_beside_an_ungraded_criterion_keeps_the_fix_prompt(self):
+        codex = {"available": True, "verdict": "findings", "findings": [{"severity": "important", "summary": "edge"}]}
+        _, real = run(args=DIRECT, replies={"direct-review": BAD})
+        plain = prompt(real, "direct-fix")
+        for replies in ({"direct-review": dict(BAD, acceptance=self.UNGRADED["acceptance"])},
+                        {"direct-review": self.UNGRADED, "direct-codex": codex}):
+            with self.subTest(replies=sorted(replies)):
+                _, calls = run(args=DIRECT, replies=replies)
+                fix = prompt(calls, "direct-fix")
+                found = self.FIX_FINDINGS.search(fix).group(1)
+                self.assertIn("Acceptance criterion AC1", found)
+                self.assertEqual(len(json.loads(found)), 2)
+                self.assertIn(self.OLD_FIX % found, fix)
+                self.assertEqual(fix, plain.replace(self.FIX_FINDINGS.search(plain).group(1), found))
+                self.assertNotIn("the notes carry the evidence", prompt(calls, "direct-rereview"))
+
+    def test_a_criterion_still_unmet_after_the_evidence_round_stops_before_verify(self):
+        result, calls = run(args=DIRECT, replies={"direct-review": self.UNGRADED, "direct-rereview": BAD})
+        self.assertEqual(result["stage"], "direct-review")
+        self.assertEqual(labels(calls).count("direct-fix"), 1)
+        self.assertNotIn("verify", labels(calls))
+
+    def test_a_clean_direct_delivery_keeps_its_step_sequence(self):
+        _, calls = run(args=DIRECT)
+        names = labels(calls)
+        self.assertNotIn("direct-fix", names)
+        self.assertNotIn("direct-rereview", names)
+        start = names.index("direct-impl")
+        self.assertEqual(names[start:start + 2], ["direct-impl", "renew-final-review"])
+        self.assertEqual(set(names[start + 2:start + 4]), {"direct-codex", "direct-review"})
+        self.assertEqual(names[start + 4], "verify")
+
     def test_one_fix_round_that_resolves_continues(self):
         result, _ = run(args=DIRECT, replies={"direct-review": BAD})
         self.assertEqual(result["stage"], "done")
@@ -6144,9 +6202,16 @@ class PreCommitFocusTest(unittest.TestCase):
     def test_every_focused_site_has_a_scenario(self):
         # A prompt family that gains or loses FOCUSED must be reflected in SCENARIOS.
         source = PROGRAM.read_text(encoding="utf-8")
-        # The merge sync names FMT directly (it runs WHOLE, not FOCUSED); two of the FMT uses are the FOCUSED and FIX_TESTS definitions.
-        sites = source.count("${FOCUSED}") + source.count("${FIX_TESTS}") + source.count("${FMT}") - 2
+        # The merge sync names FMT directly (it runs WHOLE, not FOCUSED); three of the FMT uses are the FOCUSED, FIX_TESTS and
+        # EVIDENCE_FIX definitions (#935: EVIDENCE_FIX is direct-fix's other wording, the same family).
+        sites = source.count("${FOCUSED}") + source.count("${FIX_TESTS}") + source.count("${FMT}") - 3
         self.assertEqual(sites, len(self.FAMILIES))
+
+    def test_the_evidence_fix_round_names_the_flagged_argv_too(self):
+        ungraded = {"verdict": "pass", "findings": [], "acceptance": [{"id": "AC1", "met": False, "evidence": ""}]}
+        _, calls = run(args=DIRECT, replies={"direct-review": ungraded}, patch={"setup": {"verification": self.FLAGGED}})
+        self.assertIn("Produce the evidence each criterion asks for", prompt(calls, "direct-fix"))
+        self.assertIn(self.NAMED, prompt(calls, "direct-fix"))
 
     def test_every_implementer_prompt_names_the_flagged_argv(self):
         for label, text in self.implementer_prompts(self.FLAGGED).items():
