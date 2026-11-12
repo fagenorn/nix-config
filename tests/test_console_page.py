@@ -104,7 +104,8 @@ def walk(tree: dict):
 def item(key: str, **fields) -> dict:
     base = {
         "type": "inbox_item", "key": key, "project_id": "owner/p00", "issue": 7,
-        "url": "/" + key.lower(), "reason": "decision", "question": f"Question {key}?",
+        "url": "/" + key.lower(), "reason": "decision", "headline": f"Question {key}?",
+        "more_questions": 0, "answered_at": None,
         "questions": [], "items": [], "answered": False, "held_work": 1,
         "waiting_since": "2026-11-10T08:00:00+00:00", "stale": False,
         "read_at": "2026-11-10T08:30:00+00:00",
@@ -255,11 +256,11 @@ class PageTest(unittest.TestCase):
                         {"question": "Which port?", "options": ["80", "8080"],
                          "chosen": None},
                     ]),
-                    item("Y", reason="conflict", question="The branch conflicts",
+                    item("Y", reason="conflict", headline="The branch conflicts",
                          items=["Merge conflict in flake.lock"], held_work=1, stale=True,
                          read_at="2026-11-10T09:00:00+00:00"),
                 ],
-                "answered": [item("Z", answered=True, question="Already answered?")],
+                "answered": [item("Z", answered=True, headline="Already answered?")],
             },
         }
         result = render_page(view)
@@ -270,7 +271,7 @@ class PageTest(unittest.TestCase):
         for expected in ("Question X?", "Which database?", "Which port?",
                          "chosen: postgres", "holds 3 issues", "waiting ",
                          "The branch conflicts", "Merge conflict in flake.lock",
-                         "Answered, waiting for the agent"):
+                         "Already answered?", "waiting for the agent"):
             self.assertIn(expected, text)
         self.assertEqual(len([n for n in walk(result["inbox"]) if n["cls"] == "read-at"]), 1)
         links = [(n["text"], n["href"], n["rel"])
@@ -278,18 +279,18 @@ class PageTest(unittest.TestCase):
         self.assertEqual(links, [("Answer on the tracker", f"/{k}", "noreferrer")
                                  for k in "xyz"])
 
-    def test_later_rows_keep_their_questions_and_issue(self) -> None:
+    def test_later_rows_keep_their_questions_and_project(self) -> None:
         view = {
             "project_count": 0, "entries": [], "unmanaged": [],
             "statement": {"inbox_items": 3, "headline": "3 things need you",
                           "sentence": "s", "stale": False},
             "inbox": {
                 "open": [
-                    item("A", issue=11, question="Decisions are needed."),
-                    item("B", issue=22, question="Decisions are needed.", questions=[
+                    item("A", issue=11, headline="Decisions are needed."),
+                    item("B", issue=22, headline="Which cache?", questions=[
                         {"question": "Which cache?", "options": ["redis", "memcached"],
                          "chosen": "redis"}]),
-                    item("C", issue=33, question="Decisions are needed.", questions=[
+                    item("C", issue=33, headline="Which queue?", questions=[
                         {"question": "Which queue?", "options": ["sqs", "nats"],
                          "chosen": None}]),
                 ],
@@ -298,12 +299,15 @@ class PageTest(unittest.TestCase):
         }
         rows = next(n for n in walk(render_page(view)["inbox"]) if n["cls"] == "rest")
         first, second = rows["children"]
-        self.assertIn("owner/p00 #22", first["text"])
+        self.assertIn("owner/p00", first["text"])
         self.assertIn("Which cache?", first["text"])
         self.assertIn("chosen: redis", first["text"])
-        self.assertIn("owner/p00 #33", second["text"])
+        self.assertIn("owner/p00", second["text"])
         self.assertIn("Which queue?", second["text"])
         self.assertIn("nats", second["text"])
+        for row in (first, second):
+            self.assertNotIn("#22", row["text"])
+            self.assertNotIn("#33", row["text"])
 
     def test_an_answered_stale_item_shows_when_it_was_last_read(self) -> None:
         view = {
@@ -329,7 +333,7 @@ class PageTest(unittest.TestCase):
         result = render_page(view)
         self.assertIsNotNone(result["inbox"])
         self.assertEqual([n for n in walk(result["inbox"]) if n["tag"] == "a"], [])
-        self.assertNotIn("Answered, waiting for the agent", result["inbox"]["text"])
+        self.assertNotIn("waiting for the agent", result["inbox"]["text"])
         h1 = next(n for n in walk(result["statement"]) if n["tag"] == "h1")
         self.assertEqual(h1["cls"], "")
 
@@ -342,6 +346,30 @@ class PageTest(unittest.TestCase):
         (snap,) = render([START, {"frame": frame([ANSWERABLE])}, {"snapshot": True}])
         self.assertEqual(
             [n for n in nodes(snap["inbox"]) if n["tag"] in ("input", "textarea")], [])
+
+    def test_the_lead_headline_is_the_largest_type_after_the_statement(self) -> None:
+        sizes = {}
+        for body in re.findall(r"(?s)<style>(.*?)</style>", self.text):
+            css = re.sub(r"(?s)/\*.*?\*/", "", body)
+            for selectors, rule in re.findall(r"([^{}]+)\{([^{}]*)\}", css):
+                selector = " ".join(selectors.split())
+                for decl in rule.split(";"):
+                    name, _, value = decl.partition(":")
+                    name, value = name.strip(), value.strip()
+                    if name == "font-size":
+                        size = re.fullmatch(r"([\d.]+)rem", value)
+                    elif name == "font":
+                        size = re.search(r"(?:^|\s)([\d.]+)rem(?:/|\s)", value)
+                    else:
+                        continue
+                    if size:
+                        sizes.setdefault(selector, []).append(float(size.group(1)))
+        self.assertEqual(sizes.get(".card .q"), [1.5])
+        for selector, found in sizes.items():
+            if ".statement h1" in selector or selector == ".card .q":
+                continue
+            for size in found:
+                self.assertLess(size, 1.5, selector)
 
     def test_the_tracker_link_is_the_only_href(self) -> None:
         self.assertEqual(len(re.findall(r"\.href\s*=", self.text)), 1)
@@ -370,6 +398,23 @@ def nodes(tree: dict) -> list:
     for child in tree["children"]:
         flat += nodes(child)
     return flat
+
+
+BOILER = "Delivery waits for the owner's choice: tick exactly one box under each question."
+
+
+def visible(tree: dict) -> list:
+    """The node and its descendants, skipping the body of a closed `details` (its `summary` stays)."""
+    flat = [tree]
+    for child in tree["children"]:
+        if tree["tag"] == "details" and not tree["open"] and child["tag"] != "summary":
+            continue
+        flat += visible(child)
+    return flat
+
+
+def visible_text(tree: dict) -> str:
+    return " ".join(n["text"] for n in visible(tree))
 
 
 def text(tree: dict) -> str:
@@ -792,7 +837,7 @@ class PageFocusTest(unittest.TestCase):
         self.assertEqual(hidden["posts"], [LOOK])
         self.assertEqual(blurred["posts"], [LOOK])
 
-ANSWERABLE = item("A", questions=[
+ANSWERABLE = item("A", headline="Which host?", questions=[
     {"question": "Which host?", "options": ["one", "two"], "chosen": None,
      "recommended": "two"}])
 OTHER = item("B", held_work=5, questions=[
@@ -907,8 +952,9 @@ class PageAnswerTest(unittest.TestCase):
             {"snapshot": True},
         ])
         self.assertIn(SENT_TEXT, full(sent["inbox"]))
-        head = next(n for n in nodes(moved["inbox"]) if has_class(n, "done-head"))
-        self.assertEqual(head["text"], SENT_TEXT)
+        (row,) = [n for n in nodes(moved["inbox"]) if n["tag"] == "details" and has_class(n, "done-item")]
+        (summary,) = [c for c in row["children"] if c["tag"] == "summary"]
+        self.assertIn("waiting for the agent", full(summary))
 
     def test_an_item_the_tracker_shows_open_again_after_a_send_is_answerable_again(self) -> None:
         reopened = {**ANSWERABLE, "questions": [{**ANSWERABLE["questions"][0], "recommended": None}]}
@@ -1300,6 +1346,93 @@ def with_digest(digest: dict | None) -> dict:
     if digest is not None:
         frame["digest"] = digest
     return frame
+
+
+def q(question: str, options: list) -> dict:
+    return {"question": question, "options": options, "chosen": None, "recommended": None}
+
+
+class PageInboxGlanceTest(unittest.TestCase):
+    def test_an_item_is_headed_by_its_first_question_with_a_count(self) -> None:
+        first = item("M", issue=7, headline="Which database?", more_questions=2, question=BOILER,
+                     questions=[q("Which database?", ["sqlite", "postgres"]),
+                                q("Which port?", ["80", "8080"]), q("Which host?", ["one", "two"])])
+        second = item("N", issue=22, headline="Which cache?",
+                      questions=[q("Which cache?", ["redis", "memcached"])])
+        (snap,) = render([START, {"frame": frame([first, second])}, {"snapshot": True}])
+        inbox = snap["inbox"]
+        (head,) = [n for n in nodes(inbox) if n["tag"] == "h2" and has_class(n, "q")]
+        self.assertEqual(head["text"], "Which database?")
+        self.assertEqual(full(inbox).count("and 2 more questions"), 1)
+        (rest,) = [n for n in nodes(inbox) if has_class(n, "rest")]
+        self.assertNotIn("more question", full(rest))
+        self.assertEqual(full(inbox).count("Which cache?"), 1)
+        self.assertNotIn(BOILER, full(inbox))
+        self.assertIsNone(re.search(r"#\d", full(inbox)))
+        lead = inbox["children"][0]
+        (meta,) = [n for n in nodes(lead) if has_class(n, "meta") and "waiting" in full(n)]
+        self.assertIn("owner/p00", full(meta))
+        self.assertIsNone(re.search(r"item\.question(?!s)", PAGE.read_text(encoding="utf-8")))
+
+    def test_an_answered_item_is_one_closed_line_until_opened(self) -> None:
+        done = item("Z", answered=True, headline="Which database?",
+                    answered_at="2026-11-11T10:00:00+00:00",
+                    questions=[{"question": "Which database?", "options": ["sqlite", "postgres"],
+                                "chosen": "postgres", "recommended": None}])
+        closed, opened = render([
+            {"start": {"focused": False, "clock": NOW_MS}}, {"frame": frame([], answered=[done])},
+            {"snapshot": True}, {"open": "answered:owner/p00#Z"}, {"snapshot": True},
+        ])
+        (ul,) = [n for n in nodes(closed["inbox"]) if n["tag"] == "ul" and has_class(n, "done")]
+        (row,) = ul["children"]
+        self.assertEqual(row["tag"], "li")
+        (fold,) = row["children"]
+        (summary,) = [c for c in fold["children"] if c["tag"] == "summary"]
+        self.assertEqual([(c["tag"], c["cls"]) for c in summary["children"]],
+                         [("b", ""), ("span", "when")])
+        self.assertEqual(summary["children"][0]["text"], "Which database?")
+        self.assertEqual(full(summary["children"][1]), "answered 2 h ago, waiting for the agent")
+        inside = {id(n) for n in nodes(summary)} | {id(row), id(fold)}
+        self.assertTrue(all(id(n) in inside for n in visible(row)))
+        self.assertNotIn("postgres", visible_text(row))
+        self.assertNotIn("Answer on the tracker", visible_text(row))
+        (fold,) = [n for n in nodes(opened["inbox"]) if n["tag"] == "details" and has_class(n, "done-item")]
+        self.assertTrue(fold["open"])
+        self.assertIn("chosen: postgres", full(fold))
+        self.assertIn("Answer on the tracker", full(fold))
+
+    def test_an_open_answered_line_survives_a_key_redraw(self) -> None:
+        done = item("Z", answered=True, headline="Which database?")
+        (snap,) = render([
+            START, {"frame": frame([ANSWERABLE], answered=[done])},
+            {"open": "answered:owner/p00#Z"}, {"key": "2"}, {"snapshot": True},
+        ])
+        (fold,) = [n for n in nodes(snap["inbox"]) if n["key"] == "answered:owner/p00#Z"]
+        self.assertTrue(fold["open"])
+
+    def test_a_checks_detail_and_confirmation_show_only_when_opened(self) -> None:
+        live = check_item("P", "approval", issue=12, headline="Approve the live check?",
+                          detail="nix-build /srv/p00/checks/live.nix")
+        manual = check_item("M", "manual-check", detail="Open /srv/p00/README.md and read it.")
+        closed, opened = render([
+            START, {"frame": frame([live, manual])}, {"snapshot": True},
+            {"open": "check:owner/p00#P"},
+            {"type": {"class": "confirm-text", "text": "octo/widgets#12"}}, {"snapshot": True},
+        ])
+        shown = visible_text(closed["inbox"])
+        for expected in ("Review and approve", "Show the check", "Approve the live check?"):
+            self.assertIn(expected, shown)
+        for hidden in ("octo/widgets#12", "to approve.", "/srv"):
+            self.assertNotIn(hidden, shown)
+        self.assertIsNone(re.search(r"#\d", shown))
+        self.assertTrue(field(closed, "ans-approve")["disabled"])
+        (fold,) = [n for n in nodes(opened["inbox"]) if n["key"] == "check:owner/p00#P"]
+        self.assertTrue(fold["open"])
+        shown = visible_text(opened["inbox"])
+        self.assertIn("Type octo/widgets#12 to approve.", shown)
+        self.assertIn("nix-build /srv/p00/checks/live.nix", shown)
+        self.assertNotIn("/srv/p00/README.md", shown)
+        self.assertFalse(field(opened, "ans-approve")["disabled"])
 
 
 class PageDigestTest(unittest.TestCase):
