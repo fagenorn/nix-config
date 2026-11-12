@@ -381,6 +381,25 @@ class NudgeServiceTest(MessageRouteTest):
         self.assertTrue(row["ok"])
         self.assertEqual(row["listing_failed"], "the listing is not a JSON array")
 
+    def test_a_manager_that_starts_during_the_full_listing_read_is_relayed_to_not_woken(self):
+        svc, sid = self.stopped_with_full_listing(frozenset())
+        observed = sessions.Observation(
+            "s-9", "/srv/p01", 3, "idle", None, self.name(sid), None)
+
+        def slow(profile, cwd):
+            self.full_calls.append((profile, cwd))
+            self.listed["s-9"] = observed
+            return frozenset()
+
+        svc._full_listing = slow
+        svc.send_message("owner/p01", sid, TEXT)
+        self.queued.run_next()
+        self.assertEqual(self.full_calls, [("work", "/srv/p01")])
+        self.assertEqual(self.nudges, [nudge.Nudge(
+            sid, "relay", self.name(sid), "s-9", "work", "/srv/p01")])
+        ((_, row),) = self.nudged()
+        self.assertEqual((row["route"], row["ok"], "listing_failed" in row), ("relay", True, False))
+
     def test_a_relay_never_reads_the_full_listing(self):
         calls = []
         svc = self.begin(full_listing=lambda profile, cwd: calls.append((profile, cwd)) or set())

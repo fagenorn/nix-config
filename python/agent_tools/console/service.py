@@ -1948,6 +1948,10 @@ class ConsoleService:
         if listing_failed is not None:
             print(f"console: listing_failed {sprint_id} {listing_failed}", file=sys.stderr)
 
+    def _listed_ids(self, name: str) -> list[str]:
+        """Off the ingest lock: the session ids the running listing shows under `name`, lowest first."""
+        return sorted(o.session_id for o in self._listing().values() if o.name == name)
+
     def _nudge(self, sprint_id: str) -> None:
         """Tell the sprint's manager to read its inbox, then record the attempt; the reservation ends here."""
         with self._ingest:
@@ -1963,13 +1967,15 @@ class ConsoleService:
             profile, known, cwd = sprint.manager.profile, sprint.manager_session, project.root
         route, reason, listing_failed = None, None, None
         try:
-            listed = sorted(o.session_id for o in self._listing().values() if o.name == name)
+            listed, settings = self._listed_ids(name), None
+            if not listed and known is not None:
+                settings, listing_failed = self._wake_settings(sprint_id, known, profile, cwd)
+                listed = self._listed_ids(name)  # the full listing is slow: the manager may be running now
             if listed:
-                route = nudge.RELAY
+                route, listing_failed = nudge.RELAY, None
                 self._nudger(nudge.Nudge(sprint_id, route, name, listed[0], profile, cwd))
             elif known is not None:
                 route = nudge.WAKE
-                settings, listing_failed = self._wake_settings(sprint_id, known, profile, cwd)
                 self._nudger(nudge.Nudge(sprint_id, route, name, known, profile, cwd, settings))
             else:
                 reason = nudge.UNKNOWN_SESSION
