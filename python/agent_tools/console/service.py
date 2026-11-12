@@ -15,9 +15,10 @@ Routes (every response carries `Cache-Control: no-store` and
     POST /api/readings 204, no body, the cache proxy's limit reading (below)
     POST /api/looked 204, no body, the page records that the owner looked (below)
     POST /api/answer 204, a JSON body, the page sends the owner's choice (below)
+    POST /api/check-answer 204, a JSON body, the page answers one verification prompt (below)
     anything else   404
     other methods   405 with `Allow: GET` (`Allow: POST` on `/api/hooks`, `/api/readings`,
-                    `/api/looked` and `/api/answer`)
+                    `/api/looked`, `/api/answer` and `/api/check-answer`)
 
 Two kinds of write exist. The hook and reading routes append what the proxies and hooks observe:
 `POST /api/hooks` appends session observations, `POST /api/readings` the capacity kinds
@@ -37,8 +38,8 @@ is one stderr line `console: hook_unreadable <message>`; any other failure is
 ignored payload (an unknown event, a missing member) appends nothing. The
 route carries no token: it records observations and answers nothing (ADR-console-004).
 
-A page write (`PAGE_WRITES`, today `POST /api/looked` and `POST /api/answer`; ADR-console-008,
-ADR-console-010) is made by the desk page
+A page write (`PAGE_WRITES`, today `POST /api/looked`, `POST /api/answer` and `POST
+/api/check-answer`; ADR-console-008, ADR-console-010) is made by the desk page
 alone and goes through one guard, `_page_write`, whatever its route. After the loopback `Host`
 check and before any body is read, exactly one `Origin` header must equal `http://<Host>` (else
 403 `text/plain` `origin refused`) and exactly one `X-Console-Token` header must equal the
@@ -56,8 +57,11 @@ line before it is translated: `answer.Refused` is `console: answer_refused <proj
 <reason>` and 409 with the reason; a `ForgeError` is `console: answer_tick_failed <project_id> <key>
 <code>: <detail>` (whitespace runs collapsed to one space; the detail is what `gh` wrote to stderr)
 and 502 `the tracker refused the tick: <error>`; any other exception is `console: answer_failed
-<Type>: <message>` and 500 `answer failed`. Success is an empty `204`. No refusal appends to the
-event log. The token is created once in
+<Type>: <message>` and 500 `answer failed`. `POST /api/check-answer` (#863) runs the same body checks in the same order, with
+`answer.parse_check_request` as the parser, and calls `answer_check(project_id, key, answer, note,
+confirm)`; an `answer.Refused` or a `verify_answer.Refused` is the same stderr line and 409, and a
+`ForgeError` and any other exception are mapped as above. Success is an empty `204`. No refusal
+appends to the event log. The token is created once in
 `page-token` beside the event log and reaches a client only inside `GET /`, where it replaces
 the slot in the page's `console-token` meta tag.
 
@@ -160,6 +164,20 @@ the next read appends nothing. A tracker read that began before an answer finish
 item back to unanswered (each answer takes a generation; a read keeps the answered item when its
 own generation is older), and a read that began after it is authoritative.
 
+Verification answers (#863): `answer_check(project_id, key, answer, note, confirm)` answers one runner
+prompt of the inbox (a manual check, a verdict, an approval or a stale check) through `owner_path`
+(default `verify_answer.answer_prompt`; `owner_path(slug, issue, comment_id, answer, note=note,
+paid=paid)`), which runs outside the ingest lock. Under the lock, in order, it raises `answer.Refused`
+with `NOT_OPEN` when the project is not registered, no record exists, the item is answered or the
+item takes no answer; with `NOT_AN_ANSWER` when the word is not among the item's answers; with
+`CONFIRM` when the word is `approve` and `confirm` is not exactly the item's own `confirm` text (an
+item without one is never approved): every live or paid approval needs its typed confirmation; with
+`SENDING` while another answer to the same item runs. No request answers more than one item, and no
+multi-item route exists. A note posts the owner's text and leaves the item open; any other word marks
+the item answered at once, as `answer` does and with the same generation bookkeeping, when the record
+still exists, is unanswered and names the same comment. A failure of `owner_path` propagates and
+appends nothing.
+
 Retention (ADR-console-009): construction runs one retention pass (`EventLog.retain`) after
 opening the log and before reading its events, and `RETENTION_THREAD`, started by `start()`, calls
 `retain()` every `retention_seconds` (`RETENTION_SECONDS`, one day). A pass that removed rows
@@ -226,6 +244,7 @@ from agent_tools.console.view import (
     project_for, project_states, read_states, registry_changes)
 from agent_tools.project_contract import agent_platform
 from agent_tools.system.forge_api import ForgeError
+from agent_tools.verification import verify_answer
 
 def _reduced(questions: list[dict]) -> list[tuple[str, list[str]]]:
     return [(q["question"], list(q["options"])) for q in questions]
@@ -244,7 +263,8 @@ WATCH_THREAD = "console-registry-watch"
 HOOK_PATH = "/api/hooks"
 LOOKED_PATH = "/api/looked"
 ANSWER_PATH = "/api/answer"
-PAGE_WRITES: frozenset[str] = frozenset({LOOKED_PATH, ANSWER_PATH})
+CHECK_PATH = "/api/check-answer"
+PAGE_WRITES: frozenset[str] = frozenset({LOOKED_PATH, ANSWER_PATH, CHECK_PATH})
 MAX_ANSWER_BYTES = 4096
 MAX_HOOK_BYTES = 8 * 1024 * 1024
 READINGS_PATH = "/api/readings"
@@ -406,30 +426,43 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         except Exception as error:
             print(f"console: {name}_failed {type(error).__name__}: {error}", file=sys.stderr)
 
-    def _answer_request(self, console: "ConsoleService") -> bool:
-        """Read and carry out an answer; False when it was refused (already answered to the page)."""
+    def _answer_body(self) -> bytes | None:
+        """The JSON body of an answer, or None once a check refused it (already answered to the page)."""
         if self.headers.get("Transfer-Encoding") is not None:
             self._refuse(411, "length required")
-            return False
+            return None
         media = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
         if media != "application/json":
             self._refuse(415, "json only")
-            return False
+            return None
         length = self.headers.get("Content-Length", "")
         if not (length.isascii() and length.isdigit()):
             self._refuse(411, "length required")
-            return False
+            return None
         if int(length) > MAX_ANSWER_BYTES:
             self._refuse(413, "too large")
+            return None
+        return self.rfile.read(int(length))
+
+    def _answer_request(self, console: "ConsoleService", route: str = ANSWER_PATH) -> bool:
+        """Read and carry out an answer; False when it was refused (already answered to the page)."""
+        body = self._answer_body()
+        if body is None:
             return False
         try:
-            project_id, key, choices = answer.parse_request(self.rfile.read(int(length)))
+            if route == CHECK_PATH:
+                project_id, key, *rest = answer.parse_check_request(body)
+            else:
+                project_id, key, choices = answer.parse_request(body)
         except ValueError:
             self._refuse(400, "bad answer")
             return False
         try:
-            console.answer(project_id, key, choices)
-        except answer.Refused as error:
+            if route == CHECK_PATH:
+                console.answer_check(project_id, key, *rest)
+            else:
+                console.answer(project_id, key, choices)
+        except (answer.Refused, verify_answer.Refused) as error:
             print(f"console: answer_refused {project_id} {key} {error}", file=sys.stderr)
             self._refuse(409, str(error))
             return False
@@ -452,9 +485,9 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             self.headers.get_all(write_guard.TOKEN_HEADER) or [], console.page_token)
         if refusal is not None:
             return self._refuse(*refusal)
-        if route == ANSWER_PATH:
+        if route in (ANSWER_PATH, CHECK_PATH):
             self.close_connection = True
-            if not self._answer_request(console):
+            if not self._answer_request(console, route):
                 return
         else:
             if (self.headers.get("Content-Length", "0") != "0"
@@ -544,9 +577,11 @@ class ConsoleService:
                  digest_seconds: float = DIGEST_SECONDS,
                  log_clock: Callable[[], str] = utc_now,
                  token_path: Path | None = None,
-                 tick: Callable[[str, int, int, list[dict], list[int]], None] = answer.tick_on_tracker):
+                 tick: Callable[[str, int, int, list[dict], list[int]], None] = answer.tick_on_tracker,
+                 owner_path: Callable[..., None] = verify_answer.answer_prompt):
         self.registry = Path(registry)
         self._tick = tick
+        self._owner_path = owner_path
         self._sending: set[tuple[str, str]] = set()
         self._answered: dict[tuple[str, str], int] = {}
         self._answer_generation = 0
@@ -761,6 +796,43 @@ class ConsoleService:
                 if sent and not self._stop.is_set():
                     self._answer_generation += 1
                     self._mark_answered(slot, questions, choices)
+
+    def answer_check(self, project_id: str, key: str, answer_word: str, note: str | None = None,
+                     confirm: str | None = None) -> None:
+        """Answer one verification prompt through the owner path; see the module docstring."""
+        slot = (project_id, key)
+        with self._ingest:
+            record = self._inbox.get(slot) if project_id in self._states else None
+            item = record.item if record is not None else None
+            if item is None or item["answered"] or not item.get("answers", []):
+                raise answer.Refused(answer.NOT_OPEN)
+            if answer_word not in item["answers"]:
+                raise answer.Refused(answer.NOT_AN_ANSWER)
+            if answer_word == "approve" and (not item.get("confirm", "") or confirm != item["confirm"]):
+                raise answer.Refused(answer.CONFIRM)
+            if slot in self._sending:
+                raise answer.Refused(answer.SENDING)
+            self._sending.add(slot)
+        sent = False
+        try:
+            self._owner_path(item["repo"], item["issue"], item["comment_id"], answer_word,
+                             note=note, paid=bool(item.get("paid")))
+            sent = True
+        finally:
+            with self._ingest:
+                self._sending.discard(slot)
+                if sent and answer_word != "note" and not self._stop.is_set():
+                    self._answer_generation += 1
+                    self._mark_check_answered(slot, item["comment_id"])
+
+    def _mark_check_answered(self, slot: tuple[str, str], comment_id: int) -> None:
+        record = self._inbox.get(slot)
+        if record is None or record.item["answered"] or record.item["comment_id"] != comment_id:
+            return
+        appended = self.log.append([(INBOX_CHANGED, slot[0], {**record.item, "answered": True})])
+        self._fold(appended)
+        self._answered[slot] = self._answer_generation
+        self._publish()
 
     def _mark_answered(self, slot: tuple[str, str], questions: list[dict], choices: list[int]) -> None:
         record = self._inbox.get(slot)
