@@ -10,9 +10,9 @@
 <style>
 :root {
   --base: #24273a; --mantle: #1e2030;
-  --s1: #494d64; --s2: #5b6078;
+  --s0: #363a4f; --s1: #494d64; --s2: #5b6078;
   --text: #cad3f5; --sub1: #b8c0e0; --sub0: #a5adcb; --ov2: #939ab7;
-  --peach: #f5a97f; --lav: #b7bdf8;
+  --crust: #181926; --peach: #f5a97f; --lav: #b7bdf8;
   --green: #a6da95; --yellow: #eed49f; --red: #ed8796;
   --hair: rgba(202, 211, 245, .09);
   --ui: "Segoe UI Variable Text", "Segoe UI", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter Variable", "Inter", system-ui, "Noto Sans", "Helvetica Neue", Arial, sans-serif;
@@ -29,6 +29,7 @@ body {
 h1, h2, p, ul { margin: 0; padding: 0; }
 ul { list-style: none; }
 :focus-visible { outline: 2px solid var(--lav); outline-offset: 2px; border-radius: 6px; }
+kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; padding: 0 5px; font: 600 .71875rem/1 var(--ui); color: var(--sub0); border: 1px solid var(--s2); border-radius: 5px; }
 .ic { width: 16px; height: 16px; flex: none; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; align-self: center; }
 
 .top { position: sticky; top: 0; z-index: 10; background: var(--base); border-bottom: 1px solid var(--hair); }
@@ -49,7 +50,8 @@ ul { list-style: none; }
 
 #inbox { margin-top: 40px; max-width: 44rem; }
 .card { padding: 0 0 18px; }
-.card .q { font: 600 1.5rem/1.3 var(--display); letter-spacing: -.012em; text-wrap: balance; }
+.card.lead { background: var(--s0); border: 1px solid var(--hair); border-radius: 16px; padding: 22px 32px 20px; margin: 0 -32px; box-shadow: 0 28px 48px -30px rgba(8, 9, 16, .9), 0 3px 8px -3px rgba(8, 9, 16, .45); }
+.card .q { margin-top: 10px; font: 600 1.5rem/1.3 var(--display); letter-spacing: -.012em; text-wrap: balance; }
 .more { font-size: .8125rem; color: var(--ov2); }
 .card .more { display: block; margin-top: 4px; }
 .card .opts { margin-top: 6px; padding-left: 18px; list-style: disc; color: var(--sub0); font-size: .84375rem; }
@@ -57,11 +59,27 @@ ul { list-style: none; }
 .rest .meta, .done .meta { flex-basis: 100%; margin: 0; font-size: .8125rem; color: var(--ov2); }
 .card .opts .picked, .rest .opts .picked, .done .opts .picked { color: var(--lav); }
 .card .meta { margin-top: 8px; font-size: .8125rem; color: var(--ov2); }
+.card .head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 0; font-size: .84375rem; color: var(--sub0); }
+.head .wait { margin-left: auto; }
+.kind { display: inline-flex; gap: 7px; font-weight: 600; }
+.kind.needs { color: var(--peach); }
+.held { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--hair); font-size: .84375rem; color: var(--sub0); }
 .rest, .done { margin-top: 10px; }
 .rest li, .done li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; padding: 5px 0; font-size: .875rem; color: var(--ov2); }
 .rest b, .done b { font-weight: 600; color: var(--sub0); }
-.done-item { flex: 1 0 100%; }
+.rest > li.row { display: block; padding: 12px 0; }
+.rest > li.row + li.row { border-top: 1px solid var(--hair); }
+.row-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; width: 100%; margin: 0; }
+.row-head b { font-size: 1rem; font-weight: 500; color: var(--text); }
+.row-head .lm { font-size: .84375rem; color: var(--sub0); }
+.row-head .lw { margin-left: auto; font-size: .84375rem; color: var(--sub0); white-space: nowrap; }
+.done-item { flex: 1 0 100%; min-width: 0; }
+.keys { margin-top: 18px; display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: .8125rem; color: var(--ov2); }
+.keys span { display: inline-flex; align-items: center; gap: 6px; }
 .done-item summary, .check-more summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; cursor: pointer; list-style: none; padding: 4px 12px; margin: 0 -12px; border-radius: 10px; font-size: .875rem; color: var(--ov2); transition: background-color .16s; }
+.done-item summary { flex-wrap: nowrap; }
+.done-item summary > b { flex: 0 1000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.done-item summary > span { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .done-item summary::-webkit-details-marker, .check-more summary::-webkit-details-marker { display: none; }
 .done-item summary:hover, .check-more summary:hover { background: rgba(202, 211, 245, .05); }
 .done-item > :not(summary) { margin-top: 4px; }
@@ -69,7 +87,7 @@ ul { list-style: none; }
 .abox { flex-basis: 100%; margin-top: 6px; }
 .abox .meta { margin-top: 6px; }
 .abox .meta.now { color: var(--text); }
-.abox .opts { list-style: none; padding-left: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; margin-top: 4px; }
+.abox .opts { list-style: none; padding-left: 0; display: flex; flex-direction: column; align-items: stretch; gap: 2px; margin-top: 14px; }
 .opt, .send, .undo, .approve, .reply-send, .goal-open, .goal-send, .goal-cancel, .goal-project, .withdraw, .retry, .tell-send, .abox button[class^="ans-"] { display: inline-flex; align-items: baseline; gap: 8px; font: inherit; color: inherit; text-align: left; background: none; border: 1px solid var(--hair); border-radius: 8px; padding: 2px 10px; cursor: pointer; transition: background-color .16s; }
 .opt:hover:enabled, .send:hover:enabled, .undo:hover:enabled, .approve:hover:enabled, .reply-send:hover:enabled, .goal-open:hover:enabled, .goal-send:hover:enabled, .goal-cancel:hover:enabled, .goal-project:hover:enabled, .withdraw:hover:enabled, .retry:hover:enabled, .tell-send:hover:enabled, .abox button[class^="ans-"]:hover:enabled { background: rgba(202, 211, 245, .05); }
 .opt:disabled, .send:disabled, .reply-send:disabled, .goal-send:disabled, .withdraw:disabled, .retry:disabled, .tell-send:disabled, .abox button[class^="ans-"]:disabled { cursor: default; }
@@ -78,8 +96,13 @@ ul { list-style: none; }
 .card .detail, .rest .detail, .done .detail { flex-basis: 100%; margin: 6px 0 0; padding: 6px 10px; white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; font-size: .84375rem; color: var(--sub0); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; }
 .abox textarea, .abox input { display: block; width: 100%; max-width: 40rem; margin-top: 6px; padding: 4px 8px; font: inherit; color: var(--text); background: var(--mantle); border: 1px solid var(--s1); border-radius: 8px; }
 .abox textarea { min-height: 4.5rem; resize: vertical; }
-.opt kbd { font: inherit; color: var(--ov2); }
-.opt.picked, .goal-project.picked { color: var(--lav); border-color: var(--lav); }
+.opt { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; align-items: center; column-gap: 14px; width: 100%; padding: 9px 14px; border-radius: 10px; border: 1px solid transparent; }
+.opt .ot { font-size: 1.0625rem; line-height: 1.4; font-weight: 500; overflow-wrap: anywhere; }
+.opt kbd { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border: 1px solid var(--s2); border-radius: 6px; font: inherit; font-size: .75rem; font-weight: 600; color: var(--sub1); }
+.opt .rec { font-size: .75rem; font-weight: 600; color: var(--sub1); border: 1px solid var(--s2); border-radius: 999px; padding: 1px 8px; white-space: nowrap; }
+.opt.picked { border-color: var(--lav); background: rgba(183, 189, 248, .10); }
+.opt.picked kbd { background: var(--lav); border-color: var(--lav); color: var(--crust); }
+.goal-project.picked { color: var(--lav); border-color: var(--lav); }
 #goal { margin-top: 24px; max-width: 44rem; }
 .goal-box { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
 .goal-filter, .goal-text, .reply-text { width: 100%; font: inherit; color: var(--text); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; padding: 6px 10px; }
@@ -114,6 +137,14 @@ ul { list-style: none; }
 .tell { width: 100%; max-width: 40rem; min-height: 3.5rem; resize: vertical; font: inherit; color: var(--text); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; padding: 4px 8px; }
 .act { flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin-top: 8px; font-size: .8125rem; color: var(--ov2); }
 .fail { color: var(--red); }
+.lead .act { margin-top: 14px; align-items: center; gap: 8px; font-size: .9375rem; }
+.act .primary.needs { display: inline-flex; align-items: center; gap: 10px; min-height: 40px; padding: 0 16px; border: 0; border-radius: 10px; font-weight: 600; background: var(--peach); color: var(--crust); text-decoration: none; }
+.act .primary.needs:hover:enabled { background: #f8bb98; }
+.act .primary.needs:disabled { background: var(--s1); color: var(--sub0); cursor: not-allowed; }
+.act .primary.needs kbd { border-color: rgba(24, 25, 38, .28); color: var(--crust); }
+.item-detail { margin-left: auto; }
+.item-detail summary { cursor: pointer; list-style: none; padding: 4px 12px; border-radius: 8px; color: var(--sub1); }
+.item-detail summary::-webkit-details-marker { display: none; }
 #digest { margin-top: 40px; max-width: 44rem; }
 #digest:empty { margin-top: 0; }
 .digest-head { font: 600 .875rem/1.4 var(--ui); color: var(--ov2); }
@@ -165,6 +196,7 @@ ul { list-style: none; }
   .desk-grid { grid-template-columns: minmax(0, 1fr) 400px; column-gap: 56px; }
 }
 @media (max-width: 900px) {
+  .card.lead { margin: 0 -8px; padding: 20px 16px; }
   .desk-grid { grid-template-columns: minmax(0, 1fr); padding: 32px 16px 56px; }
   .top-in { padding: 10px 16px; gap: 10px 16px; }
   .side { margin-top: 48px; }
@@ -176,6 +208,9 @@ ul { list-style: none; }
   .statement h1 { font-size: 2rem; }
   .top-in { flex-wrap: wrap; }
   .cap { margin-left: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .001ms !important; animation-delay: 0s !important; transition-duration: .001ms !important; }
 }
 </style>
 </head>
@@ -195,6 +230,12 @@ ul { list-style: none; }
 </aside>
 </div>
 <template id="quiet-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M12.5 9.5A5 5 0 0 1 6.5 3.5a5 5 0 1 0 6 6z"/></svg></template>
+<template id="decision-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 13.5V9.5M8 9.5c0-3-3.6-2.6-3.6-6M8 9.5c0-3 3.6-2.6 3.6-6"/></svg></template>
+<template id="brief-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5h5.2L12 5.3v8.2H4zM9 2.5v3h3M6.2 8.5h3.6M6.2 11h3.6"/></svg></template>
+<template id="check-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="5.8"/><path d="M5.4 8.2l1.8 1.8 3.4-3.7"/></svg></template>
+<template id="approval-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><circle cx="5.4" cy="10.6" r="2.6"/><path d="M7.3 8.7L13 3M10.4 5.6l1.9 1.9"/></svg></template>
+<template id="conflict-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 3.5l7 9M11.5 3.5l-7 9"/></svg></template>
+<template id="label-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 3.5h5.2l5.8 5.8-4.2 4.2-6.8-6.8z"/><circle cx="5.4" cy="6.2" r=".9"/></svg></template>
 <script>
 "use strict";
 function el(tag, cls, text) {
@@ -203,8 +244,11 @@ function el(tag, cls, text) {
   if (text !== undefined) node.textContent = text;
   return node;
 }
+function icon(id) {
+  return document.getElementById(id).content.firstElementChild.cloneNode(true);
+}
 function quietIcon() {
-  return document.getElementById("quiet-icon").content.firstElementChild.cloneNode(true);
+  return icon("quiet-icon");
 }
 function movedWords(run, cls) {
   if (!Number.isFinite(Date.parse(run.moved_at))) return el("span", cls, run.moved_text);
@@ -625,8 +669,8 @@ function renderPromoted(view) {
 function holds(item) {
   return item.held_work === 1 ? "holds 1 issue" : "holds " + item.held_work + " issues";
 }
-function answerLink(item) {
-  const a = el("a", "answer", "Answer on the tracker");
+function answerLink(item, cls) {
+  const a = el("a", cls || "answer", "Answer on the tracker");
   a.href = item.url;
   a.rel = "noreferrer";
   return a;
@@ -638,6 +682,43 @@ function metaLine(item, tag, cls) {
     line.appendChild(phrase("span", "read-at", "read ", timeEl("ago", item.read_at, "")));
   }
   return line;
+}
+function kindOf(item) {
+  if (isBrief(item)) return ["Brief", "brief-icon"];
+  if (item.reason === "decision") return ["Decision", "decision-icon"];
+  if (item.reason === "conflict") return ["Conflict", "conflict-icon"];
+  if (item.reason === "needs-label") return ["Label", "label-icon"];
+  if (item.kind === "approval" || item.kind === "paid-approval") return ["Approval", "approval-icon"];
+  return ["Check", "check-icon"];
+}
+function kindWords(item) {
+  const [word, id] = kindOf(item);
+  const node = el("span", "kind needs");
+  node.appendChild(icon(id));
+  node.appendChild(el("span", "", word));
+  return node;
+}
+function headLine(item) {
+  const line = el("p", "head meta");
+  line.appendChild(kindWords(item));
+  line.appendChild(el("span", "proj", item.project_id));
+  line.appendChild(phrase("span", "wait", "waiting ", timeEl("since", item.waiting_since, "")));
+  return line;
+}
+function heldLine(item) {
+  const line = phrase("p", "held", holds(item));
+  if (item.stale) {
+    line.appendChild(el("span", "", " \u00b7 "));
+    line.appendChild(phrase("span", "read-at", "read ", timeEl("ago", item.read_at, "")));
+  }
+  return line;
+}
+function detailFold(item) {
+  const fold = el("details", "item-detail");
+  fold.dataset.key = "detail:" + itemId(item);
+  fold.appendChild(el("summary", "", "Detail"));
+  fold.appendChild(answerLink(item));
+  return fold;
 }
 function moreWords(item) {
   if (!(item.more_questions > 0)) return null;
@@ -948,17 +1029,18 @@ function briefRecord(sprintId) {
   let rec = briefCards.get(sprintId);
   if (rec === undefined) {
     const card = el("article", "card brief");
-    const head = el("h2");
+    const top = el("p", "head meta");
+    const head = el("h2", "q");
     const goal = el("p", "goal-line");
     const parts = el("div", "parts");
-    const act = el("p", "act");
+    const act = el("div", "act");
     const field = el("textarea", "reply-text");
     field.setAttribute("aria-label", "Reply");
-    rec = { card, head, goal, parts, act, field, status: el("p", "act"), item: null };
+    rec = { card, top, head, goal, parts, act, field, status: el("p", "act"), item: null };
     rec.send = actionButton("reply-send", "Ask for changes", () => sendReply(rec));
     const box = el("div", "reply");
     for (const part of [field, rec.send, rec.status]) box.appendChild(part);
-    for (const part of [head, goal, parts, act, box]) card.appendChild(part);
+    for (const part of [top, head, goal, parts, act, box]) card.appendChild(part);
     briefCards.set(sprintId, rec);
   }
   return rec;
@@ -969,10 +1051,15 @@ function listPart(label, texts) {
   for (const text of texts) list.appendChild(el("li", "", text));
   return [el("p", "meta", label), list];
 }
-function drawBrief(rec, item) {
+function drawBrief(rec, item, lead) {
   const state = briefState(item);
   const parts = item.brief;
   rec.item = item;
+  rec.card.className = lead ? "card brief lead" : "card brief";
+  rec.top.replaceChildren(
+    kindWords(item), el("span", "proj", item.project_id),
+    phrase("span", "wait", "waiting ", timeEl("since", item.waiting_since, "")),
+  );
   rec.head.textContent = item.project_id + " brief, version " + item.version;
   rec.goal.textContent = item.goal;
   rec.parts.replaceChildren(
@@ -980,7 +1067,7 @@ function drawBrief(rec, item) {
     ...listPart("Excluded", parts.excluded), ...listPart("Slices", parts.slices),
     ...listPart("Risks", parts.risks), ...listPart("What I expect to ask", parts.asks),
   );
-  rec.act.replaceChildren(...approveLine(item, state));
+  rec.act.replaceChildren(...approveLine(item, state, lead));
   const reply = state.reply;
   const words = { sending: "Sending\u2026", sent: "Reply sent, waiting for a new brief" };
   const status = reply.phase === "failed"
@@ -989,7 +1076,7 @@ function drawBrief(rec, item) {
   rec.status.replaceChildren(...status);
   rec.send.disabled = reply.phase === "sending";
 }
-function approveLine(item, state) {
+function approveLine(item, state, lead) {
   if (state.phase === "waiting") {
     return [
       el("span", "", "Approving in five seconds."),
@@ -1004,7 +1091,9 @@ function approveLine(item, state) {
   if (old !== undefined) {
     nodes.push(el("span", "", "A newer brief replaced version " + old + "; nothing was approved."));
   }
-  nodes.push(actionButton("approve", "Approve", () => { if (startApproval(item, state)) redraw(); }));
+  const approve = actionButton(lead ? "approve primary needs" : "approve", "Approve", () => { if (startApproval(item, state)) redraw(); });
+  if (itemId(item) === currentId) approve.appendChild(el("kbd", "", "Enter"));
+  nodes.push(approve);
   return nodes;
 }
 function placeBriefCards(section, briefs) {
@@ -1013,9 +1102,9 @@ function placeBriefCards(section, briefs) {
     const busy = [...answers.values()].some((s) => s.kind === "brief" && s.sprint_id === id && sending(s));
     if (!open.has(id) && !busy) briefCards.delete(id);
   }
-  const wanted = briefs.map((item) => {
+  const wanted = briefs.map((item, i) => {
     const rec = briefRecord(item.sprint_id);
-    drawBrief(rec, item);
+    drawBrief(rec, item, i === 0);
     return rec.card;
   });
   const keep = new Set(wanted);
@@ -1060,13 +1149,15 @@ function statusLine(act, state) {
   }
   return true;
 }
-function actionLine(item, state) {
-  const act = el("p", "act");
+function actionLine(item, state, lead) {
+  const act = el("div", "act");
   if (!statusLine(act, state)) {
-    const send = actionButton("send", "Send", () => { if (start(item, state)) redraw(); });
+    const send = actionButton(lead ? "send primary needs" : "send", "Send answer", () => { if (start(item, state)) redraw(); });
+    if (itemId(item) === currentId) send.appendChild(el("kbd", "", "Enter"));
     if (!picksComplete(item, state)) send.setAttribute("disabled", "");
     act.appendChild(send);
   }
+  if (lead) act.appendChild(detailFold(item));
   return act;
 }
 const ANSWER_LABELS = {
@@ -1113,7 +1204,7 @@ function confirmBox(item, box, approve) {
   box.appendChild(draftField(input, itemId(item) + "\nconfirm", (value) => { approve.disabled = value !== item.confirm; }));
   approve.disabled = input.value !== item.confirm;
 }
-function checkBox(item, state) {
+function checkBox(item, state, lead) {
   const box = el("div", "abox");
   if (item.paid) box.appendChild(el("p", "meta", "This check costs money."));
   const approves = item.answers.includes("approve");
@@ -1123,13 +1214,19 @@ function checkBox(item, state) {
     if (item.detail) fold.appendChild(el("pre", "detail", item.detail));
     box.appendChild(fold);
   }
-  const act = el("p", "act");
-  if (statusLine(act, state)) {
+  const act = el("div", "act");
+  const finish = () => {
+    if (lead) {
+      box.appendChild(heldLine(item));
+      act.appendChild(detailFold(item));
+    }
     box.appendChild(act);
     return box;
-  }
+  };
+  if (statusLine(act, state)) return finish();
   const labels = ANSWER_LABELS[item.kind] || {};
   const buttons = [];
+  let marked = false;
   for (const answer of item.answers) {
     if (answer === "note") {
       buttons.push(noteBox(item, state, box));
@@ -1137,7 +1234,9 @@ function checkBox(item, state) {
     }
     const approve = answer === "approve";
     const extra = () => (approve ? { confirm: draftOf(itemId(item) + "\nconfirm").value } : {});
-    const button = actionButton("ans-" + answer, labels[answer] || answer, () => {
+    const primary = lead && !marked;
+    if (primary) marked = true;
+    const button = actionButton("ans-" + answer + (primary ? " primary needs" : ""), labels[answer] || answer, () => {
       if (button.disabled) return;
       if (startCheck(item, state, answer, extra())) redraw();
     });
@@ -1145,11 +1244,10 @@ function checkBox(item, state) {
     buttons.push(button);
   }
   for (const button of buttons) act.appendChild(button);
-  box.appendChild(act);
-  return box;
+  return finish();
 }
-function answerBox(item, state) {
-  if (check(item)) return checkBox(item, state);
+function answerBox(item, state, lead) {
+  if (check(item)) return checkBox(item, state, lead);
   const live = choosable(state);
   const now = Math.min(state.q, item.questions.length - 1);
   const box = el("div", "abox");
@@ -1163,7 +1261,9 @@ function answerBox(item, state) {
       button.type = "button";
       if (!live) button.setAttribute("disabled", "");
       button.appendChild(el("kbd", "", String(oi + 1)));
-      button.appendChild(el("span", "", option === q.chosen ? "chosen: " + option : option));
+      button.setAttribute("aria-pressed", String(state.picks[qi] === oi));
+      button.appendChild(el("span", "ot", option === q.chosen ? "chosen: " + option : option));
+      if (option === q.recommended) button.appendChild(el("span", "rec", "Recommended"));
       button.addEventListener("click", () => {
         if (!choosable(state)) return;
         choose(state, qi, oi);
@@ -1175,7 +1275,8 @@ function answerBox(item, state) {
     });
     box.appendChild(list);
   });
-  box.appendChild(actionLine(item, state));
+  if (lead) box.appendChild(heldLine(item));
+  box.appendChild(actionLine(item, state, lead));
   return box;
 }
 function boxState(item) {
@@ -1185,28 +1286,39 @@ function boxState(item) {
   return itemId(item) === currentId || state.phase !== "choosing" ? state : null;
 }
 function leadItem(item) {
-  const card = el("article", "card");
+  const card = el("article", "card lead");
+  card.appendChild(headLine(item));
   card.appendChild(el("h2", "q", item.headline));
   const more = moreWords(item);
   if (more !== null) card.appendChild(more);
   const state = boxState(item);
-  if (state === null) appendDetail(card, item, true);
-  else card.appendChild(answerBox(item, state));
-  card.appendChild(metaLine(item, "p", "meta"));
-  const links = el("p", "meta");
-  links.appendChild(answerLink(item));
-  card.appendChild(links);
+  if (state === null) {
+    appendDetail(card, item, true);
+    card.appendChild(heldLine(item));
+    const act = el("div", "act");
+    act.appendChild(answerLink(item, "answer primary needs"));
+    card.appendChild(act);
+  } else card.appendChild(answerBox(item, state, true));
   return card;
 }
 function itemLine(item) {
-  const line = el("li");
-  line.appendChild(el("b", "", item.headline));
+  const line = el("li", "row");
+  const head = el("p", "row-head");
+  head.appendChild(kindWords(item));
+  head.appendChild(el("b", "", item.headline));
+  const lm = phrase("span", "lm", item.project_id + " \u00b7 " + holds(item));
+  if (item.stale) {
+    lm.appendChild(el("span", "", " \u00b7 "));
+    lm.appendChild(phrase("span", "read-at", "read ", timeEl("ago", item.read_at, "")));
+  }
+  head.appendChild(lm);
+  head.appendChild(phrase("span", "lw", "waiting ", timeEl("since", item.waiting_since, "")));
+  line.appendChild(head);
   const more = moreWords(item);
   if (more !== null) line.appendChild(more);
   const state = boxState(item);
   if (state === null) appendDetail(line, item, true);
-  else line.appendChild(answerBox(item, state));
-  line.appendChild(metaLine(item, "span", ""));
+  else line.appendChild(answerBox(item, state, false));
   line.appendChild(answerLink(item));
   return line;
 }
@@ -1236,6 +1348,31 @@ function dropBriefState(id, state, briefs) {
     }
   }
   if (!sending(state)) answers.delete(id);
+}
+function keyStrip(current, open) {
+  if (open.length === 0) return null;
+  const entries = [];
+  const entry = (keys, word) => {
+    const span = el("span");
+    for (const key of keys) span.appendChild(key);
+    span.appendChild(el("span", "", word));
+    entries.push(span);
+  };
+  if (current !== null && isBrief(current.item)) {
+    if (current.state.reply.phase !== "sending") entry([el("kbd", "", "Enter")], " approve");
+  } else if (current !== null) {
+    const questions = current.item.questions;
+    const n = Math.min(9, questions[Math.min(current.state.q, questions.length - 1)].options.length);
+    entry(n > 1 ? [el("kbd", "", "1"), el("span", "", "\u2013"), el("kbd", "", String(n))] : [el("kbd", "", "1")], " choose");
+    if (picksComplete(current.item, current.state)) entry([el("kbd", "", "Enter")], " send answer");
+  }
+  if (open.some((item) => { const s = answers.get(stateId(item)); return s !== undefined && s.phase === "waiting"; })) {
+    entry([el("kbd", "", "Esc")], " undo");
+  }
+  if (entries.length === 0) return null;
+  const strip = el("p", "keys");
+  for (const e of entries) strip.appendChild(e);
+  return strip;
 }
 function renderInbox(view) {
   const fresh = view !== lastView;
@@ -1274,10 +1411,11 @@ function renderInbox(view) {
   const current = currentEntry(open);
   currentId = current === null ? null : itemId(current.item);
   placeBriefCards(section, briefs);
-  if (tracked.length > 0) section.appendChild(leadItem(tracked[0]));
-  if (tracked.length > 1) {
+  if (briefs.length === 0 && tracked.length > 0) section.appendChild(leadItem(tracked[0]));
+  const rows = briefs.length === 0 ? tracked.slice(1) : tracked;
+  if (rows.length > 0) {
     const rest = el("ul", "rest");
-    for (const item of tracked.slice(1)) rest.appendChild(itemLine(item));
+    for (const item of rows) rest.appendChild(itemLine(item));
     section.appendChild(rest);
   }
   const answered = view.inbox.answered;
@@ -1286,6 +1424,8 @@ function renderInbox(view) {
     for (const item of answered) done.appendChild(answeredLine(item));
     section.appendChild(done);
   }
+  const strip = keyStrip(current, open);
+  if (strip !== null) section.appendChild(strip);
   for (const fold of document.querySelectorAll("#inbox details")) {
     if (wasOpen.has(fold.dataset.key)) fold.open = true;
   }

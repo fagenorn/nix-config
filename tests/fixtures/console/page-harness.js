@@ -198,14 +198,14 @@ const script = html.slice(open + "<script>".length, close);
 const markup = html.slice(0, open) + html.slice(close);
 
 const root = new Elem("html");
-let template = null;
+const templates = new Map();
 for (const m of markup.matchAll(/<([a-zA-Z][a-zA-Z0-9]*)\b([^>]*?\bid="([^"]+)"[^>]*)>/g)) {
   const node = new Elem(m[1]);
   node.id = m[3];
   const withContent = /\bcontent="([^"]*)"/.exec(m[2]);
   if (withContent) node.content = withContent[1];
   if (m[1] === "template") {
-    template = node;
+    templates.set(node.id, node);
     node.content = new Elem("fragment");
     node.content.appendChild(new Elem("svg"));
   } else {
@@ -298,7 +298,7 @@ const document = {
   },
   createElement: (tag) => new Elem(tag),
   getElementById(id) {
-    if (template && template.id === id) return template;
+    if (templates.has(id)) return templates.get(id);
     return attached(root).find((n) => n.id === id) || null;
   },
   querySelectorAll(selector) {
@@ -334,6 +334,7 @@ function node(n) {
     key: n.dataset.key === undefined ? null : n.dataset.key,
     title: n.attributes.title === undefined ? null : n.attributes.title,
     open: n.open,
+    pressed: n.attributes["aria-pressed"] === undefined ? null : n.attributes["aria-pressed"],
     value: n.value === undefined ? null : n.value,
     disabled: n.disabled === true || "disabled" in n.attributes,
     text: n.children.filter((c) => c.isText).map((c) => c.text).join(""),
