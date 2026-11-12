@@ -2890,7 +2890,9 @@ class ShipTest(unittest.TestCase):
         result, calls = run(patch=dict(behind, **{"sync-1": dict(conflicted, markers_checked=True)}))
         self.assertEqual(result["stage"], "done")
         sync = prompt(calls, "sync-1")
-        self.assertIn("diff --check HEAD before committing and remove every leftover conflict marker", sync)
+        self.assertIn("diff --check HEAD before committing and remove each leftover conflict marker it reports in a file you resolved by hand, "
+                      "unless origin/", sync)
+        self.assertIn("every other line it reports is content and stays", sync)
         self.assertLess(sync.index("diff --check HEAD"), sync.index("commit the merge"))
         self.assertIn("markers_checked", sync)
         self.assertNotIn(unchecked, prompt(calls, "sync-review-1"))

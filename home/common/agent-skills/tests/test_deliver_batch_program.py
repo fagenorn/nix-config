@@ -2001,7 +2001,9 @@ class SyncFixRoundTest(unittest.TestCase):
         result, calls, _ = self.land()
         self.assertEqual(row(result, 1)["outcome"], "landed")
         sync = prompt(calls, "land-sync-1-1")
-        self.assertIn("run git -C /r/.wt/w-issue-1-x diff --check HEAD before committing and remove every leftover conflict marker", sync)
+        self.assertIn("run git -C /r/.wt/w-issue-1-x diff --check HEAD before committing and remove each leftover conflict marker it reports "
+                      "in a file you resolved by hand, unless origin/dev's version of that file has the line; every other line it reports "
+                      "is content and stays", sync)
         self.assertIn("markers_checked", sync)
         self.assertLess(sync.index("diff --check HEAD"), sync.index("commit the merge"))
         self.assertIn("markers_checked", next(c for c in calls if c["label"] == "land-sync-1-1")["schema"]["properties"])
@@ -2032,7 +2034,7 @@ class SyncFixRoundTest(unittest.TestCase):
             self.assertIn(text, fix["prompt"])
         self.assertNotIn("style", fix["prompt"])
         again = next(c for c in calls if c["label"] == "land-sync-rereview-1-1")
-        self.assertEqual(again["agentType"], "reviewer-lite")
+        self.assertEqual(again["agentType"], "reviewer")
         self.assertIn(f"diff {B}..{self.FIXED}", again["prompt"])
         self.assertIn("dropped a sentence dev added", again["prompt"])
         # The lock moves to the fix through the record step, its checks are waited for there, and the merge names it.
@@ -2048,6 +2050,8 @@ class SyncFixRoundTest(unittest.TestCase):
         result, calls, _ = self.land(**{"land-sync-review-1-1": self.FOUND, "land-sync-rereview-1-1": self.LEFT})
         got = row(result, 1)
         self.assertEqual((got["outcome"], got["reason"]), ("conflict", "review finding: the sentence is still missing"))
+        # The pushed, unaccepted fix is named on the row.
+        self.assertEqual(got["fix"], {"commit": self.FIXED, "notes": "ok"})
         ls = labels(calls)
         for gone in ("land-record-1-1", "land-merge-1", "land-ask-1", "release-1", "land-sync-fix-1-2"):
             self.assertNotIn(gone, ls)
@@ -2065,6 +2069,7 @@ class SyncFixRoundTest(unittest.TestCase):
                 got = row(result, 1)
                 self.assertEqual((got["outcome"], got["reason"]),
                                  ("conflict", "the sync fix round did not finish; review finding: dropped a sentence dev added"))
+                self.assertEqual(got.get("fix"), None if fix is None else {k: fix[k] for k in ("commit", "notes") if k in fix})
                 ls = labels(calls)
                 for gone in ("land-sync-rereview-1-1", "land-record-1-1", "land-merge-1"):
                     self.assertNotIn(gone, ls)
@@ -2075,12 +2080,15 @@ class SyncFixRoundTest(unittest.TestCase):
         got = row(result, 1)
         self.assertEqual((got["outcome"], got["reason"]),
                          ("conflict", "the sync re-review returned nothing; review finding: dropped a sentence dev added"))
+        self.assertEqual(got["fix"], {"commit": self.FIXED, "notes": "ok"})
         self.assertEqual(labels(calls).count("land-unlock-1"), 1)
 
     def test_a_rebuttal_with_evidence_is_adjudicated_and_lands_at_the_merge(self):
         rebuttal = {"status": "done", "start_head": B, "commit": B, "notes": "the sentence is on line 12"}
         result, calls, _ = self.land(**{"land-sync-review-1-1": self.FOUND, "land-sync-fix-1-1": rebuttal})
         self.assertEqual(row(result, 1)["outcome"], "landed")
+        # A rebuttal is adjudicated by the full reviewer, never reviewer-lite.
+        self.assertEqual([c["agentType"] for c in calls if c["label"] == "land-sync-rereview-1-1"], ["reviewer"])
         again = prompt(calls, "land-sync-rereview-1-1")
         self.assertIn("the rebuttal (no new commit) of", again)
         self.assertIn("Check each rebuttal against the code yourself", again)
@@ -2629,14 +2637,13 @@ class SourceTest(unittest.TestCase):
         self.assertNotIn("deliver-batch.js", text)
 
 
-CLERK, IMPL, REV, REV_LITE = "clerk", "implementer", "reviewer", "reviewer-lite"
+CLERK, IMPL, REV = "clerk", "implementer", "reviewer"
 EXPECTED = {stem: frozenset({kind}) for kind, stems in (
     (CLERK, ("setup", "facts-", "release-", "acquire-", "readopt-", "recover-end-", "ask-", "settle-",
              "land-unlock-", "land-ask-", "land-lock-", "land-record-", "land-status-", "land-pr-", "land-checks-", "land-merge-", "close-out-",
              "train-sweep-", "train-pr-", "train-checks-", "train-ready-", "train-merge-", "train-flip-")),
     (IMPL, ("land-sync-", "land-sync-fix-", "land-fix-", "train-build-")),
-    (REV, ("land-sync-review-", "land-fix-review-")),
-    (REV_LITE, ("land-sync-rereview-",)),
+    (REV, ("land-sync-review-", "land-sync-rereview-", "land-fix-review-")),
 ) for stem in stems}
 STEM_PATTERNS = (
     r"\b(?:label|reviewLabel): (['`])([a-z][a-z0-9-]*)",

@@ -843,7 +843,9 @@ const COMMIT_SCOPE = 'Before committing, read git status in the worktree you com
 // #907: the conflicted-sync wording, the same text in deliver-batch.js. The marker check runs before the merge is committed, when HEAD is still the
 // branch's own head: git diff --check HEAD compares the whole working tree with it, so it reads every line the merge brings in, in a file
 // resolved by hand as in one merged cleanly, staged or not (the plain form goes silent once a file is staged, --cached misses a later edit).
-const MARKER_CHECK = wt => `run git -C ${wt} diff --check HEAD before committing and remove every leftover conflict marker it reports (its whitespace reports are not yours to fix)`
+// It also reports content the integration branch brought in (a setext or RST underline of seven =, a fixture with markers, whitespace), so removal is
+// limited to hand-resolved files and to lines origin's version lacks; markers_checked says the check ran, whatever it reported.
+const MARKER_CHECK = (wt, int) => `run git -C ${wt} diff --check HEAD before committing and remove each leftover conflict marker it reports in a file you resolved by hand, unless origin/${int}'s version of that file has the line; every other line it reports is content and stays`
 const MARKERS_UNCHECKED = ' The merge was not checked for leftover conflict markers: report any left in the files it changed.'
 const SYNC_FIX = (wt, mc, findings) => `A reviewer found defects in the conflict resolution of merge commit ${mc} (git -C ${wt} show --cc ${mc}): ${JSON.stringify(findings)}. Fix each real defect on top of the merge with a regression test (never redo or rewrite the merge), then commit; if a finding is wrong, commit nothing for it and say so with evidence in notes.`
 const SYNC_REREVIEW = (wt, mc, findings, fix, moved) => `Re-review these conflict-resolution findings against ${moved ? `the fix (git -C ${wt} diff ${fix.start_head}..${fix.commit}) made on top of` : 'the rebuttal (no new commit) of'} merge commit ${mc}: ${JSON.stringify(findings)}; notes: ${fix.notes}. ${moved ? '' : `Check each rebuttal against the code yourself (git -C ${wt} show --cc ${mc}); a finding the evidence does not refute is still unresolved. `}Report any still unresolved and any new Important or Critical defect. Do not edit anything.`
@@ -1607,7 +1609,7 @@ ${RULES}`, { label: 'merge', phase: 'Ship', agentType: 'clerk', model: DEFAULT_C
     raced = false
     syncs++
     const sy = await call(`${CTX}
-The branch is behind ${INT}. Merge origin/${INT} into it in the worktree (git -C ${W} merge origin/${INT}). If it conflicts, resolve each conflict keeping both sides' intent, ${MARKER_CHECK(W)}, commit the merge, and ${WHOLE('the files the merge changed against its first parent')}. ${FMT} Do not push. Return conflicted, merge_commit (full sha), resolved_files and markers_checked (true when that check ran); status blocked with notes if you cannot resolve it safely.
+The branch is behind ${INT}. Merge origin/${INT} into it in the worktree (git -C ${W} merge origin/${INT}). If it conflicts, resolve each conflict keeping both sides' intent, ${MARKER_CHECK(W, INT)}, commit the merge, and ${WHOLE('the files the merge changed against its first parent')}. ${FMT} Do not push. Return conflicted, merge_commit (full sha), resolved_files and markers_checked (true when that check ran); status blocked with notes if you cannot resolve it safely.
 ${RULES}`, { label: `sync-${syncs}`, phase: 'Ship', agentType: 'implementer', model: 'sonnet', schema: SYNC })
     if (!sy || sy.status !== 'done' || !present(sy.merge_commit)) return stop('sync', { pr: PR, sync: sy })
     expected = sy.merge_commit

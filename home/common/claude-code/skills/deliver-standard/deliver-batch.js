@@ -479,7 +479,9 @@ const COMMIT_SCOPE = 'Before committing, read git status in the worktree you com
 // #907: the conflicted-sync wording, the same text in deliver-standard.js. The marker check runs before the merge is committed, when HEAD is still the
 // branch's own head: git diff --check HEAD compares the whole working tree with it, so it reads every line the merge brings in, in a file
 // resolved by hand as in one merged cleanly, staged or not (the plain form goes silent once a file is staged, --cached misses a later edit).
-const MARKER_CHECK = wt => `run git -C ${wt} diff --check HEAD before committing and remove every leftover conflict marker it reports (its whitespace reports are not yours to fix)`
+// It also reports content the integration branch brought in (a setext or RST underline of seven =, a fixture with markers, whitespace), so removal is
+// limited to hand-resolved files and to lines origin's version lacks; markers_checked says the check ran, whatever it reported.
+const MARKER_CHECK = (wt, int) => `run git -C ${wt} diff --check HEAD before committing and remove each leftover conflict marker it reports in a file you resolved by hand, unless origin/${int}'s version of that file has the line; every other line it reports is content and stays`
 const MARKERS_UNCHECKED = ' The merge was not checked for leftover conflict markers: report any left in the files it changed.'
 const SYNC_FIX = (wt, mc, findings) => `A reviewer found defects in the conflict resolution of merge commit ${mc} (git -C ${wt} show --cc ${mc}): ${JSON.stringify(findings)}. Fix each real defect on top of the merge with a regression test (never redo or rewrite the merge), then commit; if a finding is wrong, commit nothing for it and say so with evidence in notes.`
 const SYNC_REREVIEW = (wt, mc, findings, fix, moved) => `Re-review these conflict-resolution findings against ${moved ? `the fix (git -C ${wt} diff ${fix.start_head}..${fix.commit}) made on top of` : 'the rebuttal (no new commit) of'} merge commit ${mc}: ${JSON.stringify(findings)}; notes: ${fix.notes}. ${moved ? '' : `Check each rebuttal against the code yourself (git -C ${wt} show --cc ${mc}); a finding the evidence does not refute is still unresolved. `}Report any still unresolved and any new Important or Critical defect. Do not edit anything.`
@@ -663,7 +665,7 @@ ${RULES}`, `land-status-${n}-${c.record}`, { ...clerk, schema: STATUS_SCHEMA })
 2. Otherwise merge it: git -C ${W} merge origin/${INT}. A clean merge: answer status done, conflicted false, head (the full sha of the merge commit).
 3. ${second
       ? `This landing already resolved one conflict. If the merge conflicts, run git merge --abort inside ${W} and answer status blocked, conflicted true, with head (the full sha of HEAD) and notes. Do not resolve it.`
-      : `If the merge conflicts, resolve each conflict keeping both sides' intent, ${MARKER_CHECK(W)}, commit the merge, and ${WHOLE('the files the merge changed against its first parent')}; answer status done, conflicted true, with head (the full sha of the merge commit), resolved_files and markers_checked (true when that check ran). If you cannot resolve it safely, run git merge --abort inside ${W} and answer status blocked, conflicted true, with notes.`}
+      : `If the merge conflicts, resolve each conflict keeping both sides' intent, ${MARKER_CHECK(W, INT)}, commit the merge, and ${WHOLE('the files the merge changed against its first parent')}; answer status done, conflicted true, with head (the full sha of the merge commit), resolved_files and markers_checked (true when that check ran). If you cannot resolve it safely, run git merge --abort inside ${W} and answer status blocked, conflicted true, with notes.`}
 ${pr ? `4. After a merge you completed, push the result: git -C ${W} push origin ${B}.` : '4. Do not push.'}
 ${RULES}`, label, { phase: 'Land', agentType: 'implementer', model: 'sonnet', schema: LAND_SYNC_SCHEMA })
     if (!sy) return out('stopped', { stage: 'land-sync', detail: `${label} returned nothing` })
@@ -699,16 +701,18 @@ ${RULES}`, `land-sync-review-${n}-${c.syncReview}`, { agentType: 'reviewer', sch
         const fix = await call(`Issue #${n} of ${SLUG}, worktree ${W}, branch ${B}.
 ${SYNC_FIX(W, mc, found)} Then push (git -C ${W} push origin ${B}); before pushing, ${WHOLE('the files you changed')}. ${COMMIT_SCOPE} ${IMPL_RETURN}
 ${RULES}`, `land-sync-fix-${n}-${c.syncReview}`, { agentType: 'implementer', model: 'sonnet', schema: IMPL })
-        // As shipFix in deliver-standard.js: the fix starts at the reviewed merge, and no commit is accepted only as a rebuttal with evidence.
+        // As shipFix in deliver-standard.js: the fix starts at the reviewed merge, no commit is accepted only as a rebuttal with evidence, and a
+        // full reviewer re-reviews either. A conflict row from here on names the fix reply: its commit is pushed and unaccepted.
+        const tried = fix ? { fix: { commit: fix.commit, notes: fix.notes } } : {}
         const moved = !!fix && !sameSha(fix.commit, head)
         if (!fix || fix.status !== 'done' || !fix.commit || !sameSha(fix.start_head, head) || (!moved && !nonEmpty(fix.notes))) {
-          return out('conflict', { review: rv, detail: 'the sync fix round did not finish' })
+          return out('conflict', { review: rv, detail: 'the sync fix round did not finish', ...tried })
         }
         const rr = await call(`Issue #${n} of ${SLUG}, worktree ${W}, branch ${B}.
 ${SYNC_REREVIEW(W, mc, found, fix, moved)}
-${RULES}`, `land-sync-rereview-${n}-${c.syncReview}`, { agentType: 'reviewer-lite', schema: FINDINGS })
-        if (!rr) return out('conflict', { review: rv, detail: 'the sync re-review returned nothing' })
-        if (findingsOf(rr).length) return out('conflict', { review: { ...rr, findings: findingsOf(rr) }, sync_review: rv })
+${RULES}`, `land-sync-rereview-${n}-${c.syncReview}`, { agentType: 'reviewer', schema: FINDINGS })
+        if (!rr) return out('conflict', { review: rv, detail: 'the sync re-review returned nothing', ...tried })
+        if (findingsOf(rr).length) return out('conflict', { review: { ...rr, findings: findingsOf(rr) }, sync_review: rv, ...tried })
         if (moved) head = fix.commit
       }
     }
