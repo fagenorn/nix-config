@@ -218,7 +218,60 @@ text)`; `parse_inbox_request(body)` reads the manager's `{"sprint_id", "secret"}
 `(sprint_id, secret)`; `parse_message_reply_request(body)` reads the manager's `{"sprint_id",
 "secret", "message": <int of at least 1>, "reply": <str>}` and returns `(sprint_id, secret,
 message_id, reply)`. All three are as strict as `parse_reply` (`ValueError` otherwise).
-`inbox_entry(message)` is the wire entry `{"id", "kind", "version", "text", "at"}`.
+`inbox_entry(message)` is the wire entry `{"id", "kind", "version", "text", "at"}`, and for a
+`MESSAGE_ANSWER` message also `"question"`, `"round"` and `"chosen"` (see below).
+
+Rounds of questions (#891) are what an approved sprint's manager asks the owner. Two rows carry
+them, both kept (`event_log.QUESTIONS_ASKED`, `QUESTION_ANSWERED`; each with the project in its
+project column):
+
+    questions.asked   {"sprint_id", "goal": <str>, "blocker": <bool>,
+                       "questions": [{"question", "blocks", "options": [<str>], "recommended"}]}
+    question.answered {"sprint_id", "goal": <str>, "round": <int>, "index": <int>,
+                       "question": <str>, "answer": <str>, "chosen": <str> | null,
+                       "recommended": <str>, "differs": <bool>}
+
+The round the manager sends (inside the ask request) and the owner's answer (the page's write) are
+
+    {"questions": [{"question": "<text>", "blocks": "<one line>", "options": ["<one line>", ...],
+                    "recommended": "<exact text of one option>"}, ...],
+     "blocker": true | false}                   (blocker optional, default false)
+    {"project_id", "sprint_id", "round": <int >= 1>, "question": <int >= 0>, "choice": <int >= 0>}
+    {"project_id", "sprint_id", "round": <int >= 1>, "question": <int >= 0>, "text": "<words>"}
+
+A round has one to `MAX_ROUND_QUESTIONS` questions, each with `MIN_OPTIONS` to `MAX_OPTIONS`
+options. `checked_round(round)` refuses with `Refused` the first failure, in this order:
+`NO_QUESTIONS` (`questions` not a list, or empty), `TOO_MANY_QUESTIONS`, `BAD_BLOCKER` (`blocker`
+present and not a bool); then, per question (`n` counts from 1): `QUESTION_SHAPE` (not an object, or
+a key outside `question, blocks, options, recommended`), `QUESTION_MEMBER` for `question` (a string,
+non-empty after stripping, at most `MAX_QUESTION_CHARS` code points after stripping) and for
+`blocks` (one line), `OPTION_COUNT`, `QUESTION_MEMBER` for `options` (an option that is not one
+line), `OPTION_TWICE` (two options equal after stripping) and `NO_RECOMMENDATION` (`recommended` not
+a string whose strip equals one stripped option). It returns a new `{"blocker": <bool>,
+"questions": [{"question", "blocks", "options", "recommended"}]}` with every text stripped.
+`parse_ask_request(body)` reads the manager's `{"sprint_id", "secret", "round"}` (exactly those
+keys) and returns `(sprint_id, secret, round)`, `round` an object whose keys are a subset of
+`questions, blocker`; `parse_round_answer(body)` reads the page's body, exactly one of `choice` and
+`text`, and returns `(project_id, sprint_id, round_id, index, choice, text)` with the absent one
+None. Both are `ValueError` on anything else, a repeated key, NaN or nesting too deep.
+
+The fold keeps each open sprint's `Question`s on `SprintState.questions`, ordered by `(round_id,
+index)`. A `questions.asked` row changes a sprint only when it is open, its brief is approved
+(`STARTING`) and `checked_round` accepts the row's `questions` and `blocker` (absent: false); each
+checked question is then added with `round_id` the row's `seq`, its `index` and `at`. The fold does
+not enforce one open round; the service does. A `question.answered` row applies only when its `round`
+and `index` (ints, not bools) name an unanswered question of the sprint, its `answer` is a string and
+its `chosen` is null or one of the question's options: the question then keeps `answer`, `chosen`,
+`answered_at` (the row's `at`) and `differs`, computed as `chosen != recommended` (the row's own
+`differs` is not trusted; the owner's own words, `chosen` null, always differ), and the sprint gains
+a `MESSAGE_ANSWER` message (`text` the answer, plus `question`, `round_id`, `chosen`). A second
+answer, or any other such row, changes nothing. `open_questions(state)` is the unanswered questions
+in `(round_id, index)` order, none once the sprint has `stopped_at` or a `closing`, and `round_open(state)` is true while there is one.
+`takes_questions(state)` is false once the sprint has `stopped_at`, a `closing` or has ended (`ended_at`); then
+a `questions.asked` or `question.answered` row changes nothing (the service refuses `ENDED`). An answer's inbox
+entry is `{"id", "kind": "answer", "version": null, "text": <the answer>, "at", "question":
+<question text>, "round": <int>, "chosen": <option text> | null}`; every other entry keeps its five
+keys.
 
 A sprint ends with a closing report, and the owner can stop one (#892). Four rows carry that
 (`event_log.SPRINT_CLOSED`, `SPRINT_STOP_REQUESTED`, `MANAGER_STOPPED`, `MANAGER_STOP_FAILED`; each
@@ -266,7 +319,7 @@ an open sprint:
   retry due at once.
 
 `ended_at(state)` is every route to done, first match: `stopped_at` when set; `None` when `stop_at`
-is set (the sprint is stopping); `closing.at` when `closing` is set; `report.at` when the sprint is `STARTING` and the
+is set (the sprint is stopping); `closing.at` when `closing` is set; `report.at` when the sprint is `STARTING`, no question is open and the
 report's phase is `done` (the route that predates the closing report; a newer brief drops that
 done report when it is sent, so a replaced sprint is not ended again by the old report); else `None`. A sprint has ended when `ended_at` is not `None`.
 
@@ -303,10 +356,10 @@ from agent_tools.console.deliveries import DELIVERY_SEEN
 from agent_tools.console.event_log import (BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED,
                                            GOAL_WITHDRAWN, MANAGER_FAILED, MANAGER_STALLED,
                                            MANAGER_STARTED, MANAGER_STOP_FAILED, MANAGER_STOPPED,
-                                           MANAGER_WAITING, MANAGER_WOKEN, SPRINT_ANSWERED,
-                                           SPRINT_CLOSED, SPRINT_MESSAGED, SPRINT_NUDGED,
-                                           SPRINT_READ, SPRINT_REPORTED, SPRINT_STOP_REQUESTED,
-                                           Event)
+                                           MANAGER_WAITING, MANAGER_WOKEN, QUESTION_ANSWERED,
+                                           QUESTIONS_ASKED, SPRINT_ANSWERED, SPRINT_CLOSED,
+                                           SPRINT_MESSAGED, SPRINT_NUDGED, SPRINT_READ,
+                                           SPRINT_REPORTED, SPRINT_STOP_REQUESTED, Event)
 from agent_tools.console.manager import FAILED_TEXT, MISSING_TEXT, UNAVAILABLE_TEXT
 from agent_tools.console.manager import WAITING_TEXT as MANAGER_WAITING_TEXT
 from agent_tools.console.sessions import SEEN
@@ -350,6 +403,10 @@ STOP_SETTLE_MS = 30_000
 FINISHED_AFTER_MS = 86_400_000
 CLOSED_OUT = "closed out"
 MAX_LINE_CHARS = 500
+MIN_OPTIONS = 2
+MAX_OPTIONS = 4
+MAX_ROUND_QUESTIONS = 10
+MAX_QUESTION_CHARS = 1000
 MAX_REPORT_ISSUES = 200
 ON_TRACK = "on_track"
 ON_TRACK_TEXT = "on track"
@@ -397,12 +454,25 @@ TOO_SOON = "retry is offered two minutes after the goal"
 EMPTY_MESSAGE = "write the message first"
 MESSAGE_TOO_LONG = "a message is at most 2000 characters"
 UNKNOWN_MESSAGE = "this message is not known"
+NO_QUESTIONS = "the round has no questions"
+TOO_MANY_QUESTIONS = "a round has at most 10 questions"
+BAD_BLOCKER = "the round's blocker is not true or false"
+QUESTION_SHAPE = "question {n} is not an object of question, blocks, options and recommended"
+QUESTION_MEMBER = "question {n} has no valid {member}"
+OPTION_COUNT = "question {n} needs two to four options"
+OPTION_TWICE = "question {n} offers one option twice"
+NO_RECOMMENDATION = "question {n} recommends none of its options"
+ROUND_OPEN = "a round of questions is already open"
+UNKNOWN_QUESTION = "this question is not known"
+ANSWERED_ALREADY = "this question is already answered"
+NOT_AN_OPTION = "choose one of the question's options"
 UNREACHABLE_TEXT = "manager not reachable"
 UNREACHABLE_AFTER = 2
 RENUDGE_AFTER_MS = 60_000
 MESSAGE_APPROVED = "approved"
 MESSAGE_CHANGES = "changes"
 MESSAGE_TEXT = "text"
+MESSAGE_ANSWER = "answer"
 MESSAGE_STOP = "stop"
 SENT = "sent"
 DELIVERED = "delivered"
@@ -503,6 +573,25 @@ class Message:
     read_at: str | None = None
     reply: str | None = None
     reply_at: str | None = None
+    question: str | None = None
+    round_id: int | None = None
+    chosen: str | None = None
+
+
+@dataclass(frozen=True)
+class Question:
+    round_id: int
+    index: int
+    at: str
+    blocker: bool
+    question: str
+    blocks: str
+    options: tuple[str, ...]
+    recommended: str
+    answer: str | None = None
+    chosen: str | None = None
+    differs: bool | None = None
+    answered_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -522,6 +611,7 @@ class SprintState:
     last_nudge_at: str | None = None
     last_nudge_ok: bool | None = None
     manager_session: str | None = None
+    questions: tuple[Question, ...] = ()
     closing: Closing | None = None
     stop_at: str | None = None
     stopped_at: str | None = None
@@ -539,12 +629,16 @@ class SprintState:
         return DRAFTING
 
 
-def _object(body: bytes, keys: set[str], project: bool = True) -> dict:
+def _decoded(body: bytes) -> object:
     try:
-        value = json.loads(body.decode("utf-8"), object_pairs_hook=reject_duplicate_keys,
-                           parse_constant=reject_nonfinite_literal)
+        return json.loads(body.decode("utf-8"), object_pairs_hook=reject_duplicate_keys,
+                          parse_constant=reject_nonfinite_literal)
     except RecursionError as error:
         raise ValueError("the body is nested too deeply") from error
+
+
+def _object(body: bytes, keys: set[str], project: bool = True) -> dict:
+    value = _decoded(body)
     if not isinstance(value, dict) or set(value) != keys:
         raise ValueError(f"the body must be an object of {', '.join(sorted(keys))}")
     if project:
@@ -603,6 +697,43 @@ def parse_report_request(body: bytes) -> tuple[str, str, dict]:
     if not isinstance(report, dict) or not set(report) <= set(REPORT_MEMBERS):
         raise ValueError(f"report must be an object of {', '.join(REPORT_MEMBERS)}")
     return sprint_id, value["secret"], report
+
+
+ROUND_KEYS = ("questions", "blocker")
+
+
+def parse_ask_request(body: bytes) -> tuple[str, str, dict]:
+    value = _object(body, {"sprint_id", "secret", "round"}, project=False)
+    sprint_id = _sprint_id(value["sprint_id"])
+    if not isinstance(value["secret"], str):
+        raise ValueError("secret must be a string")
+    round_ = value["round"]
+    if not isinstance(round_, dict) or not set(round_) <= set(ROUND_KEYS):
+        raise ValueError(f"round must be an object of {', '.join(ROUND_KEYS)}")
+    return sprint_id, value["secret"], round_
+
+
+def _count(value: object, least: int) -> int:
+    if not isinstance(value, int) or isinstance(value, bool) or value < least:
+        raise ValueError(f"must be an integer of at least {least}")
+    return value
+
+
+def parse_round_answer(body: bytes) -> tuple[str, str, int, int, int | None, str | None]:
+    value = _decoded(body)
+    base = {"project_id", "sprint_id", "round", "question"}
+    if (not isinstance(value, dict) or set(value) not in (base | {"choice"}, base | {"text"})):
+        raise ValueError("the body must be an object of project_id, sprint_id, round, question "
+                         "and one of choice and text")
+    project_id = value["project_id"]
+    if not isinstance(project_id, str) or not project_id:
+        raise ValueError("project_id must be a non-empty string")
+    text = value.get("text")
+    if "text" in value and not isinstance(text, str):
+        raise ValueError("text must be a string")
+    choice = _count(value["choice"], 0) if "choice" in value else None
+    return (project_id, _sprint_id(value["sprint_id"]), _count(value["round"], 1),
+            _count(value["question"], 0), choice, text)
 
 
 def parse_close_request(body: bytes) -> tuple[str, str, dict]:
@@ -734,6 +865,44 @@ def checked_report(report: dict) -> dict:
             "inbox": sorted(set(report["inbox"])), "next": report["next"].strip()}
 
 
+def _checked_question(n: int, question: object) -> dict:
+    if not isinstance(question, dict) or not set(question) <= {"question", "blocks", "options",
+                                                                "recommended"}:
+        raise Refused(QUESTION_SHAPE.format(n=n))
+    text, blocks = question.get("question"), question.get("blocks")
+    if not _text(text) or len(text.strip()) > MAX_QUESTION_CHARS:
+        raise Refused(QUESTION_MEMBER.format(n=n, member="question"))
+    if not _line(blocks):
+        raise Refused(QUESTION_MEMBER.format(n=n, member="blocks"))
+    options = question.get("options")
+    if not isinstance(options, list) or not MIN_OPTIONS <= len(options) <= MAX_OPTIONS:
+        raise Refused(OPTION_COUNT.format(n=n))
+    if not all(_line(option) for option in options):
+        raise Refused(QUESTION_MEMBER.format(n=n, member="options"))
+    stripped = [option.strip() for option in options]
+    if len(set(stripped)) != len(stripped):
+        raise Refused(OPTION_TWICE.format(n=n))
+    recommended = question.get("recommended")
+    if not isinstance(recommended, str) or recommended.strip() not in stripped:
+        raise Refused(NO_RECOMMENDATION.format(n=n))
+    return {"question": text.strip(), "blocks": blocks.strip(), "options": stripped,
+            "recommended": recommended.strip()}
+
+
+def checked_round(round_: dict) -> dict:
+    questions = round_.get("questions")
+    if not isinstance(questions, list) or not questions:
+        raise Refused(NO_QUESTIONS)
+    if len(questions) > MAX_ROUND_QUESTIONS:
+        raise Refused(TOO_MANY_QUESTIONS)
+    blocker = round_.get("blocker", False)
+    if not isinstance(blocker, bool):
+        raise Refused(BAD_BLOCKER)
+    return {"blocker": blocker,
+            "questions": [_checked_question(n, question)
+                          for n, question in enumerate(questions, 1)]}
+
+
 def first_line(summary: str) -> str:
     return summary.strip().split("\n", 1)[0].strip()
 
@@ -796,9 +965,28 @@ def unreachable(state: SprintState) -> bool:
     return state.failed_nudges >= UNREACHABLE_AFTER
 
 
+def open_questions(state: SprintState) -> tuple[Question, ...]:
+    if state.stopped_at is not None or state.closing is not None:
+        return ()
+    return tuple(sorted((question for question in state.questions if question.answer is None),
+                        key=lambda question: (question.round_id, question.index)))
+
+
+def round_open(state: SprintState) -> bool:
+    return bool(open_questions(state))
+
+
+def takes_questions(state: SprintState) -> bool:
+    """False once the sprint has stopped, is closed or has ended: it then asks and is asked no more."""
+    return state.stopped_at is None and state.closing is None and ended_at(state) is None
+
+
 def inbox_entry(message: Message) -> dict:
-    return {"id": message.message_id, "kind": message.kind, "version": message.version,
-            "text": message.text, "at": message.at}
+    entry = {"id": message.message_id, "kind": message.kind, "version": message.version,
+             "text": message.text, "at": message.at}
+    if message.kind == MESSAGE_ANSWER:
+        entry.update(question=message.question, round=message.round_id, chosen=message.chosen)
+    return entry
 
 
 def _with_message(state: SprintState, message: Message) -> SprintState:
@@ -868,6 +1056,41 @@ def _folded_message(state: SprintState, event: Event) -> SprintState:
             return replace(state, messages=tuple(
                 replace(message, reply=reply, reply_at=event.at)
                 if message.message_id == target else message for message in state.messages))
+    return state
+
+
+def _folded_question(state: SprintState, event: Event) -> SprintState:
+    payload = event.payload
+    if not takes_questions(state):
+        return state
+    if event.kind == QUESTIONS_ASKED:
+        if state.state != STARTING:
+            return state
+        try:
+            checked = checked_round({"questions": payload.get("questions"),
+                                     "blocker": payload.get("blocker", False)})
+        except Refused:
+            return state
+        added = tuple(Question(event.seq, index, event.at, checked["blocker"], row["question"],
+                               row["blocks"], tuple(row["options"]), row["recommended"])
+                      for index, row in enumerate(checked["questions"]))
+        return replace(state, questions=(*state.questions, *added))
+    round_id, index = payload.get("round"), payload.get("index")
+    answer, chosen = payload.get("answer"), payload.get("chosen")
+    if not _id(round_id) or not _id(index) or not isinstance(answer, str):
+        return state
+    for position, question in enumerate(state.questions):
+        if (question.round_id, question.index) != (round_id, index):
+            continue
+        if question.answer is not None or (chosen is not None and chosen not in question.options):
+            return state
+        answered = replace(question, answer=answer, chosen=chosen, answered_at=event.at,
+                           differs=chosen != question.recommended)
+        questions = (*state.questions[:position], answered, *state.questions[position + 1:])
+        return _with_message(
+            replace(state, questions=questions),
+            Message(event.seq, MESSAGE_ANSWER, event.at, None, answer, question=question.question,
+                    round_id=round_id, chosen=chosen))
     return state
 
 
@@ -1039,6 +1262,8 @@ def sprint_states(events: Iterable[Event],
         elif event.kind in (SPRINT_MESSAGED, SPRINT_READ, SPRINT_ANSWERED, SPRINT_NUDGED) \
                 and sprint_id in folded:
             folded[sprint_id] = _folded_message(folded[sprint_id], event)
+        elif event.kind in (QUESTIONS_ASKED, QUESTION_ANSWERED) and sprint_id in folded:
+            folded[sprint_id] = _folded_question(folded[sprint_id], event)
     return folded
 
 
@@ -1049,7 +1274,8 @@ def ended_at(state: SprintState) -> str | None:
         return None
     if state.closing is not None:
         return state.closing.at
-    if state.state == STARTING and state.report is not None and state.report.phase == DONE:
+    if (state.state == STARTING and state.report is not None and state.report.phase == DONE
+            and not open_questions(state)):
         return state.report.at
     return None
 
