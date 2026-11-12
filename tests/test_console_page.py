@@ -337,9 +337,11 @@ class PageTest(unittest.TestCase):
         self.assertEqual(
             [n for n in nodes(snap["inbox"]) if n["tag"] in ("input", "textarea")], [])
 
-    def test_the_tracker_link_is_the_only_href(self) -> None:
-        self.assertEqual(len(re.findall(r"\.href\s*=", self.text)), 1)
-        self.assertIsNotNone(re.search(r"\.href = item\.url;", self.text))
+    def test_the_tracker_links_are_the_only_hrefs(self) -> None:
+        self.assertEqual(len(re.findall(r"\.href\s*=", self.text)), 2)
+        self.assertEqual(self.text.count("a.href = item.url;"), 1)
+        self.assertEqual(self.text.count("link.href = sprint.tracker_url;"), 1)
+        self.assertIn('sprint.tracker_url.startsWith("https:")', self.text)
 
 
 def render(steps: list) -> list:
@@ -1251,6 +1253,21 @@ SPRINT = {
 }
 
 
+REPORTED = {
+    **SPRINT, "state": "on_track", "state_text": "on track", "manager_text": None,
+    "progress": {"landed": 3, "in_delivery": 2, "queued": 2, "held": 0, "total": 7},
+    "progress_text": "3 of 7 landed, 2 in delivery, 2 queued",
+    "status": "two slices are building", "status_age_text": "4 min ago",
+    "next": "start the resume slice", "milestone": "Importer resumes",
+    "tracker_url": "https://github.com/owner/p00/milestone/3",
+    "issues": [
+        {"issue": 12, "stage": "building", "stage_text": "building task 2 of 4"},
+        {"issue": 13, "stage": "landed", "stage_text": "landed"},
+    ],
+    "waiting": 0,
+}
+
+
 def goal_named(snap: dict, cls: str) -> list:
     return [n for n in nodes(snap["goal"]) if has_class(n, cls)]
 
@@ -1433,6 +1450,83 @@ class PageGoalTest(unittest.TestCase):
             [full(n) for n in nodes(line) if has_class(n, "fail")],
             ["Could not withdraw: this sprint is not open"],
         )
+
+
+def top(line: dict) -> list:
+    return [n for n in nodes(line) if n not in nodes_of_detail(line)]
+
+
+def nodes_of_detail(line: dict) -> list:
+    return [n for d in detail_nodes(line) for n in nodes(d)]
+
+
+def detail_nodes(line: dict) -> list:
+    return [n for n in nodes(line) if n["tag"] == "details" and has_class(n, "sprint-detail")]
+
+
+def detail(line: dict) -> dict:
+    (found,) = detail_nodes(line)
+    return found
+
+
+def top_text(line: dict) -> str:
+    return " ".join(n["text"] for n in top(line))
+
+
+class PageSprintReportTest(unittest.TestCase):
+    def test_the_sprint_line_carries_no_issue_number_branch_or_session_until_opened(self) -> None:
+        outside = session("feature-s1", "working", "working", [{**RUN, "issues": [
+            {"issue": 12, "stage": "building", "stage_text": "building task 2 of 4"}]}])
+        frame = view([{**project(0, [outside]), "sprints": [REPORTED]}])
+        first, second, third = render([
+            START, {"frame": frame}, {"snapshot": True},
+            {"open": "sprint:" + "a" * 16}, {"snapshot": True},
+            {"frame": frame}, {"snapshot": True},
+        ])
+        (line,) = sprint_lines(first)
+        shown = top_text(line)
+        self.assertIsNone(re.search(r"#\d", shown))
+        for hidden in ("feature-s1", "wf_a", "issue-12"):
+            self.assertNotIn(hidden, shown)
+        self.assertFalse(detail(line)["open"])
+        for snap in (second, third):
+            (opened,) = sprint_lines(snap)
+            fold = detail(opened)
+            self.assertTrue(fold["open"])
+            for expected in ("#12", "building task 2 of 4", "#13", "landed",
+                             "Next: start the resume slice", "Milestone: Importer resumes"):
+                self.assertIn(expected, full(fold))
+            last = fold["children"][-1]
+            self.assertEqual((last["tag"], last["cls"], full(last)),
+                             ("a", "tracker", "Open on the tracker"))
+            self.assertEqual(full(fold["children"][0]), "Detail")
+
+    def test_a_reported_sprint_line_reads_state_progress_status_and_age(self) -> None:
+        quiet = {**REPORTED, "state": "quiet", "state_text": "quiet for 16 min — may be stuck"}
+        snap, stuck = render([
+            START, {"frame": with_sprints([REPORTED])}, {"snapshot": True},
+            {"frame": with_sprints([quiet])}, {"snapshot": True},
+        ])
+        (line,) = sprint_lines(snap)
+        for expected in ("on track", "3 of 7 landed, 2 in delivery, 2 queued",
+                         "two slices are building", "4 min ago"):
+            self.assertIn(expected, top_text(line))
+        (line,) = sprint_lines(stuck)
+        self.assertIn("quiet for 16 min — may be stuck", top_text(line))
+        self.assertNotIn("stalled", top_text(line).lower())
+
+    def test_a_non_https_tracker_url_draws_no_link(self) -> None:
+        bad = {**REPORTED, "tracker_url": "javascript:alert(1)"}
+        (snap,) = render([START, {"frame": with_sprints([bad])}, {"snapshot": True}])
+        (line,) = sprint_lines(snap)
+        self.assertEqual([n for n in nodes(detail(line)) if n["tag"] == "a"], [])
+
+    def test_a_sprint_without_a_report_has_no_detail(self) -> None:
+        (snap,) = render([START, {"frame": with_sprints([SPRINT])}, {"snapshot": True}])
+        (line,) = sprint_lines(snap)
+        self.assertEqual(detail_nodes(line), [])
+        for cls in ("sprint-detail", "progress", "status"):
+            self.assertEqual([n for n in nodes(line) if has_class(n, cls)], [])
 
 
 class PageInFlightTest(unittest.TestCase):
