@@ -1685,6 +1685,49 @@ class PageCardTest(unittest.TestCase):
                         self.assertTrue(any(prop in names for names in declared), prop)
 
 
+class PageRowTest(unittest.TestCase):
+    @staticmethod
+    def rows() -> tuple:
+        rest_items = [
+            ANSWERABLE,
+            item("C", issue=9, reason="conflict", headline="Landing stopped.", items=["PR #14 conflicts."]),
+            item("N", issue=11, reason="needs-label", headline="A check needs a label.", items=["PR #15 needs a label."]),
+            check_item("M", "manual-check"),
+            check_item("P", "approval", held_work=2),
+        ]
+        (snap,) = render([START, {"frame": frame(rest_items)}, {"snapshot": True}])
+        (rest,) = [n for n in nodes(snap["inbox"]) if has_class(n, "rest")]
+        return rest, rest["children"]
+
+    def test_every_other_open_item_is_one_row_with_its_kind_headline_project_and_wait(self) -> None:
+        _, rows = self.rows()
+        self.assertEqual([(r["tag"], has_class(r, "row")) for r in rows], [("li", True)] * 4)
+        heads = [r["children"][0] for r in rows]
+        for head in heads:
+            self.assertEqual(head["tag"], "p")
+            self.assertTrue(has_class(head, "row-head"))
+            self.assertEqual([(c["tag"], c["cls"].split()[0] if c["cls"] else "") for c in head["children"]],
+                             [("span", "kind"), ("b", ""), ("span", "lm"), ("span", "lw")])
+            self.assertIsNone(re.search(r"#\d", full(head)))
+            self.assertTrue(full(head["children"][3]).startswith("waiting "))
+            self.assertIn("owner/p00", full(head["children"][2]))
+        kinds = [head["children"][0] for head in heads]
+        self.assertEqual([full(k) for k in kinds], ["Conflict", "Label", "Check", "Approval"])
+        for kind in kinds:
+            self.assertIn("svg", [c["tag"] for c in kind["children"]])
+        self.assertEqual([full(h["children"][1]) for h in heads],
+                         ["Landing stopped.", "A check needs a label.", "Question M?", "Question P?"])
+        self.assertIn("holds 2 issues", full(heads[3]["children"][2]))
+
+    def test_a_row_is_never_raised_and_takes_no_primary_action(self) -> None:
+        rest, rows = self.rows()
+        self.assertTrue(all(has_class(r, "row") for r in rest["children"]))
+        for n in nodes(rest):
+            for name in ("card", "lead", "primary"):
+                self.assertFalse(has_class(n, name), name)
+        self.assertTrue([n for n in nodes(rows[2]) if has_class(n, "ans-passed")])
+
+
 class PageOptionTest(unittest.TestCase):
     @staticmethod
     def three(chosen=None) -> dict:

@@ -67,6 +67,12 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .rest, .done { margin-top: 10px; }
 .rest li, .done li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; padding: 5px 0; font-size: .875rem; color: var(--ov2); }
 .rest b, .done b { font-weight: 600; color: var(--sub0); }
+.rest > li.row { display: block; padding: 12px 0; }
+.rest > li.row + li.row { border-top: 1px solid var(--hair); }
+.row-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 12px; width: 100%; margin: 0; }
+.row-head b { font-size: 1rem; font-weight: 500; color: var(--text); }
+.row-head .lm { font-size: .84375rem; color: var(--sub0); }
+.row-head .lw { margin-left: auto; font-size: .84375rem; color: var(--sub0); white-space: nowrap; }
 .done-item { flex: 1 0 100%; }
 .done-item summary, .check-more summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; cursor: pointer; list-style: none; padding: 4px 12px; margin: 0 -12px; border-radius: 10px; font-size: .875rem; color: var(--ov2); transition: background-color .16s; }
 .done-item summary::-webkit-details-marker, .check-more summary::-webkit-details-marker { display: none; }
@@ -1192,14 +1198,23 @@ function leadItem(item) {
   return card;
 }
 function itemLine(item) {
-  const line = el("li");
-  line.appendChild(el("b", "", item.headline));
+  const line = el("li", "row");
+  const head = el("p", "row-head");
+  head.appendChild(kindWords(item));
+  head.appendChild(el("b", "", item.headline));
+  const lm = phrase("span", "lm", item.project_id + " \u00b7 " + holds(item));
+  if (item.stale) {
+    lm.appendChild(el("span", "", " \u00b7 "));
+    lm.appendChild(phrase("span", "read-at", "read ", timeEl("ago", item.read_at, "")));
+  }
+  head.appendChild(lm);
+  head.appendChild(phrase("span", "lw", "waiting ", timeEl("since", item.waiting_since, "")));
+  line.appendChild(head);
   const more = moreWords(item);
   if (more !== null) line.appendChild(more);
   const state = boxState(item);
   if (state === null) appendDetail(line, item, true);
   else line.appendChild(answerBox(item, state, false));
-  line.appendChild(metaLine(item, "span", ""));
   line.appendChild(answerLink(item));
   return line;
 }
