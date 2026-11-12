@@ -249,6 +249,84 @@ class StopServiceTest(Case):
         self.assertEqual(self.rows("manager.stopped"), [{"sprint_id": sid}])
         self.assertEqual(self.nudges, [])
 
+    def hooked(self, svc, event, received, **extra):
+        """Ingest one hook of the manager's session, received at `received` seconds after T0."""
+        svc.ingest_hook(json.dumps({
+            "hook_event_name": event, "session_id": FIRST, "cwd": "/srv/p01", **extra}).encode(),
+            received_ms=int((T0 + received) * 1000))
+
+    def test_an_idle_state_older_than_the_closing_does_not_stop_the_manager_when_it_is_ingested_late(self):
+        svc = self.begin()
+        sid = self.running(svc)
+        svc.send_report(sid, self.secret(sid), REPORT)
+        self.seen(svc, sid, "working")
+        self.now[0] = T0 + 10
+        svc.send_closing(sid, self.secret(sid), {
+            "summary": "Importer resumes after a crash", "differently": "cut smaller slices",
+            "issues": [{"issue": 12, "stage": "held"}, {"issue": 13, "stage": "landed"}]})
+        self.now[0] = T0 + 11
+        self.hooked(svc, "Stop", 5)
+        svc.finish_stops()
+        self.assertEqual(self.stops, [])
+        self.hooked(svc, "Stop", 11)
+        svc.finish_stops()
+        self.assertEqual(self.stops, [(FIRST, "work")])
+
+    def test_a_notification_that_keeps_the_idle_state_does_not_end_the_turn_after_the_closing(self):
+        svc = self.begin()
+        sid = self.running(svc)
+        svc.send_report(sid, self.secret(sid), REPORT)
+        self.seen(svc, sid, "idle")
+        self.now[0] = T0 + 10
+        svc.send_closing(sid, self.secret(sid), {
+            "summary": "Importer resumes after a crash", "differently": "cut smaller slices",
+            "issues": [{"issue": 12, "stage": "held"}, {"issue": 13, "stage": "landed"}]})
+        self.now[0] = T0 + 11
+        self.hooked(svc, "Notification", 11, notification_type="other")
+        svc.finish_stops()
+        self.assertEqual(self.stops, [])
+
+    def test_a_restart_before_the_closing_stop_gives_a_late_listing_its_settle_window(self):
+        first = self.begin()
+        sid = self.running(first)
+        self.close_after_landing(first, sid)
+        self.now[0] = T0 + 11
+        self.seen(first, sid, "idle")
+        first.close()
+        self.now[0] = T0 + 12
+        self.listed.clear()
+        svc = self.begin()
+        svc.finish_stops()
+        self.assertEqual(self.stops, [])
+        self.assertEqual(self.rows("manager.stopped"), [])
+        self.listed[FIRST] = sessions.Observation(
+            FIRST, "/srv/p01", 1, "idle", None, manager.session_name("owner/p01", sid), None,
+            "work")
+        self.now[0] = T0 + 12 + sprints.STOP_SETTLE_MS / 1000
+        svc.finish_stops()
+        self.assertEqual(self.stops, [(FIRST, "work")])
+        self.assertEqual(self.rows("manager.stopped"), [{"sprint_id": sid}])
+
+    def test_a_closed_sprints_manager_is_not_relaunched_by_a_reservation_that_was_already_made(self):
+        launcher = support.Launches()
+        svc = self.begin(launcher=launcher)
+        sid = self.running(svc)
+        svc.send_report(sid, self.secret(sid), REPORT)
+        svc.send_closing(sid, self.secret(sid), {
+            "summary": "Importer resumes after a crash", "differently": "cut smaller slices",
+            "issues": [{"issue": 12, "stage": "held"}, {"issue": 13, "stage": "landed"}]})
+        launcher.calls.clear()
+        with svc._ingest:
+            svc._apply(svc.log.append([("manager.failed", "owner/p01", {
+                "sprint_id": sid, "goal": GOAL_TEXT, "reason": "boom", "takeover": True})]))
+        self.assertIs(self.entry(svc, sid)["retry"], False)
+        for token in (service._TakeoverReservation(), service._RetryReservation()):
+            svc._launching[sid] = token
+            svc._launch_reserved(sid)
+        self.assertEqual(launcher.calls, [])
+        with self.assertRaises(sprints.Refused):
+            svc.retry_manager("owner/p01", sid)
+
     def test_a_failed_stop_is_shown_and_retried_after_a_minute(self):
         svc = self.begin()
         sid = self.running(svc)

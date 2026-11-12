@@ -1458,13 +1458,15 @@ def manager_status(state: SprintState, listed: bool, now_ms: int | None,
     manager whose `takeover` is true offers retry while the sprint has no listed session, whatever
     the brief (a takeover's sprint has a brief by design).
 
-    A sprint with `stop_at` or `stopped_at` set never offers retry, whatever its manager row says:
-    neither the view nor the service relaunches the manager of a stopping or stopped sprint.
+    A sprint with `stop_at`, `stopped_at` or `closing` set never offers retry, whatever its manager
+    row says: neither the view nor the service relaunches the manager of a stopping, stopped or
+    closed sprint (#980).
     """
     if not managers:
         return UNAVAILABLE, UNAVAILABLE_TEXT, False
     manager = state.manager
-    stopping = state.stop_at is not None or state.stopped_at is not None
+    stopping = (state.stop_at is not None or state.stopped_at is not None
+                or state.closing is not None)
     since = state.stated_at if manager is None or manager.state != STARTED else manager.at
     overdue = (now_ms is not None and now_ms - _ms(since) > NO_MANAGER_AFTER_MS
                and state.brief is None and not listed)
