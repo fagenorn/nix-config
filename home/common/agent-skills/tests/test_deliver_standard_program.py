@@ -790,6 +790,20 @@ class OwnerAnswerTest(unittest.TestCase):
         result, calls = run(replies={"plan": ASKED})
         self.assertEqual((result["stage"], result["needs_user"]), ("plan", ASKED["questions"]))
         self.assertFalse([c["label"] for c in calls if "owner-action post" in c["prompt"]])
+        with self.subTest("a recommended option passes through unchanged"):
+            recommended = {"status": "needs_user", "questions": [
+                {"question": "Which host?", "options": ["Host one.", "Host two."], "recommended": "Host two."}]}
+            result, _ = run(replies={"plan": recommended})
+            self.assertEqual(result["needs_user"], recommended["questions"])
+
+    def test_the_planner_may_name_its_recommended_option(self):
+        _, calls = run()
+        plan_call = next(c for c in calls if c["label"] == "plan")
+        text = prompt(calls, "plan")
+        item = plan_call["schema"]["properties"]["questions"]["items"]
+        self.assertEqual(item["properties"]["recommended"], {"type": "string"})
+        self.assertEqual(item["required"], ["question", "options"])
+        self.assertIn("when you would choose one option, recommended: its exact text", text)
 
     def test_the_planner_asks_in_box_form_and_only_past_r8(self):
         _, calls = run()

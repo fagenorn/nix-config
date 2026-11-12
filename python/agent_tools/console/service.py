@@ -14,8 +14,10 @@ Routes (every response carries `Cache-Control: no-store` and
     POST /api/hooks 204, no body, a Claude Code hook's input (below)
     POST /api/readings 204, no body, the cache proxy's limit reading (below)
     POST /api/looked 204, no body, the page records that the owner looked (below)
+    POST /api/answer 204, a JSON body, the page sends the owner's choice (below)
     anything else   404
-    other methods   405 with `Allow: GET` (`Allow: POST` on `/api/hooks`, `/api/readings` and `/api/looked`)
+    other methods   405 with `Allow: GET` (`Allow: POST` on `/api/hooks`, `/api/readings`,
+                    `/api/looked` and `/api/answer`)
 
 Two kinds of write exist. The hook and reading routes append what the proxies and hooks observe:
 `POST /api/hooks` appends session observations, `POST /api/readings` the capacity kinds
@@ -35,14 +37,27 @@ is one stderr line `console: hook_unreadable <message>`; any other failure is
 ignored payload (an unknown event, a missing member) appends nothing. The
 route carries no token: it records observations and answers nothing (ADR-console-004).
 
-A page write (`PAGE_WRITES`, today `POST /api/looked`; ADR-console-008) is made by the desk page
+A page write (`PAGE_WRITES`, today `POST /api/looked` and `POST /api/answer`; ADR-console-008,
+ADR-console-010) is made by the desk page
 alone and goes through one guard, `_page_write`, whatever its route. After the loopback `Host`
 check and before any body is read, exactly one `Origin` header must equal `http://<Host>` (else
 403 `text/plain` `origin refused`) and exactly one `X-Console-Token` header must equal the
 install's token (else 403 `token refused`; see `write_guard.py`), each refusal closing the
-connection and appending nothing. A page write carries no body: a `Content-Length` other than
-absent or `0`, or any `Transfer-Encoding`, is 400 `no body`. `POST /api/looked` then appends one
-`page.looked` event (`record_look`) and answers an empty `204`. The token is created once in
+connection and appending nothing. The body rule is per route. `POST /api/looked` carries no body: a
+`Content-Length` other than absent or `0`, or any `Transfer-Encoding`, is 400 `no body`; it then
+appends one `page.looked` event (`record_look`) and answers an empty `204`. `POST /api/answer`
+carries one JSON body, and after the guard these checks run in order, each refusal `text/plain`, one
+line, closing the connection, appending nothing and ticking nothing: any `Transfer-Encoding` is 411
+`length required`; a `Content-Type` whose media type is not `application/json` is 415 `json only`;
+a `Content-Length` that is not ASCII digits is 411 `length required`, one above `MAX_ANSWER_BYTES`
+(4096) is 413 `too large` (the body unread); a body `answer.parse_request` does not accept is 400
+`bad answer`. Then `answer(project_id, key, choices)` runs, and each failure writes one stderr
+line before it is translated: `answer.Refused` is `console: answer_refused <project_id> <key>
+<reason>` and 409 with the reason; a `ForgeError` is `console: answer_tick_failed <project_id> <key>
+<code>: <detail>` (whitespace runs collapsed to one space; the detail is what `gh` wrote to stderr)
+and 502 `the tracker refused the tick: <error>`; any other exception is `console: answer_failed
+<Type>: <message>` and 500 `answer failed`. Success is an empty `204`. No refusal appends to the
+event log. The token is created once in
 `page-token` beside the event log and reaches a client only inside `GET /`, where it replaces
 the slot in the page's `console-token` meta tag.
 
@@ -129,6 +144,22 @@ nothing. An exception escaping a poll is one stderr line
 `console: tracker_poll_failed <Type>: <message>` and the loop goes on. Without a tracker no
 thread starts and nothing is read.
 
+Answers (#862, ADR-console-010): `answer(project_id, key, choices)` ticks one option under each
+question of a decision item on the tracker, through `tick` (default `answer.tick_on_tracker`;
+`tick(slug, issue, comment_id, questions, choices)`), and marks the item answered at once. It
+raises `answer.Refused` with `NOT_OPEN` when the project is not registered, no record
+`(project_id, key)` exists, or the item is answered, is not a decision, or has no questions; with
+`CHOOSE` unless `choices` is a list of one `int` (not `bool`) per question within its options; with
+`SENDING` while another answer to the same item runs. A `ForgeError` of the tick propagates. The
+tick runs outside the ingest lock, so a hook or a poll never waits for `gh`. On success, under the
+lock, when the record still exists, is unanswered and holds the same `(question, options)`, one
+`inbox.changed` event with the item answered (its `chosen` set) is appended and published, so the
+count leaves the headline at once; otherwise, and once the service is stopping, nothing is appended.
+On failure nothing is appended. The appended item is what the reader makes of the ticked comment, so
+the next read appends nothing. A tracker read that began before an answer finished never turns that
+item back to unanswered (each answer takes a generation; a read keeps the answered item when its
+own generation is older), and a read that began after it is authoritative.
+
 Retention (ADR-console-009): construction runs one retention pass (`EventLog.retain`) after
 opening the log and before reading its events, and `RETENTION_THREAD`, started by `start()`, calls
 `retain()` every `retention_seconds` (`RETENTION_SECONDS`, one day). A pass that removed rows
@@ -188,13 +219,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from agent_tools.claims import owner_actions
-from agent_tools.console import capacity, deliveries, digest, inbox, sessions, write_guard
+from agent_tools.console import answer, capacity, deliveries, digest, inbox, sessions, write_guard
 from agent_tools.console.event_log import Event, EventLog, utc_now
 from agent_tools.console.view import (
-    ReadState, derive_view, encode_view, health_change, inbox_changes, inbox_records, project_for,
-    project_states, read_states, registry_changes)
+    INBOX_CHANGED, ReadState, derive_view, encode_view, health_change, inbox_changes, inbox_records,
+    project_for, project_states, read_states, registry_changes)
 from agent_tools.project_contract import agent_platform
 from agent_tools.system.forge_api import ForgeError
+
+def _reduced(questions: list[dict]) -> list[tuple[str, list[str]]]:
+    return [(q["question"], list(q["options"])) for q in questions]
+
 
 HOST = "127.0.0.1"
 DEFAULT_PORT = 27184
@@ -208,7 +243,9 @@ KEEPALIVE_SECONDS = 15.0
 WATCH_THREAD = "console-registry-watch"
 HOOK_PATH = "/api/hooks"
 LOOKED_PATH = "/api/looked"
-PAGE_WRITES: frozenset[str] = frozenset({LOOKED_PATH})
+ANSWER_PATH = "/api/answer"
+PAGE_WRITES: frozenset[str] = frozenset({LOOKED_PATH, ANSWER_PATH})
+MAX_ANSWER_BYTES = 4096
 MAX_HOOK_BYTES = 8 * 1024 * 1024
 READINGS_PATH = "/api/readings"
 MAX_READING_BYTES = 64 * 1024
@@ -369,6 +406,45 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         except Exception as error:
             print(f"console: {name}_failed {type(error).__name__}: {error}", file=sys.stderr)
 
+    def _answer_request(self, console: "ConsoleService") -> bool:
+        """Read and carry out an answer; False when it was refused (already answered to the page)."""
+        if self.headers.get("Transfer-Encoding") is not None:
+            self._refuse(411, "length required")
+            return False
+        media = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        if media != "application/json":
+            self._refuse(415, "json only")
+            return False
+        length = self.headers.get("Content-Length", "")
+        if not (length.isascii() and length.isdigit()):
+            self._refuse(411, "length required")
+            return False
+        if int(length) > MAX_ANSWER_BYTES:
+            self._refuse(413, "too large")
+            return False
+        try:
+            project_id, key, choices = answer.parse_request(self.rfile.read(int(length)))
+        except ValueError:
+            self._refuse(400, "bad answer")
+            return False
+        try:
+            console.answer(project_id, key, choices)
+        except answer.Refused as error:
+            print(f"console: answer_refused {project_id} {key} {error}", file=sys.stderr)
+            self._refuse(409, str(error))
+            return False
+        except ForgeError as error:
+            detail = " ".join(error.detail.split())
+            print(f"console: answer_tick_failed {project_id} {key} {error.code}: {detail}",
+                  file=sys.stderr)
+            self._refuse(502, f"the tracker refused the tick: {' '.join(str(error).split())}")
+            return False
+        except Exception as error:
+            print(f"console: answer_failed {type(error).__name__}: {error}", file=sys.stderr)
+            self._refuse(500, "answer failed")
+            return False
+        return True
+
     def _page_write(self, route: str):
         console = self.server.console
         refusal = write_guard.refusal(
@@ -376,15 +452,20 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             self.headers.get_all(write_guard.TOKEN_HEADER) or [], console.page_token)
         if refusal is not None:
             return self._refuse(*refusal)
-        if (self.headers.get("Content-Length", "0") != "0"
-                or self.headers.get("Transfer-Encoding") is not None):
-            return self._refuse(400, "no body")
-        self.close_connection = True
-        try:
-            console.record_look()
-        except Exception as error:
-            print(f"console: look_failed {type(error).__name__}: {error}", file=sys.stderr)
-            return self._refuse(500, "look failed")
+        if route == ANSWER_PATH:
+            self.close_connection = True
+            if not self._answer_request(console):
+                return
+        else:
+            if (self.headers.get("Content-Length", "0") != "0"
+                    or self.headers.get("Transfer-Encoding") is not None):
+                return self._refuse(400, "no body")
+            self.close_connection = True
+            try:
+                console.record_look()
+            except Exception as error:
+                print(f"console: look_failed {type(error).__name__}: {error}", file=sys.stderr)
+                return self._refuse(500, "look failed")
         try:
             self.send_response(204)
             self.send_header("Cache-Control", "no-store")
@@ -462,8 +543,13 @@ class ConsoleService:
                  retention_seconds: float = RETENTION_SECONDS,
                  digest_seconds: float = DIGEST_SECONDS,
                  log_clock: Callable[[], str] = utc_now,
-                 token_path: Path | None = None):
+                 token_path: Path | None = None,
+                 tick: Callable[[str, int, int, list[dict], list[int]], None] = answer.tick_on_tracker):
         self.registry = Path(registry)
+        self._tick = tick
+        self._sending: set[tuple[str, str]] = set()
+        self._answered: dict[tuple[str, str], int] = {}
+        self._answer_generation = 0
         self._poll_seconds = poll_seconds
         self._session_dirs = session_dirs
         self._profile_dirs = profile_dirs
@@ -648,6 +734,45 @@ class ConsoleService:
             self._apply(appended)
             return appended
 
+    def answer(self, project_id: str, key: str, choices: list[int]) -> None:
+        """Tick `choices` on the tracker and mark the item answered; see the module docstring."""
+        slot = (project_id, key)
+        with self._ingest:
+            record = self._inbox.get(slot) if project_id in self._states else None
+            item = record.item if record is not None else None
+            if (item is None or item["answered"] or item["reason"] != "decision"
+                    or not item["questions"]):
+                raise answer.Refused(answer.NOT_OPEN)
+            questions = item["questions"]
+            if (not isinstance(choices, list) or len(choices) != len(questions)
+                    or any(isinstance(c, bool) or not isinstance(c, int) or not 0 <= c < len(q["options"])
+                           for c, q in zip(choices, questions))):
+                raise answer.Refused(answer.CHOOSE)
+            if slot in self._sending:
+                raise answer.Refused(answer.SENDING)
+            self._sending.add(slot)
+        sent = False
+        try:
+            self._tick(item["repo"], item["issue"], item["comment_id"], questions, choices)
+            sent = True
+        finally:
+            with self._ingest:
+                self._sending.discard(slot)
+                if sent and not self._stop.is_set():
+                    self._answer_generation += 1
+                    self._mark_answered(slot, questions, choices)
+
+    def _mark_answered(self, slot: tuple[str, str], questions: list[dict], choices: list[int]) -> None:
+        record = self._inbox.get(slot)
+        if record is None or record.item["answered"] or _reduced(record.item["questions"]) != _reduced(questions):
+            return
+        item = {**record.item, "answered": True,
+                "questions": [{**q, "chosen": q["options"][c]} for q, c in zip(record.item["questions"], choices)]}
+        appended = self.log.append([(INBOX_CHANGED, slot[0], item)])
+        self._fold(appended)
+        self._answered[slot] = self._answer_generation
+        self._publish()
+
     def poll_sessions(self) -> list[Event]:
         """Append what the session registry shows that the folded sessions do not, and publish."""
         with self._ingest:
@@ -830,6 +955,7 @@ class ConsoleService:
             slug = self._slug_of(state.root)
             if slug is None:
                 continue
+            generation = self._answer_generation
             try:
                 items = self._tracker(project_id, slug, cancelled=self._stop.is_set)
             except ForgeError as error:
@@ -843,7 +969,7 @@ class ConsoleService:
             else:
                 if self._stop.is_set():
                     return
-                self._read_succeeded(project_id, items)
+                self._read_succeeded(project_id, items, generation)
 
     def _read_failed(self, project_id: str, error: Exception) -> None:
         print(f"console: tracker_failed {project_id} {type(error).__name__}: {error}", file=sys.stderr)
@@ -856,15 +982,25 @@ class ConsoleService:
             self._fold(appended)
             self._publish()
 
-    def _read_succeeded(self, project_id: str, items: list[dict]) -> None:
+    def _read_succeeded(self, project_id: str, items: list[dict], generation: int) -> None:
         with self._ingest:
             if project_id not in self._states:
                 return
+            items = [self._kept_answered(project_id, i, generation) for i in items]
+            self._answered = {k: g for k, g in self._answered.items()
+                              if k[0] != project_id or g > generation}
             appended = self.log.append([*inbox_changes(self._inbox, project_id, items),
                                         *health_change(self._health, project_id, True)])
             self._fold(appended)
             self._health[project_id] = ReadState(True, utc_now())
             self._publish()
+
+    def _kept_answered(self, project_id: str, item: dict, generation: int) -> dict:
+        """A read that began before the item's answer finished does not undo the answer."""
+        if item["answered"] or self._answered.get((project_id, item["key"]), 0) <= generation:
+            return item
+        record = self._inbox.get((project_id, item["key"]))
+        return record.item if record is not None and record.item["answered"] else item
 
     def _track(self) -> None:
         while True:

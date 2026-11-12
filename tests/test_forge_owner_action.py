@@ -46,10 +46,11 @@ def marker_body(reason="decision", items=("Which flag?",), holder=ME):
                      foa.SENTENCES[reason], "\n".join(f"- {item}" for item in items))
 
 
-def box_body(questions=QUESTIONS, ticks=(), clears=None, round_no=1):
+def box_body(questions=QUESTIONS, ticks=(), clears=None, round_no=1, rec=None):
     """A decision prompt; `ticks` holds (question index, option index) pairs to tick."""
     fields = {"issue": str(ISSUE), "reason": "decision", "holder": ME, "round": str(round_no),
-              "opts": foa.options_digest(questions), **({"clears": clears} if clears else {})}
+              "opts": foa.options_digest(questions), **({"rec": rec} if rec else {}),
+              **({"clears": clears} if clears else {})}
     lines = []
     for qi, q in enumerate(questions):
         lines += ["", f"**Q{qi + 1}.** {q['question']}"]
@@ -203,6 +204,76 @@ class StatusTest(Base):
         spaced = fm.parse(comment(31, fm.render("owner-action", {"issue": str(ISSUE), "reason": "conflict",
                                                                  "holder": ME}, "  Two   spaces  ")))
         self.assertEqual(foa.marker_sentence(spaced), "Two spaces")
+
+
+class TickBodyTest(unittest.TestCase):
+    def test_tick_body_ticks_exactly_the_chosen_boxes(self):
+        self.assertEqual(foa.tick_body(box_body(), [1, 0]), box_body(ticks={(0, 1), (1, 0)}))
+
+    def test_tick_body_replaces_an_earlier_tick(self):
+        self.assertEqual(foa.tick_body(box_body(ticks={(0, 0)}), [1, 0]), box_body(ticks={(0, 1), (1, 0)}))
+
+    def test_tick_body_keeps_crlf_and_every_other_line(self):
+        lines = box_body().replace("\n", "\r\n").split("\r\n")
+        lines.insert(4, "Some free text.")  # after the Q1 header
+        lines.insert(2, "- [ ] stray box")  # before the first header
+        body = "\r\n".join(lines)
+        result = foa.tick_body(body, [0, 0])
+        self.assertEqual(len(result), len(body))
+        changed = [(a, b) for a, b in zip(body, result) if a != b]
+        self.assertEqual(changed, [(" ", "x"), (" ", "x")])
+        self.assertEqual(result.count("\r\n"), body.count("\r\n"))
+        self.assertIn("- [ ] stray box", result)
+
+    def test_tick_body_refuses_a_wrong_choice(self):
+        for choices in ([0], [0, 0, 0], [2, 0], [-1, 0], [True, 0], ["0", 0]):
+            with self.subTest(choices=choices), self.assertRaises(ValueError):
+                foa.tick_body(box_body(), choices)
+
+    def test_a_ticked_body_reads_as_answered(self):
+        marker = fm.parse({"id": 1, "body": foa.tick_body(box_body(), [1, 0]), "updated_at": T0})
+        self.assertTrue(foa.answered(marker))
+        self.assertEqual([q["chosen"] for q in foa.verified_questions(marker)],
+                         ["Run it on host two.", "Approve: push the scratch branch."])
+
+
+class RecommendedTest(Base):
+    def test_recommended_reads_the_rec_field(self):
+        marker = fm.parse(comment(1, box_body(rec="2.0")))
+        self.assertEqual(foa.recommended(marker), ["Run it on host two.", None])
+
+    def test_a_malformed_rec_names_nothing(self):
+        for rec, expected in ((None, [None, None]), ("1", [None, None]), ("2.0.1", [None, None]),
+                              ("x.1", [None, None]), ("3.0", [None, None])):
+            with self.subTest(rec=rec):
+                self.assertEqual(foa.recommended(fm.parse(comment(1, box_body(rec=rec)))), expected)
+        edited = box_body(rec="2.1").replace("host two", "host nine")
+        self.assertEqual(foa.recommended(fm.parse(comment(1, edited))), [])
+
+    def test_post_records_the_recommended_option(self):
+        self.store()
+        questions = [{**QUESTIONS[0], "recommended": "Run it on host two."}, QUESTIONS[1]]
+        code, _ = run(*action("post", "decision", "--holder", ME, "--questions-file", self.items(questions)))
+        self.assertEqual(code, 0)
+        self.assertEqual(self.mutations(), [post(box_body(rec="2.0")), OA_ENSURE, OA_ADD])
+
+    def test_a_recommendation_that_matches_no_option_is_dropped_and_the_prompt_still_posts(self):
+        for value in ("Run it on host three.", "Run it on host two", ""):
+            with self.subTest(recommended=value):
+                self.store()
+                before = len(self.mutations())
+                questions = [{**QUESTIONS[0], "recommended": value}, QUESTIONS[1]]
+                code, out = run(*action("post", "decision", "--holder", ME,
+                                        "--questions-file", self.items(questions)))
+                self.assertEqual((code, out["verdict"]), (0, "posted"))
+                self.assertEqual(self.mutations()[before], post(box_body()))
+
+    def test_a_recommendation_that_is_not_a_string_is_a_usage_error(self):
+        self.store()
+        questions = [{**QUESTIONS[0], "recommended": 2}, QUESTIONS[1]]
+        code, out = run(*action("post", "decision", "--holder", ME, "--questions-file", self.items(questions)))
+        self.assertEqual((code, out["error"]), (2, "usage"))
+        self.assertEqual(self.world.argvs("gh"), [])
 
 
 class DecisionBoxTest(Base):

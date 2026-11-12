@@ -21,10 +21,10 @@ QUESTIONS = [
 C1, C2, C3 = 6803141410, 6803141420, 6803141430
 
 
-def decision_body(questions=QUESTIONS, ticks=(), reason="decision"):
+def decision_body(questions=QUESTIONS, ticks=(), reason="decision", rec=None):
     """A decision prompt; `ticks` holds (question index, option index) pairs to tick."""
     fields = {"issue": "7", "reason": reason, "holder": HOLDER, "round": "1",
-              "opts": foa.options_digest(questions)}
+              "opts": foa.options_digest(questions), **({"rec": rec} if rec else {})}
     lines = []
     for qi, q in enumerate(questions):
         lines += ["", f"**Q{qi + 1}.** {q['question']}"]
@@ -80,8 +80,10 @@ class MarkerTableTest(unittest.TestCase):
         items = read(page(three_nodes()))
         table = [
             expected(7, C1, "decision", held_work=3, questions=[
-                {"question": QUESTIONS[0]["question"], "options": QUESTIONS[0]["options"], "chosen": None},
-                {"question": QUESTIONS[1]["question"], "options": QUESTIONS[1]["options"], "chosen": None}]),
+                {"question": QUESTIONS[0]["question"], "options": QUESTIONS[0]["options"], "chosen": None,
+                 "recommended": None},
+                {"question": QUESTIONS[1]["question"], "options": QUESTIONS[1]["options"], "chosen": None,
+                 "recommended": None}]),
             expected(8, C2, "conflict", held_work=1, items=["Merge conflict in flake.lock"]),
             expected(9, C3, "needs-label", held_work=1, items=["needs the instruction-budget-raise label"]),
         ]
@@ -97,6 +99,10 @@ class MarkerTableTest(unittest.TestCase):
                          ["Run it on host two.", "Approve: push the scratch branch."])
         half = read(page([issue_node(7, [comment_node(C1, decision_body(ticks=((0, 0),)))])]))[0]
         self.assertIs(half["answered"], False)
+
+    def test_a_prompt_names_its_recommended_option(self):
+        items = read(page([issue_node(7, [comment_node(C1, decision_body(rec="2.0"))])]))
+        self.assertEqual([q["recommended"] for q in items[0]["questions"]], ["Run it on host two.", None])
 
     def test_only_a_decision_prompt_carries_questions(self):
         body = decision_body(reason="conflict")

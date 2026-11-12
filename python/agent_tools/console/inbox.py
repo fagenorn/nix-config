@@ -23,7 +23,7 @@ unexpected shape, a bad comment id or a missing or repeated cursor is `payload_i
 is sorted by `key` and holds only JSON-native values; every item is
 
     {"key": "<slug>#<issue>/<comment id>", "project_id", "repo", "issue", "comment_id", "url",
-     "reason", "question", "questions": [{"question", "options", "chosen"}] (decision only),
+     "reason", "question", "questions": [{"question", "options", "chosen", "recommended"}] (decision only),
      "items": [str] (conflict and needs-label only), "answered", "held_work"}
 
 `url` is built from the slug, the issue and the comment id, never read from the answer.
@@ -132,8 +132,10 @@ def _item(project_id: str, slug: str, issue: int, held: int, marker: fm.Marker) 
         "issue": issue, "comment_id": marker.comment_id,
         "url": f"https://github.com/{slug}/issues/{issue}#issuecomment-{marker.comment_id}",
         "reason": reason, "question": foa.marker_sentence(marker),
-        "questions": ([{"question": q["question"], "options": list(q["options"]), "chosen": q["chosen"]}
-                       for q in foa.verified_questions(marker)] if decision else []),
+        "questions": ([{"question": q["question"], "options": list(q["options"]), "chosen": q["chosen"],
+                        "recommended": rec}
+                       for q, rec in zip(foa.verified_questions(marker), foa.recommended(marker))]
+                      if decision else []),
         "items": [] if decision else foa.marker_items(marker),
         "answered": foa.answered(marker), "held_work": held,
     }

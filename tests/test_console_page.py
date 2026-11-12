@@ -21,8 +21,10 @@ const ids = new Set(JSON.parse(process.argv[3]));
 class Node {
   constructor(tag) {
     this.tagName = tag; this.className = ""; this.id = ""; this.href = "";
-    this.rel = ""; this.open = false; this.children = [];
+    this.rel = ""; this.open = false; this.children = []; this.dataset = {};
   }
+  addEventListener() {}
+  setAttribute() {}
   appendChild(child) { this.children.push(child); return child; }
   replaceChildren(...nodes) { this.children = nodes; }
   set textContent(text) { this.children = [{text: String(text)}]; }
@@ -137,7 +139,7 @@ class PageTest(unittest.TestCase):
         literals = re.findall(
             r"\b(?:fetch|EventSource)\(\s*([\"'])([^\"']*)\1", self.text
         )
-        self.assertEqual({p for _, p in literals}, {"/api/stream", "/api/looked"})
+        self.assertEqual({p for _, p in literals}, {"/api/stream", "/api/looked", "/api/answer"})
         self.assertEqual(
             len(re.findall(r"\b(?:fetch|EventSource)\(", self.text)), len(literals)
         )
@@ -145,9 +147,12 @@ class PageTest(unittest.TestCase):
     def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
         # A separate snapshot request can answer after a newer streamed frame
         # and render over it; the stream's first frame is already the snapshot.
-        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 1)
+        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 2)
         self.assertIsNotNone(
             re.search(r'fetch\("/api/looked",\s*\{\s*method:\s*"POST"', self.text)
+        )
+        self.assertIsNotNone(
+            re.search(r'fetch\("/api/answer",\s*\{\s*method:\s*"POST"', self.text)
         )
         self.assertEqual(self.text.count("render(JSON.parse("), 1)
 
@@ -310,6 +315,12 @@ class PageTest(unittest.TestCase):
         self.assertNotIn("Answered, waiting for the agent", result["inbox"]["text"])
         h1 = next(n for n in walk(result["statement"]) if n["tag"] == "h1")
         self.assertEqual(h1["cls"], "")
+
+    def test_no_reply_in_the_owners_own_words_is_offered(self) -> None:
+        for needle in ("<textarea", "contenteditable", 'createElement("input")',
+                       'createElement("textarea")'):
+            with self.subTest(needle=needle):
+                self.assertNotIn(needle, self.text)
 
     def test_the_tracker_link_is_the_only_href(self) -> None:
         self.assertEqual(len(re.findall(r"\.href\s*=", self.text)), 1)
@@ -640,6 +651,237 @@ class PageFocusTest(unittest.TestCase):
         ])
         self.assertEqual(hidden["posts"], [LOOK])
         self.assertEqual(blurred["posts"], [LOOK])
+
+ANSWERABLE = item("A", questions=[
+    {"question": "Which host?", "options": ["one", "two"], "chosen": None,
+     "recommended": "two"}])
+OTHER = item("B", held_work=5, questions=[
+    {"question": "Which port?", "options": ["80", "8080"], "chosen": None,
+     "recommended": None}])
+START = {"start": {"focused": False, "clock": 0}}
+WAIT_TEXT = "Sending in five seconds."
+SENT_TEXT = "Answered, waiting for the agent to pick it up"
+
+
+def frame(open_items: list, answered: list = ()) -> dict:
+    return {
+        "statement": {"inbox_items": len(open_items), "headline": "h", "sentence": "s",
+                      "stale": False},
+        "inbox": {"open": list(open_items), "answered": list(answered)},
+        "project_count": 0, "entries": [], "unmanaged": [],
+    }
+
+
+def full(n: dict) -> str:
+    return "".join([n["text"], *(full(c) for c in n["children"])])
+
+
+def has_class(n: dict, name: str) -> bool:
+    return name in n["cls"].split()
+
+
+def picked(snap: dict) -> list:
+    return [full(n) for n in nodes(snap["inbox"]) if has_class(n, "picked")]
+
+
+def answers(snap: dict) -> list:
+    return [p for p in snap["posts"] if p["url"] == "/api/answer"]
+
+
+def count(snap: dict, name: str) -> int:
+    return sum(1 for n in nodes(snap["inbox"]) if has_class(n, name))
+
+
+def posted(post: dict) -> dict:
+    return json.loads(post["body"])
+
+
+class PageAnswerTest(unittest.TestCase):
+    def test_the_lead_item_opens_with_its_recommended_option_selected(self) -> None:
+        (snap,) = render([START, {"frame": frame([ANSWERABLE])}, {"snapshot": True}])
+        self.assertEqual(len(picked(snap)), 1)
+        self.assertTrue(picked(snap)[0].endswith("two"))
+
+    def test_without_a_recommendation_enter_sends_nothing(self) -> None:
+        bare = item("A", questions=[{**ANSWERABLE["questions"][0], "recommended": None}])
+        (snap,) = render([
+            START, {"frame": frame([bare])}, {"key": "Enter"}, {"clock": 20000},
+            {"snapshot": True},
+        ])
+        self.assertEqual(picked(snap), [])
+        self.assertEqual(answers(snap), [])
+
+    def test_a_number_key_chooses_and_enter_sends_after_five_seconds(self) -> None:
+        early, late = render([
+            START, {"frame": frame([ANSWERABLE])}, {"key": "1"}, {"key": "Enter"},
+            {"clock": 4999}, {"snapshot": True}, {"clock": 5000}, {"snapshot": True},
+        ])
+        self.assertEqual(answers(early), [])
+        self.assertIn(WAIT_TEXT, full(early["inbox"]))
+        self.assertIn("Undo", full(early["inbox"]))
+        (post,) = answers(late)
+        self.assertEqual(post["method"], "POST")
+        self.assertEqual(post["headers"],
+                         {"X-Console-Token": TOKEN, "Content-Type": "application/json"})
+        self.assertNotIn("keepalive", post)
+        self.assertEqual(posted(post),
+                         {"project_id": "owner/p00", "key": "A", "choices": [0]})
+
+    def test_undo_within_five_seconds_sends_nothing(self) -> None:
+        for name, undo in (("escape", {"key": "Escape"}), ("button", {"click": "undo"})):
+            with self.subTest(name):
+                (snap,) = render([
+                    START, {"frame": frame([ANSWERABLE])}, {"key": "Enter"}, {"clock": 3000},
+                    undo, {"clock": 20000}, {"snapshot": True},
+                ])
+                self.assertEqual(answers(snap), [])
+                self.assertTrue(picked(snap)[0].endswith("two"))
+                self.assertNotIn(WAIT_TEXT, full(snap["inbox"]))
+
+    def test_a_refused_tick_reads_could_not_send_and_keeps_the_choice(self) -> None:
+        refusal = "the tracker refused the tick: gh_failed: gh: Server Error (HTTP 502)"
+        for name, reply, reason in (
+            ("refused", [{"respond": {"status": 502, "text": refusal + "\n"}}], refusal),
+            ("no answer", [{"fail_fetch": True}], "the console did not answer"),
+        ):
+            with self.subTest(name):
+                first, second = render([
+                    START, {"frame": frame([ANSWERABLE])}, *reply, {"key": "Enter"},
+                    {"clock": 5000}, {"snapshot": True},
+                    {"frame": frame([ANSWERABLE])}, {"snapshot": True},
+                ])
+                for snap in (first, second):
+                    self.assertIn("Could not send: " + reason, full(snap["inbox"]))
+                    (fail,) = [n for n in nodes(snap["inbox"]) if has_class(n, "fail")]
+                    self.assertEqual(fail["text"], "Could not send: " + reason)
+                    self.assertTrue(picked(snap)[0].endswith("two"))
+                    lead = snap["inbox"]["children"][0]
+                    self.assertEqual(lead["tag"], "article")
+                    self.assertIn("Which host?", full(lead))
+
+    def test_a_sent_answer_reads_answered_waiting_for_the_agent_to_pick_it_up(self) -> None:
+        sent, moved = render([
+            START, {"frame": frame([ANSWERABLE])}, {"key": "Enter"}, {"clock": 5000},
+            {"snapshot": True},
+            {"frame": frame([], answered=[{**ANSWERABLE, "answered": True}])},
+            {"snapshot": True},
+        ])
+        self.assertIn(SENT_TEXT, full(sent["inbox"]))
+        head = next(n for n in nodes(moved["inbox"]) if has_class(n, "done-head"))
+        self.assertEqual(head["text"], SENT_TEXT)
+
+    def test_an_item_the_tracker_shows_open_again_after_a_send_is_answerable_again(self) -> None:
+        reopened = {**ANSWERABLE, "questions": [{**ANSWERABLE["questions"][0], "recommended": None}]}
+        sent, again, resent = render([
+            START, {"frame": frame([ANSWERABLE])}, {"key": "Enter"}, {"clock": 5000},
+            {"snapshot": True}, {"frame": frame([reopened])}, {"snapshot": True},
+            {"key": "1"}, {"key": "Enter"}, {"clock": 10000}, {"snapshot": True},
+        ])
+        self.assertIn(SENT_TEXT, full(sent["inbox"]))
+        self.assertNotIn(SENT_TEXT, full(again["inbox"]))
+        self.assertEqual(picked(again), [])
+        self.assertEqual(count(again, "send"), 1)
+        self.assertEqual([posted(p)["choices"] for p in answers(resent)], [[1], [0]])
+
+    def test_an_item_that_leaves_while_waiting_is_never_sent(self) -> None:
+        (snap,) = render([
+            START, {"frame": frame([ANSWERABLE])}, {"key": "Enter"}, {"clock": 2000},
+            {"frame": frame([])}, {"clock": 10000}, {"snapshot": True},
+        ])
+        self.assertEqual(answers(snap), [])
+
+    def test_keys_with_a_modifier_or_on_an_item_without_boxes_do_nothing(self) -> None:
+        bare = item("A", questions=[{**ANSWERABLE["questions"][0], "recommended": None}])
+        (snap,) = render([
+            START, {"frame": frame([bare])}, {"key": "1", "ctrlKey": True},
+            {"key": "1", "altKey": True}, {"key": "1", "metaKey": True}, {"snapshot": True},
+        ])
+        self.assertEqual(picked(snap), [])
+        conflict = item("K", reason="conflict", items=["Rebase onto main."])
+        (snap,) = render([
+            START, {"frame": frame([conflict])}, {"key": "1"}, {"key": "Enter"},
+            {"clock": 20000}, {"snapshot": True},
+        ])
+        self.assertEqual(answers(snap), [])
+        self.assertEqual(count(snap, "opt"), 0)
+
+    def test_number_keys_move_through_the_questions(self) -> None:
+        two = item("A", questions=[
+            {"question": "Which database?", "options": ["sqlite", "postgres"],
+             "chosen": None, "recommended": None},
+            {"question": "Which port?", "options": ["80", "8080"],
+             "chosen": None, "recommended": None}])
+        (snap,) = render([
+            START, {"frame": frame([two])}, {"key": "2"}, {"key": "1"}, {"key": "Enter"},
+            {"clock": 5000}, {"snapshot": True},
+        ])
+        (post,) = answers(snap)
+        self.assertEqual(posted(post)["choices"], [1, 0])
+
+    def test_a_decision_behind_a_conflict_takes_the_keys(self) -> None:
+        conflict = item("K", reason="conflict", items=["Rebase onto main."],
+                        waiting_since="2026-11-10T07:00:00+00:00")
+        first, last = render([
+            START, {"frame": frame([conflict, ANSWERABLE])}, {"snapshot": True},
+            {"key": "1"}, {"key": "Enter"}, {"clock": 5000}, {"snapshot": True},
+        ])
+        self.assertEqual(count(first, "opt"), 2)
+        self.assertEqual(len(picked(first)), 1)
+        self.assertTrue(picked(first)[0].endswith("two"))
+        (post,) = answers(last)
+        self.assertEqual(posted(post),
+                         {"project_id": "owner/p00", "key": "A", "choices": [0]})
+
+    def test_undo_stays_reachable_when_another_item_takes_the_lead(self) -> None:
+        for name, undo in (("button", {"click": "undo"}), ("escape", {"key": "Escape"})):
+            with self.subTest(name):
+                moved, last = render([
+                    START, {"frame": frame([ANSWERABLE])}, {"key": "Enter"}, {"clock": 1000},
+                    {"frame": frame([OTHER, ANSWERABLE])}, {"snapshot": True},
+                    undo, {"clock": 20000}, {"snapshot": True},
+                ])
+                self.assertIn(WAIT_TEXT, full(moved["inbox"]))
+                self.assertIn("Undo", full(moved["inbox"]))
+                self.assertEqual(answers(last), [])
+                self.assertTrue(picked(last)[0].endswith("two"))
+
+    def test_a_failure_stays_visible_when_the_item_stops_leading(self) -> None:
+        held = item("B", held_work=5, questions=[
+            {"question": "Which port?", "options": ["80"], "chosen": None,
+             "recommended": None}])
+        first, last = render([
+            START, {"frame": frame([ANSWERABLE])},
+            {"respond": {"status": 502, "text": "boom"}}, {"key": "Enter"},
+            {"clock": 5000}, {"snapshot": True},
+            {"frame": frame([held, ANSWERABLE])}, {"snapshot": True},
+        ])
+        for snap in (first, last):
+            self.assertIn("Could not send: boom", full(snap["inbox"]))
+            self.assertEqual(count(snap, "fail"), 1)
+        self.assertEqual(count(last, "send"), 2)
+
+    def test_enter_and_digits_stay_with_a_focused_link_button_or_summary(self) -> None:
+        for tag in ("A", "BUTTON", "SUMMARY"):
+            with self.subTest(tag):
+                (snap,) = render([
+                    START, {"frame": frame([ANSWERABLE])}, {"key": "Enter", "target": tag},
+                    {"key": "1", "target": tag}, {"clock": 5000}, {"snapshot": True},
+                ])
+                self.assertEqual(answers(snap), [])
+                self.assertTrue(picked(snap)[0].endswith("two"))
+                self.assertNotIn(WAIT_TEXT, full(snap["inbox"]))
+
+    def test_while_one_answer_waits_the_keys_choose_for_the_next(self) -> None:
+        first = item("A", questions=[{**ANSWERABLE["questions"][0], "recommended": None}])
+        (snap,) = render([
+            START, {"frame": frame([first, OTHER])}, {"key": "1"}, {"key": "Enter"},
+            {"key": "2"}, {"key": "Enter"}, {"clock": 5000}, {"snapshot": True},
+        ])
+        one, two = answers(snap)
+        self.assertEqual(posted(one),
+                         {"project_id": "owner/p00", "key": "A", "choices": [0]})
+        self.assertEqual(posted(two),
+                         {"project_id": "owner/p00", "key": "B", "choices": [1]})
 
 
 def moment(at: str, sentence: str) -> dict:

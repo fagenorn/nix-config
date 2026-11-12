@@ -4,18 +4,28 @@ Run: just agent-workflow-tests
 """
 import contextlib
 import io
+import json
 import re
 import stat
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
 
 from agent_tools.console import console, digest, service, write_guard
 
+from agent_tools.console import answer
+from agent_tools.system.forge_api import ForgeError
+
 from . import console_test_support as support
+from .forge_world import ForgeWorld
+from .test_console_answer import C, ITEM, view_of
+from .test_console_tracker import Scripted
+from .test_forge_owner_action import ISSUE, SLUG, box_body, comment
 
 LOOK = "/api/looked"
+ANSWER = "/api/answer"
 
 
 class Case(unittest.TestCase):
@@ -111,7 +121,7 @@ class WriteRouteTest(Case):
 
     def test_every_page_write_route_is_guarded(self):
         svc = self.start()
-        self.assertEqual(service.PAGE_WRITES, {"/api/looked"})
+        self.assertEqual(service.PAGE_WRITES, {"/api/looked", "/api/answer"})
         for path in service.PAGE_WRITES:
             with self.subTest(path=path):
                 status, _, body = support.post_page(
@@ -124,6 +134,130 @@ class WriteRouteTest(Case):
         for method in ("GET", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"):
             with self.subTest(method=method):
                 status, headers, _ = support.request(svc.address, method, LOOK)
+                self.assertEqual(status, 405)
+                self.assertEqual(headers["Allow"], "POST")
+
+
+class AnswerRouteTest(Case):
+    def open(self, **kwargs):
+        support.write_registry(self.registry, support.entries(1))
+        svc = service.ConsoleService(
+            self.store, self.registry, port=0, tracker=Scripted([ITEM]), tracker_seconds=3600,
+            slug_of=lambda root: SLUG, activity=lambda root: time.time(), session_dirs=lambda: [],
+            profile_dirs=lambda: [], repo_of=lambda cwd: cwd,
+            branch_pattern_of=lambda repo: "issue-<num>-<slug>", **kwargs)
+        svc.poll_tracker()
+        svc.start()
+        self.addCleanup(svc.close)
+        return svc
+
+    def body(self, **over):
+        return json.dumps(
+            {"project_id": "owner/p00", "key": ITEM["key"], "choices": [1, 0], **over}).encode()
+
+    def headers(self, svc, **extra):
+        return self.own(svc, **{"Content-Type": "application/json", **extra})
+
+    def refused(self, svc, headers, status, text, body=None, **kwargs):
+        got = self.assert_unchanged(svc, lambda: support.post_page(
+            svc.address, ANSWER, headers, self.body() if body is None else body, **kwargs))
+        self.assertEqual((got[0], got[2]), (status, text + b"\n"))
+        return got
+
+    def test_an_answer_from_the_page_ticks_exactly_that_box_as_the_owner(self):
+        world = ForgeWorld(self)
+        world.comment_store(SLUG, ISSUE, [comment(C, box_body())])
+        world.respond_json("gh", ["api", f"repos/{SLUG}/issues/{ISSUE}"],
+                           {"number": ISSUE, "state": "open"})
+        svc = self.open()
+        status, headers, body = support.post_page(
+            svc.address, ANSWER, self.headers(svc), self.body())
+        self.assertEqual((status, body), (204, b""))
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertEqual(world.stored()[0]["body"], box_body(ticks={(0, 1), (1, 0)}))
+        patches = [argv for argv in world.argvs("gh") if "-X" in argv]
+        self.assertEqual(len(patches), 1)
+        self.assertIn(f"repos/{SLUG}/issues/comments/{C}", patches[0])
+        self.assertTrue(all(call["token_visible"] is False for call in world.calls()))
+        self.assertEqual(view_of(svc)["statement"]["inbox_items"], 0)
+
+    def test_an_answer_without_the_token_or_from_another_origin_is_refused_and_ticks_nothing(self):
+        ticks = []
+        svc = self.open(tick=lambda *args: ticks.append(args))
+        own = self.headers(svc)
+        origin = own["Origin"]
+        token = own["X-Console-Token"]
+        without = {k: v for k, v in own.items() if k != "X-Console-Token"}
+        no_origin = {k: v for k, v in own.items() if k != "Origin"}
+        table = [
+            ("no token", without, b"token refused", {}),
+            ("wrong token", {**own, "X-Console-Token": "A" * 43}, b"token refused", {}),
+            ("two tokens", {**own, "X-Console-Token": [token, token]}, b"token refused", {}),
+            ("other origin", {**own, "Origin": "http://example.test"}, b"origin refused", {}),
+            ("null origin", {**own, "Origin": "null"}, b"origin refused", {}),
+            ("no origin", no_origin, b"origin refused", {}),
+            ("foreign host", own, b"loopback only", {"host": "evil.test"}),
+        ]
+        for name, headers, text, kwargs in table:
+            with self.subTest(name):
+                self.refused(svc, headers, 403, text, **kwargs)
+        with self.subTest("guard before body"):
+            self.refused(svc, without, 403, b"token refused", body=b"x" * 10000)
+        self.assertEqual(origin, own["Origin"])
+        self.assertEqual(ticks, [])
+
+    def test_an_answer_body_is_checked_before_it_is_read(self):
+        ticks = []
+        svc = self.open(tick=lambda *args: ticks.append(args))
+        table = [
+            ("not json type", self.headers(svc, **{"Content-Type": "text/plain"}), b"json only", None),
+            ("chunked", self.headers(svc, **{"Transfer-Encoding": "chunked"}), b"length required", None),
+            ("too large", self.headers(svc), b"too large", b"x" * (service.MAX_ANSWER_BYTES + 1)),
+        ]
+        bad = [b"not json", self.body(extra=1), self.body(choices=[True, 0]), self.body(choices=[]),
+               self.body(choices=[-1, 0]), self.body(key=""), b"[1, 2]",
+               b'{"project_id": "owner/p00", "key": "k"}',
+               b'{"project_id": "owner/p00", "project_id": "owner/p01", "key": "k", "choices": [0]}']
+        table += [(f"bad {i}", self.headers(svc), b"bad answer", body) for i, body in enumerate(bad)]
+        for name, headers, text, body in table:
+            with self.subTest(name):
+                status = {b"json only": 415, b"length required": 411, b"too large": 413}.get(text, 400)
+                self.refused(svc, headers, status, text, body=body)
+        self.assertEqual(ticks, [])
+        self.assertEqual([i["key"] for i in view_of(svc)["inbox"]["open"]], [ITEM["key"]])
+
+    def test_a_refused_tick_answers_with_its_reason_and_logs_it(self):
+        key = ITEM["key"]
+        table = [
+            (answer.Refused(answer.CHANGED), 409, b"the prompt changed on the tracker\n",
+             f"console: answer_refused owner/p00 {key} the prompt changed on the tracker"),
+            (ForgeError("gh_failed", "gh: Server Error\n(HTTP 502)"), 502,
+             b"the tracker refused the tick: gh_failed: gh: Server Error (HTTP 502)\n",
+             f"console: answer_tick_failed owner/p00 {key} gh_failed: gh: Server Error (HTTP 502)"),
+            (RuntimeError("boom"), 500, b"answer failed\n",
+             "console: answer_failed RuntimeError: boom"),
+        ]
+        for error, status, text, line in table:
+            with self.subTest(error=type(error).__name__):
+                def tick(*args, error=error):
+                    raise error
+
+                svc = self.open(tick=tick)
+                err = io.StringIO()
+                with contextlib.redirect_stderr(err):
+                    got = self.assert_unchanged(svc, lambda: support.post_page(
+                        svc.address, ANSWER, self.headers(svc), self.body()))
+                self.assertEqual((got[0], got[2]), (status, text))
+                self.assertIn(line, err.getvalue())
+                self.assertEqual(
+                    [i["key"] for i in view_of(svc)["inbox"]["open"]], [key])
+                svc.close()
+
+    def test_other_methods_on_the_answer_route_are_refused(self):
+        svc = self.start()
+        for method in ("GET", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"):
+            with self.subTest(method=method):
+                status, headers, _ = support.request(svc.address, method, ANSWER)
                 self.assertEqual(status, 405)
                 self.assertEqual(headers["Allow"], "POST")
 

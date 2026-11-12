@@ -2,7 +2,15 @@
 // Test-only. Runs the console page's script under node with a minimal DOM.
 //   node page-harness.js <page.html>   (JSON list of steps on stdin)
 // Steps: frame, open, snapshot, and the focus clock: a first-only start
-// {focused, clock}, then clock, focus, blur, hide, pagehide.
+// {focused, clock}, then clock, focus, blur, hide, pagehide. The owner's
+// answer adds {key, ctrlKey?, altKey?, metaKey?, target?} (a keydown on the
+// document; target is the tag name of the focused element, default none),
+// {click: "<class>"} (the click listeners of the first attached element with
+// that class; none throws), {respond: {status, text}} (queues the answer of
+// the next /api/answer fetch, default 204 with no text) and {fail_fetch: true}
+// (the next /api/answer fetch rejects). The fake setTimeout/clearTimeout fire
+// when a clock step reaches their due time. Each step settles pending
+// promises before the next.
 // Prints a JSON list of snapshots on stdout; any failure exits 1 with the
 // error on stderr. A selector the fake DOM does not support throws, so a
 // test cannot pass on a stub.
@@ -23,9 +31,17 @@ class Elem {
     this.className = "";
     this.id = "";
     this.dataset = {};
+    this.attributes = {};
+    this.listeners = {};
     this.open = false;
     this.children = [];
     this.parentNode = null;
+  }
+  addEventListener(name, fn) {
+    (this.listeners[name] = this.listeners[name] || []).push(fn);
+  }
+  setAttribute(name, value) {
+    this.attributes[name] = String(value);
   }
   get firstElementChild() {
     return this.children.find((c) => !c.isText) || null;
@@ -159,17 +175,52 @@ function listen(target) {
     (listeners[target][name] = listeners[target][name] || []).push(fn);
   };
 }
-function fire(target, name) {
-  for (const fn of listeners[target][name] || []) fn({ type: name });
+function fire(target, name, extra) {
+  for (const fn of listeners[target][name] || []) fn(Object.assign({ type: name }, extra));
 }
 const window = { addEventListener: listen("window") };
 const posts = [];
+const replies = [];
 function fetch(url, options) {
-  posts.push({
+  const post = {
     url, method: options.method, headers: options.headers, keepalive: options.keepalive,
+  };
+  if (options.body !== undefined) post.body = options.body;
+  posts.push(post);
+  if (url !== "/api/answer") return Promise.resolve({});
+  const reply = replies.length > 0 ? replies.shift() : { status: 204, text: "" };
+  if (reply.reject) return Promise.reject(new Error("the console did not answer"));
+  return Promise.resolve({
+    status: reply.status, ok: reply.status >= 200 && reply.status < 300,
+    text: () => Promise.resolve(reply.text),
   });
-  return Promise.resolve({});
 }
+
+const timers = new Map();
+let nextTimer = 1;
+function setTimeout(fn, ms) {
+  const id = nextTimer++;
+  timers.set(id, { fn, due: HarnessDate.now() + ms });
+  return id;
+}
+function clearTimeout(id) {
+  timers.delete(id);
+}
+function runDueTimers() {
+  for (;;) {
+    let next = null;
+    for (const [id, timer] of timers) {
+      if (timer.due <= HarnessDate.now() && (next === null || timer.due < timers.get(next).due)) next = id;
+    }
+    if (next === null) return;
+    const { fn } = timers.get(next);
+    timers.delete(next);
+    fn();
+  }
+}
+const settle = async () => {
+  for (let i = 0; i < 5; i++) await new Promise((r) => setImmediate(r));
+};
 
 const document = {
   addEventListener: listen("document"),
@@ -205,6 +256,7 @@ class EventSource {
 
 vm.runInNewContext(script, {
   document, window, fetch, EventSource, Date: HarnessDate, JSON, String, Math, Number, Array, Object, console,
+  setTimeout, clearTimeout,
 });
 
 function node(n) {
@@ -219,39 +271,65 @@ function node(n) {
 }
 
 const snapshots = [];
-for (const step of steps) {
-  if ("frame" in step) {
-    const listener = sources[0] && sources[0].listeners.view;
-    if (!listener) throw new Error("the page registered no view listener");
-    listener({ data: JSON.stringify(step.frame) });
-  } else if ("open" in step) {
-    const fold = attached(root).find((n) => n.tagName === "DETAILS" && n.dataset.key === step.open);
-    if (!fold) throw new Error("no details with key " + step.open);
-    fold.open = true;
-  } else if ("clock" in step) {
-    state.clock = step.clock;
-  } else if (step.focus) {
-    state.focused = true;
-    fire("window", "focus");
-  } else if (step.blur) {
-    state.focused = false;
-    fire("window", "blur");
-  } else if (step.hide) {
-    state.visibility = "hidden";
-    fire("document", "visibilitychange");
-  } else if (step.pagehide) {
-    fire("window", "pagehide");
-  } else if (step.snapshot) {
-    const byId = (id) => root.children.find((n) => n.id === id) || null;
-    const unmanaged = byId("unmanaged");
-    snapshots.push({
-      projects: node(byId("projects")),
-      unmanaged: unmanaged ? node(unmanaged) : null,
-      digest: byId("digest") ? node(byId("digest")) : null,
-      posts: posts.slice(),
-    });
-  } else {
-    throw new Error("unknown step " + JSON.stringify(step));
+async function run() {
+  for (const step of steps) {
+    if ("frame" in step) {
+      const listener = sources[0] && sources[0].listeners.view;
+      if (!listener) throw new Error("the page registered no view listener");
+      listener({ data: JSON.stringify(step.frame) });
+    } else if ("open" in step) {
+      const fold = attached(root).find((n) => n.tagName === "DETAILS" && n.dataset.key === step.open);
+      if (!fold) throw new Error("no details with key " + step.open);
+      fold.open = true;
+    } else if ("clock" in step) {
+      state.clock = step.clock;
+      runDueTimers();
+    } else if ("key" in step) {
+      fire("document", "keydown", {
+        key: step.key, ctrlKey: !!step.ctrlKey, altKey: !!step.altKey, metaKey: !!step.metaKey,
+        shiftKey: false, repeat: false, preventDefault() {},
+        target: step.target === undefined ? null : { tagName: step.target },
+      });
+    } else if ("click" in step) {
+      const target = attached(root).find((n) => n.className.split(/\s+/).includes(step.click));
+      if (!target) throw new Error("no element with class " + step.click);
+      for (const fn of target.listeners.click || []) fn({ type: "click", preventDefault() {} });
+    } else if ("respond" in step) {
+      replies.push(step.respond);
+    } else if ("fail_fetch" in step) {
+      replies.push({ reject: true });
+    } else if (step.focus) {
+      state.focused = true;
+      fire("window", "focus");
+    } else if (step.blur) {
+      state.focused = false;
+      fire("window", "blur");
+    } else if (step.hide) {
+      state.visibility = "hidden";
+      fire("document", "visibilitychange");
+    } else if (step.pagehide) {
+      fire("window", "pagehide");
+    } else if (step.snapshot) {
+      const byId = (id) => root.children.find((n) => n.id === id) || null;
+      const unmanaged = byId("unmanaged");
+      snapshots.push({
+        inbox: byId("inbox") ? node(byId("inbox")) : null,
+        statement: byId("statement") ? node(byId("statement")) : null,
+        projects: node(byId("projects")),
+        unmanaged: unmanaged ? node(unmanaged) : null,
+        digest: byId("digest") ? node(byId("digest")) : null,
+        posts: posts.slice(),
+      });
+    } else {
+      throw new Error("unknown step " + JSON.stringify(step));
+    }
+    await settle();
   }
 }
-process.stdout.write(JSON.stringify(snapshots));
+run().then(
+  () => process.stdout.write(JSON.stringify(snapshots)),
+  (error) => {
+    process.stderr.write(String(error && error.stack ? error.stack : error) + "\n");
+    process.exit(1);
+  },
+);
