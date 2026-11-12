@@ -3,6 +3,7 @@
 Run: just agent-workflow-tests
 """
 import json
+import os
 import threading
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -96,10 +97,11 @@ class IdleServiceTest(IdleCase):
         self.poll(svc, 301)
         self.assertEqual(len(self.continues()), 1)
 
-    def test_a_working_manager_or_a_moving_delivery_gets_no_nudge(self):
-        seen = {"session_id": "s-1", "run_id": "wf_1", "moved_ms": int((T0 + 200) * 1000),
+    RUN_SEEN = {"session_id": "s-1", "run_id": "wf_1", "moved_ms": int((T0 + 200) * 1000),
                 "issues": [{"issue": 12, "stage": "building", "task": None, "tasks": None}]}
-        for name in ("working", "moving", "finished"):
+
+    def test_a_working_manager_or_a_finished_delivery_gets_no_early_nudge(self):
+        for name in ("working", "finished"):
             with self.subTest(name):
                 self.setUp()
                 svc, sid = self.idle_service()
@@ -111,17 +113,55 @@ class IdleServiceTest(IdleCase):
                     self.assertEqual(self.continues(), [])
                     continue
                 self.now[0] = T0 + 200
-                self.append(svc, [("delivery.seen", "owner/p01", seen)])
-                if name == "finished":
-                    self.now[0] = T0 + 250
-                    self.append(svc, [("delivery.gone", "owner/p01",
-                                       {"session_id": "s-1", "run_id": "wf_1"})])
+                self.append(svc, [("delivery.seen", "owner/p01", self.RUN_SEEN)])
+                self.now[0] = T0 + 250
+                self.append(svc, [("delivery.gone", "owner/p01",
+                                   {"session_id": "s-1", "run_id": "wf_1"})])
                 self.poll(svc, 300)
                 self.assertEqual(self.continues(), [])
                 self.poll(svc, 499.999)
                 self.assertEqual(self.continues(), [])
                 self.poll(svc, 500)
                 self.assertEqual(len(self.continues()), 1)
+
+    def test_a_run_in_progress_that_moved_within_thirty_minutes_holds_the_nudge(self):
+        svc, sid = self.idle_service()
+        self.now[0] = T0 + 200
+        self.append(svc, [("delivery.seen", "owner/p01", self.RUN_SEEN)])
+        for seconds in (300, 500, 1200, 1999.999):
+            self.poll(svc, seconds)
+            self.assertEqual(self.continues(), [], seconds)
+
+    def test_a_run_in_progress_that_has_not_moved_for_thirty_minutes_no_longer_holds_it(self):
+        svc, sid = self.idle_service()
+        self.now[0] = T0 + 200
+        self.append(svc, [("delivery.seen", "owner/p01", self.RUN_SEEN)])
+        self.poll(svc, 1999.999)
+        self.assertEqual(self.continues(), [])
+        self.poll(svc, 2000)
+        self.assertEqual(len(self.continues()), 1)
+        self.poll(svc, 2001)
+        self.assertEqual(len(self.continues()), 1)
+
+    def write_setup_journal(self, moved_at):
+        """A run of s-1 that has started its setup and named no issue, last moved at `moved_at`."""
+        journal = (self.store.parent.parent.parent / "projects/-srv-p01/s-1"
+                   / "subagents/workflows/wf_1/journal.jsonl")
+        journal.parent.mkdir(parents=True)
+        journal.write_text(json.dumps(
+            {"agentId": "a1", "type": "started", "label": "setup", "phase": "setup"}) + "\n")
+        os.utime(journal, ns=(int(moved_at * 1e9),) * 2)
+
+    def test_a_run_awaiting_its_setup_result_holds_the_nudge_like_one_with_an_issue(self):
+        svc, sid = self.idle_service(session_dirs=[self.store.parent.parent.parent / "sessions"])
+        self.write_setup_journal(T0 + 200)
+        svc.poll_deliveries()
+        self.assertEqual(self.rows("delivery.seen"), [])
+        for seconds in (300, 500, 1200, 1999.999):
+            self.poll(svc, seconds)
+            self.assertEqual(self.continues(), [], seconds)
+        self.poll(svc, 2000)
+        self.assertEqual(len(self.continues()), 1)
 
     def reach_no_progress(self, svc, sid):
         for seconds in (300, 900, 1500, 2100):

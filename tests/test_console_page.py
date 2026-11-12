@@ -2963,6 +2963,29 @@ class PageManagerTest(unittest.TestCase):
         self.assertEqual([full(n) for n in nodes(card) if n["tag"] == "button"],
                          ["Try again", "Withdraw"])
 
+    def test_both_manager_items_style_the_keep_going_choice_primary_and_withdraw_quiet(self) -> None:
+        for item, keep, away in ((STALL, "try-again", "stall-withdraw"),
+                                 (PROGRESS, "continue", "progress-withdraw")):
+            with self.subTest(item=item["reason"]):
+                (snap,) = render([START, {"frame": frame([item])}, {"snapshot": True}])
+                (card,) = [n for n in nodes(snap["inbox"]) if has_class(n, "card")]
+                first, second = [n for n in nodes(card) if n["tag"] == "button"]
+                self.assertTrue(has_class(first, keep))
+                self.assertTrue(has_class(first, "primary") and has_class(first, "needs"))
+                self.assertTrue(has_class(second, away))
+                self.assertFalse(has_class(second, "primary") or has_class(second, "needs"))
+                (act,) = [n for n in nodes(card) if has_class(n, "act")]
+                self.assertEqual([n for n in nodes(act) if n["tag"] == "button"], [first, second])
+
+    def test_the_quiet_withdraw_buttons_share_the_page_button_rules(self) -> None:
+        text = PAGE.read_text(encoding="utf-8")
+        style = text[text.index("<style>"):text.index("</style>")]
+        for name in ("continue", "progress-withdraw", "try-again", "stall-withdraw"):
+            with self.subTest(name=name):
+                for suffix in ("", ":hover:enabled", ":disabled"):
+                    self.assertRegex(style, r"(?m)^[^{]*\." + re.escape(name) + re.escape(suffix) + r"[,\s{]")
+        self.assertRegex(style, r"\.card \.reason \{[^}]*color: var\(--ov2\)")
+
     def test_a_stall_card_withdraw_posts_the_withdrawal(self) -> None:
         (snap,) = render([
             START, {"frame": frame([STALL])}, {"click": "stall-withdraw"}, {"snapshot": True},

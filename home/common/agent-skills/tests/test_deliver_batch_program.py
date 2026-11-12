@@ -3673,8 +3673,17 @@ class StopReasonTest(unittest.TestCase):
                 self.assertIn(f"#1: stopped ({reason})", out["logs"])
                 self.assertEqual(result["relaunch"]["reasons"], {"1": reason})
 
+    def test_every_child_is_launched_from_the_child_script_the_batch_was_given(self):
+        """#981: the batch names no other child path, so a child path inside a placed set pins the set."""
+        SET = "/r/.program-copies/deliver-standard/0123456789ab/deliver-standard.js"
+        result, calls, _ = run(args=dict(ARGS, issues=[1, 2, 3], child_script=SET), children={"2": {"throw": "x"}})
+        launched = [c for c in calls if c.get("kind") == "workflow"]
+        self.assertGreaterEqual({c["label"] for c in launched}, {"child-1", "child-2"}, labels(calls))
+        self.assertEqual({c["script"] for c in launched}, {SET})
+        self.assertEqual(result["relaunch"]["child_script"], SET)
+
     def test_a_child_that_throws_names_the_error_and_the_script(self):
-        MSG = "Cannot load the script\n    at load (workflow.js:1)"
+        MSG ="Cannot load the script\n    at load (workflow.js:1)"
         WHY = "child program could not be loaded or threw: Cannot load the script (/s/deliver-standard.js)"
         DIRECT = {"facts-1": {"lane": "direct", "why": "small"}}
         INELIGIBLE = {"stage": "ineligible", "cont": {"setup": {}, "lane": "direct"}}

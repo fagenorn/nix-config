@@ -1,7 +1,7 @@
 # ADR-console-020 — A manager idle while its sprint has work is told to go on, and waits out a quota
 
 - **Status:** accepted
-- **Decided in:** #837, #839, #891, #893, #929
+- **Decided in:** #837, #839, #891, #893, #929, #974
 
 ## Context
 
@@ -10,6 +10,8 @@ ADR-console-017's Consequences leave "a manager that is listed but idle while wo
 ## Decision
 
 **Idle.** A manager is idle when its manager row is `started`, the session carrying the sprint's manager name is listed in state `idle` or `limit`, and both the time of that session's last change and the time of its last activity are at least five minutes old. The last activity is the latest of the last movement of any delivery run of that session and the console's last launch, nudge or wake of the sprint. A run's movement outlives the run, so a run that moved and then ended still holds the nudge.
+
+**A delivery at work.** A manager waiting on its own delivery is waiting on purpose, and one step of a delivery (writing a plan) can run for ten to fifteen minutes with no journal row. While a delivery run of the manager's session is in progress (the console still sees it: its journal has no final record) the idle nudge is held back, however long the manager has been idle, until the run itself has not moved for 30 minutes; then the manager is nudged as before. A run that has ended holds nothing beyond the five minutes above. The ten minutes between nudges, the limit of three, the quota rule and the owner's continue are unchanged.
 
 **Work.** The rule applies to a sprint with work in the sense of ADR-console-017 read without the clock: starting or on track, with a quiet closing sprint reading closing (#893). A sprint waiting on the owner, drafting, closing, done, stopping, stopped or withdrawn is never nudged, and neither is a stalled sprint or one whose no-progress item is open.
 

@@ -1,4 +1,4 @@
-"""`program-copies`: a skill's Workflow programs, copied into the checkout (issue 912, ADR-delivery-008).
+"""`program-copies`: a skill's Workflow programs, copied into the checkout (issues 912 and 981, ADR-delivery-008, ADR-delivery-009).
 
 The Workflow tool loads a script by path. A skill directory reached through a store link
 stops resolving once an activation replaces it, and is then refused as a script path. So a
@@ -6,12 +6,20 @@ lead starts the programs from these copies.
 
 `program-copies --repo-root <checkout> --from <dir>` copies every regular `*.js` file directly
 in `<dir>` (not recursive; a symlink, the directory itself or a file, is followed, so a Nix
-store link is copied by its content) to `<checkout>/.program-copies/<name>/<file>`. `<name>` is
-the last component of `--from` as given, not resolved: a resolved store path would name the
-hash. A last component that is empty, `.` or `..` (as in `/skills/deliver-standard/sub/..`),
-or an existing `.program-copies` or `.program-copies/<name>` that is a symlink, is refused
-before anything is written: the copies are never placed outside `<checkout>/.program-copies/<name>`. Directories are created with parents. The printed paths are built from `--repo-root`
-as given.
+store link is copied by its content) to `<checkout>/.program-copies/<name>/<set>/<file>`.
+`<name>` is the last component of `--from` as given, not resolved: a resolved store path would
+name the hash. `<set>` is the first 12 hex digits of a SHA-256 over every program's name and
+bytes, so one version of the programs has one directory, a set, and another version another.
+A last component that is empty, `.` or `..` (as in `/skills/deliver-standard/sub/..`), or an
+existing `.program-copies`, `.program-copies/<name>` or set that is a symlink, is refused
+before anything is written: the copies are never placed outside
+`<checkout>/.program-copies/<name>`. Directories are created with parents. The printed paths
+are built from `--repo-root` as given.
+
+A set is never modified once it exists (issue 981). A running batch read its own program
+once, at launch, but the Workflow runtime reads the child program from its path at every
+child launch; children launched from a set therefore run the version the batch was launched
+with, whatever is placed later. A caller takes every path of one launch from one output.
 
 `--repo-root` must be the top level of a git working tree: `git -C <checkout> rev-parse
 --show-toplevel` succeeds and prints a path that resolves to the same directory as
@@ -22,39 +30,66 @@ Workflow tool accepts a script path only from the working directory or an added 
 
 `<checkout>/.program-copies/.gitignore` holds exactly `*\\n`; git then ignores the whole
 directory, the ignore file included, so the copies never show as untracked and `git add -A`
-never stages them. A missing or different one is written the way a copy is.
+never stages them. A missing or different one is written to a temporary file beside it and
+renamed into place.
 
-A copy is left untouched (no write, same inode and mtime) when it is a regular file, not a
-symlink, whose bytes equal the source's. Otherwise the source bytes go to a temporary file
-created in the copy directory, mode 0644, which is `os.replace`d onto the copy path: a
-reader that already opened the old copy keeps its bytes, a reader opening the path sees the
-old or the new file and never a partial one, and a symlink at the copy path becomes a
-regular file. On any failure the temporary file is removed. Other files in the copy
-directory are left alone.
+Placing a set that exists writes no file and prints the same paths; it only sets the set
+directory's modification time to now, which records the set's last use. An existing set
+whose files are not exactly the programs (a missing, extra, symlinked, hard-linked or different file) is
+refused as `copy_failed` and left as it is. A new set is written to a temporary directory
+`.tmp-*` beside it, files mode 0644, and renamed into place, so a reader sees a whole set or
+none; when another placement created the same set first, that one is used. On any failure
+the temporary directory is removed.
+
+After a placement, every other set (a directory named by 12 hex digits) and every `.tmp-*`
+directory under `.program-copies/<name>` whose modification time is more than 24 hours old
+is removed; a failure to remove one is ignored. The set just placed is never removed. A
+set is renamed to a `.tmp-*` name before its files are removed, so an interrupted removal
+never leaves part of a set under a set name. A placement holds an exclusive `flock` on
+`.program-copies/<name>/.lock` from before it looks for its set until it has pruned, so
+one placement never removes the set another has just stamped and printed. A
+batch runs about four hours and every launch stamps its set, so a set a running batch uses
+was stamped less than 24 hours ago, while the sets kept are bounded by the versions placed
+within a day. The regular `*.js` files an earlier version of this command placed directly
+in that directory are never written again and are removed by the same rule, modification
+time more than 24 hours old: a batch launched from them keeps them while they are younger,
+and a caller that still names such a path then fails to load it instead of running an old
+program. Their modification time is when their content last changed, not their last use.
+Anything else in that directory is left alone.
 
 Success prints one JSON line mapping each copied file name to its absolute copy path.
 Refusals write `{"error": {code, detail}}` to stderr. Exit 1: `not_a_checkout` (the git call
 fails, prints nothing, or prints another top level, as for a subdirectory or a `.git`
 directory; nothing is created), `no_programs` (`--from` is not a directory or holds no
 `*.js` file; nothing is created), `unsafe_destination` (the destination rule above; nothing is written), `copy_failed` (an OSError
-reading or writing). Exit 2:
+reading or writing, or an existing set that does not hold the programs). Exit 2:
 `relative_path` (`--repo-root` or `--from` is not absolute).
 """
 
 from __future__ import annotations
 
 import argparse
+import fcntl
+import hashlib
 import json
 import os
+import re
+import shutil
+import stat
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 COPY_DIR = ".program-copies"
 IGNORE_NAME = ".gitignore"
 IGNORE_BODY = b"*\n"
 GIT_TIMEOUT = 120
+SET_NAME = re.compile(r"[0-9a-f]{12}\Z")
+TEMP_PREFIX = ".tmp-"
+LOCK_NAME = ".lock"
+KEEP_SECONDS = 24 * 60 * 60
 
 
 class CopyRefusal(Exception):
@@ -99,7 +134,7 @@ def programs(source: Path) -> list[Path]:
 
 def _replace(target: Path, data: bytes) -> None:
     """Write `data` to a temporary file beside `target` and rename it over `target`."""
-    fd, name = tempfile.mkstemp(dir=target.parent, prefix=".tmp-")
+    fd, name = tempfile.mkstemp(dir=target.parent, prefix=TEMP_PREFIX)
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(data)
@@ -119,11 +154,80 @@ def _sync(target: Path, data: bytes) -> None:
     _replace(target, data)
 
 
-def _check_destination(root: Path, base: Path, target: Path) -> None:
+def set_name(contents: list[tuple[str, bytes]]) -> str:
+    """The directory name of one version of the programs: 12 hex digits over names and bytes."""
+    digest = hashlib.sha256()
+    for name, data in contents:
+        for part in (name.encode(), data):
+            digest.update(len(part).to_bytes(8, "big"))
+            digest.update(part)
+    return digest.hexdigest()[:12]
+
+
+def _holds(directory: Path, contents: list[tuple[str, bytes]]) -> bool:
+    """Whether `directory` holds exactly `contents`: no other entry, each a regular file with one link."""
+    if sorted(os.listdir(directory)) != sorted(name for name, _ in contents):
+        return False
+    for name, data in contents:
+        found = os.lstat(directory / name)
+        if not stat.S_ISREG(found.st_mode) or found.st_nlink != 1 or (directory / name).read_bytes() != data:
+            return False
+    return True
+
+
+def _place_set(directory: Path, contents: list[tuple[str, bytes]]) -> None:
+    """Create `directory` holding `contents`, or confirm it already does; never change one that exists."""
+    if not directory.exists():
+        temp = Path(tempfile.mkdtemp(dir=directory.parent, prefix=TEMP_PREFIX))
+        try:
+            for name, data in contents:
+                (temp / name).write_bytes(data)
+                os.chmod(temp / name, 0o644)
+            os.chmod(temp, 0o755)
+            try:
+                os.rename(temp, directory)
+            except OSError:
+                if not directory.is_dir():
+                    raise
+        finally:
+            shutil.rmtree(temp, ignore_errors=True)
+    if not _holds(directory, contents):
+        raise CopyRefusal("copy_failed", f"{directory} exists and does not hold these programs", 1)
+    os.utime(directory)
+
+
+def _prune(target: Path, keep: Path) -> None:
+    """Remove what lies under `target` with a modification time over a day old, never `keep`:
+    the sets, the temporary directories and the flat `*.js` files of the earlier layout."""
+    cutoff = time.time() - KEEP_SECONDS
+    try:
+        entries = list(target.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        directory = bool(SET_NAME.match(entry.name)) or entry.name.startswith(TEMP_PREFIX)
+        if entry.name == keep.name or not (directory or entry.name.endswith(".js")):
+            continue
+        try:
+            if entry.is_symlink() or entry.lstat().st_mtime >= cutoff:
+                continue
+            if directory and entry.is_dir():
+                if not entry.name.startswith(TEMP_PREFIX):
+                    gone = target / f"{TEMP_PREFIX}{entry.name}"
+                    os.rename(entry, gone)
+                    entry = gone
+                shutil.rmtree(entry, ignore_errors=True)
+            elif not directory and entry.is_file():
+                entry.unlink()
+        except OSError:
+            continue
+
+
+def _check_destination(root: Path, base: Path, target: Path, *extra: Path) -> None:
     """Refuse a destination that is not a plain directory chain inside the checkout."""
     if target.name in ("", ".", ".."):
         raise CopyRefusal("unsafe_destination", f"{target.name!r} is not a usable directory name", 1)
-    for part in (base, target):
+    for part in (base, target, *extra):
         if part.is_symlink():
             raise CopyRefusal("unsafe_destination", f"{part} is a symlink", 1)
     if target.resolve().parent.parent != root.resolve():
@@ -136,18 +240,25 @@ def place(repo_root: Path, source: Path) -> dict[str, str]:
     files = programs(source)
     base = root / COPY_DIR
     target = base / source.name
-    _check_destination(root, base, target)
-    mapping: dict[str, str] = {}
     try:
         contents = [(f.name, f.read_bytes()) for f in files]
-        target.mkdir(parents=True, exist_ok=True)
-        _sync(base / IGNORE_NAME, IGNORE_BODY)
-        for name, data in contents:
-            _sync(target / name, data)
-            mapping[name] = str(target / name)
     except OSError as error:
         raise CopyRefusal("copy_failed", str(error), 1) from None
-    return mapping
+    directory = target / set_name(contents)
+    _check_destination(root, base, target, directory)
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        _sync(base / IGNORE_NAME, IGNORE_BODY)
+        lock = os.open(target / LOCK_NAME, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o644)
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            _place_set(directory, contents)
+            _prune(target, directory)
+        finally:
+            os.close(lock)
+    except OSError as error:
+        raise CopyRefusal("copy_failed", str(error), 1) from None
+    return {name: str(directory / name) for name, _ in contents}
 
 
 def build_parser() -> argparse.ArgumentParser:

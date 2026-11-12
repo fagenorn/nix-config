@@ -1,6 +1,6 @@
 # ADR-delivery-008 — The delivery programs run from copies in the checkout
 
-- **Status:** accepted
+- **Status:** accepted; amended by ADR-delivery-009
 - **Decided in:** issue 912
 
 ## Context
