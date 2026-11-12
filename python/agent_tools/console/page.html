@@ -619,7 +619,7 @@ function drawSprint(item, entry, sprint) {
     item.appendChild(el("span", "fail", "Could not retry: " + retrying.reason));
   }
   const messages = sprint.messages || [];
-  if (sprint.stoppable === true) stopControls(item, entry, sprint);
+  const stopButton = sprint.stoppable === true ? stopControls(item, entry, sprint) : null;
   if (typeof sprint.stop_text === "string") {
     item.appendChild(el("span", "stop-fail", sprint.stop_text));
   }
@@ -644,6 +644,7 @@ function drawSprint(item, entry, sprint) {
   more.dataset.key = "more:" + sprint.sprint_id;
   if (moreWasOpen) more.open = true;
   more.appendChild(el("summary", "", "More"));
+  if (stopButton !== null) more.appendChild(stopButton);
   const button = actionButton("withdraw", "Withdraw", () => withdraw(item, entry, sprint));
   if (state !== undefined && state.phase === "sending") button.setAttribute("disabled", "");
   more.appendChild(button);
@@ -654,11 +655,13 @@ function stopControls(item, entry, sprint) {
   const id = sprint.sprint_id;
   const state = stops.get(id);
   const asking = state !== undefined && (state.phase === "confirming" || state.phase === "sending");
+  // The Stop button sits under "More" beside Withdraw; the confirmation it opens stays on the sprint's line.
+  let button = null;
   if (!asking) {
-    item.appendChild(actionButton("stop", "Stop", () => {
+    button = actionButton("stop", "Stop", () => {
       stops.set(id, { phase: "confirming", reason: "" });
       refillRows(id);
-    }));
+    });
   } else {
     item.appendChild(el("span", "stop-ask",
       "Stop this sprint? The manager finishes what is mid-merge, starts nothing new and reports."));
@@ -675,6 +678,7 @@ function stopControls(item, entry, sprint) {
   if (state !== undefined && state.phase === "failed") {
     item.appendChild(el("span", "fail", "Could not stop: " + state.reason));
   }
+  return button;
 }
 async function stop(item, entry, sprint) {
   const id = sprint.sprint_id;
