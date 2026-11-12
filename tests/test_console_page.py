@@ -3096,7 +3096,9 @@ class PageSprintEndTest(unittest.TestCase):
         for sprint, boxes in ((ended, 0), (stopped, 0), (SPRINT, 1)):
             with self.subTest(state=sprint["state"], ended=sprint.get("ended_at")):
                 (snap,) = render([START, {"frame": with_sprints([sprint])}, {"snapshot": True}])
-                self.assertEqual(len(of_class(snap["projects"], "div", "sprint-tell")), boxes)
+                offered = (of_class(snap["projects"], "div", "sprint-tell")
+                           + of_class(snap["projects"], "button", "tell-open"))
+                self.assertEqual(len(offered), boxes)
 
     def test_an_unstopped_manager_is_shown_under_the_statement(self) -> None:
         text = "The manager of a withdrawn goal could not be stopped: boom; trying again"
