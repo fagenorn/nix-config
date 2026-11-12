@@ -793,6 +793,19 @@ class MessageFoldTest(unittest.TestCase):
             with self.subTest(row=row.payload):
                 self.assertIsNone(sprints.sprint_states([goal, row])[SID].manager_session)
 
+    def test_a_started_manager_forgets_the_session_of_the_manager_it_replaces(self):
+        name = manager.session_name("owner/p01", SID)
+        seen = Event(2, at(2), "session.seen", "owner/p01",
+                     {"session_id": "s-1", "name": name, "cwd": "/x", "repo": None,
+                      "state": "ended"})
+        rows = [stated(1, "owner/p01", SID, "one"), seen,
+                managed(3, SID, MANAGER_STARTED, profile="work", session_name=name)]
+        self.assertIsNone(sprints.sprint_states(rows)[SID].manager_session)
+        later = Event(4, at(4), "session.seen", "owner/p01",
+                      {"session_id": "s-2", "name": name, "cwd": "/x", "repo": None,
+                       "state": "idle"})
+        self.assertEqual(sprints.sprint_states([*rows, later])[SID].manager_session, "s-2")
+
     def test_malformed_message_rows_change_nothing(self):
         base = message_rows()
         bad = [read_through(7, SID, True), read_through(7, SID, "6"),

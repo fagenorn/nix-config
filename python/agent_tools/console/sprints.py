@@ -181,7 +181,8 @@ row wins). Every other such row changes nothing, and a withdrawn sprint keeps no
 A `session.seen` row carries no sprint id: when its string `name` fully matches
 `<project> sprint <16 lowercase hex>` (`manager.session_name`), the sprint is open, the name's
 project and the row's project column both equal the sprint's, the row's string `session_id` becomes
-the sprint's `manager_session` (the latest row wins).
+the sprint's `manager_session` (the latest row wins); a valid `manager.started` row clears it, since
+the session it named belonged to the manager that row replaces.
 
 `message_state(message)` is `READ` when `read_at` is set, else `DELIVERED` when `delivered_at` is,
 else `SENT`; `unread(state)` is the messages without `read_at`, in id order; `unreachable(state)` is
@@ -678,7 +679,8 @@ def _folded_manager(state: SprintState, event: Event) -> SprintState:
     if event.kind == MANAGER_STARTED:
         profile, name = payload.get("profile"), payload.get("session_name")
         if isinstance(profile, str) and isinstance(name, str):
-            return replace(state, manager=Manager(STARTED, event.at, profile, name))
+            return replace(state, manager=Manager(STARTED, event.at, profile, name),
+                           manager_session=None)
     elif event.kind == MANAGER_FAILED:
         reason = payload.get("reason")
         if isinstance(reason, str):

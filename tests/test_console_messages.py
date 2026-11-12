@@ -369,6 +369,23 @@ class NudgeServiceTest(MessageRouteTest):
         self.assertEqual(self.nudges, [])
         self.assertEqual(self.queued.jobs, [])
 
+    def test_a_message_after_a_finished_retry_does_not_wake_the_replaced_manager(self):
+        svc, sid = self.stopped_and_overdue()
+        svc.retry_manager("owner/p01", sid)
+        self.queued.run_next()
+        self.assertEqual(self.sprint_state(svc, sid).manager.state, sprints.STARTED)
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            svc.send_message("owner/p01", sid, TEXT)
+            self.queued.run_next()
+            self.now[0] += 120
+            svc.renudge()
+            while self.queued.jobs:
+                self.queued.run_next()
+        self.assertEqual(self.nudges, [])
+        self.assertTrue(all(row["route"] is None and not row["ok"]
+                            for _, row in self.nudged()))
+
     def test_an_unknown_session_fails_the_nudge_without_calling_the_nudger(self):
         svc = self.begin()
         sid = svc.state_goal("owner/p01", GOAL_TEXT)
