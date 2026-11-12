@@ -1,7 +1,7 @@
 export const meta = {
   name: 'deliver-batch',
   description: 'Deliver a batch of tracker issues in one repository: intake, just-in-time claims, deliver-standard children (a standard-lane issue planned ahead in plan mode, then resumed in ready mode), a serial land queue under the cross-host land lock, one table',
-  whenToUse: 'A batch of issues of one repository the user asked to deliver together; args {repo_root, batch_id (<host>-<yyyymmdd-hhmm>), child_script (the absolute path of the deliver-standard.js copy program-copies placed), issues (numbers) or label (every open issue carrying it), decisions? (owner answers by issue), conts? (a previous run forwarded child continuations), amend? ({"<issue>": a list of {file, find, replace} edits of that issue\'s plan files, only for an issue in conts: sent with its cont to the first child call of the run, and kept in the relaunch with that cont}), unattended? (true only for a run no session watches: its questions are then posted as box prompts), review_sizing? (true passes review_sizing to every deliver-standard child: sized Claude plan and final reviews), train? (true lands up to three ready issues that wait behind a busy land queue through one cumulative car pull request, a landing train; false or absent lands every issue serially), clerk_model? (sonnet, the default, or haiku: the model of the status clerk steps, here and in every deliver-standard child; the setup steps and every step that emits a lifecycle verb stay on sonnet)}; returns one table and, when any issue is unfinished, the relaunch args for a new run',
+  whenToUse: 'A batch of issues of one repository the user asked to deliver together; args {repo_root, batch_id (<host>-<yyyymmdd-hhmm>), child_script (the absolute path of the deliver-standard.js copy program-copies placed), issues (numbers) or label (every open issue carrying it), decisions? (owner answers by issue), conts? (a previous run forwarded child continuations), amend? ({"<issue>": a list of {file, find, replace} edits of that issue\'s plan files, only for an issue in conts: sent with its cont to the first child call of the run, and kept in the relaunch with that cont}), unattended? (true only for a run no session watches: its questions are then posted as box prompts), review_sizing? (true passes review_sizing to every deliver-standard child: sized Claude plan and final reviews), train? (true lands up to three ready issues that wait behind a busy land queue, or that became ready while the one landing waited for the land lock, through one cumulative car pull request, a landing train; false or absent lands every issue serially), clerk_model? (sonnet, the default, or haiku: the model of the status clerk steps, here and in every deliver-standard child; the setup steps and every step that emits a lifecycle verb stay on sonnet)}; returns one table and, when any issue is unfinished, the relaunch args for a new run',
   phases: [
     { title: 'Setup', detail: 'resolve the project contract once' },
     { title: 'Intake', detail: 'read every issue\'s facts and lane behind one barrier, decide eligibility in code' },
@@ -19,7 +19,7 @@ export const meta = {
 // no session watches, D12), review_sizing (boolean, default off: passed to every child and kept in the relaunch, #747), clerk_model (sonnet, the default, or haiku: the model of every clerk call except the setup step and the steps that emit a lifecycle verb (land-pr, land-lock, land-relock, land-merge, land-unlock), which stay on sonnet, #813;
 // passed to every child and kept in the relaunch when haiku, #803), amend ({"<issue>": a non-empty list of {file, find, replace} edits of
 // that issue's plan files}, only for an issue in conts, #811: sent with its cont to the first child call of the run, kept in the relaunch with that cont).
-// train (boolean, default false, #822: true lands up to TRAIN_MAX ready issues waiting behind a busy land queue through one car pull request, see Train landing below;
+// train (boolean, default false, #822: true lands up to TRAIN_MAX ready issues waiting behind a busy land queue, or ready by the end of a landing's lock wait (#936), through one car pull request, see Train landing below;
 // false or absent, every step and label is the serial landing's; kept in the relaunch when true, never passed to a child).
 // reasons ({"<issue>": the reason of its stopped row in the previous run}, #869: the relaunch writes it; a row this run leaves not-admitted, blocked or waiting shows it as "previous run: ...", and the relaunch carries the latest reason of each open issue).
 // The lead compares a relaunch with the args it ran with reasons aside.
@@ -121,7 +121,7 @@ Hard rules for this step (they override anything else you remember):
 - Global skills, agents and standards are shared by other projects: never write a project-specific literal (check names, branch names, recipe names, repository paths) into them.
 - Run git as git -C <worktree> and name every file by its absolute path; never prefix a command with cd <worktree> &&, except for a tool that must run inside the worktree and has no directory flag (a test runner or a build).`
 // forge-claim retries a transport error itself (#740), up to 150 s in a hanging outage, above the Bash tool's 120 s default.
-const FORGE_TIMEOUT = 'Give each forge-claim command a Bash timeout of 20 minutes (1200000 ms), and land acquire --wait 60 minutes (3600000 ms): forge-claim retries a forge outage itself before it prints its one JSON line.'
+const FORGE_TIMEOUT = 'Give each forge-claim command a Bash timeout of 20 minutes (1200000 ms). Only a land acquire command that ends in --wait gets more: the flag takes no value, so write nothing after it, and the command itself can run for up to 60 minutes, so give it a Bash timeout of 60 minutes (3600000 ms). The reason for both: forge-claim retries a forge outage itself before it prints its one JSON line.'
 
 // --- Setup: one agent resolves the contract; nothing is defaulted ---
 phase('Setup')
@@ -912,9 +912,12 @@ ${RULES}`, label, { ...lifecycleClerk, schema: withRenew({ type: 'object', prope
     // #822: the first issue of a train hands over here, holding the lock at its ready head, once its own first poll answers behind (a head that is
     // current lands alone, as ever). The train answers merged (its car, which contains this head, is merged: only the close-out is left), a row
     // that ends this landing, or nothing, and then the landing goes on below as if no train had run. The lock never moves meanwhile.
+    // #936: a landing that began alone asks via.join at this same point, in the same turn its lock wait ended: it answers a train when other
+    // issues of the batch became ready meanwhile, else nothing, and then no step is added and the landing goes on alone.
     let trained = false
-    if (via.train && carried && carried.reply && carried.reply.state === 'behind' && carried.reply.head === expected) {
-      const t = await via.train(pr)
+    const handover = carried && carried.reply && carried.reply.state === 'behind' && carried.reply.head === expected ? (via.train || (via.join ? via.join() : null)) : null
+    if (handover) {
+      const t = await handover(pr)
       if (t && t.row) return out(t.row.outcome, t.row.extra)
       trained = !!(t && t.merged)
     }
@@ -1033,6 +1036,10 @@ ${RULES}`, `land-merge-${n}`, { ...lifecycleClerk, schema: withRenew(LAND_MERGE_
 // --- Train landing (#822): only with the train arg; without it landReady is the serial enqueue and nothing below runs ---
 // A ready issue joins WAITING and enqueues one drain on the land queue. A drain takes up to TRAIN_MAX waiting issues. One issue, a merge
 // strategy other than merge, or a first issue whose head is current with the integration branch, lands serially through land(), unchanged.
+// #936: an issue a drain lands alone still forms a train when others became ready while it waited for the land lock. Its land-pr call
+// (or nothing later) is the wait: when that call returns holding the lock with a behind first poll, the handover point of a train's first
+// issue, the landing takes up to TRAIN_MAX - 1 issues waiting at that moment as the later members of a train and hands over exactly as below.
+// Nothing is waiting: no step is added. Past that point (a first poll that is not behind, a retried wait, a sync, a record) nothing joins.
 // Otherwise the first issue's land() takes the lock at its ready head H1 and hands over to the train (via.train), which:
 //   train-pr-<n>      opens the PR of every later member at its ready head (renew first; no lock, no checks);
 //   train-build-<t>   builds car i = integration branch + heads 1..i on scratch branches land-train/<batch>-<t>-<i>, one car PR each;
@@ -1116,8 +1123,9 @@ ${RULES_FOR(REPO, '<branch>')}`, `train-sweep-${sweepNo}`, { ...TRAIN_LIFECYCLE,
   if (carsMaybe) log(`train-sweep-${sweepNo}: cars of ${BATCH} may still be open${sw && sw.detail ? ` (${sw.detail})` : ''}`)
 }
 
-// One train over `cands` (two or three waiting issues, in order). Every candidate's row is resolved here.
-const runTrain = async cands => {
+// One train over `cands` (two or three ready issues, in order): `train` is what the first candidate's landing calls at its handover, `tag`
+// marks that landing's row, and `rest`, run once that landing ended, resolves the row of every other candidate.
+const trainOf = cands => {
   const t = ++trainNo
   const first = cands[0]
   const H1 = first.ready.head
@@ -1328,14 +1336,21 @@ ${RULES_FOR(REPO, carName(members.length))}`, `train-merge-${t}`, { ...TRAIN_LIF
   }
 
   const tag = r => (car ? { ...r, train: t, car_pr: car.pr } : r)
-  // The first landing owns the lock: it takes it, the train runs inside it, and it releases it on every exit.
-  first.resolve(tag(await land(first.n, first.ready, { train })))
-  // Open cars would refuse the next landing's lock moves, so they are cleared before anything else lands.
-  if (carsMaybe) await trainSweep(SETUP.delete_branch ? [...(firstMerged ? [first] : []), ...closeOuts.map(m => m.e)].map(e => e.ready.branch) : [])
-  for (const e of cands.slice(1)) if (settled[e.n]) e.resolve(settled[e.n])
-  for (const m of closeOuts) m.e.resolve(tag(await land(m.e.n, m.e.ready, { mergedPr: m.pr })))
-  // Every other candidate lands serially, here and now: it never waits for another train.
-  for (const e of cands.slice(1)) if (!settled[e.n] && !closeOuts.some(m => m.e === e)) e.resolve(await land(e.n, e.ready))
+  const rest = async () => {
+    // Open cars would refuse the next landing's lock moves, so they are cleared before anything else lands.
+    if (carsMaybe) await trainSweep(SETUP.delete_branch ? [...(firstMerged ? [first] : []), ...closeOuts.map(m => m.e)].map(e => e.ready.branch) : [])
+    for (const e of cands.slice(1)) if (settled[e.n]) e.resolve(settled[e.n])
+    for (const m of closeOuts) m.e.resolve(tag(await land(m.e.n, m.e.ready, { mergedPr: m.pr })))
+    // Every other candidate lands serially, here and now: it never waits for another train.
+    for (const e of cands.slice(1)) if (!settled[e.n] && !closeOuts.some(m => m.e === e)) e.resolve(await land(e.n, e.ready))
+  }
+  return { train, tag, rest }
+}
+// A train of issues that waited together. The first landing owns the lock: it takes it, the train runs inside it, and it releases it on every exit.
+const runTrain = async cands => {
+  const T = trainOf(cands)
+  cands[0].resolve(T.tag(await land(cands[0].n, cands[0].ready, { train: T.train })))
+  await T.rest()
 }
 
 const kindsOk = e => Array.isArray(e.ready.acceptance) && e.ready.acceptance.every(a => a && ACCEPT_KINDS.includes(a.kind))
@@ -1343,15 +1358,36 @@ const drain = async () => {
   if (!WAITING.length) return // an earlier drain took this entry
   if (carsMaybe) await trainSweep()
   const take = WAITING.splice(0, TRAIN_MAX)
+  const joined = [] // #936: the issues that left WAITING to join a landing of this drain
   try {
     // The indirect merge needs the cars' commits in the integration branch's history, so only the merge strategy trains.
-    const cands = SETUP.merge_strategy === 'merge' ? take.filter(kindsOk) : []
+    const trainable = SETUP.merge_strategy === 'merge'
+    const cands = trainable ? take.filter(kindsOk) : []
     const trains = cands.length >= 2
     if (trains) await runTrain(cands)
-    for (const e of take) if (!(trains && cands.includes(e))) e.resolve(await land(e.n, e.ready))
+    for (const e of take) {
+      if (trains && cands.includes(e)) continue
+      // #936: this issue lands alone. Its landing asks join once, when its lock wait ended with a behind first poll: the issues waiting
+      // then (they became ready during that wait) leave WAITING and ride a train behind it, under the lock it already holds at its ready head.
+      let T = null
+      const join = () => {
+        const more = WAITING.filter(kindsOk).slice(0, TRAIN_MAX - 1)
+        if (!more.length) return null
+        // The train is built and announced first: a throw here leaves every joiner in WAITING, for its own drain.
+        const built = trainOf([e, ...more])
+        log(`#${e.n}: ${more.map(m => `#${m.n}`).join(', ')} became ready while it waited for the land lock; they land with it as a train`)
+        for (const m of more) WAITING.splice(WAITING.indexOf(m), 1)
+        joined.push(...more)
+        T = built
+        return T.train
+      }
+      const row = await land(e.n, e.ready, trainable && kindsOk(e) ? { join } : {})
+      e.resolve(T ? T.tag(row) : row)
+      if (T) await T.rest()
+    }
   } catch (err) {
     // land() never throws and releases its own lock; a row already resolved keeps its value.
-    for (const e of take) e.resolve({ issue: e.n, outcome: 'stopped', stage: 'land', detail: String((err && err.message) || err) })
+    for (const e of [...take, ...joined]) e.resolve({ issue: e.n, outcome: 'stopped', stage: 'land', detail: String((err && err.message) || err) })
   }
 }
 // The one way a ready issue reaches the land queue. Without train it is the serial enqueue, exactly as before #822.
@@ -1408,7 +1444,8 @@ Run alone and exactly: forge-claim release --repo ${SLUG} --issue ${n} --holder 
 Return its verdict and any detail. ${FORGE_TIMEOUT} Run nothing else.
 ${RULES_FOR(REPO, f.branch)}`, { label: `release-${n}`, phase: 'Deliver', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: RELEASE_SCHEMA }), `release-${n}`)
       }
-      rows[n] = { issue: n, outcome: 'needs-design', lane: f.lane }
+      // #932: the row says why intake routed it away, in one bounded line.
+      rows[n] = { issue: n, outcome: 'needs-design', lane: f.lane, ...(nonEmpty(f.why) && oneLine(f.why) ? { reason: oneLine(f.why) } : {}) }
       return false
     }
     laneName = f.lane

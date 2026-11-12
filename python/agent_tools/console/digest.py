@@ -41,6 +41,10 @@ moments. Transitions:
   known unanswered record to `answered` true. Anything else about the inbox says
   nothing.
 
+A session whose known name fully matches `sprints.MANAGER_SESSION_NAME` (`<project> sprint <16
+lowercase hex>`, made by `manager.session_name`) makes no session moment, because what a sprint did
+is said by its brief, report and withdrawal lines (#922).
+
 Sentences (exact). `<headline>` is the first question of an item that has
 questions, else the stored question (`view.item_headline`, so a decision never
 reads its fixed boilerplate); `<where>` is the event's project, else the last
@@ -93,7 +97,7 @@ from agent_tools.console.event_log import (
     Event)
 from agent_tools.console.sessions import (
     ENDED, GONE, HOOK, LIMIT, SEEN, WORKING, SessionState, session_states)
-from agent_tools.console.sprints import SprintState, sprint_states
+from agent_tools.console.sprints import MANAGER_SESSION_NAME, SprintState, sprint_states
 from agent_tools.console.view import (
     INBOX_CHANGED, INBOX_SEEN, InboxRecord, inbox_records, item_headline, repo_name,
     sprint_state, sprint_waiting)
@@ -155,6 +159,8 @@ def _session_moment(event: Event, before: SessionState | None,
         else:
             return None
         session = after
+    if isinstance(session.name, str) and MANAGER_SESSION_NAME.fullmatch(session.name):
+        return None
     if session.repo is None:
         return None
     where = event.project or repo_name(session.repo)
