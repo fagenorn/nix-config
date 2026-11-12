@@ -12,7 +12,7 @@ import sys
 import unittest
 from pathlib import Path
 
-from agent_tools.console import sprint
+from agent_tools.console import manager, sprint
 
 from . import console_test_support as support
 from .test_console_answer import view_of
@@ -22,10 +22,12 @@ from .test_console_writes import Case
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-def run_sprint(*args, stdin=None):
+def run_sprint(*args, stdin=None, env=None):
+    inherited = {k: v for k, v in os.environ.items()
+                 if k not in (manager.ID_ENV, manager.SECRET_ENV)}
     return subprocess.run(
         [sys.executable, "-m", "agent_tools.console.sprint", *map(str, args)],
-        env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "python")},
+        env={**inherited, "PYTHONPATH": str(REPO_ROOT / "python"), **(env or {})},
         input=stdin, capture_output=True, text=True, timeout=30)
 
 
@@ -170,6 +172,57 @@ class SprintCommandTest(Case):
                          "--port", self.port(svc), stdin=json.dumps(PARTS))
         self.assertEqual((got.returncode, got.stdout, got.stderr),
                          (0, "sprint: brief version 1 sent\n", ""))
+
+    def test_the_sprint_and_secret_may_come_from_the_environment(self):
+        svc = self.open()
+        sid = self.goal(svc)
+        secret, brief = self.files(sid, PARTS)
+        text = secret.read_text()
+        env = {manager.ID_ENV: sid, manager.SECRET_ENV: text}
+        port = self.port(svc)
+        got = run_sprint("brief", "--brief-file", brief, "--port", port, env=env)
+        self.assertEqual((got.returncode, got.stdout, got.stderr),
+                         (0, "sprint: brief version 1 sent\n", ""))
+        after = run_sprint("status", "--port", port, env=env)
+        self.assertEqual(after.returncode, 0)
+        parsed = json.loads(after.stdout)
+        self.assertEqual((parsed["decision"], parsed["version"]), ("none", 1))
+        for output in (got.stdout + got.stderr, after.stdout + after.stderr):
+            self.assertNotIn(text.strip(), output)
+
+    def test_a_missing_id_or_secret_exits_2_and_sends_nothing(self):
+        svc = self.open()
+        sid = self.goal(svc)
+        secret, brief = self.files(sid, PARTS)
+        text = secret.read_text()
+        port = self.port(svc)
+        no_id = "sprint: no sprint id: pass --sprint or set CONSOLE_SPRINT_ID\n"
+        cases = [
+            (("brief", "--brief-file", brief, "--port", port), {}, no_id),
+            (("brief", "--brief-file", brief, "--port", port), {manager.ID_ENV: sid},
+             "sprint: no secret: pass --secret-file or set CONSOLE_SPRINT_SECRET\n"),
+            (("brief", "--brief-file", brief, "--port", port),
+             {manager.ID_ENV: "XYZ", manager.SECRET_ENV: text},
+             "sprint: CONSOLE_SPRINT_ID is not a sprint id (16 lowercase hex characters)\n"),
+            (("status", "--port", port), {}, no_id),
+        ]
+        for args, env, line in cases:
+            with self.subTest(args=args, env=sorted(env)):
+                got = self.assert_unchanged(svc, lambda: run_sprint(*args, env=env))
+                self.assertEqual((got.returncode, got.stdout, got.stderr), (2, "", line))
+                self.assertNotIn(text.strip(), got.stderr)
+
+    def test_flags_win_over_the_environment(self):
+        svc = self.open()
+        sid = self.goal(svc)
+        secret, brief = self.files(sid, PARTS)
+        env = {manager.ID_ENV: "b" * 16, manager.SECRET_ENV: "not the secret"}
+        got = run_sprint("brief", "--sprint", sid, "--secret-file", secret,
+                         "--brief-file", brief, "--port", self.port(svc), env=env)
+        self.assertEqual((got.returncode, got.stdout, got.stderr),
+                         (0, "sprint: brief version 1 sent\n", ""))
+        after = run_sprint("status", "--sprint", sid, "--port", self.port(svc), env=env)
+        self.assertEqual(json.loads(after.stdout)["sprint_id"], sid)
 
 
 class CommandContractTest(unittest.TestCase):
