@@ -1434,6 +1434,18 @@ class PageInboxGlanceTest(unittest.TestCase):
         self.assertNotIn("/srv/p00/README.md", shown)
         self.assertFalse(field(opened, "ans-approve")["disabled"])
 
+    def test_an_act_prompts_detail_shows_only_when_its_fold_is_opened(self) -> None:
+        act = check_item("A", "act", answers=[], detail="Run /srv/p00/deploy.sh on the host.")
+        closed, opened = render([
+            START, {"frame": frame([act])}, {"snapshot": True},
+            {"open": "check:owner/p00#A"}, {"snapshot": True},
+        ])
+        self.assertNotIn("/srv/p00/deploy.sh", visible_text(closed["inbox"]))
+        (fold,) = [n for n in nodes(closed["inbox"]) if n["key"] == "check:owner/p00#A"]
+        self.assertFalse(fold["open"])
+        self.assertIn("Show the check", visible_text(closed["inbox"]))
+        self.assertIn("/srv/p00/deploy.sh", visible_text(opened["inbox"]))
+
 
 class PageDigestTest(unittest.TestCase):
     def test_the_digest_lists_newest_first_with_earlier_folded(self) -> None:

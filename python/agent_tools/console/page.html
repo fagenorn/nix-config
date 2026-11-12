@@ -412,8 +412,21 @@ function moreWords(item) {
   if (!(item.more_questions > 0)) return null;
   return el("span", "more", item.more_questions === 1 ? "and 1 more question" : "and " + item.more_questions + " more questions");
 }
-function appendDetail(node, item) {
-  if (item.detail) node.appendChild(el("pre", "detail", item.detail));
+function checkFold(item, words) {
+  const fold = el("details", "check-more");
+  fold.dataset.key = "check:" + itemId(item);
+  fold.appendChild(el("summary", "", words));
+  return fold;
+}
+function appendDetail(node, item, folded) {
+  if (item.detail) {
+    const pre = el("pre", "detail", item.detail);
+    if (folded) {
+      const fold = checkFold(item, "Show the check");
+      fold.appendChild(pre);
+      node.appendChild(fold);
+    } else node.appendChild(pre);
+  }
   if (item.questions.length > 0) {
     const state = decision(item) ? answerState(item) : null;
     item.questions.forEach((q, qi) => {
@@ -644,9 +657,7 @@ function checkBox(item, state) {
   const approves = item.answers.includes("approve");
   let fold = box;
   if (item.detail || approves) {
-    fold = el("details", "check-more");
-    fold.dataset.key = "check:" + itemId(item);
-    fold.appendChild(el("summary", "", approves ? "Review and approve" : "Show the check"));
+    fold = checkFold(item, approves ? "Review and approve" : "Show the check");
     if (item.detail) fold.appendChild(el("pre", "detail", item.detail));
     box.appendChild(fold);
   }
@@ -717,7 +728,7 @@ function leadItem(item) {
   const more = moreWords(item);
   if (more !== null) card.appendChild(more);
   const state = boxState(item);
-  if (state === null) appendDetail(card, item);
+  if (state === null) appendDetail(card, item, true);
   else card.appendChild(answerBox(item, state));
   card.appendChild(metaLine(item, "p", "meta"));
   const links = el("p", "meta");
@@ -731,7 +742,7 @@ function itemLine(item) {
   const more = moreWords(item);
   if (more !== null) line.appendChild(more);
   const state = boxState(item);
-  if (state === null) appendDetail(line, item);
+  if (state === null) appendDetail(line, item, true);
   else line.appendChild(answerBox(item, state));
   line.appendChild(metaLine(item, "span", ""));
   line.appendChild(answerLink(item));
