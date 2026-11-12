@@ -66,6 +66,9 @@ const DEFAULTS = [
   [/^ws-check-/, { whitespace_exit: 1, changed_paths: ['src/a.js'] }],
   [/^verify-fix-/, DONE],
   [/^verify/, { head: SHA, clean: true, results: [{ id: 'build', status: 'pass', summary: 'ok' }], renew: { verdict: 'renewed' } }],
+  // #923: a task fix round commits on top of the head just reviewed; a fix at that same head is a rebuttal.
+  [/^fix-\d+-1$/, { ...DONE, start_head: 'c0ffee', commit: 'f1c0de' }],
+  [/^fix-\d+-2$/, { ...DONE, start_head: 'f1c0de', commit: 'f2c0de' }],
   [/^impl-/, { ...DONE, renew: { verdict: 'renewed' } }],
   [/^(impl|fix)-|^fix-wave$/, DONE],
   [/^pr$/, { pr: 42, head: SHA, renew: { verdict: 'renewed' }, lock: { verdict: 'already_held', lock_sha: SHA }, checks: { state: 'passed', head: SHA, required: ['ci'] } }],
