@@ -1,7 +1,7 @@
 export const meta = {
   name: 'deliver-batch',
   description: 'Deliver a batch of tracker issues in one repository: intake, just-in-time claims, deliver-standard children (a standard-lane issue planned ahead in plan mode, then resumed in ready mode), a serial land queue under the cross-host land lock, one table',
-  whenToUse: 'A batch of issues of one repository the user asked to deliver together; args {repo_root, batch_id (<host>-<yyyymmdd-hhmm>), child_script (the absolute path of deliver-standard.js), issues (numbers) or label (every open issue carrying it), decisions? (owner answers by issue), conts? (a previous run forwarded child continuations), amend? ({"<issue>": a list of {file, find, replace} edits of that issue\'s plan files, only for an issue in conts: sent with its cont to the first child call of the run, and kept in the relaunch with that cont}), unattended? (true only for a run no session watches: its questions are then posted as box prompts), review_sizing? (true passes review_sizing to every deliver-standard child: sized Claude plan and final reviews), train? (true lands up to three ready issues that wait behind a busy land queue through one cumulative car pull request, a landing train; false or absent lands every issue serially), clerk_model? (sonnet, the default, or haiku: the model of the status clerk steps, here and in every deliver-standard child; the setup steps and every step that emits a lifecycle verb stay on sonnet)}; returns one table and, when any issue is unfinished, the relaunch args for a new run',
+  whenToUse: 'A batch of issues of one repository the user asked to deliver together; args {repo_root, batch_id (<host>-<yyyymmdd-hhmm>), child_script (the absolute path of the deliver-standard.js copy program-copies placed), issues (numbers) or label (every open issue carrying it), decisions? (owner answers by issue), conts? (a previous run forwarded child continuations), amend? ({"<issue>": a list of {file, find, replace} edits of that issue\'s plan files, only for an issue in conts: sent with its cont to the first child call of the run, and kept in the relaunch with that cont}), unattended? (true only for a run no session watches: its questions are then posted as box prompts), review_sizing? (true passes review_sizing to every deliver-standard child: sized Claude plan and final reviews), train? (true lands up to three ready issues that wait behind a busy land queue through one cumulative car pull request, a landing train; false or absent lands every issue serially), clerk_model? (sonnet, the default, or haiku: the model of the status clerk steps, here and in every deliver-standard child; the setup steps and every step that emits a lifecycle verb stay on sonnet)}; returns one table and, when any issue is unfinished, the relaunch args for a new run',
   phases: [
     { title: 'Setup', detail: 'resolve the project contract once' },
     { title: 'Intake', detail: 'read every issue\'s facts and lane behind one barrier, decide eligibility in code' },
@@ -12,7 +12,7 @@ export const meta = {
 
 // Args: repo_root (the checkout), batch_id (the caller-supplied id; the claim holder is
 // <host>/<batch_id>, so a relaunch with the same batch_id re-adopts its own claims), child_script
-// (the absolute path of deliver-standard.js: this program has no filesystem access, D8), issues
+// (the absolute path of the deliver-standard.js copy program-copies placed: this program has no filesystem access, D8), issues
 // (positive integers, distinct) or label (every open issue carrying it; exactly one of the two),
 // decisions ({"<issue>": owner answer}), conts ({"<issue>": a previous run's forwarded child
 // continuation}, only for listed issues, D9; the relaunch keeps of each cont's setup only what a resume reads, see slimCont), unattended (boolean, default false: true only for a run
@@ -425,6 +425,15 @@ const rowReason = r => {
     nonEmpty(finding) ? `review finding: ${finding}` : ''].filter(nonEmpty)
   if (!said.length && r.outcome !== 'stopped') return ''
   return oneLine([r.stage, said.join('; ')].filter(nonEmpty).join(': ') || 'no detail')
+}
+// #912: a thrown child call's reason is the error's first line and the child script; the path is kept whole within REASON_MAX.
+const THREW = 'child program could not be loaded or threw: '
+const threwReason = e => {
+  const msg = e && typeof e.message === 'string' ? e.message : String(e)
+  const first = msg.split('\n')[0].replace(/\s+/g, ' ').trim() || 'no message'
+  const tail = ` (${CHILD})`
+  const room = REASON_MAX - THREW.length - tail.length
+  return `${THREW}${first.length > room ? `${first.slice(0, Math.max(0, room - 3))}...` : first}${tail}`
 }
 // An issue this run never got to deliver: its row keeps the previous run's reason beside its own.
 const UNTRIED = ['not-admitted', 'blocked', 'waits-verification']
@@ -1385,9 +1394,20 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
     }
 
     let r = null
+    let threw = ''
+    // #912: a thrown call logs its error whole and keeps its reason for the row; it reads laneName when called.
+    const child = async mode => {
+      try {
+        return amended(n, await workflow({ scriptPath: CHILD }, childArgs(n, laneName, mode)))
+      } catch (e) {
+        log(`#${n}: child-${n} threw: ${String((e && (e.stack || e.message)) || e)}`)
+        threw = threwReason(e)
+        return null
+      }
+    }
     try {
       if (ahead) {
-        try { r = amended(n, await workflow({ scriptPath: CHILD }, childArgs(n, laneName, 'plan'))) } catch (e) { r = null }
+        r = await child('plan')
         if (r && r.stage === 'planned' && isObj(r.cont) && !terminalChild(r)) {
           CONTS[n] = r.cont
           if (breaker) { rows[n] = { issue: n, outcome: 'not-admitted', stage: 'planned' }; return }
@@ -1395,18 +1415,18 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
           PLAN.leave()
           held = RUN
           if (breaker) { rows[n] = { issue: n, outcome: 'not-admitted', stage: 'planned' }; return }
-          try { r = amended(n, await workflow({ scriptPath: CHILD }, childArgs(n, laneName, 'ready'))) } catch (e) { r = null }
+          r = await child('ready')
         }
         // D9: a live stop with no cont makes the forwarded or planned cont obsolete (terminalChild(null) is true: a dead child keeps it).
         if (!terminalChild(r) && !r.cont) delete CONTS[n]
       } else {
-        try { r = amended(n, await workflow({ scriptPath: CHILD }, childArgs(n, laneName, 'ready'))) } catch (e) { r = null }
+        r = await child('ready')
         if (r && r.stage === 'ineligible' && !terminalChild(r)) {
           // The direct lane rejected the issue: its cont would repeat the rejected attempt, so drop it and rerun once in the standard lane (setup re-adopts the worktree and the claim).
           delete CONTS[n]
           laneName = 'standard'
           rows[n] = { issue: n, outcome: 'eligible', lane: laneName }
-          try { r = amended(n, await workflow({ scriptPath: CHILD }, childArgs(n, laneName, 'ready'))) } catch (e) { r = null }
+          r = await child('ready')
         }
       }
       if (terminalChild(r)) trip(`child-${n}`)
@@ -1414,7 +1434,7 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
       release()
     }
 
-    if (r === null || r === undefined) { rows[n] = { issue: n, outcome: 'stopped', detail: `child-${n} returned nothing` }; return }
+    if (r === null || r === undefined) { rows[n] = { issue: n, outcome: 'stopped', detail: threw || `child-${n} returned nothing` }; return }
     if (r.cont) CONTS[n] = r.cont
     if (terminalChild(r)) { rows[n] = { issue: n, outcome: 'stopped', stage: r.stage, dead_agents: r.dead_agents, ...stopDetail(r) }; return }
     if (r.stage === 'done') {

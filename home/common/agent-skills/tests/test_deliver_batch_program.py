@@ -2911,6 +2911,45 @@ class StopReasonTest(unittest.TestCase):
                 self.assertIn(f"#1: stopped ({reason})", out["logs"])
                 self.assertEqual(result["relaunch"]["reasons"], {"1": reason})
 
+    def test_a_child_that_throws_names_the_error_and_the_script(self):
+        MSG = "Cannot load the script\n    at load (workflow.js:1)"
+        WHY = "child program could not be loaded or threw: Cannot load the script (/s/deliver-standard.js)"
+        DIRECT = {"facts-1": {"lane": "direct", "why": "small"}}
+        INELIGIBLE = {"stage": "ineligible", "cont": {"setup": {}, "lane": "direct"}}
+        cases = (
+            ("plan call", {"children": {"1": {"throw": MSG}}}),
+            ("ready call after a plan", {"children": {"1": [planned(1), {"throw": MSG}]}}),
+            ("direct ready call", {"patch": DIRECT, "children": {"1": {"throw": MSG}}}),
+            ("standard rerun of an ineligible direct child", {"patch": DIRECT, "children": {"1": [INELIGIBLE, {"throw": MSG}]}}),
+        )
+        for name, scenario in cases:
+            with self.subTest(name):
+                out = run_full(**scenario)
+                result = out["result"]
+                self.assertEqual(row(result, 1), {"issue": 1, "outcome": "stopped", "reason": WHY})
+                self.assertEqual(result["relaunch"]["reasons"], {"1": WHY})
+                self.assertIn(f"#1: stopped ({WHY})", out["logs"])
+                self.assertNotIn("at load", row(result, 1)["reason"])
+                self.assertEqual(result["stage"], "breaker")
+                self.assertTrue(any(line.startswith("#1: child-1 threw: ") and "at load (workflow.js:1)" in line for line in out["logs"]), out["logs"])
+        with self.subTest("another script path"):
+            out = run_full(args=dict(ARGS, child_script="/c/other.js"), children={"1": {"throw": MSG}})
+            self.assertEqual(row(out["result"], 1)["reason"], "child program could not be loaded or threw: Cannot load the script (/c/other.js)")
+        with self.subTest("empty message"):
+            out = run_full(children={"1": {"throw": ""}})
+            self.assertEqual(row(out["result"], 1)["reason"], "child program could not be loaded or threw: no message (/s/deliver-standard.js)")
+
+    def test_a_long_thrown_message_keeps_the_script_path(self):
+        LONG = "E" * 400
+        CUT = "child program could not be loaded or threw: " + "E" * 228 + "... (/s/deliver-standard.js)"
+        self.assertEqual(len(CUT), 300)
+        out = run_full(children={"1": {"throw": LONG}})
+        result = out["result"]
+        self.assertEqual(row(result, 1), {"issue": 1, "outcome": "stopped", "reason": CUT})
+        self.assertEqual(result["relaunch"]["reasons"], {"1": CUT})
+        self.assertIn(f"#1: stopped ({CUT})", out["logs"])
+        self.assertTrue(any(line.startswith("#1: child-1 threw: ") and LONG in line for line in out["logs"]), out["logs"])
+
     def test_every_stopped_row_has_a_bounded_one_line_reason(self):
         long = {"stage": "task", "reason": "task: " + "x\n" * 400, "cont": {"setup": {}}}
         rows = (
