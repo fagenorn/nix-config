@@ -60,6 +60,17 @@ ul { list-style: none; }
 .rest, .done { margin-top: 10px; }
 .rest li, .done li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; padding: 5px 0; font-size: .875rem; color: var(--ov2); }
 .rest b, .done b { font-weight: 600; color: var(--sub0); }
+.abox { flex-basis: 100%; margin-top: 6px; }
+.abox .meta { margin-top: 6px; }
+.abox .meta.now { color: var(--text); }
+.abox .opts { list-style: none; padding-left: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; margin-top: 4px; }
+.opt, .send, .undo { display: inline-flex; align-items: baseline; gap: 8px; font: inherit; color: inherit; text-align: left; background: none; border: 1px solid var(--hair); border-radius: 8px; padding: 2px 10px; cursor: pointer; transition: background-color .16s; }
+.opt:hover:enabled, .send:hover:enabled, .undo:hover:enabled { background: rgba(202, 211, 245, .05); }
+.opt:disabled, .send:disabled { cursor: default; }
+.opt kbd { font: inherit; color: var(--ov2); }
+.opt.picked { color: var(--lav); border-color: var(--lav); }
+.act { flex-basis: 100%; display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 10px; margin-top: 8px; font-size: .8125rem; color: var(--ov2); }
+.fail { color: var(--red); }
 .done-head { margin-top: 24px; font: 600 .875rem/1.4 var(--ui); color: var(--ov2); }
 #digest { margin-top: 40px; max-width: 44rem; }
 #digest:empty { margin-top: 0; }
@@ -259,26 +270,194 @@ function metaLine(item) {
 }
 function appendDetail(node, item) {
   if (item.questions.length > 0) {
-    for (const q of item.questions) {
+    const state = answerable(item) ? answerState(item) : null;
+    item.questions.forEach((q, qi) => {
       node.appendChild(el("p", "meta", q.question));
       const list = el("ul", "opts");
-      for (const option of q.options) {
+      q.options.forEach((option, oi) => {
         const chosen = option === q.chosen;
-        list.appendChild(el("li", chosen ? "picked" : "", chosen ? "chosen: " + option : option));
-      }
+        const picked = chosen || (state !== null && state.picks[qi] === oi);
+        list.appendChild(el("li", picked ? "picked" : "", chosen ? "chosen: " + option : option));
+      });
       node.appendChild(list);
-    }
+    });
   } else if (item.items.length > 0) {
     const list = el("ul", "opts");
     for (const entry of item.items) list.appendChild(el("li", "", entry));
     node.appendChild(list);
   }
 }
+const UNDO_MS = 5000;
+const answers = new Map();
+let lastView = null;
+let currentId = null;
+function itemId(item) {
+  return item.project_id + "#" + item.key;
+}
+function answerable(item) {
+  return item.reason === "decision" && item.questions.length > 0 && !item.answered;
+}
+function startPicks(item) {
+  return item.questions.map((q) => {
+    const chosen = q.options.indexOf(q.chosen);
+    if (chosen >= 0) return chosen;
+    const recommended = q.options.indexOf(q.recommended);
+    return recommended >= 0 ? recommended : null;
+  });
+}
+function answerState(item) {
+  const id = itemId(item);
+  let state = answers.get(id);
+  if (state === undefined) {
+    const picks = startPicks(item);
+    const first = picks.indexOf(null);
+    state = {
+      phase: "choosing", picks, q: first >= 0 ? first : 0, timer: null, reason: "",
+      project_id: item.project_id, key: item.key,
+    };
+    answers.set(id, state);
+  }
+  return state;
+}
+function choosable(state) {
+  return state.phase === "choosing" || state.phase === "failed";
+}
+function currentEntry(open) {
+  for (const item of open) {
+    if (!answerable(item)) continue;
+    const state = answerState(item);
+    if (choosable(state)) return { item, state };
+  }
+  return null;
+}
+function picksComplete(item, state) {
+  return item.questions.every((_, i) => typeof state.picks[i] === "number");
+}
+function redraw() {
+  if (lastView !== null) renderInbox(lastView);
+}
+function choose(state, qi, oi) {
+  if (!choosable(state)) return;
+  state.picks[qi] = oi;
+  state.q = qi;
+  state.phase = "choosing";
+  state.reason = "";
+}
+function start(item, state) {
+  if (!choosable(state) || !picksComplete(item, state)) return false;
+  state.phase = "waiting";
+  state.reason = "";
+  state.timer = setTimeout(() => fireAnswer(itemId(item)), UNDO_MS);
+  return true;
+}
+function undo(state) {
+  if (state.phase !== "waiting") return;
+  clearTimeout(state.timer);
+  state.timer = null;
+  state.phase = "choosing";
+}
+function fireAnswer(id) {
+  const state = answers.get(id);
+  if (state === undefined || state.phase !== "waiting") return;
+  state.timer = null;
+  const item = lastView === null ? undefined : lastView.inbox.open.find((i) => itemId(i) === id);
+  if (item === undefined) {
+    answers.delete(id);
+    return;
+  }
+  sendAnswer(id, state, item);
+}
+async function sendAnswer(id, state, item) {
+  state.phase = "sending";
+  redraw();
+  let reason = null;
+  try {
+    const response = await fetch("/api/answer", {
+      method: "POST",
+      headers: { "X-Console-Token": token, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        project_id: state.project_id, key: state.key,
+        choices: item.questions.map((_, i) => state.picks[i]),
+      }),
+    });
+    if (response.status !== 204) {
+      reason = (await response.text()).trim() || "HTTP " + response.status;
+    }
+  } catch (error) {
+    console.error(error);
+    reason = "the console did not answer";
+  }
+  if (answers.get(id) !== state) return;
+  if (reason === null) {
+    state.phase = "sent";
+  } else {
+    state.phase = "failed";
+    state.reason = reason;
+  }
+  redraw();
+}
+function actionButton(cls, label, onClick) {
+  const button = el("button", cls, label);
+  button.type = "button";
+  button.addEventListener("click", onClick);
+  return button;
+}
+function actionLine(item, state) {
+  const act = el("p", "act");
+  if (state.phase === "waiting") {
+    act.appendChild(el("span", "", "Sending in five seconds."));
+    act.appendChild(actionButton("undo", "Undo", () => { undo(state); redraw(); }));
+  } else if (state.phase === "sending") {
+    act.appendChild(el("span", "", "Sending\u2026"));
+  } else if (state.phase === "sent") {
+    act.appendChild(el("span", "", "Answered, waiting for the agent to pick it up"));
+  } else {
+    if (state.phase === "failed") act.appendChild(el("span", "fail", "Could not send: " + state.reason));
+    const send = actionButton("send", "Send", () => { if (start(item, state)) redraw(); });
+    if (!picksComplete(item, state)) send.setAttribute("disabled", "");
+    act.appendChild(send);
+  }
+  return act;
+}
+function answerBox(item, state) {
+  const live = choosable(state);
+  const now = Math.min(state.q, item.questions.length - 1);
+  const box = el("div", "abox");
+  item.questions.forEach((q, qi) => {
+    box.appendChild(el("p", live && itemId(item) === currentId && qi === now ? "meta now" : "meta", q.question));
+    const list = el("ul", "opts");
+    q.options.forEach((option, oi) => {
+      const button = el("button", state.picks[qi] === oi ? "opt picked" : "opt");
+      button.type = "button";
+      if (!live) button.setAttribute("disabled", "");
+      button.appendChild(el("kbd", "", String(oi + 1)));
+      button.appendChild(el("span", "", option === q.chosen ? "chosen: " + option : option));
+      button.addEventListener("click", () => {
+        if (!choosable(state)) return;
+        choose(state, qi, oi);
+        redraw();
+      });
+      const row = el("li");
+      row.appendChild(button);
+      list.appendChild(row);
+    });
+    box.appendChild(list);
+  });
+  box.appendChild(actionLine(item, state));
+  return box;
+}
+function boxState(item) {
+  if (!answerable(item)) return null;
+  const state = answerState(item);
+  return itemId(item) === currentId || !choosable(state) ? state : null;
+}
 function leadItem(item) {
   const card = el("article", "card");
   card.appendChild(el("h2", "", item.project_id + " #" + item.issue));
   card.appendChild(el("p", "ask", item.question));
-  appendDetail(card, item);
+  const state = boxState(item);
+  if (state === null) appendDetail(card, item);
+  else card.appendChild(answerBox(item, state));
   card.appendChild(el("p", "meta", metaLine(item)));
   const links = el("p", "meta");
   links.appendChild(answerLink(item));
@@ -289,15 +468,24 @@ function itemLine(item) {
   const line = el("li");
   line.appendChild(el("b", "", item.project_id + " #" + item.issue));
   line.appendChild(el("span", "", item.question));
-  appendDetail(line, item);
+  const state = boxState(item);
+  if (state === null) appendDetail(line, item);
+  else line.appendChild(answerBox(item, state));
   line.appendChild(el("span", "", metaLine(item)));
   line.appendChild(answerLink(item));
   return line;
 }
 function renderInbox(view) {
+  lastView = view;
   const section = document.getElementById("inbox");
   section.replaceChildren();
   const open = view.inbox.open;
+  const present = new Set(open.map(itemId));
+  for (const [id, state] of answers) {
+    if (!present.has(id) && state.phase !== "waiting" && state.phase !== "sending") answers.delete(id);
+  }
+  const current = currentEntry(open);
+  currentId = current === null ? null : itemId(current.item);
   if (open.length > 0) section.appendChild(leadItem(open[0]));
   if (open.length > 1) {
     const rest = el("ul", "rest");
@@ -306,7 +494,7 @@ function renderInbox(view) {
   }
   const answered = view.inbox.answered;
   if (answered.length > 0) {
-    section.appendChild(el("h2", "done-head", "Answered, waiting for the agent"));
+    section.appendChild(el("h2", "done-head", "Answered, waiting for the agent to pick it up"));
     const done = el("ul", "done");
     for (const item of answered) done.appendChild(itemLine(item));
     section.appendChild(done);
@@ -421,6 +609,40 @@ window.addEventListener("focus", () => { if (heldSince === null) heldSince = Dat
 window.addEventListener("blur", endHold);
 window.addEventListener("pagehide", endHold);
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") endHold(); });
+document.addEventListener("keydown", (event) => {
+  if (event.ctrlKey || event.altKey || event.metaKey || event.repeat || lastView === null) return;
+  if (event.key === "Escape") {
+    let undone = false;
+    for (const state of answers.values()) {
+      if (state.phase === "waiting") {
+        undo(state);
+        undone = true;
+      }
+    }
+    if (undone) {
+      event.preventDefault();
+      redraw();
+    }
+    return;
+  }
+  const current = currentEntry(lastView.inbox.open);
+  if (current === null) return;
+  const { item, state } = current;
+  if (event.key === "Enter") {
+    if (start(item, state)) {
+      event.preventDefault();
+      redraw();
+    }
+  } else if (/^[1-9]$/.test(event.key)) {
+    const qi = Math.min(state.q, item.questions.length - 1);
+    const oi = Number(event.key) - 1;
+    if (oi >= item.questions[qi].options.length) return;
+    choose(state, qi, oi);
+    state.q = Math.min(qi + 1, item.questions.length - 1);
+    event.preventDefault();
+    redraw();
+  }
+});
 const conn = document.getElementById("conn");
 const source = new EventSource("/api/stream");
 source.addEventListener("view", (event) => render(JSON.parse(event.data)));

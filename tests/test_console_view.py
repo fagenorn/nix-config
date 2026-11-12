@@ -14,6 +14,7 @@ from agent_tools.console.deliveries import (
 from agent_tools.console.event_log import Event
 from agent_tools.console.sessions import ENDED, SessionState
 from agent_tools.console.view import (
+    CHOOSE_SENTENCE,
     INBOX_CHANGED,
     INBOX_GONE,
     INBOX_HEALTH,
@@ -535,6 +536,25 @@ class InboxStatementTest(unittest.TestCase):
                 self.assertEqual(statement["inbox_items"], n)
                 if n:
                     self.assertEqual(statement["sentence"], NEEDS_SENTENCE)
+
+    def test_the_sentence_offers_the_keys_only_when_an_item_can_be_answered(self):
+        decision = {**item("p", "kd"), "reason": "decision", "questions": [
+            {"question": "Which?", "options": ["a", "b"], "chosen": None,
+             "recommended": None}]}
+        table = [
+            ("a question", [item("p", "kq")], NEEDS_SENTENCE),
+            ("a decision behind a conflict",
+             [{**item("p", "kc"), "reason": "conflict", "items": ["x"]}, decision],
+             CHOOSE_SENTENCE),
+            ("an unverified prompt", [{**decision, "questions": []}], NEEDS_SENTENCE),
+            ("an answered decision",
+             [item("p", "kq"), {**decision, "answered": True}], NEEDS_SENTENCE),
+        ]
+        for name, items, expected in table:
+            with self.subTest(name):
+                sentence = derive_view([state("p", 1)], self.records(*items))[
+                    "statement"]["sentence"]
+                self.assertEqual(sentence, expected)
 
     def test_open_items_are_ordered_by_held_work(self):
         items = [item("p", "a", held=1), item("p", "b", held=5),
