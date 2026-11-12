@@ -430,3 +430,172 @@ class StopServiceTest(Case):
         (entry,) = project["finished_sprints"]["sprints"]
         self.assertEqual((entry["sprint_id"], entry["state"], entry["ended_at"]),
                          (sid, "done", reported))
+
+
+class WithdrawStopTest(StopServiceTest):
+    def withdraw(self, svc, sid, project_id="owner/p01"):
+        return support.post_page(svc.address, "/api/withdraw", self.own(svc, **JSON),
+                                 json.dumps({"project_id": project_id, "sprint_id": sid}).encode())
+
+    def unstopped(self, svc):
+        return view_of(svc)["unstopped"]
+
+    def stored(self, kind):
+        return [row for row in support.log_rows(self.store) if row[2] == kind]
+
+    def withdrawing_launch(self, listed_in_launch):
+        """A launcher that withdraws the sprint it launches; the service is `self.svc`."""
+        self.during = []
+
+        def launch(launched):
+            self.svc.withdraw_goal("owner/p01", launched.sprint_id)
+            self.during.append(list(self.stops))
+            if listed_in_launch:
+                self.listed[FIRST] = sessions.Observation(
+                    FIRST, "/srv/p01", 1, "idle", None, launched.session_name, None, "work")
+
+        return launch
+
+    def test_withdrawing_stops_the_managers_session_exactly_once(self):
+        svc = self.begin()
+        sid = self.running(svc)
+        self.nudges.clear()
+        self.assertEqual(self.withdraw(svc, sid)[::2], (204, b""))
+        self.assertEqual(self.stops, [(FIRST, "work")])
+        self.assertEqual(self.rows("manager.stopped"), [{"sprint_id": sid}])
+        self.assertEqual(self.stored("manager.stopped")[0][3], "owner/p01")
+        self.assertEqual(self.rows("sprint.stop_requested"), [])
+        self.assertEqual(self.nudges, [])
+        self.now[0] += 3600
+        svc.finish_stops()
+        self.assertEqual(len(self.stops), 1)
+
+    def test_a_failed_withdrawal_stop_is_shown_and_retried(self):
+        svc = self.begin()
+        sid = self.running(svc)
+        self.failures = ["No job matching"]
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            self.assertEqual(self.withdraw(svc, sid)[::2], (204, b""))
+        self.assertEqual(len(self.stops), 1)
+        (row,) = self.stored("manager.stop_failed")
+        self.assertIn(f"console: manager_stop_failed {sid} No job matching\n", stderr.getvalue())
+        self.assertEqual(self.unstopped(svc), [{
+            "project_id": "owner/p01", "sprint_id": sid, "goal": GOAL_TEXT,
+            "text": "The manager of a withdrawn goal could not be stopped: No job matching; "
+                    "trying again",
+            "failed_at": row[1]}])
+        self.now[0] = T0 + 59
+        svc.finish_stops()
+        self.assertEqual(len(self.stops), 1)
+        self.now[0] = T0 + 60
+        svc.finish_stops()
+        self.assertEqual(len(self.stops), 2)
+        self.assertEqual(self.rows("manager.stopped"), [{"sprint_id": sid}])
+        self.assertEqual(self.unstopped(svc), [])
+        self.now[0] = T0 + 3600
+        svc.finish_stops()
+        self.assertEqual(len(self.stops), 2)
+
+    def test_a_withdrawal_without_a_listed_session_records_a_stop_without_a_call(self):
+        svc = self.begin()
+        sid = self.running(svc)
+        self.listed = {}
+        self.now[0] = T0 + 31
+        self.withdraw(svc, sid)
+        self.assertEqual(self.stops, [])
+        self.assertEqual(self.rows("manager.stopped"), [{"sprint_id": sid}])
+        self.assertEqual(self.unstopped(svc), [])
+
+    def test_a_pending_withdrawal_stop_survives_a_restart(self):
+        first = self.begin()
+        sid = self.running(first)
+        self.failures = ["No job matching"]
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.withdraw(first, sid)
+        first.close()
+        self.now[0] = T0 + 60
+        svc = self.begin()
+        self.assertEqual(len(self.unstopped(svc)), 1)
+        svc.finish_stops()
+        self.assertEqual(len(self.stops), 2)
+        self.assertEqual(self.rows("manager.stopped"), [{"sprint_id": sid}])
+        self.assertEqual(self.unstopped(svc), [])
+
+    def test_a_withdrawal_recorded_before_this_change_is_stopped_on_start(self):
+        sid = "0123456789abcdef"
+        log = EventLog(self.store, clock=self.log_clock)
+        log.append([("goal.stated", "owner/p01", {"sprint_id": sid, "goal": GOAL_TEXT})])
+        log.append([("goal.withdrawn", "owner/p01", {"sprint_id": sid, "goal": GOAL_TEXT})])
+        log.close()
+        self.listed[FIRST] = sessions.Observation(
+            FIRST, "/srv/p01", 1, "idle", None, manager.session_name("owner/p01", sid), None,
+            "work")
+        svc = self.begin()
+        svc.finish_stops()
+        self.assertEqual(self.stops, [(FIRST, "work")])
+        self.assertEqual(self.rows("manager.stopped"), [{"sprint_id": sid}])
+
+    def test_without_a_stopper_a_withdrawal_appends_only_its_row(self):
+        svc = self.begin(stopper=None)
+        sid = self.running(svc)
+        before = len(support.log_rows(self.store))
+        self.withdraw(svc, sid)
+        added = support.log_rows(self.store)[before:]
+        self.assertEqual([row[2] for row in added], ["goal.withdrawn"])
+        self.now[0] = T0 + 3600
+        svc.finish_stops()
+        self.assertEqual(len(support.log_rows(self.store)), before + 1)
+        self.assertEqual(self.stops, [])
+
+    def test_a_completed_withdrawal_stop_survives_retention_and_a_restart(self):
+        first = self.begin()
+        sid = self.running(first)
+        self.withdraw(first, sid)
+        self.assertEqual(len(self.stops), 1)
+        self.assertEqual(self.rows("manager.stopped"), [{"sprint_id": sid}])
+        first.close()
+        self.now[0] = T0 + 91 * 86400
+        svc = self.begin()
+        svc.finish_stops()
+        self.assertEqual(len(self.stops), 1)
+        self.assertEqual(len(self.rows("manager.stopped")), 1)
+        self.assertEqual(self.unstopped(svc), [])
+
+    def test_a_withdrawal_during_a_launch_stops_the_session_the_launch_made(self):
+        svc = self.begin(launcher=self.withdrawing_launch(True))
+        self.svc = svc
+        sid = svc.state_goal("owner/p01", GOAL_TEXT)
+        self.assertEqual(self.during, [[]])
+        self.assertEqual(self.stops, [])
+        for kind in ("manager.stopped", "manager.stop_failed", "manager.started"):
+            self.assertEqual(self.rows(kind), [])
+        svc.finish_stops()
+        self.assertEqual(self.stops, [(FIRST, "work")])
+        self.assertEqual(self.rows("manager.stopped"), [{"sprint_id": sid}])
+
+    def test_a_session_listed_late_after_a_launch_is_still_stopped(self):
+        svc = self.begin(launcher=self.withdrawing_launch(False))
+        self.svc = svc
+        sid = svc.state_goal("owner/p01", GOAL_TEXT)
+        svc.finish_stops()
+        self.assertEqual(self.stops, [])
+        self.assertEqual(self.rows("manager.stopped"), [])
+        self.now[0] = T0 + 10
+        self.listed[FIRST] = sessions.Observation(
+            FIRST, "/srv/p01", 1, "idle", None, manager.session_name("owner/p01", sid), None,
+            "work")
+        svc.finish_stops()
+        self.assertEqual(self.stops, [(FIRST, "work")])
+        self.assertEqual(self.rows("manager.stopped"), [{"sprint_id": sid}])
+        self.listed = {}
+        self.now[0] = T0 + 100
+        second = svc.state_goal("owner/p01", GOAL_TEXT)
+        self.now[0] = T0 + 129.999
+        svc.finish_stops()
+        self.assertEqual(self.rows("manager.stopped"), [{"sprint_id": sid}])
+        self.now[0] = T0 + 130
+        svc.finish_stops()
+        self.assertEqual(self.rows("manager.stopped"),
+                         [{"sprint_id": sid}, {"sprint_id": second}])
+        self.assertEqual(len(self.stops), 1)

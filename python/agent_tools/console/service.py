@@ -323,7 +323,9 @@ folded sprint exists and belongs to that project (registration is not checked: a
 that left the registry is hidden, and withdrawing it is harmless), appends exactly one
 `goal.withdrawn` row carrying the stated goal, folds and publishes, then removes the secret; a
 failure to remove is one stderr line `console: sprint_secret_unremoved <sprint_id> <Type>:
-<message>` and the withdrawal still succeeds. The sprints are folded at construction and in `_fold`
+<message>` and the withdrawal still succeeds; then, with a stopper, it stops the manager's session at
+once, or once its launch or nudge in flight has ended (below), sending the manager no message and no
+nudge. The sprints are folded at construction and in `_fold`
 (`sprints.sprint_states`) and handed to `derive_view`; `retain()` re-folds nothing, because goal, brief,
 report, closing, stop-request and `manager.stopped` rows are never removed. The secret's value appears in no answer, view, stream frame, row or stderr line.
 
@@ -395,6 +397,19 @@ ingest lock, raises `Refused` with `NOT_OPEN` unless the sprint is open and of t
 `ALREADY_STOPPING` when it has `stop_at`, `ENDED` when it has `stopped_at` or has ended, each with
 nothing appended; else it appends one `sprint.stop_requested {sprint_id, goal}` row (the sprint's one
 stop message), folds and publishes, and reserves and dispatches the nudge as `send_message` does.
+A withdrawal leaves a pending stop (`_pending`, `sprints.pending_stops`, folded with the sprints at
+construction, after the retention pass, and in `_fold`, and handed to `derive_view` as `pending`):
+`withdraw_goal` calls `_reserve_stop` under the lock, with a stopper, and dispatches `_stop_session`
+after releasing it when that reserved; while a launch or a nudge of the sprint is in flight nothing is
+dispatched, the stop stays pending and the first `finish_stops` after they end takes it. A pending
+stop is ended for good only by a `manager.stopped` row, which is kept, so it stays ended past
+retention and a restart; a withdrawal recorded before this change, with no such row, is stopped on
+the first `finish_stops`. A failure (`manager.stop_failed`) leaves it pending, shown in the view's
+`unstopped`, and due again `sprints.STOP_RETRY_MS` after it. `finish_stops` also reserves each pending
+stop for which `sprints.pending_due` holds, only with a stopper (without one a withdrawal appends
+exactly its one `goal.withdrawn` row). `_stop_session` serves a pending stop as well (the open sprint
+gone): the session name and the rows' project come from the pending stop, the settle window below
+applies, and no row is appended for a sprint that is neither stopping nor pending.
 One sprint's launch, nudge and session stop never overlap: `_reserve_stop(sprint_id)`, under the lock,
 adds the sprint to `_stopping` only when it is in none of `_stopping`, `_launching` and `_nudging`
 (a stop that cannot be reserved stays due and the next `finish_stops` takes it). `finish_stops()`,
@@ -452,7 +467,7 @@ unreadable, again only after it read successfully in between) and `console: jour
 Construction order: bind the server (an `OSError` propagates and nothing else is
 opened); load or create the page token (a `write_guard.TokenError` propagates: the service does
 not start); open the event log; run one retention pass; fold the projects, the sessions, the inbox,
-the read health, the deliveries, the sprints and the withdrawn ids, then the last look and the digest moments, from it; publish
+the read health, the deliveries, the sprints, the withdrawn ids and the pending stops, then the last look and the digest moments, from it; publish
 the view; sample the registry's signature; `refresh()`; `poll_sessions()`; `poll_deliveries()`. The
 absent set starts empty, so a restart drops a session only after two polls miss
 it. On any failure after the bind, what was opened is closed and the exception
@@ -1167,6 +1182,7 @@ class ConsoleService:
         self._nudger = nudger
         self._stopper = stopper
         self._stopping: set[str] = set()
+        self._pending: dict[str, sprints.PendingStop] = {}
         self._settled: dict[str, int] = {}
         self._listing = (
             (lambda: sessions.read_session_registry(self._session_dirs()))
@@ -1241,6 +1257,7 @@ class ConsoleService:
             self._deliveries = deliveries.delivery_states(events)
             self._sprints = sprints.sprint_states(events)
             self._withdrawn = sprints.withdrawn_ids(events)
+            self._pending = sprints.pending_stops(events)
             self._publish()
             self._signature = signature(self.registry)
             self.refresh()
@@ -1306,7 +1323,7 @@ class ConsoleService:
             now_ms=int(self._clock() * 1000), sprints=self._sprints,
             digest=digest.digest(self._moments, self._looked, self._now()),
             capacity=capacity.capacity_view(self._profiles, self._capacity, self._clock()),
-            managers=self._launcher is not None))
+            managers=self._launcher is not None, pending=self._pending))
         with self._published:
             if view != self._view:
                 self._view = view
@@ -1591,7 +1608,7 @@ class ConsoleService:
             print(f"console: manager_failed {launch.sprint_id} {reason}", file=sys.stderr)
 
     def withdraw_goal(self, project_id: str, sprint_id: str) -> None:
-        """Append one `goal.withdrawn` event for an open sprint of that project, then drop its secret."""
+        """Append one `goal.withdrawn` event for an open sprint of that project, drop its secret, stop its manager."""
         with self._ingest:
             sprint = self._sprints.get(sprint_id)
             if sprint is None or sprint.project_id != project_id:
@@ -1600,6 +1617,9 @@ class ConsoleService:
                 [(GOAL_WITHDRAWN, project_id, {"sprint_id": sprint_id, "goal": sprint.goal})])
             self._apply(appended)
             self._drop_sprint_files(sprint_id)
+            reserved = self._stopper is not None and self._reserve_stop(sprint_id)
+        if reserved:
+            self._dispatch_stop(sprint_id)
 
     def _drop_sprint_files(self, sprint_id: str) -> None:
         """Remove a sprint's secret and its manager's settings file; a failure is logged, not raised."""
@@ -1870,6 +1890,10 @@ class ConsoleService:
             for sprint_id, sprint in self._sprints.items():
                 if sprints.stop_due(sprint, now) and self._reserve_stop(sprint_id):
                     due.append(sprint_id)
+            if self._stopper is not None:
+                for sprint_id, pending in self._pending.items():
+                    if sprints.pending_due(pending, now) and self._reserve_stop(sprint_id):
+                        due.append(sprint_id)
         for sprint_id in due:
             self._dispatch_stop(sprint_id)
 
@@ -1883,24 +1907,34 @@ class ConsoleService:
                 self._stopping.discard(sprint_id)
                 self._record_stop_failure(sprint_id, reason)
 
+    def _stoppable(self, sprint_id: str) -> str | None:
+        """Under the ingest lock: the project of a sprint whose session is to be stopped, else None.
+
+        That is a stopping sprint not yet stopped, or a withdrawn sprint whose stop is pending.
+        """
+        sprint = self._sprints.get(sprint_id)
+        if sprint is not None:
+            return sprint.project_id if sprint.stop_at is not None and sprint.stopped_at is None \
+                else None
+        pending = self._pending.get(sprint_id)
+        return pending.project_id if pending is not None else None
+
     def _record_stop_failure(self, sprint_id: str, reason: str) -> None:
         """Under the ingest lock: append one `manager.stop_failed` row for a stopping sprint, say it, publish."""
-        sprint = self._sprints.get(sprint_id)
-        if (sprint is None or sprint.stop_at is None or sprint.stopped_at is not None
-                or self._stop.is_set()):
+        project_id = self._stoppable(sprint_id)
+        if project_id is None or self._stop.is_set():
             return
-        self._apply(self.log.append([(MANAGER_STOP_FAILED, sprint.project_id, {
+        self._apply(self.log.append([(MANAGER_STOP_FAILED, project_id, {
             "sprint_id": sprint_id, "reason": reason})]))
         print(f"console: manager_stop_failed {sprint_id} {reason}", file=sys.stderr)
 
     def _stop_session(self, sprint_id: str) -> None:
         """End the stopping sprint's manager session and record the outcome; the reservation ends here."""
         with self._ingest:
-            sprint = self._sprints.get(sprint_id)
-            if sprint is None or sprint.stop_at is None or sprint.stopped_at is not None:
+            project_id = self._stoppable(sprint_id)
+            if project_id is None:
                 self._stopping.discard(sprint_id)
                 return
-            project_id = sprint.project_id
             name = manager.session_name(project_id, sprint_id)
             settled = self._settled.get(sprint_id)
         deferred, reason = False, None
@@ -1922,7 +1956,7 @@ class ConsoleService:
                 return
             if reason is not None:
                 self._record_stop_failure(sprint_id, reason)
-            elif sprint_id in self._sprints:
+            elif self._stoppable(sprint_id) is not None:
                 self._apply(self.log.append([(MANAGER_STOPPED, project_id, {
                     "sprint_id": sprint_id})]))
 
@@ -2131,6 +2165,7 @@ class ConsoleService:
         self._deliveries = deliveries.delivery_states(appended, self._deliveries)
         self._sprints = sprints.sprint_states(appended, self._sprints)
         self._withdrawn = sprints.withdrawn_ids(appended, self._withdrawn)
+        self._pending = sprints.pending_stops(appended, self._pending)
         self._moments = digest.keep([*self._moments, *new],
                                     digest.window_start(self._looked, self._now()))
 
