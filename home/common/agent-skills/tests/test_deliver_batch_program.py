@@ -1025,7 +1025,7 @@ class FlakyVerificationRowTest(unittest.TestCase):
                 self.assertEqual([a for a in result["owner_actions"] if a.get("reason") == "unrelated"], [])
 
     CONFLICT_REASON = "plan-review: the acceptance rules R5 and R1 conflict for AC5: the revise that settled one broke the other"
-    CONFLICT = {"ac": "AC5", "rules": ["R5", "R1"]}
+    CONFLICT = {"ac": "AC5", "rules": ["R5", "R1"], "revises_left": 1}
 
     def test_a_rules_conflict_is_an_owner_action_and_is_not_relaunched(self):
         """#988: a plan-review stop whose criterion two rules pull apart waits for the owner's decision."""
@@ -1039,13 +1039,27 @@ class FlakyVerificationRowTest(unittest.TestCase):
         self.assertEqual(list(result["relaunch"]["conts"]), ["2"])
         (action,) = [a for a in result["owner_actions"] if a["issue"] == 1]
         self.assertEqual({k: action[k] for k in ("reason", "ac", "rules", "claim", "holder")},
-                         dict(self.CONFLICT, reason="rules-conflict", claim="held", holder=HOLDER))
+                         {"ac": "AC5", "rules": ["R5", "R1"], "reason": "rules-conflict", "claim": "held", "holder": HOLDER})
         self.assertEqual(action["cont"]["plan"], cont["plan"])
+        # The cont is slimmed as a relaunch cont is.
+        self.assertIn("ok", cont["setup"])
+        self.assertEqual(sorted(action["cont"]["setup"]), ["branch", "holder", "plan_dir", "worktree", "worktree_path"])
         for conflict in (None, {"ac": "", "rules": ["R1"]}, {"ac": "AC5", "rules": []}, "AC5"):
             with self.subTest(conflict=conflict):
                 result, _, _ = run(children={"1": dict(stop, conflict=conflict)})
                 self.assertIn("1", result["relaunch"]["conts"])
                 self.assertEqual([a for a in result["owner_actions"] if a.get("reason") == "rules-conflict"], [])
+
+    def test_a_closed_issue_whose_release_failed_is_no_owner_action(self):
+        """#988 review: it stays a plain stopped row, so a relaunch releases its claim."""
+        conflict = {"stage": "plan-review", "reason": self.CONFLICT_REASON, "conflict": self.CONFLICT, "cont": dict(reviewed(1), plan_reviewed=False)}
+        unrelated = {"stage": "verify-unrelated", "reason": self.REASON, "unrelated": self.UNRELATED, "cont": reviewed(1)}
+        for name, stop in (("rules-conflict", conflict), ("unrelated", unrelated)):
+            with self.subTest(stop=name):
+                result, _, _ = run(children={"1": stop}, replies={"settle-1": {"state": "CLOSED", "release": "error"}})
+                self.assertEqual(result["table"][0]["outcome"], "stopped")
+                self.assertEqual([a for a in result["owner_actions"] if a["issue"] == 1], [])
+                self.assertIn("1", result["relaunch"]["conts"])
 
 
 def run_child(args, replies=None, patch=None):

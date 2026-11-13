@@ -30,9 +30,11 @@ export const meta = {
 // A row stopped at verify-unrelated (#972: its child's verification fix found no cause here for a failing test and edited nothing) is not relaunched: the
 // failure cannot change by itself, so it is reported in owner_actions with reason unrelated, the test, the evidence, the claim holder and the
 // child's cont (slimmed as a relaunch cont is); the owner repairs the test, then a relaunch with that cont in conts resumes it. The claim stays held.
-// A row stopped at plan-review with conflict (#988: {ac, rules}, a criterion that drew a blocking rule finding again after its rules revise)
-// is not relaunched either: it is reported in owner_actions with reason rules-conflict, the criterion, the rules, the claim holder and the
-// child's cont (slimmed); the owner decides how the criterion is classified, then a relaunch with that cont and the decision resumes it.
+// A row stopped at plan-review with conflict (#988: {ac, rules, revises_left}, a criterion whose rules revise settled one classification
+// rule and broke another) is not relaunched either: it is reported in owner_actions with reason rules-conflict, the criterion, the rules,
+// the claim holder and the child's cont (slimmed). The owner decides how the criterion is classified; a relaunch with that cont and the
+// decision then runs the one rules revise left, or plans again when none is. A closed issue whose release failed stays a plain stopped
+// row instead, here and for verify-unrelated, so that a relaunch releases it.
 // An already-fixed row is final and reported in owner_actions with its commit; the batch closes nothing.
 // A no-changes row (#923: every task of the child's plan ended with no commit, so there is nothing to land) is final too, once its claim
 // is released, and reported in owner_actions: the owner closes the issue. A release that failed leaves the row stopped for a relaunch.
@@ -1806,6 +1808,7 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `release-${n}`, phase: 'Deliver', agentT
       return
     }
     if (r.cont) {
+      let closedMeanwhile = false
       if (r.stage !== 'planned' && !postMerge(r) && !mergedReadopt(n, f)) {
         // A stop on an issue closed meanwhile: give the claim back and drop the cont; an open issue keeps both (#714).
         // A re-adopted merged landing is never settled, whatever stage it stopped at: its close-out is still owed (#714).
@@ -1813,6 +1816,7 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `release-${n}`, phase: 'Deliver', agentT
 1. Read ${UNSET}gh issue view ${n} --repo ${SLUG} --json state and return state (OPEN or CLOSED).
 2. Only when state is CLOSED, run alone and exactly: forge-claim release --repo ${SLUG} --issue ${n} --holder ${HOLDER} --reason closed and return its verdict as release: released (exit 0), not_held (exit 3) when the claim is already gone, or error on any other exit; otherwise return release null. ${FORGE_TIMEOUT} Run nothing else.
 ${RULES_FOR(REPO, f.branch)}`, { label: `settle-${n}`, phase: 'Deliver', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: SETTLE_SCHEMA }), `settle-${n}`)
+        closedMeanwhile = !!(st && st.state === 'CLOSED')
         if (st && st.state === 'CLOSED' && (st.release === 'released' || st.release === 'not_held')) {
           delete CONTS[n]
           rows[n] = { issue: n, outcome: 'closed', stage: r.stage, released: st.release === 'released' }
@@ -1838,8 +1842,8 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `settle-${n}`, phase: 'Deliver', agentTy
           return
         }
       }
-      if (r.stage === 'plan-review' && isObj(r.conflict) && nonEmpty(r.conflict.ac) && Array.isArray(r.conflict.rules) && r.conflict.rules.length && r.conflict.rules.every(nonEmpty)) RULES_CONFLICT[n] = { ac: oneLine(r.conflict.ac), rules: r.conflict.rules.map(oneLine), claim: 'held', holder: HOLDER, cont: r.cont }
-      if (r.stage === 'verify-unrelated' && isObj(r.unrelated) && nonEmpty(r.unrelated.test)) UNRELATED[n] = { test: oneLine(r.unrelated.test), ...(nonEmpty(r.unrelated.evidence) ? { evidence: oneLine(r.unrelated.evidence) } : {}), claim: 'held', holder: HOLDER, cont: r.cont }
+      if (!closedMeanwhile && r.stage === 'plan-review' && isObj(r.conflict) && nonEmpty(r.conflict.ac) && Array.isArray(r.conflict.rules) && r.conflict.rules.length && r.conflict.rules.every(nonEmpty)) RULES_CONFLICT[n] = { ac: oneLine(r.conflict.ac), rules: r.conflict.rules.map(oneLine), claim: 'held', holder: HOLDER, cont: r.cont }
+      if (!closedMeanwhile && r.stage === 'verify-unrelated' && isObj(r.unrelated) && nonEmpty(r.unrelated.test)) UNRELATED[n] = { test: oneLine(r.unrelated.test), ...(nonEmpty(r.unrelated.evidence) ? { evidence: oneLine(r.unrelated.evidence) } : {}), claim: 'held', holder: HOLDER, cont: r.cont }
       rows[n] = { issue: n, outcome: 'stopped', stage: r.stage, ...stopDetail(r) }
       return
     }
