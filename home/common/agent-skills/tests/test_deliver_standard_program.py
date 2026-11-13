@@ -4149,6 +4149,15 @@ class MergeRefusedBehindTest(unittest.TestCase):
         self.assertEqual(labels(calls).count("merge"), 1)
         self.assertIn("cont", result)
 
+    def test_a_refusal_marked_behind_is_handled_as_behind_whatever_its_message_says(self):
+        # Behind and the policy text together: the three-refusal budget alone, with no extra poll and no fourth merge.
+        behind = {"state": "behind", "head": SHA}
+        result, calls = run(replies={"merge": dict(self.POLICY, behind=True), "checks-2": behind, "checks-4": behind})
+        self.assertEqual(result["stage"], "merge")
+        names = labels(calls)
+        self.assertEqual(names.count("merge"), 3)
+        self.assertEqual([l for l in names if l.startswith("sync-")], ["sync-1", "sync-2"])
+
     def test_a_second_policy_refusal_stops_at_the_merge(self):
         result, calls = run(replies={"merge": self.POLICY})
         self.assertEqual((result["stage"], result["merge"]["notes"]), ("merge", self.POLICY["notes"]))
@@ -5294,6 +5303,15 @@ class AllChecksTest(unittest.TestCase):
         self.assertIn("A head with no check reported at all is pending, never passed", text)
         self.assertIn("whenever that reply lists no required status checks, from classic branch protection", text)
         self.assertNotIn("none when neither answers", text)
+        self.assertIn("passed (every name passing at head; a passed answer naming none is read as pending)", text)
+
+    def test_a_poll_waits_for_the_first_check_before_it_answers_pending(self):  # #1008
+        wait = ("While no check is reported on head, do not answer yet: read the list again about once a minute, running alone "
+                "timeout 60 tail -f /dev/null between two reads (this step's own wait, which ends by itself with exit 124), and "
+                "answer pending only when none is reported 5 minutes after your first read of the list.")
+        _, calls = run(patch={"pr": {"checks": {"state": "pending", "head": SHA, "pending": ["e2e"]}}})
+        for label in ("pr", "checks-2"):
+            self.assertEqual(prompt(calls, label).count(wait), 1, label)
 
     def test_a_failing_non_required_check_stops_the_merge_named(self):  # AC2
         red = {"state": "passed", "head": SHA, "required": ["lint"], "passed": ["lint"], "failing": ["e2e"],

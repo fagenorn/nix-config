@@ -1619,6 +1619,23 @@ class LandTest(unittest.TestCase):
         text = prompt(calls, "land-pr-1")
         self.assertIn("A head with no check reported at all is pending too, never passed", text)
         self.assertIn("whenever that reply lists no required status checks, from classic branch protection", text)
+        self.assertIn("passed (every name passing at head; a passed answer naming none is read as pending)", text)
+
+    def test_a_landing_poll_waits_for_the_first_check_before_it_answers_pending(self):  # #1008
+        wait = ("While no check is reported on head, do not answer yet: read the list again about once a minute, running alone "
+                "timeout 60 tail -f /dev/null between two reads (this step's own wait, which ends by itself with exit 124), and "
+                "answer pending only when none is reported 5 minutes after your first read of the list.")
+        _, calls, _ = run(patch=folded({"state": "pending", "head": SHA, "pending": ["e2e"]}))
+        for label in ("land-pr-1", "land-checks-1-2"):
+            self.assertEqual(prompt(calls, label).count(wait), 1, label)
+        # The same sentence, byte for byte, in deliver-standard.js, with the train's own number of minutes.
+        self.assertIn(wait.replace("5 minutes", "${NO_CHECKS_MIN} minutes"), PROGRAM.with_name("deliver-standard.js").read_text())
+        self.assertIn("const NO_CHECKS_MIN = 5\n", PROGRAM.with_name("deliver-standard.js").read_text())
+        self.assertIn("const TRAIN_NO_CHECKS_MIN = 5\n", PROGRAM.read_text())
+        # A train car's step keeps its own wait for the first check and gains no second one.
+        _, calls, _ = train_run()
+        self.assertNotIn("While no check is reported on head", prompt(calls, "train-checks-1-1"))
+        self.assertIn("or that reports no check in the first 5 minutes of this step", prompt(calls, "train-checks-1-1"))
 
     def test_every_declared_check_passing_lands(self):
         result, _, _ = run(patch=dict({"setup": {"required_checks": ["ci", "lint"]}},
@@ -1889,7 +1906,13 @@ class LandTest(unittest.TestCase):
     def test_a_refusal_marked_behind_is_resynced_whatever_its_message_says(self):
         result, calls, _ = run(replies={"land-merge-1": [dict(self.POLICY, behind=True), self.MERGED]})
         self.assertEqual(row(result, 1)["outcome"], "landed")
-        self.assertIn("land-sync-1-1", of(calls, 1))
+        # The resync follows the refusal at once: no checks poll of the policy path comes between them.
+        ls = of(calls, 1)
+        self.assertEqual(ls[ls.index("land-merge-1"):ls.index("land-merge-1") + 2], ["land-merge-1", "land-sync-1-1"])
+        # And it spends the behind budget alone: refused so every time, the landing stops after the same three merges.
+        result, calls, _ = run(replies={"land-merge-1": dict(self.POLICY, behind=True)})
+        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "merge"))
+        self.assertEqual(of(calls, 1).count("land-merge-1"), 3)
 
     def test_non_code_criteria_hold_the_issue_open(self):
         acceptance = [{"id": "AC1", "text": "works", "kind": "code"}, {"id": "AC2", "text": "live", "kind": "evidence"}]
