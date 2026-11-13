@@ -33,7 +33,7 @@ export const meta = {
 // A fresh run re-adopts an existing branch or worktree (never resetting it) and stops `dirty` when it holds uncommitted changes.
 //
 // RESUME: every stop from the claim on returns { stage, ..., cont }, where cont is
-// { setup, lane, plan (declared branches, when any, as [{name, worktree, base, head, current, toplevel, common_dir, clean}]), plan_reviewed, plan_findings?, prior_findings? (#988: the blocking findings left on each plan this delivery dropped after its review, bounded; carried through every stop until a plan passes review, and shown to the planner that plans again), decisions?, done, pr? (a batch-built close-out cont: the PR the batch merged), fix_waves, fix_findings? (#924: the findings a fix-wave-review stop left open, bounded; the resume's first fix wave gets them with what its fresh final review raises; #940: such a stop also carries diverging: {file, waves} beside cont when the waves spent across runs reached FIX_WAVES_BOUND and a finding it left open is in a file the findings carried into the run named, and deliver-batch then hands the issue to the owner instead of relaunching it), checks_fixes?, sync_fixes?, verified?, final_reviewed?, partial?, blocked? (#996: {task, notes, asked?}, the task whose implementer returned blocked and its notes, kept until that task runs again; an amend with no decision clears it and the implementer runs on the plan files as they then are; see BLOCKED), reordered? (#896: [{task, after, notes}], each a blocked task moved once to just after the later task it named; cont.plan.tasks is already in that order), claim_incomplete? }. Passing it back as args.cont
+// { setup, lane, plan (declared branches, when any, as [{name, worktree, base, head, current, toplevel, common_dir, clean}]), plan_reviewed, plan_findings?, prior_findings? (#988: the blocking findings left on each plan this delivery dropped after its review, bounded; carried through every stop until a plan passes review, and shown to the planner that plans again), decisions?, done, pr? (a batch-built close-out cont: the PR the batch merged), fix_waves, fix_findings? (#924: the findings a fix-wave-review stop left open, bounded; the resume's first fix wave gets them with what its fresh final review raises; #940: such a stop also carries diverging: {file, waves} beside cont when the waves spent across runs reached FIX_WAVES_BOUND and a finding it left open is in a file the findings carried into the run named, and deliver-batch then hands the issue to the owner instead of relaunching it; #1000: it carries oscillating: {file, rounds} the same way when two fixes of one file in a row each drew a new finding there, rounds being that file's findings per round and each wave's range (its notes too when it changed that file alone), and deliver-batch reports it to the owner too; that stop keeps oscillating in cont beside fix_findings, and a resume of such a cont with no decision the cont does not hold and no amend stops before any agent, while one with a decision gives it, as binding, with the history to its first fix wave and that wave's re-review), checks_fixes?, sync_fixes?, verified?, final_reviewed?, partial?, blocked? (#996: {task, notes, asked?}, the task whose implementer returned blocked and its notes, kept until that task runs again; an amend with no decision clears it and the implementer runs on the plan files as they then are; see BLOCKED), reordered? (#896: [{task, after, notes}], each a blocked task moved once to just after the later task it named; cont.plan.tasks is already in that order), claim_incomplete? }. Passing it back as args.cont
 // re-adopts the claimed worktree (setup re-checks it and refuses a dirty tree
 // unless cont.partial names the task that left the edits), reuses cont.plan
 // (reviewing it first unless plan_reviewed; a plan-review stop keeps the revised plan with plan_findings { rules, findings, rounds, noted? (#988: the rules reviewer's minor findings on the criteria of rules, context for the revise only) }, and the resume reads the owner's answer and, when every finding left names a rule and none has source codex, runs one rules-only revise of it whatever triggered the full revise (#823), dropping the plan once rounds reach two; any other finding left has spent the plan's one full revise, so the resume plans again), skips the tasks in cont.done, then
@@ -139,11 +139,13 @@ const FULL_SHA = { type: 'string', pattern: '^[0-9a-f]{40}$' }
 // #992: start_head and commit are full shas or absent (a blocked reply names none), so the harness refuses a placeholder and the agent corrects it.
 const IMPL = {
   type: 'object',
-  properties: { status: { type: 'string', enum: ['done', 'blocked'] }, start_head: FULL_SHA, commit: FULL_SHA, tests: { type: 'array', items: { type: 'string' } }, mutation_checked: { type: 'boolean' }, notes: { type: 'string' }, blocked_on: { type: 'integer' } },
+  properties: { status: { type: 'string', enum: ['done', 'blocked'] }, start_head: FULL_SHA, commit: FULL_SHA, tests: { type: 'array', items: { type: 'string' } }, notes: { type: 'string' }, blocked_on: { type: 'integer' } },
   required: ['status', 'notes'],
 }
 // #986, #992: the sync review's schema; with followup it also returns descends. Named so that every FINDINGS schema of the program is one readReview() reads.
 const SYNC_REVIEW_SCHEMA = followup => (followup ? { ...FINDINGS, properties: { ...FINDINGS.properties, descends: { type: 'boolean' } }, required: [...FINDINGS.required, 'descends'] } : FINDINGS)
+// #1002: how a removal check is run. One per criterion bounds their number; the filter and the incremental build bound the cost of each.
+const REMOVALS = "For a removal run only the tests that pin it, through the runner's filter, as an incremental build: never the suite, never a clean rebuild; removals that are independent may be made and checked in one script, and a run of zero tests confirms nothing."
 const IMPL_RETURN = 'Return start_head (git rev-parse HEAD before you change anything) and commit (the full sha of HEAD after your last commit).'
 // A wave that may commit on several branches reports the issue worktree's commits only in start_head and commit.
 const IMPL_RETURN_AT = w => `Return start_head (git -C ${w} rev-parse HEAD before you change anything) and commit (the full sha of git -C ${w} rev-parse HEAD after your last commit): both name the issue worktree ${w}, never a declared branch's commit (those go in branch_heads); when you commit nothing there, commit equals start_head.`
@@ -295,6 +297,8 @@ const stopReason = (stage, x) => {
   const task = isEntry(x.task) ? `task ${x.task.n} ` : ''
   // #940: a stop whose fix waves do not converge says so first, so the cap cuts the findings and never the verdict.
   if (isEntry(x.diverging)) say(`the fix waves do not converge on ${String(x.diverging.file).slice(0, 120)} after ${x.diverging.waves} waves; an owner decision on the design is needed`)
+  // #1000: so does a stop on a file two fixes in a row each drew a new finding in.
+  if (isEntry(x.oscillating)) say(`the fix waves go back and forth on ${String(x.oscillating.file).slice(0, 120)}: two fixes of it in a row each drew a new finding there; an owner decision on the approach is needed`)
   // #988: a criterion whose classification the rules revise changed and that then broke another classification rule; said first, as the diverging verdict is.
   if (isEntry(x.conflict) && Array.isArray(x.conflict.rules)) say(`the acceptance rules ${x.conflict.rules.join(' and ')} conflict for ${x.conflict.ac}: the revise that settled one broke the other; an owner decision on how ${x.conflict.ac} is classified is the expected way out: ${x.conflict.revises_left ? 'a relaunch without one gets the one rules revise left' : 'the plan was dropped, and a relaunch without one plans again'}`)
   say(x.details)
@@ -380,6 +384,12 @@ let newDecision = BLOCKED && !RERUN_WORD && typeof args.decisions === 'string' &
 const WAYS_OUT = LANE === 'direct' ? 'resume with decisions (the implementer gets it with these notes), or decisions rerun if the cause was outside the task' : 'resume with decisions (a planner revises the task file), amend {file, find, replace}, or decisions rerun if the cause was outside the task file'
 const UNSETTLED = { details: 'not run again: this resume brings nothing new from the owner', ways: WAYS_OUT }
 if (BLOCKED && !RERUN && newDecision === null && AMEND === null && !(BLOCKED.asked && LANE === 'standard')) return why({ stage: 'task', task: { n: BLOCKED.task }, blocked: BLOCKED, ...UNSETTLED, cont: CONT })
+// #1000: a cont stopped on a file its fix waves went back and forth on resumes only on something new from the owner, as a blocked task
+// does: a decision the cont does not hold (the first fix wave and its re-review get it as binding) or an amend of the plan.
+const OSC_KEPT = CONT && isEntry(CONT.oscillating) && typeof CONT.oscillating.file === 'string' && CONT.oscillating.file.trim() && Array.isArray(CONT.oscillating.rounds) && Array.isArray(CONT.fix_findings) && CONT.fix_findings.length ? CONT.oscillating : null
+const oscDecision = OSC_KEPT && !RERUN_WORD && typeof args.decisions === 'string' && args.decisions.trim() && !heldDecision(args.decisions) ? args.decisions : null
+const OSC_WAYS = `resume with decisions (the approach)${LANE === 'direct' ? '' : ', or amend'}`
+if (OSC_KEPT && oscDecision === null && AMEND === null) return why({ stage: 'fix-wave-review', oscillating: OSC_KEPT, details: UNSETTLED.details, ways: OSC_WAYS, fix_waves: CONT.fix_waves || 0, cont: CONT })
 const AMEND_STOP = AMEND === null ? null
   : Number.isInteger(CONT.partial) ? `the stop at task ${CONT.partial}`
   : (() => {
@@ -611,6 +621,13 @@ const carryOf = list => (Array.isArray(list) ? list : []).filter(f => isEntry(f)
   .map(f => ({ severity: f.severity === 'critical' ? 'critical' : 'important', ...(typeof f.file === 'string' && f.file ? { file: clip(f.file) } : {}), summary: clip(f.summary), ...(typeof f.failing_input === 'string' && f.failing_input ? { failing_input: clip(f.failing_input) } : {}) }))
 const findingKey = f => `${typeof f.file === 'string' ? f.file : ''}\n${clip(String(f.summary)).toLowerCase().replace(/\s+/g, ' ').trim()}`
 let carried = carryOf(CONT && CONT.fix_findings)
+// #1000: the history of a file the fix waves went back and forth on, kept in cont.oscillating beside the findings that stop left open;
+// bounded on the way out and on the way in (the last ROUNDS_MAX entries, each round's findings and every text capped).
+const ROUNDS_MAX = 12
+const roundsOf = list => list.filter(isEntry).slice(-ROUNDS_MAX).map(x => ({ ...(Number.isInteger(x.round) ? { round: x.round } : {}), ...(Number.isInteger(x.wave) ? { wave: x.wave } : {}), ...(Array.isArray(x.findings) ? { findings: x.findings.filter(v => typeof v === 'string').slice(0, CARRY_MAX).map(clip) } : {}), ...(typeof x.notes === 'string' && x.notes ? { notes: clip(x.notes) } : {}), ...(typeof x.range === 'string' && x.range ? { range: clip(x.range) } : {}) }))
+let osc = OSC_KEPT ? { file: clip(OSC_KEPT.file.trim()), rounds: roundsOf(OSC_KEPT.rounds) } : null
+// The decision on it is left out of cont.decisions until a fix wave has had it, so a stop before that leaves it new for the next resume.
+let oscPending = oscDecision !== null
 // #988: the blocking findings left on a plan this delivery dropped after its review (a second failed rules revise, a kept plan no rules
 // revise may settle, a revise that came back as questions or not well formed). Kept in cont.prior_findings through every stop until a
 // plan passes review, newest first and bounded as the fix findings are, so the next planner does not rediscover them.
@@ -681,11 +698,11 @@ let amendApplied = false
 // decision that settles it is still unused: a stop before it was used leaves it out of cont.decisions, so the same resume counts it as new again.
 let blocked = RERUN ? null : BLOCKED
 let decisionPending = newDecision !== null
-const keptDecisions = () => (decisionPending ? decisions.filter(d => d !== newDecision) : decisions)
+const keptDecisions = () => decisions.filter(d => !(decisionPending && d === newDecision) && !(oscPending && d === oscDecision))
 const blockedKept = () => !!blocked && (LANE === 'direct' || !!plan) && !taskLog.some(d => d.n === blocked.task)
 const stop = (stage, extra) => {
   const fr = SYNC_WINDOW.includes(stage) ? (finalReviewed = null) : finalReviewed
-  return { stage, ...extra, ...(stage === 'planned' || stage === 'ready' ? {} : { reason: stopReason(stage, extra || {}) }), ...(amendApplied ? { amended: true } : {}), ...deadOf(), cont: { setup, lane: LANE, plan, plan_reviewed: planReviewed, ...(plan && !planReviewed && planFindingsKept ? { plan_findings: planFindingsKept } : {}), ...(!planReviewed && priorFindings.length ? { prior_findings: priorFindings } : {}), ...(keptDecisions().length ? { decisions: keptDecisions() } : {}), done: taskLog, ...(OWN_PR !== null ? { pr: OWN_PR } : {}), fix_waves: fixWaves, ...(carried.length ? { fix_findings: carried } : {}), ...(checksFixes ? { checks_fixes: checksFixes } : {}), ...(syncFixes ? { sync_fixes: syncFixes } : {}), ...(verified ? { verified } : {}), ...(outsideFixes.length ? { outside_fixes: outsideFixes } : {}), ...(fr ? { final_reviewed: fr } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}), ...(blockedKept() ? { blocked } : {}), ...(reordered.length ? { reordered } : {}) } }
+  return { stage, ...extra, ...(stage === 'planned' || stage === 'ready' ? {} : { reason: stopReason(stage, extra || {}) }), ...(amendApplied ? { amended: true } : {}), ...deadOf(), cont: { setup, lane: LANE, plan, plan_reviewed: planReviewed, ...(plan && !planReviewed && planFindingsKept ? { plan_findings: planFindingsKept } : {}), ...(!planReviewed && priorFindings.length ? { prior_findings: priorFindings } : {}), ...(keptDecisions().length ? { decisions: keptDecisions() } : {}), done: taskLog, ...(OWN_PR !== null ? { pr: OWN_PR } : {}), fix_waves: fixWaves, ...(carried.length ? { fix_findings: carried } : {}), ...(carried.length && osc ? { oscillating: osc } : {}), ...(checksFixes ? { checks_fixes: checksFixes } : {}), ...(syncFixes ? { sync_fixes: syncFixes } : {}), ...(verified ? { verified } : {}), ...(outsideFixes.length ? { outside_fixes: outsideFixes } : {}), ...(fr ? { final_reviewed: fr } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}), ...(blockedKept() ? { blocked } : {}), ...(reordered.length ? { reordered } : {}) } }
 }
 
 const haltTask = (n, stage, extra) => { const s = stop(stage, extra); return { ...s, cont: { ...s.cont, partial: n } } }
@@ -1133,7 +1150,7 @@ if (LANE === 'direct') {
     impl = await recall(() => call(`${CTX}
 ${RENEW_FIRST}
 Then deliver issue #${ISSUE} in the direct lane. Invoke the deliver-direct skill with the Skill tool to read it: it is the single source for this step. Its steps 1 and 2 are done by this program (the claim is held by ${setup.holder}; the worktree is ${W} on branch ${setup.branch}). Check its Eligibility first: if the issue fails it, change nothing and return status blocked with ineligible true and why. Otherwise follow its step 3 exactly and commit. Do not run its steps 4 to 7: review, verification, ship and close-out belong to this program. Return acceptance (the issue's criteria; ${KIND_GUIDE}) and sensitive (true when the diff touches authentication or authorization, permission or command guards, secrets or credentials, CI/CD or deploy config, or data migrations). ${NO_VERIFY_AC} ${FOCUSED} ${IMPL_RETURN}${CONT && CONT.partial === 1 ? `
-An earlier attempt at this task was cut off and may have left uncommitted edits or commits in the worktree (git -C ${W} status, git -C ${W} diff and git -C ${W} log ${RANGE}). Inspect them: keep what matches, finish or redo the rest, and make sure the failing-test-first and mutation checks still hold for the final result; start_head is the head before this task's first commit.` : ''}${newDecision !== null ? `
+An earlier attempt at this task was cut off and may have left uncommitted edits or commits in the worktree (git -C ${W} status, git -C ${W} diff and git -C ${W} log ${RANGE}). Inspect them: keep what matches, finish or redo the rest, and make sure every test was seen failing first; of the removals, make only those not already made against the final result; start_head is the head before this task's first commit.` : ''}${newDecision !== null ? `
 That attempt returned blocked: ${JSON.stringify(BLOCKED.notes)}. The owner's decision settles it and is binding: ${JSON.stringify(newDecision)}` : ''}
 ${RULES}`, { label: 'direct-impl', phase: 'Tasks', agentType: 'implementer', model: 'sonnet', schema: withRenew(DIRECT_IMPL) }), r => r.renew)
     // #996: a reply means the decision reached the implementer; a blocked one below records its own notes.
@@ -1516,8 +1533,8 @@ for (let ti = 0; ti < plan.tasks.length; ti++) {
   const halt = (stage, extra) => haltTask(t.n, stage, extra)
   const WAITS = waiting ? ` Task ${waiting.task} waits for task ${waiting.after} and may have left uncommitted edits: ` : ''
   const KEEP_WAITING = waiting ? `${WAITS}leave them as they are.` : ''
-  const implPrompt = `${first ? `${start}\n${RENEW_FIRST}\nThen implement` : `${start}\nImplement`} task ${t.n} (${t.title}) exactly as its task file ${t.file} specifies: write the failing test first and see it fail, implement, see it pass, run the task's focused test commands, then for each new test temporarily remove the code it pins and confirm it fails, restore, and commit only this task's files in the worktree. ${MAP_FIRST} ${FOCUSED} ${IMPL_RETURN}${PUSH_HERE} Return status blocked with notes if the task file is wrong or impossible, and blocked_on: the number of the later task of this plan it needs first, if that is why; when you name it, first undo every uncommitted edit you made, leaving the worktree as you found it.${KEEP_WAITING}${moved ? ` Task ${moved.after}, which this task was blocked on, is done now.` : ''}${(CONT && CONT.partial === t.n) || moved ? `
-An earlier attempt at this task was cut off and may have left uncommitted edits or commits in the worktree (git -C ${TW} status, git -C ${TW} diff and git -C ${TW} log ${B ? `${B.base}..HEAD` : RANGE}). Inspect them: keep what matches the task file, finish or redo the rest, and make sure the failing-test-first and mutation checks still hold for the final result; start_head is ${moved ? 'HEAD as this attempt starts' : "the head before this task's first commit"}.` : ''}
+  const implPrompt = `${first ? `${start}\n${RENEW_FIRST}\nThen implement` : `${start}\nImplement`} task ${t.n} (${t.title}) exactly as its task file ${t.file} specifies: write the failing test first and see it fail, implement, see it pass, run the task's focused test commands, then once for each acceptance criterion the task covers (not for each test or branch; at least once when the task adds a test) temporarily remove the code that satisfies it and confirm the tests that pin it fail, restore, and commit only this task's files in the worktree. ${REMOVALS} ${MAP_FIRST} ${FOCUSED} ${IMPL_RETURN}${PUSH_HERE} Return status blocked with notes if the task file is wrong or impossible, and blocked_on: the number of the later task of this plan it needs first, if that is why; when you name it, first undo every uncommitted edit you made, leaving the worktree as you found it.${KEEP_WAITING}${moved ? ` Task ${moved.after}, which this task was blocked on, is done now.` : ''}${(CONT && CONT.partial === t.n) || moved ? `
+An earlier attempt at this task was cut off and may have left uncommitted edits or commits in the worktree (git -C ${TW} status, git -C ${TW} diff and git -C ${TW} log ${B ? `${B.base}..HEAD` : RANGE}). Inspect them: keep what matches the task file, finish or redo the rest, and make sure every test was seen failing first; of the removals, make only those not already made against the final result; start_head is ${moved ? 'HEAD as this attempt starts' : "the head before this task's first commit"}.` : ''}
 ${RULES}`
   const callImpl = () => call(implPrompt, { label: `impl-${t.n}`, phase: 'Tasks', agentType: 'implementer', model: 'sonnet', schema: first ? withRenew(IMPL) : IMPL })
   let impl = first ? await recall(callImpl, r => r.renew) : await callImpl()
@@ -1688,7 +1705,36 @@ if (finalFindings.length) {
   // (none critical, none without a severity) and they are no more than the first re-review left. #950: a finding that is not marked
   // narrowing (new, or with no relation: unknown is new) counts as narrowing in both admissions when its file is one the wave just
   // re-reviewed changed, a regression inside the fix's own diff; with no file, or in a file the fix left alone, it stops as before.
+  // #1000: a fix that draws a new finding where it was made. The signal: a re-review's finding not marked narrowing, in a file the wave
+  // just re-reviewed changed (inFix, as #950 reads it) and the round before also had a finding in. Its first firing on a file changes
+  // nothing about which wave runs (#950 still admits or refuses it); the wave that follows gets that file's history (the earlier rounds'
+  // findings on it, each fix's notes and range) with the request to change the approach or rebut, and the class sentence leaves that
+  // file out. Its second firing on the same file stops at fix-wave-review with oscillating: { file, rounds }, whatever wave was left,
+  // and deliver-batch hands the issue to the owner. That stop keeps the marker in cont, so the count outlives the run: a resume starts
+  // that file at its stopped count, gives its first wave and that wave's re-review the history and the owner's decision, and stops again
+  // on the next firing there. The #940 bound (diverging) still counts waves across runs, and a stop may carry both. A wave's notes are
+  // in a file's history only when the wave changed that file alone: otherwise they say nothing about it, and the range does.
+  // Waves after the first get only the first-round findings that may still be open: those in a file a current finding names, and all
+  // of them when a finding (theirs or a current one) names no file or a current narrowing finding is in a file no first-round finding
+  // named (its parent cannot be told). Every wave is told to change only what its findings need.
   const MAX_WAVES = 3
+  const rounds = [finalFindings]
+  const fixes = []
+  const RESUMED = osc
+  // A resumed file starts as already fired twice (the count its stop reached), so its next firing stops again.
+  const fired = RESUMED ? { [RESUMED.file]: 2 } : {}
+  let turning = RESUMED ? [RESUMED.file] : []
+  const onFile = (list, file) => list.filter(f => fileOf(f) === file).slice(0, CARRY_MAX).map(f => clip(String(f.summary)))
+  // The kept history ends with the findings its stop left open: this run's first round holds them again, so that entry gives way to it.
+  const before = file => (RESUMED && RESUMED.file === file ? RESUMED.rounds.slice(0, RESUMED.rounds.length && own(RESUMED.rounds[RESUMED.rounds.length - 1], 'round') ? -1 : undefined) : [])
+  const historyOf = file => {
+    const kept = before(file)
+    const base = kept.filter(x => own(x, 'wave')).length
+    return kept.concat(fixes.flatMap((x, j) => [{ round: base + j, findings: onFile(rounds[j], file) }, { wave: base + j + 1, ...(x.files.length === 1 && x.files[0] === file && x.notes ? { notes: clip(x.notes) } : {}), range: x.range }]))
+  }
+  // What the owner brought to the resume: the decision, else the amend. Every wave and re-review of this run whose findings name the file gets it with the history.
+  const DECIDED = !RESUMED ? '' : oscDecision !== null ? ` The owner decided the approach for ${RESUMED.file}, and the decision is binding: ${JSON.stringify(oscDecision)}.` : amendApplied ? ` The owner amended the plan for ${RESUMED.file} (plan.md, Amendments): it is binding.` : ''
+  const FOLLOW = oscDecision !== null ? 'follow that decision' : 'follow that amendment'
   let waveFindings = finalFindings
   let afterFirst = 0
   let regressions = 0
@@ -1698,8 +1744,18 @@ if (finalFindings.length) {
     const rvLabel = k === 1 ? 'fix-wave-review' : `fix-wave-review-${k}`
     log(`final review: ${waveFindings.length} blocking findings, fix wave ${k}`)
     fixWaves++
-    const fw = await call(`${CTX}\n${PLAN_REF} Fix these final-review findings, each real defect with a regression test, then commit: ${JSON.stringify(waveFindings)}.${k === 1 && fromStop.length ? ` The last ${fromStop.length} were left open by an earlier run's fix waves and may repeat the ones before them: check each against the current head, and explain one that no longer holds in notes; when you commit nothing, return commit equal to start_head.` : ''}${k >= 2 ? ` They ${regressions ? 'follow the fix of' : 'narrow'} these first-round findings${regressions ? ' (any not marked narrowing is a defect in a file the previous fix wave changed)' : ''}: ${JSON.stringify(finalFindings)}.` : ''}${k === 3 ? ' Fix the class of defect: enumerate every path of the same kind as each reported one and close them all, not only the reported instance.' : ''} If a finding is wrong, explain with evidence in notes. ${OWN_TESTS} ${COMMIT_SCOPE} ${hasBranches ? IMPL_RETURN_AT(W) : IMPL_RETURN} Also return changed_files: the output lines of ${CHANGED_CMD('<start_head>..<commit>')}, run alone after your last commit.${hasBranches ? ` A finding on a declared branch is fixed in that branch's worktree and pushed with its push form. Return branch_heads: one {name, head} per declared branch (${declared(plan).map(b => b.name).join(', ')}), head being git -C <its worktree> rev-parse HEAD after your last commit.` : ''}\n${RULES}`, { label: fwLabel, phase: 'Final review', agentType: 'implementer', model: 'sonnet', schema: withChanged(hasBranches ? FIX_WAVE_IMPL : IMPL) })
+    // #1000: a first-round finding stays in the prompt while a current finding may still be about it; a turning file's are in its history.
+    const orphan = waveFindings.some(f => f.relation === 'narrowing' && fileOf(f) && !finalFindings.some(g => fileOf(g) === fileOf(f)))
+    const unplaced = orphan || waveFindings.some(f => !fileOf(f))
+    const resumedHere = !!RESUMED && (k === 1 || waveFindings.some(f => fileOf(f) === RESUMED.file))
+    if (resumedHere && !turning.includes(RESUMED.file)) turning = turning.concat(RESUMED.file)
+    const decided = file => (resumedHere && file === RESUMED.file ? DECIDED : '')
+    const stillOpen = k === 1 ? [] : finalFindings.filter(f => !turning.includes(fileOf(f)) && (unplaced || !fileOf(f) || waveFindings.some(w => fileOf(w) === fileOf(f))))
+    const settled = finalFindings.filter(f => !turning.includes(fileOf(f))).length - stillOpen.length
+    const classWide = k === 3 && waveFindings.some(f => !turning.includes(fileOf(f)))
+    const fw = await call(`${CTX}\n${PLAN_REF} Fix these final-review findings, each real defect with a regression test, then commit: ${JSON.stringify(waveFindings)}.${k === 1 && fromStop.length ? ` The last ${fromStop.length} were left open by an earlier run's fix waves and may repeat the ones before them: check each against the current head, and explain one that no longer holds in notes; when you commit nothing, return commit equal to start_head.` : ''}${k >= 2 && (stillOpen.length || !orphan) ? ` They ${regressions ? 'follow the fix of' : 'narrow'} ${stillOpen.length ? 'these' : 'the'} first-round findings${regressions ? ' (any not marked narrowing is a defect in a file the previous fix wave changed)' : ''}${stillOpen.length ? `: ${JSON.stringify(stillOpen)}.${settled ? ` The other ${settled} ${settled === 1 ? 'is' : 'are'} settled.` : ''}` : '; none of those is still open.'}` : ''}${turning.map(file => ` ${file} has now been judged more than once in the same place: the fix of one finding drew the next.${decided(file)} Its history, oldest first: ${JSON.stringify(historyOf(file).slice(-ROUNDS_MAX))}. Read each range (git -C ${W} diff <range> -- ${file}), then ${decided(file) ? FOLLOW : 'change the approach or rebut the finding with evidence in notes'}; do not move the same lines back.`).join('')}${classWide ? ` Fix the class of defect: enumerate every path of the same kind as each reported one and close them all, not only the reported instance.${turning.length ? ` Not in ${turning.join(' or ')}: fix only what is reported there.` : ''}` : ''} If a finding is wrong, explain with evidence in notes. Change only what ${classWide ? 'closing that class needs, its' : 'fixing these findings needs, their'} regression tests included. ${OWN_TESTS} ${COMMIT_SCOPE} ${hasBranches ? IMPL_RETURN_AT(W) : IMPL_RETURN} Also return changed_files: the output lines of ${CHANGED_CMD('<start_head>..<commit>')}, run alone after your last commit.${hasBranches ? ` A finding on a declared branch is fixed in that branch's worktree and pushed with its push form. Return branch_heads: one {name, head} per declared branch (${declared(plan).map(b => b.name).join(', ')}), head being git -C <its worktree> rev-parse HEAD after your last commit.` : ''}\n${RULES}`, { label: fwLabel, phase: 'Final review', agentType: 'implementer', model: 'sonnet', schema: withChanged(hasBranches ? FIX_WAVE_IMPL : IMPL) })
     // The carried findings outlive only a wave that gave no reply: one that answered and failed has had them, and the resume's fresh review decides.
+    if (fw) oscPending = false
     const spent = details => {
       if (fw && carried.length) { log(`fix-wave: ${carried.length} carried finding(s) dropped after a wave that answered and failed`); carried = [] }
       return stop('fix-wave', { fw, finalFindings: waveFindings, fix_waves: fixWaves, ...(details ? { details } : {}) })
@@ -1716,7 +1772,7 @@ if (finalFindings.length) {
     // A wave that had carried findings and committed nothing found them closed already: its re-review reads the head, with no diff range.
     const idle = k === 1 && fromStop.length > 0 && sameSha(fw.commit, fw.start_head) && !collected.length
     if (!idle) carried = []
-    const rv = await readReview(`${CTX}\nRe-review these findings against ${idle ? `the current head of ${W}${hasBranches ? ` and of each declared branch's worktree (${declared(plan).map(b => `${b.name} in ${b.worktree}`).join(', ')})` : ''} (the fix wave committed nothing, so there is no diff to read). Nothing changed since these were raised, so each finding stands unless the code at the head shows it does not hold. The notes are the implementer's claims: check each against the code and never clear a finding on the notes alone` : `the fix (${span(fw)}${collected.length ? ` and ${collected.join(' and ')}` : ''})`}; notes: ${fw.notes}. Findings: ${JSON.stringify(waveFindings)}.${k === 1 && fromStop.length && !idle ? ` The last ${fromStop.length} were left open by an earlier run and may repeat the ones before them: check each against the head, not only the diff.` : ''} Report any still unresolved and any new Important or Critical defect, setting relation on each finding you still report: narrowing when it is the same kind of defect as one above, reached on another path, input or call site; else new. Unsure is new.${idle ? '' : ` Also return changed_files: the output lines of ${CHANGED_CMD(`${fw.start_head}..${fw.commit}`)}, run alone.`}`, { label: rvLabel, phase: 'Final review', agentType: 'reviewer', schema: withChanged(FINDINGS) })
+    const rv = await readReview(`${CTX}\nRe-review these findings against ${idle ? `the current head of ${W}${hasBranches ? ` and of each declared branch's worktree (${declared(plan).map(b => `${b.name} in ${b.worktree}`).join(', ')})` : ''} (the fix wave committed nothing, so there is no diff to read). Nothing changed since these were raised, so each finding stands unless the code at the head shows it does not hold. The notes are the implementer's claims: check each against the code and never clear a finding on the notes alone` : `the fix (${span(fw)}${collected.length ? ` and ${collected.join(' and ')}` : ''})`}; notes: ${fw.notes}. Findings: ${JSON.stringify(waveFindings)}.${k === 1 && fromStop.length && !idle ? ` The last ${fromStop.length} were left open by an earlier run and may repeat the ones before them: check each against the head, not only the diff.` : ''}${resumedHere ? `${DECIDED ? `${DECIDED} Report no finding that only disputes it.` : ''} ${RESUMED.file} was judged more than once in the same place before this fix; its history, oldest first: ${JSON.stringify(historyOf(RESUMED.file).slice(-ROUNDS_MAX))}.` : ''} Report any still unresolved and any new Important or Critical defect, setting relation on each finding you still report: narrowing when it is the same kind of defect as one above, reached on another path, input or call site; else new. Unsure is new.${idle ? '' : ` Also return changed_files: the output lines of ${CHANGED_CMD(`${fw.start_head}..${fw.commit}`)}, run alone.`}`, { label: rvLabel, phase: 'Final review', agentType: 'reviewer', schema: withChanged(FINDINGS) })
     if (!rv) return stop('fix-wave-review', { rv, fix_waves: fixWaves })
     carried = []
     const next = findingsOf(rv)
@@ -1724,14 +1780,22 @@ if (finalFindings.length) {
     const inFix = changedBy(fw).filter(p => changedBy(rv).includes(p))
     const fresh = next.filter(f => f.relation !== 'narrowing')
     const narrow = fresh.every(f => fileOf(f) && inFix.includes(fileOf(f)))
+    fixes.push({ notes: String(fw.notes || ''), range: `${fw.start_head}..${fw.commit}`, files: changedBy(fw) })
+    rounds.push(next)
+    turning = [...new Set(fresh.map(fileOf).filter(p => p && inFix.includes(p) && waveFindings.some(w => fileOf(w) === p)))]
+    for (const p of turning) fired[p] = (fired[p] || 0) + 1
+    const twice = turning.find(p => fired[p] > 1)
+    const oscillating = twice ? { file: clip(twice), rounds: roundsOf(historyOf(twice).concat({ round: historyOf(twice).filter(x => own(x, 'wave')).length, findings: onFile(next, twice) })) } : null
     // A wave that committed nothing earns no further wave: what its re-review still holds stops.
     const again = k === 1 ? narrow && !idle : k === 2 && narrow && next.every(f => f.severity === 'important') && next.length <= afterFirst
-    if (!again) {
+    if (!again || oscillating) {
       carried = carryOf(next)
+      osc = oscillating
       if (carried.length < next.length) log(`fix-wave-review: ${next.length - carried.length} of ${next.length} open finding(s) not carried in cont`)
       const diverging = divergingOf(carried)
       if (diverging) log(`fix-wave-review: the fix waves do not converge on ${diverging.file} after ${diverging.waves} waves`)
-      return stop('fix-wave-review', { rv, fix_waves: fixWaves, ...(diverging ? { diverging } : {}) })
+      if (oscillating) log(`fix-wave-review: fix waves ${k - 1} and ${k} each drew a new finding in ${oscillating.file}`)
+      return stop('fix-wave-review', { rv, fix_waves: fixWaves, ...(diverging ? { diverging } : {}), ...(oscillating ? { oscillating } : {}) })
     }
     if (k === 1) afterFirst = next.length
     regressions = fresh.length

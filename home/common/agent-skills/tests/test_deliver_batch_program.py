@@ -801,6 +801,84 @@ class NoChangesTest(unittest.TestCase):
                 self.assertEqual(result["relaunch"]["conts"], {"1": self.CONT})
 
 
+class FixOscillatingTest(unittest.TestCase):
+    """#1000: a child stopped on a file two fixes in a row each drew a new finding in waits for the owner and is not relaunched."""
+
+    ROUNDS = [{"round": 0, "findings": ["pattern too wide"]}, {"wave": 1, "notes": "narrowed", "range": "b0..c1"},
+              {"round": 1, "findings": ["pattern too narrow"]}, {"wave": 2, "notes": "widened", "range": "c1..c2"},
+              {"round": 2, "findings": ["pattern too wide again"]}]
+    REASON = "fix-wave-review: the fix waves go back and forth on tools/grader.json; 1 finding(s): pattern too wide again"
+
+    def stop(self, n=1, **more):
+        return dict({"stage": "fix-wave-review", "fix_waves": 2, "reason": self.REASON,
+                     "oscillating": {"file": "tools/grader.json", "rounds": self.ROUNDS}, "cont": dict(reviewed(n), fix_waves=2)}, **more)
+
+    def test_an_oscillating_child_is_an_owner_action_and_is_not_relaunched(self):
+        other = {"stage": "verify", "reason": "verify: build: boom", "cont": reviewed(2)}
+        result, calls, _ = run(args=dict(ARGS, issues=[1, 2]), children={"1": self.stop(), "2": other})
+        row = result["table"][0]
+        self.assertEqual((row["outcome"], row["stage"], row["reason"]), ("stopped", "fix-wave-review", self.REASON))
+        self.assertEqual(result["relaunch"]["issues"], [2])
+        self.assertEqual(list(result["relaunch"]["conts"]), ["2"])
+        (action,) = [a for a in result["owner_actions"] if a["issue"] == 1]
+        self.assertEqual({k: action[k] for k in ("reason", "file", "rounds", "claim", "holder")},
+                         {"reason": "fix-oscillating", "file": "tools/grader.json", "rounds": self.ROUNDS, "claim": "held", "holder": HOLDER})
+        self.assertEqual(action["cont"]["fix_waves"], 2)
+        self.assertEqual(sorted(action["cont"]["setup"]), ["branch", "holder", "plan_dir", "worktree", "worktree_path"])
+        self.assertFalse([c for c in calls if c["label"].startswith("release-1")])
+
+    def test_the_marker_in_the_cont_reaches_the_owner_action_and_a_no_decision_stop_is_the_same_action(self):
+        """Review B1: the child keeps oscillating in cont; its stop on a resume with nothing new is reported the same way."""
+        marker = {"file": "tools/grader.json", "rounds": self.ROUNDS}
+        cont = dict(reviewed(1), fix_waves=2, fix_findings=[{"severity": "important", "file": "tools/grader.json", "summary": "s"}],
+                    oscillating=marker)
+        for name, stop in (("the stop", self.stop(cont=cont)),
+                           ("the resume with nothing new", self.stop(cont=cont, reason=self.REASON + "; not run again"))):
+            with self.subTest(name):
+                result, _, _ = run(children={"1": stop})
+                self.assertIsNone(result["relaunch"])
+                (action,) = result["owner_actions"]
+                self.assertEqual((action["reason"], action["file"], action["rounds"]), ("fix-oscillating", "tools/grader.json", self.ROUNDS))
+                self.assertEqual(action["cont"]["oscillating"], marker)
+                self.assertEqual(action["cont"]["fix_findings"], cont["fix_findings"])
+
+    def test_alone_it_leaves_no_relaunch(self):
+        result, _, _ = run(children={"1": self.stop()})
+        self.assertIsNone(result["relaunch"])
+        self.assertEqual([a["reason"] for a in result["owner_actions"]], ["fix-oscillating"])
+
+    def test_a_stop_that_names_no_file_stays_an_open_row(self):
+        for marker in (None, {"rounds": self.ROUNDS}, {"file": ""}, "tools/grader.json"):
+            with self.subTest(marker=marker):
+                result, _, _ = run(children={"1": self.stop(oscillating=marker)})
+                self.assertIn("1", result["relaunch"]["conts"])
+                self.assertEqual(result["owner_actions"], [])
+
+    def test_a_closed_issue_is_no_owner_action(self):
+        failed, _, _ = run(children={"1": self.stop()}, replies={"settle-1": {"state": "CLOSED", "release": "error"}})
+        self.assertEqual(failed["table"][0]["outcome"], "stopped")
+        self.assertEqual(failed["owner_actions"], [])
+        self.assertIn("1", failed["relaunch"]["conts"])
+        closed, _, _ = run(children={"1": self.stop()}, replies={"settle-1": {"state": "CLOSED", "release": "released"}})
+        self.assertEqual(closed["table"][0]["outcome"], "closed")
+        self.assertEqual(closed["owner_actions"], [])
+
+    def test_the_history_is_bounded_and_on_one_line(self):
+        rounds = [{"round": 0, "findings": ["a\nb"] * 30 + [7]}, {"wave": 1, "notes": "n" * 900, "range": "b0..c1", "extra": 1}, "junk"] * 20
+        result, _, _ = run(children={"1": self.stop(oscillating={"file": " tools/grader.json\n", "rounds": rounds})})
+        (action,) = result["owner_actions"]
+        self.assertEqual(action["file"], "tools/grader.json")
+        self.assertEqual(len(action["rounds"]), 20)
+        self.assertEqual(action["rounds"][0], {"round": 0, "findings": ["a b"] * 10})
+        self.assertEqual(sorted(action["rounds"][1]), ["notes", "range", "wave"])
+        self.assertEqual(len(action["rounds"][1]["notes"]), 300)
+
+    def test_a_stop_also_marked_diverging_is_the_not_converging_row(self):
+        result, _, _ = run(children={"1": self.stop(diverging={"file": "tools/grader.json", "waves": 4})})
+        self.assertEqual(result["table"][0]["outcome"], "not-converging")
+        self.assertEqual([a["reason"] for a in result["owner_actions"]], ["not-converging"])
+
+
 class NotConvergingTest(unittest.TestCase):
     """#940: a child whose fix waves do not converge goes to the owner: final, not relaunched, the work and the claim left as they are."""
 
