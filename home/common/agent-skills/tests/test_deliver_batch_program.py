@@ -827,6 +827,21 @@ class FixOscillatingTest(unittest.TestCase):
         self.assertEqual(sorted(action["cont"]["setup"]), ["branch", "holder", "plan_dir", "worktree", "worktree_path"])
         self.assertFalse([c for c in calls if c["label"].startswith("release-1")])
 
+    def test_the_marker_in_the_cont_reaches_the_owner_action_and_a_no_decision_stop_is_the_same_action(self):
+        """Review B1: the child keeps oscillating in cont; its stop on a resume with nothing new is reported the same way."""
+        marker = {"file": "tools/grader.json", "rounds": self.ROUNDS}
+        cont = dict(reviewed(1), fix_waves=2, fix_findings=[{"severity": "important", "file": "tools/grader.json", "summary": "s"}],
+                    oscillating=marker)
+        for name, stop in (("the stop", self.stop(cont=cont)),
+                           ("the resume with nothing new", self.stop(cont=cont, reason=self.REASON + "; not run again"))):
+            with self.subTest(name):
+                result, _, _ = run(children={"1": stop})
+                self.assertIsNone(result["relaunch"])
+                (action,) = result["owner_actions"]
+                self.assertEqual((action["reason"], action["file"], action["rounds"]), ("fix-oscillating", "tools/grader.json", self.ROUNDS))
+                self.assertEqual(action["cont"]["oscillating"], marker)
+                self.assertEqual(action["cont"]["fix_findings"], cont["fix_findings"])
+
     def test_alone_it_leaves_no_relaunch(self):
         result, _, _ = run(children={"1": self.stop()})
         self.assertIsNone(result["relaunch"])

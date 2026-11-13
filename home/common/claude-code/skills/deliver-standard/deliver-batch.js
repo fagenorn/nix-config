@@ -42,7 +42,8 @@ export const meta = {
 // #1000: so is a fix-wave-review stop that carries oscillating ({file, rounds}: two fixes of one file in a row each drew a new finding
 // there): reported with reason fix-oscillating, the file, its rounds (the findings per round, each wave's notes and range), the claim
 // holder and the child's cont (slimmed), the claim held and the row left stopped. The owner decides the approach and relaunches with that
-// cont in conts and the decision. A stop also marked diverging is the not-converging row below instead.
+// cont in conts and the decision: the cont keeps the marker, the child's first fix wave and its re-review get the decision as binding,
+// and a relaunch that brings none stops in the child before any agent and is this owner action again. A stop also marked diverging is the not-converging row below instead.
 // An already-fixed row is final and reported in owner_actions with its commit; the batch closes nothing.
 // A no-changes row (#923: every task of the child's plan ended with no commit, so there is nothing to land) is final too, once its claim
 // is released, and reported in owner_actions: the owner closes the issue. A release that failed leaves the row stopped for a relaunch.
