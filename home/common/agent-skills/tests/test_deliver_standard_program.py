@@ -53,8 +53,8 @@ RULES_FILE = REPO_ROOT / "home/common/agent-skills/standards/acceptance-planning
 SIZED = dict(ARGS, review_sizing=True)
 FULL_RUBRIC = "a task whose test cannot fail, wrong or missing interfaces"
 # #996: how a blocked task stop ends its reason, after the cap.
-WAYS = "; resume with decisions (a planner revises the task file from it) or amend {file, find, replace}"
-DIRECT_WAYS = "; resume with decisions (the implementer gets it with these notes)"
+WAYS = "; resume with decisions (a planner revises the task file), amend {file, find, replace}, or decisions rerun if the cause was outside the task file"
+DIRECT_WAYS = "; resume with decisions (the implementer gets it with these notes), or decisions rerun if the cause was outside the task"
 CODEX_OWNS = "The Codex plan review running beside you owns code correctness"
 RULE_ID = "put the broken rule's id in the finding's rule)."
 PASS_REPLY = {"verdict": "pass", "findings": []}
@@ -8132,14 +8132,88 @@ class BlockedTaskDecisionTest(unittest.TestCase):
                 self.assertIs(result["cont"]["plan_reviewed"], True)
                 self.assertNotIn("plan_findings", result["cont"])
                 self.assertEqual(result["cont"]["blocked"], dict(cont["blocked"], **({"asked": True} if asked else {})))
-                self.assertNotIn("decisions", result["cont"])
                 self.assertEqual(result["cont"]["done"], cont["done"])
                 if asked:
+                    # The planner read the decision and asked on: it is kept, and the resume with the answer shows the planner both.
                     self.assertEqual(result["needs_user"], questions)
+                    self.assertEqual(result["cont"]["decisions"], [self.DECISION])
+                    for more in ({"decisions": "The first one."}, {}):
+                        answer = {"verdict": "answered", "comment_id": 3, "questions": [], "decisions": "The first one."}
+                        _, again = self.resume(result["cont"], replies={"owner-answer": answer}, **more)
+                        for text in (self.DECISION, "The first one."):
+                            self.assertIn(text, prompt(again, "plan-task-revise"))
+                        self.assertIn("impl-2", labels(again))
+                    continue
+                self.assertNotIn("decisions", result["cont"])
                 # The same resume tries the revise again.
                 _, again = self.resume(result["cont"], decisions=self.DECISION)
                 self.assertIn("plan-task-revise", labels(again))
                 self.assertIn("impl-2", labels(again))
+
+    def test_the_decision_rerun_runs_the_implementer_on_the_unchanged_task_file_with_no_planner(self):
+        cont = self.stopped(decisions="An earlier answer.")["cont"]
+        for word in ("rerun", " rerun\n"):
+            with self.subTest(word=word):
+                result, calls = self.resume(cont, replies={"verify": None}, decisions=word)
+                self.assertEqual(labels(calls)[:2], ["setup", "impl-2"])
+                self.assertNotIn("plan-task-revise", labels(calls))
+                self.assertEqual(result["cont"]["decisions"], ["An earlier answer."])
+                self.assertNotIn("blocked", result["cont"])
+                self.assertNotIn("rerun", prompt(calls, "impl-2").split("exactly as its task file")[0].lower())
+        # Blocked again: the new notes, and rerun works again (it is never a held decision).
+        again, _ = self.resume(cont, replies={"impl-2": blocked("the token is still rejected")}, decisions="rerun")
+        self.assertEqual(again["cont"]["blocked"], {"task": 2, "notes": "the token is still rejected"})
+        self.assertIn("decisions rerun if the cause was outside the task file", again["reason"])
+        _, calls = self.resume(again["cont"], decisions="rerun")
+        self.assertEqual(labels(calls)[:2], ["setup", "impl-2"])
+        # A longer text that only starts with the word is a decision like any other.
+        _, calls = self.resume(cont, decisions="rerun it with the other fixture")
+        self.assertIn("plan-task-revise", labels(calls))
+        # Outside a blocked resume the word is still no decision: no planner ever reads it.
+        fresh, calls = run(args=dict(ARGS, decisions="rerun"), replies={"verify": None})
+        self.assertNotIn("decisions", fresh["cont"])
+        self.assertNotIn("they are binding", prompt(calls, "plan"))
+
+    def test_the_direct_lane_reruns_without_the_decision_sentence(self):
+        first, _ = run(args=DIRECT, replies={"direct-impl": {"status": "blocked", "notes": self.NOTES}})
+        result, calls = run(args=dict(ARGS, cont=first["cont"], decisions="rerun"), replies={"verify": None})
+        self.assertEqual(labels(calls)[:2], ["setup", "direct-impl"])
+        self.assertNotIn("That attempt returned blocked", prompt(calls, "direct-impl"))
+        self.assertNotIn("decisions", result["cont"])
+        self.assertNotIn("blocked", result["cont"])
+
+    def test_a_revise_that_touches_a_done_task_or_removes_a_criterion_fails(self):
+        two = dict(self.PLAN2, acceptance=self.PLAN2["acceptance"] + [{"id": "AC2", "text": "is fast", "kind": "code"}])
+        first, _ = run(replies={"plan": two, "impl-2": blocked(self.NOTES)})
+        cont = first["cont"]
+        moved = [dict(tasks(2)[0], file="/g/task-1b.md"), tasks(2)[1]]
+        cases = (("a done task's file", dict(two, tasks=moved), "done task(s) 1"),
+                 ("a done task dropped", dict(two, tasks=tasks(2)[1:]), "done task(s) 1"),
+                 ("a criterion removed", dict(two, acceptance=two["acceptance"][:1]), "removed the criteria AC2"))
+        for name, reply, said in cases:
+            with self.subTest(name):
+                result, calls = self.resume(cont, replies={"plan-task-revise": dict(reply, criteria_edited=[])}, decisions=self.DECISION)
+                self.assertEqual((result["stage"], result["step"]), ("plan", "plan-task-revise"))
+                self.assertIn(said, result["reason"])
+                self.assertNotIn("impl-2", labels(calls))
+                self.assertEqual((result["cont"]["plan"], result["cont"]["blocked"]), (cont["plan"], cont["blocked"]))
+                self.assertNotIn("decisions", result["cont"])
+        # The blocked task itself may change, a task may be added, and a criterion's text may be restated.
+        free = dict(two, tasks=[tasks(2)[0], dict(tasks(2)[1], file="/g/task-2b.md", title="t2 again"), tasks(3)[2]],
+                    acceptance=[two["acceptance"][0], dict(two["acceptance"][1], text="answers within a second")], criteria_edited=["AC2"])
+        result, calls = self.resume(cont, replies={"plan-task-revise": free, "verify": None}, decisions=self.DECISION)
+        self.assertEqual(result["stage"], "verify")
+        self.assertIn("/g/task-2b.md", prompt(calls, "impl-2"))
+        self.assertIn("impl-3", labels(calls))
+
+    def test_a_failed_revise_restores_the_reorder_record(self):
+        moved = [{"task": 2, "after": 1, "notes": "needed task 1"}]
+        cont = dict(self.stopped()["cont"], reordered=moved)
+        result, _ = self.resume(cont, replies={"plan-task-revise": {"status": "planned"}}, decisions=self.DECISION)
+        self.assertEqual((result["stage"], result["cont"]["reordered"]), ("plan", moved))
+        # An accepted revise is a new plan: it drops the record, as every new plan does.
+        done, _ = self.resume(cont, replies={"verify": None}, decisions=self.DECISION)
+        self.assertNotIn("reordered", done["cont"])
 
     def test_a_revise_that_asked_reads_the_owners_answer_on_its_resume(self):
         cont = dict(self.stopped()["cont"])
@@ -8208,7 +8282,13 @@ class CodexQuotaStopTest(unittest.TestCase):
                 self.assertIn("cont", result)
 
     def test_the_reset_time_is_read_from_the_message_or_left_null(self):
+        real = "You've hit your usage limit. Visit https://chatgpt.com/settings/usage to purchase more credits or try again at "
         for raw, want in (("runtime failure: usage limit reached, resets at 09:00 UTC on Friday. Buy credits.", "09:00 UTC on Friday"),
+                          (real + "Nov 17th, 2026 7:09 AM.", "Nov 17th, 2026 7:09 AM"),
+                          (real + "Nov 12th, 2026 5:34 p.m. Buy credits to go on.", "Nov 12th, 2026 5:34 p.m."),
+                          (real + "5:34 A.M.", "5:34 A.M."),
+                          ("You exceeded your current quota, please check your plan and billing details.", None),
+                          ("You have exceeded your quota. Try again in 2 hours.", "2 hours"),
                           ("Quota exceeded for this workspace; try again in 3 days 4 hours", "3 days 4 hours"),
                           ("runtime failure: quota exceeded", None), ("You've hit your usage limit.", None)):
             with self.subTest(raw=raw):
@@ -8217,7 +8297,8 @@ class CodexQuotaStopTest(unittest.TestCase):
                 self.assertEqual(result["retry_after"], want)
 
     def test_any_other_codex_failure_carries_no_retry_after(self):
-        for raw in ("daemon rejected the slot; try again at 5 PM", "runtime failure: the payload was malformed", "  ", None):
+        for raw in ("daemon rejected the slot; try again at 5 PM", "the run failed, and this is not a usage or quota limit",
+                    "write failed: Disk quota exceeded; try again at 5 PM", "the quota of reviewers is one per packet", "runtime failure: the payload was malformed", "  ", None):
             with self.subTest(raw=raw):
                 self.assertNotIn("retry_after", self.stop(ARGS, "plan-codex", raw))
         dead, _ = run(replies={"final-codex": None})

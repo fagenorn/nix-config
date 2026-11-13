@@ -33,7 +33,7 @@ export const meta = {
 // A fresh run re-adopts an existing branch or worktree (never resetting it) and stops `dirty` when it holds uncommitted changes.
 //
 // RESUME: every stop from the claim on returns { stage, ..., cont }, where cont is
-// { setup, lane, plan (declared branches, when any, as [{name, worktree, base, head, current, toplevel, common_dir, clean}]), plan_reviewed, plan_findings?, decisions?, done, pr? (a batch-built close-out cont: the PR the batch merged), fix_waves, fix_findings? (#924: the findings a fix-wave-review stop left open, bounded; the resume's first fix wave gets them with what its fresh final review raises; #940: such a stop also carries diverging: {file, waves} beside cont when the waves spent across runs reached FIX_WAVES_BOUND and a finding it left open is in a file the findings carried into the run named, and deliver-batch then hands the issue to the owner instead of relaunching it), checks_fixes?, sync_fixes?, verified?, final_reviewed?, partial?, blocked? (#996: {task, notes, asked?}, the task whose implementer returned blocked and its notes, kept until that task runs again; see BLOCKED), reordered? (#896: [{task, after, notes}], each a blocked task moved once to just after the later task it named; cont.plan.tasks is already in that order), claim_incomplete? }. Passing it back as args.cont
+// { setup, lane, plan (declared branches, when any, as [{name, worktree, base, head, current, toplevel, common_dir, clean}]), plan_reviewed, plan_findings?, decisions?, done, pr? (a batch-built close-out cont: the PR the batch merged), fix_waves, fix_findings? (#924: the findings a fix-wave-review stop left open, bounded; the resume's first fix wave gets them with what its fresh final review raises; #940: such a stop also carries diverging: {file, waves} beside cont when the waves spent across runs reached FIX_WAVES_BOUND and a finding it left open is in a file the findings carried into the run named, and deliver-batch then hands the issue to the owner instead of relaunching it), checks_fixes?, sync_fixes?, verified?, final_reviewed?, partial?, blocked? (#996: {task, notes, asked?}, the task whose implementer returned blocked and its notes, kept until that task runs again; an amend with no decision clears it and the implementer runs on the plan files as they then are; see BLOCKED), reordered? (#896: [{task, after, notes}], each a blocked task moved once to just after the later task it named; cont.plan.tasks is already in that order), claim_incomplete? }. Passing it back as args.cont
 // re-adopts the claimed worktree (setup re-checks it and refuses a dirty tree
 // unless cont.partial names the task that left the edits), reuses cont.plan
 // (reviewing it first unless plan_reviewed; a plan-review stop keeps the revised plan with plan_findings { rules, findings, rounds }, and the resume reads the owner's answer and, when every finding left names a rule and none has source codex, runs one rules-only revise of it whatever triggered the full revise (#823), dropping the plan once rounds reach two; any other finding left has spent the plan's one full revise, so the resume plans again), skips the tasks in cont.done, then
@@ -353,16 +353,20 @@ if (AMEND !== null) {
 // gets both), or an amend. With neither it stops here, before any agent runs, with the cont unchanged. asked marks a revise whose planner
 // asked the owner: that resume reads the decision prompt's answer first. A cont from before this member (partial with no blocked) cannot
 // tell a blocked task from a cut-off one, so it resumes as it always did: the implementer runs again.
+// The decision whose whole text is rerun is the third way out, for a cause outside the task file (a rejected token the owner repaired):
+// it clears blocked and runs the implementer on the unchanged task file with no planner step, and is never kept as a decision.
 const NOTES_MAX = 2000
 const BLOCKED = CONT && isEntry(CONT.blocked) && Number.isInteger(CONT.blocked.task) && CONT.partial === CONT.blocked.task &&
   !(Array.isArray(CONT.done) && CONT.done.some(d => isEntry(d) && d.n === CONT.blocked.task)) && (LANE === 'direct' || (isEntry(CONT.plan) && CONT.plan_reviewed === true))
   ? { task: CONT.blocked.task, notes: typeof CONT.blocked.notes === 'string' ? CONT.blocked.notes : '', ...(CONT.blocked.asked === true ? { asked: true } : {}) } : null
+const RERUN_WORD = typeof args.decisions === 'string' && args.decisions.trim() === 'rerun'
+const RERUN = !!BLOCKED && RERUN_WORD
 const heldDecision = d => !!CONT && Array.isArray(CONT.decisions) && CONT.decisions.includes(d)
 // The decision that settles the blocked task: one this resume brings that the cont does not hold.
-let newDecision = BLOCKED && typeof args.decisions === 'string' && args.decisions.trim() && !heldDecision(args.decisions) ? args.decisions : null
-const WAYS_OUT = LANE === 'direct' ? 'resume with decisions (the implementer gets it with these notes)' : 'resume with decisions (a planner revises the task file from it) or amend {file, find, replace}'
+let newDecision = BLOCKED && !RERUN_WORD && typeof args.decisions === 'string' && args.decisions.trim() && !heldDecision(args.decisions) ? args.decisions : null
+const WAYS_OUT = LANE === 'direct' ? 'resume with decisions (the implementer gets it with these notes), or decisions rerun if the cause was outside the task' : 'resume with decisions (a planner revises the task file), amend {file, find, replace}, or decisions rerun if the cause was outside the task file'
 const UNSETTLED = { details: 'not run again: this resume brings nothing new from the owner', ways: WAYS_OUT }
-if (BLOCKED && newDecision === null && AMEND === null && !(BLOCKED.asked && LANE === 'standard')) return why({ stage: 'task', task: { n: BLOCKED.task }, blocked: BLOCKED, ...UNSETTLED, cont: CONT })
+if (BLOCKED && !RERUN && newDecision === null && AMEND === null && !(BLOCKED.asked && LANE === 'standard')) return why({ stage: 'task', task: { n: BLOCKED.task }, blocked: BLOCKED, ...UNSETTLED, cont: CONT })
 const AMEND_STOP = AMEND === null ? null
   : Number.isInteger(CONT.partial) ? `the stop at task ${CONT.partial}`
   : (() => {
@@ -603,12 +607,12 @@ const outsideFixes = outsideOf(CONT && CONT.outside_fixes)
 let decisions = []
 const addDecision = text => { if (typeof text === 'string' && text.trim() && !decisions.includes(text)) decisions.push(text) }
 if (CONT && Array.isArray(CONT.decisions)) CONT.decisions.forEach(addDecision)
-addDecision(args.decisions)
+if (!RERUN_WORD) addDecision(args.decisions)
 // True once plan-amend applied the amend: every later stop says so, so deliver-batch stops sending an amend that no longer needs to be (#811).
 let amendApplied = false
 // #996: the blocked task a stop carries, until an amend, a revise or a decision-bearing implementer call has answered it; and whether the
 // decision that settles it is still unused: a stop before it was used leaves it out of cont.decisions, so the same resume counts it as new again.
-let blocked = BLOCKED
+let blocked = RERUN ? null : BLOCKED
 let decisionPending = newDecision !== null
 const keptDecisions = () => (decisionPending ? decisions.filter(d => d !== newDecision) : decisions)
 const blockedKept = () => !!blocked && (LANE === 'direct' || !!plan) && !taskLog.some(d => d.n === blocked.task)
@@ -970,14 +974,15 @@ const CX_WAIT = 'this step may dispatch the Codex reviewer that skill uses, and 
 const CX_NONE = 'If Codex cannot be run, return available false with the reason in raw_summary; never substitute your own review.'
 // #790: a codex-unavailable stop says why (a usage limit and its reset time), so no diagnosis run is needed.
 const codexWhy = r => (!r ? 'the Codex review step returned nothing' : typeof r.raw_summary === 'string' && r.raw_summary.trim() ? r.raw_summary : 'the Codex review step gave no reason')
-// #996: a Codex refusal whose message names a usage or quota limit (codex-collaboration returns the message verbatim, with the reset time)
-// carries retry_after: the reset time the message gives after "try again at" or "resets at", null when it gives none. The limit does not
+// #996: a Codex refusal whose message is the provider's usage or quota limit (codex-collaboration returns the message verbatim, with the
+// reset time; the provider's wording is matched, so "not a quota limit" or "Disk quota exceeded" is no quota stop)
+// carries retry_after: the reset time the message gives after "try again at" or "resets at" (up to the sentence's end, an a.m. or p.m. kept whole), null when it gives none. The limit does not
 // lift by a relaunch, so deliver-batch hands such a stop to the owner; any other codex-unavailable stop carries no retry_after and is unchanged.
 // The message is read, not a schema member: CODEX's keys are the codex-collaboration skill's contract, and no review prompt grows.
 const codexStop = (step, r) => {
   const said = r && typeof r.raw_summary === 'string' ? r.raw_summary : ''
-  const quota = /usage limit|quota/i.test(said)
-  const reset = quota ? ((/\b(?:try again|resets?) (?:at|in|on) ([^.\n]{1,60})/i.exec(said) || [])[1] || '').trim() : ''
+  const quota = /hit your usage limit|exceeded your (?:current )?quota|(?<!disk )quota exceeded|usage limit reached/i.test(said)
+  const reset = quota ? ((/\b(?:try again|resets?) (?:at|in|on) ([^.\n]{0,60}?[ap]\.m\.|[^.\n]{1,60})/i.exec(said) || [])[1] || '').trim() : ''
   return stop('codex-unavailable', { step, details: codexWhy(r), codex: r, ...(quota ? { retry_after: reset || null } : {}) })
 }
 let ACS = null, PLAN_REF = null
@@ -1246,9 +1251,11 @@ const settleRevise = async (revised, planFindings, reviewedFacts, reviewedCriter
 }
 // #996: the task revise. A resume of a task-blocked cont with a new decision has a planner amend that task's file from the decision and
 // the implementer's notes before the implementer runs again, through the plan-revise path above. A revise that does not end in an
-// accepted plan (questions, a malformed reply, a done task dropped, rule findings left) changes nothing in the cont: the plan as it came,
-// the blocked member and the decision still unused, so the same resume tries it again; the task files on disk may hold its edits.
-const BLOCKED_TASK = BLOCKED && plan && planReviewed ? plan.tasks.find(t => isEntry(t) && t.n === BLOCKED.task) || null : null
+// accepted plan (questions, a malformed reply, rule findings left, a done task dropped or given another file or branch, a criterion
+// removed: restating a criterion's text is allowed, removing one stays an owner amend) keeps the cont's plan and its blocked member; the
+// task files on disk may hold its edits. The decision stays unused, so the same resume tries again, except after questions: then it is
+// kept, and the resume that brings the answer shows the planner both.
+const BLOCKED_TASK = BLOCKED && !RERUN && plan && planReviewed ? plan.tasks.find(t => isEntry(t) && t.n === BLOCKED.task) || null : null
 // A decision for a blocked task the plan no longer lists has nothing to revise: it is kept as any other.
 if (!BLOCKED_TASK) decisionPending = false
 let renewedHere = AMEND !== null
@@ -1277,13 +1284,19 @@ if (BLOCKED_TASK && newDecision !== null) {
   const asked = [{ severity: 'important', file: t.file, summary: `the implementer of task ${t.n} returned blocked: ${BLOCKED.notes}` }]
   const revised = await call(planPrompt(`\n${MAP_FIRST} Task ${t.n} (${t.title}) of your plan at ${plan.plan_root} stopped: its implementer returned blocked on its task file ${t.file}, and the owner then decided: ${JSON.stringify(newDecision)}. Treat the implementer's notes as the finding and that decision as binding: fix only that task file in place (and plan.md, the code map or another task file only where the decision requires it), keep every task's number, and return the full result again, with criteria_edited: the ids of the criteria whose text you changed to follow the decision (typing the same criterion again in other words is not a change; an empty list when you changed none). The notes: ${JSON.stringify(BLOCKED.notes)}`, REVISE_PACE), { label: 'plan-task-revise', phase: 'Plan', agentType: 'planner', schema: PLAN_SCHEMA })
   let failed = await settleRevise(revised, asked, facts, criteria)
-  if (!failed && !taskLog.every(d => plan.tasks.some(o => o.n === d.n))) failed = { invalid: plan, details: 'the task revise dropped a task that is already done' }
+  if (!failed) {
+    const touched = taskLog.filter(d => { const was = prior.plan.tasks.find(o => o.n === d.n), now = plan.tasks.find(o => o.n === d.n); return !now || (!!was && (now.file !== was.file || now.branch !== was.branch)) }).map(d => d.n)
+    const gone = criteria.filter(a => !plan.acceptance.some(b => b.id === a.id)).map(a => a.id)
+    if (touched.length) failed = { invalid: plan, details: `the task revise dropped or changed the done task(s) ${touched.join(', ')} (number, file or branch)` }
+    else if (gone.length) failed = { invalid: plan, details: `the task revise removed the criteria ${gone.join(', ')}; removing a criterion is an owner amend` }
+  }
   if (failed) {
     plan = prior.plan
     reordered = prior.reordered
     planReviewed = true
     planFindingsKept = null
-    if (Array.isArray(failed.needs_user)) blocked = { ...blocked, asked: true }
+    // The decision reached the planner, which asked on: it is kept, so the resume with the answer shows the planner both.
+    if (Array.isArray(failed.needs_user)) { blocked = { ...blocked, asked: true }; decisionPending = false }
     const said = Object.fromEntries(['needs_user', 'invalid', 'branch_problems', 'rules', 'details'].filter(k => own(failed, k)).map(k => [k, failed[k]]))
     return stop(Array.isArray(failed.needs_user) || own(failed, 'invalid') ? 'plan' : 'plan-review', { step: 'plan-task-revise', ...said })
   }

@@ -6018,7 +6018,7 @@ class TrainPathTest(unittest.TestCase):
         self.assertEqual([row(out["result"], n) for n in (2, 3)], [{"issue": n, "outcome": "landed", "pr": 40 + n} for n in (2, 3)])
 
 
-WAYS = "; resume with decisions (a planner revises the task file from it) or amend {file, find, replace}"
+WAYS = "; resume with decisions (a planner revises the task file), amend {file, find, replace}, or decisions rerun if the cause was outside the task file"
 
 
 class BlockedTaskOwnerActionTest(unittest.TestCase):
@@ -6062,6 +6062,15 @@ class BlockedTaskOwnerActionTest(unittest.TestCase):
         self.assertEqual(child(calls, 1)["args"]["cont"], cont)
         self.assertEqual(child(calls, 1)["args"]["decisions"], "Use the other fixture.")
         self.assertEqual(again["stage"], "done")
+
+    def test_the_decision_rerun_passes_through_to_the_child_which_runs_the_implementer(self):
+        result, _, _ = run(children={"1": self.STOP})
+        cont = result["owner_actions"][0]["cont"]
+        _, calls, _ = run(args=dict(ARGS, conts={"1": cont}, decisions={"1": "rerun"}), patch={"facts-1": HELD})
+        self.assertEqual((child(calls, 1)["args"]["cont"], child(calls, 1)["args"]["decisions"]), (cont, "rerun"))
+        first, _ = run_child(dict(self.CHILD_ARGS, mode="ready"), replies={"impl-1": {"status": "blocked", "notes": self.NOTES}})
+        _, steps = run_child(dict(self.CHILD_ARGS, mode="ready", cont=first["cont"], decisions="rerun"))
+        self.assertEqual([c["label"] for c in steps][:2], ["setup", "impl-1"])
 
     def test_only_the_blocked_issue_leaves_the_relaunch(self):
         other = {"stage": "verify", "reason": "verify: build: boom", "cont": reviewed(2)}
