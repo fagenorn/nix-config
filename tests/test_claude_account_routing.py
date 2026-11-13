@@ -63,11 +63,12 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         self.server.requests.append(self.path)
+        body = getattr(self.server, "excluded", b'{"excluded":[]}') if self.path == "/api/excluded" else self.server.body
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(self.server.body)))
+        self.send_header("Content-Length", str(len(body)))
         self.end_headers()
-        self.wfile.write(self.server.body)
+        self.wfile.write(body)
 
     def log_message(self, format, *args):
         pass
@@ -380,9 +381,11 @@ class ProfileChoiceTest(LauncherCase):
         self.state.mkdir(parents=True, exist_ok=True)
         (self.state / "bindings.tsv").write_text("%s\t%s\n" % (work.resolve(), name))
 
-    def console(self, body):
+    def console(self, body, excluded=None):
         server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), ConsoleHandler)
         server.body = body
+        if excluded is not None:
+            server.excluded = excluded
         server.requests = self.console_requests
         return self.serve(server)
 
@@ -508,6 +511,41 @@ class ProfileChoiceTest(LauncherCase):
             self.profile("-e", False, self.now)
             self.profile("a", False, self.now)
             self.assertEqual(self.chosen(self.launch(self.closed())), self.path("-e"))
+
+    def test_an_excluded_profile_is_not_the_most_recently_used_fallback(self):
+        self.profile("a", True, self.now - 100)
+        self.profile("b", True, self.now)
+        url = self.console(b'{"profile":null}', b'{"excluded":["b"]}')
+        environment = self.launch(self.closed(), console_url=url)
+        self.assertEqual(self.chosen(environment), self.path("a"))
+        self.assertEqual(self.console_requests, ["/api/profile", "/api/excluded"])
+
+    def test_an_excluded_profile_is_not_the_first_named_last_resort(self):
+        self.profile("a", False, self.now)
+        self.profile("b", False, self.now)
+        url = self.console(b'{"profile":null}', b'{"excluded":["a"]}')
+        self.assertEqual(self.chosen(self.launch(self.closed(), console_url=url)), self.path("b"))
+
+    def test_the_sole_signed_in_profile_excluded_is_not_started_by_the_fallback(self):
+        self.profile("work", True, self.now)
+        url = self.console(b'{"profile":null}', b'{"excluded":["work"]}')
+        environment = self.launch(self.closed(), console_url=url)
+        self.assertNotIn("CLAUDE_CONFIG_DIR", environment)
+
+    def test_a_profile_excluded_among_two_leaves_the_other_one_signed_out_to_sign_in(self):
+        self.profile("work", True, self.now)
+        self.profile("other", False, self.now - 100)
+        url = self.console(b'{"profile":null}', b'{"excluded":["work"]}')
+        self.assertEqual(self.chosen(self.launch(self.closed(), console_url=url)), self.path("other"))
+
+    def test_an_unusable_exclusion_answer_excludes_nothing(self):
+        self.profile("a", True, self.now - 100)
+        self.profile("b", True, self.now)
+        bodies = (b'{"excluded":[b]}', b'{"excluded": ["b"]}', b'{"excluded":["../b"]}', b"not json", b"")
+        for body in bodies:
+            with self.subTest(body=body):
+                url = self.console(b'{"profile":null}', body)
+                self.assertEqual(self.chosen(self.launch(self.closed(), console_url=url)), self.path("b"))
 
 
 if __name__ == "__main__":

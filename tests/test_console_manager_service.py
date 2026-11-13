@@ -950,6 +950,71 @@ class ProfileChoiceServiceTest(ManagerServiceTest):
         self.assertEqual(len(self.exclusion_rows()), 2)
         self.assertEqual(self.ask(svc)[2], b'{"profile":"work"}')
 
+    def prepare_then_exclude(self, svc, queue, *profiles):
+        """Run the queued launch with each of `profiles` excluded just after the lock that prepared it is released."""
+        prepared = svc._prepared_launch
+        lock = svc._ingest
+        state = {"prepared": False}
+
+        class ReleaseHook:
+            def __enter__(hook):
+                lock.acquire()
+
+            def __exit__(hook, *exc):
+                lock.release()
+                if state["prepared"]:
+                    state["prepared"] = False
+                    for profile in profiles:
+                        self.assertEqual(self.exclude(svc, profile)[::2], (204, b""))
+
+        def prepared_then_flagged(*args):
+            launch = prepared(*args)
+            state["prepared"] = True
+            return launch
+
+        with mock.patch.object(svc, "_prepared_launch", side_effect=prepared_then_flagged), \
+                mock.patch.object(svc, "_ingest", ReleaseHook()):
+            queue.run_next()
+
+    def test_a_launch_prepared_before_an_exclusion_is_not_started_under_the_excluded_profile(self):
+        dirs = self.two_signed_in()
+        launches = support.Launches()
+        queue = support.Queued()
+        svc = self.start(profile_dirs=dirs, clock=lambda: NOW, choice_file=self.choice,
+                         launcher=launches, dispatch=queue)
+        self.state(svc)
+        self.prepare_then_exclude(svc, queue, "work")
+        self.assertEqual([c.profile for c in launches.calls], ["home"])
+        _, _, kind, _, payload = self.manager_rows()[-1]
+        self.assertEqual((kind, json.loads(payload)["profile"]), ("manager.started", "home"))
+
+    def test_a_launch_prepared_before_the_last_profile_was_excluded_waits(self):
+        dirs = self.two_signed_in()
+        launches = support.Launches()
+        queue = support.Queued()
+        svc = self.start(profile_dirs=dirs, clock=lambda: NOW, choice_file=self.choice,
+                         launcher=launches, dispatch=queue)
+        self.state(svc)
+        self.prepare_then_exclude(svc, queue, "work", "home")
+        self.assertEqual(launches.calls, [])
+        _, _, kind, _, payload = support.log_rows(self.store)[-1]
+        self.assertEqual(kind, "manager.waiting")
+        self.assertIsNone(json.loads(payload)["until"])
+        self.assertEqual(self.manager_rows()[-1][2], "manager.waiting")
+
+    def test_the_excluded_route_answers_the_excluded_profiles_in_name_order(self):
+        dirs = self.two_signed_in()
+        svc = self.start(profile_dirs=dirs, clock=lambda: NOW, choice_file=self.choice)
+        route = "/api/excluded"
+        self.assertEqual(support.request(svc.address, "GET", route)[::2],
+                         (200, b'{"excluded":[]}'))
+        self.assertEqual(self.exclude(svc, "work")[::2], (204, b""))
+        self.assertEqual(self.exclude(svc, "home")[::2], (204, b""))
+        self.assertEqual(support.request(svc.address, "GET", route)[::2],
+                         (200, b'{"excluded":["home","work"]}'))
+        self.assertEqual(
+            support.request(svc.address, "GET", route, host="example.com:80")[0], 403)
+
 
 if __name__ == "__main__":
     unittest.main()

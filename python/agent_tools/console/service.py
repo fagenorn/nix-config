@@ -34,6 +34,7 @@ Routes (every response carries `Cache-Control: no-store` and
     POST /api/recap 200 application/json, a manager reads what it needs to pick a sprint up (below)
     GET /api/sprint-status?sprint_id=<id> 200 application/json, what became of a brief (below)
     GET /api/profile 200 application/json, the profile a new session should use (below)
+    GET /api/excluded 200 application/json, the profiles the owner excluded (below)
     anything else   404
     other methods   405 with `Allow: GET` (`Allow: POST` on `/api/hooks`, `/api/readings`,
                     `/api/looked`, `/api/answer`, `/api/check-answer`, `/api/goal`, `/api/withdraw`,
@@ -473,6 +474,14 @@ a failed write is a 500 with nothing appended or published and the file as it wa
 leaves the file naming an excluded profile; a failed append puts the file back to the choice over the
 old set and is a 500. Only then is the row appended, folded and published. The excluded profiles
 are folded from the log at construction and by `_fold`, and rebuilt by `retain()`.
+`GET /api/excluded` answers them, exactly `{"excluded":["<name>",...]}` in name order (`json.dumps`
+with sorted keys and compact separators), behind the same loopback check with no token: the account
+launcher asks it before its own fallback, so a profile the owner excluded is never started by the
+launcher's guess either (ADR-hosts-008). A manager launch that was prepared before an exclusion is
+checked again under the ingest lock immediately before the launcher runs: when its profile has been
+excluded since, the choice is made again over the set now in force (a wait row when nothing can be
+chosen), so an exclusion that succeeded is never followed by a launch under that profile that was
+prepared before it.
 
 Nudges (#889): the service takes `nudger` (`nudge.nudger_for(sys.platform)` from `console.py`; None
 means no nudge is ever made, no reservation, row or listing read) and `listing` (default: read
@@ -693,6 +702,7 @@ sets the stop flag, then `closing`, wakes every waiter, joins the watcher, the s
 tracker, retention and digest threads and tears the rest down; it is idempotent.
 """
 
+import dataclasses
 import hmac
 import http.server
 import json
@@ -759,6 +769,7 @@ CLOSE_PATH = "/api/close"
 STOP_PATH = "/api/stop"
 STATUS_PATH = "/api/sprint-status"
 PROFILE_PATH = "/api/profile"
+EXCLUDED_PATH = "/api/excluded"
 MESSAGE_PATH = "/api/message"
 INBOX_PATH = "/api/inbox"
 MESSAGE_REPLY_PATH = "/api/message-reply"
@@ -1486,6 +1497,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             body = json.dumps({"profile": self.server.console.session_profile()},
                               sort_keys=True, separators=(",", ":")).encode()
             self._send(200, "application/json", body)
+        elif route == EXCLUDED_PATH:
+            body = json.dumps({"excluded": self.server.console.excluded_profiles()},
+                              sort_keys=True, separators=(",", ":")).encode()
+            self._send(200, "application/json", body)
         elif route in POST_LIMITS or route in PAGE_WRITES or route in MANAGER_WRITES:
             self._refuse_method()
         else:
@@ -2110,6 +2125,10 @@ class ConsoleService:
                 launch = self._prepared_launch(sprint_id, token, listed)
             if launch is None:
                 return
+            with self._ingest:
+                launch = self._unexcluded_launch(launch, token)
+            if launch is None:
+                return
             reason = None
             try:
                 self._launcher(launch)
@@ -2171,6 +2190,29 @@ class ConsoleService:
         return manager.new_launch(sprint_id, project_id, sprint.goal, project.root, choice,
                                   secret, self._sprint_secrets, takeover=takeover,
                                   seen_after=sprint.manager_seen_seq or 0)
+
+    def _unexcluded_launch(self, launch: manager.Launch, token: object) -> manager.Launch | None:
+        """Under the ingest lock: `launch`, or its replacement when its profile was excluded after it was prepared.
+
+        The choice is made again over the set now in force; with nothing to choose a wait row is
+        appended (as `_prepared_launch` does) and None returned.
+        """
+        if launch.profile not in self._excluded:
+            return launch
+        sprint = self._sprints.get(launch.sprint_id)
+        if sprint is None:
+            self._release(launch.sprint_id, token)
+            return None
+        choice = manager.choose_profile(
+            capacity.capacity_view(self._read_profiles(), self._capacity, self._clock(),
+                                   self._signins, excluded=self._excluded),
+            self._use.last)
+        if isinstance(choice, manager.Wait):
+            marks = {"takeover": True, "goal": sprint.goal} if launch.takeover else {}
+            self._append_manager(MANAGER_WAITING, launch.project_id, {
+                "sprint_id": launch.sprint_id, "until": choice.until, **marks}, token)
+            return None
+        return dataclasses.replace(launch, profile=choice)
 
     def _append_manager(self, kind: str, project_id: str, payload: dict, token: object) -> None:
         """Under the ingest lock: append one manager row, release the attempt's hold, publish."""
@@ -3096,6 +3138,11 @@ class ConsoleService:
                 raise
             self._apply(appended)
             return appended
+
+    def excluded_profiles(self) -> list[str]:
+        """The profiles the owner excluded, in name order."""
+        with self._ingest:
+            return sorted(self._excluded)
 
     def session_profile(self) -> str | None:
         """The profile a new session should use now, over the profile directories as they are; kept in the choice file."""

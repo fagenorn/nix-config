@@ -441,12 +441,26 @@ console_profile() {
   return 0
 }
 
+# The profiles the owner excluded from the console's choice (#1028), as one comma-separated
+# line, when the console answers GET /api/excluded exactly {"excluded":["<name>",...]}; nothing
+# for any other answer or none. The caller bounds it.
+console_excluded() {
+  [ -n "$CONSOLE_URL" ] || return 0
+  local hostport="${CONSOLE_URL#http://}" body list
+  local re='^\{"excluded":\[(("[a-z0-9_-]+")(,"[a-z0-9_-]+")*)?\]\}$'
+  loopback_body "${hostport%:*}" "${hostport##*:}" /api/excluded body || return 0
+  if [[ $body =~ $re ]]; then list="${BASH_REMATCH[1]//\"/}"; printf '%s\n' "$list"; fi
+  return 0
+}
+
 # The account a launch uses (ADR-hosts-008): CLAUDE_ACCOUNT; else, with no named profile,
 # default; else the console's answer, the first line of the choice file, the most recently
 # used signed-in named profile, the first named profile by name, each used only when it is an
-# account. Never reads the bindings. Prints only the name: stdout and stderr belong to claude.
+# account and, for the last two, not excluded by the owner (the console is asked); when every
+# named profile is excluded, default. Never reads the bindings. Prints only the name: stdout and
+# stderr belong to claude.
 launch_account() {
-  local names name answer="" waited=0 choice="" best=""
+  local names name answer="" waited=0 choice="" best="" excluded="" first=""
   if [ -n "${CLAUDE_ACCOUNT:-}" ]; then printf '%s\n' "$CLAUDE_ACCOUNT"; return 0; fi
   names="$(named_profiles)"
   if [ -z "$names" ]; then printf 'default\n'; return 0; fi
@@ -461,14 +475,22 @@ launch_account() {
     choice="${choice%"${choice##*[![:space:]]}"}"
     if is_account "$choice"; then printf '%s\n' "$choice"; return 0; fi
   fi
+  # The same 1 s deadline, reaped the same way, covers the exclusion list.
+  waited=0
+  IFS= read -r -t 1 excluded < <(console_excluded 2>/dev/null) || waited=$?
+  if [ "$waited" -gt 128 ]; then kill "$!" 2>/dev/null || true; excluded=""; fi
+  wait "$!" 2>/dev/null || true
   while IFS= read -r name; do
+    case ",$excluded," in *",$name,"*) continue ;; esac
+    if [ -z "$first" ]; then first="$name"; fi
     signed_in "$name" || continue
     if [ -z "$best" ] || [ "$(profile_dir "$name")/.claude.json" -nt "$(profile_dir "$best")/.claude.json" ]; then
       best="$name"
     fi
   done <<<"$names"
   if [ -n "$best" ]; then printf '%s\n' "$best"; return 0; fi
-  printf '%s\n' "${names%%$'\n'*}"
+  if [ -n "$first" ]; then printf '%s\n' "$first"; return 0; fi
+  printf 'default\n'
 }
 
 cmd_run() {
