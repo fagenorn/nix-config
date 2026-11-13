@@ -49,6 +49,13 @@ retention pass leaves the newest row of each profile (by sequence number, the pr
 payload's `profile`) in place whatever its age, because the console records a sign-in only when it
 changes and a profile signed out for longer than the window would otherwise read as never read.
 
+One kind is kept while in force (#1028): `PROFILE_EXCLUSION` (`profile.exclusion`) is not in
+`KEPT_KINDS`, but the retention pass leaves, whatever its age, the newest valid row of each profile
+when that row's `excluded` is JSON `true`, and removes every other old row of the kind. A row is
+valid when its `profile` is a non-empty JSON string and its `excluded` a JSON boolean (an integer
+is not one), the rule `exclusion.excluded_profiles` folds by, so a newer invalid row never displaces
+the row in force and the folded set is the same before and after a pass.
+
 Another is kept in part (#1011): a session's profile is assigned by its `SESSION_SEEN` and
 `SESSION_PROFILE` rows, and a profile's last use is read from the session's later `SESSION_HOOK` rows
 (`manager.profile_use`). The pass therefore leaves, for a session with a `SESSION_HOOK` row inside the
@@ -106,6 +113,7 @@ SPRINT_STOP_REQUESTED = "sprint.stop_requested"
 MANAGER_STOPPED = "manager.stopped"
 MANAGER_STOP_FAILED = "manager.stop_failed"
 SIGNIN_READING = "signin.reading"
+PROFILE_EXCLUSION = "profile.exclusion"
 SESSION_HOOK = "session.hook"
 SESSION_SEEN = "session.seen"
 SESSION_PROFILE = "session.profile"
@@ -276,7 +284,7 @@ class EventLog:
             return self._transaction(insert)
 
     def retain(self) -> int:
-        """Remove the rows older than the retention window, keeping each profile's newest sign-in reading; return how many."""
+        """Remove the rows older than the retention window, keeping each profile's newest sign-in reading and exclusion in force; return how many."""
         with self._lock:
             now = datetime.fromisoformat(self._clock())
             cutoff = (now - RETENTION).astimezone(timezone.utc).isoformat(
@@ -292,6 +300,15 @@ class EventLog:
                     "AND NOT (kind = ? AND seq = (SELECT MAX(newer.seq) FROM events AS newer "
                     "WHERE newer.kind = events.kind AND json_extract(newer.payload, '$.profile') "
                     "IS json_extract(events.payload, '$.profile'))) "
+                    "AND NOT (kind = ? AND json_type(events.payload, '$.excluded') = 'true' "
+                    "AND json_type(events.payload, '$.profile') = 'text' "
+                    "AND json_extract(events.payload, '$.profile') <> '' "
+                    "AND seq = (SELECT MAX(newer.seq) FROM events AS newer "
+                    "WHERE newer.kind = events.kind "
+                    "AND json_type(newer.payload, '$.profile') = 'text' "
+                    "AND json_type(newer.payload, '$.excluded') IN ('true', 'false') "
+                    "AND json_extract(newer.payload, '$.profile') = "
+                    "json_extract(events.payload, '$.profile'))) "
                     "AND NOT (kind IN (?, ?) AND seq = (SELECT MAX(owner.seq) FROM events AS owner "
                     "WHERE owner.kind IN (?, ?) AND owner.at < ? AND "
                     "json_extract(owner.payload, '$.session_id') "
@@ -300,7 +317,7 @@ class EventLog:
                     "AND hook.at >= ? AND hook.seq > events.seq AND "
                     "json_extract(hook.payload, '$.session_id') "
                     "IS json_extract(events.payload, '$.session_id')))",
-                    (cutoff, *sorted(KEPT_KINDS), SIGNIN_READING,
+                    (cutoff, *sorted(KEPT_KINDS), SIGNIN_READING, PROFILE_EXCLUSION,
                      SESSION_SEEN, SESSION_PROFILE, SESSION_SEEN, SESSION_PROFILE, cutoff,
                      SESSION_HOOK, cutoff)).rowcount
 
