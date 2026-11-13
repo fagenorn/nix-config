@@ -2167,10 +2167,19 @@ class PlanRuleMessagesTest(unittest.TestCase):
                 self.assertNotIn("plan-revise", labels(calls))
         _, calls = run()
         self.assertIn("Return no criterion that only restates a declared verification command passing", prompt(calls, "plan"))
+        # A plan whose every criterion restates the verification keeps them: dropping them would leave no criterion and no plan.
+        restated = [{"id": "AC1", "text": "nodo:lint passes", "kind": "code"}, {"id": "AC2", "text": "test passes at the branch head", "kind": "code"}]
+        for name, acceptance in (("sole", restated[:1]), ("all", restated)):
+            with self.subTest(only=name):
+                result, calls = run(replies={"plan": dict(PLAN, acceptance=acceptance)}, patch=setup)
+                self.assertNotIn("plan-revise", labels(calls))
+                self.assertNotIn("plan-rules-revise", labels(calls))
+                self.assertIn("impl-1", labels(calls))
+                self.assertNotIn(result["stage"], ("plan", "plan-review"))
 
     def test_no_final_review_is_asked_to_run_the_declared_suite(self):
         """#993: the chunk reviews and the integration review leave the declared verification to the verify step."""
-        owned = "The verify step runs the declared verification: do not run the whole suite."
+        owned = "The verify step runs the declared verification: run only the targeted tests a finding needs, never the whole suite."
         _, calls = run(replies={"plan": dict(PLAN, tasks=tasks(4))})
         for label in ("final-1", "final-2", "final-integration"):
             self.assertEqual(prompt(calls, label).count(owned), 1, label)

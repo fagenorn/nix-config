@@ -850,10 +850,14 @@ const restatesVerify = text => {
 const planRules = p => {
   const out = []
   const scripts = Array.isArray(p.scripts) ? p.scripts : []
+  // #993: dropping is the fix, and a plan with no criterion is not well formed: when every criterion restates the verification
+  // none is refused, or the revise would empty the plan, drop it and the relaunch would plan the same thing again.
+  const restates = a => a.kind === 'code' && restatesVerify(a.text)
+  const droppable = p.acceptance.some(a => !restates(a))
   for (const a of p.acceptance) {
     const hit = (rule, why) => out.push({ severity: 'important', rule, ac: a.id, summary: `${rule} (${a.id}): ${why}` })
     const v = a.verify
-    if (a.kind === 'code' && restatesVerify(a.text)) hit(VERIFY_RULE, `the criterion only restates the declared verification, which the verify step runs and proves: drop the criterion`)
+    if (restates(a) && droppable) hit(VERIFY_RULE, `the criterion only restates the declared verification, which the verify step runs and proves: drop the criterion`)
     if (a.metric === true && !(a.kind === 'evidence' && v && typeof v === 'object' && v.mode === 'observe')) hit('R5', a.kind === 'note'
       ? `a note carries no metric: drop metric (R9), or, when no decision makes the reading the orchestrator's own, make it an evidence check with mode observe`
       : `metric is set on a criterion that is not an evidence check with mode observe: make it one when only a deploy or observation over time shows the threshold, or drop metric and ${CODE_FIX}`)
@@ -1472,7 +1476,7 @@ ${PLAN_REF} Acceptance criteria: ${ACS}.
 Run the project's configured independent code review: the contract's workflow.review.code is the command ${REVIEW_CODE}. ${CX_USE} diff review over the delivery range ${RANGE} in the worktree ${W}, with no review package;${EXTRA_RANGES()} ${CX_WAIT} Return Codex's Important or Critical findings as they are (correctness defects with a concrete failing input, unmet criteria) without adding your own review; verdict pass if none. ${CX_NONE}
 ${RULES}`, { label: 'final-codex', phase: 'Final review', agentType: 'clerk', model: CLERK_MODEL, effort: 'high', schema: CODEX }) : Promise.resolve(null)
 // #993: shared by the chunk and the integration review.
-const VERIFY_OWNED = `The verify step runs the declared verification: do not run the whole suite.`
+const VERIFY_OWNED = `The verify step runs the declared verification: run only the targeted tests a finding needs, never the whole suite.`
 const finals = await parallel(groups.map((g, gi) => () => call(`${CTX}
 ${PLAN_REF} Acceptance criteria: ${ACS}.
 Final review${chunked ? ` of chunk ${gi + 1}/${groups.length}: tasks ${g.map(t => t.n).join(', ')} only (their files: ${g.map(t => t.file).join(', ')}); grade only these tasks` : ' of the whole delivery'}: git -C ${W} diff ${RANGE}${chunked ? ' restricted to the paths these tasks own' : ''}.${EXTRA_RANGES()} ${KNOW} Two axes: correctness (real defects with a concrete failing input) and conformance (each task and each acceptance criterion of kind code is met, with the test or command that shows it). ${VERIFY_OWNED} Report Important or Critical findings only. Do not edit anything.`, { label: `final-${gi + 1}`, phase: 'Final review', agentType: 'reviewer', schema: FINDINGS })))
