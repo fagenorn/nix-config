@@ -26,6 +26,10 @@ ISSUE_BRANCH_ARGV = re.compile(r"\bissue-branch --repo-root (\S+) --issue (\d+)\
 
 HELD = {"claim": {"verdict": "held_by", "by": HOLDER}}
 
+# #992: the one sentence about the structured reply, the same in both programs.
+REPLY_ALONE = ("Call StructuredOutput alone in its own message, never beside another tool call, only after every other tool "
+               "result has come back: the first accepted call is final and ends the step.")
+
 
 PROGRAM_AGENT_TYPES = {"clerk", "planner", "implementer", "reviewer", "reviewer-lite"}
 
@@ -36,12 +40,37 @@ def untyped(calls):
             if c.get("kind", "agent") == "agent" and c["agentType"] not in PROGRAM_AGENT_TYPES]
 
 
+class Raw(dict):
+    """A fixture reply named() sends exactly as written: its findings get no default subject."""
+
+
+def named(fixtures):
+    """A copy of scenario replies or patches whose blocking fixture findings name a subject (#992).
+
+    A review finding the program accepts names a file or a failing input. A fixture finding that says neither
+    gets a failing input here; one that spells either key itself, an empty file included, is left as written.
+    """
+    def fix(value):
+        if isinstance(value, list):
+            return [fix(v) for v in value]
+        if not isinstance(value, dict):
+            return value
+        if isinstance(value, Raw):
+            return dict(value)
+        out = {k: fix(v) for k, v in value.items()}
+        if isinstance(out.get("findings"), list):
+            out["findings"] = [dict(f, failing_input="x") if isinstance(f, dict) and f.get("severity") != "minor"
+                               and "file" not in f and "failing_input" not in f else f for f in out["findings"]]
+        return out
+    return fix(fixtures or {})
+
+
 def run_full(args=None, replies=None, patch=None, children=None, turns=None, delays=None):
     node = shutil.which("node")
     if node is None:
         raise AssertionError("node is not on PATH; the deliver-batch scenarios need it")
-    scenario = {"args": ARGS if args is None else args, "replies": replies or {},
-                "patch": patch or {}, "children": children or {}, "turns": turns or {}, "delays": delays or {}}
+    scenario = {"args": ARGS if args is None else args, "replies": named(replies),
+                "patch": named(patch), "children": children or {}, "turns": turns or {}, "delays": delays or {}}
     done = subprocess.run([node, str(HARNESS), str(PROGRAM)], input=json.dumps(scenario),
                           capture_output=True, text=True, timeout=60, check=False)
     if done.returncode != 0:
@@ -1066,7 +1095,7 @@ def run_child(args, replies=None, patch=None):
     node = shutil.which("node")
     if node is None:
         raise AssertionError("node is not on PATH; the deliver-standard scenarios need it")
-    scenario = {"args": args, "replies": replies or {}, "patch": patch or {}}
+    scenario = {"args": args, "replies": named(replies), "patch": named(patch)}
     done = subprocess.run([node, str(CHILD_HARNESS), str(CHILD_PROGRAM)], input=json.dumps(scenario),
                           capture_output=True, text=True, timeout=60, check=False)
     if done.returncode != 0:
@@ -1465,7 +1494,7 @@ class LandTest(unittest.TestCase):
 
     def test_a_rejected_fix_is_never_recorded_as_accepted(self):
         result, calls, _ = run(patch=folded(CI_RED), replies={
-            "land-fix-review-1": {"verdict": "findings", "findings": [{"severity": "important", "summary": "skipped a test"}]}})
+            "land-fix-review-1": {"verdict": "findings", "findings": [{"severity": "important", "summary": "skipped a test", "failing_input": "x"}]}})
         self.assertEqual(row(result, 1)["outcome"], "ci-failed")
         self.assertNotIn("land-record-1-1", labels(calls))
         self.assertNotIn("land-merge-1", labels(calls))
@@ -1508,8 +1537,8 @@ class LandTest(unittest.TestCase):
     def test_a_rejected_resolution_is_sync_review_without_an_owner_action(self):
         result, calls, _ = run(patch=BEHIND, replies={
             "land-sync-1-1": ABORTED, "land-sync-resolve-1-1": {"status": "done", "conflicted": True, "head": B, "merge_commit": B, "notes": "ok"},
-            "land-sync-review-1-1": {"verdict": "findings", "findings": [{"severity": "important", "summary": "dropped a change"}]},
-            "land-sync-rereview-1-1": {"verdict": "findings", "findings": [{"severity": "important", "summary": "dropped a change"}]}})
+            "land-sync-review-1-1": {"verdict": "findings", "findings": [{"severity": "important", "summary": "dropped a change", "failing_input": "x"}]},
+            "land-sync-rereview-1-1": {"verdict": "findings", "findings": [{"severity": "important", "summary": "dropped a change", "failing_input": "x"}]}})
         self.assertEqual(row(result, 1)["outcome"], "sync-review")
         for label in ("land-ask-1", "release-1"):
             self.assertNotIn(label, labels(calls))
@@ -2329,9 +2358,9 @@ class SyncFixRoundTest(unittest.TestCase):
     FIXED = "f" * 40
     CONFLICTED = {"status": "done", "conflicted": True, "head": B, "merge_commit": B, "resolved_files": ["x.py"],
                   "markers_checked": True, "tests": ["t"], "notes": "removed one marker"}
-    FOUND = {"verdict": "findings", "findings": [{"severity": "important", "summary": "dropped a sentence dev added"},
+    FOUND = {"verdict": "findings", "findings": [{"severity": "important", "summary": "dropped a sentence dev added", "failing_input": "x"},
                                                  {"severity": "minor", "summary": "style"}]}
-    LEFT = {"verdict": "findings", "findings": [{"severity": "important", "summary": "the sentence is still missing"}]}
+    LEFT = {"verdict": "findings", "findings": [{"severity": "important", "summary": "the sentence is still missing", "failing_input": "x"}]}
     UNCHECKED = "The merge was not checked for leftover conflict markers"
 
     def land(self, **replies):
@@ -2523,7 +2552,7 @@ class ConflictedSyncOutsideLockTest(unittest.TestCase):
     reviewed head takes the lock again, waiting, and a clean merge never leaves it."""
 
     RELEASE = "forge-claim land release --repo owner/repo --branch dev --sha "
-    FOUND = {"verdict": "findings", "findings": [{"severity": "important", "summary": "dropped a change"}]}
+    FOUND = {"verdict": "findings", "findings": [{"severity": "important", "summary": "dropped a change", "failing_input": "x"}]}
 
     def land(self, **replies):
         return run_full(patch=BEHIND, replies=dict({"land-sync-1-1": ABORTED}, **replies))
@@ -2770,6 +2799,18 @@ class ConflictedSyncOutsideLockTest(unittest.TestCase):
         # The only step that runs a merge command, land-merge, never ran (asserted above); what ran is the landing up to the resolution.
         self.assertEqual(land_labels(calls), ["land-pr-1", "land-sync-1-1", "land-unlock-1", "land-sync-resolve-1-1"])
         self.assertEqual(ls.count("land-unlock-1"), 1)
+
+    def test_a_sync_step_that_resolved_the_conflict_itself_and_names_no_merge_commit_never_lands(self):
+        """#986: the same refusal when the sync step, not the resolve step, answers conflicted with a head alone."""
+        result, calls, _ = run(patch=BEHIND, replies={"land-sync-1-1": {
+            "status": "done", "conflicted": True, "head": C, "resolved_files": ["x.py"], "notes": "ok"}})
+        got = row(result, 1)
+        self.assertEqual((got["outcome"], got["stage"], got["reason"]),
+                         ("stopped", "land-sync", "land-sync: the resolution named no merge commit"))
+        ls = labels(calls)
+        for gone in ("land-sync-resolve-1-1", "land-sync-review-1-1", "land-record-1-1", "land-merge-1"):
+            self.assertNotIn(gone, ls)
+        self.assertEqual(land_labels(calls)[:2], ["land-pr-1", "land-sync-1-1"])
 
     def test_a_clean_sync_whose_head_is_not_its_merge_commit_is_reviewed_too(self):
         clean = {"status": "done", "conflicted": False, "head": C, "merge_commit": B, "notes": "ok"}
@@ -3212,7 +3253,7 @@ class ReadoptTest(unittest.TestCase):
     def test_a_relaunch_after_a_rejected_fix_review_reruns_the_gates_before_landing(self):
         # Run 1: CI fails, the fix is pushed, its review rejects it: ci-failed, PR head = the fix.
         first, _, _ = run(patch=folded(CI_RED), replies={
-            "land-fix-review-1": {"verdict": "findings", "findings": [{"severity": "important", "summary": "weakened a test"}]}})
+            "land-fix-review-1": {"verdict": "findings", "findings": [{"severity": "important", "summary": "weakened a test", "failing_input": "x"}]}})
         self.assertEqual(row(first, 1)["outcome"], "ci-failed")
         # Run 2: the PR is open at the unaccepted fix head; readopt refuses to land it as it stands.
         result, calls, _ = run(args=first["relaunch"],
@@ -3627,7 +3668,7 @@ SCENARIOS = (
     # #907: a sync-review finding reaches the fix round and its re-review.
     {"patch": BEHIND,
      "replies": {"land-sync-1-1": ABORTED, "land-sync-resolve-1-1": {"status": "done", "conflicted": True, "head": B, "merge_commit": B, "notes": "ok"},
-                 "land-sync-review-1-1": {"verdict": "findings", "findings": [{"severity": "important", "summary": "dropped"}]}}},
+                 "land-sync-review-1-1": {"verdict": "findings", "findings": [{"severity": "important", "summary": "dropped", "failing_input": "x"}]}}},
     {"patch": BEHIND,
      "replies": {"land-sync-1-1": {"status": "done", "conflicted": False, "head": B, "merge_commit": B, "notes": "ok"},
                  "land-record-1-1": {"ok": True, "head": B, "lock": {"verdict": "lost_to", "lock_sha": SHA, "by": HOLDER}},
@@ -4017,8 +4058,8 @@ class StopReasonTest(unittest.TestCase):
         """A row that is not final says why in reason, whatever member held it; a final row has none."""
         red = {"state": "failed", "head": SHA, "failing": ["ci"], "details": "FAIL test_cache"}
         rejected = {"land-sync-1-1": ABORTED, "land-sync-resolve-1-1": {"status": "done", "conflicted": True, "head": "b" * 40, "merge_commit": "b" * 40, "notes": "ok"},
-                    "land-sync-review-1-1": {"verdict": "findings", "findings": [{"severity": "important", "summary": "dropped a change"}]},
-                    "land-sync-rereview-1-1": {"verdict": "findings", "findings": [{"severity": "important", "summary": "dropped a change"}]}}
+                    "land-sync-review-1-1": {"verdict": "findings", "findings": [{"severity": "important", "summary": "dropped a change", "failing_input": "x"}]},
+                    "land-sync-rereview-1-1": {"verdict": "findings", "findings": [{"severity": "important", "summary": "dropped a change", "failing_input": "x"}]}}
         rows = (
             ("ci-failed", {"patch": {"land-pr-1": {"checks": red}}, "replies": {"land-fix-1": None}},
              "the fix round did not finish; failing checks ci"),
@@ -4143,7 +4184,7 @@ class FoldedFirstLandChecksTest(unittest.TestCase):
     def test_each_folded_first_checks_answer_is_graded_as_before(self):
         behind = {"state": "behind", "head": SHA}
         pending = {"state": "pending", "head": SHA, "pending": ["e2e"]}
-        fix_review = {"verdict": "findings", "findings": [{"severity": "important", "summary": "skipped a test"}]}
+        fix_review = {"verdict": "findings", "findings": [{"severity": "important", "summary": "skipped a test", "failing_input": "x"}]}
         table = (
             (None, {}, ("stopped", "checks"), PRE_MERGE_CONTS,
              lambda ls: (self.assertEqual(ls.count("land-unlock-1"), 1), self.assertNotIn("land-merge-1", ls))),
@@ -5441,8 +5482,8 @@ class ResolveBeforeLockTest(unittest.TestCase):
     EARLY = {"land-pr-1": {"probe": {"conflicted": True, "tree": "e" * 40, "files": ["x.py"]}, "lock": None, "checks": None}}
     RESOLVED = ["land-pr-1", "land-sync-resolve-1-1", "land-sync-review-1-1", "land-record-1-1"]
     FIXED = "f" * 40
-    FOUND = {"verdict": "findings", "findings": [{"severity": "important", "summary": "dropped a sentence dev added"}]}
-    LEFT = {"verdict": "findings", "findings": [{"severity": "important", "summary": "the sentence is still missing"}]}
+    FOUND = {"verdict": "findings", "findings": [{"severity": "important", "summary": "dropped a sentence dev added", "failing_input": "x"}]}
+    LEFT = {"verdict": "findings", "findings": [{"severity": "important", "summary": "the sentence is still missing", "failing_input": "x"}]}
     BEHIND_AT_B = {"ok": True, "head": B, "lock": {"verdict": "acquired", "lock_sha": B}, "checks": {"state": "behind", "head": B}}
 
     def land(self, **replies):
@@ -6053,6 +6094,195 @@ class TrainPathTest(unittest.TestCase):
         out = run_full(args={**ARGS, "issues": [1, 2, 3], "train": True}, replies={"train-checks-1-2": late}, patch={"setup": {"max_parallel": 3}, **BEHIND})
         self.assertEqual(builds_of(out["calls"]), [[1, 2, 3]])
         self.assertEqual([row(out["result"], n) for n in (2, 3)], [{"issue": n, "outcome": "landed", "pr": 40 + n} for n in (2, 3)])
+
+
+INCOMPLETE = {"verdict": "incomplete", "findings": []}
+# What a reply sent beside a pending lookup held (#992): a blocking finding that names neither a file nor a failing input.
+PLACEHOLDER = {"verdict": "findings", "findings": [{"severity": "important", "file": "", "summary": "Placeholder emitted to satisfy the schema"}]}
+REAL = {"verdict": "findings", "findings": [{"severity": "important", "file": "x.py", "summary": "dropped a guard"}]}
+# The exact #992 shape: no file key and no failing_input key at all. Raw, so named() gives it no subject.
+KEYLESS = Raw({"verdict": "findings", "findings": [{"severity": "important", "summary": "Placeholder emitted to satisfy the schema"}]})
+NO_REVIEW = ": the reply is no review ("
+LOST_REVIEW = ": the second reply is no review either; the review is lost"
+
+
+class StructuredReplyTest(unittest.TestCase):
+    """#992: the structured reply goes alone and last; an unusable review reply reruns the step once and is never a finding."""
+
+    CONFLICTED = SyncFixRoundTest.CONFLICTED
+    REVIEW, REREVIEW = "land-sync-review-1-1", "land-sync-rereview-1-1"
+
+    def land(self, **replies):
+        return run_full(patch=BEHIND, replies=dict({"land-sync-1-1": ABORTED, "land-sync-resolve-1-1": self.CONFLICTED}, **replies))
+
+    def test_every_step_carries_the_one_sentence_once(self):
+        seen = all_calls()
+        self.assertTrue(seen)
+        for call in seen:
+            with self.subTest(label=call["label"]):
+                self.assertIsNotNone(call["schema"])
+                self.assertEqual(call["prompt"].count(f"\n- {REPLY_ALONE}"), 1)
+                self.assertEqual(call["prompt"].count("StructuredOutput"), 1)
+
+    def test_the_sentence_is_one_constant_shared_with_deliver_standard(self):
+        mine = PROGRAM.read_text(encoding="utf-8")
+        standard = CHILD_PROGRAM.read_text(encoding="utf-8")
+        line = f"const REPLY_ALONE = '{REPLY_ALONE}'\n"
+        self.assertEqual((mine.count(line), standard.count(line)), (1, 1))
+        self.assertEqual(REPLY_ALONE.index("."), len(REPLY_ALONE) - 1)
+        # It is the last of the rules every step gets, and written nowhere else.
+        self.assertIn("(a test runner or a build).\n- ${REPLY_ALONE}`\n", mine)
+        self.assertEqual(mine.count("${REPLY_ALONE}"), 1)
+        self.assertEqual(mine.count("StructuredOutput"), 2)
+
+    def test_an_unusable_sync_review_reruns_once_and_spends_no_fix_round(self):
+        for name, reply in (("placeholder", PLACEHOLDER), ("incomplete", INCOMPLETE)):
+            with self.subTest(reply=name):
+                out = self.land(**{self.REVIEW: reply})
+                self.assertEqual(row(out["result"], 1)["outcome"], "landed")
+                self.assertEqual(land_labels(out["calls"]), [
+                    "land-pr-1", "land-sync-1-1", "land-unlock-1", "land-sync-resolve-1-1", self.REVIEW, self.REVIEW + "-again",
+                    "land-record-1-1", "land-merge-1", "close-out-1"])
+                first, again = (next(c for c in out["calls"] if c["label"] == label) for label in (self.REVIEW, self.REVIEW + "-again"))
+                self.assertEqual((again["agentType"], again["schema"]), (first["agentType"], first["schema"]))
+                self.assertTrue(again["prompt"].startswith(first["prompt"] + "\nAn earlier reply to this step was discarded: "))
+                self.assertTrue(again["prompt"].endswith("Finish the review before you reply."))
+                self.assertEqual(len([l for l in out["logs"] if l.startswith(self.REVIEW + NO_REVIEW)]), 1)
+                self.assertEqual(out["result"]["stage"], "done")
+
+    def test_the_rerun_s_real_finding_gets_the_fix_round(self):
+        out = self.land(**{self.REVIEW: PLACEHOLDER, self.REVIEW + "-again": REAL})
+        self.assertEqual(row(out["result"], 1)["outcome"], "landed")
+        fix = prompt(out["calls"], "land-sync-fix-1-1")
+        self.assertIn("dropped a guard", fix)
+        self.assertNotIn("Placeholder", fix)
+        self.assertIn("dropped a guard", prompt(out["calls"], self.REREVIEW))
+
+    def test_two_unusable_replies_in_a_row_are_a_lost_review(self):
+        for first, second in ((PLACEHOLDER, PLACEHOLDER), (INCOMPLETE, PLACEHOLDER), (PLACEHOLDER, INCOMPLETE)):
+            with self.subTest(first=first["verdict"], second=second["verdict"]):
+                out = self.land(**{self.REVIEW: first, self.REVIEW + "-again": second})
+                got = row(out["result"], 1)
+                lost = row(self.land(**{self.REVIEW: None})["result"], 1)
+                # The row a sync review that returned nothing ends with; no fix round ran, and the breaker is left alone.
+                self.assertEqual(got["outcome"], lost["outcome"])
+                # A lost review and a dead reviewer are told apart: by the row's lost_reviews, and by the reason.
+                self.assertEqual(got["reason"], f"sync-review of merge {B}: the sync review answered twice with no usable review")
+                self.assertEqual(got["lost_reviews"], [self.REVIEW])
+                self.assertEqual(lost["reason"], f"sync-review of merge {B}: the sync review returned nothing")
+                self.assertNotIn("lost_reviews", lost)
+                names = land_labels(out["calls"])
+                self.assertEqual(names[names.index(self.REVIEW):], [self.REVIEW, self.REVIEW + "-again"])
+                self.assertNotIn("fix", got)
+                self.assertEqual(out["result"]["stage"], "done")
+                self.assertIn(self.REVIEW + LOST_REVIEW, out["logs"])
+
+    def test_a_finding_with_no_file_key_and_no_failing_input_key_is_no_review(self):
+        self.assertEqual(named({self.REVIEW: KEYLESS})[self.REVIEW]["findings"], [{"severity": "important", "summary": "Placeholder emitted to satisfy the schema"}])
+        out = self.land(**{self.REVIEW: KEYLESS})
+        names = land_labels(out["calls"])
+        self.assertEqual(names[names.index(self.REVIEW):names.index(self.REVIEW) + 2], [self.REVIEW, self.REVIEW + "-again"])
+        self.assertNotIn("land-sync-fix-1-1", names)
+        self.assertEqual(row(out["result"], 1)["outcome"], "landed")
+        out = self.land(**{self.REVIEW: KEYLESS, self.REVIEW + "-again": KEYLESS})
+        got = row(out["result"], 1)
+        self.assertEqual((got["outcome"], got["lost_reviews"]), ("sync-review", [self.REVIEW]))
+        names = land_labels(out["calls"])
+        self.assertEqual(names[names.index(self.REVIEW):], [self.REVIEW, self.REVIEW + "-again"])
+        self.assertIn(self.REVIEW + LOST_REVIEW, out["logs"])
+
+    def test_a_child_s_lost_reviews_reach_its_row(self):
+        lost = {"stage": "task-review", "task": {"n": 1}, "reason": "task-review: task 1 the reviewer answered twice with no usable review",
+                "lost_reviews": ["review-1"], "cont": {"setup": {}}}
+        result, _, _ = run(children={"1": lost})
+        got = row(result, 1)
+        self.assertEqual((got["outcome"], got["stage"], got["lost_reviews"], got["reason"]), ("stopped", "task-review", ["review-1"], lost["reason"]))
+        # No dead agent: the row names none, and a stop without the list carries no lost_reviews.
+        self.assertNotIn("dead_agents", got)
+        result, _, _ = run(children={"1": {k: v for k, v in lost.items() if k != "lost_reviews"}})
+        self.assertNotIn("lost_reviews", row(result, 1))
+        # A stop that names both keeps both.
+        result, _, _ = run(children={"1": dict(lost, dead_agents=["verify"])})
+        got = row(result, 1)
+        self.assertEqual((got["dead_agents"], got["lost_reviews"]), (["verify"], ["review-1"]))
+
+    def test_an_unusable_rereview_reruns_once_and_then_is_a_lost_rereview(self):
+        out = self.land(**{self.REVIEW: REAL, self.REREVIEW: PLACEHOLDER})
+        self.assertEqual(row(out["result"], 1)["outcome"], "landed")
+        names = land_labels(out["calls"])
+        self.assertEqual(names[names.index("land-sync-fix-1-1"):names.index("land-record-1-1")], ["land-sync-fix-1-1", self.REREVIEW, self.REREVIEW + "-again"])
+        self.assertEqual(names.count("land-sync-fix-1-1"), 1)
+        out = self.land(**{self.REVIEW: REAL, self.REREVIEW: INCOMPLETE, self.REREVIEW + "-again": PLACEHOLDER})
+        got = row(out["result"], 1)
+        self.assertEqual(got["outcome"], "sync-review")
+        self.assertIn("the sync re-review answered twice with no usable review", got["reason"])
+        self.assertEqual(got["lost_reviews"], [self.REREVIEW])
+        self.assertNotIn("Placeholder", got["reason"])
+        self.assertEqual(land_labels(out["calls"]).count("land-sync-fix-1-1"), 1)
+
+    def test_an_unusable_ci_fix_review_reruns_once_and_two_end_ci_failed(self):
+        fixed = {"land-record-1-1": {"ok": True, "head": FIX}}
+        out = run_full(patch=folded(CI_RED), replies=dict(fixed, **{"land-fix-review-1": INCOMPLETE}))
+        self.assertEqual(row(out["result"], 1)["outcome"], "landed")
+        names = land_labels(out["calls"])
+        self.assertEqual(names[names.index("land-fix-1"):names.index("land-fix-1") + 4], ["land-fix-1", "land-fix-review-1", "land-fix-review-1-again", "land-record-1-1"])
+        out = run_full(patch=folded(CI_RED), replies=dict(fixed, **{"land-fix-review-1": PLACEHOLDER, "land-fix-review-1-again": INCOMPLETE}))
+        got = row(out["result"], 1)
+        self.assertEqual(got["outcome"], "ci-failed")
+        self.assertIsNone(got.get("review"))
+        self.assertEqual(got["lost_reviews"], ["land-fix-review-1"])
+        self.assertNotIn("land-record-1-1", labels(out["calls"]))
+        self.assertEqual(out["result"]["stage"], "done")
+
+    def test_a_usable_reply_is_never_rerun(self):
+        minor = {"verdict": "findings", "findings": [{"severity": "minor", "summary": "style"}]}
+        by_input = {"verdict": "findings", "findings": [{"severity": "critical", "summary": "crash", "failing_input": "an empty list"}]}
+        for name, reply in (("pass", {"verdict": "pass", "findings": []}), ("minor", minor), ("file", REAL), ("failing input", by_input)):
+            with self.subTest(reply=name):
+                out = self.land(**{self.REVIEW: reply})
+                self.assertFalse([n for n in labels(out["calls"]) if n.endswith("-again")])
+                self.assertFalse([l for l in out["logs"] if NO_REVIEW in l])
+
+    def test_every_review_reply_is_read_through_the_one_wrapper(self):
+        source = PROGRAM.read_text(encoding="utf-8")
+        # Each options object that names a findings schema closes a readReview() call that began at the nearest "await" before it.
+        sites = list(re.finditer(r"schema: (?:SYNC_REVIEW_SCHEMA\(followup\)|FINDINGS) \}\)", source))
+        self.assertEqual(len(sites), 3)
+        for site in sites:
+            opened = source.rindex("await ", 0, site.start())
+            self.assertTrue(source.startswith("await readReview(`", opened), source[opened:opened + 40])
+        self.assertEqual(len(re.findall(r"= await readReview\(", source)), 3)
+        # No findings schema is named or built anywhere else: FINDINGS is spread once, into the sync review's schema.
+        self.assertEqual(len(re.findall(r"schema: [^}\n]*FINDINGS", source)), 2)
+        self.assertEqual(source.count("...FINDINGS,"), 1)
+        self.assertEqual(source.count("SYNC_REVIEW_SCHEMA("), 1)
+        _, calls, _ = run(patch=BEHIND, replies={"land-sync-1-1": ABORTED, "land-sync-resolve-1-1": self.CONFLICTED, self.REVIEW: REAL})
+        for label in (self.REVIEW, self.REREVIEW):
+            with self.subTest(label=label):
+                schema = schema_of(calls, label)
+                self.assertEqual(schema["properties"]["verdict"]["enum"], ["pass", "findings", "incomplete"])
+                self.assertIn("incomplete", schema["properties"]["verdict"]["description"])
+                items = schema["properties"]["findings"]["items"]
+                self.assertEqual(items["description"], "a critical or important finding names its file or its failing_input")
+                self.assertEqual(items["required"], ["severity", "summary"])
+
+    def test_an_implementer_reply_names_full_shas_or_none(self):
+        _, synced, _ = run(patch=BEHIND, replies={"land-sync-1-1": ABORTED, "land-sync-resolve-1-1": self.CONFLICTED, self.REVIEW: REAL})
+        _, red, _ = run(patch=folded(CI_RED), replies={"land-record-1-1": {"ok": True, "head": FIX}})
+        for calls, label in ((synced, "land-sync-fix-1-1"), (red, "land-fix-1")):
+            with self.subTest(label=label):
+                schema = schema_of(calls, label)
+                for field in ("commit", "start_head"):
+                    spec = schema["properties"][field]
+                    self.assertEqual(spec, {"type": "string", "pattern": "^[0-9a-f]{40}$"})
+                    for bad in ("PLACEHOLDER", "", "c0ffee", SHA.upper(), SHA + "0", "none"):
+                        self.assertIsNone(re.search(spec["pattern"], bad), bad)
+                    self.assertIsNotNone(re.search(spec["pattern"], SHA))
+                    # A blocked reply names no commit: the two stay optional.
+                    self.assertNotIn(field, schema["required"])
+        # The same pattern as deliver-standard.js, and the one the train's car heads are read with.
+        self.assertIn("const FULL_SHA = { type: 'string', pattern: '^[0-9a-f]{40}$' }\n", CHILD_PROGRAM.read_text(encoding="utf-8"))
+        self.assertEqual(PROGRAM.read_text(encoding="utf-8").count("const FULL_SHA = /^[0-9a-f]{40}$/\n"), 1)
 
 
 WAYS = "; resume with decisions (a planner revises the task file), amend {file, find, replace}, or decisions rerun if the cause was outside the task file"

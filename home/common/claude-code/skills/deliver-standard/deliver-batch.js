@@ -136,6 +136,9 @@ const AMEND = args.amend || {}
 const AMEND_APPLIED = new Set() // #811: issues whose child reported the amend applied (`amended`): it needs no relaunch
 const AMEND_SENT = new Set() // #811: an issue's amend reaches at most one child call of a run
 
+// #992: a StructuredOutput call sent beside another tool call is taken as the step's final answer before that call's result exists.
+// One sentence in the rules every step gets, the same line in deliver-standard.js.
+const REPLY_ALONE = 'Call StructuredOutput alone in its own message, never beside another tool call, only after every other tool result has come back: the first accepted call is final and ends the step.'
 const BASE_RULES = `
 Hard rules for this step (they override anything else you remember):
 - Work only in the worktree path you are given. Never commit in the shared checkout. Never git stash. Never sed -i (use python for edits).
@@ -143,7 +146,8 @@ Hard rules for this step (they override anything else you remember):
 - Do not dispatch subagents unless this step says so.
 - Never run a host activation, deploy or release command.
 - Global skills, agents and standards are shared by other projects: never write a project-specific literal (check names, branch names, recipe names, repository paths) into them.
-- Run git as git -C <worktree> and name every file by its absolute path; never prefix a command with cd <worktree> &&, except for a tool that must run inside the worktree and has no directory flag (a test runner or a build).`
+- Run git as git -C <worktree> and name every file by its absolute path; never prefix a command with cd <worktree> &&, except for a tool that must run inside the worktree and has no directory flag (a test runner or a build).
+- ${REPLY_ALONE}`
 // forge-claim retries a transport error itself (#740), up to 150 s in a hanging outage, above the Bash tool's 120 s default.
 const FORGE_TIMEOUT = 'Give each forge-claim command a Bash timeout of 20 minutes (1200000 ms). Only a land acquire command that ends in --wait gets more: the flag takes no value, so write nothing after it, and the command itself waits for up to 50 minutes and then answers land-contended by itself, so give it a Bash timeout of 60 minutes (3600000 ms) and never run it in the background. The reason for both: forge-claim retries a forge outage itself before it prints its one JSON line.'
 
@@ -478,7 +482,7 @@ const childReason = r => {
   if (!said.length && r.result === null) said.push('the step returned nothing')
   return said.length ? `${r.stage}: ${said.join('; ')}` : ''
 }
-const stopDetail = r => ({ ...(r.stage === 'codex-unavailable' && typeof r.details === 'string' && r.details ? { detail: r.details } : {}), ...(childReason(r) ? { reason: childReason(r) } : {}) })
+const stopDetail = r => ({ ...(Array.isArray(r.lost_reviews) && r.lost_reviews.length ? { lost_reviews: r.lost_reviews } : {}), ...(r.stage === 'codex-unavailable' && typeof r.details === 'string' && r.details ? { detail: r.details } : {}), ...(childReason(r) ? { reason: childReason(r) } : {}) })
 // #869: why an open row is open, in one bounded line: the child's reason when it gave one, else the row's own stage and what it carries; '' when it carries nothing.
 const REASON_MAX = 300
 const FINDINGS_MAX = 10
@@ -546,19 +550,25 @@ const enqueue = (branch, fn) => {
 const LAND_OA = [] // owner-actions the landings posted
 const DIVERGING = {} // #940: by issue, what a not-converging row's owner action carries for whoever takes the work over
 const SEV = { type: 'string', enum: ['critical', 'important', 'minor'] }
+// #992: incomplete is the verdict of a review that could not finish; readReview() in land() reads every reply of this schema.
 const FINDINGS = {
   type: 'object',
   properties: {
-    verdict: { type: 'string', enum: ['pass', 'findings'] },
-    findings: { type: 'array', items: { type: 'object', properties: { severity: SEV, file: { type: 'string' }, summary: { type: 'string' }, failing_input: { type: 'string' } }, required: ['severity', 'summary'] } },
+    verdict: { type: 'string', enum: ['pass', 'findings', 'incomplete'], description: 'incomplete: the review is not finished; never a placeholder finding' },
+    findings: { type: 'array', items: { type: 'object', description: 'a critical or important finding names its file or its failing_input', properties: { severity: SEV, file: { type: 'string' }, summary: { type: 'string' }, failing_input: { type: 'string' } }, required: ['severity', 'summary'] } },
   },
   required: ['verdict', 'findings'],
 }
+const FULL_SHA = /^[0-9a-f]{40}$/
+// #992: start_head and commit are full shas or absent (a blocked reply names none), so the harness refuses a placeholder and the agent corrects it.
+const SHA_SCHEMA = { type: 'string', pattern: FULL_SHA.source }
 const IMPL = {
   type: 'object',
-  properties: { status: { type: 'string', enum: ['done', 'blocked'] }, start_head: { type: 'string' }, commit: { type: 'string' }, tests: STRS, mutation_checked: { type: 'boolean' }, notes: { type: 'string' } },
+  properties: { status: { type: 'string', enum: ['done', 'blocked'] }, start_head: SHA_SCHEMA, commit: SHA_SCHEMA, tests: STRS, mutation_checked: { type: 'boolean' }, notes: { type: 'string' } },
   required: ['status', 'notes'],
 }
+// #986, #992: the sync review's schema; with followup it also returns descends. Named so that every FINDINGS schema of the program is one readReview() reads.
+const SYNC_REVIEW_SCHEMA = followup => (followup ? { ...FINDINGS, properties: { ...FINDINGS.properties, descends: { type: 'boolean' } }, required: [...FINDINGS.required, 'descends'] } : FINDINGS)
 const IMPL_RETURN = 'Return start_head (git rev-parse HEAD before you change anything) and commit (the full sha of HEAD after your last commit).'
 // #787: the same text as WHOLE in deliver-standard.js.
 const WHOLE = files => `run in full every test file among or covering ${files} (never a single test class) and any fast suite the project declares, not the declared verification; return tests: each command and its result`
@@ -594,6 +604,15 @@ const STALE_RERUN = (unset, slug) => `This poll follows a rerun of failed jobs a
 const WITH_STALE = s => ({ ...s, properties: { ...s.properties, stale: { type: 'array', items: { type: 'integer' } } } })
 const staleOf = ck => (Array.isArray(ck.stale) ? ck.stale.filter(Number.isInteger) : [])
 const findingsOf = r => (r.findings || []).filter(f => f.severity !== 'minor')
+// #992: why a FINDINGS reply is no review, else ''. A verdict of incomplete, or a blocking finding naming neither a file nor a failing
+// input (what a reply sent beside a pending lookup holds), is a lost review, never a finding. Every review of this program reads a
+// diff, so none is exempt.
+const AGAIN = '-again'
+const unusable = r => {
+  if (!r) return ''
+  if (r.verdict === 'incomplete') return 'its verdict was incomplete'
+  return (Array.isArray(r.findings) ? r.findings : []).some(f => f && f.severity !== 'minor' && !nonEmpty(f.file) && !nonEmpty(f.failing_input)) ? 'a blocking finding named neither a file nor a failing input' : ''
+}
 const RENEW_SCHEMA = { type: 'object', properties: { verdict: { type: 'string', enum: ['renewed', 'not_held', 'error'] }, by: { type: 'string' }, detail: { type: 'string' }, transient: { type: 'boolean' } }, required: ['verdict'] }
 const LOCK_SCHEMA = {
   type: 'object',
@@ -701,8 +720,25 @@ const land = async (n, ready, via = {}) => {
   let carried = null
   const PENDING_WAITS = 3
   const c = { sync: 0, syncReview: 0, checks: 0, record: 0, relock: 0, conflicts: 0, ciFails: 0, pending: 0, refused: 0, early: 0 }
-  const out = (outcome, extra) => ({ issue: n, outcome, ...(pr ? { pr } : {}), ...(extra || {}) })
+  // #992: labels of this landing's reviews that answered twice with no usable review; every row of the landing carries them.
+  const lost = []
+  const silence = label => (lost.includes(label) ? 'answered twice with no usable review' : 'returned nothing')
+  const out = (outcome, extra) => ({ issue: n, outcome, ...(pr ? { pr } : {}), ...(lost.length ? { lost_reviews: lost.slice() } : {}), ...(extra || {}) })
   const call = (prompt, label, opts) => ask(agent(prompt, { label, phase: 'Land', ...opts }), label)
+  // #992: every FINDINGS reply of a landing is read here. An unusable one (see unusable) runs the same step once more as <label>-again;
+  // a second is answered as null, so it reaches no findingsOf and spends no fix round. The step did answer, so the breaker is left
+  // alone: the row names it in lost_reviews and its reason says the review answered twice with no usable review.
+  const readReview = async (prompt, label, opts) => {
+    const first = await call(prompt, label, opts)
+    const why = unusable(first)
+    if (!why) return first
+    log(`${label}: the reply is no review (${why}); the step runs once more`)
+    const again = await call(`${prompt}\nAn earlier reply to this step was discarded: ${why}. Finish the review before you reply.`, label + AGAIN, opts)
+    if (!unusable(again)) return again
+    log(`${label}: the second reply is no review either; the review is lost`)
+    lost.push(label)
+    return null
+  }
   const clerk = { agentType: 'clerk', model: CLERK_MODEL, effort: 'low' }
   const lifecycleClerk = { ...clerk, model: DEFAULT_CLERK_MODEL }
   // The checks poll steps, shared by the standalone poll and the poll land-pr carries (#801).
@@ -887,11 +923,11 @@ ${RULES}`, label, { phase: 'Land', agentType: 'implementer', model: 'sonnet', sc
 ${RULES}`, rlabel, { phase: 'Land', agentType: 'implementer', model: 'sonnet', schema: LAND_SYNC_SCHEMA })
         if (!merge) return out('stopped', { stage: 'land-sync', detail: `${rlabel} returned nothing` })
         if (merge.status !== 'done') return out('conflict', { detail: merge.notes })
-        // #986: the head may be a commit on top of the merge, so a resolution that names no merge commit names nothing the review can
-        // read as the merge: it never lands. (A merge that was clean this time names its head alone, as the sync step does.)
-        if (merge.conflicted === true && !nonEmpty(merge.merge_commit)) return out('stopped', { stage: 'land-sync', detail: 'the resolution named no merge commit' })
       }
     }
+    // #986: the head may be a commit on top of the merge, so a resolution that names no merge commit names nothing the review can
+    // read as the merge: it never lands, whether the sync step or the resolve step made it. (A clean merge names its head alone.)
+    if (merge.conflicted === true && !nonEmpty(merge.merge_commit)) return out('stopped', { stage: 'land-sync', detail: 'the resolution named no merge commit' })
     let head = merge.head || merge.merge_commit
     if (!head) return out('stopped', { stage: 'land-sync', detail: 'the resync named no head' })
     // The review reads the merge commit and the landing merges the head. They are one commit, or (#986) the head is the merge commit
@@ -904,9 +940,10 @@ ${RULES}`, rlabel, { phase: 'Land', agentType: 'implementer', model: 'sonnet', s
     if (aborted || merge.conflicted || followup) {
       const after = followup ? SYNC_AFTER(W, mc, head) : ''
       c.syncReview++
-      const rv = await call(`Issue #${n} of ${SLUG}, worktree ${W}, branch ${B}.
+      const reviewLabel = `land-sync-review-${n}-${c.syncReview}`, rereviewLabel = `land-sync-rereview-${n}-${c.syncReview}`
+      const rv = await readReview(`Issue #${n} of ${SLUG}, worktree ${W}, branch ${B}.
 Review the conflict resolution in merge commit ${mc}: git -C ${W} show --cc ${mc} and the resolved files ${JSON.stringify(merge.resolved_files || [])}; the tests run: ${JSON.stringify(merge.tests || [])}. Report Important or Critical defects only: a dropped change from either side, a broken merge of intent, a resolved file whose tests were not run.${merge.markers_checked === true ? '' : MARKERS_UNCHECKED}${followup ? DESCENDS(W, mc, head) : ''} Do not edit anything.
-${RULES}`, `land-sync-review-${n}-${c.syncReview}`, { agentType: 'reviewer', schema: followup ? { ...FINDINGS, properties: { ...FINDINGS.properties, descends: { type: 'boolean' } }, required: [...FINDINGS.required, 'descends'] } : FINDINGS })
+${RULES}`, reviewLabel, { agentType: 'reviewer', schema: SYNC_REVIEW_SCHEMA(followup) })
       // #955: from here on the merge is resolved, so a landing that ends is a sync-review row, never a conflict one: what is left is the
       // review of the resolution. Its reason leads with what ended it, then the pushed and unaccepted fix commit, then the finding left
       // open (its file and summary), so the cap of the table's reason cuts the summary last. Like every other open row it posts no owner
@@ -916,7 +953,7 @@ ${RULES}`, `land-sync-review-${n}-${c.syncReview}`, { agentType: 'reviewer', sch
         const left = isObj(finding) && nonEmpty(finding.summary) ? `finding ${nonEmpty(finding.file) ? `${finding.file}: ` : ''}${finding.summary}` : ''
         return out('sync-review', { ...extra, reason: [`sync-review of merge ${mc}: ${what}`, commit, left].filter(Boolean).join('; ') })
       }
-      if (!rv) return syncStop('the sync review returned nothing', null, null, { review: rv })
+      if (!rv) return syncStop(`the sync review ${silence(reviewLabel)}`, null, null, { review: rv })
       // Only the review's own proof accepts a head that is not the merge commit; a missing answer is no proof.
       if (followup && rv.descends !== true) return out('stopped', { stage: 'land-sync', detail: `the resolution names the head ${head} and the merge commit ${mc}, and the head does not descend from it: only a reviewed merge commit lands` })
       const found = findingsOf(rv)
@@ -934,10 +971,10 @@ ${RULES}`, `land-sync-fix-${n}-${c.syncReview}`, { agentType: 'implementer', mod
         if (!fix || fix.status !== 'done' || !fix.commit || !sameSha(fix.start_head, head) || (!moved && !nonEmpty(fix.notes))) {
           return syncStop('the sync fix round did not finish', found[0], fix, { review: rv, ...tried })
         }
-        const rr = await call(`Issue #${n} of ${SLUG}, worktree ${W}, branch ${B}.
+        const rr = await readReview(`Issue #${n} of ${SLUG}, worktree ${W}, branch ${B}.
 ${SYNC_REREVIEW(W, mc, found, fix, moved, after)}
-${RULES}`, `land-sync-rereview-${n}-${c.syncReview}`, { agentType: 'reviewer', schema: FINDINGS })
-        if (!rr) return syncStop('the sync re-review returned nothing', found[0], fix, { review: rv, ...tried })
+${RULES}`, rereviewLabel, { agentType: 'reviewer', schema: FINDINGS })
+        if (!rr) return syncStop(`the sync re-review ${silence(rereviewLabel)}`, found[0], fix, { review: rv, ...tried })
         const leftOpen = findingsOf(rr)
         if (leftOpen.length) return syncStop(`${leftOpen.length === 1 ? 'a finding' : `${leftOpen.length} findings`} survived the fix round${moved ? '' : ' (a rebuttal, no fix commit)'}`, leftOpen[0], fix, { review: { ...rr, findings: leftOpen }, sync_review: rv, ...tried })
         if (moved) head = fix.commit
@@ -1156,7 +1193,7 @@ ${RULES}`, `land-fix-${n}`, { agentType: 'implementer', model: 'sonnet', schema:
           reran = true
           continue
         }
-        const rv = await call(`Issue #${n} of ${SLUG}, worktree ${W}, branch ${B}.
+        const rv = await readReview(`Issue #${n} of ${SLUG}, worktree ${W}, branch ${B}.
 Review this fix for failing checks: git -C ${W} diff ${fix.start_head || expected}..${fix.commit}; the failure it answers: ${JSON.stringify(failingNames)}; the notes: ${fix.notes}. Report Important or Critical defects only, above all a weakened, skipped or deleted test or check. Do not edit anything.
 ${RULES}`, `land-fix-review-${n}`, { agentType: 'reviewer', schema: FINDINGS })
         if (!rv || findingsOf(rv).length) return out('ci-failed', { failing: failingNames, review: rv })
@@ -1299,7 +1336,6 @@ const lockLost = ck => isObj(ck) && isObj(ck.refresh) && ck.refresh.last === 'no
 // train-flip step again while a member still reads OPEN, this many times at most, and each call's own duration is the wait.
 const TRAIN_FLIP_CALLS = 8
 const CAR_PREFIX = `land-train/${BATCH}-`
-const FULL_SHA = /^[0-9a-f]{40}$/
 const WAITING = []
 let trainNo = 0
 let sweepNo = 0

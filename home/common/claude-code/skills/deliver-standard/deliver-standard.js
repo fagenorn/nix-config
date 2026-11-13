@@ -41,7 +41,8 @@ export const meta = {
 // is already merged, the re-adopt goes straight to close-out; that PR is the delivery's own only when it is cont.pr or carries a commit of cont.done (#752). A resume skips the final review when cont.final_reviewed names the head it
 // passed at and the head is unchanged or only gained integration-branch merges with no unreviewed conflict resolution; a stop between a
 // sync merge and its acceptance drops the marker. A result also carries dead_agents,
-// the labels of agents that returned nothing or threw, when any did. A red check, and a sync-review
+// the labels of agents that returned nothing or threw, when any did, and lost_reviews, the labels of reviews that answered twice with
+// no usable review (#992). A red check, and a sync-review
 // finding, each get one fix wave per delivery (an implementer with a regression test, then a fresh reviewer); a second one stops with cont.
 //
 // LAND: ship opens the PR at the verified head, takes the cross-host land lock of the integration branch with --wait
@@ -104,12 +105,19 @@ Hard rules for this step (they override anything else you remember):
 - Global skills, agents and standards are shared by other projects: never write a project-specific literal (check names, branch names, recipe names, repository paths) into them.
 - Run git as git -C <worktree> and name every file by its absolute path; never prefix a command with cd <worktree> &&, except for a tool that must run inside the worktree and has no directory flag (a test runner or a build).`
 
+// #992: a StructuredOutput call sent beside another tool call is taken as the step's final answer before that call's result exists: a
+// review once returned a placeholder finding that way and it spent the fix round. One sentence, the same line in deliver-batch.js, added
+// last in call() so no step can miss it. It is about the reply alone, so it stands with the ROUNDS sentences: those put a round's
+// lookups in one message, this keeps the reply out of every round.
+const REPLY_ALONE = 'Call StructuredOutput alone in its own message, never beside another tool call, only after every other tool result has come back: the first accepted call is final and ends the step.'
+
 const SEV = { type: 'string', enum: ['critical', 'important', 'minor'] }
+// #992: incomplete is the verdict of a review that could not finish; readReview() below reads every reply of this schema.
 const FINDINGS = {
   type: 'object',
   properties: {
-    verdict: { type: 'string', enum: ['pass', 'findings'] },
-    findings: { type: 'array', items: { type: 'object', properties: { severity: SEV, file: { type: 'string' }, summary: { type: 'string' }, failing_input: { type: 'string' }, relation: { type: 'string', enum: ['narrowing', 'new'] } }, required: ['severity', 'summary'] } },
+    verdict: { type: 'string', enum: ['pass', 'findings', 'incomplete'], description: 'incomplete: the review is not finished; never a placeholder finding' },
+    findings: { type: 'array', items: { type: 'object', description: 'a critical or important finding names its file or its failing_input', properties: { severity: SEV, file: { type: 'string' }, summary: { type: 'string' }, failing_input: { type: 'string' }, relation: { type: 'string', enum: ['narrowing', 'new'] } }, required: ['severity', 'summary'] } },
   },
   required: ['verdict', 'findings'],
 }
@@ -127,17 +135,20 @@ const CODEX = {
 }
 // The delivery's changed-line count from the diff-size clerk; measured false means it could not be read.
 const SIZE_SCHEMA = { type: 'object', properties: { measured: { type: 'boolean' }, changed_lines: { type: 'integer', minimum: 0 } }, required: ['measured'] }
+const FULL_SHA = { type: 'string', pattern: '^[0-9a-f]{40}$' }
+// #992: start_head and commit are full shas or absent (a blocked reply names none), so the harness refuses a placeholder and the agent corrects it.
 const IMPL = {
   type: 'object',
-  properties: { status: { type: 'string', enum: ['done', 'blocked'] }, start_head: { type: 'string' }, commit: { type: 'string' }, tests: { type: 'array', items: { type: 'string' } }, mutation_checked: { type: 'boolean' }, notes: { type: 'string' }, blocked_on: { type: 'integer' } },
+  properties: { status: { type: 'string', enum: ['done', 'blocked'] }, start_head: FULL_SHA, commit: FULL_SHA, tests: { type: 'array', items: { type: 'string' } }, mutation_checked: { type: 'boolean' }, notes: { type: 'string' }, blocked_on: { type: 'integer' } },
   required: ['status', 'notes'],
 }
+// #986, #992: the sync review's schema; with followup it also returns descends. Named so that every FINDINGS schema of the program is one readReview() reads.
+const SYNC_REVIEW_SCHEMA = followup => (followup ? { ...FINDINGS, properties: { ...FINDINGS.properties, descends: { type: 'boolean' } }, required: [...FINDINGS.required, 'descends'] } : FINDINGS)
 const IMPL_RETURN = 'Return start_head (git rev-parse HEAD before you change anything) and commit (the full sha of HEAD after your last commit).'
 // A wave that may commit on several branches reports the issue worktree's commits only in start_head and commit.
 const IMPL_RETURN_AT = w => `Return start_head (git -C ${w} rev-parse HEAD before you change anything) and commit (the full sha of git -C ${w} rev-parse HEAD after your last commit): both name the issue worktree ${w}, never a declared branch's commit (those go in branch_heads); when you commit nothing there, commit equals start_head.`
 const STRS = { type: 'array', items: { type: 'string' } }
 // A forge or agent may report a short sha; the same head must not read as moved.
-const FULL_SHA = { type: 'string', pattern: '^[0-9a-f]{40}$' }
 const BRANCH_HEADS = { type: 'array', items: { type: 'object', properties: { name: { type: 'string' }, head: FULL_SHA, current: { type: 'string' }, toplevel: { type: 'string' }, common_dir: { type: 'string' } }, required: ['name', 'head'] } }
 const FIX_WAVE_IMPL = { ...IMPL, properties: { ...IMPL.properties, branch_heads: BRANCH_HEADS } }
 // #950: a final-review fix wave and its re-review each also return the files the wave's commits changed in the issue worktree.
@@ -300,7 +311,7 @@ const stopReason = (stage, x) => {
   const reviews = ['review', 'rv'].filter(k => own(x, k)).map(k => x[k])
   const found = Array.isArray(x.rules) && x.rules.length ? x.rules : Array.isArray(x.findings) ? x.findings : reviews.flatMap(r => (isEntry(r) && Array.isArray(r.findings) ? findingsOf(r) : []))
   if (found.length) say(`${task}${found.length} finding(s)${isEntry(found[0]) && present(found[0].summary) ? `: ${found[0].summary}` : ''}`)
-  else if (reviews.some(r => !r)) say(`${task}the reviewer returned nothing`)
+  else if (reviews.some(r => !r)) say(`${task}the reviewer ${silence()}`)
   if (Array.isArray(x.problems)) say(x.problems.filter(isEntry).map(q => [q.id, q.summary].filter(present).join(': ')).join('; '))
   names('failing', 'failing checks')
   names('pending', 'pending checks')
@@ -389,6 +400,10 @@ On refusal return ok=false, reason contract, and in details the resolver's error
 - verification: for each id in bindings.workflow.verification its bindings.commands argv, its cwd relative to project.root (. for the root), and any bindings.workflow.verification_conditions entry (when_changed globs, skip_reason), and pre_commit: true on an entry whose verification_conditions entry has pre_commit true (omit pre_commit otherwise).`
 // Labels of agents that returned nothing or threw: deliver-batch's breaker reads them (#636).
 const DEAD = []
+// #992: labels of reviews that answered twice with no usable review (readReview). Not dead agents: the breaker does not count them.
+const LOST = []
+// What a review that gave the program nothing did: with no label, any review of this run.
+const silence = (...labels) => ((labels.length ? labels.some(l => LOST.includes(l)) : LOST.length) ? 'answered twice with no usable review' : 'returned nothing')
 // #987: every reviewer and implementer step opens with its one-sentence turn procedure. Measured over four runs, both kinds sent one
 // tool call in 80 to 100% of their tool messages at up to 183k of context; the planner, under the same wording first in its prompt, 27%.
 // Added in call(), not per prompt, so no site of either kind can miss it. reviewer-lite is left out: a median of three turns under 20k.
@@ -397,11 +412,13 @@ const ROUNDS = {
   implementer: `Work in rounds: put a round's lookups in one message, send its independent edits as several Edit calls in one message, and run the tests once per round of edits, never one small call per turn.`,
 }
 const withRounds = (prompt, opts) => (opts && ROUNDS[opts.agentType] ? `${ROUNDS[opts.agentType]}\n${prompt}` : prompt)
+// #992: every step that replies through a schema ends with the one sentence about that reply.
+const withReply = (prompt, opts) => (opts && opts.schema ? `${prompt}\n${REPLY_ALONE}` : prompt)
 // optional: a step whose failure the caller recovers (the diff-size measurement) is not reported as a dead agent.
 const call = async (prompt, opts, optional) => {
   let reply
   try {
-    reply = await agent(withRounds(prompt, opts), opts)
+    reply = await agent(withRounds(withReply(prompt, opts), opts), opts)
   } catch (error) {
     if (!optional) DEAD.push(opts && opts.label)
     throw error
@@ -409,7 +426,36 @@ const call = async (prompt, opts, optional) => {
   if (reply == null && !optional) DEAD.push(opts && opts.label)
   return reply
 }
-const deadOf = () => (DEAD.length ? { dead_agents: DEAD.slice() } : {})
+const deadOf = () => ({ ...(DEAD.length ? { dead_agents: DEAD.slice() } : {}), ...(LOST.length ? { lost_reviews: LOST.slice() } : {}) })
+// #992: every FINDINGS reply is read through readReview(). A reply whose verdict is incomplete, or that carries a blocking finding naming
+// neither a file nor a failing input (what a reply sent beside a pending lookup holds), is a lost review, never a finding: the same step
+// runs once more as <label>-again, and a second such reply is returned as null. So it reaches no findingsOf and spends no fix round.
+// The step did answer, so it is no dead agent: DEAD is left alone, LOST names it, a stop carries LOST as lost_reviews beside
+// dead_agents, and its reason says the review answered twice with no usable review.
+// Every review is held to that. Measured over 35 runs, all 390 blocking findings of the final, fix-wave, plan and direct reviews named
+// a file or a failing input. Two named exceptions: ruled, the two plan reviews, where a finding that names its criterion (ac) or the
+// rule it breaks (rule) names its subject; and fileless, the reviews of a task that first ended with no commit, judged on outputs
+// that may be no file, which are held to the verdict only.
+const AGAIN = '-again'
+const unusable = (r, { fileless = false, ruled = false } = {}) => {
+  if (!r) return ''
+  if (r.verdict === 'incomplete') return 'its verdict was incomplete'
+  const blocking = (Array.isArray(r.findings) ? r.findings : []).filter(f => f && f.severity !== 'minor')
+  const named = f => present(f.file) || present(f.failing_input) || (ruled && (present(f.ac) || present(f.rule)))
+  return !fileless && blocking.some(f => !named(f)) ? 'a blocking finding named neither a file nor a failing input' : ''
+}
+const readReview = async (prompt, opts, { fileless = false, ruled = false, optional = false } = {}) => {
+  const lax = { fileless, ruled }
+  const first = await call(prompt, opts, optional)
+  const why = unusable(first, lax)
+  if (!why) return first
+  log(`${opts.label}: the reply is no review (${why}); the step runs once more`)
+  const again = await call(`${prompt}\nAn earlier reply to this step was discarded: ${why}. Finish the review before you reply.`, { ...opts, label: opts.label + AGAIN }, optional)
+  if (!unusable(again, lax)) return again
+  log(`${opts.label}: the second reply is no review either; the review is lost`)
+  LOST.push(opts.label)
+  return null
+}
 
 // Shared by the fresh setup and the re-deriving resume of a claim_incomplete cont that lacks its location.
 const DERIVE_LOCATION = `Run alone and exactly issue-branch --repo-root ${REPO} --issue ${ISSUE}: it prints one JSON line, and branch and worktree_path are its branch and worktree_path. On a non-zero exit refuse (ok=false) with reason branch and the line it wrote to stderr in details. On any refusal set transient true only when the failed command's stderr JSON has transient true anywhere in it.`
@@ -1069,7 +1115,8 @@ const DIRECT_FINDINGS = { ...GRADED_FINDINGS, properties: { ...GRADED_FINDINGS.p
 const ungradedFindings = (review, criteria) => criteria.filter(a => a.kind === 'code').flatMap(a => {
   const g = (Array.isArray(review.acceptance) ? review.acceptance : []).find(x => x && x.id === a.id)
   if (g && g.met === true && typeof g.evidence === 'string' && g.evidence.trim()) return []
-  return [{ severity: 'important', summary: `Acceptance criterion ${a.id} (${a.text}) is not shown met with evidence: ${g ? (g.met === true ? 'the review gave no evidence' : 'the review graded it unmet') : 'the review did not grade it'}. Assert it with a test, or show the command that proves it.` }]
+  // #992: the criterion is the finding's subject, so a re-review that restates the finding is a usable review.
+  return [{ severity: 'important', failing_input: `criterion ${a.id}`, summary: `Acceptance criterion ${a.id} (${a.text}) is not shown met with evidence: ${g ? (g.met === true ? 'the review gave no evidence' : 'the review graded it unmet') : 'the review did not grade it'}. Assert it with a test, or show the command that proves it.` }]
 })
 // #935: a criterion restating the declared verification had no evidence before verify (the direct lane runs focused tests only), so it stopped the delivery.
 const NO_VERIFY_AC = 'Do not write the declared verification commands as an acceptance criterion: the verify step gates on them.'
@@ -1121,10 +1168,10 @@ ${RULES}`, { label: 'direct-codex', phase: 'Final review', agentType: 'clerk', m
     const lite = plan.tasks[0].risk !== 'security'
     const reviewPrompt = isLite => `${CTX}
 ${isLite ? 'lane: direct. ' : ''}Review the delivery diff git -C ${W} diff ${RANGE} for issue #${ISSUE} against its acceptance criteria ${ACS}. ${KNOW} Report Important or Critical correctness defects and unmet code criteria only, each with a concrete failing input. Return acceptance with one entry per criterion id: met, and evidence, which is the test name and file:line that asserts the criterion, or the command that shows it; a code criterion that is not met, or has no evidence, is an Important finding, and criteria of other kinds are not findings (grade them and give what you observed). ${isLite ? 'If the diff touches authentication or authorization, permission or command guards, secrets or credentials, CI/CD or deploy config, or data migrations, set escalate true. ' : ''}Do not edit anything.`
-    let review = await call(reviewPrompt(lite), { label: 'direct-review', phase: 'Final review', agentType: lite ? 'reviewer-lite' : 'reviewer', schema: DIRECT_FINDINGS })
+    let review = await readReview(reviewPrompt(lite), { label: 'direct-review', phase: 'Final review', agentType: lite ? 'reviewer-lite' : 'reviewer', schema: DIRECT_FINDINGS })
     let passedBy = lite ? 'reviewer-lite' : 'reviewer'
     if (lite && review && review.escalate === true) {
-      review = await call(reviewPrompt(false), { label: 'direct-review-full', phase: 'Final review', agentType: 'reviewer', schema: GRADED_FINDINGS })
+      review = await readReview(reviewPrompt(false), { label: 'direct-review-full', phase: 'Final review', agentType: 'reviewer', schema: GRADED_FINDINGS })
       passedBy = 'reviewer'
     }
     const codexR = await codexP
@@ -1140,7 +1187,7 @@ ${isLite ? 'lane: direct. ' : ''}Review the delivery diff git -C ${W} diff ${RAN
       if (evidenceOnly) log('direct review: only ungraded criteria, the fix round produces their evidence')
       fix = await call(evidenceOnly ? `${CTX}\n${PLAN_REF} The review did not see these acceptance criteria shown met: ${JSON.stringify(findings)}. ${EVIDENCE_FIX} ${COMMIT_SCOPE} ${IMPL_RETURN}\n${RULES}` : `${CTX}\n${PLAN_REF} Fix these review findings in the worktree, with a regression test for each real defect, then commit: ${JSON.stringify(findings)}. If a finding is wrong, say so in notes with evidence instead of changing code. ${FOCUSED} ${COMMIT_SCOPE} ${IMPL_RETURN}\n${RULES}`, { label: 'direct-fix', phase: 'Final review', agentType: 'implementer', model: 'sonnet', schema: IMPL })
       if (!implDone(fix)) return stop('direct-fix', { fix })
-      const rereview = await call(`${CTX}
+      const rereview = await readReview(`${CTX}
 Re-review only these previously reported findings against the fix: ${span(fix)}; the implementer's notes: ${fix.notes}. Findings: ${JSON.stringify(findings)}. Report any finding still unresolved and any new Important or Critical defect the fix introduced.${evidenceOnly ? EVIDENCE_REREVIEW : ''}`, { label: 'direct-rereview', phase: 'Final review', agentType: 'reviewer-lite', schema: FINDINGS })
       if (!rereview || findingsOf(rereview).length) return stop('direct-review', { review: rereview, findings })
       passedBy = 'reviewer-lite'
@@ -1226,8 +1273,9 @@ if (!plan) {
   if (halted) return halted
 }
 const rulesReview = async triggered => {
-  return call(`${CTX}
-Re-check only the acceptance criteria of the revised plan at ${plan.plan_root} against every rule of ~/.agents/standards/acceptance-planning.md (read it). The findings that triggered the revision were ${JSON.stringify(triggered)}. Report each criterion that still or newly breaks a rule, with the broken rule's id in the finding's rule and the criterion's id in its ac (on a minor finding too).${decisions.length ? ` The owner's decisions for this issue are binding, so a criterion classified as one of them says breaks no rule: ${decisions.join('\n')}` : ''} Do not edit anything.`, { label: 'plan-rules-review', phase: 'Plan', agentType: 'reviewer', schema: PLAN_REVIEW })
+  // #992: a rule finding may name its criterion and its rule and no file: ruled, as the plan review is.
+  return readReview(`${CTX}
+Re-check only the acceptance criteria of the revised plan at ${plan.plan_root} against every rule of ~/.agents/standards/acceptance-planning.md (read it). The findings that triggered the revision were ${JSON.stringify(triggered)}. Report each criterion that still or newly breaks a rule, with the broken rule's id in the finding's rule and the criterion's id in its ac (on a minor finding too).${decisions.length ? ` The owner's decisions for this issue are binding, so a criterion classified as one of them says breaks no rule: ${decisions.join('\n')}` : ''} Do not edit anything.`, { label: 'plan-rules-review', phase: 'Plan', agentType: 'reviewer', schema: PLAN_REVIEW }, { ruled: true })
 }
 // #819: the members of a criterion the rules judge (its wording among them), key order aside; a revise that leaves them as reviewed needs no rules re-review.
 const ruleFacts = p => canon(p.acceptance.map(a => [a.id, a.text === undefined ? null : a.text, a.kind, a.metric === true, a.verify === undefined ? null : a.verify]))
@@ -1289,7 +1337,7 @@ const reviewStop = (rules, findings, rounds, given, noted = []) => {
   else planFindingsKept = { rules, findings, rounds, ...(noted.length ? { noted } : {}) }
   return stop('plan-review', { ...(extra || {}), rules, findings })
 }
-const SILENT = { details: 'the rules re-reviewer returned nothing' }
+const SILENT = () => ({ details: `the rules re-reviewer ${silence('plan-rules-review')}` })
 // What follows a full revise (the plan review's, and #996's task revise): the reply through takePlan, then the program's rule check and
 // the rules re-review. null = the revised plan stands; else the stop to return.
 const settleRevise = async (revised, planFindings, reviewedFacts, reviewedCriteria) => {
@@ -1312,13 +1360,13 @@ const settleRevise = async (revised, planFindings, reviewedFacts, reviewedCriter
   const sameRules = !planFindings.some(f => present(f.rule)) && !still.length && ruleFacts(plan) === reviewedFacts
   if (sameRules) log('plan rules re-review skipped: no finding named a rule and the acceptance criteria are unchanged')
   const rr = sameRules ? { findings: [] } : await rulesReview(planFindings)
-  if (!rr) return reviewStop(planFindings, planFindings, 0, SILENT)
+  if (!rr) return reviewStop(planFindings, planFindings, 0, SILENT())
   let rules = still.concat(findingsOf(rr)), rounds = 0, noted = notedOn(rr.findings, rules), extra
   if (rulesOnly(rules)) {
     rounds++
     const r = await rulesRevise(rules, noted, planFindings)
     if (r.halted) return { ...r.halted, findings: planFindings }
-    if (r.silent) return reviewStop(rules, planFindings, rounds, SILENT, noted)
+    if (r.silent) return reviewStop(rules, planFindings, rounds, SILENT(), noted)
     rules = r.rules
     noted = r.noted
     extra = r.extra
@@ -1394,7 +1442,7 @@ if (RESUME_RULES) {
   const noted = notedOn(planFindingsKept.noted, rules)
   const r = await rulesRevise(rules, noted)
   if (r.halted) return { ...r.halted, findings }
-  if (r.silent) return reviewStop(rules, findings, rounds + 1, SILENT, noted)
+  if (r.silent) return reviewStop(rules, findings, rounds + 1, SILENT(), noted)
   if (r.rules.length) return reviewStop(r.rules, findings, rounds + 1, r.extra, r.noted)
   planFindingsKept = null
   planReviewed = true
@@ -1407,10 +1455,10 @@ Run the project's configured independent plan review: the contract's workflow.re
 ${RULES}`, { label: 'plan-codex', phase: 'Plan', agentType: 'clerk', model: CLERK_MODEL, effort: 'high', schema: CODEX }) : Promise.resolve(null)
   const ruleFindings = planRules(plan)
   const narrow = REVIEW_SIZING && !!REVIEW_PLAN
-  const planReviewClaude = await call(`${CTX}
-Review the implementation plan at ${plan.plan_root} (and its task files) against issue #${ISSUE} (gh issue view ${ISSUE} --repo ${SLUG} --json title,body,comments).${SPEC} ${KNOW} ${MAP_FIRST} Report only Important or Critical defects: ${narrow ? PLAN_RUBRIC_SIZED : PLAN_RUBRIC}, or an acceptance criterion that breaks a rule of ~/.agents/standards/acceptance-planning.md (read it; put the broken rule's id in the finding's rule).${narrow ? ` ${PLAN_CODEX_OWNS}` : ''} No style notes. Do not edit anything.`, { label: 'plan-review', phase: 'Plan', agentType: 'reviewer', schema: PLAN_REVIEW })
+  const planReviewClaude = await readReview(`${CTX}
+Review the implementation plan at ${plan.plan_root} (and its task files) against issue #${ISSUE} (gh issue view ${ISSUE} --repo ${SLUG} --json title,body,comments).${SPEC} ${KNOW} ${MAP_FIRST} Report only Important or Critical defects: ${narrow ? PLAN_RUBRIC_SIZED : PLAN_RUBRIC}, or an acceptance criterion that breaks a rule of ~/.agents/standards/acceptance-planning.md (read it; put the broken rule's id in the finding's rule).${narrow ? ` ${PLAN_CODEX_OWNS}` : ''} No style notes. Do not edit anything.`, { label: 'plan-review', phase: 'Plan', agentType: 'reviewer', schema: PLAN_REVIEW }, { ruled: true })
   const planCodexR = await planCodexP
-  if (!planReviewClaude) return stop('plan-review', { details: 'the plan reviewer returned nothing' })
+  if (!planReviewClaude) return stop('plan-review', { details: `the plan reviewer ${silence('plan-review')}` })
   let planFindings = ruleFindings.concat(findingsOf(planReviewClaude))
   if (REVIEW_PLAN) {
     if (!planCodexR || !planCodexR.available) return codexStop('plan', planCodexR)
@@ -1507,16 +1555,19 @@ ${RULES}`
   // False until the task's diff had its first pass; a task with no commit has none to review.
   let diffReviewed = !sameSha(impl.commit, accepted)
   // #932: a no-change check names the head the program holds (the fuller spelling), never the reply's short or uppercase one.
+  // #992: IMPL's pattern now refuses such a spelling, so no IMPL reply reaches this with one; kept for a reply the harness let through.
   let held = diffReviewed ? impl.commit : fuller(accepted, impl.commit)
   // reviewer-lite first-passes only a task whose declared lane is mechanical or low (its lane verification mode).
   let reviewer = liteLane && diffReviewed ? 'reviewer-lite' : 'reviewer'
-  const diffReview = (range, label, answers) => call(`${start}
-${reviewer === 'reviewer-lite' ? `lane: ${t.risk}. ` : ''}Review the diff of task ${t.n} only: ${range} (and the task file ${t.file} as its contract). ${KNOW} Report Important or Critical correctness defects and unmet task requirements only, each with a concrete failing input. No style notes. Do not edit anything.${answers ? ` The task first ended with no commit, and this diff answers these findings: ${JSON.stringify(answers)}; report any still unresolved.` : ''}`, { label, phase: 'Tasks', agentType: reviewer, schema: FINDINGS })
+  // #992: a task that first ended with no commit is judged on outputs that may be no file, and its later reviews repeat those findings: fileless.
+  const fileless = !diffReviewed
+  const diffReview = (range, label, answers) => readReview(`${start}
+${reviewer === 'reviewer-lite' ? `lane: ${t.risk}. ` : ''}Review the diff of task ${t.n} only: ${range} (and the task file ${t.file} as its contract). ${KNOW} Report Important or Critical correctness defects and unmet task requirements only, each with a concrete failing input. No style notes. Do not edit anything.${answers ? ` The task first ended with no commit, and this diff answers these findings: ${JSON.stringify(answers)}; report any still unresolved.` : ''}`, { label, phase: 'Tasks', agentType: reviewer, schema: FINDINGS }, { fileless })
   // Tracked files only: an untracked file (a build output, a tool's cache) is no edit of the task, and a waiting task's kept edits are not this task's.
   const HEAD_UNMOVED = h => `First confirm that git -C ${TW} rev-parse HEAD prints ${h} and git -C ${TW} status --porcelain --untracked-files=no prints nothing: another head or an uncommitted change to a tracked file is a finding.${waiting ? `${WAITS}those are not a finding.` : ''}`
   const CONFIRM = `with read-only commands that change nothing, the task file's own verification commands or a lookup (run a gh command as ${UNSET}gh ...)`
-  let review = diffReviewed ? await diffReview(`git -C ${TW} diff ${taskStart}..${impl.commit}`, `review-${t.n}`) : await call(`${start}
-Task ${t.n} ended with no new commit: the head of ${TW} is still ${held}. There is no diff to review and none is missing; do not ask for a range. Judge the task from its task file ${t.file} (the contract) and the implementer's report: notes: ${impl.notes}; checks run: ${JSON.stringify(Array.isArray(impl.tests) ? impl.tests : [])}. ${HEAD_UNMOVED(held)} Then decide two things. 1. Does the task file require a tracked file to be created, changed or deleted? If it does, the task is not done: report one Critical finding naming the files it requires. 2. If it requires none, is every output the task file asks for in place? Confirm each yourself, ${CONFIRM}; the implementer's word alone is not evidence, and an output you cannot confirm is a finding. Report Important or Critical findings only, each with what is missing. Do not edit anything.`, { label: `review-${t.n}`, phase: 'Tasks', agentType: 'reviewer', schema: FINDINGS })
+  let review = diffReviewed ? await diffReview(`git -C ${TW} diff ${taskStart}..${impl.commit}`, `review-${t.n}`) : await readReview(`${start}
+Task ${t.n} ended with no new commit: the head of ${TW} is still ${held}. There is no diff to review and none is missing; do not ask for a range. Judge the task from its task file ${t.file} (the contract) and the implementer's report: notes: ${impl.notes}; checks run: ${JSON.stringify(Array.isArray(impl.tests) ? impl.tests : [])}. ${HEAD_UNMOVED(held)} Then decide two things. 1. Does the task file require a tracked file to be created, changed or deleted? If it does, the task is not done: report one Critical finding naming the files it requires. 2. If it requires none, is every output the task file asks for in place? Confirm each yourself, ${CONFIRM}; the implementer's word alone is not evidence, and an output you cannot confirm is a finding. Report Important or Critical findings only, each with what is missing. Do not edit anything.`, { label: `review-${t.n}`, phase: 'Tasks', agentType: 'reviewer', schema: FINDINGS }, { fileless })
   if (!review) return halt('task-review', { task: t, review: null })
   let rounds = 0
   while (findingsOf(review).length && rounds < 2) {
@@ -1531,15 +1582,15 @@ ${RULES}`, { label: `fix-${t.n}-${rounds}`, phase: 'Tasks', agentType: 'implemen
     held = sameSha(fix.commit, reviewed) ? fuller(held, fix.commit) : fix.commit
     const label = `rereview-${t.n}-${rounds}`
     if (sameSha(fix.commit, reviewed)) {
-      review = await call(`${start}
-Re-review only these previously reported findings for task ${t.n} against the implementer's answer. The fix made no new commit (the head of ${TW} is still ${held}), so there is no fix diff to review and none is missing; do not ask for a range. The implementer's notes: ${fix.notes}. Findings: ${JSON.stringify(findingsOf(review))}. ${HEAD_UNMOVED(held)} Then check each answer yourself against the task file ${t.file}${diffReviewed ? `, the task's diff (git -C ${TW} diff ${taskStart}..${fix.commit})` : ''} and the evidence the notes name, ${CONFIRM}; a finding the evidence does not refute is still unresolved. Report any finding still unresolved. Do not edit anything.`, { label, phase: 'Tasks', agentType: 'reviewer', schema: FINDINGS })
+      review = await readReview(`${start}
+Re-review only these previously reported findings for task ${t.n} against the implementer's answer. The fix made no new commit (the head of ${TW} is still ${held}), so there is no fix diff to review and none is missing; do not ask for a range. The implementer's notes: ${fix.notes}. Findings: ${JSON.stringify(findingsOf(review))}. ${HEAD_UNMOVED(held)} Then check each answer yourself against the task file ${t.file}${diffReviewed ? `, the task's diff (git -C ${TW} diff ${taskStart}..${fix.commit})` : ''} and the evidence the notes name, ${CONFIRM}; a finding the evidence does not refute is still unresolved. Report any finding still unresolved. Do not edit anything.`, { label, phase: 'Tasks', agentType: 'reviewer', schema: FINDINGS }, { fileless })
     } else if (!diffReviewed) {
       reviewer = liteLane ? 'reviewer-lite' : 'reviewer'
       review = await diffReview(`git -C ${TW} diff ${taskStart}..${fix.commit}`, label, findingsOf(review))
       diffReviewed = true
     } else {
-      review = await call(`${start}
-Re-review only these previously reported findings for task ${t.n} against the fix: git -C ${TW} diff ${reviewed}..${fix.commit}; the implementer's notes: ${fix.notes}. Findings: ${JSON.stringify(findingsOf(review))}. Report any finding still unresolved and any new Important or Critical defect the fix introduced.`, { label, phase: 'Tasks', agentType: 'reviewer-lite', schema: FINDINGS })
+      review = await readReview(`${start}
+Re-review only these previously reported findings for task ${t.n} against the fix: git -C ${TW} diff ${reviewed}..${fix.commit}; the implementer's notes: ${fix.notes}. Findings: ${JSON.stringify(findingsOf(review))}. Report any finding still unresolved and any new Important or Critical defect the fix introduced.`, { label, phase: 'Tasks', agentType: 'reviewer-lite', schema: FINDINGS }, { fileless })
     }
     if (!review) return halt('task-review', { task: t, review: null })
   }
@@ -1600,17 +1651,17 @@ Run the project's configured independent code review: the contract's workflow.re
 ${RULES}`, { label: 'final-codex', phase: 'Final review', agentType: 'clerk', model: CLERK_MODEL, effort: 'high', schema: CODEX }) : Promise.resolve(null)
 // #993: shared by the chunk and the integration review.
 const VERIFY_OWNED = `The verify step runs the declared verification: run only the targeted tests a finding needs, never the whole suite.`
-const finals = await parallel(groups.map((g, gi) => () => call(`${CTX}
+const finals = await parallel(groups.map((g, gi) => () => readReview(`${CTX}
 ${PLAN_REF} Acceptance criteria: ${ACS}.
 Final review${chunked ? ` of chunk ${gi + 1}/${groups.length}: tasks ${g.map(t => t.n).join(', ')} only (their files: ${g.map(t => t.file).join(', ')}); grade only these tasks` : ' of the whole delivery'}: git -C ${W} diff ${RANGE}${chunked ? ' restricted to the paths these tasks own' : ''}.${EXTRA_RANGES()} ${KNOW} Two axes: correctness (real defects with a concrete failing input) and conformance (each task and each acceptance criterion of kind code is met, with the test or command that shows it). ${VERIFY_OWNED} Report Important or Critical findings only. Do not edit anything.`, { label: `final-${gi + 1}`, phase: 'Final review', agentType: 'reviewer', schema: FINDINGS })))
 if (finals.some(r => !r)) {
   await codexP
-  return stop('final-review', { details: 'a final reviewer returned nothing', finals })
+  return stop('final-review', { details: `a final reviewer ${silence(...groups.map((g, gi) => `final-${gi + 1}`))}`, finals })
 }
 // #967: the integration review reads only the chunk verdicts, so it runs beside Codex. It counts as dead only where its reply is read:
 // a Codex stop leaves it unused, and still running unread, on purpose: waiting for it would cost wall time for nothing.
-const integP = chunked ? call(`${CTX}
-${PLAN_REF} Integration review. The delivery was reviewed in ${groups.length} chunks by task; their verdicts: ${JSON.stringify(finals)}. Read the full changed-file list (git -C ${W} diff --stat ${RANGE}) and the head tree as needed.${EXTRA_RANGES()} ${KNOW} Check the interfaces between chunks and grade every acceptance criterion: ${ACS}. ${VERIFY_OWNED} Report Important or Critical findings only.`, { label: 'final-integration', phase: 'Final review', agentType: 'reviewer', schema: FINDINGS }, true) : null
+const integP = chunked ? readReview(`${CTX}
+${PLAN_REF} Integration review. The delivery was reviewed in ${groups.length} chunks by task; their verdicts: ${JSON.stringify(finals)}. Read the full changed-file list (git -C ${W} diff --stat ${RANGE}) and the head tree as needed.${EXTRA_RANGES()} ${KNOW} Check the interfaces between chunks and grade every acceptance criterion: ${ACS}. ${VERIFY_OWNED} Report Important or Critical findings only.`, { label: 'final-integration', phase: 'Final review', agentType: 'reviewer', schema: FINDINGS }, { optional: true }) : null
 if (integP) integP.catch(() => {})
 const codexR = await codexP
 let finalFindings = finals.flatMap(findingsOf)
@@ -1622,8 +1673,8 @@ if (REVIEW_CODE) {
 if (integP) {
   const integ = await integP
   if (!integ) {
-    DEAD.push('final-integration')
-    return stop('final-review', { details: 'the integration reviewer returned nothing' })
+    if (!LOST.includes('final-integration')) DEAD.push('final-integration')
+    return stop('final-review', { details: `the integration reviewer ${silence('final-integration')}` })
   }
   finalFindings = finalFindings.concat(findingsOf(integ))
 }
@@ -1665,7 +1716,7 @@ if (finalFindings.length) {
     // A wave that had carried findings and committed nothing found them closed already: its re-review reads the head, with no diff range.
     const idle = k === 1 && fromStop.length > 0 && sameSha(fw.commit, fw.start_head) && !collected.length
     if (!idle) carried = []
-    const rv = await call(`${CTX}\nRe-review these findings against ${idle ? `the current head of ${W}${hasBranches ? ` and of each declared branch's worktree (${declared(plan).map(b => `${b.name} in ${b.worktree}`).join(', ')})` : ''} (the fix wave committed nothing, so there is no diff to read). Nothing changed since these were raised, so each finding stands unless the code at the head shows it does not hold. The notes are the implementer's claims: check each against the code and never clear a finding on the notes alone` : `the fix (${span(fw)}${collected.length ? ` and ${collected.join(' and ')}` : ''})`}; notes: ${fw.notes}. Findings: ${JSON.stringify(waveFindings)}.${k === 1 && fromStop.length && !idle ? ` The last ${fromStop.length} were left open by an earlier run and may repeat the ones before them: check each against the head, not only the diff.` : ''} Report any still unresolved and any new Important or Critical defect, setting relation on each finding you still report: narrowing when it is the same kind of defect as one above, reached on another path, input or call site; else new. Unsure is new.${idle ? '' : ` Also return changed_files: the output lines of ${CHANGED_CMD(`${fw.start_head}..${fw.commit}`)}, run alone.`}`, { label: rvLabel, phase: 'Final review', agentType: 'reviewer', schema: withChanged(FINDINGS) })
+    const rv = await readReview(`${CTX}\nRe-review these findings against ${idle ? `the current head of ${W}${hasBranches ? ` and of each declared branch's worktree (${declared(plan).map(b => `${b.name} in ${b.worktree}`).join(', ')})` : ''} (the fix wave committed nothing, so there is no diff to read). Nothing changed since these were raised, so each finding stands unless the code at the head shows it does not hold. The notes are the implementer's claims: check each against the code and never clear a finding on the notes alone` : `the fix (${span(fw)}${collected.length ? ` and ${collected.join(' and ')}` : ''})`}; notes: ${fw.notes}. Findings: ${JSON.stringify(waveFindings)}.${k === 1 && fromStop.length && !idle ? ` The last ${fromStop.length} were left open by an earlier run and may repeat the ones before them: check each against the head, not only the diff.` : ''} Report any still unresolved and any new Important or Critical defect, setting relation on each finding you still report: narrowing when it is the same kind of defect as one above, reached on another path, input or call site; else new. Unsure is new.${idle ? '' : ` Also return changed_files: the output lines of ${CHANGED_CMD(`${fw.start_head}..${fw.commit}`)}, run alone.`}`, { label: rvLabel, phase: 'Final review', agentType: 'reviewer', schema: withChanged(FINDINGS) })
     if (!rv) return stop('fix-wave-review', { rv, fix_waves: fixWaves })
     carried = []
     const next = findingsOf(rv)
@@ -1795,7 +1846,7 @@ while (verify && verifyProblems(verify).length && vRounds < 2) {
   const pre = rerunIds(verify, fix)
   const ws = pre ? await call(wsCheckPrompt(fix), { label: `ws-check-${vRounds}`, phase: 'Verify', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: WS_CHECK }) : null
   const asked = pre && wsOnly(ws) ? pre : null
-  const fr = await call(`${CTX}\nReview this verification fix: ${span(fix)}; the failure it answers: ${JSON.stringify(verifyProblems(verify))}; notes: ${fix.notes}. Report Important or Critical defects only, above all a weakened, skipped or deleted test or check.${outside.length ? ` It edits files outside the branch's diff, each for a stated cause: ${JSON.stringify(outside)}; a cause the code or the failure does not bear out is an Important defect.` : ''}${asked ? wsAsk(ws) : ''}`, { label: `verify-fix-review-${vRounds}`, phase: 'Verify', agentType: 'reviewer', schema: asked ? WS_REVIEW : FINDINGS })
+  const fr = await readReview(`${CTX}\nReview this verification fix: ${span(fix)}; the failure it answers: ${JSON.stringify(verifyProblems(verify))}; notes: ${fix.notes}. Report Important or Critical defects only, above all a weakened, skipped or deleted test or check.${outside.length ? ` It edits files outside the branch's diff, each for a stated cause: ${JSON.stringify(outside)}; a cause the code or the failure does not bear out is an Important defect.` : ''}${asked ? wsAsk(ws) : ''}`, { label: `verify-fix-review-${vRounds}`, phase: 'Verify', agentType: 'reviewer', schema: asked ? WS_REVIEW : FINDINGS })
   if (!fr || findingsOf(fr).length) return stop('verify-fix-review', { review: fr })
   const rerun = asked && attested(fr) ? asked : null
   const next = await call(rerun ? `${CTX}\nA whitespace-only fix followed the verification at ${verify.head}; the declared ids not listed below passed there and are carried forward, so run only the listed ones.\n${verifyBodyFor(setup.verification.filter(e => rerun.includes(e.id)))}` : verifyPrompt, { label: `verify-${vRounds + 1}`, phase: 'Verify', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: VERIFY })
@@ -1910,7 +1961,7 @@ const shipFix = async ({ label, reviewLabel, fixPrompt, reviewPrompt, rebuttal =
   const moved = !sameSha(fix.commit, expected)
   if (!moved && rerun) return { fix, ok: true, rerun: true, moved }
   if (!moved && !(rebuttal && present(fix.notes))) return { fix, ok: false }
-  const review = await call(reviewPrompt(fix, moved), { label: reviewLabel, phase: 'Ship', agentType: 'reviewer', schema: FINDINGS })
+  const review = await readReview(reviewPrompt(fix, moved), { label: reviewLabel, phase: 'Ship', agentType: 'reviewer', schema: FINDINGS })
   return { fix, review, moved, ok: true }
 }
 const landBody = async () => {
@@ -2003,8 +2054,8 @@ ${RULES}`, { label: `sync-resolve-${syncs}`, phase: 'Ship', agentType: 'implemen
     // A merge that conflicted is reviewed whatever its resolution says of itself: the sync step saw the conflict. A head that is not the
     // merge commit is reviewed too, whatever the merge was: nothing else would read the commits on top of it.
     if (aborted || merge.conflicted || followup) {
-      const sr = await call(`${CTX}
-Review the conflict resolution in merge commit ${merge.merge_commit}: git -C ${W} show --cc ${merge.merge_commit} and the resolved files ${JSON.stringify(merge.resolved_files || [])}; the tests run: ${JSON.stringify(merge.tests || [])}. Report Important or Critical defects only: a dropped change from either side, a broken merge of intent, a resolved file whose tests were not run.${merge.markers_checked === true ? '' : MARKERS_UNCHECKED}${followup ? DESCENDS(W, mc, merge.head) : ''}`, { label: `sync-review-${syncs}`, phase: 'Ship', agentType: 'reviewer', schema: followup ? { ...FINDINGS, properties: { ...FINDINGS.properties, descends: { type: 'boolean' } }, required: [...FINDINGS.required, 'descends'] } : FINDINGS })
+      const sr = await readReview(`${CTX}
+Review the conflict resolution in merge commit ${merge.merge_commit}: git -C ${W} show --cc ${merge.merge_commit} and the resolved files ${JSON.stringify(merge.resolved_files || [])}; the tests run: ${JSON.stringify(merge.tests || [])}. Report Important or Critical defects only: a dropped change from either side, a broken merge of intent, a resolved file whose tests were not run.${merge.markers_checked === true ? '' : MARKERS_UNCHECKED}${followup ? DESCENDS(W, mc, merge.head) : ''}`, { label: `sync-review-${syncs}`, phase: 'Ship', agentType: 'reviewer', schema: SYNC_REVIEW_SCHEMA(followup) })
       if (!sr) return stop('sync-review', { pr: PR, review: sr })
       // Only the review's own proof accepts a head that is not the merge commit; a missing answer is no proof.
       if (followup && sr.descends !== true) return stop('sync', { pr: PR, sync: merge, details: `the resolution names the head ${merge.head} and the merge commit ${mc}, and the head does not descend from it: only a reviewed merge commit lands` })
