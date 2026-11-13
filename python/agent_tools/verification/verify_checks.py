@@ -127,6 +127,14 @@ its output, a timeout or a shell that cannot be run). It never writes a file.
 `console-state --port N` (`verify_checks.console_state`, issue 856) is met when
 `GET http://127.0.0.1:N/api/state` answers 200 within 5 seconds, not met on any other status or no
 answer; it reads only that endpoint.
+
+`issue-closed --repo R --issue N` (`verify_checks.issue_closed`, issue 1010) is met when issue N of R
+was closed as completed, which the verify run does only once the issue's held verify block had its
+checks met (an unverified finish closes it as `not_planned`). It reads `repos/R/issues/N` once and
+only reads the forge: `closed` with reason `completed` exits 0, `closed` with any other reason exits
+1, `open` exits 75, and each reports `{"issue", "state", "state_reason"}`. A payload that is not an
+object, or whose state is neither `open` nor `closed`, is a `payload_invalid` forge error (exit 2),
+as is any other forge error; a bad `--repo` or `--issue` (a positive integer) is a usage error (2).
 """
 from __future__ import annotations
 

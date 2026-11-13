@@ -297,6 +297,11 @@ class IssueClosedTest(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertIn("verify-checks: forge_error: transport", err.getvalue())
 
+    def test_the_docstring_documents_the_check(self):
+        for needle in ("issue-closed --repo R --issue N", "verify_checks.issue_closed",
+                       "repos/R/issues/N", "`completed`", "payload_invalid", "issue 1010"):
+            self.assertIn(needle, verify_checks.__doc__)
+
     def test_the_issue_closed_wrapper_is_committed_executable(self):
         self.assertEqual(committed_mode(f"{CHECKS}/issue-closed"), "100755")
         self.assertEqual(run_from_root([str(ROOT / CHECKS / "issue-closed")]).returncode, 2)
