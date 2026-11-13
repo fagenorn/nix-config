@@ -17,11 +17,12 @@ import tempfile
 import threading
 import time
 import unittest
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import deliveries, digest, service, sessions, sprints
+from agent_tools.console import deliveries, digest, probe, service, sessions, sprints
 from agent_tools.console import view
 from agent_tools.console.event_log import EventLog
 from agent_tools.console.view import derive_view, encode_view, project_states
@@ -804,6 +805,209 @@ class ReadingsRouteTest(Case):
         self.assertEqual((status, response["Allow"]), (405, "POST"))
         time.sleep(0.2)
         self.assertEqual(support.log_rows(self.store), rows)
+
+
+class ProbeServiceTest(Case):
+    """The service probes every listed profile and credits the reading to the profile it probed (#1009)."""
+
+    def setUp(self):
+        super().setUp()
+        self.accounts = self.root / "accounts"
+        self.work = self.accounts / "profiles/work"
+        self.spare = self.accounts / "profiles/spare"
+        self.work.mkdir(parents=True)
+        self.spare.mkdir(parents=True)
+        (self.spare / "sessions").mkdir()
+        for directory in (self.work, self.spare):
+            for name in CREDENTIAL_NAMES:
+                (directory / name).write_text("cred-secret")
+        self.proj = self.root / "proj"
+        self.proj.mkdir()
+        self.now = [NOW]
+        support.write_registry(self.registry, [{"project_id": "owner/p00",
+                                                "root": str(self.proj)}])
+        support.write_session(self.work / "sessions", pid=os.getpid(), session_id="ses-1",
+                              cwd=str(self.proj), status="busy")
+
+    def begin(self, prober, dispatch=None, **kwargs):
+        return support.service(
+            self, self.store, self.registry,
+            session_dirs=[self.work / "sessions", self.spare / "sessions"],
+            profile_dirs=kwargs.pop("profile_dirs", [self.spare, self.work]),
+            clock=lambda: self.now[0], session_poll_seconds=3600, prober=prober,
+            probe_dispatch=(lambda job: job()) if dispatch is None else dispatch,
+            probe_tick_seconds=kwargs.pop("probe_tick_seconds", 3600), **kwargs)
+
+    def entry(self, svc, name):
+        view = json.loads(svc.view_bytes)["capacity"]
+        return next(e for e in view["profiles"] if e["profile"] == name)
+
+    def recorder(self):
+        seen = []
+        return seen, lambda p: seen.append(p.profile)
+
+    def test_a_probe_reading_of_a_profile_with_no_session_is_its_reading(self):
+        def prober(p):
+            if p.profile == "spare":
+                svc.ingest_reading(reading_body(ALLOWED, "acc-5", p.session_id))
+
+        svc = self.begin(prober)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            appended = svc.ingest_reading(reading_body(ALLOWED, "acc-5", str(uuid.uuid4())))
+        self.assertEqual(appended, [])
+        self.assertEqual(err.getvalue(), "console: reading_unattributed\n")
+        self.assertEqual(self.entry(svc, "spare")["state"], "unknown")
+        svc.ingest_reading(reading_body(ALLOWED, "acc-5", "ses-1"))
+        paired = [json.loads(row[4]) for row in support.log_rows(self.store)
+                  if row[2] == "capacity.reading"]
+        self.assertEqual(paired[-1]["profile"], "work")
+        self.now[0] = NOW + 30
+        probes = svc.probe_round()
+        self.assertEqual([p.profile for p in probes], ["spare", "work"])
+        ids = [str(uuid.UUID(p.session_id)) for p in probes]
+        self.assertEqual(len(set(ids)), 2)
+        last = [json.loads(row[4]) for row in support.log_rows(self.store)
+                if row[2] == "capacity.reading"][-1]
+        self.assertEqual((last["profile"], last["session_id"]), ("spare", probes[0].session_id))
+        spare = self.entry(svc, "spare")
+        self.assertEqual((spare["state"], spare["week_left"]), ("ok", 58))
+
+    def test_a_refused_probe_leaves_the_profile_out_with_its_reset(self):
+        def prober(p):
+            if p.profile == "spare":
+                svc.ingest_reading(reading_body(REFUSED, "acc-6", p.session_id))
+                raise probe.ProbeFailed("exited")
+
+        svc = self.begin(prober)
+        self.now[0] = NOW + 30
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            svc.probe_round()
+        spare = self.entry(svc, "spare")
+        self.assertEqual(spare["state"], "out")
+        self.assertEqual(spare["out_until"], iso(RESET))
+        stops = [json.loads(row[4]) for row in support.log_rows(self.store)
+                 if row[2] == "capacity.stop"]
+        self.assertEqual(stops, [{"profile": "spare", "window": "7d", "reset": RESET}])
+        self.assertIn("console: probe_failed spare exited", err.getvalue().splitlines())
+
+    def test_a_probe_is_never_a_session_on_the_page(self):
+        ids = []
+
+        def prober(p):
+            if p.profile != "spare":
+                return
+            ids.append(p.session_id)
+            for name in ("session start", "finished turn", "session end"):
+                svc.ingest_hook(support.hook_body(
+                    name, session_id=p.session_id, cwd=str(self.proj)))
+            support.write_session(self.spare / "sessions", pid=os.getpid(),
+                                  session_id=p.session_id, cwd=str(self.proj), status="busy")
+            svc.ingest_reading(reading_body(ALLOWED, "acc-5", p.session_id))
+
+        svc = self.begin(prober)
+        CREDENTIAL_HITS.clear()
+        CREDENTIAL_ARMED.set()
+        self.addCleanup(CREDENTIAL_ARMED.clear)
+        self.now[0] = NOW + 30
+        svc.probe_round()
+        svc.poll_sessions()
+        CREDENTIAL_ARMED.clear()
+        rows = support.log_rows(self.store)
+        about = [row for row in rows if row[2].startswith("session.")
+                 and json.loads(row[4]).get("session_id") == ids[0]]
+        self.assertEqual(about, [])
+        self.assertNotIn(ids[0], svc.view_bytes.decode())
+        self.assertTrue([row for row in rows if row[2] == "session.seen"
+                         and json.loads(row[4]).get("session_id") == "ses-1"])
+        self.assertEqual(self.entry(svc, "spare")["state"], "ok")
+        self.assertEqual(CREDENTIAL_HITS, [])
+
+    def test_probes_run_every_ten_minutes_after_a_first_probe_soon_after_start(self):
+        seen, prober = self.recorder()
+        svc = self.begin(prober)
+        rounds = []
+        for offset in (29, 30, 629, 630):
+            self.now[0] = NOW + offset
+            rounds.append([p.profile for p in svc.probe_round()])
+        self.assertEqual(rounds, [[], ["spare", "work"], [], ["spare", "work"]])
+        self.assertEqual(len(seen), 4)
+
+    def test_at_most_one_probe_per_profile_is_in_flight(self):
+        queue = support.Queued()
+        _, prober = self.recorder()
+        svc = self.begin(prober, dispatch=queue)
+        self.now[0] = NOW + 30
+        self.assertEqual(len(svc.probe_round()), 2)
+        self.assertEqual(len(queue.jobs), 2)
+        self.now[0] = NOW + 700
+        self.assertEqual(svc.probe_round(), [])
+        self.assertEqual(len(queue.jobs), 2)
+        queue.run_next()
+        queue.run_next()
+        self.assertEqual(len(svc.probe_round()), 2)
+
+    def test_a_failing_probe_keeps_the_last_reading(self):
+        def prober(p):
+            if p.profile == "work":
+                raise probe.ProbeFailed("timed_out")
+            raise RuntimeError("leak-me")
+
+        svc = self.begin(prober)
+        svc.ingest_reading(reading_body(ALLOWED))
+        before = self.entry(svc, "work")
+        rows = support.log_rows(self.store)
+        self.now[0] = NOW + 30
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            svc.probe_round()
+        self.assertEqual(support.log_rows(self.store), rows)
+        self.assertEqual(self.entry(svc, "work"), before)
+        self.assertEqual(before["week_left"], 58)
+        self.assertEqual(err.getvalue().splitlines(),
+                         ["console: probe_failed spare RuntimeError",
+                          "console: probe_failed work timed_out"])
+        self.assertNotIn("leak-me", err.getvalue())
+        self.now[0] = NOW + 630
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual([p.profile for p in svc.probe_round()], ["spare", "work"])
+
+    def test_a_probe_session_is_remembered_for_the_last_256_probes(self):
+        ids = []
+        svc = self.begin(lambda p: ids.append(p.session_id), profile_dirs=[self.spare])
+        for i in range(257):
+            self.now[0] = NOW + 30 + 600 * i
+            svc.probe_round()
+        self.assertEqual(len(ids), 257)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            old = svc.ingest_reading(reading_body(ALLOWED, "acc-old", ids[0]))
+        self.assertEqual(old, [])
+        self.assertEqual(err.getvalue(), "console: reading_unattributed\n")
+        new = svc.ingest_reading(reading_body(ALLOWED, "acc-new", ids[-1]))
+        self.assertEqual(len(new), 1)
+        last = [json.loads(row[4]) for row in support.log_rows(self.store)
+                if row[2] == "capacity.reading"][-1]
+        self.assertEqual(last["profile"], "spare")
+
+    def test_the_probe_loop_runs_rounds_on_its_thread(self):
+        event = threading.Event()
+        svc = self.begin(lambda p: event.set(), probe_tick_seconds=0.05)
+        self.now[0] = NOW + 30
+        self.assertTrue(event.wait(5))
+        self.assertIn(service.PROBE_LOOP_THREAD, [t.name for t in threading.enumerate()])
+        self.assertIsNotNone(svc)
+
+    def test_without_a_prober_nothing_is_probed(self):
+        svc = self.begin(None)
+        self.now[0] = NOW + 30
+        self.assertEqual(svc.probe_round(), [])
+        self.assertNotIn(service.PROBE_LOOP_THREAD, [t.name for t in threading.enumerate()])
+
+
+def iso(seconds):
+    return datetime.fromtimestamp(seconds, timezone.utc).isoformat()
 
 
 class ReadFleetTest(Case):
