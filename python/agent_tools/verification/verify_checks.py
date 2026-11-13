@@ -129,12 +129,18 @@ its output, a timeout or a shell that cannot be run). It never writes a file.
 answer; it reads only that endpoint.
 
 `issue-closed --repo R --issue N` (`verify_checks.issue_closed`, issue 1010) is met when issue N of R
-was closed as completed, which the verify run does only once the issue's held verify block had its
-checks met (an unverified finish closes it as `not_planned`). It reads `repos/R/issues/N` once and
-only reads the forge: `closed` with reason `completed` exits 0, `closed` with any other reason exits
-1, `open` exits 75, and each reports `{"issue", "state", "state_reason"}`. A payload that is not an
-object, or whose state is neither `open` nor `closed`, is a `payload_invalid` forge error (exit 2),
-as is any other forge error; a bad `--repo` or `--issue` (a positive integer) is a usage error (2).
+was closed as completed after the verify run verified its held block: a closed state with reason
+`completed` alone is not enough, since an owner can close an issue that way by hand. It reads
+`repos/R/issues/N` and, for a completed closure, every page of `repos/R/issues/N/comments`, and only
+reads the forge. The held block is the newest trusted one (`verify_issues.select`) and the closure is
+verified when a live `verify-closed` marker by a trusted author names that block's version with
+outcome `verified`; a block that is absent or unparsable, a marker of an older block version, an
+untrusted marker or any other outcome is not. Exit 0 when `closed` as `completed` and verified; 1
+when `closed` with any other reason (its comments unread), or as `completed` unverified; 75 when
+`open`. The report is `{"issue", "state", "state_reason"}`, plus `"verified"` once the comments were
+read. A payload that is not an object, or whose state is neither `open` nor `closed`, or a malformed
+comment page, is a `payload_invalid` forge error (exit 2), as is any other forge error; a bad `--repo`
+or `--issue` (a positive integer) is a usage error (2).
 """
 from __future__ import annotations
 
@@ -161,6 +167,7 @@ from agent_tools.canonical import parse_rfc3339_utc
 from agent_tools.guard.push_fixture import make_push_fixture
 from agent_tools.system import forge_api, github_remote
 from agent_tools.system.semver import parse_semver
+from agent_tools.verification import verify_issues
 
 REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _STAMP = "%Y-%m-%dT%H:%M:%SZ"
@@ -300,7 +307,7 @@ def required_checks(repo: str, base: str, since: datetime) -> tuple[int, dict]:
 
 
 def issue_closed(repo: str, issue: int) -> tuple[int, dict]:
-    """Met when `issue` is closed as completed: the verify run closed it with its checks met."""
+    """Met when `issue` is closed as completed after its held block was verified by the verify run."""
     found = forge_api.api_get(f"repos/{repo}/issues/{issue}")
     state = found.get("state") if isinstance(found, dict) else None
     if state not in ("open", "closed"):
@@ -309,7 +316,15 @@ def issue_closed(repo: str, issue: int) -> tuple[int, dict]:
     report = {"issue": issue, "state": state, "state_reason": reason}
     if state == "open":
         return 75, report
-    return (0 if reason == "completed" else 1), report
+    if reason != "completed":
+        return 1, report
+    comments = verify_issues.comments_from_rest(forge_api.api_pages(
+        f"repos/{repo}/issues/{issue}/comments?per_page=100"))
+    held = verify_issues.select(comments)
+    closing = (verify_issues.live_one(held.markers, verify_issues.CLOSED, {"block": held.key})
+               if held is not None else None)
+    report["verified"] = closing is not None and closing.fields.get("outcome") == "verified"
+    return (0 if report["verified"] else 1), report
 
 
 def self_hosted_runner(repo: str, runner: str, labels: Sequence[str]) -> tuple[int, dict]:

@@ -1153,6 +1153,26 @@ class SigninServiceTest(Case):
         self.assertEqual(self.asks(svc), [])
         self.assertEqual(self.view(svc)["statement"]["inbox_items"], 0)
 
+    def test_a_sign_in_unchanged_past_the_retention_window_is_still_known(self):
+        log_clock = clocks(self.now)["log_clock"]
+        self.answers = {"spare": signin.Status("signed_out", None),
+                        "work": signin.Status("signed_in", self.ends(200))}
+        svc = self.begin(self.read, log_clock=log_clock)
+        self.now[0] = NOW + 30
+        svc.probe_round()
+        self.now[0] = NOW + 91 * 86400
+        svc.probe_round()
+        self.assertEqual(len(self.rows()), 2)
+        self.assertGreaterEqual(svc.retain(), 0)
+        self.assertEqual([self.entry(svc, n)["signin"]["state"] for n in ("spare", "work")],
+                         ["signed_out", "signed_in"])
+        self.assertEqual(self.asks(svc), ["signin/spare"])
+        svc.close()
+        again = self.begin(self.read, log_clock=log_clock)
+        self.assertEqual([self.entry(again, n)["signin"]["state"] for n in ("spare", "work")],
+                         ["signed_out", "signed_in"])
+        self.assertEqual(self.asks(again), ["signin/spare"])
+
     def test_a_failing_or_unreadable_status_is_unknown_and_asks_nothing(self):
         self.answers = {"spare": signin.Status("signed_out", None),
                         "work": signin.Status("signed_in", self.ends(30))}

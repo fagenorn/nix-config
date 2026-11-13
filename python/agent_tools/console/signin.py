@@ -31,7 +31,9 @@ Failures are `StatusFailed(kind)` with `kind` one of `KINDS`, and `str(error) ==
 `manager.supported(platform)`, else None.
 
 Event. `entry(profile, status)` is `("signin.reading", None, {"profile", "state", "ends_at"})`,
-`READING` being the kind. The kind is not in `KEPT_KINDS`: retention removes it like any other row.
+`READING` being the kind. The kind is not in `KEPT_KINDS`, but retention leaves the newest row of each
+profile in place (`event_log.SIGNIN_READING`): only changes are recorded, so an unchanged sign-in
+would otherwise vanish once its one row aged out.
 
 Fold. `signin_state(events, state=None)` returns `{profile: SignIn(state, ends_at, at)}` from the
 `READING` events: only a payload with a non-empty string `profile`, a `state` in `STATES` and an
@@ -58,9 +60,9 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from agent_tools.console import manager, probe
-from agent_tools.console.event_log import Event
+from agent_tools.console.event_log import SIGNIN_READING, Event
 
-READING = "signin.reading"
+READING = SIGNIN_READING
 STATES = ("signed_in", "signed_out", "unknown")
 STATUS_TIMEOUT = 30
 ASK_SECONDS = 259200

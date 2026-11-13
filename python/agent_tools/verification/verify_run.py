@@ -137,7 +137,7 @@ def _with_every_comment(slug: str, node: dict) -> dict:
         return node
     if not _is_int(node.get("number")):
         raise _invalid("an issue has no integer number")
-    every = _rest_comments(forge_api.api_pages(f"repos/{slug}/issues/{node['number']}/comments?per_page=100"))
+    every = verify_issues.comments_from_rest(forge_api.api_pages(f"repos/{slug}/issues/{node['number']}/comments?per_page=100"))
     return {**node, "comments": {**listing, "nodes": [
         {"fullDatabaseId": str(c.id), "authorAssociation": c.association, "body": c.body,
          "createdAt": c.created_at, "updatedAt": c.created_at} for c in every]}}
@@ -149,23 +149,6 @@ def _invalid(what: str) -> ForgeError:
 
 def _is_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
-
-
-def _rest_comments(pages: Sequence[Any]) -> list[verify_issues.Comment]:
-    """The comments of the pages of a REST listing, ascending id; `payload_invalid` for a bad page or comment."""
-    found = []
-    for page in pages:
-        if not isinstance(page, list):
-            raise _invalid("a comment page is not an array")
-        for item in page:
-            if not isinstance(item, dict) or not _is_int(item.get("id")):
-                raise _invalid("a comment has no integer id")
-            for key in ("author_association", "body", "created_at"):
-                if not isinstance(item.get(key), str):
-                    raise _invalid(f"comment {item['id']} has no string {key}")
-            found.append(verify_issues.Comment(item["id"], item["author_association"], item["body"],
-                                               item["created_at"]))
-    return sorted(found, key=lambda c: c.id)
 
 
 def held_issues(slug: str) -> list[tuple[int, list[verify_issues.Comment]]]:
@@ -195,7 +178,7 @@ def held_issues(slug: str) -> list[tuple[int, list[verify_issues.Comment]]]:
                     or not isinstance(listing.get("nodes"), list):
                 raise _invalid(f"issue {node['number']} has no comment listing")
             if listing["totalCount"] > len(listing["nodes"]):
-                comments = _rest_comments(forge_api.api_pages(
+                comments = verify_issues.comments_from_rest(forge_api.api_pages(
                     f"repos/{slug}/issues/{node['number']}/comments?per_page=100"))
             else:
                 comments = verify_issues.comments_from_graphql(listing["nodes"])
