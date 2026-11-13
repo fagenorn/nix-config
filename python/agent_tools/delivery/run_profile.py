@@ -22,7 +22,7 @@ agent's model is the meta file's `model`, else the commonest model recorded in i
 transcript's assistant messages, else `?`. Issues are keyed by the run's repository slug
 from its setup result. An issue is listed only once a `close-out` agent for it returned
 `released: true`, and its planner calls count its `plan`, `plan-revise`,
-`plan-rules-revise` and `plan-branch-revise` agents.
+`plan-rules-revise`, `plan-branch-revise` and `plan-task-revise` agents.
 
 A transcript or journal that cannot be read in full (including one holding a line that is
 not a JSON object: truncated, not UTF-8) is listed under `incomplete` (a table in text
@@ -39,7 +39,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 BATCH_PHASES: frozenset[str] = frozenset({"Intake", "Deliver", "Land"})
-PLANNER_FAMILIES: frozenset[str] = frozenset({"plan", "plan-revise", "plan-rules-revise", "plan-branch-revise"})
+PLANNER_FAMILIES: frozenset[str] = frozenset({"plan", "plan-revise", "plan-rules-revise", "plan-branch-revise", "plan-task-revise"})
 USER_RELAY_PREFIX: str = "[Workflow harness — user request]"
 
 _USAGE_FIELDS = ("input_tokens", "cache_creation_input_tokens",
