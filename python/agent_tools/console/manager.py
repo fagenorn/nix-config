@@ -12,6 +12,21 @@ account bound to the directory's main checkout (a linked worktree reads its owne
 `sessions.main_checkout`) or the nearest bound parent in `bindings.tsv` of the accounts
 directory (`$CLAUDE_ACCOUNTS_DIR`, else `~/.claude-accounts`), else `default`.
 
+Session profile (#1011). `session_profile(capacity, last_use)` names the profile a new session
+runs under, or None when nothing can be chosen; it never returns a `Wait` and ignores `all_out`.
+Room is a profile whose state is `ok` or `reset` and whose sign-in is not `signed_out` (an entry
+without a sign-in reading counts as `unknown`, P1); the most `week_left`, then the most
+`five_hour_left` (unknown below 0) wins, then the smallest name. With no room, the signed-in
+profile used most recently (as an instant; a never-used one ranks below every used one, ties to
+the smallest name) answers; with none signed in, `default`, unless an entry named `default` reads
+`signed_out`, when the answer is None (P2). A name in `last_use` that is not an entry is ignored.
+Last use is folded from the log's session rows by `profile_use(events, use)` (a new `ProfileUse`
+of `last`, profile to the `at` of its latest `session.seen`, `session.hook` or `session.profile`
+row, and `owner`, live session id to profile) and outlives the session: a `session.gone` row only
+drops the owner (P3). `write_choice(path, profile)` writes `<name>\n` atomically to the file
+`CHOICE_FILE` names (`chosen-profile`) and removes the file for None; `read_choice(path)` reads it
+back, None for a missing, empty or unreadable file.
+
 Command (Linux only; `launch_command` is None elsewhere and `launcher_for` gives None). The
 manager runs in its own transient systemd scope and in the background, so it outlives the console
 unit and a restart of it does not end it:
@@ -100,11 +115,16 @@ import sys
 import tempfile
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
-from agent_tools.console.sessions import DEFAULT_PROFILE, main_checkout
+from agent_tools.console.event_log import Event
+from agent_tools.console.sessions import (
+    DEFAULT_PROFILE, GONE, HOOK, PROFILE, SEEN, at_ms, main_checkout)
+
+CHOICE_FILE = "chosen-profile"
 
 PROMPT_LEAD = ("You are the manager of one sprint, started by the console. "
                'Run "sprint contract" first and follow what it prints. The goal: ')
@@ -212,6 +232,102 @@ def choose_profile(capacity: Mapping, bound: str) -> str | Wait:
         if unknown:
             return unknown[0]
     return bound
+
+
+@dataclass(frozen=True)
+class ProfileUse:
+    last: Mapping[str, str]
+    owner: Mapping[str, str]
+
+
+def profile_use(events: Iterable[Event], use: ProfileUse | None = None) -> ProfileUse:
+    last = dict(use.last) if use else {}
+    owner = dict(use.owner) if use else {}
+    for event in events:
+        session_id = event.payload.get("session_id")
+        if not isinstance(session_id, str):
+            continue
+        if event.kind == GONE:
+            owner.pop(session_id, None)
+            continue
+        if event.kind not in (SEEN, HOOK, PROFILE):
+            continue
+        profile = event.payload.get("profile")
+        if event.kind in (SEEN, PROFILE) and isinstance(profile, str):
+            owner[session_id] = profile
+        name = owner.get(session_id)
+        if name is None:
+            continue
+        moment = at_ms(event.at)
+        if moment is None:
+            continue
+        known = at_ms(last[name]) if name in last else None
+        if known is None or moment > known:
+            last[name] = event.at
+    return ProfileUse(last=last, owner=owner)
+
+
+def _instant(value) -> float | None:
+    try:
+        moment = datetime.fromisoformat(value[:-1] + "+00:00" if value.endswith("Z") else value)
+    except (ValueError, TypeError, AttributeError):
+        return None
+    if moment.tzinfo is None:
+        return None
+    return moment.timestamp()
+
+
+def session_profile(capacity: Mapping, last_use: Mapping[str, str]) -> str | None:
+    entries = capacity["profiles"]
+
+    def signin(entry):
+        return (entry.get("signin") or {}).get("state", "unknown")
+
+    room = [entry for entry in entries
+            if entry["state"] in ("ok", "reset") and signin(entry) != "signed_out"]
+    if room:
+        def key(entry):
+            return (entry["week_left"] if entry["week_left"] is not None else -1,
+                    entry["five_hour_left"] if entry["five_hour_left"] is not None else -1)
+        best = max(key(entry) for entry in room)
+        return min(entry["profile"] for entry in room if key(entry) == best)
+    signed_in = [entry["profile"] for entry in entries if signin(entry) == "signed_in"]
+    if signed_in:
+        def rank(name):
+            instant = _instant(last_use.get(name))
+            return (instant is not None, instant or 0.0)
+        best = max(rank(name) for name in signed_in)
+        return min(name for name in signed_in if rank(name) == best)
+    if any(entry["profile"] == DEFAULT_PROFILE and signin(entry) == "signed_out"
+           for entry in entries):
+        return None
+    return DEFAULT_PROFILE
+
+
+def write_choice(path: Path, profile: str | None) -> None:
+    """Replace the file at `path` with `profile` and a newline; remove it for None. `OSError` propagates."""
+    if profile is None:
+        path.unlink(missing_ok=True)
+        return
+    temporary = None
+    try:
+        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=".", suffix=".tmp")
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(profile + "\n")
+        os.replace(temporary, path)
+        temporary = None
+    finally:
+        if temporary is not None:
+            Path(temporary).unlink(missing_ok=True)
+
+
+def read_choice(path: Path) -> str | None:
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return None
+    return (lines[0].strip() or None) if lines else None
 
 
 def quota_wait(capacity: Mapping, profile: str | None) -> Wait | None:
