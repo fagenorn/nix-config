@@ -3811,7 +3811,7 @@ class SourceTest(unittest.TestCase):
 
 CLERK, IMPL, REV = "clerk", "implementer", "reviewer"
 EXPECTED = {stem: frozenset({kind}) for kind, stems in (
-    (CLERK, ("setup", "facts-", "release-", "acquire-", "readopt-", "recover-end-", "ask-", "settle-",
+    (CLERK, ("setup", "facts-", "release-", "acquire-", "readopt-", "readopt-push-", "recover-end-", "ask-", "settle-",
              "land-unlock-", "land-ask-", "land-lock-", "land-relock-", "land-record-", "land-status-", "land-pr-", "land-open-", "land-checks-", "land-merge-", "close-out-",
              "train-sweep-", "train-pr-", "train-checks-", "train-ready-", "train-merge-", "train-flip-")),
     (IMPL, ("land-sync-", "land-sync-resolve-", "land-sync-fix-", "land-fix-", "train-build-")),
@@ -3852,6 +3852,11 @@ SCENARIOS = (
     {"patch": folded({"state": "pending", "head": SHA, "pending": ["e2e"]})},
     {"replies": {"land-pr-1": {"pr": 41, "head": SHA, "lock": {"verdict": "land-contended"}}}},
     {"patch": {"facts-1": dict(HELD, open_pr=OPEN_PR)}},
+    # #1019: a readopt that finds the worktree ahead of its PR by one clean merge of the integration branch pushes it.
+    {"patch": {"facts-1": dict(HELD, open_pr=OPEN_PR)},
+     "replies": {"readopt-1": {"ok": False, "reason": "worktree", "worktree": "/r/.wt/w-issue-1-x", "branch": "issue-1-x", "head": B, "pr_head": SHA,
+                               "acceptance": [{"id": "AC1", "text": "works", "kind": "code"}],
+                               "ahead": [{"commit": B, "parents": [SHA, "d" * 40], "on_integration": True, "tree": "c" * 40, "clean_tree": "c" * 40}]}}},
     {"args": dict(ARGS, conts={"1": {"setup": {}, "pr": 41}}),
      "patch": {"facts-1": dict(HELD, **landing(41))},
      "children": {"1": {"stage": "done", "pr": 41, "merged": True,
@@ -3904,7 +3909,7 @@ class AgentTypeTest(unittest.TestCase):
 class ClerkModelTest(unittest.TestCase):
     """#803, #813: clerk_model is checked, sets the model of every clerk call except the setup and lifecycle steps, which stay on the default, and is passed to every child and the relaunch only when haiku."""
 
-    ON_DEFAULT = {"setup", "land-unlock-", "land-lock-", "land-relock-", "land-pr-", "land-open-", "land-merge-", "land-record-", "land-checks-", "close-out-",
+    ON_DEFAULT = {"setup", "readopt-push-", "land-unlock-", "land-lock-", "land-relock-", "land-pr-", "land-open-", "land-merge-", "land-record-", "land-checks-", "close-out-",
                   "train-sweep-", "train-pr-", "train-checks-", "train-merge-"}
 
     def test_clerk_model_must_be_sonnet_or_haiku(self):
@@ -7119,3 +7124,217 @@ class BehindRedBeforeLockTest(unittest.TestCase):
         result, calls, _ = run(patch={"land-pr-1": {"own_red": self.PRE["land-pr-1"]["own_red"]}})
         self.assertEqual([(c["label"], c.get("prompt")) for c in calls], base)
         self.assertEqual(object_branch(schema_of(calls, "land-pr-1")["properties"]["own_red"])["properties"]["behind"], {"type": "boolean"})
+
+
+READ_ONLY = ("Never check out, switch, reset or stash in the worktree: read another commit with git show.")
+
+
+class ReadOnlyReviewTest(unittest.TestCase):
+    """#1019: every review step of a landing is told, in one shared sentence, never to move the worktree's HEAD."""
+
+    def test_every_review_step_carries_the_sentence_once_and_no_other_step_does(self):
+        seen = all_calls()
+        self.assertEqual({AgentTypeTest.stem_of(c["label"]) for c in seen if READ_ONLY in c["prompt"]},
+                         {stem for stem, kinds in EXPECTED.items() if kinds == frozenset({REV})})
+        for call in seen:
+            with self.subTest(label=call["label"]):
+                review = call["agentType"] == REV
+                self.assertEqual(call["prompt"].count(READ_ONLY), 1 if review else 0)
+                if review:
+                    self.assertTrue(call["prompt"].endswith(f"reviewers read them by path.\n{READ_ONLY}"))
+
+    def test_a_rerun_review_carries_it_once(self):
+        out = run_full(patch=BEHIND, replies={"land-sync-1-1": ABORTED, "land-sync-resolve-1-1": SyncFixRoundTest.CONFLICTED,
+                                              "land-sync-review-1-1": [{"verdict": "incomplete", "findings": []}, {"verdict": "pass", "findings": []}]})
+        again = prompt(out["calls"], "land-sync-review-1-1-again")
+        self.assertEqual(again.count(READ_ONLY), 1)
+        self.assertLess(again.index(READ_ONLY), again.index("An earlier reply to this step was discarded"))
+
+    def test_the_sentence_is_one_constant_shared_with_deliver_standard(self):
+        mine = PROGRAM.read_text(encoding="utf-8")
+        standard = CHILD_PROGRAM.read_text(encoding="utf-8")
+        line = f"const READ_ONLY = '{READ_ONLY}'\n"
+        self.assertEqual((mine.count(line), standard.count(line)), (1, 1))
+        self.assertEqual(READ_ONLY.index("."), len(READ_ONLY) - 1)
+        self.assertEqual(mine.count("${READ_ONLY}"), 1)
+
+
+M1, M2, I1, I2, T1, T2 = "1" * 40, "2" * 40, "3" * 40, "4" * 40, "5" * 40, "6" * 40
+PR_HEAD = "9" * 40
+WT1 = "/r/.wt/w-issue-1-x"
+
+
+def merge(commit, first, second=I1, tree=T1, **over):
+    """One readopt fact: a two-parent merge whose second parent is on the integration branch and whose tree is the clean merge's."""
+    return dict({"commit": commit, "parents": [first, second], "on_integration": True, "tree": tree, "clean_tree": tree}, **over)
+
+
+def ahead(*commits, **over):
+    """A readopt reply for a clean worktree whose HEAD is not the PR head, with the facts read on top of the PR head."""
+    return dict({"ok": False, "reason": "worktree", "detail": f"HEAD {commits[0]['commit'] if commits else PR_HEAD} differs from headRefOid {PR_HEAD}",
+                 "worktree": WT1, "branch": "issue-1-x", "head": commits[0]["commit"] if commits else PR_HEAD, "pr_head": PR_HEAD,
+                 "acceptance": [{"id": "AC1", "text": "works", "kind": "code"}], "ahead": list(commits)}, **over)
+
+
+class ReadoptReattachTest(unittest.TestCase):
+    """#1019: readopt puts a worktree detached at its branch tip, with a clean tree, back on the branch; any other detached HEAD stops as before."""
+
+    def test_readopt_reattaches_the_worktree_at_its_contract_path(self):
+        _, calls, _ = run(patch={"facts-1": {"open_pr": OPEN_PR}})
+        text = prompt(calls, "readopt-1")
+        sentence = ("When HEAD in <path> is detached (git -C <path> symbolic-ref -q HEAD fails), put it back on issue-1-x first, only when "
+                    "git -C <path> rev-parse HEAD and git -C <path> rev-parse refs/heads/issue-1-x print the same sha and "
+                    "git -C <path> status --porcelain prints nothing: run git -C <path> switch issue-1-x, alone, and return reattached true. "
+                    "It is the one change this read may make; never reset, and leave any other detached HEAD as it is.")
+        self.assertEqual(text.count(sentence), 1)
+        self.assertLess(text.index("When the list has an entry at <path>: "), text.index(sentence))
+        self.assertLess(text.index(sentence), text.index("When the list has no entry at <path>, add one"))
+        self.assertIn("An entry there that is still not on issue-1-x: answer ok false with reason other", text)
+        self.assertIn("except a missing worktree and the re-attach of step 3", text)
+        self.assertEqual(schema_of(calls, "readopt-1")["properties"]["reattached"], {"type": "boolean"})
+
+    def test_a_reattached_worktree_lands_as_it_stands(self):
+        out = run_full(patch={"facts-1": {"open_pr": OPEN_PR}, "readopt-1": {"reattached": True}})
+        self.assertEqual(row(out["result"], 1)["outcome"], "landed")
+        self.assertEqual(of(out["calls"], 1)[:4], ["facts-1", "acquire-1", "readopt-1", "land-pr-1"])
+        self.assertEqual(len([line for line in out["logs"] if line.startswith("readopt-1: the worktree was on a detached HEAD at its branch tip")]), 1)
+
+    def test_any_other_detached_head_stops_with_the_existing_reason(self):
+        result, calls, _ = run(patch={"facts-1": {"open_pr": OPEN_PR}},
+                               replies={"readopt-1": {"ok": False, "reason": "other", "detail": "HEAD is detached at c0ffee, not the tip of issue-1-x"}})
+        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "readopt"))
+        self.assertTrue(row(result, 1)["reason"].startswith("readopt: other; HEAD is detached at c0ffee"), row(result, 1)["reason"])
+        self.assertNotIn("land-pr-1", labels(calls))
+
+
+class ReadoptCleanMergesTest(unittest.TestCase):
+    """#1019: a worktree ahead of its PR only by clean merges of the integration branch is pushed and lands; anything else stops as before."""
+
+    def go(self, reply, **replies):
+        return run_full(patch={"facts-1": {"open_pr": OPEN_PR}}, replies=dict({"readopt-1": reply}, **replies))
+
+    def stopped(self, out, name=None):
+        result, calls = out["result"], out["calls"]
+        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "readopt"), name)
+        self.assertTrue(row(result, 1)["reason"].startswith("readopt: worktree; "), name)
+        for label in ("land-pr-1", "child-1", "release-1"):
+            self.assertNotIn(label, labels(calls), name)
+        self.assertEqual(result["relaunch"]["issues"], [1])
+
+    def test_one_clean_merge_is_pushed_and_the_pr_lands_at_the_pushed_head(self):
+        out = self.go(ahead(merge(M1, PR_HEAD)), **{"land-pr-1": {"pr": 41, "head": M1},
+                                                    "land-merge-1": {"merged": True, "merge_commit": SHA, "notes": "merged"}})
+        result, calls = out["result"], out["calls"]
+        self.assertEqual(of(calls, 1)[:5], ["facts-1", "acquire-1", "readopt-1", "readopt-push-1", "land-pr-1"])
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+        self.assertNotIn("child-1", labels(calls))
+        push = prompt(calls, "readopt-push-1")
+        for needle in (f"git -C {WT1} rev-parse HEAD prints {M1}", f"git -C {WT1} push origin issue-1-x",
+                       "gh pr view 41 --repo owner/repo --json headRefOid", f"only when headRefOid is {M1}", "never merge, commit or force"):
+            self.assertIn(needle, push)
+        # The push step proves each merge again with its own commands before it pushes.
+        proof = push[push.index("\n2. "):push.index("\n3. ")]
+        for needle in (f"git -C {WT1} fetch origin", json.dumps([{"commit": M1, "first": PR_HEAD, "second": I1}], separators=(",", ":")),
+                       f"git -C {WT1} rev-list --parents -n 1 <commit> must print exactly <commit> <first> <second>",
+                       f"git -C {WT1} merge-base --is-ancestor <second> origin/dev must succeed",
+                       f"git -C {WT1} merge-tree --write-tree <first> <second> must exit 0",
+                       f"git -C {WT1} rev-parse <commit>^{{tree}} prints as its first output line",
+                       "On any difference push nothing, run nothing else and answer pushed false with the commit and the mismatch in detail."):
+            self.assertIn(needle, proof)
+        self.assertLess(push.index("\n2. Run git"), push.index("\n3. Push the branch"))
+        self.assertNotIn("push origin", proof)
+        # The landing takes the pushed head as the accepted one, and merges exactly it.
+        self.assertIn(f"Accepted head: {M1}", prompt(calls, "land-pr-1"))
+        self.assertIn(f"--match-head-commit {M1}", prompt(calls, "land-merge-1"))
+        self.assertEqual(len([line for line in out["logs"] if line.startswith("readopt-1: pushed 1 clean merge(s) of dev")]), 1)
+
+    def test_a_chain_of_clean_merges_is_pushed(self):
+        out = self.go(ahead(merge(M2, M1, I2, T2), merge(M1, PR_HEAD)), **{"land-pr-1": {"pr": 41, "head": M2}})
+        self.assertIn("readopt-push-1", labels(out["calls"]))
+        self.assertIn(f"Accepted head: {M2}", prompt(out["calls"], "land-pr-1"))
+        self.assertIn(json.dumps([{"commit": M2, "first": M1, "second": I2}, {"commit": M1, "first": PR_HEAD, "second": I1}], separators=(",", ":")),
+                      prompt(out["calls"], "readopt-push-1"))
+
+    def test_the_readopt_reads_the_facts_and_pushes_nothing(self):
+        _, calls, _ = run(patch={"facts-1": {"open_pr": OPEN_PR}})
+        text = prompt(calls, "readopt-1")
+        for needle in ("rev-list --first-parent --parents headRefOid..HEAD", "merge-base --is-ancestor <second parent> origin/dev",
+                       "rev-parse <commit>^{tree}", "merge-tree --write-tree <first parent> <second parent> when it exits 0",
+                       "leave it out when it does not", "only the first 8 lines", "Push nothing."):
+            self.assertIn(needle, text)
+        self.assertNotIn("push origin", text[:text.index("\nHard rules for this step")])
+        fact = schema_of(calls, "readopt-1")["properties"]["ahead"]["items"]["properties"]
+        self.assertEqual(sorted(fact), ["clean_tree", "commit", "on_integration", "parents", "tree"])
+        self.assertNotIn("readopt-push-1", labels(calls))
+
+    def test_everything_else_stops_with_the_existing_reason_and_pushes_nothing(self):
+        plain = {"commit": M1, "parents": [PR_HEAD]}
+        cases = (
+            ("a plain commit", ahead(plain)),
+            ("a plain commit under a clean merge", ahead(merge(M2, M1), dict(plain))),
+            ("a plain commit on top of a clean merge", ahead({"commit": M2, "parents": [M1]}, merge(M1, PR_HEAD))),
+            ("a merge whose tree is not the clean merge's", ahead(merge(M1, PR_HEAD, clean_tree=T2))),
+            ("a merge that conflicts when replayed", ahead({k: v for k, v in merge(M1, PR_HEAD).items() if k != "clean_tree"})),
+            ("a merge of another branch", ahead(merge(M1, PR_HEAD, on_integration=False))),
+            ("a merge with no word on its second parent", ahead({k: v for k, v in merge(M1, PR_HEAD).items() if k != "on_integration"})),
+            ("an octopus merge", ahead(merge(M1, PR_HEAD, parents=[PR_HEAD, I1, I2]))),
+            ("a head behind the PR head", ahead()),
+            ("a head at the PR head", ahead(merge(M1, PR_HEAD), head=PR_HEAD)),
+            ("a head apart from the PR head", ahead(merge(M1, "8" * 40))),
+            ("a chain that does not start at HEAD", ahead(merge(M1, PR_HEAD), head=M2)),
+            ("a chain with a gap", ahead(merge(M2, "8" * 40), merge(M1, PR_HEAD))),
+            ("a short sha", ahead(merge(M1[:12], PR_HEAD), head=M1[:12])),
+            ("no PR head", ahead(merge(M1, PR_HEAD), pr_head=None)),
+            ("more commits than are read", ahead(*[merge(f"{i:040x}", f"{i + 1:040x}") for i in range(1, 10)], pr_head=f"{10:040x}")),
+            ("no facts", {"ok": False, "reason": "worktree", "detail": "both shas", "worktree": WT1}),
+            ("facts of no object", ahead(merge(M1, PR_HEAD), ahead=["x"])),
+            ("no worktree", {k: v for k, v in ahead(merge(M1, PR_HEAD)).items() if k != "worktree"}),
+            # A reply the landing could not use pushes nothing, however clean its merges.
+            ("no acceptance", ahead(merge(M1, PR_HEAD), acceptance=[])),
+            ("acceptance left out", {k: v for k, v in ahead(merge(M1, PR_HEAD)).items() if k != "acceptance"}),
+            ("no branch", {k: v for k, v in ahead(merge(M1, PR_HEAD)).items() if k != "branch"}),
+            ("an empty branch", ahead(merge(M1, PR_HEAD), branch="")),
+        )
+        for name, reply in cases:
+            with self.subTest(case=name):
+                out = self.go(reply)
+                self.stopped(out, name)
+                self.assertNotIn("readopt-push-1", labels(out["calls"]))
+
+    def test_eight_clean_merges_are_the_most_that_is_pushed(self):
+        chain = [merge(f"{i:040x}", f"{i + 1:040x}") for i in range(1, 9)]
+        out = self.go(ahead(*chain, pr_head=f"{9:040x}"), **{"land-pr-1": {"pr": 41, "head": chain[0]["commit"]}})
+        self.assertIn("readopt-push-1", labels(out["calls"]))
+
+    def test_another_refusal_is_never_pushed(self):
+        for reason in ("dirty", "other", "no-acceptance"):
+            with self.subTest(reason=reason):
+                out = self.go(ahead(merge(M1, PR_HEAD), reason=reason))
+                self.assertTrue(row(out["result"], 1)["reason"].startswith(f"readopt: {reason}; "), row(out["result"], 1)["reason"])
+                self.assertNotIn("readopt-push-1", labels(out["calls"]))
+
+    def test_a_push_that_does_not_go_through_stops_with_the_existing_reason(self):
+        cases = (
+            ("refused", {"pushed": False, "detail": "the lifecycle guard refused the push"}, "the lifecycle guard refused the push"),
+            ("the tree is not the clean merge's", {"pushed": False, "detail": f"{M1}: merge-tree printed {T2}, the commit's tree is {T1}"},
+             f"{M1}: merge-tree printed {T2}, the commit's tree is {T1}"),
+            ("the second parent is not on the integration branch", {"pushed": False, "detail": f"{M1}: {I1} is no ancestor of origin/dev"},
+             f"{M1}: {I1} is no ancestor of origin/dev"),
+            ("the PR head did not move", {"pushed": True, "head": PR_HEAD}, "the PR head is not the worktree head"),
+            ("no head", {"pushed": True}, "the PR head is not the worktree head"),
+            ("lost", None, "readopt-push-1 returned nothing"),
+        )
+        for name, reply, why in cases:
+            with self.subTest(case=name):
+                out = self.go(ahead(merge(M1, PR_HEAD)), **{"readopt-push-1": reply})
+                self.stopped(out, name)
+                self.assertEqual(labels(out["calls"]).count("readopt-push-1"), 1)
+                self.assertTrue(row(out["result"], 1)["note"].endswith(f"its clean merges of dev were not pushed: {why}"), row(out["result"], 1)["note"])
+
+    def test_the_push_is_a_lifecycle_clerk_step_on_the_default_model(self):
+        out = run_full(args=dict(ARGS, clerk_model="haiku"), patch={"facts-1": {"open_pr": OPEN_PR}},
+                       replies={"readopt-1": ahead(merge(M1, PR_HEAD)), "land-pr-1": {"pr": 41, "head": M1}})
+        (push,) = [c for c in out["calls"] if c["label"] == "readopt-push-1"]
+        self.assertEqual((push["agentType"], push["model"], push["effort"]), ("clerk", "sonnet", "low"))
+        self.assertEqual(schema_of(out["calls"], "readopt-push-1")["required"], ["pushed"])
+        self.assertIn(f"git -C {WT1} push origin issue-1-x;", push["prompt"][push["prompt"].index("Lifecycle commands"):])
