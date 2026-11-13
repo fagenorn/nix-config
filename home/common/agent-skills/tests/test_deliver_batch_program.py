@@ -1591,6 +1591,52 @@ class LandTest(unittest.TestCase):
         self.assertNotIn("land-merge-1", labels(calls))
         self.assertIn("land-unlock-1", labels(calls))
 
+    def test_a_passed_reply_that_names_no_check_is_pending_and_never_merged(self):  # #1008
+        empty = {"state": "passed", "head": SHA, "required": [], "passed": []}
+        for name, patch in (("undeclared", {}), ("declared", {"setup": {"required_checks": ["ci"]}})):
+            with self.subTest(name=name):
+                result, calls, _ = run(patch=dict(patch, **folded(empty)), replies={f"land-checks-1-{k}": empty for k in (2, 3)})
+                r = row(result, 1)
+                self.assertEqual((r["outcome"], r["stage"], r["pending"]), ("stopped", "checks-pending", []))
+                names = labels(calls)
+                self.assertNotIn("land-merge-1", names)
+                self.assertNotIn("land-checks-1-4", names)
+                self.assertIn("land-unlock-1", names)
+
+    def test_a_head_with_no_check_yet_is_polled_again_and_the_next_poll_decides(self):  # #1008
+        empty = {"state": "passed", "head": SHA, "passed": []}
+        result, calls, _ = run(patch=folded(empty))
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+        names = labels(calls)
+        self.assertLess(names.index("land-checks-1-2"), names.index("land-merge-1"))
+        result, calls, _ = run(patch=folded(empty), replies={"land-checks-1-2": CI_RED})
+        names = labels(calls)
+        self.assertLess(names.index("land-checks-1-2"), names.index("land-fix-1"))
+        self.assertEqual(names.count("land-merge-1"), 1)
+
+    def test_the_checks_prompt_calls_a_head_with_no_check_pending_and_reads_classic_protection(self):  # #1008
+        _, calls, _ = run()
+        text = prompt(calls, "land-pr-1")
+        self.assertIn("A head with no check reported at all is pending too, never passed", text)
+        self.assertIn("whenever that reply lists no required status checks, from classic branch protection", text)
+        self.assertIn("passed (every name passing at head; a passed answer naming none is read as pending)", text)
+
+    def test_a_landing_poll_waits_for_the_first_check_before_it_answers_pending(self):  # #1008
+        wait = ("While no check is reported on head, do not answer yet: read the list again about once a minute, running alone "
+                "timeout 60 tail -f /dev/null between two reads (this step's own wait, which ends by itself with exit 124), and "
+                "answer pending only when none is reported 5 minutes after your first read of the list.")
+        _, calls, _ = run(patch=folded({"state": "pending", "head": SHA, "pending": ["e2e"]}))
+        for label in ("land-pr-1", "land-checks-1-2"):
+            self.assertEqual(prompt(calls, label).count(wait), 1, label)
+        # The same sentence, byte for byte, in deliver-standard.js, with the train's own number of minutes.
+        self.assertIn(wait.replace("5 minutes", "${NO_CHECKS_MIN} minutes"), PROGRAM.with_name("deliver-standard.js").read_text())
+        self.assertIn("const NO_CHECKS_MIN = 5\n", PROGRAM.with_name("deliver-standard.js").read_text())
+        self.assertIn("const TRAIN_NO_CHECKS_MIN = 5\n", PROGRAM.read_text())
+        # A train car's step keeps its own wait for the first check and gains no second one.
+        _, calls, _ = train_run()
+        self.assertNotIn("While no check is reported on head", prompt(calls, "train-checks-1-1"))
+        self.assertIn("or that reports no check in the first 5 minutes of this step", prompt(calls, "train-checks-1-1"))
+
     def test_every_declared_check_passing_lands(self):
         result, _, _ = run(patch=dict({"setup": {"required_checks": ["ci", "lint"]}},
                                       **folded({"state": "passed", "head": SHA, "required": ["ci", "lint"],
@@ -1821,6 +1867,52 @@ class LandTest(unittest.TestCase):
                 self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "merge"))
                 self.assertEqual(labels(calls).count("land-merge-1"), 1)
                 self.assertNotIn("land-sync-1-1", labels(calls))
+
+    # #1008: the forge's own words for a merge its branch protection refuses while the head is up to date.
+    POLICY = {"merged": False, "behind": False,
+              "notes": "X Pull request owner/repo#41 is not mergeable: the base branch policy prohibits the merge."}
+
+    def test_a_policy_refusal_polls_the_checks_once_more_and_merges_when_they_passed(self):
+        result, calls, _ = run(replies={"land-merge-1": [self.POLICY, self.MERGED]})
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+        ls = of(calls, 1)
+        self.assertEqual(ls[ls.index("land-merge-1"):], ["land-merge-1", "land-checks-1-2", "land-merge-1", "close-out-1"])
+
+    def test_a_policy_refusal_whose_poll_is_red_goes_to_the_fix_step(self):
+        result, calls, _ = run(replies={"land-merge-1": [self.POLICY, self.MERGED], "land-checks-1-2": CI_RED,
+                                        "land-record-1-1": {"ok": True, "head": FIX}})
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+        ls = of(calls, 1)
+        self.assertEqual(ls[ls.index("land-merge-1"):ls.index("land-fix-1") + 1], ["land-merge-1", "land-checks-1-2", "land-fix-1"])
+        self.assertNotIn("land-sync-1-1", ls)
+
+    def test_a_policy_refusal_whose_poll_stays_pending_stops_at_the_pending_waits(self):
+        waiting = {"state": "pending", "head": SHA, "pending": ["lint"]}
+        result, calls, _ = run(replies=dict({"land-merge-1": self.POLICY}, **{f"land-checks-1-{k}": waiting for k in (2, 3, 4)}))
+        r = row(result, 1)
+        self.assertEqual((r["outcome"], r["stage"], r["pending"]), ("stopped", "checks-pending", ["lint"]))
+        self.assertEqual(labels(calls).count("land-merge-1"), 1)
+
+    def test_a_second_policy_refusal_stops_at_the_merge(self):
+        result, calls, _ = run(replies={"land-merge-1": self.POLICY})
+        r = row(result, 1)
+        self.assertEqual((r["outcome"], r["stage"]), ("stopped", "merge"))
+        ls = of(calls, 1)
+        self.assertEqual(ls.count("land-merge-1"), 2)
+        self.assertEqual([label for label in ls if label.startswith("land-checks-")], ["land-checks-1-2"])
+        self.assertNotIn("land-sync-1-1", ls)
+        self.assertIn("land-unlock-1", ls)
+
+    def test_a_refusal_marked_behind_is_resynced_whatever_its_message_says(self):
+        result, calls, _ = run(replies={"land-merge-1": [dict(self.POLICY, behind=True), self.MERGED]})
+        self.assertEqual(row(result, 1)["outcome"], "landed")
+        # The resync follows the refusal at once: no checks poll of the policy path comes between them.
+        ls = of(calls, 1)
+        self.assertEqual(ls[ls.index("land-merge-1"):ls.index("land-merge-1") + 2], ["land-merge-1", "land-sync-1-1"])
+        # And it spends the behind budget alone: refused so every time, the landing stops after the same three merges.
+        result, calls, _ = run(replies={"land-merge-1": dict(self.POLICY, behind=True)})
+        self.assertEqual((row(result, 1)["outcome"], row(result, 1)["stage"]), ("stopped", "merge"))
+        self.assertEqual(of(calls, 1).count("land-merge-1"), 3)
 
     def test_non_code_criteria_hold_the_issue_open(self):
         acceptance = [{"id": "AC1", "text": "works", "kind": "code"}, {"id": "AC2", "text": "live", "kind": "evidence"}]
@@ -4772,10 +4864,11 @@ class TrainTest(unittest.TestCase):
                 ("head", {"state": "passed", "head": X1, "required": ["ci"], "passed": ["ci"]}, None),
                 ("failing list", {"state": "passed", "head": X2, "passed": ["ci"], "failing": ["lint"]}, None),
                 ("dead", None, None),
+                ("no check", {"state": "passed", "head": X2, "required": [], "passed": []}, None),  # #1008
                 ("declared", {"state": "passed", "head": X2, "required": ["ci"], "passed": ["ci"]}, declared)):
             with self.subTest(name=name):
                 replies = {"train-checks-1-2": reply}
-                if name == "pending":
+                if name in ("pending", "no check"):
                     replies["train-checks-1-2-more"] = reply
                 if patch:
                     replies["train-checks-1-1"] = {"state": "passed", "head": X1, "required": ["gate"], "passed": ["gate"]}
@@ -4904,6 +4997,14 @@ class TrainTest(unittest.TestCase):
         self.assertIn("gh pr merge 92 ", prompt(calls, "train-merge-1"))
         for n, pr in ((1, 41), (2, 42)):
             self.assertEqual(row(result, n), {"issue": n, "outcome": "landed", "pr": pr, "train": 1, "car_pr": 92})
+
+    def test_a_car_with_no_check_reported_is_late_and_rides_once_its_checks_passed(self):  # #1008
+        empty = {"state": "passed", "head": X2, "required": [], "passed": []}
+        result, calls, _ = train_run(replies={"train-checks-1-2": empty})
+        self.assertEqual([l for l in labels(calls) if l.startswith("train-checks-")],
+                         ["train-checks-1-1", "train-checks-1-2", "train-checks-1-2-more"])
+        self.assertIn("gh pr merge 92 ", prompt(calls, "train-merge-1"))
+        self.assertEqual([row(result, n).get("car_pr") for n in (1, 2)], [92, 92])
 
     def test_every_late_car_shares_the_one_further_wait(self):
         late = {f"train-checks-1-{i}": {"state": "pending", "head": head, "pending": ["e2e"]} for i, head in ((1, X1), (2, X2))}
