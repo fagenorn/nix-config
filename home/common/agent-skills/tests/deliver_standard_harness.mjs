@@ -13,7 +13,7 @@ const scenario = JSON.parse(readFileSync(0, 'utf8'))
 const SHA = 'a'.repeat(40)
 const PASS = { verdict: 'pass', findings: [] }
 const TASK_COMMIT = n => (n === 1 ? 'c0ffee' : `c0ffee${n}`)
-const DONE = { status: 'done', start_head: 'b0', commit: 'c0ffee', tests: ['t'], mutation_checked: true, notes: 'ok' }
+const DONE = { status: 'done', start_head: 'b0', commit: 'c0ffee', tests: ['t'], notes: 'ok' }
 const SETUP = {
   ok: true, host: 'h1', slug: 'owner/repo', integration_branch: 'dev', default_branch: 'main',
   branch: 'issue-9-x', worktree_path: '/r/.wt/w-issue-9-x', dirty: false, unset_env: [], merge_strategy: 'merge', delete_branch: true,

@@ -2635,11 +2635,46 @@ class PlanTestCaseFormTest(unittest.TestCase):
         batch = (PROGRAM.parent / "deliver-batch.js").read_text(encoding="utf-8")
         self.assertNotIn(self.MARK, batch)
 
+    REMOVALS = ("For a removal run only the tests that pin it, through the runner's filter, as an incremental build: never the suite, "
+                "never a clean rebuild; removals that are independent may be made and checked in one script.")
+    RESUMED = ("and make sure every test was seen failing first; of the removals, make only those not already made against the final "
+               "result; start_head is")
+
     def test_the_implementer_prompt_still_demands_red_first_and_a_mutation_check(self):
         _, calls = run()
         impl = prompt(calls, "impl-1")
         self.assertIn("write the failing test first and see it fail", impl)
-        self.assertIn("temporarily remove the code it pins and confirm it fails", impl)
+        # #1002: one removal per acceptance criterion, checked by the tests that pin it alone.
+        self.assertIn("then once for each acceptance criterion the task covers (not for each test or branch) temporarily remove the code "
+                      "that satisfies it and confirm the tests that pin it fail, restore, and commit only this task's files", impl)
+        self.assertEqual(impl.count(self.REMOVALS), 1)
+        # How to run a removal is the one sentence the prompt grew by.
+        self.assertEqual((self.REMOVALS.count(". "), self.REMOVALS[-1]), (0, "."))
+        for gone in ("for each new test", "mutation checks"):
+            self.assertNotIn(gone, impl)
+
+    def test_a_resumed_implementer_makes_only_the_removals_not_already_made(self):
+        stopped, _ = run(replies={"impl-1": {"status": "blocked", "notes": "no"}})
+        _, calls = run(args=dict(ARGS, cont=stopped["cont"], decisions="rerun"))
+        impl = prompt(calls, "impl-1")
+        self.assertIn(self.RESUMED, impl)
+        self.assertNotIn("mutation checks still hold", impl)
+        direct = PROGRAM.read_text(encoding="utf-8")
+        self.assertEqual(direct.count(self.RESUMED.replace(" start_head is", "")), 2)
+
+    def test_no_implementer_schema_asks_for_mutation_checked(self):
+        """#1002: nothing read the member, so no schema asks for it: not here, not in deliver-batch, not in the harness fixture."""
+        _, calls = run()
+        self.assertNotIn("mutation_checked", json.dumps([c.get("schema") for c in calls]))
+        for path in (PROGRAM, PROGRAM.parent / "deliver-batch.js", HARNESS):
+            self.assertNotIn("mutation_checked", path.read_text(encoding="utf-8"), path.name)
+
+    def test_the_direct_lane_skill_carries_the_bound_and_the_filtered_run(self):
+        skill = (REPO_ROOT / "home/common/agent-skills/skills/deliver-direct/SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("Once per criterion, remove its code: its tests alone, by filter, no clean build, run and fail.", skill)
+        self.assertNotIn("Remove each new code branch in turn", skill)
+        _, calls = run(args=dict(ARGS, lane="direct"))
+        self.assertIn("follow its step 3 exactly", prompt(calls, "direct-impl"))
 
 
 class TaskTest(unittest.TestCase):

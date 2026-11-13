@@ -569,7 +569,7 @@ const FULL_SHA = /^[0-9a-f]{40}$/
 const SHA_SCHEMA = { type: 'string', pattern: FULL_SHA.source }
 const IMPL = {
   type: 'object',
-  properties: { status: { type: 'string', enum: ['done', 'blocked'] }, start_head: SHA_SCHEMA, commit: SHA_SCHEMA, tests: STRS, mutation_checked: { type: 'boolean' }, notes: { type: 'string' } },
+  properties: { status: { type: 'string', enum: ['done', 'blocked'] }, start_head: SHA_SCHEMA, commit: SHA_SCHEMA, tests: STRS, notes: { type: 'string' } },
   required: ['status', 'notes'],
 }
 // #986, #992: the sync review's schema; with followup it also returns descends. Named so that every FINDINGS schema of the program is one readReview() reads.
