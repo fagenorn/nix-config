@@ -49,6 +49,10 @@ retention pass leaves the newest row of each profile (by sequence number, the pr
 payload's `profile`) in place whatever its age, because the console records a sign-in only when it
 changes and a profile signed out for longer than the window would otherwise read as never read.
 
+Two more rows record the owner's sign-in from the page (#1026): `SIGNIN_ACTED` (`signin.acted`, one per
+accepted owner action) and `SIGNIN_ENDED` (`signin.ended`, one per finished client). Neither is in
+`KEPT_KINDS`, and neither carries a link or a code.
+
 Another is kept in part (#1011): a session's profile is assigned by its `SESSION_SEEN` and
 `SESSION_PROFILE` rows, and a profile's last use is read from the session's later `SESSION_HOOK` rows
 (`manager.profile_use`). The pass therefore leaves, for a session with a `SESSION_HOOK` row inside the
@@ -106,6 +110,8 @@ SPRINT_STOP_REQUESTED = "sprint.stop_requested"
 MANAGER_STOPPED = "manager.stopped"
 MANAGER_STOP_FAILED = "manager.stop_failed"
 SIGNIN_READING = "signin.reading"
+SIGNIN_ACTED = "signin.acted"
+SIGNIN_ENDED = "signin.ended"
 SESSION_HOOK = "session.hook"
 SESSION_SEEN = "session.seen"
 SESSION_PROFILE = "session.profile"
