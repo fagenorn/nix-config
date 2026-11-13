@@ -1127,7 +1127,7 @@ class RelaunchContSizeTest(unittest.TestCase):
         ("ready", {"plan": {"status": "needs_user", "questions": [{"question": "Which host?", "options": ["One.", "Two."]}]}},
          "plan", "plan"),
         ("ready", {"plan-review": RULE, "plan-rules-review": RULE}, "plan-review", "plan-rules-revise"),
-        ("ready", {"impl-1": {"status": "blocked", "notes": "the fixture is missing"}}, "task", "impl-1"),
+        ("ready", {"impl-1": {"status": "done", "notes": "the fixture is missing"}}, "task", "impl-1"),
         ("ready", {"verify": None}, "verify", "verify"),
     )
     # A resume's setup reply reads the contract afresh; a dirty tree, a moved head and a merged PR take the other resume paths.
@@ -3884,7 +3884,9 @@ class StopReasonTest(unittest.TestCase):
     """#869: a stopped row says why, the table text shows it and a relaunch keeps it until the issue moves on."""
 
     CHILD_ARGS = {"repo_root": "/r", "issue": 1, "batch_id": "b1", "lane": "standard"}
-    BLOCKED = "Task 1 cannot be finished as written because it depends on Task 2"
+    # #996: an implementer that says blocked goes to the owner and leaves the relaunch, so the stop these tests relaunch is one that
+    # ended with no commit and did not say so.
+    UNFINISHED = "Task 1 could not be finished: the fixture server never came up"
     WAITS = {"facts-1": {"blockers": [{"issue": 50, "state": "OPEN"}]}}
 
     def child_stop(self, mode, replies, stage):
@@ -3897,12 +3899,12 @@ class StopReasonTest(unittest.TestCase):
                "tasks": [{"n": 1, "title": "one", "file": "/g/task-1.md", "risk": "standard", "branch": "other"}]}
         return self.child_stop("plan", {"plan": bad, "plan-branch-revise": bad}, "plan")
 
-    def blocked_task(self):
-        return self.child_stop("ready", {"impl-1": {"status": "blocked", "notes": self.BLOCKED}}, "task")
+    def unfinished_task(self):
+        return self.child_stop("ready", {"impl-1": {"status": "done", "notes": self.UNFINISHED}}, "task")
 
-    def test_a_refused_plan_and_a_blocked_task_reach_the_row_and_the_table_text(self):
+    def test_a_refused_plan_and_an_unfinished_task_reach_the_row_and_the_table_text(self):
         cases = ((self.refused_plan(), "plan", 'plan: branch problems: task 1: branch "other" is not declared'),
-                 (self.blocked_task(), "task", f"task: task 1 blocked: {self.BLOCKED}"))
+                 (self.unfinished_task(), "task", f"task: task 1 done: {self.UNFINISHED}"))
         for stop, stage, reason in cases:
             with self.subTest(stage=stage):
                 out = run_full(children={"1": stop})
@@ -4005,8 +4007,8 @@ class StopReasonTest(unittest.TestCase):
         self.assertNotIn("reason", row(landed, 1))
 
     def test_the_reason_survives_a_relaunch_until_the_issue_moves_on(self):
-        stop = self.blocked_task()
-        reason = f"task: task 1 blocked: {self.BLOCKED}"
+        stop = self.unfinished_task()
+        reason = f"task: task 1 done: {self.UNFINISHED}"
         first, _, _ = run(children={"1": stop})
         # The relaunch does not get to the issue: its row still says why it stopped, and the next relaunch keeps saying so.
         waiting = run_full(args=first["relaunch"], patch=self.WAITS)
@@ -4025,7 +4027,7 @@ class StopReasonTest(unittest.TestCase):
         self.assertIsNone(landed["relaunch"])
 
     def test_the_relaunch_grows_by_at_most_the_bounded_reason(self):
-        stop = dict(self.blocked_task(), reason="task: " + "y" * 900)
+        stop = dict(self.unfinished_task(), reason="task: " + "y" * 900)
         result, _, _ = run(children={"1": stop})
         relaunch = result["relaunch"]
         self.assertEqual(len(relaunch["reasons"]["1"]), 300)
@@ -4035,7 +4037,7 @@ class StopReasonTest(unittest.TestCase):
 
     def test_a_flapping_stop_with_an_unchanged_cont_repeats_the_relaunch_reasons_aside(self):
         """The lead stops relaunching once a relaunch, reasons aside, equals the args it ran with; the relaunch carries the latest reason."""
-        stop = self.blocked_task()
+        stop = self.unfinished_task()
         relaunch, _, _ = run(children={"1": stop})
         relaunch = relaunch["relaunch"]
         for flap in ("verify: build: 2 tests failed", "task: task 1 blocked: Task 2 has to come first", "verify: build: 1 test failed"):
@@ -6244,3 +6246,147 @@ class StructuredReplyTest(unittest.TestCase):
         # The same pattern as deliver-standard.js, and the one the train's car heads are read with.
         self.assertIn("const FULL_SHA = { type: 'string', pattern: '^[0-9a-f]{40}$' }\n", CHILD_PROGRAM.read_text(encoding="utf-8"))
         self.assertEqual(PROGRAM.read_text(encoding="utf-8").count("const FULL_SHA = /^[0-9a-f]{40}$/\n"), 1)
+
+
+WAYS = "; resume with decisions (a planner revises the task file), amend {file, find, replace}, or decisions rerun if the cause was outside the task file"
+
+
+class BlockedTaskOwnerActionTest(unittest.TestCase):
+    """#996: a blocked task goes to the owner, who answers with decisions or amend; the batch does not relaunch it as it is."""
+
+    CHILD_ARGS = {"repo_root": "/r", "issue": 1, "batch_id": "b1", "lane": "standard"}
+    NOTES = "the task file names a fixture that does not exist"
+    REASON = f"task: task 2 blocked: {NOTES}{WAYS}"
+    CONT = dict(reviewed(1), partial=2, blocked={"task": 2, "notes": NOTES})
+    STOP = {"stage": "task", "task": {"n": 2}, "reason": REASON, "cont": CONT}
+
+    def test_a_blocked_task_is_an_owner_action_that_names_both_ways_out_and_is_not_relaunched(self):
+        result, calls, _ = run(children={"1": self.STOP})
+        self.assertEqual(row(result, 1), {"issue": 1, "outcome": "stopped", "stage": "task", "reason": self.REASON})
+        self.assertIsNone(result["relaunch"])
+        self.assertEqual(result["owner_actions"], [{"issue": 1, "reason": "task-blocked", "task": 2, "notes": self.NOTES,
+                                                    "detail": self.REASON, "claim": "held", "holder": HOLDER, "cont": slim(self.CONT)}])
+        for way in ("decisions", "amend {file, find, replace}"):
+            self.assertIn(way, result["owner_actions"][0]["detail"])
+        self.assertEqual(of(calls, 1)[-2:], ["child-1", "settle-1"])
+        for call in calls:
+            self.assertFalse(call["label"].startswith("release-"), call["label"])
+
+    def test_the_real_child_stops_a_resume_with_no_new_decision_before_any_agent(self):
+        first, _ = run_child(dict(self.CHILD_ARGS, mode="ready"), replies={"impl-1": {"status": "blocked", "notes": self.NOTES}})
+        self.assertEqual((first["stage"], first["cont"]["blocked"]), ("task", {"task": 1, "notes": self.NOTES}))
+        for stop in (first, run_child(dict(self.CHILD_ARGS, mode="ready", cont=first["cont"]))[0]):
+            result, _, _ = run(children={"1": stop})
+            self.assertIsNone(result["relaunch"])
+            action = result["owner_actions"][0]
+            self.assertEqual((action["reason"], action["task"], action["notes"]), ("task-blocked", 1, self.NOTES))
+            self.assertIn("decisions", action["detail"])
+            self.assertIn("amend", action["detail"])
+        again, calls = run_child(dict(self.CHILD_ARGS, mode="ready", cont=first["cont"]))
+        self.assertEqual((again["stage"], calls), ("task", []))
+
+    def test_the_owners_relaunch_sends_the_cont_and_the_decision_to_the_child(self):
+        result, _, _ = run(children={"1": self.STOP})
+        cont = result["owner_actions"][0]["cont"]
+        again, calls, _ = run(args=dict(ARGS, conts={"1": cont}, decisions={"1": "Use the other fixture."}), patch={"facts-1": HELD})
+        self.assertEqual(child(calls, 1)["args"]["cont"], cont)
+        self.assertEqual(child(calls, 1)["args"]["decisions"], "Use the other fixture.")
+        self.assertEqual(again["stage"], "done")
+
+    def test_the_decision_rerun_passes_through_to_the_child_which_runs_the_implementer(self):
+        result, _, _ = run(children={"1": self.STOP})
+        cont = result["owner_actions"][0]["cont"]
+        _, calls, _ = run(args=dict(ARGS, conts={"1": cont}, decisions={"1": "rerun"}), patch={"facts-1": HELD})
+        self.assertEqual((child(calls, 1)["args"]["cont"], child(calls, 1)["args"]["decisions"]), (cont, "rerun"))
+        first, _ = run_child(dict(self.CHILD_ARGS, mode="ready"), replies={"impl-1": {"status": "blocked", "notes": self.NOTES}})
+        _, steps = run_child(dict(self.CHILD_ARGS, mode="ready", cont=first["cont"], decisions="rerun"))
+        self.assertEqual([c["label"] for c in steps][:2], ["setup", "impl-1"])
+
+    def test_the_relaunch_never_carries_the_decision_rerun(self):
+        other = {"stage": "verify", "reason": "verify: build: boom", "cont": reviewed(1)}
+        waits = {"stage": "verify", "reason": "verify: build: boom", "cont": reviewed(2)}
+        result, calls, _ = run(args=dict(ARGS, issues=[1, 2], conts={"1": self.CONT}, decisions={"1": " rerun\n", "2": "Use the flag."}),
+                               patch={"facts-1": HELD}, children={"1": other, "2": waits})
+        self.assertEqual(child(calls, 1)["args"]["decisions"], " rerun\n")
+        self.assertEqual(result["relaunch"]["issues"], [1, 2])
+        self.assertEqual(result["relaunch"]["decisions"], {"2": "Use the flag."})
+
+    def test_a_task_revise_that_ends_in_a_rules_conflict_is_the_rules_conflict_owner_action(self):
+        conflict = {"ac": "AC5", "rules": ["R5", "R1"], "revises_left": 1}
+        stop = {"stage": "plan-review", "step": "plan-task-revise", "conflict": conflict, "cont": self.CONT,
+                "reason": "plan-review: the acceptance rules R5 and R1 conflict for AC5"}
+        result, _, _ = run(children={"1": stop})
+        self.assertIsNone(result["relaunch"])
+        self.assertEqual([(a["reason"], a["ac"], a["rules"], a["cont"]) for a in result["owner_actions"]],
+                         [("rules-conflict", "AC5", ["R5", "R1"], slim(self.CONT))])
+
+    def test_only_the_blocked_issue_leaves_the_relaunch(self):
+        other = {"stage": "verify", "reason": "verify: build: boom", "cont": reviewed(2)}
+        result, _, _ = run(args=dict(ARGS, issues=[1, 2]), children={"1": self.STOP, "2": other})
+        self.assertEqual((result["relaunch"]["issues"], list(result["relaunch"]["conts"])), ([2], ["2"]))
+        self.assertNotIn("1", result["relaunch"].get("reasons", {}))
+        self.assertEqual([a["issue"] for a in result["owner_actions"] if a["reason"] == "task-blocked"], [1])
+
+    def test_a_task_stop_with_no_matching_blocked_member_stays_an_open_row(self):
+        for name, cont in (("none", reviewed(1)), ("another task", dict(self.CONT, partial=1)), ("not an object", dict(self.CONT, blocked="x"))):
+            with self.subTest(name):
+                result, _, _ = run(children={"1": dict(self.STOP, cont=cont)})
+                self.assertIn("1", result["relaunch"]["conts"])
+                self.assertEqual(result["owner_actions"], [])
+        other, _, _ = run(children={"1": dict(self.STOP, stage="verify")})
+        self.assertIn("1", other["relaunch"]["conts"])
+
+    def test_an_issue_closed_meanwhile_settles_as_closed(self):
+        result, _, _ = run(children={"1": self.STOP}, replies={"settle-1": {"state": "CLOSED", "release": "released"}})
+        self.assertEqual(row(result, 1), {"issue": 1, "outcome": "closed", "stage": "task", "released": True})
+        self.assertEqual(result["owner_actions"], [])
+        # A closed issue whose release failed stays open, so a relaunch releases it.
+        failed, _, _ = run(children={"1": self.STOP}, replies={"settle-1": {"state": "CLOSED", "release": "error"}})
+        self.assertEqual(failed["owner_actions"], [])
+        self.assertEqual(failed["relaunch"]["issues"], [1])
+
+
+class CodexQuotaOwnerActionTest(unittest.TestCase):
+    """#996: a Codex usage limit goes to the owner with its reset time; the batch does not relaunch into it."""
+
+    MESSAGE = "runtime failure: You've hit your usage limit. Try again at Nov 12th, 2026 5:34 AM."
+    RESET = "Nov 12th, 2026 5:34 AM"
+    STOP = {"stage": "codex-unavailable", "step": "plan", "details": MESSAGE, "reason": f"codex-unavailable: {MESSAGE}",
+            "retry_after": RESET, "cont": reviewed(1)}
+
+    def test_a_quota_stop_is_an_owner_action_with_the_reset_time_and_no_relaunch(self):
+        for retry_after in (self.RESET, None):
+            with self.subTest(retry_after=retry_after):
+                result, calls, _ = run(children={"1": dict(self.STOP, retry_after=retry_after)})
+                self.assertEqual(row(result, 1), {"issue": 1, "outcome": "stopped", "stage": "codex-unavailable",
+                                                  "reason": f"codex-unavailable: {self.MESSAGE}"})
+                self.assertIsNone(result["relaunch"])
+                self.assertEqual(result["owner_actions"], [{"issue": 1, "reason": "codex-quota", "retry_after": retry_after,
+                                                            "claim": "held", "holder": HOLDER, "cont": slim(reviewed(1))}])
+                self.assertEqual(labels(calls).count("child-1"), 1)
+
+    def test_a_codex_failure_that_is_not_a_quota_is_relaunched_as_before(self):
+        stop = {k: v for k, v in self.STOP.items() if k != "retry_after"}
+        result, _, _ = run(children={"1": stop})
+        self.assertEqual(result["relaunch"]["issues"], [1])
+        self.assertEqual(result["relaunch"]["conts"], {"1": slim(reviewed(1))})
+        self.assertEqual(result["owner_actions"], [])
+
+    def test_the_real_childs_quota_stop_is_not_relaunched_and_its_other_codex_stops_are(self):
+        codex = {"available": False, "verdict": "pass", "findings": []}
+        for raw, parked in ((self.MESSAGE, True), ("daemon rejected the slot", False)):
+            with self.subTest(raw=raw):
+                stop, _ = run_child({"repo_root": "/r", "issue": 1, "batch_id": "b1", "lane": "standard", "mode": "ready"},
+                                    replies={"plan-codex": dict(codex, raw_summary=raw)})
+                self.assertEqual(stop["stage"], "codex-unavailable")
+                result, _, _ = run(children={"1": stop})
+                self.assertEqual(result["relaunch"] is None, parked)
+                self.assertEqual([(a["reason"], a["retry_after"]) for a in result["owner_actions"]],
+                                 [("codex-quota", self.RESET)] if parked else [])
+
+    def test_only_the_quota_issue_leaves_the_relaunch_and_a_closed_one_is_settled(self):
+        other = {"stage": "verify", "reason": "verify: build: boom", "cont": reviewed(2)}
+        result, _, _ = run(args=dict(ARGS, issues=[1, 2]), children={"1": self.STOP, "2": other})
+        self.assertEqual(result["relaunch"]["issues"], [2])
+        closed, _, _ = run(children={"1": self.STOP}, replies={"settle-1": {"state": "CLOSED", "release": "released"}})
+        self.assertEqual((row(closed, 1)["outcome"], closed["owner_actions"]), ("closed", []))

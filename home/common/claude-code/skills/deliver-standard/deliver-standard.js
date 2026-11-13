@@ -14,7 +14,7 @@ export const meta = {
 
 // Args: repo_root (the checkout), issue (number), session_id or batch_id (the claim
 // holder is <host>/<batch_id> or <host>/session-<session_id>), decisions (owner answers to a
-// needs_user stop; decisions also come from a fully ticked decision prompt read after the claim), spec (path of an approved design spec), mode (plan: stop after the plan
+// needs_user stop, or to a blocked task, #996; decisions also come from a fully ticked decision prompt read after the claim), spec (path of an approved design spec), mode (plan: stop after the plan
 // review with { stage: 'planned', plan, cont }; ready: stop after verify with { stage: 'ready',
 // head, branch, worktree, verify, flaky? (#972: [{id, summary}], each check that failed outside the branch's changed files and passed on its one rerun), outside_fixes? (#972: [{file, why}], each file outside the branch's diff a verification fix edited, with the cause it established; a done result carries both too), tasks, acceptance, fix_waves, cont } and no PR, keeping the claim;
 // ship, the default: merge. A ready cont resumed in ship skips the final review and verify when
@@ -33,7 +33,7 @@ export const meta = {
 // A fresh run re-adopts an existing branch or worktree (never resetting it) and stops `dirty` when it holds uncommitted changes.
 //
 // RESUME: every stop from the claim on returns { stage, ..., cont }, where cont is
-// { setup, lane, plan (declared branches, when any, as [{name, worktree, base, head, current, toplevel, common_dir, clean}]), plan_reviewed, plan_findings?, prior_findings? (#988: the blocking findings left on each plan this delivery dropped after its review, bounded; carried through every stop until a plan passes review, and shown to the planner that plans again), decisions?, done, pr? (a batch-built close-out cont: the PR the batch merged), fix_waves, fix_findings? (#924: the findings a fix-wave-review stop left open, bounded; the resume's first fix wave gets them with what its fresh final review raises; #940: such a stop also carries diverging: {file, waves} beside cont when the waves spent across runs reached FIX_WAVES_BOUND and a finding it left open is in a file the findings carried into the run named, and deliver-batch then hands the issue to the owner instead of relaunching it), checks_fixes?, sync_fixes?, verified?, final_reviewed?, partial?, reordered? (#896: [{task, after, notes}], each a blocked task moved once to just after the later task it named; cont.plan.tasks is already in that order), claim_incomplete? }. Passing it back as args.cont
+// { setup, lane, plan (declared branches, when any, as [{name, worktree, base, head, current, toplevel, common_dir, clean}]), plan_reviewed, plan_findings?, prior_findings? (#988: the blocking findings left on each plan this delivery dropped after its review, bounded; carried through every stop until a plan passes review, and shown to the planner that plans again), decisions?, done, pr? (a batch-built close-out cont: the PR the batch merged), fix_waves, fix_findings? (#924: the findings a fix-wave-review stop left open, bounded; the resume's first fix wave gets them with what its fresh final review raises; #940: such a stop also carries diverging: {file, waves} beside cont when the waves spent across runs reached FIX_WAVES_BOUND and a finding it left open is in a file the findings carried into the run named, and deliver-batch then hands the issue to the owner instead of relaunching it), checks_fixes?, sync_fixes?, verified?, final_reviewed?, partial?, blocked? (#996: {task, notes, asked?}, the task whose implementer returned blocked and its notes, kept until that task runs again; an amend with no decision clears it and the implementer runs on the plan files as they then are; see BLOCKED), reordered? (#896: [{task, after, notes}], each a blocked task moved once to just after the later task it named; cont.plan.tasks is already in that order), claim_incomplete? }. Passing it back as args.cont
 // re-adopts the claimed worktree (setup re-checks it and refuses a dirty tree
 // unless cont.partial names the task that left the edits), reuses cont.plan
 // (reviewing it first unless plan_reviewed; a plan-review stop keeps the revised plan with plan_findings { rules, findings, rounds, noted? (#988: the rules reviewer's minor findings on the criteria of rules, context for the revise only) }, and the resume reads the owner's answer and, when every finding left names a rule and none has source codex, runs one rules-only revise of it whatever triggered the full revise (#823), dropping the plan once rounds reach two; any other finding left has spent the plan's one full revise, so the resume plans again), skips the tasks in cont.done, then
@@ -304,6 +304,7 @@ const stopReason = (stage, x) => {
   if (Array.isArray(x.needs_user)) say(`${x.needs_user.length} question(s) for the owner`)
   // #896: why a blocked task was not moved, ahead of the implementer's notes so the cap cuts the notes.
   if (present(x.order)) say(`${task}${x.order}`)
+  if (isEntry(x.blocked)) say(`${task}${['blocked', x.blocked.notes].filter(present).join(': ')}`)
   for (const k of ['impl', 'fix', 'fw']) {
     if (own(x, k) && !implDone(x[k])) say(isEntry(x[k]) ? `${task}${[x[k].status, x[k].notes].filter(present).join(': ') || 'the implementer gave no status'}` : `${task}the implementer returned nothing`)
   }
@@ -327,7 +328,10 @@ const stopReason = (stage, x) => {
     say(isEntry(v) ? [v.reason, v.verdict, v.status, v.details, v.detail, v.notes].filter(present).join(', ') : `the ${k} step returned nothing`)
   }
   const text = [stage, parts.join('; ')].filter(present).join(': ').replace(/\s+/g, ' ').trim()
-  return text.length > REASON_MAX ? `${text.slice(0, REASON_MAX - 3)}...` : text
+  // #996: the ways out of a blocked task end the reason, after the cap, so long notes never cut them.
+  const tail = present(x.ways) ? `; ${x.ways}` : ''
+  const room = REASON_MAX - tail.length
+  return `${text.length > room ? `${text.slice(0, room - 3)}...` : text}${tail}`
 }
 const why = r => ({ ...r, reason: stopReason(r.stage, r) })
 
@@ -355,6 +359,27 @@ if (AMEND !== null) {
   if (!root.startsWith('/') || amendTarget(root) === null) refused.push({ file: root, reason: 'outside plan_dir' })
   if (refused.length) return why({ stage: 'amend', refused, details: 'an amend file or the plan root is outside cont.setup.plan_dir; nothing was applied', cont: CONT })
 }
+// ---------------- Blocked task (#996) ----------------
+// A task stop whose implementer returned blocked keeps { task, notes } in cont.blocked. Running that task again with the same task file
+// blocks again, so its resume needs something new from the owner: a decision the cont does not hold yet (args.decisions; a planner then
+// revises the task file from it and the notes before the implementer runs, and in the direct lane, which has no plan, the implementer
+// gets both), or an amend. With neither it stops here, before any agent runs, with the cont unchanged. asked marks a revise whose planner
+// asked the owner: that resume reads the decision prompt's answer first. A cont from before this member (partial with no blocked) cannot
+// tell a blocked task from a cut-off one, so it resumes as it always did: the implementer runs again.
+// The decision whose whole text is rerun is the third way out, for a cause outside the task file (a rejected token the owner repaired):
+// it clears blocked and runs the implementer on the unchanged task file with no planner step, and is never kept as a decision.
+const NOTES_MAX = 2000
+const BLOCKED = CONT && isEntry(CONT.blocked) && Number.isInteger(CONT.blocked.task) && CONT.partial === CONT.blocked.task &&
+  !(Array.isArray(CONT.done) && CONT.done.some(d => isEntry(d) && d.n === CONT.blocked.task)) && (LANE === 'direct' || (isEntry(CONT.plan) && CONT.plan_reviewed === true))
+  ? { task: CONT.blocked.task, notes: typeof CONT.blocked.notes === 'string' ? CONT.blocked.notes : '', ...(CONT.blocked.asked === true ? { asked: true } : {}) } : null
+const RERUN_WORD = typeof args.decisions === 'string' && args.decisions.trim() === 'rerun'
+const RERUN = !!BLOCKED && RERUN_WORD
+const heldDecision = d => !!CONT && Array.isArray(CONT.decisions) && CONT.decisions.includes(d)
+// The decision that settles the blocked task: one this resume brings that the cont does not hold.
+let newDecision = BLOCKED && !RERUN_WORD && typeof args.decisions === 'string' && args.decisions.trim() && !heldDecision(args.decisions) ? args.decisions : null
+const WAYS_OUT = LANE === 'direct' ? 'resume with decisions (the implementer gets it with these notes), or decisions rerun if the cause was outside the task' : 'resume with decisions (a planner revises the task file), amend {file, find, replace}, or decisions rerun if the cause was outside the task file'
+const UNSETTLED = { details: 'not run again: this resume brings nothing new from the owner', ways: WAYS_OUT }
+if (BLOCKED && !RERUN && newDecision === null && AMEND === null && !(BLOCKED.asked && LANE === 'standard')) return why({ stage: 'task', task: { n: BLOCKED.task }, blocked: BLOCKED, ...UNSETTLED, cont: CONT })
 const AMEND_STOP = AMEND === null ? null
   : Number.isInteger(CONT.partial) ? `the stop at task ${CONT.partial}`
   : (() => {
@@ -649,15 +674,27 @@ const outsideFixes = outsideOf(CONT && CONT.outside_fixes)
 let decisions = []
 const addDecision = text => { if (typeof text === 'string' && text.trim() && !decisions.includes(text)) decisions.push(text) }
 if (CONT && Array.isArray(CONT.decisions)) CONT.decisions.forEach(addDecision)
-addDecision(args.decisions)
+if (!RERUN_WORD) addDecision(args.decisions)
 // True once plan-amend applied the amend: every later stop says so, so deliver-batch stops sending an amend that no longer needs to be (#811).
 let amendApplied = false
+// #996: the blocked task a stop carries, until an amend, a revise or a decision-bearing implementer call has answered it; and whether the
+// decision that settles it is still unused: a stop before it was used leaves it out of cont.decisions, so the same resume counts it as new again.
+let blocked = RERUN ? null : BLOCKED
+let decisionPending = newDecision !== null
+const keptDecisions = () => (decisionPending ? decisions.filter(d => d !== newDecision) : decisions)
+const blockedKept = () => !!blocked && (LANE === 'direct' || !!plan) && !taskLog.some(d => d.n === blocked.task)
 const stop = (stage, extra) => {
   const fr = SYNC_WINDOW.includes(stage) ? (finalReviewed = null) : finalReviewed
-  return { stage, ...extra, ...(stage === 'planned' || stage === 'ready' ? {} : { reason: stopReason(stage, extra || {}) }), ...(amendApplied ? { amended: true } : {}), ...deadOf(), cont: { setup, lane: LANE, plan, plan_reviewed: planReviewed, ...(plan && !planReviewed && planFindingsKept ? { plan_findings: planFindingsKept } : {}), ...(!planReviewed && priorFindings.length ? { prior_findings: priorFindings } : {}), ...(decisions.length ? { decisions } : {}), done: taskLog, ...(OWN_PR !== null ? { pr: OWN_PR } : {}), fix_waves: fixWaves, ...(carried.length ? { fix_findings: carried } : {}), ...(checksFixes ? { checks_fixes: checksFixes } : {}), ...(syncFixes ? { sync_fixes: syncFixes } : {}), ...(verified ? { verified } : {}), ...(outsideFixes.length ? { outside_fixes: outsideFixes } : {}), ...(fr ? { final_reviewed: fr } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}), ...(reordered.length ? { reordered } : {}) } }
+  return { stage, ...extra, ...(stage === 'planned' || stage === 'ready' ? {} : { reason: stopReason(stage, extra || {}) }), ...(amendApplied ? { amended: true } : {}), ...deadOf(), cont: { setup, lane: LANE, plan, plan_reviewed: planReviewed, ...(plan && !planReviewed && planFindingsKept ? { plan_findings: planFindingsKept } : {}), ...(!planReviewed && priorFindings.length ? { prior_findings: priorFindings } : {}), ...(keptDecisions().length ? { decisions: keptDecisions() } : {}), done: taskLog, ...(OWN_PR !== null ? { pr: OWN_PR } : {}), fix_waves: fixWaves, ...(carried.length ? { fix_findings: carried } : {}), ...(checksFixes ? { checks_fixes: checksFixes } : {}), ...(syncFixes ? { sync_fixes: syncFixes } : {}), ...(verified ? { verified } : {}), ...(outsideFixes.length ? { outside_fixes: outsideFixes } : {}), ...(fr ? { final_reviewed: fr } : {}), ...(claimIncomplete ? { claim_incomplete: true } : {}), ...(partial !== undefined ? { partial } : {}), ...(blockedKept() ? { blocked } : {}), ...(reordered.length ? { reordered } : {}) } }
 }
 
 const haltTask = (n, stage, extra) => { const s = stop(stage, extra); return { ...s, cont: { ...s.cont, partial: n } } }
+// #996: a task stop on an implementer that returned blocked keeps its notes in the cont and names the ways out in its reason.
+const haltImpl = (n, extra) => {
+  const said = isEntry(extra.impl) && extra.impl.status === 'blocked'
+  if (said) blocked = { task: n, notes: typeof extra.impl.notes === 'string' ? extra.impl.notes.slice(0, NOTES_MAX) : '' }
+  return haltTask(n, 'task', said ? { ...extra, ways: WAYS_OUT } : extra)
+}
 
 if (CONT && setup.dirty && !setup.merged_pr && partial === undefined) {
   return stop('dirty', { details: `the worktree ${setup.worktree} has uncommitted changes no task claims; commit or discard them, then resume` })
@@ -1028,6 +1065,17 @@ const CX_WAIT = 'this step may dispatch the Codex reviewer that skill uses, and 
 const CX_NONE = 'If Codex cannot be run, return available false with the reason in raw_summary; never substitute your own review.'
 // #790: a codex-unavailable stop says why (a usage limit and its reset time), so no diagnosis run is needed.
 const codexWhy = r => (!r ? 'the Codex review step returned nothing' : typeof r.raw_summary === 'string' && r.raw_summary.trim() ? r.raw_summary : 'the Codex review step gave no reason')
+// #996: a Codex refusal whose message is the provider's usage or quota limit (codex-collaboration returns the message verbatim, with the
+// reset time; the provider's wording is matched, so "not a quota limit" or "Disk quota exceeded" is no quota stop)
+// carries retry_after: the reset time the message gives after "try again at" or "resets at" (up to the sentence's end, an a.m. or p.m. kept whole), null when it gives none. The limit does not
+// lift by a relaunch, so deliver-batch hands such a stop to the owner; any other codex-unavailable stop carries no retry_after and is unchanged.
+// The message is read, not a schema member: CODEX's keys are the codex-collaboration skill's contract, and no review prompt grows.
+const codexStop = (step, r) => {
+  const said = r && typeof r.raw_summary === 'string' ? r.raw_summary : ''
+  const quota = /hit your usage limit|exceeded your (?:current )?quota|(?<!disk )quota exceeded|usage limit reached/i.test(said)
+  const reset = quota ? ((/\b(?:try again|resets?) (?:at|in|on) ([^.\n]{0,60}?[ap]\.m\.|[^.\n]{1,60})/i.exec(said) || [])[1] || '').trim() : ''
+  return stop('codex-unavailable', { step, details: codexWhy(r), codex: r, ...(quota ? { retry_after: reset || null } : {}) })
+}
 let ACS = null, PLAN_REF = null
 // The last head this run knows for each declared branch (#713); read only through own().
 const branchTips = Object.create(null)
@@ -1084,14 +1132,17 @@ if (LANE === 'direct') {
     impl = await recall(() => call(`${CTX}
 ${RENEW_FIRST}
 Then deliver issue #${ISSUE} in the direct lane. Invoke the deliver-direct skill with the Skill tool to read it: it is the single source for this step. Its steps 1 and 2 are done by this program (the claim is held by ${setup.holder}; the worktree is ${W} on branch ${setup.branch}). Check its Eligibility first: if the issue fails it, change nothing and return status blocked with ineligible true and why. Otherwise follow its step 3 exactly and commit. Do not run its steps 4 to 7: review, verification, ship and close-out belong to this program. Return acceptance (the issue's criteria; ${KIND_GUIDE}) and sensitive (true when the diff touches authentication or authorization, permission or command guards, secrets or credentials, CI/CD or deploy config, or data migrations). ${NO_VERIFY_AC} ${FOCUSED} ${IMPL_RETURN}${CONT && CONT.partial === 1 ? `
-An earlier attempt at this task was cut off and may have left uncommitted edits or commits in the worktree (git -C ${W} status, git -C ${W} diff and git -C ${W} log ${RANGE}). Inspect them: keep what matches, finish or redo the rest, and make sure the failing-test-first and mutation checks still hold for the final result; start_head is the head before this task's first commit.` : ''}
+An earlier attempt at this task was cut off and may have left uncommitted edits or commits in the worktree (git -C ${W} status, git -C ${W} diff and git -C ${W} log ${RANGE}). Inspect them: keep what matches, finish or redo the rest, and make sure the failing-test-first and mutation checks still hold for the final result; start_head is the head before this task's first commit.` : ''}${newDecision !== null ? `
+That attempt returned blocked: ${JSON.stringify(BLOCKED.notes)}. The owner's decision settles it and is binding: ${JSON.stringify(newDecision)}` : ''}
 ${RULES}`, { label: 'direct-impl', phase: 'Tasks', agentType: 'implementer', model: 'sonnet', schema: withRenew(DIRECT_IMPL) }), r => r.renew)
+    // #996: a reply means the decision reached the implementer; a blocked one below records its own notes.
+    if (impl) { decisionPending = false; blocked = null }
     if (impl) {
       const lost = renewed(impl.renew, 'tasks')
       if (lost) return lost
     }
     if (impl && impl.ineligible) return stop('ineligible', { impl, details: 'rerun in the standard lane without cont; setup re-adopts the worktree and the claim' })
-    if (!implDone(impl)) return haltTask(1, 'task', { task: { n: 1 }, impl })
+    if (!implDone(impl)) return haltImpl(1, { task: { n: 1 }, impl })
     if (!Array.isArray(impl.acceptance) || !impl.acceptance.length) return haltTask(1, 'task', { task: { n: 1 }, impl, details: 'no acceptance criteria' })
     plan = { status: 'planned', plan_root: null, acceptance: impl.acceptance, tasks: [{ n: 1, title: 'direct', file: null, risk: impl.sensitive ? 'security' : 'low' }] }
     planReviewed = true
@@ -1124,7 +1175,7 @@ ${isLite ? 'lane: direct. ' : ''}Review the delivery diff git -C ${W} diff ${RAN
     }
     const codexR = await codexP
     if (!review) return stop('direct-review', { review: null })
-    if (REVIEW_CODE && (!codexR || !codexR.available)) return stop('codex-unavailable', { step: 'code', details: codexWhy(codexR), codex: codexR })
+    if (REVIEW_CODE && (!codexR || !codexR.available)) return codexStop('code', codexR)
     const ungraded = ungradedFindings(review, plan.acceptance)
     const findings = findingsOf(review).concat(ungraded, REVIEW_CODE ? findingsOf(codexR).map(f => ({ ...f, source: 'codex' })) : [])
     if (REVIEW_CODE) log(`codex review: ${findingsOf(codexR).length} blocking findings`)
@@ -1206,6 +1257,8 @@ ${RULES}`, { label: 'amend', phase: 'Plan', agentType: 'clerk', model: CLERK_MOD
   if (!graded) return why({ stage: 'amend', amend: am, details: 'plan-amend did not apply every edit; a refused or error status wrote nothing', ...deadOf(), cont: am.status === 'refused' ? CONT : STALE })
   log(`amend: applied ${AMEND_INPUT.edits.length} edit(s) to the plan`)
   amendApplied = true
+  // #996: the amended task file is the owner's answer to a blocked task, unless a decision is still to be worked in below.
+  if (newDecision === null && !(BLOCKED && BLOCKED.asked)) blocked = null
   // An applied amend makes every cached result stale, even when every edit was recorded already: an earlier run may have died after the clerk
   // wrote the plan and before any stop said so, leaving only a cont from before the amend. The final review and verify run again.
   SKIP_REVIEW = false
@@ -1284,6 +1337,105 @@ const reviewStop = (rules, findings, rounds, given, noted = []) => {
   return stop('plan-review', { ...(extra || {}), rules, findings })
 }
 const SILENT = () => ({ details: `the rules re-reviewer ${silence('plan-rules-review')}` })
+// What follows a full revise (the plan review's, and #996's task revise): the reply through takePlan, then the program's rule check and
+// the rules re-review. null = the revised plan stands; else the stop to return.
+const settleRevise = async (revised, planFindings, reviewedFacts, reviewedCriteria) => {
+  const halted = await takePlan(revised, 'plan-revise', planFindings)
+  if (halted) return { ...halted, findings: planFindings }
+  // #819: the restored candidate replaces the reply only when it makes the skip below fire; a renumbered, reused or duplicated id,
+  // or any other change, leaves the reply exactly as returned. A plan-revise reply with no criteria_edited is unknown: no restore.
+  // A branch revise that takePlan ran after it adds its own list to the plan-revise reply's.
+  if (Array.isArray(revised.criteria_edited) && !planFindings.some(f => present(f.rule))) {
+    const edited = [revised.criteria_edited, planEdited].flatMap(l => (Array.isArray(l) ? l : [])).filter(x => typeof x === 'string').map(x => x.toLowerCase())
+    const candidate = { ...plan, acceptance: keepUnlistedText(reviewedCriteria, plan.acceptance, edited) }
+    const restored = candidate.acceptance.filter((a, i) => a !== plan.acceptance[i]).length
+    if (restored && !planRules(candidate).length && ruleFacts(candidate) === reviewedFacts) {
+      log(`plan-revise: kept the earlier text of ${restored} criteria the revise does not list as edited`)
+      plan = candidate
+    }
+  }
+  const still = planRules(plan)
+  // #819: no trigger named a rule, the program's rule check is clean and no criterion's id, text, kind, metric or verify changed.
+  const sameRules = !planFindings.some(f => present(f.rule)) && !still.length && ruleFacts(plan) === reviewedFacts
+  if (sameRules) log('plan rules re-review skipped: no finding named a rule and the acceptance criteria are unchanged')
+  const rr = sameRules ? { findings: [] } : await rulesReview(planFindings)
+  if (!rr) return reviewStop(planFindings, planFindings, 0, SILENT())
+  let rules = still.concat(findingsOf(rr)), rounds = 0, noted = notedOn(rr.findings, rules), extra
+  if (rulesOnly(rules)) {
+    rounds++
+    const r = await rulesRevise(rules, noted, planFindings)
+    if (r.halted) return { ...r.halted, findings: planFindings }
+    if (r.silent) return reviewStop(rules, planFindings, rounds, SILENT(), noted)
+    rules = r.rules
+    noted = r.noted
+    extra = r.extra
+  }
+  if (rules.length) return reviewStop(rules, planFindings, rounds, extra, noted)
+  return null
+}
+// #996: the task revise. A resume of a task-blocked cont with a new decision has a planner amend that task's file from the decision and
+// the implementer's notes before the implementer runs again, through the plan-revise path above. A revise that does not end in an
+// accepted plan (questions, a malformed reply, rule findings left (a rules conflict among them), a done task dropped or given another file or branch, a criterion
+// removed: restating a criterion's text is allowed, removing one stays an owner amend) keeps the cont's plan and its blocked member (it stays reviewed, so the stop carries no prior_findings); the
+// task files on disk may hold its edits. The decision stays unused, so the same resume tries again, except after questions: then it is
+// kept, and the resume that brings the answer shows the planner both; so it is after a rules conflict, whose stop carries the conflict
+// for deliver-batch's rules-conflict owner action: the owner's classification is the new decision that revises again.
+const BLOCKED_TASK = BLOCKED && !RERUN && plan && planReviewed ? plan.tasks.find(t => isEntry(t) && t.n === BLOCKED.task) || null : null
+// A decision for a blocked task the plan no longer lists has nothing to revise: it is kept as any other.
+if (!BLOCKED_TASK) decisionPending = false
+let renewedHere = AMEND !== null
+if (BLOCKED_TASK) {
+  if (newDecision === null && BLOCKED.asked) {
+    // The revise asked the owner: the answer is on the decision prompt (that read carries the claim renew).
+    const had = decisions.slice()
+    const stopped = await readAnswer()
+    if (stopped) return stopped
+    renewedHere = true
+    newDecision = decisions.find(d => !had.includes(d)) || null
+    decisionPending = newDecision !== null
+  }
+  if (newDecision === null && !amendApplied) return stop('task', { task: { n: BLOCKED.task }, blocked: BLOCKED, ...UNSETTLED })
+  if (newDecision === null) blocked = null
+}
+if (BLOCKED_TASK && newDecision !== null) {
+  const t = BLOCKED_TASK
+  // The implementer's first call would renew, but it runs after this step (as after an amend, whose own renew stands for this one).
+  if (!renewedHere) {
+    const lost = await renew('plan', 'Plan')
+    if (lost) return lost
+  }
+  const prior = { plan, reordered }
+  const facts = ruleFacts(plan), criteria = plan.acceptance
+  const asked = [{ severity: 'important', file: t.file, summary: `the implementer of task ${t.n} returned blocked: ${BLOCKED.notes}` }]
+  const revised = await call(planPrompt(`\n${MAP_FIRST} Task ${t.n} (${t.title}) of your plan at ${plan.plan_root} stopped: its implementer returned blocked on its task file ${t.file}, and the owner then decided: ${JSON.stringify(newDecision)}. Treat the implementer's notes as the finding and that decision as binding: fix only that task file in place (and plan.md, the code map or another task file only where the decision requires it), keep every task's number, and return the full result again, with criteria_edited: the ids of the criteria whose text you changed to follow the decision (typing the same criterion again in other words is not a change; an empty list when you changed none). The notes: ${JSON.stringify(BLOCKED.notes)}`, REVISE_PACE), { label: 'plan-task-revise', phase: 'Plan', agentType: 'planner', schema: PLAN_SCHEMA })
+  let failed = await settleRevise(revised, asked, facts, criteria)
+  if (!failed) {
+    const touched = taskLog.filter(d => { const was = prior.plan.tasks.find(o => o.n === d.n), now = plan.tasks.find(o => o.n === d.n); return !now || (!!was && (now.file !== was.file || now.branch !== was.branch)) }).map(d => d.n)
+    const gone = criteria.filter(a => !plan.acceptance.some(b => b.id === a.id)).map(a => a.id)
+    if (touched.length) failed = { invalid: plan, details: `the task revise dropped or changed the done task(s) ${touched.join(', ')} (number, file or branch)` }
+    else if (gone.length) failed = { invalid: plan, details: `the task revise removed the criteria ${gone.join(', ')}; removing a criterion is an owner amend` }
+  }
+  if (failed) {
+    plan = prior.plan
+    reordered = prior.reordered
+    planReviewed = true
+    planFindingsKept = null
+    // The decision reached the planner, which asked on: it is kept, so the resume with the answer shows the planner both.
+    if (Array.isArray(failed.needs_user)) { blocked = { ...blocked, asked: true }; decisionPending = false }
+    if (isEntry(failed.conflict)) decisionPending = false
+    const said = Object.fromEntries(['needs_user', 'invalid', 'branch_problems', 'rules', 'conflict', 'details'].filter(k => own(failed, k)).map(k => [k, failed[k]]))
+    return stop(Array.isArray(failed.needs_user) || own(failed, 'invalid') ? 'plan' : 'plan-review', { step: 'plan-task-revise', ...said })
+  }
+  log(`task ${t.n}: its task file was revised from the owner's decision`)
+  blocked = null
+  decisionPending = false
+  // As after an applied amend: the plan changed, so no cached final review or verify stands.
+  SKIP_REVIEW = false
+  SKIP_FINAL = false
+  VERIFY_CACHED = false
+  verified = null
+  finalReviewed = null
+}
 if (RESUME_RULES) {
   const { rules, findings, rounds } = planFindingsKept
   const noted = notedOn(planFindingsKept.noted, rules)
@@ -1308,7 +1460,7 @@ Review the implementation plan at ${plan.plan_root} (and its task files) against
   if (!planReviewClaude) return stop('plan-review', { details: `the plan reviewer ${silence('plan-review')}` })
   let planFindings = ruleFindings.concat(findingsOf(planReviewClaude))
   if (REVIEW_PLAN) {
-    if (!planCodexR || !planCodexR.available) return stop('codex-unavailable', { step: 'plan', details: codexWhy(planCodexR), codex: planCodexR })
+    if (!planCodexR || !planCodexR.available) return codexStop('plan', planCodexR)
     planFindings = planFindings.concat(findingsOf(planCodexR).map(f => ({ ...f, source: 'codex' })))
     log(`codex plan review: ${findingsOf(planCodexR).length} blocking findings`)
   }
@@ -1316,37 +1468,8 @@ Review the implementation plan at ${plan.plan_root} (and its task files) against
     log(`plan review: ${planFindings.length} blocking findings, revising once`)
     const reviewedFacts = ruleFacts(plan), reviewedCriteria = plan.acceptance
     const revised = await call(planPrompt(`\n${MAP_FIRST} A reviewer found these defects in your plan at ${plan.plan_root}; fix them in place and return the full result again, with criteria_edited: the ids of the criteria whose text you changed to fix a finding (typing the same criterion again in other words is not a change; an empty list when you changed none): ${JSON.stringify(planFindings)}`, REVISE_PACE), { label: 'plan-revise', phase: 'Plan', agentType: 'planner', schema: PLAN_SCHEMA })
-    const halted = await takePlan(revised, 'plan-revise', planFindings)
-    if (halted) return { ...halted, findings: planFindings }
-    // #819: the restored candidate replaces the reply only when it makes the skip below fire; a renumbered, reused or duplicated id,
-    // or any other change, leaves the reply exactly as returned. A plan-revise reply with no criteria_edited is unknown: no restore.
-    // A branch revise that takePlan ran after it adds its own list to the plan-revise reply's.
-    if (Array.isArray(revised.criteria_edited) && !planFindings.some(f => present(f.rule))) {
-      const edited = [revised.criteria_edited, planEdited].flatMap(l => (Array.isArray(l) ? l : [])).filter(x => typeof x === 'string').map(x => x.toLowerCase())
-      const candidate = { ...plan, acceptance: keepUnlistedText(reviewedCriteria, plan.acceptance, edited) }
-      const restored = candidate.acceptance.filter((a, i) => a !== plan.acceptance[i]).length
-      if (restored && !planRules(candidate).length && ruleFacts(candidate) === reviewedFacts) {
-        log(`plan-revise: kept the earlier text of ${restored} criteria the revise does not list as edited`)
-        plan = candidate
-      }
-    }
-    const still = planRules(plan)
-    // #819: no trigger named a rule, the program's rule check is clean and no criterion's id, text, kind, metric or verify changed.
-    const sameRules = !planFindings.some(f => present(f.rule)) && !still.length && ruleFacts(plan) === reviewedFacts
-    if (sameRules) log('plan rules re-review skipped: no finding named a rule and the acceptance criteria are unchanged')
-    const rr = sameRules ? { findings: [] } : await rulesReview(planFindings)
-    if (!rr) return reviewStop(planFindings, planFindings, 0, SILENT())
-    let rules = still.concat(findingsOf(rr)), rounds = 0, noted = notedOn(rr.findings, rules), extra
-    if (rulesOnly(rules)) {
-      rounds++
-      const r = await rulesRevise(rules, noted, planFindings)
-      if (r.halted) return { ...r.halted, findings: planFindings }
-      if (r.silent) return reviewStop(rules, planFindings, rounds, SILENT(), noted)
-      rules = r.rules
-      noted = r.noted
-      extra = r.extra
-    }
-    if (rules.length) return reviewStop(rules, planFindings, rounds, extra, noted)
+    const unsettled = await settleRevise(revised, planFindings, reviewedFacts, reviewedCriteria)
+    if (unsettled) return unsettled
   }
   planFindingsKept = null
   planReviewed = true
@@ -1403,7 +1526,7 @@ ${RULES}`
   }
   if (!implDone(impl)) {
     const fix = reorder(ti, impl)
-    if (!fix.order) return halt('task', { task: t, impl, ...(fix.why ? { order: fix.why } : {}) })
+    if (!fix.order) return haltImpl(t.n, { task: t, impl, ...(fix.why ? { order: fix.why } : {}) })
     plan = { ...plan, tasks: fix.order }
     reordered = [...reordered, { task: t.n, after: fix.after, notes: typeof impl.notes === 'string' ? impl.notes.slice(0, REASON_MAX) : '' }]
     // Its edits, if any, stay claimed while the tasks before it run.
@@ -1542,7 +1665,7 @@ if (integP) integP.catch(() => {})
 const codexR = await codexP
 let finalFindings = finals.flatMap(findingsOf)
 if (REVIEW_CODE) {
-  if (!codexR || !codexR.available) return stop('codex-unavailable', { step: 'code', details: codexWhy(codexR), codex: codexR })
+  if (!codexR || !codexR.available) return codexStop('code', codexR)
   finalFindings = finalFindings.concat(findingsOf(codexR).map(f => ({ ...f, source: 'codex' })))
   log(`codex review: ${findingsOf(codexR).length} blocking findings`)
 }
