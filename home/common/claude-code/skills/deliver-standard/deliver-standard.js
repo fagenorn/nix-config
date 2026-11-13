@@ -115,7 +115,7 @@ Hard rules for this step (they override anything else you remember):
 const REPLY_ALONE = 'Call StructuredOutput alone in its own message, never beside another tool call, only after every other tool result has come back: the first accepted call is final and ends the step.'
 // #1019: a reviewer once detached the worktree to run a script at the commit under review, and the next run's setup stopped on the
 // detached HEAD. One sentence, the same line in deliver-batch.js, added in readReview() so no review step can miss it.
-const READ_ONLY = 'Never check out, switch, reset or stash in the worktree: read another commit with git show, or in a temporary git worktree outside it.'
+const READ_ONLY = 'Never check out, switch, reset or stash in the worktree: read another commit with git show.'
 
 const SEV = { type: 'string', enum: ['critical', 'important', 'minor'] }
 // #992: incomplete is the verdict of a review that could not finish; readReview() below reads every reply of this schema.
@@ -1356,13 +1356,15 @@ const rulesRevise = async (findings, noted, left = []) => {
   if (!rr) return { silent: true }
   const rules = still.concat(findingsOf(rr))
   const conflict = conflictOf(findings, rules)
-  // #1019: the criteria this revise changed or added, by the members the rules judge (ruleFacts), as acKey spells an id.
+  // #1019: the criteria this revise was asked to fix and did change, by the members the rules judge (ruleFacts), as acKey spells an
+  // id. A planner retypes every criterion it returns, so one it was not asked about is never read as changed, whatever its wording.
   const facts = a => ruleFacts({ acceptance: [a] })
-  const changed = plan.acceptance.filter(a => !was.some(b => facts(b) === facts(a))).map(a => acKey({ ac: a.id }))
+  const asked = findings.map(acKey).filter(k => k !== '')
+  const changed = plan.acceptance.filter(a => !was.some(b => facts(b) === facts(a))).map(a => acKey({ ac: a.id })).filter(k => asked.includes(k))
   return { rules, changed, noted: notedOn(rr.findings, rules), ...(conflict ? { extra: { conflict } } : {}) }
 }
 // #1019: the rules revises of one run, two at most across the delivery (spent: those an earlier stop already counted). The second runs
-// right away, without a stop and a relaunch, only when every finding the first re-review left is on a criterion that revise changed:
+// right away, without a stop and a relaunch, only when every finding the first re-review left is on a criterion that revise was asked to fix and changed:
 // a finding where the fix was made narrows it, as #950 reads a fix wave's findings by the files it changed. A finding on a criterion
 // the revise left alone, one that names no criterion, one no rules revise may touch, or a conflict between classification rules
 // stops as before, and so does whatever the second re-review leaves: a third revise is never run.

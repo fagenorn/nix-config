@@ -146,7 +146,7 @@ const AMEND_SENT = new Set() // #811: an issue's amend reaches at most one child
 const REPLY_ALONE = 'Call StructuredOutput alone in its own message, never beside another tool call, only after every other tool result has come back: the first accepted call is final and ends the step.'
 // #1019: a reviewer once detached the worktree to run a script at the commit under review, and the next run's setup stopped on the
 // detached HEAD. One sentence, the same line in deliver-standard.js, added in a landing's readReview() so no review step can miss it.
-const READ_ONLY = 'Never check out, switch, reset or stash in the worktree: read another commit with git show, or in a temporary git worktree outside it.'
+const READ_ONLY = 'Never check out, switch, reset or stash in the worktree: read another commit with git show.'
 const BASE_RULES = `
 Hard rules for this step (they override anything else you remember):
 - Work only in the worktree path you are given. Never commit in the shared checkout. Never git stash. Never sed -i (use python for edits).
@@ -1825,6 +1825,8 @@ const REATTACH = (branch, path) => `When HEAD in ${path} is detached (git -C ${p
 // PR head through two-parent merges alone, each with its second parent on the integration branch and with the tree a conflict-free
 // merge of its parents gives. The tree is what keeps a resolution made by hand out: it reaches a PR only through the sync review.
 // Anything else (a plain commit, a merge with another tree, a head behind or apart from the PR head, a missing fact) stops as before.
+// The push step reads the two safety facts of each merge again with its own commands before it pushes, so one clerk's word is not
+// the only proof; and nothing is pushed for a reply the landing could not use (readoptUsable).
 const AHEAD_MAX = 8
 const FULL_SHA_RE = /^[0-9a-f]{40}$/
 const fullSha = v => typeof v === 'string' && FULL_SHA_RE.test(v)
@@ -1836,6 +1838,8 @@ const cleanMerges = ro => {
     && c.on_integration === true && fullSha(c.tree) && c.tree === c.clean_tree
   return ahead.every(merge) && ahead[ahead.length - 1].parents[0] === ro.pr_head
 }
+// What a readopt reply must name for its PR to land as it stands.
+const readoptUsable = ro => !!(ro.head && ro.branch && ro.worktree && Array.isArray(ro.acceptance) && ro.acceptance.length)
 const READOPT_PUSH_SCHEMA = { type: 'object', properties: { pushed: { type: 'boolean' }, head: { type: 'string' }, detail: { type: 'string' } }, required: ['pushed'] }
 const READOPT_SCHEMA = {
   type: 'object',
@@ -1862,8 +1866,9 @@ const readoptPushPrompt = (n, ro) => {
   const f = FACTS[n], B = f.branch, pr = f.open_pr.number, W = ro.worktree
   return `The worktree ${W} of issue #${n} of ${SLUG} (the git repository at ${REPO}) is ahead of its open pull request #${pr} only by clean merges of ${INT} into the branch ${B}, which an earlier run made and could not push. Push them and change nothing else: never reset, clean, restore or stash anything, and never merge, commit or force.
 1. Confirm git -C ${W} rev-parse HEAD prints ${ro.head}, git -C ${W} branch --show-current prints ${B} and git -C ${W} status --porcelain prints nothing. If any fails, run nothing else and answer pushed false with what you read in detail.
-2. Push the branch: git -C ${W} push origin ${B}. When the push is refused or fails, answer pushed false with the exact message in detail; never retry with another form.
-3. Read ${UNSET}gh pr view ${pr} --repo ${SLUG} --json headRefOid. Answer pushed true only when headRefOid is ${ro.head}, with head (the headRefOid you read, the full sha); else pushed false with head and what you read in detail.
+2. Run git -C ${W} fetch origin, then prove each of these merges again, newest first, as JSON: ${JSON.stringify(ro.ahead.map(c => ({ commit: c.commit, first: c.parents[0], second: c.parents[1] })))}. For each one: git -C ${W} rev-list --parents -n 1 <commit> must print exactly <commit> <first> <second>; git -C ${W} merge-base --is-ancestor <second> origin/${INT} must succeed; and git -C ${W} merge-tree --write-tree <first> <second> must exit 0 with the sha that git -C ${W} rev-parse <commit>^{tree} prints as its first output line. On any difference push nothing, run nothing else and answer pushed false with the commit and the mismatch in detail.
+3. Push the branch: git -C ${W} push origin ${B}. When the push is refused or fails, answer pushed false with the exact message in detail; never retry with another form.
+4. Read ${UNSET}gh pr view ${pr} --repo ${SLUG} --json headRefOid. Answer pushed true only when headRefOid is ${ro.head}, with head (the headRefOid you read, the full sha); else pushed false with head and what you read in detail.
 ${RULES_FOR(W, B)}`
 }
 
@@ -1938,7 +1943,7 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
       if (ro === null || ro === undefined) { rows[n] = { issue: n, outcome: 'stopped', stage: 'readopt', detail: `readopt-${n} returned nothing` }; return }
       if (ro.reattached === true) log(`readopt-${n}: the worktree was on a detached HEAD at its branch tip with a clean tree; it is back on its branch`)
       // #1019: a head ahead of the PR only by clean merges of the integration branch is pushed, and the readopt goes on at the pushed head.
-      if (ro.ok !== true && ro.reason === 'worktree' && nonEmpty(ro.worktree) && cleanMerges(ro)) {
+      if (ro.ok !== true && ro.reason === 'worktree' && nonEmpty(ro.worktree) && readoptUsable(ro) && cleanMerges(ro)) {
         const ps = await ask(agent(readoptPushPrompt(n, ro), { label: `readopt-push-${n}`, phase: 'Deliver', agentType: 'clerk', model: DEFAULT_CLERK_MODEL, effort: 'low', schema: READOPT_PUSH_SCHEMA }), `readopt-push-${n}`)
         if (ps && ps.pushed === true && ps.head === ro.head) {
           log(`readopt-${n}: pushed ${ro.ahead.length} clean merge(s) of ${INT} an earlier run left local; the PR head is ${ro.head}`)
@@ -1951,7 +1956,7 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
       // #811: an accepted PR still goes through the child when an amend is pending for it: landing as it stands would drop the amend.
       const amendPending = !!(CONTS[n] && AMEND[String(n)] && !AMEND_SENT.has(String(n)))
       if (ro.ok === true && !amendPending) {
-        if (!ro.head || !ro.branch || !ro.worktree || !Array.isArray(ro.acceptance) || !ro.acceptance.length) {
+        if (!readoptUsable(ro)) {
           rows[n] = { issue: n, outcome: 'stopped', stage: 'readopt', detail: 'readopt reply lacks head, branch, worktree or acceptance' }
           return
         }

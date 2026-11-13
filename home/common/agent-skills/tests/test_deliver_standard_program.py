@@ -66,8 +66,7 @@ IMPLEMENTER_ROUNDS = ("Work in rounds: put a round's lookups in one message, sen
 
 # #992: the one sentence about the structured reply, the same in both programs.
 # #1019: the one sentence every review step gets, the same in both programs.
-READ_ONLY = ("Never check out, switch, reset or stash in the worktree: read another commit with git show, or in a temporary "
-             "git worktree outside it.")
+READ_ONLY = ("Never check out, switch, reset or stash in the worktree: read another commit with git show.")
 REPLY_ALONE = ("Call StructuredOutput alone in its own message, never beside another tool call, only after every other tool "
                "result has come back: the first accepted call is final and ends the step.")
 
@@ -9838,8 +9837,11 @@ class ReadOnlyReviewTest(unittest.TestCase):
             self.assertEqual(text.count("${READ_ONLY}"), 1)
             self.assertEqual(text.count("Never check out, switch, reset or stash"), 1)
             self.assertIn("    const prompt = `${asked}\\n${READ_ONLY}`\n" if text is batch else "  const prompt = `${asked}\\n${READ_ONLY}`\n", text)
-        for word in ("check out", "switch", "reset", "stash", "git show", "temporary git worktree outside it"):
+        for word in ("check out", "switch", "reset", "stash", "git show"):
             self.assertIn(word, READ_ONLY)
+        # No second worktree is offered: every step works only in the worktree it is given.
+        self.assertNotIn("temporary", READ_ONLY)
+        self.assertNotIn("worktree add", READ_ONLY)
 
 
 class ReattachTest(unittest.TestCase):
@@ -9918,11 +9920,13 @@ class RulesReviseSecondRoundTest(unittest.TestCase):
     LOOSE = dict(HUMAN, text="looks right on the day of the check")
     ON_AC3 = PlanRuleMessagesTest.review(PlanRuleMessagesTest.finding("important", "AC3", "a pinned date", "R2"))
     OPEN = {"close-out": {"issue_state": "OPEN"}}
+    # What the first rules revise is asked to fix: a finding on AC3.
+    ASKED = PlanRuleMessagesTest.review(PlanRuleMessagesTest.finding("important", "AC3", "not checkable", "R2"))
 
-    def go(self, revises, rereviews, **more):
+    def go(self, revises, rereviews, asked=None, **more):
         plan = with_criteria(HUMAN)
         replies = {"plan": plan, "plan-revise": plan, "plan-review": PlanRulesTest.RULE_FINDING,
-                   "plan-rules-revise": revises, "plan-rules-review": [PlanRulesTest.RULE_FINDING] + rereviews}
+                   "plan-rules-revise": revises, "plan-rules-review": [asked or self.ASKED] + rereviews}
         return run_out(replies=replies, patch=self.OPEN, **more)
 
     @staticmethod
@@ -9938,7 +9942,7 @@ class RulesReviseSecondRoundTest(unittest.TestCase):
         self.assertIn("impl-1", labels(calls))
         second = [c["prompt"] for c in calls if c["label"] == "plan-rules-revise"][1]
         self.assertIn('"summary":"a pinned date"', second)
-        self.assertNotIn('"summary":"s"', second[second.index("Fix only these rule findings"):])
+        self.assertNotIn('"summary":"not checkable"', second[second.index("Fix only these rule findings"):])
         self.assertEqual(len([line for line in out["logs"] if line.endswith("one more rules revise")]), 1)
 
     def test_a_third_revise_is_never_run(self):
@@ -9971,6 +9975,25 @@ class RulesReviseSecondRoundTest(unittest.TestCase):
                 self.assertEqual(result["cont"]["plan_findings"]["rounds"], 1)
                 self.assertEqual(result["cont"]["plan"], revised)
                 self.assertFalse([line for line in out["logs"] if line.endswith("one more rules revise")])
+
+    def test_a_reworded_criterion_the_revise_was_not_asked_about_is_not_changed(self):
+        """A planner retypes criteria: AC1 reworded while AC3 is fixed, then a finding on AC1, stops after one revise."""
+        reworded = dict(PLAN, acceptance=[dict(PLAN["acceptance"][0], text="it works"), self.PINNED])
+        on_ac1 = PlanRuleMessagesTest.review(PlanRuleMessagesTest.finding("important", "AC1", "vague", "R2"))
+        out = self.go([reworded, with_criteria(self.LOOSE)], [on_ac1, PASS_REPLY])
+        result, calls = out["result"], out["calls"]
+        self.assertEqual(self.counts(calls), (1, 2))
+        self.assertEqual(result["stage"], "plan-review")
+        self.assertEqual(result["cont"]["plan_findings"]["rounds"], 1)
+        self.assertEqual([(r["rule"], r["ac"]) for r in result["rules"]], [("R2", "AC1")])
+        # The same reply with the finding on AC3, which the revise was asked to fix and changed, gets the second round.
+        out = self.go([reworded, with_criteria(self.LOOSE)], [self.ON_AC3, PASS_REPLY])
+        self.assertEqual(self.counts(out["calls"]), (2, 3))
+
+    def test_a_revise_asked_about_no_named_criterion_gets_no_second_round(self):
+        out = self.go([with_criteria(self.PINNED), with_criteria(self.LOOSE)], [self.ON_AC3, PASS_REPLY], asked=PlanRulesTest.RULE_FINDING)
+        self.assertEqual(self.counts(out["calls"]), (1, 2))
+        self.assertEqual(out["result"]["stage"], "plan-review")
 
     def test_the_criterion_id_is_matched_without_case_or_spaces(self):
         left = PlanRuleMessagesTest.review(PlanRuleMessagesTest.finding("important", " ac3 ", "a pinned date", "R2"))

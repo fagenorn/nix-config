@@ -6936,8 +6936,7 @@ class EarlyOpenTest(unittest.TestCase):
         self.assertEqual(row(result, 2)["outcome"], "stopped")
 
 
-READ_ONLY = ("Never check out, switch, reset or stash in the worktree: read another commit with git show, or in a temporary "
-             "git worktree outside it.")
+READ_ONLY = ("Never check out, switch, reset or stash in the worktree: read another commit with git show.")
 
 
 class ReadOnlyReviewTest(unittest.TestCase):
@@ -7043,6 +7042,17 @@ class ReadoptCleanMergesTest(unittest.TestCase):
         for needle in (f"git -C {WT1} rev-parse HEAD prints {M1}", f"git -C {WT1} push origin issue-1-x",
                        "gh pr view 41 --repo owner/repo --json headRefOid", f"only when headRefOid is {M1}", "never merge, commit or force"):
             self.assertIn(needle, push)
+        # The push step proves each merge again with its own commands before it pushes.
+        proof = push[push.index("\n2. "):push.index("\n3. ")]
+        for needle in (f"git -C {WT1} fetch origin", json.dumps([{"commit": M1, "first": PR_HEAD, "second": I1}], separators=(",", ":")),
+                       f"git -C {WT1} rev-list --parents -n 1 <commit> must print exactly <commit> <first> <second>",
+                       f"git -C {WT1} merge-base --is-ancestor <second> origin/dev must succeed",
+                       f"git -C {WT1} merge-tree --write-tree <first> <second> must exit 0",
+                       f"git -C {WT1} rev-parse <commit>^{{tree}} prints as its first output line",
+                       "On any difference push nothing, run nothing else and answer pushed false with the commit and the mismatch in detail."):
+            self.assertIn(needle, proof)
+        self.assertLess(push.index("\n2. Run git"), push.index("\n3. Push the branch"))
+        self.assertNotIn("push origin", proof)
         # The landing takes the pushed head as the accepted one, and merges exactly it.
         self.assertIn(f"Accepted head: {M1}", prompt(calls, "land-pr-1"))
         self.assertIn(f"--match-head-commit {M1}", prompt(calls, "land-merge-1"))
@@ -7052,6 +7062,8 @@ class ReadoptCleanMergesTest(unittest.TestCase):
         out = self.go(ahead(merge(M2, M1, I2, T2), merge(M1, PR_HEAD)), **{"land-pr-1": {"pr": 41, "head": M2}})
         self.assertIn("readopt-push-1", labels(out["calls"]))
         self.assertIn(f"Accepted head: {M2}", prompt(out["calls"], "land-pr-1"))
+        self.assertIn(json.dumps([{"commit": M2, "first": M1, "second": I2}, {"commit": M1, "first": PR_HEAD, "second": I1}], separators=(",", ":")),
+                      prompt(out["calls"], "readopt-push-1"))
 
     def test_the_readopt_reads_the_facts_and_pushes_nothing(self):
         _, calls, _ = run(patch={"facts-1": {"open_pr": OPEN_PR}})
@@ -7087,6 +7099,11 @@ class ReadoptCleanMergesTest(unittest.TestCase):
             ("no facts", {"ok": False, "reason": "worktree", "detail": "both shas", "worktree": WT1}),
             ("facts of no object", ahead(merge(M1, PR_HEAD), ahead=["x"])),
             ("no worktree", {k: v for k, v in ahead(merge(M1, PR_HEAD)).items() if k != "worktree"}),
+            # A reply the landing could not use pushes nothing, however clean its merges.
+            ("no acceptance", ahead(merge(M1, PR_HEAD), acceptance=[])),
+            ("acceptance left out", {k: v for k, v in ahead(merge(M1, PR_HEAD)).items() if k != "acceptance"}),
+            ("no branch", {k: v for k, v in ahead(merge(M1, PR_HEAD)).items() if k != "branch"}),
+            ("an empty branch", ahead(merge(M1, PR_HEAD), branch="")),
         )
         for name, reply in cases:
             with self.subTest(case=name):
@@ -7109,6 +7126,10 @@ class ReadoptCleanMergesTest(unittest.TestCase):
     def test_a_push_that_does_not_go_through_stops_with_the_existing_reason(self):
         cases = (
             ("refused", {"pushed": False, "detail": "the lifecycle guard refused the push"}, "the lifecycle guard refused the push"),
+            ("the tree is not the clean merge's", {"pushed": False, "detail": f"{M1}: merge-tree printed {T2}, the commit's tree is {T1}"},
+             f"{M1}: merge-tree printed {T2}, the commit's tree is {T1}"),
+            ("the second parent is not on the integration branch", {"pushed": False, "detail": f"{M1}: {I1} is no ancestor of origin/dev"},
+             f"{M1}: {I1} is no ancestor of origin/dev"),
             ("the PR head did not move", {"pushed": True, "head": PR_HEAD}, "the PR head is not the worktree head"),
             ("no head", {"pushed": True}, "the PR head is not the worktree head"),
             ("lost", None, "readopt-push-1 returned nothing"),
