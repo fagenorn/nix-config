@@ -18,6 +18,7 @@ from agent_tools.console.capacity import (
     report_entries,
 )
 from agent_tools.console.event_log import Event
+from agent_tools.console.signin import SignIn
 from agent_tools.console.view import (
     ALL_OUT_HEADLINE,
     ALL_OUT_SENTENCE,
@@ -62,6 +63,12 @@ def reading_of(document, profile="work", seq=1, at="t1"):
 def refused_report():
     headers = fixture_headers("limits-refused")
     return rate_limits.report_document(429, headers, b"{}")
+
+
+def open_reading_of(profile):
+    return reading_of(report(
+        status="allowed", reset=T + 3600, binding="7d", claim="seven_day",
+        windows={"7d": window("allowed", 0.4, T + 3600)}), profile)
 
 
 def open_reading():
@@ -318,6 +325,78 @@ class CapacityViewTest(unittest.TestCase):
             encode_view(derive_view(states)),
             encode_view(derive_view(states, capacity=capacity_view((), CapacityState({}, {}), 5.0))))
         self.assertEqual(derive_view(states)["capacity"], capacity.EMPTY)
+
+
+def refused_reading(until, profile="work"):
+    return reading_of(report(
+        http_status=429, status="rejected", reset=until, binding="7d",
+        windows={"7d": window("rejected", 1.0, until)}), profile)
+
+
+class SigninCapacityTest(unittest.TestCase):
+    def test_each_profile_entry_carries_its_sign_in(self):
+        state = CapacityState({"work": open_reading()}, {})
+        signins = {"work": SignIn("signed_in", iso(T + 10 * 86400), "t1")}
+        shown = capacity_view(["spare", "work"], state, T, signins)
+        by_name = {e["profile"]: e for e in shown["profiles"]}
+        self.assertEqual(by_name["work"]["signin"], {
+            "state": "signed_in", "ends_at": iso(T + 864000), "days_left": 10, "ask": False,
+            "since": None})
+        self.assertEqual(by_name["spare"]["signin"], {
+            "state": "unknown", "ends_at": None, "days_left": None, "ask": False, "since": None})
+        self.assertEqual(list(shown), ["tight", "all_out", "resumes_at", "no_reading", "profiles"])
+
+    def test_a_signed_out_profile_is_not_a_profile_with_no_reading(self):
+        signins = {"default": SignIn("signed_out", None, "t1")}
+        shown = capacity_view(["default", "work"], CapacityState({}, {}), T, signins)
+        self.assertEqual(shown["no_reading"], "1 with no reading yet")
+        by_name = {e["profile"]: e for e in shown["profiles"]}
+        self.assertEqual(by_name["default"]["state"], "unknown")
+        self.assertEqual(by_name["default"]["signin"]["state"], "signed_out")
+        covered = capacity_view(["default", "work"], CapacityState({"work": open_reading()}, {}),
+                                T, signins)
+        self.assertIsNone(covered["no_reading"])
+
+    def test_a_signed_out_profile_never_blocks_all_out_or_tight(self):
+        signed_out = {"default": SignIn("signed_out", None, "t1")}
+        out = CapacityState({"work": refused_reading(T + 100)}, {})
+        shown = capacity_view(["default", "work"], out, T, signed_out)
+        self.assertIs(shown["all_out"], True)
+        self.assertEqual(shown["resumes_at"], iso(T + 100))
+        tight = CapacityState({"work": open_reading(), "spare": refused_reading(T + 100, "spare")},
+                              {})
+        self.assertIs(capacity_view(["default", "spare", "work"], tight, T, signed_out)["tight"],
+                      True)
+        alone = capacity_view(["default"], CapacityState({}, {}), T, signed_out)
+        self.assertIs(alone["all_out"], False)
+        self.assertIs(alone["tight"], False)
+        self.assertIsNone(alone["no_reading"])
+        old = CapacityState({"work": refused_reading(T + 100), "default": open_reading_of("default")},
+                            {})
+        kept = capacity_view(["default", "work"], old, T, signed_out)
+        self.assertIs(kept["all_out"], True)
+        self.assertEqual(kept["resumes_at"], iso(T + 100))
+        self.assertEqual({e["profile"]: e["state"] for e in kept["profiles"]},
+                         {"default": "ok", "work": "out"})
+        today = capacity_view(["default", "work"], old, T)
+        self.assertIs(today["all_out"], False)
+
+    def test_an_ask_is_open_exactly_within_three_days_or_signed_out(self):
+        empty = CapacityState({}, {})
+
+        def ask(signin, now):
+            return capacity_view(["work"], empty, now, {"work": signin})["profiles"][0]["signin"]
+
+        ending = SignIn("signed_in", iso(T + 259200), "t1")
+        self.assertIs(ask(ending, T - 1)["ask"], False)
+        at = ask(ending, T)
+        self.assertIs(at["ask"], True)
+        self.assertEqual(at["since"], iso(T))
+        self.assertIs(ask(SignIn("signed_in", iso(T + 30 * 86400), "t2"), T + 10)["ask"], False)
+        out = ask(SignIn("signed_out", None, "t3"), T + 10)
+        self.assertIs(out["ask"], True)
+        self.assertEqual(out["since"], "t3")
+        self.assertIs(ask(SignIn("unknown", None, "t4"), T + 10)["ask"], False)
 
 
 if __name__ == "__main__":
