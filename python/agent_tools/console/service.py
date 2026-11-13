@@ -1800,7 +1800,11 @@ class ConsoleService:
         threading.Thread(target=job, name=PROBE_THREAD, daemon=True).start()
 
     def probe_round(self) -> list[probe.Probe]:
-        """Start a probe of every profile that is due and return them in profile order."""
+        """Start a probe of every profile that is due and return them in profile order.
+
+        A dispatch that fails frees the in-flight mark of its probe and of every probe not yet
+        dispatched, so those profiles are probed again at the next due time.
+        """
         if self._prober is None:
             return []
         with self._ingest:
@@ -1815,8 +1819,14 @@ class ConsoleService:
                 probes.append(one)
             while len(self._probe_sessions) > probe.PROBE_MEMORY:
                 self._probe_sessions.popitem(last=False)
-        for one in probes:
-            self._probe_dispatch(lambda one=one: self._run_probe(one))
+        for at, one in enumerate(probes):
+            try:
+                self._probe_dispatch(lambda one=one: self._run_probe(one))
+            except BaseException:
+                with self._ingest:
+                    for unrun in probes[at:]:
+                        self._probing.discard(unrun.profile)
+                raise
         return probes
 
     def _run_probe(self, one: probe.Probe) -> None:

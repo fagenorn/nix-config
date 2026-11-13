@@ -973,6 +973,25 @@ class ProbeServiceTest(Case):
         with contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual([p.profile for p in svc.probe_round()], ["spare", "work"])
 
+    def test_a_dispatch_that_fails_frees_every_undispatched_probe(self):
+        calls = []
+
+        def dispatch(job):
+            calls.append(job)
+            if len(calls) == 1:
+                raise RuntimeError("can't start new thread")
+            job()
+
+        seen, prober = self.recorder()
+        svc = self.begin(prober, dispatch=dispatch)
+        self.now[0] = NOW + 30
+        with self.assertRaises(RuntimeError):
+            svc.probe_round()
+        self.assertEqual((len(calls), seen), (1, []))
+        self.now[0] = NOW + 630
+        self.assertEqual([p.profile for p in svc.probe_round()], ["spare", "work"])
+        self.assertEqual(seen, ["spare", "work"])
+
     def test_a_probe_session_is_remembered_for_the_last_256_probes(self):
         ids = []
         svc = self.begin(lambda p: ids.append(p.session_id), profile_dirs=[self.spare])
