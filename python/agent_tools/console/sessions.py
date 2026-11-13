@@ -64,9 +64,12 @@ Profiles: a session's profile is the account it runs under, named by the
 registry directory its record was read from (`profile_of`): a directory
 `<accounts>/profiles/<name>/sessions` gives `<name>`, any other directory
 (`~/.claude/sessions` included) gives `default` (`DEFAULT_PROFILE`). Nothing
-beyond the registry files already read is opened to learn it. `poll_changes`
-records a changed profile before the hooks-win rule, so a newer hook never hides
-it.
+beyond the registry files already read is opened to learn it. An account
+(`account_name`) is only a directory `<accounts>/profiles/<name>` whose name
+`claude-account` accepts (`a-z`, `0-9`, `-`, `_`, never `default`); the
+unprofiled `~/.claude` is not one, though its sessions are still read and named
+`default` (#1016). `poll_changes` records a changed profile before the hooks-win
+rule, so a newer hook never hides it.
 
 A registry record whose `cwd` holds a NUL character is not a session and is
 skipped like any other malformed record.
@@ -94,6 +97,7 @@ without them is never live. Without procfs only the pid's existence is checked.
 
 import json
 import os
+import re
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -275,6 +279,18 @@ def profile_name(config_dir: Path) -> str:
     if config_dir.parent.name == "profiles":
         return config_dir.name
     return DEFAULT_PROFILE
+
+
+_ACCOUNT_NAME = re.compile(r"[a-z0-9_-]+")
+
+
+def account_name(config_dir: Path) -> str | None:
+    """The account a config directory is: its name under `profiles/` when `claude-account` accepts it."""
+    name = config_dir.name
+    if (config_dir.parent.name == "profiles" and _ACCOUNT_NAME.fullmatch(name)
+            and name != DEFAULT_PROFILE):
+        return name
+    return None
 
 
 def profile_of(directory: Path) -> str:

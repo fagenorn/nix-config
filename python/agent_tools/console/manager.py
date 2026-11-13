@@ -13,8 +13,9 @@ Room is a profile whose state is `ok` or `reset` and whose sign-in is not `signe
 without a sign-in reading counts as `unknown`, P1); the most `week_left`, then the most
 `five_hour_left` (unknown below 0) wins, then the smallest name. With no room, the signed-in
 profile used most recently (as an instant; a never-used one ranks below every used one, ties to
-the smallest name) answers; with none signed in, `default`, unless an entry named `default` reads
-`signed_out`, when the answer is None (P2). A name in `last_use` that is not an entry is ignored.
+the smallest name) answers; with none signed in, None (P2). The entries are the accounts only (the
+service lists the named profiles, #1016), so the unprofiled client directory is never chosen. A
+name in `last_use` that is not an entry is ignored.
 Last use is folded from the log's session rows by `profile_use(events, use)` (a new `ProfileUse`
 of `last`, profile to the `at` of its latest `session.seen`, `session.hook` or `session.profile`
 row, and `owner`, live session id to profile) and outlives the session: a `session.gone` row only
@@ -281,10 +282,7 @@ def session_profile(capacity: Mapping, last_use: Mapping[str, str]) -> str | Non
             return (instant is not None, instant or 0.0)
         best = max(rank(name) for name in signed_in)
         return min(name for name in signed_in if rank(name) == best)
-    if any(entry["profile"] == DEFAULT_PROFILE and signin(entry) == "signed_out"
-           for entry in entries):
-        return None
-    return DEFAULT_PROFILE
+    return None
 
 
 def write_choice(path: Path, profile: str | None) -> None:

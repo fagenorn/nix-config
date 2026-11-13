@@ -40,11 +40,17 @@ def ago(seconds):
     return (datetime.now(timezone.utc) - timedelta(seconds=seconds)).isoformat()
 
 
-def view(*rows):
-    """A console view; a row is `(name, read_at)` or `(name, read_at, signin)`."""
-    return {"capacity": {"profiles": [
+def view(*rows, asks=None):
+    """A console view; a row is `(name, read_at)` or `(name, read_at, signin)`.
+
+    `asks` is None for a view with no `inbox`, else the keys of the open sign-in items."""
+    document = {"capacity": {"profiles": [
         {"profile": row[0], "read_at": row[1], **({"signin": row[2]} if len(row) > 2 else {})}
         for row in rows]}}
+    if asks is not None:
+        document["inbox"] = {"open": [{"reason": "signin", "key": key,
+                                       "profile": key.split("/", 1)[1]} for key in asks]}
+    return document
 
 
 class CapacityCheckTest(unittest.TestCase):
@@ -154,6 +160,43 @@ class CapacityCheckTest(unittest.TestCase):
 
     def test_signin_and_every_together_are_refused(self):
         self.assertEqual(self.run_check("--every", "--signin")[0], 2)
+
+    def test_accounts_is_met_with_named_profiles_only(self):
+        url = serve(self, view(("spare", None), ("work", ago(60)), asks=["signin/spare"]))
+        code, out = self.run_check("--url", url, "--accounts")
+        self.assertEqual((code, json.loads(out)),
+                         (0, {"status": "met", "profiles": ["spare", "work"]}))
+
+    def test_accounts_is_not_met_on_a_default_row_or_its_sign_in_item(self):
+        cases = [(view(("default", None), ("work", ago(60)), asks=[]),
+                  {"status": "not_met", "default_row": True, "default_signin": False}),
+                 (view(("work", ago(60)), asks=["signin/default"]),
+                  {"status": "not_met", "default_row": False, "default_signin": True})]
+        for document, expected in cases:
+            with self.subTest(expected=expected):
+                code, out = self.run_check("--url", serve(self, document), "--accounts")
+                self.assertEqual((code, json.loads(out)), (1, expected))
+
+    def test_accounts_on_an_empty_strip_is_not_yet(self):
+        code, out = self.run_check("--url", serve(self, view(asks=[])), "--accounts")
+        self.assertEqual((code, json.loads(out)), (75, {"status": "pending", "profiles": []}))
+
+    def test_accounts_without_a_readable_inbox_is_not_yet(self):
+        work = view(("work", ago(60)))
+        cases = [work, {**work, "inbox": []}, {**work, "inbox": {}},
+                 {**work, "inbox": {"open": {}}}, view(("default", None))]
+        for document in cases:
+            with self.subTest(document=document):
+                code, out = self.run_check("--url", serve(self, document), "--accounts")
+                self.assertEqual((code, json.loads(out)), (75, {"status": "no_inbox"}))
+
+    def test_accounts_is_exclusive_with_every_and_signin(self):
+        for other in ("--every", "--signin"):
+            with self.subTest(other=other):
+                done = subprocess.run([ROOT / WRAPPER, "--accounts", other], cwd=ROOT,
+                                      capture_output=True, text=True, timeout=60)
+                self.assertEqual(done.returncode, 2)
+                self.assertIn("not allowed with argument", done.stderr)
 
     def test_without_every_one_fresh_profile_still_meets(self):
         url = serve(self, view(("work", ago(60)), ("spare", None)))

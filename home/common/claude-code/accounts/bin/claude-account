@@ -3,8 +3,8 @@
 #
 # Each account is a profile directory used as CLAUDE_CONFIG_DIR, so its login
 # is its own while settings, skills, plugins and transcripts stay shared with
-# ~/.claude through symlinks. A project is bound to an account once; `run`
-# then launches claude under whichever account the current project is bound to.
+# ~/.claude through symlinks. A launch (`run`) starts claude under the profile
+# the console chooses (ADR-hosts-008).
 set -euo pipefail
 
 ROOT="${CLAUDE_ACCOUNTS_DIR:-$HOME/.claude-accounts}"
@@ -25,6 +25,11 @@ DEFAULT_CLAUDE_BIN=
 # build writes in the URL of the port it gives the cache-proxy service.
 CACHE_PROXY_URL=
 
+# The console's address (ADR-hosts-008): a launch asks it for the profile a new
+# session starts under, GET /api/profile, and falls back when it does not answer.
+# A plain constant: the console's port has no Nix binding to substitute.
+CONSOLE_URL=http://127.0.0.1:27184
+
 # What a profile shares with ~/.claude. Everything else (the login, caches,
 # per-process state) is the profile's own.
 SHARED=(settings.json CLAUDE.md keybindings.json skills agents commands
@@ -42,8 +47,8 @@ usage: claude-account <command>
   use <name|default>   bind the current project to an account
   status               the account of this session and of this project, and
                        every account's 5-hour and weekly usage
-  run [claude args]    start claude under this project's account (what plain
-                       `claude` does)
+  run [claude args]    start claude under the profile the console chooses (what
+                       plain `claude` does)
   switch <name> <id>   from inside a session: restart it as session <id> under
                        an account (what /account <name> does)
   rm <name>            delete an account profile
@@ -91,7 +96,8 @@ bound_account() {
   done
 }
 
-# The account a launch from here would use.
+# The account this project is bound to, or CLAUDE_ACCOUNT: what `list`, `status`
+# and `usage` show. A launch does not use it (ADR-hosts-008): see launch_account.
 resolve_account() {
   local account="${CLAUDE_ACCOUNT:-}"
   [ -n "$account" ] || account="$(bound_account "$(project_key)")"
@@ -171,13 +177,16 @@ claude_bin() {
   echo "$bin"
 }
 
-# Prints `healthy` when the cache proxy at host $1, port $2 answers GET /_proxy/health with a
-# 2xx status and a body naming "service":"cache-proxy", and nothing otherwise. Only bash
-# builtins run here, so the probe starts no curl or jq process (#450); the caller bounds it.
-cache_proxy_health() {
-  local status line length="" body=""
+# Prints the body of GET <path> on the loopback server at host $1, port $2, followed by a
+# newline, when it answers with a 2xx status and a Content-Length; prints nothing and returns 1
+# otherwise. Only bash builtins run here, so the request starts no curl or jq process (#450);
+# the caller bounds it. With a fourth argument the body goes to the variable of that name
+# instead, so a caller that is itself killed at its deadline has no subshell to leave behind
+# blocked on the socket.
+loopback_body() {
+  local status line length="" received=""
   {
-    printf 'GET /_proxy/health HTTP/1.0\r\nHost: %s:%s\r\nConnection: close\r\n\r\n' "$1" "$2" >&3
+    printf 'GET %s HTTP/1.0\r\nHost: %s:%s\r\nConnection: close\r\n\r\n' "$3" "$1" "$2" >&3
     IFS= read -r status <&3 || return 1
     case "$status" in "HTTP/1."[01]" 2"[0-9][0-9]" "*) ;; *) return 1 ;; esac
     while IFS= read -r line <&3; do
@@ -188,9 +197,17 @@ cache_proxy_health() {
       esac
     done
     [ -n "$length" ] || return 1
-    IFS= read -r -N "$length" body <&3 || return 1
-    case "$body" in *'"service":"cache-proxy"'*) echo healthy ;; esac
+    IFS= read -r -N "$length" received <&3 || return 1
+    if [ -n "${4:-}" ]; then printf -v "$4" '%s' "$received"; else printf '%s\n' "$received"; fi
   } 3<>"/dev/tcp/$1/$2"
+}
+
+# Prints `healthy` when the cache proxy at host $1, port $2 answers GET /_proxy/health with a
+# 2xx status and a body naming "service":"cache-proxy", and nothing otherwise.
+cache_proxy_health() {
+  local body
+  loopback_body "$1" "$2" /_proxy/health body || return 0
+  case "$body" in *'"service":"cache-proxy"'*) echo healthy ;; esac
 }
 
 # Routes this launch through the cache proxy while the proxy's health check
@@ -394,6 +411,66 @@ cmd_status() {
   show_usage
 }
 
+# The named profiles, one per line in byte order: each directory under $PROFILES whose name is a
+# valid account name. Names are printed with printf, never echo: valid_name accepts -n and -e.
+named_profiles() {
+  local dir name
+  for dir in "$PROFILES"/*; do
+    [ -d "$dir" ] || continue
+    name="${dir##*/}"
+    valid_name "$name" || continue
+    printf '%s\n' "$name"
+  done | LC_ALL=C sort
+}
+
+is_account() { valid_name "$1" && [ -d "$(profile_dir "$1")" ]; }
+
+# Whether the profile holds a login: its .claude.json records an oauthAccount object. Never an
+# error: no file, or a jq that fails, is "not signed in".
+signed_in() {
+  "$JQ" -e '.oauthAccount | type == "object"' "$(profile_dir "$1")/.claude.json" >/dev/null 2>&1
+}
+
+# The profile the console answers on GET /api/profile, when the body is exactly
+# {"profile":"<name>"}; nothing for any other answer or none. The caller bounds it.
+console_profile() {
+  [ -n "$CONSOLE_URL" ] || return 0
+  local hostport="${CONSOLE_URL#http://}" body re='^\{"profile":"([a-z0-9_-]+)"\}$'
+  loopback_body "${hostport%:*}" "${hostport##*:}" /api/profile body || return 0
+  if [[ $body =~ $re ]]; then printf '%s\n' "${BASH_REMATCH[1]}"; fi
+  return 0
+}
+
+# The account a launch uses (ADR-hosts-008): CLAUDE_ACCOUNT; else, with no named profile,
+# default; else the console's answer, the first line of the choice file, the most recently
+# used signed-in named profile, the first named profile by name, each used only when it is an
+# account. Never reads the bindings. Prints only the name: stdout and stderr belong to claude.
+launch_account() {
+  local names name answer="" waited=0 choice="" best=""
+  if [ -n "${CLAUDE_ACCOUNT:-}" ]; then printf '%s\n' "$CLAUDE_ACCOUNT"; return 0; fi
+  names="$(named_profiles)"
+  if [ -z "$names" ]; then printf 'default\n'; return 0; fi
+  # One 1 s deadline covers the connect, the request and the answer, reaped as in route_cache_proxy.
+  IFS= read -r -t 1 answer < <(console_profile 2>/dev/null) || waited=$?
+  if [ "$waited" -gt 128 ]; then kill "$!" 2>/dev/null || true; fi
+  wait "$!" 2>/dev/null || true
+  if is_account "$answer"; then printf '%s\n' "$answer"; return 0; fi
+  if [ -f "$ROOT/chosen-profile" ]; then
+    IFS= read -r choice 2>/dev/null < "$ROOT/chosen-profile" || true
+    choice="${choice#"${choice%%[![:space:]]*}"}"
+    choice="${choice%"${choice##*[![:space:]]}"}"
+    if is_account "$choice"; then printf '%s\n' "$choice"; return 0; fi
+  fi
+  while IFS= read -r name; do
+    signed_in "$name" || continue
+    if [ -z "$best" ] || [ "$(profile_dir "$name")/.claude.json" -nt "$(profile_dir "$best")/.claude.json" ]; then
+      best="$name"
+    fi
+  done <<<"$names"
+  if [ -n "$best" ]; then printf '%s\n' "$best"; return 0; fi
+  printf '%s\n' "${names%%$'\n'*}"
+}
+
 cmd_run() {
   local name status request session
   # A launch from inside a session inherits this, so the mod is added once.
@@ -408,7 +485,7 @@ cmd_run() {
       *) route_cache_proxy; exec "$(claude_bin)" "$@" ;;
     esac
   fi
-  name="$(resolve_account)"
+  name="$(launch_account)"
   # claude is waited on, not exec'd, so `switch` can end it and have it resumed
   # here under another account. Without a switch request this exits as claude did.
   export CLAUDE_ACCOUNT_LAUNCHER=$$
