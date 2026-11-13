@@ -394,6 +394,20 @@ class DocsTreeTest(unittest.TestCase):
         ):
             self.assertIn(needle, context)
 
+    def test_the_console_signin_decision_is_recorded(self):
+        path = "docs/areas/console/adr/022-a-profiles-sign-in-is-read-from-the-clients-status-command.md"
+        first = (REPO_ROOT / path).read_text().splitlines()[0]
+        self.assertEqual(
+            first, "# ADR-console-022 — A profile's sign-in is read from the client's status command")
+        adr = self.doc(path)
+        for needle in ("auth status --json", "loginExpiresAt", "three days",
+                       "CLAUDE_ACCOUNT=<profile> claude", "ADR-console-006", "ADR-console-015",
+                       "launch choice", "#1010"):
+            self.assertIn(needle, adr)
+        self.assertIn("**Sign-in state**:", self.doc("docs/areas/console/CONTEXT.md"))
+        self.assertIn("ADR-console-022", self.doc(
+            "docs/areas/console/adr/006-capacity-readings-arrive-from-the-proxy.md"))
+
     def test_the_console_answer_decision_is_recorded(self):
         path = "docs/areas/console/adr/010-the-page-answers-a-decision-prompt-by-ticking-it-as-the-owner.md"
         first = (REPO_ROOT / path).read_text().splitlines()[0]

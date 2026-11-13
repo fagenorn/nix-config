@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import capacity, console, manager, nudge, probe, sprints
+from agent_tools.console import capacity, console, manager, nudge, probe, signin, sprints
 from agent_tools.console.event_log import GOAL_STATED, EventLog
 
 from . import console_test_support as support
@@ -151,6 +151,24 @@ class ManagerServiceTest(Case):
         self.assertEqual((sprint["manager_state"], sprint["manager_text"],
                           sprint["manager_until"], sprint["retry"]),
                          ("waiting", "waiting on quota until", until, True))
+
+    def test_a_signed_out_profile_keeps_todays_launch_choice(self):
+        dirs = self.profiles(work=0, home=0)
+        self.seed_readings({"work": self.exhausted(FAR)})
+        self.store.parent.mkdir(parents=True, exist_ok=True)
+        log = EventLog(self.store)
+        log.append([signin.entry("home", signin.Status("signed_out", None))])
+        log.close()
+        launches = support.Launches()
+        svc = self.start(launcher=launches, profile_dirs=list(dirs.values()),
+                         clock=lambda: NOW, bound_profile_of=lambda root: "work")
+        self.state(svc)
+        self.assertEqual([c.profile for c in launches.calls], ["home"])
+        self.assertEqual([r for r in support.log_rows(self.store) if r[2] == "manager.waiting"], [])
+        shown = json.loads(svc.view_bytes)["capacity"]
+        home = next(e for e in shown["profiles"] if e["profile"] == "home")
+        self.assertTrue(shown["all_out"])
+        self.assertEqual(home["signin"]["state"], "signed_out")
 
     def test_a_failed_start_shows_its_reason_and_retry_launches_again(self):
         launches = support.Launches(fail=["the directory is not trusted", None])

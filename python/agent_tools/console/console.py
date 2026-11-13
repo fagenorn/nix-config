@@ -32,6 +32,9 @@ stop is recorded without a call.
 
 It is also given `probe.prober_for(sys.platform)` (#1009): on Linux every listed profile is read every
 10 minutes by one small request under it (`agent_tools.console.probe`); elsewhere no probe is made.
+
+It is also given `signin.reader_for(sys.platform)` (#1010): on Linux each probe job first reads the
+profile's sign-in from the client's status command (`agent_tools.console.signin`); elsewhere none is read.
 """
 
 from __future__ import annotations
@@ -42,7 +45,7 @@ import sqlite3
 import sys
 import threading
 
-from agent_tools.console import inbox, manager, nudge, probe, service
+from agent_tools.console import inbox, manager, nudge, probe, service, signin
 from agent_tools.console.event_log import EventLogError
 from agent_tools.console.write_guard import TokenError
 
@@ -72,7 +75,7 @@ def main(argv: list[str] | None = None) -> int:
             tracker=inbox.read_items, launcher=manager.launcher_for(sys.platform),
             nudger=nudge.nudger_for(sys.platform), stopper=manager.stopper_for(sys.platform),
             full_listing=nudge.full_lister_for(sys.platform),
-            prober=probe.prober_for(sys.platform))
+            prober=probe.prober_for(sys.platform), signin_reader=signin.reader_for(sys.platform))
     except TokenError as error:
         print(f"console: page token unusable: {error}", file=sys.stderr)
         return 1

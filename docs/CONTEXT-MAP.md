@@ -86,6 +86,7 @@
 | ResolvedProject | Project contract |
 | Row check | Guard |
 | Session | Console |
+| Sign-in state | Console |
 | Sprint | Console |
 | Stale claim | Claims |
 | Suite member | Delivery |

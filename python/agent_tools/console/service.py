@@ -147,8 +147,20 @@ the prober has returned or raised. A round that escapes is one stderr line `cons
 <Type>: <message>`. `close()` sets the stop event every `probe.Probe` carries and joins the probe loop and
 the default dispatch's workers, so a probe still running is killed and reaped (`probe.py`'s Stop) before
 it returns, and a probe not yet started runs nothing. The service starts no client itself and opens no
-credential file: the prober is the
-only seam that runs a subprocess.
+credential file: the prober
+and the sign-in reader are the only seams that run a subprocess.
+
+Sign-in (#1010, ADR-console-022): with a `signin_reader` (`signin.reader_for(sys.platform)` from
+`console.py`; none elsewhere than Linux) the same probe job, under the same in-flight mark, schedule and
+stop event, first reads the profile's sign-in with the same `probe.Probe`, then runs the prober when
+there is one; a service with a reader and no prober still runs the loop and its rounds. The answer is
+appended as one `signin.reading` row only when its `(state, ends_at)` differs from the folded one (a
+profile with no folded sign-in counts as different), then folded and published. A `signin.StatusFailed`
+is one stderr line `console: signin_unknown <profile> <kind>`, any other exception `console:
+signin_unknown <profile> <Type>` (never its message); both record `unknown`, so the last answer wins
+and an unknown sign-in asks nothing. A stop set during the read records nothing, and a reader that
+fails never stops the prober of the same job. Only the published view is given the sign-ins: the
+quota wait and the manager's launch choice read the capacity without them, so they decide as before.
 
 The manager's route, `POST /api/brief`, is not a page write: it carries no token and the sprint's
 secret takes the token's place. After the loopback `Host` check it runs the hook route's body checks
@@ -665,8 +677,8 @@ from urllib.parse import parse_qsl
 
 from agent_tools.claims import owner_actions
 from agent_tools.console import (
-    answer, capacity, deliveries, digest, idle, inbox, manager, nudge, probe, revive, sessions, sprints,
-    write_guard)
+    answer, capacity, deliveries, digest, idle, inbox, manager, nudge, probe, revive, sessions,
+    signin, sprints, write_guard)
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
     MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_STOP_FAILED,
@@ -1477,10 +1489,12 @@ class ConsoleService:
                  stopper: Callable[[str, str], None] | None = None,
                  full_listing: Callable[[str, str], Collection[str]] | None = None,
                  prober: Callable[[probe.Probe], None] | None = None,
+                 signin_reader: Callable[[probe.Probe], signin.Status] | None = None,
                  probe_dispatch: Callable[[Callable[[], None]], None] | None = None,
                  probe_tick_seconds: float = PROBE_TICK_SECONDS):
         self.registry = Path(registry)
         self._prober = prober
+        self._signin_reader = signin_reader
         self._probe_dispatch = self._on_probe_thread if probe_dispatch is None else probe_dispatch
         self._probe_tick_seconds = probe_tick_seconds
         self._probe_since = clock()
@@ -1520,6 +1534,7 @@ class ConsoleService:
         self._profile_dirs = profile_dirs
         self._profiles: frozenset[str] = frozenset()
         self._capacity = capacity.CapacityState({}, {})
+        self._signins: dict[str, signin.SignIn] = {}
         self._session_poll_seconds = session_poll_seconds
         self._repo_of = repo_of
         self._sessions: dict[str, sessions.SessionState] = {}
@@ -1570,6 +1585,7 @@ class ConsoleService:
             self._inbox = inbox_records(events)
             self._health = read_states(events)
             self._capacity = capacity.capacity_state(events)
+            self._signins = signin.signin_state(events)
             self._derive_digest(events)
             self._deliveries = deliveries.delivery_states(events)
             self._moved = idle.last_moved(events)
@@ -1641,7 +1657,8 @@ class ConsoleService:
             sessions=self._sessions.values(), deliveries=self._deliveries,
             now_ms=int(self._clock() * 1000), sprints=self._sprints,
             digest=digest.digest(self._moments, self._looked, self._now()),
-            capacity=capacity.capacity_view(self._profiles, self._capacity, self._clock()),
+            capacity=capacity.capacity_view(
+                self._profiles, self._capacity, self._clock(), self._signins),
             managers=self._launcher is not None, pending=self._pending))
         with self._published:
             if view != self._view:
@@ -1827,7 +1844,7 @@ class ConsoleService:
         A dispatch that fails frees the in-flight mark of its probe and of every probe not yet
         dispatched, so those profiles are probed again at the next due time.
         """
-        if self._prober is None:
+        if self._prober is None and self._signin_reader is None:
             return []
         with self._ingest:
             now = self._clock()
@@ -1850,9 +1867,36 @@ class ConsoleService:
                 raise
         return probes
 
+    def _read_signin(self, one: probe.Probe) -> None:
+        """Read the profile's sign-in and record it; a failed read records `unknown`."""
+        try:
+            status = self._signin_reader(one)
+        except signin.StatusFailed as error:
+            status = signin.UNKNOWN
+            if not self._stop.is_set():
+                print(f"console: signin_unknown {one.profile} {error.kind}", file=sys.stderr)
+        except Exception as error:
+            status = signin.UNKNOWN
+            if not self._stop.is_set():
+                print(f"console: signin_unknown {one.profile} {type(error).__name__}",
+                      file=sys.stderr)
+        if not self._stop.is_set():
+            self._record_signin(one.profile, status)
+
+    def _record_signin(self, profile: str, status: signin.Status) -> None:
+        with self._ingest:
+            folded = self._signins.get(profile)
+            if folded is not None and (folded.state, folded.ends_at) == (
+                    status.state, status.ends_at):
+                return
+            self._fold(self.log.append([signin.entry(profile, status)]))
+            self._publish()
+
     def _run_probe(self, one: probe.Probe) -> None:
         try:
-            if not self._stop.is_set():
+            if self._signin_reader is not None and not self._stop.is_set():
+                self._read_signin(one)
+            if self._prober is not None and not self._stop.is_set():
                 self._prober(one)
         except probe.ProbeFailed as error:
             if not self._stop.is_set():
@@ -3082,6 +3126,7 @@ class ConsoleService:
         self._inbox = inbox_records(appended, self._inbox)
         self._health = read_states(appended, self._health)
         self._capacity = capacity.capacity_state(appended, self._capacity)
+        self._signins = signin.signin_state(appended, self._signins)
         self._deliveries = deliveries.delivery_states(appended, self._deliveries)
         self._moved = idle.last_moved(appended, self._moved)
         self._sprints = sprints.sprint_states(appended, self._sprints)
@@ -3103,6 +3148,7 @@ class ConsoleService:
                 self._sessions = sessions.session_states(events)
                 self._inbox = inbox_records(events)
                 self._capacity = capacity.capacity_state(events)
+                self._signins = signin.signin_state(events)
                 self._derive_digest(events)
                 self._publish()
             return removed
@@ -3227,7 +3273,7 @@ class ConsoleService:
         self._digest_thread = threading.Thread(
             target=self._expire_loop, name=DIGEST_THREAD, daemon=True)
         self._digest_thread.start()
-        if self._prober is not None:
+        if self._prober is not None or self._signin_reader is not None:
             self._probe_thread = threading.Thread(
                 target=self._probe_loop, name=PROBE_LOOP_THREAD, daemon=True)
             self._probe_thread.start()

@@ -22,9 +22,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import deliveries, digest, probe, service, sessions, sprints
+from agent_tools.console import console as console_module
+from agent_tools.console import deliveries, digest, probe, service, sessions, signin, sprints
 from agent_tools.console import view
 from agent_tools.console.event_log import EventLog
+from agent_tools.console.write_guard import TokenError
 from agent_tools.console.view import derive_view, encode_view, project_states
 
 from . import console_test_support as support
@@ -1064,6 +1066,177 @@ class ProbeServiceTest(Case):
         self.now[0] = NOW + 30
         self.assertEqual(svc.probe_round(), [])
         self.assertNotIn(service.PROBE_LOOP_THREAD, [t.name for t in threading.enumerate()])
+
+
+class SigninServiceTest(Case):
+    """The service reads every listed profile's sign-in on the probe schedule (#1010)."""
+
+    def setUp(self):
+        super().setUp()
+        self.accounts = self.root / "accounts"
+        self.work = self.accounts / "profiles/work"
+        self.spare = self.accounts / "profiles/spare"
+        self.work.mkdir(parents=True)
+        self.spare.mkdir(parents=True)
+        (self.spare / "sessions").mkdir()
+        self.proj = self.root / "proj"
+        self.proj.mkdir()
+        self.now = [NOW]
+        self.answers = {}
+        support.write_registry(self.registry, [{"project_id": "owner/p00",
+                                                "root": str(self.proj)}])
+        support.write_session(self.work / "sessions", pid=os.getpid(), session_id="ses-1",
+                              cwd=str(self.proj), status="busy")
+
+    def begin(self, reader, prober=None, dispatch=None, **kwargs):
+        return support.service(
+            self, self.store, self.registry,
+            session_dirs=[self.work / "sessions", self.spare / "sessions"],
+            profile_dirs=[self.spare, self.work],
+            clock=lambda: self.now[0], session_poll_seconds=3600, signin_reader=reader,
+            prober=prober, probe_dispatch=(lambda job: job()) if dispatch is None else dispatch,
+            probe_tick_seconds=kwargs.pop("probe_tick_seconds", 3600), **kwargs)
+
+    def read(self, one):
+        answer = self.answers[one.profile]
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    @staticmethod
+    def ends(days):
+        return iso(NOW + days * 86400)
+
+    def rows(self):
+        return [json.loads(r[4]) for r in support.log_rows(self.store)
+                if r[2] == signin.READING]
+
+    def view(self, svc):
+        return json.loads(svc.view_bytes)
+
+    def entry(self, svc, name):
+        return next(e for e in self.view(svc)["capacity"]["profiles"] if e["profile"] == name)
+
+    def asks(self, svc):
+        return [i["key"] for i in self.view(svc)["inbox"]["open"] if i["reason"] == "signin"]
+
+    def test_each_round_reads_every_profiles_sign_in_and_logs_only_changes(self):
+        self.answers = {"spare": signin.Status("signed_out", None),
+                        "work": signin.Status("signed_in", self.ends(10))}
+        svc = self.begin(self.read)
+        self.now[0] = NOW + 30
+        svc.probe_round()
+        self.assertEqual(self.rows(), [
+            {"profile": "spare", "state": "signed_out", "ends_at": None},
+            {"profile": "work", "state": "signed_in", "ends_at": self.ends(10)}])
+        self.assertEqual(self.entry(svc, "work")["signin"]["days_left"], 9)
+        self.now[0] = NOW + 630
+        svc.probe_round()
+        self.assertEqual(len(self.rows()), 2)
+        svc.close()
+        again = self.begin(self.read)
+        self.assertEqual([self.entry(again, n)["signin"]["state"] for n in ("spare", "work")],
+                         ["signed_out", "signed_in"])
+
+    def test_a_signed_out_profile_or_one_ending_within_three_days_is_one_inbox_item(self):
+        self.answers = {"spare": signin.Status("signed_out", None),
+                        "work": signin.Status("signed_in", self.ends(2))}
+        svc = self.begin(self.read)
+        self.now[0] = NOW + 30
+        svc.probe_round()
+        self.assertEqual(self.asks(svc), ["signin/spare", "signin/work"])
+        self.assertEqual(self.view(svc)["statement"]["inbox_items"], 2)
+        self.answers = {"spare": signin.Status("signed_in", self.ends(30)),
+                        "work": signin.Status("signed_in", self.ends(30))}
+        self.now[0] = NOW + 630
+        svc.probe_round()
+        self.assertEqual(self.asks(svc), [])
+        self.assertEqual(self.view(svc)["statement"]["inbox_items"], 0)
+
+    def test_a_failing_or_unreadable_status_is_unknown_and_asks_nothing(self):
+        self.answers = {"spare": signin.Status("signed_out", None),
+                        "work": signin.Status("signed_in", self.ends(30))}
+        svc = self.begin(self.read)
+        self.now[0] = NOW + 30
+        svc.probe_round()
+        self.assertEqual(self.asks(svc), ["signin/spare"])
+        self.answers = {"spare": signin.StatusFailed("unreadable"),
+                        "work": signin.StatusFailed("exited")}
+        self.now[0] = NOW + 630
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            svc.probe_round()
+        self.assertEqual([self.entry(svc, n)["signin"]["state"] for n in ("spare", "work")],
+                         ["unknown", "unknown"])
+        self.assertEqual(self.asks(svc), [])
+        self.assertIn("console: signin_unknown spare unreadable", err.getvalue().splitlines())
+        self.assertIn("console: signin_unknown work exited", err.getvalue().splitlines())
+        self.answers["work"] = RuntimeError("leak-me")
+        self.now[0] = NOW + 1230
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            svc.probe_round()
+        self.assertIn("console: signin_unknown work RuntimeError", err.getvalue().splitlines())
+        self.assertNotIn("leak-me", err.getvalue())
+
+    def test_sign_in_is_read_on_the_probe_schedule_before_the_probe(self):
+        calls = []
+        self.answers = {"spare": signin.Status("signed_out", None),
+                        "work": signin.Status("signed_out", None)}
+
+        def reader(one):
+            calls.append(("signin", one.profile))
+            return self.read(one)
+
+        svc = self.begin(reader, prober=lambda one: calls.append(("probe", one.profile)))
+        rounds = []
+        for offset in (29, 30, 629, 630):
+            self.now[0] = NOW + offset
+            rounds.append([p.profile for p in svc.probe_round()])
+        self.assertEqual(rounds, [[], ["spare", "work"], [], ["spare", "work"]])
+        once = [("signin", "spare"), ("probe", "spare"), ("signin", "work"), ("probe", "work")]
+        self.assertEqual(calls, once + once)
+
+    def test_a_reader_without_a_prober_still_has_rounds(self):
+        self.answers = {"spare": signin.Status("signed_out", None),
+                        "work": signin.Status("signed_out", None)}
+        svc = self.begin(self.read)
+        self.now[0] = NOW + 30
+        self.assertEqual([p.profile for p in svc.probe_round()], ["spare", "work"])
+
+    def test_without_a_reader_or_a_prober_nothing_is_read(self):
+        svc = self.begin(None)
+        self.now[0] = NOW + 30
+        self.assertEqual(svc.probe_round(), [])
+        self.assertEqual(self.rows(), [])
+
+    def test_the_console_gives_the_service_the_linux_sign_in_reader(self):
+        kwargs = {}
+
+        def fake(*args, **given):
+            kwargs.update(given)
+            raise TokenError("x")
+
+        with mock.patch.object(console_module.service, "ConsoleService", fake), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(console_module.main([]), 1)
+        self.assertIs(kwargs["signin_reader"], signin.reader_for(sys.platform))
+
+    def test_a_reader_without_a_prober_reads_on_the_loop_thread(self):
+        event = threading.Event()
+
+        def reader(one):
+            event.set()
+            return signin.Status("signed_out", None)
+
+        svc = self.begin(reader, probe_tick_seconds=0.05)
+        self.now[0] = NOW + 30
+        self.assertTrue(event.wait(5))
+        deadline = time.time() + 5
+        while not self.rows() and time.time() < deadline:
+            time.sleep(0.02)
+        self.assertTrue(self.rows())
+        self.assertIsNotNone(svc)
 
 
 def iso(seconds):
