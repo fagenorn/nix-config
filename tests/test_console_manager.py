@@ -418,24 +418,31 @@ class SessionProfileTest(unittest.TestCase):
 
 
 class ProfileTest(unittest.TestCase):
-    def test_the_profile_choice_rule(self):
-        wait = manager.Wait("2026-11-13T00:00:00+00:00")
+    def test_the_launch_choice_is_the_session_choice_or_a_wait(self):
+        unknown = (None, None)
         table = [
-            (cap(("a", "ok", 40, 90), ("b", "ok", 70, 10)), "a", "b"),
-            (cap(("a", "ok", 70, 20), ("b", "ok", 70, 50)), "a", "b"),
-            (cap(("b", "ok", 70, 50), ("a", "ok", 70, 50)), "b", "a"),
-            (cap(("a", "out", 0, 0), ("b", "reset", 100, 100)), "a", "b"),
-            (cap(("a", "ok", None, None), ("b", "ok", 5, 5)), "a", "b"),
-            (cap(("a", "unknown", None, None), ("b", "unknown", None, None)), "b", "b"),
-            (cap(), "default", "default"),
-            (cap(("a", "out", 0, 0), ("b", "unknown", None, None)), "a", "b"),
-            (cap(("a", "out", 0, 0), ("b", "unknown", None, None)), "c", "c"),
-            (cap(("a", "out", 0, 0), ("b", "out", 0, 0), all_out=True,
-                 resumes_at="2026-11-13T00:00:00+00:00"), "a", wait),
+            (cap(("a", "ok", 40, 90), ("b", "ok", 70, 10)), {}),
+            (cap(("a", "ok", 90, 90, "signed_out"), ("b", "ok", 10, 10, "signed_in")), {}),
+            (cap(("a", "out", 0, 0, "signed_in"), ("b", "unknown", *unknown, "signed_in")),
+             {"b": T_EARLY}),
+            (cap(("a", "unknown", *unknown, "signed_in"), ("b", "unknown", *unknown, "signed_in")),
+             {"a": T_LATE, "b": T_EARLY}),
         ]
-        for capacity, bound, expected in table:
-            with self.subTest(rows=capacity["profiles"], bound=bound):
-                self.assertEqual(manager.choose_profile(capacity, bound), expected)
+        for capacity, last_use in table:
+            with self.subTest(capacity=capacity["profiles"], last_use=last_use):
+                self.assertEqual(manager.choose_profile(capacity, last_use),
+                                 manager.session_profile(capacity, last_use))
+        until = "2026-11-13T00:00:00+00:00"
+        self.assertEqual(manager.choose_profile(
+            cap(("a", "out", 0, 0), ("b", "out", 0, 0), all_out=True, resumes_at=until), {}),
+            manager.Wait(until))
+        self.assertEqual(manager.choose_profile(cap(("default", "ok", 90, 90, "signed_out")), {}),
+                         manager.Wait(None))
+
+    def test_the_binding_is_no_longer_an_input(self):
+        self.assertFalse(hasattr(manager, "bound_profile"))
+        self.assertEqual(list(inspect.signature(manager.choose_profile).parameters),
+                         ["capacity", "last_use"])
 
     def test_quota_wait_reads_only_an_out_profile(self):
         until = "2026-11-13T00:00:00+00:00"
@@ -448,33 +455,6 @@ class ProfileTest(unittest.TestCase):
         for profile in ("home", "gone", None):
             with self.subTest(profile=profile):
                 self.assertIsNone(manager.quota_wait(capacity, profile))
-
-    def test_the_bound_profile_is_read_from_the_bindings(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            d = Path(tmp)
-            (d / "bindings.tsv").write_text("/srv\tparent\n/srv/p01\twork\n")
-            self.assertEqual(manager.bound_profile("/srv/p01", d), "work")
-            self.assertEqual(manager.bound_profile("/srv/p02", d), "parent")
-            self.assertEqual(manager.bound_profile("/elsewhere", d), "default")
-            empty = d / "empty"
-            empty.mkdir()
-            self.assertEqual(manager.bound_profile("/srv/p01", empty), "default")
-            with mock.patch.dict(os.environ, {"CLAUDE_ACCOUNTS_DIR": str(d)}):
-                self.assertEqual(manager.bound_profile("/srv/p01"), "work")
-
-    def test_a_linked_worktree_reads_its_main_checkouts_binding(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            d = Path(os.path.realpath(tmp))
-            main, worktree = d / "src" / "repo", d / "work" / "topic"
-            admin = main / ".git" / "worktrees" / "topic"
-            admin.mkdir(parents=True)
-            (admin / "commondir").write_text("../..\n")
-            worktree.mkdir(parents=True)
-            (worktree / ".git").write_text(f"gitdir: {admin}\n")
-            (d / "bindings.tsv").write_text(f"{main}\twork\n")
-            self.assertEqual(manager.bound_profile(str(worktree), d), "work")
-            self.assertEqual(manager.bound_profile(str(main), d), "work")
-            self.assertEqual(manager.bound_profile(str(d / "work"), d), "default")
 
 
 class StopTest(unittest.TestCase):

@@ -159,8 +159,8 @@ profile with no folded sign-in counts as different), then folded and published. 
 is one stderr line `console: signin_unknown <profile> <kind>`, any other exception `console:
 signin_unknown <profile> <Type>` (never its message); both record `unknown`, so the last answer wins
 and an unknown sign-in asks nothing. A stop set during the read records nothing, and a reader that
-fails never stops the prober of the same job. Only the published view is given the sign-ins: the
-quota wait and the manager's launch choice read the capacity without them, so they decide as before.
+fails never stops the prober of the same job. The published view and the manager's launch choice are
+given the sign-ins, so a signed-out profile is never launched; the quota wait reads the capacity without them.
 
 The manager's route, `POST /api/brief`, is not a page write: it carries no token and the sprint's
 secret takes the token's place. After the loopback `Host` check it runs the hook route's body checks
@@ -414,8 +414,7 @@ report, closing, stop-request and `manager.stopped` rows are never removed. The 
 
 Managers (#888): the service takes `launcher` (`manager.launcher_for(sys.platform)` from `console.py`;
 None means managers are not available on this host, no launch is ever made, no manager row is
-written and every sprint reads `unavailable`), `bound_profile_of` (default `manager.bound_profile`)
-and `dispatch` (default None: each launch runs on a new daemon thread named `MANAGER_THREAD`,
+written and every sprint reads `unavailable`) and `dispatch` (default None: each launch runs on a new daemon thread named `MANAGER_THREAD`,
 `console-manager-launch`; a test passes a stand-in). With a launcher, `state_goal` reserves the new
 sprint (`_launching`, changed only under the ingest lock) in the critical section that appends
 `goal.stated` and dispatches `_launch_reserved(sprint_id)` after releasing it. `retry_manager(
@@ -432,8 +431,9 @@ a stop, #892) or its manager reads `started` (a stale or duplicate job never sta
 manager), and a launch a retry reserved also returns when the sprint no longer offers retry (the
 failed manager registered or briefed meanwhile); a missing secret appends `manager.failed` ("the sprint's secret is missing"); the profile
 is chosen by `manager.choose_profile` over `capacity.capacity_view` of the profile directories read
-at that moment (`_read_profiles`, never the last poll's) and the project's bound profile, and
-`Wait` appends `manager.waiting`. Otherwise the launcher is called outside the lock, and then,
+at that moment (`_read_profiles`, never the last poll's) with the sign-ins and each profile's last use,
+folded from the log's session rows (`manager.profile_use`, kept after a session leaves; ADR-console-023,
+#1011), and `Wait` appends `manager.waiting`. Otherwise the launcher is called outside the lock, and then,
 under it, a sprint that was withdrawn meanwhile has its secret and settings file removed again and
 no row appended, and otherwise, unless the service is stopping, `manager.started {sprint_id, profile, session_name}`
 or `manager.failed {sprint_id, reason}` is appended (the reason of a `LaunchFailed`, else `<Type>:
@@ -1482,7 +1482,6 @@ class ConsoleService:
                  tick: Callable[[str, int, int, list[dict], list[int]], None] = answer.tick_on_tracker,
                  owner_path: Callable[..., None] = verify_answer.answer_prompt,
                  launcher: Callable[[manager.Launch], None] | None = None,
-                 bound_profile_of: Callable[[str], str] = manager.bound_profile,
                  dispatch: Callable[[Callable[[], None]], None] | None = None,
                  nudger: Callable[[nudge.Nudge], None] | None = None,
                  listing: Callable[[], Mapping[str, sessions.Observation]] | None = None,
@@ -1518,7 +1517,6 @@ class ConsoleService:
         self._nudging: set[str] = set()
         self._nudge_again: set[str] = set()
         self._launcher = launcher
-        self._bound_profile_of = bound_profile_of
         self._dispatch = self._on_new_thread if dispatch is None else dispatch
         self._launching: dict[str, object] = {}
         self._last_listed: dict[str, int] = {}
@@ -1538,6 +1536,7 @@ class ConsoleService:
         self._session_poll_seconds = session_poll_seconds
         self._repo_of = repo_of
         self._sessions: dict[str, sessions.SessionState] = {}
+        self._use = manager.ProfileUse({}, {})
         self._absent: frozenset[str] = frozenset()
         self._deliveries: dict[tuple[str, str], deliveries.DeliveryState] = {}
         self._reader = deliveries.JournalReader()
@@ -1582,6 +1581,7 @@ class ConsoleService:
             events = self.log.events()
             self._states = project_states(events)
             self._sessions = sessions.session_states(events)
+            self._use = manager.profile_use(events)
             self._inbox = inbox_records(events)
             self._health = read_states(events)
             self._capacity = capacity.capacity_state(events)
@@ -2081,8 +2081,9 @@ class ConsoleService:
             self._release(sprint_id, token)
             return None
         choice = manager.choose_profile(
-            capacity.capacity_view(self._read_profiles(), self._capacity, self._clock()),
-            self._bound_profile_of(project.root))
+            capacity.capacity_view(self._read_profiles(), self._capacity, self._clock(),
+                                   self._signins),
+            self._use.last)
         if isinstance(choice, manager.Wait):
             self._append_manager(MANAGER_WAITING, project_id, {
                 "sprint_id": sprint_id, "until": choice.until, **marks}, token)
@@ -3123,6 +3124,7 @@ class ConsoleService:
         self._looked = digest.last_looked(appended, self._looked)
         self._states = project_states(appended, self._states)
         self._sessions = sessions.session_states(appended, self._sessions)
+        self._use = manager.profile_use(appended, self._use)
         self._inbox = inbox_records(appended, self._inbox)
         self._health = read_states(appended, self._health)
         self._capacity = capacity.capacity_state(appended, self._capacity)
@@ -3146,6 +3148,7 @@ class ConsoleService:
             if removed:
                 events = self.log.events()
                 self._sessions = sessions.session_states(events)
+                self._use = manager.profile_use(events)
                 self._inbox = inbox_records(events)
                 self._capacity = capacity.capacity_state(events)
                 self._signins = signin.signin_state(events)

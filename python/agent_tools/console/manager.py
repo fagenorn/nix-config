@@ -2,15 +2,10 @@
 
 Reads no clock: capacity arrives as the `capacity.capacity_view` dict the caller built.
 
-Profile (rule P7). `choose_profile(capacity, bound)` returns a profile name or a `Wait`. A profile
-has room when its state is `ok` or `reset`. With room, the profile with the most `week_left`, then
-the most `five_hour_left` (an unknown value counts below 0) wins, and among equal keys the
-smallest name. With no room and `all_out` set, the answer is `Wait(resumes_at)`. Otherwise it is
-`bound`, unless `bound` is listed as `out`, when it is the smallest-named `unknown` profile (and
-`bound` again when none is). `bound_profile(root)` mirrors the launcher's `bound_account`: the
-account bound to the directory's main checkout (a linked worktree reads its owner's binding,
-`sessions.main_checkout`) or the nearest bound parent in `bindings.tsv` of the accounts
-directory (`$CLAUDE_ACCOUNTS_DIR`, else `~/.claude-accounts`), else `default`.
+Launch profile (#1011). `choose_profile(capacity, last_use)` returns a profile name or a `Wait`.
+With `capacity["all_out"]` set (every profile that is not signed out reads out) it is
+`Wait(resumes_at)`; otherwise it is `session_profile(capacity, last_use)`, and `Wait(None)` when
+that names nothing. The per-project account binding is not an input.
 
 Session profile (#1011). `session_profile(capacity, last_use)` names the profile a new session
 runs under, or None when nothing can be chosen; it never returns a `Wait` and ignores `all_out`.
@@ -122,7 +117,7 @@ from pathlib import Path
 
 from agent_tools.console.event_log import Event
 from agent_tools.console.sessions import (
-    DEFAULT_PROFILE, GONE, HOOK, PROFILE, SEEN, at_ms, main_checkout)
+    DEFAULT_PROFILE, GONE, HOOK, PROFILE, SEEN, at_ms)
 
 CHOICE_FILE = "chosen-profile"
 
@@ -216,22 +211,11 @@ def new_launch(sprint_id: str, project_id: str, goal: str, root: str, profile: s
         seen_after=seen_after)
 
 
-def choose_profile(capacity: Mapping, bound: str) -> str | Wait:
-    profiles = capacity["profiles"]
-    room = [entry for entry in profiles if entry["state"] in ("ok", "reset")]
-    if room:
-        def key(entry):
-            return (entry["week_left"] if entry["week_left"] is not None else -1,
-                    entry["five_hour_left"] if entry["five_hour_left"] is not None else -1)
-        best = max(key(entry) for entry in room)
-        return min(entry["profile"] for entry in room if key(entry) == best)
+def choose_profile(capacity: Mapping, last_use: Mapping[str, str]) -> str | Wait:
     if capacity["all_out"]:
         return Wait(capacity["resumes_at"])
-    if any(entry["profile"] == bound and entry["state"] == "out" for entry in profiles):
-        unknown = sorted(entry["profile"] for entry in profiles if entry["state"] == "unknown")
-        if unknown:
-            return unknown[0]
-    return bound
+    chosen = session_profile(capacity, last_use)
+    return Wait(None) if chosen is None else chosen
 
 
 @dataclass(frozen=True)
@@ -338,26 +322,6 @@ def quota_wait(capacity: Mapping, profile: str | None) -> Wait | None:
         if entry["profile"] == profile:
             return Wait(entry["out_until"]) if entry["state"] == "out" else None
     return None
-
-
-def bound_profile(root: str, accounts_dir: Path | None = None) -> str:
-    if accounts_dir is None:
-        accounts_dir = Path(os.environ.get("CLAUDE_ACCOUNTS_DIR")
-                            or Path.home() / ".claude-accounts")
-    try:
-        lines = (accounts_dir / "bindings.tsv").read_text(encoding="utf-8").splitlines()
-    except (OSError, UnicodeDecodeError):
-        return DEFAULT_PROFILE
-    bindings: dict[str, str] = {}
-    for line in lines:
-        fields = line.split("\t")
-        if len(fields) >= 2:
-            bindings.setdefault(fields[0], fields[1])
-    start = Path(main_checkout(root) or root)
-    for directory in (start, *start.parents):
-        if str(directory) in bindings:
-            return bindings[str(directory)]
-    return DEFAULT_PROFILE
 
 
 def supported(platform: str) -> bool:

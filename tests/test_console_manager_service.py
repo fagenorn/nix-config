@@ -3,8 +3,10 @@
 Run: just agent-workflow-tests
 """
 import contextlib
+import inspect
 import io
 import json
+import os
 import sys
 import threading
 import time
@@ -13,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import capacity, console, manager, nudge, probe, signin, sprints
+from agent_tools.console import capacity, console, manager, nudge, probe, service, signin, sprints
 from agent_tools.console.event_log import GOAL_STATED, EventLog
 
 from . import console_test_support as support
@@ -70,7 +72,7 @@ class ManagerServiceTest(Case):
         base = self.store.parent.parent / "accounts" / "profiles"
         dirs = {name: base / name for name in utilization}
         for directory in dirs.values():
-            directory.mkdir(parents=True)
+            directory.mkdir(parents=True, exist_ok=True)
         return dirs
 
     def seed_readings(self, readings):
@@ -92,7 +94,9 @@ class ManagerServiceTest(Case):
 
     def test_a_stated_goal_launches_one_manager_with_its_identity(self):
         launches = support.Launches()
-        svc = self.start(launcher=launches, bound_profile_of=lambda root: "work")
+        support.sign_in(self.store, "work")
+        svc = self.start(launcher=launches,
+                         profile_dirs=[support.profile_dir(self.store, "work")])
         sid = self.state(svc)
         (launch,) = launches.calls
         self.assertEqual(launch.cwd, "/srv/p01")
@@ -152,7 +156,19 @@ class ManagerServiceTest(Case):
                           sprint["manager_until"], sprint["retry"]),
                          ("waiting", "waiting on quota until", until, True))
 
-    def test_a_signed_out_profile_keeps_todays_launch_choice(self):
+    def test_a_binding_to_another_profile_does_not_change_the_launch(self):
+        dirs = self.profiles(work=0, home=0)
+        accounts = self.store.parent.parent / "accounts"
+        (accounts / "bindings.tsv").write_text("/srv/p01\thome\n")
+        support.sign_in(self.store, "work")
+        launches = support.Launches()
+        with mock.patch.dict(os.environ, {"CLAUDE_ACCOUNTS_DIR": str(accounts)}):
+            svc = self.start(launcher=launches, profile_dirs=list(dirs.values()),
+                             clock=lambda: NOW)
+            self.state(svc)
+        self.assertEqual([c.profile for c in launches.calls], ["work"])
+
+    def test_a_signed_out_profile_is_never_launched(self):
         dirs = self.profiles(work=0, home=0)
         self.seed_readings({"work": self.exhausted(FAR)})
         self.store.parent.mkdir(parents=True, exist_ok=True)
@@ -161,14 +177,29 @@ class ManagerServiceTest(Case):
         log.close()
         launches = support.Launches()
         svc = self.start(launcher=launches, profile_dirs=list(dirs.values()),
-                         clock=lambda: NOW, bound_profile_of=lambda root: "work")
+                         clock=lambda: NOW)
+        sid = self.state(svc)
+        self.assertEqual(launches.calls, [])
+        until = datetime.fromtimestamp(FAR, timezone.utc).isoformat()
+        _, _, kind, project, payload = support.log_rows(self.store)[-1]
+        self.assertEqual((kind, project, json.loads(payload)),
+                         ("manager.waiting", "owner/p01", {"sprint_id": sid, "until": until}))
+        self.assertTrue(json.loads(svc.view_bytes)["capacity"]["all_out"])
+
+    def test_a_signed_out_profile_with_the_most_room_is_skipped(self):
+        dirs = self.profiles(work=0, home=0)
+        self.seed_readings({"work": self.weekly(0.2), "home": self.weekly(0.6)})
+        log = EventLog(self.store)
+        log.append([signin.entry("work", signin.Status("signed_out", None))])
+        log.close()
+        launches = support.Launches()
+        svc = self.start(launcher=launches, profile_dirs=list(dirs.values()),
+                         clock=lambda: NOW)
         self.state(svc)
         self.assertEqual([c.profile for c in launches.calls], ["home"])
-        self.assertEqual([r for r in support.log_rows(self.store) if r[2] == "manager.waiting"], [])
-        shown = json.loads(svc.view_bytes)["capacity"]
-        home = next(e for e in shown["profiles"] if e["profile"] == "home")
-        self.assertTrue(shown["all_out"])
-        self.assertEqual(home["signin"]["state"], "signed_out")
+
+    def test_the_service_takes_no_binding(self):
+        self.assertNotIn("bound_profile_of", inspect.signature(service.ConsoleService).parameters)
 
     def test_a_failed_start_shows_its_reason_and_retry_launches_again(self):
         launches = support.Launches(fail=["the directory is not trusted", None])

@@ -52,8 +52,9 @@ class StopServiceTest(Case):
             raise manager.StopFailed(self.failures.pop(0))
 
     def begin(self, **overrides):
+        support.sign_in(self.store, "work")
         options = dict(
-            launcher=support.Launches(), bound_profile_of=lambda root: "work",
+            launcher=support.Launches(), profile_dirs=[support.profile_dir(self.store, "work")],
             dispatch=lambda job: job(), nudger=self.nudger, listing=lambda: dict(self.listed),
             stopper=self.stopper, clock=lambda: self.now[0], log_clock=self.log_clock,
             session_poll_seconds=3600)

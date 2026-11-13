@@ -10,6 +10,8 @@ from pathlib import Path
 from agent_tools.console import manager as console_manager
 from agent_tools.console import service as console_service
 from agent_tools.console import sessions as console_sessions
+from agent_tools.console import signin
+from agent_tools.console.event_log import EventLog
 
 
 def entries(n):
@@ -158,11 +160,25 @@ class Queued:
         self.jobs.pop(0)()
 
 
+def profile_dir(store, name):
+    path = Path(store).parent.parent / "accounts" / "profiles" / name
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def sign_in(store, *names):
+    Path(store).parent.mkdir(parents=True, exist_ok=True)
+    log = EventLog(store)
+    try:
+        log.append([signin.entry(name, signin.Status("signed_in", None)) for name in names])
+    finally:
+        log.close()
+
+
 def service(test, store, registry, session_dirs=(), repo_of=lambda cwd: cwd, profile_dirs=(),
             **kwargs):
     kwargs.setdefault("branch_pattern_of", lambda repo: "issue-<num>-<slug>")
     kwargs.setdefault("dispatch", lambda job: job())
-    kwargs.setdefault("bound_profile_of", lambda root: "default")
     svc = console_service.ConsoleService(
         store, registry, port=0, session_dirs=lambda: list(session_dirs),
         profile_dirs=lambda: list(profile_dirs), repo_of=repo_of, **kwargs)

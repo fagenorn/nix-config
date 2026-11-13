@@ -298,8 +298,9 @@ class QuestionNudgeTest(Case):
         self.nudges.append(sent)
 
     def begin(self):
+        support.sign_in(self.store, "work")
         return self.start(
-            launcher=support.Launches(), bound_profile_of=lambda root: "work",
+            launcher=support.Launches(), profile_dirs=[support.profile_dir(self.store, "work")],
             dispatch=self.queued, nudger=self.nudger, listing=lambda: dict(self.listed),
             clock=lambda: T0, log_clock=self.log_clock, session_poll_seconds=3600)
 
