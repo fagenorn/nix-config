@@ -582,6 +582,24 @@ class DocsTreeTest(unittest.TestCase):
         manager = self.doc("docs/areas/console/CONTEXT.md")
         self.assertIn("ADR-console-021", manager)
 
+    def test_the_console_probe_decision_is_recorded(self):
+        path = "docs/areas/console/adr/006-capacity-readings-arrive-from-the-proxy.md"
+        first = (REPO_ROOT / path).read_text().splitlines()[0]
+        self.assertEqual(first, "# ADR-console-006 — Capacity readings arrive from the proxy "
+                                "and are kept per profile")
+        adr = self.doc(path)
+        for needle in ("#1009", "--session-id", "--no-session-persistence",
+                       "CLAUDE_CACHE_PROXY=required", "10 minutes", "30 seconds", "429", "256",
+                       "ADR-hosts-007", "ADR-console-015", "unless it is a console probe"):
+            self.assertIn(needle, adr)
+        self.assertNotIn("is attributed only by an account already paired with one.", adr)
+        hosts = self.doc("docs/areas/hosts/adr/004-claude-routes-through-the-proxy-by-default.md")
+        self.assertIn("CLAUDE_CACHE_PROXY=required", hosts)
+        self.assertIn("#1009", hosts)
+        context = self.doc("docs/areas/console/CONTEXT.md")
+        self.assertIn("every 10 minutes", context)
+        self.assertIn("idle profiles are read too", context)
+
     def test_the_console_delivery_decision_is_recorded(self):
         path = "docs/areas/console/adr/005-in-flight-delivery-stage-is-read-from-run-journals.md"
         first = (REPO_ROOT / path).read_text().splitlines()[0]
