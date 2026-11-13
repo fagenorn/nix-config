@@ -45,6 +45,7 @@
 | Derived row | Guard |
 | Detaching word | Guard |
 | Digest | Console |
+| Excluded profile | Console |
 | Fleet registry | Project contract |
 | Goal | Console |
 | Held issue | Verification |
