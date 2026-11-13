@@ -30,6 +30,11 @@ export const meta = {
 // A row stopped at verify-unrelated (#972: its child's verification fix found no cause here for a failing test and edited nothing) is not relaunched: the
 // failure cannot change by itself, so it is reported in owner_actions with reason unrelated, the test, the evidence, the claim holder and the
 // child's cont (slimmed as a relaunch cont is); the owner repairs the test, then a relaunch with that cont in conts resumes it. The claim stays held.
+// A row stopped at plan-review with conflict (#988: {ac, rules, revises_left}, a criterion whose rules revise settled one classification
+// rule and broke another) is not relaunched either: it is reported in owner_actions with reason rules-conflict, the criterion, the rules,
+// the claim holder and the child's cont (slimmed). The owner decides how the criterion is classified; a relaunch with that cont and the
+// decision then runs the one rules revise left, or plans again when none is. A closed issue whose release failed stays a plain stopped
+// row instead, here and for verify-unrelated, so that a relaunch releases it.
 // An already-fixed row is final and reported in owner_actions with its commit; the batch closes nothing.
 // A no-changes row (#923: every task of the child's plan ended with no commit, so there is nothing to land) is final too, once its claim
 // is released, and reported in owner_actions: the owner closes the issue. A release that failed leaves the row stopped for a relaunch.
@@ -509,6 +514,7 @@ const POST_MERGE = ['hold', 'close-out', 'code-unmet']
 const postMerge = r => !!r.pr || POST_MERGE.includes(r.stage)
 const READY = {}
 const FLAKY = {} // #972: by issue, the checks its child saw fail and pass on the one rerun
+const RULES_CONFLICT = {} // #988: by issue, the criterion and the rules a plan-review stop reported as conflicting
 const UNRELATED = {} // #972: by issue, the failing test its child's verification fix found no cause for, with the evidence
 const OUTSIDE = {} // #972: by issue, the files outside the branch's diff its child's verification fix edited, each with its cause
 const readyOf = n => READY[n]
@@ -1900,6 +1906,7 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `release-${n}`, phase: 'Deliver', agentT
       return
     }
     if (r.cont) {
+      let closedMeanwhile = false
       if (r.stage !== 'planned' && !postMerge(r) && !mergedReadopt(n, f)) {
         // A stop on an issue closed meanwhile: give the claim back and drop the cont; an open issue keeps both (#714).
         // A re-adopted merged landing is never settled, whatever stage it stopped at: its close-out is still owed (#714).
@@ -1907,6 +1914,7 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `release-${n}`, phase: 'Deliver', agentT
 1. Read ${UNSET}gh issue view ${n} --repo ${SLUG} --json state and return state (OPEN or CLOSED).
 2. Only when state is CLOSED, run alone and exactly: forge-claim release --repo ${SLUG} --issue ${n} --holder ${HOLDER} --reason closed and return its verdict as release: released (exit 0), not_held (exit 3) when the claim is already gone, or error on any other exit; otherwise return release null. ${FORGE_TIMEOUT} Run nothing else.
 ${RULES_FOR(REPO, f.branch)}`, { label: `settle-${n}`, phase: 'Deliver', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: SETTLE_SCHEMA }), `settle-${n}`)
+        closedMeanwhile = !!(st && st.state === 'CLOSED')
         if (st && st.state === 'CLOSED' && (st.release === 'released' || st.release === 'not_held')) {
           delete CONTS[n]
           rows[n] = { issue: n, outcome: 'closed', stage: r.stage, released: st.release === 'released' }
@@ -1932,7 +1940,8 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `settle-${n}`, phase: 'Deliver', agentTy
           return
         }
       }
-      if (r.stage === 'verify-unrelated' && isObj(r.unrelated) && nonEmpty(r.unrelated.test)) UNRELATED[n] = { test: oneLine(r.unrelated.test), ...(nonEmpty(r.unrelated.evidence) ? { evidence: oneLine(r.unrelated.evidence) } : {}), claim: 'held', holder: HOLDER, cont: r.cont }
+      if (!closedMeanwhile && r.stage === 'plan-review' && isObj(r.conflict) && nonEmpty(r.conflict.ac) && Array.isArray(r.conflict.rules) && r.conflict.rules.length && r.conflict.rules.every(nonEmpty)) RULES_CONFLICT[n] = { ac: oneLine(r.conflict.ac), rules: r.conflict.rules.map(oneLine), claim: 'held', holder: HOLDER, cont: r.cont }
+      if (!closedMeanwhile && r.stage === 'verify-unrelated' && isObj(r.unrelated) && nonEmpty(r.unrelated.test)) UNRELATED[n] = { test: oneLine(r.unrelated.test), ...(nonEmpty(r.unrelated.evidence) ? { evidence: oneLine(r.unrelated.evidence) } : {}), claim: 'held', holder: HOLDER, cont: r.cont }
       rows[n] = { issue: n, outcome: 'stopped', stage: r.stage, ...stopDetail(r) }
       return
     }
@@ -1975,7 +1984,9 @@ const table = ISSUES.map(n => {
 // A cycle only the owner can break: relaunching it returns the same blocked rows, so it is an owner action, not an open issue.
 // #972: a failure with no cause in the delivery cannot change by a relaunch either: an owner action, not an open issue.
 const unrelated = table.filter(r => r.outcome === 'stopped' && r.stage === 'verify-unrelated' && UNRELATED[r.issue]).map(r => r.issue)
-const open = table.filter(r => !FINAL.includes(r.outcome) && !cycle.includes(r.issue) && !unrelated.includes(r.issue)).map(r => r.issue)
+// #988: nor can a criterion the acceptance rules pull two ways: the owner decides its classification.
+const conflicted = table.filter(r => r.outcome === 'stopped' && r.stage === 'plan-review' && RULES_CONFLICT[r.issue]).map(r => r.issue)
+const open = table.filter(r => !FINAL.includes(r.outcome) && !cycle.includes(r.issue) && !unrelated.includes(r.issue) && !conflicted.includes(r.issue)).map(r => r.issue)
 const rowOf = n => table.find(r => r.issue === n)
 // The lead copies the relaunch into the next run's args, so a forwarded cont carries only what a resume reads from it. A resumed child's setup
 // step reads every contract field fresh and takes from cont.setup only the members below (the claim holder, the delivery's location and
@@ -2015,7 +2026,7 @@ for (const r of table) log(`#${r.issue}: ${r.outcome}${r.reason || r.detail ? ` 
 return {
   stage: breaker ? 'breaker' : 'done', batch_id: BATCH, table,
   questions: table.filter(r => r.outcome === 'questions').map(r => ({ issue: r.issue, questions: r.questions, marker: r.marker })),
-  owner_actions: [...table.filter(r => r.outcome === 'questions' && r.marker !== null && r.marker !== undefined).map(r => ({ issue: r.issue, reason: 'decision', comment_id: r.marker })), ...table.filter(r => r.outcome === 'already-fixed').map(r => ({ issue: r.issue, reason: 'already-fixed', commit: r.commit })), ...table.filter(r => r.outcome === 'no-changes').map(r => ({ issue: r.issue, reason: 'no-changes' })), ...table.filter(r => r.outcome === 'not-converging').map(r => ({ issue: r.issue, reason: 'not-converging', ...DIVERGING[r.issue], cont: slimCont(DIVERGING[r.issue].cont) })), ...cycle.map(n => ({ issue: n, reason: 'cycle' })), ...unrelated.map(n => ({ issue: n, reason: 'unrelated', ...UNRELATED[n], cont: slimCont(UNRELATED[n].cont) })), ...LAND_OA],
+  owner_actions: [...table.filter(r => r.outcome === 'questions' && r.marker !== null && r.marker !== undefined).map(r => ({ issue: r.issue, reason: 'decision', comment_id: r.marker })), ...table.filter(r => r.outcome === 'already-fixed').map(r => ({ issue: r.issue, reason: 'already-fixed', commit: r.commit })), ...table.filter(r => r.outcome === 'no-changes').map(r => ({ issue: r.issue, reason: 'no-changes' })), ...table.filter(r => r.outcome === 'not-converging').map(r => ({ issue: r.issue, reason: 'not-converging', ...DIVERGING[r.issue], cont: slimCont(DIVERGING[r.issue].cont) })), ...cycle.map(n => ({ issue: n, reason: 'cycle' })), ...unrelated.map(n => ({ issue: n, reason: 'unrelated', ...UNRELATED[n], cont: slimCont(UNRELATED[n].cont) })), ...conflicted.map(n => ({ issue: n, reason: 'rules-conflict', ...RULES_CONFLICT[n], cont: slimCont(RULES_CONFLICT[n].cont) })), ...LAND_OA],
   relaunch: open.length ? relaunchArgs() : null,
   ...(breaker ? { breaker } : {}),
 }

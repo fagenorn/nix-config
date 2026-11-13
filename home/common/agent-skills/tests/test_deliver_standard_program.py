@@ -1904,6 +1904,368 @@ class PlanRulesTest(unittest.TestCase):
                 self.assertNotIn(line.split("** ", 1)[1][:40], source)
 
 
+class PlanRuleMessagesTest(unittest.TestCase):
+    """#988: a program rule message names every way out, and a minor finding on a blocked criterion reaches the rules revise."""
+
+    CAPPED = dict(PLAN["acceptance"][0], id="AC5", text="the evaluation costs at most $5", metric=True)
+    HELD = criterion(EVIDENCE, id="AC5", text="the evaluation costs at most $5", metric=True, verify_ac="AC5", verify_mode="observe")
+    BETTER = "label AC5 plain code and describe the bound as the cap AC2 enforces"
+    HUMAN_WAYS = ("name the one of senses, hands, credentials, money, taste that applies", "make the criterion code or evidence")
+    CODE_WAY = "make it a code criterion when a test, CI or a local evaluation shows it before merge (R1)"
+    # Each program message: the row of PlanRulesTest.ROWS it answers, then every way out it must name.
+    WAYS = (
+        (0, ("make it a code criterion, graded at ship", "trigger the check on that")),
+        (1, ("drop the post-merge ask", "keep a human check only for")),
+        (2, HUMAN_WAYS),
+        (3, HUMAN_WAYS),
+        (4, ("add one", CODE_WAY)),
+        (7, ("a committed script or a probe", CODE_WAY)),
+        (8, ("set its ac and kind to this criterion's",)),
+    )
+
+    @staticmethod
+    def program_findings(bad):
+        plan = with_criteria(bad)
+        result, _ = run(replies={"plan": plan, "plan-revise": plan, "plan-rules-revise": plan})
+        return [r["summary"] for r in result["rules"] if r.get("ac") == bad["id"]]
+
+    @staticmethod
+    def review(*findings):
+        return {"verdict": "findings" if findings else "pass", "findings": list(findings)}
+
+    @staticmethod
+    def finding(severity, ac=None, summary="s", rule="R5"):
+        return dict({"severity": severity, "rule": rule, "summary": summary}, **({} if ac is None else {"ac": ac}))
+
+    def test_the_r5_message_names_both_ways_out(self):
+        for bad in (self.CAPPED, criterion(EVIDENCE, metric=True), criterion(HUMAN, metric=True)):
+            with self.subTest(kind=bad["kind"]):
+                (summary,) = [s for s in self.program_findings(bad) if s.startswith("R5 ")]
+                self.assertIn("an evidence check with mode observe", summary)
+                self.assertIn(f"or drop metric and {self.CODE_WAY}", summary)
+        (summary,) = [s for s in self.program_findings(criterion(NOTE, metric=True)) if s.startswith("R5 ")]
+        self.assertIn("drop metric (R9)", summary)
+        self.assertIn("make it an evidence check with mode observe", summary)
+
+    def test_every_other_program_rule_message_names_its_ways_out(self):
+        for index, ways in self.WAYS:
+            rule, bad = PlanRulesTest.ROWS[index]
+            with self.subTest(row=index, rule=rule):
+                summaries = [s for s in self.program_findings(bad) if s.startswith(f"{rule} ")]
+                self.assertTrue(summaries)
+                for way in ways:
+                    self.assertTrue(any(way in s for s in summaries), (way, summaries))
+        for _, bad in PlanRulesTest.NOTE_ROWS:
+            with self.subTest(note=sorted(bad)):
+                (summary,) = self.program_findings(bad)
+                self.assertIn("drop them", summary)
+                self.assertIn("make the criterion evidence (R4)", summary)
+
+    def test_the_rules_review_is_asked_for_the_criterion_id(self):
+        plan = with_criteria(self.CAPPED)
+        _, calls = run(replies={"plan": plan, "plan-revise": plan, "plan-rules-revise": plan})
+        self.assertIn("the criterion's id in its ac", prompt(calls, "plan-rules-review"))
+        item = schema_of(calls, "plan-rules-review")["properties"]["findings"]["items"]
+        self.assertEqual(item["properties"]["ac"], {"type": "string"})
+        self.assertNotIn("ac", item["required"])
+
+    def test_a_minor_finding_on_a_criterion_the_program_blocks_reaches_the_rules_revise(self):
+        plan = with_criteria(self.CAPPED)
+        for ac in ("AC5", "ac5", " Ac 5 "):
+            with self.subTest(ac=ac):
+                _, calls = run(replies={"plan": plan, "plan-revise": plan, "plan-rules-revise": plan,
+                                        "plan-rules-review": self.review(self.finding("minor", ac, self.BETTER))})
+                revise = prompt(calls, "plan-rules-revise")
+                self.assertIn("also noted", revise)
+                self.assertIn(self.BETTER, revise)
+                self.assertLess(revise.index('"summary":"R5 (AC5)'), revise.index(self.BETTER))
+
+    def test_a_minor_finding_on_a_criterion_the_reviewer_blocks_reaches_the_rules_revise(self):
+        plan = with_criteria(HUMAN)
+        rereview = self.review(self.finding("important", "AC3", "not a human check", "R3"), self.finding("minor", "ac3", self.BETTER, "R3"))
+        _, calls = run(replies={"plan": plan, "plan-revise": plan, "plan-rules-revise": plan,
+                                "plan-review": PlanRulesTest.RULE_FINDING, "plan-rules-review": rereview})
+        self.assertIn(self.BETTER, prompt(calls, "plan-rules-revise"))
+
+    def test_a_minor_finding_on_another_criterion_neither_travels_nor_blocks(self):
+        plan = with_criteria(self.CAPPED)
+        for name, minor in (("other", self.finding("minor", "AC1", self.BETTER)), ("no-id", self.finding("minor", None, self.BETTER)),
+                            ("in-prose", self.finding("minor", None, f"AC5: {self.BETTER}"))):
+            with self.subTest(minor=name):
+                result, calls = run(replies={"plan": plan, "plan-revise": plan, "plan-rules-revise": plan,
+                                             "plan-rules-review": self.review(minor)})
+                revise = prompt(calls, "plan-rules-revise")
+                self.assertNotIn("also noted", revise)
+                self.assertNotIn(self.BETTER, revise)
+                self.assertEqual([r["severity"] for r in result["rules"]], ["important"])
+                self.assertNotIn("noted", result["cont"]["plan_findings"])
+        # With nothing blocking, a minor finding that names a criterion starts no rules revise and stops nothing.
+        clean = with_criteria(HUMAN)
+        result, calls = run(replies={"plan": clean, "plan-revise": clean, "plan-review": PlanRulesTest.RULE_FINDING,
+                                     "plan-rules-review": self.review(self.finding("minor", "AC3", self.BETTER))},
+                            patch={"close-out": {"issue_state": "OPEN"}})
+        self.assertNotIn("plan-rules-revise", labels(calls))
+        self.assertIn("impl-1", labels(calls))
+        self.assertNotEqual(result["stage"], "plan-review")
+
+    def chain(self):
+        # nodocom issue 2215: the revise labels AC5 code with a metric, the program reports R5, the rules review gives the right
+        # fix as a minor finding, the rules revise makes AC5 an observed hold, and the second rules review reports R1.
+        plan = with_criteria(self.CAPPED)
+        first = self.review(self.finding("minor", "AC5", self.BETTER))
+        second = self.review(self.finding("important", "AC5", "a local evaluation is a code criterion", "R1"),
+                             self.finding("minor", "AC5", self.BETTER, "R1"))
+        return run(replies={"plan": plan, "plan-revise": plan, "plan-rules-revise": with_criteria(self.HELD),
+                            "plan-rules-review": [first, second]})
+
+    def test_the_2215_chain_hands_the_revise_the_minor_finding(self):
+        result, calls = self.chain()
+        names = labels(calls)
+        self.assertEqual((names.count("plan-revise"), names.count("plan-rules-revise"), names.count("plan-rules-review")), (1, 1, 2))
+        revise = prompt(calls, "plan-rules-revise")
+        self.assertIn('"summary":"R5 (AC5): metric is set', revise)
+        self.assertIn("drop metric and make it a code criterion", revise)
+        self.assertIn(self.BETTER, revise)
+        # The noted finding is context only: the stop lists the one blocking finding and still allows one more rules revise.
+        self.assertEqual(result["stage"], "plan-review")
+        self.assertEqual([(r["rule"], r["severity"]) for r in result["rules"]], [("R1", "important")])
+        self.assertIn("1 finding(s)", result["reason"])
+        kept = result["cont"]["plan_findings"]
+        self.assertEqual(kept["rounds"], 1)
+        self.assertEqual([(n["severity"], n["ac"]) for n in kept["noted"]], [("minor", "AC5")])
+
+    def test_a_resumed_rules_revise_gets_the_kept_minor_finding(self):
+        first, _ = self.chain()
+        fixed = with_criteria(dict(self.CAPPED, metric=False))
+        _, calls = run(args=dict(ARGS, cont=first["cont"]), replies={"plan-rules-revise": fixed},
+                       patch={"close-out": {"issue_state": "OPEN"}})
+        revise = prompt(calls, "plan-rules-revise")
+        self.assertIn('"rule":"R1"', revise)
+        self.assertIn(self.BETTER, revise)
+        self.assertIn("impl-1", labels(calls))
+        # A kept note that matches no blocking criterion, or is not minor, is not passed on.
+        cont = json.loads(json.dumps(first["cont"]))
+        cont["plan_findings"]["noted"] = [self.finding("minor", "AC1", "stray-note"), self.finding("important", "AC5", "loud-note")]
+        _, calls = run(args=dict(ARGS, cont=cont), replies={"plan-rules-revise": fixed}, patch={"close-out": {"issue_state": "OPEN"}})
+        revise = prompt(calls, "plan-rules-revise")
+        self.assertNotIn("stray-note", revise)
+        self.assertNotIn("loud-note", revise)
+
+    def test_a_bound_a_pre_merge_run_enforces_is_a_code_criterion_with_no_metric(self):
+        """#988 (a): the planner sets metric only on an observed evidence criterion, so R1 and R5 cannot both fire on the correct form."""
+        bound = dict(self.CAPPED, metric=False)
+        _, calls = run(replies={"plan": with_criteria(bound)})
+        text = prompt(calls, "plan")
+        metric = text[text.index("set metric true"):]
+        metric = metric[:metric.index(". ")]
+        self.assertIn("set metric true only on an evidence criterion, never on a note (R9: ", metric)
+        self.assertIn("mode observe (R5)", metric)
+        self.assertIn("a code criterion with metric false (R1)", metric)
+        self.assertNotIn("of a code, evidence or human criterion", text)
+        self.assertNotIn("plan-revise", labels(calls))
+        self.assertIn("impl-1", labels(calls))
+        (r5,) = [line for line in RULES_FILE.read_text(encoding="utf-8").splitlines() if line.startswith("- **R5.")]
+        self.assertIn("that only a deploy or observation over time shows is a check with `mode: observe`", r5)
+        self.assertIn("is not a metric: it is part of its `code` criterion (R1)", r5)
+
+    def test_a_criterion_two_rules_pull_apart_stops_as_an_owner_decision(self):
+        """#988 (b): the stop names both rules and the criterion, before anything the cap could cut."""
+        result, _ = self.chain()
+        self.assertEqual(result["conflict"], {"ac": "AC5", "rules": ["R5", "R1"], "revises_left": 1})
+        self.assertTrue(result["reason"].startswith("plan-review: the acceptance rules R5 and R1 conflict for AC5: "), result["reason"])
+        self.assertIn("an owner decision on how AC5 is classified is the expected way out: "
+                      "a relaunch without one gets the one rules revise left", result["reason"])
+        # With no revise left the plan is dropped, and the reason says that instead.
+        dropped, _ = self.relaunched()
+        self.assertEqual(dropped["conflict"], {"ac": "AC5", "rules": ["R1", "R5"], "revises_left": 0})
+        self.assertIn("the plan was dropped, and a relaunch without one plans again", dropped["reason"])
+        self.assertNotIn("rules revise left", dropped["reason"])
+
+    def test_a_mechanical_survivor_is_not_a_conflict(self):
+        """#988 (b): only a swap between classification rules is a conflict; the rest stays a plain plan-review stop."""
+        plan = with_criteria(HUMAN)
+        r3 = self.review(self.finding("important", "AC3", "not a human check", "R3"))
+        cases = (
+            ("same rule survives", r3, self.finding("important", "AC3", "not a human check", "R3")),
+            ("R3 then R4", r3, self.finding("important", "AC3", "the verify block is wrong", "R4")),
+            ("R4 then R1", self.review(self.finding("important", "AC3", "no block", "R4")), self.finding("important", "AC3", "s", "R1")),
+            ("no id", r3, self.finding("important", None, "s", "R1")),
+            ("another criterion", r3, self.finding("important", "AC1", "s", "R1")),
+        )
+        for name, before, after in cases:
+            with self.subTest(case=name):
+                result, calls = run(replies={"plan": plan, "plan-revise": plan, "plan-rules-revise": plan, "plan-review": PlanRulesTest.RULE_FINDING,
+                                             "plan-rules-review": [before, self.review(after)]})
+                self.assertEqual(result["stage"], "plan-review")
+                self.assertEqual(labels(calls).count("plan-rules-revise"), 1)
+                self.assertNotIn("conflict", result)
+                self.assertNotIn("conflict", result["reason"])
+                self.assertEqual(result["cont"]["plan_findings"]["rounds"], 1)
+        # The earlier rule still blocking beside the new one is no swap either.
+        both = self.review(self.finding("important", "AC3", "not a human check", "R3"), self.finding("important", "AC3", "s", "R1"))
+        result, _ = run(replies={"plan": plan, "plan-revise": plan, "plan-rules-revise": plan, "plan-review": PlanRulesTest.RULE_FINDING,
+                                 "plan-rules-review": [r3, both]})
+        self.assertNotIn("conflict", result)
+        # R3 gone and R1 new on the same criterion is one.
+        swap = self.review(self.finding("important", "ac3", "s", "R1"))
+        result, _ = run(replies={"plan": plan, "plan-revise": plan, "plan-rules-revise": plan, "plan-review": PlanRulesTest.RULE_FINDING,
+                                 "plan-rules-review": [r3, swap]})
+        self.assertEqual(result["conflict"], {"ac": "ac3", "rules": ["R3", "R1"], "revises_left": 1})
+
+    def test_no_existing_rule_stop_is_a_conflict(self):
+        """#988 review: the rule rows that stop at plan review with their rule left are relaunchable stops, as before."""
+        for rule, bad in PlanRulesTest.ROWS + PlanRulesTest.NOTE_ROWS:
+            with self.subTest(rule=rule, ac=bad["id"]):
+                plan = with_criteria(bad)
+                result, _ = run(replies={"plan": plan, "plan-revise": plan, "plan-rules-revise": plan})
+                self.assertEqual(result["stage"], "plan-review")
+                self.assertNotIn("conflict", result)
+
+    def test_the_notes_and_the_prior_findings_are_bounded(self):
+        plan = with_criteria(self.CAPPED)
+        notes = self.review(*[self.finding("minor", "AC5", f"note-{i}-end") for i in range(10)])
+        _, calls = run(replies={"plan": plan, "plan-revise": plan, "plan-rules-revise": plan, "plan-rules-review": notes})
+        revise = prompt(calls, "plan-rules-revise")
+        self.assertEqual([i for i in range(10) if f"note-{i}-end" in revise], list(range(8)))
+        dropped, _ = self.relaunched()
+        cont = json.loads(json.dumps(dropped["cont"]))
+        cont["prior_findings"] = [self.finding("important", "AC5", f"prior-{i}-end") for i in range(25)]
+        result, calls = run(args=dict(ARGS, cont=cont), replies={"plan-review": None})
+        self.assertEqual([f["summary"] for f in result["cont"]["prior_findings"]], [f"prior-{i}-end" for i in range(20)])
+        self.assertNotIn("prior-20-end", prompt(calls, "plan"))
+
+    def test_only_the_fresh_plan_prompt_shows_the_prior_findings(self):
+        dropped, _ = self.relaunched()
+        earlier = "An earlier plan of this issue was dropped"
+        plan = with_criteria(HUMAN)
+        _, calls = run(args=dict(ARGS, cont=dropped["cont"]),
+                       replies={"plan": plan, "plan-revise": plan, "plan-rules-revise": plan, "plan-review": PlanRulesTest.RULE_FINDING,
+                                "plan-rules-review": PlanRulesTest.RULE_FINDING})
+        self.assertIn(earlier, prompt(calls, "plan"))
+        for label in ("plan-revise", "plan-rules-revise"):
+            self.assertNotIn(earlier, prompt(calls, label), label)
+        wrong = bplan([dict(BR, name="dev")])
+        _, calls = run(args=dict(ARGS, cont=dropped["cont"]), replies={"plan": wrong, "plan-branch-revise": wrong})
+        self.assertIn(earlier, prompt(calls, "plan"))
+        self.assertNotIn(earlier, prompt(calls, "plan-branch-revise"))
+
+    def test_the_rules_review_reads_the_owner_decisions(self):
+        first, _ = self.chain()
+        decision = "D: AC5 is a code criterion and the 5 USD bound is the cap AC2 enforces."
+        _, calls = run(args=dict(ARGS, cont=first["cont"], decisions=decision), replies={"plan-rules-revise": with_criteria(self.CAPPED)})
+        self.assertIn(decision, prompt(calls, "plan-rules-review"))
+        _, calls = run(replies={"plan": with_criteria(self.CAPPED)})
+        self.assertNotIn("owner's decisions", prompt(calls, "plan-rules-review"))
+
+    def test_the_command_message_lists_no_empty_id_list(self):
+        outside = criterion(EVIDENCE, verify_run={"command": "smoke"})
+        plan = with_criteria(outside)
+        result, _ = run(replies={"plan": plan, "plan-revise": plan, "plan-rules-revise": plan}, patch={"setup": {"verification": []}})
+        (summary,) = [r["summary"] for r in result["rules"] if "unattended command" in r["summary"]]
+        self.assertIn("use a committed script or a probe", summary)
+        self.assertNotIn("[]", summary)
+        (summary,) = [s for s in self.program_findings(outside) if "unattended command" in s]
+        self.assertIn('use one of ["build"], a committed script or a probe', summary)
+
+    def test_a_criterion_that_only_restates_the_declared_verification_is_refused(self):
+        """#993: the verify step proves it, so the program asks for it to be dropped; anything naming a test of its own passes."""
+        setup = {"setup": {"verification": [{"id": "lint", "argv": ["devenv", "tasks", "run", "nodo:lint"], "cwd": "."},
+                                            {"id": "test", "argv": ["devenv", "tasks", "run", "nodo:test:fast"], "cwd": "."}]}}
+        for text in ("`nodo:lint` and `nodo:test:fast` pass at the branch head", "Lint and test pass.", "devenv tasks run nodo:lint exits 0"):
+            with self.subTest(text=text):
+                plan = with_criteria({"id": "AC6", "text": text, "kind": "code"})
+                result, calls = run(replies={"plan": plan, "plan-revise": plan, "plan-rules-revise": plan}, patch=setup)
+                self.assertEqual(result["stage"], "plan-review")
+                (found,) = result["rules"]
+                self.assertEqual((found["rule"], found["ac"], found["severity"]), ("verify", "AC6", "important"))
+                self.assertIn("only restates the declared verification", found["summary"])
+                self.assertIn("drop the criterion", found["summary"])
+                self.assertEqual(labels(calls).count("plan-rules-revise"), 1)
+                self.assertIn("drop the criterion", prompt(calls, "plan-rules-revise"))
+        for text in ("the lint rule for unused imports passes on the new module", "test_parser_rejects_empty_input passes",
+                     "the suite passes at the branch head", "works"):
+            with self.subTest(kept=text):
+                plan = with_criteria({"id": "AC6", "text": text, "kind": "code"})
+                _, calls = run(replies={"plan": plan}, patch=dict(setup, **{"close-out": {"issue_state": "OPEN"}}))
+                self.assertNotIn("plan-revise", labels(calls))
+        _, calls = run()
+        self.assertIn("Return no criterion that only restates a declared verification command passing", prompt(calls, "plan"))
+        # A plan whose every criterion restates the verification keeps them: dropping them would leave no criterion and no plan.
+        restated = [{"id": "AC1", "text": "nodo:lint passes", "kind": "code"}, {"id": "AC2", "text": "test passes at the branch head", "kind": "code"}]
+        for name, acceptance in (("sole", restated[:1]), ("all", restated)):
+            with self.subTest(only=name):
+                result, calls = run(replies={"plan": dict(PLAN, acceptance=acceptance)}, patch=setup)
+                self.assertNotIn("plan-revise", labels(calls))
+                self.assertNotIn("plan-rules-revise", labels(calls))
+                self.assertIn("impl-1", labels(calls))
+                self.assertNotIn(result["stage"], ("plan", "plan-review"))
+
+    def test_no_final_review_is_asked_to_run_the_declared_suite(self):
+        """#993: the chunk reviews and the integration review leave the declared verification to the verify step."""
+        owned = "The verify step runs the declared verification: run only the targeted tests a finding needs, never the whole suite."
+        _, calls = run(replies={"plan": dict(PLAN, tasks=tasks(4))})
+        for label in ("final-1", "final-2", "final-integration"):
+            self.assertEqual(prompt(calls, label).count(owned), 1, label)
+        _, calls = run()
+        self.assertEqual(prompt(calls, "final-1").count(owned), 1)
+        self.assertEqual(PROGRAM.read_text(encoding="utf-8").count(owned), 1)
+
+    def relaunched(self):
+        # The relaunch of 2215: the kept plan's rules revise makes AC5 code but leaves metric set, so the program reports R5 again.
+        first, _ = self.chain()
+        return run(args=dict(ARGS, cont=first["cont"]), replies={"plan-rules-revise": with_criteria(self.CAPPED)})
+
+    def test_the_findings_of_a_dropped_plan_survive_until_a_plan_is_accepted(self):
+        """#988 (c): the second failed rules revise drops the plan; what was found on it reaches the next planner."""
+        dropped, _ = self.relaunched()
+        self.assertEqual(dropped["stage"], "plan-review")
+        self.assertIsNone(dropped["cont"]["plan"])
+        self.assertNotIn("plan_findings", dropped["cont"])
+        prior = dropped["cont"]["prior_findings"]
+        self.assertEqual([(f["rule"], f["ac"]) for f in prior], [("R5", "AC5"), ("R1", "AC5")])
+        self.assertTrue(all(f["severity"] == "important" for f in prior))
+        # A stop of the run that plans again, before any plan is accepted, still carries them.
+        asked, calls = run(args=dict(ARGS, cont=dropped["cont"]),
+                           replies={"plan": {"status": "needs_user", "questions": [{"question": "q", "options": ["a b c."]}]}})
+        text = prompt(calls, "plan")
+        self.assertIn("An earlier plan of this issue was dropped at plan review", text)
+        self.assertIn("a local evaluation is a code criterion", text)
+        self.assertIn('"summary":"R5 (AC5): metric is set', text)
+        self.assertEqual(asked["stage"], "plan")
+        self.assertEqual(asked["cont"]["prior_findings"], prior)
+        again, _ = run(args=dict(ARGS, cont=asked["cont"]), replies={"plan-review": None})
+        self.assertEqual(again["stage"], "plan-review")
+        self.assertEqual(again["cont"]["prior_findings"], prior)
+        # A plan that passes review ends the carry, and a first run's prompt never mentions an earlier plan.
+        done, calls = run(args=dict(ARGS, cont=again["cont"]), patch={"close-out": {"issue_state": "OPEN"}})
+        self.assertIn("impl-1", labels(calls))
+        self.assertNotIn("prior_findings", done.get("cont") or {})
+        _, calls = run()
+        self.assertNotIn("An earlier plan", prompt(calls, "plan"))
+
+    def test_a_revise_that_drops_the_plan_keeps_what_its_review_found(self):
+        """#988 (c): a revise that comes back as questions drops the plan; the findings it was fixing are not lost."""
+        ask = {"status": "needs_user", "questions": [{"question": "q", "options": ["a b c."]}]}
+        plan = with_criteria(HUMAN)
+        for label in ("plan-revise", "plan-rules-revise"):
+            with self.subTest(label=label):
+                replies = {"plan": plan, "plan-revise": plan, "plan-review": PlanRulesTest.RULE_FINDING,
+                           "plan-rules-review": PlanRulesTest.RULE_FINDING}
+                result, _ = run(replies=dict(replies, **{label: ask}))
+                self.assertEqual(result["stage"], "plan")
+                self.assertIsNone(result["cont"]["plan"])
+                self.assertEqual([f["rule"] for f in result["cont"]["prior_findings"]], ["R2"])
+        first, _ = PlanRulesTest().keep_stop()
+        result, _ = run(args=dict(ARGS, cont=first["cont"]), replies={"plan-rules-revise": ask})
+        self.assertIsNone(result["cont"]["plan"])
+        self.assertEqual([f["rule"] for f in result["cont"]["prior_findings"]], ["R2"])
+        # A kept plan no rules revise may settle is planned again with its findings in the prompt.
+        bare = {"verdict": "findings", "findings": [{"severity": "important", "summary": "interface-mismatch-988"}]}
+        first, _ = run(replies={"plan": plan, "plan-revise": with_criteria(HUMAN, EVIDENCE), "plan-review": bare, "plan-rules-review": None})
+        _, calls = run(args=dict(ARGS, cont=first["cont"]))
+        self.assertIn("interface-mismatch-988", prompt(calls, "plan"))
+
+
 class PlanTurnStructureTest(unittest.TestCase):
     """#819: the planner writes its files in one message, revises with Edit, and self-checks three finding classes."""
 

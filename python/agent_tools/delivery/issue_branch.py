@@ -17,6 +17,11 @@ same-repository PR, else the newest commit. `worktree_path` is
 Exit 2 refuses (`resolver_refused`, `tracker_unsupported`, `derived_is_protected`);
 exit 1 is a `forge_failed` or `git_failed` failure. Both write
 `{"error": {code, detail}}` to stderr.
+
+A fetch that fails on the network (issue 999: unreachable, timed out, reset, an
+unresolved host, an early EOF, a hung-up remote) is run once more after
+`FETCH_RETRY_PAUSE` seconds. When it fails again, and when the fetch times out, the
+`git_failed` error carries `transient: true` beside `code` and `detail`.
 """
 
 from __future__ import annotations
@@ -27,6 +32,7 @@ import os
 import re
 import subprocess
 import sys
+import time
 import unicodedata
 from collections.abc import Collection, Mapping
 
@@ -39,17 +45,21 @@ SLUG_CHARS = 40
 EMPTY_SLUG = "untitled"
 SLUG_CLASS = "[a-z0-9][a-z0-9-]*"
 GIT_TIMEOUT = 120
+FETCH_RETRY_PAUSE = 2
+NETWORK_FAILURES = ("network is unreachable", "connection timed out", "connection reset",
+                    "could not resolve host", "early eof", "remote end hung up")
 PLACEHOLDERS = re.compile(r"(<num>|<slug>)")
 
 
 class BranchRefusal(Exception):
     """One refusal or failure: a closed code, its detail and the exit code (2 refuse, 1 fail)."""
 
-    def __init__(self, code: str, detail: object, exit_code: int) -> None:
+    def __init__(self, code: str, detail: object, exit_code: int, *, transient: bool = False) -> None:
         super().__init__(code)
         self.code = code
         self.detail = detail
         self.exit_code = exit_code
+        self.transient = transient
 
 
 def title_slug(title: str) -> str:
@@ -103,10 +113,32 @@ def _git(root: str, *args: str) -> str:
         done = subprocess.run(["git", "-C", root, *args], capture_output=True, text=True,
                               timeout=GIT_TIMEOUT, check=False)
     except subprocess.TimeoutExpired:
-        raise BranchRefusal("git_failed", "timeout", 1) from None
+        raise BranchRefusal("git_failed", "timeout", 1, transient=args[:1] == ("fetch",)) from None
     if done.returncode != 0:
         raise BranchRefusal("git_failed", done.stderr.strip(), 1)
     return done.stdout
+
+
+def network_failure(detail: object) -> bool:
+    """True when git's stderr names a failure of the network rather than of the repository."""
+    return isinstance(detail, str) and any(marker in detail.lower() for marker in NETWORK_FAILURES)
+
+
+def fetch_origin(root: str) -> None:
+    """`git fetch origin`, run once more after a pause when the network failed it."""
+    try:
+        _git(root, "fetch", "--quiet", "origin")
+    except BranchRefusal as refusal:
+        if not network_failure(refusal.detail):
+            raise
+    else:
+        return
+    time.sleep(FETCH_RETRY_PAUSE)
+    try:
+        _git(root, "fetch", "--quiet", "origin")
+    except BranchRefusal as refusal:
+        refusal.transient = refusal.transient or network_failure(refusal.detail)
+        raise
 
 
 def ref_dates(root: str) -> dict[str, int]:
@@ -151,7 +183,7 @@ def derive(repo_root: str, issue: int) -> dict:
         if derived in excluded:
             raise BranchRefusal("derived_is_protected", derived, 2)
         root = snapshot["project"]["root"]
-        _git(root, "fetch", "--quiet", "origin")
+        fetch_origin(root)
         refs = ref_dates(root)
         pr_heads = {b: v["number"] for b, v in worktree_forge.open_pull_heads(slug).items()}
     except forge_api.ForgeError as error:
@@ -185,8 +217,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         value = derive(args.repo_root, args.issue)
     except BranchRefusal as refusal:
-        sys.stderr.write(json.dumps({"error": {"code": refusal.code, "detail": refusal.detail}},
-                                    sort_keys=True, separators=(",", ":")) + "\n")
+        error = {"code": refusal.code, "detail": refusal.detail}
+        if refusal.transient:
+            error["transient"] = True
+        sys.stderr.write(json.dumps({"error": error}, sort_keys=True, separators=(",", ":")) + "\n")
         return refusal.exit_code
     sys.stdout.write(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
     return 0
