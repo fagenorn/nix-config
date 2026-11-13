@@ -123,6 +123,10 @@ def untyped(calls):
             if c.get("kind", "agent") == "agent" and c["agentType"] not in PROGRAM_AGENT_TYPES]
 
 
+class Raw(dict):
+    """A fixture reply named() sends exactly as written: its findings get no default subject."""
+
+
 def named(fixtures):
     """A copy of scenario replies or patches whose blocking fixture findings name a subject (#992).
 
@@ -134,6 +138,8 @@ def named(fixtures):
             return [fix(v) for v in value]
         if not isinstance(value, dict):
             return value
+        if isinstance(value, Raw):
+            return dict(value)
         out = {k: fix(v) for k, v in value.items()}
         if isinstance(out.get("findings"), list):
             out["findings"] = [dict(f, failing_input="x") if isinstance(f, dict) and f.get("severity") != "minor"
@@ -8388,6 +8394,8 @@ INCOMPLETE = {"verdict": "incomplete", "findings": []}
 # What a reply sent beside a pending lookup held (#992): a blocking finding that names neither a file nor a failing input.
 PLACEHOLDER = {"verdict": "findings", "findings": [{"severity": "important", "file": "", "summary": "Placeholder emitted to satisfy the schema"}]}
 REAL = {"verdict": "findings", "findings": [{"severity": "important", "file": "src/a.py", "summary": "off by one"}]}
+# The exact #992 shape: no file key and no failing_input key at all. Raw, so named() gives it no subject.
+KEYLESS = Raw({"verdict": "findings", "findings": [{"severity": "important", "summary": "Placeholder emitted to satisfy the schema"}]})
 NO_REVIEW = ": the reply is no review ("
 LOST_REVIEW = ": the second reply is no review either; the review is lost"
 
@@ -8446,6 +8454,34 @@ class StructuredReplyTest(unittest.TestCase):
                 self.assertTrue(again["prompt"].endswith("Finish the review before you reply.\n" + REPLY_ALONE))
                 self.assertEqual(len([l for l in out["logs"] if l.startswith("review-1" + NO_REVIEW)]), 1)
                 self.assertNotIn("dead_agents", result)
+
+    def test_a_finding_with_no_file_key_and_no_failing_input_key_is_no_review(self):
+        self.assertEqual(named({"review-1": KEYLESS})["review-1"]["findings"], [{"severity": "important", "summary": "Placeholder emitted to satisfy the schema"}])
+        out = run_out(replies={"review-1": KEYLESS})
+        names = labels(out["calls"])
+        self.assertEqual(names[names.index("review-1"):names.index("review-1") + 3], ["review-1", "review-1-again", "renew-final-review"])
+        self.assertNotIn("fix-1-1", names)
+        self.assertEqual(out["result"]["stage"], "done")
+        out = run_out(replies={"review-1": KEYLESS, "review-1-again": KEYLESS})
+        result, names = out["result"], labels(out["calls"])
+        self.assertEqual(names[-2:], ["review-1", "review-1-again"])
+        self.assertEqual((result["stage"], result["lost_reviews"]), ("task-review", ["review-1"]))
+        self.assertIsNone(result["review"])
+        self.assertNotIn("dead_agents", result)
+        self.assertIn("review-1" + LOST_REVIEW, out["logs"])
+
+    def test_a_criterion_the_program_found_ungraded_names_its_subject(self):
+        # The direct re-review restates the program's own finding: with its subject it is a usable review, with it stripped it is not.
+        ungraded = {"verdict": "pass", "findings": [], "acceptance": [{"id": "AC1", "met": False, "evidence": ""}]}
+        _, calls = run(args=DIRECT, replies={"direct-review": ungraded})
+        sent = prompt(calls, "direct-rereview")
+        made = json.loads(sent[sent.index("Findings: [") + len("Findings: "):sent.index("]", sent.index("Findings: [")) + 1])
+        self.assertEqual((len(made), made[0]["failing_input"]), (1, "criterion AC1"))
+        out = run_out(args=DIRECT, replies={"direct-review": ungraded, "direct-rereview": Raw({"verdict": "findings", "findings": made})})
+        self.assertFalse([n for n in labels(out["calls"]) if n.endswith("-again")])
+        bare = [{k: v for k, v in made[0].items() if k != "failing_input"}]
+        out = run_out(args=DIRECT, replies={"direct-review": ungraded, "direct-rereview": Raw({"verdict": "findings", "findings": bare})})
+        self.assertIn("direct-rereview-again", labels(out["calls"]))
 
     def test_the_rerun_s_real_finding_gets_the_fix_round(self):
         result, calls = run(replies={"review-1": PLACEHOLDER, "review-1-again": REAL})

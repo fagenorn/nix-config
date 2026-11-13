@@ -40,6 +40,10 @@ def untyped(calls):
             if c.get("kind", "agent") == "agent" and c["agentType"] not in PROGRAM_AGENT_TYPES]
 
 
+class Raw(dict):
+    """A fixture reply named() sends exactly as written: its findings get no default subject."""
+
+
 def named(fixtures):
     """A copy of scenario replies or patches whose blocking fixture findings name a subject (#992).
 
@@ -51,6 +55,8 @@ def named(fixtures):
             return [fix(v) for v in value]
         if not isinstance(value, dict):
             return value
+        if isinstance(value, Raw):
+            return dict(value)
         out = {k: fix(v) for k, v in value.items()}
         if isinstance(out.get("findings"), list):
             out["findings"] = [dict(f, failing_input="x") if isinstance(f, dict) and f.get("severity") != "minor"
@@ -6094,6 +6100,8 @@ INCOMPLETE = {"verdict": "incomplete", "findings": []}
 # What a reply sent beside a pending lookup held (#992): a blocking finding that names neither a file nor a failing input.
 PLACEHOLDER = {"verdict": "findings", "findings": [{"severity": "important", "file": "", "summary": "Placeholder emitted to satisfy the schema"}]}
 REAL = {"verdict": "findings", "findings": [{"severity": "important", "file": "x.py", "summary": "dropped a guard"}]}
+# The exact #992 shape: no file key and no failing_input key at all. Raw, so named() gives it no subject.
+KEYLESS = Raw({"verdict": "findings", "findings": [{"severity": "important", "summary": "Placeholder emitted to satisfy the schema"}]})
 NO_REVIEW = ": the reply is no review ("
 LOST_REVIEW = ": the second reply is no review either; the review is lost"
 
@@ -6168,6 +6176,35 @@ class StructuredReplyTest(unittest.TestCase):
                 self.assertNotIn("fix", got)
                 self.assertEqual(out["result"]["stage"], "done")
                 self.assertIn(self.REVIEW + LOST_REVIEW, out["logs"])
+
+    def test_a_finding_with_no_file_key_and_no_failing_input_key_is_no_review(self):
+        self.assertEqual(named({self.REVIEW: KEYLESS})[self.REVIEW]["findings"], [{"severity": "important", "summary": "Placeholder emitted to satisfy the schema"}])
+        out = self.land(**{self.REVIEW: KEYLESS})
+        names = land_labels(out["calls"])
+        self.assertEqual(names[names.index(self.REVIEW):names.index(self.REVIEW) + 2], [self.REVIEW, self.REVIEW + "-again"])
+        self.assertNotIn("land-sync-fix-1-1", names)
+        self.assertEqual(row(out["result"], 1)["outcome"], "landed")
+        out = self.land(**{self.REVIEW: KEYLESS, self.REVIEW + "-again": KEYLESS})
+        got = row(out["result"], 1)
+        self.assertEqual((got["outcome"], got["lost_reviews"]), ("sync-review", [self.REVIEW]))
+        names = land_labels(out["calls"])
+        self.assertEqual(names[names.index(self.REVIEW):], [self.REVIEW, self.REVIEW + "-again"])
+        self.assertIn(self.REVIEW + LOST_REVIEW, out["logs"])
+
+    def test_a_child_s_lost_reviews_reach_its_row(self):
+        lost = {"stage": "task-review", "task": {"n": 1}, "reason": "task-review: task 1 the reviewer answered twice with no usable review",
+                "lost_reviews": ["review-1"], "cont": {"setup": {}}}
+        result, _, _ = run(children={"1": lost})
+        got = row(result, 1)
+        self.assertEqual((got["outcome"], got["stage"], got["lost_reviews"], got["reason"]), ("stopped", "task-review", ["review-1"], lost["reason"]))
+        # No dead agent: the row names none, and a stop without the list carries no lost_reviews.
+        self.assertNotIn("dead_agents", got)
+        result, _, _ = run(children={"1": {k: v for k, v in lost.items() if k != "lost_reviews"}})
+        self.assertNotIn("lost_reviews", row(result, 1))
+        # A stop that names both keeps both.
+        result, _, _ = run(children={"1": dict(lost, dead_agents=["verify"])})
+        got = row(result, 1)
+        self.assertEqual((got["dead_agents"], got["lost_reviews"]), (["verify"], ["review-1"]))
 
     def test_an_unusable_rereview_reruns_once_and_then_is_a_lost_rereview(self):
         out = self.land(**{self.REVIEW: REAL, self.REREVIEW: PLACEHOLDER})

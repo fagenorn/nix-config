@@ -1115,7 +1115,8 @@ const DIRECT_FINDINGS = { ...GRADED_FINDINGS, properties: { ...GRADED_FINDINGS.p
 const ungradedFindings = (review, criteria) => criteria.filter(a => a.kind === 'code').flatMap(a => {
   const g = (Array.isArray(review.acceptance) ? review.acceptance : []).find(x => x && x.id === a.id)
   if (g && g.met === true && typeof g.evidence === 'string' && g.evidence.trim()) return []
-  return [{ severity: 'important', summary: `Acceptance criterion ${a.id} (${a.text}) is not shown met with evidence: ${g ? (g.met === true ? 'the review gave no evidence' : 'the review graded it unmet') : 'the review did not grade it'}. Assert it with a test, or show the command that proves it.` }]
+  // #992: the criterion is the finding's subject, so a re-review that restates the finding is a usable review.
+  return [{ severity: 'important', failing_input: `criterion ${a.id}`, summary: `Acceptance criterion ${a.id} (${a.text}) is not shown met with evidence: ${g ? (g.met === true ? 'the review gave no evidence' : 'the review graded it unmet') : 'the review did not grade it'}. Assert it with a test, or show the command that proves it.` }]
 })
 // #935: a criterion restating the declared verification had no evidence before verify (the direct lane runs focused tests only), so it stopped the delivery.
 const NO_VERIFY_AC = 'Do not write the declared verification commands as an acceptance criterion: the verify step gates on them.'
