@@ -42,6 +42,9 @@ class ManagerServiceTest(Case):
     def start(self, **kwargs):
         support.write_registry(self.registry, support.entries(2))
         kwargs.setdefault("session_poll_seconds", 3600)
+        if "profile_dirs" not in kwargs:
+            support.sign_in(self.store, "work")
+            kwargs["profile_dirs"] = [support.profile_dir(self.store, "work")]
         return super().start(**kwargs)
 
     def post(self, svc, path, body, **extra):
@@ -610,10 +613,27 @@ class ProfileChoiceServiceTest(ManagerServiceTest):
         again = self.start(profile_dirs=dirs, clock=lambda: now[0], log_clock=stamp)
         self.assertEqual(self.ask(again)[2], b'{"profile":"home"}')
 
-    def test_with_no_sign_in_known_the_route_answers_default(self):
+    def test_with_no_sign_in_known_the_route_answers_null(self):
         dirs = list(self.profiles(work=0, home=0).values())
-        svc = self.start(profile_dirs=dirs, clock=lambda: NOW)
-        self.assertEqual(self.ask(svc)[2], b'{"profile":"default"}')
+        svc = self.start(profile_dirs=dirs, clock=lambda: NOW, choice_file=self.choice)
+        self.assertEqual(self.ask(svc)[::2], (200, b'{"profile":null}'))
+        self.assertFalse(self.choice.exists())
+
+    def test_the_route_never_answers_the_unprofiled_directory(self):
+        home = self.store.parent.parent / "home/.claude"
+        home.mkdir(parents=True)
+        self.seed_readings({"default": self.weekly(0.0)})
+        self.seed_signins(default="signed_in")
+        svc = self.start(profile_dirs=[home], clock=lambda: NOW, choice_file=self.choice)
+        self.assertEqual(self.ask(svc)[::2], (200, b'{"profile":null}'))
+        self.assertFalse(self.choice.exists())
+        work = self.profiles(work=0)["work"]
+        self.seed_readings({"work": self.weekly(0.5)})
+        self.seed_signins(work="signed_in")
+        svc.close()
+        again = self.start(profile_dirs=[home, work], clock=lambda: NOW, choice_file=self.choice)
+        self.assertEqual(self.ask(again)[2], b'{"profile":"work"}')
+        self.assertEqual(self.choice.read_text(), "work\n")
 
     def test_other_methods_on_the_profile_route_are_refused(self):
         svc = self.start()
@@ -740,12 +760,12 @@ class ProfileChoiceServiceTest(ManagerServiceTest):
                                  Path(home) / ".claude-accounts" / "chosen-profile")
 
     def test_when_nothing_can_be_chosen_the_route_answers_null_and_the_file_goes(self):
-        dirs = [support.profile_dir(self.store, "default")]
-        self.seed_readings({"default": self.weekly(0.2)})
-        self.seed_signins(default="signed_out")
+        dirs = [support.profile_dir(self.store, "work")]
+        self.seed_readings({"work": self.weekly(0.2)})
+        self.seed_signins(work="signed_out")
         choice = self.choice
         choice.parent.mkdir(parents=True, exist_ok=True)
-        choice.write_text("default\n")
+        choice.write_text("work\n")
         launches = support.Launches()
         svc = self.start(profile_dirs=dirs, clock=lambda: NOW, choice_file=choice,
                          launcher=launches)

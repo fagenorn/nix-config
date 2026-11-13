@@ -21,6 +21,7 @@ from agent_tools.console.sessions import (
     SEEN,
     Observation,
     SessionState,
+    account_name,
     hook_entry,
     main_checkout,
     own_pid_domain,
@@ -463,6 +464,17 @@ class ProfileTest(unittest.TestCase):
             result = read_session_registry([work, home])
         self.assertEqual(result["s-work"].profile, "work")
         self.assertEqual(result["s-home"].profile, "default")
+
+    def test_an_account_is_a_named_profile_directory(self):
+        for config, name in (("/h/.claude-accounts/profiles/work", "work"),
+                             ("/h/.claude-accounts/profiles/a-1_b", "a-1_b")):
+            with self.subTest(config=config):
+                self.assertEqual(account_name(Path(config)), name)
+        for config in ("/h/.claude", "/h/.claude-accounts/profiles/default",
+                       "/h/.claude-accounts/profiles/Work", "/h/.claude-accounts/profiles/.hidden",
+                       "/h/x/work"):
+            with self.subTest(config=config):
+                self.assertIsNone(account_name(Path(config)))
 
     def test_a_new_session_is_seen_with_its_profile(self):
         obs = Observation("s1", "/srv/p00", 10, "busy", None, None, 5, "work")

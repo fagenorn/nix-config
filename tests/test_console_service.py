@@ -23,7 +23,7 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools.console import console as console_module
-from agent_tools.console import deliveries, digest, probe, service, sessions, signin, sprints
+from agent_tools.console import capacity, deliveries, digest, probe, service, sessions, signin, sprints
 from agent_tools.console import view
 from agent_tools.console.event_log import EventLog
 from agent_tools.console.write_guard import TokenError
@@ -753,9 +753,10 @@ class ReadingsRouteTest(Case):
         self.assertEqual(capacity["resumes_at"], datetime.fromtimestamp(
             RESET, timezone.utc).isoformat())
 
-    def test_the_default_profile_dirs_are_the_base_and_every_profile(self):
+    def test_the_default_profile_dirs_are_every_profile_and_not_the_base(self):
         with tempfile.TemporaryDirectory() as raw:
             home, accounts = Path(raw) / "home", Path(raw) / "accounts"
+            (home / ".claude").mkdir(parents=True)
             (accounts / "profiles/b").mkdir(parents=True)
             (accounts / "profiles/a/sessions").mkdir(parents=True)
             (accounts / "profiles/notes.txt").write_text("x")
@@ -763,14 +764,13 @@ class ReadingsRouteTest(Case):
                                               "CLAUDE_ACCOUNTS_DIR": str(accounts)}):
                 self.assertEqual(
                     service.default_profile_dirs(),
-                    [home / ".claude", accounts / "profiles/a", accounts / "profiles/b"])
+                    [accounts / "profiles/a", accounts / "profiles/b"])
             fallback = home / ".claude-accounts"
             (fallback / "profiles/c").mkdir(parents=True)
             environment = {k: v for k, v in os.environ.items() if k != "CLAUDE_ACCOUNTS_DIR"}
             environment["HOME"] = str(home)
             with mock.patch.dict(os.environ, environment, clear=True):
-                self.assertEqual(service.default_profile_dirs(),
-                                 [home / ".claude", fallback / "profiles/c"])
+                self.assertEqual(service.default_profile_dirs(), [fallback / "profiles/c"])
 
     def test_a_refused_reading_appends_a_limit_stop(self):
         self.arrange()
@@ -1119,6 +1119,57 @@ class SigninServiceTest(Case):
 
     def asks(self, svc):
         return [i["key"] for i in self.view(svc)["inbox"]["open"] if i["reason"] == "signin"]
+
+    def test_the_unprofiled_directory_is_not_an_account_though_it_has_readings(self):
+        home = self.root / "home/.claude"
+        support.write_session(home / "sessions", pid=os.getpid(), session_id="ses-home",
+                              cwd=str(self.proj), status="busy")
+        self.store.parent.mkdir(parents=True, exist_ok=True)
+        log = EventLog(self.store)
+        log.append(capacity.report_entries(
+            capacity.parse_report(json.loads(reading_body(ALLOWED, "acc-0", "ses-0"))),
+            "default"))
+        log.append([signin.entry("default", signin.Status("signed_out", None))])
+        log.close()
+        svc = support.service(
+            self, self.store, self.registry,
+            session_dirs=[home / "sessions", self.work / "sessions"],
+            profile_dirs=[home, self.spare, self.work],
+            clock=lambda: self.now[0], session_poll_seconds=3600)
+        svc.poll_sessions()
+        view = json.loads(svc.view_bytes)
+        self.assertEqual([e["profile"] for e in view["capacity"]["profiles"]],
+                         ["spare", "work"])
+        self.assertEqual(svc.profiles, frozenset({"spare", "work"}))
+        self.assertEqual(self.asks(svc), [])
+        self.assertIn("ses-home", listed(svc))
+        rows = support.log_rows(self.store)
+        self.assertEqual(
+            [json.loads(r[4])["profile"] for r in rows if r[2] == "capacity.reading"],
+            ["default"])
+        self.assertEqual(
+            [json.loads(r[4])["profile"] for r in rows if r[2] == signin.READING],
+            ["default"])
+
+    def test_no_probe_or_sign_in_reading_runs_under_the_unprofiled_directory(self):
+        home = self.root / "home/.claude"
+        home.mkdir(parents=True)
+        read, probed = [], []
+        svc = support.service(
+            self, self.store, self.registry, session_dirs=[self.work / "sessions"],
+            profile_dirs=[home, self.spare, self.work],
+            clock=lambda: self.now[0], session_poll_seconds=3600,
+            signin_reader=lambda one: (read.append(one.profile),
+                                       signin.Status("signed_in", None))[1],
+            prober=lambda one: probed.append(one.profile),
+            probe_dispatch=lambda job: job(), probe_tick_seconds=3600)
+        svc.poll_sessions()
+        self.now[0] = NOW + 30
+        probes = svc.probe_round()
+        self.assertEqual([p.profile for p in probes], ["spare", "work"])
+        self.assertEqual(read, ["spare", "work"])
+        self.assertEqual(probed, ["spare", "work"])
+        self.assertNotIn("default", [row["profile"] for row in self.rows()])
 
     def test_each_round_reads_every_profiles_sign_in_and_logs_only_changes(self):
         self.answers = {"spare": signin.Status("signed_out", None),

@@ -126,8 +126,10 @@ placed that session under a profile, else the profile its account was last attri
 `console: reading_unattributed` and no identifier. No credential file is opened and no subprocess
 started to learn a profile. The attributed reading is appended with its `capacity.stop` when it was
 a refusal, and published. Every poll of the session registry also lists the profile directories
-(`profile_dirs()`, `default_profile_dirs()`: `$HOME/.claude` and each directory of `profiles/` under
-`$CLAUDE_ACCOUNTS_DIR`, else `$HOME/.claude-accounts`; only `is_dir` touches one) so a profile never
+(`profile_dirs()`, `default_profile_dirs()`: each directory of `profiles/` under
+`$CLAUDE_ACCOUNTS_DIR`, else `$HOME/.claude-accounts`; only `is_dir` touches one; only the accounts
+among them count, `sessions.account_name`, so the unprofiled `$HOME/.claude` is never listed, probed,
+read for sign-in or chosen, #1016) so a profile never
 used reads `unknown` and a removed one is no longer listed, and ends by publishing, so a reset that has passed shows within one poll.
 
 Probes (#1009, ADR-console-006): with a `prober` (`probe.prober_for(sys.platform)` from `console.py`;
@@ -805,11 +807,13 @@ def default_session_dirs() -> list[Path]:
 
 
 def default_profile_dirs() -> list[Path]:
-    """Every account's config directory, as `claude-account list` names them: the base and each profile."""
+    """Every account's config directory: each directory of `profiles/`.
+
+    The unprofiled `~/.claude` is not an account (#1016).
+    """
     home = Path.home()
     accounts = os.environ.get("CLAUDE_ACCOUNTS_DIR") or str(home / ".claude-accounts")
-    return [home / ".claude",
-            *sorted(p for p in Path(accounts).glob("profiles/*") if p.is_dir())]
+    return sorted(p for p in Path(accounts).glob("profiles/*") if p.is_dir())
 
 
 def default_choice_file() -> Path:
@@ -3032,8 +3036,9 @@ class ConsoleService:
         self._unreadable.discard("choice")
 
     def _read_profiles(self) -> frozenset[str]:
-        """The profile directories as they are now."""
-        return frozenset(sessions.profile_name(d) for d in self._profile_dirs() if d.is_dir())
+        """The accounts among the profile directories as they are now."""
+        names = (sessions.account_name(d) for d in self._profile_dirs() if d.is_dir())
+        return frozenset(name for name in names if name is not None)
 
     def _warn_once(self, key: str, line: str) -> None:
         """Print `line` unless `key` is already unreadable; `_unreadable` is cleared by a good read."""

@@ -1,7 +1,7 @@
 # ADR-console-023 — A new session's profile is the console's choice, on a route and in a file
 
 - **Status:** accepted
-- **Decided in:** #839, #842, #1011
+- **Decided in:** #839, #842, #1011, #1016
 
 ## Context
 
@@ -9,7 +9,7 @@
 
 ## Decision
 
-**D1. The rule.** A profile has room when its capacity reads ok or reset, unless it is signed out (ADR-console-022): a signed-out profile has no room. Among the profiles with room the choice is the one with the most weekly allowance left, then the most five-hour allowance left, then the smallest name. With no profile known to have room, the choice is the most recently used signed-in profile, its use being the latest log row of any of its sessions; that use is kept after the session leaves and is rebuilt from the log when the console restarts, the retention pass leaving the assignment row a retained row of the session needs. When no listed profile is signed in the choice is `default`, unless `default` itself reads signed out, and then nothing is chosen.
+**D1. The rule.** A profile has room when its capacity reads ok or reset, unless it is signed out (ADR-console-022): a signed-out profile has no room. Among the profiles with room the choice is the one with the most weekly allowance left, then the most five-hour allowance left, then the smallest name. With no profile known to have room, the choice is the most recently used signed-in profile, its use being the latest log row of any of its sessions; that use is kept after the session leaves and is rebuilt from the log when the console restarts, the retention pass leaving the assignment row a retained row of the session needs. When no listed profile has room and none is signed in, nothing is chosen. The unprofiled client directory is not a listed profile (ADR-console-006), so it is never chosen, and a host with no named profile has nothing to choose (#1016).
 
 **D2. The route.** `GET /api/profile` answers `{"profile":"<name>"}`, and `{"profile":null}` when nothing is chosen. It sits behind the loopback check and takes no token, because it changes nothing (ADR-console-008 governs only the page's writes).
 
