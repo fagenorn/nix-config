@@ -177,12 +177,15 @@ request do not undo each other. While nobody is ahead of it the waiter also read
 alone every `FAST_POLL` seconds (20) between two polls and polls at once when it differs from
 what the poll saw, or is free (issue 1018: a poll whose takeover of a closed lock lost to the
 holder's release ends having read the lock free, and a read that only compared would see no
-change until a waiter behind had taken the lock at its grace's end). After a failed poll (D8)
-a waiter that was first in line keeps reading the lock ref so, and a read that fails then
-waits for the next one, so the failed polls keep their 120-second rate. A failed queue read or write (the clock, the listing, the pull request ahead,
-the registration's create or delete, whatever the error) never fails the wait and is no failed
-poll (D8): that poll attempts unordered, as a client before this rule does, at the 120-second
-rate, and answers `position` `null`. The order holds among registered waiters up to the seconds
+change until a waiter behind had taken the lock at its grace's end). After one failed poll
+(D8) a waiter that was first in line keeps reading the lock ref so until its next poll, and
+a read that fails then waits for the next one; after a second failed poll in a row it reads
+nothing between polls, so a forge that stays down, or a lock that is free and cannot be
+written, is polled once early and then at the 120-second rate. A failed queue read or write
+(the clock, the listing, the pull request ahead, the registration's create or delete, whatever
+the error) never fails the wait and is no failed poll (D8): that poll attempts unordered, as a
+client before this rule does, at the 120-second rate, and answers `position` `null`. The
+order holds among registered waiters up to the seconds
 between a waiter's clock read and its registration being listed: two that arrive that close can
 both find themselves first, and then the create decides, as before. A one-shot `acquire` and a
 client that predates this rule register nothing and are not ordered: they take a free lock when
@@ -598,7 +601,7 @@ def wait_acquire(args: Any, node: Callable[[], str],
                 failures += 1
                 if error.code not in ("gh_failed", "gh_timeout") or failures >= FAILED_POLLS:
                     raise
-                first = led  # issue 1018: one failed poll does not blind the first in line for a whole poll
+                first = led and failures == 1  # issue 1018: one fast retry, then the 120-second rate (D8)
             else:
                 failures = 0
                 if outcome.verdict in ("acquired", "already_held", "moved"):

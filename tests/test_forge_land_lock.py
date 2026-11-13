@@ -1878,6 +1878,23 @@ class QueueTest(Base):
             code, out = self.wait(clock)
         self.assertEqual((code, out["verdict"], out["error"], polls), (1, "error", "gh_failed", [0, 20, 140, 260]))
 
+    def test_a_free_lock_that_cannot_be_written_gets_one_fast_retry_then_the_poll_rate(self):
+        """Issue 1018: the lock is free from 40 and every create of it fails. The first in line
+        polls at 40, once more at its next read, and then at the 120-second rate, so the wait
+        does not spend its three failed polls within a minute."""
+        real_create = fm.create_ref
+        creates = []
+
+        def create(slug, ref, sha):
+            if ref == REF:
+                creates.append(clock.now - clock.start)
+                raise fm.ForgeError("gh_failed", "HTTP 502")
+            return real_create(slug, ref, sha)
+        clock = self.clock(lambda elapsed: self.world.set_ref(REF, None) if elapsed == 40 else None)
+        with mock.patch.object(fm, "create_ref", create):
+            code, out = self.wait(clock)
+        self.assertEqual((code, out["verdict"], out["error"], creates), (1, "error", "gh_failed", [40, 60, 180]))
+
     def test_a_dead_first_waiter_is_skipped_after_the_bound(self):
         self.assertEqual(land_lock.QUEUE_LIVE, 390)
         self.register(13, -100, 0)  # never refreshed

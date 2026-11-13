@@ -2000,7 +2000,7 @@ const logWait = (label, lock) => {
 // red check after a sync under the lock is fixed under it.
 // #1018: a check that failed at a head behind its base counts in that read only while another landing holds the lock (one land status
 // read): the branch is then brought up to date before the lock is asked for, and a failure that survives is fixed there too.
-const OWN_RED = (wt, prRef, sha) => `Otherwise, and only when an open PR already existed and was reused (a PR this step opened has no finished check, so skip this read), read the checks of the pushed head once before any lock command: ${UNSET}gh pr view ${prRef} --repo ${SLUG} --json headRefOid,statusCheckRollup, one read, never a watch and never a wait. A head that was just pushed can still show the checks of the head before it, so the read counts only when its headRefOid is ${sha}. Only when it is and a check there has failed (count only the newest run of each check name, the one with the latest startedAt, so a failed attempt whose re-run passed does not count; a check run whose conclusion is FAILURE or TIMED_OUT, or a status whose state is FAILURE or ERROR; a cancelled check does not count), see whether origin/${INT} is an ancestor of HEAD (git -C ${wt} merge-base --is-ancestor origin/${INT} HEAD succeeds). When it is not, the head is behind its base and gets new checks after the sync under the lock, so the failure counts only while another landing holds the lock and this one would wait: read the lock once, run alone and exactly: forge-claim land status --repo ${SLUG} --branch ${INT} --sha ${sha} (a Bash timeout of 20 minutes), and it counts only on the verdict held_by with a lock_sha other than ${sha}. When the failure counts, run no other lock command and wait for no check: return own_red with head (the headRefOid you read), failing (the name of every failed check), details (their links) and behind (true when the head is behind its base, else false), and lock null and checks null, because a later step fixes the branch before the lock is asked for, after it brought a head that is behind up to date. In every other case (another head, a head behind its base while no other landing holds the lock, no failed check, checks still running, none reported, or a read failed) return own_red null and go on.`
+const OWN_RED = (wt, prRef, sha) => `Otherwise, and only when an open PR already existed and was reused (a PR this step opened has no finished check, so skip this read), read the checks of the pushed head once before any lock command: ${UNSET}gh pr view ${prRef} --repo ${SLUG} --json headRefOid,statusCheckRollup, one read, never a watch and never a wait. A head that was just pushed can still show the checks of the head before it, so the read counts only when its headRefOid is ${sha}. Only when it is and a check there has failed (count only the newest run of each check name, the one with the latest startedAt, so a failed attempt whose re-run passed does not count; a check run whose conclusion is FAILURE or TIMED_OUT, or a status whose state is FAILURE or ERROR; a cancelled check does not count), see whether origin/${INT} is an ancestor of HEAD (git -C ${wt} merge-base --is-ancestor origin/${INT} HEAD succeeds). When it is not, the head is behind its base and gets new checks once it is synced, so the failure counts only while another landing holds the lock and this one would wait: read the lock once, run alone and exactly: forge-claim land status --repo ${SLUG} --branch ${INT} --sha ${sha} (a Bash timeout of 20 minutes), and it counts only on the verdict held_by with a lock_sha other than ${sha}. When the failure counts, run no other lock command and wait for no check: return own_red with head (the headRefOid you read), failing (the name of every failed check), details (their links) and behind (true when the head is behind its base, else false), and lock null and checks null, because a later step fixes the branch before the lock is asked for, after it brought a head that is behind up to date. In every other case (another head, a head behind its base while no other landing holds the lock, no failed check, checks still running, none reported, or a read failed) return own_red null and go on.`
 const OWN_RED_SCHEMA = { type: 'object', properties: { head: { type: 'string' }, failing: STRS, details: { type: 'string' }, behind: { type: 'boolean' } }, required: ['head', 'failing'] }
 // The program checks the head itself: a reply that names another head, or none, diverts nothing.
 const ownRed = (r, sha) => !!r && typeof r === 'object' && !Array.isArray(r) && sameSha(r.head, sha) && Array.isArray(r.failing) && r.failing.some(x => typeof x === 'string' && x !== '')
@@ -2040,19 +2040,24 @@ const LAND_WAIT_RETRIES = 3
 // its relaunch redid the whole landing. A reply with no position (the queue was not read) spends a retry, as every wait did before.
 // The ceiling bounds what progress alone cannot: a landing held the lock for 20 to 40 minutes and waits of 100 to 200 minutes were
 // normal with three ahead, so six hours is nine such landings; a wait is made again only when it can end within that, at the CLI's
-// bound of 50 minutes a call (LAND_WAIT_CALL_S, also what a reply that names no waited_s counts for).
+// bound of 50 minutes a call (LAND_WAIT_CALL_S, the least a wait that ran out counts for).
 const LAND_WAIT_MAX_S = 6 * 3600
 const LAND_WAIT_CALL_S = 3000
-// One budget per run of waits. The function it returns is asked with the lock reply of the wait that just ran out (null when the
-// program asks for a first wait itself) and answers whether to wait again.
+// One ceiling per landing and one count of retries per run of waits: waitBudget() is made once for a landing, and each run of waits
+// asks it for a function, which is asked with the lock reply of the wait that just ran out (null when the program asks for a first
+// wait itself) and answers whether to wait again. A wait that ran out counts as a whole call at least, whatever its reply says it
+// waited, so no reply can lift the ceiling.
 const waitBudget = () => {
-  let spent = 0, total = 0, place = null
-  return lock => {
-    const at = lock && Number.isInteger(lock.position) && lock.position >= 1 ? lock.position : null
-    if (lock) total += Number.isFinite(lock.waited_s) && lock.waited_s >= 0 ? lock.waited_s : LAND_WAIT_CALL_S
-    if (!(at === 1 || (at !== null && place !== null && at < place))) spent++
-    place = at
-    return spent <= LAND_WAIT_RETRIES && total + LAND_WAIT_CALL_S <= LAND_WAIT_MAX_S
+  let total = 0
+  return () => {
+    let spent = 0, place = null
+    return lock => {
+      const at = lock && Number.isInteger(lock.position) && lock.position >= 1 ? lock.position : null
+      if (lock) total += Math.max(Number.isFinite(lock.waited_s) ? lock.waited_s : 0, LAND_WAIT_CALL_S)
+      if (!(at === 1 || (at !== null && place !== null && at < place))) spent++
+      place = at
+      return spent <= LAND_WAIT_RETRIES && total + LAND_WAIT_CALL_S <= LAND_WAIT_MAX_S
+    }
   }
 }
 let pendingWaits = 0
@@ -2085,6 +2090,7 @@ let syncedOut = false
 // #1001: the sync merges made under the lock; while there is none, a red poll shows the branch's own failure.
 let lockSyncs = 0
 let relocks = 0
+const waits = waitBudget()
 let retakes = 0
 const HOLDING = ['acquired', 'already_held', 'moved']
 // Releases the last held sha once; {} when nothing was held or it was released, else lock_unreleased (and a fresh dead_agents) for the result to carry. Never throws.
@@ -2160,7 +2166,7 @@ ${RULES}`, { label: 'pr', phase: 'Ship', agentType: 'clerk', model: DEFAULT_CLER
   // waits again, within the budget of waitBudget (#1018: a wait that ended first in line or at a better place spends no retry).
   // Each call is marked as possibly holding the lock first, as the pr call is.
   let waited = false
-  const more = waitBudget()
+  const more = waits()
   let ranOut = prR.lock || null
   for (let k = 1; !early && !preRed && v === 'land-contended' && more(ranOut); k++) {
     waited = true
@@ -2299,8 +2305,11 @@ When the failure has no cause in the code (an infrastructure, cache or network e
       // for with no lock asked for. Still red: the fix wave below runs before the lock, as for any check that had failed at the
       // head. Anything else: the next round takes the lock, waiting. A green head that is behind is never synced early.
       log(`${failingNames.join(', ')} had failed at a head behind ${INT} and the land lock is held; bringing the branch up to date before the lock is asked for`)
+      lockOut = false
       const stopped = await syncRound(null, true)
       if (stopped) return unheld(stopped)
+      // syncRound sets lockOut only for a conflict it resolved: the round that takes the lock then says so.
+      const resolved = lockOut
       lockOut = true
       lockFirst = true
       const pk = await recall(() => call(`${CTX}
@@ -2317,7 +2326,7 @@ ${RULES}`, { label: `checks-${round}`, phase: 'Ship', agentType: 'clerk', model:
       // As in the loop below: behind (the base moved again) is not a red poll, and the poll under the lock answers it.
       red = pk.state !== 'behind' && (pk.state === 'failed' || failingNames.length > 0)
       ck = { state: 'failed', head: expected, failing: failingNames, details: pk.details }
-      syncedOut = !red
+      syncedOut = !red && !resolved
     }
     if (red) {
       log(`${failingNames.join(', ')} had already failed at the head; fixing before the land lock is asked for`)
@@ -2380,7 +2389,7 @@ ${RULES}`, { label: `checks-${round}`, phase: 'Ship', agentType: 'clerk', model:
         // #913: the retake's wait ran out behind other landings, so another holder has the lock: renew the claim and wait again,
         // within the budget of waitBudget, as the first wait does. Each call is marked as possibly holding the lock first.
         let relocked = false
-        const more = waitBudget()
+        const more = waits()
         let ranOut = ck ? ck.lock || null : null
         for (; retake && mv === 'land-contended' && more(ranOut);) {
           relocks++

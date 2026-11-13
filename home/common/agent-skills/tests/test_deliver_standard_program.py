@@ -9647,7 +9647,7 @@ class OwnRedOutsideLockTest(unittest.TestCase):
         for needle in ("only when an open PR already existed and was reused (a PR this step opened has no finished check, so skip this read)",
                        f"so the read counts only when its headRefOid is {SHA}",
                        "merge-base --is-ancestor origin/dev HEAD succeeds). When it is not, the head is behind its base and gets new checks "
-                       "after the sync under the lock, so the failure counts only while another landing holds the lock and this one would wait",
+                       "once it is synced, so the failure counts only while another landing holds the lock and this one would wait",
                        f"forge-claim land status --repo owner/repo --branch dev --sha {SHA} (a Bash timeout of 20 minutes), and it counts "
                        f"only on the verdict held_by with a lock_sha other than {SHA}",
                        "a cancelled check does not count), see whether origin/dev is an ancestor of HEAD",
@@ -9840,6 +9840,24 @@ class WaitByPlaceTest(unittest.TestCase):
         self.assertIn("const LAND_WAIT_MAX_S = 6 * 3600\nconst LAND_WAIT_CALL_S = 3000\n", PROGRAM.read_text(encoding="utf-8"))
         self.assertEqual(self.waits(*[1] * 12), ("land-contended", [f"land-lock-{k}" for k in range(1, 7)]))  # 7 waits of 50 minutes
 
+    def test_a_reply_that_under_reports_its_wait_does_not_lift_the_ceiling(self):
+        for waited in (0, 1, -5, None):
+            with self.subTest(waited_s=waited):
+                lock = {"lock": {"verdict": "land-contended", "position": 1, "waited_s": waited}}
+                result, calls = run(replies={f"land-lock-{k}": lock for k in range(1, 12)}, patch={"pr": dict(lock, checks=None)})
+                self.assertEqual(result["stage"], "land-contended")
+                self.assertEqual(len([label for label in labels(calls) if label.startswith("land-lock-")]), 6)
+
+    def test_a_retake_judges_each_wait_by_its_own_reply_and_shares_the_ceiling(self):
+        ship = ConflictedSyncOutsideLockTest().ship
+        relocks = lambda out: [label for label in labels(out["calls"]) if label.startswith("land-relock-")]  # noqa: E731
+        # The checks call's wait ended first in line; the waits after it end at place 3 and spend the retries.
+        out = ship(replies={"checks-2": self.ran_out(1), **{f"land-relock-{k}": self.ran_out(3) for k in range(1, 10)}})
+        self.assertEqual((out["result"]["stage"], relocks(out)), ("land-contended", [f"land-relock-{k}" for k in range(1, 5)]))
+        # First in line for ever: seven waits of 50 minutes in all, the checks call's included.
+        out = ship(replies={"checks-2": self.ran_out(1), **{f"land-relock-{k}": self.ran_out(1) for k in range(1, 10)}})
+        self.assertEqual((out["result"]["stage"], relocks(out)), ("land-contended", [f"land-relock-{k}" for k in range(1, 7)]))
+
     def test_the_lock_replies_carry_the_place(self):
         _, calls = run(patch={"pr": dict(self.ran_out(1), checks=None)})
         for label in ("pr", "land-lock-1"):
@@ -9915,6 +9933,39 @@ class BehindRedBeforeLockTest(unittest.TestCase):
                       patch={"pr": self.PRE, "sync-1": self.SYNCED, "sync-2": {"merge_commit": m2}, "sync-3": {"merge_commit": m3}})
         self.assertEqual(out["result"]["stage"], "done")
         self.assertEqual([name for name in self.shipped(out) if name.startswith("sync-")], ["sync-1", "sync-2", "sync-3"])
+
+    def test_a_red_check_under_the_lock_after_a_green_sync_before_it_is_still_the_branchs_own(self):
+        """No sync has changed the head under the lock, so the fix step releases the lock before it edits (#1001)."""
+        out = run_out(replies={"checks-0": self.GREEN, "checks-1": dict(RED, head=MERGE), "checks-2": dict(self.GREEN, head=FIX)},
+                      patch={"pr": self.PRE, "sync-1": self.SYNCED, "fix-ci": {"start_head": MERGE, "commit": FIX, "lock_released": True}})
+        self.assertEqual(out["result"]["stage"], "done")
+        fix = prompt(out["calls"], "fix-ci")
+        self.assertIn(f"The landing lock of the branch dev is held for this pull request at {MERGE}", fix)
+        self.assertIn("lock_released", schema_of(out["calls"], "fix-ci")["properties"])
+        self.assertIn("it was released while a failing check of the branch was fixed", prompt(out["calls"], "checks-2"))
+
+    def test_a_poll_that_is_behind_is_no_red_poll_whatever_it_lists_as_failing(self):
+        out = run_out(replies={"checks-0": {"state": "behind", "head": MERGE, "failing": ["shard-3"]}, "checks-1": self.GREEN},
+                      patch={"pr": self.PRE, "sync-1": self.SYNCED})
+        self.assertEqual(out["result"]["stage"], "done")
+        self.assertEqual(self.shipped(out), ["pr", "sync-1", "checks-0", "land-push-1", "checks-1", "merge", "hold", "close-out"])
+        self.assertIn(self.UP_TO_DATE, prompt(out["calls"], "checks-1"))
+
+    def test_a_conflict_met_by_that_sync_is_resolved_outside_the_lock_and_said_so(self):
+        out = run_out(replies={"checks-0": self.GREEN, "checks-1": self.GREEN},
+                      patch={"pr": self.PRE, "sync-1": ABORTED, "sync-resolve-1": {"merge_commit": MERGE}})
+        self.assertEqual(out["result"]["stage"], "done")
+        self.assertEqual(self.shipped(out), ["pr", "sync-1", "sync-resolve-1", "sync-review-1", "checks-0", "land-push-1", "checks-1",
+                                             "merge", "hold", "close-out"])
+        checks = prompt(out["calls"], "checks-1")
+        self.assertIn(f"at the head {MERGE}; a conflict with dev was resolved before the lock was asked for", checks)
+        self.assertNotIn(self.UP_TO_DATE, checks)
+        self.assertEqual(self.releases(out["calls"]), [MERGE])
+        # A stop inside that resolution holds nothing but may release the verified head once, as before any first take.
+        stopped = run_out(patch={"pr": self.PRE, "sync-1": ABORTED, "sync-resolve-1": {"status": "blocked", "notes": "cannot resolve"}})
+        self.assertEqual(stopped["result"]["stage"], "sync")
+        self.assertEqual(self.shipped(stopped), ["pr", "sync-1", "sync-resolve-1", "land-unlock"])
+        self.assertEqual(self.releases(stopped["calls"]), [SHA])
 
     def test_a_stop_before_the_lock_releases_the_verified_head_once(self):
         stops = {"the sync is blocked": ({}, {"sync-1": {"status": "blocked", "notes": "dirty tree"}}, "sync"),
