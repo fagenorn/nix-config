@@ -42,6 +42,9 @@ class ManagerServiceTest(Case):
     def start(self, **kwargs):
         support.write_registry(self.registry, support.entries(2))
         kwargs.setdefault("session_poll_seconds", 3600)
+        if "profile_dirs" not in kwargs:
+            support.sign_in(self.store, "work")
+            kwargs["profile_dirs"] = [support.profile_dir(self.store, "work")]
         return super().start(**kwargs)
 
     def post(self, svc, path, body, **extra):
@@ -610,10 +613,11 @@ class ProfileChoiceServiceTest(ManagerServiceTest):
         again = self.start(profile_dirs=dirs, clock=lambda: now[0], log_clock=stamp)
         self.assertEqual(self.ask(again)[2], b'{"profile":"home"}')
 
-    def test_with_no_sign_in_known_the_route_answers_default(self):
+    def test_with_no_sign_in_known_the_route_answers_null(self):
         dirs = list(self.profiles(work=0, home=0).values())
-        svc = self.start(profile_dirs=dirs, clock=lambda: NOW)
-        self.assertEqual(self.ask(svc)[2], b'{"profile":"default"}')
+        svc = self.start(profile_dirs=dirs, clock=lambda: NOW, choice_file=self.choice)
+        self.assertEqual(self.ask(svc)[::2], (200, b'{"profile":null}'))
+        self.assertFalse(self.choice.exists())
 
     def test_other_methods_on_the_profile_route_are_refused(self):
         svc = self.start()

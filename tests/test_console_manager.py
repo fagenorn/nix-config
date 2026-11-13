@@ -334,17 +334,19 @@ class SessionProfileTest(unittest.TestCase):
             with self.subTest(capacity=capacity["profiles"], last_use=last_use):
                 self.assertEqual(manager.session_profile(capacity, last_use), expected)
 
-    def test_with_no_sign_in_known_the_answer_is_default_unless_default_is_signed_out(self):
+    def test_with_no_room_and_none_signed_in_nothing_is_chosen(self):
         unknown = (None, None)
         table = [
-            (cap(("a", "out", 0, 0), ("b", "unknown", *unknown)), {"a": T_LATE}, "default"),
-            (cap(), {}, "default"),
-            (cap(("default", "ok", 90, 90, "signed_out")), {}, None),
-            (cap(("default", "out", 0, 0, "signed_out"), ("work", "unknown", *unknown)), {}, None),
+            (cap(("a", "out", 0, 0), ("b", "unknown", *unknown)), {"a": T_LATE}),
+            (cap(), {}),
+            (cap(("work", "ok", 90, 90, "signed_out")), {}),
+            (cap(("work", "out", 0, 0, "signed_out"), ("home", "unknown", *unknown)),
+             {"home": T_LATE}),
         ]
-        for capacity, last_use, expected in table:
+        for capacity, last_use in table:
             with self.subTest(capacity=capacity["profiles"], last_use=last_use):
-                self.assertEqual(manager.session_profile(capacity, last_use), expected)
+                self.assertIsNone(manager.session_profile(capacity, last_use))
+        self.assertEqual(manager.choose_profile(cap(), {}), manager.Wait(None))
 
     def test_profile_use_survives_a_session_leaving(self):
         def seen(seq, h, sid, profile):
