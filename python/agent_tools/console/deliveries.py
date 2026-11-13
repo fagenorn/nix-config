@@ -306,7 +306,8 @@ BATCH_LABELS: tuple[tuple[str | None, str], ...] = (
         r"setup|train-build-\d+|train-ready-\d+|train-merge-\d+|train-sweep-\d+|train-checks-\d+-\d+"
         r"|train-flip-\d+-\d+",
     ),
-    (QUEUED, r"facts-(\d+)"),
+    # land-open opens the PR of an issue that waits in the land queue: no stage of its own, so the issue keeps the one it has.
+    (QUEUED, r"facts-(\d+)|land-open-(\d+)"),
     (PLANNING, r"acquire-(\d+)|readopt-(\d+)"),
     (WORKING, r"release-(\d+)|recover-end-(\d+)|ask-(\d+)|settle-(\d+)"),
     (LANDING, r"close-out-(\d+)|train-pr-(\d+)|land-[a-z]+(?:-[a-z]+)*-(\d+)(?:-\d+)?"),

@@ -1961,11 +1961,13 @@ const logWait = (label, lock) => {
 // after a conflict, #913; with no place kept among the waiters: the branch was not ready). A failure with no cause in the code keeps
 // the lock and reruns its jobs as before (#818, #986). One fix wave per delivery either way (checksFixes), so this never repeats, and a
 // red check after a sync under the lock is fixed under it.
-const OWN_RED = (prRef, sha) => `Otherwise, and only when an open PR already existed and was reused (a PR this step opened has no finished check, so skip this read), read the checks of the pushed head once before any lock command: gh pr checks ${prRef} --repo ${SLUG} --json name,bucket,link, one read, never --watch and never a wait. Only when the pushed head is ${sha} and a check there has the bucket fail, run no lock command and wait for no check: return own_red with failing (every name whose bucket is fail) and details (their links), and lock null and checks null, because a later step fixes the branch before the lock is asked for. In every other case (no failed check, checks still running, none reported, or the read failed) return own_red null and go on.`
-const OWN_RED_SCHEMA = { type: 'object', properties: { failing: STRS, details: { type: 'string' } }, required: ['failing'] }
-const ownRed = r => !!r && typeof r === 'object' && Array.isArray(r.failing) && r.failing.some(present)
-const FIX_OFF_LOCK = sha => `The landing lock of the branch ${INT} is held for this pull request at ${sha}, and other landings wait for it. So find the cause first, changing nothing. When the cause is in this branch's changes (the fix needs a commit), release the lock before you edit any file: run alone and exactly: forge-claim land release --repo ${SLUG} --branch ${INT} --sha ${sha}
-released and not_held are both fine (give it a Bash timeout of 20 minutes). Return lock_released true once it answered either; the program takes the lock again at your commit after its review. When no commit is needed (a failure with no cause in the code), keep the lock: run no forge-claim command and return lock_released false.`
+const OWN_RED = (wt, prRef, sha) => `Otherwise, and only when an open PR already existed and was reused (a PR this step opened has no finished check, so skip this read), read the checks of the pushed head once before any lock command: ${UNSET}gh pr view ${prRef} --repo ${SLUG} --json headRefOid,statusCheckRollup, one read, never a watch and never a wait. A head that was just pushed can still show the checks of the head before it, so the read counts only when its headRefOid is ${sha}. Only when it is, origin/${INT} is an ancestor of HEAD (git -C ${wt} merge-base --is-ancestor origin/${INT} HEAD succeeds: a head behind its base gets new checks after the sync under the lock) and a check there has failed (a check run whose conclusion is FAILURE or TIMED_OUT, or a status whose state is FAILURE or ERROR; a cancelled check does not count), run no lock command and wait for no check: return own_red with head (the headRefOid you read), failing (the name of every failed check) and details (their links), and lock null and checks null, because a later step fixes the branch before the lock is asked for. In every other case (another head, a head behind its base, no failed check, checks still running, none reported, or the read failed) return own_red null and go on.`
+const OWN_RED_SCHEMA = { type: 'object', properties: { head: { type: 'string' }, failing: STRS, details: { type: 'string' } }, required: ['head', 'failing'] }
+// The program checks the head itself: a reply that names another head, or none, diverts nothing.
+const ownRed = (r, sha) => !!r && typeof r === 'object' && !Array.isArray(r) && sameSha(r.head, sha) && Array.isArray(r.failing) && r.failing.some(x => typeof x === 'string' && x !== '')
+// The diagnosis is the one part of the fix that stays under the lock, so it is bounded: reading only, and a release when in doubt.
+const FIX_OFF_LOCK = sha => `The landing lock of the branch ${INT} is held for this pull request at ${sha}, and other landings wait for it. So decide first, quickly and changing nothing, whether the fix needs a commit: read only the failed job log, the check details and the branch's diff, and run no build and no test before the release. When the cause is in this branch's changes, or you cannot tell, release the lock before you edit any file: run alone and exactly: forge-claim land release --repo ${SLUG} --branch ${INT} --sha ${sha}
+released and not_held are both fine (give it a Bash timeout of 20 minutes). Return lock_released true once it answered either; the program takes the lock again after the review (that costs this landing one wait; holding the lock costs every waiter). Only when the failure clearly has no cause in the code (no commit is needed), keep the lock: run no forge-claim command and return lock_released false.`
 const FIX_NO_LOCK = `The landing lock of the branch ${INT} is not held and was not asked for yet: run no forge-claim command.`
 // #941: the probe a landing runs before it asks for the land lock, the same text in deliver-batch.js. git merge-tree --write-tree (git 2.38
 // or later) merges in memory: it writes no commit and touches neither the worktree nor the index, and its exit status alone says whether
@@ -2060,7 +2062,7 @@ const landBody = async () => {
 ${RENEW_FIRST}
 Then open the pull request for this branch. Push the branch (git -C ${W} push origin ${setup.branch}). If an open PR with head ${setup.branch} already exists (a resumed delivery), reuse it; else open one against ${INT}. Title: a short summary of the issue. Body, plain prose, no single or double quotes, dollar signs, backticks or backslashes: sections Why, What changes, Acceptance (a table with one row per criterion: id, criterion, kind, and the test or command that shows it; criteria ${ACS}), Evidence (verification ${JSON.stringify(verify.results)}${outsideFixes.length ? `; verification fixes outside the branch's diff, each with its cause: ${JSON.stringify(outsideFixes)}` : ''}; ${taskLog.length} tasks reviewed; ${LANE === 'direct' ? 'direct-lane review' : 'final review ' + (chunked ? 'chunked' : 'whole')}${REVIEW_CODE ? ' plus the configured independent review' : ''}), Merge danger; then the line ${closesLine} as the last line, with no attribution or generated-by line. Never attach or link the plan or the spec. Return pr (number) and head (full sha of the pushed head).
 Then, ${PROBE(W, INT)}
-${OWN_RED('<the PR number>', expected)}
+${OWN_RED(W, '<the PR number>', expected)}
 Otherwise take the cross-host landing lock of the branch ${INT} for that PR at the verified head ${expected}: run alone and exactly: ${LAND_ACQUIRE(expected, true)}
 ${LOCK_RETURN} Return it as lock; when no PR was opened or reused, run neither the probe nor a lock command and return probe null and lock null. Then, only when lock's verdict is acquired, already_held or moved and the pushed head is ${expected}, wait ${CHECKS_WAIT('<the PR number>')} Return those fields as checks; otherwise run nothing more and return checks null.
 ${RULES}`, { label: 'pr', phase: 'Ship', agentType: 'clerk', model: DEFAULT_CLERK_MODEL, effort: 'high', schema: withRenew(PR_SCHEMA, { probe: NULLABLE(PROBE_SCHEMA), own_red: NULLABLE(OWN_RED_SCHEMA), lock: NULLABLE(LOCK_SCHEMA), checks: NULLABLE(CHECKS) }) }), r => r.renew)
@@ -2070,7 +2072,7 @@ ${RULES}`, { label: 'pr', phase: 'Ship', agentType: 'clerk', model: DEFAULT_CLER
   const early = probeConflict(prR.probe) && !prR.lock ? prR.probe : null
   // #1001: a check had already failed at the head, so the call ran no lock command either. A reply that names a lock verdict all the
   // same is read as before (the first poll under the lock finds the red check).
-  const preRed = !early && !prR.lock && ownRed(prR.own_red) ? prR.own_red : null
+  const preRed = !early && !prR.lock && ownRed(prR.own_red, expected) ? prR.own_red : null
   if (early || preRed) lockHeld = false
   // A renew that ended, or a refused lock, means the prompt ran no lock command that holds anything.
   if (prR.renew && prR.renew.verdict !== 'renewed') lockHeld = false
@@ -2257,14 +2259,17 @@ ${RULES}`, { label: `land-push-${round}`, phase: 'Ship', agentType: 'clerk', mod
     const folded = round === 1 && !moved && !waited
     // #986: the poll that follows a rerun of failed jobs (the head is unchanged, so it is an unmoved poll), the only one that may answer
     // stale; a poll whose wait ran out keeps it for the next.
-    const stalePoll = reran && !moved && !folded
+    // #1001: a rerun made while the lock was not held (before it was asked for, or by a step that released it) is followed by a round
+    // that takes the lock at the unchanged head, so that round asks the stale question too. reran is cleared by the first poll that
+    // is not pending, so while it stands the head is the one the jobs were rerun at.
+    const stalePoll = reran && !folded
     let ck
     if (folded) ck = prR.checks || null
     else {
       ck = await recall(() => call(`${CTX}
 ${moved ? `${retake && lockFirst ? `Take the cross-host landing lock of the branch ${INT} for PR #${PR} at the head ${expected}; ${fixedOut ? 'a failing check of the branch was fixed' : `a conflict with ${INT} was resolved`} before the lock was asked for` : retake ? `Take the cross-host landing lock of the branch ${INT} for PR #${PR} again, at the head ${expected}; it was released while ${fixedOut ? 'a failing check of the branch was fixed' : 'a conflict was resolved'}` : `Move the cross-host landing lock of the branch ${INT} for PR #${PR} to the head ${expected}`}: run alone and exactly: ${LAND_ACQUIRE(expected, retake)}
-${LOCK_RETURN} Return it as lock. Only when lock's verdict is acquired, already_held or moved, wait ${CHECKS_WAIT(PR)} Otherwise run nothing else and return only lock.` : `${RENEW_FIRST}\nThen wait ${CHECKS_WAIT(PR)}${stalePoll ? ` ${STALE_RERUN(UNSET, SLUG)}` : ''}`}
-${RULES}`, { label: `checks-${round}`, phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: moved ? { ...CHECKS, properties: { ...CHECKS.properties, lock: NULLABLE(LOCK_SCHEMA) }, required: ['lock'] } : withRenew(stalePoll ? WITH_STALE(CHECKS) : CHECKS) }), r => (moved ? null : r.renew))
+${LOCK_RETURN} Return it as lock. Only when lock's verdict is acquired, already_held or moved, wait ${CHECKS_WAIT(PR)}${stalePoll ? ` ${STALE_RERUN(UNSET, SLUG)}` : ''} Otherwise run nothing else and return only lock.` : `${RENEW_FIRST}\nThen wait ${CHECKS_WAIT(PR)}${stalePoll ? ` ${STALE_RERUN(UNSET, SLUG)}` : ''}`}
+${RULES}`, { label: `checks-${round}`, phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: moved ? { ...(stalePoll ? WITH_STALE(CHECKS) : CHECKS), properties: { ...(stalePoll ? WITH_STALE(CHECKS) : CHECKS).properties, lock: NULLABLE(LOCK_SCHEMA) }, required: ['lock'] } : withRenew(stalePoll ? WITH_STALE(CHECKS) : CHECKS) }), r => (moved ? null : r.renew))
       if (moved) {
         let mv = ck && ck.lock ? ck.lock.verdict : null
         if (ck) logWait(`checks-${round}`, ck.lock)

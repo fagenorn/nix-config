@@ -3,7 +3,7 @@
 //   { "args": {...}, "replies": {"<label>": reply | [reply per call]}, "patch": {"<label>": {...}},
 //     "children": {"<issue>": child result | [one per call] | "throw"}, "turns": {"<issue>:<mode>": n}, "delays": {"<label>": n} }
 // A label with no reply gets its default (DEFAULTS); a patch is merged over that default. A reply
-// of null is returned as null (a dead agent). Prints { result, calls, logs (each log() line), max_active, max_planning, child_events, child_returns }:
+// of null is returned as null (a dead agent). Prints { result, calls, events (each agent's `call <label>` and `reply <label>`, in order), logs (each log() line), max_active, max_planning, child_events, child_returns }:
 // calls lists agents ({kind: 'agent', label, prompt, schema, agentType, model, effort, facts_pending}) and children
 // ({kind: 'workflow', label: 'child-<issue>', script, args}) in start order. A children entry applies to every child
 // call of its issue, mode 'plan' and 'ready' alike, in call order, and a list element "throw" throws Error('child failed'); an object
@@ -77,7 +77,13 @@ const NESTED = [[/^train-pr-/, ['renew']], [/^train-merge-/, ['lock']], [/^land-
 const calls = []
 let factsPending = 0 // facts agents started and not yet answered
 const seen = {}
+// Each agent call and each reply, in the order they happened (#1001: a step that must wait for another's reply).
+const events = []
 async function agent(prompt, opts = {}) {
+  events.push(`call ${opts.label}`)
+  try { return await answer(prompt, opts) } finally { events.push(`reply ${opts.label}`) }
+}
+async function answer(prompt, opts = {}) {
   const label = opts.label
   calls.push({ kind: 'agent', label, prompt, schema: opts.schema || null, agentType: opts.agentType || null, model: opts.model || null, effort: opts.effort || null, facts_pending: factsPending })
   const isFacts = /^facts-/.test(label)
@@ -171,4 +177,4 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
 const run = new AsyncFunction('agent', 'parallel', 'pipeline', 'phase', 'log', 'args', 'budget', 'workflow', body)
 const logs = []
 const result = await run(agent, parallel, pipeline, noop, line => { logs.push(String(line)) }, scenario.args, budget, workflow)
-process.stdout.write(JSON.stringify({ result, calls, logs, max_active: maxActive, max_planning: maxPlanning, child_events: childEvents, child_returns: childReturns }))
+process.stdout.write(JSON.stringify({ result, calls, events, logs, max_active: maxActive, max_planning: maxPlanning, child_events: childEvents, child_returns: childReturns }))

@@ -9486,7 +9486,7 @@ class OwnRedOutsideLockTest(unittest.TestCase):
     RERAN = {"start_head": SHA, "commit": SHA, "notes": "cache restore failed in setup; failed jobs rerun"}
     FIXED = {"start_head": SHA, "commit": FIX}
     GREEN = {"state": "passed", "head": FIX, "required": ["ci-tests"]}
-    PRE_RED = {"own_red": {"failing": ["shard-3"], "details": "https://ci/run/7"}, "lock": None, "checks": None}
+    PRE_RED = {"own_red": {"head": SHA, "failing": ["shard-3"], "details": "https://ci/run/7"}, "lock": None, "checks": None}
 
     @staticmethod
     def shipped(out):
@@ -9563,16 +9563,19 @@ class OwnRedOutsideLockTest(unittest.TestCase):
     def test_the_pr_call_reads_a_reused_pull_request_once_before_the_lock(self):
         _, calls = run()
         text = prompt(calls, "pr")
-        read = "gh pr checks <the PR number> --repo owner/repo --json name,bucket,link, one read, never --watch and never a wait"
+        read = "gh pr view <the PR number> --repo owner/repo --json headRefOid,statusCheckRollup, one read, never a watch and never a wait"
         self.assertIn(read, text)
         for needle in ("only when an open PR already existed and was reused (a PR this step opened has no finished check, so skip this read)",
-                       f"Only when the pushed head is {SHA} and a check there has the bucket fail, run no lock command and wait for no check",
-                       "In every other case (no failed check, checks still running, none reported, or the read failed) return own_red null and go on."):
+                       f"so the read counts only when its headRefOid is {SHA}",
+                       "merge-base --is-ancestor origin/dev HEAD succeeds: a head behind its base gets new checks after the sync under the lock",
+                       "a cancelled check does not count), run no lock command and wait for no check",
+                       "In every other case (another head, a head behind its base, no failed check, checks still running, none reported, "
+                       "or the read failed) return own_red null and go on."):
             self.assertIn(needle, text)
         self.assertLess(text.index("merge-tree --write-tree"), text.index(read))
         self.assertLess(text.index(read), text.index(f"--sha {SHA} --wait\n"))
         self.assertIn({"type": "null"}, schema_of(calls, "pr")["properties"]["own_red"]["anyOf"])
-        self.assertEqual(member(schema_of(calls, "pr"), "own_red")["required"], ["failing"])
+        self.assertEqual(member(schema_of(calls, "pr"), "own_red")["required"], ["head", "failing"])
 
     def test_a_check_already_red_before_the_lock_is_fixed_with_no_lock_and_the_fix_head_takes_it(self):
         out = run_out(replies={"checks-1": self.GREEN}, patch={"pr": self.PRE_RED, "fix-ci": self.FIXED})
@@ -9599,6 +9602,106 @@ class OwnRedOutsideLockTest(unittest.TestCase):
         self.assertEqual(self.shipped(out), ["pr", "fix-ci", "land-push-1", "checks-1", "merge", "hold", "close-out"])
         self.assertIn(f"--sha {SHA} --wait\n", prompt(out["calls"], "checks-1"))
 
+    def test_a_red_rollup_at_another_head_diverts_nothing(self):
+        """A head that was just pushed can still show the checks of the head before it: only a read at the pushed head counts."""
+        base = [(c["label"], c["prompt"]) for c in run()[1]]
+        for head in (MERGE, "", None):
+            own = {"failing": ["shard-3"]} if head is None else {"head": head, "failing": ["shard-3"]}
+            with self.subTest(head=head):
+                result, calls = run(patch={"pr": {"own_red": own}})
+                self.assertEqual([(c["label"], c["prompt"]) for c in calls], base)
+                out = run_out(patch={"pr": {"own_red": own, "lock": None, "checks": None}})
+                self.assertEqual(out["result"]["stage"], "land-lock")
+                self.assertEqual(self.shipped(out), ["pr", "land-unlock"])
+
+    def test_the_diagnosis_under_the_lock_is_bounded(self):
+        _, calls = run(patch={"pr": {"checks": RED}, "fix-ci": self.FIXED}, replies={"checks-2": self.GREEN})
+        fix = prompt(calls, "fix-ci")
+        for needle in ("read only the failed job log, the check details and the branch's diff, and run no build and no test before the release",
+                       "When the cause is in this branch's changes, or you cannot tell, release the lock before you edit any file",
+                       "Only when the failure clearly has no cause in the code (no commit is needed), keep the lock"):
+            self.assertIn(needle, fix)
+
+    STALE = {"state": "failed", "head": SHA, "failing": ["gate"], "stale": [77]}
+    STALE_ASK = "This poll follows a rerun of failed jobs at this head."
+
+    def test_a_stale_gate_after_a_rerun_before_the_lock_is_asked_in_the_round_that_takes_the_lock(self):
+        """#986 on the #1001 paths: the round after such a rerun takes the lock, and it still asks the stale question."""
+        passed = {"state": "passed", "head": SHA, "required": ["ci-tests"]}
+        out = run_out(replies={"checks-1": self.STALE, "checks-2": passed}, patch={"pr": self.PRE_RED, "fix-ci": self.RERAN})
+        calls = out["calls"]
+        self.assertEqual(out["result"]["stage"], "done")
+        self.assertEqual(self.shipped(out), ["pr", "fix-ci", "land-push-1", "checks-1", "checks-2", "merge", "hold", "close-out"])
+        first = prompt(calls, "checks-1")
+        self.assertIn(f"--sha {SHA} --wait\n", first)
+        self.assertIn(self.STALE_ASK, first)
+        self.assertIn("stale", schema_of(calls, "checks-1")["properties"])
+        self.assertEqual(schema_of(calls, "checks-1")["required"], ["lock"])
+        # Once: the poll after it carries no such instruction, and a check that is red there stops the delivery.
+        self.assertNotIn(self.STALE_ASK, prompt(calls, "checks-2"))
+        again = run_out(replies={"checks-1": self.STALE, "checks-2": dict(RED, head=SHA)}, patch={"pr": self.PRE_RED, "fix-ci": self.RERAN})
+        self.assertEqual(again["result"]["stage"], "checks")
+        # A red answer that names no stale run is a second red poll, as ever.
+        red = run_out(replies={"checks-1": dict(RED, head=SHA)}, patch={"pr": self.PRE_RED, "fix-ci": self.RERAN})
+        self.assertEqual(red["result"]["stage"], "checks")
+
+    def test_a_stale_gate_after_a_rerun_that_released_the_lock_is_asked_in_the_retake_round(self):
+        passed = {"state": "passed", "head": SHA, "required": ["ci-tests"]}
+        out = run_out(replies={"checks-2": self.STALE, "checks-3": passed},
+                      patch={"pr": {"checks": RED}, "fix-ci": dict(self.RERAN, lock_released=True)})
+        calls = out["calls"]
+        self.assertEqual(out["result"]["stage"], "done")
+        self.assertEqual(self.shipped(out), ["pr", "fix-ci", "land-push-2", "checks-2", "checks-3", "merge", "hold", "close-out"])
+        self.assertIn(f"--sha {SHA} --wait\n", prompt(calls, "checks-2"))
+        self.assertIn(self.STALE_ASK, prompt(calls, "checks-2"))
+        self.assertIn("stale", schema_of(calls, "checks-2")["properties"])
+        self.assertNotIn(self.STALE_ASK, prompt(calls, "checks-3"))
+
+    def test_a_round_that_moves_the_lock_to_a_fix_commit_asks_no_stale_question(self):
+        out = run_out(replies={"checks-2": self.GREEN}, patch={"pr": {"checks": RED}, "fix-ci": self.FIXED})
+        self.assertNotIn(self.STALE_ASK, prompt(out["calls"], "checks-2"))
+        self.assertNotIn("stale", schema_of(out["calls"], "checks-2")["properties"])
+
+    def test_a_red_first_poll_after_a_conflict_resolved_before_the_lock_releases_the_accepted_head(self):
+        """#941 then #1001: the lock was first taken at the accepted head, so that head, never the verified one, is released."""
+        for told in (True, False):
+            with self.subTest(lock_released=told):
+                out = run_out(replies={"checks-1": dict(RED, head=MERGE), "checks-2": self.GREEN},
+                              patch={"pr": ResolveBeforeLockTest.EARLY, "sync-resolve-1": {"merge_commit": MERGE},
+                                     "fix-ci": {"start_head": MERGE, "commit": FIX, "lock_released": told}})
+                calls = out["calls"]
+                self.assertEqual(out["result"]["stage"], "done")
+                self.assertEqual(self.shipped(out), ["pr", "sync-resolve-1", "sync-review-1", "land-push-1", "checks-1", "fix-ci"]
+                                 + ([] if told else ["land-unlock"]) + ["fix-ci-review", "land-push-2", "checks-2", "merge", "hold", "close-out"])
+                fix = prompt(calls, "fix-ci")
+                release = "forge-claim land release --repo owner/repo --branch dev --sha "
+                self.assertIn(f"is held for this pull request at {MERGE}", fix)
+                self.assertIn(f"{release}{MERGE}\n", fix)
+                self.assertNotIn(f"{release}{SHA}", fix)
+                if not told:
+                    self.assertIn(f"{release}{MERGE}\n", prompt(calls, "land-unlock"))
+                self.assertIn(f"again, at the head {FIX}; it was released while a failing check of the branch was fixed", prompt(calls, "checks-2"))
+                self.assertIn(f"--sha {FIX} --wait\n", prompt(calls, "checks-2"))
+
+    def test_a_reported_release_that_left_the_lock_held_is_a_move_and_ships(self):
+        for verdict in ("moved", "already_held", "acquired"):
+            with self.subTest(verdict=verdict):
+                out = run_out(replies={"checks-2": dict(self.GREEN, lock={"verdict": verdict, "lock_sha": FIX})},
+                              patch={"pr": {"checks": RED}, "fix-ci": dict(self.FIXED, lock_released=True)})
+                self.assertEqual(out["result"]["stage"], "done")
+                self.assertNotIn("land-unlock", labels(out["calls"]))
+                self.assertIn(f"forge-claim land release --repo owner/repo --branch dev --sha {FIX}", prompt(out["calls"], "hold"))
+
+    def test_a_rerun_whose_lock_was_lost_unreported_polls_again_before_it_merges(self):
+        """The step kept quiet about a release and reran: the pre-merge acquire answers acquired, so the checks are read again first."""
+        passed = {"state": "passed", "head": SHA, "required": ["ci-tests"]}
+        retaken = {"merged": False, "lock": {"verdict": "acquired", "lock_sha": SHA}}
+        out = run_out(replies={"checks-2": passed, "checks-3": passed, "merge": [retaken, {"merged": True, "merge_commit": SHA, "notes": "merged"}]},
+                      patch={"pr": {"checks": RED}, "fix-ci": dict(self.RERAN, lock_released=False)})
+        self.assertEqual(out["result"]["stage"], "done")
+        self.assertEqual(self.shipped(out), ["pr", "fix-ci", "checks-2", "merge", "checks-3", "merge", "hold", "close-out"])
+        self.assertIn("merge-base --is-ancestor origin/dev HEAD", prompt(out["calls"], "checks-3"))
+
     def test_a_stop_before_the_first_take_releases_the_verified_head_once(self):
         for stage, replies, patch in (("checks-fix-review", {"fix-ci-review": FINDING}, {"fix-ci": self.FIXED}),
                                       ("checks-fix", {}, {"fix-ci": {"status": "blocked", "notes": "no"}})):
@@ -9613,7 +9716,7 @@ class OwnRedOutsideLockTest(unittest.TestCase):
 
     def test_an_own_red_reply_that_names_a_lock_verdict_or_no_check_is_the_old_flow(self):
         base = [(c["label"], c["prompt"]) for c in run()[1]]
-        for own in ({"failing": ["shard-3"]}, {"failing": []}, None):
+        for own in ({"head": SHA, "failing": ["shard-3"]}, {"head": SHA, "failing": []}, None):
             with self.subTest(own=own):
                 result, calls = run(patch={"pr": {"own_red": own}})
                 self.assertEqual([(c["label"], c["prompt"]) for c in calls], base)

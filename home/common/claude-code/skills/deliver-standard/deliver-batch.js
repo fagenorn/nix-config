@@ -665,11 +665,13 @@ const logWait = (label, lock) => {
 // then run outside the lock, and the record step takes the lock again at the reviewed head, waiting (with no place kept among the
 // waiters: the branch was not ready). A failure with no cause in the code keeps the lock and reruns its jobs as before (#818, #986).
 // One fix round per landing either way (ciFails), so this never repeats, and a red check after a sync under the lock is fixed under it.
-const OWN_RED = (prRef, sha) => `Otherwise, and only when step 2 reused an open PR (a PR this step opened has no finished check, so skip this read), read the checks of the pushed head once before any lock command: gh pr checks ${prRef} --repo ${SLUG} --json name,bucket,link, one read, never --watch and never a wait. Only when the pushed head is ${sha} and a check there has the bucket fail, run no lock command and wait for no check: return own_red with failing (every name whose bucket is fail) and details (their links), and lock null and checks null, because a later step fixes the branch before the lock is asked for. In every other case (no failed check, checks still running, none reported, or the read failed) return own_red null and go on.`
-const OWN_RED_SCHEMA = { type: 'object', properties: { failing: STRS, details: { type: 'string' } }, required: ['failing'] }
-const ownRed = r => isObj(r) && Array.isArray(r.failing) && r.failing.some(nonEmpty)
-const FIX_OFF_LOCK = sha => `The landing lock of the branch ${INT} is held for this pull request at ${sha}, and other landings wait for it. So find the cause first, changing nothing. When the cause is in this branch's changes (the fix needs a commit), release the lock before you edit any file: run alone and exactly: forge-claim land release --repo ${SLUG} --branch ${INT} --sha ${sha}
-released and not_held are both fine (give it a Bash timeout of 20 minutes). Return lock_released true once it answered either; the program takes the lock again at your commit after its review. When no commit is needed (a failure with no cause in the code), keep the lock: run no forge-claim command and return lock_released false.`
+const OWN_RED = (wt, prRef, sha) => `Otherwise, and only when step 2 reused an open PR (a PR this step opened has no finished check, so skip this read), read the checks of the pushed head once before any lock command: ${UNSET}gh pr view ${prRef} --repo ${SLUG} --json headRefOid,statusCheckRollup, one read, never a watch and never a wait. A head that was just pushed can still show the checks of the head before it, so the read counts only when its headRefOid is ${sha}. Only when it is, origin/${INT} is an ancestor of HEAD (git -C ${wt} merge-base --is-ancestor origin/${INT} HEAD succeeds: a head behind its base gets new checks after the sync under the lock) and a check there has failed (a check run whose conclusion is FAILURE or TIMED_OUT, or a status whose state is FAILURE or ERROR; a cancelled check does not count), run no lock command and wait for no check: return own_red with head (the headRefOid you read), failing (the name of every failed check) and details (their links), and lock null and checks null, because a later step fixes the branch before the lock is asked for. In every other case (another head, a head behind its base, no failed check, checks still running, none reported, or the read failed) return own_red null and go on.`
+const OWN_RED_SCHEMA = { type: 'object', properties: { head: { type: 'string' }, failing: STRS, details: { type: 'string' } }, required: ['head', 'failing'] }
+// The program checks the head itself: a reply that names another head, or none, diverts nothing.
+const ownRed = (r, sha) => !!r && typeof r === 'object' && !Array.isArray(r) && sameSha(r.head, sha) && Array.isArray(r.failing) && r.failing.some(x => typeof x === 'string' && x !== '')
+// The diagnosis is the one part of the fix that stays under the lock, so it is bounded: reading only, and a release when in doubt.
+const FIX_OFF_LOCK = sha => `The landing lock of the branch ${INT} is held for this pull request at ${sha}, and other landings wait for it. So decide first, quickly and changing nothing, whether the fix needs a commit: read only the failed job log, the check details and the branch's diff, and run no build and no test before the release. When the cause is in this branch's changes, or you cannot tell, release the lock before you edit any file: run alone and exactly: forge-claim land release --repo ${SLUG} --branch ${INT} --sha ${sha}
+released and not_held are both fine (give it a Bash timeout of 20 minutes). Return lock_released true once it answered either; the program takes the lock again after the review (that costs this landing one wait; holding the lock costs every waiter). Only when the failure clearly has no cause in the code (no commit is needed), keep the lock: run no forge-claim command and return lock_released false.`
 const FIX_NO_LOCK = `The landing lock of the branch ${INT} is not held and was not asked for yet: run no forge-claim command.`
 // #941: the probe a landing runs before it asks for the land lock, the same text in deliver-standard.js. git merge-tree --write-tree (git 2.38
 // or later) merges in memory: it writes no commit and touches neither the worktree nor the index, and its exit status alone says whether
@@ -705,12 +707,13 @@ const OPEN_KINDS = ['evidence', 'human']
 const isOpen = a => !!(a && OPEN_KINDS.includes(a.kind))
 const RENEW_FIRST_OF = (n, B) => `First renew the claim of issue #${n}: run alone and exactly forge-claim renew --repo ${SLUG} --issue ${n} --holder ${HOLDER} --branch ${B} and return its verdict (renewed, not_held, or error on any other exit), by, detail and transient (true only when its JSON line has transient true) as renew. When renew's verdict is not renewed, stop there: run nothing else and return only renew. ${FORGE_TIMEOUT}`
 // The PR step of a landing: push the branch and open or re-adopt its PR with the body at the accepted head. land-pr and a train's train-pr (#822) share it.
-const PR_OPEN = (n, ready, expected) => {
+// #1001: with opened, land-open already wrote the body for this head, so the step leaves a body that names it alone.
+const PR_OPEN = (n, ready, expected, opened = false) => {
   const ACS = JSON.stringify(ready.acceptance)
   const closesLine = !ready.acceptance.some(isOpen) && INT === SETUP.default_branch ? `Closes #${n}` : `Refs #${n}`
   return `Then open the pull request of issue #${n} of ${SLUG} (the git repository at ${REPO}) from the branch ${ready.branch} (worktree ${ready.worktree}) into ${INT}, or re-adopt the open one, so that its body is exactly the text below.
 1. Push the branch: git -C ${ready.worktree} push origin ${ready.branch}.
-2. If an open PR with head ${ready.branch} exists (a re-run), reuse it: write the body to a file under a fresh directory made with mktemp -d and run ${UNSET}gh pr edit <pr> --repo ${SLUG} --body-file <that file>. Never reuse or edit a PR whose head is another branch, even when it references this issue; leave it untouched. Otherwise open one with the create form above. Title: a short summary of the issue.
+2. If an open PR with head ${ready.branch} exists (a re-run), reuse it: ${opened ? `an earlier step of this run opened it, so read its body first (${UNSET}gh pr view <pr> --repo ${SLUG} --json body) and, when its Evidence section already ends with the line Accepted head: ${expected}, leave the body as it is and edit nothing; otherwise ` : ''}write the body to a file under a fresh directory made with mktemp -d and run ${UNSET}gh pr edit <pr> --repo ${SLUG} --body-file <that file>. Never reuse or edit a PR whose head is another branch, even when it references this issue; leave it untouched. Otherwise open one with the create form above. Title: a short summary of the issue.
 Body, plain prose, no single or double quotes, dollar signs, backticks or backslashes: sections Why, What changes, Acceptance (a table with one row per criterion: id, criterion, kind, and the test or command that shows it; criteria ${ACS}), Evidence (verification ${JSON.stringify(ready.verify || [])}${OUTSIDE[n] ? `; verification fixes outside the branch's diff, each with its cause: ${JSON.stringify(OUTSIDE[n])}` : ''}; ${(ready.tasks || []).length} tasks reviewed; the last line of the Evidence section is exactly: Accepted head: ${expected}), Merge danger; then the line ${closesLine} as the last line of the body, with no attribution or generated-by line. Never attach or link the plan or the spec.
 Return pr (number) and head (the full sha of the pushed head).`
 }
@@ -1060,9 +1063,9 @@ ${RULES}`, `close-out-${n}`, { ...lifecycleClerk, schema: folding ? { ...CLOSE_S
     lockHeld = true
     lockSha = expected
     const prR = await recall(() => call(`${RENEW_FIRST}
-${PR_OPEN(n, ready, expected)}
+${PR_OPEN(n, ready, expected, !!OPENING[n])}
 Then, ${PROBE(W, INT)}
-${OWN_RED('<the PR number>', expected)}
+${OWN_RED(W, '<the PR number>', expected)}
 Otherwise take the cross-host landing lock of the branch ${INT} for that PR at the head ${expected}: run alone and exactly: ${LAND_ACQUIRE(expected, true)}
 ${LOCK_RETURN} Return it as lock; when no PR was opened or reused, run neither the probe nor a lock command and return probe null and lock null.
 Then, only when lock's verdict is acquired, already_held or moved and the pushed head is ${expected}, wait for every check of that PR at the head, required or not:
@@ -1075,7 +1078,7 @@ ${RULES}`, `land-pr-${n}`, { agentType: 'clerk', model: DEFAULT_CLERK_MODEL, eff
     const early = probeConflict(prR.probe) && !prR.lock ? prR.probe : null
     // #1001: a check had already failed at the head, so the step ran no lock command either. A reply that names a lock verdict all the
     // same is read as before (the first poll under the lock finds the red check).
-    const preRed = !early && !prR.lock && ownRed(prR.own_red) ? prR.own_red : null
+    const preRed = !early && !prR.lock && ownRed(prR.own_red, expected) ? prR.own_red : null
     if (early || preRed) lockHeld = false
     // A renew that ended ran nothing after it; a refused lock holds nothing (P5). Otherwise the lock stays marked held at expected (O2).
     if (prR.renew && prR.renew.verdict !== 'renewed') lockHeld = false
@@ -1512,7 +1515,7 @@ const trainOf = (cands, joined) => {
         // #1001: a PR being opened while the member waited in the land queue is reused by this step, so it must be there first.
         if (OPENING[e.n]) await OPENING[e.n]
         return recall(() => trainCall(`${RENEW_FIRST_OF(e.n, e.ready.branch)}
-${PR_OPEN(e.n, e.ready, e.ready.head)}
+${PR_OPEN(e.n, e.ready, e.ready.head, !!OPENING[e.n])}
 This PR rides a landing train: take no lock and wait for no check in this step.
 ${RULES_FOR(e.ready.worktree, e.ready.branch)}`, `train-pr-${e.n}`, { agentType: 'clerk', model: DEFAULT_CLERK_MODEL, effort: 'high', schema: withRenew(LAND_PR_SCHEMA) }), r => r.renew)
       }))
@@ -1706,7 +1709,8 @@ const runTrain = async (cands, joined) => {
 const kindsOk = e => Array.isArray(e.ready.acceptance) && e.ready.acceptance.every(a => a && ACCEPT_KINDS.includes(a.kind))
 // #1001: the landings that are queued or running, and by issue the early opening of its PR (see landReady). The opening is optional:
 // it never throws and its reply is not read, because the issue's own pr step (land-pr, train-pr) renews, pushes and re-adopts the PR
-// by itself and reports whatever went wrong here; a dead opening step therefore trips no breaker.
+// by itself and reports whatever went wrong here; a dead opening step therefore trips no breaker. It is a push and one gh command
+// with the body given, so it runs at the low clerk effort; the pr step that follows leaves a body that already names the head alone.
 let LANDINGS = 0
 const OPENING = {}
 const openEarly = async (n, ready) => {
@@ -1714,7 +1718,7 @@ const openEarly = async (n, ready) => {
     await agent(`${RENEW_FIRST_OF(n, ready.branch)}
 ${PR_OPEN(n, ready, ready.head)}
 This issue waits behind another landing of its batch: take no lock and wait for no check in this step.
-${RULES_FOR(ready.worktree, ready.branch)}`, { label: `land-open-${n}`, phase: 'Land', agentType: 'clerk', model: DEFAULT_CLERK_MODEL, effort: 'high', schema: withRenew(LAND_PR_SCHEMA) })
+${RULES_FOR(ready.worktree, ready.branch)}`, { label: `land-open-${n}`, phase: 'Land', agentType: 'clerk', model: DEFAULT_CLERK_MODEL, effort: 'low', schema: withRenew(LAND_PR_SCHEMA) })
   } catch (e) { /* the pr step of the landing opens it */ }
 }
 // The ordinary landing start of an issue that lands alone: one its drain took alone (#936) or one a train did not land (#971). Its landing
