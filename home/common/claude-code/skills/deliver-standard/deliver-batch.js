@@ -569,8 +569,25 @@ const COMMIT_SCOPE = 'Before committing, read git status in the worktree you com
 // such a line stands. Removal is limited to those lines in hand-resolved files; markers_checked says both checks ran, whatever they reported.
 const MARKER_CHECK = (wt, int) => `run git -C ${wt} diff --check HEAD and git -C ${wt} diff --check origin/${int} before committing and remove each leftover conflict marker both report (same file and line) in a file you resolved by hand; every other line they report is content and stays`
 const MARKERS_UNCHECKED = ' The merge was not checked for leftover conflict markers: report any left in the files it changed.'
-const SYNC_FIX = (wt, mc, findings) => `A reviewer found defects in the conflict resolution of merge commit ${mc} (git -C ${wt} show --cc ${mc}): ${JSON.stringify(findings)}. Fix each real defect on top of the merge with a regression test (never redo or rewrite the merge), then commit; if a finding is wrong, commit nothing for it and say so with evidence in notes.`
-const SYNC_REREVIEW = (wt, mc, findings, fix, moved) => `Re-review these conflict-resolution findings against ${moved ? `the fix (git -C ${wt} diff ${fix.start_head}..${fix.commit}) made on top of` : 'the rebuttal (no new commit) of'} merge commit ${mc}: ${JSON.stringify(findings)}; notes: ${fix.notes}. ${moved ? '' : `Check each rebuttal against the code yourself (git -C ${wt} show --cc ${mc}); a finding the evidence does not refute is still unresolved. `}Report any still unresolved and any new Important or Critical defect. Do not edit anything.`
+const SYNC_FIX = (wt, mc, findings, after = '') => `A reviewer found defects in the conflict resolution of merge commit ${mc} (git -C ${wt} show --cc ${mc})${after}: ${JSON.stringify(findings)}. Fix each real defect on top of ${after ? 'that head' : 'the merge'} with a regression test (never redo or rewrite the merge), then commit; if a finding is wrong, commit nothing for it and say so with evidence in notes.`
+const SYNC_REREVIEW = (wt, mc, findings, fix, moved, after = '') => `Re-review these conflict-resolution findings against ${moved ? `the fix (git -C ${wt} diff ${fix.start_head}..${fix.commit}) made on top of` : 'the rebuttal (no new commit) of'} merge commit ${mc}${after}: ${JSON.stringify(findings)}; notes: ${fix.notes}. ${moved ? '' : `Check each rebuttal against the code yourself (git -C ${wt} show --cc ${mc}); a finding the evidence does not refute is still unresolved. `}Report any still unresolved and any new Important or Critical defect. Do not edit anything.`
+// #986: a resolution may carry plain commits on top of its merge commit (a fix its tests asked for once the merge was committed). The
+// program cannot read git, so the sync review proves the ancestry itself (DESCENDS) and reads the merge and the range from it to the head;
+// the fix round and the re-review name the same range (SYNC_AFTER). A head that does not descend from its merge commit never lands.
+// The same text in both programs, like the wording above.
+const SYNC_AFTER = (wt, mc, head) => ` and the commits made on top of it up to the head ${head} (git -C ${wt} diff ${mc}..${head})`
+const DESCENDS = (wt, mc, head) => ` The resolution's head ${head} is not its merge commit: first run git -C ${wt} merge-base --is-ancestor ${mc} ${head} and git -C ${wt} rev-list --count --min-parents=2 ${mc}..${head}, and return descends true only when the first exits 0 and the second prints 0 (the head is the merge commit with plain commits on top of it), else descends false and no finding. When it descends, review those commits as well (git -C ${wt} diff ${mc}..${head}), above all for a test or check they weaken, skip or delete, and report any conflict marker git -C ${wt} diff --check ${mc} ${head} shows in them.`
+const RESOLVE_ORDER = 'Fix in the resolution itself what those tests show and commit the merge only once they pass. When a defect shows only after the merge is committed, never amend or redo the merge: fix it in a commit on top of it, run those tests again, and report the merge commit and the head as they are'
+// #986: a rerun covers every failed run of the head. Each check is its own workflow run, so a gate or aggregate check that failed only
+// because another check failed keeps its old failure unless its own run is rerun too; a gate that waits for the head's other runs then
+// goes green with them, so the reruns need no order.
+const RERUN_ALL = (unset, slug, sha) => `rerun the failed jobs once, with ${unset}gh run rerun <run-id> --repo ${slug} --failed for each failed run of the head: list them with ${unset}gh run list --repo ${slug} --commit ${sha} --json databaseId,workflowName,conclusion, keep the newest run of each workflowName (the highest databaseId; never an older run that one superseded) and rerun each of those whose conclusion is failure, cancelled or timed_out, not only the run of the check that broke first. Every check is its own run, so a gate or aggregate check that failed only because another check failed is rerun too, with the same command`
+// #986: the backstop for a gate that was not rerun, or was rerun before the checks it reports on finished: in the one poll that follows a
+// rerun, the checks step reruns such a gate and names its runs as stale. The program then polls once more and does not count that poll
+// as red; the poll after it carries no such instruction, so a check that is red there ends the landing as any second red poll does.
+const STALE_RERUN = (unset, slug) => `This poll follows a rerun of failed jobs at this head. When checks still fail once none is pending, decide whether every failing check is stale: a check that only reports on other checks (a gate or aggregate job) is stale when every check it reports on now passes at head and its own run finished before theirs did (compare updatedAt from ${unset}gh run view <run-id> --repo ${slug} --json updatedAt; it was not rerun, or it was rerun too early). Only when every failing check is stale, rerun each of their runs once with ${unset}gh run rerun <run-id> --repo ${slug} --failed (the run id is in the check's link), do not wait for them, and answer failed with failing and with stale: the run ids you reran. In every other case rerun nothing and return no stale.`
+const WITH_STALE = s => ({ ...s, properties: { ...s.properties, stale: { type: 'array', items: { type: 'integer' } } } })
+const staleOf = ck => (Array.isArray(ck.stale) ? ck.stale.filter(Number.isInteger) : [])
 const findingsOf = r => (r.findings || []).filter(f => f.severity !== 'minor')
 const RENEW_SCHEMA = { type: 'object', properties: { verdict: { type: 'string', enum: ['renewed', 'not_held', 'error'] }, by: { type: 'string' }, detail: { type: 'string' }, transient: { type: 'boolean' } }, required: ['verdict'] }
 const LOCK_SCHEMA = {
@@ -860,24 +877,31 @@ ${RULES}`, label, { phase: 'Land', agentType: 'implementer', model: 'sonnet', sc
         merge = await call(`Issue #${n} of ${SLUG} is being landed into ${INT}, and merging origin/${INT} into the branch ${B} conflicts. Resolve it in the worktree ${W}. The landing lock is not held while you work.
 1. If a merge is in progress in ${W} (git -C ${W} rev-parse -q --verify MERGE_HEAD succeeds), run git merge --abort inside ${W} first. Then git -C ${W} fetch origin and git -C ${W} merge origin/${INT}.
 2. A merge that is clean this time (the integration branch moved): answer status done, conflicted false, head (the full sha of the merge commit); it is reviewed all the same.
-3. Otherwise resolve each conflict keeping both sides' intent, ${MARKER_CHECK(W, INT)}, commit the merge, and ${WHOLE('the files you resolved by hand')}; ${RESOLVE_SCOPE}; answer status done, conflicted true, with head (the full sha of the merge commit), resolved_files and markers_checked (true when both checks ran). If you cannot resolve it safely, run git merge --abort inside ${W} and answer status blocked, conflicted true, with notes.
+3. Otherwise resolve each conflict keeping both sides' intent, ${MARKER_CHECK(W, INT)}, and, still before committing, ${WHOLE('the files you resolved by hand')}; ${RESOLVE_SCOPE}. ${RESOLVE_ORDER}; answer status done, conflicted true, with merge_commit (the full sha of the merge commit), head (the full sha of HEAD: the merge commit, or the last commit you made on top of it), resolved_files and markers_checked (true when both checks ran). If you cannot resolve it safely, run git merge --abort inside ${W} and answer status blocked, conflicted true, with notes.
 4. After a merge you completed, push the result: git -C ${W} push origin ${B}.
 ${RULES}`, rlabel, { phase: 'Land', agentType: 'implementer', model: 'sonnet', schema: LAND_SYNC_SCHEMA })
         if (!merge) return out('stopped', { stage: 'land-sync', detail: `${rlabel} returned nothing` })
         if (merge.status !== 'done') return out('conflict', { detail: merge.notes })
+        // #986: the head may be a commit on top of the merge, so a resolution that names no merge commit names nothing the review can
+        // read as the merge: it never lands. (A merge that was clean this time names its head alone, as the sync step does.)
+        if (merge.conflicted === true && !nonEmpty(merge.merge_commit)) return out('stopped', { stage: 'land-sync', detail: 'the resolution named no merge commit' })
       }
     }
     let head = merge.head || merge.merge_commit
     if (!head) return out('stopped', { stage: 'land-sync', detail: 'the resync named no head' })
-    // A merge that conflicted is reviewed whatever its resolution says of itself: the sync step saw the conflict.
-    if (aborted || merge.conflicted) {
-      const mc = merge.merge_commit || head
-      // The review reads the merge commit and the landing merges the head: they must be one commit.
-      if (!sameSha(head, mc)) return out('stopped', { stage: 'land-sync', detail: `the resolution names the head ${head} and the merge commit ${mc}: only a reviewed merge commit lands` })
+    // The review reads the merge commit and the landing merges the head. They are one commit, or (#986) the head is the merge commit
+    // with plain commits on top of it: the review then proves that ancestry and reads the range between them too, and the fix round
+    // and the re-review start at the head. Any other head is refused below, on the review's own answer.
+    const mc = merge.merge_commit || head
+    const followup = !sameSha(head, mc)
+    // A merge that conflicted is reviewed whatever its resolution says of itself: the sync step saw the conflict. A head that is not the
+    // merge commit is reviewed too, even after a clean merge: nothing else would read the commits on top of it.
+    if (aborted || merge.conflicted || followup) {
+      const after = followup ? SYNC_AFTER(W, mc, head) : ''
       c.syncReview++
       const rv = await call(`Issue #${n} of ${SLUG}, worktree ${W}, branch ${B}.
-Review the conflict resolution in merge commit ${mc}: git -C ${W} show --cc ${mc} and the resolved files ${JSON.stringify(merge.resolved_files || [])}; the tests run: ${JSON.stringify(merge.tests || [])}. Report Important or Critical defects only: a dropped change from either side, a broken merge of intent, a resolved file whose tests were not run.${merge.markers_checked === true ? '' : MARKERS_UNCHECKED} Do not edit anything.
-${RULES}`, `land-sync-review-${n}-${c.syncReview}`, { agentType: 'reviewer', schema: FINDINGS })
+Review the conflict resolution in merge commit ${mc}: git -C ${W} show --cc ${mc} and the resolved files ${JSON.stringify(merge.resolved_files || [])}; the tests run: ${JSON.stringify(merge.tests || [])}. Report Important or Critical defects only: a dropped change from either side, a broken merge of intent, a resolved file whose tests were not run.${merge.markers_checked === true ? '' : MARKERS_UNCHECKED}${followup ? DESCENDS(W, mc, head) : ''} Do not edit anything.
+${RULES}`, `land-sync-review-${n}-${c.syncReview}`, { agentType: 'reviewer', schema: followup ? { ...FINDINGS, properties: { ...FINDINGS.properties, descends: { type: 'boolean' } }, required: [...FINDINGS.required, 'descends'] } : FINDINGS })
       // #955: from here on the merge is resolved, so a landing that ends is a sync-review row, never a conflict one: what is left is the
       // review of the resolution. Its reason leads with what ended it, then the pushed and unaccepted fix commit, then the finding left
       // open (its file and summary), so the cap of the table's reason cuts the summary last. Like every other open row it posts no owner
@@ -888,13 +912,15 @@ ${RULES}`, `land-sync-review-${n}-${c.syncReview}`, { agentType: 'reviewer', sch
         return out('sync-review', { ...extra, reason: [`sync-review of merge ${mc}: ${what}`, commit, left].filter(Boolean).join('; ') })
       }
       if (!rv) return syncStop('the sync review returned nothing', null, null, { review: rv })
+      // Only the review's own proof accepts a head that is not the merge commit; a missing answer is no proof.
+      if (followup && rv.descends !== true) return out('stopped', { stage: 'land-sync', detail: `the resolution names the head ${head} and the merge commit ${mc}, and the head does not descend from it: only a reviewed merge commit lands` })
       const found = findingsOf(rv)
       if (found.length) {
         // #907: one fix round per reviewed merge. It is no resync, so it spends neither MAX_SYNCS nor MERGE_REFUSAL_RETRIES, and like the
         // resolution it runs outside the lock (#913). Only a fix the re-review passes is recorded: advance(true) below takes the lock at it
         // and waits for its checks.
         const fix = await call(`Issue #${n} of ${SLUG}, worktree ${W}, branch ${B}.
-${SYNC_FIX(W, mc, found)} Then push (git -C ${W} push origin ${B}); before pushing, ${WHOLE('the files you changed')}. ${COMMIT_SCOPE} ${IMPL_RETURN}
+${SYNC_FIX(W, mc, found, after)} Then push (git -C ${W} push origin ${B}); before pushing, ${WHOLE('the files you changed')}. ${COMMIT_SCOPE} ${IMPL_RETURN}
 ${RULES}`, `land-sync-fix-${n}-${c.syncReview}`, { agentType: 'implementer', model: 'sonnet', schema: IMPL })
         // As shipFix in deliver-standard.js: the fix starts at the reviewed merge, no commit is accepted only as a rebuttal with evidence, and a
         // full reviewer re-reviews either. A sync-review row from here on names the fix reply: its commit is pushed and unaccepted.
@@ -904,7 +930,7 @@ ${RULES}`, `land-sync-fix-${n}-${c.syncReview}`, { agentType: 'implementer', mod
           return syncStop('the sync fix round did not finish', found[0], fix, { review: rv, ...tried })
         }
         const rr = await call(`Issue #${n} of ${SLUG}, worktree ${W}, branch ${B}.
-${SYNC_REREVIEW(W, mc, found, fix, moved)}
+${SYNC_REREVIEW(W, mc, found, fix, moved, after)}
 ${RULES}`, `land-sync-rereview-${n}-${c.syncReview}`, { agentType: 'reviewer', schema: FINDINGS })
         if (!rr) return syncStop('the sync re-review returned nothing', found[0], fix, { review: rv, ...tried })
         const leftOpen = findingsOf(rr)
@@ -1032,7 +1058,7 @@ ${RULES}`, label, { ...lifecycleClerk, schema: withRenew({ type: 'object', prope
       if (row) return row
     }
 
-    // A retried wait polled no checks: the loop polls them itself.
+    // A retried wait polled no checks: the loop polls them itself, and its first poll is the handover point (#986).
     if (!early) carried = lockStep === `land-pr-${n}` ? { label: lockStep, reply: prR.checks || null } : null
 
     // #822: the first issue of a train hands over here, holding the lock at its ready head (the reviewed head, when it resolved a conflict
@@ -1041,9 +1067,18 @@ ${RULES}`, label, { ...lifecycleClerk, schema: withRenew({ type: 'object', prope
     // that ends this landing, or nothing, and then the landing goes on below as if no train had run. The lock never moves meanwhile.
     // #936: a landing that began alone asks via.join at this same point, in the same turn its lock wait ended: it answers a train when other
     // issues of the batch became ready meanwhile, else nothing, and then no step is added and the landing goes on alone.
+    // #986: a wait that ended in a retry step (land-lock, or land-relock after the record step of a #941 resolution) carried no poll, so
+    // the first poll is the loop's own land-checks step. It is the same handover point: nothing has moved since the lock was taken (no
+    // sync, no record, no fix), a behind answer returns at once, and the long wait is exactly when other issues become ready. The
+    // handover is asked once per landing, at its first poll, whichever step carried it; the wait after a train lost the lock is not one.
     let trained = false
-    const handover = carried && carried.reply && carried.reply.state === 'behind' && carried.reply.head === expected ? (via.train || (via.join ? via.join() : null)) : null
-    if (handover) {
+    let asked = false
+    // Answers a row that ends the landing, 'again' when the lock was lost and waited for again (poll anew), or null (go on).
+    const handOver = async reply => {
+      if (asked) return null
+      asked = true
+      const handover = reply && reply.state === 'behind' && reply.head === expected ? (via.train || (via.join ? via.join() : null)) : null
+      if (!handover) return null
       const t = await handover(pr, expected)
       if (t && t.row) return out(t.row.outcome, t.row.extra)
       trained = !!(t && t.merged)
@@ -1054,20 +1089,35 @@ ${RULES}`, label, { ...lifecycleClerk, schema: withRenew({ type: 'object', prope
         v1 = 'land-contended'
         carried = null
         const row = await waitAgain('another landing took it over while this one waited for the checks of a landing train')
-        if (row) return row
+        return row || 'again'
       }
+      return null
+    }
+    if (carried) {
+      const row = await handOver(carried.reply)
+      if (row && row !== 'again') return row
     }
 
+    // True after a rerun of failed jobs at an unchanged head, until the poll that follows it answered (#986).
+    let reran = false
     for (; !trained;) {
       c.checks++
       const label = `land-checks-${n}-${c.checks}`
       const fold = carried
       carried = null
+      // #986: the poll that follows a rerun of failed jobs, the only one that may answer stale; a poll whose wait ran out keeps it for the next.
+      const stalePoll = reran && !fold
       const ck = fold ? fold.reply : await call(`Wait for every check of PR #${pr} of issue #${n} of ${SLUG} (worktree ${W}, branch ${B}) at the head, required or not.
 ${CHECKS_STEPS(pr)}
-${RULES}`, label, { ...lifecycleClerk, schema: LAND_CHECKS_SCHEMA })
+${stalePoll ? `${STALE_RERUN(UNSET, SLUG)}\n` : ''}${RULES}`, label, { ...lifecycleClerk, schema: stalePoll ? WITH_STALE(LAND_CHECKS_SCHEMA) : LAND_CHECKS_SCHEMA })
       if (!ck) return out('stopped', { stage: 'checks', detail: fold ? `${fold.label} returned no checks` : `${label} returned nothing` })
       if (ck.head !== expected) return out('stopped', { stage: 'head-moved', expected, head: ck.head })
+      if (!asked) {
+        const row = await handOver(ck)
+        if (row === 'again') continue
+        if (row) return row
+        if (trained) break
+      }
 
       const failingNames = ck.failing || []
       const pendingNames = ck.pending || []
@@ -1080,16 +1130,27 @@ ${RULES}`, label, { ...lifecycleClerk, schema: LAND_CHECKS_SCHEMA })
         const names = (ck.failing || []).join(', ')
         return await ownerAction('needs-label', [`PR #${pr} of issue #${n} needs the label ${ck.label || '(unnamed)'}, which only the owner applies; the failing checks: ${names || 'unnamed'}.`], 'needs-label', { label: ck.label, failing: ck.failing })
       }
+      if (state !== 'pending') reran = false
       if (state === 'failed') {
+        // #986: every failing check was a gate on an old result and the checks step reran it: not a red poll. Once per landing, since
+        // only the one poll after the one rerun is asked; the next poll counts whatever it shows.
+        if (stalePoll && staleOf(ck).length) {
+          log(`#${n}: ${label} reran ${staleOf(ck).length === 1 ? 'a stale gate run' : `${staleOf(ck).length} stale gate runs`} (${staleOf(ck).join(', ')}); polling once more`)
+          continue
+        }
         c.ciFails++
         if (c.ciFails >= 2) return out('ci-failed', { failing: failingNames, details: ck.details })
         const fix = await call(`Issue #${n} of ${SLUG}: the checks of PR #${pr} failed at ${expected}: ${JSON.stringify(failingNames)}. Details: ${ck.details || 'none given'}.
 Work in the worktree ${W} on branch ${B}. Find the cause in this branch's changes, fix the failing checks with the smallest change and a regression test, commit, and push (git -C ${W} push origin ${B}); before pushing, ${WHOLE('the files you changed')}. Never weaken, skip or delete a test or check to make it pass. ${COMMIT_SCOPE} ${IMPL_RETURN}
-When the failure has no cause in the code (an infrastructure, cache or network error in a setup step), change and commit nothing: rerun the failed jobs once, with ${UNSET}gh run rerun <run-id> --repo ${SLUG} --failed for each failed run (its id is in the failing check's link), do not wait for them, and return status done with the head unchanged (commit equal to start_head, ${expected}) and the error you saw in notes; the program then polls the checks itself.
+When the failure has no cause in the code (an infrastructure, cache or network error in a setup step), change and commit nothing: ${RERUN_ALL(UNSET, SLUG, expected)}, do not wait for them, and return status done with the head unchanged (commit equal to start_head, ${expected}) and the error you saw in notes; the program then polls the checks itself.
 ${RULES}`, `land-fix-${n}`, { agentType: 'implementer', model: 'sonnet', schema: IMPL })
         if (!fix || fix.status !== 'done' || !fix.commit) return out('ci-failed', { failing: failingNames, detail: 'the fix round did not finish' })
         // #818: done at the unchanged head is a rerun of jobs that failed for no cause in the code. The loop polls again; ciFails still ends a second red poll as ci-failed.
-        if (sameSha(fix.commit, expected)) continue
+        // #986: that next poll alone may rerun a stale gate (STALE_RERUN).
+        if (sameSha(fix.commit, expected)) {
+          reran = true
+          continue
+        }
         const rv = await call(`Issue #${n} of ${SLUG}, worktree ${W}, branch ${B}.
 Review this fix for failing checks: git -C ${W} diff ${fix.start_head || expected}..${fix.commit}; the failure it answers: ${JSON.stringify(failingNames)}; the notes: ${fix.notes}. Report Important or Critical defects only, above all a weakened, skipped or deleted test or check. Do not edit anything.
 ${RULES}`, `land-fix-review-${n}`, { agentType: 'reviewer', schema: FINDINGS })
@@ -1175,7 +1236,8 @@ ${RULES}`, `land-merge-${n}`, { ...lifecycleClerk, schema: withRenew(LAND_MERGE_
 // #936: an issue a drain lands alone still forms a train when others became ready while it waited for the land lock. Its land-pr call
 // (or nothing later) is the wait: when that call returns holding the lock with a behind first poll, the handover point of a train's first
 // issue, the landing takes up to TRAIN_MAX - 1 issues waiting at that moment as the later members of a train and hands over exactly as below.
-// Nothing is waiting: no step is added. Past that point (a first poll that is not behind, a retried wait, a sync, a record) nothing joins.
+// Nothing is waiting: no step is added. Past that point (a first poll that is not behind, a sync, a record) nothing joins. A wait that
+// ended in a retry step (land-lock, land-relock) carried no poll: the landing's own first poll is then that point (#986).
 // #941: a landing whose probe found a conflict resolved it before it asked for the lock, so its wait is the record step that takes the lock
 // at the reviewed head: that step's reply is the handover point in the same way, and the train runs with that head as H1.
 // Otherwise the first issue's land() takes the lock at its ready head H1 and hands over to the train (via.train), which:
