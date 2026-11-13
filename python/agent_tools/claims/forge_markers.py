@@ -19,7 +19,7 @@ when it is not itself an `end` marker, carries no `released` field and no `end` 
 same listing names it, so a delayed edit that rewrites an older body can drop a field but can
 never bring an ended marker back.
 
-Ref primitives (issue 629): `read_ref`, `create_ref`, `commit_parent`, `repo_node_id`, `default_branch` and `cas_ref`, a
+Ref primitives (issue 629): `read_ref`, `matching_refs`, `create_ref`, `commit_parent`, `repo_node_id`, `default_branch` and `cas_ref`, a
 compare-and-swap through the GraphQL `updateRefs` mutation with `force: true` (the oid pair is
 the guard; an `after` of `ZERO_OID` deletes). Any CAS error, timeout or lie is "not done": the
 caller re-reads the ref to learn what happened and keeps the returned `ForgeError` (its code and
@@ -276,6 +276,24 @@ def read_ref(slug: str, ref: str) -> str | None:
     return sha
 
 
+def matching_refs(slug: str, prefix: str) -> dict[str, str]:
+    """Every ref whose full name starts with `prefix` (`refs/...`), name to sha: one page of 100.
+
+    The forge is asked without a trailing slash and the answer is filtered by `prefix` here."""
+    asked = quote(prefix.removeprefix("refs/").rstrip("/"), safe="/")
+    payload = forge_api.gh_json(["api", f"repos/{slug}/git/matching-refs/{asked}?per_page=100"])
+    refs: dict[str, str] = {}
+    for item in payload if isinstance(payload, list) else [None]:
+        obj = item.get("object") if isinstance(item, dict) else None
+        sha = obj.get("sha") if isinstance(obj, dict) else None
+        if (not isinstance(item, dict) or not isinstance(item.get("ref"), str)
+                or not isinstance(sha, str) or not OID.fullmatch(sha)):
+            raise ForgeError("payload_invalid", f"matching refs payload for {prefix}")
+        if item["ref"].startswith(prefix):
+            refs[item["ref"]] = sha
+    return refs
+
+
 def create_ref(slug: str, ref: str, sha: str) -> bool:
     """Create the ref at `sha`: True when created, False on HTTP 422 (re-read to learn why)."""
     status, _ = forge_api.run_gh(["api", "-X", "POST", f"repos/{slug}/git/refs", "-f", f"ref={ref}",
@@ -351,6 +369,16 @@ def _pull(item: Any) -> Pull:
              for side in (base, head)]
     return Pull(number, item["state"], item.get("merged_at") is not None, *refs,
                 same_repo=isinstance(names[0], str) and names[0] == names[1])
+
+
+def pull_open(slug: str, number: int) -> bool:
+    """Pull request `number` is open; false when it is closed, merged or (HTTP 404) not there."""
+    payload = forge_api.gh_json(["api", f"repos/{slug}/pulls/{number}"], allow=(404,))
+    if payload is None:
+        return False
+    if not isinstance(payload, dict) or payload.get("state") not in ("open", "closed"):
+        raise ForgeError("payload_invalid", f"pull request payload for {number}")
+    return payload["state"] == "open"
 
 
 def commit_pulls(slug: str, sha: str) -> list[Pull]:

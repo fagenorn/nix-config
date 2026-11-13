@@ -8,7 +8,8 @@ import sys
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from unittest import mock
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from email.utils import format_datetime
 
 from agent_tools.claims import forge_claim
 from agent_tools.claims import forge_land_lock as land_lock
@@ -19,6 +20,11 @@ SLUG, BRANCH = "octo/widgets", "main"
 OWNER, NAME = SLUG.split("/")
 REF = "refs/agent-locks/land/main"
 BEAT = "refs/agent-locks/land-beat/main"
+WAIT = "refs/agent-locks/land-wait/main/"
+NOW = ["api", "--include", "rate_limit"]
+LOCK_READ = ["api", f"repos/{SLUG}/git/ref/agent-locks/land/main"]
+FORGE_T0 = datetime(2026, 11, 6, 10, tzinfo=timezone.utc)
+EPOCH = int(FORGE_T0.timestamp())  # the forge's clock, in seconds, when a test begins
 BEAT_READ = ["api", f"repos/{SLUG}/git/ref/agent-locks/land-beat/main"]
 A, B, C, D, E = "a" * 40, "b" * 40, "c" * 40, "d" * 40, "e" * 40
 OTHER = "eleven-m5/session-b"
@@ -82,12 +88,22 @@ class Base(unittest.TestCase):
         patcher = mock.patch.object(forge_claim, "sleep", self.slept.append)
         patcher.start()
         self.addCleanup(patcher.stop)
+        # The suites before D12 count whole polls; QueueTest sets the real FAST_POLL again.
+        patcher = mock.patch.object(land_lock, "FAST_POLL", land_lock.POLL)
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.world = ForgeWorld(self)
 
     def lock(self, sha=None, **kwargs):
         self.world.ref_store(SLUG, {REF: sha} if sha else {}, **kwargs)
         self.closed, self.from_branch, self.open_from, self.open_based = [], {}, {}, {}
         self.respond_closed()
+        self.forge_time(0)
+
+    def forge_time(self, seconds):
+        """Set the forge's clock (D12) to `seconds` after EPOCH; it stands still until set again."""
+        stamp = format_datetime(FORGE_T0 + timedelta(seconds=seconds), usegmt=True)
+        self.world.respond("gh", NOW, stdout=f"HTTP/2.0 200 OK\ndate: {stamp}\n\n{{}}")
 
     def respond_closed(self):
         self.world.respond_json("gh", CLOSED_BASED,
@@ -125,6 +141,7 @@ class Base(unittest.TestCase):
         self.respond_closed()
         for p in prs:
             self.closing(p["number"])
+            self.world.respond_json("gh", ["api", f"repos/{SLUG}/pulls/{p['number']}"], p)
 
     def closing(self, pr, *issues):
         self.world.respond_json(
@@ -137,7 +154,28 @@ class Base(unittest.TestCase):
         return [a for a in self.world.argvs("gh") if a == argv]
 
     def cas_calls(self):
-        return [a for a in self.world.argvs("gh") if a[:2] == ["api", "graphql"] and "updateRefs(" in a[3]]
+        """The swaps of the lock and of the beat; a waiter's registration (D12) is in `queue_calls`."""
+        return [a for a in self.world.argvs("gh") if a[:2] == ["api", "graphql"] and "updateRefs(" in a[3]
+                and not a[7].startswith(f"name={WAIT}")]
+
+    def attempts(self):
+        """The creates of the lock sent."""
+        return [a for a in self.world.argvs("gh") if a[:4] == ["api", "-X", "POST", f"repos/{SLUG}/git/refs"]
+                and a[5] == f"ref={REF}"]
+
+    def queue_calls(self):
+        """The creates and the deletes of waiters' registrations (D12), as (op, ref) pairs."""
+        calls = []
+        for a in self.world.argvs("gh"):
+            if a[:4] == ["api", "-X", "POST", f"repos/{SLUG}/git/refs"] and a[5].startswith(f"ref={WAIT}"):
+                calls.append(("create", a[5][4:]))
+            elif a[:2] == ["api", "graphql"] and "updateRefs(" in a[3] and a[7].startswith(f"name={WAIT}"):
+                calls.append(("delete", a[7][5:]))
+        return calls
+
+    def waiting(self):
+        """The registrations in the ref store: full ref name to sha."""
+        return {ref: sha for ref, sha in self.world.refs().items() if ref.startswith(WAIT)}
 
     def writes(self):
         return [a for a in self.world.argvs("gh") if a[:3] == ["api", "-X", "POST"]] + self.cas_calls()
@@ -1143,10 +1181,12 @@ class ReleaseWaitTest(Base):
         self.assertEqual(self.world.refs(), {REF: E})
         self.assertEqual(self.cas_calls(), [])
         calls = self.world.argvs("gh")
-        # The open listing replaces the commit lookup of --sha: 5 calls a poll behind a live
-        # holder (listing, create, read, the holder's lookup, the beat read of D11), the default
-        # branch once.
-        self.assertEqual((len(self.reads(OPEN_FROM)), len(self.reads(DEFAULT_READ)), len(calls)), (3, 1, 13))
+        # The open listing replaces the commit lookup of --sha, and the default branch is read
+        # once. The forge's clock stands still here, so the registration (D12) is created once
+        # and never rewritten: 8 calls in the first poll (listing, default branch, clock,
+        # registrations, lock, the holder's lookup, the beat read of D11, the registration), 6 in
+        # the second, 5 in the one that creates the lock, 2 to delete the registration.
+        self.assertEqual((len(self.reads(OPEN_FROM)), len(self.reads(DEFAULT_READ)), len(calls)), (3, 1, 21))
         self.assertEqual([a for a in calls if f"commits/{A}/pulls" in a[1]], [])
 
     def test_a_release_pull_request_closed_while_waiting_stops_with_no_open_pr(self):
@@ -1248,20 +1288,32 @@ class ReleaseWaitTest(Base):
         self.assertNotIn("head_moved", out)
         self.assertEqual(self.reads(OPEN_FROM), [])
 
-    def test_a_waiting_lander_behind_a_live_holder_makes_five_forge_calls_a_poll(self):
+    def test_a_waiting_lander_behind_a_live_holder_makes_nine_forge_calls_a_poll(self):
         """Through `--wait` and its own eligibility read: the open listing of issue 905 is never
-        read while the commit lookup lists the caller's pull request. The fifth call is the beat
-        read (D11, issue 971), which only a waiter makes."""
+        read while the commit lookup lists the caller's pull request. Only a waiter reads the
+        beat (D11, issue 971) and the queue (D12, issue 1001)."""
         self.lock(A)
         self.pulls(B, pull(11, sha=B))
         self.pulls(A, pull(12, sha=A))
-        clock = FakeClock(lambda elapsed: self.world.set_ref(REF, None) if elapsed == 240 else None)
-        code, out = self.wait(clock, B)
+
+        def forge(elapsed):
+            self.forge_time(elapsed)
+            if elapsed == 240:
+                self.world.set_ref(REF, None)
+        code, out = self.wait(FakeClock(forge), B)
         self.assertEqual((code, out["verdict"], out["waited_s"]), (0, "acquired", 240))
-        # Two polls behind the holder (eligibility, create, ref read, lookup of the lock, beat
-        # read), then eligibility and the create that takes the released lock.
-        self.assertEqual((len(self.world.argvs("gh")), self.reads(OPEN_BASED)), (5 + 5 + 2, []))
+        # The first poll behind the holder: eligibility, the forge's clock, the registrations,
+        # the lock, the lookup of the lock, the beat, and the create of its registration (7).
+        # Every later one refreshes instead: the create of the new registration, the node id
+        # (once a wait) and the delete of the old one (9, 8 from the third on). The poll that
+        # takes the released lock: eligibility, clock, registrations, lock, create (5), and the
+        # delete of the registration (1). Two of a poll's calls are writes, none on the lock,
+        # and the poll that takes the lock refreshes nothing.
+        self.assertEqual((len(self.world.argvs("gh")), self.reads(OPEN_BASED)), (7 + 9 + 5 + 1, []))
         self.assertEqual(len(self.reads(BEAT_READ)), 2)
+        self.assertEqual([op for op, _ in self.queue_calls()], ["create", "create", "delete", "delete"])
+        self.assertEqual(len(self.attempts()), 1)
+        self.assertEqual(self.world.refs(), {REF: B})
 
     def test_a_lander_poll_behind_a_live_holder_makes_four_forge_calls(self):
         """The waiter's cost per poll is the same behind a lander and behind a release."""
@@ -1310,9 +1362,6 @@ class WaitTest(Base):
                 mock.patch.object(land_lock, "sleep", clock.sleep):
             return run(*land("acquire", A, "--wait"))
 
-    def attempts(self):
-        return [a for a in self.world.argvs("gh") if a[:4] == ["api", "-X", "POST", f"repos/{SLUG}/git/refs"]]
-
     def move_once(self, at, sha):
         done = []
 
@@ -1328,9 +1377,11 @@ class WaitTest(Base):
         self.assertEqual((code, out["verdict"], out["waited_s"], out["lock_sha"], out["pr"]),
                          (3, "land-contended", 3000, C, 12))
         self.assertEqual(clock.slept, [120] * 25)
-        self.assertEqual(len(self.attempts()), 26)
+        # D12: a waiter reads the lock first and sends a create only for one it read as free.
+        self.assertEqual((len(self.reads(LOCK_READ)), self.attempts()), (26, []))
         self.assertEqual(self.cas_calls(), [])
-        self.assertEqual(self.world.refs(), {REF: C})
+        self.assertEqual(self.world.refs(), {REF: C, **self.waiting()})
+        self.assertEqual((out["position"], out["ahead"], len(self.waiting())), (1, [], 1))
 
     def test_a_wait_ends_by_itself_inside_a_sixty_minute_bash_call(self):
         """Issue 941: the wait answers land-contended with ten minutes to spare, and can still complete an idle watch."""
@@ -1368,7 +1419,8 @@ class WaitTest(Base):
         with host_clock(datetime(2100, 1, 1, tzinfo=timezone.utc), fm, forge_claim):
             code, out = self.wait(clock)
         self.assertEqual((code, out["verdict"], out["took_over"], out["waited_s"]), (0, "acquired", "idle", 2760))
-        self.assertEqual(len(self.attempts()), 24)  # 0 .. 2640 held_by (< 2700), 2760 takes over
+        # 0 .. 2640 held_by (< 2700), 2760 takes over: the swap and its read-back
+        self.assertEqual((len(self.reads(LOCK_READ)), self.attempts()), (24 + 1, []))
         self.assertEqual(len(self.cas_calls()), 1)
         self.assertEqual(self.world.refs(), {REF: A})
 
@@ -1432,7 +1484,7 @@ class WaitTest(Base):
             code, out = self.wait(clock)
         self.assertEqual((code, out["verdict"], out["lock_sha"], out["waited_s"]), (3, "land-contended", B, 3000))
         self.assertEqual(len(self.cas_calls()), 1)  # 2760 lost to C; B seen anew at 2880 needs until 5580
-        self.assertEqual(self.world.refs(), {REF: B})
+        self.assertEqual(self.world.refs(), {REF: B, **self.waiting()})
 
     def test_an_observed_absence_restarts_the_watch(self):
         clock = FakeClock()
@@ -1636,6 +1688,238 @@ class RefreshTest(Base):
                        "restarts its watch exactly as a changed lock does",
                        "No clock is read (D3)"):
             self.assertIn(phrase, doc)
+
+
+class QueueTest(Base):
+    """Issue 1001, D12: the waiters of a branch queue. The waiter under test is pull request 11
+    at A; pull request 12 holds the lock at B; the other waiter is pull request 13 at D."""
+
+    def setUp(self):
+        super().setUp()
+        patcher = mock.patch.object(land_lock, "FAST_POLL", 20)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.prepare(B)
+
+    def prepare(self, lock_sha):
+        self.lock(lock_sha)
+        self.pulls(A, pull(11, sha=A))
+        self.pulls(B, pull(12, sha=B))
+        self.pulls(D, pull(13, sha=D))
+        self.others = {}
+
+    def register(self, pr, since, beat, sha=D):
+        """Write the registration of `pr`, in place of the one this helper wrote before; a
+        `beat` of None only removes that one."""
+        if pr in self.others:
+            self.world.set_ref(self.others.pop(pr), None)
+        if beat is not None:
+            self.others[pr] = f"{WAIT}{EPOCH + int(since)}-{pr}-{EPOCH + int(beat)}"
+            self.world.set_ref(self.others[pr], sha)
+
+    def clock(self, hook=None, offset=0, alive=None):
+        """A clock the forge's follows; `alive` is the `since` of a pull request 13 that
+        refreshes its registration at every step, `hook(elapsed)` changes the forge."""
+        def on_sleep(elapsed):
+            self.forge_time(offset + elapsed)
+            if alive is not None and 13 in self.others:
+                self.register(13, alive, offset + elapsed)
+            if hook:
+                hook(elapsed)
+        self.forge_time(offset)
+        if alive is not None:
+            self.register(13, alive, offset)
+        return FakeClock(on_sleep)
+
+    def wait(self, clock, sha=A):
+        with mock.patch.object(land_lock, "monotonic", clock.monotonic), \
+                mock.patch.object(land_lock, "sleep", clock.sleep):
+            return run(*land("acquire", sha, "--wait"))
+
+    def test_two_waiters_and_one_free_window_the_older_takes_it(self):
+        def node():
+            return "R_kgDOtest"
+        older, younger = land_lock.Queue(SLUG, BRANCH, node), land_lock.Queue(SLUG, BRANCH, node)
+        older.look(13, D)
+        older.stay()
+        self.forge_time(5)
+        younger.look(11, A)
+        younger.stay()
+        self.assertEqual(len(self.waiting()), 2)
+        self.world.set_ref(REF, None)  # the one free window
+        self.forge_time(100)
+        outcomes = {}
+        for queue, pr, sha in ((younger, 11, A), (older, 13, D)):  # the younger polls first
+            queue.look(pr, sha)
+            outcomes[pr] = land_lock.acquire_once(SLUG, BRANCH, sha, fm.commit_pulls(SLUG, sha), lambda _: False,
+                                                  node, behind=lambda lock, q=queue: bool(q.ahead))
+        self.assertEqual((outcomes[11].verdict, outcomes[13].verdict), ("queued", "acquired"))
+        self.assertEqual((younger.position, younger.ahead, older.position, older.ahead), (2, [13], 1, []))
+        self.assertEqual(self.world.refs()[REF], D)
+        self.assertEqual(len(self.attempts()), 1)
+
+    def test_a_younger_waiter_leaves_the_free_window_to_the_older_and_takes_the_next(self):
+        def forge(elapsed):
+            if elapsed == 240:
+                self.world.set_ref(REF, None)  # 12 releases: the window
+            if elapsed == 300:
+                self.world.set_ref(REF, D)  # 13, first in line, has taken it
+                self.register(13, None, None)
+                self.pulls(B, pull(12, state="closed", merged=True, sha=B))
+            if elapsed == 600:
+                self.world.set_ref(REF, None)
+                self.pulls(D, pull(13, state="closed", merged=True, sha=D))
+        clock = self.clock(forge, alive=-100)
+        code, out = self.wait(clock)
+        self.assertEqual((code, out["verdict"], out["waited_s"], out["waited_on"]), (0, "acquired", 600, [12, 13]))
+        self.assertEqual((out["position"], out["ahead"]), (1, []))
+        self.assertEqual(len(self.attempts()), 1)  # the free lock read at 240 was not asked for
+        # Behind 13 it polls every 120 s, and 60 s after it saw the lock free; first in line it
+        # reads the lock every 20 s, and the release at 600 is seen in that read.
+        self.assertEqual((clock.slept[:3], set(clock.slept[3:])), ([120, 120, 60], {20}))
+        self.assertEqual(self.world.refs(), {REF: A})
+
+    def test_the_first_in_line_sees_a_release_within_twenty_seconds(self):
+        def forge(elapsed):
+            if elapsed == 20:
+                self.register(13, 10, 20)  # a younger waiter arrives
+            if elapsed == 140:
+                self.world.set_ref(REF, None)
+        clock = self.clock(forge)
+        with host_clock(datetime(2100, 1, 1, tzinfo=timezone.utc), fm, forge_claim):
+            code, out = self.wait(clock)
+        self.assertEqual((code, out["verdict"], out["waited_s"], out["position"], out["ahead"]),
+                         (0, "acquired", 140, 1, []))
+        self.assertEqual(set(clock.slept), {20})
+        # Between two polls only the lock ref is read: 2 polls and the one at 140, 6 reads between.
+        self.assertEqual((len(self.reads(LOCK_READ)), len(self.reads(NOW))), (3 + 6, 3))
+        # Its registration was created, refreshed once (the poll at 120) and deleted on acquire.
+        self.assertEqual([op for op, _ in self.queue_calls()], ["create", "create", "delete", "delete"])
+        self.assertEqual(self.world.refs(), {REF: A, self.others[13]: D})
+
+    def test_a_dead_first_waiter_is_skipped_after_the_bound(self):
+        self.assertEqual(land_lock.QUEUE_LIVE, 390)
+        self.register(13, -100, 0)  # never refreshed
+        clock = self.clock(lambda elapsed: self.world.set_ref(REF, None) if elapsed == 480 else None)
+        with host_clock(datetime(1970, 1, 1, tzinfo=timezone.utc), fm, forge_claim):  # no host clock decides
+            code, out = self.wait(clock)
+        # Live through the poll at 360 (360 <= 390), dead at 480: deleted, and the lock taken.
+        self.assertEqual((code, out["verdict"], out["waited_s"], out["position"], out["ahead"]),
+                         (0, "acquired", 480, 1, []))
+        self.assertEqual(clock.slept, [120] * 4)
+        self.assertIn(("delete", self.others[13]), self.queue_calls())
+        self.assertEqual(self.world.refs(), {REF: A})
+
+    def test_a_live_first_waiter_that_leaves_the_lock_free_is_passed_after_the_grace(self):
+        clock = self.clock(lambda elapsed: self.world.set_ref(REF, None) if elapsed == 480 else None, alive=-100)
+        code, out = self.wait(clock)
+        self.assertEqual((code, out["verdict"], out["waited_s"], out["position"], out["ahead"]),
+                         (0, "acquired", 480 + land_lock.FREE_GRACE, 2, [13]))
+        self.assertEqual(len(self.attempts()), 1)
+        self.assertEqual(self.world.refs(), {REF: A, self.others[13]: D})
+
+    def test_a_waiter_whose_pull_request_is_closed_or_unknown_is_skipped(self):
+        self.world.reset()
+        self.prepare(None)
+        self.pulls(D, pull(13, state="closed", merged=True, sha=D))
+        self.world.respond("gh", ["api", f"repos/{SLUG}/pulls/99"], exit=1, stderr="gh: Not Found (HTTP 404)")
+        self.register(99, -200, 0, sha=B)
+        self.register(13, -100, 0)
+        self.world.set_ref(WAIT + "not-a-registration", B)
+        code, out = self.wait(self.clock())
+        self.assertEqual((code, out["verdict"], out["waited_s"], out["position"], out["ahead"]),
+                         (0, "acquired", 0, 1, []))
+        # Both are deleted, a name that is no registration is left alone, and a wait that
+        # takes the lock in its first poll never registers.
+        self.assertEqual(self.queue_calls(), [("delete", self.others[99]), ("delete", self.others[13])])
+        self.assertEqual(self.world.refs(), {REF: A, WAIT + "not-a-registration": B})
+
+    def test_a_one_shot_acquire_and_an_old_client_are_not_queued(self):
+        """A client that predates D12 is a create on a free lock; a one-shot `acquire` is the same."""
+        self.world.reset()
+        self.prepare(None)
+        self.clock(alive=-100)
+        code, out = run(*land("acquire", A))
+        self.assertEqual((code, out["verdict"], out["lock_sha"]), (0, "acquired", A))
+        self.assertEqual(("position" in out, "ahead" in out), (False, False))
+        self.assertEqual((self.reads(NOW), self.queue_calls()), ([], []))
+        self.assertEqual(len(self.world.argvs("gh")), 2)  # eligibility and the create, as before
+        code, out = run(*land("acquire", A))  # the holder's recheck before its merge
+        self.assertEqual((code, out["verdict"]), (0, "already_held"))
+        self.assertEqual(self.world.refs(), {REF: A, self.others[13]: D})
+
+    def test_a_holder_is_answered_whatever_its_place(self):
+        """`already_held` and `moved` concern the caller's own lock: a waiter ahead changes neither."""
+        self.world.set_ref(REF, A)
+        code, out = self.wait(self.clock(alive=-100))
+        self.assertEqual((code, out["verdict"], out["waited_s"], out["position"], out["ahead"]),
+                         (0, "already_held", 0, 2, [13]))
+        self.pulls(A, pull(11, sha=C))  # pull request 11 moved on to C; its lock is still at A
+        self.pulls(C, pull(11, sha=C))
+        code, out = self.wait(self.clock(alive=-100), C)
+        self.assertEqual((code, out["verdict"], out["lock_sha"], out["position"]), (0, "moved", C, 2))
+        self.assertEqual((self.queue_calls(), self.world.refs()), ([], {REF: C, self.others[13]: D}))
+
+    def test_a_contended_wait_keeps_its_place_for_the_next_wait(self):
+        with mock.patch.object(land_lock, "BOUND", 360):
+            code, out = self.wait(self.clock())
+        self.assertEqual((code, out["verdict"], out["waited_s"], out["position"], out["ahead"]),
+                         (3, "land-contended", 360, 1, []))
+        kept = self.waiting()
+        self.assertEqual(list(kept), [f"{WAIT}{EPOCH}-11-{EPOCH + 360}"])
+        self.register(13, 100, 400)  # arrived while the first wait ran
+        clock = self.clock(lambda elapsed: self.world.set_ref(REF, None) if elapsed == 40 else None,
+                           offset=400, alive=100)
+        code, out = self.wait(clock)
+        # The second wait adopts the place of the first (since EPOCH, before 13's), so it is
+        # first in line, reads the lock every 20 s and takes it; both registrations are gone.
+        self.assertEqual((code, out["verdict"], out["waited_s"], out["position"], out["ahead"]),
+                         (0, "acquired", 40, 1, []))
+        self.assertEqual(self.world.refs(), {REF: A, self.others[13]: D})
+
+    def test_a_registration_is_removed_when_the_wait_ends_without_the_lock(self):
+        def advance(elapsed):
+            if elapsed == 120:
+                self.pulls(A, pull(11, sha=C))  # the caller's pull request moved on
+        code, out = self.wait(self.clock(advance))
+        self.assertEqual((code, out["verdict"], out["error"]), (2, "error", "no_open_pr"))
+        self.assertEqual([op for op, _ in self.queue_calls()], ["create", "delete"])
+        self.assertEqual(self.world.refs(), {REF: B})
+
+    def test_no_place_in_the_queue_grants_the_lock(self):
+        """First in line with every write of the lock refused: no answer says the lock is held."""
+        real_create, real_cas = fm.create_ref, fm.cas_ref
+
+        def create(slug, ref, sha):
+            return ref != REF and real_create(slug, ref, sha)
+
+        def cas(slug, node, ref, before, after):
+            return fm.ForgeError("gh_failed", "refused") if ref == REF else real_cas(slug, node, ref, before, after)
+        for lock, holder in ((None, None), (B, pull(12, state="closed", merged=True, sha=B))):
+            with self.subTest(lock=lock):
+                self.world.reset()
+                self.prepare(lock)
+                if holder:
+                    self.pulls(B, holder)
+                with mock.patch.object(fm, "create_ref", create), mock.patch.object(fm, "cas_ref", cas):
+                    code, out = self.wait(self.clock())
+                self.assertEqual((code, out["verdict"], out["error"]), (1, "error", "gh_failed"))
+                self.assertEqual(self.world.refs().get(REF), lock)
+
+    def test_the_docstring_states_the_queue(self):
+        doc = " ".join(land_lock.__doc__.split())
+        for phrase in ("The queue decides only who tries",
+                       "`refs/agent-locks/land-wait/<branch>/<since>-<pr>-<beat>`",
+                       "no host clock is compared between hosts",
+                       "more than `QUEUE_LIVE` seconds (390, three polls and a margin)",
+                       "it still answers `already_held` and `moved`",
+                       "watched the lock free for `FREE_GRACE` seconds (60",
+                       "A `land-contended` answer leaves the registration",
+                       "reads the lock ref alone every `FAST_POLL` seconds (20)",
+                       "A one-shot `acquire` and a client that predates this rule register nothing",
+                       "adds `position` and `ahead` (D12)"):
+            self.assertIn(phrase, doc)
+        self.assertEqual((land_lock.FAST_POLL, land_lock.FREE_GRACE, land_lock.QUEUE_REFRESH), (20, 60, 60))
 
 
 class IdleRaceTest(Base):

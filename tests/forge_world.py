@@ -55,7 +55,8 @@ makes every host-clock read of the named modules return one instant, so a module
 the host clock instead of the server's fails its test.
 
 `ref_store(slug, refs, node_id=..., schedule=(), cas_lies=0)` serves a repository's git refs
-from shared state (issue 629, see REF_HANDLER): the single-ref read, the ref create (HTTP 422
+from shared state (issue 629, see REF_HANDLER): the single-ref read, the prefix listing
+(`git/matching-refs`, never scheduled), the ref create (HTTP 422
 when it exists), the repository node id and the `updateRefs` compare-and-swap, which applies
 only from the observed oid. `cas_lies=n` makes the next n applied swaps answer failure, the
 spike's observed lie. Schedule entries are the bare op names `get`, `create` and `cas`, with
@@ -128,6 +129,9 @@ if tool == "gh" and (state / "refs.json").exists():
         if len(argv) == 2 and argv[0] == "api" and argv[1].startswith(one):
             name = "refs/" + argv[1][len(one):]
             return ("get", name) if name.startswith(store.get("prefix", "")) else None
+        many = "repos/" + slug + "/git/matching-refs/"
+        if len(argv) == 2 and argv[0] == "api" and argv[1].startswith(many):
+            return "list", "refs/" + argv[1][len(many):].split("?")[0]
         if (len(argv) == 8 and argv[:4] == ["api", "-X", "POST", "repos/" + slug + "/git/refs"]
                 and argv[4] == "-f" and argv[5].startswith("ref=")
                 and argv[6] == "-f" and argv[7].startswith("sha=")):
@@ -176,6 +180,11 @@ if tool == "gh" and (state / "refs.json").exists():
                     sys.stderr.write(LOST_REPLY + "\\n")
                     sys.exit(1)
 
+                if kind == "list":
+                    save_refs(store)
+                    sys.stdout.write(json.dumps([{"ref": name, "object": {"sha": refs[name], "type": "commit"}}
+                                                 for name in sorted(refs) if name.startswith(arg)]))
+                    sys.exit(0)
                 if kind == "get":
                     if lose:
                         lost_reply()
