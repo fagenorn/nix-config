@@ -55,6 +55,11 @@ FULL_RUBRIC = "a task whose test cannot fail, wrong or missing interfaces"
 CODEX_OWNS = "The Codex plan review running beside you owns code correctness"
 RULE_ID = "put the broken rule's id in the finding's rule)."
 PASS_REPLY = {"verdict": "pass", "findings": []}
+# #987: the one-sentence turn procedure call() puts first in every reviewer and implementer prompt.
+REVIEWER_ROUNDS = ("Look things up in rounds: load the files under review in one message, then put every open question's "
+                   "Bash, Grep or Read call in the same message as the others, never one small lookup per turn.")
+IMPLEMENTER_ROUNDS = ("Work in rounds: put a round's lookups in one message, send its independent edits as several Edit calls "
+                      "in one message, and run the tests once per round of edits, never one small call per turn.")
 
 
 def refused(*errors):
@@ -2995,8 +3000,11 @@ class NoCommitTaskTest(unittest.TestCase):
             with self.subTest(risk=risk):
                 _, calls = run(replies={"plan": dict(PLAN, tasks=tasks(1, risk)), "review-1": TASK_FINDING})
                 impl = prompt(calls, "impl-1")
-                head = impl[:impl.index("\nFirst renew the claim")]
-                self.assertEqual(prompt(calls, "review-1"), f"{head}\n{lane}Review the diff of task 1 only: "
+                # #987: the implementer's opening line is its own; a reviewer opens with the reviewer's, reviewer-lite with none.
+                self.assertTrue(impl.startswith(IMPLEMENTER_ROUNDS + "\n"))
+                head = impl[len(IMPLEMENTER_ROUNDS) + 1:impl.index("\nFirst renew the claim")]
+                opener = "" if lane else REVIEWER_ROUNDS + "\n"
+                self.assertEqual(prompt(calls, "review-1"), f"{opener}{head}\n{lane}Review the diff of task 1 only: "
                                  f"git -C {self.WT} diff {SHA}..c0ffee (and the task file /g/task-1.md as its contract). {KNOW_TEXT} "
                                  "Report Important or Critical correctness defects and unmet task requirements only, each with a "
                                  "concrete failing input. No style notes. Do not edit anything.")
@@ -7298,6 +7306,36 @@ class PlannerReadsTest(unittest.TestCase):
                 self.assertLess(text.index(needle), text.index("Issue #9 of "), label)
             seen.add(label)
         self.assertEqual(seen, set(self.PLANNERS))
+
+    # #987: the reviewer's and the implementer's own one-sentence procedures, different sentences from the planner's BATCH.
+    ROUNDS = {"reviewer": REVIEWER_ROUNDS, "implementer": IMPLEMENTER_ROUNDS}
+    OPENERS = ("Look things up in rounds: load", "Work in rounds:")
+
+    def test_every_reviewer_and_implementer_prompt_opens_with_its_one_sentence(self):
+        seen = set()
+        for call in all_calls():
+            text, label, kind = call["prompt"], call["label"], call["agentType"]
+            if kind not in self.ROUNDS:
+                # reviewer-lite included: its steps are a few turns at a small context.
+                for opener in self.OPENERS:
+                    self.assertNotIn(opener, text, label)
+                continue
+            # One sentence, once, on a line of its own before the step's prompt, and never the other kind's.
+            self.assertTrue(text.startswith(self.ROUNDS[kind] + "\n"), label)
+            self.assertEqual(sum(text.count(opener) for opener in self.OPENERS), 1, label)
+            seen.add(AgentTypeTest.stem_of(label))
+        # Every site that can run one of the two kinds is seen running it, but for the two the scenarios reach on reviewer-lite only.
+        self.assertEqual(seen | {"direct-review", "rereview-"}, {stem for stem, kinds in EXPECTED.items() if kinds & set(self.ROUNDS)})
+
+    def test_each_rounds_sentence_is_one_constant_added_where_every_call_passes(self):
+        source = PROGRAM.read_text(encoding="utf-8")
+        for kind, sentence in self.ROUNDS.items():
+            self.assertEqual(source.count(f"  {kind}: `{sentence}`,\n"), 1, kind)
+            # One sentence: its only full stop ends it.
+            self.assertEqual(sentence.index("."), len(sentence) - 1, kind)
+        self.assertIn("reply = await agent(withRounds(prompt, opts), opts)", source)
+        # Every agent call of the program goes through that one wrapper.
+        self.assertEqual(len(re.findall(r"\bawait agent\(", source)), 1)
 
     def test_the_shared_rules_keep_the_no_subagent_line_and_name_no_grant(self):
         source = PROGRAM.read_text(encoding="utf-8")

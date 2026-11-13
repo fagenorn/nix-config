@@ -364,11 +364,19 @@ On refusal return ok=false, reason contract, and in details the resolver's error
 - verification: for each id in bindings.workflow.verification its bindings.commands argv, its cwd relative to project.root (. for the root), and any bindings.workflow.verification_conditions entry (when_changed globs, skip_reason), and pre_commit: true on an entry whose verification_conditions entry has pre_commit true (omit pre_commit otherwise).`
 // Labels of agents that returned nothing or threw: deliver-batch's breaker reads them (#636).
 const DEAD = []
+// #987: every reviewer and implementer step opens with its one-sentence turn procedure. Measured over four runs, both kinds sent one
+// tool call in 80 to 100% of their tool messages at up to 183k of context; the planner, under the same wording first in its prompt, 27%.
+// Added in call(), not per prompt, so no site of either kind can miss it. reviewer-lite is left out: a median of three turns under 20k.
+const ROUNDS = {
+  reviewer: `Look things up in rounds: load the files under review in one message, then put every open question's Bash, Grep or Read call in the same message as the others, never one small lookup per turn.`,
+  implementer: `Work in rounds: put a round's lookups in one message, send its independent edits as several Edit calls in one message, and run the tests once per round of edits, never one small call per turn.`,
+}
+const withRounds = (prompt, opts) => (opts && ROUNDS[opts.agentType] ? `${ROUNDS[opts.agentType]}\n${prompt}` : prompt)
 // optional: a step whose failure the caller recovers (the diff-size measurement) is not reported as a dead agent.
 const call = async (prompt, opts, optional) => {
   let reply
   try {
-    reply = await agent(prompt, opts)
+    reply = await agent(withRounds(prompt, opts), opts)
   } catch (error) {
     if (!optional) DEAD.push(opts && opts.label)
     throw error
