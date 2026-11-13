@@ -153,10 +153,13 @@ smallest `<since>` of its live registrations, ties going to the smaller number; 
 requests placed before the caller's are ahead of it. Starting at the oldest, one that is not
 open (`GET pulls/<n>`, HTTP 404 included) is skipped and its registrations deleted, and the
 first open one ends the check, so a poll reads one pull request when somebody is ahead and none
-when nobody is. A waiter with a pull request ahead of it creates no free lock and takes no
-closed one over until it has itself watched the lock free, or seen it closed, for `FREE_GRACE`
-seconds (60; its next poll comes that soon), since a live first waiter takes either within
-`FAST_POLL` seconds: that bounds what a waiter that died or hangs can cost. The queue is asked
+when nobody is. A waiter with a pull request ahead of it creates no free lock until it has
+itself watched the lock free for `FREE_GRACE` seconds (60), and takes no closed one over until
+it has itself seen it closed for `CLOSED_GRACE` seconds (150); its next poll comes when that
+grace ends. A live first waiter takes a free lock within `FAST_POLL` seconds and a closed one
+within one poll of 120 seconds, because a merge leaves the lock's oid unchanged and only a whole
+poll sees it; each grace is longer than that, and bounds what a waiter that died or hangs can
+cost. The queue is asked
 nothing else. `already_held` and `moved` concern only the caller's own lock and are answered
 before the queue is read, and the idle takeover of D4 does not depend on the caller's place: its
 own 45-minute watch is the bound. A following release's second attempt, right after it deleted
@@ -206,7 +209,8 @@ FAST_POLL = 20  # D12: the first in line reads the lock ref this often between t
 QUEUE_LIVE = 3 * POLL + 30  # D12: a registration not refreshed for this long is dead
 QUEUE_REFRESH = POLL // 2  # D12: a registration is rewritten at most this often
 QUEUE_SKEW = 60  # D12: a registration whose beat is this far ahead of the forge's clock is dead
-FREE_GRACE = 60  # D12: a lock watched free or closed this long is tried by a waiter that is not first
+FREE_GRACE = 60  # D12: a lock watched free this long is tried by a waiter that is not first
+CLOSED_GRACE = POLL + 30  # D12: and one seen closed this long; the first in line sees that in a whole poll
 ACTIONS = ("acquire", "release", "status", "refresh")
 
 monotonic = time.monotonic
@@ -523,7 +527,7 @@ def wait_acquire(args: Any, node: Callable[[], str],
     waited_on: set[int] = set()  # D7: the pull requests seen holding the lock
     queue = Queue(args.repo, args.branch, node)
     keep = False  # D12: a land-contended answer leaves the registration to the next wait
-    poll: list[Any] = [None, "", False, False]  # pull request, sha, queue read, held back by it
+    poll: list[Any] = [None, "", False, 0.0]  # pull request, sha, queue read, grace left when held back
     closed: list[Any] = [None, 0.0]  # [a lock seen closed with a waiter ahead, first seen so]
 
     def seen(oid: str | None) -> None:
@@ -553,13 +557,13 @@ def wait_acquire(args: Any, node: Callable[[], str],
         consult()
         if not queue.ahead:
             return False
-        since = watch[1]
+        since, grace = watch[1], FREE_GRACE
         if lock is not None:
             if closed[0] != lock:
                 closed[0], closed[1] = lock, monotonic()
-            since = closed[1]
-        poll[3] = monotonic() - since < FREE_GRACE
-        return poll[3]
+            since, grace = closed[1], CLOSED_GRACE
+        poll[3] = max(0.0, since + grace - monotonic())
+        return poll[3] > 0
 
     def attempt(sha: str, mine: list[fm.Pull]) -> Outcome:
         return acquire_once(args.repo, args.branch, sha, mine, idle, node, seen, behind=behind)
@@ -567,7 +571,7 @@ def wait_acquire(args: Any, node: Callable[[], str],
     try:
         while True:
             first = False
-            poll[2] = poll[3] = False
+            poll[2], poll[3] = False, 0.0
             try:
                 mine = eligible()
                 if not mine:
@@ -615,7 +619,7 @@ def wait_acquire(args: Any, node: Callable[[], str],
                                  by=holder(args.repo, last.pr) if last else None,
                                  waited_s=int(monotonic() - start), waited_on=sorted(waited_on),
                                  position=queue.position, ahead=queue.ahead)
-            until = min(monotonic() + (FREE_GRACE if poll[3] else POLL), start + BOUND)
+            until = min(monotonic() + (min(POLL, poll[3]) if poll[3] else POLL), start + BOUND)
             while True:  # D12: the first in line reads the lock ref between two polls
                 sleep(min(FAST_POLL if first else POLL, until - monotonic()))
                 if not first or monotonic() >= until:

@@ -1937,11 +1937,13 @@ class QueueTest(Base):
         seen = []
         clock = self.clock(forge, alive=-100)
         code, out = self.wait(clock)
-        # The poll at 240 sees the closed lock and writes nothing; the next comes 60 s later
-        # and, 13 still not having taken it, takes it over.
+        # The polls at 240 and 360 see the closed lock and write nothing: the first in line
+        # sees a merge only in a whole poll, so the grace is longer than one (150 s). The next
+        # poll comes when it ends and, 13 still not having taken the lock, takes it over.
+        self.assertEqual((land_lock.CLOSED_GRACE, land_lock.FREE_GRACE), (land_lock.POLL + 30, 60))
         self.assertEqual((code, out["verdict"], out["took_over"], out["waited_s"], out["position"], out["ahead"]),
-                         (0, "acquired", "closed", 240 + land_lock.FREE_GRACE, 2, [13]))
-        self.assertEqual((clock.slept, seen[-1]), ([120, 120, 60], (300, 0)))
+                         (0, "acquired", "closed", 240 + land_lock.CLOSED_GRACE, 2, [13]))
+        self.assertEqual((clock.slept, seen[-1]), ([120, 120, 120, 30], (390, 0)))
         self.assertEqual((len(self.cas_calls()), self.attempts()), (1, []))
 
     def test_a_free_lock_is_not_asked_for_before_the_grace(self):
@@ -2055,7 +2057,9 @@ class QueueTest(Base):
                        "`already_held` and `moved` concern only the caller's own lock and are answered before "
                        "the queue is read",
                        "the idle takeover of D4 does not depend on the caller's place",
-                       "watched the lock free, or seen it closed, for `FREE_GRACE` seconds (60",
+                       "watched the lock free for `FREE_GRACE` seconds (60)",
+                       "seen it closed for `CLOSED_GRACE` seconds (150)",
+                       "a closed one within one poll of 120 seconds",
                        "is not queued either, so the lock it gave up is not left free behind a waiter",
                        "more than `QUEUE_SKEW` seconds (60) ahead of it, is dead",
                        "which the forge answers whole, unpaginated",
