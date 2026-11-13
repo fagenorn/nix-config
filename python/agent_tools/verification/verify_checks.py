@@ -291,6 +291,19 @@ def required_checks(repo: str, base: str, since: datetime) -> tuple[int, dict]:
     return (0 if not report["missing"] else 1), report
 
 
+def issue_closed(repo: str, issue: int) -> tuple[int, dict]:
+    """Met when `issue` is closed as completed: the verify run closed it with its checks met."""
+    found = forge_api.api_get(f"repos/{repo}/issues/{issue}")
+    state = found.get("state") if isinstance(found, dict) else None
+    if state not in ("open", "closed"):
+        raise _invalid(f"issue {issue} has no open or closed state")
+    reason = found.get("state_reason")
+    report = {"issue": issue, "state": state, "state_reason": reason}
+    if state == "open":
+        return 75, report
+    return (0 if reason == "completed" else 1), report
+
+
 def self_hosted_runner(repo: str, runner: str, labels: Sequence[str]) -> tuple[int, dict]:
     """Met when `runner` is listed on `repo`, online, and carries `self-hosted` and every label."""
     required = {"self-hosted", *labels}
@@ -1089,6 +1102,16 @@ def _port(value: str) -> int:
     return port
 
 
+def _issue_number(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError:
+        number = 0
+    if number < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return number
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="verify-checks")
     checks = parser.add_subparsers(dest="check", required=True)
@@ -1141,6 +1164,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         "console-state",
         help="issue 856: the console's state endpoint answers 200 on loopback")
     console.add_argument("--port", type=_port, required=True)
+    closed = checks.add_parser(
+        "issue-closed",
+        help="issue 1010: an issue was closed as completed, by its own verify run")
+    closed.add_argument("--repo", type=_repo, required=True)
+    closed.add_argument("--issue", type=_issue_number, required=True)
     args = parser.parse_args(argv)
     if args.check == "console-state":
         code, report = console_state(args.port)
@@ -1211,6 +1239,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.check == "self-hosted-runner":
             code, report = self_hosted_runner(args.repo, args.runner, args.label)
+        elif args.check == "issue-closed":
+            code, report = issue_closed(args.repo, args.issue)
         else:
             code, report = required_checks(args.repo, args.base, args.since)
     except forge_api.ForgeError as error:

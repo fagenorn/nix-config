@@ -259,6 +259,49 @@ class RequiredChecksCommandTest(unittest.TestCase):
         self.assertEqual(committed_mode(f"{CHECKS}/required-checks"), "100755")
 
 
+class IssueClosedTest(unittest.TestCase):
+    PATH = "repos/o/r/issues/1009"
+
+    def read(self, payload):
+        def api_get(path, allow=()):
+            self.assertEqual(path, self.PATH)
+            return payload
+        return mock.patch.object(forge_api, "api_get", side_effect=api_get)
+
+    def test_an_issue_closed_as_completed_is_met(self):
+        with self.read({"state": "closed", "state_reason": "completed"}):
+            self.assertEqual(verify_checks.issue_closed("o/r", 1009),
+                             (0, {"issue": 1009, "state": "closed", "state_reason": "completed"}))
+
+    def test_an_open_issue_is_not_yet(self):
+        with self.read({"state": "open", "state_reason": None}):
+            self.assertEqual(verify_checks.issue_closed("o/r", 1009),
+                             (75, {"issue": 1009, "state": "open", "state_reason": None}))
+
+    def test_an_issue_closed_another_way_is_not_met(self):
+        with self.read({"state": "closed", "state_reason": "not_planned"}):
+            code, report = verify_checks.issue_closed("o/r", 1009)
+        self.assertEqual((code, report["state_reason"]), (1, "not_planned"))
+
+    def test_an_unreadable_issue_is_a_forge_error(self):
+        for payload in ([], {"state": "gone"}):
+            with self.subTest(payload=payload), self.read(payload):
+                with self.assertRaises(forge_api.ForgeError) as raised:
+                    verify_checks.issue_closed("o/r", 1009)
+                self.assertEqual(raised.exception.code, "payload_invalid")
+        err = io.StringIO()
+        with mock.patch.object(forge_api, "api_get",
+                               side_effect=forge_api.ForgeError("transport", "x")):
+            with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+                code = verify_checks.main(["issue-closed", "--repo", "o/r", "--issue", "1009"])
+        self.assertEqual(code, 2)
+        self.assertIn("verify-checks: forge_error: transport", err.getvalue())
+
+    def test_the_issue_closed_wrapper_is_committed_executable(self):
+        self.assertEqual(committed_mode(f"{CHECKS}/issue-closed"), "100755")
+        self.assertEqual(run_from_root([str(ROOT / CHECKS / "issue-closed")]).returncode, 2)
+
+
 class PlatformStatusWrapperTest(unittest.TestCase):
     def test_runs_the_installed_platform_status_and_passes_it_through(self):
         with tempfile.TemporaryDirectory() as home:

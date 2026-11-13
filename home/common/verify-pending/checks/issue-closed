@@ -1,0 +1,5 @@
+#!/bin/sh
+# Verify check for issue 1010: an issue was closed as completed, which verify-pending run does
+# only when the issue's held verify block was accepted and its checks passed. Reads the forge only.
+# verify-pending runs it from the repository root at the commit the block names.
+PYTHONPATH=python exec python3 -m agent_tools.verification.verify_checks issue-closed "$@"
