@@ -148,6 +148,21 @@ class SelectTest(unittest.TestCase):
         self.assertEqual(self.pick("<slug>-<num>", refs, excluded=("release-9", "trunk-9")), f"{SHORT}-9")
 
 
+FAKE_GIT = '''import os, sys
+argv = sys.argv[1:]
+left = os.environ.get("FAKE_GIT_FETCH_FAILURES")
+if left and "fetch" in argv:
+    count = int(open(left).read())
+    if count > 0:
+        open(left, "w").write(str(count - 1))
+        sys.stderr.write(os.environ["FAKE_GIT_FETCH_STDERR"])
+        sys.exit(128)
+os.execv(os.environ["REAL_GIT"], ["git", *argv])
+'''
+UNREACHABLE = ("ssh: connect to host ssh.github.com port 443: Network is unreachable\n"
+               "fatal: Could not read from remote repository.\n")
+
+
 class IssueBranchCase(unittest.TestCase):
     """A git copy of the fixture project with a bare origin, a manifest HOME and a stub gh."""
 
@@ -205,7 +220,7 @@ class IssueBranchCase(unittest.TestCase):
             if not local:
                 self.git(self.root, "update-ref", "-d", f"refs/heads/{branch}")
 
-    def issue_branch(self, issue=9, argv=None):
+    def issue_branch(self, issue=9, argv=None, env=None):
         """Run the command; `argv` (a program's sent argv) replaces the default one, with only the
         launcher and the --repo-root value swapped for this fixture."""
         args = ["--repo-root", str(self.root), "--issue", str(issue)] if argv is None else self.fixture_args(argv)
@@ -213,8 +228,18 @@ class IssueBranchCase(unittest.TestCase):
             [sys.executable, "-m", "agent_tools.delivery.issue_branch", *args],
             capture_output=True, text=True, timeout=120, cwd=str(self.home),
             env={**os.environ, "HOME": str(self.home), "FAKE_GH_STATE": str(self.state),
-                 "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}"})
+                 "PATH": f"{self.bin}{os.pathsep}{os.environ['PATH']}", **(env or {})})
         return proc.returncode, proc.stdout, proc.stderr
+
+    def fail_fetches(self, count, stderr=UNREACHABLE):
+        """The next `count` `git fetch` runs of the command fail with `stderr`; returns the env to run under."""
+        git = self.bin / "git"
+        git.write_text(f"#!{sys.executable}\n{FAKE_GIT}", encoding="utf-8")
+        git.chmod(0o755)
+        left = self.bin.parent / "fetch-failures"
+        left.write_text(str(count), encoding="utf-8")
+        return {"REAL_GIT": shutil.which("git"), "FAKE_GIT_FETCH_FAILURES": str(left),
+                "FAKE_GIT_FETCH_STDERR": stderr}
 
     def fixture_args(self, argv):
         """`argv` without its program name, the value after --repo-root pointing at the fixture project."""
@@ -279,6 +304,52 @@ class IssueBranchCommandTest(IssueBranchCase):
     def test_a_forge_failure_exits_one(self):
         self.set_forge(TWENTY_WORDS, [], slug="someone/else")
         self.assertEqual(self.refused(1), "forge_failed")
+
+
+class FetchRetryTest(IssueBranchCase):
+    """Issue 999: a network failure of the fetch is retried once, then reported transient."""
+
+    def failed(self, env):
+        code, out, err = self.issue_branch(env=env)
+        self.assertEqual((code, out), (1, ""), err)
+        return json.loads(err)["error"]
+
+    def left(self, env):
+        return int(Path(env["FAKE_GIT_FETCH_FAILURES"]).read_text(encoding="utf-8"))
+
+    def test_a_fetch_that_fails_once_on_the_network_then_succeeds_derives_the_branch(self):
+        env = self.fail_fetches(1)
+        code, out, err = self.issue_branch(env=env)
+        self.assertEqual((code, err), (0, ""), err)
+        self.assertEqual(json.loads(out)["branch"], "issue-9-" + SHORT)
+        self.assertEqual(self.left(env), 0)
+
+    def test_two_network_failures_exit_one_marked_transient(self):
+        env = self.fail_fetches(5)
+        self.assertEqual(self.failed(env), {"code": "git_failed", "detail": UNREACHABLE.strip(), "transient": True})
+        self.assertEqual(self.left(env), 3, "the fetch ran exactly twice")
+
+    def test_a_failure_that_is_not_the_network_is_neither_retried_nor_transient(self):
+        stderr = "fatal: 'origin' does not appear to be a git repository\n"
+        env = self.fail_fetches(5, stderr)
+        self.assertEqual(self.failed(env), {"code": "git_failed", "detail": stderr.strip()})
+        self.assertEqual(self.left(env), 4, "the fetch ran once")
+
+    def test_every_network_failure_git_and_ssh_report_is_recognised(self):
+        for text in ("ssh: connect to host ssh.github.com port 443: Network is unreachable",
+                     "ssh: connect to host github.com port 22: Connection timed out",
+                     "fatal: unable to access 'https://x/': Recv failure: Connection reset by peer",
+                     "kex_exchange_identification: read: Connection reset by peer",
+                     "fatal: unable to access 'https://x/': Could not resolve host: github.com",
+                     "ssh: Could not resolve hostname github.com: Temporary failure in name resolution",
+                     "fatal: early EOF",
+                     "fatal: the remote end hung up unexpectedly"):
+            with self.subTest(text=text):
+                self.assertTrue(issue_branch.network_failure(text))
+        for text in ("fatal: 'origin' does not appear to be a git repository",
+                     "fatal: couldn't find remote ref main", "Permission denied (publickey).", "timeout", ""):
+            with self.subTest(text=text):
+                self.assertFalse(issue_branch.network_failure(text))
 
 
 class ProgramsDeriveAlikeTest(IssueBranchCase):
