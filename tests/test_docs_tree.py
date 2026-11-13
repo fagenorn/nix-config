@@ -427,6 +427,21 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("ADR-console-023", context)
         self.assertIn("binding", context)
 
+    def test_the_launch_choice_decision_is_recorded(self):
+        path = "docs/areas/hosts/adr/008-claude-starts-under-the-consoles-profile-choice.md"
+        first = (REPO_ROOT / path).read_text().splitlines()[0]
+        self.assertEqual(
+            first,
+            "# ADR-hosts-008 — `claude` starts under the console's profile choice, not the project's binding")
+        adr = self.doc(path)
+        for needle in ("GET /api/profile", "chosen-profile", "bindings.tsv", "one second",
+                       "most recently used", "oauthAccount", "CLAUDE_ACCOUNT", "default",
+                       "ADR-hosts-005", "ADR-console-023", "#1012"):
+            self.assertIn(needle, adr)
+        context = self.doc("docs/areas/hosts/CONTEXT.md")
+        self.assertIn("ADR-hosts-008", context)
+        self.assertNotIn("`claude` reads it at launch to pick the profile directory.", context)
+
     def test_the_console_answer_decision_is_recorded(self):
         path = "docs/areas/console/adr/010-the-page-answers-a-decision-prompt-by-ticking-it-as-the-owner.md"
         first = (REPO_ROOT / path).read_text().splitlines()[0]

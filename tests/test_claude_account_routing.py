@@ -4,6 +4,10 @@ Each case runs the source `claude-account run` from a temporary copy of the acco
 `CACHE_PROXY_URL=` line is substituted the way `home/common/claude-code/default.nix` substitutes
 it, with the system `env` standing in for claude, so what it prints is the environment claude
 would receive.
+
+#1012: a launch with `CLAUDE_ACCOUNT` unset picks the profile the console answers on
+`GET /api/profile`, else the choice file, else the most recently used signed-in profile, else the
+first by name.
 """
 
 import http.server
@@ -24,6 +28,7 @@ from agent_tools.hosts import cache_proxy
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ACCOUNTS = REPO_ROOT / "home" / "common" / "claude-code" / "accounts"
 PLACEHOLDER = "CACHE_PROXY_URL="
+CONSOLE_LINE = "\nCONSOLE_URL=http://127.0.0.1:27184\n"
 CALLER_URL = "http://127.0.0.1:9/caller"
 REQUIRED_REFUSAL = "claude-account: CLAUDE_CACHE_PROXY=required and the cache proxy is not answering\n"
 REMINDER = "CLAUDE_CODE_TOTAL_TOKENS_REMINDER"
@@ -48,6 +53,21 @@ class ForeignHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def log_message(self, format, *args):
+        pass
+
+
+class ConsoleHandler(http.server.BaseHTTPRequestHandler):
+    """A stand-in console: records each GET path on its server and answers 200 with `server.body`."""
+
+    def do_GET(self):
+        self.server.requests.append(self.path)
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(self.server.body)))
+        self.end_headers()
+        self.wfile.write(self.server.body)
 
     def log_message(self, format, *args):
         pass
@@ -129,7 +149,7 @@ class LauncherCase(unittest.TestCase):
         listener.listen(8)
         return "http://127.0.0.1:%d" % listener.getsockname()[1]
 
-    def run_launcher(self, proxy_url, env=None, substitute=True, without_curl_and_jq=False):
+    def run_launcher(self, proxy_url, env=None, substitute=True, without_curl_and_jq=False, console_url=None):
         """`claude-account run` from a fresh copy of the mod, as a finished process.
 
         `without_curl_and_jq` points the copy's CURL and JQ at paths that do not exist."""
@@ -144,6 +164,8 @@ class LauncherCase(unittest.TestCase):
             for line in ("\nCURL=curl\n", "\nJQ=jq\n"):
                 self.assertEqual(text.count(line), 1)
                 text = text.replace(line, line.replace("=", "=/nonexistent/"))
+        self.assertEqual(text.count(CONSOLE_LINE), 1)
+        text = text.replace(CONSOLE_LINE, "\nCONSOLE_URL=" + (console_url or "http://127.0.0.1:%d" % closed_port()) + "\n")
         script.write_text(text)
         home, work = self.root / "home", self.root / "work"
         home.mkdir(exist_ok=True)
@@ -155,9 +177,9 @@ class LauncherCase(unittest.TestCase):
         return subprocess.run([shutil.which("bash"), str(script), "run"], cwd=work, env=child,
                               capture_output=True, text=True, timeout=TIMEOUT, check=False)
 
-    def launch(self, proxy_url, env=None, substitute=True, without_curl_and_jq=False):
+    def launch(self, proxy_url, env=None, substitute=True, without_curl_and_jq=False, console_url=None):
         """The environment the stand-in claude printed; the launch must succeed silently."""
-        completed = self.run_launcher(proxy_url, env, substitute, without_curl_and_jq)
+        completed = self.run_launcher(proxy_url, env, substitute, without_curl_and_jq, console_url)
         self.assertEqual((completed.returncode, completed.stderr), (0, ""))
         return dict(line.split("=", 1) for line in completed.stdout.splitlines() if "=" in line)
 
@@ -323,6 +345,169 @@ class RequiredRoutingTest(LauncherCase):
         completed = self.run_launcher(dead, {"ANTHROPIC_BASE_URL": CALLER_URL})
         self.assertEqual((completed.returncode, completed.stdout, completed.stderr),
                          (1, "", REQUIRED_REFUSAL))
+
+
+class ProfileChoiceTest(LauncherCase):
+    """A launch with CLAUDE_ACCOUNT unset starts under the profile the console chooses (#1012).
+
+    The order is the console's answer, the choice file, the most recently used signed-in named
+    profile, the first named profile by name; with no named profile the client is unprofiled."""
+
+    switch = {"CLAUDE_CACHE_PROXY": "0"}
+
+    def setUp(self):
+        super().setUp()
+        self.assertIsNotNone(shutil.which("jq"), "jq is required on PATH")
+        self.state = self.root / "accounts-state"
+        self.now = time.time()
+        self.console_requests = []
+
+    def profile(self, name, signed_in, used=None):
+        directory = self.state / "profiles" / name
+        directory.mkdir(parents=True, exist_ok=True)
+        record = directory / ".claude.json"
+        record.write_text('{"oauthAccount": {"emailAddress": "%s@example.invalid"}}' % name if signed_in else "{}")
+        if used is not None:
+            os.utime(record, (used, used))
+
+    def choose(self, text):
+        self.state.mkdir(parents=True, exist_ok=True)
+        (self.state / "chosen-profile").write_text(text)
+
+    def bind(self, name):
+        work = self.root / "work"
+        work.mkdir(exist_ok=True)
+        self.state.mkdir(parents=True, exist_ok=True)
+        (self.state / "bindings.tsv").write_text("%s\t%s\n" % (work.resolve(), name))
+
+    def console(self, body):
+        server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), ConsoleHandler)
+        server.body = body
+        server.requests = self.console_requests
+        return self.serve(server)
+
+    def chosen(self, environment):
+        return environment.get("CLAUDE_CONFIG_DIR")
+
+    def path(self, name):
+        return str(self.state / "profiles" / name)
+
+    def closed(self):
+        return "http://127.0.0.1:%d" % closed_port()
+
+    def test_the_console_choice_wins_over_the_binding(self):
+        self.profile("a", True, self.now - 100)
+        self.profile("b", True, self.now)
+        self.bind("b")
+        self.choose("b\n")
+        url = self.console(b'{"profile":"a"}')
+        environment = self.launch(self.closed(), console_url=url)
+        self.assertEqual(self.chosen(environment), self.path("a"))
+        self.assertEqual(self.console_requests, ["/api/profile"])
+
+    def test_an_unusable_console_answer_counts_as_none(self):
+        self.profile("a", False, self.now)
+        self.profile("b", True, self.now - 100)
+        bodies = (b'{"profile":null}', b'{"profile":"default"}', b'{"profile":"ghost"}', b'{"profile":"../a"}',
+                  b'{"profile": "a"}', b"not json")
+        for body in bodies:
+            with self.subTest(body=body):
+                environment = self.launch(self.closed(), console_url=self.console(body))
+                self.assertEqual(self.chosen(environment), self.path("b"))
+
+    def test_the_choice_file_is_used_when_the_console_is_down(self):
+        self.profile("a", True, self.now - 100)
+        self.profile("b", True, self.now)
+        self.choose(" a \n")
+        self.bind("b")
+        self.assertEqual(self.chosen(self.launch(self.closed())), self.path("a"))
+
+    def test_a_silent_console_falls_back_within_the_deadline(self):
+        url = self.silent_listener()
+        self.profile("a", True, self.now - 100)
+        self.profile("b", True, self.now)
+        self.choose("a\n")
+        started = time.monotonic()
+        environment = self.launch(self.closed(), console_url=url)
+        elapsed = time.monotonic() - started
+        self.assertEqual(self.chosen(environment), self.path("a"))
+        self.assertLess(elapsed, 2.0)
+
+    def test_the_most_recently_used_signed_in_profile_is_next(self):
+        self.profile("a", True, self.now - 100)
+        self.profile("b", True, self.now)
+        self.profile("c", False, self.now + 100)
+        self.profile("default", True, self.now + 200)
+        self.bind("a")
+        for choice in (None, "ghost\n", "default\n"):
+            with self.subTest(choice=choice):
+                (self.state / "chosen-profile").unlink(missing_ok=True)
+                if choice is not None:
+                    self.choose(choice)
+                self.assertEqual(self.chosen(self.launch(self.closed())), self.path("b"))
+
+    def test_equal_use_breaks_ties_by_name(self):
+        self.profile("b", True, self.now)
+        self.profile("a", True, self.now)
+        self.assertEqual(self.chosen(self.launch(self.closed())), self.path("a"))
+
+    def test_the_first_named_profile_is_the_last_resort(self):
+        self.profile("b", False, self.now)
+        self.profile("a", False, self.now - 100)
+        self.bind("b")
+        self.assertEqual(self.chosen(self.launch(self.closed())), self.path("a"))
+
+    def test_with_no_named_profile_the_launch_is_unprofiled_and_asks_no_console(self):
+        (self.state / "profiles" / "default").mkdir(parents=True)
+        (self.state / "profiles" / ".hidden").mkdir(parents=True)
+        url = self.console(b'{"profile":"default"}')
+        environment = self.launch(self.closed(), console_url=url)
+        self.assertNotIn("CLAUDE_CONFIG_DIR", environment)
+        self.assertEqual(self.console_requests, [])
+
+    def test_claude_account_wins_over_the_console(self):
+        self.profile("a", True, self.now)
+        self.profile("b", True, self.now)
+        url = self.console(b'{"profile":"a"}')
+        environment = self.launch(self.closed(), {"CLAUDE_ACCOUNT": "b"}, console_url=url)
+        self.assertEqual(self.chosen(environment), self.path("b"))
+        self.assertEqual(self.console_requests, [])
+
+    def test_a_caller_set_config_dir_wins_over_the_console(self):
+        self.profile("a", True, self.now)
+        url = self.console(b'{"profile":"a"}')
+        custom = str(self.root / "custom")
+        environment = self.launch(self.closed(), {"CLAUDE_CONFIG_DIR": custom}, console_url=url)
+        self.assertEqual(self.chosen(environment), custom)
+        self.assertNotIn("CLAUDE_ACCOUNT_LAUNCHER", environment)
+        self.assertEqual(self.console_requests, [])
+
+    def test_an_option_like_profile_name_is_launched(self):
+        def fresh():
+            shutil.rmtree(self.state, ignore_errors=True)
+
+        with self.subTest("console"):
+            fresh()
+            self.profile("-n", False, self.now - 100)
+            self.profile("a", True, self.now)
+            url = self.console(b'{"profile":"-n"}')
+            self.assertEqual(self.chosen(self.launch(self.closed(), console_url=url)), self.path("-n"))
+        with self.subTest("choice file"):
+            fresh()
+            self.profile("-n", False, self.now - 100)
+            self.profile("a", True, self.now)
+            self.choose("-n\n")
+            self.assertEqual(self.chosen(self.launch(self.closed())), self.path("-n"))
+        with self.subTest("most recently used"):
+            fresh()
+            self.profile("-n", True, self.now)
+            self.profile("a", True, self.now - 100)
+            self.assertEqual(self.chosen(self.launch(self.closed())), self.path("-n"))
+        with self.subTest("first by name"):
+            fresh()
+            self.profile("-e", False, self.now)
+            self.profile("a", False, self.now)
+            self.assertEqual(self.chosen(self.launch(self.closed())), self.path("-e"))
 
 
 if __name__ == "__main__":
