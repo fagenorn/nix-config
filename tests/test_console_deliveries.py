@@ -503,6 +503,9 @@ class RunFoldTest(unittest.TestCase):
                 again = deliveries.classify(label + deliveries.RERUN_SUFFIX, batch=False)
                 self.assertIsNotNone(again)
                 self.assertEqual(again, deliveries.classify(label, batch=False))
+        # #1022: the proof step of a rerun sync is a landing step of its issue, like every other land-sync step.
+        self.assertEqual((deliveries.classify("land-sync-prove-2684-1", batch=True).issue,
+                          shown([S("t0", "facts-2684", "Intake"), S("t1", "land-sync-prove-2684-1", "Land")])), (2684, {2684: "landing"}))
         for label in ("land-sync-review-2259-1", "land-sync-rereview-2259-1", "land-fix-review-2259"):
             with self.subTest(label=label):
                 again = deliveries.classify(label + deliveries.RERUN_SUFFIX, batch=True)
