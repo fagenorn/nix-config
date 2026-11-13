@@ -6624,6 +6624,7 @@ class OwnRedOutsideLockTest(unittest.TestCase):
                        f"so the read counts only when its headRefOid is {SHA}",
                        "merge-base --is-ancestor origin/dev HEAD succeeds: a head behind its base gets new checks after the sync under the lock",
                        "a cancelled check does not count), run no lock command and wait for no check",
+                       "count only the newest run of each check name, the one with the latest startedAt, so a failed attempt whose re-run passed does not count",
                        "In every other case (another head, a head behind its base, no failed check, checks still running, none reported, "
                        "or the read failed) return own_red null and go on."):
             self.assertIn(needle, text)
