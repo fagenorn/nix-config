@@ -123,11 +123,17 @@ after the progress entries and before the questions, ordered by profile, and cou
 `inbox_items` and the headline. Its entry is
 
     {"type": "inbox_item", "reason": "signin", "key": "signin/<profile>", "project_id": null,
-     "profile": "<profile>", "headline": "Sign in to <profile> again",
-     "command": "CLAUDE_ACCOUNT=<profile> claude", "signin": <the entry's signin>,
+     "profile": "<profile>", "headline": "Sign in to <profile> again", "action": "signin",
+     "run": <signin_runs.get(profile)> | null, "signin": <the entry's signin>,
      "answered": false, "waiting_since": <signin["since"]>}
 
-`SIGNIN_SENTENCE` says what the page offers.
+`SIGNIN_SENTENCE` says what the page offers: its Sign in action, which posts the profile to
+`/api/signin`, then a code to `/api/signin-code` or a cancel to `/api/signin-cancel`. The item
+carries no terminal command. `run` is the profile's latest sign-in run from the `signin_runs`
+argument, `{"state": "running" | "signed_in" | "failed" | "timed_out" | "cancelled", "at":
+<ISO string> | null, "attempt": <positive int>}`, and the view's top-level `signin_runs` member
+is that mapping, `{profile: run}`, copied (an empty object when none is given). The sign-in
+link is never in the view: the page holds it from the start answer alone.
 
 A sprint's `state` is `quota` ("waiting on quota until") when its manager is `started` and the
 capacity view holds an `out` entry for the manager's profile (`manager.quota_wait`), unless the
@@ -393,7 +399,7 @@ QUESTION_SENTENCE = "Choose an option with its number and press Enter, or answer
 MANAGER_SENTENCE = "Try again to start a new manager, or withdraw the sprint."
 PROGRESS_SENTENCE = "Tell the manager to continue, or withdraw the sprint."
 SIGNIN_HEADLINE = "Sign in to {profile} again"
-SIGNIN_SENTENCE = "Sign in again in a terminal with the command shown."
+SIGNIN_SENTENCE = "Press Sign in, then finish signing in in your browser."
 CHOOSE_SENTENCE = "Choose an option with its number and press Enter, or answer on the tracker."
 ANSWER_SENTENCE = "Answer it here, or on the tracker."
 STALE_SENTENCE = ("The tracker could not be read for {projects}; "
@@ -861,13 +867,13 @@ def _progress_entry(sprint: SprintState) -> dict:
             "answered": False, "waiting_since": sprint.no_progress_at}
 
 
-def _signin_entry(entry: Mapping) -> dict:
+def _signin_entry(entry: Mapping, runs: Mapping[str, Mapping]) -> dict:
     profile = entry["profile"]
     signin = entry["signin"]
     return {"type": "inbox_item", "reason": "signin", "key": f"signin/{profile}",
             "project_id": None, "profile": profile,
             "headline": SIGNIN_HEADLINE.format(profile=profile),
-            "command": f"CLAUDE_ACCOUNT={profile} claude", "signin": signin,
+            "action": "signin", "run": runs.get(profile) or None, "signin": signin,
             "answered": False, "waiting_since": signin["since"]}
 
 
@@ -893,8 +899,10 @@ def derive_view(
     sprints: Mapping[str, SprintState] | None = None,
     managers: bool = True,
     pending: Mapping[str, PendingStop] | None = None,
+    signin_runs: Mapping[str, Mapping] | None = None,
 ) -> dict:
     states = list(states)
+    signin_runs = {profile: dict(run) for profile, run in (signin_runs or {}).items()}
     capacity = EMPTY if capacity is None else capacity
     registered = {s.project_id for s in states}
     health = health or {}
@@ -1014,10 +1022,11 @@ def derive_view(
         "capacity": capacity,
         "inbox": {"open": [_brief_entry(s) for s in briefs] + [_stall_entry(s) for s in stalls]
                           + [_progress_entry(s) for s in unprogressed]
-                          + [_signin_entry(e) for e in signins]
+                          + [_signin_entry(e, signin_runs) for e in signins]
                           + [_question_entry(s, q) for s, q in asked]
                           + [_inbox_entry(r, health) for r in open_items],
                   "answered": [_inbox_entry(r, health) for r in answered]},
+        "signin_runs": signin_runs,
         "project_count": len(states),
         "entries": entries,
         "unmanaged": [

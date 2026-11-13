@@ -249,7 +249,10 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .run .stage { color: var(--sub0); }
 .run .moved { color: var(--ov2); }
 .cap-none { color: var(--ov2); }
-.signin-command { display: block; margin: 6px 0; padding: 6px 10px; background: var(--mantle); border-radius: 6px; color: var(--sub1); overflow-wrap: anywhere; }
+.signin-run { margin: 6px 0 0; color: var(--sub0); }
+.signin-failed { color: var(--red); }
+.signin-link { color: var(--blue); overflow-wrap: anywhere; }
+.signin-code { flex: 1 1 14rem; max-width: 24rem; padding: 4px 8px; font: inherit; color: var(--text); background: var(--mantle); border: 1px solid var(--s1); border-radius: 8px; }
 .s-working { color: var(--green); }
 .s-waiting_answer, .s-waiting_permission { color: var(--yellow); }
 .s-limit { color: var(--red); }
@@ -931,11 +934,119 @@ function signedOut(p) {
 function isSignin(item) {
   return item.reason === "signin";
 }
+const signinLinks = new Map();
+const signinPosts = new Map();
+const SIGNIN_NOTES = new Map([
+  ["running", "A sign-in is running."],
+  ["timed_out", "The sign-in timed out."],
+  ["failed", "The sign-in did not finish."],
+  ["cancelled", "The sign-in was cancelled."],
+]);
+// The held link is judged against the newest view alone: the stream sends only the newest view, so a running frame can be skipped.
+function signinEnded(run, attempt) {
+  if (run === null || typeof run !== "object") return false;
+  return run.attempt > attempt || (run.attempt === attempt && run.state !== "running");
+}
+function isHttps(link) {
+  return typeof link === "string" && /^https:\/\//.test(link);
+}
+// An answer that arrives after its run ended or its item closed is held for no frame: the redraw that follows reconciles it away.
+function holdSigninLink(profile, answer) {
+  if (answer === null || typeof answer !== "object") return;
+  const link = answer.link;
+  if (!isHttps(link)) return;
+  if (!Number.isInteger(answer.attempt) || answer.attempt < 1) return;
+  signinLinks.set(profile, { link, attempt: answer.attempt });
+}
+async function signinPost(item, kind, failure, send) {
+  const key = kind + "\n" + item.profile;
+  const current = signinPosts.get(key);
+  if (current !== undefined && current.phase === "sending") return;
+  const state = { phase: "sending", reason: "", failure };
+  signinPosts.set(key, state);
+  redraw();
+  let reason = null;
+  try {
+    const response = await send();
+    if (kind === "start" && response.status === 200) {
+      holdSigninLink(item.profile, JSON.parse(await response.text()));
+    } else if (kind !== "start" && response.status === 204) {
+      if (kind === "code") drafts.delete(stateId(item) + "\nsignin-code");
+    } else {
+      reason = (await response.text()).trim() || "HTTP " + response.status;
+    }
+  } catch (error) {
+    console.error(error);
+    reason = "the console did not answer";
+  }
+  if (signinPosts.get(key) !== state) return;
+  if (reason === null) signinPosts.delete(key);
+  else {
+    state.phase = "failed";
+    state.reason = reason;
+  }
+  redraw();
+}
+function signinBody(item, code) {
+  const body = { profile: item.profile };
+  if (code !== undefined) body.code = code;
+  return JSON.stringify(body);
+}
 function signinCard(item) {
   const card = el("article", "card signin");
   card.appendChild(el("p", "q", item.headline));
-  card.appendChild(el("code", "signin-command", item.command));
   card.appendChild(el("span", "reason", signinWords(item.signin)));
+  const run = item.run !== null && typeof item.run === "object" ? item.run : null;
+  const note = run === null ? undefined : SIGNIN_NOTES.get(run.state);
+  if (note !== undefined) card.appendChild(el("p", "signin-run", note));
+  const held = signinLinks.get(item.profile);
+  const starting = signinPosts.get("start\n" + item.profile);
+  const sendingCode = signinPosts.get("code\n" + item.profile);
+  const cancelling = signinPosts.get("cancel\n" + item.profile);
+  const act = el("div", "act");
+  if (held === undefined) {
+    const start = actionButton("signin-start primary needs", "Sign in",
+      () => signinPost(item, "start", "Could not start the sign-in: ", () => fetch("/api/signin", {
+        method: "POST", headers: stallHeaders(), body: signinBody(item),
+      })));
+    if (starting !== undefined && starting.phase === "sending") start.setAttribute("disabled", "");
+    act.appendChild(start);
+  } else {
+    const link = el("a", "signin-link", "Open the sign-in page");
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    if (isHttps(held.link)) link.href = held.link;
+    act.appendChild(link);
+    const input = document.createElement("input");
+    input.type = "text";
+    input.autocomplete = "off";
+    input.className = "signin-code";
+    input.setAttribute("placeholder", "Code from the sign-in page");
+    input.setAttribute("aria-label", "Sign-in code");
+    const send = actionButton("signin-send", "Send code",
+      () => signinPost(item, "code", "Could not send the code: ", () => fetch("/api/signin-code", {
+        method: "POST", headers: stallHeaders(), body: signinBody(item, input.value.trim()),
+      })));
+    act.appendChild(draftField(input, stateId(item) + "\nsignin-code", (value) => {
+      send.disabled = value.trim() === "" || (sendingCode !== undefined && sendingCode.phase === "sending");
+    }));
+    send.disabled = input.value.trim() === "" || (sendingCode !== undefined && sendingCode.phase === "sending");
+    act.appendChild(send);
+  }
+  if ((run !== null && run.state === "running") || held !== undefined) {
+    const cancel = actionButton("signin-cancel", "Cancel",
+      () => signinPost(item, "cancel", "Could not cancel: ", () => fetch("/api/signin-cancel", {
+        method: "POST", headers: stallHeaders(), body: signinBody(item),
+      })));
+    if (cancelling !== undefined && cancelling.phase === "sending") cancel.setAttribute("disabled", "");
+    act.appendChild(cancel);
+  }
+  for (const state of [starting, sendingCode, cancelling]) {
+    if (state !== undefined && state.phase === "failed") {
+      act.appendChild(el("span", "signin-failed", state.failure + state.reason));
+    }
+  }
+  card.appendChild(act);
   return card;
 }
 function sprintList(entry, sprints) {
@@ -1916,6 +2027,14 @@ function renderInbox(view) {
     const id = key.split("\n")[1];
     const shown = key.startsWith("continue\n") || key.startsWith("progress-withdraw\n") ? progress : stalls;
     if (state.phase !== "sending" && !shown.some((item) => item.sprint_id === id)) stallPosts.delete(key);
+  }
+  for (const [profile, held] of [...signinLinks]) {
+    const shown = signins.find((item) => item.profile === profile);
+    if (shown === undefined || signinEnded(shown.run, held.attempt)) signinLinks.delete(profile);
+  }
+  for (const [key, state] of [...signinPosts]) {
+    const profile = key.split("\n")[1];
+    if (state.phase !== "sending" && !signins.some((item) => item.profile === profile)) signinPosts.delete(key);
   }
   const present = new Set(open.map(stateId));
   // A frame that shows a sent item open again supersedes the page's own "sent"; a redraw of the same view does not.
