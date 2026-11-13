@@ -54,7 +54,7 @@ and a revive with no session id raises `NudgeFailed(UNKNOWN_SESSION)` and runs n
 Runner. `run_nudge` starts the command with no terminal (`stdin` to the null device; `stdout` to
 a temporary file for the relay and to the null device for the wake; stderr to a temporary file,
 never a pipe), in its own session, in the project root, within `RELAY_TIMEOUT` or `WAKE_TIMEOUT`
-seconds (a command that exceeds them has its whole process group killed, `run_in_own_group`), in the environment `manager.client_environment(profile, environ)`. `NUDGE_TOOLS` names
+seconds (a command that exceeds them has its whole process group killed, `manager.run_in_own_group`), in the environment `manager.client_environment(profile, environ)`. `NUDGE_TOOLS` names
 every program a nudge runs by name on `PATH`. `nudger_for(platform)` is `run_nudge` on Linux and
 None elsewhere.
 
@@ -80,10 +80,8 @@ non-empty stderr line of a nudge that failed, `the nudge exited <n>`, or, for a 
 
 from __future__ import annotations
 
-import contextlib
 import json
 import os
-import signal
 import subprocess
 import sys
 import tempfile
@@ -158,26 +156,7 @@ def _last_line(text: str) -> str | None:
     return lines[-1] if lines else None
 
 
-def run_in_own_group(argv: list[str], *, timeout: float, check: bool = False,
-                     **kwargs) -> subprocess.CompletedProcess:
-    """`subprocess.run` for a command started with `start_new_session`: a timeout ends its whole group.
-
-    `subprocess.run` kills only the immediate child, and the account wrapper waits for a Claude child
-    instead of replacing itself, so the child would outlive the failure and could still send.
-    """
-    assert not check, "a nudge's exit status is read by the caller"
-    with subprocess.Popen(argv, **kwargs) as process:
-        try:
-            process.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGKILL)
-            process.wait()
-            raise
-        return subprocess.CompletedProcess(argv, process.returncode)
-
-
-def run_nudge(nudge: Nudge, *, platform: str = sys.platform, run=run_in_own_group,
+def run_nudge(nudge: Nudge, *, platform: str = sys.platform, run=manager.run_in_own_group,
               environ: Mapping[str, str] = os.environ) -> None:
     argv = nudge_command(nudge, platform)
     if argv is None:
@@ -212,7 +191,7 @@ def listing_command() -> list[str]:
     return ["claude-account", "run", "agents", "--json", "--all"]
 
 
-def read_full_entries(profile: str, cwd: str, *, run=run_in_own_group,
+def read_full_entries(profile: str, cwd: str, *, run=manager.run_in_own_group,
                       environ: Mapping[str, str] = os.environ) -> list[dict]:
     if not Path(cwd).is_dir():
         raise ListingUnreadable(f"the project root {cwd} is not a directory")
@@ -243,7 +222,7 @@ def read_full_entries(profile: str, cwd: str, *, run=run_in_own_group,
     return [entry for entry in entries if isinstance(entry, dict)]
 
 
-def read_full_listing(profile: str, cwd: str, *, run=run_in_own_group,
+def read_full_listing(profile: str, cwd: str, *, run=manager.run_in_own_group,
                       environ: Mapping[str, str] = os.environ) -> frozenset[str]:
     entries = read_full_entries(profile, cwd, run=run, environ=environ)
     return frozenset(entry["sessionId"] for entry in entries

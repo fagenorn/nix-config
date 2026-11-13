@@ -82,13 +82,19 @@ save)` is that `before` for a check's finish: it saves the check's state, then r
 540), because verify-pending kills a run after 600. The verify checks use these to remove the
 record of each test manager they stopped. The console's own withdrawal removes nothing
 (ADR-console-018).
+
+`run_in_own_group(argv, *, timeout, check=False, **kwargs)` is the one runner nudges and probes
+share for a command started in its own session: a timeout kills the whole process group, not only
+the immediate child, because the account wrapper waits for its Claude child.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shlex
+import signal
 import subprocess
 import sys
 import tempfile
@@ -295,6 +301,25 @@ def client_environment(profile: str, environ: Mapping[str, str]) -> dict[str, st
         path = environ.get("PATH")
         env["PATH"] = f"{home}/.agents/bin" + (f":{path}" if path else "")
     return env
+
+
+def run_in_own_group(argv: list[str], *, timeout: float, check: bool = False,
+                     **kwargs) -> subprocess.CompletedProcess:
+    """`subprocess.run` for a command started with `start_new_session`: a timeout ends its whole group.
+
+    `subprocess.run` kills only the immediate child, and the account wrapper waits for its Claude
+    child instead of replacing itself, so the child would outlive the failure and could still send.
+    """
+    assert not check, "the caller reads the exit status"
+    with subprocess.Popen(argv, **kwargs) as process:
+        try:
+            process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+            process.wait()
+            raise
+        return subprocess.CompletedProcess(argv, process.returncode)
 
 
 def run_launch(launch: Launch, *, platform: str = sys.platform, run=subprocess.run,
