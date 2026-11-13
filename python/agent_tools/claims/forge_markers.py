@@ -277,11 +277,12 @@ def read_ref(slug: str, ref: str) -> str | None:
 
 
 def matching_refs(slug: str, prefix: str) -> dict[str, str]:
-    """Every ref whose full name starts with `prefix` (`refs/...`), name to sha: one page of 100.
+    """Every ref whose full name starts with `prefix` (`refs/...`), name to sha.
 
-    The forge is asked without a trailing slash and the answer is filtered by `prefix` here."""
+    The forge answers this listing whole, whatever paging is asked for (verified live), so none
+    is. It is asked without a trailing slash and the answer is filtered by `prefix` here."""
     asked = quote(prefix.removeprefix("refs/").rstrip("/"), safe="/")
-    payload = forge_api.gh_json(["api", f"repos/{slug}/git/matching-refs/{asked}?per_page=100"])
+    payload = forge_api.gh_json(["api", f"repos/{slug}/git/matching-refs/{asked}"])
     refs: dict[str, str] = {}
     for item in payload if isinstance(payload, list) else [None]:
         obj = item.get("object") if isinstance(item, dict) else None

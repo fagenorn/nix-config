@@ -294,7 +294,7 @@ class RefTest(unittest.TestCase):
         self.world.ref_store(SLUG, {REF: OID_A, wait + "5-7-9": OID_B, "refs/agent-locks/land-wait/main-x/1-2-3": OID_A})
         self.assertEqual(fm.matching_refs(SLUG, wait), {wait + "5-7-9": OID_B})
         self.assertEqual(self.world.argvs("gh")[0],
-                         ["api", f"repos/{SLUG}/git/matching-refs/agent-locks/land-wait/main?per_page=100"])
+                         ["api", f"repos/{SLUG}/git/matching-refs/agent-locks/land-wait/main"])
         for number, state in ((7, "open"), (8, "closed")):
             self.world.respond_json("gh", ["api", f"repos/{SLUG}/pulls/{number}"], {"number": number, "state": state})
         self.world.respond("gh", ["api", f"repos/{SLUG}/pulls/9"], exit=1, stderr="gh: Not Found (HTTP 404)")

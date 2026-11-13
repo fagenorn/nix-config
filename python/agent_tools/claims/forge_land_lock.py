@@ -94,9 +94,9 @@ and `waited_s`. `sha` is always `--sha` as given and `lock_sha` is where the loc
 (issue 913): the pull requests, in ascending order, its polls saw holding the lock while it waited,
 on a successful answer and on `land-contended` alike, `[]` when no poll was held off; `by` is derived
 only on a refusal, so a wait that succeeds is attributed by these numbers. On the same two answers
-`acquire --wait` adds `position` and `ahead` (D12): its place in the waiters' queue at its last
-completed poll (1 is first in line, `null` when no poll completed) and the pull requests ahead of
-it, oldest first. The `acquire` verdicts are
+`acquire --wait` adds `position` and `ahead` (D12): its place in the waiters' queue as last read
+(1 is first in line; `null` when the queue was never read, as for a caller that already holds
+the lock, or when its last read failed) and the pull requests ahead of it, oldest first. The `acquire` verdicts are
 `acquired`, `already_held` (the lock is already at `--sha`, or at the followed head), `moved`,
 `held_by` and `lost_to`. Exit 0 is `acquired`, `already_held`, `moved`,
 `released` and every `status` verdict (`free`, `held_by`, `stale`); exit 3 is contention
@@ -143,36 +143,45 @@ still granted by nothing but the create and the compare-and-swap of D1, so no qu
 or false, can make two holders. A registration is a ref
 `refs/agent-locks/land-wait/<branch>/<since>-<pr>-<beat>` at the waiting head: `<pr>` is the
 waiter's pull request, `<since>` and `<beat>` are seconds of the forge's clock (the `Date` header
-of a free `rate_limit` call, read once in every poll; no host clock is compared between hosts),
-`<since>` read when the waiter first asked and `<beat>` at its last refresh. Every poll of
-`--wait` lists the registrations (`GET git/matching-refs`, one page of 100). One whose beat is
-more than `QUEUE_LIVE` seconds (390, three polls and a margin) behind the forge's clock is dead:
-it is skipped and deleted by whoever lists it. A pull request's place is the smallest `<since>`
-of its live registrations, ties going to the smaller number; the pull requests placed before the
-caller's are ahead of it. Starting at the oldest, one that is not open (`GET pulls/<n>`, HTTP 404
-included) is skipped and its registrations deleted, and the first open one ends the check, so a
-poll reads one pull request when somebody is ahead and none when nobody is. A waiter with a pull
-request ahead of it creates no lock and takes none over, closed or idle; it still answers
-`already_held` and `moved`, which concern only its own lock, and keeps its D4 watch. One
-exception bounds what a waiter that died or hangs can cost: a waiter that has itself watched the
-lock free for `FREE_GRACE` seconds (60, its next poll comes that soon after it saw the lock free)
-tries whatever its place, since a live first waiter takes a free lock within `FAST_POLL` seconds.
-A waiter registers only once an attempt did not give it the lock, so a wait nobody is ahead of
-that finds the lock free writes no registration. It refreshes after each poll that did not give
-it the lock, at most once in 60 seconds, by creating the ref with the new beat (the clock that
-poll read) and then deleting the old one, and deletes its
-registration when it ends with the lock, with `no_open_pr` or with an error. A `land-contended`
-answer leaves the registration: the programs ask again at once, and the next `--wait` of that
-pull request adopts the `<since>` of a registration still live, so a wait that ran into its
-bound keeps its place; left alone it dies after `QUEUE_LIVE` seconds. While nobody is ahead of
-it the waiter also reads the lock ref alone every `FAST_POLL` seconds (20) between two polls and
-polls at once when it differs from what the poll saw. The order holds among registered waiters
-up to the seconds between a waiter's clock read and its registration being listed: two that
-arrive that close can both find themselves first, and then the create decides, as before. A
-one-shot `acquire` and a client that predates this rule register nothing and are not ordered:
-they take a free lock when they find one, exactly as before, they are never held back by the
-queue, and a registered waiter is held back by them only as it always was, by the lock they
-hold. Against them only the first in line competes, with a poll six times as fast.
+of a free `rate_limit` call; no host clock is compared between hosts), `<since>` read when the
+waiter first asked and `<beat>` at its last refresh. A poll of `--wait` that does not end with
+the lock reads the queue once: the clock and the registrations (`GET git/matching-refs`, which
+the forge answers whole, unpaginated). One whose beat is more than `QUEUE_LIVE` seconds (390,
+three polls and a margin) behind the forge's clock, or more than `QUEUE_SKEW` seconds (60) ahead
+of it, is dead: it is skipped and deleted by whoever lists it. A pull request's place is the
+smallest `<since>` of its live registrations, ties going to the smaller number; the pull
+requests placed before the caller's are ahead of it. Starting at the oldest, one that is not
+open (`GET pulls/<n>`, HTTP 404 included) is skipped and its registrations deleted, and the
+first open one ends the check, so a poll reads one pull request when somebody is ahead and none
+when nobody is. A waiter with a pull request ahead of it creates no free lock and takes no
+closed one over until it has itself watched the lock free, or seen it closed, for `FREE_GRACE`
+seconds (60; its next poll comes that soon), since a live first waiter takes either within
+`FAST_POLL` seconds: that bounds what a waiter that died or hangs can cost. The queue is asked
+nothing else. `already_held` and `moved` concern only the caller's own lock and are answered
+before the queue is read, and the idle takeover of D4 does not depend on the caller's place: its
+own 45-minute watch is the bound. A following release's second attempt, right after it deleted
+its own lock (D5), is not queued either, so the lock it gave up is not left free behind a
+waiter. A waiter registers only once a poll did not give it the lock, so a wait that finds the
+lock free with nobody ahead writes no registration. It refreshes after each poll that did not
+give it the lock, at most once in 60 seconds, by creating the ref with the new beat (the clock
+that poll read) and then deleting its own old one, and deletes its registration when it ends
+with the lock, with `no_open_pr` or with an error. A `land-contended` answer leaves the
+registration: the programs ask again at once, and the next `--wait` of that pull request adopts
+the `<since>` of a registration still live, so a wait that ran into its bound keeps its place
+when it is called again within `QUEUE_LIVE` seconds; left alone the registration dies then. A
+process deletes, while it waits, only registrations it created itself, so two waits of one pull
+request do not undo each other. While nobody is ahead of it the waiter also reads the lock ref
+alone every `FAST_POLL` seconds (20) between two polls and polls at once when it differs from
+what the poll saw. A failed queue read or write (the clock, the listing, the pull request ahead,
+the registration's create or delete, whatever the error) never fails the wait and is no failed
+poll (D8): that poll attempts unordered, as a client before this rule does, at the 120-second
+rate, and answers `position` `null`. The order holds among registered waiters up to the seconds
+between a waiter's clock read and its registration being listed: two that arrive that close can
+both find themselves first, and then the create decides, as before. A one-shot `acquire` and a
+client that predates this rule register nothing and are not ordered: they take a free lock when
+they find one, exactly as before, they are never held back by the queue, and a registered
+waiter is held back by them only as it always was, by the lock they hold. Against them only the
+first in line competes, with a poll six times as fast.
 """
 import re
 import time
@@ -196,7 +205,8 @@ FAILED_POLLS = 3
 FAST_POLL = 20  # D12: the first in line reads the lock ref this often between two polls
 QUEUE_LIVE = 3 * POLL + 30  # D12: a registration not refreshed for this long is dead
 QUEUE_REFRESH = POLL // 2  # D12: a registration is rewritten at most this often
-FREE_GRACE = 60  # D12: a lock watched free this long is tried by a waiter that is not first
+QUEUE_SKEW = 60  # D12: a registration whose beat is this far ahead of the forge's clock is dead
+FREE_GRACE = 60  # D12: a lock watched free or closed this long is tried by a waiter that is not first
 ACTIONS = ("acquire", "release", "status", "refresh")
 
 monotonic = time.monotonic
@@ -260,7 +270,7 @@ class Queue:
         self.slug, self.prefix, self.node = slug, wait_prefix(branch), node
         self.key: tuple[int, int] | None = None  # (since, pull request): the caller's place
         self.mine: tuple[str, str] | None = None  # the caller's registration: ref and oid
-        self.own: list[tuple[str, str]] = []  # other registrations of the caller's pull request
+        self.ghosts: list[tuple[str, str]] = []  # its pull request's, found by the first read
         self.sha, self.now, self.beaten = "", 0, 0.0
         self.position: int | None = None
         self.ahead: list[int] = []
@@ -273,11 +283,12 @@ class Queue:
             match = WAITER.fullmatch(ref[len(self.prefix):])
             if match:
                 listed.append(Waiter(int(match[1]), int(match[2]), int(match[3]), ref, oid))
-        live = [w for w in listed if self.now - w.beat <= QUEUE_LIVE]
+        live = [w for w in listed if -QUEUE_SKEW <= self.now - w.beat <= QUEUE_LIVE]
         if self.key is None or self.key[1] != pr:
+            # The place a wait of this pull request left behind is adopted; what it left is
+            # deleted when this wait ends, and until then only what this process created.
             self.key = (min((w.since for w in live if w.pr == pr), default=self.now), pr)
-        current = self.mine[0] if self.mine else None
-        self.own = [(w.ref, w.oid) for w in listed if w.pr == pr and w.ref != current]
+            self.ghosts = [(w.ref, w.oid) for w in listed if w.pr == pr and (self.mine is None or w.ref != self.mine[0])]
         place: dict[int, int] = {}
         for w in listed:
             if w.pr == pr:
@@ -294,18 +305,21 @@ class Queue:
             ahead.pop(0)
         self.ahead, self.position = ahead, len(ahead) + 1
 
+    def lost(self) -> None:
+        """A read of the queue failed: until one succeeds the caller is not ordered."""
+        self.ahead, self.position = [], None
+
     def stay(self) -> None:
-        """The poll `look` began did not give the caller the lock: register it, or refresh it."""
+        """The poll `look` read did not give the caller the lock: register it, or refresh it."""
         if self.key is None or (self.mine is not None and monotonic() - self.beaten < QUEUE_REFRESH):
             return
         name = f"{self.prefix}{self.key[0]}-{self.key[1]}-{self.now}"
-        stale = self.own + ([self.mine] if self.mine else [])
-        if self.mine is None or self.mine[0] != name:
+        old = self.mine
+        if old is None or old[0] != name:
             fm.create_ref(self.slug, name, self.sha)
-            self.mine, self.own = (name, self.sha), []
-            for ref, oid in stale:
-                if ref != name:
-                    self._drop(ref, oid)
+            self.mine = (name, self.sha)
+            if old is not None:
+                self._drop(*old)
         self.beaten = monotonic()
 
     def _drop(self, ref: str, oid: str) -> None:
@@ -314,7 +328,7 @@ class Queue:
 
     def leave(self) -> None:
         """Delete the caller's registrations; one that cannot be deleted dies by itself."""
-        gone, self.mine, self.own = self.own + ([self.mine] if self.mine else []), None, []
+        gone, self.mine, self.ghosts = self.ghosts + ([self.mine] if self.mine else []), None, []
         for ref, oid in gone:
             try:
                 self._drop(ref, oid)
@@ -407,9 +421,10 @@ def acquire_once(slug: str, branch: str, sha: str, mine: list[fm.Pull],
     """One acquire attempt (D1, D2, D3, D5); `idle(lock)` lets a `held` lock be taken over.
 
     `behind`, a waiter's (D12), makes the attempt read the lock before it writes. It is asked
-    with None before a free lock is created and with the lock before a closed or idle one is
-    taken over; true means another waiter is first, and nothing is written (`queued` for a free
-    lock, `held_by` otherwise). A lock at the caller's own sha or pull request never asks."""
+    with None before a free lock is created and with the lock before a closed one is taken
+    over; true means another waiter is first, and nothing is written (`queued` for a free lock,
+    `held_by` for a closed one). A lock at the caller's own sha or pull request never asks,
+    and neither does an idle one."""
     ref = lock_ref(branch)
 
     def observe() -> str | None:
@@ -443,7 +458,7 @@ def acquire_once(slug: str, branch: str, sha: str, mine: list[fm.Pull],
         if not idle(lock):
             return Outcome("held_by", lock, pr, None)
         kind = "idle"
-    if kind != "move" and behind is not None and behind(lock):
+    if kind == "closed" and behind is not None and behind(lock):
         return Outcome("held_by", lock, pr, None)
     if attempts is not None:
         attempts.wrote = True
@@ -494,9 +509,10 @@ def wait_acquire(args: Any, node: Callable[[], str],
     head stops with `no_open_pr`. The attempt is made at the head of `mine`, which is `--sha`
     except for a following release, whose `eligible` follows its pull request (issue 901).
 
-    D12: every poll reads the waiters' queue before its attempt, the attempt writes the lock only
-    when nobody is ahead (or the lock stayed free for `FREE_GRACE`), and the caller's
-    registration is deleted on every exit but `land-contended`.
+    D12: the attempt asks the waiters' queue before it creates a free lock or takes a closed one
+    over, a poll that did not end with the lock reads the queue if its attempt did not, and the
+    caller's registration is deleted on every exit but `land-contended`. No failure of the queue
+    fails a poll.
     """
     start = monotonic()
     watch: list[Any] = [object(), None]  # [oid or None, first seen]; the sentinel matches nothing
@@ -507,6 +523,8 @@ def wait_acquire(args: Any, node: Callable[[], str],
     waited_on: set[int] = set()  # D7: the pull requests seen holding the lock
     queue = Queue(args.repo, args.branch, node)
     keep = False  # D12: a land-contended answer leaves the registration to the next wait
+    poll: list[Any] = [None, "", False, False]  # pull request, sha, queue read, held back by it
+    closed: list[Any] = [None, 0.0]  # [a lock seen closed with a waiter ahead, first seen so]
 
     def seen(oid: str | None) -> None:
         if watch[0] != oid:
@@ -520,34 +538,53 @@ def wait_acquire(args: Any, node: Callable[[], str],
         beat[0] = now
         return monotonic() - watch[1] >= IDLE_AFTER
 
+    def consult() -> None:
+        """Read the queue once a poll; a failed read leaves the poll unordered (D12)."""
+        if poll[2]:
+            return
+        poll[2] = True
+        try:
+            queue.look(poll[0], poll[1])
+        except forge_api.ForgeError:
+            queue.lost()
+
     def behind(lock: str | None) -> bool:
         seen(lock)
-        return bool(queue.ahead) and (lock is not None or monotonic() - watch[1] < FREE_GRACE)
+        consult()
+        if not queue.ahead:
+            return False
+        since = watch[1]
+        if lock is not None:
+            if closed[0] != lock:
+                closed[0], closed[1] = lock, monotonic()
+            since = closed[1]
+        poll[3] = monotonic() - since < FREE_GRACE
+        return poll[3]
 
     def attempt(sha: str, mine: list[fm.Pull]) -> Outcome:
         return acquire_once(args.repo, args.branch, sha, mine, idle, node, seen, behind=behind)
 
     try:
         while True:
-            first = free = False
+            first = False
+            poll[2] = poll[3] = False
             try:
                 mine = eligible()
                 if not mine:
                     return _no_open_pr(args)
                 sha = mine[0].head_sha
                 mine = [p for p in mine if p.head_sha == sha]
-                queue.look(min(p.number for p in mine), sha)
+                poll[0], poll[1] = min(p.number for p in mine), sha
                 outcome = attempt(sha, mine)
                 if (outcome.verdict == "held_by" and outcome.lock_sha == args.sha != sha
                         and not _headed_by_another(args, {m.number for m in mine})):
                     # D5: the release's own lock at the head it started from; release it, try again.
+                    # D12: unqueued, so the lock just given up is not left free behind a waiter.
                     failure = fm.cas_ref(args.repo, node(), lock_ref(args.branch), args.sha, fm.ZERO_OID)
-                    outcome = attempt(sha, mine)
+                    outcome = acquire_once(args.repo, args.branch, sha, mine, idle, node, seen)
                     if failure and outcome.verdict == "held_by" and outcome.lock_sha == args.sha:
                         raise forge_api.ForgeError(failure.code, "compare-and-swap delete not applied and "
                                                    "the lock is unchanged", transient=failure.transient)
-                if outcome.verdict not in ("acquired", "already_held", "moved"):
-                    queue.stay()
             except forge_api.ForgeError as error:
                 failures += 1
                 if error.code not in ("gh_failed", "gh_timeout") or failures >= FAILED_POLLS:
@@ -560,7 +597,13 @@ def wait_acquire(args: Any, node: Callable[[], str],
                                      took_over=outcome.took_over, waited_s=int(monotonic() - start),
                                      waited_on=sorted(waited_on), position=queue.position,
                                      ahead=queue.ahead, **moved)
-                first, free = not queue.ahead, outcome.verdict == "queued"
+                consult()
+                try:
+                    if queue.position is not None:
+                        queue.stay()
+                except forge_api.ForgeError:
+                    pass  # D12: unregistered or unrefreshed, the wait goes on
+                first = queue.position == 1
                 if outcome.lock_sha is not None:
                     last = outcome
                 if outcome.pr is not None:
@@ -572,7 +615,7 @@ def wait_acquire(args: Any, node: Callable[[], str],
                                  by=holder(args.repo, last.pr) if last else None,
                                  waited_s=int(monotonic() - start), waited_on=sorted(waited_on),
                                  position=queue.position, ahead=queue.ahead)
-            until = min(monotonic() + (FREE_GRACE if free else POLL), start + BOUND)
+            until = min(monotonic() + (FREE_GRACE if poll[3] else POLL), start + BOUND)
             while True:  # D12: the first in line reads the lock ref between two polls
                 sleep(min(FAST_POLL if first else POLL, until - monotonic()))
                 if not first or monotonic() >= until:
