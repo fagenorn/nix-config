@@ -5,6 +5,7 @@ merge commit and opens one pull request from it into the integration branch. The
 outcome in the run result: it never parks, fails or rolls back the published release.
 """
 import unittest
+from unittest import mock
 
 from agent_tools.release import forge_adapter, release_driver, release_sync
 from . import release_driver_support as rs
@@ -40,8 +41,30 @@ class DeniedAfterRelease(rs.StatefulForge):
                                stderr="lifecycle guard: refused")
 
 
+class LookupDown(rs.StatefulForge):
+    """A forge whose first `failures` readings of the sync pull request listing fail (HTTP 502)."""
+
+    def __init__(self, world, failures):
+        super().__init__(world)
+        self.failures = failures
+
+    def inspect(self, request):
+        if request.get("operation") != "sync_pr" or not self.failures:
+            return super().inspect(request)
+        self.failures -= 1
+        listing = SYNC_ROWS["sync_pr.list"]["argv"][1:]
+        self.world.respond("gh", listing, exit=1, stderr="gh: Bad Gateway (HTTP 502)")
+        try:
+            return super().inspect(request)
+        finally:
+            self.world.respond_json("gh", listing, [])
+
+
 class SyncCase(unittest.TestCase):
     def setUp(self):
+        patcher = mock.patch.object(release_sync, "time")
+        self.time = patcher.start()
+        self.addCleanup(patcher.stop)
         self.world = ForgeWorld(self)
         self.world.verification_ready(integration="dev")
         self.world.merge_observation_ready()
@@ -148,6 +171,64 @@ class SyncRunTest(SyncCase):
         except release_driver.Refusal as caught:
             refusal = caught.code
         self.assertEqual(refusal, "confirmation_stale")
+
+
+class SyncLookupTest(SyncCase):
+    """Issue 998: one failed lookup is read again, and a run that still fails is finished by the
+    next one, which opens the pull request or finds the one opened by hand."""
+
+    LOOKUP_FAILED = "sync_pr: unknown lookup_failed (gh: Bad Gateway (HTTP 502))"
+
+    def lookups(self):
+        return len(self.argvs("gh", SYNC_ROWS["sync_pr.list"]["argv"][1:]))
+
+    def test_one_failed_lookup_is_read_again_and_the_same_run_opens_the_pull_request(self):
+        driver = self.driver(forge=LookupDown(self.world, 1))
+        _, result = rs.release(driver, rs.candidate())
+        self.assertPublished(driver, result)
+        self.assertEqual(result["sync"], DONE)
+        self.assertEqual(self.argvs("gh", ["pr", "create"]), [CREATE])
+        self.assertEqual(self.lookups(), 3)  # failed, read again, and once after the create
+        self.assertEqual(self.time.sleep.call_args_list,
+                         [mock.call(release_sync.RETRY_PAUSE_SECONDS)])
+
+    def failed_after_the_push(self):
+        """A release whose sync branch is pushed and whose pull request lookup failed twice."""
+        self.world.sync_ready(branch_tip=MERGED)
+        forge = LookupDown(self.world, 2)
+        driver = self.driver(forge=forge)
+        _, result = rs.release(driver, rs.candidate())
+        self.assertPublished(driver, result)
+        self.assertEqual(result["sync"], {
+            "status": "failed", "branch": SYNC["branch"], "pr": None, "url": None,
+            "reason": self.LOOKUP_FAILED, "manual": MANUAL[2:]})
+        self.assertEqual((self.lookups(), forge.failures, self.argvs("gh", ["pr", "create"])),
+                         (2, 0, []))  # read twice, never a third time, and nothing opened blind
+        return driver, result
+
+    def test_a_rerun_after_a_failed_lookup_with_the_branch_pushed_opens_the_pull_request(self):
+        driver, result = self.failed_after_the_push()
+        rerun = driver.run(None, [])
+        self.assertPublished(driver, rerun)
+        self.assertEqual((rerun["sync"], rerun["transaction_id"]), (DONE, result["transaction_id"]))
+        self.assertEqual(self.argvs("gh", ["pr", "create"]), [CREATE])
+        self.assertEqual(self.argvs("git", ["push"])[1:], [])  # the pushed branch is not pushed again
+
+    def test_a_rerun_after_a_failed_lookup_finds_the_pull_request_opened_by_hand(self):
+        driver, _ = self.failed_after_the_push()
+        self.world.sync_ready(branch_tip=MERGED, prs=[sync_pull()])
+        rerun = driver.run(None, [])
+        self.assertEqual(rerun["sync"], DONE)
+        self.assertEqual(self.argvs("gh", ["pr", "create"]), [])
+
+    def test_a_lookup_that_is_not_transient_is_not_read_again(self):
+        self.world.sync_ready(branch_tip=MERGED)
+        self.world.respond("gh", SYNC_ROWS["sync_pr.list"]["argv"][1:], stdout="not json")
+        driver = self.driver()
+        _, result = rs.release(driver, rs.candidate())
+        self.assertEqual((result["sync"]["status"], result["sync"]["reason"]),
+                         ("failed", "sync_pr: unknown payload_invalid"))
+        self.assertEqual((self.lookups(), self.time.sleep.call_args_list), (1, []))
 
 
 class SyncFailureTest(SyncCase):

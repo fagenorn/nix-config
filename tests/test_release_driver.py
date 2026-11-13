@@ -717,3 +717,30 @@ class RailwayActivationWatchTest(DriverCase):
         self.assertEqual(self.deploy(driver)["attempts"], 0)
         self.assertGreaterEqual(len(watch.requests), inspected)
 
+    def test_an_absent_park_names_its_recovery_and_a_resume_after_the_redeploy_seals(self):
+        """Issue 998: the deployment_absent park reason says how to recover (redeploy the unit
+        from source at the release commit, then run again), and that resume succeeds once the
+        watch reads the deployment. Only an absent park carries the hint."""
+        recovery = ("; nothing deployed the release commit: redeploy deploy from source at that "
+                    "commit, then run the release again to resume it")
+        self.assertEqual(release_driver.ABSENT_RECOVERY.format(name="deploy"), recovery)
+        watch = rs.ScriptedRailway(("absent", "deployment_absent"))
+        driver = self.watched(watch)
+        rs.release(driver, rs.candidate())
+        self.clock.advance(rs.WATCH_DEADLINE_MS + 1)
+        self.assertEqual(driver.run(None, [])["next"], "attention")
+        reason = driver.status()["release"]["reason"]
+        self.assertIn("deployment_absent", reason)
+        self.assertTrue(reason.endswith(recovery), reason)
+        watch.effects = [("satisfied", "deployed")]
+        resumed = driver.run(None, [])
+        self.assertEqual((resumed["state"], resumed["next"]), ("succeeded", "done"))
+        self.assertIsNotNone(driver.status()["release"]["receipt"])
+        for outcome, cause in (("in_progress", "deployment_in_progress"), ("unknown", "lookup_failed")):
+            with self.subTest(outcome=outcome):
+                driver = self.watched(rs.ScriptedRailway((outcome, cause)))
+                rs.release(driver, rs.candidate())
+                self.clock.advance(rs.WATCH_DEADLINE_MS + 1)
+                self.assertEqual(driver.run(None, [])["next"], "attention")
+                self.assertNotIn("redeploy", driver.status()["release"]["reason"])
+

@@ -104,7 +104,10 @@ D5): `satisfied` goes on to proving; `absent`, `in_progress` or `unknown` is `wa
 minus the first `action_declared` stamp is at most the node's `observation_deadline_ms`, and
 past it parks `<name>: <status> past <deadline> ms: <reference>`; `diverged` parks `<name>:
 diverged: <reference>`, `<reference>` being the latest inspection's reason and references (an
-`absent` one names no run).
+`absent` one names no run). An `absent` park ends with `ABSENT_RECOVERY`, the recovery in
+generic words (issue 998): nothing deployed the release commit, so redeploy the unit from source
+at that commit, then run the release again, which resumes it and seals once the watch reads
+`satisfied`. It names no command: a schema-2 contract binds no deploy or redeploy command.
 
 The result is `{schema_version, transaction_id, state, next, actions, receipt_digest, legacy}`
 (plus `lock` and `sync` for a profile that has a sync), `actions` being `{name, status, attempts}`, with `next` one of `done` (terminal `succeeded`),
@@ -197,6 +200,8 @@ SCOPE_AUTHORITY = "release-scope"
 OPERATOR = "operator"
 ACTIVATION_NOT_APPLICABLE = "activation-not-applicable"
 ABANDON_REASON = "abandoned by operator"
+ABSENT_RECOVERY = ("; nothing deployed the release commit: redeploy {name} from source at that "
+                   "commit, then run the release again to resume it")
 REFUSAL_DETAIL_LIMIT = 240
 
 
@@ -995,7 +1000,8 @@ class _Drive:
         """The ending for an inspected `WATCH_MODE` unit that is not satisfied (issue 555 D5).
 
         `diverged` parks. `absent`, `in_progress` and `unknown` wait while the unit is within
-        its observation deadline, counted from its first declaration, and park past it.
+        its observation deadline, counted from its first declaration, and park past it; an
+        `absent` park names its recovery (`ABSENT_RECOVERY`, issue 998).
         """
         if status == "diverged":
             return self.park(f"{name}: diverged: {self.reference(name)}")
@@ -1007,7 +1013,8 @@ class _Drive:
         deadline = self.driver.compiled["deadlines"][name]
         if self.driver.now_ms() - parse_at(declared) <= deadline:
             return "wait"
-        return self.park(f"{name}: {status} past {deadline} ms: {self.reference(name)}")
+        recovery = ABSENT_RECOVERY.format(name=name) if status == "absent" else ""
+        return self.park(f"{name}: {status} past {deadline} ms: {self.reference(name)}{recovery}")
 
     def after_invoke(self, name: str) -> str:
         """` after <result> <error_class>: <reference>` for the action's latest invoke when it
