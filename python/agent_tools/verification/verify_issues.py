@@ -91,6 +91,23 @@ def comments_from_graphql(nodes: list) -> list[Comment]:
     return sorted(comments, key=lambda c: c.id)
 
 
+def comments_from_rest(pages: list) -> list[Comment]:
+    """The comments of the pages of a REST listing, ascending id; `payload_invalid` for a bad page or comment."""
+    found = []
+    for page in pages:
+        if not isinstance(page, list):
+            raise forge_api.ForgeError("payload_invalid", "a comment page is not an array")
+        for item in page:
+            cid = item.get("id") if isinstance(item, dict) else None
+            if not isinstance(item, dict) or isinstance(cid, bool) or not isinstance(cid, int):
+                raise forge_api.ForgeError("payload_invalid", "a comment has no integer id")
+            for key in ("author_association", "body", "created_at"):
+                if not isinstance(item.get(key), str):
+                    raise forge_api.ForgeError("payload_invalid", f"comment {cid} has no string {key}")
+            found.append(Comment(cid, item["author_association"], item["body"], item["created_at"]))
+    return sorted(found, key=lambda c: c.id)
+
+
 def _as_marker(comment: Comment) -> forge_markers.Marker | None:
     return forge_markers.parse({"id": comment.id, "body": comment.body, "updated_at": comment.created_at})
 

@@ -4452,3 +4452,150 @@ class PageStandingRulesTest(unittest.TestCase):
         for value in horizontal:
             self.assertRegex(value, r"^\d+(\.\d+)?px$")
             self.assertLessEqual(float(value[:-2]), 16)
+
+
+def si(state: str, days, ask: bool = False) -> dict:
+    return {"state": state, "ends_at": None, "days_left": days, "ask": ask, "since": None}
+
+
+SIGNIN = {
+    "type": "inbox_item", "reason": "signin", "key": "signin/work", "project_id": None,
+    "profile": "work", "headline": "Sign in to work again",
+    "command": "CLAUDE_ACCOUNT=work claude", "signin": si("signed_in", 2, ask=True),
+    "answered": False, "waiting_since": "2026-11-12T08:00:00+00:00",
+}
+
+
+def classes(snap: dict) -> list:
+    return [n["cls"] for n in strip(snap)]
+
+
+def signed_out_pair() -> dict:
+    return capacity([
+        profile("a", "out", out_until="2026-11-14T09:00:00+00:00", signin=si("signed_in", 9)),
+        profile("default", "ok", week_left=80, next_reset="2026-11-13T05:00:00+00:00",
+                signin=si("signed_out", None)),
+    ], all_out=True, resumes_at="2026-11-14T09:00:00+00:00")
+
+
+class SigninPageTest(unittest.TestCase):
+    def test_each_listed_profile_shows_its_sign_in_words(self) -> None:
+        snap = capacity_snap(capacity([
+            profile("a", "ok", week_left=60, signin=si("signed_in", 12)),
+            profile("b", "ok", week_left=50, signin=si("signed_in", 1)),
+            profile("c", "ok", week_left=40, signin=si("signed_in", 0)),
+            profile("d", "out", signin=si("signed_in", None)),
+            profile("e", "ok", week_left=30, signin=si("unknown", None)),
+        ]))
+        self.assertEqual(
+            [full(n) for n in nodes(snap["capacity"]) if has_class(n, "cap-signin")],
+            ["signed in, ends in 12 days", "signed in, ends in 1 day", "signed in, ends today",
+             "signed in", "sign-in unknown"])
+
+    def test_a_profile_without_a_capacity_reading_shows_its_sign_in(self) -> None:
+        snap = capacity_snap(capacity([
+            profile("a", "ok", week_left=60, signin=si("signed_in", 20)),
+            profile("b", "unknown", signin=si("signed_in", 5)),
+            profile("c", "unknown", signin=si("unknown", None)),
+        ], no_reading="2 with no reading yet"))
+        self.assertEqual(classes(snap), [
+            "cap-state cap-fine", "cap-acct", "cap-acct cap-no-reading",
+            "cap-acct cap-no-reading", "cap-none"])
+        _, _, b, c, _ = strip(snap)
+        self.assertIn("b", full(b))
+        self.assertIn("signed in, ends in 5 days", full(b))
+        self.assertIn("c", full(c))
+        self.assertIn("sign-in unknown", full(c))
+        self.assertEqual(bars(b), [])
+        self.assertEqual(bars(c), [])
+
+    def test_a_signed_out_profile_is_listed_as_signed_out(self) -> None:
+        snap = capacity_snap(capacity([
+            profile("a", "ok", week_left=60, signin=si("signed_in", 20)),
+            profile("default", "unknown", signin=si("signed_out", None)),
+        ], no_reading=None))
+        self.assertEqual(classes(snap), ["cap-state cap-fine", "cap-acct", "cap-acct cap-signed-out"])
+        out = strip(snap)[2]
+        self.assertIn("default", full(out))
+        self.assertIn("signed out", full(out))
+        self.assertEqual(bars(out), [])
+        self.assertNotIn("no reading yet", full(snap["capacity"]))
+
+    def test_a_signed_out_profile_with_an_old_reading_drives_nothing(self) -> None:
+        snap = capacity_snap(signed_out_pair())
+        self.assertEqual(classes(snap)[0], "cap-state cap-out")
+        self.assertEqual(full(strip(snap)[0]), "out")
+        (default,) = [n for n in accounts(snap) if "default" in full(n)]
+        self.assertEqual(default["cls"], "cap-acct cap-signed-out")
+        self.assertEqual(bars(default), [])
+        text = full(snap["capacity"])
+        self.assertNotIn("80%", text)
+        self.assertNotIn("Fri 05:00", text)
+        self.assertNotIn("resets", text)
+
+    def test_a_signed_out_profile_with_an_old_reading_never_makes_the_strip_fine(self) -> None:
+        snap = capacity_snap(capacity([
+            profile("a", "out", out_until="2026-11-14T09:00:00+00:00", signin=si("signed_in", 9)),
+            profile("default", "ok", week_left=80, next_reset="2026-11-13T05:00:00+00:00",
+                    signin=si("signed_out", None)),
+        ], all_out=True, resumes_at="2026-11-14T09:00:00+00:00"))
+        self.assertEqual(full(strip(snap)[0]), "out")
+        self.assertEqual(full(part(snap, "cap-when")), "resumes Sat 09:00")
+
+    def test_the_all_out_panel_names_a_signed_out_profile_as_signed_out(self) -> None:
+        result = render_page({**view([]), "capacity": signed_out_pair()})
+        a, default = [n for n in nodes(result["promoted"]) if n["tag"] == "li"]
+        self.assertEqual(a["cls"], "cap-out")
+        self.assertTrue(full(a).startswith("a out until"))
+        self.assertEqual(default["cls"], "cap-signed-out")
+        self.assertEqual(full(default), "default signed out")
+
+    def test_only_signed_out_profiles_show_without_a_state_word(self) -> None:
+        snap = capacity_snap(capacity([
+            profile("default", "unknown", signin=si("signed_out", None))]))
+        self.assertEqual(classes(snap), ["cap-acct cap-signed-out"])
+
+    def test_a_signed_out_profile_with_an_old_reading_alone_gives_no_state_word_or_reset(self) -> None:
+        snap = capacity_snap(capacity([
+            profile("default", "ok", week_left=80, next_reset="2026-11-16T05:00:00+00:00",
+                    signin=si("signed_out", None))]))
+        self.assertEqual(classes(snap), ["cap-acct cap-signed-out"])
+        self.assertNotIn("resets", full(snap["capacity"]))
+
+    def test_a_view_from_before_sign_in_adds_no_words(self) -> None:
+        snap = capacity_snap(capacity(
+            [profile("a", "ok", week_left=60), profile("b", "unknown")],
+            no_reading="1 with no reading yet"))
+        self.assertEqual([n for n in nodes(snap["capacity"]) if has_class(n, "cap-signin")], [])
+        self.assertEqual(classes(snap), ["cap-state cap-fine", "cap-acct", "cap-none"])
+
+    def test_a_sign_in_ask_is_a_card_naming_the_profile_and_the_command(self) -> None:
+        f = frame([SIGNIN])
+        f["statement"]["headline"] = "1 thing needs you"
+        (snap,) = render([START, {"frame": f}, {"snapshot": True}])
+        (card,) = [n for n in nodes(snap["inbox"]) if n["tag"] == "article" and has_class(n, "signin")]
+        self.assertTrue(has_class(card, "card"))
+        self.assertIn("Sign in to work again", full(card))
+        self.assertEqual([full(n) for n in nodes(card) if has_class(n, "signin-command")],
+                         ["CLAUDE_ACCOUNT=work claude"])
+        self.assertEqual([full(n) for n in nodes(card) if has_class(n, "reason")],
+                         ["signed in, ends in 2 days"])
+        self.assertEqual([n for n in nodes(card) if n["tag"] == "button"], [])
+        self.assertEqual([n for n in nodes(snap["inbox"]) if has_class(n, "answer")], [])
+        self.assertIn("1 thing needs you", full(snap["statement"]))
+
+    def test_sign_in_cards_sit_between_progress_and_questions(self) -> None:
+        (snap,) = render([
+            START, {"frame": frame([PROGRESS, SIGNIN, Q0, ANSWERABLE])}, {"snapshot": True}])
+        order = []
+        for child in snap["inbox"]["children"]:
+            text = full(child)
+            if has_class(child, "progress"):
+                order.append("progress")
+            elif has_class(child, "signin"):
+                order.append("signin")
+            elif Q0["headline"] in text:
+                order.append("question")
+            elif ANSWERABLE["headline"] in text:
+                order.append("tracker")
+        self.assertEqual(order, ["progress", "signin", "question", "tracker"])

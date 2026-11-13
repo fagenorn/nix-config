@@ -174,6 +174,16 @@ class ProbeCommandTest(unittest.TestCase):
         self.assertLess(time.monotonic() - started, 10)
         self.assertEqual(result.returncode, -signal.SIGKILL)
 
+    def test_the_group_runner_returns_what_the_command_printed(self):
+        argv = [sys.executable, "-c", "print('ok')"]
+        for extra in ({}, {"cancel": threading.Event()}):
+            with self.subTest(extra=list(extra)):
+                result = manager.run_in_own_group(
+                    argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                    start_new_session=True, timeout=30, **extra)
+                self.assertEqual(result.returncode, 0)
+                self.assertEqual(result.stdout, b"ok\n")
+
     def test_a_probe_with_a_stop_event_hands_it_to_the_runner_as_cancel(self):
         stop = threading.Event()
         with_stop = Recorder()

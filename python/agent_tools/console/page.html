@@ -47,6 +47,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .meter { display: block; flex: none; width: 34px; height: 4px; border-radius: 2px; background: var(--s1); overflow: hidden; }
 .meter i { display: block; height: 100%; background: var(--sub0); }
 .cap-pc { color: var(--sub1); }
+.cap-signin, .cap-no-reading, .cap-signed-out { color: var(--ov2); }
 
 .desk-grid { max-width: 1360px; margin: 0 auto; padding: 30px 48px 72px; display: grid; grid-template-columns: minmax(0, 1fr) 460px; column-gap: 88px; align-items: start; }
 
@@ -248,6 +249,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .run .stage { color: var(--sub0); }
 .run .moved { color: var(--ov2); }
 .cap-none { color: var(--ov2); }
+.signin-command { display: block; margin: 6px 0; padding: 6px 10px; background: var(--mantle); border-radius: 6px; color: var(--sub1); overflow-wrap: anywhere; }
 .s-working { color: var(--green); }
 .s-waiting_answer, .s-waiting_permission { color: var(--yellow); }
 .s-limit { color: var(--red); }
@@ -915,6 +917,27 @@ function progressCard(item) {
   card.appendChild(act);
   return card;
 }
+function signinWords(s) {
+  if (s === null || typeof s !== "object") return "";
+  if (s.state === "signed_out") return "signed out";
+  if (s.state !== "signed_in") return "sign-in unknown";
+  if (s.days_left === null || s.days_left === undefined) return "signed in";
+  if (s.days_left === 0) return "signed in, ends today";
+  return s.days_left === 1 ? "signed in, ends in 1 day" : "signed in, ends in " + s.days_left + " days";
+}
+function signedOut(p) {
+  return p.signin !== null && typeof p.signin === "object" && p.signin.state === "signed_out";
+}
+function isSignin(item) {
+  return item.reason === "signin";
+}
+function signinCard(item) {
+  const card = el("article", "card signin");
+  card.appendChild(el("p", "q", item.headline));
+  card.appendChild(el("code", "signin-command", item.command));
+  card.appendChild(el("span", "reason", signinWords(item.signin)));
+  return card;
+}
 function sprintList(entry, sprints) {
   const list = el("ul", "sprints");
   for (const sprint of sprints) {
@@ -1022,7 +1045,9 @@ function renderCapacity(view) {
   const box = document.getElementById("capacity");
   const cap = view.capacity || {profiles: []};
   const known = (v) => v !== null && v !== undefined;
-  const readings = cap.profiles.filter((p) => p.state !== "unknown");
+  const readings = cap.profiles.filter((p) => p.state !== "unknown" && !signedOut(p));
+  const listed = cap.profiles.filter((p) => readings.includes(p)
+    || (p.signin !== null && typeof p.signin === "object"));
   const nodes = [];
   if (readings.length) {
     const [tone, word, mark] = cap.all_out ? ["cap-out", "out", "stop-icon"]
@@ -1032,7 +1057,16 @@ function renderCapacity(view) {
     state.appendChild(el("span", "", word));
     nodes.push(state);
   }
-  for (const p of readings) {
+  for (const p of listed) {
+    if (signedOut(p) || !readings.includes(p)) {
+      const acct = el("span", signedOut(p) ? "cap-acct cap-signed-out" : "cap-acct cap-no-reading");
+      const who = el("b", "", p.profile);
+      who.setAttribute("title", p.profile);
+      acct.appendChild(who);
+      acct.appendChild(el("span", "cap-signin", signinWords(p.signin)));
+      nodes.push(acct);
+      continue;
+    }
     const acct = el("span", p.state === "out" ? "cap-acct cap-out" : "cap-acct");
     const shares = [known(p.week_left) ? p.week_left + "% of the week left" : "week unknown"];
     if (known(p.five_hour_left)) shares.push(p.five_hour_left + "% of 5 hours");
@@ -1051,6 +1085,8 @@ function renderCapacity(view) {
     if (p.state === "out") acct.appendChild(outWords(p, ""));
     else if (p.state === "reset") acct.appendChild(el("span", "cap-pc", "reset, not yet used"));
     else acct.appendChild(el("span", "cap-pc", known(p.week_left) ? p.week_left + "%" : "week unknown"));
+    const words = signinWords(p.signin);
+    if (words !== "") acct.appendChild(el("span", "cap-signin", words));
     nodes.push(acct);
   }
   if (readings.length) {
@@ -1074,7 +1110,10 @@ function renderPromoted(view) {
   box.replaceChildren();
   if (!cap.all_out) return;
   const list = el("ul");
-  for (const p of cap.profiles) list.appendChild(phrase("li", "cap-out", p.profile + " ", outWords(p, "")));
+  for (const p of cap.profiles) {
+    if (signedOut(p)) list.appendChild(el("li", "cap-signed-out", p.profile + " signed out"));
+    else list.appendChild(phrase("li", "cap-out", p.profile + " ", outWords(p, "")));
+  }
   box.appendChild(el("h2", "sec-h", "Capacity"));
   box.appendChild(list);
 }
@@ -1871,7 +1910,8 @@ function renderInbox(view) {
   const briefs = open.filter(isBrief);
   const stalls = open.filter(isStall);
   const progress = open.filter(isProgress);
-  const tracked = open.filter((item) => !isBrief(item) && !isStall(item) && !isProgress(item));
+  const signins = open.filter(isSignin);
+  const tracked = open.filter((item) => !isBrief(item) && !isStall(item) && !isProgress(item) && !isSignin(item));
   for (const [key, state] of [...stallPosts]) {
     const id = key.split("\n")[1];
     const shown = key.startsWith("continue\n") || key.startsWith("progress-withdraw\n") ? progress : stalls;
@@ -1902,6 +1942,7 @@ function renderInbox(view) {
   placeBriefCards(section, briefs);
   for (const item of stalls) section.appendChild(stallCard(item));
   for (const item of progress) section.appendChild(progressCard(item));
+  for (const item of signins) section.appendChild(signinCard(item));
   if (briefs.length === 0 && tracked.length > 0) section.appendChild(leadItem(tracked[0]));
   const rows = briefs.length === 0 ? tracked.slice(1) : tracked;
   if (rows.length > 0) {

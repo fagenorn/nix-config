@@ -44,21 +44,30 @@ the reset of the window the refusal names (`binding`, else the first of "7d", "5
 and, when refused, the refusal reset (null when none is known, or when not out); `next_reset` the
 earliest reset still ahead.
 
-`capacity_view` returns `{"tight", "all_out", "resumes_at", "no_reading", "profiles":
-[<profile_capacity>]}` over
+`capacity_view(profiles, state, now, signins=None)` returns `{"tight", "all_out", "resumes_at",
+"no_reading", "profiles": [<profile_capacity>]}` over
 exactly the named profiles, sorted: the configured ones, so a profile removed with
 `claude-account rm` stops counting at once while its readings stay in the log and the fold. `tight`
 is true when exactly one profile has room (state "ok" or "reset") among at least two and every
 other profile is out, so a profile with no reading never makes it tight; `all_out` when there is a
 profile and every one is out; `resumes_at` the earliest `out_until` then, null when none is known;
 `no_reading` is "<n> with no reading yet" over the profiles in state "unknown", null when none.
+
+Each profile entry also carries `"signin"` (#1010): `signin.profile_signin(signins.get(name), now)`
+for the optional `signins` argument, the unknown sign-in when it is None or holds no entry for the
+profile. A profile whose `signin["state"]` is "signed_out" is left out of the room count, the
+no-reading count, `all_out`, `resumes_at` and `tight`, which are evaluated over the other entries
+exactly as above (`tight` still needs at least two of them): its client cannot make a request, so
+an old reading of it gives no room, and it is not a profile that merely has no reading. It stays in
+`profiles`, its reading kept. Without `signins` every result is the same apart from that member.
 """
 
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from agent_tools.console import signin as signin_state
 from agent_tools.console.event_log import Event
 
 READING = "capacity.reading"
@@ -260,16 +269,22 @@ def profile_capacity(profile: str, reading: Reading | None, now: float) -> dict:
     }
 
 
-def capacity_view(profiles: Iterable[str], state: CapacityState, now: float) -> dict:
+def capacity_view(profiles: Iterable[str], state: CapacityState, now: float,
+                  signins: Mapping[str, signin_state.SignIn] | None = None) -> dict:
     names = sorted(set(profiles))
-    entries = [profile_capacity(name, state.readings.get(name), now) for name in names]
-    room = sum(entry["state"] in ("ok", "reset") for entry in entries)
-    unknown = sum(entry["state"] == "unknown" for entry in entries)
-    all_out = bool(entries) and all(entry["state"] == "out" for entry in entries)
-    until = [entry["out_until"] for entry in entries if entry["out_until"] is not None]
+    signins = signins or {}
+    entries = [{**profile_capacity(name, state.readings.get(name), now),
+                "signin": signin_state.profile_signin(signins.get(name), now)}
+               for name in names]
+    considered = [entry for entry in entries if entry["signin"]["state"] != "signed_out"]
+    room = sum(entry["state"] in ("ok", "reset") for entry in considered)
+    unknown = sum(entry["state"] == "unknown" for entry in considered)
+    all_out = bool(considered) and all(entry["state"] == "out" for entry in considered)
+    until = [entry["out_until"] for entry in considered if entry["out_until"] is not None]
     return {
-        "tight": len(entries) >= 2 and room == 1 and all(
-            entry["state"] == "out" for entry in entries if entry["state"] not in ("ok", "reset")),
+        "tight": len(considered) >= 2 and room == 1 and all(
+            entry["state"] == "out" for entry in considered
+            if entry["state"] not in ("ok", "reset")),
         "all_out": all_out,
         "resumes_at": min(until) if all_out and until else None,
         "no_reading": f"{unknown} with no reading yet" if unknown else None,

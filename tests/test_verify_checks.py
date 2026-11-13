@@ -18,7 +18,8 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools.delivery import agent_gate_bundle
-from agent_tools.verification import verify_checks
+from agent_tools.claims import forge_markers
+from agent_tools.verification import verify_checks, verify_issues
 from agent_tools.system import forge_api
 from agent_tools.verification.verify_checks import required_checks, self_hosted_runner
 
@@ -257,6 +258,101 @@ class RequiredChecksCommandTest(unittest.TestCase):
 
     def test_wrapper_is_committed_executable(self):
         self.assertEqual(committed_mode(f"{CHECKS}/required-checks"), "100755")
+
+
+class IssueClosedTest(unittest.TestCase):
+    PATH = "repos/o/r/issues/1009"
+    COMMENTS = PATH + "/comments?per_page=100"
+    BLOCK = {"v": 1, "merge": "a" * 40, "checks": [{"ac": "AC1", "kind": "evidence", "host": "mbp"}]}
+    KEY = verify_issues.block_key(10, BLOCK)
+
+    @staticmethod
+    def comment(cid, body, association="OWNER"):
+        return {"id": cid, "author_association": association, "body": body,
+                "created_at": "2026-11-06T10:00:00Z"}
+
+    def held(self):
+        return self.comment(10, "Held.\n\n```verify\n" + json.dumps(self.BLOCK) + "\n```\n")
+
+    def closed(self, cid=11, outcome="verified", association="OWNER", key=None):
+        body = forge_markers.render(verify_issues.CLOSED, {"block": key or self.KEY, "outcome": outcome},
+                                    "Recorded.")
+        return self.comment(cid, body, association)
+
+    def read(self, payload, comments=()):
+        def api_get(path, allow=()):
+            self.assertEqual(path, self.PATH)
+            return payload
+
+        def api_pages(path):
+            self.assertEqual(path, self.COMMENTS)
+            return [list(comments)]
+        stack = contextlib.ExitStack()
+        stack.enter_context(mock.patch.object(forge_api, "api_get", side_effect=api_get))
+        stack.enter_context(mock.patch.object(forge_api, "api_pages", side_effect=api_pages))
+        return stack
+
+    def completed(self, *comments):
+        with self.read({"state": "closed", "state_reason": "completed"}, comments):
+            return verify_checks.issue_closed("o/r", 1009)
+
+    def test_an_issue_closed_as_completed_after_its_block_was_verified_is_met(self):
+        self.assertEqual(self.completed(self.held(), self.closed()),
+                         (0, {"issue": 1009, "state": "closed", "state_reason": "completed",
+                              "verified": True}))
+
+    def test_an_issue_closed_as_completed_by_hand_is_not_met(self):
+        for comments in ((), (self.held(),), (self.held(), self.closed(outcome="expired")),
+                         (self.held(), self.closed(association="NONE")),
+                         (self.held(), self.closed(key="10.0123456789abcdef")),
+                         (self.closed(),)):
+            with self.subTest(comments=comments):
+                code, report = self.completed(*comments)
+                self.assertEqual((code, report["verified"]), (1, False))
+
+    def test_a_verified_marker_of_an_older_block_does_not_count_for_a_replacement(self):
+        newer = self.comment(12, "Held.\n\n```verify\n" + json.dumps({**self.BLOCK, "merge": "b" * 40})
+                             + "\n```\n")
+        self.assertEqual(self.completed(self.held(), self.closed(), newer)[0], 1)
+
+    def test_an_open_issue_is_not_yet(self):
+        with self.read({"state": "open", "state_reason": None}):
+            self.assertEqual(verify_checks.issue_closed("o/r", 1009),
+                             (75, {"issue": 1009, "state": "open", "state_reason": None}))
+
+    def test_an_issue_closed_another_way_is_not_met_without_reading_its_comments(self):
+        with self.read({"state": "closed", "state_reason": "not_planned"}, ()) as _, \
+                mock.patch.object(forge_api, "api_pages", side_effect=AssertionError("read")):
+            code, report = verify_checks.issue_closed("o/r", 1009)
+        self.assertEqual((code, report["state_reason"]), (1, "not_planned"))
+
+    def test_an_unreadable_issue_is_a_forge_error(self):
+        for payload in ([], {"state": "gone"}):
+            with self.subTest(payload=payload), self.read(payload):
+                with self.assertRaises(forge_api.ForgeError) as raised:
+                    verify_checks.issue_closed("o/r", 1009)
+                self.assertEqual(raised.exception.code, "payload_invalid")
+        with self.read({"state": "closed", "state_reason": "completed"}, [{"id": "x"}]):
+            with self.assertRaises(forge_api.ForgeError) as raised:
+                verify_checks.issue_closed("o/r", 1009)
+            self.assertEqual(raised.exception.code, "payload_invalid")
+        err = io.StringIO()
+        with mock.patch.object(forge_api, "api_get",
+                               side_effect=forge_api.ForgeError("transport", "x")):
+            with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+                code = verify_checks.main(["issue-closed", "--repo", "o/r", "--issue", "1009"])
+        self.assertEqual(code, 2)
+        self.assertIn("verify-checks: forge_error: transport", err.getvalue())
+
+    def test_the_docstring_documents_the_check(self):
+        for needle in ("issue-closed --repo R --issue N", "verify_checks.issue_closed",
+                       "repos/R/issues/N", "`completed`", "payload_invalid", "issue 1010",
+                       "verify-closed", "`verified`"):
+            self.assertIn(needle, verify_checks.__doc__)
+
+    def test_the_issue_closed_wrapper_is_committed_executable(self):
+        self.assertEqual(committed_mode(f"{CHECKS}/issue-closed"), "100755")
+        self.assertEqual(run_from_root([str(ROOT / CHECKS / "issue-closed")]).returncode, 2)
 
 
 class PlatformStatusWrapperTest(unittest.TestCase):

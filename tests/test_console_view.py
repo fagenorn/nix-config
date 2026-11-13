@@ -1720,3 +1720,71 @@ class ReviveViewTest(unittest.TestCase):
         shown = derive_view([state("p00", 1)], sprints=sprints)
         self.assertEqual(shown["inbox"]["open"], [])
         self.assertEqual(shown["statement"], derive_view([state("p00", 1)])["statement"])
+
+
+def signin_entry(profile, state, ask, since=None, days_left=None, ends_at=None):
+    return {"profile": profile, "state": "unknown", "week_left": None, "five_hour_left": None,
+            "next_reset": None, "out_until": None, "read_at": None,
+            "signin": {"state": state, "ends_at": ends_at, "days_left": days_left, "ask": ask,
+                       "since": since}}
+
+
+def signin_capacity(*entries):
+    return {"tight": False, "all_out": False, "resumes_at": None, "no_reading": None,
+            "profiles": list(entries)}
+
+
+def signin_item(profile, signin):
+    return {"type": "inbox_item", "reason": "signin", "key": f"signin/{profile}",
+            "project_id": None, "profile": profile, "headline": f"Sign in to {profile} again",
+            "command": f"CLAUDE_ACCOUNT={profile} claude", "signin": signin, "answered": False,
+            "waiting_since": signin["since"]}
+
+
+class SigninViewTest(unittest.TestCase):
+    def test_each_asking_profile_is_one_inbox_item_until_a_fresh_sign_in(self):
+        spare = signin_entry("spare", "signed_out", True, since="t1")
+        work = signin_entry("work", "signed_in", True, since="2026-11-10T09:00:00+00:00",
+                            days_left=2, ends_at="2026-11-13T09:00:00+00:00")
+        home = signin_entry("home", "signed_in", False, days_left=20,
+                            ends_at="2026-12-03T09:00:00+00:00")
+        shown = derive_view([state("p00", 1)], capacity=signin_capacity(home, spare, work))
+        self.assertEqual(shown["inbox"]["open"], [signin_item("spare", spare["signin"]),
+                                                  signin_item("work", work["signin"])])
+        self.assertEqual(shown["statement"]["inbox_items"], 2)
+        self.assertEqual(shown["statement"]["headline"], "2 things need you")
+        self.assertEqual(shown["statement"]["sentence"], view.SIGNIN_SENTENCE)
+        self.assertEqual(view.SIGNIN_SENTENCE,
+                         "Sign in again in a terminal with the command shown.")
+        fresh = signin_entry("work", "signed_in", False, days_left=30,
+                             ends_at="2026-12-13T09:00:00+00:00")
+        shown = derive_view([state("p00", 1)], capacity=signin_capacity(home, fresh))
+        self.assertEqual(shown["inbox"]["open"], [])
+        self.assertEqual(shown["statement"]["headline"], "Nothing needs you")
+
+    def test_sign_in_items_follow_progress_and_precede_questions(self):
+        ask = signin_entry("spare", "signed_out", True, since="t1")
+        records = {("p00", "k1"): InboxRecord(
+            {**item("p00", "k1"), "reason": "decision", "questions": [
+                {"question": "Which one?", "options": ["x"], "chosen": None}]}, "t1", "u1")}
+        b = "b" * 16
+        sprints = {A: asked(started(A)), b: dataclasses.replace(
+            with_manager(started(b)), no_progress_at=iso(R))}
+        shown = derive_view([state("p00", 1)], records, sprints=sprints,
+                            capacity=signin_capacity(ask))
+        self.assertEqual([e["reason"] for e in shown["inbox"]["open"]],
+                         ["progress", "signin", "question", "question", "decision"])
+        self.assertEqual(shown["statement"]["sentence"], view.PROGRESS_SENTENCE)
+        without = derive_view([state("p00", 1)], records, sprints={A: asked(started(A))},
+                              capacity=signin_capacity(ask))
+        self.assertEqual([e["reason"] for e in without["inbox"]["open"]],
+                         ["signin", "question", "question", "decision"])
+        self.assertEqual(without["statement"]["sentence"], view.SIGNIN_SENTENCE)
+        c = "c" * 16
+        briefed_too = derive_view([state("p00", 1)], records, capacity=signin_capacity(ask),
+                                  sprints={A: asked(started(A)), c: briefed(sprint(c), at="t5")})
+        self.assertEqual(briefed_too["statement"]["sentence"], BRIEF_SENTENCE)
+
+    def test_a_capacity_without_sign_in_raises_nothing(self):
+        shown = derive_view([state("p00", 1)], capacity=out())
+        self.assertEqual([e for e in shown["inbox"]["open"] if e["reason"] == "signin"], [])

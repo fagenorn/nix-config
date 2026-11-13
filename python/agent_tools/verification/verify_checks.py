@@ -127,6 +127,20 @@ its output, a timeout or a shell that cannot be run). It never writes a file.
 `console-state --port N` (`verify_checks.console_state`, issue 856) is met when
 `GET http://127.0.0.1:N/api/state` answers 200 within 5 seconds, not met on any other status or no
 answer; it reads only that endpoint.
+
+`issue-closed --repo R --issue N` (`verify_checks.issue_closed`, issue 1010) is met when issue N of R
+was closed as completed after the verify run verified its held block: a closed state with reason
+`completed` alone is not enough, since an owner can close an issue that way by hand. It reads
+`repos/R/issues/N` and, for a completed closure, every page of `repos/R/issues/N/comments`, and only
+reads the forge. The held block is the newest trusted one (`verify_issues.select`) and the closure is
+verified when a live `verify-closed` marker by a trusted author names that block's version with
+outcome `verified`; a block that is absent or unparsable, a marker of an older block version, an
+untrusted marker or any other outcome is not. Exit 0 when `closed` as `completed` and verified; 1
+when `closed` with any other reason (its comments unread), or as `completed` unverified; 75 when
+`open`. The report is `{"issue", "state", "state_reason"}`, plus `"verified"` once the comments were
+read. A payload that is not an object, or whose state is neither `open` nor `closed`, or a malformed
+comment page, is a `payload_invalid` forge error (exit 2), as is any other forge error; a bad `--repo`
+or `--issue` (a positive integer) is a usage error (2).
 """
 from __future__ import annotations
 
@@ -153,6 +167,7 @@ from agent_tools.canonical import parse_rfc3339_utc
 from agent_tools.guard.push_fixture import make_push_fixture
 from agent_tools.system import forge_api, github_remote
 from agent_tools.system.semver import parse_semver
+from agent_tools.verification import verify_issues
 
 REPO = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _STAMP = "%Y-%m-%dT%H:%M:%SZ"
@@ -289,6 +304,27 @@ def required_checks(repo: str, base: str, since: datetime) -> tuple[int, dict]:
     report["missing"] = sorted({r[0] for r in required
                                 if not _context_met(r, runs, statuses, merged_at)})
     return (0 if not report["missing"] else 1), report
+
+
+def issue_closed(repo: str, issue: int) -> tuple[int, dict]:
+    """Met when `issue` is closed as completed after its held block was verified by the verify run."""
+    found = forge_api.api_get(f"repos/{repo}/issues/{issue}")
+    state = found.get("state") if isinstance(found, dict) else None
+    if state not in ("open", "closed"):
+        raise _invalid(f"issue {issue} has no open or closed state")
+    reason = found.get("state_reason")
+    report = {"issue": issue, "state": state, "state_reason": reason}
+    if state == "open":
+        return 75, report
+    if reason != "completed":
+        return 1, report
+    comments = verify_issues.comments_from_rest(forge_api.api_pages(
+        f"repos/{repo}/issues/{issue}/comments?per_page=100"))
+    held = verify_issues.select(comments)
+    closing = (verify_issues.live_one(held.markers, verify_issues.CLOSED, {"block": held.key})
+               if held is not None else None)
+    report["verified"] = closing is not None and closing.fields.get("outcome") == "verified"
+    return (0 if report["verified"] else 1), report
 
 
 def self_hosted_runner(repo: str, runner: str, labels: Sequence[str]) -> tuple[int, dict]:
@@ -1089,6 +1125,16 @@ def _port(value: str) -> int:
     return port
 
 
+def _issue_number(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError:
+        number = 0
+    if number < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return number
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="verify-checks")
     checks = parser.add_subparsers(dest="check", required=True)
@@ -1141,6 +1187,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         "console-state",
         help="issue 856: the console's state endpoint answers 200 on loopback")
     console.add_argument("--port", type=_port, required=True)
+    closed = checks.add_parser(
+        "issue-closed",
+        help="issue 1010: an issue was closed as completed, by its own verify run")
+    closed.add_argument("--repo", type=_repo, required=True)
+    closed.add_argument("--issue", type=_issue_number, required=True)
     args = parser.parse_args(argv)
     if args.check == "console-state":
         code, report = console_state(args.port)
@@ -1211,6 +1262,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.check == "self-hosted-runner":
             code, report = self_hosted_runner(args.repo, args.runner, args.label)
+        elif args.check == "issue-closed":
+            code, report = issue_closed(args.repo, args.issue)
         else:
             code, report = required_checks(args.repo, args.base, args.since)
     except forge_api.ForgeError as error:

@@ -44,6 +44,11 @@ nudge to a manager session that sat idle), `MANAGER_NO_PROGRESS` (`manager.no_pr
 console's give-up that opens an item for the owner) and `SPRINT_CONTINUED` (`sprint.continued`, the
 owner's answer to it). Like the other manager rows they are not in `KEPT_KINDS`.
 
+One kind is kept in part (#1010): `SIGNIN_READING` (`signin.reading`) is not in `KEPT_KINDS`, but the
+retention pass leaves the newest row of each profile (by sequence number, the profile being the
+payload's `profile`) in place whatever its age, because the console records a sign-in only when it
+changes and a profile signed out for longer than the window would otherwise read as never read.
+
 `EventLog.append` writes all its entries in one transaction under one `at`
 taken from the clock: a failure writes no row, rolls back the earlier entries of
 the same call and leaves the connection usable. An empty sequence returns `[]`
@@ -93,6 +98,7 @@ SPRINT_CLOSED = "sprint.closed"
 SPRINT_STOP_REQUESTED = "sprint.stop_requested"
 MANAGER_STOPPED = "manager.stopped"
 MANAGER_STOP_FAILED = "manager.stop_failed"
+SIGNIN_READING = "signin.reading"
 # Rows of these kinds (the two goal kinds, the three brief kinds, the report
 # Rows of these kinds (the two goal kinds, the three brief kinds, the report
 # kind, the three message kinds, the two question kinds, the closing kind, the
@@ -260,7 +266,7 @@ class EventLog:
             return self._transaction(insert)
 
     def retain(self) -> int:
-        """Remove the rows older than the retention window; return how many."""
+        """Remove the rows older than the retention window, keeping each profile's newest sign-in reading; return how many."""
         with self._lock:
             now = datetime.fromisoformat(self._clock())
             cutoff = (now - RETENTION).astimezone(timezone.utc).isoformat(
@@ -272,8 +278,11 @@ class EventLog:
                     (cutoff, cutoff))
                 marks = ", ".join("?" * len(KEPT_KINDS))
                 return self._connection.execute(
-                    f"DELETE FROM events WHERE at < ? AND kind NOT IN ({marks})",
-                    (cutoff, *sorted(KEPT_KINDS))).rowcount
+                    f"DELETE FROM events WHERE at < ? AND kind NOT IN ({marks}) "
+                    "AND NOT (kind = ? AND seq = (SELECT MAX(newer.seq) FROM events AS newer "
+                    "WHERE newer.kind = events.kind AND json_extract(newer.payload, '$.profile') "
+                    "IS json_extract(events.payload, '$.profile')))",
+                    (cutoff, *sorted(KEPT_KINDS), SIGNIN_READING)).rowcount
 
             return self._transaction(remove)
 

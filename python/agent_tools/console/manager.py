@@ -314,25 +314,28 @@ def run_in_own_group(argv: list[str], *, timeout: float, check: bool = False,
     `subprocess.run` kills only the immediate child, and the account wrapper waits for its Claude
     child instead of replacing itself, so the child would outlive the failure and could still send.
     A `cancel` event that is set (checked every `CANCEL_POLL_SECONDS`) ends the whole group the same
-    way, and the call returns with the killed status once the group is reaped.
+    way, and the call returns with the killed status once the group is reaped. The result carries
+    what `communicate` returned (`stdout` and `stderr` for the streams that were piped, None for the
+    others and after a cancel), so a caller that pipes `stdout` reads it from the result.
     """
     assert not check, "the caller reads the exit status"
     with subprocess.Popen(argv, **kwargs) as process:
         deadline = time.monotonic() + timeout
+        out = err = None
         while True:
             if cancel is not None and cancel.is_set():
                 _kill_group(process)
                 break
             remaining = deadline - time.monotonic()
             try:
-                process.communicate(
+                out, err = process.communicate(
                     timeout=remaining if cancel is None else min(remaining, CANCEL_POLL_SECONDS))
                 break
             except subprocess.TimeoutExpired:
                 if deadline - time.monotonic() <= 0:
                     _kill_group(process)
                     raise
-        return subprocess.CompletedProcess(argv, process.returncode)
+        return subprocess.CompletedProcess(argv, process.returncode, out, err)
 
 
 def _kill_group(process: subprocess.Popen) -> None:

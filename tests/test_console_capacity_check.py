@@ -41,7 +41,10 @@ def ago(seconds):
 
 
 def view(*rows):
-    return {"capacity": {"profiles": [{"profile": name, "read_at": at} for name, at in rows]}}
+    """A console view; a row is `(name, read_at)` or `(name, read_at, signin)`."""
+    return {"capacity": {"profiles": [
+        {"profile": row[0], "read_at": row[1], **({"signin": row[2]} if len(row) > 2 else {})}
+        for row in rows]}}
 
 
 class CapacityCheckTest(unittest.TestCase):
@@ -104,6 +107,53 @@ class CapacityCheckTest(unittest.TestCase):
                                            "--max-age", "900")
                 self.assertEqual((code, json.loads(out)),
                                  (75, {"status": "pending", "profiles": names}))
+
+    def test_every_skips_a_signed_out_profile(self):
+        url = serve(self, view(("work", ago(60), {"state": "signed_in"}),
+                               ("default", None, {"state": "signed_out"})))
+        code, out = self.run_check("--url", url, "--every", "--max-age", "900")
+        document = json.loads(out)
+        self.assertEqual(code, 0)
+        self.assertEqual(document["status"], "met")
+        self.assertEqual(document["profiles"], 1)
+        self.assertEqual(document["signed_out"], ["default"])
+
+    def test_every_still_waits_on_a_signed_in_profile_without_a_reading(self):
+        signed_in, signed_out = {"state": "signed_in"}, {"state": "signed_out"}
+        cases = [([("work", ago(60), signed_in), ("spare", None, signed_in),
+                   ("default", None, signed_out)], ["spare"]),
+                 ([("default", None, signed_out)], [])]
+        for rows, names in cases:
+            with self.subTest(rows=rows):
+                code, out = self.run_check("--url", serve(self, view(*rows)), "--every",
+                                           "--max-age", "900")
+                self.assertEqual((code, json.loads(out)),
+                                 (75, {"status": "pending", "profiles": names}))
+
+    def test_signin_is_met_when_every_profile_knows_its_sign_in(self):
+        url = serve(self, view(("work", ago(60), {"state": "signed_in"}),
+                               ("default", None, {"state": "signed_out"})))
+        code, out = self.run_check("--url", url, "--signin")
+        self.assertEqual((code, json.loads(out)),
+                         (0, {"status": "met", "profiles": 2, "signed_out": ["default"]}))
+
+    def test_signin_is_pending_on_an_unknown_profile(self):
+        cases = [([("work", ago(60), {"state": "signed_in"}),
+                   ("spare", None, {"state": "unknown"})], ["spare"]),
+                 ([], [])]
+        for rows, names in cases:
+            with self.subTest(rows=rows):
+                code, out = self.run_check("--url", serve(self, view(*rows)), "--signin")
+                self.assertEqual((code, json.loads(out)),
+                                 (75, {"status": "pending", "profiles": names}))
+
+    def test_signin_on_a_console_without_sign_in_is_not_deployed(self):
+        url = serve(self, view(("work", ago(60)), ("spare", None)))
+        code, out = self.run_check("--url", url, "--signin")
+        self.assertEqual((code, json.loads(out)), (75, {"status": "not_deployed"}))
+
+    def test_signin_and_every_together_are_refused(self):
+        self.assertEqual(self.run_check("--every", "--signin")[0], 2)
 
     def test_without_every_one_fresh_profile_still_meets(self):
         url = serve(self, view(("work", ago(60)), ("spare", None)))

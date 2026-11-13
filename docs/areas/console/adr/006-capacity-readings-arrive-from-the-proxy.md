@@ -1,7 +1,7 @@
 # ADR-console-006 — Capacity readings arrive from the proxy and are kept per profile
 
 - **Status:** accepted
-- **Decided in:** #839, #849, #860, #895, #1009
+- **Decided in:** #839, #849, #860, #895, #1009, #1010
 
 ## Context
 
@@ -15,7 +15,7 @@ A reading is attributed to a profile through the console's own probes first (bel
 
 **Readings the console asks for (#1009).** On Linux, every 10 minutes and once 30 seconds after it starts, the console sends one small request under each listed profile, `claude-account run -p --session-id <id> --no-session-persistence --strict-mcp-config --model haiku --max-turns 1 <prompt>` with `CLAUDE_ACCOUNT=<profile>` and `CLAUDE_CACHE_PROXY=required`, no terminal, in an empty temporary directory, so the profile's own login signs it, it goes through the cache proxy and it leaves no transcript. While the proxy does not answer the launcher refuses the probe instead of sending it direct (ADR-hosts-004), so a probe never spends a request that yields no reading. A probe that outlives its 120 s timeout has its whole process group killed, the Claude child the launcher waits on included, before its profile may be probed again. The console never reads, stores or logs a credential. The console picks the session id (a new UUID) before starting the client and remembers the profile under it for the last 256 probes; a reading whose session is one of them is credited to that profile before any other rule, a refusal (HTTP 429) included, which leaves the profile out with its reset. Hooks and registry entries of a probe session are dropped, so a probe is never a session on the page (ADR-console-004). One probe per profile is in flight; one that fails or times out is one stderr line naming its profile and its kind, and the profile keeps its last reading. The proxy's forwarding is unchanged and nothing is added to the request stream (ADR-hosts-007). Off Linux no probe is made, as no manager is started (ADR-console-015).
 
-The listed profiles are `default` plus every directory under `profiles/`, used or not, and no others: a profile with no reading counts in one note on the strip, "<n> with no reading yet", and keeps "every profile is out" from firing, and one removed with `claude-account rm` drops out of the strip and the count at the next poll while its readings stay in the log. The capacity strip sits in the top bar. When every profile is out the statement says so and when everything resumes, and nothing is asked of the owner. "Tight" is one profile with room among two or more while every other profile reads out.
+The listed profiles are `default` plus every directory under `profiles/`, used or not, and no others: a profile with no reading counts in one note on the strip, "<n> with no reading yet", and keeps "every profile is out" from firing, while a profile whose sign-in reads signed out is listed as signed out, is not in the note and does not block "every profile is out" (ADR-console-022), and one removed with `claude-account rm` drops out of the strip and the count at the next poll while its readings stay in the log. The capacity strip sits in the top bar. When every profile is out the statement says so and when everything resumes, and nothing is asked of the owner. "Tight" is one profile with room among two or more while every other profile reads out.
 
 ## Consequences
 

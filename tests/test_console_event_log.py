@@ -548,5 +548,21 @@ class RetentionTest(unittest.TestCase):
             self.raw().execute("DELETE FROM events WHERE kind = 'questions.asked'")
 
 
+    def test_a_pass_keeps_the_newest_sign_in_reading_of_each_profile(self):
+        log = self.open()
+        self.now = OLD
+        log.append([(event_log.SIGNIN_READING, None, {"profile": "a", "state": "signed_out",
+                                                       "ends_at": None})])
+        log.append([(event_log.SIGNIN_READING, None, {"profile": "a", "state": "signed_out",
+                                                       "ends_at": None}),
+                    (event_log.SIGNIN_READING, None, {"profile": "b", "state": "signed_out",
+                                                       "ends_at": None})])
+        log.append([("old", None, {})])
+        self.assertEqual(self.retain_at(log, NOW), 2)
+        self.assertEqual([(r[0], r[2]) for r in rows(self.store)],
+                         [(2, event_log.SIGNIN_READING), (3, event_log.SIGNIN_READING)])
+        self.assertEqual(self.retain_at(log, NOW), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

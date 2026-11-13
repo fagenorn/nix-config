@@ -66,7 +66,8 @@ see below), else
 project's tracker cannot be read, else "Nothing needs you". The sentence is `ALL_OUT_SENTENCE`
 when every profile is out of usage, else `STALE_SENTENCE` naming those projects when any is
 stale, else `BRIEF_SENTENCE` when any brief is open, else `MANAGER_SENTENCE` when a sprint is
-stalled, else `QUESTION_SENTENCE` when any manager question is open, else `CHOOSE_SENTENCE` when an open item is a
+stalled, else `PROGRESS_SENTENCE` when a manager stopped making progress, else `SIGNIN_SENTENCE`
+when a profile's sign-in asks, else `QUESTION_SENTENCE` when any manager question is open, else `CHOOSE_SENTENCE` when an open item is a
 decision with questions (the page can
 answer it), else `ANSWER_SENTENCE` when an open item has answers (a verification prompt the page
 can answer), else `NEEDS_SENTENCE` when something is open, else the registered-project count. The
@@ -114,7 +115,19 @@ one entry of `inbox.open`, after the stalls and before the questions, ordered by
      "waiting_since": "<time the stop was noticed>"}
 
 `PROGRESS_SENTENCE` says what the page offers. The sentence precedence is all out, stale, briefs,
-stalls, progress, questions, then the existing ones.
+stalls, progress, sign-in, questions, then the existing ones.
+
+A profile whose sign-in asks (#1010: `capacity["profiles"][i]["signin"]["ask"]` is true, a read of
+`entry.get("signin")` so a capacity without that member shows none) is one entry of `inbox.open`,
+after the progress entries and before the questions, ordered by profile, and counts in
+`inbox_items` and the headline. Its entry is
+
+    {"type": "inbox_item", "reason": "signin", "key": "signin/<profile>", "project_id": null,
+     "profile": "<profile>", "headline": "Sign in to <profile> again",
+     "command": "CLAUDE_ACCOUNT=<profile> claude", "signin": <the entry's signin>,
+     "answered": false, "waiting_since": <signin["since"]>}
+
+`SIGNIN_SENTENCE` says what the page offers.
 
 A sprint's `state` is `quota` ("waiting on quota until") when its manager is `started` and the
 capacity view holds an `out` entry for the manager's profile (`manager.quota_wait`), unless the
@@ -379,6 +392,8 @@ BRIEF_SENTENCE = "Press Enter to approve the brief, or write a reply to ask for 
 QUESTION_SENTENCE = "Choose an option with its number and press Enter, or answer in your own words."
 MANAGER_SENTENCE = "Try again to start a new manager, or withdraw the sprint."
 PROGRESS_SENTENCE = "Tell the manager to continue, or withdraw the sprint."
+SIGNIN_HEADLINE = "Sign in to {profile} again"
+SIGNIN_SENTENCE = "Sign in again in a terminal with the command shown."
 CHOOSE_SENTENCE = "Choose an option with its number and press Enter, or answer on the tracker."
 ANSWER_SENTENCE = "Answer it here, or on the tracker."
 STALE_SENTENCE = ("The tracker could not be read for {projects}; "
@@ -846,6 +861,16 @@ def _progress_entry(sprint: SprintState) -> dict:
             "answered": False, "waiting_since": sprint.no_progress_at}
 
 
+def _signin_entry(entry: Mapping) -> dict:
+    profile = entry["profile"]
+    signin = entry["signin"]
+    return {"type": "inbox_item", "reason": "signin", "key": f"signin/{profile}",
+            "project_id": None, "profile": profile,
+            "headline": SIGNIN_HEADLINE.format(profile=profile),
+            "command": f"CLAUDE_ACCOUNT={profile} claude", "signin": signin,
+            "answered": False, "waiting_since": signin["since"]}
+
+
 def _headline(open_count: int, stale: bool, all_out: bool) -> str:
     if open_count == 1:
         return "1 thing needs you"
@@ -904,7 +929,10 @@ def derive_view(
     unprogressed = sorted((s for group in drafted.values() for s in group
                            if s.no_progress_at is not None),
                           key=lambda s: (s.no_progress_at, s.sprint_id))
-    open_count = (len(briefs) + len(stalls) + len(unprogressed) + len(asked)
+    signins = sorted((e for e in capacity["profiles"]
+                      if isinstance(e.get("signin"), Mapping) and e["signin"].get("ask")),
+                     key=lambda e: e["profile"])
+    open_count = (len(briefs) + len(stalls) + len(unprogressed) + len(signins) + len(asked)
                   + len(open_items))
     all_out = bool(capacity["all_out"])
     if all_out:
@@ -917,6 +945,8 @@ def derive_view(
         sentence = MANAGER_SENTENCE
     elif unprogressed:
         sentence = PROGRESS_SENTENCE
+    elif signins:
+        sentence = SIGNIN_SENTENCE
     elif asked:
         sentence = QUESTION_SENTENCE
     elif any(r.item["reason"] == "decision" and r.item["questions"] for r in open_items):
@@ -984,6 +1014,7 @@ def derive_view(
         "capacity": capacity,
         "inbox": {"open": [_brief_entry(s) for s in briefs] + [_stall_entry(s) for s in stalls]
                           + [_progress_entry(s) for s in unprogressed]
+                          + [_signin_entry(e) for e in signins]
                           + [_question_entry(s, q) for s, q in asked]
                           + [_inbox_entry(r, health) for r in open_items],
                   "answered": [_inbox_entry(r, health) for r in answered]},
