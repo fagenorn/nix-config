@@ -485,6 +485,28 @@ class RunFoldTest(unittest.TestCase):
                     self.assertEqual(step.issue, 4242 if names_issue else None)
 
 
+    def test_a_rerun_review_label_reads_as_the_step_it_reruns(self):
+        # Both programs append one suffix to the label of a review they run once more (an unusable first reply).
+        for name in ("deliver-standard.js", "deliver-batch.js"):
+            with self.subTest(program=name):
+                source = (PROGRAMS / name).read_text(encoding="utf-8")
+                self.assertEqual(source.count(f"const AGAIN = '{deliveries.RERUN_SUFFIX}'\n"), 1)
+        for label in ("review-3", "rereview-3-1", "plan-review", "final-2", "fix-wave-review-2", "sync-review-1", "verify-fix-review-1"):
+            with self.subTest(label=label):
+                again = deliveries.classify(label + deliveries.RERUN_SUFFIX, batch=False)
+                self.assertIsNotNone(again)
+                self.assertEqual(again, deliveries.classify(label, batch=False))
+        for label in ("land-sync-review-2259-1", "land-sync-rereview-2259-1", "land-fix-review-2259"):
+            with self.subTest(label=label):
+                again = deliveries.classify(label + deliveries.RERUN_SUFFIX, batch=True)
+                self.assertEqual(again, deliveries.classify(label, batch=True))
+                self.assertEqual(again.issue, 2259)
+        self.assertEqual(
+            shown([S("t0", "facts-857", "Intake"), S("t1", "land-sync-review-857-1-again", "Land")]),
+            {857: "landing"},
+        )
+
+
 class ConfiguredBranchPatternTest(unittest.TestCase):
     def test_the_pattern_is_the_contracts_vcs_branch_pattern(self):
         snapshot = {"bindings": {"vcs": {"branch_pattern": "<slug>-<num>"}}}

@@ -61,6 +61,10 @@ REVIEWER_ROUNDS = ("Look things up in rounds: load the files under review in one
 IMPLEMENTER_ROUNDS = ("Work in rounds: put a round's lookups in one message, send its independent edits as several Edit calls "
                       "in one message, and run the tests once per round of edits, never one small call per turn.")
 
+# #992: the one sentence about the structured reply, the same in both programs.
+REPLY_ALONE = ("Call StructuredOutput alone in its own message, never beside another tool call, only after every other tool "
+               "result has come back: the first call is final and ends the step.")
+
 
 def refused(*errors):
     return {"ok": False, "errors": [{"field": f, "code": c, "message": "m"} for f, c in errors]}
@@ -2266,9 +2270,9 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(result["reason"], "task: task 1 the implementer returned nothing")
         result, _ = run(replies={"impl-1": {"status": "blocked"}})
         self.assertEqual(result["reason"], "task: task 1 blocked")
-        for replies in ({"impl-1": {}}, {"review-1": {"verdict": "findings", "findings": [{"severity": "critical"}]},
-                                         "rereview-1-1": {"verdict": "findings", "findings": [{"severity": "critical"}]},
-                                         "rereview-1-2": {"verdict": "findings", "findings": [{"severity": "critical"}]}},
+        for replies in ({"impl-1": {}}, {"review-1": {"verdict": "findings", "findings": [{"severity": "critical", "failing_input": "x"}]},
+                                         "rereview-1-1": {"verdict": "findings", "findings": [{"severity": "critical", "failing_input": "x"}]},
+                                         "rereview-1-2": {"verdict": "findings", "findings": [{"severity": "critical", "failing_input": "x"}]}},
                         {"renew-final-review": {}}, {"merge": {"lock": None}}):
             with self.subTest(replies=replies):
                 result, _ = run(replies=replies)
@@ -2308,7 +2312,7 @@ class TaskTest(unittest.TestCase):
         self.assertNotIn("reason", done)
 
     def test_unresolved_findings_after_two_fix_rounds_stop(self):
-        bad = {"verdict": "findings", "findings": [{"severity": "critical", "summary": "bug"}]}
+        bad = {"verdict": "findings", "findings": [{"severity": "critical", "summary": "bug", "failing_input": "x"}]}
         result, calls = run(replies={"review-1": bad, "rereview-1-1": bad, "rereview-1-2": bad})
         self.assertEqual(result["stage"], "task-review")
         self.assertEqual([l for l in labels(calls) if l.startswith("fix-1-")], ["fix-1-1", "fix-1-2"])
@@ -2322,7 +2326,7 @@ class TaskTest(unittest.TestCase):
     def test_first_pass_reviews_use_reviewer_lite_only_in_a_mode_it_accepts(self):
         # reviewer-lite accepts a first pass only for a declared mechanical or low lane;
         # every rereview names the prior findings.
-        bad = {"verdict": "findings", "findings": [{"severity": "important", "summary": "bug"}]}
+        bad = {"verdict": "findings", "findings": [{"severity": "important", "summary": "bug", "failing_input": "x"}]}
         _, calls = run(replies={"review-1": bad})
         for c in calls:
             if c["agentType"] == "reviewer-lite":
@@ -2764,11 +2768,11 @@ class NoCommitTaskTest(unittest.TestCase):
                 self.assertEqual(prompt(calls, "review-1"), f"{opener}{head}\n{lane}Review the diff of task 1 only: "
                                  f"git -C {self.WT} diff {SHA}..c0ffee (and the task file /g/task-1.md as its contract). {KNOW_TEXT} "
                                  "Report Important or Critical correctness defects and unmet task requirements only, each with a "
-                                 "concrete failing input. No style notes. Do not edit anything.")
+                                 f"concrete failing input. No style notes. Do not edit anything.\n{REPLY_ALONE}")
                 self.assertEqual(prompt(calls, "rereview-1-1"), f"{head}\nRe-review only these previously reported findings for "
                                  f"task 1 against the fix: git -C {self.WT} diff c0ffee..f1c0de; the implementer's notes: ok. "
-                                 'Findings: [{"severity":"important","summary":"bug on the candidate"}]. Report any finding still '
-                                 "unresolved and any new Important or Critical defect the fix introduced.")
+                                 'Findings: [{"severity":"important","summary":"bug on the candidate","failing_input":"x"}]. Report any finding still '
+                                 f"unresolved and any new Important or Critical defect the fix introduced.\n{REPLY_ALONE}")
                 kinds = {c["label"]: c["agentType"] for c in calls}
                 self.assertEqual((kinds["review-1"], kinds["rereview-1-1"]),
                                  ("reviewer-lite" if lane else "reviewer", "reviewer-lite"))
@@ -2876,7 +2880,7 @@ class ReviewAndVerifyTest(unittest.TestCase):
         self.assertIn("diff --no-renames --name-only", prompt(calls, "verify"))
 
     def test_fix_reviews_cover_the_whole_fix_range(self):
-        bad = {"verdict": "findings", "findings": [{"severity": "important", "summary": "bug"}]}
+        bad = {"verdict": "findings", "findings": [{"severity": "important", "summary": "bug", "failing_input": "x"}]}
         _, calls = run(replies={"final-1": bad})
         self.assertIn("diff b0..c0ffee", prompt(calls, "fix-wave-review"))
 
@@ -2886,7 +2890,7 @@ class ReviewAndVerifyTest(unittest.TestCase):
 
     def test_codex_finding_drives_the_fix_wave(self):
         codex = {"available": True, "verdict": "findings",
-                 "findings": [{"severity": "important", "summary": "edge"}]}
+                 "findings": [{"severity": "important", "summary": "edge", "failing_input": "x"}]}
         _, calls = run(replies={"final-codex": codex})
         self.assertIn("edge", prompt(calls, "fix-wave"))
         self.assertIn("fix-wave-review", labels(calls))
@@ -2902,7 +2906,7 @@ class ReviewAndVerifyTest(unittest.TestCase):
 
     def test_verify_fix_is_reviewed(self):
         fail = {"head": SHA, "clean": True, "results": [{"id": "build", "status": "fail", "summary": "boom"}]}
-        bad = {"verdict": "findings", "findings": [{"severity": "important", "summary": "weakened test"}]}
+        bad = {"verdict": "findings", "findings": [{"severity": "important", "summary": "weakened test", "failing_input": "x"}]}
         result, calls = run(replies={"verify": fail, "verify-fix-review-1": bad})
         self.assertEqual(result["stage"], "verify-fix-review")
         self.assertEqual([c["agentType"] for c in calls if c["label"] == "verify-fix-review-1"], ["reviewer"])
@@ -3553,7 +3557,7 @@ class ShipTest(unittest.TestCase):
         self.assertEqual(review[0]["agentType"], "reviewer")
 
     def test_conflicted_sync_with_findings_stops(self):
-        bad = {"verdict": "findings", "findings": [{"severity": "important", "summary": "lost"}]}
+        bad = {"verdict": "findings", "findings": [{"severity": "important", "summary": "lost", "failing_input": "x"}]}
         result, calls = run(replies={"sync-review-1": bad, "fix-sync-review-1": bad},
                             patch={"pr": {"checks": {"state": "behind", "head": SHA}},
                                    "sync-1": ABORTED, "sync-resolve-1": {"conflicted": True, "merge_commit": "d" * 40},
@@ -3586,7 +3590,7 @@ class ShipTest(unittest.TestCase):
                 self.assertEqual(labels(calls), names)
 
     def test_a_surviving_sync_finding_stops_with_its_reason(self):
-        left = {"verdict": "findings", "findings": [{"severity": "important", "summary": "still lost"}]}
+        left = {"verdict": "findings", "findings": [{"severity": "important", "summary": "still lost", "failing_input": "x"}]}
         result, calls = run(replies={"sync-review-1": FINDING, "fix-sync-review-1": left},
                             patch={"pr": {"checks": {"state": "behind", "head": SHA}},
                                    "sync-1": ABORTED, "sync-resolve-1": {"conflicted": True, "merge_commit": "d" * 40},
@@ -3710,7 +3714,7 @@ MERGE = "d" * 40
 # #913: a sync step whose merge conflicts aborts it and answers conflicted; the resolution is its own step, sync-resolve, outside the land lock.
 ABORTED = {"status": "conflicted", "conflicted": True, "notes": "a.py conflicts"}
 RED = {"state": "failed", "head": SHA, "failing": ["ci-tests"], "details": "FAIL test_cache: host-installed state"}
-FINDING = {"verdict": "findings", "findings": [{"severity": "important", "summary": "dropped the new call site"}]}
+FINDING = {"verdict": "findings", "findings": [{"severity": "important", "summary": "dropped the new call site", "failing_input": "x"}]}
 # The cont every ship stop of the default fresh run carries (observed at the base commit of #801).
 SHIP_PINNED = {"lane": "standard", "plan_reviewed": True, "fix_waves": 0, "final_reviewed": {"head": "c0ffee"},
                "done": [{"n": 1, "commit": "c0ffee", "review_rounds": 0, "reviewer": "reviewer"}]}
@@ -5971,7 +5975,7 @@ class FinalReviewedResumeTest(unittest.TestCase):
 
 
 DIRECT = dict(ARGS, lane="direct")
-BAD = {"verdict": "findings", "findings": [{"severity": "important", "summary": "bug"}]}
+BAD = {"verdict": "findings", "findings": [{"severity": "important", "summary": "bug", "failing_input": "x"}]}
 
 
 class DirectLaneTest(unittest.TestCase):
@@ -6260,7 +6264,7 @@ class FixCommitScopeTest(unittest.TestCase):
     SCOPE = ("Before committing, read git status in the worktree you commit in and stage by path only the files the fix "
              "itself changed or created; never run git add -A, git commit -a or git add on a directory (the dot included); a lock file, "
              "a generated file or an untracked file the fix did not need is left unstaged and named in notes.")
-    CRITICAL = {"verdict": "findings", "findings": [{"severity": "critical", "summary": "bug"}]}
+    CRITICAL = {"verdict": "findings", "findings": [{"severity": "critical", "summary": "bug", "failing_input": "x"}]}
     FAIL = {"head": SHA, "clean": True, "results": [{"id": "build", "status": "fail", "summary": "boom"}]}
 
     def test_every_fix_prompt_carries_the_commit_scope(self):
@@ -6407,7 +6411,7 @@ BR = {"name": "cand", "worktree": "/r/.wt/cand", "base": "origin/dev", "head": "
       "current": "cand", "toplevel": "/r/.wt/cand", "common_dir": "/r/.git", "clean": True}
 BR_PUSH = "git -C /r/.wt/cand push origin cand"
 NO_FORCE = "Never push with --force, --force-with-lease or a +refspec, and never push dev or main."
-TASK_FINDING = {"verdict": "findings", "findings": [{"severity": "important", "summary": "bug on the candidate"}]}
+TASK_FINDING = {"verdict": "findings", "findings": [{"severity": "important", "summary": "bug on the candidate", "failing_input": "x"}]}
 REVIEWERS = ("reviewer", "reviewer-lite")
 
 
@@ -6956,7 +6960,7 @@ class PromptCommandFormTest(unittest.TestCase):
 
 
 MAP_PATH = "/r/.git/worktrees/w/deliver-standard/context.md"
-MAP_TASK_FINDING = {"verdict": "findings", "findings": [{"severity": "important", "summary": "gap"}]}
+MAP_TASK_FINDING = {"verdict": "findings", "findings": [{"severity": "important", "summary": "gap", "failing_input": "x"}]}
 MAP_READERS = re.compile(r"plan|plan-review|plan-codex|plan-revise|plan-rules-revise|plan-branch-revise|impl-\d+|fix-\d+-\d+")
 
 
@@ -7090,7 +7094,7 @@ class PlannerReadsTest(unittest.TestCase):
             self.assertEqual(source.count(f"  {kind}: `{sentence}`,\n"), 1, kind)
             # One sentence: its only full stop ends it.
             self.assertEqual(sentence.index("."), len(sentence) - 1, kind)
-        self.assertIn("reply = await agent(withRounds(prompt, opts), opts)", source)
+        self.assertIn("reply = await agent(withRounds(withReply(prompt, opts), opts), opts)", source)
         # Every agent call of the program goes through that one wrapper.
         self.assertEqual(len(re.findall(r"\bawait agent\(", source)), 1)
 
@@ -7845,6 +7849,242 @@ class AmendTest(unittest.TestCase):
             with self.subTest(name):
                 result, _ = run(args=args, replies=replies)
                 self.assertNotIn("amended", result)
+
+
+
+INCOMPLETE = {"verdict": "incomplete", "findings": []}
+# What a reply sent beside a pending lookup held (#992): a blocking finding that names neither a file nor a failing input.
+PLACEHOLDER = {"verdict": "findings", "findings": [{"severity": "important", "summary": "Placeholder emitted to satisfy the schema"}]}
+REAL = {"verdict": "findings", "findings": [{"severity": "important", "file": "src/a.py", "summary": "off by one"}]}
+NO_REVIEW = ": the reply is no review ("
+LOST_REVIEW = ": the second reply is no review either; the review is lost"
+
+
+class StructuredReplyTest(unittest.TestCase):
+    """#992: the structured reply goes alone and last; an unusable review reply reruns the step once and is never a finding."""
+
+    FOUR = {"plan": dict(PLAN, tasks=tasks(4))}
+    SYNC = {"pr": {"checks": {"state": "behind", "head": SHA}}, "sync-1": ABORTED,
+            "sync-resolve-1": {"conflicted": True, "merge_commit": MERGE, "resolved_files": ["a.py"]}}
+
+    def test_every_step_ends_with_the_one_sentence(self):
+        seen = all_calls()
+        self.assertTrue(seen)
+        for call in seen:
+            with self.subTest(label=call["label"]):
+                self.assertIsNotNone(call["schema"])
+                self.assertTrue(call["prompt"].endswith("\n" + REPLY_ALONE))
+                self.assertEqual(call["prompt"].count("StructuredOutput"), 1)
+
+    def test_the_sentence_is_one_constant_shared_with_deliver_batch(self):
+        mine = PROGRAM.read_text(encoding="utf-8")
+        batch = PROGRAM.with_name("deliver-batch.js").read_text(encoding="utf-8")
+        line = f"const REPLY_ALONE = '{REPLY_ALONE}'\n"
+        self.assertEqual((mine.count(line), batch.count(line)), (1, 1))
+        # One sentence: its only full stop ends it. It is added where every call passes, and nowhere else.
+        self.assertEqual(REPLY_ALONE.index("."), len(REPLY_ALONE) - 1)
+        self.assertEqual(mine.count("StructuredOutput"), 2)
+        self.assertIn("const withReply = (prompt, opts) => (opts && opts.schema ? `${prompt}\\n${REPLY_ALONE}` : prompt)\n", mine)
+
+    def test_the_sentence_stands_with_the_rounds_sentences(self):
+        # The rounds sentences batch lookups and edits; the reply sentence is about the one tool they never name.
+        for rounds in (REVIEWER_ROUNDS, IMPLEMENTER_ROUNDS):
+            self.assertNotIn("StructuredOutput", rounds)
+            self.assertNotIn("every tool call", rounds)
+        self.assertIn("never beside another tool call", REPLY_ALONE)
+        _, calls = run()
+        text = prompt(calls, "review-1")
+        self.assertTrue(text.startswith(REVIEWER_ROUNDS + "\n"))
+        self.assertTrue(text.endswith("\n" + REPLY_ALONE))
+
+    def test_an_unusable_task_review_reruns_once_and_spends_no_fix_round(self):
+        for name, reply in (("placeholder", PLACEHOLDER), ("incomplete", INCOMPLETE)):
+            with self.subTest(reply=name):
+                out = run_out(replies={"review-1": reply})
+                result, calls = out["result"], out["calls"]
+                self.assertEqual(result["stage"], "done")
+                names = labels(calls)
+                self.assertEqual(names[names.index("impl-1"):names.index("impl-1") + 4], ["impl-1", "review-1", "review-1-again", "renew-final-review"])
+                self.assertFalse([n for n in names if n.startswith(("fix-1-", "rereview-1-"))])
+                self.assertEqual(result["tasks"][0]["review_rounds"], 0)
+                first, again = (next(c for c in calls if c["label"] == label) for label in ("review-1", "review-1-again"))
+                self.assertEqual((again["agentType"], again["schema"]), (first["agentType"], first["schema"]))
+                body = first["prompt"][:-len("\n" + REPLY_ALONE)]
+                self.assertTrue(again["prompt"].startswith(body + "\nAn earlier reply to this step was discarded: "))
+                self.assertTrue(again["prompt"].endswith("Finish the review before you reply.\n" + REPLY_ALONE))
+                self.assertEqual(len([l for l in out["logs"] if l.startswith("review-1" + NO_REVIEW)]), 1)
+                self.assertNotIn("dead_agents", result)
+
+    def test_the_rerun_s_real_finding_gets_the_fix_round(self):
+        result, calls = run(replies={"review-1": PLACEHOLDER, "review-1-again": REAL})
+        self.assertEqual(result["stage"], "done")
+        self.assertIn("off by one", prompt(calls, "fix-1-1"))
+        self.assertNotIn("Placeholder", prompt(calls, "fix-1-1"))
+        self.assertEqual(result["tasks"][0]["review_rounds"], 1)
+
+    def test_two_unusable_replies_in_a_row_are_a_lost_review(self):
+        for first, second in ((PLACEHOLDER, PLACEHOLDER), (INCOMPLETE, PLACEHOLDER), (PLACEHOLDER, INCOMPLETE)):
+            with self.subTest(first=first["verdict"], second=second["verdict"]):
+                out = run_out(replies={"review-1": first, "review-1-again": second})
+                result, names = out["result"], labels(out["calls"])
+                # The stop a reviewer that returned nothing takes, with no fix round spent and no dead agent named.
+                lost, _ = run(replies={"review-1": None})
+                self.assertEqual((result["stage"], result["reason"]), (lost["stage"], lost["reason"]))
+                self.assertEqual(result["reason"], "task-review: task 1 the reviewer returned nothing")
+                self.assertIsNone(result["review"])
+                self.assertEqual(names[-2:], ["review-1", "review-1-again"])
+                self.assertNotIn("dead_agents", result)
+                self.assertEqual(lost["dead_agents"], ["review-1"])
+                self.assertIn("review-1" + LOST_REVIEW, out["logs"])
+
+    def test_an_unusable_rereview_reruns_too_and_the_fix_round_it_follows_is_the_only_one(self):
+        result, calls = run(replies={"review-1": REAL, "rereview-1-1": PLACEHOLDER})
+        self.assertEqual(result["stage"], "done")
+        names = labels(calls)
+        self.assertEqual([n for n in names if "1-" in n and n.startswith(("fix-", "rereview-"))], ["fix-1-1", "rereview-1-1", "rereview-1-1-again"])
+        result, calls = run(replies={"review-1": REAL, "rereview-1-1": INCOMPLETE, "rereview-1-1-again": INCOMPLETE})
+        self.assertEqual(result["stage"], "task-review")
+        self.assertNotIn("fix-1-2", labels(calls))
+
+    def test_a_usable_reply_is_never_rerun(self):
+        minor = {"verdict": "findings", "findings": [{"severity": "minor", "summary": "style"}]}
+        by_input = {"verdict": "findings", "findings": [{"severity": "critical", "summary": "crash", "failing_input": "an empty list"}]}
+        for name, reply in (("pass", PASS_REPLY), ("minor", minor), ("file", REAL), ("failing input", by_input)):
+            with self.subTest(reply=name):
+                out = run_out(replies={"review-1": reply})
+                self.assertFalse([n for n in labels(out["calls"]) if n.endswith("-again")])
+                self.assertFalse([l for l in out["logs"] if NO_REVIEW in l])
+
+    def test_every_strict_review_site_reruns_a_placeholder(self):
+        red = {"head": SHA, "clean": True, "results": [{"id": "build", "status": "fail", "summary": "boom"}]}
+        cases = (
+            ("sync-review-1", {"patch": self.SYNC}),
+            ("fix-sync-review-1", {"patch": dict(self.SYNC, **{"fix-sync-1": {"start_head": MERGE, "commit": FIX}}), "replies": {"sync-review-1": REAL}}),
+            ("fix-ci-review", {"patch": {"pr": {"checks": RED}, "fix-ci": {"start_head": SHA, "commit": FIX}}}),
+            ("verify-fix-review-1", {"replies": {"verify": red}}),
+        )
+        for label, scenario in cases:
+            for name, reply in (("placeholder", PLACEHOLDER), ("incomplete", INCOMPLETE)):
+                with self.subTest(label=label, reply=name):
+                    replies = dict(scenario.get("replies", {}), **{label: reply})
+                    _, calls = run(patch=scenario.get("patch"), replies=replies)
+                    names = labels(calls)
+                    self.assertEqual(names[names.index(label):names.index(label) + 2], [label, label + "-again"])
+                    self.assertEqual(names.count(label + "-again"), 1)
+
+    def test_a_lost_sync_review_stops_as_a_sync_review_that_returned_nothing_and_spends_no_fix(self):
+        result, calls = run(patch=self.SYNC, replies={"sync-review-1": PLACEHOLDER, "sync-review-1-again": PLACEHOLDER})
+        lost, _ = run(patch=self.SYNC, replies={"sync-review-1": None})
+        self.assertEqual((result["stage"], result["reason"]), (lost["stage"], lost["reason"]))
+        self.assertEqual(result["stage"], "sync-review")
+        self.assertNotIn("fix-sync-1", labels(calls))
+        self.assertNotIn("sync_fixes", result["cont"])
+        self.assertNotIn("dead_agents", result)
+
+    def test_a_fileless_review_keeps_its_fileless_finding_and_still_reruns_an_incomplete_verdict(self):
+        bare = {"verdict": "findings", "findings": [{"severity": "important", "summary": "AC1 is not shown met"}]}
+        ruled = dict(bare, findings=[dict(bare["findings"][0], rule="R2")])
+        no_commit = {"impl-1": {"start_head": SHA, "commit": SHA}}
+        # label: (scenario, the step a finding of it reaches)
+        sites = {
+            "plan-review": ({}, "plan-revise"),
+            "plan-rules-review": ({"replies": {"plan-review": ruled}}, "plan-rules-revise"),
+            "review-1": ({"patch": no_commit}, "fix-1-1"),
+            "final-1": ({}, "fix-wave"),
+            "final-integration": ({"replies": dict(self.FOUR)}, "fix-wave"),
+            "fix-wave-review": ({"replies": {"final-1": bare}}, None),
+            "direct-review": ({"args": DIRECT}, "direct-fix"),
+            "direct-rereview": ({"args": DIRECT, "replies": {"direct-review": bare}}, None),
+        }
+        for label, (scenario, reached) in sites.items():
+            with self.subTest(label=label, reply="a finding with no file"):
+                finding = ruled if label == "plan-rules-review" else bare
+                out = run_out(scenario.get("args"), dict(scenario.get("replies", {}), **{label: finding}), scenario.get("patch"))
+                names = labels(out["calls"])
+                self.assertIn(label, names)
+                self.assertFalse([n for n in names if n.endswith("-again")])
+                self.assertFalse([l for l in out["logs"] if NO_REVIEW in l])
+                if reached:
+                    self.assertIn(reached, names)
+                else:
+                    self.assertNotEqual(out["result"]["stage"], "done")
+            with self.subTest(label=label, reply="incomplete"):
+                out = run_out(scenario.get("args"), dict(scenario.get("replies", {}), **{label: INCOMPLETE}), scenario.get("patch"))
+                names = labels(out["calls"])
+                self.assertEqual(names.count(label + "-again"), 1)
+                if reached:
+                    self.assertNotIn(reached, names)
+
+    def test_a_task_that_commits_holds_its_reviews_to_a_file_or_a_failing_input(self):
+        # The same finding that a no-commit task's review may raise is a placeholder on a diff review.
+        bare = {"verdict": "findings", "findings": [{"severity": "important", "summary": "the comment was not posted"}]}
+        _, calls = run(replies={"review-1": bare})
+        self.assertIn("review-1-again", labels(calls))
+        _, calls = run(replies={"review-1": bare}, patch={"impl-1": {"start_head": SHA, "commit": SHA}})
+        self.assertNotIn("review-1-again", labels(calls))
+        self.assertIn("fix-1-1", labels(calls))
+
+    def test_a_lost_integration_review_stops_the_final_review_and_is_no_dead_agent(self):
+        result, calls = run(replies=dict(self.FOUR, **{"final-integration": INCOMPLETE, "final-integration-again": INCOMPLETE}))
+        self.assertEqual((result["stage"], result["details"]), ("final-review", "the integration reviewer returned nothing"))
+        self.assertNotIn("dead_agents", result)
+        self.assertNotIn("fix-wave", labels(calls))
+        dead, _ = run(replies=dict(self.FOUR, **{"final-integration": None}))
+        self.assertEqual(dead["dead_agents"], ["final-integration"])
+
+    def test_a_lost_final_review_spends_no_fix_wave(self):
+        result, calls = run(replies={"final-1": INCOMPLETE, "final-1-again": INCOMPLETE})
+        self.assertEqual((result["stage"], result["details"]), ("final-review", "a final reviewer returned nothing"))
+        self.assertEqual(result["cont"]["fix_waves"], 0)
+        self.assertNotIn("fix-wave", labels(calls))
+        self.assertNotIn("dead_agents", result)
+
+    def test_the_findings_schema_names_the_incomplete_verdict_and_what_a_blocking_finding_carries(self):
+        _, calls = run(replies=dict(self.FOUR, **{"review-1": REAL, "final-1": REAL}))
+        for label in ("plan-review", "review-1", "rereview-1-1", "final-1", "final-integration", "fix-wave-review"):
+            with self.subTest(label=label):
+                schema = schema_of(calls, label)
+                self.assertEqual(schema["properties"]["verdict"]["enum"], ["pass", "findings", "incomplete"])
+                self.assertIn("incomplete", schema["properties"]["verdict"]["description"])
+                items = schema["properties"]["findings"]["items"]
+                self.assertEqual(items["description"], "a critical or important finding names its file or its failing_input")
+                self.assertEqual(items["required"], ["severity", "summary"])
+
+    def test_every_review_reply_is_read_through_the_one_wrapper(self):
+        source = PROGRAM.read_text(encoding="utf-8")
+        schemas = r"schema: (?:asked \? WS_REVIEW : FINDINGS|withChanged\(FINDINGS\)|FINDINGS|PLAN_REVIEW|GRADED_FINDINGS|DIRECT_FINDINGS) \}"
+        sites = [m.end() for m in re.finditer(schemas, source)]
+        self.assertEqual(len(sites), 15)
+        # The options object of a review call closes the readReview() call, or its named exemption does.
+        for end in sites:
+            tail = source[end:end + 40]
+            self.assertTrue(tail.startswith((")", ", { fileless })", ", { fileless: true })", ", { fileless: true, optional: true })")), tail)
+        self.assertEqual(len(re.findall(r"\breadReview\((?!\))", source)), 15)
+        self.assertEqual(len(re.findall(r"\{ fileless: true", source)), 8)
+
+    def test_an_implementer_reply_names_full_shas_or_none(self):
+        red = {"head": SHA, "clean": True, "results": [{"id": "build", "status": "fail", "summary": "boom"}]}
+        scenarios = (
+            (("impl-1", "fix-1-1", "fix-wave"), {"replies": {"review-1": REAL, "final-1": REAL}}),
+            (("direct-impl", "direct-fix"), {"args": DIRECT, "replies": {"direct-review": BAD}}),
+            (("verify-fix-1",), {"replies": {"verify": red}}),
+            (("fix-ci",), {"patch": {"pr": {"checks": RED}, "fix-ci": {"start_head": SHA, "commit": FIX}}}),
+            (("fix-sync-1",), {"patch": dict(self.SYNC, **{"fix-sync-1": {"start_head": MERGE, "commit": FIX}}), "replies": {"sync-review-1": REAL}}),
+        )
+        for wanted, scenario in scenarios:
+            _, calls = run(**scenario)
+            for label in wanted:
+                with self.subTest(label=label):
+                    schema = schema_of(calls, label)
+                    for field in ("commit", "start_head"):
+                        spec = schema["properties"][field]
+                        self.assertEqual(spec, {"type": "string", "pattern": "^[0-9a-f]{40}$"})
+                        for bad in ("PLACEHOLDER", "", "c0ffee", SHA.upper(), SHA + "0", "none"):
+                            self.assertIsNone(re.search(spec["pattern"], bad), bad)
+                        self.assertIsNotNone(re.search(spec["pattern"], SHA))
+                        # A blocked reply names no commit: the two stay optional.
+                        self.assertNotIn(field, schema["required"])
+                    self.assertLessEqual({"status", "notes"}, set(schema["properties"]))
 
 
 if __name__ == "__main__":

@@ -40,7 +40,9 @@ chunking (folding a list in pieces equals folding it whole), and `RunFold.issues
   with `re.fullmatch`. In the batch table only the listed issue-bearing templates carry an issue
   (group 1); any other number there counts trains, sweeps or rounds and is never an issue, so an
   unknown batch label, or one with no issue, touches no issue. An owner label not in its table
-  reads `WORKING`, never an error; a step with no stage moves nothing.
+  reads `WORKING`, never an error; a step with no stage moves nothing. A label ending in `RERUN_SUFFIX`
+  (`-again`: a review step the program ran once more after an unusable reply) is read as the label
+  before the suffix, in both tables.
 - `RunFold(branch_pattern)` takes the project's configured branch pattern (`<num>` and `<slug>`
   placeholders, as `issue-branch` renders it) or None. A child's issue is the number its `setup`
   result's `branch` carries under that pattern (`branch_issue`; a branch that does not fit it, a
@@ -311,6 +313,10 @@ BATCH_LABELS: tuple[tuple[str | None, str], ...] = (
 )
 
 
+# What both programs append to the label of a review step they run once more after an unusable reply.
+RERUN_SUFFIX = "-again"
+
+
 def _group(match: re.Match) -> int | None:
     found = next((g for g in match.groups() if g is not None), None)
     return None if found is None else int(found)
@@ -318,6 +324,7 @@ def _group(match: re.Match) -> int | None:
 
 def classify(label: str, *, batch: bool) -> Step | None:
     """The step a label stands for in the owner table or, with `batch`, the batch table; None if unknown."""
+    label = label.removesuffix(RERUN_SUFFIX)
     for stage, pattern in BATCH_LABELS if batch else OWNER_LABELS:
         match = re.fullmatch(pattern, label)
         if match is None:
