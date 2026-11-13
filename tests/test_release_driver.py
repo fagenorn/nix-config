@@ -541,8 +541,13 @@ class ActivationWatchTest(DriverCase):
                 self.assertTrue(status["reason"].startswith(
                     f"deploy: {outcome} past {rs.WATCH_DEADLINE_MS} ms: "), status["reason"])
                 self.assertIn(reason, status["reason"])
+                self.assertNotIn("redeploy", status["reason"])  # issue 998: no Railway wording here
                 if outcome == "absent":
                     self.assertNotIn("actions/runs/", status["reason"])
+                    self.assertTrue(status["reason"].endswith(
+                        "; no workflow run exists for the release commit: re-run the workflow of "
+                        "deploy at that commit, then run the release again to resume it"),
+                        status["reason"])
                 else:
                     self.assertIn(rs.WATCH_RUN_REFERENCE, status["reason"])
 
@@ -723,7 +728,8 @@ class RailwayActivationWatchTest(DriverCase):
         watch reads the deployment. Only an absent park carries the hint."""
         recovery = ("; nothing deployed the release commit: redeploy deploy from source at that "
                     "commit, then run the release again to resume it")
-        self.assertEqual(release_driver.ABSENT_RECOVERY.format(name="deploy"), recovery)
+        self.assertEqual(
+            release_driver.ABSENT_RECOVERY["deployment_absent"].format(name="deploy"), recovery)
         watch = rs.ScriptedRailway(("absent", "deployment_absent"))
         driver = self.watched(watch)
         rs.release(driver, rs.candidate())
