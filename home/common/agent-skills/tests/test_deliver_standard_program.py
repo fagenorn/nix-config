@@ -4189,7 +4189,8 @@ class LandLockTest(unittest.TestCase):
                                      "land-push-2": {"head": FIX}},
                             patch={"pr": {"checks": RED}, "fix-ci": {"start_head": SHA, "commit": short}})
         self.assertEqual(result["stage"], "done")
-        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {FIX}\n", prompt(calls, "checks-2"))
+        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {FIX} --wait\n", prompt(calls, "checks-2"))
+        self.assertNotIn(f"--sha {short} ", prompt(calls, "checks-2"))
         self.assertNotIn(f"--sha {short}\n", prompt(calls, "checks-2"))
         self.assertIn(f"forge-claim land release --repo owner/repo --branch dev --sha {FIX}", prompt(calls, "hold"))
 
@@ -7920,7 +7921,7 @@ class FoldedFirstChecksTest(unittest.TestCase):
         pr = prompt(calls, "pr")
         self.assertIn(self.CHECKS_CMD, pr)
         self.assertIn("gh api repos/owner/repo/rules/branches/dev", pr)
-        self.assertLess(pr.index(f"--sha {SHA} --wait\n"), pr.index(self.CHECKS_CMD))
+        self.assertLess(pr.index(f"--sha {SHA} --wait\n"), pr.rindex(self.CHECKS_CMD))
         self.assertLess(pr.index(RENEW), pr.index(self.PUSH_CMD))
         schema = schema_of(calls, "pr")
         self.assertEqual(set(member(schema, "checks")["properties"]),
@@ -8096,7 +8097,9 @@ class FoldedMovedRoundTest(unittest.TestCase):
                                      "checks-2": {"state": "passed", "head": FIX, "required": ["ci-tests"]}})
         self.assertEqual(result["stage"], "done")
         self.assertNotIn("cont", result)
-        self.assertIn(f"--sha {FIX}\n", prompt(calls, "checks-2"))
+        # #1001: the lock was released while the fix was made, so the checks call takes it again, waiting.
+        self.assertIn(f"--sha {FIX} --wait\n", prompt(calls, "checks-2"))
+        self.assertNotIn(f"--sha {FIX[:9]} ", prompt(calls, "checks-2"))
         self.assertNotIn(f"--sha {FIX[:9]}\n", prompt(calls, "checks-2"))
         self.assertIn(self.REL(FIX) + "\n", prompt(calls, "hold"))
 
@@ -9065,6 +9068,149 @@ class CodexQuotaStopTest(unittest.TestCase):
             self.assertEqual(set(schema_of(calls, label)["properties"]), {"available", "verdict", "findings", "raw_summary"})
             self.assertNotIn("quota", prompt(calls, label))
             self.assertNotIn("retry_after", prompt(calls, label))
+
+
+class OwnRedOutsideLockTest(unittest.TestCase):
+    """#1001: a red check the branch itself caused is fixed outside the land lock. Under the lock, the fix step of a red poll at a
+    head no sync has changed releases the lock before it edits, and the reviewed fix takes it again, waiting; a pull request that
+    already existed is read once before the lock is asked for, and a check that had already failed there is fixed with no lock."""
+
+    RELEASE = f"forge-claim land release --repo owner/repo --branch dev --sha {SHA}\n"
+    RERAN = {"start_head": SHA, "commit": SHA, "notes": "cache restore failed in setup; failed jobs rerun"}
+    FIXED = {"start_head": SHA, "commit": FIX}
+    GREEN = {"state": "passed", "head": FIX, "required": ["ci-tests"]}
+    PRE_RED = {"own_red": {"failing": ["shard-3"], "details": "https://ci/run/7"}, "lock": None, "checks": None}
+
+    @staticmethod
+    def shipped(out):
+        names = labels(out["calls"])
+        return names[names.index("pr"):]
+
+    def test_a_red_first_poll_releases_the_lock_for_the_fix_and_ships_the_reviewed_head(self):
+        out = run_out(replies={"checks-2": self.GREEN}, patch={"pr": {"checks": RED}, "fix-ci": dict(self.FIXED, lock_released=True)})
+        result, calls = out["result"], out["calls"]
+        self.assertEqual(result["stage"], "done")
+        # No step is added: the fix step releases the lock itself, and the next checks call takes it again.
+        self.assertEqual(self.shipped(out), ["pr", "fix-ci", "fix-ci-review", "land-push-2", "checks-2", "merge", "hold", "close-out"])
+        fix = prompt(calls, "fix-ci")
+        self.assertIn(f"The landing lock of the branch dev is held for this pull request at {SHA}", fix)
+        self.assertIn(f"release the lock before you edit any file: run alone and exactly: {self.RELEASE}", fix)
+        self.assertIn("keep the lock: run no forge-claim command and return lock_released false", fix)
+        self.assertLess(fix.index(self.RELEASE), fix.index("Find the cause in this branch's changes"))
+        self.assertEqual(schema_of(calls, "fix-ci")["properties"]["lock_released"], {"type": "boolean"})
+        checks = prompt(calls, "checks-2")
+        self.assertIn(f"Take the cross-host landing lock of the branch dev for PR #42 again, at the head {FIX}; "
+                      "it was released while a failing check of the branch was fixed", checks)
+        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {FIX} --wait\n", checks)
+        merge = prompt(calls, "merge")
+        self.assertIn(f"--sha {FIX}\n", merge)
+        self.assertIn(f"--match-head-commit {FIX}", merge)
+        self.assertNotIn("land-unlock", labels(calls))
+        self.assertIn(f"forge-claim land release --repo owner/repo --branch dev --sha {FIX}", prompt(calls, "hold"))
+        self.assertIn("ci-tests failed at the head the lock was taken at; its fix is reviewed outside the land lock", out["logs"])
+
+    def test_a_release_the_fix_step_did_not_report_is_made_before_the_review(self):
+        out = run_out(replies={"checks-2": self.GREEN}, patch={"pr": {"checks": RED}, "fix-ci": dict(self.FIXED, lock_released=False)})
+        self.assertEqual(out["result"]["stage"], "done")
+        self.assertEqual(self.shipped(out), ["pr", "fix-ci", "land-unlock", "fix-ci-review", "land-push-2", "checks-2", "merge", "hold", "close-out"])
+        self.assertIn(self.RELEASE, prompt(out["calls"], "land-unlock"))
+
+    def test_a_flaky_red_is_rerun_under_the_lock_as_before(self):
+        out = run_out(replies={"checks-2": {"state": "passed", "head": SHA, "required": ["ci-tests"]}},
+                      patch={"pr": {"checks": RED}, "fix-ci": self.RERAN})
+        self.assertEqual(out["result"]["stage"], "done")
+        self.assertEqual(self.shipped(out), ["pr", "fix-ci", "checks-2", "merge", "hold", "close-out"])
+        self.assertNotIn("forge-claim land acquire", prompt(out["calls"], "checks-2"))
+        self.assertEqual([line for line in out["logs"] if "outside the land lock" in line], [])
+
+    def test_a_rerun_that_released_the_lock_against_its_prompt_takes_it_again(self):
+        out = run_out(replies={"checks-2": {"state": "passed", "head": SHA, "required": ["ci-tests"]}},
+                      patch={"pr": {"checks": RED}, "fix-ci": dict(self.RERAN, lock_released=True)})
+        self.assertEqual(out["result"]["stage"], "done")
+        self.assertEqual(self.shipped(out), ["pr", "fix-ci", "land-push-2", "checks-2", "merge", "hold", "close-out"])
+        self.assertIn(f"--sha {SHA} --wait\n", prompt(out["calls"], "checks-2"))
+
+    def test_the_fix_outside_the_lock_happens_once_per_delivery(self):
+        out = run_out(replies={"checks-2": dict(RED, head=FIX)}, patch={"pr": {"checks": RED}, "fix-ci": self.FIXED})
+        self.assertEqual(out["result"]["stage"], "checks")
+        self.assertEqual(self.shipped(out), ["pr", "fix-ci", "fix-ci-review", "land-push-2", "checks-2", "land-unlock"])
+        self.assertIn(f"--sha {FIX}\n", prompt(out["calls"], "land-unlock"))
+
+    def test_a_fix_the_review_rejects_releases_the_verified_head_once_more_and_never_ships(self):
+        out = run_out(replies={"fix-ci-review": FINDING}, patch={"pr": {"checks": RED}, "fix-ci": self.FIXED})
+        self.assertEqual(out["result"]["stage"], "checks-fix-review")
+        self.assertEqual(self.shipped(out), ["pr", "fix-ci", "fix-ci-review", "land-unlock"])
+        self.assertIn(self.RELEASE, prompt(out["calls"], "land-unlock"))
+
+    def test_a_red_check_after_a_sync_under_the_lock_is_fixed_under_it_as_before(self):
+        out = run_out(replies={"checks-2": RED, "checks-3": self.GREEN},
+                      patch={"pr": {"checks": {"state": "behind", "head": SHA}}, "fix-ci": self.FIXED})
+        calls = out["calls"]
+        self.assertEqual(out["result"]["stage"], "done")
+        self.assertEqual(self.shipped(out), ["pr", "sync-1", "checks-2", "fix-ci", "fix-ci-review", "land-push-3", "checks-3", "merge", "hold", "close-out"])
+        self.assertNotIn("forge-claim", prompt(calls, "fix-ci"))
+        self.assertNotIn("lock_released", schema_of(calls, "fix-ci")["properties"])
+        self.assertIn(f"Move the cross-host landing lock of the branch dev for PR #42 to the head {FIX}", prompt(calls, "checks-3"))
+        self.assertNotIn("--wait\n", prompt(calls, "checks-3"))
+
+    def test_the_pr_call_reads_a_reused_pull_request_once_before_the_lock(self):
+        _, calls = run()
+        text = prompt(calls, "pr")
+        read = "gh pr checks <the PR number> --repo owner/repo --json name,bucket,link, one read, never --watch and never a wait"
+        self.assertIn(read, text)
+        for needle in ("only when an open PR already existed and was reused (a PR this step opened has no finished check, so skip this read)",
+                       f"Only when the pushed head is {SHA} and a check there has the bucket fail, run no lock command and wait for no check",
+                       "In every other case (no failed check, checks still running, none reported, or the read failed) return own_red null and go on."):
+            self.assertIn(needle, text)
+        self.assertLess(text.index("merge-tree --write-tree"), text.index(read))
+        self.assertLess(text.index(read), text.index(f"--sha {SHA} --wait\n"))
+        self.assertIn({"type": "null"}, schema_of(calls, "pr")["properties"]["own_red"]["anyOf"])
+        self.assertEqual(member(schema_of(calls, "pr"), "own_red")["required"], ["failing"])
+
+    def test_a_check_already_red_before_the_lock_is_fixed_with_no_lock_and_the_fix_head_takes_it(self):
+        out = run_out(replies={"checks-1": self.GREEN}, patch={"pr": self.PRE_RED, "fix-ci": self.FIXED})
+        result, calls = out["result"], out["calls"]
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(self.shipped(out), ["pr", "fix-ci", "fix-ci-review", "land-push-1", "checks-1", "merge", "hold", "close-out"])
+        fix = prompt(calls, "fix-ci")
+        self.assertIn('failed at ' + SHA + ': ["shard-3"]. Log tail: https://ci/run/7.', fix)
+        self.assertIn("The landing lock of the branch dev is not held and was not asked for yet: run no forge-claim command.", fix)
+        self.assertNotIn("forge-claim land", fix)
+        checks = prompt(calls, "checks-1")
+        self.assertIn(f"Take the cross-host landing lock of the branch dev for PR #42 at the head {FIX}; "
+                      "a failing check of the branch was fixed before the lock was asked for", checks)
+        self.assertIn(f"--sha {FIX} --wait\n", checks)
+        # One hold, taken at the fix head and released there once, in the hold call: no step ever held the verified head.
+        releases = [sha for c in calls for sha in re.findall(r"forge-claim land release --repo owner/repo --branch dev --sha ([0-9a-f]+)", c["prompt"])]
+        self.assertEqual(releases, [FIX])
+        self.assertIn("shard-3 had already failed at the head; fixing before the land lock is asked for", out["logs"])
+
+    def test_a_rerun_before_the_lock_takes_the_lock_at_the_unchanged_head(self):
+        out = run_out(replies={"checks-1": {"state": "passed", "head": SHA, "required": ["ci-tests"]}},
+                      patch={"pr": self.PRE_RED, "fix-ci": self.RERAN})
+        self.assertEqual(out["result"]["stage"], "done")
+        self.assertEqual(self.shipped(out), ["pr", "fix-ci", "land-push-1", "checks-1", "merge", "hold", "close-out"])
+        self.assertIn(f"--sha {SHA} --wait\n", prompt(out["calls"], "checks-1"))
+
+    def test_a_stop_before_the_first_take_releases_the_verified_head_once(self):
+        for stage, replies, patch in (("checks-fix-review", {"fix-ci-review": FINDING}, {"fix-ci": self.FIXED}),
+                                      ("checks-fix", {}, {"fix-ci": {"status": "blocked", "notes": "no"}})):
+            with self.subTest(stage=stage):
+                out = run_out(replies=replies, patch=dict({"pr": self.PRE_RED}, **patch))
+                self.assertEqual(out["result"]["stage"], stage)
+                self.assertEqual(out["result"]["cont"]["checks_fixes"], 1)
+                names = self.shipped(out)
+                self.assertEqual(names[-1], "land-unlock")
+                self.assertNotIn("merge", names)
+                self.assertIn(self.RELEASE, prompt(out["calls"], "land-unlock"))
+
+    def test_an_own_red_reply_that_names_a_lock_verdict_or_no_check_is_the_old_flow(self):
+        base = [(c["label"], c["prompt"]) for c in run()[1]]
+        for own in ({"failing": ["shard-3"]}, {"failing": []}, None):
+            with self.subTest(own=own):
+                result, calls = run(patch={"pr": {"own_red": own}})
+                self.assertEqual([(c["label"], c["prompt"]) for c in calls], base)
+                self.assertEqual(result["stage"], "done")
 
 
 if __name__ == "__main__":

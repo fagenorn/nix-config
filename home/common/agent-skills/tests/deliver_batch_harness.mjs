@@ -29,6 +29,9 @@ const AC = [{ id: 'AC1', text: 'works', kind: 'code' }]
 const promptHead = p => (p.match(/Accepted head: ([0-9a-f]+)/) || [])[1] || SHA
 const num = label => Number((label.match(/-(\d+)(?:-|$)/) || [])[1])
 const CAR = i => String(i).repeat(40)
+// One sha is the other, in full or short form.
+const sameHead = (a, b) => typeof a === 'string' && typeof b === 'string' && a !== '' && b !== '' && (a.startsWith(b) || b.startsWith(a))
+const RELEASED = (p, r) => (/return lock_released true/i.test(p) && !sameHead(r.commit, r.start_head) ? { lock_released: true } : {})
 // The JSON value that ends the prompt line starting with `lead`.
 const jsonAfter = (p, lead) => JSON.parse(p.slice(p.indexOf(lead) + lead.length).split('\n')[0])
 // Ordered: the first matching pattern wins. A default gets the label and the prompt.
@@ -49,10 +52,13 @@ const DEFAULTS = [
   // #913: the resolution of an aborted sync merge, outside the land lock, defaults to a resolved merge commit RESOLVED.
   [/^land-sync-resolve-/, () => ({ status: 'done', conflicted: true, head: RESOLVED, merge_commit: RESOLVED, resolved_files: ['x.py'], markers_checked: true, tests: ['t'], notes: 'ok' })],
   [/^land-sync-/, () => ({ status: 'current', conflicted: false, head: SHA, notes: 'ok' })],
+  // #1001: the PR opened while the issue waited in the land queue, at the same number its land-pr or train-pr reports.
+  [/^land-open-/, (l, p) => ({ pr: 40 + num(l), head: promptHead(p), renew: { verdict: 'renewed' } })],
   [/^land-pr-/, (l, p) => ({ pr: 40 + num(l), head: SHA, renew: { verdict: 'renewed' }, lock: { verdict: 'already_held', lock_sha: SHA }, checks: { state: 'passed', head: promptHead(p), required: ['ci'], passed: ['ci'] } })],
   [/^land-(re)?lock-/, () => ({ renew: { verdict: 'renewed' }, lock: { verdict: 'acquired', lock_sha: SHA } })],
   [/^land-checks-/, () => ({ state: 'passed', head: SHA, required: ['ci'], passed: ['ci'] })],
-  [/^land-fix-/, () => DONE],
+  // #1001: a fix step asked to release the land lock before it edits reports the release, unless a scenario says otherwise.
+  [/^land-fix-/, (l, p) => ({ ...DONE, ...RELEASED(p, DONE) })],
   [/^land-merge-/, () => ({ merged: true, merge_commit: SHA, notes: 'merged', renew: { verdict: 'renewed' }, lock: { verdict: 'already_held', lock_sha: SHA } })],
   [/^land-unlock-/, () => ({ verdict: 'released' })],
   [/^close-out-/, () => ({ issue_state: 'CLOSED', released: true, decision_ended: true, branch_deleted: true, notes: 'ok', release: { verdict: 'released' } })],
@@ -92,6 +98,8 @@ async function agent(prompt, opts = {}) {
     const r = replies[label]
     const out = structuredClone(Array.isArray(r) ? r[Math.min(n, r.length) - 1] : r)
     if (out === 'throw') throw new Error(`stub agent ${label} threw`)
+    // An explicit fix reply that does not say whether it released the lock gets the default answer: released when it made a commit.
+    if (/^land-fix-\d+$/.test(label) && out && typeof out === 'object' && !Object.prototype.hasOwnProperty.call(out, 'lock_released')) Object.assign(out, RELEASED(prompt, out))
     const row = NESTED.find(([re]) => re.test(label))
     if (row && out && typeof out === 'object' && !Array.isArray(out)) {
       const base = DEFAULTS.find(([re]) => re.test(label))[1](label, prompt)
