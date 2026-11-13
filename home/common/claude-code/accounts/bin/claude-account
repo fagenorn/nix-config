@@ -196,13 +196,19 @@ cache_proxy_health() {
 # Routes this launch through the cache proxy while the proxy's health check
 # answers, unless CLAUDE_CACHE_PROXY=0 (on by default since #450), and sends it
 # direct otherwise. 0 runs no probe and unsets a base URL equal to the proxy URL,
-# which a routed parent passed down; any value but unset, empty, 0 or 1 is
-# refused. Otherwise a base URL the caller set to anything but the proxy is the
+# which a routed parent passed down; any value but unset, empty, 0, 1 or required
+# is refused. Otherwise a base URL the caller set to anything but the proxy is the
 # caller's own endpoint and is left alone, and one equal to the proxy URL is
-# decided again. Silent except for the refusal: stdout and stderr belong to claude.
+# decided again. required (#1009) probes the same way and routes a healthy launch
+# the same way, but never goes direct: a base URL the caller set to another endpoint
+# is decided again too, and every outcome but a healthy proxy is refused with
+# "CLAUDE_CACHE_PROXY=required and the cache proxy is not answering".
+# Silent except for the refusals: stdout and stderr belong to claude.
 route_cache_proxy() {
+  local required=""
   case "${CLAUDE_CACHE_PROXY:-}" in
     "" | 1) ;;
+    required) required=1 ;;
     0)
       # Opted out: no probe, and a proxy URL inherited from a routed parent goes too.
       if [ -n "$CACHE_PROXY_URL" ] && [ "${ANTHROPIC_BASE_URL:-}" = "$CACHE_PROXY_URL" ]; then
@@ -210,11 +216,14 @@ route_cache_proxy() {
       fi
       return 0
       ;;
-    *) die "CLAUDE_CACHE_PROXY must be 1, 0 or unset" ;;
+    *) die "CLAUDE_CACHE_PROXY must be 1, 0, required or unset" ;;
   esac
   local verdict="" waited=0 hostport="${CACHE_PROXY_URL#http://}"
-  [ -n "$CACHE_PROXY_URL" ] || return 0
-  if [ -n "${ANTHROPIC_BASE_URL:-}" ] && [ "$ANTHROPIC_BASE_URL" != "$CACHE_PROXY_URL" ]; then
+  if [ -z "$CACHE_PROXY_URL" ]; then
+    [ -z "$required" ] || die "CLAUDE_CACHE_PROXY=required and the cache proxy is not answering"
+    return 0
+  fi
+  if [ -z "$required" ] && [ -n "${ANTHROPIC_BASE_URL:-}" ] && [ "$ANTHROPIC_BASE_URL" != "$CACHE_PROXY_URL" ]; then
     return 0
   fi
   # One 0.5 s deadline covers the connect, the request and the answer, so a dead or hung proxy
@@ -233,6 +242,7 @@ route_cache_proxy() {
     # (https://github.com/anthropics/claude-code/issues/98464); verified on Claude Code 2.1.310.
     [ -n "${CLAUDE_CODE_TOTAL_TOKENS_REMINDER+set}" ] || export CLAUDE_CODE_TOTAL_TOKENS_REMINDER=padded-countdown
   else
+    [ -z "$required" ] || die "CLAUDE_CACHE_PROXY=required and the cache proxy is not answering"
     unset ANTHROPIC_BASE_URL
   fi
 }
