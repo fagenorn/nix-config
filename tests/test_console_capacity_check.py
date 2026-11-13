@@ -53,6 +53,37 @@ def view(*rows, asks=None):
     return document
 
 
+def serve_paths(test, answers):
+    """A stub console: `answers` maps a path to `(status, body)`; any other path answers 404.
+
+    Returns the `/api/state` URL."""
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            status, body = answers.get(self.path, (404, b""))
+            data = body if isinstance(body, bytes) else json.dumps(body).encode()
+            self.send_response(status)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    test.addCleanup(thread.join, 5)
+    test.addCleanup(server.server_close)
+    test.addCleanup(server.shutdown)
+    return f"http://127.0.0.1:{server.server_address[1]}/api/state"
+
+
+def excluded_view(*rows):
+    """A console view whose rows are `(name, excluded)`."""
+    return {"capacity": {"profiles": [{"profile": name, "read_at": None, "excluded": excluded}
+                                      for name, excluded in rows]}}
+
+
 class CapacityCheckTest(unittest.TestCase):
     def run_check(self, *args):
         done = subprocess.run([ROOT / WRAPPER, *args], cwd=ROOT, capture_output=True, text=True,
@@ -194,6 +225,49 @@ class CapacityCheckTest(unittest.TestCase):
         for other in ("--every", "--signin"):
             with self.subTest(other=other):
                 done = subprocess.run([ROOT / WRAPPER, "--accounts", other], cwd=ROOT,
+                                      capture_output=True, text=True, timeout=60)
+                self.assertEqual(done.returncode, 2)
+                self.assertIn("not allowed with argument", done.stderr)
+
+    def exclusion(self, state, profile):
+        url = serve_paths(self, {"/api/state": (200, state), "/api/profile": profile})
+        code, out = self.run_check("--url", url, "--exclusion")
+        return code, json.loads(out)
+
+    def test_exclusion_is_met_when_the_choice_is_another_profile(self):
+        state = excluded_view(("home", True), ("work", False))
+        self.assertEqual(self.exclusion(state, (200, {"profile": "work"})),
+                         (0, {"status": "met", "profile": "work", "excluded": ["home"]}))
+
+    def test_exclusion_is_not_met_when_the_choice_is_excluded(self):
+        state = excluded_view(("home", True), ("work", False))
+        self.assertEqual(self.exclusion(state, (200, {"profile": "home"})),
+                         (1, {"status": "not_met", "profile": "home", "excluded": ["home"]}))
+
+    def test_exclusion_without_data_is_not_yet(self):
+        none_excluded = excluded_view(("home", False), ("work", False))
+        one_excluded = excluded_view(("home", True), ("work", False))
+        no_flag = {"capacity": {"profiles": [{"profile": "home", "read_at": None}]}}
+        cases = [
+            (none_excluded, (200, {"profile": "work"}),
+             {"status": "pending", "profile": "work", "excluded": []}),
+            (one_excluded, (200, {"profile": None}),
+             {"status": "pending", "profile": None, "excluded": ["home"]}),
+            (no_flag, (200, {"profile": "work"}), {"status": "not_deployed"}),
+            (excluded_view(("home", 1)), (200, {"profile": "work"}), {"status": "not_deployed"}),
+            (one_excluded, (404, b""), {"status": "no_profile"}),
+            (one_excluded, (200, {"chosen": "work"}), {"status": "no_profile"}),
+            (one_excluded, (200, {"profile": 3}), {"status": "no_profile"}),
+            (one_excluded, (200, b"not json"), {"status": "no_profile"}),
+        ]
+        for state, profile, expected in cases:
+            with self.subTest(profile=profile, expected=expected):
+                self.assertEqual(self.exclusion(state, profile), (75, expected))
+
+    def test_exclusion_is_exclusive_with_the_other_modes(self):
+        for other in ("--every", "--signin", "--accounts"):
+            with self.subTest(other=other):
+                done = subprocess.run([ROOT / WRAPPER, "--exclusion", other], cwd=ROOT,
                                       capture_output=True, text=True, timeout=60)
                 self.assertEqual(done.returncode, 2)
                 self.assertIn("not allowed with argument", done.stderr)
