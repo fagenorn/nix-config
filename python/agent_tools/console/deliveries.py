@@ -48,10 +48,10 @@ chunking (folding a list in pieces equals folding it whole), and `RunFold.issues
   run's issue likewise. The issue is created at
   `PLANNING` if not yet known, and everything its owner did before then (stages, plan counts,
   close-outs) is applied at that moment, in order. Until then a child touches no issue.
-- A `plan`, `plan-revise`, `plan-rules-revise` or `plan-branch-revise` result with `status` `"planned"` and a non-empty
+- A `plan`, `plan-revise`, `plan-rules-revise`, `plan-branch-revise` or `plan-task-revise` result with `status` `"planned"` and a non-empty
   `tasks` list sets its issue's task total (latest wins; the count is per issue, so a later child
   of the same issue inherits it). A `BUILDING` label with a task sets the issue's task.
-- A `plan`, `plan-revise`, `plan-rules-revise` or `plan-branch-revise` result's non-empty `acceptance` list also grades its
+- A `plan`, `plan-revise`, `plan-rules-revise`, `plan-branch-revise` or `plan-task-revise` result's non-empty `acceptance` list also grades its
   issue (`Grading`; latest wins): held when a criterion has kind `evidence` or `human`, with notes
   when one has kind `note`.
 - A `close-out` result (owner) or `close-out-<n>` result (batch) makes its issue `DONE` only when
@@ -275,7 +275,7 @@ class Step:
 # One (stage, pattern) row per label template. Owner rows: group 1, where present, is the task.
 OWNER_LABELS: tuple[tuple[str | None, str], ...] = (
     (None, r"setup|acquire|worktree"),
-    (PLANNING, r"owner-answer|amend|renew-plan|renew-amend|plan|plan-revise|plan-rules-revise|plan-branch-revise"),
+    (PLANNING, r"owner-answer|amend|renew-plan|renew-amend|plan|plan-revise|plan-rules-revise|plan-branch-revise|plan-task-revise"),
     (PLAN_REVIEW, r"plan-review|plan-codex|plan-rules-review"),
     (BUILDING, r"impl-(\d+)"),
     (BUILDING, r"review-(\d+)"),
@@ -393,7 +393,7 @@ def configured_branch_pattern(repo: str) -> str | None:
     return pattern if isinstance(pattern, str) else None
 
 
-_PLAN_LABELS = ("plan", "plan-revise", "plan-rules-revise", "plan-branch-revise")
+_PLAN_LABELS = ("plan", "plan-revise", "plan-rules-revise", "plan-branch-revise", "plan-task-revise")
 _BATCH_CLOSE_OUT = re.compile(r"close-out-(\d+)")
 
 

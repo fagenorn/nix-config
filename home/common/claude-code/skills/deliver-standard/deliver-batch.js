@@ -30,6 +30,10 @@ export const meta = {
 // A row stopped at verify-unrelated (#972: its child's verification fix found no cause here for a failing test and edited nothing) is not relaunched: the
 // failure cannot change by itself, so it is reported in owner_actions with reason unrelated, the test, the evidence, the claim holder and the
 // child's cont (slimmed as a relaunch cont is); the owner repairs the test, then a relaunch with that cont in conts resumes it. The claim stays held.
+// #996: two more stops a relaunch cannot change are owner actions too, each with the claim holder and the child's cont (slimmed), the claim
+// held and the row left stopped: task-blocked (a task whose implementer returned blocked: task, notes, and detail, the child's reason, which
+// names the ways out; the owner relaunches with that cont in conts and decisions or amend for the issue) and codex-quota (a codex-unavailable
+// stop that carries retry_after, the usage limit's reset time or null: the owner relaunches with that cont once the limit has reset).
 // An already-fixed row is final and reported in owner_actions with its commit; the batch closes nothing.
 // A no-changes row (#923: every task of the child's plan ended with no commit, so there is nothing to land) is final too, once its claim
 // is released, and reported in owner_actions: the owner closes the issue. A release that failed leaves the row stopped for a relaunch.
@@ -505,6 +509,7 @@ const POST_MERGE = ['hold', 'close-out', 'code-unmet']
 const postMerge = r => !!r.pr || POST_MERGE.includes(r.stage)
 const READY = {}
 const FLAKY = {} // #972: by issue, the checks its child saw fail and pass on the one rerun
+const PARKED = {} // #996: by issue, the owner action of a stop a relaunch cannot change: a blocked task, a Codex usage limit
 const UNRELATED = {} // #972: by issue, the failing test its child's verification fix found no cause for, with the evidence
 const OUTSIDE = {} // #972: by issue, the files outside the branch's diff its child's verification fix edited, each with its cause
 const readyOf = n => READY[n]
@@ -1895,6 +1900,13 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `settle-${n}`, phase: 'Deliver', agentTy
           rows[n] = { issue: n, outcome: 'not-converging', stage: r.stage, ...taken, ...stopDetail(r) }
           return
         }
+        // #996: neither stop changes by a relaunch as it is. An issue closed meanwhile was settled above; one whose release failed stays open so a relaunch releases it.
+        const openIssue = !(st && st.state === 'CLOSED')
+        if (openIssue && r.stage === 'task' && isObj(r.cont.blocked) && Number.isInteger(r.cont.blocked.task) && r.cont.partial === r.cont.blocked.task) {
+          PARKED[n] = { reason: 'task-blocked', task: r.cont.blocked.task, ...(nonEmpty(r.cont.blocked.notes) ? { notes: oneLine(r.cont.blocked.notes) } : {}), ...(childReason(r) ? { detail: oneLine(childReason(r)) } : {}), claim: 'held', holder: HOLDER, cont: r.cont }
+        } else if (openIssue && r.stage === 'codex-unavailable' && Object.prototype.hasOwnProperty.call(r, 'retry_after')) {
+          PARKED[n] = { reason: 'codex-quota', retry_after: nonEmpty(r.retry_after) ? oneLine(r.retry_after) : null, claim: 'held', holder: HOLDER, cont: r.cont }
+        }
       }
       if (r.stage === 'verify-unrelated' && isObj(r.unrelated) && nonEmpty(r.unrelated.test)) UNRELATED[n] = { test: oneLine(r.unrelated.test), ...(nonEmpty(r.unrelated.evidence) ? { evidence: oneLine(r.unrelated.evidence) } : {}), claim: 'held', holder: HOLDER, cont: r.cont }
       rows[n] = { issue: n, outcome: 'stopped', stage: r.stage, ...stopDetail(r) }
@@ -1939,7 +1951,9 @@ const table = ISSUES.map(n => {
 // A cycle only the owner can break: relaunching it returns the same blocked rows, so it is an owner action, not an open issue.
 // #972: a failure with no cause in the delivery cannot change by a relaunch either: an owner action, not an open issue.
 const unrelated = table.filter(r => r.outcome === 'stopped' && r.stage === 'verify-unrelated' && UNRELATED[r.issue]).map(r => r.issue)
-const open = table.filter(r => !FINAL.includes(r.outcome) && !cycle.includes(r.issue) && !unrelated.includes(r.issue)).map(r => r.issue)
+// #996: nor can a blocked task or a Codex usage limit.
+const parked = table.filter(r => r.outcome === 'stopped' && PARKED[r.issue] && r.stage === (PARKED[r.issue].reason === 'task-blocked' ? 'task' : 'codex-unavailable')).map(r => r.issue)
+const open = table.filter(r => !FINAL.includes(r.outcome) && !cycle.includes(r.issue) && !unrelated.includes(r.issue) && !parked.includes(r.issue)).map(r => r.issue)
 const rowOf = n => table.find(r => r.issue === n)
 // The lead copies the relaunch into the next run's args, so a forwarded cont carries only what a resume reads from it. A resumed child's setup
 // step reads every contract field fresh and takes from cont.setup only the members below (the claim holder, the delivery's location and
@@ -1979,7 +1993,7 @@ for (const r of table) log(`#${r.issue}: ${r.outcome}${r.reason || r.detail ? ` 
 return {
   stage: breaker ? 'breaker' : 'done', batch_id: BATCH, table,
   questions: table.filter(r => r.outcome === 'questions').map(r => ({ issue: r.issue, questions: r.questions, marker: r.marker })),
-  owner_actions: [...table.filter(r => r.outcome === 'questions' && r.marker !== null && r.marker !== undefined).map(r => ({ issue: r.issue, reason: 'decision', comment_id: r.marker })), ...table.filter(r => r.outcome === 'already-fixed').map(r => ({ issue: r.issue, reason: 'already-fixed', commit: r.commit })), ...table.filter(r => r.outcome === 'no-changes').map(r => ({ issue: r.issue, reason: 'no-changes' })), ...table.filter(r => r.outcome === 'not-converging').map(r => ({ issue: r.issue, reason: 'not-converging', ...DIVERGING[r.issue], cont: slimCont(DIVERGING[r.issue].cont) })), ...cycle.map(n => ({ issue: n, reason: 'cycle' })), ...unrelated.map(n => ({ issue: n, reason: 'unrelated', ...UNRELATED[n], cont: slimCont(UNRELATED[n].cont) })), ...LAND_OA],
+  owner_actions: [...table.filter(r => r.outcome === 'questions' && r.marker !== null && r.marker !== undefined).map(r => ({ issue: r.issue, reason: 'decision', comment_id: r.marker })), ...table.filter(r => r.outcome === 'already-fixed').map(r => ({ issue: r.issue, reason: 'already-fixed', commit: r.commit })), ...table.filter(r => r.outcome === 'no-changes').map(r => ({ issue: r.issue, reason: 'no-changes' })), ...table.filter(r => r.outcome === 'not-converging').map(r => ({ issue: r.issue, reason: 'not-converging', ...DIVERGING[r.issue], cont: slimCont(DIVERGING[r.issue].cont) })), ...cycle.map(n => ({ issue: n, reason: 'cycle' })), ...unrelated.map(n => ({ issue: n, reason: 'unrelated', ...UNRELATED[n], cont: slimCont(UNRELATED[n].cont) })), ...parked.map(n => ({ issue: n, ...PARKED[n], cont: slimCont(PARKED[n].cont) })), ...LAND_OA],
   relaunch: open.length ? relaunchArgs() : null,
   ...(breaker ? { breaker } : {}),
 }

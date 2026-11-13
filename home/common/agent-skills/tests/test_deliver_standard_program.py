@@ -52,6 +52,9 @@ NOTE = {"id": "AC4", "text": "the next session's first-turn prompt reads under 3
 RULES_FILE = REPO_ROOT / "home/common/agent-skills/standards/acceptance-planning.md"
 SIZED = dict(ARGS, review_sizing=True)
 FULL_RUBRIC = "a task whose test cannot fail, wrong or missing interfaces"
+# #996: how a blocked task stop ends its reason, after the cap.
+WAYS = "; resume with decisions (a planner revises the task file from it) or amend {file, find, replace}"
+DIRECT_WAYS = "; resume with decisions (the implementer gets it with these notes)"
 CODEX_OWNS = "The Codex plan review running beside you owns code correctness"
 RULE_ID = "put the broken rule's id in the finding's rule)."
 PASS_REPLY = {"verdict": "pass", "findings": []}
@@ -1884,7 +1887,7 @@ class PlanRulesTest(unittest.TestCase):
 class PlanTurnStructureTest(unittest.TestCase):
     """#819: the planner writes its files in one message, revises with Edit, and self-checks three finding classes."""
 
-    PLANNERS = ("plan", "plan-revise", "plan-rules-revise", "plan-branch-revise")
+    PLANNERS = ("plan", "plan-revise", "plan-rules-revise", "plan-branch-revise", "plan-task-revise")
     WRITE_ONCE = ("write the code map, plan.md and every task file as parallel Write calls in one message",
                   "a second message only if the output limit forces it", "then run any checks in one message")
     REVISE = ("first list /r/.git/worktrees/w/deliver-standard/*.md and load them all as parallel Read calls in one message, then fix",
@@ -2193,7 +2196,7 @@ class RulesRereviewSkipTest(unittest.TestCase):
 class PlanTestCaseFormTest(unittest.TestCase):
     """#746 trial: only the plan step's task files state each failing test as a case, not as code."""
 
-    PLANNERS = ("plan", "plan-revise", "plan-rules-revise", "plan-branch-revise")
+    PLANNERS = ("plan", "plan-revise", "plan-rules-revise", "plan-branch-revise", "plan-task-revise")
     MARK = "state each failing test as a case"
 
     @staticmethod
@@ -2259,13 +2262,13 @@ class TaskTest(unittest.TestCase):
         """#869: the implementer's own words reach the stop."""
         notes = "Task 1 cannot be finished as written\nbecause it depends on Task 2"
         result, _ = run(replies={"impl-1": {"status": "blocked", "notes": notes}})
-        self.assertEqual(result["reason"], "task: task 1 blocked: Task 1 cannot be finished as written because it depends on Task 2")
+        self.assertEqual(result["reason"], f"task: task 1 blocked: Task 1 cannot be finished as written because it depends on Task 2{WAYS}")
         result, _ = run(replies={"impl-1": {"status": "blocked", "notes": "x" * 900}})
         self.assertEqual(len(result["reason"]), 300)
         result, _ = run(replies={"impl-1": None})
         self.assertEqual(result["reason"], "task: task 1 the implementer returned nothing")
         result, _ = run(replies={"impl-1": {"status": "blocked"}})
-        self.assertEqual(result["reason"], "task: task 1 blocked")
+        self.assertEqual(result["reason"], f"task: task 1 blocked{WAYS}")
         for replies in ({"impl-1": {}}, {"review-1": {"verdict": "findings", "findings": [{"severity": "critical"}]},
                                          "rereview-1-1": {"verdict": "findings", "findings": [{"severity": "critical"}]},
                                          "rereview-1-2": {"verdict": "findings", "findings": [{"severity": "critical"}]}},
@@ -2417,7 +2420,7 @@ class BlockedOnLaterTaskTest(unittest.TestCase):
 
     def test_a_block_that_names_no_later_task_stops_as_before(self):
         result, calls, _ = self.go(**{"impl-5": blocked("the task file is wrong")})
-        self.assertEqual(result["reason"], "task: task 5 blocked: the task file is wrong")
+        self.assertEqual(result["reason"], f"task: task 5 blocked: the task file is wrong{WAYS}")
         self.assertEqual((result["cont"]["partial"], result["cont"]["plan"]["tasks"]), (5, tasks(6)))
         self.assertNotIn("reordered", result["cont"])
         self.assertNotIn("impl-6", labels(calls))
@@ -2433,7 +2436,7 @@ class BlockedOnLaterTaskTest(unittest.TestCase):
         for wrong in ("6", 6.5, None):
             with self.subTest(wrong=wrong):
                 result, calls, _ = self.go(**{"impl-5": blocked("needs it", blocked_on=wrong)})
-                self.assertEqual(result["reason"], "task: task 5 blocked: needs it")
+                self.assertEqual(result["reason"], f"task: task 5 blocked: needs it{WAYS}")
                 self.assertNotIn("impl-6", labels(calls))
 
     def test_a_named_task_in_another_worktree_stops(self):
@@ -6926,7 +6929,7 @@ EXPECTED = {stem: frozenset({kind}) if isinstance(kind, str) else kind for kind,
     (CLERK, ("setup", "acquire", "worktree", "renew-", "owner-answer", "plan-codex", "direct-codex", "final-codex", "diff-size", "amend",
              "verify", "verify-", "verify-rerun-", "ws-check-", "land-unlock", "land-push-", "land-lock-", "land-relock-", "pr", "checks-", "merge",
              "hold", "close-out")),
-    (PLANNER, ("plan", "plan-revise", "plan-rules-revise", "plan-branch-revise")),
+    (PLANNER, ("plan", "plan-revise", "plan-rules-revise", "plan-branch-revise", "plan-task-revise")),
     (IMPL, ("direct-impl", "direct-fix", "impl-", "fix-", "fix-wave", "fix-wave-", "verify-fix-", "fix-ci", "sync-", "sync-resolve-",
             "fix-sync-")),
     (REV, ("plan-review", "plan-rules-review", "direct-review-full", "final-", "final-integration", "fix-wave-review",
@@ -6949,6 +6952,7 @@ SCENARIOS = (
     {},
     {"args": dict(ARGS, cont=RESUME_FOR_ANSWER), "replies": {"owner-answer": ANSWER}},
     {"args": dict(ARGS, cont=AMEND_CONT, amend=[AMEND_EDIT])},
+    {"args": dict(ARGS, cont=dict(AMEND_CONT, blocked={"task": 2, "notes": "the fixture is missing"}), decisions="Use the other fixture.")},
     {"replies": {"plan": with_criteria(PlanRulesTest.ROWS[0][1]), "plan-revise": with_criteria(PlanRulesTest.ROWS[0][1]),
                  "plan-rules-revise": with_criteria(PlanRulesTest.ROWS[0][1])}},
     {"replies": {"plan-review": FINDING}},
@@ -7011,8 +7015,8 @@ class AgentTypeTest(unittest.TestCase):
             self.assertEqual((call["agentType"], call["effort"]), ("clerk", "high"), call["label"])
 
     def test_planner_sites_take_the_definition_tier(self):
-        found = [c for c in all_calls() if c["label"] in ("plan", "plan-revise", "plan-rules-revise", "plan-branch-revise")]
-        self.assertEqual({c["label"] for c in found}, {"plan", "plan-revise", "plan-rules-revise", "plan-branch-revise"})
+        found = [c for c in all_calls() if c["label"] in ("plan", "plan-revise", "plan-rules-revise", "plan-branch-revise", "plan-task-revise")]
+        self.assertEqual({c["label"] for c in found}, {"plan", "plan-revise", "plan-rules-revise", "plan-branch-revise", "plan-task-revise"})
         for call in found:
             self.assertEqual((call["agentType"], call["model"], call["effort"]), ("planner", None, None), call["label"])
 
@@ -7081,7 +7085,7 @@ class ClerkModelTest(unittest.TestCase):
 class PromptCommandFormTest(unittest.TestCase):
     """#738: a command ends at a line break, and a prompt that reads the issue body asks for it."""
 
-    BODY_READERS = ("plan", "plan-revise", "plan-rules-revise", "plan-branch-revise", "plan-review")
+    BODY_READERS = ("plan", "plan-revise", "plan-rules-revise", "plan-branch-revise", "plan-task-revise", "plan-review")
 
     def test_no_command_is_followed_by_a_lone_dot_argument(self):
         for call in all_calls():
@@ -7160,7 +7164,7 @@ class CodeMapTest(unittest.TestCase):
 class PlannerReadsTest(unittest.TestCase):
     """#737, #819: the plan step batches its lookups itself; no step is granted a subagent, the Agent tool not existing here."""
 
-    PLANNERS = ("plan", "plan-revise", "plan-rules-revise", "plan-branch-revise")
+    PLANNERS = ("plan", "plan-revise", "plan-rules-revise", "plan-branch-revise", "plan-task-revise")
     NO_SUBAGENTS = "- Do not dispatch subagents unless this step says so."
     HARD_RULES = "Hard rules for this step"
     BATCH = "put every open question's Bash or Read call in the same message as the others"
@@ -7197,9 +7201,9 @@ class PlannerReadsTest(unittest.TestCase):
                 self.assertNotIn(self.BATCH, text, label)
                 continue
             self.assertTrue(text.startswith("Procedure for this step."), label)
-            pace, other = (self.REVISE_PACE, self.PACE) if label == "plan-revise" else (self.PACE, self.REVISE_PACE)
+            pace, other = (self.REVISE_PACE, self.PACE) if label in ("plan-revise", "plan-task-revise") else (self.PACE, self.REVISE_PACE)
             self.assertNotIn(other, text, label)
-            self.assertNotIn("twelfth" if label == "plan-revise" else "follow-up lookup", text, label)
+            self.assertNotIn("twelfth" if pace == self.REVISE_PACE else "follow-up lookup", text, label)
             # The pace sits inside the one procedure sentence, between the batching rule and the subagent line.
             self.assertIn(f"never one small lookup per turn), {pace}. No subagent can be dispatched", text, label)
             self.assertLess(text.index(pace), text.index("This is a revision:" if label != "plan" else "Then write the code map"), label)
@@ -7992,6 +7996,239 @@ class AmendTest(unittest.TestCase):
             with self.subTest(name):
                 result, _ = run(args=args, replies=replies)
                 self.assertNotIn("amended", result)
+
+
+class BlockedTaskDecisionTest(unittest.TestCase):
+    """#996: a blocked task's notes ride in the cont, and its resume needs a new decision (a planner revises the task file) or an amend."""
+
+    NOTES = "the task file names a fixture that does not exist"
+    DECISION = "Use the fixture tests/data/a.json instead."
+    PLAN2 = dict(PLAN, tasks=tasks(2))
+    REVISED = dict(PLAN2, criteria_edited=[])
+
+    def stopped(self, notes=None, **args):
+        result, _ = run(args=dict(ARGS, **args), replies={"plan": self.PLAN2, "impl-2": blocked(self.NOTES if notes is None else notes)})
+        self.assertEqual(result["stage"], "task")
+        return result
+
+    def resume(self, cont, replies=None, **args):
+        return run(args=dict(ARGS, cont=cont, **args), replies=dict({"plan-task-revise": self.REVISED}, **(replies or {})))
+
+    def test_the_task_stop_keeps_the_notes_and_names_both_ways_out(self):
+        result = self.stopped()
+        self.assertEqual(result["cont"]["blocked"], {"task": 2, "notes": self.NOTES})
+        self.assertEqual(result["cont"]["partial"], 2)
+        self.assertEqual(result["reason"], f"task: task 2 blocked: {self.NOTES}{WAYS}")
+        for way in ("decisions", "amend {file, find, replace}"):
+            self.assertIn(way, result["reason"])
+        long = self.stopped(notes="x" * 5000)
+        self.assertEqual(len(long["cont"]["blocked"]["notes"]), 2000)
+        self.assertEqual(len(long["reason"]), 300)
+        self.assertTrue(long["reason"].endswith(f"...{WAYS}"), long["reason"])
+
+    def test_a_stop_that_is_not_a_blocked_implementer_keeps_no_notes(self):
+        for replies in ({"impl-2": None}, {"impl-2": {"status": "done", "notes": "no commit"}}, {"verify": None}):
+            with self.subTest(replies=replies):
+                result, _ = run(replies=dict({"plan": self.PLAN2}, **replies))
+                self.assertNotIn("blocked", result["cont"])
+                self.assertNotIn("decisions (", result["reason"])
+
+    def test_a_new_decision_runs_a_planner_step_before_the_implementer(self):
+        cont = self.stopped()["cont"]
+        result, calls = self.resume(cont, decisions=self.DECISION)
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(labels(calls)[:4], ["setup", "renew-plan", "plan-task-revise", "impl-2"])
+        step = next(c for c in calls if c["label"] == "plan-task-revise")
+        self.assertEqual(step["agentType"], "planner")
+        for needle in (self.DECISION, self.NOTES, "/g/task-2.md", "Task 2 (t2)", "fix only that task file in place", "criteria_edited",
+                       "check every finding's claim in the first lookup message"):
+            self.assertIn(needle, step["prompt"])
+        # The implementer gets the task as it always does: the decision reached the task file, not its prompt.
+        self.assertNotIn(self.DECISION, prompt(calls, "impl-2"))
+        self.assertIn("exactly as its task file /g/task-2.md specifies", prompt(calls, "impl-2"))
+        # No criterion changed, so the rules are not reviewed again (#819).
+        self.assertNotIn("plan-rules-review", labels(calls))
+        self.assertNotIn("plan-review", labels(calls))
+
+    def test_a_used_decision_is_kept_and_the_blocked_member_is_gone(self):
+        cont = self.stopped()["cont"]
+        result, _ = self.resume(cont, replies={"verify": None}, decisions=self.DECISION)
+        self.assertEqual(result["stage"], "verify")
+        self.assertEqual(result["cont"]["decisions"], [self.DECISION])
+        self.assertNotIn("blocked", result["cont"])
+        # Blocked again after the revise: the new notes, and the same decision is no longer new.
+        again, calls = self.resume(cont, replies={"impl-2": blocked("still wrong")}, decisions=self.DECISION)
+        self.assertEqual((again["stage"], again["cont"]["blocked"]), ("task", {"task": 2, "notes": "still wrong"}))
+        self.assertEqual(again["cont"]["decisions"], [self.DECISION])
+        last, calls = self.resume(again["cont"], decisions=self.DECISION)
+        self.assertEqual((last["stage"], calls), ("task", []))
+
+    def test_a_revise_that_changes_a_criterion_gets_the_rules_review(self):
+        cont = self.stopped()["cont"]
+        changed = dict(self.PLAN2, acceptance=[{"id": "AC1", "text": "works with the fixture", "kind": "code"}], criteria_edited=["AC1"])
+        result, calls = self.resume(cont, replies={"plan-task-revise": changed, "verify": None}, decisions=self.DECISION)
+        names = labels(calls)
+        self.assertLess(names.index("plan-task-revise"), names.index("plan-rules-review"))
+        self.assertLess(names.index("plan-rules-review"), names.index("impl-2"))
+        self.assertEqual(result["cont"]["plan"]["acceptance"][0]["text"], "works with the fixture")
+
+    def test_no_new_decision_stops_before_any_agent_and_names_both_ways_out(self):
+        held = self.stopped(decisions="An earlier answer.")["cont"]
+        self.assertEqual(held["decisions"], ["An earlier answer."])
+        for name, cont, args in (("none", self.stopped()["cont"], {}), ("blank", self.stopped()["cont"], {"decisions": "  "}),
+                                 ("already held", held, {"decisions": "An earlier answer."})):
+            with self.subTest(name):
+                result, calls = self.resume(cont, **args)
+                self.assertEqual(calls, [])
+                self.assertEqual((result["stage"], result["task"], result["blocked"]), ("task", {"n": 2}, {"task": 2, "notes": self.NOTES}))
+                self.assertEqual(result["cont"], cont)
+                self.assertEqual(result["reason"], "task: not run again: this resume brings nothing new from the owner; "
+                                                   f"task 2 blocked: {self.NOTES}{WAYS}")
+
+    def test_an_amend_answers_a_blocked_task_without_a_planner(self):
+        cont = dict(AMEND_CONT, blocked={"task": 2, "notes": self.NOTES})
+        result, calls = run(args=dict(ARGS, cont=cont, amend=[AMEND_EDIT]), replies={"verify": None})
+        self.assertEqual(labels(calls)[:4], ["setup", "renew-amend", "amend", "impl-2"])
+        self.assertNotIn("plan-task-revise", labels(calls))
+        self.assertNotIn("blocked", result["cont"])
+        # With a decision as well, the amend is applied first and the planner works the decision in; one renew covers both.
+        _, calls = run(args=dict(ARGS, cont=cont, amend=[AMEND_EDIT], decisions=self.DECISION), replies={"plan-task-revise": self.REVISED})
+        self.assertEqual(labels(calls)[:5], ["setup", "renew-amend", "amend", "plan-task-revise", "impl-2"])
+
+    def test_a_cont_from_before_the_blocked_member_runs_the_implementer_again(self):
+        cont = {k: v for k, v in self.stopped()["cont"].items() if k != "blocked"}
+        for args in ({}, {"decisions": self.DECISION}):
+            with self.subTest(args=args):
+                _, calls = self.resume(cont, **args)
+                self.assertEqual(labels(calls)[:2], ["setup", "impl-2"])
+                self.assertNotIn("plan-task-revise", labels(calls))
+
+    def test_a_blocked_member_that_does_not_match_the_cont_is_ignored(self):
+        base = self.stopped()["cont"]
+        for name, cont in (("another task", dict(base, blocked={"task": 1, "notes": "x"})), ("not an object", dict(base, blocked="x")),
+                           ("the task is done", dict(base, done=base["done"] + [{"n": 2, "commit": "c2"}])),
+                           ("no partial", {k: v for k, v in base.items() if k != "partial"})):
+            with self.subTest(name):
+                _, calls = self.resume(cont)
+                self.assertIn("setup", labels(calls))
+                self.assertNotIn("plan-task-revise", labels(calls))
+
+    def test_a_revise_that_fails_keeps_the_plan_the_notes_and_the_decision_unused(self):
+        cont = self.stopped()["cont"]
+        questions = [{"question": "Which fixture?", "options": ["The first one.", "The second one."]}]
+        cases = (
+            ("questions", {"status": "needs_user", "questions": questions}, "plan", True),
+            ("malformed", {"status": "planned"}, "plan", False),
+            ("a done task dropped", dict(self.REVISED, tasks=tasks(2)[1:]), "plan", False),
+            ("rule findings left", dict(self.PLAN2, acceptance=self.PLAN2["acceptance"] + [criterion(EVIDENCE, lint=None)],
+                                        criteria_edited=[]), "plan-review", False),
+        )
+        for name, reply, stage, asked in cases:
+            with self.subTest(name):
+                result, calls = self.resume(cont, replies={"plan-task-revise": reply, "plan-rules-revise": reply}, decisions=self.DECISION)
+                self.assertEqual((result["stage"], result["step"]), (stage, "plan-task-revise"))
+                self.assertNotIn("impl-2", labels(calls))
+                self.assertEqual(result["cont"]["plan"], cont["plan"])
+                self.assertIs(result["cont"]["plan_reviewed"], True)
+                self.assertNotIn("plan_findings", result["cont"])
+                self.assertEqual(result["cont"]["blocked"], dict(cont["blocked"], **({"asked": True} if asked else {})))
+                self.assertNotIn("decisions", result["cont"])
+                self.assertEqual(result["cont"]["done"], cont["done"])
+                if asked:
+                    self.assertEqual(result["needs_user"], questions)
+                # The same resume tries the revise again.
+                _, again = self.resume(result["cont"], decisions=self.DECISION)
+                self.assertIn("plan-task-revise", labels(again))
+                self.assertIn("impl-2", labels(again))
+
+    def test_a_revise_that_asked_reads_the_owners_answer_on_its_resume(self):
+        cont = dict(self.stopped()["cont"])
+        cont["blocked"] = dict(cont["blocked"], asked=True)
+        answer = {"verdict": "answered", "comment_id": 3, "questions": [], "decisions": "Which fixture? Chosen: The first one."}
+        result, calls = self.resume(cont, replies={"owner-answer": answer, "verify": None})
+        self.assertEqual(labels(calls)[:4], ["setup", "owner-answer", "plan-task-revise", "impl-2"])
+        self.assertIn(answer["decisions"], prompt(calls, "plan-task-revise"))
+        self.assertEqual(result["cont"]["decisions"], [answer["decisions"]])
+        unanswered, calls = self.resume(cont)
+        self.assertEqual(labels(calls), ["setup", "owner-answer"])
+        self.assertEqual((unanswered["stage"], unanswered["cont"]["blocked"]), ("task", cont["blocked"]))
+        self.assertIn("amend {file, find, replace}", unanswered["reason"])
+
+    def test_a_lost_renew_before_the_revise_leaves_the_decision_new(self):
+        cont = self.stopped()["cont"]
+        result, calls = self.resume(cont, replies={"renew-plan": {"verdict": "error", "detail": "x"}}, decisions=self.DECISION)
+        self.assertEqual(labels(calls), ["setup", "renew-plan", "renew-plan"][:len(calls)])
+        self.assertNotIn("plan-task-revise", labels(calls))
+        self.assertNotIn("decisions", result["cont"])
+        self.assertEqual(result["cont"]["blocked"], cont["blocked"])
+
+    def test_no_other_prompt_grows(self):
+        _, calls = run(replies={"plan": self.PLAN2})
+        for call in calls:
+            for needle in ("returned blocked", "the owner then decided", "resume with decisions", self.DECISION):
+                self.assertNotIn(needle, call["prompt"], call["label"])
+        self.assertNotIn("plan-task-revise", labels(calls))
+
+    def test_the_direct_lane_gives_the_decision_and_the_notes_to_its_implementer(self):
+        reply = {"status": "blocked", "notes": self.NOTES}
+        first, calls = run(args=DIRECT, replies={"direct-impl": reply})
+        self.assertEqual((first["stage"], first["cont"]["blocked"], first["cont"]["partial"]), ("task", {"task": 1, "notes": self.NOTES}, 1))
+        self.assertEqual(first["reason"], f"task: task 1 blocked: {self.NOTES}{DIRECT_WAYS}")
+        self.assertNotIn("That attempt returned blocked", prompt(calls, "direct-impl"))
+        unsettled, calls = run(args=dict(ARGS, cont=first["cont"]))
+        self.assertEqual((unsettled["stage"], calls, unsettled["cont"]), ("task", [], first["cont"]))
+        self.assertTrue(unsettled["reason"].endswith(DIRECT_WAYS), unsettled["reason"])
+        self.assertNotIn("amend", unsettled["reason"])
+        result, calls = run(args=dict(ARGS, cont=first["cont"], decisions=self.DECISION), replies={"verify": None})
+        self.assertEqual(labels(calls)[:2], ["setup", "direct-impl"])
+        self.assertNotIn("plan-task-revise", labels(calls))
+        for needle in (self.DECISION, self.NOTES, "That attempt returned blocked"):
+            self.assertIn(needle, prompt(calls, "direct-impl"))
+        self.assertEqual(result["cont"]["decisions"], [self.DECISION])
+        self.assertNotIn("blocked", result["cont"])
+
+
+class CodexQuotaStopTest(unittest.TestCase):
+    """#996: a codex-unavailable stop whose message names a usage or quota limit carries retry_after; any other is unchanged."""
+
+    SITES = CodexUnavailableReasonTest.SITES
+
+    def stop(self, args, label, raw):
+        reply = {"available": False, "verdict": "pass", "findings": [], **({} if raw is None else {"raw_summary": raw})}
+        result, _ = run(args=args, replies={label: reply})
+        self.assertEqual(result["stage"], "codex-unavailable")
+        return result
+
+    def test_a_usage_limit_carries_its_reset_time_at_every_site(self):
+        for args, label, _ in self.SITES:
+            with self.subTest(label=label):
+                result = self.stop(args, label, CodexUnavailableReasonTest.REASON)
+                self.assertEqual(result["retry_after"], "Nov 12th, 2026 5:34 AM")
+                self.assertEqual(result["details"], CodexUnavailableReasonTest.REASON)
+                self.assertIn("cont", result)
+
+    def test_the_reset_time_is_read_from_the_message_or_left_null(self):
+        for raw, want in (("runtime failure: usage limit reached, resets at 09:00 UTC on Friday. Buy credits.", "09:00 UTC on Friday"),
+                          ("Quota exceeded for this workspace; try again in 3 days 4 hours", "3 days 4 hours"),
+                          ("runtime failure: quota exceeded", None), ("You've hit your usage limit.", None)):
+            with self.subTest(raw=raw):
+                result = self.stop(ARGS, "final-codex", raw)
+                self.assertIn("retry_after", result)
+                self.assertEqual(result["retry_after"], want)
+
+    def test_any_other_codex_failure_carries_no_retry_after(self):
+        for raw in ("daemon rejected the slot; try again at 5 PM", "runtime failure: the payload was malformed", "  ", None):
+            with self.subTest(raw=raw):
+                self.assertNotIn("retry_after", self.stop(ARGS, "plan-codex", raw))
+        dead, _ = run(replies={"final-codex": None})
+        self.assertNotIn("retry_after", dead)
+
+    def test_the_codex_schema_and_prompts_are_unchanged(self):
+        _, calls = run()
+        for label in ("plan-codex", "final-codex"):
+            self.assertEqual(set(schema_of(calls, label)["properties"]), {"available", "verdict", "findings", "raw_summary"})
+            self.assertNotIn("quota", prompt(calls, label))
+            self.assertNotIn("retry_after", prompt(calls, label))
 
 
 if __name__ == "__main__":
