@@ -6465,6 +6465,54 @@ class FixWaveHistoryTest(unittest.TestCase):
         self.assertIn(f"{decided} Report no finding that only disputes it. tools/grader.json was judged more than once in the same place "
                       f"before this fix; its history, oldest first: {history}. Report any still unresolved", prompt(calls, "fix-wave-review"))
 
+    AMENDED = " The owner amended the plan for tools/grader.json (plan.md, Amendments): it is binding."
+
+    def test_an_amend_only_resume_tells_the_wave_and_its_re_review_of_the_amendment(self):
+        """Re-review X1: the amendment is what the owner brought, so the fixer and the re-reviewer are pointed at it."""
+        cont = self.stopped()["cont"]
+        out = run_out(args=dict(ARGS, cont=cont, amend=[dict(AMEND_EDIT, file="task-1.md")]), patch={"fix-wave": self.ONLY})
+        result, calls = out["result"], out["calls"]
+        self.assertEqual((result["stage"], result["fix_waves"]), ("done", 3))
+        self.assertIn("amend", labels(calls))
+        self.assertEqual(waves(calls), ThirdFixWaveTest.THREE[:2])
+        history = json.dumps(self.KEPT, separators=(",", ":"))
+        self.assertIn(f"the fix of one finding drew the next.{self.AMENDED} Its history, oldest first: {history}. Read each range "
+                      "(git -C /r/.wt/w-issue-9-x diff <range> -- tools/grader.json), then follow that amendment; do not move the same "
+                      "lines back.", prompt(calls, "fix-wave"))
+        self.assertIn(f"{self.AMENDED} Report no finding that only disputes it. tools/grader.json was judged more than once",
+                      prompt(calls, "fix-wave-review"))
+        # A decision with the amend is the decision's clause.
+        both = run_out(args=dict(ARGS, cont=cont, amend=[dict(AMEND_EDIT, file="task-1.md")], decisions=self.DECISION),
+                       patch={"fix-wave": self.ONLY})
+        self.assertIn(json.dumps(self.DECISION), prompt(both["calls"], "fix-wave"))
+        self.assertNotIn(self.AMENDED, prompt(both["calls"], "fix-wave"))
+        # A run that did not resume an oscillating cont says nothing of either.
+        plain = self.two(self.found((self.FILE, "pattern too narrow", "new")))
+        for label in ThirdFixWaveTest.THREE[:4]:
+            self.assertNotIn("The owner ", prompt(plain["calls"], label))
+
+    def test_every_wave_of_the_resumed_run_that_names_the_file_gets_the_decision_and_the_history(self):
+        """Re-review Y1: a narrowing finding on the file admits a second wave, which is not left blind."""
+        narrowing = self.found((self.FILE, "same on another token", "narrowing"), ("src/lock.py", "lock path", "narrowing"))
+        elsewhere = self.found(("src/lock.py", "lock path 2", "narrowing"))
+        out = self.resume(replies={"fix-wave-review": narrowing, "fix-wave-review-2": elsewhere},
+                          patch={"fix-wave": dict(self.ONLY, notes="literal token", start_head="e" * 40, commit="f" * 40),
+                                 "fix-wave-2": dict(self.ONLY, start_head="f" * 40, commit="a" * 40)})
+        result, calls = out["result"], out["calls"]
+        self.assertEqual((result["stage"], result["fix_waves"]), ("done", 5))
+        self.assertEqual(waves(calls), ThirdFixWaveTest.THREE)
+        decided = f" The owner decided the approach for tools/grader.json, and the decision is binding: {json.dumps(self.DECISION)}."
+        history = json.dumps(self.KEPT + [{"round": 2, "findings": ["pattern too wide again"]},
+                                          {"wave": 3, "notes": "literal token", "range": f"{'e' * 40}..{'f' * 40}"}], separators=(",", ":"))
+        self.assertIn(f"the fix of one finding drew the next.{decided} Its history, oldest first: {history}. Read each range "
+                      "(git -C /r/.wt/w-issue-9-x diff <range> -- tools/grader.json), then follow that decision;", prompt(calls, "fix-wave-2"))
+        self.assertIn(f"{decided} Report no finding that only disputes it. tools/grader.json was judged more than once in the same place "
+                      f"before this fix; its history, oldest first: {history}.", prompt(calls, "fix-wave-review-2"))
+        # The third wave's findings no longer name the file: neither the decision nor the history.
+        for label in ("fix-wave-3", "fix-wave-review-3"):
+            self.assertNotIn("The owner decided", prompt(calls, label))
+            self.assertNotIn("judged more than once", prompt(calls, label))
+
     def test_the_decision_is_kept_once_a_wave_has_had_it_and_stays_new_until_then(self):
         lost = self.resume(replies={"fix-wave": None})["result"]
         self.assertEqual(lost["stage"], "fix-wave")
