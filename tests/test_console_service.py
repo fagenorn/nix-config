@@ -1010,6 +1010,47 @@ class ProbeServiceTest(Case):
                 if row[2] == "capacity.reading"][-1]
         self.assertEqual(last["profile"], "spare")
 
+    def test_a_batch_of_more_than_256_probes_is_attributed_while_it_runs(self):
+        dirs = []
+        for i in range(257):
+            directory = self.accounts / f"profiles/p{i:03d}"
+            directory.mkdir(parents=True)
+            dirs.append(directory)
+        queue = support.Queued()
+        svc = self.begin(lambda p: svc.ingest_reading(
+            reading_body(ALLOWED, f"acc-{p.profile}", p.session_id)),
+            dispatch=queue, profile_dirs=dirs)
+        self.now[0] = NOW + 30
+        probes = svc.probe_round()
+        self.assertEqual(len(probes), 257)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            while queue.jobs:
+                queue.run_next()
+        self.assertEqual(err.getvalue(), "")
+        readings = [json.loads(row[4]) for row in support.log_rows(self.store)
+                    if row[2] == "capacity.reading"]
+        self.assertEqual(sorted(r["profile"] for r in readings), sorted(p.profile for p in probes))
+
+    def test_closing_the_service_ends_a_probe_that_is_still_running(self):
+        started = threading.Event()
+        ended = threading.Event()
+
+        def prober(p):
+            started.set()
+            p.stop.wait(30)
+            ended.set()
+
+        svc = support.service(
+            self, self.store, self.registry, session_dirs=[self.work / "sessions"],
+            profile_dirs=[self.work], clock=lambda: self.now[0], session_poll_seconds=3600,
+            prober=prober, probe_tick_seconds=0.05)
+        self.now[0] = NOW + 30
+        self.assertTrue(started.wait(5))
+        svc.close()
+        self.assertTrue(ended.is_set())
+        self.assertNotIn(service.PROBE_THREAD, [t.name for t in threading.enumerate()])
+
     def test_the_probe_loop_runs_rounds_on_its_thread(self):
         event = threading.Event()
         svc = self.begin(lambda p: event.set(), probe_tick_seconds=0.05)

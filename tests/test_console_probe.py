@@ -158,6 +158,31 @@ class ProbeCommandTest(unittest.TestCase):
                 time.sleep(0.05)
             self.assertFalse(self.alive(pid), f"child {pid} outlived the probe's timeout")
 
+    def test_a_cancelled_run_kills_and_reaps_the_group_before_it_returns(self):
+        cancel = threading.Event()
+
+        def cancel_soon():
+            time.sleep(0.3)
+            cancel.set()
+
+        threading.Thread(target=cancel_soon, daemon=True).start()
+        started = time.monotonic()
+        result = manager.run_in_own_group(
+            [sys.executable, "-c", "import time; time.sleep(300)"], timeout=60,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True, cancel=cancel)
+        self.assertLess(time.monotonic() - started, 10)
+        self.assertEqual(result.returncode, -signal.SIGKILL)
+
+    def test_a_probe_with_a_stop_event_hands_it_to_the_runner_as_cancel(self):
+        stop = threading.Event()
+        with_stop = Recorder()
+        probe.run_probe(Probe("work", SID, stop), run=with_stop, environ=ENVIRON)
+        self.assertIs(with_stop.calls[0][1]["cancel"], stop)
+        without = Recorder()
+        probe.run_probe(Probe("work", SID), run=without, environ=ENVIRON)
+        self.assertNotIn("cancel", without.calls[0][1])
+
     @staticmethod
     def alive(pid):
         try:

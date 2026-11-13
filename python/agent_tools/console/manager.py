@@ -98,6 +98,8 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -114,6 +116,7 @@ SECRET_ENV = "CONSOLE_SPRINT_SECRET"
 ACCOUNT_ENV = "CLAUDE_ACCOUNT"
 LAUNCH_TIMEOUT = 60
 STOP_TIMEOUT = 60
+CANCEL_POLL_SECONDS = 0.25
 REMOVE_TIMEOUT = 60
 FINISH_LIMIT = 590
 FINISH_SECONDS = 50
@@ -304,22 +307,38 @@ def client_environment(profile: str, environ: Mapping[str, str]) -> dict[str, st
 
 
 def run_in_own_group(argv: list[str], *, timeout: float, check: bool = False,
+                     cancel: threading.Event | None = None,
                      **kwargs) -> subprocess.CompletedProcess:
     """`subprocess.run` for a command started with `start_new_session`: a timeout ends its whole group.
 
     `subprocess.run` kills only the immediate child, and the account wrapper waits for its Claude
     child instead of replacing itself, so the child would outlive the failure and could still send.
+    A `cancel` event that is set (checked every `CANCEL_POLL_SECONDS`) ends the whole group the same
+    way, and the call returns with the killed status once the group is reaped.
     """
     assert not check, "the caller reads the exit status"
     with subprocess.Popen(argv, **kwargs) as process:
-        try:
-            process.communicate(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            with contextlib.suppress(ProcessLookupError):
-                os.killpg(process.pid, signal.SIGKILL)
-            process.wait()
-            raise
+        deadline = time.monotonic() + timeout
+        while True:
+            if cancel is not None and cancel.is_set():
+                _kill_group(process)
+                break
+            remaining = deadline - time.monotonic()
+            try:
+                process.communicate(
+                    timeout=remaining if cancel is None else min(remaining, CANCEL_POLL_SECONDS))
+                break
+            except subprocess.TimeoutExpired:
+                if deadline - time.monotonic() <= 0:
+                    _kill_group(process)
+                    raise
         return subprocess.CompletedProcess(argv, process.returncode)
+
+
+def _kill_group(process: subprocess.Popen) -> None:
+    with contextlib.suppress(ProcessLookupError):
+        os.killpg(process.pid, signal.SIGKILL)
+    process.wait()
 
 
 def run_launch(launch: Launch, *, platform: str = sys.platform, run=subprocess.run,

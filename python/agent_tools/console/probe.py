@@ -27,7 +27,12 @@ Failures are `ProbeFailed(kind)` with `kind` one of `KINDS`, and `str(error) == 
 Schedule. `due_profiles(profiles, in_flight, last_started, started_at, now)` returns, sorted, each
 profile not in `in_flight` that is either in `last_started` with `now - last_started[p] >=
 PROBE_SECONDS` (600), or not in `last_started` with `now - started_at >= PROBE_FIRST_SECONDS` (30).
-`PROBE_MEMORY` (256) is the number of probe sessions the service remembers.
+`PROBE_MEMORY` (256) is the number of completed probe sessions the service remembers.
+
+Stop. `Probe.stop` (default None, not part of equality) is the service's stop event. When it is
+set, `run_probe` passes it to `run` as `cancel=`, and `manager.run_in_own_group` then kills and
+reaps the probe's whole process group within `manager.CANCEL_POLL_SECONDS` and returns, so a
+console that is closing leaves no probe process behind; the killed status is a failed probe.
 """
 
 from __future__ import annotations
@@ -36,7 +41,8 @@ import os
 import subprocess
 import tempfile
 from collections.abc import Callable, Collection, Iterable, Mapping
-from dataclasses import dataclass
+import threading
+from dataclasses import dataclass, field
 
 from agent_tools.console import manager
 
@@ -55,6 +61,7 @@ _DROPPED_ENV = ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN
 class Probe:
     profile: str
     session_id: str
+    stop: threading.Event | None = field(default=None, compare=False)
 
 
 class ProbeFailed(Exception):
@@ -81,11 +88,12 @@ def run_probe(probe: Probe, *, run=manager.run_in_own_group,
               environ: Mapping[str, str] = os.environ, timeout: float = PROBE_TIMEOUT) -> None:
     argv = probe_command(probe)
     env = probe_environment(probe.profile, environ)
+    cancel = {} if probe.stop is None else {"cancel": probe.stop}
     with tempfile.TemporaryDirectory(prefix="console-probe-") as cwd:
         try:
             result = run(argv, cwd=cwd, env=env, stdin=subprocess.DEVNULL,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                         start_new_session=True, timeout=timeout, check=False)
+                         start_new_session=True, timeout=timeout, check=False, **cancel)
         except FileNotFoundError as error:
             raise ProbeFailed("not_installed") from error
         except subprocess.TimeoutExpired as error:
