@@ -63,7 +63,7 @@ IMPLEMENTER_ROUNDS = ("Work in rounds: put a round's lookups in one message, sen
 
 # #992: the one sentence about the structured reply, the same in both programs.
 REPLY_ALONE = ("Call StructuredOutput alone in its own message, never beside another tool call, only after every other tool "
-               "result has come back: the first call is final and ends the step.")
+               "result has come back: the first accepted call is final and ends the step.")
 
 
 def refused(*errors):
@@ -120,12 +120,31 @@ def untyped(calls):
             if c.get("kind", "agent") == "agent" and c["agentType"] not in PROGRAM_AGENT_TYPES]
 
 
+def named(fixtures):
+    """A copy of scenario replies or patches whose blocking fixture findings name a subject (#992).
+
+    A review finding the program accepts names a file or a failing input. A fixture finding that says neither
+    gets a failing input here; one that spells either key itself, an empty file included, is left as written.
+    """
+    def fix(value):
+        if isinstance(value, list):
+            return [fix(v) for v in value]
+        if not isinstance(value, dict):
+            return value
+        out = {k: fix(v) for k, v in value.items()}
+        if isinstance(out.get("findings"), list):
+            out["findings"] = [dict(f, failing_input="x") if isinstance(f, dict) and f.get("severity") != "minor"
+                               and "file" not in f and "failing_input" not in f else f for f in out["findings"]]
+        return out
+    return fix(fixtures or {})
+
+
 def run_out(args=None, replies=None, patch=None, after=None):
     """The harness's whole output: result, calls, the program's log lines and the call and reply events."""
     node = shutil.which("node")
     if node is None:
         raise AssertionError("node is not on PATH; the deliver-standard scenarios need it")
-    scenario = {"args": ARGS if args is None else args, "replies": replies or {}, "patch": patch or {}, "after": after or {}}
+    scenario = {"args": ARGS if args is None else args, "replies": named(replies), "patch": named(patch), "after": after or {}}
     done = subprocess.run([node, str(HARNESS), str(PROGRAM)], input=json.dumps(scenario),
                           capture_output=True, text=True, timeout=60, check=False)
     if done.returncode != 0:
@@ -2508,8 +2527,8 @@ class NoCommitTaskTest(unittest.TestCase):
     WT = "/r/.wt/w-issue-9-x"
     NO_COMMIT = {"start_head": HEAD, "commit": HEAD, "notes": "posted the comment on the issue", "tests": ["gh issue view -> 1"]}
     NEEDS_CHANGE = {"verdict": "findings",
-                    "findings": [{"severity": "critical", "summary": "the task file requires src/a.py to change"}]}
-    NEEDS_JSON = '[{"severity":"critical","summary":"the task file requires src/a.py to change"}]'
+                    "findings": [{"severity": "critical", "summary": "the task file requires src/a.py to change", "failing_input": "x"}]}
+    NEEDS_JSON = '[{"severity":"critical","summary":"the task file requires src/a.py to change","failing_input":"x"}]'
     TRACKED_ONLY = f"git -C {WT} status --porcelain --untracked-files=no prints nothing"
 
     def go(self, risk="low", replies=None, patch=None, **more):
@@ -2931,9 +2950,9 @@ class IntegrationBesideCodexTest(unittest.TestCase):
     FOUR = {"plan": dict(PLAN, tasks=tasks(4))}
     # The Codex reply is held until the integration review has been called: a run that waits for Codex first never ends.
     HELD = {"final-codex": "final-integration"}
-    CHUNK = {"severity": "important", "summary": "chunk defect"}
-    CODEX = {"severity": "important", "summary": "codex defect"}
-    INTEG = {"severity": "critical", "summary": "seam defect"}
+    CHUNK = {"severity": "important", "summary": "chunk defect", "failing_input": "x"}
+    CODEX = {"severity": "important", "summary": "codex defect", "failing_input": "x"}
+    INTEG = {"severity": "critical", "summary": "seam defect", "failing_input": "x"}
 
     @staticmethod
     def found(*findings, **extra):
@@ -4039,6 +4058,98 @@ class ConflictedSyncOutsideLockTest(unittest.TestCase):
         self.assertIn(f"{self.RELEASE}{MERGE}", prompt(calls, "hold"))
         self.assertNotIn("lock_unreleased", result)
 
+    # #986: the resolver committed the merge MERGE, its tests then caught a defect, and it fixed it in a commit on top: the head M2.
+    FOLLOWED = {"merge_commit": MERGE, "head": M2, "resolved_files": ["a.py"], "markers_checked": True}
+    DESCENDS = {"verdict": "pass", "findings": [], "descends": True}
+
+    def followed(self, review, replies=None, **patch):
+        return run_out(replies=dict({"checks-2": {"state": "passed", "head": self.M2}, "sync-review-1": review}, **(replies or {})),
+                       patch={**self.BEHIND, "sync-1": ABORTED, "sync-resolve-1": self.FOLLOWED, **patch})
+
+    def test_a_resolution_with_commits_on_top_of_its_merge_commit_is_reviewed_over_both_and_ships_at_its_head(self):
+        out = self.followed(self.DESCENDS)
+        result, calls = out["result"], out["calls"]
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(self.shipped(out), ["pr", "sync-1", "land-unlock", "sync-resolve-1", "sync-review-1", "land-push-2",
+                                             "checks-2", "merge", "hold", "close-out"])
+        review = prompt(calls, "sync-review-1")
+        wt = "/r/.wt/w-issue-9-x"
+        for needle in (f"git -C {wt} show --cc {MERGE}", f"git -C {wt} merge-base --is-ancestor {MERGE} {self.M2}",
+                       f"git -C {wt} rev-list --count --min-parents=2 {MERGE}..{self.M2}", f"git -C {wt} diff {MERGE}..{self.M2}",
+                       f"git -C {wt} diff --check {MERGE} {self.M2}", "above all for a test or check they weaken, skip or delete"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, review)
+        self.assertIn("descends", schema_of(calls, "sync-review-1")["required"])
+        # Everything downstream is at the head: the push, the lock, the merge and the release.
+        self.assertIn(f"at the head {self.M2}", prompt(calls, "land-push-2"))
+        self.assertIn(f"forge-claim land acquire --repo owner/repo --branch dev --sha {self.M2} --wait\n", prompt(calls, "checks-2"))
+        self.assertIn(f"--match-head-commit {self.M2}", prompt(calls, "merge"))
+        self.assertIn(f"{self.RELEASE}{self.M2}", prompt(calls, "hold"))
+
+    def test_a_resolution_whose_head_does_not_descend_from_its_merge_commit_stops(self):
+        for name, review in (("unrelated", {"verdict": "pass", "findings": [], "descends": False}),
+                             ("unproven", {"verdict": "pass", "findings": []}),
+                             ("unrelated with findings", dict(FINDING, descends=False))):
+            with self.subTest(review=name):
+                out = self.followed(review)
+                result = out["result"]
+                self.assertEqual(result["stage"], "sync")
+                self.assertEqual(result["reason"], f"sync: the resolution names the head {self.M2} and the merge commit {MERGE}, and the head "
+                                                   "does not descend from it: only a reviewed merge commit lands")
+                names = self.shipped(out)
+                for gone in ("fix-sync-1", "land-push-2", "checks-2", "merge"):
+                    self.assertNotIn(gone, names)
+        # A head that is the merge commit asks for no proof.
+        out = self.ship(**{"sync-resolve-1": {"merge_commit": MERGE, "head": MERGE}})
+        self.assertEqual(out["result"]["stage"], "done")
+        self.assertNotIn("descends", prompt(out["calls"], "sync-review-1"))
+
+    def test_a_clean_sync_whose_head_is_not_its_merge_commit_is_reviewed_too(self):
+        """A sync step that committed on top of its clean merge is asked for its head, and those commits are reviewed or refused."""
+        clean = {**self.BEHIND, "sync-1": {"conflicted": False, "merge_commit": MERGE, "head": self.M2}}
+        out = run_out(replies={"checks-2": {"state": "passed", "head": self.M2}, "sync-review-1": self.DESCENDS}, patch=clean)
+        self.assertEqual(out["result"]["stage"], "done")
+        self.assertEqual(self.shipped(out), ["pr", "sync-1", "sync-review-1", "land-push-2", "checks-2", "merge", "hold", "close-out"])
+        self.assertIn(f"diff {MERGE}..{self.M2}", prompt(out["calls"], "sync-review-1"))
+        self.assertIn(f"--match-head-commit {self.M2}", prompt(out["calls"], "merge"))
+        self.assertIn("head (the full sha of HEAD after the merge: the merge commit itself, unless you committed on top of it)",
+                      prompt(out["calls"], "sync-1"))
+        out = run_out(replies={"sync-review-1": {"verdict": "pass", "findings": [], "descends": False}}, patch=clean)
+        self.assertEqual(out["result"]["stage"], "sync")
+        self.assertNotIn("merge", self.shipped(out))
+        # A clean merge whose head is the merge commit runs no review, as ever.
+        out = run_out(replies={"checks-2": {"state": "passed", "head": MERGE}},
+                      patch={**self.BEHIND, "sync-1": {"conflicted": False, "merge_commit": MERGE, "head": MERGE}})
+        self.assertEqual(out["result"]["stage"], "done")
+        self.assertNotIn("sync-review-1", self.shipped(out))
+
+    def test_the_fix_wave_of_a_resolution_with_follow_up_commits_starts_at_its_head_and_names_the_range(self):
+        fixed = "9" * 40
+        out = self.followed(dict(FINDING, descends=True), replies={"checks-2": {"state": "passed", "head": fixed}},
+                            **{"fix-sync-1": {"start_head": self.M2, "commit": fixed}})
+        calls = out["calls"]
+        self.assertEqual(out["result"]["stage"], "done")
+        rng = f"merge commit {MERGE} (git -C /r/.wt/w-issue-9-x show --cc {MERGE}) and the commits made on top of it up to the head {self.M2}"
+        self.assertIn(rng, prompt(calls, "fix-sync-1"))
+        self.assertIn(f"diff {self.M2}..{fixed}", prompt(calls, "fix-sync-review-1"))
+        self.assertIn(f"--match-head-commit {fixed}", prompt(calls, "merge"))
+        # A fix that started at the merge commit, beneath the follow-up commits, is not a fix of the reviewed head.
+        out = self.followed(dict(FINDING, descends=True), **{"fix-sync-1": {"start_head": MERGE, "commit": fixed}})
+        self.assertEqual(out["result"]["stage"], "sync-fix")
+
+    def test_the_resolver_runs_its_tests_before_it_commits_the_merge_and_never_amends_it(self):
+        calls = self.ship()["calls"]
+        resolve = prompt(calls, "sync-resolve-1")
+        before = "still before committing, run in full every test file among or covering the files you resolved by hand"
+        self.assertLess(resolve.index("diff --check HEAD"), resolve.index(before))
+        self.assertLess(resolve.index(before), resolve.index("commit the merge only once they pass"))
+        self.assertNotIn(", commit the merge, and run in full", resolve)
+        for needle in ("never amend or redo the merge: fix it in a commit on top of it",
+                       "head (the full sha of HEAD: the merge commit, or the last commit you made on top of it)"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, resolve)
+        self.assertIn("head", schema_of(calls, "sync-resolve-1")["properties"])
+
     def test_a_clean_merge_keeps_the_lock(self):
         result, calls = run(replies={"checks-2": {"state": "passed", "head": MERGE}},
                             patch=dict(self.BEHIND, **{"sync-1": {"merge_commit": MERGE}}))
@@ -4496,6 +4607,61 @@ class ShipFixWaveTest(unittest.TestCase):
         self.assertEqual(result["cont"]["checks_fixes"], 1)
         names = labels(calls)
         self.assertEqual(names[names.index("pr"):], ["pr", "fix-ci", "checks-2", "land-unlock"])
+
+    # #986: the gate failed only because another check flaked; that check's rerun passed and the gate, in its own run, shows its old failure.
+    STALE_GATE = {"state": "failed", "head": SHA, "failing": ["required-checks"], "stale": [43286872194]}
+    STALE_LEAD = "This poll follows a rerun of failed jobs at this head."
+
+    def test_a_gate_left_stale_by_a_rerun_is_rerun_by_the_poll_and_does_not_count_as_red(self):
+        out = run_out(replies={"checks-2": self.STALE_GATE, "checks-3": {"state": "passed", "head": SHA, "required": ["ci-tests"]}},
+                      patch={"pr": {"checks": RED}, "fix-ci": self.RERAN})
+        result, calls = out["result"], out["calls"]
+        self.assertEqual(result["stage"], "done")
+        names = labels(calls)
+        self.assertEqual(names[names.index("pr"):], ["pr", "fix-ci", "checks-2", "checks-3", "merge", "hold", "close-out"])
+        self.assertIn("checks-2 reran a stale gate run (43286872194); polling once more", out["logs"])
+        asked = prompt(calls, "checks-2")
+        for needle in (self.STALE_LEAD, "a gate or aggregate job", "gh run view <run-id> --repo owner/repo --json updatedAt",
+                       "Only when every failing check is stale",
+                       "gh run rerun <run-id> --repo owner/repo --failed", "stale: the run ids you reran"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, asked)
+        self.assertIn("stale", schema_of(calls, "checks-2")["properties"])
+        self.assertNotIn(self.STALE_LEAD, prompt(calls, "checks-3"))
+        self.assertNotIn("stale", schema_of(calls, "checks-3")["properties"])
+        self.assertNotIn(self.STALE_LEAD, prompt(calls, "pr"))
+
+    def test_a_check_still_red_after_the_stale_rerun_stops_as_the_ci_failure(self):
+        for name, third in (("red", dict(RED, failing=["required-checks"])), ("stale again", self.STALE_GATE)):
+            with self.subTest(third=name):
+                result, calls = run(replies={"checks-2": self.STALE_GATE, "checks-3": third},
+                                    patch={"pr": {"checks": RED}, "fix-ci": self.RERAN})
+                self.assertEqual((result["stage"], result["failing"]), ("checks", ["required-checks"]))
+                names = labels(calls)
+                self.assertEqual(names[names.index("pr"):], ["pr", "fix-ci", "checks-2", "checks-3", "land-unlock"])
+
+    def test_stale_is_read_only_from_the_poll_that_follows_a_rerun(self):
+        # A first poll that names stale runs is a red poll like any other: it spends the one fix, and the next red poll stops.
+        result, calls = run(replies={"checks-2": RED}, patch={"pr": {"checks": self.STALE_GATE}, "fix-ci": self.RERAN})
+        self.assertEqual(result["stage"], "checks")
+        names = labels(calls)
+        self.assertEqual(names[names.index("pr"):], ["pr", "fix-ci", "checks-2", "land-unlock"])
+        # The poll after a code fix moved the head is not asked either.
+        result, calls = self.red_then(dict(self.STALE_GATE, head=FIX))
+        self.assertEqual(result["stage"], "checks")
+        self.assertNotIn(self.STALE_LEAD, prompt(calls, "checks-2"))
+        self.assertNotIn("checks-3", labels(calls))
+
+    def test_the_ci_fix_prompt_reruns_every_failed_run_of_the_head_a_gate_included(self):
+        _, calls = run(replies={"checks-2": {"state": "passed", "head": SHA}},
+                       patch={"setup": {"unset_env": ["GITHUB_TOKEN"]}, "pr": {"checks": RED}, "fix-ci": self.RERAN})
+        text = prompt(calls, "fix-ci")
+        for needle in (f"unset GITHUB_TOKEN && gh run list --repo owner/repo --commit {SHA} --json databaseId,workflowName,conclusion",
+                       "keep the newest run of each workflowName (the highest databaseId; never an older run that one superseded)",
+                       "rerun each of those whose conclusion is failure, cancelled or timed_out, not only the run of the check that broke first",
+                       "a gate or aggregate check that failed only because another check failed is rerun too, with the same command"):
+            with self.subTest(needle=needle):
+                self.assertIn(needle, text)
 
     def test_the_ci_fix_prompt_tells_a_causeless_failure_to_rerun(self):
         _, calls = run(replies={"checks-2": {"state": "passed", "head": SHA}},
@@ -5234,7 +5400,7 @@ class ThirdFixWaveTest(unittest.TestCase):
     def test_a_stop_after_the_first_wave_carries_its_findings(self):
         new = {"verdict": "findings", "findings": [{"severity": "critical", "summary": "leak", "relation": "new"}]}
         result, _ = run(replies={"final-1": self.FIRST, "fix-wave-review": new})
-        self.assertEqual(result["cont"]["fix_findings"], [{"severity": "critical", "summary": "leak"}])
+        self.assertEqual(result["cont"]["fix_findings"], [{"severity": "critical", "summary": "leak", "failing_input": "x"}])
 
     def test_a_lost_rereview_and_a_clean_delivery_carry_nothing(self):
         lost, _ = run(replies={"final-1": self.FIRST, "fix-wave-review": None})
@@ -7854,7 +8020,7 @@ class AmendTest(unittest.TestCase):
 
 INCOMPLETE = {"verdict": "incomplete", "findings": []}
 # What a reply sent beside a pending lookup held (#992): a blocking finding that names neither a file nor a failing input.
-PLACEHOLDER = {"verdict": "findings", "findings": [{"severity": "important", "summary": "Placeholder emitted to satisfy the schema"}]}
+PLACEHOLDER = {"verdict": "findings", "findings": [{"severity": "important", "file": "", "summary": "Placeholder emitted to satisfy the schema"}]}
 REAL = {"verdict": "findings", "findings": [{"severity": "important", "file": "src/a.py", "summary": "off by one"}]}
 NO_REVIEW = ": the reply is no review ("
 LOST_REVIEW = ": the second reply is no review either; the review is lost"
@@ -7929,12 +8095,16 @@ class StructuredReplyTest(unittest.TestCase):
                 result, names = out["result"], labels(out["calls"])
                 # The stop a reviewer that returned nothing takes, with no fix round spent and no dead agent named.
                 lost, _ = run(replies={"review-1": None})
-                self.assertEqual((result["stage"], result["reason"]), (lost["stage"], lost["reason"]))
-                self.assertEqual(result["reason"], "task-review: task 1 the reviewer returned nothing")
+                self.assertEqual(result["stage"], lost["stage"])
                 self.assertIsNone(result["review"])
                 self.assertEqual(names[-2:], ["review-1", "review-1-again"])
+                # A lost review and a dead reviewer are told apart: by the list that names the step, and by the reason.
+                self.assertEqual(result["reason"], "task-review: task 1 the reviewer answered twice with no usable review")
+                self.assertEqual(result["lost_reviews"], ["review-1"])
                 self.assertNotIn("dead_agents", result)
+                self.assertEqual(lost["reason"], "task-review: task 1 the reviewer returned nothing")
                 self.assertEqual(lost["dead_agents"], ["review-1"])
+                self.assertNotIn("lost_reviews", lost)
                 self.assertIn("review-1" + LOST_REVIEW, out["logs"])
 
     def test_an_unusable_rereview_reruns_too_and_the_fix_round_it_follows_is_the_only_one(self):
@@ -7972,72 +8142,112 @@ class StructuredReplyTest(unittest.TestCase):
                     self.assertEqual(names[names.index(label):names.index(label) + 2], [label, label + "-again"])
                     self.assertEqual(names.count(label + "-again"), 1)
 
-    def test_a_lost_sync_review_stops_as_a_sync_review_that_returned_nothing_and_spends_no_fix(self):
+    def test_a_lost_sync_review_stops_at_the_sync_review_and_spends_no_fix(self):
         result, calls = run(patch=self.SYNC, replies={"sync-review-1": PLACEHOLDER, "sync-review-1-again": PLACEHOLDER})
         lost, _ = run(patch=self.SYNC, replies={"sync-review-1": None})
-        self.assertEqual((result["stage"], result["reason"]), (lost["stage"], lost["reason"]))
-        self.assertEqual(result["stage"], "sync-review")
+        self.assertEqual((result["stage"], lost["stage"]), ("sync-review", "sync-review"))
+        self.assertEqual((result["reason"], lost["reason"]), ("sync-review: the reviewer answered twice with no usable review", "sync-review: the reviewer returned nothing"))
         self.assertNotIn("fix-sync-1", labels(calls))
         self.assertNotIn("sync_fixes", result["cont"])
-        self.assertNotIn("dead_agents", result)
+        self.assertEqual((result["lost_reviews"], result.get("dead_agents")), (["sync-review-1"], None))
+        self.assertEqual((lost.get("lost_reviews"), lost["dead_agents"]), (None, ["sync-review-1"]))
 
-    def test_a_fileless_review_keeps_its_fileless_finding_and_still_reruns_an_incomplete_verdict(self):
-        bare = {"verdict": "findings", "findings": [{"severity": "important", "summary": "AC1 is not shown met"}]}
+    def test_every_review_holds_a_blocking_finding_to_its_subject(self):
+        # A finding that names neither a file nor a failing input (an empty file: named() leaves it as written).
+        bare = {"verdict": "findings", "findings": [{"severity": "important", "file": "", "summary": "AC1 is not shown met"}]}
         ruled = dict(bare, findings=[dict(bare["findings"][0], rule="R2")])
-        no_commit = {"impl-1": {"start_head": SHA, "commit": SHA}}
-        # label: (scenario, the step a finding of it reaches)
+        # label: (scenario, the step a finding of it would reach)
         sites = {
             "plan-review": ({}, "plan-revise"),
-            "plan-rules-review": ({"replies": {"plan-review": ruled}}, "plan-rules-revise"),
-            "review-1": ({"patch": no_commit}, "fix-1-1"),
+            "plan-rules-review": ({"replies": {"plan-review": ruled}}, None),
             "final-1": ({}, "fix-wave"),
             "final-integration": ({"replies": dict(self.FOUR)}, "fix-wave"),
-            "fix-wave-review": ({"replies": {"final-1": bare}}, None),
+            "fix-wave-review": ({"replies": {"final-1": REAL}}, None),
             "direct-review": ({"args": DIRECT}, "direct-fix"),
-            "direct-rereview": ({"args": DIRECT, "replies": {"direct-review": bare}}, None),
+            "direct-rereview": ({"args": DIRECT, "replies": {"direct-review": REAL}}, None),
         }
         for label, (scenario, reached) in sites.items():
-            with self.subTest(label=label, reply="a finding with no file"):
-                finding = ruled if label == "plan-rules-review" else bare
-                out = run_out(scenario.get("args"), dict(scenario.get("replies", {}), **{label: finding}), scenario.get("patch"))
-                names = labels(out["calls"])
-                self.assertIn(label, names)
-                self.assertFalse([n for n in names if n.endswith("-again")])
-                self.assertFalse([l for l in out["logs"] if NO_REVIEW in l])
-                if reached:
-                    self.assertIn(reached, names)
-                else:
-                    self.assertNotEqual(out["result"]["stage"], "done")
-            with self.subTest(label=label, reply="incomplete"):
-                out = run_out(scenario.get("args"), dict(scenario.get("replies", {}), **{label: INCOMPLETE}), scenario.get("patch"))
-                names = labels(out["calls"])
-                self.assertEqual(names.count(label + "-again"), 1)
-                if reached:
-                    self.assertNotIn(reached, names)
+            for name, reply in (("placeholder", bare), ("incomplete", INCOMPLETE)):
+                with self.subTest(label=label, reply=name):
+                    out = run_out(scenario.get("args"), dict(scenario.get("replies", {}), **{label: reply}), scenario.get("patch"))
+                    names = labels(out["calls"])
+                    self.assertEqual(names.count(label + "-again"), 1)
+                    self.assertEqual(len([l for l in out["logs"] if l.startswith(label + NO_REVIEW)]), 1)
+                    if reached:
+                        self.assertNotIn(reached, names)
 
-    def test_a_task_that_commits_holds_its_reviews_to_a_file_or_a_failing_input(self):
-        # The same finding that a no-commit task's review may raise is a placeholder on a diff review.
-        bare = {"verdict": "findings", "findings": [{"severity": "important", "summary": "the comment was not posted"}]}
+    def test_a_plan_review_finding_that_names_its_rule_or_criterion_names_its_subject(self):
+        # The two plan reviews only: a rule finding is about a criterion, and the plan's own rule check reports ac and rule alone.
+        for key, value in (("rule", "R2"), ("ac", "AC1")):
+            ruled = {"verdict": "findings", "findings": [{"severity": "important", "file": "", "summary": "AC1 breaks a rule", "rule": "R2", key: value}]}
+            for label, replies in (("plan-review", {}), ("plan-rules-review", {"plan-review": ruled})):
+                with self.subTest(label=label, key=key):
+                    out = run_out(replies=dict(replies, **{label: ruled}))
+                    self.assertFalse([n for n in labels(out["calls"]) if n.endswith("-again")])
+                    self.assertFalse([l for l in out["logs"] if NO_REVIEW in l])
+        # Anywhere else a rule names nothing the fix wave can act on.
+        ruled = {"verdict": "findings", "findings": [{"severity": "important", "file": "", "summary": "AC1 breaks a rule", "rule": "R2"}]}
+        _, calls = run(replies={"final-1": ruled})
+        self.assertIn("final-1-again", labels(calls))
+
+    def test_only_a_task_that_ended_with_no_commit_may_raise_a_finding_with_no_subject(self):
+        # Its outputs may be no file (a posted comment); the same finding on a diff review is a placeholder.
+        bare = {"verdict": "findings", "findings": [{"severity": "important", "file": "", "summary": "the comment was not posted"}]}
+        no_commit = {"impl-1": {"start_head": SHA, "commit": SHA}}
         _, calls = run(replies={"review-1": bare})
         self.assertIn("review-1-again", labels(calls))
-        _, calls = run(replies={"review-1": bare}, patch={"impl-1": {"start_head": SHA, "commit": SHA}})
-        self.assertNotIn("review-1-again", labels(calls))
-        self.assertIn("fix-1-1", labels(calls))
+        out = run_out(replies={"review-1": bare}, patch=no_commit)
+        self.assertFalse([n for n in labels(out["calls"]) if n.endswith("-again")])
+        self.assertFalse([l for l in out["logs"] if NO_REVIEW in l])
+        self.assertIn("fix-1-1", labels(out["calls"]))
+        # Its verdict is still read: an unfinished review of it runs once more.
+        _, calls = run(replies={"review-1": INCOMPLETE}, patch=no_commit)
+        self.assertEqual(labels(calls).count("review-1-again"), 1)
+        self.assertNotIn("fix-1-1", labels(calls))
+
+    def test_the_fixture_helper_names_a_failing_input_only_where_a_fixture_names_no_subject(self):
+        given = {"review-1": {"verdict": "findings", "findings": [
+            {"severity": "important", "summary": "a"}, {"severity": "minor", "summary": "b"}, {"severity": "critical", "file": "", "summary": "c"},
+            {"severity": "critical", "file": "x.py", "summary": "d"}, {"severity": "critical", "failing_input": "y", "summary": "e"}]}, "plan": None, "verify": [PASS_REPLY, "throw"]}
+        got = named(given)
+        self.assertEqual(got["review-1"]["findings"][0], {"severity": "important", "summary": "a", "failing_input": "x"})
+        self.assertEqual(got["review-1"]["findings"][1:], given["review-1"]["findings"][1:])
+        self.assertEqual((got["plan"], got["verify"]), (None, [PASS_REPLY, "throw"]))
+        self.assertNotIn("failing_input", given["review-1"]["findings"][0])
 
     def test_a_lost_integration_review_stops_the_final_review_and_is_no_dead_agent(self):
         result, calls = run(replies=dict(self.FOUR, **{"final-integration": INCOMPLETE, "final-integration-again": INCOMPLETE}))
-        self.assertEqual((result["stage"], result["details"]), ("final-review", "the integration reviewer returned nothing"))
+        self.assertEqual((result["stage"], result["details"]), ("final-review", "the integration reviewer answered twice with no usable review"))
+        self.assertEqual(result["reason"], "final-review: the integration reviewer answered twice with no usable review")
+        self.assertEqual(result["lost_reviews"], ["final-integration"])
         self.assertNotIn("dead_agents", result)
         self.assertNotIn("fix-wave", labels(calls))
         dead, _ = run(replies=dict(self.FOUR, **{"final-integration": None}))
-        self.assertEqual(dead["dead_agents"], ["final-integration"])
+        self.assertEqual((dead["details"], dead["dead_agents"]), ("the integration reviewer returned nothing", ["final-integration"]))
+        self.assertNotIn("lost_reviews", dead)
 
     def test_a_lost_final_review_spends_no_fix_wave(self):
         result, calls = run(replies={"final-1": INCOMPLETE, "final-1-again": INCOMPLETE})
-        self.assertEqual((result["stage"], result["details"]), ("final-review", "a final reviewer returned nothing"))
+        self.assertEqual((result["stage"], result["details"]), ("final-review", "a final reviewer answered twice with no usable review"))
         self.assertEqual(result["cont"]["fix_waves"], 0)
         self.assertNotIn("fix-wave", labels(calls))
+        self.assertEqual(result["lost_reviews"], ["final-1"])
         self.assertNotIn("dead_agents", result)
+        dead, _ = run(replies={"final-1": None})
+        self.assertEqual(dead["details"], "a final reviewer returned nothing")
+
+    def test_a_lost_plan_review_says_so_and_a_later_stop_still_names_it(self):
+        result, _ = run(replies={"plan-review": INCOMPLETE, "plan-review-again": INCOMPLETE})
+        self.assertEqual((result["stage"], result["reason"]), ("plan-review", "plan-review: the plan reviewer answered twice with no usable review"))
+        self.assertEqual(result["lost_reviews"], ["plan-review"])
+        dead, _ = run(replies={"plan-review": None})
+        self.assertEqual(dead["reason"], "plan-review: the plan reviewer returned nothing")
+        ruled = {"verdict": "findings", "findings": [{"severity": "important", "summary": "AC1 breaks a rule", "rule": "R2"}]}
+        result, _ = run(replies={"plan-review": ruled, "plan-rules-review": INCOMPLETE, "plan-rules-review-again": INCOMPLETE})
+        self.assertEqual((result["stage"], result["details"]), ("plan-review", "the rules re-reviewer answered twice with no usable review"))
+        self.assertEqual(result["lost_reviews"], ["plan-rules-review"])
+        dead, _ = run(replies={"plan-review": ruled, "plan-rules-review": None})
+        self.assertEqual(dead["details"], "the rules re-reviewer returned nothing")
 
     def test_the_findings_schema_names_the_incomplete_verdict_and_what_a_blocking_finding_carries(self):
         _, calls = run(replies=dict(self.FOUR, **{"review-1": REAL, "final-1": REAL}))
@@ -8052,15 +8262,20 @@ class StructuredReplyTest(unittest.TestCase):
 
     def test_every_review_reply_is_read_through_the_one_wrapper(self):
         source = PROGRAM.read_text(encoding="utf-8")
-        schemas = r"schema: (?:asked \? WS_REVIEW : FINDINGS|withChanged\(FINDINGS\)|FINDINGS|PLAN_REVIEW|GRADED_FINDINGS|DIRECT_FINDINGS) \}"
+        schemas = (r"schema: (?:asked \? WS_REVIEW : FINDINGS|withChanged\(FINDINGS\)|SYNC_REVIEW_SCHEMA\(followup\)|FINDINGS|PLAN_REVIEW"
+                   r"|GRADED_FINDINGS|DIRECT_FINDINGS) \}")
         sites = [m.end() for m in re.finditer(schemas, source)]
         self.assertEqual(len(sites), 15)
-        # The options object of a review call closes the readReview() call, or its named exemption does.
-        for end in sites:
-            tail = source[end:end + 40]
-            self.assertTrue(tail.startswith((")", ", { fileless })", ", { fileless: true })", ", { fileless: true, optional: true })")), tail)
+        # The options object of a review call closes the readReview() call, or one of its three named options does.
+        tails = [source[end:source.index(")", end) + 1] for end in sites]
+        self.assertEqual(sorted(set(tails)), sorted([")", ", { fileless })", ", { ruled: true })", ", { optional: true })"]))
+        self.assertEqual((tails.count(", { fileless })"), tails.count(", { ruled: true })"), tails.count(", { optional: true })")), (4, 2, 1))
         self.assertEqual(len(re.findall(r"\breadReview\((?!\))", source)), 15)
-        self.assertEqual(len(re.findall(r"\{ fileless: true", source)), 8)
+        # No schema that carries findings is built anywhere else: each is one of the named ones above, FINDINGS spread into it.
+        self.assertEqual(len(re.findall(r"\.\.\.(?:GRADED_)?FINDINGS,", source)), 5)
+        self.assertEqual(source.count(", { fileless })"), 4)
+        self.assertEqual(source.count("const fileless = !diffReviewed\n"), 1)
+        self.assertEqual(source.count("{ ruled: true }"), 2)
 
     def test_an_implementer_reply_names_full_shas_or_none(self):
         red = {"head": SHA, "clean": True, "results": [{"id": "build", "status": "fail", "summary": "boom"}]}

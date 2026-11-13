@@ -41,7 +41,8 @@ export const meta = {
 // is already merged, the re-adopt goes straight to close-out; that PR is the delivery's own only when it is cont.pr or carries a commit of cont.done (#752). A resume skips the final review when cont.final_reviewed names the head it
 // passed at and the head is unchanged or only gained integration-branch merges with no unreviewed conflict resolution; a stop between a
 // sync merge and its acceptance drops the marker. A result also carries dead_agents,
-// the labels of agents that returned nothing or threw, when any did. A red check, and a sync-review
+// the labels of agents that returned nothing or threw, when any did, and lost_reviews, the labels of reviews that answered twice with
+// no usable review (#992). A red check, and a sync-review
 // finding, each get one fix wave per delivery (an implementer with a regression test, then a fresh reviewer); a second one stops with cont.
 //
 // LAND: ship opens the PR at the verified head, takes the cross-host land lock of the integration branch with --wait
@@ -108,7 +109,7 @@ Hard rules for this step (they override anything else you remember):
 // review once returned a placeholder finding that way and it spent the fix round. One sentence, the same line in deliver-batch.js, added
 // last in call() so no step can miss it. It is about the reply alone, so it stands with the ROUNDS sentences: those put a round's
 // lookups in one message, this keeps the reply out of every round.
-const REPLY_ALONE = 'Call StructuredOutput alone in its own message, never beside another tool call, only after every other tool result has come back: the first call is final and ends the step.'
+const REPLY_ALONE = 'Call StructuredOutput alone in its own message, never beside another tool call, only after every other tool result has come back: the first accepted call is final and ends the step.'
 
 const SEV = { type: 'string', enum: ['critical', 'important', 'minor'] }
 // #992: incomplete is the verdict of a review that could not finish; readReview() below reads every reply of this schema.
@@ -141,6 +142,8 @@ const IMPL = {
   properties: { status: { type: 'string', enum: ['done', 'blocked'] }, start_head: FULL_SHA, commit: FULL_SHA, tests: { type: 'array', items: { type: 'string' } }, mutation_checked: { type: 'boolean' }, notes: { type: 'string' }, blocked_on: { type: 'integer' } },
   required: ['status', 'notes'],
 }
+// #986, #992: the sync review's schema; with followup it also returns descends. Named so that every FINDINGS schema of the program is one readReview() reads.
+const SYNC_REVIEW_SCHEMA = followup => (followup ? { ...FINDINGS, properties: { ...FINDINGS.properties, descends: { type: 'boolean' } }, required: [...FINDINGS.required, 'descends'] } : FINDINGS)
 const IMPL_RETURN = 'Return start_head (git rev-parse HEAD before you change anything) and commit (the full sha of HEAD after your last commit).'
 // A wave that may commit on several branches reports the issue worktree's commits only in start_head and commit.
 const IMPL_RETURN_AT = w => `Return start_head (git -C ${w} rev-parse HEAD before you change anything) and commit (the full sha of git -C ${w} rev-parse HEAD after your last commit): both name the issue worktree ${w}, never a declared branch's commit (those go in branch_heads); when you commit nothing there, commit equals start_head.`
@@ -305,7 +308,7 @@ const stopReason = (stage, x) => {
   const reviews = ['review', 'rv'].filter(k => own(x, k)).map(k => x[k])
   const found = Array.isArray(x.rules) && x.rules.length ? x.rules : Array.isArray(x.findings) ? x.findings : reviews.flatMap(r => (isEntry(r) && Array.isArray(r.findings) ? findingsOf(r) : []))
   if (found.length) say(`${task}${found.length} finding(s)${isEntry(found[0]) && present(found[0].summary) ? `: ${found[0].summary}` : ''}`)
-  else if (reviews.some(r => !r)) say(`${task}the reviewer returned nothing`)
+  else if (reviews.some(r => !r)) say(`${task}the reviewer ${silence()}`)
   if (Array.isArray(x.problems)) say(x.problems.filter(isEntry).map(q => [q.id, q.summary].filter(present).join(': ')).join('; '))
   names('failing', 'failing checks')
   names('pending', 'pending checks')
@@ -370,6 +373,10 @@ On refusal return ok=false, reason contract, and in details the resolver's error
 - verification: for each id in bindings.workflow.verification its bindings.commands argv, its cwd relative to project.root (. for the root), and any bindings.workflow.verification_conditions entry (when_changed globs, skip_reason), and pre_commit: true on an entry whose verification_conditions entry has pre_commit true (omit pre_commit otherwise).`
 // Labels of agents that returned nothing or threw: deliver-batch's breaker reads them (#636).
 const DEAD = []
+// #992: labels of reviews that answered twice with no usable review (readReview). Not dead agents: the breaker does not count them.
+const LOST = []
+// What a review that gave the program nothing did: with no label, any review of this run.
+const silence = (...labels) => ((labels.length ? labels.some(l => LOST.includes(l)) : LOST.length) ? 'answered twice with no usable review' : 'returned nothing')
 // #987: every reviewer and implementer step opens with its one-sentence turn procedure. Measured over four runs, both kinds sent one
 // tool call in 80 to 100% of their tool messages at up to 183k of context; the planner, under the same wording first in its prompt, 27%.
 // Added in call(), not per prompt, so no site of either kind can miss it. reviewer-lite is left out: a median of three turns under 20k.
@@ -392,28 +399,32 @@ const call = async (prompt, opts, optional) => {
   if (reply == null && !optional) DEAD.push(opts && opts.label)
   return reply
 }
-const deadOf = () => (DEAD.length ? { dead_agents: DEAD.slice() } : {})
+const deadOf = () => ({ ...(DEAD.length ? { dead_agents: DEAD.slice() } : {}), ...(LOST.length ? { lost_reviews: LOST.slice() } : {}) })
 // #992: every FINDINGS reply is read through readReview(). A reply whose verdict is incomplete, or that carries a blocking finding naming
 // neither a file nor a failing input (what a reply sent beside a pending lookup holds), is a lost review, never a finding: the same step
-// runs once more as <label>-again, and a second such reply is returned as null, the reply of a reviewer that returned nothing. So it
-// reaches no findingsOf and spends no fix round. The step did answer, so it is no dead agent: DEAD is left alone, and LOST names it.
-// fileless: a review whose findings may rightly name no file (a plan, a rule, a criterion, an output that is no file, a finding relayed
-// from Codex or carried from an earlier review of that kind) is held to its verdict only.
+// runs once more as <label>-again, and a second such reply is returned as null. So it reaches no findingsOf and spends no fix round.
+// The step did answer, so it is no dead agent: DEAD is left alone, LOST names it, a stop carries LOST as lost_reviews beside
+// dead_agents, and its reason says the review answered twice with no usable review.
+// Every review is held to that. Measured over 35 runs, all 390 blocking findings of the final, fix-wave, plan and direct reviews named
+// a file or a failing input. Two named exceptions: ruled, the two plan reviews, where a finding that names its criterion (ac) or the
+// rule it breaks (rule) names its subject; and fileless, the reviews of a task that first ended with no commit, judged on outputs
+// that may be no file, which are held to the verdict only.
 const AGAIN = '-again'
-const LOST = []
-const unusable = (r, fileless) => {
+const unusable = (r, { fileless = false, ruled = false } = {}) => {
   if (!r) return ''
   if (r.verdict === 'incomplete') return 'its verdict was incomplete'
   const blocking = (Array.isArray(r.findings) ? r.findings : []).filter(f => f && f.severity !== 'minor')
-  return !fileless && blocking.some(f => !present(f.file) && !present(f.failing_input)) ? 'a blocking finding named neither a file nor a failing input' : ''
+  const named = f => present(f.file) || present(f.failing_input) || (ruled && (present(f.ac) || present(f.rule)))
+  return !fileless && blocking.some(f => !named(f)) ? 'a blocking finding named neither a file nor a failing input' : ''
 }
-const readReview = async (prompt, opts, { fileless = false, optional = false } = {}) => {
+const readReview = async (prompt, opts, { fileless = false, ruled = false, optional = false } = {}) => {
+  const lax = { fileless, ruled }
   const first = await call(prompt, opts, optional)
-  const why = unusable(first, fileless)
+  const why = unusable(first, lax)
   if (!why) return first
   log(`${opts.label}: the reply is no review (${why}); the step runs once more`)
   const again = await call(`${prompt}\nAn earlier reply to this step was discarded: ${why}. Finish the review before you reply.`, { ...opts, label: opts.label + AGAIN }, optional)
-  if (!unusable(again, fileless)) return again
+  if (!unusable(again, lax)) return again
   log(`${opts.label}: the second reply is no review either; the review is lost`)
   LOST.push(opts.label)
   return null
@@ -948,8 +959,25 @@ const COMMIT_SCOPE = 'Before committing, read git status in the worktree you com
 // such a line stands. Removal is limited to those lines in hand-resolved files; markers_checked says both checks ran, whatever they reported.
 const MARKER_CHECK = (wt, int) => `run git -C ${wt} diff --check HEAD and git -C ${wt} diff --check origin/${int} before committing and remove each leftover conflict marker both report (same file and line) in a file you resolved by hand; every other line they report is content and stays`
 const MARKERS_UNCHECKED = ' The merge was not checked for leftover conflict markers: report any left in the files it changed.'
-const SYNC_FIX = (wt, mc, findings) => `A reviewer found defects in the conflict resolution of merge commit ${mc} (git -C ${wt} show --cc ${mc}): ${JSON.stringify(findings)}. Fix each real defect on top of the merge with a regression test (never redo or rewrite the merge), then commit; if a finding is wrong, commit nothing for it and say so with evidence in notes.`
-const SYNC_REREVIEW = (wt, mc, findings, fix, moved) => `Re-review these conflict-resolution findings against ${moved ? `the fix (git -C ${wt} diff ${fix.start_head}..${fix.commit}) made on top of` : 'the rebuttal (no new commit) of'} merge commit ${mc}: ${JSON.stringify(findings)}; notes: ${fix.notes}. ${moved ? '' : `Check each rebuttal against the code yourself (git -C ${wt} show --cc ${mc}); a finding the evidence does not refute is still unresolved. `}Report any still unresolved and any new Important or Critical defect. Do not edit anything.`
+const SYNC_FIX = (wt, mc, findings, after = '') => `A reviewer found defects in the conflict resolution of merge commit ${mc} (git -C ${wt} show --cc ${mc})${after}: ${JSON.stringify(findings)}. Fix each real defect on top of ${after ? 'that head' : 'the merge'} with a regression test (never redo or rewrite the merge), then commit; if a finding is wrong, commit nothing for it and say so with evidence in notes.`
+const SYNC_REREVIEW = (wt, mc, findings, fix, moved, after = '') => `Re-review these conflict-resolution findings against ${moved ? `the fix (git -C ${wt} diff ${fix.start_head}..${fix.commit}) made on top of` : 'the rebuttal (no new commit) of'} merge commit ${mc}${after}: ${JSON.stringify(findings)}; notes: ${fix.notes}. ${moved ? '' : `Check each rebuttal against the code yourself (git -C ${wt} show --cc ${mc}); a finding the evidence does not refute is still unresolved. `}Report any still unresolved and any new Important or Critical defect. Do not edit anything.`
+// #986: a resolution may carry plain commits on top of its merge commit (a fix its tests asked for once the merge was committed). The
+// program cannot read git, so the sync review proves the ancestry itself (DESCENDS) and reads the merge and the range from it to the head;
+// the fix round and the re-review name the same range (SYNC_AFTER). A head that does not descend from its merge commit never lands.
+// The same text in both programs, like the wording above.
+const SYNC_AFTER = (wt, mc, head) => ` and the commits made on top of it up to the head ${head} (git -C ${wt} diff ${mc}..${head})`
+const DESCENDS = (wt, mc, head) => ` The resolution's head ${head} is not its merge commit: first run git -C ${wt} merge-base --is-ancestor ${mc} ${head} and git -C ${wt} rev-list --count --min-parents=2 ${mc}..${head}, and return descends true only when the first exits 0 and the second prints 0 (the head is the merge commit with plain commits on top of it), else descends false and no finding. When it descends, review those commits as well (git -C ${wt} diff ${mc}..${head}), above all for a test or check they weaken, skip or delete, and report any conflict marker git -C ${wt} diff --check ${mc} ${head} shows in them.`
+const RESOLVE_ORDER = 'Fix in the resolution itself what those tests show and commit the merge only once they pass. When a defect shows only after the merge is committed, never amend or redo the merge: fix it in a commit on top of it, run those tests again, and report the merge commit and the head as they are'
+// #986: a rerun covers every failed run of the head. Each check is its own workflow run, so a gate or aggregate check that failed only
+// because another check failed keeps its old failure unless its own run is rerun too; a gate that waits for the head's other runs then
+// goes green with them, so the reruns need no order.
+const RERUN_ALL = (unset, slug, sha) => `rerun the failed jobs once, with ${unset}gh run rerun <run-id> --repo ${slug} --failed for each failed run of the head: list them with ${unset}gh run list --repo ${slug} --commit ${sha} --json databaseId,workflowName,conclusion, keep the newest run of each workflowName (the highest databaseId; never an older run that one superseded) and rerun each of those whose conclusion is failure, cancelled or timed_out, not only the run of the check that broke first. Every check is its own run, so a gate or aggregate check that failed only because another check failed is rerun too, with the same command`
+// #986: the backstop for a gate that was not rerun, or was rerun before the checks it reports on finished: in the one poll that follows a
+// rerun, the checks step reruns such a gate and names its runs as stale. The program then polls once more and does not count that poll
+// as red; the poll after it carries no such instruction, so a check that is red there ends the landing as any second red poll does.
+const STALE_RERUN = (unset, slug) => `This poll follows a rerun of failed jobs at this head. When checks still fail once none is pending, decide whether every failing check is stale: a check that only reports on other checks (a gate or aggregate job) is stale when every check it reports on now passes at head and its own run finished before theirs did (compare updatedAt from ${unset}gh run view <run-id> --repo ${slug} --json updatedAt; it was not rerun, or it was rerun too early). Only when every failing check is stale, rerun each of their runs once with ${unset}gh run rerun <run-id> --repo ${slug} --failed (the run id is in the check's link), do not wait for them, and answer failed with failing and with stale: the run ids you reran. In every other case rerun nothing and return no stale.`
+const WITH_STALE = s => ({ ...s, properties: { ...s.properties, stale: { type: 'array', items: { type: 'integer' } } } })
+const staleOf = ck => (Array.isArray(ck.stale) ? ck.stale.filter(Number.isInteger) : [])
 const CX_USE = 'Use the codex-collaboration skill (invoke it with the Skill tool) to run that Codex'
 const CX_WAIT = 'this step may dispatch the Codex reviewer that skill uses, and must wait for its result in this turn.'
 const CX_NONE = 'If Codex cannot be run, return available false with the reason in raw_summary; never substitute your own review.'
@@ -1043,11 +1071,10 @@ ${RULES}`, { label: 'direct-codex', phase: 'Final review', agentType: 'clerk', m
     const lite = plan.tasks[0].risk !== 'security'
     const reviewPrompt = isLite => `${CTX}
 ${isLite ? 'lane: direct. ' : ''}Review the delivery diff git -C ${W} diff ${RANGE} for issue #${ISSUE} against its acceptance criteria ${ACS}. ${KNOW} Report Important or Critical correctness defects and unmet code criteria only, each with a concrete failing input. Return acceptance with one entry per criterion id: met, and evidence, which is the test name and file:line that asserts the criterion, or the command that shows it; a code criterion that is not met, or has no evidence, is an Important finding, and criteria of other kinds are not findings (grade them and give what you observed). ${isLite ? 'If the diff touches authentication or authorization, permission or command guards, secrets or credentials, CI/CD or deploy config, or data migrations, set escalate true. ' : ''}Do not edit anything.`
-    // #992: a criterion finding names no file, and the re-review repeats those and Codex's: fileless.
-    let review = await readReview(reviewPrompt(lite), { label: 'direct-review', phase: 'Final review', agentType: lite ? 'reviewer-lite' : 'reviewer', schema: DIRECT_FINDINGS }, { fileless: true })
+    let review = await readReview(reviewPrompt(lite), { label: 'direct-review', phase: 'Final review', agentType: lite ? 'reviewer-lite' : 'reviewer', schema: DIRECT_FINDINGS })
     let passedBy = lite ? 'reviewer-lite' : 'reviewer'
     if (lite && review && review.escalate === true) {
-      review = await readReview(reviewPrompt(false), { label: 'direct-review-full', phase: 'Final review', agentType: 'reviewer', schema: GRADED_FINDINGS }, { fileless: true })
+      review = await readReview(reviewPrompt(false), { label: 'direct-review-full', phase: 'Final review', agentType: 'reviewer', schema: GRADED_FINDINGS })
       passedBy = 'reviewer'
     }
     const codexR = await codexP
@@ -1064,7 +1091,7 @@ ${isLite ? 'lane: direct. ' : ''}Review the delivery diff git -C ${W} diff ${RAN
       fix = await call(evidenceOnly ? `${CTX}\n${PLAN_REF} The review did not see these acceptance criteria shown met: ${JSON.stringify(findings)}. ${EVIDENCE_FIX} ${COMMIT_SCOPE} ${IMPL_RETURN}\n${RULES}` : `${CTX}\n${PLAN_REF} Fix these review findings in the worktree, with a regression test for each real defect, then commit: ${JSON.stringify(findings)}. If a finding is wrong, say so in notes with evidence instead of changing code. ${FOCUSED} ${COMMIT_SCOPE} ${IMPL_RETURN}\n${RULES}`, { label: 'direct-fix', phase: 'Final review', agentType: 'implementer', model: 'sonnet', schema: IMPL })
       if (!implDone(fix)) return stop('direct-fix', { fix })
       const rereview = await readReview(`${CTX}
-Re-review only these previously reported findings against the fix: ${span(fix)}; the implementer's notes: ${fix.notes}. Findings: ${JSON.stringify(findings)}. Report any finding still unresolved and any new Important or Critical defect the fix introduced.${evidenceOnly ? EVIDENCE_REREVIEW : ''}`, { label: 'direct-rereview', phase: 'Final review', agentType: 'reviewer-lite', schema: FINDINGS }, { fileless: true })
+Re-review only these previously reported findings against the fix: ${span(fix)}; the implementer's notes: ${fix.notes}. Findings: ${JSON.stringify(findings)}. Report any finding still unresolved and any new Important or Critical defect the fix introduced.${evidenceOnly ? EVIDENCE_REREVIEW : ''}`, { label: 'direct-rereview', phase: 'Final review', agentType: 'reviewer-lite', schema: FINDINGS })
       if (!rereview || findingsOf(rereview).length) return stop('direct-review', { review: rereview, findings })
       passedBy = 'reviewer-lite'
     }
@@ -1147,9 +1174,9 @@ if (!plan) {
   if (halted) return halted
 }
 const rulesReview = async triggered => {
-  // #992: a rule finding names a criterion and a rule, no file: fileless, as the plan review is.
+  // #992: a rule finding may name its criterion and its rule and no file: ruled, as the plan review is.
   return readReview(`${CTX}
-Re-check only the acceptance criteria of the revised plan at ${plan.plan_root} against every rule of ~/.agents/standards/acceptance-planning.md (read it). The findings that triggered the revision were ${JSON.stringify(triggered)}. Report each criterion that still or newly breaks a rule, with the broken rule's id in the finding's rule. Do not edit anything.`, { label: 'plan-rules-review', phase: 'Plan', agentType: 'reviewer', schema: PLAN_REVIEW }, { fileless: true })
+Re-check only the acceptance criteria of the revised plan at ${plan.plan_root} against every rule of ~/.agents/standards/acceptance-planning.md (read it). The findings that triggered the revision were ${JSON.stringify(triggered)}. Report each criterion that still or newly breaks a rule, with the broken rule's id in the finding's rule. Do not edit anything.`, { label: 'plan-rules-review', phase: 'Plan', agentType: 'reviewer', schema: PLAN_REVIEW }, { ruled: true })
 }
 // #819: the members of a criterion the rules judge (its wording among them), key order aside; a revise that leaves them as reviewed needs no rules re-review.
 const ruleFacts = p => canon(p.acceptance.map(a => [a.id, a.text === undefined ? null : a.text, a.kind, a.metric === true, a.verify === undefined ? null : a.verify]))
@@ -1181,12 +1208,12 @@ const reviewStop = (rules, findings, rounds, extra) => {
   if (rounds >= 2) { plan = null; planFindingsKept = null } else planFindingsKept = { rules, findings, rounds }
   return stop('plan-review', { ...(extra || {}), rules, findings })
 }
-const SILENT = { details: 'the rules re-reviewer returned nothing' }
+const SILENT = () => ({ details: `the rules re-reviewer ${silence('plan-rules-review')}` })
 if (RESUME_RULES) {
   const { rules, findings, rounds } = planFindingsKept
   const r = await rulesRevise(rules)
   if (r.halted) return { ...r.halted, findings }
-  if (r.silent) return reviewStop(rules, findings, rounds + 1, SILENT)
+  if (r.silent) return reviewStop(rules, findings, rounds + 1, SILENT())
   if (r.rules.length) return reviewStop(r.rules, findings, rounds + 1)
   planFindingsKept = null
   planReviewed = true
@@ -1200,9 +1227,9 @@ ${RULES}`, { label: 'plan-codex', phase: 'Plan', agentType: 'clerk', model: CLER
   const ruleFindings = planRules(plan)
   const narrow = REVIEW_SIZING && !!REVIEW_PLAN
   const planReviewClaude = await readReview(`${CTX}
-Review the implementation plan at ${plan.plan_root} (and its task files) against issue #${ISSUE} (gh issue view ${ISSUE} --repo ${SLUG} --json title,body,comments).${SPEC} ${KNOW} ${MAP_FIRST} Report only Important or Critical defects: ${narrow ? PLAN_RUBRIC_SIZED : PLAN_RUBRIC}, or an acceptance criterion that breaks a rule of ~/.agents/standards/acceptance-planning.md (read it; put the broken rule's id in the finding's rule).${narrow ? ` ${PLAN_CODEX_OWNS}` : ''} No style notes. Do not edit anything.`, { label: 'plan-review', phase: 'Plan', agentType: 'reviewer', schema: PLAN_REVIEW }, { fileless: true })
+Review the implementation plan at ${plan.plan_root} (and its task files) against issue #${ISSUE} (gh issue view ${ISSUE} --repo ${SLUG} --json title,body,comments).${SPEC} ${KNOW} ${MAP_FIRST} Report only Important or Critical defects: ${narrow ? PLAN_RUBRIC_SIZED : PLAN_RUBRIC}, or an acceptance criterion that breaks a rule of ~/.agents/standards/acceptance-planning.md (read it; put the broken rule's id in the finding's rule).${narrow ? ` ${PLAN_CODEX_OWNS}` : ''} No style notes. Do not edit anything.`, { label: 'plan-review', phase: 'Plan', agentType: 'reviewer', schema: PLAN_REVIEW }, { ruled: true })
   const planCodexR = await planCodexP
-  if (!planReviewClaude) return stop('plan-review', { details: 'the plan reviewer returned nothing' })
+  if (!planReviewClaude) return stop('plan-review', { details: `the plan reviewer ${silence('plan-review')}` })
   let planFindings = ruleFindings.concat(findingsOf(planReviewClaude))
   if (REVIEW_PLAN) {
     if (!planCodexR || !planCodexR.available) return stop('codex-unavailable', { step: 'plan', details: codexWhy(planCodexR), codex: planCodexR })
@@ -1232,13 +1259,13 @@ Review the implementation plan at ${plan.plan_root} (and its task files) against
     const sameRules = !planFindings.some(f => present(f.rule)) && !still.length && ruleFacts(plan) === reviewedFacts
     if (sameRules) log('plan rules re-review skipped: no finding named a rule and the acceptance criteria are unchanged')
     const rr = sameRules ? { findings: [] } : await rulesReview(planFindings)
-    if (!rr) return reviewStop(planFindings, planFindings, 0, SILENT)
+    if (!rr) return reviewStop(planFindings, planFindings, 0, SILENT())
     let rules = still.concat(findingsOf(rr)), rounds = 0
     if (rulesOnly(rules)) {
       rounds++
       const r = await rulesRevise(rules)
       if (r.halted) return { ...r.halted, findings: planFindings }
-      if (r.silent) return reviewStop(rules, planFindings, rounds, SILENT)
+      if (r.silent) return reviewStop(rules, planFindings, rounds, SILENT())
       rules = r.rules
     }
     if (rules.length) return reviewStop(rules, planFindings, rounds)
@@ -1326,6 +1353,7 @@ ${RULES}`
   // False until the task's diff had its first pass; a task with no commit has none to review.
   let diffReviewed = !sameSha(impl.commit, accepted)
   // #932: a no-change check names the head the program holds (the fuller spelling), never the reply's short or uppercase one.
+  // #992: IMPL's pattern now refuses such a spelling, so no IMPL reply reaches this with one; kept for a reply the harness let through.
   let held = diffReviewed ? impl.commit : fuller(accepted, impl.commit)
   // reviewer-lite first-passes only a task whose declared lane is mechanical or low (its lane verification mode).
   let reviewer = liteLane && diffReviewed ? 'reviewer-lite' : 'reviewer'
@@ -1419,18 +1447,17 @@ const codexP = REVIEW_CODE ? call(`${CTX}
 ${PLAN_REF} Acceptance criteria: ${ACS}.
 Run the project's configured independent code review: the contract's workflow.review.code is the command ${REVIEW_CODE}. ${CX_USE} diff review over the delivery range ${RANGE} in the worktree ${W}, with no review package;${EXTRA_RANGES()} ${CX_WAIT} Return Codex's Important or Critical findings as they are (correctness defects with a concrete failing input, unmet criteria) without adding your own review; verdict pass if none. ${CX_NONE}
 ${RULES}`, { label: 'final-codex', phase: 'Final review', agentType: 'clerk', model: CLERK_MODEL, effort: 'high', schema: CODEX }) : Promise.resolve(null)
-// #992: a conformance finding names a task or a criterion, and the integration review and the fix-wave re-review repeat those, Codex's and carried ones: fileless.
 const finals = await parallel(groups.map((g, gi) => () => readReview(`${CTX}
 ${PLAN_REF} Acceptance criteria: ${ACS}.
-Final review${chunked ? ` of chunk ${gi + 1}/${groups.length}: tasks ${g.map(t => t.n).join(', ')} only (their files: ${g.map(t => t.file).join(', ')}); grade only these tasks` : ' of the whole delivery'}: git -C ${W} diff ${RANGE}${chunked ? ' restricted to the paths these tasks own' : ''}.${EXTRA_RANGES()} ${KNOW} Two axes: correctness (real defects with a concrete failing input) and conformance (each task and each acceptance criterion of kind code is met, with the test or command that shows it). Report Important or Critical findings only. Do not edit anything.`, { label: `final-${gi + 1}`, phase: 'Final review', agentType: 'reviewer', schema: FINDINGS }, { fileless: true })))
+Final review${chunked ? ` of chunk ${gi + 1}/${groups.length}: tasks ${g.map(t => t.n).join(', ')} only (their files: ${g.map(t => t.file).join(', ')}); grade only these tasks` : ' of the whole delivery'}: git -C ${W} diff ${RANGE}${chunked ? ' restricted to the paths these tasks own' : ''}.${EXTRA_RANGES()} ${KNOW} Two axes: correctness (real defects with a concrete failing input) and conformance (each task and each acceptance criterion of kind code is met, with the test or command that shows it). Report Important or Critical findings only. Do not edit anything.`, { label: `final-${gi + 1}`, phase: 'Final review', agentType: 'reviewer', schema: FINDINGS })))
 if (finals.some(r => !r)) {
   await codexP
-  return stop('final-review', { details: 'a final reviewer returned nothing', finals })
+  return stop('final-review', { details: `a final reviewer ${silence(...groups.map((g, gi) => `final-${gi + 1}`))}`, finals })
 }
 // #967: the integration review reads only the chunk verdicts, so it runs beside Codex. It counts as dead only where its reply is read:
 // a Codex stop leaves it unused, and still running unread, on purpose: waiting for it would cost wall time for nothing.
 const integP = chunked ? readReview(`${CTX}
-${PLAN_REF} Integration review. The delivery was reviewed in ${groups.length} chunks by task; their verdicts: ${JSON.stringify(finals)}. Read the full changed-file list (git -C ${W} diff --stat ${RANGE}) and the head tree as needed.${EXTRA_RANGES()} ${KNOW} Check the interfaces between chunks and grade every acceptance criterion: ${ACS}. Report Important or Critical findings only.`, { label: 'final-integration', phase: 'Final review', agentType: 'reviewer', schema: FINDINGS }, { fileless: true, optional: true }) : null
+${PLAN_REF} Integration review. The delivery was reviewed in ${groups.length} chunks by task; their verdicts: ${JSON.stringify(finals)}. Read the full changed-file list (git -C ${W} diff --stat ${RANGE}) and the head tree as needed.${EXTRA_RANGES()} ${KNOW} Check the interfaces between chunks and grade every acceptance criterion: ${ACS}. Report Important or Critical findings only.`, { label: 'final-integration', phase: 'Final review', agentType: 'reviewer', schema: FINDINGS }, { optional: true }) : null
 if (integP) integP.catch(() => {})
 const codexR = await codexP
 let finalFindings = finals.flatMap(findingsOf)
@@ -1443,7 +1470,7 @@ if (integP) {
   const integ = await integP
   if (!integ) {
     if (!LOST.includes('final-integration')) DEAD.push('final-integration')
-    return stop('final-review', { details: 'the integration reviewer returned nothing' })
+    return stop('final-review', { details: `the integration reviewer ${silence('final-integration')}` })
   }
   finalFindings = finalFindings.concat(findingsOf(integ))
 }
@@ -1485,7 +1512,7 @@ if (finalFindings.length) {
     // A wave that had carried findings and committed nothing found them closed already: its re-review reads the head, with no diff range.
     const idle = k === 1 && fromStop.length > 0 && sameSha(fw.commit, fw.start_head) && !collected.length
     if (!idle) carried = []
-    const rv = await readReview(`${CTX}\nRe-review these findings against ${idle ? `the current head of ${W}${hasBranches ? ` and of each declared branch's worktree (${declared(plan).map(b => `${b.name} in ${b.worktree}`).join(', ')})` : ''} (the fix wave committed nothing, so there is no diff to read). Nothing changed since these were raised, so each finding stands unless the code at the head shows it does not hold. The notes are the implementer's claims: check each against the code and never clear a finding on the notes alone` : `the fix (${span(fw)}${collected.length ? ` and ${collected.join(' and ')}` : ''})`}; notes: ${fw.notes}. Findings: ${JSON.stringify(waveFindings)}.${k === 1 && fromStop.length && !idle ? ` The last ${fromStop.length} were left open by an earlier run and may repeat the ones before them: check each against the head, not only the diff.` : ''} Report any still unresolved and any new Important or Critical defect, setting relation on each finding you still report: narrowing when it is the same kind of defect as one above, reached on another path, input or call site; else new. Unsure is new.${idle ? '' : ` Also return changed_files: the output lines of ${CHANGED_CMD(`${fw.start_head}..${fw.commit}`)}, run alone.`}`, { label: rvLabel, phase: 'Final review', agentType: 'reviewer', schema: withChanged(FINDINGS) }, { fileless: true })
+    const rv = await readReview(`${CTX}\nRe-review these findings against ${idle ? `the current head of ${W}${hasBranches ? ` and of each declared branch's worktree (${declared(plan).map(b => `${b.name} in ${b.worktree}`).join(', ')})` : ''} (the fix wave committed nothing, so there is no diff to read). Nothing changed since these were raised, so each finding stands unless the code at the head shows it does not hold. The notes are the implementer's claims: check each against the code and never clear a finding on the notes alone` : `the fix (${span(fw)}${collected.length ? ` and ${collected.join(' and ')}` : ''})`}; notes: ${fw.notes}. Findings: ${JSON.stringify(waveFindings)}.${k === 1 && fromStop.length && !idle ? ` The last ${fromStop.length} were left open by an earlier run and may repeat the ones before them: check each against the head, not only the diff.` : ''} Report any still unresolved and any new Important or Critical defect, setting relation on each finding you still report: narrowing when it is the same kind of defect as one above, reached on another path, input or call site; else new. Unsure is new.${idle ? '' : ` Also return changed_files: the output lines of ${CHANGED_CMD(`${fw.start_head}..${fw.commit}`)}, run alone.`}`, { label: rvLabel, phase: 'Final review', agentType: 'reviewer', schema: withChanged(FINDINGS) })
     if (!rv) return stop('fix-wave-review', { rv, fix_waves: fixWaves })
     carried = []
     const next = findingsOf(rv)
@@ -1642,7 +1669,7 @@ const MERGE_SCHEMA = { type: 'object', properties: { merged: { type: 'boolean' }
 const CHECKS = { type: 'object', properties: { state: { type: 'string', enum: ['passed', 'failed', 'pending', 'behind'] }, head: FULL_SHA, required: STRS, passed: STRS, failing: STRS, pending: STRS, details: { type: 'string' } }, required: ['state', 'head'] }
 const PUSH_SCHEMA = { type: 'object', properties: { head: FULL_SHA, notes: { type: 'string' } }, required: ['head'] }
 const CHECKS_WAIT = pr => `for PR #${pr} to be mergeable. 1. git -C ${W} fetch origin; if the local branch is ahead of origin/${setup.branch}, push it. head is git -C ${W} rev-parse HEAD (full sha). 2. If origin/${INT} is not an ancestor of HEAD (git -C ${W} merge-base --is-ancestor origin/${INT} HEAD fails), return state behind at once. 3. Otherwise wait in this turn until every check on head has completed, required or not. List every check with gh pr checks ${pr} --repo ${SLUG} --json name,bucket,link (never --required) and wait with gh pr checks ${pr} --repo ${SLUG} --watch (Bash timeout up to 60 minutes; rerun while any is pending). It can return early and a list can be partial: never treat a partial list as green, and read the list again before you answer. Bucket pass has passed; fail or cancel has failed; pending is still running; skipping never started and is ignored. Report as required the required check names from gh api repos/${SLUG}/rules/branches/${INT} (its required_status_checks rules) or else classic branch protection, none when neither answers. Return passed only when no check on head is pending, failing or cancelled, with required and passed (the names passing at head). Return failed when any check failed, required or not, with failing (every failing or cancelled name) and details (for each failing check, the last 60 lines of its failed log: gh run view <run id> --repo ${SLUG} --log-failed). Return pending with pending (the names still running) only when the wait ran out and no check failed.`
-const SYNC = { type: 'object', properties: { status: { type: 'string', enum: ['done', 'conflicted', 'blocked'] }, conflicted: { type: 'boolean' }, merge_commit: FULL_SHA, resolved_files: STRS, markers_checked: { type: 'boolean' }, tests: STRS, notes: { type: 'string' } }, required: ['status', 'conflicted', 'notes'] }
+const SYNC = { type: 'object', properties: { status: { type: 'string', enum: ['done', 'conflicted', 'blocked'] }, conflicted: { type: 'boolean' }, merge_commit: FULL_SHA, head: FULL_SHA, resolved_files: STRS, markers_checked: { type: 'boolean' }, tests: STRS, notes: { type: 'string' } }, required: ['status', 'conflicted', 'notes'] }
 const LOCK_SCHEMA = {
   type: 'object',
   properties: { verdict: { type: 'string', enum: ['acquired', 'already_held', 'moved', 'held_by', 'lost_to', 'land-contended', 'error'] }, lock_sha: { type: 'string' }, pr: { type: 'integer' }, by: { type: 'string' }, detail: { type: 'string' }, waited_s: { type: 'integer' }, waited_on: { type: 'array', items: { type: 'integer' } } },
@@ -1680,6 +1707,8 @@ let mg = null
 let mergeRefusals = 0
 let raced = false
 let contended = 0
+// True after a rerun of failed jobs at an unchanged head, until the poll that follows it answered (#986).
+let reran = false
 // The cross-host land lock of the integration branch (#677): taken with --wait right after the PR opens, before any sync,
 // moved with a one-shot acquire after every head change, re-checked once before the merge, released after the merge and on every stop;
 // a conflicted sync merge releases it and its accepted resolution takes it again, waiting (lockOut below, #913).
@@ -1793,7 +1822,7 @@ ${RULES}`, { label: `land-lock-${k}`, phase: 'Ship', agentType: 'clerk', model: 
     raced = false
     syncs++
     const sy = early ? { status: 'conflicted', conflicted: true, notes: `the probe before the land lock found a conflict with ${INT}${(early.files || []).length ? ` in ${early.files.join(', ')}` : ''}` } : await call(`${CTX}
-The branch is behind ${INT}. Merge origin/${INT} into it in the worktree (git -C ${W} merge origin/${INT}). If it conflicts, do not resolve it: run git merge --abort inside ${W}, confirm no merge is left in progress (git -C ${W} rev-parse -q --verify MERGE_HEAD fails), and return status conflicted with conflicted true and the conflicting files in notes; a later step resolves it. ${FMT} Do not push. For a clean merge return conflicted false and merge_commit (full sha); status blocked with notes if the merge cannot be made.
+The branch is behind ${INT}. Merge origin/${INT} into it in the worktree (git -C ${W} merge origin/${INT}). If it conflicts, do not resolve it: run git merge --abort inside ${W}, confirm no merge is left in progress (git -C ${W} rev-parse -q --verify MERGE_HEAD fails), and return status conflicted with conflicted true and the conflicting files in notes; a later step resolves it. ${FMT} Do not push. For a clean merge return conflicted false, merge_commit (full sha) and head (the full sha of HEAD after the merge: the merge commit itself, unless you committed on top of it); status blocked with notes if the merge cannot be made.
 ${RULES}`, { label: `sync-${syncs}`, phase: 'Ship', agentType: 'implementer', model: 'sonnet', schema: SYNC })
     // A blocked answer that names a conflict is the aborted merge under another name.
     const aborted = !!sy && (sy.status === 'conflicted' || (sy.status === 'blocked' && sy.conflicted === true))
@@ -1807,25 +1836,33 @@ ${RULES}`, { label: `sync-${syncs}`, phase: 'Ship', agentType: 'implementer', mo
       if ((await unlock()).lock_unreleased) lockHeld = true
       if (aborted) {
         merge = await call(`${CTX}
-Merging origin/${INT} into the branch conflicts. Resolve it in the worktree; the landing lock is not held while you work. If a merge is in progress (git -C ${W} rev-parse -q --verify MERGE_HEAD succeeds), run git merge --abort inside ${W} first. Then git -C ${W} fetch origin and git -C ${W} merge origin/${INT}. If it conflicts, resolve each conflict keeping both sides' intent, ${MARKER_CHECK(W, INT)}, commit the merge, and ${WHOLE('the files you resolved by hand')}; ${RESOLVE_SCOPE}. ${FMT} Do not push. Return conflicted (false when the merge was clean this time; it is reviewed all the same), merge_commit (full sha), resolved_files and markers_checked (true when both checks ran); status blocked with notes if you cannot resolve it safely.
+Merging origin/${INT} into the branch conflicts. Resolve it in the worktree; the landing lock is not held while you work. If a merge is in progress (git -C ${W} rev-parse -q --verify MERGE_HEAD succeeds), run git merge --abort inside ${W} first. Then git -C ${W} fetch origin and git -C ${W} merge origin/${INT}. If it conflicts, resolve each conflict keeping both sides' intent, ${MARKER_CHECK(W, INT)}, and, still before committing, ${WHOLE('the files you resolved by hand')}; ${RESOLVE_SCOPE}. ${RESOLVE_ORDER}. ${FMT} Do not push. Return conflicted (false when the merge was clean this time; it is reviewed all the same), merge_commit (full sha), head (the full sha of HEAD: the merge commit, or the last commit you made on top of it), resolved_files and markers_checked (true when both checks ran); status blocked with notes if you cannot resolve it safely.
 ${RULES}`, { label: `sync-resolve-${syncs}`, phase: 'Ship', agentType: 'implementer', model: 'sonnet', schema: SYNC })
       }
     }
     if (!merge || merge.status !== 'done' || !present(merge.merge_commit)) return stop('sync', { pr: PR, sync: merge })
-    expected = merge.merge_commit
-    // A merge that conflicted is reviewed whatever its resolution says of itself: the sync step saw the conflict.
-    if (aborted || merge.conflicted) {
+    // #986: the head the landing goes on with is the merge commit, or the resolution's head when it made plain commits on top of the merge.
+    // The sync review then proves that ancestry and reads the range between them too; any other head stops at the sync stage.
+    const mc = merge.merge_commit
+    const followup = present(merge.head) && !sameSha(merge.head, mc)
+    const after = followup ? SYNC_AFTER(W, mc, merge.head) : ''
+    expected = followup ? merge.head : mc
+    // A merge that conflicted is reviewed whatever its resolution says of itself: the sync step saw the conflict. A head that is not the
+    // merge commit is reviewed too, whatever the merge was: nothing else would read the commits on top of it.
+    if (aborted || merge.conflicted || followup) {
       const sr = await readReview(`${CTX}
-Review the conflict resolution in merge commit ${merge.merge_commit}: git -C ${W} show --cc ${merge.merge_commit} and the resolved files ${JSON.stringify(merge.resolved_files || [])}; the tests run: ${JSON.stringify(merge.tests || [])}. Report Important or Critical defects only: a dropped change from either side, a broken merge of intent, a resolved file whose tests were not run.${merge.markers_checked === true ? '' : MARKERS_UNCHECKED}`, { label: `sync-review-${syncs}`, phase: 'Ship', agentType: 'reviewer', schema: FINDINGS })
+Review the conflict resolution in merge commit ${merge.merge_commit}: git -C ${W} show --cc ${merge.merge_commit} and the resolved files ${JSON.stringify(merge.resolved_files || [])}; the tests run: ${JSON.stringify(merge.tests || [])}. Report Important or Critical defects only: a dropped change from either side, a broken merge of intent, a resolved file whose tests were not run.${merge.markers_checked === true ? '' : MARKERS_UNCHECKED}${followup ? DESCENDS(W, mc, merge.head) : ''}`, { label: `sync-review-${syncs}`, phase: 'Ship', agentType: 'reviewer', schema: SYNC_REVIEW_SCHEMA(followup) })
       if (!sr) return stop('sync-review', { pr: PR, review: sr })
+      // Only the review's own proof accepts a head that is not the merge commit; a missing answer is no proof.
+      if (followup && sr.descends !== true) return stop('sync', { pr: PR, sync: merge, details: `the resolution names the head ${merge.head} and the merge commit ${mc}, and the head does not descend from it: only a reviewed merge commit lands` })
       if (findingsOf(sr).length) {
         if (syncFixes >= 1) return stop('sync-review', { pr: PR, review: sr })
         syncFixes++
         const w = await shipFix({
           label: `fix-sync-${syncs}`, reviewLabel: `fix-sync-review-${syncs}`,
           rebuttal: true,
-          fixPrompt: `${CTX}\n${SYNC_FIX(W, merge.merge_commit, findingsOf(sr))} Do not push. ${FIX_TESTS} ${COMMIT_SCOPE} ${IMPL_RETURN}\n${RULES}`,
-          reviewPrompt: (fix, moved) => `${CTX}\n${SYNC_REREVIEW(W, merge.merge_commit, findingsOf(sr), fix, moved)}`,
+          fixPrompt: `${CTX}\n${SYNC_FIX(W, merge.merge_commit, findingsOf(sr), after)} Do not push. ${FIX_TESTS} ${COMMIT_SCOPE} ${IMPL_RETURN}\n${RULES}`,
+          reviewPrompt: (fix, moved) => `${CTX}\n${SYNC_REREVIEW(W, merge.merge_commit, findingsOf(sr), fix, moved, after)}`,
         })
         if (!w.ok) return stop('sync-fix', { pr: PR, review: sr, fix: w.fix })
         if (!w.review || findingsOf(w.review).length) return stop('sync-review', { pr: PR, review: w.review, sync_review: sr, fix: w.fix })
@@ -1880,13 +1917,16 @@ ${RULES}`, { label: `land-push-${round}`, phase: 'Ship', agentType: 'clerk', mod
     // Round 1 reads the poll the pr call carried (its renew covered the claim), unless a retried wait took the lock, which polled no checks;
     // a moved round moves the lock then polls, one call; every other unmoved round polls on its own with a renew.
     const folded = round === 1 && !moved && !waited
+    // #986: the poll that follows a rerun of failed jobs (the head is unchanged, so it is an unmoved poll), the only one that may answer
+    // stale; a poll whose wait ran out keeps it for the next.
+    const stalePoll = reran && !moved && !folded
     let ck
     if (folded) ck = prR.checks || null
     else {
       ck = await recall(() => call(`${CTX}
 ${moved ? `${retake && lockFirst ? `Take the cross-host landing lock of the branch ${INT} for PR #${PR} at the head ${expected}; a conflict with ${INT} was resolved before the lock was asked for` : retake ? `Take the cross-host landing lock of the branch ${INT} for PR #${PR} again, at the head ${expected}; it was released while a conflict was resolved` : `Move the cross-host landing lock of the branch ${INT} for PR #${PR} to the head ${expected}`}: run alone and exactly: ${LAND_ACQUIRE(expected, retake)}
-${LOCK_RETURN} Return it as lock. Only when lock's verdict is acquired, already_held or moved, wait ${CHECKS_WAIT(PR)} Otherwise run nothing else and return only lock.` : `${RENEW_FIRST}\nThen wait ${CHECKS_WAIT(PR)}`}
-${RULES}`, { label: `checks-${round}`, phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: moved ? { ...CHECKS, properties: { ...CHECKS.properties, lock: NULLABLE(LOCK_SCHEMA) }, required: ['lock'] } : withRenew(CHECKS) }), r => (moved ? null : r.renew))
+${LOCK_RETURN} Return it as lock. Only when lock's verdict is acquired, already_held or moved, wait ${CHECKS_WAIT(PR)} Otherwise run nothing else and return only lock.` : `${RENEW_FIRST}\nThen wait ${CHECKS_WAIT(PR)}${stalePoll ? ` ${STALE_RERUN(UNSET, SLUG)}` : ''}`}
+${RULES}`, { label: `checks-${round}`, phase: 'Ship', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: moved ? { ...CHECKS, properties: { ...CHECKS.properties, lock: NULLABLE(LOCK_SCHEMA) }, required: ['lock'] } : withRenew(stalePoll ? WITH_STALE(CHECKS) : CHECKS) }), r => (moved ? null : r.renew))
       if (moved) {
         let mv = ck && ck.lock ? ck.lock.verdict : null
         if (ck) logWait(`checks-${round}`, ck.lock)
@@ -1939,7 +1979,14 @@ ${RULES}`, { label: `land-relock-${relocks}`, phase: 'Ship', agentType: 'clerk',
       if (++pendingWaits >= PENDING_WAITS) return stop('checks-pending', { pr: PR, pending: pendingNames, checks: ck })
       continue
     }
+    reran = false
     if (state === 'failed') {
+      // #986: every failing check was a gate on an old result and the checks step reran it: not a red poll. Once per landing, since
+      // only the one poll after the one rerun is asked; the next poll counts whatever it shows.
+      if (stalePoll && staleOf(ck).length) {
+        log(`checks-${round} reran ${staleOf(ck).length === 1 ? 'a stale gate run' : `${staleOf(ck).length} stale gate runs`} (${staleOf(ck).join(', ')}); polling once more`)
+        continue
+      }
       if (checksFixes >= 1) return stop('checks', { pr: PR, failing: failingNames, checks: ck })
       checksFixes++
       const failing = JSON.stringify(failingNames)
@@ -1947,12 +1994,16 @@ ${RULES}`, { label: `land-relock-${relocks}`, phase: 'Ship', agentType: 'clerk',
         label: 'fix-ci', reviewLabel: 'fix-ci-review',
         rerun: true,
         fixPrompt: `${CTX}\n${PLAN_REF} The checks of PR #${PR} failed at ${expected}: ${failing}. Log tail: ${ck.details || 'none given'}. Find the cause in this branch's changes (git -C ${W} diff ${RANGE}), fix it with the smallest change and a regression test that fails without it, then commit. Do not push: the next checks step pushes. Never weaken, skip or delete a test or check to make it pass. ${FIX_TESTS} ${COMMIT_SCOPE} ${IMPL_RETURN}
-When the failure has no cause in the code (an infrastructure, cache or network error in a setup step), change and commit nothing: rerun the failed jobs once, with ${UNSET}gh run rerun <run-id> --repo ${SLUG} --failed for each failed run (its id is in the failing check's link), do not wait for them, and return status done with the head unchanged (commit equal to start_head, ${expected}) and the error you saw in notes; the program then polls the checks itself.\n${RULES}`,
+When the failure has no cause in the code (an infrastructure, cache or network error in a setup step), change and commit nothing: ${RERUN_ALL(UNSET, SLUG, expected)}, do not wait for them, and return status done with the head unchanged (commit equal to start_head, ${expected}) and the error you saw in notes; the program then polls the checks itself.\n${RULES}`,
         reviewPrompt: fix => `${CTX}\nReview this fix for failing checks: ${span(fix)}; the failure it answers: ${failing} (${ck.details || 'no log'}); notes: ${fix.notes}. Report Important or Critical defects only, above all a weakened, skipped or deleted test or check, or a fix with no regression test. Do not edit anything.`,
       })
       if (!w.ok) return stop('checks-fix', { pr: PR, checks: ck, fix: w.fix })
       // #818: the failed jobs were rerun at the unchanged head. The loop polls again; checksFixes still ends a second red poll at the checks stop.
-      if (w.rerun) continue
+      // #986: that next poll alone may rerun a stale gate (STALE_RERUN).
+      if (w.rerun) {
+        reran = true
+        continue
+      }
       if (!w.review || findingsOf(w.review).length) return stop('checks-fix-review', { pr: PR, checks: ck, review: w.review })
       expected = w.fix.commit
       continue
