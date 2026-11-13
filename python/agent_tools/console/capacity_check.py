@@ -1,6 +1,6 @@
 """`capacity_check`: the verify check that the console shows a capacity reading for an account in use (#860).
 
-`python -m agent_tools.console.capacity_check [--url URL] [--max-age SECONDS] [--every]` reads the console's
+`python -m agent_tools.console.capacity_check [--url URL] [--max-age SECONDS] [--every | --signin]` reads the console's
 `/api/state` view (default `http://127.0.0.1:27184/api/state`; the URL must be `http` on a loopback
 host, `127.0.0.1` or `localhost`, else exit 2) and looks at `capacity.profiles[].read_at`.
 `--max-age` is a positive integer number of seconds (default 600).
@@ -21,6 +21,19 @@ one row, and every row's `read_at` parses and is at most `--max-age` seconds bef
 `{"status": "pending", "profiles": [<names whose reading is missing, unreadable or older than
 --max-age, in row order>]}`, exit 75; an empty view is pending with `[]`. `--every` never exits 1,
 because the check cannot see when the host was activated, so a missing reading may still arrive.
+
+`--every` leaves out each row whose `signin` member (#1010) is an object with `state` `signed_out`:
+a profile that holds no sign-in has no reading to wait for. Over the remaining rows the rule is
+the one above, and it is met when at least one remains and none is stale, as
+`{"status": "met", "profiles": <remaining count>, "oldest_age_seconds": <largest age>,
+"signed_out": [<skipped names, row order>]}`; all rows signed out is pending with `[]`.
+
+`--signin` (#1010, exclusive with `--every`, `--max-age` ignored) meets when every listed profile
+knows its sign-in: at least one row and every row's `signin.state` is `signed_in` or `signed_out`.
+Then `{"status": "met", "profiles": <row count>, "signed_out": [<names>]}`, exit 0. Otherwise
+`{"status": "pending", "profiles": [<names whose state is anything else, in row order>]}`, exit 75
+(an empty view is pending with `[]`). A row whose `signin` is not an object with a string `state`
+means the console predates sign-in: `{"status": "not_deployed"}`, exit 75. It never exits 1.
 
 A console that is down or predates this change is "not yet", never "not met", and only a reading
 newer than `--max-age` meets the check. A bad argument is exit 2. The check only reads: it sends one
@@ -80,8 +93,10 @@ def fetch(url: str) -> bytes | None:
         connection.close()
 
 
-def readings(body: bytes) -> list[tuple[str, object]] | None:
-    """The `(profile, read_at)` rows of a console view, None when it has no capacity object."""
+def readings(body: bytes) -> list[tuple[str, object, object]] | None:
+    """The `(profile, read_at, signin)` rows of a console view, None when it has no capacity object.
+
+    `signin` is the row's raw `signin` member, None when absent."""
     try:
         document = json.loads(body)
     except ValueError:
@@ -93,7 +108,7 @@ def readings(body: bytes) -> list[tuple[str, object]] | None:
     rows = []
     for row in profiles if isinstance(profiles, list) else []:
         if isinstance(row, dict) and isinstance(row.get("profile"), str):
-            rows.append((row["profile"], row.get("read_at")))
+            rows.append((row["profile"], row.get("read_at"), row.get("signin")))
     return rows
 
 
@@ -110,22 +125,44 @@ def age_seconds(read_at: object, now: datetime) -> int | None:
     return max(0, int((now - moment).total_seconds()))
 
 
-def verdict(rows: list[tuple[str, object]], max_age: int, now: datetime) -> tuple[int, dict]:
-    ages = [(age, name) for name, read_at in rows
+def verdict(rows: list[tuple[str, object, object]], max_age: int,
+            now: datetime) -> tuple[int, dict]:
+    ages = [(age, name) for name, read_at, _ in rows
             if (age := age_seconds(read_at, now)) is not None]
     if ages and min(ages)[0] <= max_age:
         age, name = min(ages)
         return 0, {"status": "met", "profile": name, "age_seconds": age}
-    return 1, {"status": "not_met", "profiles": [name for name, _ in rows]}
+    return 1, {"status": "not_met", "profiles": [name for name, _, _ in rows]}
 
 
-def every_verdict(rows: list[tuple[str, object]], max_age: int, now: datetime) -> tuple[int, dict]:
-    """Met when there is a row and every row is fresh, else pending on the ones that are not."""
-    ages = [age_seconds(read_at, now) for _, read_at in rows]
-    stale = [name for (name, _), age in zip(rows, ages) if age is None or age > max_age]
-    if rows and not stale:
-        return 0, {"status": "met", "profiles": len(rows), "oldest_age_seconds": max(ages)}
+def _state(signin: object) -> object:
+    return signin.get("state") if isinstance(signin, dict) else None
+
+
+def every_verdict(rows: list[tuple[str, object, object]], max_age: int,
+                  now: datetime) -> tuple[int, dict]:
+    """Met when a signed-in row remains and every one is fresh, else pending on the stale ones."""
+    signed_out = [name for name, _, signin in rows if _state(signin) == "signed_out"]
+    kept = [(name, read_at) for name, read_at, signin in rows if _state(signin) != "signed_out"]
+    ages = [age_seconds(read_at, now) for _, read_at in kept]
+    stale = [name for (name, _), age in zip(kept, ages) if age is None or age > max_age]
+    if kept and not stale:
+        return 0, {"status": "met", "profiles": len(kept), "oldest_age_seconds": max(ages),
+                   "signed_out": signed_out}
     return NOT_YET, {"status": "pending", "profiles": stale}
+
+
+def signin_verdict(rows: list[tuple[str, object, object]]) -> tuple[int, dict]:
+    """Met when there is a row and every row's sign-in is known, else pending on the others."""
+    if any(not isinstance(_state(signin), str) for _, _, signin in rows):
+        return NOT_YET, {"status": "not_deployed"}
+    known = ("signed_in", "signed_out")
+    pending = [name for name, _, signin in rows if _state(signin) not in known]
+    if rows and not pending:
+        return 0, {"status": "met", "profiles": len(rows),
+                   "signed_out": [name for name, _, signin in rows
+                                  if _state(signin) == "signed_out"]}
+    return NOT_YET, {"status": "pending", "profiles": pending}
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -134,9 +171,13 @@ def build_parser() -> argparse.ArgumentParser:
                         help="the console state view to read (default: %(default)s)")
     parser.add_argument("--max-age", type=_positive, default=DEFAULT_MAX_AGE,
                         help="newest reading allowed, in seconds (default: %(default)s)")
-    parser.add_argument("--every", action="store_true",
-                        help="require a fresh reading for every listed profile; a missing one "
-                             "is not yet")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--every", action="store_true",
+                      help="require a fresh reading for every signed-in profile; a missing one "
+                           "is not yet")
+    mode.add_argument("--signin", action="store_true",
+                      help="require every listed profile to know its sign-in (signed in or "
+                           "signed out)")
     return parser
 
 
@@ -150,8 +191,11 @@ def main(argv: list[str] | None = None) -> int:
     if rows is None:
         print(json.dumps({"status": "not_deployed"}, sort_keys=True))
         return NOT_YET
-    decide = every_verdict if args.every else verdict
-    code, result = decide(rows, args.max_age, datetime.now(timezone.utc))
+    if args.signin:
+        code, result = signin_verdict(rows)
+    else:
+        decide = every_verdict if args.every else verdict
+        code, result = decide(rows, args.max_age, datetime.now(timezone.utc))
     print(json.dumps(result, sort_keys=True))
     return code
 
