@@ -53,7 +53,7 @@ let
   cacheProxyCaFile = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
 
   # The `accounts` mod (./accounts): one config directory per Claude account,
-  # bound per project. Mod and launcher are one store path because the mod runs
+  # chosen per launch by the console. Mod and launcher are one store path because the mod runs
   # `$.plugin.root/bin/claude-account` and the launcher names its own folder in
   # CLAUDE_CODE_PLUGIN_DIRS. The launcher's tools are rewritten to store paths
   # rather than prefixed onto PATH, which the claude it execs would inherit, and its
@@ -76,7 +76,7 @@ let
         HOME="$(mktemp -d)" "$out/bin/claude-account" status
       '';
 
-  # `claude` on PATH starts under the account the current project is bound to,
+  # `claude` on PATH starts under the account the console chooses (ADR-hosts-008),
   # for interactive and non-interactive callers alike. Both entries are scripts,
   # not links, because the launcher finds the mod relative to its own real location.
   claudeWithAccounts = pkgs.symlinkJoin {
