@@ -408,6 +408,25 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("ADR-console-022", self.doc(
             "docs/areas/console/adr/006-capacity-readings-arrive-from-the-proxy.md"))
 
+    def test_the_console_profile_choice_decision_is_recorded(self):
+        path = "docs/areas/console/adr/023-a-new-sessions-profile-is-the-consoles-choice.md"
+        first = (REPO_ROOT / path).read_text().splitlines()[0]
+        self.assertEqual(
+            first,
+            "# ADR-console-023 — A new session's profile is the console's choice, on a route and in a file")
+        adr = self.doc(path)
+        for needle in ("GET /api/profile", "chosen-profile", "bindings.tsv", "most recently used",
+                       "null", "ADR-console-015", "ADR-console-020", "ADR-console-022", "#1011"):
+            self.assertIn(needle, adr)
+        for older in ("docs/areas/console/adr/015-a-stated-goal-starts-a-manager.md",
+                      "docs/areas/console/adr/022-a-profiles-sign-in-is-read-from-the-clients-status-command.md"):
+            self.assertIn("ADR-console-023", self.doc(older))
+        self.assertNotIn("Skipping signed-out profiles at launch is a later change", self.doc(
+            "docs/areas/console/adr/022-a-profiles-sign-in-is-read-from-the-clients-status-command.md"))
+        context = self.doc("docs/areas/console/CONTEXT.md")
+        self.assertIn("ADR-console-023", context)
+        self.assertIn("binding", context)
+
     def test_the_console_answer_decision_is_recorded(self):
         path = "docs/areas/console/adr/010-the-page-answers-a-decision-prompt-by-ticking-it-as-the-owner.md"
         first = (REPO_ROOT / path).read_text().splitlines()[0]
