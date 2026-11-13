@@ -3,7 +3,7 @@
 //   { "args": {...}, "replies": {"<label>": reply | [reply per call]}, "patch": {"<label>": {...}},
 //     "children": {"<issue>": child result | [one per call] | "throw"}, "turns": {"<issue>:<mode>": n}, "delays": {"<label>": n} }
 // A label with no reply gets its default (DEFAULTS); a patch is merged over that default. A reply
-// of null is returned as null (a dead agent). Prints { result, calls, logs (each log() line), max_active, max_planning, child_events, child_returns }:
+// of null is returned as null (a dead agent). Prints { result, calls, events (each agent's `call <label>` and `reply <label>`, in order), logs (each log() line), max_active, max_planning, child_events, child_returns }:
 // calls lists agents ({kind: 'agent', label, prompt, schema, agentType, model, effort, facts_pending}) and children
 // ({kind: 'workflow', label: 'child-<issue>', script, args}) in start order. A children entry applies to every child
 // call of its issue, mode 'plan' and 'ready' alike, in call order, and a list element "throw" throws Error('child failed'); an object
@@ -29,6 +29,9 @@ const AC = [{ id: 'AC1', text: 'works', kind: 'code' }]
 const promptHead = p => (p.match(/Accepted head: ([0-9a-f]+)/) || [])[1] || SHA
 const num = label => Number((label.match(/-(\d+)(?:-|$)/) || [])[1])
 const CAR = i => String(i).repeat(40)
+// One sha is the other, in full or short form.
+const sameHead = (a, b) => typeof a === 'string' && typeof b === 'string' && a !== '' && b !== '' && (a.startsWith(b) || b.startsWith(a))
+const RELEASED = (p, r) => (/return lock_released true/i.test(p) && !sameHead(r.commit, r.start_head) ? { lock_released: true } : {})
 // The JSON value that ends the prompt line starting with `lead`.
 const jsonAfter = (p, lead) => JSON.parse(p.slice(p.indexOf(lead) + lead.length).split('\n')[0])
 // Ordered: the first matching pattern wins. A default gets the label and the prompt.
@@ -49,10 +52,13 @@ const DEFAULTS = [
   // #913: the resolution of an aborted sync merge, outside the land lock, defaults to a resolved merge commit RESOLVED.
   [/^land-sync-resolve-/, () => ({ status: 'done', conflicted: true, head: RESOLVED, merge_commit: RESOLVED, resolved_files: ['x.py'], markers_checked: true, tests: ['t'], notes: 'ok' })],
   [/^land-sync-/, () => ({ status: 'current', conflicted: false, head: SHA, notes: 'ok' })],
+  // #1001: the PR opened while the issue waited in the land queue, at the same number its land-pr or train-pr reports.
+  [/^land-open-/, (l, p) => ({ pr: 40 + num(l), head: promptHead(p), renew: { verdict: 'renewed' } })],
   [/^land-pr-/, (l, p) => ({ pr: 40 + num(l), head: SHA, renew: { verdict: 'renewed' }, lock: { verdict: 'already_held', lock_sha: SHA }, checks: { state: 'passed', head: promptHead(p), required: ['ci'], passed: ['ci'] } })],
   [/^land-(re)?lock-/, () => ({ renew: { verdict: 'renewed' }, lock: { verdict: 'acquired', lock_sha: SHA } })],
   [/^land-checks-/, () => ({ state: 'passed', head: SHA, required: ['ci'], passed: ['ci'] })],
-  [/^land-fix-/, () => DONE],
+  // #1001: a fix step asked to release the land lock before it edits reports the release, unless a scenario says otherwise.
+  [/^land-fix-/, (l, p) => ({ ...DONE, ...RELEASED(p, DONE) })],
   [/^land-merge-/, () => ({ merged: true, merge_commit: SHA, notes: 'merged', renew: { verdict: 'renewed' }, lock: { verdict: 'already_held', lock_sha: SHA } })],
   [/^land-unlock-/, () => ({ verdict: 'released' })],
   [/^close-out-/, () => ({ issue_state: 'CLOSED', released: true, decision_ended: true, branch_deleted: true, notes: 'ok', release: { verdict: 'released' } })],
@@ -71,7 +77,13 @@ const NESTED = [[/^train-pr-/, ['renew']], [/^train-merge-/, ['lock']], [/^land-
 const calls = []
 let factsPending = 0 // facts agents started and not yet answered
 const seen = {}
+// Each agent call and each reply, in the order they happened (#1001: a step that must wait for another's reply).
+const events = []
 async function agent(prompt, opts = {}) {
+  events.push(`call ${opts.label}`)
+  try { return await answer(prompt, opts) } finally { events.push(`reply ${opts.label}`) }
+}
+async function answer(prompt, opts = {}) {
   const label = opts.label
   calls.push({ kind: 'agent', label, prompt, schema: opts.schema || null, agentType: opts.agentType || null, model: opts.model || null, effort: opts.effort || null, facts_pending: factsPending })
   const isFacts = /^facts-/.test(label)
@@ -92,6 +104,8 @@ async function agent(prompt, opts = {}) {
     const r = replies[label]
     const out = structuredClone(Array.isArray(r) ? r[Math.min(n, r.length) - 1] : r)
     if (out === 'throw') throw new Error(`stub agent ${label} threw`)
+    // An explicit fix reply that does not say whether it released the lock gets the default answer: released when it made a commit.
+    if (/^land-fix-\d+$/.test(label) && out && typeof out === 'object' && !Object.prototype.hasOwnProperty.call(out, 'lock_released')) Object.assign(out, RELEASED(prompt, out))
     const row = NESTED.find(([re]) => re.test(label))
     if (row && out && typeof out === 'object' && !Array.isArray(out)) {
       const base = DEFAULTS.find(([re]) => re.test(label))[1](label, prompt)
@@ -163,4 +177,4 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor
 const run = new AsyncFunction('agent', 'parallel', 'pipeline', 'phase', 'log', 'args', 'budget', 'workflow', body)
 const logs = []
 const result = await run(agent, parallel, pipeline, noop, line => { logs.push(String(line)) }, scenario.args, budget, workflow)
-process.stdout.write(JSON.stringify({ result, calls, logs, max_active: maxActive, max_planning: maxPlanning, child_events: childEvents, child_returns: childReturns }))
+process.stdout.write(JSON.stringify({ result, calls, events, logs, max_active: maxActive, max_planning: maxPlanning, child_events: childEvents, child_returns: childReturns }))

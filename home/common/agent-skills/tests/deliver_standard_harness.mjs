@@ -109,6 +109,11 @@ async function agent(prompt, opts = {}) {
     events.push(`reply ${opts.label}`)
   }
 }
+// #1001: a CI fix asked to release the land lock before it edits reports the release when it made a commit, unless a scenario says otherwise.
+const released = (label, prompt, r) => {
+  if (label === 'fix-ci' && r && typeof r === 'object' && /return lock_released true/i.test(prompt) && !Object.prototype.hasOwnProperty.call(r, 'lock_released') && !(typeof r.commit === 'string' && typeof r.start_head === 'string' && r.commit && r.start_head && (r.commit.startsWith(r.start_head) || r.start_head.startsWith(r.commit)))) r.lock_released = true
+  return r
+}
 function replyOf(prompt, opts) {
   const label = opts.label
   calls.push({ label, agentType: opts.agentType || null, model: opts.model || null, effort: opts.effort || null, schema: opts.schema || null, prompt })
@@ -124,7 +129,7 @@ function replyOf(prompt, opts) {
       const base = defaultOf(label, prompt, out)
       for (const k of row[1]) if (!Object.prototype.hasOwnProperty.call(out, k)) out[k] = structuredClone(base[k])
     }
-    return out
+    return released(label, prompt, out)
   }
   const base = defaultOf(label, prompt)
   const patch = (scenario.patch || {})[label] || {}
@@ -134,7 +139,7 @@ function replyOf(prompt, opts) {
     delete merged.holder
     Object.assign(merged, holderOf(merged.host, prompt))
   }
-  return structuredClone(merged)
+  return released(label, prompt, structuredClone(merged))
 }
 const parallel = thunks => Promise.all(thunks.map(t => Promise.resolve().then(t).catch(() => null)))
 const pipeline = () => { throw new Error('pipeline is not stubbed') }

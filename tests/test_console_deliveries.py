@@ -281,6 +281,13 @@ class RunFoldTest(unittest.TestCase):
         records = journal("batch")[:10] + [S("q", "facts-856", "Intake")]
         self.assertEqual(shown(records)[856], "planning")
 
+    def test_the_early_opening_of_a_queued_landing_leaves_the_stage_alone(self):
+        """land-open opens the PR of an issue that waits in the land queue: it is not landing until its own pr step starts."""
+        records = journal("batch")[:10] + [S("o", "land-open-856", "Land")]
+        self.assertEqual(shown(records)[856], "planning")
+        self.assertEqual(shown(records + [S("p", "land-pr-856", "Land")])[856], "landing")
+        self.assertEqual(deliveries.classify("land-open-856", batch=True), deliveries.classify("facts-856", batch=True))
+
     def test_folding_in_chunks_equals_folding_whole(self):
         for name in ("single", "batch"):
             lines = journal(name)
