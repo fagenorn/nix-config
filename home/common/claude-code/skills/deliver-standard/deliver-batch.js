@@ -636,9 +636,11 @@ const LAND_CHECKS_SCHEMA = {
   required: ['state', 'head'],
 }
 const RECORD_SCHEMA = { type: 'object', properties: { ok: { type: 'boolean' }, head: { type: 'string' }, detail: { type: 'string' } }, required: ['ok'] }
+// One commit on top of a known head, as a step read it (#1019, #1022): what cleanMerges() judges.
+const AHEAD_ITEM = { type: 'object', properties: { commit: { type: 'string' }, parents: { type: 'array', items: { type: 'string' } }, on_integration: { type: 'boolean' }, tree: { type: 'string' }, clean_tree: { type: 'string' } }, required: ['commit', 'parents'] }
 const LAND_SYNC_SCHEMA = {
   type: 'object',
-  properties: { status: { type: 'string', enum: ['current', 'done', 'conflicted', 'blocked'] }, conflicted: { type: 'boolean' }, head: { type: 'string' }, merge_commit: { type: 'string' }, resolved_files: STRS, markers_checked: { type: 'boolean' }, tests: STRS, notes: { type: 'string' } },
+  properties: { status: { type: 'string', enum: ['current', 'done', 'conflicted', 'blocked'] }, conflicted: { type: 'boolean' }, head: { type: 'string' }, merge_commit: { type: 'string' }, resolved_files: STRS, markers_checked: { type: 'boolean' }, tests: STRS, notes: { type: 'string' }, ahead: { type: 'array', items: AHEAD_ITEM }, pushed: { type: 'boolean' } },
   required: ['status'],
 }
 const LAND_MERGE_SCHEMA = { type: 'object', properties: { merged: { type: 'boolean' }, behind: { type: 'boolean' }, merge_commit: { type: 'string' }, notes: { type: 'string' } }, required: ['merged'] }
@@ -956,7 +958,7 @@ ${RULES}`, rl, { ...lifecycleClerk, schema: withRenew({ type: 'object', properti
     if (early || prelock) c.early++
     const label = `land-sync-${n}-${c.sync}`
     const sy = early ? { status: 'conflicted', conflicted: true, head: expected, notes: `the probe before the land lock found a conflict with ${INT}${(early.files || []).length ? ` in ${early.files.join(', ')}` : ''}` } : await call(`Issue #${n} of ${SLUG} is being landed into ${INT}. Bring the branch ${B} up to date in the worktree ${W}.
-1. git -C ${W} fetch origin. If origin/${INT} is an ancestor of HEAD (git -C ${W} merge-base --is-ancestor origin/${INT} HEAD succeeds), change nothing and answer status current with head (git -C ${W} rev-parse HEAD, the full sha).
+1. git -C ${W} fetch origin. If origin/${INT} is an ancestor of HEAD (git -C ${W} merge-base --is-ancestor origin/${INT} HEAD succeeds), change nothing and answer status current with head (git -C ${W} rev-parse HEAD, the full sha). When that head is not ${expected} (an earlier run of this step may have merged and pushed before it was interrupted), the answer also carries these facts, read without changing anything, every sha in full: ${AHEAD_FACTS(W, expected)}; and pushed (true only when git -C ${W} rev-parse origin/${B} prints that head).
 2. Otherwise merge it: git -C ${W} merge origin/${INT}. A clean merge: answer status done, conflicted false, head (the full sha of the merge commit).
 3. If the merge conflicts, do not resolve it: run git merge --abort inside ${W}, confirm no merge is left in progress (git -C ${W} rev-parse -q --verify MERGE_HEAD fails), and answer status conflicted, conflicted true, with head (the full sha of HEAD, unchanged) and the conflicting files in notes. A later step resolves it.
 ${pr ? `4. After a clean merge, push the result: git -C ${W} push origin ${B}.` : '4. Do not push.'}
@@ -967,7 +969,15 @@ ${RULES}`, label, { phase: 'Land', agentType: 'implementer', model: 'sonnet', sc
     if (sy.status === 'blocked' && !aborted) return out('stopped', { stage: 'land-sync', detail: sy.notes })
     if (sy.status === 'current') {
       const at = sy.head || sy.merge_commit || expected
-      if (at !== expected) return out('stopped', { stage: 'head-moved', expected, head: at })
+      if (at === expected) return null
+      // #1022: a sync step that was interrupted after its push and ran again finds the branch current at its own merge. The same
+      // step reads the commits on top of the expected head as facts, and the landing goes on as after a clean sync only when they
+      // pass the clean-merge rule of readopt (cleanMerges) and the remote branch is at that head, so nothing is pushed here. The
+      // record step then reads the PR head itself before it moves the lock. Anything else is a head this landing did not make.
+      if (!(sy.pushed === true && cleanMerges({ head: at, pr_head: expected, ahead: sy.ahead }))) return out('stopped', { stage: 'head-moved', expected, head: at })
+      log(`${label}: the branch was already at ${at}, ${sy.ahead.length === 1 ? 'a clean merge' : `${sy.ahead.length} clean merges`} of ${INT} on top of ${expected} that an earlier run of this step pushed; going on from it`)
+      expected = at
+      if (pr && !prelock) return await advance(false, !!early)
       return null
     }
     if (!aborted && sy.status !== 'done') return out('stopped', { stage: 'land-sync', detail: sy.notes })
@@ -1907,6 +1917,8 @@ const REATTACH = (branch, path) => `When HEAD in ${path} is detached (git -C ${p
 // The push step reads the two safety facts of each merge again with its own commands before it pushes, so one clerk's word is not
 // the only proof; and nothing is pushed for a reply the landing could not use (readoptUsable).
 const AHEAD_MAX = 8
+// The facts of the commits on top of a known head, read by the readopt step (#1019) and by a sync step that finds its merge already made (#1022).
+const AHEAD_FACTS = (wt, from) => `ahead, one entry per output line of git -C ${wt} rev-list --first-parent --parents ${from}..HEAD, in that order (only the first ${AHEAD_MAX} lines when there are more, none when it prints nothing): commit (the first sha of the line), parents (its other shas, in order) and, only for a line with exactly two parents, on_integration (true only when git -C ${wt} merge-base --is-ancestor <second parent> origin/${INT} succeeds), tree (git -C ${wt} rev-parse <commit>^{tree}) and clean_tree (the first output line of git -C ${wt} merge-tree --write-tree <first parent> <second parent> when it exits 0; leave it out when it does not)`
 const FULL_SHA_RE = /^[0-9a-f]{40}$/
 const fullSha = v => typeof v === 'string' && FULL_SHA_RE.test(v)
 const cleanMerges = ro => {
@@ -1925,7 +1937,7 @@ const READOPT_SCHEMA = {
   properties: {
     ok: { type: 'boolean' }, reason: { type: 'string', enum: ['unaccepted', 'dirty', 'no-acceptance', 'worktree', 'other'] }, detail: { type: 'string' },
     worktree: { type: 'string' }, branch: { type: 'string' }, head: { type: 'string' }, reattached: { type: 'boolean' }, pr_head: { type: 'string' },
-    ahead: { type: 'array', items: { type: 'object', properties: { commit: { type: 'string' }, parents: { type: 'array', items: { type: 'string' } }, on_integration: { type: 'boolean' }, tree: { type: 'string' }, clean_tree: { type: 'string' } }, required: ['commit', 'parents'] } },
+    ahead: { type: 'array', items: AHEAD_ITEM },
     acceptance: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, text: { type: 'string' }, kind: { type: 'string', enum: ACCEPT_KINDS } }, required: ['id', 'text', 'kind'] } },
   },
   required: ['ok'],
@@ -1936,7 +1948,7 @@ const readoptPrompt = n => {
 1. Run git -C ${REPO} fetch origin.
 2. Read ${UNSET}gh pr view ${pr} --repo ${SLUG} --json headRefOid,body. The PR is landed as it stands only at its accepted head: the body's Evidence section ends with a line Accepted head: <sha>. Answer ok false with reason unaccepted (and the head you read in detail) when the body has no Accepted head: line or the line's sha differs from headRefOid, and stop there.
 3. Find the worktree on ${B}: run git -C ${REPO} worktree list --porcelain and take the entry whose branch is refs/heads/${B}. When there is none, resolve the contract once (resolve-project resolve --repo-root ${REPO}): <path> is bindings.vcs.worktree.root (resolved against project.root) plus bindings.vcs.worktree.prefix and ${B}. When the list has an entry at <path>: ${REATTACH(B, '<path>')} An entry there that is still not on ${B}: answer ok false with reason other and what it is on in detail. When the list has no entry at <path>, add one: git -C ${REPO} worktree add <path> ${B} when the local branch exists, else git -C ${REPO} worktree add --no-track -b ${B} <path> origin/${B} when only the remote branch exists. When that fails, answer ok false with reason other and the error in detail.
-4. In that worktree: when git -C <worktree> status --porcelain shows any change, answer ok false with reason dirty and the status in detail. When git -C <worktree> rev-parse HEAD differs from headRefOid, the answer is ok false with reason worktree and both shas in detail, and it carries these facts too, read without changing anything, every sha in full: head (git -C <worktree> rev-parse HEAD), pr_head (headRefOid) and ahead, one entry per output line of git -C <worktree> rev-list --first-parent --parents headRefOid..HEAD, in that order (only the first ${AHEAD_MAX} lines when there are more, none when it prints nothing): commit (the first sha of the line), parents (its other shas, in order) and, only for a line with exactly two parents, on_integration (true only when git -C <worktree> merge-base --is-ancestor <second parent> origin/${INT} succeeds), tree (git -C <worktree> rev-parse <commit>^{tree}) and clean_tree (the first output line of git -C <worktree> merge-tree --write-tree <first parent> <second parent> when it exits 0; leave it out when it does not). Push nothing. Then run step 5, whose worktree, branch and acceptance that answer carries as well.
+4. In that worktree: when git -C <worktree> status --porcelain shows any change, answer ok false with reason dirty and the status in detail. When git -C <worktree> rev-parse HEAD differs from headRefOid, the answer is ok false with reason worktree and both shas in detail, and it carries these facts too, read without changing anything, every sha in full: head (git -C <worktree> rev-parse HEAD), pr_head (headRefOid) and ${AHEAD_FACTS('<worktree>', 'headRefOid')}. Push nothing. Then run step 5, whose worktree, branch and acceptance that answer carries as well.
 5. Read the body's Acceptance table, one row per criterion (id, criterion, kind, and how it is shown). When the body has no Acceptance table, answer ok false with reason no-acceptance. Otherwise answer ok true (step 4's ok false answer when the heads differ) with worktree (its absolute path), branch ${B}, head (headRefOid, the full sha; HEAD in step 4's answer) and acceptance: one {id, text (the criterion), kind (${ACCEPT_KINDS.join(', ')}, as the table says)} per row.
 ${RULES_FOR('<the worktree path>', B)}`
 }

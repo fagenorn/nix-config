@@ -7338,3 +7338,104 @@ class ReadoptCleanMergesTest(unittest.TestCase):
         self.assertEqual((push["agentType"], push["model"], push["effort"]), ("clerk", "sonnet", "low"))
         self.assertEqual(schema_of(out["calls"], "readopt-push-1")["required"], ["pushed"])
         self.assertIn(f"git -C {WT1} push origin issue-1-x;", push["prompt"][push["prompt"].index("Lifecycle commands"):])
+
+
+class SyncRerunTest(unittest.TestCase):
+    """#1022: a sync step interrupted after its push and run again answers current at its own merge. The step reads the commits on
+    top of the expected head as facts, and the landing goes on as after a clean sync only when they pass the clean-merge rule of
+    readopt and the remote branch is at that head; anything else stays head-moved, with the lock released."""
+
+    @staticmethod
+    def current(*commits, **over):
+        return dict({"status": "current", "conflicted": False, "head": commits[0]["commit"], "ahead": list(commits), "pushed": True,
+                     "notes": "already up to date"}, **over)
+
+    @staticmethod
+    def landing(out):
+        names = labels(out["calls"])
+        return names[names.index("land-pr-1"):]
+
+    def test_a_rerun_that_finds_its_own_pushed_merge_goes_on_as_after_a_clean_sync(self):
+        out = run_full(patch=BEHIND, replies={"land-sync-1-1": self.current(merge(M1, SHA))})
+        calls = out["calls"]
+        self.assertEqual(row(out["result"], 1), {"issue": 1, "outcome": "landed", "pr": 41})
+        self.assertEqual(self.landing(out), ["land-pr-1", "land-sync-1-1", "land-record-1-1", "land-merge-1", "close-out-1"])
+        record = prompt(calls, "land-record-1-1")
+        self.assertIn(f"Accepted head: {M1}", record)
+        self.assertIn(f"confirm headRefOid is {M1}", record)
+        self.assertIn(f"move the cross-host landing lock of the branch dev to the head {M1}", record)
+        self.assertIn(f"--match-head-commit {M1}", prompt(calls, "land-merge-1"))
+        self.assertEqual(land_release_shas(calls), [M1])
+        self.assertIn(f"land-sync-1-1: the branch was already at {M1}, a clean merge of dev on top of {SHA} that an earlier run of "
+                      "this step pushed; going on from it", out["logs"])
+
+    def test_two_clean_merges_on_top_are_one_chain(self):
+        out = run_full(patch=BEHIND, replies={"land-sync-1-1": self.current(merge(M2, M1, I2, T2), merge(M1, SHA))})
+        self.assertEqual(row(out["result"], 1)["outcome"], "landed")
+        self.assertIn(f"--match-head-commit {M2}", prompt(out["calls"], "land-merge-1"))
+        self.assertIn(f"the branch was already at {M2}, 2 clean merges of dev on top of {SHA}", " ".join(out["logs"]))
+
+    def test_anything_else_stays_head_moved_and_releases_the_lock(self):
+        clean = merge(M1, SHA)
+        cases = (
+            ("no facts", {"status": "current", "conflicted": False, "head": M1, "notes": "ok"}),
+            ("no facts, pushed", {"status": "current", "conflicted": False, "head": M1, "pushed": True, "notes": "ok"}),
+            ("a plain commit on top", self.current({"commit": M1, "parents": [SHA]})),
+            ("a plain commit on top of a clean merge", self.current({"commit": M2, "parents": [M1]}, clean)),
+            ("a tree that is not the clean merge's", self.current(merge(M1, SHA, clean_tree=T2))),
+            ("a merge that conflicts when replayed", self.current({k: v for k, v in clean.items() if k != "clean_tree"})),
+            ("a merge of another branch", self.current(merge(M1, SHA, on_integration=False))),
+            ("a chain that does not reach the expected head", self.current(merge(M1, PR_HEAD))),
+            ("a chain that does not start at the head", self.current(clean, head=M2)),
+            ("a remote branch that is elsewhere", self.current(clean, pushed=False)),
+            ("no word on the remote branch", {k: v for k, v in self.current(clean).items() if k != "pushed"}),
+            ("more commits than are read", self.current(*[merge(f"{i:040x}", f"{i + 1:040x}") for i in range(1, 10)])),
+        )
+        for name, reply in cases:
+            with self.subTest(name):
+                out = run_full(patch=BEHIND, replies={"land-sync-1-1": reply})
+                got = row(out["result"], 1)
+                self.assertEqual((got["outcome"], got["stage"], got["expected"], got["head"]), ("stopped", "head-moved", SHA, reply["head"]))
+                self.assertEqual(self.landing(out), ["land-pr-1", "land-sync-1-1", "land-unlock-1"])
+                self.assertEqual(land_release_shas(out["calls"]), [SHA])
+                self.assertEqual([line for line in out["logs"] if "going on from it" in line], [])
+
+    def test_current_at_the_expected_head_needs_no_fact(self):
+        base = run_full(patch=BEHIND)
+        self.assertEqual(row(base["result"], 1)["outcome"], "landed")
+        self.assertEqual(self.landing(base), ["land-pr-1", "land-sync-1-1", "land-checks-1-2", "land-merge-1", "close-out-1"])
+
+    def test_the_sync_step_names_the_expected_head_and_reads_the_facts_itself(self):
+        _, calls, _ = run(patch=BEHIND)
+        text = prompt(calls, "land-sync-1-1")
+        for needle in (f"When that head is not {SHA} (an earlier run of this step may have merged and pushed before it was interrupted)",
+                       "read without changing anything, every sha in full",
+                       f"git -C {WT1} rev-list --first-parent --parents {SHA}..HEAD",
+                       f"git -C {WT1} merge-base --is-ancestor <second parent> origin/dev",
+                       f"git -C {WT1} rev-parse <commit>^{{tree}}",
+                       f"git -C {WT1} merge-tree --write-tree <first parent> <second parent> when it exits 0",
+                       "only the first 8 lines",
+                       f"and pushed (true only when git -C {WT1} rev-parse origin/issue-1-x prints that head)"):
+            self.assertIn(needle, text)
+        self.assertLess(text.index("answer status current"), text.index("When that head is not"))
+        self.assertLess(text.index("When that head is not"), text.index("2. Otherwise merge it"))
+        schema = schema_of(calls, "land-sync-1-1")["properties"]
+        self.assertEqual(schema["pushed"], {"type": "boolean"})
+        self.assertEqual(schema["ahead"], schema_of(run(patch={"facts-1": {"open_pr": OPEN_PR}})[1], "readopt-1")["properties"]["ahead"])
+
+    def test_the_sync_before_the_lock_goes_on_from_its_own_pushed_merge_too(self):
+        """#1018's sync before the lock shares the step: nothing is recorded or taken until the checks of that head were read."""
+        green = {"state": "passed", "head": M1, "required": ["ci"], "passed": ["ci"]}
+        out = run_full(patch=BehindRedBeforeLockTest.PRE, replies={"land-sync-1-1": self.current(merge(M1, SHA)), "land-checks-1-1": green})
+        calls = out["calls"]
+        self.assertEqual(row(out["result"], 1)["outcome"], "landed")
+        self.assertEqual(self.landing(out), ["land-pr-1", "land-sync-1-1", "land-checks-1-1", "land-record-1-1", "land-merge-1", "close-out-1"])
+        self.assertIn(f"take the cross-host landing lock of the branch dev at the head {M1}; {BehindRedBeforeLockTest.UP_TO_DATE}",
+                      prompt(calls, "land-record-1-1"))
+        self.assertEqual(land_release_shas(calls), [M1])
+        # A head the facts do not prove stops before any lock was asked for; the ready head is released once, as ever.
+        bad = run_full(patch=BehindRedBeforeLockTest.PRE, replies={"land-sync-1-1": self.current({"commit": M1, "parents": [SHA]})})
+        got = row(bad["result"], 1)
+        self.assertEqual((got["outcome"], got["stage"], got["head"]), ("stopped", "head-moved", M1))
+        self.assertEqual(self.landing(bad), ["land-pr-1", "land-sync-1-1", "land-unlock-1"])
+        self.assertEqual(land_release_shas(bad["calls"]), [SHA])
