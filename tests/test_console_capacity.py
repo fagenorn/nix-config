@@ -5,7 +5,7 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-from agent_tools.console import capacity
+from agent_tools.console import capacity, manager
 from agent_tools.console.capacity import (
     READING,
     STOP,
@@ -397,6 +397,39 @@ class SigninCapacityTest(unittest.TestCase):
         self.assertIs(out["ask"], True)
         self.assertEqual(out["since"], "t3")
         self.assertIs(ask(SignIn("unknown", None, "t4"), T + 10)["ask"], False)
+
+
+class ExclusionCapacityTest(unittest.TestCase):
+    def test_an_excluded_entry_keeps_its_reading_and_sign_in(self):
+        state = CapacityState({"work": open_reading(), "home": open_reading_of("home")}, {})
+        signins = {"work": SignIn("signed_in", None, "t1")}
+        plain = capacity_view(["home", "work"], state, T, signins)
+        marked = capacity_view(["home", "work"], state, T, signins, excluded={"work"})
+        by_plain = {e["profile"]: e for e in plain["profiles"]}
+        by_marked = {e["profile"]: e for e in marked["profiles"]}
+        self.assertIs(by_marked["work"]["excluded"], True)
+        self.assertIs(by_marked["home"]["excluded"], False)
+        self.assertEqual({e["excluded"] for e in plain["profiles"]}, {False})
+        for name in ("home", "work"):
+            without = {k: v for k, v in by_marked[name].items() if k != "excluded"}
+            self.assertEqual(without, {k: v for k, v in by_plain[name].items() if k != "excluded"})
+        self.assertEqual(list(by_marked["work"])[-2:], ["signin", "excluded"])
+
+    def test_an_excluded_profile_never_gives_room(self):
+        out = CapacityState({"work": open_reading(), "spare": refused_reading(T + 100, "spare")}, {})
+        shown = capacity_view(["spare", "work"], out, T, excluded={"work"})
+        self.assertIs(shown["all_out"], True)
+        self.assertEqual(shown["resumes_at"], iso(T + 100))
+        self.assertIs(shown["tight"], False)
+        self.assertEqual(manager.choose_profile(shown, {}), manager.Wait(iso(T + 100)))
+        covered = CapacityState({"work": open_reading()}, {})
+        self.assertIsNone(
+            capacity_view(["home", "work"], covered, T, excluded={"home"})["no_reading"])
+        self.assertEqual(capacity_view(["home", "work"], covered, T)["no_reading"],
+                         "1 with no reading yet")
+        alone = capacity_view(["work"], covered, T, excluded={"work"})
+        self.assertIs(alone["all_out"], False)
+        self.assertIs(alone["tight"], False)
 
 
 if __name__ == "__main__":

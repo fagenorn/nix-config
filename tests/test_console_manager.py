@@ -31,11 +31,13 @@ REFUSAL = ("Nobody watches this session, so the permission prompt was refused: d
 
 
 def cap(*rows, all_out=False, resumes_at=None):
-    def entry(p, s, w, f, signin=None):
+    def entry(p, s, w, f, signin=None, excluded=False):
         row = {"profile": p, "state": s, "week_left": w, "five_hour_left": f,
                "next_reset": None, "out_until": None, "read_at": None}
         if signin is not None:
             row["signin"] = {"state": signin}
+        if excluded:
+            row["excluded"] = True
         return row
     return {"tight": False, "all_out": all_out, "resumes_at": resumes_at,
             "profiles": [entry(*row) for row in rows]}
@@ -315,6 +317,21 @@ class SessionProfileTest(unittest.TestCase):
         for capacity, last_use, expected in table:
             with self.subTest(capacity=capacity["profiles"], last_use=last_use):
                 self.assertEqual(manager.session_profile(capacity, last_use), expected)
+
+    def test_an_excluded_profile_is_never_chosen(self):
+        unknown = (None, None)
+        table = [
+            (cap(("a", "ok", 90, 90, None, True), ("b", "ok", 10, 10)), {}, "b"),
+            (cap(("a", "ok", 90, 90, None, True)), {}, None),
+            (cap(("a", "unknown", *unknown, "signed_in", True),
+                 ("b", "unknown", *unknown, "signed_in")), {"a": T_LATE, "b": T_EARLY}, "b"),
+            (cap(("a", "unknown", *unknown, "signed_in", True)), {"a": T_LATE}, None),
+        ]
+        for capacity, last_use, expected in table:
+            with self.subTest(capacity=capacity["profiles"], last_use=last_use):
+                self.assertEqual(manager.session_profile(capacity, last_use), expected)
+        self.assertEqual(manager.choose_profile(cap(("a", "ok", 90, 90, None, True)), {}),
+                         manager.Wait(None))
 
     def test_with_no_room_the_most_recently_used_signed_in_profile_answers(self):
         unknown = (None, None)
