@@ -10,7 +10,7 @@ Hosts covers what each machine runs for the agents: the pinned Claude Code binar
 ## Language
 
 **Account binding**:
-The recorded choice of which account profile a project runs under, kept in a per-user table. `claude` reads it at launch to pick the profile directory.
+The recorded choice of which account profile a project runs under, kept in a per-user table. `claude` no longer reads it at launch: a new session starts under the console's profile choice (ADR-hosts-008). The commands that record it go in a later change, which supersedes ADR-hosts-005.
 _Avoid_: account mapping
 
 **Account profile**:
