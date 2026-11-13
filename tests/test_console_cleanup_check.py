@@ -5,6 +5,7 @@ Run: just agent-workflow-tests
 import contextlib
 import io
 import json
+import os
 import subprocess
 import tempfile
 import unittest
@@ -124,6 +125,26 @@ class CleanupCheckTest(unittest.TestCase):
         self.configured = []
         self.assertEqual((75, {"status": "no_profiles"}), self.check())
         self.assertEqual([], self.read)
+
+    def test_the_unprofiled_directory_is_searched_though_no_result_names_it(self):
+        with tempfile.TemporaryDirectory() as raw:
+            home, accounts = Path(raw) / "home", Path(raw) / "accounts"
+            (home / ".claude").mkdir(parents=True)
+            (accounts / "profiles/work").mkdir(parents=True)
+            self.all_fresh(profiles=["work"])
+            self.listings = {"default": [{"sessionId": "z", "name": "p sprint a"}], "work": []}
+            out = io.StringIO()
+            with mock.patch.dict(os.environ, {"HOME": str(home),
+                                              "CLAUDE_ACCOUNTS_DIR": str(accounts)}):
+                configured = cleanup_check.configured_profiles()
+                with contextlib.redirect_stdout(out):
+                    code = cleanup_check.main(
+                        ["--project", PROJECT, "--checks-dir", str(self.dir)],
+                        run_check=self.run_check, lister=self.lister)
+        self.assertEqual(configured, ["default", "work"])
+        self.assertEqual((code, json.loads(out.getvalue())),
+                         (1, {"left": ["p sprint a"], "status": "not_met"}))
+        self.assertIn("default", self.read)
 
     def test_a_named_session_still_listed_is_not_met(self):
         self.all_fresh()
