@@ -65,6 +65,9 @@ IMPLEMENTER_ROUNDS = ("Work in rounds: put a round's lookups in one message, sen
                       "in one message, and run the tests once per round of edits, never one small call per turn.")
 
 # #992: the one sentence about the structured reply, the same in both programs.
+# #1019: the one sentence every review step gets, the same in both programs.
+READ_ONLY = ("Never check out, switch, reset or stash in the worktree: read another commit with git show, or in a temporary "
+             "git worktree outside it.")
 REPLY_ALONE = ("Call StructuredOutput alone in its own message, never beside another tool call, only after every other tool "
                "result has come back: the first accepted call is final and ends the step.")
 
@@ -3195,11 +3198,11 @@ class NoCommitTaskTest(unittest.TestCase):
                 self.assertEqual(prompt(calls, "review-1"), f"{opener}{head}\n{lane}Review the diff of task 1 only: "
                                  f"git -C {self.WT} diff {SHA}..c0ffee (and the task file /g/task-1.md as its contract). {KNOW_TEXT} "
                                  "Report Important or Critical correctness defects and unmet task requirements only, each with a "
-                                 f"concrete failing input. No style notes. Do not edit anything.\n{REPLY_ALONE}")
+                                 f"concrete failing input. No style notes. Do not edit anything.\n{READ_ONLY}\n{REPLY_ALONE}")
                 self.assertEqual(prompt(calls, "rereview-1-1"), f"{head}\nRe-review only these previously reported findings for "
                                  f"task 1 against the fix: git -C {self.WT} diff c0ffee..f1c0de; the implementer's notes: ok. "
                                  'Findings: [{"severity":"important","summary":"bug on the candidate","failing_input":"x"}]. Report any finding still '
-                                 f"unresolved and any new Important or Critical defect the fix introduced.\n{REPLY_ALONE}")
+                                 f"unresolved and any new Important or Critical defect the fix introduced.\n{READ_ONLY}\n{REPLY_ALONE}")
                 kinds = {c["label"]: c["agentType"] for c in calls}
                 self.assertEqual((kinds["review-1"], kinds["rereview-1-1"]),
                                  ("reviewer-lite" if lane else "reviewer", "reviewer-lite"))
@@ -9799,6 +9802,211 @@ class OwnRedOutsideLockTest(unittest.TestCase):
                 result, calls = run(patch={"pr": {"own_red": own}})
                 self.assertEqual([(c["label"], c["prompt"]) for c in calls], base)
                 self.assertEqual(result["stage"], "done")
+
+
+REVIEWERS = ("reviewer", "reviewer-lite")
+
+
+class ReadOnlyReviewTest(unittest.TestCase):
+    """#1019: every review step is told, in one shared sentence, never to move the worktree's HEAD."""
+
+    def test_every_review_step_carries_the_sentence_once_and_no_other_step_does(self):
+        seen = all_calls()
+        kinds = {c["agentType"] for c in seen if READ_ONLY in c["prompt"]}
+        self.assertEqual(kinds, set(REVIEWERS))
+        for call in seen:
+            with self.subTest(label=call["label"]):
+                review = call["agentType"] in REVIEWERS
+                self.assertEqual(call["prompt"].count(READ_ONLY), 1 if review else 0)
+                if review and not call["label"].endswith("-again"):
+                    self.assertTrue(call["prompt"].endswith(f"\n{READ_ONLY}\n{REPLY_ALONE}"))
+
+    def test_a_rerun_review_carries_it_once(self):
+        _, calls = run(replies={"review-1": INCOMPLETE})
+        again = prompt(calls, "review-1-again")
+        self.assertEqual(again.count(READ_ONLY), 1)
+        self.assertLess(again.index(READ_ONLY), again.index("An earlier reply to this step was discarded"))
+
+    def test_the_sentence_is_one_constant_shared_with_deliver_batch(self):
+        mine = PROGRAM.read_text(encoding="utf-8")
+        batch = PROGRAM.with_name("deliver-batch.js").read_text(encoding="utf-8")
+        line = f"const READ_ONLY = '{READ_ONLY}'\n"
+        self.assertEqual((mine.count(line), batch.count(line)), (1, 1))
+        # One sentence: its only full stop ends it. It is added where every review passes, and nowhere else.
+        self.assertEqual(READ_ONLY.index("."), len(READ_ONLY) - 1)
+        for text in (mine, batch):
+            self.assertEqual(text.count("${READ_ONLY}"), 1)
+            self.assertEqual(text.count("Never check out, switch, reset or stash"), 1)
+            self.assertIn("    const prompt = `${asked}\\n${READ_ONLY}`\n" if text is batch else "  const prompt = `${asked}\\n${READ_ONLY}`\n", text)
+        for word in ("check out", "switch", "reset", "stash", "git show", "temporary git worktree outside it"):
+            self.assertIn(word, READ_ONLY)
+
+
+class ReattachTest(unittest.TestCase):
+    """#1019: a worktree detached at its branch tip with a clean tree is put back on the branch; any other detached HEAD stops as before."""
+
+    WT, BRANCH = "/r/.wt/w-issue-9-x", "issue-9-x"
+
+    @staticmethod
+    def reattach(branch, path):
+        return (f"When HEAD in {path} is detached (git -C {path} symbolic-ref -q HEAD fails), put it back on {branch} first, only when "
+                f"git -C {path} rev-parse HEAD and git -C {path} rev-parse refs/heads/{branch} print the same sha and "
+                f"git -C {path} status --porcelain prints nothing: run git -C {path} switch {branch}, alone, and return reattached true. "
+                "It is the one change this read may make; never reset, and leave any other detached HEAD as it is.")
+
+    def cont(self):
+        return ResumeTest().cont()
+
+    def test_the_resumed_setup_reattaches_before_it_judges_the_branch(self):
+        _, calls = run(args=dict(ARGS, cont=self.cont()))
+        text = prompt(calls, "setup")
+        sentence = self.reattach(self.BRANCH, self.WT)
+        self.assertEqual(text.count(sentence), 1)
+        self.assertLess(text.index(f"exists and is on branch {self.BRANCH}"), text.index(sentence))
+        self.assertLess(text.index(sentence), text.index("If any fails, return ok=false with reason not-resumable and the evidence."))
+        self.assertIn("Change nothing but that re-attach.", text)
+        self.assertNotIn("checkout", sentence)
+
+    def test_a_resume_reattached_at_the_branch_tip_goes_on(self):
+        out = run_out(args=dict(ARGS, cont=self.cont()), patch={"setup": {"reattached": True}})
+        self.assertEqual(out["result"]["stage"], "done")
+        self.assertIn("impl-2", labels(out["calls"]))
+        self.assertEqual(len([line for line in out["logs"] if line.startswith("setup: the worktree was on a detached HEAD at its branch tip")]), 1)
+        # The fact belongs to this run alone: no cont carries it to the next.
+        stopped = run_out(args=dict(ARGS, cont=self.cont()), patch={"setup": {"reattached": True}}, replies={"impl-2": None})["result"]
+        self.assertNotIn("reattached", stopped["cont"]["setup"])
+
+    def test_a_resume_with_no_reattach_logs_nothing(self):
+        out = run_out(args=dict(ARGS, cont=self.cont()))
+        self.assertFalse([line for line in out["logs"] if "detached" in line])
+
+    def test_any_other_detached_head_stops_with_the_existing_reason(self):
+        for evidence in ("HEAD is detached at c0ffee, not the tip of issue-9-x", "HEAD is detached at the tip and the tree is dirty: M a.py"):
+            with self.subTest(evidence=evidence):
+                result, calls = run(args=dict(ARGS, cont=self.cont()),
+                                    replies={"setup": {"ok": False, "reason": "not-resumable", "details": evidence}})
+                self.assertEqual((result["stage"], result["result"]["reason"]), ("setup", "not-resumable"))
+                self.assertEqual(labels(calls), ["setup"])
+
+    def test_the_fresh_setup_and_the_incomplete_claim_resume_reattach_through_the_existing_read(self):
+        _, calls = run()
+        fresh = prompt(calls, "setup")
+        self.assertEqual(fresh.count(self.reattach("<branch>", "<worktree_path>")), 1)
+        self.assertLess(fresh.index(self.reattach("<branch>", "<worktree_path>")), fresh.index("Return existing with local_branch"))
+        cont = {"setup": {"ok": True, "branch": self.BRANCH, "worktree_path": self.WT, "holder": HOLDER}, "lane": "standard", "plan": None,
+                "plan_reviewed": False, "done": [], "fix_waves": 0, "claim_incomplete": True}
+        _, calls = run(args=dict(ARGS, cont=cont))
+        self.assertEqual(prompt(calls, "setup").count(self.reattach(self.BRANCH, self.WT)), 1)
+
+    def test_the_setup_schema_names_the_reattach(self):
+        _, calls = run()
+        self.assertEqual(schema_of(calls, "setup")["properties"]["reattached"], {"type": "boolean"})
+
+    def test_the_sentence_is_the_same_in_deliver_batch(self):
+        mine = PROGRAM.read_text(encoding="utf-8")
+        batch = PROGRAM.with_name("deliver-batch.js").read_text(encoding="utf-8")
+        (line,) = [l for l in mine.splitlines() if l.startswith("const REATTACH = ")]
+        self.assertEqual(batch.count(line + "\n"), 1)
+        self.assertIn("switch ${branch}", line)
+        self.assertNotIn("checkout", line)
+
+
+class RulesReviseSecondRoundTest(unittest.TestCase):
+    """#1019: a rules re-review that leaves only findings on criteria the revise changed gets one more revise; never a third."""
+
+    PINNED = dict(HUMAN, text="looks right on 2026-11-13")
+    LOOSE = dict(HUMAN, text="looks right on the day of the check")
+    ON_AC3 = PlanRuleMessagesTest.review(PlanRuleMessagesTest.finding("important", "AC3", "a pinned date", "R2"))
+    OPEN = {"close-out": {"issue_state": "OPEN"}}
+
+    def go(self, revises, rereviews, **more):
+        plan = with_criteria(HUMAN)
+        replies = {"plan": plan, "plan-revise": plan, "plan-review": PlanRulesTest.RULE_FINDING,
+                   "plan-rules-revise": revises, "plan-rules-review": [PlanRulesTest.RULE_FINDING] + rereviews}
+        return run_out(replies=replies, patch=self.OPEN, **more)
+
+    @staticmethod
+    def counts(calls):
+        names = labels(calls)
+        return names.count("plan-rules-revise"), names.count("plan-rules-review")
+
+    def test_a_finding_on_a_criterion_the_revise_changed_gets_a_second_round(self):
+        out = self.go([with_criteria(self.PINNED), with_criteria(self.LOOSE)], [self.ON_AC3, PASS_REPLY])
+        result, calls = out["result"], out["calls"]
+        self.assertEqual(self.counts(calls), (2, 3))
+        self.assertNotEqual(result["stage"], "plan-review")
+        self.assertIn("impl-1", labels(calls))
+        second = [c["prompt"] for c in calls if c["label"] == "plan-rules-revise"][1]
+        self.assertIn('"summary":"a pinned date"', second)
+        self.assertNotIn('"summary":"s"', second[second.index("Fix only these rule findings"):])
+        self.assertEqual(len([line for line in out["logs"] if line.endswith("one more rules revise")]), 1)
+
+    def test_a_third_revise_is_never_run(self):
+        out = self.go([with_criteria(self.PINNED), with_criteria(self.LOOSE), with_criteria(self.PINNED)],
+                      [self.ON_AC3, self.ON_AC3, PASS_REPLY])
+        result, calls = out["result"], out["calls"]
+        self.assertEqual(self.counts(calls), (2, 3))
+        self.assertEqual(result["stage"], "plan-review")
+        self.assertEqual([(r["rule"], r["ac"]) for r in result["rules"]], [("R2", "AC3")])
+        # Both revises are spent: the plan is dropped, as after the second revise of a relaunch.
+        self.assertIsNone(result["cont"]["plan"])
+        self.assertNotIn("plan_findings", result["cont"])
+        self.assertNotIn("impl-1", labels(calls))
+
+    def test_any_other_finding_stops_after_one_revise_as_before(self):
+        f = PlanRuleMessagesTest.finding
+        cases = (
+            ("a criterion the revise left alone", with_criteria(self.PINNED), [f("important", "AC1", "s", "R2")]),
+            ("one of two on another criterion", with_criteria(self.PINNED), [f("important", "AC3", "s", "R2"), f("important", "AC1", "s", "R2")]),
+            ("no criterion named", with_criteria(self.PINNED), [f("important", None, "s", "R2")]),
+            ("the revise changed no criterion", with_criteria(HUMAN), [f("important", "AC3", "s", "R2")]),
+            ("only the tasks changed", PlanRulesTest.REVISED, [f("important", "AC3", "s", "R2")]),
+        )
+        for name, revised, left in cases:
+            with self.subTest(case=name):
+                out = self.go([revised, with_criteria(self.LOOSE)], [PlanRuleMessagesTest.review(*left), PASS_REPLY])
+                result, calls = out["result"], out["calls"]
+                self.assertEqual(self.counts(calls), (1, 2))
+                self.assertEqual(result["stage"], "plan-review")
+                self.assertEqual(result["cont"]["plan_findings"]["rounds"], 1)
+                self.assertEqual(result["cont"]["plan"], revised)
+                self.assertFalse([line for line in out["logs"] if line.endswith("one more rules revise")])
+
+    def test_the_criterion_id_is_matched_without_case_or_spaces(self):
+        left = PlanRuleMessagesTest.review(PlanRuleMessagesTest.finding("important", " ac3 ", "a pinned date", "R2"))
+        out = self.go([with_criteria(self.PINNED), with_criteria(self.LOOSE)], [left, PASS_REPLY])
+        self.assertEqual(self.counts(out["calls"]), (2, 3))
+
+    def test_a_swap_between_classification_rules_keeps_its_owner_action_and_its_bound(self):
+        f = PlanRuleMessagesTest.finding
+        plan = with_criteria(HUMAN)
+        r3 = PlanRuleMessagesTest.review(f("important", "AC3", "not a human check", "R3"))
+        swap = PlanRuleMessagesTest.review(f("important", "AC3", "s", "R1"))
+        result, calls = run(replies={"plan": plan, "plan-revise": plan, "plan-review": PlanRulesTest.RULE_FINDING,
+                                     "plan-rules-revise": [with_criteria(self.PINNED), with_criteria(self.LOOSE)],
+                                     "plan-rules-review": [r3, swap, PASS_REPLY]})
+        self.assertEqual(self.counts(calls), (1, 2))
+        self.assertEqual(result["stage"], "plan-review")
+        self.assertEqual(result["conflict"], {"ac": "AC3", "rules": ["R3", "R1"], "revises_left": 1})
+        self.assertEqual(result["cont"]["plan_findings"]["rounds"], 1)
+
+    def test_a_silent_second_re_review_stops_with_the_findings_the_second_revise_was_given(self):
+        out = self.go([with_criteria(self.PINNED), with_criteria(self.LOOSE)], [self.ON_AC3, None])
+        result, calls = out["result"], out["calls"]
+        self.assertEqual(self.counts(calls), (2, 3))
+        self.assertEqual(result["stage"], "plan-review")
+        self.assertEqual([r["summary"] for r in result["rules"]], ["a pinned date"])
+        self.assertIsNone(result["cont"]["plan"])
+
+    def test_a_relaunch_that_already_spent_one_revise_runs_only_the_one_left(self):
+        first = self.go([with_criteria(HUMAN)], [PlanRuleMessagesTest.review(PlanRuleMessagesTest.finding("important", "AC3", "s", "R2"))])["result"]
+        self.assertEqual(first["cont"]["plan_findings"]["rounds"], 1)
+        result, calls = run(args=dict(ARGS, cont=first["cont"]),
+                            replies={"plan-rules-revise": [with_criteria(self.PINNED), with_criteria(self.LOOSE)],
+                                     "plan-rules-review": [self.ON_AC3, PASS_REPLY]})
+        self.assertEqual(self.counts(calls), (1, 1))
+        self.assertEqual(result["stage"], "plan-review")
+        self.assertIsNone(result["cont"]["plan"])
 
 
 if __name__ == "__main__":

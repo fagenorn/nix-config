@@ -31,12 +31,13 @@ export const meta = {
 // answers `error` with `transient` (forge-claim's own transport retries ran out) is re-called once, a folded step whole, before it stops (#740).
 //
 // A fresh run re-adopts an existing branch or worktree (never resetting it) and stops `dirty` when it holds uncommitted changes.
+// #1019: every setup first puts a worktree back on its branch when its HEAD is detached at the branch tip and the tree is clean.
 //
 // RESUME: every stop from the claim on returns { stage, ..., cont }, where cont is
 // { setup, lane, plan (declared branches, when any, as [{name, worktree, base, head, current, toplevel, common_dir, clean}]), plan_reviewed, plan_findings?, prior_findings? (#988: the blocking findings left on each plan this delivery dropped after its review, bounded; carried through every stop until a plan passes review, and shown to the planner that plans again), decisions?, done, pr? (a batch-built close-out cont: the PR the batch merged), fix_waves, fix_findings? (#924: the findings a fix-wave-review stop left open, bounded; the resume's first fix wave gets them with what its fresh final review raises; #940: such a stop also carries diverging: {file, waves} beside cont when the waves spent across runs reached FIX_WAVES_BOUND and a finding it left open is in a file the findings carried into the run named, and deliver-batch then hands the issue to the owner instead of relaunching it; #1000: it carries oscillating: {file, rounds} the same way when two fixes of one file in a row each drew a new finding there, rounds being that file's findings per round and each wave's range (its notes too when it changed that file alone), and deliver-batch reports it to the owner too; that stop keeps oscillating in cont beside fix_findings, and a resume of such a cont with no decision the cont does not hold and no amend stops before any agent, while one with a decision gives it, as binding, with the history to its first fix wave and that wave's re-review), checks_fixes?, sync_fixes?, verified?, final_reviewed?, partial?, blocked? (#996: {task, notes, asked?}, the task whose implementer returned blocked and its notes, kept until that task runs again; an amend with no decision clears it and the implementer runs on the plan files as they then are; see BLOCKED), reordered? (#896: [{task, after, notes}], each a blocked task moved once to just after the later task it named; cont.plan.tasks is already in that order), claim_incomplete? }. Passing it back as args.cont
 // re-adopts the claimed worktree (setup re-checks it and refuses a dirty tree
 // unless cont.partial names the task that left the edits), reuses cont.plan
-// (reviewing it first unless plan_reviewed; a plan-review stop keeps the revised plan with plan_findings { rules, findings, rounds, noted? (#988: the rules reviewer's minor findings on the criteria of rules, context for the revise only) }, and the resume reads the owner's answer and, when every finding left names a rule and none has source codex, runs one rules-only revise of it whatever triggered the full revise (#823), dropping the plan once rounds reach two; any other finding left has spent the plan's one full revise, so the resume plans again), skips the tasks in cont.done, then
+// (reviewing it first unless plan_reviewed; a plan-review stop keeps the revised plan with plan_findings { rules, findings, rounds, noted? (#988: the rules reviewer's minor findings on the criteria of rules, context for the revise only) }, and the resume reads the owner's answer and, when every finding left names a rule and none has source codex, runs one rules-only revise of it whatever triggered the full revise (#823), dropping the plan once rounds reach two (#1019: the second of those two revises runs in the same run, with no stop between, when the first one's re-review leaves only findings on criteria that revise changed); any other finding left has spent the plan's one full revise, so the resume plans again), skips the tasks in cont.done, then
 // runs final review, verify and ship again (ship reuses an open PR). Every resume re-reads the facts of each branch cont.plan declares (a missing or wrong one stops setup with branch_heads.<name> missing, but only for a plan whose declarations are valid: an invalid one is dropped by the Plan section first); cont.verified and cont.final_reviewed carry branches { <name>: <head> }, and a resume reuses either only when every declared head the setup re-read is unchanged. When the PR
 // is already merged, the re-adopt goes straight to close-out; that PR is the delivery's own only when it is cont.pr or carries a commit of cont.done (#752). A resume skips the final review when cont.final_reviewed names the head it
 // passed at and the head is unchanged or only gained integration-branch merges with no unreviewed conflict resolution; a stop between a
@@ -112,6 +113,9 @@ Hard rules for this step (they override anything else you remember):
 // last in call() so no step can miss it. It is about the reply alone, so it stands with the ROUNDS sentences: those put a round's
 // lookups in one message, this keeps the reply out of every round.
 const REPLY_ALONE = 'Call StructuredOutput alone in its own message, never beside another tool call, only after every other tool result has come back: the first accepted call is final and ends the step.'
+// #1019: a reviewer once detached the worktree to run a script at the commit under review, and the next run's setup stopped on the
+// detached HEAD. One sentence, the same line in deliver-batch.js, added in readReview() so no review step can miss it.
+const READ_ONLY = 'Never check out, switch, reset or stash in the worktree: read another commit with git show, or in a temporary git worktree outside it.'
 
 const SEV = { type: 'string', enum: ['critical', 'important', 'minor'] }
 // #992: incomplete is the verdict of a review that could not finish; readReview() below reads every reply of this schema.
@@ -174,7 +178,7 @@ const SETUP_SCHEMA = {
     ok: { type: 'boolean' }, reason: { type: 'string' }, details: { type: 'string' }, transient: { type: 'boolean' },
     host: { type: 'string' }, slug: { type: 'string' }, integration_branch: { type: 'string' }, default_branch: { type: 'string' },
     branch: { type: 'string' }, worktree_path: { type: 'string' }, head: { type: 'string' },
-    merged_pr: { type: 'integer' }, dirty: { type: 'boolean' }, duplicate_pr: { type: 'integer' },
+    merged_pr: { type: 'integer' }, dirty: { type: 'boolean' }, reattached: { type: 'boolean' }, duplicate_pr: { type: 'integer' },
     merged_refs: { type: 'array', items: { type: 'object', properties: { number: { type: 'integer' }, closes: { type: 'boolean' } }, required: ['number', 'closes'] } },
     merged_heads: { type: 'array', items: { type: 'object', properties: { number: { type: 'integer' }, commits: STRS }, required: ['number', 'commits'] } },
     since_reviewed: { type: 'string', enum: ['same', 'merge_only', 'moved'] },
@@ -456,8 +460,9 @@ const unusable = (r, { fileless = false, ruled = false } = {}) => {
   const named = f => present(f.file) || present(f.failing_input) || (ruled && (present(f.ac) || present(f.rule)))
   return !fileless && blocking.some(f => !named(f)) ? 'a blocking finding named neither a file nor a failing input' : ''
 }
-const readReview = async (prompt, opts, { fileless = false, ruled = false, optional = false } = {}) => {
+const readReview = async (asked, opts, { fileless = false, ruled = false, optional = false } = {}) => {
   const lax = { fileless, ruled }
+  const prompt = `${asked}\n${READ_ONLY}`
   const first = await call(prompt, opts, optional)
   const why = unusable(first, lax)
   if (!why) return first
@@ -475,8 +480,11 @@ const DERIVE_LOCATION = `Run alone and exactly issue-branch --repo-root ${REPO} 
 const REDERIVE = !!(CONT && CONT.claim_incomplete && !(CONT.setup && present(CONT.setup.branch) && present(CONT.setup.worktree_path)))
 const RES_BRANCH = REDERIVE ? '<branch>' : CONT && CONT.setup && CONT.setup.branch
 const RES_PATH = REDERIVE ? '<worktree_path>' : CONT && CONT.setup && CONT.setup.worktree_path
+// #1019: a worktree left on a detached HEAD at its branch's own tip, with a clean tree, lost nothing: the setup puts it back on the
+// branch (a switch, never a reset) and goes on. Any other detached HEAD is left as found and refused as before.
+const REATTACH = (branch, path) => `When HEAD in ${path} is detached (git -C ${path} symbolic-ref -q HEAD fails), put it back on ${branch} first, only when git -C ${path} rev-parse HEAD and git -C ${path} rev-parse refs/heads/${branch} print the same sha and git -C ${path} status --porcelain prints nothing: run git -C ${path} switch ${branch}, alone, and return reattached true. It is the one change this read may make; never reset, and leave any other detached HEAD as it is.`
 // Shared by the fresh setup and the incomplete-claim resume: the facts the worktree step chooses its command from.
-const EXISTING_READ = (branch, path) => `Read what already exists for the delivery, and change nothing: never reset, clean, restore or stash, and never delete a branch or worktree. Return existing with local_branch (a local branch named ${branch} exists), remote_branch (origin/${branch} exists), worktree (the path ${path} exists and is on branch ${branch}), dirty (git -C ${path} status --porcelain is non-empty), status (that output, its first 40 lines) and head (git -C ${path} rev-parse HEAD, or the branch tip when there is no worktree). Omit existing when there is no such branch and no such path. Refuse with reason worktree-mismatch and the path when ${path} is on another branch or ${branch} is checked out at another path.`
+const EXISTING_READ = (branch, path) => `Read what already exists for the delivery, and change nothing: never reset, clean, restore or stash, and never delete a branch or worktree. ${REATTACH(branch, path)} Return existing with local_branch (a local branch named ${branch} exists), remote_branch (origin/${branch} exists), worktree (the path ${path} exists and is on branch ${branch}), dirty (git -C ${path} status --porcelain is non-empty), status (that output, its first 40 lines) and head (git -C ${path} rev-parse HEAD, or the branch tip when there is no worktree). Omit existing when there is no such branch and no such path. Refuse with reason worktree-mismatch and the path when ${path} is on another branch or ${branch} is checked out at another path.`
 // The head the final review passed at, when a resume's cont names one: the setup then reports how HEAD relates to it.
 const FR_HEAD = CONT && CONT.final_reviewed && present(CONT.final_reviewed.head) ? CONT.final_reviewed.head : null
 const FR_ACCEPTED = FR_HEAD && Array.isArray(CONT.final_reviewed.accepted) ? CONT.final_reviewed.accepted.filter(present) : []
@@ -508,9 +516,9 @@ const OWN_ID = OWN_PR !== null ? `#${OWN_PR}` : `a PR whose commits include one 
 const setupCall = () => call(CONT ? `You re-adopt issue #${ISSUE} of the git repository at ${REPO} for a resumed delivery. Earlier setup: ${JSON.stringify(CONT.setup)}.
 1. ${CONTRACT_READ}
 2. ${REDERIVE ? `${DERIVE_LOCATION} ` : ''}${OWN_PR !== null || OWN_COMMITS.length ? `List the merged PRs whose head is ${RES_BRANCH} (gh pr list --repo <slug> --state merged --head ${RES_BRANCH} --json number) and, for each, its commits (gh pr view <number> --repo <slug> --json commits); return them as merged_heads, one {number, commits} each with every commit oid. This delivery's own merged PR is the one that is ${OWN_ID}: return ok=true with merged_pr set to that PR's number only for it (the worktree may already be gone). Any other merged PR on that head is not this delivery's: leave merged_pr unset for it.` : 'This delivery has no commit and no PR yet, so look for no merged PR and leave merged_pr and merged_heads unset.'}
-3. Otherwise confirm: ${CONT.claim_incomplete ? `the issue is open (an earlier claim stopped part way; the next step finishes it)` : `the issue is open; the worktree ${CONT.setup && CONT.setup.worktree} exists and is on branch ${CONT.setup && CONT.setup.branch}${CONT.plan ? `; the plan directory ${CONT.setup && CONT.setup.plan_dir} exists` : ''}`}. If any fails, return ok=false with reason not-resumable and the evidence. An open PR whose head is that branch is expected and fine. Set dirty true if git -C <worktree> status --porcelain is non-empty. Return head: git -C <worktree> rev-parse HEAD (the full sha).${SINCE_REVIEWED}${BRANCH_READ}
+3. Otherwise confirm: ${CONT.claim_incomplete ? `the issue is open (an earlier claim stopped part way; the next step finishes it)` : `the issue is open; the worktree ${CONT.setup && CONT.setup.worktree} exists and is on branch ${CONT.setup && CONT.setup.branch}${CONT.plan ? `; the plan directory ${CONT.setup && CONT.setup.plan_dir} exists` : ''}. ${REATTACH(CONT.setup && CONT.setup.branch, CONT.setup && CONT.setup.worktree)}`} If any fails, return ok=false with reason not-resumable and the evidence. An open PR whose head is that branch is expected and fine. Set dirty true if git -C <worktree> status --porcelain is non-empty. Return head: git -C <worktree> rev-parse HEAD (the full sha).${SINCE_REVIEWED}${BRANCH_READ}
 ${CONT.claim_incomplete ? `4. After git -C ${REPO} fetch origin: ${EXISTING_READ(RES_BRANCH, RES_PATH)} An earlier worktree step may have created the branch, the worktree or both before it failed, so report existing afresh.
-5.` : '4.'} Return every contract field read fresh, ${REDERIVE ? 'with branch and worktree_path as derived' : 'branch as in the earlier setup'}. Change nothing.
+5.` : '4.'} Return every contract field read fresh, ${REDERIVE ? 'with branch and worktree_path as derived' : 'branch as in the earlier setup'}. Change nothing but that re-attach.
 ${BASE_RULES}` : `You check issue #${ISSUE} of the git repository at ${REPO} before delivery. Change nothing in this step except one issue comment named below, the claim of step 5 and the worktree of step ${WT_STEP}.
 1. ${CONTRACT_READ}
 2. ${DERIVE_LOCATION} Then gh issue view ${ISSUE} --repo <slug> --json state,labels,title and gh pr list --repo <slug> --state all --search ${ISSUE} --json number,state,headRefName,closingIssuesReferences. Return merged_refs: one {number, closes} per merged PR that list holds, closes true only when its closingIssuesReferences lists issue ${ISSUE}. Refuse (ok=false) with reason closed, parked (label needs-verification or parked), duplicate (a merged PR whose closes is true, a possible duplicate delivery: set duplicate_pr to its number; a merged PR that only mentions or Refs the issue, such as an approved spec merged in its own docs PR, is no duplicate) or open-pr (an open PR referencing this issue whose head is not branch).
@@ -532,6 +540,9 @@ else if (!CONT && setup && setup.ok === true && !setup.acquire && !present(setup
 // A lost reply carries no cont, fresh or resumed: a fresh reply that never showed the refusal checks pass must not resume past them,
 // and a rerun redoes the full fresh setup (the acquire is idempotent for the same holder).
 if (!setup) return { stage: 'setup', result: null, ...deadOf() }
+// #1019: said once in the log, never kept: the cont's setup must not claim it for a later run.
+if (setup.reattached === true) log('setup: the worktree was on a detached HEAD at its branch tip with a clean tree; it is back on its branch')
+delete setup.reattached
 // The fresh reply's folded claim, read once and removed so setup (and every cont built from it) keeps its old shape.
 // A batch child's folded acquire answers already_held, because the batch's own acquire claimed first and is kept since it gates the readopt path;
 // that acquire refreshes nothing, so the setup renews (issue 745).
@@ -1336,7 +1347,7 @@ const conflictOf = (before, after) => {
 }
 // left: the review findings to keep as prior findings when this revise drops a plan that no plan-review stop has kept yet.
 const rulesRevise = async (findings, noted, left = []) => {
-  const root = plan.plan_root
+  const root = plan.plan_root, was = plan.acceptance
   const also = noted.length ? ` The rules reviewer also noted these minor findings on the same criteria; they are context for choosing the fix, not findings to fix by themselves: ${JSON.stringify(noted)}` : ''
   const halted = await takePlan(await call(planPrompt(`\nFix only these rule findings in your plan at ${root} in place, change nothing else, and return the full result again: ${JSON.stringify(findings)}${also}`), { label: 'plan-rules-revise', phase: 'Plan', agentType: 'planner', schema: PLAN_SCHEMA }), 'plan-rules-revise', findings.concat(left))
   if (halted) return { halted }
@@ -1345,7 +1356,27 @@ const rulesRevise = async (findings, noted, left = []) => {
   if (!rr) return { silent: true }
   const rules = still.concat(findingsOf(rr))
   const conflict = conflictOf(findings, rules)
-  return { rules, noted: notedOn(rr.findings, rules), ...(conflict ? { extra: { conflict } } : {}) }
+  // #1019: the criteria this revise changed or added, by the members the rules judge (ruleFacts), as acKey spells an id.
+  const facts = a => ruleFacts({ acceptance: [a] })
+  const changed = plan.acceptance.filter(a => !was.some(b => facts(b) === facts(a))).map(a => acKey({ ac: a.id }))
+  return { rules, changed, noted: notedOn(rr.findings, rules), ...(conflict ? { extra: { conflict } } : {}) }
+}
+// #1019: the rules revises of one run, two at most across the delivery (spent: those an earlier stop already counted). The second runs
+// right away, without a stop and a relaunch, only when every finding the first re-review left is on a criterion that revise changed:
+// a finding where the fix was made narrows it, as #950 reads a fix wave's findings by the files it changed. A finding on a criterion
+// the revise left alone, one that names no criterion, one no rules revise may touch, or a conflict between classification rules
+// stops as before, and so does whatever the second re-review leaves: a third revise is never run.
+// before and was: the findings and notes the last revise was given, for a stop whose re-review said nothing.
+const rulesRounds = async (rules, noted, spent, left = []) => {
+  let r = await rulesRevise(rules, noted, left), rounds = spent + 1, before = rules, was = noted
+  if (rounds < 2 && !r.halted && !r.silent && !r.extra && rulesOnly(r.rules) && r.rules.every(f => r.changed.includes(acKey(f)))) {
+    log(`plan-rules-revise: the ${r.rules.length} finding(s) left are all on criteria the revise changed; one more rules revise`)
+    before = r.rules
+    was = r.noted
+    r = await rulesRevise(before, was, left)
+    rounds++
+  }
+  return { ...r, rounds, before, was }
 }
 // A plan-review stop keeps the revised plan unless this was the second failed rules revise (D5).
 const reviewStop = (rules, findings, rounds, given, noted = []) => {
@@ -1382,10 +1413,10 @@ const settleRevise = async (revised, planFindings, reviewedFacts, reviewedCriter
   if (!rr) return reviewStop(planFindings, planFindings, 0, SILENT())
   let rules = still.concat(findingsOf(rr)), rounds = 0, noted = notedOn(rr.findings, rules), extra
   if (rulesOnly(rules)) {
-    rounds++
-    const r = await rulesRevise(rules, noted, planFindings)
+    const r = await rulesRounds(rules, noted, rounds, planFindings)
     if (r.halted) return { ...r.halted, findings: planFindings }
-    if (r.silent) return reviewStop(rules, planFindings, rounds, SILENT(), noted)
+    rounds = r.rounds
+    if (r.silent) return reviewStop(r.before, planFindings, rounds, SILENT(), r.was)
     rules = r.rules
     noted = r.noted
     extra = r.extra
@@ -1459,10 +1490,10 @@ if (BLOCKED_TASK && newDecision !== null) {
 if (RESUME_RULES) {
   const { rules, findings, rounds } = planFindingsKept
   const noted = notedOn(planFindingsKept.noted, rules)
-  const r = await rulesRevise(rules, noted)
+  const r = await rulesRounds(rules, noted, rounds)
   if (r.halted) return { ...r.halted, findings }
-  if (r.silent) return reviewStop(rules, findings, rounds + 1, SILENT(), noted)
-  if (r.rules.length) return reviewStop(r.rules, findings, rounds + 1, r.extra, r.noted)
+  if (r.silent) return reviewStop(r.before, findings, r.rounds, SILENT(), r.was)
+  if (r.rules.length) return reviewStop(r.rules, findings, r.rounds, r.extra, r.noted)
   planFindingsKept = null
   planReviewed = true
 }

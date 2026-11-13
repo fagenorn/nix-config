@@ -44,6 +44,8 @@ const DEFAULTS = [
   [/^settle-/, () => ({ state: 'OPEN', release: null })],
   [/^(ask|land-ask)-/, () => ({ verdict: 'posted', comment_id: 99 })],
   [/^recover-end-/, () => ({ verdict: 'ended' })],
+  // #1019: the push of the clean merges a readopt found on top of the PR head lands at the head its prompt names.
+  [/^readopt-push-/, (l, p) => ({ pushed: true, head: (p.match(/rev-parse HEAD prints ([0-9a-f]{40})/) || [])[1] })],
   [/^readopt-/, l => ({ ok: true, worktree: `/r/.wt/w-issue-${num(l)}-x`, branch: `issue-${num(l)}-x`, head: SHA, acceptance: AC })],
   [/^land-sync-review-|^land-sync-rereview-|^land-fix-review-/, () => PASS],
   // #907: a sync fix defaults to one commit, SYNC_FIXED, on top of the merge commit its prompt names.
