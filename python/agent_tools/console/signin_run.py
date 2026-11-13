@@ -38,7 +38,8 @@ The client is spawned in a new session (its pid is its process-group id), in a f
 (0600); one daemon watcher thread per run reads the FIFO (and a pty master, discarding it) until the
 client exits. `wait_link(profile)` waits at most `link_wait` seconds (`LINK_WAIT`, 15), or until the
 run ends, and returns the link or None. `send_code(profile, code)` and `cancel(profile)` of a profile
-with no live run raise `NotRunning`. `running()` is the profiles with a live run.
+with no live run raise `NotRunning`; a write the live client's input refuses raises its `OSError`
+unchanged, so the caller can tell it from a missing run. `running()` is the profiles with a live run.
 
 Deadline. `expire()` kills every run with `clock() - started >= deadline` (`LOGIN_DEADLINE`, 600
 seconds) and returns their profiles, sorted; a younger run is untouched. The caller calls it on a
@@ -368,10 +369,7 @@ class SignIns:
             run = self._runs.get(profile)
             if run is None or run.exited.is_set():
                 raise NotRunning(profile)
-            try:
-                run.client.send(code)
-            except OSError as error:
-                raise NotRunning(profile) from error
+            run.client.send(code)
 
     def cancel(self, profile: str) -> None:
         with self._lock:

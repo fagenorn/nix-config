@@ -209,6 +209,21 @@ class SigninWriteTest(Case):
                                                 self.record.read_text().splitlines()])
         self.assertEqual(self.wait_ended()[0][1]["attempt"], attempt)
 
+    def test_a_code_the_clients_input_refuses_answers_502_and_the_run_stays_running(self):
+        self.environ["FAKE_MODE"] = "deaf"
+        self.begin()
+        self.post(SIGNIN)
+        until(self, lambda: self.record.exists() and {"deaf": True} in
+              [json.loads(line) for line in self.record.read_text().splitlines()])
+        rows = support.log_rows(self.store)
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            status, _, body = self.post(CODE_PATH)
+        self.assertEqual((status, body), (502, b"the code could not be passed on\n"))
+        self.assertEqual(err.getvalue(), "console: signin_code_failed work BrokenPipeError\n")
+        self.assertEqual(support.log_rows(self.store), rows)
+        self.assertEqual(self.view()["signin_runs"]["work"]["state"], "running")
+
     def test_bodies_and_merits_are_refused_without_a_row(self):
         self.begin()
         rows = support.log_rows(self.store)

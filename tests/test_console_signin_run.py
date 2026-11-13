@@ -49,6 +49,10 @@ FAKE = textwrap.dedent('''\
         line = sys.stdin.readline()
         record({"code": line.rstrip("\\r\\n")})
         sys.exit(int(os.environ.get("FAKE_EXIT", "0")))
+    if mode == "deaf":
+        os.close(0)
+        record({"deaf": True})
+        time.sleep(600)
     if mode == "hang":
         child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
         server = socket.socket()
@@ -259,6 +263,17 @@ class RunTest(unittest.TestCase):
         self.assertEqual(self.ends[0][:3], ("work", 1, "cancelled"))
         self.assertIsInstance(self.ends[0][3], int)
         until(self, lambda: not self.alive(found["grandchild"]), 5)
+
+    def test_a_write_the_clients_input_refuses_is_not_a_missing_run(self):
+        self.arrange("deaf")
+        runs = self.make()
+        runs.start("work")
+        self.wait_record("deaf")
+        with self.assertRaises(BrokenPipeError):
+            runs.send_code("work", CODE)
+        self.assertEqual(runs.running(), frozenset({"work"}))
+        runs.cancel("work")
+        until(self, lambda: self.ends)
 
     def test_code_and_cancel_need_a_running_sign_in(self):
         self.arrange("code")
