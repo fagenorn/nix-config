@@ -1982,6 +1982,8 @@ const relaunchArgs = () => {
   // An issue whose child asked again carries no answer at all: the old one answered the earlier questions, and the new prompt's own ticks are read by the child.
   const decisions = { ...(DECISIONS || {}) }
   for (const n of open) if (rowOf(n).outcome === 'questions') delete decisions[String(n)]
+  // #996: the decision rerun is new on every run, so a relaunch that carried it would run a blocked task again unasked.
+  for (const k of Object.keys(decisions)) if (decisions[k].trim() === 'rerun') delete decisions[k]
   if (DECISIONS !== undefined || Object.keys(decisions).length) a.decisions = decisions
   const conts = {}
   for (const n of open) if (CONTS[n]) conts[n] = slimCont(CONTS[n])

@@ -6109,6 +6109,24 @@ class BlockedTaskOwnerActionTest(unittest.TestCase):
         _, steps = run_child(dict(self.CHILD_ARGS, mode="ready", cont=first["cont"], decisions="rerun"))
         self.assertEqual([c["label"] for c in steps][:2], ["setup", "impl-1"])
 
+    def test_the_relaunch_never_carries_the_decision_rerun(self):
+        other = {"stage": "verify", "reason": "verify: build: boom", "cont": reviewed(1)}
+        waits = {"stage": "verify", "reason": "verify: build: boom", "cont": reviewed(2)}
+        result, calls, _ = run(args=dict(ARGS, issues=[1, 2], conts={"1": self.CONT}, decisions={"1": " rerun\n", "2": "Use the flag."}),
+                               patch={"facts-1": HELD}, children={"1": other, "2": waits})
+        self.assertEqual(child(calls, 1)["args"]["decisions"], " rerun\n")
+        self.assertEqual(result["relaunch"]["issues"], [1, 2])
+        self.assertEqual(result["relaunch"]["decisions"], {"2": "Use the flag."})
+
+    def test_a_task_revise_that_ends_in_a_rules_conflict_is_the_rules_conflict_owner_action(self):
+        conflict = {"ac": "AC5", "rules": ["R5", "R1"], "revises_left": 1}
+        stop = {"stage": "plan-review", "step": "plan-task-revise", "conflict": conflict, "cont": self.CONT,
+                "reason": "plan-review: the acceptance rules R5 and R1 conflict for AC5"}
+        result, _, _ = run(children={"1": stop})
+        self.assertIsNone(result["relaunch"])
+        self.assertEqual([(a["reason"], a["ac"], a["rules"], a["cont"]) for a in result["owner_actions"]],
+                         [("rules-conflict", "AC5", ["R5", "R1"], slim(self.CONT))])
+
     def test_only_the_blocked_issue_leaves_the_relaunch(self):
         other = {"stage": "verify", "reason": "verify: build: boom", "cont": reviewed(2)}
         result, _, _ = run(args=dict(ARGS, issues=[1, 2]), children={"1": self.STOP, "2": other})

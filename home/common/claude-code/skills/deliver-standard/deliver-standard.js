@@ -1329,9 +1329,10 @@ const settleRevise = async (revised, planFindings, reviewedFacts, reviewedCriter
 // #996: the task revise. A resume of a task-blocked cont with a new decision has a planner amend that task's file from the decision and
 // the implementer's notes before the implementer runs again, through the plan-revise path above. A revise that does not end in an
 // accepted plan (questions, a malformed reply, rule findings left (a rules conflict among them), a done task dropped or given another file or branch, a criterion
-// removed: restating a criterion's text is allowed, removing one stays an owner amend) keeps the cont's plan, its prior findings and its blocked member; the
+// removed: restating a criterion's text is allowed, removing one stays an owner amend) keeps the cont's plan and its blocked member (it stays reviewed, so the stop carries no prior_findings); the
 // task files on disk may hold its edits. The decision stays unused, so the same resume tries again, except after questions: then it is
-// kept, and the resume that brings the answer shows the planner both.
+// kept, and the resume that brings the answer shows the planner both; so it is after a rules conflict, whose stop carries the conflict
+// for deliver-batch's rules-conflict owner action: the owner's classification is the new decision that revises again.
 const BLOCKED_TASK = BLOCKED && !RERUN && plan && planReviewed ? plan.tasks.find(t => isEntry(t) && t.n === BLOCKED.task) || null : null
 // A decision for a blocked task the plan no longer lists has nothing to revise: it is kept as any other.
 if (!BLOCKED_TASK) decisionPending = false
@@ -1356,7 +1357,7 @@ if (BLOCKED_TASK && newDecision !== null) {
     const lost = await renew('plan', 'Plan')
     if (lost) return lost
   }
-  const prior = { plan, reordered, priorFindings }
+  const prior = { plan, reordered }
   const facts = ruleFacts(plan), criteria = plan.acceptance
   const asked = [{ severity: 'important', file: t.file, summary: `the implementer of task ${t.n} returned blocked: ${BLOCKED.notes}` }]
   const revised = await call(planPrompt(`\n${MAP_FIRST} Task ${t.n} (${t.title}) of your plan at ${plan.plan_root} stopped: its implementer returned blocked on its task file ${t.file}, and the owner then decided: ${JSON.stringify(newDecision)}. Treat the implementer's notes as the finding and that decision as binding: fix only that task file in place (and plan.md, the code map or another task file only where the decision requires it), keep every task's number, and return the full result again, with criteria_edited: the ids of the criteria whose text you changed to follow the decision (typing the same criterion again in other words is not a change; an empty list when you changed none). The notes: ${JSON.stringify(BLOCKED.notes)}`, REVISE_PACE), { label: 'plan-task-revise', phase: 'Plan', agentType: 'planner', schema: PLAN_SCHEMA })
@@ -1370,12 +1371,12 @@ if (BLOCKED_TASK && newDecision !== null) {
   if (failed) {
     plan = prior.plan
     reordered = prior.reordered
-    priorFindings = prior.priorFindings
     planReviewed = true
     planFindingsKept = null
     // The decision reached the planner, which asked on: it is kept, so the resume with the answer shows the planner both.
     if (Array.isArray(failed.needs_user)) { blocked = { ...blocked, asked: true }; decisionPending = false }
-    const said = Object.fromEntries(['needs_user', 'invalid', 'branch_problems', 'rules', 'details'].filter(k => own(failed, k)).map(k => [k, failed[k]]))
+    if (isEntry(failed.conflict)) decisionPending = false
+    const said = Object.fromEntries(['needs_user', 'invalid', 'branch_problems', 'rules', 'conflict', 'details'].filter(k => own(failed, k)).map(k => [k, failed[k]]))
     return stop(Array.isArray(failed.needs_user) || own(failed, 'invalid') ? 'plan' : 'plan-review', { step: 'plan-task-revise', ...said })
   }
   log(`task ${t.n}: its task file was revised from the owner's decision`)

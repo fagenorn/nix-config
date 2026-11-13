@@ -8572,6 +8572,51 @@ class BlockedTaskDecisionTest(unittest.TestCase):
         self.assertIn("/g/task-2b.md", prompt(calls, "impl-2"))
         self.assertIn("impl-3", labels(calls))
 
+    def test_a_revise_that_moves_a_done_task_to_another_declared_branch_fails(self):
+        cont = self.stopped()["cont"]
+        moved = dict(self.PLAN2, branches=[dict(BR)], tasks=[dict(tasks(2)[0], branch="cand"), tasks(2)[1]], criteria_edited=[])
+        result, calls = self.resume(cont, replies={"plan-task-revise": moved}, decisions=self.DECISION)
+        self.assertEqual((result["stage"], result["step"]), ("plan", "plan-task-revise"))
+        self.assertNotIn("branch_problems", result)
+        self.assertIn("done task(s) 1", result["reason"])
+        self.assertNotIn("impl-2", labels(calls))
+        self.assertEqual(result["cont"]["plan"], cont["plan"])
+        # The blocked task itself may move to a declared branch.
+        free = dict(self.PLAN2, branches=[dict(BR)], tasks=[tasks(2)[0], dict(tasks(2)[1], branch="cand")], criteria_edited=[])
+        _, calls = self.resume(cont, replies={"plan-task-revise": free}, decisions=self.DECISION)
+        self.assertIn("impl-2", labels(calls))
+
+    def test_a_failed_revise_leaves_no_prior_findings_in_the_cont(self):
+        cont = self.stopped()["cont"]
+        self.assertNotIn("prior_findings", cont)
+        unlinted = dict(self.PLAN2, acceptance=self.PLAN2["acceptance"] + [criterion(EVIDENCE, lint=None)], criteria_edited=[])
+        for reply in ({"status": "planned"}, {"status": "needs_user", "questions": [{"question": "q", "options": ["a."]}]}, unlinted):
+            with self.subTest(reply=reply.get("status"), criteria=len(reply.get("acceptance", []))):
+                result, _ = self.resume(cont, replies={"plan-task-revise": reply, "plan-rules-revise": reply}, decisions=self.DECISION)
+                self.assertNotIn("prior_findings", result["cont"])
+                self.assertIs(result["cont"]["plan_reviewed"], True)
+
+    def test_a_revise_that_ends_in_a_rules_conflict_carries_it_and_keeps_the_decision(self):
+        cont = self.stopped()["cont"]
+        capped = dict(PLAN["acceptance"][0], id="AC5", text="the evaluation costs at most $5", metric=True)
+        held = criterion(EVIDENCE, id="AC5", text="the evaluation costs at most $5", metric=True, verify_ac="AC5", verify_mode="observe")
+        r1 = {"verdict": "findings", "findings": [{"severity": "important", "rule": "R1", "ac": "AC5", "summary": "a local evaluation is a code criterion"}]}
+        replies = {"plan-task-revise": dict(self.PLAN2, acceptance=self.PLAN2["acceptance"] + [capped], criteria_edited=[]),
+                   "plan-rules-revise": dict(self.PLAN2, acceptance=self.PLAN2["acceptance"] + [held]),
+                   "plan-rules-review": [PASS_REPLY, r1]}
+        result, calls = self.resume(cont, replies=replies, decisions=self.DECISION)
+        self.assertEqual((result["stage"], result["step"]), ("plan-review", "plan-task-revise"))
+        self.assertEqual((result["conflict"]["ac"], result["conflict"]["rules"]), ("AC5", ["R5", "R1"]))
+        self.assertIn("the acceptance rules R5 and R1 conflict for AC5", result["reason"])
+        self.assertNotIn("impl-2", labels(calls))
+        self.assertEqual((result["cont"]["plan"], result["cont"]["blocked"]), (cont["plan"], cont["blocked"]))
+        self.assertEqual(result["cont"]["decisions"], [self.DECISION])
+        # The owner's classification is the new decision: the revise runs again and its planner reads both.
+        _, again = self.resume(result["cont"], decisions="AC5 is a code criterion.")
+        for text in (self.DECISION, "AC5 is a code criterion."):
+            self.assertIn(text, prompt(again, "plan-task-revise"))
+        self.assertIn("impl-2", labels(again))
+
     def test_a_failed_revise_restores_the_reorder_record(self):
         moved = [{"task": 2, "after": 1, "notes": "needed task 1"}]
         cont = dict(self.stopped()["cont"], reordered=moved)
