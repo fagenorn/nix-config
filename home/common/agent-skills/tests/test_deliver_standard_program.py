@@ -6226,6 +6226,168 @@ class FixDiffFindingTest(unittest.TestCase):
         self.assertEqual(asked, set(ThirdFixWaveTest.THREE))
 
 
+class FixWaveHistoryTest(unittest.TestCase):
+    """#1000: a file whose fix drew a new finding gets its history; a second time stops for the owner; settled findings leave the prompt."""
+
+    FILE = "tools/grader.json"
+    FIRST = {"verdict": "findings", "findings": [
+        {"severity": "important", "file": "tools/grader.json:16", "summary": "pattern too wide"},
+        {"severity": "important", "file": "src/lock.py", "summary": "settled lock race"},
+        {"severity": "critical", "file": "src/renew.py:3", "summary": "settled renew leak"}]}
+    CHANGED = {"changed_files": ["tools/grader.json", "src/lock.py"]}
+    HISTORY = "tools/grader.json has now been judged more than once in the same place"
+    SCOPE = " If a finding is wrong, explain with evidence in notes. Change nothing no finding names. "
+
+    @staticmethod
+    def found(*rows, changed=CHANGED["changed_files"]):
+        return {"verdict": "findings", "changed_files": changed,
+                "findings": [{"severity": "important", "file": f, "summary": s, "relation": r} for f, s, r in rows]}
+
+    def two(self, after_1, after_2=None, **patch):
+        replies = {"final-1": self.FIRST, "fix-wave-review": after_1}
+        if after_2 is not None:
+            replies["fix-wave-review-2"] = after_2
+        waves_ = {"fix-wave": dict(self.CHANGED, notes="narrowed the pattern"),
+                  "fix-wave-2": dict(self.CHANGED, notes="widened it again", start_head="d" * 40, commit="e" * 40)}
+        return run_out(replies=replies, patch=dict(waves_, **patch))
+
+    def test_the_first_firing_gets_its_wave_with_the_history_of_the_file(self):
+        out = self.two(self.found(("./tools/grader.json:16", "pattern too narrow", "new")))
+        result, calls = out["result"], out["calls"]
+        self.assertEqual((result["stage"], result["fix_waves"]), ("done", 2))
+        self.assertEqual(waves(calls), ThirdFixWaveTest.THREE[:4])
+        self.assertNotIn("oscillating", result)
+        second = prompt(calls, "fix-wave-2")
+        history = [{"round": 0, "findings": ["pattern too wide"]}, {"wave": 1, "notes": "narrowed the pattern", "range": "b0..c0ffee"}]
+        self.assertIn(f" {self.HISTORY}: the fix of one finding drew the next. Its history, oldest first: "
+                      f"{json.dumps(history, separators=(',', ':'))}. "
+                      "Read each range (git -C /r/.wt/w-issue-9-x diff <range>), then change the approach or rebut the finding with "
+                      "evidence in notes; do not move the same lines back.", second)
+        self.assertIn("pattern too narrow", second)
+        self.assertNotIn(self.HISTORY, prompt(calls, "fix-wave"))
+
+    def test_later_waves_do_not_carry_settled_first_round_findings(self):
+        out = self.two(self.found(("src/lock.py", "lock race on another path", "narrowing"), ("src/new.py", "same race", "narrowing")),
+                       self.found(("src/new.py", "same race again", "narrowing")))
+        calls = out["calls"]
+        self.assertEqual(waves(calls), ThirdFixWaveTest.THREE)
+        second, third = prompt(calls, "fix-wave-2"), prompt(calls, "fix-wave-3")
+        self.assertIn(f"They narrow these first-round findings: {json.dumps([self.FIRST['findings'][1]], separators=(',', ':'))}. "
+                      "The other 2 are settled.", second)
+        for gone in ("pattern too wide", "settled renew leak"):
+            self.assertNotIn(gone, second)
+        self.assertIn(" They narrow the first-round findings, all settled.", third)
+        for gone in ("pattern too wide", "settled renew leak", "settled lock race"):
+            self.assertNotIn(gone, third)
+        self.assertIn("pattern too wide", prompt(calls, "fix-wave"))
+        # A turning file's first-round findings are in its history, once.
+        turned = prompt(self.two(self.found(("tools/grader.json", "pattern too narrow", "new")))["calls"], "fix-wave-2")
+        self.assertEqual(turned.count("pattern too wide"), 1)
+        self.assertIn(" They follow the fix of the first-round findings (any not marked narrowing is a defect in a file the previous "
+                      "fix wave changed), all settled.", turned)
+        self.assertNotIn("settled lock race", turned)
+
+    def test_a_finding_that_names_no_file_keeps_what_cannot_be_told_settled(self):
+        first = {"verdict": "findings", "findings": self.FIRST["findings"] + [{"severity": "important", "summary": "no file here"}]}
+        after = self.found(("src/lock.py", "lock race on another path", "narrowing"))
+        _, calls = run(replies={"final-1": first, "fix-wave-review": after})
+        second = prompt(calls, "fix-wave-2")
+        self.assertIn("no file here", second)
+        self.assertIn("settled lock race", second)
+        self.assertNotIn("settled renew leak", second)
+        self.assertIn("The other 2 are settled.", second)
+        nowhere = {"verdict": "findings", "findings": [{"severity": "important", "summary": "somewhere", "relation": "narrowing"}]}
+        _, calls = run(replies={"final-1": self.FIRST, "fix-wave-review": nowhere})
+        second = prompt(calls, "fix-wave-2")
+        self.assertIn(f"They narrow these first-round findings: {json.dumps(self.FIRST['findings'], separators=(',', ':'))}. If", second)
+        self.assertNotIn("settled.", second)
+
+    def test_every_wave_is_told_to_change_nothing_no_finding_names(self):
+        _, calls = run(replies={"final-1": ThirdFixWaveTest.FIRST, "fix-wave-review": ThirdFixWaveTest.AFTER_1,
+                                "fix-wave-review-2": ThirdFixWaveTest.AFTER_2})
+        for label in ("fix-wave", "fix-wave-2"):
+            self.assertIn(self.SCOPE, prompt(calls, label))
+        self.assertIn("not only the reported instance. If a finding is wrong, explain with evidence in notes. Change nothing outside "
+                      "that class. ", prompt(calls, "fix-wave-3"))
+
+    def test_the_signal_needs_a_new_finding_the_fix_diff_and_a_finding_the_round_before(self):
+        rows = (("a narrowing finding", self.found((self.FILE, "another path", "narrowing")), self.CHANGED),
+                ("a file the round before did not name", self.found(("src/lock.py", "x", "narrowing"), ("src/fresh.py", "y", "new"),
+                                                                    changed=["src/fresh.py"]), {"changed_files": ["src/fresh.py"]}))
+        for name, after_1, wave in rows:
+            with self.subTest(name):
+                out = self.two(after_1, **{"fix-wave": wave})
+                self.assertEqual((out["result"]["stage"], out["result"]["fix_waves"]), ("done", 2))
+                self.assertNotIn("judged more than once", prompt(out["calls"], "fix-wave-2"))
+        # Outside the fix diff a new finding stops as it did (#950), unmarked.
+        out = self.two(self.found((self.FILE, "pattern too narrow", "new")), **{"fix-wave": {"changed_files": ["src/lock.py"]}})
+        self.assertEqual((out["result"]["stage"], out["result"]["fix_waves"]), ("fix-wave-review", 1))
+        self.assertNotIn("oscillating", out["result"])
+
+    def test_the_second_firing_on_the_file_stops_for_the_owner_with_its_history(self):
+        after_2 = self.found((self.FILE, "pattern too wide again", "new"), changed=["tools/grader.json"])
+        out = self.two(self.found(("tools/grader.json:16", "pattern too narrow", "new")), after_2)
+        result, calls = out["result"], out["calls"]
+        self.assertEqual((result["stage"], result["fix_waves"]), ("fix-wave-review", 2))
+        self.assertEqual(waves(calls), ThirdFixWaveTest.THREE[:4])
+        self.assertEqual(result["oscillating"], {"file": self.FILE, "rounds": [
+            {"round": 0, "findings": ["pattern too wide"]}, {"wave": 1, "notes": "narrowed the pattern", "range": "b0..c0ffee"},
+            {"round": 1, "findings": ["pattern too narrow"]}, {"wave": 2, "notes": "widened it again", "range": f"{'d' * 40}..{'e' * 40}"},
+            {"round": 2, "findings": ["pattern too wide again"]}]})
+        self.assertTrue(result["reason"].startswith("fix-wave-review: the fix waves go back and forth on tools/grader.json: two fixes of "
+                                                    "it in a row each drew a new finding there; an owner decision on the approach is needed"),
+                        result["reason"])
+        self.assertLessEqual(len(result["reason"]), 300)
+        self.assertEqual([f["summary"] for f in result["cont"]["fix_findings"]], ["pattern too wide again"])
+        self.assertNotIn("oscillating", result["cont"])
+        self.assertNotIn("diverging", result)
+        self.assertEqual(len([line for line in out["logs"] if "fix waves 1 and 2 each drew a new finding in tools/grader.json" in line]), 1)
+
+    def test_a_second_firing_on_another_file_is_a_first_firing(self):
+        after_2 = self.found(("src/lock.py", "lock regressed", "new"), changed=["src/lock.py"])
+        out = self.two(self.found((self.FILE, "pattern too narrow", "new"), ("src/lock.py", "lock path", "narrowing")), after_2,
+                       **{"fix-wave-2": {"changed_files": ["src/lock.py"], "notes": "locked"}})
+        result, calls = out["result"], out["calls"]
+        self.assertEqual((result["stage"], result["fix_waves"]), ("done", 3))
+        third = prompt(calls, "fix-wave-3")
+        self.assertIn("src/lock.py has now been judged more than once in the same place", third)
+        self.assertNotIn(self.HISTORY, third)
+        # Every finding of the third wave is in the turning file: no class sentence at all.
+        self.assertNotIn(ThirdFixWaveTest.CLASS, third)
+        self.assertIn(self.SCOPE, third)
+
+    def test_the_class_sentence_leaves_the_turning_file_out(self):
+        after_1 = self.found((self.FILE, "pattern too narrow", "narrowing"), ("src/lock.py", "lock path", "narrowing"))
+        after_2 = self.found((self.FILE, "pattern too wide again", "new"), ("src/lock.py", "lock path 2", "narrowing"),
+                             changed=["tools/grader.json"])
+        out = self.two(after_1, after_2)
+        self.assertEqual((out["result"]["stage"], out["result"]["fix_waves"]), ("done", 3))
+        third = prompt(out["calls"], "fix-wave-3")
+        self.assertIn(self.HISTORY, third)
+        self.assertIn("close them all, not only the reported instance. Not in tools/grader.json: fix only what is reported there. If", third)
+        history = third.split("Its history, oldest first: ")[1].split(". Read each range")[0]
+        self.assertEqual([e.get("findings", e.get("range")) for e in json.loads(history)],
+                         [["pattern too wide"], "b0..c0ffee", ["pattern too narrow"], f"{'d' * 40}..{'e' * 40}"])
+
+    def test_a_second_firing_at_the_last_wave_is_marked_too(self):
+        after_1 = self.found((self.FILE, "pattern too narrow", "narrowing"))
+
+        def new(summary):
+            return self.found((self.FILE, summary, "new"), changed=["tools/grader.json"])
+        replies = {"final-1": self.FIRST, "fix-wave-review": after_1, "fix-wave-review-2": new("too wide again"),
+                   "fix-wave-review-3": new("too narrow again")}
+        patch = {k: self.CHANGED for k in ("fix-wave", "fix-wave-2", "fix-wave-3")}
+        result, calls = run(replies=replies, patch=patch)
+        self.assertEqual((result["stage"], result["fix_waves"]), ("fix-wave-review", 3))
+        self.assertEqual(waves(calls), ThirdFixWaveTest.THREE)
+        self.assertEqual(result["oscillating"]["file"], self.FILE)
+        self.assertEqual(len(result["oscillating"]["rounds"]), 7)
+        # A first firing at the last wave is the plain stop at the wave bound.
+        once, _ = run(replies=dict(replies, **{"fix-wave-review-2": self.found((self.FILE, "still", "narrowing"))}), patch=patch)
+        self.assertEqual((once["stage"], once["fix_waves"]), ("fix-wave-review", 3))
+        self.assertNotIn("oscillating", once)
+
+
 class ModeTest(unittest.TestCase):
     """#635: each mode stops at its stage and returns its stage object."""
 

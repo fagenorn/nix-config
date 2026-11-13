@@ -33,7 +33,7 @@ export const meta = {
 // A fresh run re-adopts an existing branch or worktree (never resetting it) and stops `dirty` when it holds uncommitted changes.
 //
 // RESUME: every stop from the claim on returns { stage, ..., cont }, where cont is
-// { setup, lane, plan (declared branches, when any, as [{name, worktree, base, head, current, toplevel, common_dir, clean}]), plan_reviewed, plan_findings?, prior_findings? (#988: the blocking findings left on each plan this delivery dropped after its review, bounded; carried through every stop until a plan passes review, and shown to the planner that plans again), decisions?, done, pr? (a batch-built close-out cont: the PR the batch merged), fix_waves, fix_findings? (#924: the findings a fix-wave-review stop left open, bounded; the resume's first fix wave gets them with what its fresh final review raises; #940: such a stop also carries diverging: {file, waves} beside cont when the waves spent across runs reached FIX_WAVES_BOUND and a finding it left open is in a file the findings carried into the run named, and deliver-batch then hands the issue to the owner instead of relaunching it), checks_fixes?, sync_fixes?, verified?, final_reviewed?, partial?, blocked? (#996: {task, notes, asked?}, the task whose implementer returned blocked and its notes, kept until that task runs again; an amend with no decision clears it and the implementer runs on the plan files as they then are; see BLOCKED), reordered? (#896: [{task, after, notes}], each a blocked task moved once to just after the later task it named; cont.plan.tasks is already in that order), claim_incomplete? }. Passing it back as args.cont
+// { setup, lane, plan (declared branches, when any, as [{name, worktree, base, head, current, toplevel, common_dir, clean}]), plan_reviewed, plan_findings?, prior_findings? (#988: the blocking findings left on each plan this delivery dropped after its review, bounded; carried through every stop until a plan passes review, and shown to the planner that plans again), decisions?, done, pr? (a batch-built close-out cont: the PR the batch merged), fix_waves, fix_findings? (#924: the findings a fix-wave-review stop left open, bounded; the resume's first fix wave gets them with what its fresh final review raises; #940: such a stop also carries diverging: {file, waves} beside cont when the waves spent across runs reached FIX_WAVES_BOUND and a finding it left open is in a file the findings carried into the run named, and deliver-batch then hands the issue to the owner instead of relaunching it; #1000: it carries oscillating: {file, rounds} the same way when two fixes of one file in a row each drew a new finding there, rounds being that file's findings per round and each wave's notes and range, and deliver-batch reports it to the owner too), checks_fixes?, sync_fixes?, verified?, final_reviewed?, partial?, blocked? (#996: {task, notes, asked?}, the task whose implementer returned blocked and its notes, kept until that task runs again; an amend with no decision clears it and the implementer runs on the plan files as they then are; see BLOCKED), reordered? (#896: [{task, after, notes}], each a blocked task moved once to just after the later task it named; cont.plan.tasks is already in that order), claim_incomplete? }. Passing it back as args.cont
 // re-adopts the claimed worktree (setup re-checks it and refuses a dirty tree
 // unless cont.partial names the task that left the edits), reuses cont.plan
 // (reviewing it first unless plan_reviewed; a plan-review stop keeps the revised plan with plan_findings { rules, findings, rounds, noted? (#988: the rules reviewer's minor findings on the criteria of rules, context for the revise only) }, and the resume reads the owner's answer and, when every finding left names a rule and none has source codex, runs one rules-only revise of it whatever triggered the full revise (#823), dropping the plan once rounds reach two; any other finding left has spent the plan's one full revise, so the resume plans again), skips the tasks in cont.done, then
@@ -295,6 +295,8 @@ const stopReason = (stage, x) => {
   const task = isEntry(x.task) ? `task ${x.task.n} ` : ''
   // #940: a stop whose fix waves do not converge says so first, so the cap cuts the findings and never the verdict.
   if (isEntry(x.diverging)) say(`the fix waves do not converge on ${String(x.diverging.file).slice(0, 120)} after ${x.diverging.waves} waves; an owner decision on the design is needed`)
+  // #1000: so does a stop on a file two fixes in a row each drew a new finding in.
+  if (isEntry(x.oscillating)) say(`the fix waves go back and forth on ${String(x.oscillating.file).slice(0, 120)}: two fixes of it in a row each drew a new finding there; an owner decision on the approach is needed`)
   // #988: a criterion whose classification the rules revise changed and that then broke another classification rule; said first, as the diverging verdict is.
   if (isEntry(x.conflict) && Array.isArray(x.conflict.rules)) say(`the acceptance rules ${x.conflict.rules.join(' and ')} conflict for ${x.conflict.ac}: the revise that settled one broke the other; an owner decision on how ${x.conflict.ac} is classified is the expected way out: ${x.conflict.revises_left ? 'a relaunch without one gets the one rules revise left' : 'the plan was dropped, and a relaunch without one plans again'}`)
   say(x.details)
@@ -1688,7 +1690,21 @@ if (finalFindings.length) {
   // (none critical, none without a severity) and they are no more than the first re-review left. #950: a finding that is not marked
   // narrowing (new, or with no relation: unknown is new) counts as narrowing in both admissions when its file is one the wave just
   // re-reviewed changed, a regression inside the fix's own diff; with no file, or in a file the fix left alone, it stops as before.
+  // #1000: a fix that draws a new finding where it was made. The signal: a re-review's finding not marked narrowing, in a file the wave
+  // just re-reviewed changed (inFix, as #950 reads it) and the round before also had a finding in. Its first firing on a file changes
+  // nothing about which wave runs (#950 still admits or refuses it); the wave that follows gets that file's history (the earlier rounds'
+  // findings on it, each fix's notes and range) with the request to change the approach or rebut, and the class sentence leaves that
+  // file out. Its second firing on the same file in one run stops at fix-wave-review with oscillating: { file, rounds }, whatever wave
+  // was left, and deliver-batch hands the issue to the owner. The count is this run's: across runs the #940 bound (diverging) decides,
+  // and a stop may carry both. Waves after the first get only the first-round findings that may still be open: those in a file a current
+  // finding names, and all of them when a finding (theirs or a current one) names no file. Every wave is told to change nothing else.
   const MAX_WAVES = 3
+  const rounds = [finalFindings]
+  const fixes = []
+  const fired = {}
+  let turning = []
+  const onFile = (list, file) => list.filter(f => fileOf(f) === file).slice(0, CARRY_MAX).map(f => clip(String(f.summary)))
+  const historyOf = file => fixes.flatMap((x, j) => [{ round: j, findings: onFile(rounds[j], file) }, { wave: j + 1, notes: clip(x.notes), range: x.range }])
   let waveFindings = finalFindings
   let afterFirst = 0
   let regressions = 0
@@ -1698,7 +1714,12 @@ if (finalFindings.length) {
     const rvLabel = k === 1 ? 'fix-wave-review' : `fix-wave-review-${k}`
     log(`final review: ${waveFindings.length} blocking findings, fix wave ${k}`)
     fixWaves++
-    const fw = await call(`${CTX}\n${PLAN_REF} Fix these final-review findings, each real defect with a regression test, then commit: ${JSON.stringify(waveFindings)}.${k === 1 && fromStop.length ? ` The last ${fromStop.length} were left open by an earlier run's fix waves and may repeat the ones before them: check each against the current head, and explain one that no longer holds in notes; when you commit nothing, return commit equal to start_head.` : ''}${k >= 2 ? ` They ${regressions ? 'follow the fix of' : 'narrow'} these first-round findings${regressions ? ' (any not marked narrowing is a defect in a file the previous fix wave changed)' : ''}: ${JSON.stringify(finalFindings)}.` : ''}${k === 3 ? ' Fix the class of defect: enumerate every path of the same kind as each reported one and close them all, not only the reported instance.' : ''} If a finding is wrong, explain with evidence in notes. ${OWN_TESTS} ${COMMIT_SCOPE} ${hasBranches ? IMPL_RETURN_AT(W) : IMPL_RETURN} Also return changed_files: the output lines of ${CHANGED_CMD('<start_head>..<commit>')}, run alone after your last commit.${hasBranches ? ` A finding on a declared branch is fixed in that branch's worktree and pushed with its push form. Return branch_heads: one {name, head} per declared branch (${declared(plan).map(b => b.name).join(', ')}), head being git -C <its worktree> rev-parse HEAD after your last commit.` : ''}\n${RULES}`, { label: fwLabel, phase: 'Final review', agentType: 'implementer', model: 'sonnet', schema: withChanged(hasBranches ? FIX_WAVE_IMPL : IMPL) })
+    // #1000: a first-round finding stays in the prompt while a current finding may still be about it; a turning file's are in its history.
+    const unplaced = waveFindings.some(f => !fileOf(f))
+    const stillOpen = k === 1 ? [] : finalFindings.filter(f => !turning.includes(fileOf(f)) && (unplaced || !fileOf(f) || waveFindings.some(w => fileOf(w) === fileOf(f))))
+    const settled = finalFindings.filter(f => !turning.includes(fileOf(f))).length - stillOpen.length
+    const classWide = k === 3 && waveFindings.some(f => !turning.includes(fileOf(f)))
+    const fw = await call(`${CTX}\n${PLAN_REF} Fix these final-review findings, each real defect with a regression test, then commit: ${JSON.stringify(waveFindings)}.${k === 1 && fromStop.length ? ` The last ${fromStop.length} were left open by an earlier run's fix waves and may repeat the ones before them: check each against the current head, and explain one that no longer holds in notes; when you commit nothing, return commit equal to start_head.` : ''}${k >= 2 ? ` They ${regressions ? 'follow the fix of' : 'narrow'} ${stillOpen.length ? 'these' : 'the'} first-round findings${regressions ? ' (any not marked narrowing is a defect in a file the previous fix wave changed)' : ''}${stillOpen.length ? `: ${JSON.stringify(stillOpen)}.${settled ? ` The other ${settled} are settled.` : ''}` : ', all settled.'}` : ''}${turning.map(file => ` ${file} has now been judged more than once in the same place: the fix of one finding drew the next. Its history, oldest first: ${JSON.stringify(historyOf(file))}. Read each range (git -C ${W} diff <range>), then change the approach or rebut the finding with evidence in notes; do not move the same lines back.`).join('')}${classWide ? ` Fix the class of defect: enumerate every path of the same kind as each reported one and close them all, not only the reported instance.${turning.length ? ` Not in ${turning.join(' or ')}: fix only what is reported there.` : ''}` : ''} If a finding is wrong, explain with evidence in notes. Change nothing ${classWide ? 'outside that class' : 'no finding names'}. ${OWN_TESTS} ${COMMIT_SCOPE} ${hasBranches ? IMPL_RETURN_AT(W) : IMPL_RETURN} Also return changed_files: the output lines of ${CHANGED_CMD('<start_head>..<commit>')}, run alone after your last commit.${hasBranches ? ` A finding on a declared branch is fixed in that branch's worktree and pushed with its push form. Return branch_heads: one {name, head} per declared branch (${declared(plan).map(b => b.name).join(', ')}), head being git -C <its worktree> rev-parse HEAD after your last commit.` : ''}\n${RULES}`, { label: fwLabel, phase: 'Final review', agentType: 'implementer', model: 'sonnet', schema: withChanged(hasBranches ? FIX_WAVE_IMPL : IMPL) })
     // The carried findings outlive only a wave that gave no reply: one that answered and failed has had them, and the resume's fresh review decides.
     const spent = details => {
       if (fw && carried.length) { log(`fix-wave: ${carried.length} carried finding(s) dropped after a wave that answered and failed`); carried = [] }
@@ -1724,14 +1745,21 @@ if (finalFindings.length) {
     const inFix = changedBy(fw).filter(p => changedBy(rv).includes(p))
     const fresh = next.filter(f => f.relation !== 'narrowing')
     const narrow = fresh.every(f => fileOf(f) && inFix.includes(fileOf(f)))
+    fixes.push({ notes: String(fw.notes || ''), range: `${fw.start_head}..${fw.commit}` })
+    rounds.push(next)
+    turning = [...new Set(fresh.map(fileOf).filter(p => p && inFix.includes(p) && waveFindings.some(w => fileOf(w) === p)))]
+    for (const p of turning) fired[p] = (fired[p] || 0) + 1
+    const twice = turning.find(p => fired[p] > 1)
+    const oscillating = twice ? { file: clip(twice), rounds: historyOf(twice).concat({ round: k, findings: onFile(next, twice) }) } : null
     // A wave that committed nothing earns no further wave: what its re-review still holds stops.
     const again = k === 1 ? narrow && !idle : k === 2 && narrow && next.every(f => f.severity === 'important') && next.length <= afterFirst
-    if (!again) {
+    if (!again || oscillating) {
       carried = carryOf(next)
       if (carried.length < next.length) log(`fix-wave-review: ${next.length - carried.length} of ${next.length} open finding(s) not carried in cont`)
       const diverging = divergingOf(carried)
       if (diverging) log(`fix-wave-review: the fix waves do not converge on ${diverging.file} after ${diverging.waves} waves`)
-      return stop('fix-wave-review', { rv, fix_waves: fixWaves, ...(diverging ? { diverging } : {}) })
+      if (oscillating) log(`fix-wave-review: fix waves ${k - 1} and ${k} each drew a new finding in ${oscillating.file}`)
+      return stop('fix-wave-review', { rv, fix_waves: fixWaves, ...(diverging ? { diverging } : {}), ...(oscillating ? { oscillating } : {}) })
     }
     if (k === 1) afterFirst = next.length
     regressions = fresh.length
