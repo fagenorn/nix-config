@@ -15,7 +15,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from agent_tools.console import manager, revive_check
+from agent_tools.console import manager, revive_check, sessions
+from agent_tools.console.event_log import Event
 from agent_tools.console.sessions import Observation
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -30,10 +31,14 @@ REFUSAL = ("Nobody watches this session, so the permission prompt was refused: d
 
 
 def cap(*rows, all_out=False, resumes_at=None):
+    def entry(p, s, w, f, signin=None):
+        row = {"profile": p, "state": s, "week_left": w, "five_hour_left": f,
+               "next_reset": None, "out_until": None, "read_at": None}
+        if signin is not None:
+            row["signin"] = {"state": signin}
+        return row
     return {"tight": False, "all_out": all_out, "resumes_at": resumes_at,
-            "profiles": [{"profile": p, "state": s, "week_left": w, "five_hour_left": f,
-                          "next_reset": None, "out_until": None, "read_at": None}
-                         for p, s, w, f in rows]}
+            "profiles": [entry(*row) for row in rows]}
 
 
 class Case(unittest.TestCase):
@@ -287,25 +292,177 @@ class RunTest(Case):
             self.assertEqual(run.calls, [])
 
 
-class ProfileTest(unittest.TestCase):
-    def test_the_profile_choice_rule(self):
-        wait = manager.Wait("2026-11-13T00:00:00+00:00")
+T_EARLY = "2026-11-13T10:00:00+01:00"
+T_LATE = "2026-11-13T09:30:00+00:00"
+
+
+def hour(h):
+    return f"2026-11-13T{h:02d}:00:00.000000+00:00"
+
+
+class SessionProfileTest(unittest.TestCase):
+    def test_the_session_profile_rule(self):
         table = [
-            (cap(("a", "ok", 40, 90), ("b", "ok", 70, 10)), "a", "b"),
-            (cap(("a", "ok", 70, 20), ("b", "ok", 70, 50)), "a", "b"),
-            (cap(("b", "ok", 70, 50), ("a", "ok", 70, 50)), "b", "a"),
-            (cap(("a", "out", 0, 0), ("b", "reset", 100, 100)), "a", "b"),
-            (cap(("a", "ok", None, None), ("b", "ok", 5, 5)), "a", "b"),
-            (cap(("a", "unknown", None, None), ("b", "unknown", None, None)), "b", "b"),
-            (cap(), "default", "default"),
-            (cap(("a", "out", 0, 0), ("b", "unknown", None, None)), "a", "b"),
-            (cap(("a", "out", 0, 0), ("b", "unknown", None, None)), "c", "c"),
-            (cap(("a", "out", 0, 0), ("b", "out", 0, 0), all_out=True,
-                 resumes_at="2026-11-13T00:00:00+00:00"), "a", wait),
+            (cap(("a", "ok", 40, 90), ("b", "ok", 70, 10)), {}, "b"),
+            (cap(("a", "ok", 70, 20), ("b", "ok", 70, 50)), {}, "b"),
+            (cap(("b", "ok", 70, 50), ("a", "ok", 70, 50)), {}, "a"),
+            (cap(("a", "out", 0, 0), ("b", "reset", 100, 100)), {}, "b"),
+            (cap(("a", "ok", None, None), ("b", "ok", 5, 5)), {}, "b"),
+            (cap(("a", "ok", 90, 90, "signed_out"), ("b", "ok", 10, 10, "signed_in")), {}, "b"),
+            (cap(("a", "ok", 90, 90), ("b", "ok", 10, 10, "signed_in")), {}, "a"),
+            (cap(("a", "ok", 10, 10, "signed_in")), {"gone": T_LATE}, "a"),
         ]
-        for capacity, bound, expected in table:
-            with self.subTest(rows=capacity["profiles"], bound=bound):
-                self.assertEqual(manager.choose_profile(capacity, bound), expected)
+        for capacity, last_use, expected in table:
+            with self.subTest(capacity=capacity["profiles"], last_use=last_use):
+                self.assertEqual(manager.session_profile(capacity, last_use), expected)
+
+    def test_with_no_room_the_most_recently_used_signed_in_profile_answers(self):
+        unknown = (None, None)
+        table = [
+            (cap(("a", "unknown", *unknown, "signed_in"), ("b", "unknown", *unknown, "signed_in"),
+                 ("c", "unknown", *unknown, "signed_out")),
+             {"a": T_LATE, "b": T_EARLY, "c": "2026-11-13T11:00:00+00:00"}, "a"),
+            (cap(("a", "out", 0, 0, "signed_in"), ("b", "unknown", *unknown, "signed_in")),
+             {"b": T_EARLY}, "b"),
+            (cap(("b", "unknown", *unknown, "signed_in"), ("a", "unknown", *unknown, "signed_in")),
+             {}, "a"),
+            (cap(("a", "unknown", *unknown), ("b", "unknown", *unknown, "signed_in")),
+             {"a": T_LATE}, "b"),
+            (cap(("a", "out", 0, 0, "signed_in"), all_out=True), {}, "a"),
+        ]
+        for capacity, last_use, expected in table:
+            with self.subTest(capacity=capacity["profiles"], last_use=last_use):
+                self.assertEqual(manager.session_profile(capacity, last_use), expected)
+
+    def test_with_no_sign_in_known_the_answer_is_default_unless_default_is_signed_out(self):
+        unknown = (None, None)
+        table = [
+            (cap(("a", "out", 0, 0), ("b", "unknown", *unknown)), {"a": T_LATE}, "default"),
+            (cap(), {}, "default"),
+            (cap(("default", "ok", 90, 90, "signed_out")), {}, None),
+            (cap(("default", "out", 0, 0, "signed_out"), ("work", "unknown", *unknown)), {}, None),
+        ]
+        for capacity, last_use, expected in table:
+            with self.subTest(capacity=capacity["profiles"], last_use=last_use):
+                self.assertEqual(manager.session_profile(capacity, last_use), expected)
+
+    def test_profile_use_survives_a_session_leaving(self):
+        def seen(seq, h, sid, profile):
+            return Event(seq, hour(h), sessions.SEEN, "/srv/p01", {
+                "session_id": sid, "cwd": "/srv/p01", "repo": "/srv/p01", "state": "idle",
+                "profile": profile})
+
+        def row(seq, h, kind, sid):
+            return Event(seq, hour(h), kind, "/srv/p01", {"session_id": sid, "event": "Stop"})
+
+        events = [
+            seen(1, 9, "s-1", "work"),
+            row(2, 11, sessions.HOOK, "s-1"),
+            seen(3, 10, "s-2", "home"),
+            row(4, 8, sessions.HOOK, "s-9"),
+            Event(5, hour(12), sessions.GONE, "/srv/p01", {"session_id": "s-1"}),
+            Event(6, hour(12), sessions.GONE, "/srv/p01", {"session_id": "s-2"}),
+            row(7, 13, sessions.HOOK, "s-1"),
+        ]
+        use = manager.profile_use(events)
+        self.assertEqual(dict(use.last), {"work": hour(11), "home": hour(10)})
+        self.assertEqual(dict(use.owner), {})
+        later = manager.profile_use([Event(8, hour(14), sessions.PROFILE, "/srv/p01", {
+            "session_id": "s-3", "profile": "home"})], use)
+        self.assertEqual(dict(later.last), {"work": hour(11), "home": hour(14)})
+        self.assertEqual(dict(use.last), {"work": hour(11), "home": hour(10)})
+        earlier = manager.profile_use([Event(9, "2026-11-13T15:00:00+05:00", sessions.SEEN,
+                                             "/srv/p01", {"session_id": "s-4", "profile": "work",
+                                                          "cwd": "/srv/p01", "repo": "/srv/p01",
+                                                          "state": "idle"})], use)
+        self.assertEqual(earlier.last["work"], hour(11))
+
+    def test_a_newer_use_within_the_same_millisecond_wins(self):
+        def stamp(micro):
+            return f"2026-11-13T09:00:00.{micro:06d}+00:00"
+
+        events = [
+            Event(1, stamp(100), sessions.SEEN, "/srv/p01", {
+                "session_id": "s-a", "cwd": "/srv/p01", "repo": "/srv/p01", "state": "idle",
+                "profile": "a"}),
+            Event(2, stamp(500), sessions.SEEN, "/srv/p01", {
+                "session_id": "s-b", "cwd": "/srv/p01", "repo": "/srv/p01", "state": "idle",
+                "profile": "b"}),
+            Event(3, stamp(900), sessions.HOOK, "/srv/p01", {
+                "session_id": "s-a", "event": "Stop"}),
+        ]
+        use = manager.profile_use(events)
+        self.assertEqual(dict(use.last), {"a": stamp(900), "b": stamp(500)})
+        both = cap(("a", "unknown", None, None, "signed_in"),
+                   ("b", "unknown", None, None, "signed_in"))
+        self.assertEqual(manager.session_profile(both, use.last), "a")
+
+    def test_write_choice_replaces_the_file_atomically(self):
+        with tempfile.TemporaryDirectory() as name:
+            path = Path(name) / "accounts" / manager.CHOICE_FILE
+            manager.write_choice(path, "work")
+            self.assertEqual(path.read_text(), "work\n")
+            self.assertEqual(sorted(os.listdir(path.parent)), ["chosen-profile"])
+            first = path.stat().st_ino
+            manager.write_choice(path, "home")
+            self.assertEqual(path.read_text(), "home\n")
+            self.assertNotEqual(path.stat().st_ino, first)
+            self.assertEqual(sorted(os.listdir(path.parent)), ["chosen-profile"])
+            sources = []
+
+            def refuse(source, destination):
+                sources.append(Path(source))
+                raise OSError("full")
+
+            with mock.patch("agent_tools.console.manager.os.replace", side_effect=refuse):
+                with self.assertRaises(OSError):
+                    manager.write_choice(path, "work")
+            self.assertEqual(path.read_text(), "home\n")
+            self.assertEqual(len(sources), 1)
+            self.assertEqual(sources[0].parent, path.parent)
+            self.assertFalse(sources[0].exists())
+            self.assertEqual(sorted(os.listdir(path.parent)), ["chosen-profile"])
+            manager.write_choice(path, None)
+            self.assertFalse(path.exists())
+            manager.write_choice(path, None)
+
+    def test_read_choice_reads_the_first_line_or_nothing(self):
+        with tempfile.TemporaryDirectory() as name:
+            path = Path(name) / manager.CHOICE_FILE
+            self.assertIsNone(manager.read_choice(path))
+            for content, expected in [(b"home\n", "home"), (b"", None), (b"  \n", None),
+                                      (b"\xff\xfe", None)]:
+                with self.subTest(content=content):
+                    path.write_bytes(content)
+                    self.assertEqual(manager.read_choice(path), expected)
+
+
+class ProfileTest(unittest.TestCase):
+    def test_the_launch_choice_is_the_session_choice_or_a_wait(self):
+        unknown = (None, None)
+        table = [
+            (cap(("a", "ok", 40, 90), ("b", "ok", 70, 10)), {}),
+            (cap(("a", "ok", 90, 90, "signed_out"), ("b", "ok", 10, 10, "signed_in")), {}),
+            (cap(("a", "out", 0, 0, "signed_in"), ("b", "unknown", *unknown, "signed_in")),
+             {"b": T_EARLY}),
+            (cap(("a", "unknown", *unknown, "signed_in"), ("b", "unknown", *unknown, "signed_in")),
+             {"a": T_LATE, "b": T_EARLY}),
+        ]
+        for capacity, last_use in table:
+            with self.subTest(capacity=capacity["profiles"], last_use=last_use):
+                self.assertEqual(manager.choose_profile(capacity, last_use),
+                                 manager.session_profile(capacity, last_use))
+        until = "2026-11-13T00:00:00+00:00"
+        self.assertEqual(manager.choose_profile(
+            cap(("a", "out", 0, 0), ("b", "out", 0, 0), all_out=True, resumes_at=until), {}),
+            manager.Wait(until))
+        self.assertEqual(manager.choose_profile(cap(("default", "ok", 90, 90, "signed_out")), {}),
+                         manager.Wait(None))
+
+    def test_the_binding_is_no_longer_an_input(self):
+        self.assertFalse(hasattr(manager, "bound_profile"))
+        self.assertEqual(list(inspect.signature(manager.choose_profile).parameters),
+                         ["capacity", "last_use"])
 
     def test_quota_wait_reads_only_an_out_profile(self):
         until = "2026-11-13T00:00:00+00:00"
@@ -318,33 +475,6 @@ class ProfileTest(unittest.TestCase):
         for profile in ("home", "gone", None):
             with self.subTest(profile=profile):
                 self.assertIsNone(manager.quota_wait(capacity, profile))
-
-    def test_the_bound_profile_is_read_from_the_bindings(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            d = Path(tmp)
-            (d / "bindings.tsv").write_text("/srv\tparent\n/srv/p01\twork\n")
-            self.assertEqual(manager.bound_profile("/srv/p01", d), "work")
-            self.assertEqual(manager.bound_profile("/srv/p02", d), "parent")
-            self.assertEqual(manager.bound_profile("/elsewhere", d), "default")
-            empty = d / "empty"
-            empty.mkdir()
-            self.assertEqual(manager.bound_profile("/srv/p01", empty), "default")
-            with mock.patch.dict(os.environ, {"CLAUDE_ACCOUNTS_DIR": str(d)}):
-                self.assertEqual(manager.bound_profile("/srv/p01"), "work")
-
-    def test_a_linked_worktree_reads_its_main_checkouts_binding(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            d = Path(os.path.realpath(tmp))
-            main, worktree = d / "src" / "repo", d / "work" / "topic"
-            admin = main / ".git" / "worktrees" / "topic"
-            admin.mkdir(parents=True)
-            (admin / "commondir").write_text("../..\n")
-            worktree.mkdir(parents=True)
-            (worktree / ".git").write_text(f"gitdir: {admin}\n")
-            (d / "bindings.tsv").write_text(f"{main}\twork\n")
-            self.assertEqual(manager.bound_profile(str(worktree), d), "work")
-            self.assertEqual(manager.bound_profile(str(main), d), "work")
-            self.assertEqual(manager.bound_profile(str(d / "work"), d), "default")
 
 
 class StopTest(unittest.TestCase):

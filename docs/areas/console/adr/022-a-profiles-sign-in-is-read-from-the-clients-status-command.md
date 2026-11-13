@@ -1,6 +1,6 @@
 # ADR-console-022 — A profile's sign-in is read from the client's status command
 
-- **Status:** accepted
+- **Status:** accepted; amended by ADR-console-023
 - **Decided in:** #839, #842, #1010
 
 ## Context
@@ -19,14 +19,14 @@ A profile's login can end, or never have been made, and nothing on the page said
 
 **D5. Unknown raises nothing.** A status that fails, times out, exits otherwise or cannot be read records `unknown`, one stderr line `console: signin_unknown <profile> <kind>` and nothing else: the last answer wins, so an unknown sign-in closes an open ask and asks none.
 
-**D6. Signed out is not "no reading".** In the shown capacity a signed-out profile is named as signed out, is left out of the no-reading note, and does not block "every profile is out": it has no room and is not waiting for a reading. Tight and all out are decided over the profiles that are not signed out. The launch choice and the quota wait do not change: the manager's launch choice keeps ADR-console-015's profile rule over the capacity without sign-ins, so a signed-out profile with no reading is still an unknown profile there. Skipping signed-out profiles at launch is a later change.
+**D6. Signed out is not "no reading".** In the shown capacity a signed-out profile is named as signed out, is left out of the no-reading note, and does not block "every profile is out": it has no room and is not waiting for a reading. Tight and all out are decided over the profiles that are not signed out. The quota wait does not change; the launch choice reads the capacity with sign-ins and never picks a signed-out profile (ADR-console-023), keeping ADR-console-015's order otherwise.
 
 **D7. Reading, not credentials.** The console opens no credential file and starts no client but the launcher; the client's own login answers.
 
 ## Consequences
 
 - A lapsed or never-made login shows within one interval, with the command to fix it, and three days before an end it asks before anything fails.
-- A signed-out profile with an old capacity reading shows as signed out and no longer counts toward "every profile is out" in the shown capacity, while the launch can still pick it (ADR-console-015) until the launch learns to skip it.
+- A signed-out profile with an old capacity reading shows as signed out and no longer counts toward "every profile is out" in the shown capacity, and the launch never picks it (ADR-console-023).
 - Each listed profile costs one status command every 10 minutes, with no request to the model.
 - The log grows by one row per change of state or end.
 - Related: ADR-console-006 (the probe schedule and the listed profiles), ADR-console-015 (the profile rule).

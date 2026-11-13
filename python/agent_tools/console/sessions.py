@@ -99,7 +99,8 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from agent_tools.console.event_log import Event
+from agent_tools.console.event_log import (
+    SESSION_HOOK, SESSION_PROFILE, SESSION_SEEN, Event)
 
 WORKING = "working"
 WAITING_ANSWER = "waiting_answer"
@@ -117,10 +118,10 @@ STATE_TEXT = {
     LIMIT: "stopped on a usage limit",
 }
 
-HOOK = "session.hook"
-SEEN = "session.seen"
+HOOK = SESSION_HOOK
+SEEN = SESSION_SEEN
 GONE = "session.gone"
-PROFILE = "session.profile"
+PROFILE = SESSION_PROFILE
 DEFAULT_PROFILE = "default"
 
 HOOK_EVENTS = ("SessionStart", "Stop", "StopFailure", "PermissionRequest",

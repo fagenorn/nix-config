@@ -3,9 +3,13 @@
 Run: just agent-workflow-tests
 """
 import contextlib
+import inspect
 import io
 import json
+import os
+import shutil
 import sys
+import tempfile
 import threading
 import time
 import unittest
@@ -13,7 +17,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import capacity, console, manager, nudge, probe, signin, sprints
+from agent_tools.console import (capacity, console, manager, nudge, probe, service, sessions,
+                                 signin, sprints)
 from agent_tools.console.event_log import GOAL_STATED, EventLog
 
 from . import console_test_support as support
@@ -70,7 +75,7 @@ class ManagerServiceTest(Case):
         base = self.store.parent.parent / "accounts" / "profiles"
         dirs = {name: base / name for name in utilization}
         for directory in dirs.values():
-            directory.mkdir(parents=True)
+            directory.mkdir(parents=True, exist_ok=True)
         return dirs
 
     def seed_readings(self, readings):
@@ -92,7 +97,9 @@ class ManagerServiceTest(Case):
 
     def test_a_stated_goal_launches_one_manager_with_its_identity(self):
         launches = support.Launches()
-        svc = self.start(launcher=launches, bound_profile_of=lambda root: "work")
+        support.sign_in(self.store, "work")
+        svc = self.start(launcher=launches,
+                         profile_dirs=[support.profile_dir(self.store, "work")])
         sid = self.state(svc)
         (launch,) = launches.calls
         self.assertEqual(launch.cwd, "/srv/p01")
@@ -152,7 +159,19 @@ class ManagerServiceTest(Case):
                           sprint["manager_until"], sprint["retry"]),
                          ("waiting", "waiting on quota until", until, True))
 
-    def test_a_signed_out_profile_keeps_todays_launch_choice(self):
+    def test_a_binding_to_another_profile_does_not_change_the_launch(self):
+        dirs = self.profiles(work=0, home=0)
+        accounts = self.store.parent.parent / "accounts"
+        (accounts / "bindings.tsv").write_text("/srv/p01\thome\n")
+        support.sign_in(self.store, "work")
+        launches = support.Launches()
+        with mock.patch.dict(os.environ, {"CLAUDE_ACCOUNTS_DIR": str(accounts)}):
+            svc = self.start(launcher=launches, profile_dirs=list(dirs.values()),
+                             clock=lambda: NOW)
+            self.state(svc)
+        self.assertEqual([c.profile for c in launches.calls], ["work"])
+
+    def test_a_signed_out_profile_is_never_launched(self):
         dirs = self.profiles(work=0, home=0)
         self.seed_readings({"work": self.exhausted(FAR)})
         self.store.parent.mkdir(parents=True, exist_ok=True)
@@ -161,14 +180,29 @@ class ManagerServiceTest(Case):
         log.close()
         launches = support.Launches()
         svc = self.start(launcher=launches, profile_dirs=list(dirs.values()),
-                         clock=lambda: NOW, bound_profile_of=lambda root: "work")
+                         clock=lambda: NOW)
+        sid = self.state(svc)
+        self.assertEqual(launches.calls, [])
+        until = datetime.fromtimestamp(FAR, timezone.utc).isoformat()
+        _, _, kind, project, payload = support.log_rows(self.store)[-1]
+        self.assertEqual((kind, project, json.loads(payload)),
+                         ("manager.waiting", "owner/p01", {"sprint_id": sid, "until": until}))
+        self.assertTrue(json.loads(svc.view_bytes)["capacity"]["all_out"])
+
+    def test_a_signed_out_profile_with_the_most_room_is_skipped(self):
+        dirs = self.profiles(work=0, home=0)
+        self.seed_readings({"work": self.weekly(0.2), "home": self.weekly(0.6)})
+        log = EventLog(self.store)
+        log.append([signin.entry("work", signin.Status("signed_out", None))])
+        log.close()
+        launches = support.Launches()
+        svc = self.start(launcher=launches, profile_dirs=list(dirs.values()),
+                         clock=lambda: NOW)
         self.state(svc)
         self.assertEqual([c.profile for c in launches.calls], ["home"])
-        self.assertEqual([r for r in support.log_rows(self.store) if r[2] == "manager.waiting"], [])
-        shown = json.loads(svc.view_bytes)["capacity"]
-        home = next(e for e in shown["profiles"] if e["profile"] == "home")
-        self.assertTrue(shown["all_out"])
-        self.assertEqual(home["signin"]["state"], "signed_out")
+
+    def test_the_service_takes_no_binding(self):
+        self.assertNotIn("bound_profile_of", inspect.signature(service.ConsoleService).parameters)
 
     def test_a_failed_start_shows_its_reason_and_retry_launches_again(self):
         launches = support.Launches(fail=["the directory is not trusted", None])
@@ -455,6 +489,273 @@ class ManagerServiceTest(Case):
         status, _, body = self.post(svc, WITHDRAW, {"project_id": "owner/p01", "sprint_id": sid})
         self.assertEqual((status, body), (204, b""))
         self.assertFalse(launch.settings.exists())
+
+
+class ProfileChoiceServiceTest(ManagerServiceTest):
+    """The console answers the profile a new session should use and keeps it in a file (#1011)."""
+
+    PROFILE = "/api/profile"
+
+    def ask(self, svc):
+        return support.request(svc.address, "GET", self.PROFILE)
+
+    @staticmethod
+    def both(week, five):
+        return {"http_status": 200, "status": "allowed", "windows": {
+            "7d": {"status": "allowed", "utilization": week, "reset": FAR},
+            "5h": {"status": "allowed", "utilization": five, "reset": FAR}}}
+
+    def seed_signins(self, **states):
+        self.store.parent.mkdir(parents=True, exist_ok=True)
+        log = EventLog(self.store)
+        try:
+            log.append([signin.entry(name, signin.Status(state, None))
+                        for name, state in states.items()])
+        finally:
+            log.close()
+
+    @staticmethod
+    def identity(path):
+        stat = path.stat()
+        return (stat.st_ino, stat.st_mtime_ns)
+
+    @property
+    def choice(self):
+        return self.store.parent.parent / "accounts" / "chosen-profile"
+
+    def two_profiles(self, readings):
+        dirs = self.profiles(work=0, home=0)
+        self.seed_readings(readings)
+        return list(dirs.values())
+
+    def test_the_route_answers_the_profile_with_most_weekly_allowance(self):
+        dirs = self.two_profiles({"work": self.weekly(0.2), "home": self.weekly(0.6)})
+        svc = self.start(profile_dirs=dirs, clock=lambda: NOW)
+        status, headers, body = self.ask(svc)
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"], "application/json")
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertEqual(body, b'{"profile":"work"}')
+
+    def test_the_route_breaks_a_weekly_tie_on_five_hour_allowance(self):
+        dirs = self.two_profiles({"work": self.both(0.5, 0.7), "home": self.both(0.5, 0.1)})
+        svc = self.start(profile_dirs=dirs, clock=lambda: NOW)
+        self.assertEqual(self.ask(svc)[2], b'{"profile":"home"}')
+
+    def test_the_route_never_answers_a_signed_out_profile(self):
+        dirs = self.two_profiles({"work": self.weekly(0.2), "home": self.weekly(0.6)})
+        self.seed_signins(work="signed_out")
+        svc = self.start(profile_dirs=dirs, clock=lambda: NOW)
+        self.assertEqual(self.ask(svc)[2], b'{"profile":"home"}')
+
+    def test_with_no_room_the_route_answers_the_most_recently_used_signed_in_profile(self):
+        dirs = list(self.profiles(work=0, home=0).values())
+        self.seed_signins(work="signed_in", home="signed_in")
+        for session_id, profile in (("s-1", "home"), ("s-2", "work"), ("s-3", "gone")):
+            log = EventLog(self.store)
+            try:
+                log.append([(sessions.SEEN, None, {
+                    "session_id": session_id, "cwd": "/srv/p01", "repo": "/srv/p01",
+                    "state": sessions.IDLE, "profile": profile})])
+            finally:
+                log.close()
+        launches = support.Launches()
+        svc = self.start(profile_dirs=dirs, clock=lambda: NOW, launcher=launches)
+        svc.poll_sessions()
+        gone = [json.loads(row[4])["session_id"]
+                for row in support.log_rows(self.store) if row[2] == sessions.GONE]
+        self.assertIn("s-1", gone)
+        self.assertIn("s-2", gone)
+        self.assertEqual(self.ask(svc)[2], b'{"profile":"work"}')
+        self.state(svc)
+        (launch,) = launches.calls
+        self.assertEqual(launch.profile, "work")
+        svc.close()
+        again = self.start(profile_dirs=dirs, clock=lambda: NOW, launcher=support.Launches())
+        self.assertEqual(self.ask(again)[2], b'{"profile":"work"}')
+
+    def test_retention_keeps_the_use_of_a_session_whose_assignment_it_removes(self):
+        dirs = list(self.profiles(work=0, home=0).values())
+        day = 86400
+        now = [NOW]
+        stamp = lambda: iso(now[0])
+        self.store.parent.mkdir(parents=True, exist_ok=True)
+        log = EventLog(self.store, clock=stamp)
+        try:
+            def at(days, *entries):
+                now[0] = NOW + days * day
+                log.append(list(entries))
+
+            seen = lambda sid, profile: (sessions.SEEN, None, {
+                "session_id": sid, "cwd": "/srv/p01", "repo": "/srv/p01",
+                "state": sessions.IDLE, "profile": profile})
+            at(0, signin.entry("work", signin.Status("signed_in", None)),
+               signin.entry("home", signin.Status("signed_in", None)), seen("s-b", "home"),
+               ("old", None, {}))
+            at(10, seen("s-a", "work"))
+            at(20, (sessions.HOOK, None, {"session_id": "s-b", "event": "Stop"}))
+            at(30, (sessions.GONE, None, {"session_id": "s-a"}),
+               (sessions.GONE, None, {"session_id": "s-b"}))
+        finally:
+            log.close()
+        now[0] = NOW + 50 * day
+        svc = self.start(profile_dirs=dirs, clock=lambda: now[0], log_clock=stamp)
+        self.assertEqual(self.ask(svc)[2], b'{"profile":"home"}')
+        now[0] = NOW + 95 * day
+        self.assertEqual(svc.retain(), 1)
+        kinds = [r[2] for r in support.log_rows(self.store)]
+        self.assertEqual(kinds.count(sessions.SEEN), 2)
+        self.assertEqual(self.ask(svc)[2], b'{"profile":"home"}')
+        svc.close()
+        again = self.start(profile_dirs=dirs, clock=lambda: now[0], log_clock=stamp)
+        self.assertEqual(self.ask(again)[2], b'{"profile":"home"}')
+
+    def test_with_no_sign_in_known_the_route_answers_default(self):
+        dirs = list(self.profiles(work=0, home=0).values())
+        svc = self.start(profile_dirs=dirs, clock=lambda: NOW)
+        self.assertEqual(self.ask(svc)[2], b'{"profile":"default"}')
+
+    def test_other_methods_on_the_profile_route_are_refused(self):
+        svc = self.start()
+        status, headers, _ = support.request(svc.address, "POST", self.PROFILE)
+        self.assertEqual((status, headers["Allow"]), (405, "GET"))
+        self.assertEqual(
+            support.request(svc.address, "GET", self.PROFILE, host="example.com:80")[0], 403)
+
+    def test_the_choice_file_is_written_when_and_only_when_the_choice_changes(self):
+        dirs = self.two_profiles({"work": self.weekly(0.2), "home": self.weekly(0.6)})
+        now = [NOW]
+
+        def reader(one):
+            if one.profile == "work" and now[0] > NOW:
+                return signin.Status("signed_out", None)
+            return signin.Status("signed_in", None)
+
+        choice = self.choice
+        svc = self.start(profile_dirs=dirs, clock=lambda: now[0], choice_file=choice,
+                         signin_reader=reader, probe_dispatch=lambda job: job())
+        self.assertEqual(choice.read_text(), "work\n")
+        before = self.identity(choice)
+        svc.poll_sessions()
+        svc.poll_sessions()
+        self.ask(svc)
+        self.ask(svc)
+        self.assertEqual(self.identity(choice), before)
+        self.assertEqual(sorted(p.name for p in choice.parent.iterdir()),
+                         ["chosen-profile", "profiles"])
+        now[0] = NOW + 31
+        svc.probe_round()
+        svc.poll_sessions()
+        self.assertEqual(choice.read_text(), "home\n")
+        self.assertNotEqual(choice.stat().st_ino, before[0])
+        self.assertEqual(self.ask(svc)[2], b'{"profile":"home"}')
+        after = self.identity(choice)
+        svc.poll_sessions()
+        self.assertEqual(self.identity(choice), after)
+
+    def test_a_restart_that_finds_its_choice_in_the_file_writes_nothing(self):
+        dirs = self.two_profiles({"work": self.weekly(0.2), "home": self.weekly(0.6)})
+        choice = self.choice
+        choice.parent.mkdir(parents=True, exist_ok=True)
+        choice.write_text("work\n")
+        before = self.identity(choice)
+        svc = self.start(profile_dirs=dirs, clock=lambda: NOW, choice_file=choice)
+        svc.poll_sessions()
+        self.ask(svc)
+        self.assertEqual(self.identity(choice), before)
+        self.assertEqual(choice.read_text(), "work\n")
+
+    def test_a_route_answer_that_changed_is_written_at_once(self):
+        self.seed_readings({"work": self.weekly(0.6), "home": self.weekly(0.1)})
+        dirs = [support.profile_dir(self.store, "work")]
+        choice = self.choice
+        svc = self.start(profile_dirs=dirs, clock=lambda: NOW, choice_file=choice)
+        self.assertEqual(choice.read_text(), "work\n")
+        dirs.append(support.profile_dir(self.store, "home"))
+        self.assertEqual(self.ask(svc)[2], b'{"profile":"home"}')
+        self.assertEqual(choice.read_text(), "home\n")
+
+    def test_without_a_choice_file_nothing_is_written(self):
+        root = self.store.parent.parent.parent
+        dirs = self.two_profiles({"work": self.weekly(0.2), "home": self.weekly(0.6)})
+        env = {"CLAUDE_ACCOUNTS_DIR": str(self.store.parent.parent / "accounts"),
+               "HOME": str(root / "home")}
+        with mock.patch.dict(os.environ, env):
+            svc = self.start(profile_dirs=dirs, clock=lambda: NOW)
+            svc.poll_sessions()
+            status, _, body = self.ask(svc)
+        self.assertEqual((status, body), (200, b'{"profile":"work"}'))
+        self.assertEqual(list(root.rglob("chosen-profile")), [])
+
+    def test_a_choice_file_that_cannot_be_written_warns_once_until_a_write_succeeds(self):
+        self.seed_readings({"work": self.weekly(0.2), "home": self.weekly(0.1)})
+        dirs = [support.profile_dir(self.store, "work")]
+        blocked = self.store.parent.parent / "blocked"
+        blocked.write_text("x")
+        chosen = blocked / "chosen-profile"
+        stderr = io.StringIO()
+
+        def warnings():
+            return [line for line in stderr.getvalue().splitlines()
+                    if line.startswith("console: choice_unwritten ")]
+
+        with contextlib.redirect_stderr(stderr):
+            svc = self.start(clock=lambda: NOW, profile_dirs=dirs, choice_file=chosen)
+            svc.poll_sessions()
+            svc.poll_sessions()
+            self.assertEqual(len(warnings()), 1)
+            self.assertEqual(self.ask(svc)[::2], (200, b'{"profile":"work"}'))
+            blocked.unlink()
+            blocked.mkdir()
+            svc.poll_sessions()
+            self.assertEqual(chosen.read_text(), "work\n")
+            shutil.rmtree(blocked)
+            blocked.write_text("x")
+            dirs.append(support.profile_dir(self.store, "home"))
+            svc.poll_sessions()
+        self.assertEqual(len(warnings()), 2)
+
+    def test_main_passes_the_default_choice_file(self):
+        recorded = {}
+
+        class Stub:
+            def __init__(self, *args, **kwargs):
+                recorded.update(kwargs)
+                raise OSError("x")
+
+        with mock.patch("agent_tools.console.console.service.ConsoleService", Stub), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(console.main(["--port", "0"]), 1)
+        self.assertEqual(recorded["choice_file"], service.default_choice_file())
+
+    def test_the_default_choice_file_is_in_the_accounts_dir(self):
+        with mock.patch.dict(os.environ, {"CLAUDE_ACCOUNTS_DIR": "/x"}):
+            self.assertEqual(service.default_choice_file(), Path("/x/chosen-profile"))
+        with tempfile.TemporaryDirectory() as home:
+            env = {key: value for key, value in os.environ.items()
+                   if key != "CLAUDE_ACCOUNTS_DIR"}
+            env["HOME"] = home
+            with mock.patch.dict(os.environ, env, clear=True):
+                self.assertEqual(service.default_choice_file(),
+                                 Path(home) / ".claude-accounts" / "chosen-profile")
+
+    def test_when_nothing_can_be_chosen_the_route_answers_null_and_the_file_goes(self):
+        dirs = [support.profile_dir(self.store, "default")]
+        self.seed_readings({"default": self.weekly(0.2)})
+        self.seed_signins(default="signed_out")
+        choice = self.choice
+        choice.parent.mkdir(parents=True, exist_ok=True)
+        choice.write_text("default\n")
+        launches = support.Launches()
+        svc = self.start(profile_dirs=dirs, clock=lambda: NOW, choice_file=choice,
+                         launcher=launches)
+        self.assertEqual(self.ask(svc)[::2], (200, b'{"profile":null}'))
+        self.assertFalse(choice.exists())
+        self.state(svc)
+        self.assertEqual(launches.calls, [])
+        _, _, kind, _, payload = support.log_rows(self.store)[-1]
+        self.assertEqual(kind, "manager.waiting")
+        self.assertIsNone(json.loads(payload)["until"])
 
 
 if __name__ == "__main__":

@@ -51,8 +51,9 @@ class ReviveCase(Case):
             raise nudge.NudgeFailed(outcome)
 
     def begin(self, **overrides):
+        support.sign_in(self.store, "work")
         options = dict(
-            launcher=self.launches, bound_profile_of=lambda root: "work",
+            launcher=self.launches, profile_dirs=[support.profile_dir(self.store, "work")],
             dispatch=self.queued, nudger=self.nudger, listing=lambda: dict(self.listed),
             clock=lambda: self.now[0], log_clock=self.log_clock, session_poll_seconds=3600)
         return self.start(**{**options, **overrides})
@@ -115,7 +116,7 @@ class ReviveCase(Case):
         base = self.store.parent.parent / "accounts" / "profiles"
         dirs = {name: base / name for name in utilization}
         for directory in dirs.values():
-            directory.mkdir(parents=True)
+            directory.mkdir(parents=True, exist_ok=True)
         return dirs
 
     @staticmethod

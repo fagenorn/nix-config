@@ -270,8 +270,9 @@ class NudgeServiceTest(MessageRouteTest):
             raise nudge.NudgeFailed(outcome)
 
     def begin(self, **overrides):
+        support.sign_in(self.store, "work")
         options = dict(
-            launcher=support.Launches(), bound_profile_of=lambda root: "work",
+            launcher=support.Launches(), profile_dirs=[support.profile_dir(self.store, "work")],
             dispatch=self.queued, nudger=self.nudger, listing=lambda: dict(self.listed),
             clock=lambda: self.now[0], log_clock=self.log_clock, session_poll_seconds=3600)
         return self.start(**{**options, **overrides})
