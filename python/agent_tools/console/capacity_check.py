@@ -1,6 +1,6 @@
 """`capacity_check`: the verify check that the console shows a capacity reading for an account in use (#860).
 
-`python -m agent_tools.console.capacity_check [--url URL] [--max-age SECONDS]` reads the console's
+`python -m agent_tools.console.capacity_check [--url URL] [--max-age SECONDS] [--every]` reads the console's
 `/api/state` view (default `http://127.0.0.1:27184/api/state`; the URL must be `http` on a loopback
 host, `127.0.0.1` or `localhost`, else exit 2) and looks at `capacity.profiles[].read_at`.
 `--max-age` is a positive integer number of seconds (default 600).
@@ -14,6 +14,13 @@ Output is one stdout line of JSON with sorted keys:
   `{"status": "met", "profile": <name>, "age_seconds": <int>}` for the freshest such profile,
   exit 0;
 - otherwise `{"status": "not_met", "profiles": [<names>]}`, exit 1.
+
+With `--every` (#1009) the check meets only when every listed profile has a fresh reading: at least
+one row, and every row's `read_at` parses and is at most `--max-age` seconds before now. Then
+`{"status": "met", "profiles": <row count>, "oldest_age_seconds": <largest age>}`, exit 0. Otherwise
+`{"status": "pending", "profiles": [<names whose reading is missing, unreadable or older than
+--max-age, in row order>]}`, exit 75; an empty view is pending with `[]`. `--every` never exits 1,
+because the check cannot see when the host was activated, so a missing reading may still arrive.
 
 A console that is down or predates this change is "not yet", never "not met", and only a reading
 newer than `--max-age` meets the check. A bad argument is exit 2. The check only reads: it sends one
@@ -112,12 +119,24 @@ def verdict(rows: list[tuple[str, object]], max_age: int, now: datetime) -> tupl
     return 1, {"status": "not_met", "profiles": [name for name, _ in rows]}
 
 
+def every_verdict(rows: list[tuple[str, object]], max_age: int, now: datetime) -> tuple[int, dict]:
+    """Met when there is a row and every row is fresh, else pending on the ones that are not."""
+    ages = [age_seconds(read_at, now) for _, read_at in rows]
+    stale = [name for (name, _), age in zip(rows, ages) if age is None or age > max_age]
+    if rows and not stale:
+        return 0, {"status": "met", "profiles": len(rows), "oldest_age_seconds": max(ages)}
+    return NOT_YET, {"status": "pending", "profiles": stale}
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="capacity_check", description=__doc__.splitlines()[0])
     parser.add_argument("--url", type=_loopback_url, default=DEFAULT_URL,
                         help="the console state view to read (default: %(default)s)")
     parser.add_argument("--max-age", type=_positive, default=DEFAULT_MAX_AGE,
                         help="newest reading allowed, in seconds (default: %(default)s)")
+    parser.add_argument("--every", action="store_true",
+                        help="require a fresh reading for every listed profile; a missing one "
+                             "is not yet")
     return parser
 
 
@@ -131,7 +150,8 @@ def main(argv: list[str] | None = None) -> int:
     if rows is None:
         print(json.dumps({"status": "not_deployed"}, sort_keys=True))
         return NOT_YET
-    code, result = verdict(rows, args.max_age, datetime.now(timezone.utc))
+    decide = every_verdict if args.every else verdict
+    code, result = decide(rows, args.max_age, datetime.now(timezone.utc))
     print(json.dumps(result, sort_keys=True))
     return code
 
