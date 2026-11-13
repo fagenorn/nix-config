@@ -6,6 +6,7 @@ import argparse
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
 import json
+import os
 from pathlib import Path
 import re
 import subprocess
@@ -277,13 +278,26 @@ def resolve_revision(root: Path, revision: str) -> str:
     return peeled.decode("utf-8").strip()
 
 
-def normalize_artifact_path(value: str) -> bytes:
+def _under_root(value: str, top_level: str) -> str:
+    """An absolute artifact path as its root-relative form, by realpath containment."""
+    relative = os.path.relpath(os.path.realpath(value), os.path.realpath(top_level))
+    if relative == "." or relative == ".." or relative.startswith("../"):
+        raise DiffScopeError(f"--artifact-path is outside the repository: {value}")
+    return relative
+
+
+def normalize_artifact_path(value: str, top_level: str | None = None) -> bytes:
     """Normalise one --artifact-path to repository-root-relative raw bytes.
 
     Root-relative because git reports numstat paths root-relative even when it
-    is run from a subdirectory (D8).
+    is run from a subdirectory (D8). An absolute value -- the form the project
+    contract returns its artifact directories in -- is made relative to
+    `top_level`, the work tree's root, and refused when it does not lie under it
+    or when no `top_level` is given.
     """
     cleaned = value
+    if value.startswith("/") and top_level is not None:
+        cleaned = _under_root(value, top_level)
     while cleaned.startswith("./"):
         cleaned = cleaned[2:]
     if cleaned.startswith("/"):
@@ -294,6 +308,11 @@ def normalize_artifact_path(value: str) -> bytes:
     if ".." in cleaned.split("/"):
         raise DiffScopeError(f"--artifact-path escapes the repository: {value}")
     return cleaned.encode("utf-8", errors="surrogateescape")
+
+
+def _top_level(root: Path) -> str:
+    """The work tree's root directory, which `root` may be a subdirectory of."""
+    return os.fsdecode(_git(root, "rev-parse", "--show-toplevel").rstrip(b"\n"))
 
 
 def _split_records(payload: bytes) -> list[bytes]:
@@ -627,7 +646,7 @@ def _parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="PATH",
-        help="repository-relative path holding this run's own artifacts; repeatable",
+        help="path holding this run's own artifacts, repository-relative or absolute under the repository; repeatable",
     )
     parser.add_argument(
         "--format",
@@ -642,11 +661,13 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         base, head = parse_range(args.range)
-        artifact_paths = tuple(
-            normalize_artifact_path(value) for value in args.artifact_path
-        )
         root = Path(args.root)
         _validate_root(root)
+        absolute = any(value.startswith("/") for value in args.artifact_path)
+        top_level = _top_level(root) if absolute else None
+        artifact_paths = tuple(
+            normalize_artifact_path(value, top_level) for value in args.artifact_path
+        )
         result = measure(root, base, head, artifact_paths)
     except DiffScopeError as error:
         print(f"diff-scope: {error}", file=sys.stderr)

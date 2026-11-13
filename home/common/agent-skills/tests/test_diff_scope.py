@@ -724,6 +724,53 @@ class DiffScopeCommandTest(unittest.TestCase):
                 self.assertEqual(completed.returncode, 1, completed.stdout)
                 self.assertIn(b"diff-scope:", completed.stderr)
 
+    def test_an_absolute_artifact_path_under_the_root_measures_as_its_relative_form(self):
+        relative = self.measure("--artifact-path", ".claude/specs")
+        self.assertIn("artifact", json.dumps(relative["excluded"]))
+        for absolute in (
+            os.path.join(self.root, ".claude/specs"),
+            os.path.join(self.root, ".claude/specs/"),
+            os.path.join(self.root, "src/../.claude/specs"),
+        ):
+            with self.subTest(value=absolute):
+                self.assertEqual(self.measure("--artifact-path", absolute), relative)
+        mixed = self.measure(
+            "--artifact-path", os.path.join(self.root, ".claude/specs"),
+            "--artifact-path", ".claude/plans",
+        )
+        self.assertEqual(mixed, self.measure(
+            "--artifact-path", ".claude/specs", "--artifact-path", ".claude/plans"))
+
+    def test_an_absolute_artifact_path_is_relative_to_the_work_tree_root_from_a_subdirectory(self):
+        subdirectory = os.path.join(self.root, "nested-root")
+        os.makedirs(subdirectory, exist_ok=True)
+        self.addCleanup(os.rmdir, subdirectory)
+        completed = run_helper(
+            self.root, self.range, "--root", subdirectory,
+            "--artifact-path", os.path.join(self.root, ".claude/specs"),
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertEqual(
+            json.loads(completed.stdout.decode("utf-8")),
+            self.measure("--artifact-path", ".claude/specs"),
+        )
+
+    def test_an_absolute_artifact_path_outside_the_root_exits_one(self):
+        with tempfile.TemporaryDirectory() as outside:
+            link = os.path.join(self.root, "link-out")
+            os.symlink(outside, link)
+            self.addCleanup(os.unlink, link)
+            for bad in (outside, os.path.dirname(self.root), self.root, self.root + "-sibling",
+                        os.path.join(link, "specs")):
+                with self.subTest(value=bad):
+                    completed = run_helper(self.root, self.range, "--artifact-path", bad)
+                    self.assertEqual(completed.returncode, 1, completed.stdout)
+                    self.assertEqual(
+                        completed.stderr.decode("utf-8"),
+                        f"diff-scope: --artifact-path is outside the repository: {bad}\n",
+                    )
+
+    def test_a_relative_artifact_path_that_only_looks_absolute_exits_one(self):
         completed = run_helper(self.root, self.range, "--artifact-path", ".//x")
         self.assertEqual(completed.returncode, 1, completed.stdout)
         self.assertEqual(
