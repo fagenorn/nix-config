@@ -86,6 +86,33 @@ class CapacityCheckTest(unittest.TestCase):
                 code, out = self.run_check("--url", url)
                 self.assertEqual((code, json.loads(out)), (75, {"status": status}))
 
+    def test_every_profile_fresh_is_met(self):
+        url = serve(self, view(("work", ago(60)), ("spare", ago(800))))
+        code, out = self.run_check("--url", url, "--every", "--max-age", "900")
+        document = json.loads(out)
+        self.assertEqual(code, 0)
+        self.assertEqual(document["status"], "met")
+        self.assertEqual(document["profiles"], 2)
+        self.assertIn(document["oldest_age_seconds"], range(799, 810))
+
+    def test_a_profile_without_a_fresh_reading_is_not_yet_with_every(self):
+        cases = [([("work", ago(60)), ("spare", None), ("old", ago(1000))], ["spare", "old"]),
+                 ([], [])]
+        for rows, names in cases:
+            with self.subTest(rows=rows):
+                code, out = self.run_check("--url", serve(self, view(*rows)), "--every",
+                                           "--max-age", "900")
+                self.assertEqual((code, json.loads(out)),
+                                 (75, {"status": "pending", "profiles": names}))
+
+    def test_without_every_one_fresh_profile_still_meets(self):
+        url = serve(self, view(("work", ago(60)), ("spare", None)))
+        code, out = self.run_check("--url", url)
+        document = json.loads(out)
+        self.assertEqual(code, 0)
+        self.assertEqual(document["status"], "met")
+        self.assertEqual(document["profile"], "work")
+
     def test_the_wrapper_is_committed_executable(self):
         listed = subprocess.run(["git", "ls-files", "-s", WRAPPER], cwd=ROOT,
                                 capture_output=True, text=True, check=True).stdout

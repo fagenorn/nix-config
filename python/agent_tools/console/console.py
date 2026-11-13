@@ -29,6 +29,9 @@ session name and settings file again; elsewhere every wake is bare.
 Last, it is given `manager.stopper_for(sys.platform)` (#892): on Linux the owner's stop of a sprint
 ends its manager's background session (`manager.stop_session`); elsewhere there is no stopper and a
 stop is recorded without a call.
+
+It is also given `probe.prober_for(sys.platform)` (#1009): on Linux every listed profile is read every
+10 minutes by one small request under it (`agent_tools.console.probe`); elsewhere no probe is made.
 """
 
 from __future__ import annotations
@@ -39,7 +42,7 @@ import sqlite3
 import sys
 import threading
 
-from agent_tools.console import inbox, manager, nudge, service
+from agent_tools.console import inbox, manager, nudge, probe, service
 from agent_tools.console.event_log import EventLogError
 from agent_tools.console.write_guard import TokenError
 
@@ -68,7 +71,8 @@ def main(argv: list[str] | None = None) -> int:
             service.default_store(), service.default_registry(), port=args.port,
             tracker=inbox.read_items, launcher=manager.launcher_for(sys.platform),
             nudger=nudge.nudger_for(sys.platform), stopper=manager.stopper_for(sys.platform),
-            full_listing=nudge.full_lister_for(sys.platform))
+            full_listing=nudge.full_lister_for(sys.platform),
+            prober=probe.prober_for(sys.platform))
     except TokenError as error:
         print(f"console: page token unusable: {error}", file=sys.stderr)
         return 1

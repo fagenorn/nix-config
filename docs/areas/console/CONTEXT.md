@@ -94,7 +94,7 @@ One Workflow run of a delivery program started by a session, shown under that se
 _Avoid_: sprint, job
 
 **Limit reading**:
-The last unified rate-limit state the cache proxy saw for one account profile: status, weekly and 5-hour use, and resets (ADR-console-006).
+The last unified rate-limit state the cache proxy saw for one account profile: status, weekly and 5-hour use, and resets. An idle or exhausted profile is read too: on Linux the console sends one small request under every listed profile every 10 minutes (ADR-console-006).
 _Avoid_: usage
 
 **Limit stop**:
@@ -102,7 +102,7 @@ A refusal because a window is used up, recorded with its window and reset (ADR-c
 _Avoid_: rate limit error
 
 **Capacity strip**:
-The top-bar line that starts with one word, fine, tight or out, beside its icon, then each profile with a reading as its name, a bar and its share of the week left, then the next reset as a weekday and time, or when work resumes once every profile is out. It reads "tight" when one profile has room among two or more while every other reads out, and folds profiles with no reading into one note (ADR-console-006, ADR-console-002).
+The top-bar line that starts with one word, fine, tight or out, beside its icon, then each profile with a reading as its name, a bar and its share of the week left, then the next reset as a weekday and time, or when work resumes once every profile is out. It reads "tight" when one profile has room among two or more while every other reads out, and folds profiles with no reading into one note; idle profiles are read too, so the note counts only profiles not yet read (ADR-console-006, ADR-console-002).
 _Avoid_: quota bar
 
 **Console service**:

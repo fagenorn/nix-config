@@ -25,6 +25,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 ACCOUNTS = REPO_ROOT / "home" / "common" / "claude-code" / "accounts"
 PLACEHOLDER = "CACHE_PROXY_URL="
 CALLER_URL = "http://127.0.0.1:9/caller"
+REQUIRED_REFUSAL = "claude-account: CLAUDE_CACHE_PROXY=required and the cache proxy is not answering\n"
 REMINDER = "CLAUDE_CODE_TOTAL_TOKENS_REMINDER"
 MARKER_BODY = b'{"service":"cache-proxy","status":"ok"}'
 TIMEOUT = 30
@@ -288,7 +289,40 @@ class DefaultRoutingTest(LauncherCase):
                 completed = self.run_launcher(url, {"CLAUDE_CACHE_PROXY": "yes"}, substitute)
                 self.assertEqual((completed.returncode, completed.stdout), (1, ""))
                 self.assertEqual(completed.stderr,
-                                 "claude-account: CLAUDE_CACHE_PROXY must be 1, 0 or unset\n")
+                                 "claude-account: CLAUDE_CACHE_PROXY must be 1, 0, required or unset\n")
+
+
+class RequiredRoutingTest(LauncherCase):
+    """CLAUDE_CACHE_PROXY=required routes through the proxy or refuses the launch, never direct (#1009)."""
+
+    switch = {"CLAUDE_CACHE_PROXY": "required"}
+
+    def test_a_healthy_proxy_routes_a_required_launch_after_one_probe(self):
+        url = self.healthy_proxy()
+        self.assert_routed(self.launch(url), url)
+        self.assertEqual(self.proxy_requests, [cache_proxy.HEALTH_PATH])
+
+    def test_an_unavailable_proxy_refuses_a_required_launch_before_claude_starts(self):
+        cases = (
+            ("closed port", "http://127.0.0.1:%d" % closed_port(), True),
+            ("silent", self.silent_listener(), True),
+            ("foreign", self.foreign_listener(), True),
+            ("redirect", self.redirecting_listener(), True),
+            ("unsubstituted", self.healthy_proxy(), False),
+        )
+        for name, url, substitute in cases:
+            with self.subTest(name):
+                completed = self.run_launcher(url, None, substitute)
+                self.assertEqual((completed.returncode, completed.stdout, completed.stderr),
+                                 (1, "", REQUIRED_REFUSAL))
+
+    def test_a_caller_set_endpoint_does_not_bypass_required(self):
+        url = self.healthy_proxy()
+        self.assert_routed(self.launch(url, {"ANTHROPIC_BASE_URL": CALLER_URL}), url)
+        dead = "http://127.0.0.1:%d" % closed_port()
+        completed = self.run_launcher(dead, {"ANTHROPIC_BASE_URL": CALLER_URL})
+        self.assertEqual((completed.returncode, completed.stdout, completed.stderr),
+                         (1, "", REQUIRED_REFUSAL))
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 # ADR-hosts-004 — `claude` routes through the cache proxy by default
 
 - **Status:** accepted
-- **Decided in:** #438; #450
+- **Decided in:** #438; #450; #1009
 
 ## Context
 
@@ -16,3 +16,4 @@
 - A routed session has no Remote Control, which Claude Code turns off behind a non-first-party base URL; `CLAUDE_CACHE_PROXY=0 claude` keeps it for that launch.
 - A dead proxy costs a launch at most a half-second probe, after which the launch goes direct. A session keeps the route it started with.
 - The planned rule was not met: the default rests on the looser rule the owner chose after the measurement.
+- `CLAUDE_CACHE_PROXY=required` routes the launch through the proxy when its health check answers and otherwise refuses it before claude starts (exit 1), a caller-set base URL included; the console's capacity probe launches with it, so a probe never reaches the API direct (#1009, ADR-console-006).

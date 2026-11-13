@@ -118,7 +118,8 @@ the slot in the page's `console-token` meta tag.
 then ingests (`ingest_reading`): `capacity.parse_report` keeps the whitelisted members of the body
 (a body that is not UTF-8 JSON or not a report is one stderr line `console: reading_unreadable
 <message>`; any other failure `console: reading_failed <Type>: <message>`; the handler never
-raises). The reading's profile is the `profile` of the session the report names when the registry
+raises). The reading's profile is the profile the console probed under the report's session (below),
+else the `profile` of the session the report names when the registry
 placed that session under a profile, else the profile its account was last attributed to (the folded
 `(account, profile)` pairs of earlier readings), else the reading is dropped with one stderr line
 `console: reading_unattributed` and no identifier. No credential file is opened and no subprocess
@@ -127,6 +128,27 @@ a refusal, and published. Every poll of the session registry also lists the prof
 (`profile_dirs()`, `default_profile_dirs()`: `$HOME/.claude` and each directory of `profiles/` under
 `$CLAUDE_ACCOUNTS_DIR`, else `$HOME/.claude-accounts`; only `is_dir` touches one) so a profile never
 used reads `unknown` and a removed one is no longer listed, and ends by publishing, so a reset that has passed shows within one poll.
+
+Probes (#1009, ADR-console-006): with a `prober` (`probe.prober_for(sys.platform)` from `console.py`;
+none elsewhere than Linux), `PROBE_LOOP_THREAD`, started by `start()`, calls `probe_round()` every
+`probe_tick_seconds` (`PROBE_TICK_SECONDS`, 15 s). A round takes, under the ingest lock, the profiles
+`probe.due_profiles` names (a first probe 30 s after the service started, then one every 600 s, never a
+second while one is in flight), gives each a `probe.Probe` with a fresh UUID4 session id, remembers the
+id (kept for as long as the probe is pending or running, then for the last `probe.PROBE_MEMORY` (256)
+completed probes), and hands each probe, after releasing the lock, to
+`probe_dispatch` (default: a new daemon thread named `PROBE_THREAD`) as a job that runs the prober. The
+reading a probe's request makes arrives like any other and is credited to the profile probed under that
+session id, before the session rule and the account rule. A probe is never a session: a hook whose
+`session_id` is a remembered probe id appends nothing, and a registry entry with such an id is dropped
+before `sessions.poll_changes`. A prober that raises `probe.ProbeFailed` is one stderr line `console:
+probe_failed <profile> <kind>`, any other exception `console: probe_failed <profile> <Type>` (never its
+message); nothing is appended, so the last reading stays, and the profile's mark is released only once
+the prober has returned or raised. A round that escapes is one stderr line `console: probe_round_failed
+<Type>: <message>`. `close()` sets the stop event every `probe.Probe` carries and joins the probe loop and
+the default dispatch's workers, so a probe still running is killed and reaped (`probe.py`'s Stop) before
+it returns, and a probe not yet started runs nothing. The service starts no client itself and opens no
+credential file: the prober is the
+only seam that runs a subprocess.
 
 The manager's route, `POST /api/brief`, is not a page write: it carries no token and the sprint's
 secret takes the token's place. After the loopback `Host` check it runs the hook route's body checks
@@ -622,7 +644,7 @@ the view; sample the registry's signature; `refresh()`; `poll_sessions()`; `poll
 absent set starts empty, so a restart drops a session only after two polls miss
 it. On any failure after the bind, what was opened is closed and the exception
 re-raised. `start()` serves on a daemon thread named `console-http`; `close()`
-sets the stop flag, then `closing`, wakes every waiter, joins the watcher, the session poll, the
+sets the stop flag, then `closing`, wakes every waiter, joins the watcher, the session poll, the probe loop, the
 tracker, retention and digest threads and tears the rest down; it is idempotent.
 """
 
@@ -634,6 +656,8 @@ import sys
 import os
 import threading
 import time
+import uuid
+from collections import OrderedDict
 from collections.abc import Callable, Collection, Iterable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
@@ -641,7 +665,7 @@ from urllib.parse import parse_qsl
 
 from agent_tools.claims import owner_actions
 from agent_tools.console import (
-    answer, capacity, deliveries, digest, idle, inbox, manager, nudge, revive, sessions, sprints,
+    answer, capacity, deliveries, digest, idle, inbox, manager, nudge, probe, revive, sessions, sprints,
     write_guard)
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
@@ -730,6 +754,9 @@ RETENTION_THREAD = "console-retention"
 DIGEST_SECONDS = 60.0
 DIGEST_THREAD = "console-digest"
 MANAGER_THREAD = "console-manager-launch"
+PROBE_TICK_SECONDS = 15.0
+PROBE_LOOP_THREAD = "console-probe-poll"
+PROBE_THREAD = "console-probe"
 
 
 def default_store() -> Path:
@@ -1448,8 +1475,21 @@ class ConsoleService:
                  nudger: Callable[[nudge.Nudge], None] | None = None,
                  listing: Callable[[], Mapping[str, sessions.Observation]] | None = None,
                  stopper: Callable[[str, str], None] | None = None,
-                 full_listing: Callable[[str, str], Collection[str]] | None = None):
+                 full_listing: Callable[[str, str], Collection[str]] | None = None,
+                 prober: Callable[[probe.Probe], None] | None = None,
+                 probe_dispatch: Callable[[Callable[[], None]], None] | None = None,
+                 probe_tick_seconds: float = PROBE_TICK_SECONDS):
         self.registry = Path(registry)
+        self._prober = prober
+        self._probe_dispatch = self._on_probe_thread if probe_dispatch is None else probe_dispatch
+        self._probe_tick_seconds = probe_tick_seconds
+        self._probe_since = clock()
+        self._probing: set[str] = set()
+        self._probe_started: dict[str, float] = {}
+        self._probe_sessions: OrderedDict[str, str] = OrderedDict()
+        self._probe_live: dict[str, str] = {}
+        self._probe_workers: list[threading.Thread] = []
+        self._probe_thread: threading.Thread | None = None
         self._nudger = nudger
         self._full_listing = full_listing
         self._stopper = stopper
@@ -1635,6 +1675,10 @@ class ConsoleService:
             received_ms = self.received_ms()
         document = json.loads(body.decode("utf-8"))
         with self._ingest:
+            if isinstance(document, dict):
+                probed = document.get("session_id")
+                if isinstance(probed, str) and self._probe_profile(probed) is not None:
+                    return []
             entry = sessions.hook_entry(document, self._repo_of, received_ms)
             if entry is None:
                 return []
@@ -1649,8 +1693,10 @@ class ConsoleService:
         """Append the capacity rows a limit report describes; ValueError if it is not one."""
         report = capacity.parse_report(json.loads(body.decode("utf-8")))
         with self._ingest:
+            profile = self._probe_profile(report["session_id"])
             known = self._sessions.get(report["session_id"])
-            profile = known.profile if known is not None else None
+            if profile is None and known is not None:
+                profile = known.profile
             if profile is None:
                 profile = self._capacity.accounts.get(report["account"])
             if profile is None:
@@ -1755,6 +1801,78 @@ class ConsoleService:
 
     def _on_new_thread(self, job: Callable[[], None]) -> None:
         threading.Thread(target=job, name=MANAGER_THREAD, daemon=True).start()
+
+    def _on_probe_thread(self, job: Callable[[], None]) -> None:
+        worker = threading.Thread(target=job, name=PROBE_THREAD, daemon=True)
+        with self._ingest:
+            self._probe_workers = [w for w in self._probe_workers if w.is_alive()]
+            self._probe_workers.append(worker)
+        worker.start()
+
+    def _probe_profile(self, session_id: str) -> str | None:
+        """Under the ingest lock: the profile a pending, running or remembered probe session probed."""
+        profile = self._probe_live.get(session_id)
+        return profile if profile is not None else self._probe_sessions.get(session_id)
+
+    def _retire_probe(self, one: probe.Probe) -> None:
+        """Under the ingest lock: a probe that is over moves to the bounded history of probes."""
+        if self._probe_live.pop(one.session_id, None) is not None:
+            self._probe_sessions[one.session_id] = one.profile
+        while len(self._probe_sessions) > probe.PROBE_MEMORY:
+            self._probe_sessions.popitem(last=False)
+
+    def probe_round(self) -> list[probe.Probe]:
+        """Start a probe of every profile that is due and return them in profile order.
+
+        A dispatch that fails frees the in-flight mark of its probe and of every probe not yet
+        dispatched, so those profiles are probed again at the next due time.
+        """
+        if self._prober is None:
+            return []
+        with self._ingest:
+            now = self._clock()
+            probes = []
+            for profile in probe.due_profiles(
+                    self._profiles, self._probing, self._probe_started, self._probe_since, now):
+                one = probe.Probe(profile, str(uuid.uuid4()), self._stop)
+                self._probing.add(profile)
+                self._probe_started[profile] = now
+                self._probe_live[one.session_id] = profile
+                probes.append(one)
+        for at, one in enumerate(probes):
+            try:
+                self._probe_dispatch(lambda one=one: self._run_probe(one))
+            except BaseException:
+                with self._ingest:
+                    for unrun in probes[at:]:
+                        self._probing.discard(unrun.profile)
+                        self._retire_probe(unrun)
+                raise
+        return probes
+
+    def _run_probe(self, one: probe.Probe) -> None:
+        try:
+            if not self._stop.is_set():
+                self._prober(one)
+        except probe.ProbeFailed as error:
+            if not self._stop.is_set():
+                print(f"console: probe_failed {one.profile} {error.kind}", file=sys.stderr)
+        except Exception as error:
+            if not self._stop.is_set():
+                print(f"console: probe_failed {one.profile} {type(error).__name__}",
+                      file=sys.stderr)
+        finally:
+            with self._ingest:
+                self._probing.discard(one.profile)
+                self._retire_probe(one)
+
+    def _probe_loop(self) -> None:
+        while not self._stop.wait(self._probe_tick_seconds):
+            try:
+                self.probe_round()
+            except Exception as error:
+                print(f"console: probe_round_failed {type(error).__name__}: {error}",
+                      file=sys.stderr)
 
     def _dispatch_launch(self, sprint_id: str) -> None:
         """Hand a reserved sprint's launch to the dispatcher; a dispatch that fails frees the reservation."""
@@ -2794,7 +2912,10 @@ class ConsoleService:
     def poll_sessions(self) -> list[Event]:
         """Append what the session registry shows that the folded sessions do not, and publish."""
         with self._ingest:
-            observations = sessions.read_session_registry(self._session_dirs())
+            observations = {
+                session_id: seen
+                for session_id, seen in sessions.read_session_registry(self._session_dirs()).items()
+                if self._probe_profile(session_id) is None}
 
             def project_of(repo: str | None) -> str | None:
                 return None if repo is None else project_for(repo, self._states)
@@ -3106,6 +3227,10 @@ class ConsoleService:
         self._digest_thread = threading.Thread(
             target=self._expire_loop, name=DIGEST_THREAD, daemon=True)
         self._digest_thread.start()
+        if self._prober is not None:
+            self._probe_thread = threading.Thread(
+                target=self._probe_loop, name=PROBE_LOOP_THREAD, daemon=True)
+            self._probe_thread.start()
         self._thread = threading.Thread(
             target=self._server.serve_forever, name="console-http", daemon=True)
         self._thread.start()
@@ -3128,6 +3253,12 @@ class ConsoleService:
             self._retention_thread.join()
         if self._digest_thread is not None:
             self._digest_thread.join()
+        if self._probe_thread is not None:
+            self._probe_thread.join()
+        with self._ingest:
+            workers = list(self._probe_workers)
+        for worker in workers:
+            worker.join()
         if self._thread is not None:
             self._server.shutdown()
         self._server.server_close()
