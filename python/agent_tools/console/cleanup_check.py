@@ -29,8 +29,9 @@ of 540 and its finish guard). `default_run_check` launches the check as a child 
 timeout of its own, the host check bounds itself.
 
 Listing. When all three results are fresh, `names` is the sorted union of their `names` and the
-profiles to read are the sorted union of `profiles()` (every configured profile) and every
-result's `profiles`: a manager never listed at a finish leaves its profile out of `cleared`, and is
+profiles to read are the sorted union of `profiles()` (`configured_profiles`: the unprofiled `default`,
+where a test session may run though it is not an account (#1016), and every profile directory) and
+every result's `profiles`: a manager never listed at a finish leaves its profile out of `cleared`, and is
 read all the same. For each profile in order, `lister(profile, os.getcwd())` reads the full listing
 (not filtered by the working directory, so the runner's temporary worktree is a valid one). `left`
 is the sorted distinct `name` of the entries, under any profile, whose `name` is in `names`.
@@ -71,7 +72,8 @@ def default_run_check(module: str, project: str, state_file: Path, result_file: 
 
 
 def configured_profiles() -> list[str]:
-    return sorted({sessions.profile_name(d) for d in service.default_profile_dirs()})
+    return sorted({sessions.DEFAULT_PROFILE,
+                   *(sessions.profile_name(d) for d in service.default_profile_dirs())})
 
 
 def _fresh_cleared(result_file: Path, project: str) -> dict | None:

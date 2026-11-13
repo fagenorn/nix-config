@@ -1,6 +1,6 @@
 """`capacity_check`: the verify check that the console shows a capacity reading for an account in use (#860).
 
-`python -m agent_tools.console.capacity_check [--url URL] [--max-age SECONDS] [--every | --signin]` reads the console's
+`python -m agent_tools.console.capacity_check [--url URL] [--max-age SECONDS] [--every | --signin | --accounts]` reads the console's
 `/api/state` view (default `http://127.0.0.1:27184/api/state`; the URL must be `http` on a loopback
 host, `127.0.0.1` or `localhost`, else exit 2) and looks at `capacity.profiles[].read_at`.
 `--max-age` is a positive integer number of seconds (default 600).
@@ -34,6 +34,14 @@ Then `{"status": "met", "profiles": <row count>, "signed_out": [<names>]}`, exit
 `{"status": "pending", "profiles": [<names whose state is anything else, in row order>]}`, exit 75
 (an empty view is pending with `[]`). A row whose `signin` is not an object with a string `state`
 means the console predates sign-in: `{"status": "not_deployed"}`, exit 75. It never exits 1.
+
+`--accounts` (#1016, exclusive with `--every` and `--signin`, `--max-age` ignored) meets when the
+view lists at least one profile, none named `default`, and no open inbox item is keyed
+`signin/default`: `{"status": "met", "profiles": [<names>]}`, exit 0. A view whose `inbox.open` is
+not a list (no `inbox` object, or no `open` list) is `{"status": "no_inbox"}`, exit 75: the item's
+absence is never inferred from missing data. Otherwise a `default` row or that item is
+`{"status": "not_met", "default_row": <bool>, "default_signin": <bool>}`, exit 1; no row is
+`{"status": "pending", "profiles": []}`, exit 75.
 
 A console that is down or predates this change is "not yet", never "not met", and only a reading
 newer than `--max-age` meets the check. A bad argument is exit 2. The check only reads: it sends one
@@ -112,6 +120,24 @@ def readings(body: bytes) -> list[tuple[str, object, object]] | None:
     return rows
 
 
+def signin_asks(body: bytes) -> list[str] | None:
+    """The key of each open `signin/...` inbox item, in order; None when the inbox is unreadable.
+
+    None means `inbox.open` could not be read (not JSON, no `inbox` object, no `open` list), never
+    that it is empty."""
+    try:
+        document = json.loads(body)
+    except ValueError:
+        return None
+    inbox = document.get("inbox") if isinstance(document, dict) else None
+    items = inbox.get("open") if isinstance(inbox, dict) else None
+    if not isinstance(items, list):
+        return None
+    return [item["key"] for item in items
+            if isinstance(item, dict) and isinstance(item.get("key"), str)
+            and item["key"].startswith("signin/")]
+
+
 def age_seconds(read_at: object, now: datetime) -> int | None:
     """Whole seconds from `read_at` to `now` (0 for a time ahead of it), None when unreadable."""
     if not isinstance(read_at, str):
@@ -165,6 +191,21 @@ def signin_verdict(rows: list[tuple[str, object, object]]) -> tuple[int, dict]:
     return NOT_YET, {"status": "pending", "profiles": pending}
 
 
+def accounts_verdict(rows: list[tuple[str, object, object]],
+                     asks: list[str] | None) -> tuple[int, dict]:
+    """Met when there is a row, none is `default` and no sign-in item is for `default`."""
+    if asks is None:
+        return NOT_YET, {"status": "no_inbox"}
+    if not rows:
+        return NOT_YET, {"status": "pending", "profiles": []}
+    default_row = any(name == "default" for name, _, _ in rows)
+    default_signin = "signin/default" in asks
+    if default_row or default_signin:
+        return 1, {"status": "not_met", "default_row": default_row,
+                   "default_signin": default_signin}
+    return 0, {"status": "met", "profiles": [name for name, _, _ in rows]}
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="capacity_check", description=__doc__.splitlines()[0])
     parser.add_argument("--url", type=_loopback_url, default=DEFAULT_URL,
@@ -178,6 +219,9 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--signin", action="store_true",
                       help="require every listed profile to know its sign-in (signed in or "
                            "signed out)")
+    mode.add_argument("--accounts", action="store_true",
+                      help="require the listed profiles to be named accounts only: no default "
+                           "row and no sign-in item for default")
     return parser
 
 
@@ -191,7 +235,9 @@ def main(argv: list[str] | None = None) -> int:
     if rows is None:
         print(json.dumps({"status": "not_deployed"}, sort_keys=True))
         return NOT_YET
-    if args.signin:
+    if args.accounts:
+        code, result = accounts_verdict(rows, signin_asks(body))
+    elif args.signin:
         code, result = signin_verdict(rows)
     else:
         decide = every_verdict if args.every else verdict

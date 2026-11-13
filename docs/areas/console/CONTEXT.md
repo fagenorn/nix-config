@@ -102,7 +102,7 @@ A refusal because a window is used up, recorded with its window and reset (ADR-c
 _Avoid_: rate limit error
 
 **Capacity strip**:
-The top-bar line that starts with one word, fine, tight or out, beside its icon, then each profile with a reading as its name, a bar and its share of the week left, then the next reset as a weekday and time, or when work resumes once every profile is out. It reads "tight" when one profile has room among two or more while every other reads out, folds profiles with no reading into one note and names a signed-out profile as signed out, outside that note; idle profiles are read too, so the note counts only profiles not yet read (ADR-console-006, ADR-console-002).
+The top-bar line that starts with one word, fine, tight or out, beside its icon, then each profile with a reading as its name, a bar and its share of the week left, then the next reset as a weekday and time, or when work resumes once every profile is out. Only the accounts are listed, the named profiles under `profiles/`; the unprofiled `~/.claude` is not one and is never shown. It reads "tight" when one profile has room among two or more while every other reads out, folds profiles with no reading into one note and names a signed-out profile as signed out, outside that note; idle profiles are read too, so the note counts only profiles not yet read (ADR-console-006, ADR-console-002).
 _Avoid_: quota bar
 
 **Sign-in state**:

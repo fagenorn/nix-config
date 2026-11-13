@@ -144,6 +144,9 @@ const AMEND_SENT = new Set() // #811: an issue's amend reaches at most one child
 // #992: a StructuredOutput call sent beside another tool call is taken as the step's final answer before that call's result exists.
 // One sentence in the rules every step gets, the same line in deliver-standard.js.
 const REPLY_ALONE = 'Call StructuredOutput alone in its own message, never beside another tool call, only after every other tool result has come back: the first accepted call is final and ends the step.'
+// #1019: a reviewer once detached the worktree to run a script at the commit under review, and the next run's setup stopped on the
+// detached HEAD. One sentence, the same line in deliver-standard.js, added in a landing's readReview() so no review step can miss it.
+const READ_ONLY = 'Never check out, switch, reset or stash in the worktree: read another commit with git show.'
 const BASE_RULES = `
 Hard rules for this step (they override anything else you remember):
 - Work only in the worktree path you are given. Never commit in the shared checkout. Never git stash. Never sed -i (use python for edits).
@@ -764,7 +767,8 @@ const land = async (n, ready, via = {}) => {
   // #992: every FINDINGS reply of a landing is read here. An unusable one (see unusable) runs the same step once more as <label>-again;
   // a second is answered as null, so it reaches no findingsOf and spends no fix round. The step did answer, so the breaker is left
   // alone: the row names it in lost_reviews and its reason says the review answered twice with no usable review.
-  const readReview = async (prompt, label, opts) => {
+  const readReview = async (asked, label, opts) => {
+    const prompt = `${asked}\n${READ_ONLY}`
     const first = await call(prompt, label, opts)
     const why = unusable(first)
     if (!why) return first
@@ -1811,24 +1815,61 @@ const readoptable = n => {
 // A standard-lane issue plans ahead (#744 D3) unless it is re-adopted, a merged landing's close-out, or its cont already holds a reviewed plan or a PR.
 const plansAhead = (n, lane, readopt) => lane === 'standard' && !readopt && !mergedReadopt(n, FACTS[n]) &&
   !(isObj(CONTS[n]) && (CONTS[n].plan_reviewed === true || Number.isInteger(CONTS[n].pr)))
+// #1019: a worktree left on a detached HEAD at its branch's own tip, with a clean tree, lost nothing: readopt puts it back on the
+// branch (a switch, never a reset) and goes on. Any other detached HEAD is left as found and refused as before. The same line in
+// deliver-standard.js.
+const REATTACH = (branch, path) => `When HEAD in ${path} is detached (git -C ${path} symbolic-ref -q HEAD fails), put it back on ${branch} first, only when git -C ${path} rev-parse HEAD and git -C ${path} rev-parse refs/heads/${branch} print the same sha and git -C ${path} status --porcelain prints nothing: run git -C ${path} switch ${branch}, alone, and return reattached true. It is the one change this read may make; never reset, and leave any other detached HEAD as it is.`
+// #1019: a land-sync whose push was refused leaves its merge of the integration branch local, so the worktree is ahead of the PR head
+// and the relaunch stopped at readopt. The readopt clerk reads the commits on top of the PR head as facts (AHEAD_MAX at most) and the
+// program decides: they are pushed, and the landing goes on at the pushed head, only when the first-parent line from HEAD reaches the
+// PR head through two-parent merges alone, each with its second parent on the integration branch and with the tree a conflict-free
+// merge of its parents gives. The tree is what keeps a resolution made by hand out: it reaches a PR only through the sync review.
+// Anything else (a plain commit, a merge with another tree, a head behind or apart from the PR head, a missing fact) stops as before.
+// The push step reads the two safety facts of each merge again with its own commands before it pushes, so one clerk's word is not
+// the only proof; and nothing is pushed for a reply the landing could not use (readoptUsable).
+const AHEAD_MAX = 8
+const FULL_SHA_RE = /^[0-9a-f]{40}$/
+const fullSha = v => typeof v === 'string' && FULL_SHA_RE.test(v)
+const cleanMerges = ro => {
+  const ahead = Array.isArray(ro.ahead) ? ro.ahead : []
+  if (!ahead.length || ahead.length > AHEAD_MAX || !fullSha(ro.head) || !fullSha(ro.pr_head) || ro.head === ro.pr_head) return false
+  const merge = (c, i) => isObj(c) && fullSha(c.commit) && c.commit === (i ? ahead[i - 1].parents[0] : ro.head)
+    && Array.isArray(c.parents) && c.parents.length === 2 && c.parents.every(fullSha)
+    && c.on_integration === true && fullSha(c.tree) && c.tree === c.clean_tree
+  return ahead.every(merge) && ahead[ahead.length - 1].parents[0] === ro.pr_head
+}
+// What a readopt reply must name for its PR to land as it stands.
+const readoptUsable = ro => !!(ro.head && ro.branch && ro.worktree && Array.isArray(ro.acceptance) && ro.acceptance.length)
+const READOPT_PUSH_SCHEMA = { type: 'object', properties: { pushed: { type: 'boolean' }, head: { type: 'string' }, detail: { type: 'string' } }, required: ['pushed'] }
 const READOPT_SCHEMA = {
   type: 'object',
   properties: {
     ok: { type: 'boolean' }, reason: { type: 'string', enum: ['unaccepted', 'dirty', 'no-acceptance', 'worktree', 'other'] }, detail: { type: 'string' },
-    worktree: { type: 'string' }, branch: { type: 'string' }, head: { type: 'string' },
+    worktree: { type: 'string' }, branch: { type: 'string' }, head: { type: 'string' }, reattached: { type: 'boolean' }, pr_head: { type: 'string' },
+    ahead: { type: 'array', items: { type: 'object', properties: { commit: { type: 'string' }, parents: { type: 'array', items: { type: 'string' } }, on_integration: { type: 'boolean' }, tree: { type: 'string' }, clean_tree: { type: 'string' } }, required: ['commit', 'parents'] } },
     acceptance: { type: 'array', items: { type: 'object', properties: { id: { type: 'string' }, text: { type: 'string' }, kind: { type: 'string', enum: ACCEPT_KINDS } }, required: ['id', 'text', 'kind'] } },
   },
   required: ['ok'],
 }
 const readoptPrompt = n => {
   const f = FACTS[n], B = f.branch, pr = f.open_pr.number
-  return `Re-adopt the open pull request #${pr} of issue #${n} of ${SLUG} (the git repository at ${REPO}), whose head branch ${B} an earlier run of this batch pushed. Change nothing in this step except a missing worktree: never reset, clean, restore or stash anything.
+  return `Re-adopt the open pull request #${pr} of issue #${n} of ${SLUG} (the git repository at ${REPO}), whose head branch ${B} an earlier run of this batch pushed. Change nothing in this step except a missing worktree and the re-attach of step 3: never reset, clean, restore or stash anything.
 1. Run git -C ${REPO} fetch origin.
 2. Read ${UNSET}gh pr view ${pr} --repo ${SLUG} --json headRefOid,body. The PR is landed as it stands only at its accepted head: the body's Evidence section ends with a line Accepted head: <sha>. Answer ok false with reason unaccepted (and the head you read in detail) when the body has no Accepted head: line or the line's sha differs from headRefOid, and stop there.
-3. Find the worktree on ${B}: run git -C ${REPO} worktree list --porcelain and take the entry whose branch is refs/heads/${B}. When there is none, resolve the contract once (resolve-project resolve --repo-root ${REPO}) and add one at the path bindings.vcs.worktree.root (resolved against project.root) plus bindings.vcs.worktree.prefix and ${B}: git -C ${REPO} worktree add <path> ${B} when the local branch exists, else git -C ${REPO} worktree add --no-track -b ${B} <path> origin/${B} when only the remote branch exists. When that fails, answer ok false with reason other and the error in detail.
-4. In that worktree: when git -C <worktree> status --porcelain shows any change, answer ok false with reason dirty and the status in detail. When git -C <worktree> rev-parse HEAD differs from headRefOid, answer ok false with reason worktree and both shas in detail.
-5. Read the body's Acceptance table, one row per criterion (id, criterion, kind, and how it is shown). When the body has no Acceptance table, answer ok false with reason no-acceptance. Otherwise answer ok true with worktree (its absolute path), branch ${B}, head (headRefOid, the full sha) and acceptance: one {id, text (the criterion), kind (${ACCEPT_KINDS.join(', ')}, as the table says)} per row.
+3. Find the worktree on ${B}: run git -C ${REPO} worktree list --porcelain and take the entry whose branch is refs/heads/${B}. When there is none, resolve the contract once (resolve-project resolve --repo-root ${REPO}): <path> is bindings.vcs.worktree.root (resolved against project.root) plus bindings.vcs.worktree.prefix and ${B}. When the list has an entry at <path>: ${REATTACH(B, '<path>')} An entry there that is still not on ${B}: answer ok false with reason other and what it is on in detail. When the list has no entry at <path>, add one: git -C ${REPO} worktree add <path> ${B} when the local branch exists, else git -C ${REPO} worktree add --no-track -b ${B} <path> origin/${B} when only the remote branch exists. When that fails, answer ok false with reason other and the error in detail.
+4. In that worktree: when git -C <worktree> status --porcelain shows any change, answer ok false with reason dirty and the status in detail. When git -C <worktree> rev-parse HEAD differs from headRefOid, the answer is ok false with reason worktree and both shas in detail, and it carries these facts too, read without changing anything, every sha in full: head (git -C <worktree> rev-parse HEAD), pr_head (headRefOid) and ahead, one entry per output line of git -C <worktree> rev-list --first-parent --parents headRefOid..HEAD, in that order (only the first ${AHEAD_MAX} lines when there are more, none when it prints nothing): commit (the first sha of the line), parents (its other shas, in order) and, only for a line with exactly two parents, on_integration (true only when git -C <worktree> merge-base --is-ancestor <second parent> origin/${INT} succeeds), tree (git -C <worktree> rev-parse <commit>^{tree}) and clean_tree (the first output line of git -C <worktree> merge-tree --write-tree <first parent> <second parent> when it exits 0; leave it out when it does not). Push nothing. Then run step 5, whose worktree, branch and acceptance that answer carries as well.
+5. Read the body's Acceptance table, one row per criterion (id, criterion, kind, and how it is shown). When the body has no Acceptance table, answer ok false with reason no-acceptance. Otherwise answer ok true (step 4's ok false answer when the heads differ) with worktree (its absolute path), branch ${B}, head (headRefOid, the full sha; HEAD in step 4's answer) and acceptance: one {id, text (the criterion), kind (${ACCEPT_KINDS.join(', ')}, as the table says)} per row.
 ${RULES_FOR('<the worktree path>', B)}`
+}
+// #1019: the push of the clean merges cleanMerges() accepted, one lifecycle command under the usual push rule; pushed only when the PR head is then HEAD.
+const readoptPushPrompt = (n, ro) => {
+  const f = FACTS[n], B = f.branch, pr = f.open_pr.number, W = ro.worktree
+  return `The worktree ${W} of issue #${n} of ${SLUG} (the git repository at ${REPO}) is ahead of its open pull request #${pr} only by clean merges of ${INT} into the branch ${B}, which an earlier run made and could not push. Push them and change nothing else: never reset, clean, restore or stash anything, and never merge, commit or force.
+1. Confirm git -C ${W} rev-parse HEAD prints ${ro.head}, git -C ${W} branch --show-current prints ${B} and git -C ${W} status --porcelain prints nothing. If any fails, run nothing else and answer pushed false with what you read in detail.
+2. Run git -C ${W} fetch origin, then prove each of these merges again, newest first, as JSON: ${JSON.stringify(ro.ahead.map(c => ({ commit: c.commit, first: c.parents[0], second: c.parents[1] })))}. For each one: git -C ${W} rev-list --parents -n 1 <commit> must print exactly <commit> <first> <second>; git -C ${W} merge-base --is-ancestor <second> origin/${INT} must succeed; and git -C ${W} merge-tree --write-tree <first> <second> must exit 0 with the sha that git -C ${W} rev-parse <commit>^{tree} prints as its first output line. On any difference push nothing, run nothing else and answer pushed false with the commit and the mismatch in detail.
+3. Push the branch: git -C ${W} push origin ${B}. When the push is refused or fails, answer pushed false with the exact message in detail; never retry with another form.
+4. Read ${UNSET}gh pr view ${pr} --repo ${SLUG} --json headRefOid. Answer pushed true only when headRefOid is ${ro.head}, with head (the headRefOid you read, the full sha); else pushed false with head and what you read in detail.
+${RULES_FOR(W, B)}`
 }
 
 const deliverOne = async n => {
@@ -1898,12 +1939,24 @@ ${RULES_FOR(REPO, f.branch)}`, { label: `acquire-${n}`, phase: 'Deliver', agentT
 
     if (readopt) {
       // The plan was settled before the PR existed: an owner answer does not apply on this path.
-      const ro = await ask(agent(readoptPrompt(n), { label: `readopt-${n}`, phase: 'Deliver', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: READOPT_SCHEMA }), `readopt-${n}`)
+      let ro = await ask(agent(readoptPrompt(n), { label: `readopt-${n}`, phase: 'Deliver', agentType: 'clerk', model: CLERK_MODEL, effort: 'low', schema: READOPT_SCHEMA }), `readopt-${n}`)
       if (ro === null || ro === undefined) { rows[n] = { issue: n, outcome: 'stopped', stage: 'readopt', detail: `readopt-${n} returned nothing` }; return }
+      if (ro.reattached === true) log(`readopt-${n}: the worktree was on a detached HEAD at its branch tip with a clean tree; it is back on its branch`)
+      // #1019: a head ahead of the PR only by clean merges of the integration branch is pushed, and the readopt goes on at the pushed head.
+      if (ro.ok !== true && ro.reason === 'worktree' && nonEmpty(ro.worktree) && readoptUsable(ro) && cleanMerges(ro)) {
+        const ps = await ask(agent(readoptPushPrompt(n, ro), { label: `readopt-push-${n}`, phase: 'Deliver', agentType: 'clerk', model: DEFAULT_CLERK_MODEL, effort: 'low', schema: READOPT_PUSH_SCHEMA }), `readopt-push-${n}`)
+        if (ps && ps.pushed === true && ps.head === ro.head) {
+          log(`readopt-${n}: pushed ${ro.ahead.length} clean merge(s) of ${INT} an earlier run left local; the PR head is ${ro.head}`)
+          ro = { ...ro, ok: true }
+        } else {
+          const why = ps ? (nonEmpty(ps.detail) ? ps.detail : 'the PR head is not the worktree head') : `readopt-push-${n} returned nothing`
+          ro = { ...ro, detail: [ro.detail, `its clean merges of ${INT} were not pushed: ${why}`].filter(nonEmpty).join('; ') }
+        }
+      }
       // #811: an accepted PR still goes through the child when an amend is pending for it: landing as it stands would drop the amend.
       const amendPending = !!(CONTS[n] && AMEND[String(n)] && !AMEND_SENT.has(String(n)))
       if (ro.ok === true && !amendPending) {
-        if (!ro.head || !ro.branch || !ro.worktree || !Array.isArray(ro.acceptance) || !ro.acceptance.length) {
+        if (!readoptUsable(ro)) {
           rows[n] = { issue: n, outcome: 'stopped', stage: 'readopt', detail: 'readopt reply lacks head, branch, worktree or acceptance' }
           return
         }
