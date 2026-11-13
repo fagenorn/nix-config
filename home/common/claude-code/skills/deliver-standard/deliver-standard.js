@@ -1938,7 +1938,7 @@ const PR_SCHEMA = { type: 'object', properties: { pr: { type: 'integer' }, head:
 const MERGE_SCHEMA = { type: 'object', properties: { merged: { type: 'boolean' }, behind: { type: 'boolean' }, merge_commit: { type: 'string' }, notes: { type: 'string' } }, required: ['merged', 'notes'] }
 const CHECKS = { type: 'object', properties: { state: { type: 'string', enum: ['passed', 'failed', 'pending', 'behind'] }, head: FULL_SHA, required: STRS, passed: STRS, failing: STRS, pending: STRS, details: { type: 'string' } }, required: ['state', 'head'] }
 const PUSH_SCHEMA = { type: 'object', properties: { head: FULL_SHA, notes: { type: 'string' } }, required: ['head'] }
-const CHECKS_WAIT = pr => `for PR #${pr} to be mergeable. 1. git -C ${W} fetch origin; if the local branch is ahead of origin/${setup.branch}, push it. head is git -C ${W} rev-parse HEAD (full sha). 2. If origin/${INT} is not an ancestor of HEAD (git -C ${W} merge-base --is-ancestor origin/${INT} HEAD fails), return state behind at once. 3. Otherwise wait in this turn until every check on head has completed, required or not. List every check with gh pr checks ${pr} --repo ${SLUG} --json name,bucket,link (never --required) and wait with gh pr checks ${pr} --repo ${SLUG} --watch (Bash timeout up to 60 minutes; rerun while any is pending). It can return early and a list can be partial: never treat a partial list as green, and read the list again before you answer. Bucket pass has passed; fail or cancel has failed; pending is still running; skipping never started and is ignored. Report as required the required check names from gh api repos/${SLUG}/rules/branches/${INT} (its required_status_checks rules) or else classic branch protection, none when neither answers. Return passed only when no check on head is pending, failing or cancelled, with required and passed (the names passing at head). Return failed when any check failed, required or not, with failing (every failing or cancelled name) and details (for each failing check, the last 60 lines of its failed log: gh run view <run id> --repo ${SLUG} --log-failed). Return pending with pending (the names still running) only when the wait ran out and no check failed.`
+const CHECKS_WAIT = pr => `for PR #${pr} to be mergeable. 1. git -C ${W} fetch origin; if the local branch is ahead of origin/${setup.branch}, push it. head is git -C ${W} rev-parse HEAD (full sha). 2. If origin/${INT} is not an ancestor of HEAD (git -C ${W} merge-base --is-ancestor origin/${INT} HEAD fails), return state behind at once. 3. Otherwise wait in this turn until every check on head has completed, required or not. List every check with gh pr checks ${pr} --repo ${SLUG} --json name,bucket,link (never --required) and wait with gh pr checks ${pr} --repo ${SLUG} --watch (Bash timeout up to 60 minutes; rerun while any is pending). It can return early and a list can be partial: never treat a partial list as green, and read the list again before you answer. Bucket pass has passed; fail or cancel has failed; pending is still running; skipping never started and is ignored. Report as required the required check names from gh api repos/${SLUG}/rules/branches/${INT} (its required_status_checks rules) and, whenever that reply lists no required status checks, from classic branch protection; none only when neither lists any. A head with no check reported at all is pending, never passed: runs can register minutes after a push. Return passed only when no check on head is pending, failing or cancelled, with required and passed (the names passing at head). Return failed when any check failed, required or not, with failing (every failing or cancelled name) and details (for each failing check, the last 60 lines of its failed log: gh run view <run id> --repo ${SLUG} --log-failed). Return pending with pending (the names still running) only when the wait ran out and no check failed.`
 const SYNC = { type: 'object', properties: { status: { type: 'string', enum: ['done', 'conflicted', 'blocked'] }, conflicted: { type: 'boolean' }, merge_commit: FULL_SHA, head: FULL_SHA, resolved_files: STRS, markers_checked: { type: 'boolean' }, tests: STRS, notes: { type: 'string' } }, required: ['status', 'conflicted', 'notes'] }
 const LOCK_SCHEMA = {
   type: 'object',
@@ -1987,6 +1987,13 @@ let head = expected
 let syncs = 0
 let round = 0
 const PENDING_WAITS = 3
+// #1008: a passed reply that names no passing check is a head no check has reported on yet (runs register up to minutes after a
+// push), so it is read as pending and counts against the pending waits. This program reads no required checks from the contract,
+// and the contract cannot declare an empty list anyway, so the rule has no opt-out.
+const noCheckYet = ck => ck.state === 'passed' && !(Array.isArray(ck.passed) ? ck.passed : []).some(x => typeof x === 'string' && x !== '')
+// #1008: a merge the forge refused for the base branch's policy, with the head up to date, usually means the checks were not in yet.
+const POLICY_REFUSAL = m => !!m && m.merged === false && m.behind !== true && /base branch policy/i.test(String(m.notes || ''))
+let policyPolls = 0
 // #818: the extra waits a landing spends on the land lock after its first acquire --wait answered land-contended at the CLI's own bound.
 const LAND_WAIT_RETRIES = 3
 let pendingWaits = 0
@@ -2318,7 +2325,7 @@ ${RULES}`, { label: `land-relock-${relocks}`, phase: 'Ship', agentType: 'clerk',
     head = expected
     const failingNames = Array.isArray(ck.failing) ? ck.failing : []
     const pendingNames = Array.isArray(ck.pending) ? ck.pending : []
-    const state = ck.state === 'behind' ? 'behind' : ck.state === 'failed' || failingNames.length ? 'failed' : ck.state === 'pending' || pendingNames.length ? 'pending' : ck.state
+    const state = ck.state === 'behind' ? 'behind' : ck.state === 'failed' || failingNames.length ? 'failed' : ck.state === 'pending' || pendingNames.length || noCheckYet(ck) ? 'pending' : ck.state
     if (state === 'pending') {
       if (++pendingWaits >= PENDING_WAITS) return stop('checks-pending', { pr: PR, pending: pendingNames, checks: ck })
       continue
@@ -2358,7 +2365,7 @@ ${RENEW_FIRST}
 Then re-check the cross-host landing lock of the branch ${INT} for PR #${PR}: run alone and exactly: ${LAND_ACQUIRE(expected, false)}
 ${LOCK_RETURN} Return it as lock.
 Only when lock's verdict is already_held or moved, merge PR #${PR}: run, alone and exactly: ${UNSET}gh pr merge ${PR} --repo ${SLUG} --${STRATEGY} --match-head-commit ${head}${setup.delete_branch ? ' --delete-branch' : ''}
-Then read gh pr view ${PR} --repo ${SLUG} --json state,mergeCommit: merged is true only when state is MERGED. Never retry with another form; on a guard refusal or a head mismatch return merged false with the exact message, and behind true only when the refusal says the head branch is not up to date with the base branch, or the guard says the PR is behind its base (the integration branch moved), else false. On any other lock verdict run nothing else and return merged false with the verdict in notes.
+Then read gh pr view ${PR} --repo ${SLUG} --json state,mergeCommit: merged is true only when state is MERGED. Never retry with another form; on a guard refusal or a head mismatch return merged false with the exact message in notes, and behind true only when the refusal says the head branch is not up to date with the base branch, or the guard says the PR is behind its base (the integration branch moved), else false. On any other lock verdict run nothing else and return merged false with the verdict in notes.
 ${RULES}`, { label: 'merge', phase: 'Ship', agentType: 'clerk', model: DEFAULT_CLERK_MODEL, effort: 'low', schema: withRenew(MERGE_SCHEMA, { lock: NULLABLE(LOCK_SCHEMA) }) }), r => r.renew)
       if (!mg) return stop('merge', { pr: PR, merge: null })
       const pre = mg.lock ? mg.lock.verdict : null
@@ -2375,6 +2382,13 @@ ${RULES}`, { label: 'merge', phase: 'Ship', agentType: 'clerk', model: DEFAULT_C
       if (mg.merged) return null
       // Refused as not up to date: the next round's checks step fetches, reports behind and syncs; three refusals, or any other, stop.
       // That sync is bounded by the refusal budget alone, so syncs made before the first merge attempt never consume it.
+      // #1008: refused by the base branch's policy and not behind: the next round polls the checks once more, and that poll picks the
+      // merge, the fix or the stop. A second such refusal stops, as every other refusal does.
+      if (POLICY_REFUSAL(mg) && policyPolls < 1) {
+        policyPolls++
+        log(`the merge was refused by the policy of ${INT}; polling the checks once more`)
+        continue
+      }
       if (!mg || mg.behind !== true || ++mergeRefusals >= 3) return stop('merge', { pr: PR, merge: mg })
       raced = true
       continue

@@ -718,8 +718,14 @@ Body, plain prose, no single or double quotes, dollar signs, backticks or backsl
 Return pr (number) and head (the full sha of the pushed head).`
 }
 // The wait and the grading of a checks poll (its steps 3 and 4), shared by a landing's poll and a train car's (#822); `wait` is the bound of the watch.
-const CHECKS_TAIL = (prRef, wait) => `3. Otherwise wait in this turn until every check on head has completed, required or not. List every check with gh pr checks ${prRef} --repo ${SLUG} --json name,bucket,link (never --required) and wait with gh pr checks ${prRef} --repo ${SLUG} --watch ${wait}. It can return early and a list can be partial: never treat a partial list as green, and read the list again before answering. Bucket pass has passed; fail or cancel has failed; pending is still running; skipping never started and is ignored. The required set is the checks the project declares, as JSON: ${JSON.stringify(DECLARED)} (an empty list declares none), plus the checks the forge requires: take those from gh api repos/${SLUG}/rules/branches/${INT} (its required_status_checks rules) or else classic branch protection. A declared check with no run or status at head yet is pending: keep waiting, never treat it as absent or green.
+const CHECKS_TAIL = (prRef, wait) => `3. Otherwise wait in this turn until every check on head has completed, required or not. List every check with gh pr checks ${prRef} --repo ${SLUG} --json name,bucket,link (never --required) and wait with gh pr checks ${prRef} --repo ${SLUG} --watch ${wait}. It can return early and a list can be partial: never treat a partial list as green, and read the list again before answering. Bucket pass has passed; fail or cancel has failed; pending is still running; skipping never started and is ignored. The required set is the checks the project declares, as JSON: ${JSON.stringify(DECLARED)} (an empty list declares none), plus the checks the forge requires: take those from gh api repos/${SLUG}/rules/branches/${INT} (its required_status_checks rules) and, whenever that reply lists no required status checks, from classic branch protection. A declared check with no run or status at head yet is pending: keep waiting, never treat it as absent or green. A head with no check reported at all is pending too, never passed: runs can register minutes after a push.
 4. Answer passed only when no check on head is pending, failing or cancelled, with required (the required names you used) and passed (the names passing at head). Answer failed with failing (every failing or cancelled name, required or not) and details when any check failed. Answer needs_label with label and failing when a check failed only because the PR lacks a label that only a human may apply (do not apply it yourself). Answer pending with pending (the names still running) only when the wait ran out and no check failed.`
+// #1008: a passed reply that names no passing check is a head no check has reported on yet (runs register up to minutes after a
+// push), so it is read as pending: a landing counts it against its pending waits and a train car is late, never green. The contract
+// cannot declare an empty required list (the resolver refuses one), so there is no opt-out: the rule holds for every project.
+const noCheckYet = ck => !!ck && ck.state === 'passed' && !(Array.isArray(ck.passed) ? ck.passed : []).some(nonEmpty)
+// #1008: a merge the forge refused for the base branch's policy, with the head up to date, usually means the checks were not in yet.
+const POLICY_REFUSAL = mg => !!mg && mg.merged === false && mg.behind !== true && /base branch policy/i.test(String(mg.notes || ''))
 // What a refused merge answers, in land-merge and train-merge alike (#870, #822).
 const MERGE_REFUSED = 'Never retry with another form; on a guard refusal or a head mismatch return merged false with the exact message in notes, and behind true only when the refusal says the head branch is not up to date with the base branch, or the guard says the PR is behind its base, else false.'
 // The one merge form of a landing, at an exact head; a train merges its car with the same form (#822).
@@ -742,7 +748,7 @@ const land = async (n, ready, via = {}) => {
   // The poll a previous call carried for the next round: { label, reply } or null (#801).
   let carried = null
   const PENDING_WAITS = 3
-  const c = { sync: 0, syncReview: 0, checks: 0, record: 0, relock: 0, conflicts: 0, ciFails: 0, pending: 0, refused: 0, early: 0 }
+  const c = { sync: 0, syncReview: 0, checks: 0, record: 0, relock: 0, conflicts: 0, ciFails: 0, pending: 0, refused: 0, early: 0, policy: 0 }
   // #992: labels of this landing's reviews that answered twice with no usable review; every row of the landing carries them.
   const lost = []
   const silence = label => (lost.includes(label) ? 'answered twice with no usable review' : 'returned nothing')
@@ -1246,7 +1252,7 @@ ${stalePoll ? `${STALE_RERUN(UNSET, SLUG)}\n` : ''}${RULES}`, label, { ...lifecy
       const pendingNames = ck.pending || []
       const state = ck.state === 'behind' || ck.state === 'needs_label' ? ck.state
         : ck.state === 'failed' || failingNames.length ? 'failed'
-        : ck.state === 'pending' || pendingNames.length ? 'pending'
+        : ck.state === 'pending' || pendingNames.length || noCheckYet(ck) ? 'pending'
         : ck.state
 
       if (state === 'needs_label') {
@@ -1315,6 +1321,13 @@ ${RULES}`, `land-merge-${n}`, { ...lifecycleClerk, schema: withRenew(LAND_MERGE_
         c.refused++
         const r = await resync()
         if (r) return r
+        continue
+      }
+      // #1008: refused by the base branch's policy and not behind: the checks are polled once more, and that poll picks the merge, the
+      // fix or the stop. A second such refusal stops, as every other refusal does.
+      if (POLICY_REFUSAL(mg) && c.policy < 1) {
+        c.policy++
+        log(`#${n}: the merge was refused by the policy of ${INT}; polling the checks once more`)
         continue
       }
       if (!complete(mg, LAND_MERGE_SCHEMA) || mg.merged !== true) return out('stopped', { stage: 'merge', detail: mg.notes })
@@ -1486,7 +1499,7 @@ const trainOf = (cands, joined) => {
     return null
   }
   const green = (ck, c) => {
-    if (!ck || ck.head !== c.head || ck.state !== 'passed' || (ck.failing || []).length || (ck.pending || []).length) return false
+    if (!ck || ck.head !== c.head || ck.state !== 'passed' || (ck.failing || []).length || (ck.pending || []).length || noCheckYet(ck)) return false
     // D11: a declared check missing from the passed names is never merged.
     return DECLARED.every(d => (ck.passed || []).includes(d))
   }
@@ -1563,7 +1576,7 @@ ${RULES_FOR(REPO, carName(i + 1))}`, label, { ...TRAIN_LIFECYCLE, schema: TRAIN_
       const cks = await parallel(cars.map((c, i) => checks(i, TRAIN_CHECKS_WAIT_MIN, `train-checks-${t}-${i + 1}`)))
       const prefix = () => { let k = 0; while (k < cars.length && green(cks[k], cars[k])) k++; return k }
       // Still running at the cap with no failed check: not red, only late.
-      const late = i => !!cks[i] && cks[i].head === cars[i].head && cks[i].state === 'pending' && !(cks[i].failing || []).length
+      const late = i => !!cks[i] && cks[i].head === cars[i].head && (cks[i].state === 'pending' || noCheckYet(cks[i])) && !(cks[i].failing || []).length
       if (cks.some(lockLost)) return await lostNow()
       let g = prefix()
       if (g < cars.length && late(g)) {
