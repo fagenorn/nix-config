@@ -377,6 +377,26 @@ class SessionProfileTest(unittest.TestCase):
                                                           "state": "idle"})], use)
         self.assertEqual(earlier.last["work"], hour(11))
 
+    def test_a_newer_use_within_the_same_millisecond_wins(self):
+        def stamp(micro):
+            return f"2026-11-13T09:00:00.{micro:06d}+00:00"
+
+        events = [
+            Event(1, stamp(100), sessions.SEEN, "/srv/p01", {
+                "session_id": "s-a", "cwd": "/srv/p01", "repo": "/srv/p01", "state": "idle",
+                "profile": "a"}),
+            Event(2, stamp(500), sessions.SEEN, "/srv/p01", {
+                "session_id": "s-b", "cwd": "/srv/p01", "repo": "/srv/p01", "state": "idle",
+                "profile": "b"}),
+            Event(3, stamp(900), sessions.HOOK, "/srv/p01", {
+                "session_id": "s-a", "event": "Stop"}),
+        ]
+        use = manager.profile_use(events)
+        self.assertEqual(dict(use.last), {"a": stamp(900), "b": stamp(500)})
+        both = cap(("a", "unknown", None, None, "signed_in"),
+                   ("b", "unknown", None, None, "signed_in"))
+        self.assertEqual(manager.session_profile(both, use.last), "a")
+
     def test_write_choice_replaces_the_file_atomically(self):
         with tempfile.TemporaryDirectory() as name:
             path = Path(name) / "accounts" / manager.CHOICE_FILE

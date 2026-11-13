@@ -116,8 +116,7 @@ from datetime import datetime
 from pathlib import Path
 
 from agent_tools.console.event_log import Event
-from agent_tools.console.sessions import (
-    DEFAULT_PROFILE, GONE, HOOK, PROFILE, SEEN, at_ms)
+from agent_tools.console.sessions import DEFAULT_PROFILE, GONE, HOOK, PROFILE, SEEN
 
 CHOICE_FILE = "chosen-profile"
 
@@ -242,10 +241,10 @@ def profile_use(events: Iterable[Event], use: ProfileUse | None = None) -> Profi
         name = owner.get(session_id)
         if name is None:
             continue
-        moment = at_ms(event.at)
+        moment = _instant(event.at)
         if moment is None:
             continue
-        known = at_ms(last[name]) if name in last else None
+        known = _instant(last[name]) if name in last else None
         if known is None or moment > known:
             last[name] = event.at
     return ProfileUse(last=last, owner=owner)

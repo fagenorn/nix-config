@@ -49,6 +49,13 @@ retention pass leaves the newest row of each profile (by sequence number, the pr
 payload's `profile`) in place whatever its age, because the console records a sign-in only when it
 changes and a profile signed out for longer than the window would otherwise read as never read.
 
+Another is kept in part (#1011): a session's profile is assigned by its `SESSION_SEEN` and
+`SESSION_PROFILE` rows, and a profile's last use is read from the session's later `SESSION_HOOK` rows
+(`manager.profile_use`). The pass therefore leaves, for a session with a `SESSION_HOOK` row inside the
+window, the newest of its assignment rows older than the cutoff (the assignment in force when the
+window opens), so retained hooks keep their profile; once no hook of the session is inside the window
+that row is removed like any other.
+
 `EventLog.append` writes all its entries in one transaction under one `at`
 taken from the clock: a failure writes no row, rolls back the earlier entries of
 the same call and leaves the connection usable. An empty sequence returns `[]`
@@ -99,6 +106,9 @@ SPRINT_STOP_REQUESTED = "sprint.stop_requested"
 MANAGER_STOPPED = "manager.stopped"
 MANAGER_STOP_FAILED = "manager.stop_failed"
 SIGNIN_READING = "signin.reading"
+SESSION_HOOK = "session.hook"
+SESSION_SEEN = "session.seen"
+SESSION_PROFILE = "session.profile"
 # Rows of these kinds (the two goal kinds, the three brief kinds, the report
 # Rows of these kinds (the two goal kinds, the three brief kinds, the report
 # kind, the three message kinds, the two question kinds, the closing kind, the
@@ -281,8 +291,18 @@ class EventLog:
                     f"DELETE FROM events WHERE at < ? AND kind NOT IN ({marks}) "
                     "AND NOT (kind = ? AND seq = (SELECT MAX(newer.seq) FROM events AS newer "
                     "WHERE newer.kind = events.kind AND json_extract(newer.payload, '$.profile') "
-                    "IS json_extract(events.payload, '$.profile')))",
-                    (cutoff, *sorted(KEPT_KINDS), SIGNIN_READING)).rowcount
+                    "IS json_extract(events.payload, '$.profile'))) "
+                    "AND NOT (kind IN (?, ?) AND seq = (SELECT MAX(owner.seq) FROM events AS owner "
+                    "WHERE owner.kind IN (?, ?) AND owner.at < ? AND "
+                    "json_extract(owner.payload, '$.session_id') "
+                    "IS json_extract(events.payload, '$.session_id')) "
+                    "AND EXISTS (SELECT 1 FROM events AS hook WHERE hook.kind = ? "
+                    "AND hook.at >= ? AND hook.seq > events.seq AND "
+                    "json_extract(hook.payload, '$.session_id') "
+                    "IS json_extract(events.payload, '$.session_id')))",
+                    (cutoff, *sorted(KEPT_KINDS), SIGNIN_READING,
+                     SESSION_SEEN, SESSION_PROFILE, SESSION_SEEN, SESSION_PROFILE, cutoff,
+                     SESSION_HOOK, cutoff)).rowcount
 
             return self._transaction(remove)
 

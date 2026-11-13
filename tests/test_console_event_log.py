@@ -563,6 +563,26 @@ class RetentionTest(unittest.TestCase):
                          [(2, event_log.SIGNIN_READING), (3, event_log.SIGNIN_READING)])
         self.assertEqual(self.retain_at(log, NOW), 0)
 
+    def test_a_pass_keeps_the_assignment_in_force_of_a_session_with_a_hook_in_the_window(self):
+        log = self.open()
+        seen = lambda sid, profile: (event_log.SESSION_SEEN, None, {
+            "session_id": sid, "profile": profile})
+        hook = lambda sid: (event_log.SESSION_HOOK, None, {"session_id": sid})
+        self.now = OLD
+        log.append([seen("s-1", "a"), seen("s-2", "a"), seen("s-3", "a"), hook("s-1"),
+                    hook("s-3")])
+        log.append([(event_log.SESSION_PROFILE, None, {"session_id": "s-1", "profile": "b"})])
+        self.now = EDGE
+        log.append([hook("s-2")])
+        self.now = NEW
+        log.append([hook("s-1")])
+        self.assertEqual(self.retain_at(log, NOW), 4)
+        self.assertEqual(
+            [(r[0], r[2]) for r in rows(self.store)],
+            [(2, event_log.SESSION_SEEN), (6, event_log.SESSION_PROFILE),
+             (7, event_log.SESSION_HOOK), (8, event_log.SESSION_HOOK)])
+        self.assertEqual(self.retain_at(log, NOW), 0)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -574,6 +574,42 @@ class ProfileChoiceServiceTest(ManagerServiceTest):
         again = self.start(profile_dirs=dirs, clock=lambda: NOW, launcher=support.Launches())
         self.assertEqual(self.ask(again)[2], b'{"profile":"work"}')
 
+    def test_retention_keeps_the_use_of_a_session_whose_assignment_it_removes(self):
+        dirs = list(self.profiles(work=0, home=0).values())
+        day = 86400
+        now = [NOW]
+        stamp = lambda: iso(now[0])
+        self.store.parent.mkdir(parents=True, exist_ok=True)
+        log = EventLog(self.store, clock=stamp)
+        try:
+            def at(days, *entries):
+                now[0] = NOW + days * day
+                log.append(list(entries))
+
+            seen = lambda sid, profile: (sessions.SEEN, None, {
+                "session_id": sid, "cwd": "/srv/p01", "repo": "/srv/p01",
+                "state": sessions.IDLE, "profile": profile})
+            at(0, signin.entry("work", signin.Status("signed_in", None)),
+               signin.entry("home", signin.Status("signed_in", None)), seen("s-b", "home"),
+               ("old", None, {}))
+            at(10, seen("s-a", "work"))
+            at(20, (sessions.HOOK, None, {"session_id": "s-b", "event": "Stop"}))
+            at(30, (sessions.GONE, None, {"session_id": "s-a"}),
+               (sessions.GONE, None, {"session_id": "s-b"}))
+        finally:
+            log.close()
+        now[0] = NOW + 50 * day
+        svc = self.start(profile_dirs=dirs, clock=lambda: now[0], log_clock=stamp)
+        self.assertEqual(self.ask(svc)[2], b'{"profile":"home"}')
+        now[0] = NOW + 95 * day
+        self.assertEqual(svc.retain(), 1)
+        kinds = [r[2] for r in support.log_rows(self.store)]
+        self.assertEqual(kinds.count(sessions.SEEN), 2)
+        self.assertEqual(self.ask(svc)[2], b'{"profile":"home"}')
+        svc.close()
+        again = self.start(profile_dirs=dirs, clock=lambda: now[0], log_clock=stamp)
+        self.assertEqual(self.ask(again)[2], b'{"profile":"home"}')
+
     def test_with_no_sign_in_known_the_route_answers_default(self):
         dirs = list(self.profiles(work=0, home=0).values())
         svc = self.start(profile_dirs=dirs, clock=lambda: NOW)
@@ -586,7 +622,7 @@ class ProfileChoiceServiceTest(ManagerServiceTest):
         self.assertEqual(
             support.request(svc.address, "GET", self.PROFILE, host="example.com:80")[0], 403)
 
-    def test_the_choice_file_is_rewritten_when_and_only_when_the_choice_changes(self):
+    def test_the_choice_file_is_written_when_and_only_when_the_choice_changes(self):
         dirs = self.two_profiles({"work": self.weekly(0.2), "home": self.weekly(0.6)})
         now = [NOW]
 
@@ -617,7 +653,7 @@ class ProfileChoiceServiceTest(ManagerServiceTest):
         svc.poll_sessions()
         self.assertEqual(self.identity(choice), after)
 
-    def test_a_restart_that_finds_its_choice_in_the_file_rewrites_nothing(self):
+    def test_a_restart_that_finds_its_choice_in_the_file_writes_nothing(self):
         dirs = self.two_profiles({"work": self.weekly(0.2), "home": self.weekly(0.6)})
         choice = self.choice
         choice.parent.mkdir(parents=True, exist_ok=True)
