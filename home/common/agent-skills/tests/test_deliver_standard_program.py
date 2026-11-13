@@ -8160,6 +8160,10 @@ class BlockedTaskDecisionTest(unittest.TestCase):
                 self.assertEqual(result["cont"]["decisions"], ["An earlier answer."])
                 self.assertNotIn("blocked", result["cont"])
                 self.assertNotIn("rerun", prompt(calls, "impl-2").split("exactly as its task file")[0].lower())
+        # A stop of the rerun that is not a blocked implementer carries no blocked member: the old notes are answered.
+        cut, _ = self.resume(cont, replies={"impl-2": {"status": "done", "notes": "no commit"}}, decisions="rerun")
+        self.assertEqual((cut["stage"], cut["cont"]["partial"]), ("task", 2))
+        self.assertNotIn("blocked", cut["cont"])
         # Blocked again: the new notes, and rerun works again (it is never a held decision).
         again, _ = self.resume(cont, replies={"impl-2": blocked("the token is still rejected")}, decisions="rerun")
         self.assertEqual(again["cont"]["blocked"], {"task": 2, "notes": "the token is still rejected"})
