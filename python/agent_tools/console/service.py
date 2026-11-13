@@ -18,6 +18,7 @@ Routes (every response carries `Cache-Control: no-store` and
     POST /api/check-answer 204, a JSON body, the page answers one verification prompt (below)
     POST /api/goal  204, a JSON body, the page states a goal (below)
     POST /api/withdraw 204, a JSON body, the page withdraws a goal (below)
+    POST /api/exclusion 204, a JSON body, the page excludes or includes a profile (below)
     POST /api/approve 204, a JSON body, the page approves a brief (below)
     POST /api/reply 204, a JSON body, the page asks a brief for changes (below)
     POST /api/retry-manager 204, a JSON body, the page starts a sprint's manager again (below)
@@ -36,7 +37,7 @@ Routes (every response carries `Cache-Control: no-store` and
     anything else   404
     other methods   405 with `Allow: GET` (`Allow: POST` on `/api/hooks`, `/api/readings`,
                     `/api/looked`, `/api/answer`, `/api/check-answer`, `/api/goal`, `/api/withdraw`,
-                    `/api/approve`, `/api/reply`, `/api/retry-manager`, `/api/message`, `/api/stop`, `/api/brief`, `/api/report`,
+                    `/api/approve`, `/api/reply`, `/api/retry-manager`, `/api/message`, `/api/stop`, `/api/exclusion`, `/api/brief`, `/api/report`,
                     `/api/close`, `/api/inbox`, `/api/message-reply`, `/api/recap`, `/api/ask` and `/api/round-answer`)
 
 Two kinds of write exist. The hook and reading routes append what the proxies and hooks observe:
@@ -59,8 +60,8 @@ route carries no token: it records observations and answers nothing (ADR-console
 
 A page write (`PAGE_WRITES`, today `POST /api/looked`, `POST /api/answer`, `POST /api/check-answer`,
 `POST /api/goal`, `POST /api/withdraw`, `POST /api/approve`, `POST /api/reply`,
-`POST /api/retry-manager`, `POST /api/message`, `POST /api/stop`, `POST /api/round-answer` and
-`POST /api/continue`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
+`POST /api/retry-manager`, `POST /api/message`, `POST /api/stop`, `POST /api/round-answer`,
+`POST /api/continue` and `POST /api/exclusion`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
 alone and goes through one guard, `_page_write`, whatever its route. After the loopback `Host`
 check and before any body is read, exactly one `Origin` header must equal `http://<Host>` (else
 403 `text/plain` `origin refused`) and exactly one `X-Console-Token` header must equal the
@@ -436,7 +437,8 @@ failed manager registered or briefed meanwhile); a missing secret appends `manag
 is chosen by `manager.choose_profile` over `capacity.capacity_view` of the profile directories read
 at that moment (`_read_profiles`, never the last poll's) with the sign-ins and each profile's last use,
 folded from the log's session rows (`manager.profile_use`, kept after a session leaves; ADR-console-023,
-#1011), and `Wait` appends `manager.waiting`. Otherwise the launcher is called outside the lock, and then,
+#1011) and the excluded profiles folded from the log's `profile.exclusion` rows (`exclusion.excluded_profiles`,
+#1028), which `capacity_view` leaves out of the room, and `Wait` appends `manager.waiting`. Otherwise the launcher is called outside the lock, and then,
 under it, a sprint that was withdrawn meanwhile has its secret and settings file removed again and
 no row appended, and otherwise, unless the service is stopping, `manager.started {sprint_id, profile, session_name}`
 or `manager.failed {sprint_id, reason}` is appended (the reason of a `LaunchFailed`, else `<Type>:
@@ -446,7 +448,8 @@ settings file. The sprint's secret appears in no row, view or stderr line.
 
 Profile choice (#1011, ADR-console-023): `GET /api/profile` answers the profile a new session should
 use, `manager.session_profile` over `capacity.capacity_view` of the profile directories read at that
-moment (never the last poll's), the sign-ins and each profile's last use, folded from the log's
+moment (never the last poll's), the sign-ins, the excluded profiles (folded from the log's
+`profile.exclusion` rows, #1028) and each profile's last use, folded from the log's
 session rows (`manager.profile_use`, kept after a session leaves and rebuilt on restart). The body
 is exactly `{"profile":"<name>"}` (`json.dumps` with sorted keys and compact separators), and
 `{"profile":null}` when nothing can be chosen; the route needs no token and, like every GET route,
@@ -458,6 +461,18 @@ the choice differs from the last one written (at construction, what the file hol
 nothing can be chosen. A failed write is one stderr line `console: choice_unwritten <Type>:
 <message>` until a write succeeds, and is tried again at the next choice. With `choice_file` None
 no file is read or written.
+
+Exclusion (#1028): `set_exclusion(profile, excluded)` (`POST /api/exclusion`, body `{"profile",
+"excluded"}` with `excluded` a bool, at most `MAX_EXCLUSION_BYTES`; a bad body is 400 `bad
+exclusion`, a refusal 409 with the reason (`no such profile` unless the profile is among the
+directories as they are now, `already excluded`, `already included`), any other failure 500
+`exclusion failed`) appends one `profile.exclusion {profile, excluded}` row with no project, and
+nothing for a refusal. Under the ingest lock it writes the choice file first, over the set the
+toggle gives (`manager.write_choice` directly, not `_note_choice`, which swallows a failed write):
+a failed write is a 500 with nothing appended or published and the file as it was, so a 204 never
+leaves the file naming an excluded profile; a failed append puts the file back to the choice over the
+old set and is a 500. Only then is the row appended, folded and published. The excluded profiles
+are folded from the log at construction and by `_fold`, and rebuilt by `retain()`.
 
 Nudges (#889): the service takes `nudger` (`nudge.nudger_for(sys.platform)` from `console.py`; None
 means no nudge is ever made, no reservation, row or listing read) and `listing` (default: read
@@ -695,8 +710,8 @@ from urllib.parse import parse_qsl
 
 from agent_tools.claims import owner_actions
 from agent_tools.console import (
-    answer, capacity, deliveries, digest, idle, inbox, manager, nudge, probe, revive, sessions,
-    signin, sprints, write_guard)
+    answer, capacity, deliveries, digest, exclusion, idle, inbox, manager, nudge, probe, revive,
+    sessions, signin, sprints, write_guard)
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
     MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_STOP_FAILED,
@@ -737,6 +752,7 @@ APPROVE_PATH = "/api/approve"
 REPLY_PATH = "/api/reply"
 RETRY_PATH = "/api/retry-manager"
 CONTINUE_PATH = "/api/continue"
+EXCLUSION_PATH = "/api/exclusion"
 BRIEF_PATH = "/api/brief"
 REPORT_PATH = "/api/report"
 CLOSE_PATH = "/api/close"
@@ -751,7 +767,7 @@ ROUND_ANSWER_PATH = "/api/round-answer"
 CHECK_PATH = "/api/check-answer"
 PAGE_WRITES: frozenset[str] = frozenset({
     LOOKED_PATH, ANSWER_PATH, CHECK_PATH, GOAL_PATH, WITHDRAW_PATH, APPROVE_PATH, REPLY_PATH,
-    RETRY_PATH, MESSAGE_PATH, STOP_PATH, ROUND_ANSWER_PATH, CONTINUE_PATH})
+    RETRY_PATH, MESSAGE_PATH, STOP_PATH, ROUND_ANSWER_PATH, CONTINUE_PATH, EXCLUSION_PATH})
 MAX_ANSWER_BYTES = 4096
 MAX_GOAL_BYTES = 16384
 MAX_WITHDRAW_BYTES = 4096
@@ -772,6 +788,7 @@ MAX_APPROVE_BYTES = 4096
 MAX_REPLY_BYTES = 16384
 MAX_RETRY_BYTES = 4096
 MAX_CONTINUE_BYTES = 4096
+MAX_EXCLUSION_BYTES = 4096
 MAX_HOOK_BYTES = 8 * 1024 * 1024
 READINGS_PATH = "/api/readings"
 MAX_READING_BYTES = 64 * 1024
@@ -1329,6 +1346,28 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return False
         return True
 
+    def _exclusion_request(self, console: "ConsoleService") -> bool:
+        """Read and carry out the owner's exclusion or inclusion of a profile; False when refused."""
+        body = self._json_body(MAX_EXCLUSION_BYTES)
+        if body is None:
+            return False
+        try:
+            profile, excluded = exclusion.parse_request(body)
+        except ValueError:
+            self._refuse(400, "bad exclusion")
+            return False
+        try:
+            console.set_exclusion(profile, excluded)
+        except exclusion.Refused as error:
+            print(f"console: exclusion_refused {error}", file=sys.stderr)
+            self._refuse(409, str(error))
+            return False
+        except Exception as error:
+            print(f"console: exclusion_failed {type(error).__name__}: {error}", file=sys.stderr)
+            self._refuse(500, "exclusion failed")
+            return False
+        return True
+
     def _stop_request(self, console: "ConsoleService") -> bool:
         """Read and carry out an owner's stop of a sprint; False when it was refused."""
         body = self._json_body(MAX_STOP_BYTES)
@@ -1393,6 +1432,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         elif route == CONTINUE_PATH:
             self.close_connection = True
             if not self._continue_request(console):
+                return
+        elif route == EXCLUSION_PATH:
+            self.close_connection = True
+            if not self._exclusion_request(console):
                 return
         elif route == MESSAGE_PATH:
             self.close_connection = True
@@ -1567,6 +1610,7 @@ class ConsoleService:
         self._profiles: frozenset[str] = frozenset()
         self._capacity = capacity.CapacityState({}, {})
         self._signins: dict[str, signin.SignIn] = {}
+        self._excluded: frozenset[str] = frozenset()
         self._session_poll_seconds = session_poll_seconds
         self._repo_of = repo_of
         self._sessions: dict[str, sessions.SessionState] = {}
@@ -1620,6 +1664,7 @@ class ConsoleService:
             self._health = read_states(events)
             self._capacity = capacity.capacity_state(events)
             self._signins = signin.signin_state(events)
+            self._excluded = exclusion.excluded_profiles(events)
             self._derive_digest(events)
             self._deliveries = deliveries.delivery_states(events)
             self._moved = idle.last_moved(events)
@@ -1692,7 +1737,8 @@ class ConsoleService:
             now_ms=int(self._clock() * 1000), sprints=self._sprints,
             digest=digest.digest(self._moments, self._looked, self._now()),
             capacity=capacity.capacity_view(
-                self._profiles, self._capacity, self._clock(), self._signins),
+                self._profiles, self._capacity, self._clock(), self._signins,
+                excluded=self._excluded),
             managers=self._launcher is not None, pending=self._pending))
         with self._published:
             if view != self._view:
@@ -2116,7 +2162,7 @@ class ConsoleService:
             return None
         choice = manager.choose_profile(
             capacity.capacity_view(self._read_profiles(), self._capacity, self._clock(),
-                                   self._signins),
+                                   self._signins, excluded=self._excluded),
             self._use.last)
         if isinstance(choice, manager.Wait):
             self._append_manager(MANAGER_WAITING, project_id, {
@@ -3010,11 +3056,46 @@ class ConsoleService:
             self._note_choice(self._session_choice(self._profiles))
             return appended
 
-    def _session_choice(self, profiles: frozenset[str]) -> str | None:
-        """Under the ingest lock: the profile a new session should use, over `profiles`."""
+    def _session_choice(self, profiles: frozenset[str],
+                        excluded: frozenset[str] | None = None) -> str | None:
+        """Under the ingest lock: the profile a new session should use, over `profiles`.
+
+        `excluded` is the set the choice is made over, the folded one when None.
+        """
         return manager.session_profile(
-            capacity.capacity_view(profiles, self._capacity, self._clock(), self._signins),
+            capacity.capacity_view(profiles, self._capacity, self._clock(), self._signins,
+                                   excluded=self._excluded if excluded is None else excluded),
             self._use.last)
+
+    def set_exclusion(self, profile: str, excluded: bool) -> list[Event]:
+        """Exclude `profile` from the console's choice, or put it back; `exclusion.Refused` when it cannot.
+
+        Under the ingest lock: the profile must be among the directories as they are now and the
+        toggle must change something. The choice file is written first, over the set the toggle
+        gives, so a failed write appends and publishes nothing; a failed append puts the file back
+        to the choice over the old set.
+        """
+        with self._ingest:
+            profiles = self._read_profiles()
+            if profile not in profiles:
+                raise exclusion.Refused(exclusion.UNKNOWN)
+            if excluded and profile in self._excluded:
+                raise exclusion.Refused(exclusion.ALREADY_EXCLUDED)
+            if not excluded and profile not in self._excluded:
+                raise exclusion.Refused(exclusion.ALREADY_INCLUDED)
+            after = self._excluded | {profile} if excluded else self._excluded - {profile}
+            choice = self._session_choice(profiles, after)
+            if self._choice_file is not None and choice != self._choice:
+                manager.write_choice(self._choice_file, choice)
+                self._choice = choice
+                self._unreadable.discard("choice")
+            try:
+                appended = self.log.append([exclusion.entry(profile, excluded)])
+            except Exception:
+                self._note_choice(self._session_choice(profiles))
+                raise
+            self._apply(appended)
+            return appended
 
     def session_profile(self) -> str | None:
         """The profile a new session should use now, over the profile directories as they are; kept in the choice file."""
@@ -3190,6 +3271,7 @@ class ConsoleService:
         self._health = read_states(appended, self._health)
         self._capacity = capacity.capacity_state(appended, self._capacity)
         self._signins = signin.signin_state(appended, self._signins)
+        self._excluded = exclusion.excluded_profiles(appended, self._excluded)
         self._deliveries = deliveries.delivery_states(appended, self._deliveries)
         self._moved = idle.last_moved(appended, self._moved)
         self._sprints = sprints.sprint_states(appended, self._sprints)
@@ -3213,6 +3295,7 @@ class ConsoleService:
                 self._inbox = inbox_records(events)
                 self._capacity = capacity.capacity_state(events)
                 self._signins = signin.signin_state(events)
+                self._excluded = exclusion.excluded_profiles(events)
                 self._derive_digest(events)
                 self._publish()
             return removed
