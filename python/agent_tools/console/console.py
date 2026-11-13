@@ -35,6 +35,9 @@ It is also given `probe.prober_for(sys.platform)` (#1009): on Linux every listed
 
 It is also given `signin.reader_for(sys.platform)` (#1010): on Linux each probe job first reads the
 profile's sign-in from the client's status command (`agent_tools.console.signin`); elsewhere none is read.
+
+The service keeps the console's profile choice for new sessions in `$CLAUDE_ACCOUNTS_DIR/chosen-profile`
+(else `~/.claude-accounts/chosen-profile`) and answers it on `GET /api/profile` (#1011).
 """
 
 from __future__ import annotations
@@ -75,7 +78,8 @@ def main(argv: list[str] | None = None) -> int:
             tracker=inbox.read_items, launcher=manager.launcher_for(sys.platform),
             nudger=nudge.nudger_for(sys.platform), stopper=manager.stopper_for(sys.platform),
             full_listing=nudge.full_lister_for(sys.platform),
-            prober=probe.prober_for(sys.platform), signin_reader=signin.reader_for(sys.platform))
+            prober=probe.prober_for(sys.platform), signin_reader=signin.reader_for(sys.platform),
+            choice_file=service.default_choice_file())
     except TokenError as error:
         print(f"console: page token unusable: {error}", file=sys.stderr)
         return 1

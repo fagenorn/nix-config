@@ -32,6 +32,7 @@ Routes (every response carries `Cache-Control: no-store` and
     POST /api/round-answer 204, a JSON body, the page answers one question (below)
     POST /api/recap 200 application/json, a manager reads what it needs to pick a sprint up (below)
     GET /api/sprint-status?sprint_id=<id> 200 application/json, what became of a brief (below)
+    GET /api/profile 200 application/json, the profile a new session should use (below)
     anything else   404
     other methods   405 with `Allow: GET` (`Allow: POST` on `/api/hooks`, `/api/readings`,
                     `/api/looked`, `/api/answer`, `/api/check-answer`, `/api/goal`, `/api/withdraw`,
@@ -441,6 +442,21 @@ or `manager.failed {sprint_id, reason}` is appended (the reason of a `LaunchFail
 <sprint_id> <reason>`, and the view is published. `withdraw_goal` also removes the manager's
 settings file. The sprint's secret appears in no row, view or stderr line.
 
+Profile choice (#1011, ADR-console-023): `GET /api/profile` answers the profile a new session should
+use, `manager.session_profile` over `capacity.capacity_view` of the profile directories read at that
+moment (never the last poll's), the sign-ins and each profile's last use, folded from the log's
+session rows (`manager.profile_use`, kept after a session leaves and rebuilt on restart). The body
+is exactly `{"profile":"<name>"}` (`json.dumps` with sorted keys and compact separators), and
+`{"profile":null}` when nothing can be chosen; the route needs no token and, like every GET route,
+answers only a loopback `Host`. The service also keeps that choice in `choice_file`
+(`default_choice_file()`: `$CLAUDE_ACCOUNTS_DIR/chosen-profile`, else
+`~/.claude-accounts/chosen-profile`), one line holding the profile name: it is written, atomically
+(`manager.write_choice`), at the end of every `poll_sessions` and on every route answer, only when
+the choice differs from the last one written (at construction, what the file holds), and removed when
+nothing can be chosen. A failed write is one stderr line `console: choice_unwritten <Type>:
+<message>` until a write succeeds, and is tried again at the next choice. With `choice_file` None
+no file is read or written.
+
 Nudges (#889): the service takes `nudger` (`nudge.nudger_for(sys.platform)` from `console.py`; None
 means no nudge is ever made, no reservation, row or listing read) and `listing` (default: read
 `sessions.read_session_registry(self._session_dirs())` when called). After `send_message`,
@@ -724,6 +740,7 @@ REPORT_PATH = "/api/report"
 CLOSE_PATH = "/api/close"
 STOP_PATH = "/api/stop"
 STATUS_PATH = "/api/sprint-status"
+PROFILE_PATH = "/api/profile"
 MESSAGE_PATH = "/api/message"
 INBOX_PATH = "/api/inbox"
 MESSAGE_REPLY_PATH = "/api/message-reply"
@@ -793,6 +810,12 @@ def default_profile_dirs() -> list[Path]:
     accounts = os.environ.get("CLAUDE_ACCOUNTS_DIR") or str(home / ".claude-accounts")
     return [home / ".claude",
             *sorted(p for p in Path(accounts).glob("profiles/*") if p.is_dir())]
+
+
+def default_choice_file() -> Path:
+    """The file the console keeps its profile choice in: `chosen-profile` in the accounts directory."""
+    accounts = os.environ.get("CLAUDE_ACCOUNTS_DIR") or str(Path.home() / ".claude-accounts")
+    return Path(accounts) / manager.CHOICE_FILE
 
 
 def signature(path: Path) -> tuple[int, int, int] | None:
@@ -1412,6 +1435,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             self._stream()
         elif route == STATUS_PATH:
             self._status_request()
+        elif route == PROFILE_PATH:
+            body = json.dumps({"profile": self.server.console.session_profile()},
+                              sort_keys=True, separators=(",", ":")).encode()
+            self._send(200, "application/json", body)
         elif route in POST_LIMITS or route in PAGE_WRITES or route in MANAGER_WRITES:
             self._refuse_method()
         else:
@@ -1490,8 +1517,11 @@ class ConsoleService:
                  prober: Callable[[probe.Probe], None] | None = None,
                  signin_reader: Callable[[probe.Probe], signin.Status] | None = None,
                  probe_dispatch: Callable[[Callable[[], None]], None] | None = None,
-                 probe_tick_seconds: float = PROBE_TICK_SECONDS):
+                 probe_tick_seconds: float = PROBE_TICK_SECONDS,
+                 choice_file: Path | None = None):
         self.registry = Path(registry)
+        self._choice_file = choice_file
+        self._choice = manager.read_choice(choice_file) if choice_file is not None else None
         self._prober = prober
         self._signin_reader = signin_reader
         self._probe_dispatch = self._on_probe_thread if probe_dispatch is None else probe_dispatch
@@ -2973,7 +3003,33 @@ class ConsoleService:
             if appended:
                 self._fold(appended)
             self._publish()
+            self._note_choice(self._session_choice(self._profiles))
             return appended
+
+    def _session_choice(self, profiles: frozenset[str]) -> str | None:
+        """Under the ingest lock: the profile a new session should use, over `profiles`."""
+        return manager.session_profile(
+            capacity.capacity_view(profiles, self._capacity, self._clock(), self._signins),
+            self._use.last)
+
+    def session_profile(self) -> str | None:
+        """The profile a new session should use now, over the profile directories as they are; kept in the choice file."""
+        with self._ingest:
+            profile = self._session_choice(self._read_profiles())
+            self._note_choice(profile)
+            return profile
+
+    def _note_choice(self, profile: str | None) -> None:
+        """Under the ingest lock: write the choice file when `profile` differs from the last value written."""
+        if self._choice_file is None or profile == self._choice:
+            return
+        try:
+            manager.write_choice(self._choice_file, profile)
+        except OSError as error:
+            self._warn_once("choice", f"console: choice_unwritten {type(error).__name__}: {error}")
+            return
+        self._choice = profile
+        self._unreadable.discard("choice")
 
     def _read_profiles(self) -> frozenset[str]:
         """The profile directories as they are now."""
