@@ -40,6 +40,9 @@ It is also given `signin_run.runs_for(sys.platform)` (#1026): on Linux the owner
 a code to and cancels a profile's own client login from the page (`agent_tools.console.signin_run`);
 elsewhere there are no runs and the sign-in routes refuse.
 
+It is also given `account_add.adder_for(sys.platform)` (#1027), so on Linux the owner adds an account
+from the page through `claude-account add` (`agent_tools.console.account_add`).
+
 The service keeps the console's profile choice for new sessions in `$CLAUDE_ACCOUNTS_DIR/chosen-profile`
 (else `~/.claude-accounts/chosen-profile`) and answers it on `GET /api/profile` (#1011).
 """
@@ -52,7 +55,8 @@ import sqlite3
 import sys
 import threading
 
-from agent_tools.console import inbox, manager, nudge, probe, service, signin, signin_run
+from agent_tools.console import (
+    account_add, inbox, manager, nudge, probe, service, signin, signin_run)
 from agent_tools.console.event_log import EventLogError
 from agent_tools.console.write_guard import TokenError
 
@@ -84,6 +88,7 @@ def main(argv: list[str] | None = None) -> int:
             full_listing=nudge.full_lister_for(sys.platform),
             prober=probe.prober_for(sys.platform), signin_reader=signin.reader_for(sys.platform),
             signin_runs=signin_run.runs_for(sys.platform),
+            account_adder=account_add.adder_for(sys.platform),
             choice_file=service.default_choice_file())
     except TokenError as error:
         print(f"console: page token unusable: {error}", file=sys.stderr)

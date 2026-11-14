@@ -60,7 +60,7 @@ route carries no token: it records observations and answers nothing (ADR-console
 A page write (`PAGE_WRITES`, today `POST /api/looked`, `POST /api/answer`, `POST /api/check-answer`,
 `POST /api/goal`, `POST /api/withdraw`, `POST /api/approve`, `POST /api/reply`,
 `POST /api/retry-manager`, `POST /api/message`, `POST /api/stop`, `POST /api/round-answer`, `POST /api/continue`, `POST /api/signin`,
-`POST /api/signin-code` and `POST /api/signin-cancel`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
+`POST /api/signin-code`, `POST /api/signin-cancel` and `POST /api/account-add`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
 alone and goes through one guard, `_page_write`, whatever its route. After the loopback `Host`
 check and before any body is read, exactly one `Origin` header must equal `http://<Host>` (else
 403 `text/plain` `origin refused`) and exactly one `X-Console-Token` header must equal the
@@ -125,7 +125,26 @@ waiting for the link outside the service's lock; a failed start is a `signin.act
 `failed`, one stderr line `console: signin_start_failed <profile> <kind>` and 502 `the sign-in could
 not start: <kind>`. The code route answers `204`; a write the client's input refuses is `console:
 signin_code_failed <profile> <Type>` and 502 `the code could not be passed on`, appending nothing.
-The cancel route answers `204`. The token is created once in
+The cancel route answers `204`.
+
+`POST /api/account-add` (#1027) runs the same checks with `MAX_ACCOUNT_BYTES` (4096) and
+`account_add.parse_add_request`: 400 `bad account`. Under the lock `_adding` (never `_ingest`) the
+service refuses a name `account_add.refusal` refuses, a name already listed
+(`account <name> already exists`) and, without an account adder, sign-in runs or a sign-in reader,
+every name (`adding an account is not available on this host`): one stderr line `console:
+account_add_refused <reason>` and 409 with the reason, appending nothing. It then calls the adder
+(the launcher's own add), reads the listing again, and a profile not listed is `not_listed`. A
+failed add is one stderr line `console: account_add_failed <name> <kind>` and 502 `the account could
+not be created: <kind>`, appending nothing. An added profile appends one `account.added` row
+`{"by": "owner", "profile": <name>}`, joins the service's profiles at once, and its sign-in status is
+read once (a failed read is one stderr line `console: signin_add_read_failed <profile> <kind or
+Type>` and records nothing) before the sign-in starts as the start route starts it. A sign-in that
+cannot start leaves the row and the profile, appends the start route's `failed` row and answers
+502 `the account was added; its sign-in could not start: <kind>`, with `console: signin_start_failed
+<name> <kind>`. Any other exception is `console: account_add_failed <Type>` (never its message) and
+500 `adding the account failed`. Success is `200` `application/json`
+`{"attempt": <int>, "link": <string> | null, "profile": <name>}` with the start route's attempt and
+link; no row, stderr line, view or stream frame carries the link. The token is created once in
 `page-token` beside the event log and reaches a client only inside `GET /`, where it replaces
 the slot in the page's `console-token` meta tag.
 
@@ -166,7 +185,7 @@ the prober has returned or raised. A round that escapes is one stderr line `cons
 the default dispatch's workers, so a probe still running is killed and reaped (`probe.py`'s Stop) before
 it returns, and a probe not yet started runs nothing. The service starts no client itself and opens no
 credential file: the prober,
-the sign-in reader and the sign-in runs are the only seams that run a subprocess.
+the sign-in reader, the sign-in runs and the account adder are the only seams that run a subprocess.
 
 Sign-in (#1010, ADR-console-022): with a `signin_reader` (`signin.reader_for(sys.platform)` from
 `console.py`; none elsewhere than Linux) the same probe job, under the same in-flight mark, schedule and
@@ -725,7 +744,7 @@ from urllib.parse import parse_qsl
 
 from agent_tools.claims import owner_actions
 from agent_tools.console import (
-    answer, capacity, deliveries, digest, idle, inbox, manager, nudge, probe, revive, sessions,
+    account_add, answer, capacity, deliveries, digest, idle, inbox, manager, nudge, probe, revive, sessions,
     signin, signin_run, sprints, write_guard)
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
@@ -782,11 +801,13 @@ CHECK_PATH = "/api/check-answer"
 SIGNIN_PATH = "/api/signin"
 SIGNIN_CODE_PATH = "/api/signin-code"
 SIGNIN_CANCEL_PATH = "/api/signin-cancel"
+ACCOUNT_ADD_PATH = "/api/account-add"
 PAGE_WRITES: frozenset[str] = frozenset({
     LOOKED_PATH, ANSWER_PATH, CHECK_PATH, GOAL_PATH, WITHDRAW_PATH, APPROVE_PATH, REPLY_PATH,
     RETRY_PATH, MESSAGE_PATH, STOP_PATH, ROUND_ANSWER_PATH, CONTINUE_PATH, SIGNIN_PATH,
-    SIGNIN_CODE_PATH, SIGNIN_CANCEL_PATH})
+    SIGNIN_CODE_PATH, SIGNIN_CANCEL_PATH, ACCOUNT_ADD_PATH})
 MAX_SIGNIN_BYTES = 4096
+MAX_ACCOUNT_BYTES = 4096
 SIGNIN_THREAD = "console-signin-deadline"
 SIGNIN_TICK_SECONDS = 1.0
 MAX_ANSWER_BYTES = 4096
@@ -1122,6 +1143,43 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return False
         if answer is None:
             return True
+        try:
+            self._send(200, "application/json", answer, ("Connection", "close"))
+            self.wfile.flush()
+        except OSError:
+            pass
+        return False
+
+    def _account_request(self, console: "ConsoleService") -> bool:
+        """Carry out the add-account write; it answers itself, so this is always False."""
+        body = self._json_body(MAX_ACCOUNT_BYTES)
+        if body is None:
+            return False
+        try:
+            name = account_add.parse_add_request(body)
+        except ValueError:
+            self._refuse(400, "bad account")
+            return False
+        try:
+            attempt, link = console.add_account(name)
+        except sprints.Refused as error:
+            print(f"console: account_add_refused {error}", file=sys.stderr)
+            self._refuse(409, str(error))
+            return False
+        except account_add.AddFailed as error:
+            print(f"console: account_add_failed {name} {error.kind}", file=sys.stderr)
+            self._refuse(502, f"the account could not be created: {error.kind}")
+            return False
+        except signin_run.StartFailed as error:
+            print(f"console: signin_start_failed {name} {error.kind}", file=sys.stderr)
+            self._refuse(502, f"the account was added; its sign-in could not start: {error.kind}")
+            return False
+        except Exception as error:
+            print(f"console: account_add_failed {type(error).__name__}", file=sys.stderr)
+            self._refuse(500, "adding the account failed")
+            return False
+        answer = json.dumps({"attempt": attempt, "link": link, "profile": name}, sort_keys=True,
+                            separators=(",", ":")).encode()
         try:
             self._send(200, "application/json", answer, ("Connection", "close"))
             self.wfile.flush()
@@ -1500,6 +1558,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
             if not self._signin_request(console, route):
                 return
+        elif route == ACCOUNT_ADD_PATH:
+            self.close_connection = True
+            if not self._account_request(console):
+                return
         else:
             if (self.headers.get("Content-Length", "0") != "0"
                     or self.headers.get("Transfer-Encoding") is not None):
@@ -1615,6 +1677,7 @@ class ConsoleService:
                  prober: Callable[[probe.Probe], None] | None = None,
                  signin_reader: Callable[[probe.Probe], signin.Status] | None = None,
                  signin_runs: Callable[..., signin_run.SignIns] | None = None,
+                 account_adder: Callable[[str], None] | None = None,
                  probe_dispatch: Callable[[Callable[[], None]], None] | None = None,
                  probe_tick_seconds: float = PROBE_TICK_SECONDS,
                  choice_file: Path | None = None):
@@ -1623,6 +1686,8 @@ class ConsoleService:
         self._choice = manager.read_choice(choice_file) if choice_file is not None else None
         self._prober = prober
         self._signin_reader = signin_reader
+        self._account_adder = account_adder
+        self._adding = threading.Lock()
         self._probe_dispatch = self._on_probe_thread if probe_dispatch is None else probe_dispatch
         self._probe_tick_seconds = probe_tick_seconds
         self._probe_since = clock()
@@ -2047,16 +2112,16 @@ class ConsoleService:
             self._fold(self.log.append([signin.entry(profile, status)]))
             self._publish()
 
-    def _read_signin_at_end(self, profile: str) -> signin.Status | None:
-        """The status read once a client has ended; a failed read records nothing."""
+    def _read_signin_now(self, profile: str, when: str) -> signin.Status | None:
+        """The status read at once (`when` is "end" or "add"); a failed read records nothing."""
         ticket = self._signin_ticket(profile)
         try:
             status = self._signin_reader(probe.Probe(profile, str(uuid.uuid4()), self._stop))
         except signin.StatusFailed as error:
-            print(f"console: signin_end_read_failed {profile} {error.kind}", file=sys.stderr)
+            print(f"console: signin_{when}_read_failed {profile} {error.kind}", file=sys.stderr)
             return None
         except Exception as error:
-            print(f"console: signin_end_read_failed {profile} {type(error).__name__}",
+            print(f"console: signin_{when}_read_failed {profile} {type(error).__name__}",
                   file=sys.stderr)
             return None
         self._record_signin(profile, status, ticket)
@@ -2073,7 +2138,7 @@ class ConsoleService:
         attempt = found[1]
         status = None
         if self._signin_reader is not None:
-            status = self._read_signin_at_end(profile)
+            status = self._read_signin_now(profile, "end")
         if end != "exited":
             outcome = end
         elif returncode == 0 and status is not None and status.state == "signed_in":
@@ -2119,6 +2184,27 @@ class ConsoleService:
                 attempt = self._signin_live[profile]
             self._publish()
         return attempt, runs.wait_link(profile)
+
+    def add_account(self, name: str) -> tuple[int, str | None]:
+        """Create the account through the launcher, then start its sign-in; the attempt and link."""
+        if self._account_adder is None or self._signin_runs is None or self._signin_reader is None:
+            raise sprints.Refused(account_add.UNAVAILABLE)
+        reason = account_add.refusal(name)
+        if reason is not None:
+            raise sprints.Refused(reason)
+        with self._adding:
+            if name in self._read_profiles():
+                raise sprints.Refused(account_add.already_exists(name))
+            self._account_adder(name)
+            listed = self._read_profiles()
+            if name not in listed:
+                raise account_add.AddFailed("not_listed")
+            with self._ingest:
+                self._profiles = listed
+                self._fold(self.log.append([account_add.added(name)]))
+                self._publish()
+        self._read_signin_now(name, "add")
+        return self.start_signin(name)
 
     def send_signin_code(self, profile: str, code: str) -> None:
         runs = self._signin_refuse_unless_listed(profile)
