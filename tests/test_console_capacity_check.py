@@ -40,16 +40,19 @@ def ago(seconds):
     return (datetime.now(timezone.utc) - timedelta(seconds=seconds)).isoformat()
 
 
-def view(*rows, asks=None):
+def view(*rows, asks=None, runs=None):
     """A console view; a row is `(name, read_at)` or `(name, read_at, signin)`.
 
-    `asks` is None for a view with no `inbox`, else the keys of the open sign-in items."""
+    `asks` is None for a view with no `inbox`, else the keys of the open sign-in items; `runs` is
+    the top-level `signin_runs` member, left out when None."""
     document = {"capacity": {"profiles": [
         {"profile": row[0], "read_at": row[1], **({"signin": row[2]} if len(row) > 2 else {})}
         for row in rows]}}
     if asks is not None:
         document["inbox"] = {"open": [{"reason": "signin", "key": key,
                                        "profile": key.split("/", 1)[1]} for key in asks]}
+    if runs is not None:
+        document["signin_runs"] = runs
     return document
 
 
@@ -194,6 +197,43 @@ class CapacityCheckTest(unittest.TestCase):
         for other in ("--every", "--signin"):
             with self.subTest(other=other):
                 done = subprocess.run([ROOT / WRAPPER, "--accounts", other], cwd=ROOT,
+                                      capture_output=True, text=True, timeout=60)
+                self.assertEqual(done.returncode, 2)
+                self.assertIn("not allowed with argument", done.stderr)
+
+    def test_page_signin_is_met_when_a_page_signed_in_profile_has_no_open_item(self):
+        url = serve(self, view(("work", ago(5)), asks=[],
+                               runs={"work": {"state": "signed_in", "at": ago(60)}}))
+        code, out = self.run_check("--url", url, "--page-signin")
+        self.assertEqual((code, json.loads(out)), (0, {"status": "met", "profiles": ["work"]}))
+
+    def test_page_signin_is_not_met_while_the_item_stays_open(self):
+        url = serve(self, view(("work", ago(5)), asks=["signin/work"],
+                               runs={"work": {"state": "signed_in", "at": ago(60)}}))
+        code, out = self.run_check("--url", url, "--page-signin")
+        self.assertEqual((code, json.loads(out)),
+                         (1, {"status": "not_met", "profiles": ["work"]}))
+
+    def test_page_signin_is_not_yet_without_a_page_sign_in(self):
+        for runs in ({"work": {"state": "timed_out", "at": ago(60)}}, {}):
+            with self.subTest(runs=runs):
+                url = serve(self, view(("work", ago(5)), asks=[], runs=runs))
+                code, out = self.run_check("--url", url, "--page-signin")
+                self.assertEqual((code, json.loads(out)), (75, {"status": "pending"}))
+
+    def test_page_signin_on_an_older_console_is_not_yet(self):
+        cases = [(view(("work", ago(5)), asks=[]), "not_deployed"),
+                 (view(("work", ago(5)), asks=[], runs=[]), "not_deployed"),
+                 (view(("work", ago(5)), runs={"work": {"state": "signed_in"}}), "no_inbox")]
+        for document, status in cases:
+            with self.subTest(status=status):
+                code, out = self.run_check("--url", serve(self, document), "--page-signin")
+                self.assertEqual((code, json.loads(out)), (75, {"status": status}))
+
+    def test_page_signin_is_exclusive_with_the_other_modes(self):
+        for other in ("--every", "--signin", "--accounts"):
+            with self.subTest(other=other):
+                done = subprocess.run([ROOT / WRAPPER, "--page-signin", other], cwd=ROOT,
                                       capture_output=True, text=True, timeout=60)
                 self.assertEqual(done.returncode, 2)
                 self.assertIn("not allowed with argument", done.stderr)
