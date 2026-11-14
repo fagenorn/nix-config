@@ -18,6 +18,7 @@ from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- modul
 
 ROOT = Path(__file__).resolve().parents[1]
 WRAPPER = "home/common/verify-pending/checks/console-capacity-reading"
+ABSENT = object()
 
 
 def serve(test, body, status=200):
@@ -398,6 +399,48 @@ class CapacityCheckTest(unittest.TestCase):
         for other in ("--every", "--signin", "--accounts", "--page-signin"):
             with self.subTest(other=other):
                 done = subprocess.run([ROOT / WRAPPER, "--page-add", other], cwd=ROOT,
+                                      capture_output=True, text=True, timeout=60)
+                self.assertEqual(done.returncode, 2)
+                self.assertIn("not allowed with argument", done.stderr)
+
+    def pin_check(self, view):
+        url = serve_paths(self, {"/api/state": (200, view)})
+        code, out = self.run_check("--url", url, "--pin")
+        return code, json.loads(out)
+
+    def pin_view(self, launches=ABSENT, pin=None):
+        document = {"capacity": {"profiles": []}, "pin": pin}
+        if launches is not ABSENT:
+            document["pin_launches"] = launches
+        return document
+
+    def test_pin_is_met_by_a_launch_under_the_pin_even_with_no_pin_in_force(self):
+        self.assertEqual(self.pin_check(self.pin_view(["work", "home"], pin=None)),
+                         (0, {"status": "met", "profiles": ["home", "work"]}))
+        lapsed = {"profile": "work", "in_effect": False, "reason": "out of allowance",
+                  "until": None, "instead": "home"}
+        self.assertEqual(self.pin_check(self.pin_view(["home"], pin=lapsed)),
+                         (0, {"status": "met", "profiles": ["home"]}))
+
+    def test_pin_without_a_launch_under_the_pin_is_not_yet(self):
+        pending = (75, {"status": "pending", "profiles": []})
+        self.assertEqual(self.pin_check(self.pin_view([])), pending)
+        held = {"profile": "home", "in_effect": True, "reason": None, "until": None,
+                "instead": None}
+        self.assertEqual(self.pin_check(self.pin_view([], pin=held)), pending)
+
+    def test_pin_on_a_console_without_the_member_is_not_deployed(self):
+        for name, view in (("absent", self.pin_view()), ("string", self.pin_view("home")),
+                           ("non-string member", self.pin_view(["home", 1])),
+                           ("null", self.pin_view(None))):
+            with self.subTest(name=name):
+                self.assertEqual(self.pin_check(view), (75, {"status": "not_deployed"}))
+
+    def test_pin_is_exclusive_with_the_other_modes(self):
+        for other in ("--every", "--signin", "--accounts", "--exclusion", "--page-signin",
+                      "--page-add"):
+            with self.subTest(other=other):
+                done = subprocess.run([ROOT / WRAPPER, "--pin", other], cwd=ROOT,
                                       capture_output=True, text=True, timeout=60)
                 self.assertEqual(done.returncode, 2)
                 self.assertIn("not allowed with argument", done.stderr)
