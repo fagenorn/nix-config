@@ -50,8 +50,10 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .cap-signin, .cap-no-reading, .cap-signed-out { color: var(--ov2); }
 .cap-excluded, .cap-excl { color: var(--ov2); }
 .cap-pin-mark, .cap-pin-note { color: var(--sub1); }
-.cap-toggle, .cap-pin { font: inherit; color: var(--sub1); background: none; border: 1px solid var(--s1); border-radius: 4px; padding: 0 6px; cursor: pointer; }
-.cap-toggle:disabled, .cap-pin:disabled { cursor: default; opacity: .6; }
+.cap-toggle, .cap-pin, .cap-remove, .cap-remove-send, .cap-remove-cancel { font: inherit; color: var(--sub1); background: none; border: 1px solid var(--s1); border-radius: 4px; padding: 0 6px; cursor: pointer; }
+.cap-toggle:disabled, .cap-pin:disabled, .cap-remove:disabled, .cap-remove-send:disabled, .cap-remove-cancel:disabled { cursor: default; opacity: .6; }
+.cap-remove-box { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 7px; white-space: normal; color: var(--sub1); }
+.cap-remove-name { font: inherit; color: inherit; background: none; border: 1px solid var(--s1); border-radius: 4px; padding: 0 6px; }
 
 .desk-grid { max-width: 1360px; margin: 0 auto; padding: 30px 48px 72px; display: grid; grid-template-columns: minmax(0, 1fr) 460px; column-gap: 88px; align-items: start; }
 
@@ -1032,6 +1034,101 @@ function pinControls(acct, p) {
     acct.appendChild(el("span", "fail", state.failure + state.reason));
   }
 }
+// The Remove confirmation (#1030). Its typed name lives in removeDrafts, never in the inbox's
+// drafts (renderInbox drops every drafts key that is not an open item), and renderCapacity itself
+// keeps its focus and selection across a redraw.
+const removeOpen = new Set();
+const removeDrafts = new Map();
+const removePosts = new Map();
+let removeFields = new Map();
+function removeSessionsWords(p, view) {
+  const counts = view.profile_sessions;
+  if (counts === null || typeof counts !== "object" || !Object.prototype.hasOwnProperty.call(counts, p)) return null;
+  const n = counts[p];
+  if (typeof n !== "number") return null;
+  if (n === 0) return "No session is running under " + p + ".";
+  if (n === 1) return "1 session is running under " + p + " and keeps running.";
+  return n + " sessions are running under " + p + " and keep running.";
+}
+function removeTyped(p) {
+  const draft = removeDrafts.get(p);
+  return draft === undefined ? "" : draft.value;
+}
+async function removeAccount(p) {
+  const current = removePosts.get(p);
+  if (current !== undefined && current.phase === "sending") return;
+  const typed = removeTyped(p);
+  if (typed !== p) return;
+  const state = { phase: "sending", reason: "" };
+  removePosts.set(p, state);
+  redrawCapacity();
+  let reason = null;
+  try {
+    const response = await fetch("/api/account-remove", {
+      method: "POST",
+      headers: { "X-Console-Token": token, "Content-Type": "application/json" },
+      body: JSON.stringify({profile: p, typed}),
+    });
+    if (response.status !== 204) {
+      reason = (await response.text()).trim() || "HTTP " + response.status;
+    }
+  } catch (error) {
+    console.error(error);
+    reason = "the console did not answer";
+  }
+  if (removePosts.get(p) !== state) return;
+  if (reason === null) {
+    removePosts.delete(p);
+    removeOpen.delete(p);
+    removeDrafts.delete(p);
+  } else {
+    state.phase = "failed";
+    state.reason = reason;
+  }
+  redrawCapacity();
+}
+function removeControls(acct, p, view) {
+  const name = p.profile;
+  acct.appendChild(actionButton("cap-remove", "Remove", () => {
+    removeOpen.add(name);
+    redrawCapacity();
+  }));
+  if (!removeOpen.has(name)) return;
+  const state = removePosts.get(name);
+  const sending = state !== undefined && state.phase === "sending";
+  const box = el("span", "cap-remove-box");
+  const words = removeSessionsWords(name, view);
+  if (words !== null) box.appendChild(el("span", "cap-remove-sessions", words));
+  box.appendChild(el("span", "cap-remove-note", "Type " + name + " to remove it. It is signed out first."));
+  const input = el("input", "cap-remove-name");
+  input.type = "text";
+  input.setAttribute("aria-label", "Type " + name + " to remove it");
+  input.dataset.removeDraft = name;
+  const send = actionButton("cap-remove-send", "Remove " + name, () => removeAccount(name));
+  const draft = removeDrafts.get(name);
+  if (draft !== undefined) input.value = draft.value;
+  send.disabled = sending || input.value !== name;
+  input.addEventListener("input", () => {
+    removeDrafts.set(name, { value: input.value, start: input.selectionStart, end: input.selectionEnd });
+    const now = removePosts.get(name);
+    send.disabled = (now !== undefined && now.phase === "sending") || input.value !== name;
+  });
+  removeFields.set(name, input);
+  box.appendChild(input);
+  box.appendChild(send);
+  const cancel = actionButton("cap-remove-cancel", "Cancel", () => {
+    removeOpen.delete(name);
+    removeDrafts.delete(name);
+    removePosts.delete(name);
+    redrawCapacity();
+  });
+  cancel.disabled = sending;
+  box.appendChild(cancel);
+  if (state !== undefined && state.phase === "failed") {
+    box.appendChild(el("span", "fail", "Could not remove: " + state.reason));
+  }
+  acct.appendChild(box);
+}
 function isSignin(item) {
   return item.reason === "signin";
 }
@@ -1315,6 +1412,16 @@ function outWords(p, cls) {
 function renderCapacity(view) {
   const box = document.getElementById("capacity");
   const cap = view.capacity || {profiles: []};
+  const active = document.activeElement;
+  const held = active && active.dataset && active.dataset.removeDraft !== undefined
+    ? { profile: active.dataset.removeDraft, start: active.selectionStart, end: active.selectionEnd }
+    : null;
+  const present = new Set(cap.profiles.map((p) => p.profile));
+  for (const name of [...removeOpen]) if (!present.has(name)) removeOpen.delete(name);
+  for (const store of [removeDrafts, removePosts]) {
+    for (const name of [...store.keys()]) if (!present.has(name)) store.delete(name);
+  }
+  removeFields = new Map();
   const known = (v) => v !== null && v !== undefined;
   const readings = cap.profiles.filter((p) => p.state !== "unknown" && !signedOut(p));
   const eligible = readings.filter((p) => !excludedProfile(p));
@@ -1341,6 +1448,7 @@ function renderCapacity(view) {
       acct.appendChild(el("span", "cap-signin", signinWords(p.signin)));
       exclusionControls(acct, p);
       pinControls(acct, p);
+      removeControls(acct, p, view);
       nodes.push(acct);
       continue;
     }
@@ -1369,6 +1477,7 @@ function renderCapacity(view) {
     if (words !== "") acct.appendChild(el("span", "cap-signin", words));
     exclusionControls(acct, p);
     pinControls(acct, p);
+    removeControls(acct, p, view);
     nodes.push(acct);
   }
   if (eligible.length) {
@@ -1396,6 +1505,11 @@ function renderCapacity(view) {
     nodes.push(phrase("span", "cap-pin-note", ...parts));
   }
   box.replaceChildren(...nodes);
+  const again = held === null ? undefined : removeFields.get(held.profile);
+  if (again !== undefined) {
+    again.focus();
+    again.setSelectionRange(held.start, held.end);
+  }
 }
 function renderPromoted(view) {
   const box = document.getElementById("promoted");

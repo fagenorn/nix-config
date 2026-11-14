@@ -1827,6 +1827,18 @@ class SigninViewTest(unittest.TestCase):
         bare = derive_view([state("p00", 1)], capacity=signin_capacity(home))
         self.assertEqual(bare["accounts_added"], [])
 
+    def test_the_view_counts_the_running_sessions_of_each_profile(self):
+        def under(sid, status, profile):
+            return SessionState(sid, "/srv/p00", "/srv/p00", status, None, 1, "t1", None, profile)
+
+        running = [under("s1", "working", "work"), under("s2", "working", "work"),
+                   under("s3", ENDED, "work"), under("s4", "idle", "home"),
+                   under("s5", "working", None)]
+        cap = capacity_view(["home", "work", "spare"], CapacityState({}, {}), 0.0)
+        shown = derive_view([state("p00", 1)], sessions=(s for s in running), capacity=cap)
+        self.assertEqual(shown["profile_sessions"], {"home": 1, "spare": 0, "work": 2})
+        self.assertEqual(derive_view([state("p00", 1)])["profile_sessions"], {})
+
     def test_sign_in_items_follow_progress_and_precede_questions(self):
         ask = signin_entry("spare", "signed_out", True, since="t1")
         records = {("p00", "k1"): InboxRecord(

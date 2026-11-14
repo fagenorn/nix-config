@@ -271,7 +271,7 @@ class PageTest(unittest.TestCase):
              "/api/withdraw", "/api/retry-manager", "/api/approve", "/api/reply",
              "/api/message", "/api/stop", "/api/round-answer", "/api/continue",
              "/api/exclusion", "/api/pin", "/api/signin", "/api/signin-code", "/api/signin-cancel",
-             "/api/account-add", "/api/signin-link"},
+             "/api/account-add", "/api/signin-link", "/api/account-remove"},
         )
         self.assertEqual(
             len(re.findall(r"\b(?:fetch|EventSource)\(", self.text)), len(literals)
@@ -280,7 +280,7 @@ class PageTest(unittest.TestCase):
     def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
         # A separate snapshot request can answer after a newer streamed frame
         # and render over it; the stream's first frame is already the snapshot.
-        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 25)
+        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 26)
         self.assertIsNotNone(
             re.search(r'fetch\("/api/looked",\s*\{\s*method:\s*"POST"', self.text)
         )
@@ -4671,6 +4671,137 @@ def signed_out_pair() -> dict:
         profile("default", "ok", week_left=80, next_reset="2026-11-13T05:00:00+00:00",
                 signin=si("signed_out", None)),
     ], all_out=True, resumes_at="2026-11-14T09:00:00+00:00")
+
+
+class RemovePageTest(unittest.TestCase):
+    def removal_frame(self, sessions: dict | None = None, extra: dict | None = None) -> dict:
+        return {**view([]), **(extra or {}),
+                "capacity": capacity([profile("a", "ok", week_left=65),
+                                      profile("b", "ok", week_left=30)]),
+                "profile_sessions": sessions or {}}
+
+    def opened(self, *steps) -> dict:
+        (snap,) = render([
+            START, {"frame": self.removal_frame({"a": 2})}, {"click": "cap-remove"}, *steps,
+            {"snapshot": True},
+        ])
+        return snap
+
+    def remove_node(self, snap: dict, cls: str) -> dict:
+        (found,) = [n for n in nodes(snap["capacity"]) if has_class(n, cls)]
+        return found
+
+    def test_each_account_offers_remove(self) -> None:
+        snap = capacity_snap(capacity([
+            profile("a", "ok", week_left=65),
+            profile("b", "unknown", read_at=None, signin=si("signed_out", None)),
+        ]))
+        for acct in accounts(snap):
+            (remove,) = [m for m in nodes(acct) if has_class(m, "cap-remove")]
+            self.assertEqual(full(remove), "Remove")
+
+    def test_remove_asks_for_the_typed_name_and_says_how_many_sessions_run(self) -> None:
+        for count, words in (
+            (2, "2 sessions are running under a and keep running."),
+            (1, "1 session is running under a and keeps running."),
+            (0, "No session is running under a."),
+        ):
+            with self.subTest(count=count):
+                (snap,) = render([
+                    START, {"frame": self.removal_frame({"a": count})},
+                    {"click": "cap-remove"}, {"snapshot": True},
+                ])
+                self.assertEqual(full(self.remove_node(snap, "cap-remove-sessions")), words)
+                self.assertEqual(full(self.remove_node(snap, "cap-remove-note")),
+                                 "Type a to remove it. It is signed out first.")
+                send = self.remove_node(snap, "cap-remove-send")
+                self.assertEqual(full(send), "Remove a")
+                self.assertTrue(send["disabled"])
+                name = self.remove_node(snap, "cap-remove-name")
+                self.assertEqual(name["label"], "Type a to remove it")
+
+    def test_no_count_for_the_profile_says_no_sentence(self) -> None:
+        (snap,) = render([START, {"frame": self.removal_frame({})},
+                          {"click": "cap-remove"}, {"snapshot": True}])
+        self.assertEqual([n for n in nodes(snap["capacity"])
+                          if has_class(n, "cap-remove-sessions")], [])
+
+    def test_the_send_is_enabled_only_by_the_exact_name(self) -> None:
+        for typed, disabled in (("A", True), ("a ", True), ("a", False)):
+            with self.subTest(typed=typed):
+                snap = self.opened({"type": {"class": "cap-remove-name", "text": typed}})
+                self.assertEqual(self.remove_node(snap, "cap-remove-send")["disabled"], disabled)
+
+    def test_remove_posts_the_profile_and_the_typed_name_with_the_token(self) -> None:
+        snap = self.opened({"type": {"class": "cap-remove-name", "text": "a"}},
+                           {"click": "cap-remove-send"})
+        (post,) = [p for p in snap["posts"] if p["url"] == "/api/account-remove"]
+        self.assertEqual(post["method"], "POST")
+        self.assertEqual(post["headers"],
+                         {"X-Console-Token": TOKEN, "Content-Type": "application/json"})
+        self.assertEqual(post["body"], '{"profile":"a","typed":"a"}')
+
+    def test_a_refused_removal_says_why(self) -> None:
+        snap = self.opened(
+            {"type": {"class": "cap-remove-name", "text": "a"}},
+            {"respond": {"status": 502,
+                         "text": "the account was not removed: its sign-out failed: exited\n"}},
+            {"click": "cap-remove-send"})
+        (fail,) = [n for n in nodes(snap["capacity"]) if has_class(n, "fail")]
+        self.assertEqual(full(fail), "Could not remove: the account was not removed: "
+                                     "its sign-out failed: exited")
+        self.remove_node(snap, "cap-remove-box")
+
+    def test_a_removal_closes_the_box(self) -> None:
+        snap = self.opened({"type": {"class": "cap-remove-name", "text": "a"}},
+                           {"click": "cap-remove-send"})
+        self.assertEqual([n for n in nodes(snap["capacity"])
+                          if has_class(n, "cap-remove-box")], [])
+
+    def typed_and_selected(self, *steps) -> dict:
+        frame = {**self.removal_frame({"a": 1}), "inbox": {"open": [ANSWERABLE], "answered": []}}
+        (snap,) = render([
+            START, {"frame": frame}, {"click": "cap-remove"},
+            {"type": {"class": "cap-remove-name", "text": "ab"}},
+            {"select": {"cls": "cap-remove-name", "start": 0, "end": 1}},
+            *steps,
+            {"snapshot": True},
+        ])
+        return snap
+
+    def assert_kept(self, snap: dict) -> None:
+        name = self.remove_node(snap, "cap-remove-name")
+        self.assertEqual(name["value"], "ab")
+        self.assertTrue(name["focused"])
+        self.assertEqual(name["selection"], [0, 1])
+        self.remove_node(snap, "cap-remove-box")
+
+    def test_the_typed_name_its_selection_and_focus_survive_two_frames(self) -> None:
+        first = {**self.removal_frame({"a": 1}), "inbox": {"open": [ANSWERABLE], "answered": []}}
+        second = {**first, "project_count": 1}
+        snap = self.typed_and_selected({"frame": first}, {"frame": second})
+        self.assert_kept(snap)
+
+    def test_the_typed_name_its_selection_and_focus_survive_a_local_redraw(self) -> None:
+        self.assert_kept(self.typed_and_selected({"click": "cap-toggle"}))
+
+    def test_a_profile_that_leaves_the_listing_loses_its_open_box_and_name(self) -> None:
+        gone = {**self.removal_frame(), "capacity": capacity([profile("b", "ok", week_left=30)])}
+        snap, again = render([
+            START, {"frame": self.removal_frame({"a": 1})}, {"click": "cap-remove"},
+            {"type": {"class": "cap-remove-name", "text": "a"}},
+            {"frame": gone}, {"frame": self.removal_frame({"a": 1})}, {"snapshot": True},
+            {"click": "cap-remove"}, {"snapshot": True},
+        ])
+        self.assertEqual([n for n in nodes(snap["capacity"])
+                          if has_class(n, "cap-remove-box")], [])
+        self.assertEqual(self.remove_node(again, "cap-remove-name")["value"], "")
+
+    def test_cancel_closes_the_box_and_forgets_the_name(self) -> None:
+        snap = self.opened(
+            {"type": {"class": "cap-remove-name", "text": "a"}},
+            {"click": "cap-remove-cancel"}, {"click": "cap-remove"})
+        self.assertEqual(self.remove_node(snap, "cap-remove-name")["value"], "")
 
 
 class SigninPageTest(unittest.TestCase):
