@@ -437,6 +437,19 @@ class DocsTreeTest(unittest.TestCase):
         entry = context[context.index("**Excluded profile**:"):].split("\n\n")[0]
         self.assertIn("ADR-console-023", entry)
 
+    def test_the_profile_pin_decision_is_recorded(self):
+        adr = self.doc("docs/areas/console/adr/023-a-new-sessions-profile-is-the-consoles-choice.md")
+        for needle in ("#1029", "POST /api/pin", "profile.pin", "not in effect", "include it first",
+                       "unpin it first", "CLAUDE_ACCOUNT"):
+            self.assertIn(needle, adr)
+        self.assertNotIn("Pins are a later input", adr)
+        context = self.doc("docs/areas/console/CONTEXT.md")
+        self.assertIn("**Pinned profile**:", context)
+        entry = context[context.index("**Pinned profile**:"):].split("\n\n")[0]
+        self.assertIn("ADR-console-023", entry)
+        self.assertIn("not in effect", entry)
+        self.assertIn("| Pinned profile | Console |", self.doc("docs/CONTEXT-MAP.md"))
+
     def test_the_console_page_signin_decision_is_recorded(self):
         path = "docs/areas/console/adr/024-the-owner-signs-a-profile-in-from-the-page.md"
         first = (REPO_ROOT / path).read_text().splitlines()[0]

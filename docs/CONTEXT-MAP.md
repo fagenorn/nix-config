@@ -70,6 +70,7 @@
 | Outside sprints | Console |
 | Owner prompt | Verification |
 | Owner-action marker | Claims |
+| Pinned profile | Console |
 | Plan-gated floor | Guard |
 | Platform manifest | Project contract |
 | Prefix reorder | Hosts |
