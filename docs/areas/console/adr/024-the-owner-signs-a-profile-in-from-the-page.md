@@ -1,0 +1,33 @@
+# ADR-console-024 — The owner signs a profile in from the page
+
+- **Status:** accepted
+- **Decided in:** #842, #1026
+
+## Context
+
+ADR-console-022 made a signed-out profile, or one whose sign-in ends within three days, one inbox item, and its remedy was a terminal command for the owner to copy and run. #842 decided that the owner signs in from the page instead: the console runs the client's own sign-in, shows its link, and takes the code the browser then shows. The reading of ADR-console-022 stays the only thing that says whether a profile is signed in, and the console still opens no credential file.
+
+## Decision
+
+**D1. The action and the three page writes.** The sign-in item carries a Sign in action. The page makes three writes, each a member of `PAGE_WRITES` under the guard of ADR-console-008: `POST /api/signin` starts a profile's sign-in, `POST /api/signin-code` passes the code to the running client, and `POST /api/signin-cancel` ends the run. Each carries one `application/json` body of at most 4096 bytes naming the profile (the code write adds the code). A body that is not the expected object is `400 bad sign-in`, `400 bad code` or `400 bad cancel`; a refusal on its merits is `409` with the reason. The start alone answers `200` with a body, `{"attempt": <int>, "link": <string> | null}`; the code and the cancel answer an empty `204`.
+
+**D2. The run.** The console runs `claude-account run auth login` with `CLAUDE_ACCOUNT=<profile>`, with no terminal (the pseudo-terminal only if the host finding of D4 had required it), in its own process group, within the environment of ADR-console-022 D1: the inherited base URL, key and token are removed and `CLAUDE_CACHE_PROXY=0` is set. The client's own login answers; the console reads and writes no credential.
+
+**D3. The link.** `BROWSER` is pointed at a script in the run's private directory that writes its first argument into a FIFO beside it, and the console reads that FIFO. A link is accepted only when it starts with `https://`, is at most 4096 characters long and has only printable characters; any other line is dropped, with one stderr line that names the profile and no part of the line. The link appears in the start answer alone, after a wait of at most 15 seconds, or less if the run ends first; it is in no other answer, view or frame. The page holds it in memory, as the link and the attempt that produced it, and drops it when the newest view shows that attempt ended, or a newer attempt: never by waiting for a `running` frame, because a stream reader may see only the newest view and so never sees one.
+
+**D4. The code field and the host finding.** The client reads the code that the browser shows the owner from its standard input. On anis-desktop, on 2026-11-13, with client 2.1.322, each run under a throwaway configuration directory: the run saw the link and a return address of `http://localhost:<port>/callback`; a control run with nothing written stayed alive and silent on a pipe and on a pseudo-terminal; a written line (a made-up code and the line ending) was read and rejected on both, the client reacting with a rejection and staying alive, and neither complained of a missing terminal. Both modes read the code, so the console writes the code and a newline to a pipe: no terminal, no output to drain. The pseudo-terminal mode, which takes a carriage return that its default mode turns into a newline, stays as a fallback should a later client stop reading a pipe. A code is 1 to 512 printable characters.
+
+**D5. One sign-in per profile.** A profile has at most one run. A second press while one runs starts nothing and shows the running one, answering its attempt and link. Cancel is offered whenever a run is running. A run ends when the client exits, on Cancel, or at the deadline of 600 seconds, counted by a timer in the service. Every end kills the whole process group, so the listening port is released, removes the run's directory, and offers the action again.
+
+**D6. The end.** When the client exits the console reads the profile's status at once, by the reader of ADR-console-022, and the outcome is `signed_in` only when the exit status was 0 and that read says signed in, `failed` otherwise, `timed_out` for the deadline and `cancelled` for Cancel. Every status read of a profile takes a ticket, and a reading older than one already recorded is dropped, so a scheduled read that finishes after the exit read never overwrites it. An end read that fails records nothing, one stderr line aside, so an unsuccessful run's item and its action stay; a later scheduled failed read still records `unknown` by ADR-console-022 D5.
+
+**D7. What is stored.** An accepted write appends one `signin.acted` row with exactly `by` (`owner`), the profile, the action (`start`, `code` or `cancel`) and its outcome (`started`, `running` or `failed` for a start, `sent`, `cancelled`); a refusal appends none. A run's end appends one `signin.ended` row with exactly the profile, the outcome and the `attempt`, the sequence number of the run's start row; the view shows the folded end of each profile. No link or code is in any row, stderr line, view, stream frame, fixture or tracker. This amends ADR-console-022 D4: the item's remedy is the Sign in action, not the command.
+
+**D8. The page.** This amends ADR-console-002. The sign-in card carries the Sign in action instead of a terminal command and, while a sign-in runs, its link, a field for the code and Cancel. The code field is a third typed thing, beside a brief's reply and a manual check's note, and its draft, selection and focus survive every frame. The sign-in link is the page's second kind of link, beside the tracker link.
+
+## Consequences
+
+- A signed-out profile is fixed from the page, with no terminal.
+- The console starts a second kind of client, the sign-in, besides the launcher and the status reader; both stay under the secrecy of D7.
+- Sign-in from the page is on Linux only. The macOS half is held on #894.
+- Related: ADR-console-002 (the page rules), ADR-console-008 (the page writes), ADR-console-022 (the sign-in reading).
