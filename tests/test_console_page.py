@@ -6111,6 +6111,18 @@ class PanelSigninPageTest(unittest.TestCase):
         (code,) = of_class(sign_in_card(after), "input", "signin-code")
         self.assertEqual(code["value"], "ab#C")
 
+    def test_a_keyboard_code_send_or_cancel_keeps_the_focus_while_it_posts(self) -> None:
+        steps, _ = self._running_in_panel()
+        for cls, url in (("signin-send", "/api/signin-code"), ("signin-cancel", "/api/signin-cancel")):
+            for extra in ([], [{"click": cls}]):
+                with self.subTest(cls=cls, second_click=bool(extra)):
+                    (snap,) = render([
+                        *steps, {"type": {"class": "signin-code", "text": "abc"}}, {"focus_on": cls},
+                        {"hold": True}, {"click": cls}, *extra, {"snapshot": True}])
+                    (kept,) = [n for n in nodes(panel(snap)) if n["focused"]]
+                    self.assertIn(cls, kept["cls"].split())
+                    self.assertEqual(len([p for p in snap["posts"] if p["url"] == url]), 1)
+
     def test_escape_from_a_typed_code_leaves_no_field_focused(self) -> None:
         steps, _ = self._running_in_panel()
         typing, closed = render([

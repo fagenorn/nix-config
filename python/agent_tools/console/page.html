@@ -1326,10 +1326,14 @@ function signinAct(item, quiet = false) {
       () => signinPost(item, "code", "Could not send the code: ", () => fetch("/api/signin-code", {
         method: "POST", headers: stallHeaders(), body: signinBody(item, input.value.trim()),
       })));
-    act.appendChild(draftField(input, stateId(item) + "\nsignin-code", (value) => {
-      send.disabled = value.trim() === "" || (sendingCode !== undefined && sendingCode.phase === "sending");
-    }));
-    send.disabled = input.value.trim() === "" || (sendingCode !== undefined && sendingCode.phase === "sending");
+    // The panel's Send code stays focusable while its request is sending (aria-disabled): signinPost ignores a second click.
+    const sending = sendingCode !== undefined && sendingCode.phase === "sending";
+    const lock = (value) => {
+      send.disabled = value.trim() === "" || (sending && !quiet);
+      if (sending && quiet) send.setAttribute("aria-disabled", "true");
+    };
+    act.appendChild(draftField(input, stateId(item) + "\nsignin-code", lock));
+    lock(input.value);
     act.appendChild(send);
   }
   if ((run !== null && run.state === "running") || held !== undefined) {
@@ -1337,7 +1341,10 @@ function signinAct(item, quiet = false) {
       () => signinPost(item, "cancel", "Could not cancel: ", () => fetch("/api/signin-cancel", {
         method: "POST", headers: stallHeaders(), body: signinBody(item),
       })));
-    if (cancelling !== undefined && cancelling.phase === "sending") cancel.setAttribute("disabled", "");
+    if (cancelling !== undefined && cancelling.phase === "sending") {
+      // The panel's Cancel stays focusable (aria-disabled) so renderAccounts can restore the focus to it.
+      cancel.setAttribute(quiet ? "aria-disabled" : "disabled", quiet ? "true" : "");
+    }
     act.appendChild(cancel);
   }
   for (const state of [starting, sendingCode, cancelling]) {
