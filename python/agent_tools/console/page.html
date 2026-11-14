@@ -37,7 +37,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .top-in { max-width: 1360px; margin: 0 auto; padding: 8px 48px; display: flex; align-items: center; gap: 28px; min-height: 56px; }
 .brand { font-weight: 600; color: var(--sub1); white-space: nowrap; letter-spacing: -.005em; }
 .conn { color: var(--ov2); font-size: .8125rem; }
-.cap { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; margin-left: auto; min-width: 0; max-width: 100%; font-size: .8125rem; color: var(--sub0); }
+.cap { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; margin-left: auto; min-width: 0; max-width: 100%; padding: 0; background: none; border: 0; font: inherit; font-size: .8125rem; color: var(--sub0); text-align: left; cursor: pointer; }
 .cap-state { display: inline-flex; align-items: center; gap: 7px; font-weight: 600; }
 .cap-fine { color: var(--green); }
 .cap-tight { color: var(--yellow); }
@@ -50,10 +50,22 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .cap-signin, .cap-no-reading, .cap-signed-out { color: var(--ov2); }
 .cap-excluded, .cap-excl { color: var(--ov2); }
 .cap-pin-mark, .cap-pin-note { color: var(--sub1); }
-.cap-toggle, .cap-pin, .cap-remove, .cap-remove-send, .cap-remove-cancel { font: inherit; color: var(--sub1); background: none; border: 1px solid var(--s1); border-radius: 4px; padding: 0 6px; cursor: pointer; }
-.cap-toggle:disabled, .cap-pin:disabled, .cap-remove:disabled, .cap-remove-send:disabled, .cap-remove-cancel:disabled { cursor: default; opacity: .6; }
-.cap-remove-box { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 4px 7px; white-space: normal; color: var(--sub1); }
-.cap-remove-name { font: inherit; color: inherit; background: none; border: 1px solid var(--s1); border-radius: 4px; padding: 0 6px; }
+.acct-toggle, .acct-pin, .acct-remove, .acct-remove-send, .acct-remove-cancel, .acct-close { font: inherit; color: var(--sub1); background: none; border: 1px solid var(--s1); border-radius: 4px; padding: 0 6px; cursor: pointer; }
+.acct-toggle:disabled, .acct-pin:disabled, .acct-remove:disabled, .acct-remove-send:disabled, .acct-remove-cancel:disabled, .acct-close:disabled { cursor: default; opacity: .6; }
+.acct-panel { position: absolute; top: calc(100% + 6px); right: 16px; z-index: 20; width: min(600px, calc(100vw - 32px)); max-height: calc(100vh - 6rem); overflow-y: auto; padding: 12px 16px; background: var(--base); border: 1px solid var(--s1); border-radius: 12px; box-shadow: 0 28px 48px -24px rgba(8, 9, 16, .9); font-size: .84375rem; color: var(--sub0); }
+.acct-panel[hidden] { display: none; }
+.acct-panel:focus-visible { outline: none; }
+.acct-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 4px; }
+.acct-rows { list-style: none; }
+.acct-row { padding: 10px 0; border-top: 1px solid var(--hair); }
+.acct-row:first-child { border-top: 0; }
+.acct-name { display: inline-block; max-width: 16rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; margin-right: 8px; font-weight: 600; color: var(--sub1); }
+.acct-excl, .acct-pin-mark { margin-right: 8px; color: var(--ov2); }
+.acct-detail { display: flex; flex-wrap: wrap; gap: 2px 14px; margin-top: 2px; font-size: .8125rem; color: var(--sub0); }
+.acct-act { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin-top: 6px; font-size: .8125rem; }
+.acct-remove-box { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 7px; margin-top: 6px; font-size: .8125rem; color: var(--sub1); }
+.acct-remove-name { font: inherit; color: inherit; background: none; border: 1px solid var(--s1); border-radius: 4px; padding: 0 6px; }
+.acct-pin-note { margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--hair); font-size: .8125rem; color: var(--sub1); }
 
 .desk-grid { max-width: 1360px; margin: 0 auto; padding: 30px 48px 72px; display: grid; grid-template-columns: minmax(0, 1fr) 460px; column-gap: 88px; align-items: start; }
 
@@ -297,7 +309,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 </style>
 </head>
 <body>
-<header class="top"><div class="top-in"><span class="brand">Console</span><div class="goal-bar" id="goal" role="group" aria-label="Goal"></div><span class="cap" id="capacity"></span><div class="account-add" id="account-add" role="group" aria-label="Add account"></div><span class="conn" id="conn" role="status">Reconnecting…</span></div></header>
+<header class="top"><div class="top-in"><span class="brand">Console</span><div class="goal-bar" id="goal" role="group" aria-label="Goal"></div><button type="button" class="cap" id="capacity" aria-haspopup="dialog" aria-controls="accounts" aria-expanded="false" aria-keyshortcuts="a" title="Accounts (a)"></button><div class="account-add" id="account-add" role="group" aria-label="Add account"></div><span class="conn" id="conn" role="status">Reconnecting…</span></div><section class="acct-panel" id="accounts" role="dialog" aria-label="Accounts" tabindex="-1" hidden><div class="acct-body" id="accounts-body"></div></section></header>
 <div class="desk-grid">
 <main>
 <div class="statement" id="statement"></div>
@@ -955,7 +967,7 @@ async function toggleExclusion(p) {
   const excluded = !excludedProfile(p);
   const state = { phase: "sending", reason: "", failure: excluded ? "Could not exclude: " : "Could not include: " };
   exclusionPosts.set(p.profile, state);
-  redrawCapacity();
+  redrawAccounts();
   let reason = null;
   try {
     const response = await fetch("/api/exclusion", {
@@ -976,15 +988,17 @@ async function toggleExclusion(p) {
     state.phase = "failed";
     state.reason = reason;
   }
-  redrawCapacity();
+  redrawAccounts();
 }
-function redrawCapacity() {
-  if (lastView !== null) renderCapacity(lastView);
+function redrawAccounts() {
+  if (lastView === null) return;
+  renderCapacity(lastView);
+  renderAccounts(lastView);
 }
 function exclusionControls(acct, p) {
   const state = exclusionPosts.get(p.profile);
   const sending = state !== undefined && state.phase === "sending";
-  const toggle = actionButton("cap-toggle", excludedProfile(p) ? "Include" : "Exclude", () => toggleExclusion(p));
+  const toggle = actionButton("acct-toggle", excludedProfile(p) ? "Include" : "Exclude", () => toggleExclusion(p));
   toggle.disabled = sending;
   acct.appendChild(toggle);
   if (state !== undefined && state.phase === "failed") {
@@ -1001,7 +1015,7 @@ async function togglePin(p) {
   const pinned = !pinnedProfile(p);
   const state = { phase: "sending", reason: "", failure: pinned ? "Could not pin: " : "Could not unpin: " };
   pinPosts.set(p.profile, state);
-  redrawCapacity();
+  redrawAccounts();
   let reason = null;
   try {
     const response = await fetch("/api/pin", {
@@ -1022,12 +1036,12 @@ async function togglePin(p) {
     state.phase = "failed";
     state.reason = reason;
   }
-  redrawCapacity();
+  redrawAccounts();
 }
 function pinControls(acct, p) {
   const state = pinPosts.get(p.profile);
   const sending = state !== undefined && state.phase === "sending";
-  const toggle = actionButton("cap-pin", pinnedProfile(p) ? "Unpin" : "Pin", () => togglePin(p));
+  const toggle = actionButton("acct-pin", pinnedProfile(p) ? "Unpin" : "Pin", () => togglePin(p));
   toggle.disabled = sending;
   acct.appendChild(toggle);
   if (state !== undefined && state.phase === "failed") {
@@ -1035,7 +1049,7 @@ function pinControls(acct, p) {
   }
 }
 // The Remove confirmation (#1030). Its typed name lives in removeDrafts, never in the inbox's
-// drafts (renderInbox drops every drafts key that is not an open item), and renderCapacity itself
+// drafts (renderInbox drops every drafts key that is not an open item), and renderAccounts itself
 // keeps its focus and selection across a redraw.
 const removeOpen = new Set();
 const removeDrafts = new Map();
@@ -1061,7 +1075,7 @@ async function removeAccount(p) {
   if (typed !== p) return;
   const state = { phase: "sending", reason: "" };
   removePosts.set(p, state);
-  redrawCapacity();
+  redrawAccounts();
   let reason = null;
   try {
     const response = await fetch("/api/account-remove", {
@@ -1085,26 +1099,26 @@ async function removeAccount(p) {
     state.phase = "failed";
     state.reason = reason;
   }
-  redrawCapacity();
+  redrawAccounts();
 }
-function removeControls(acct, p, view) {
+function removeControls(act, row, p, view) {
   const name = p.profile;
-  acct.appendChild(actionButton("cap-remove", "Remove", () => {
+  act.appendChild(actionButton("acct-remove", "Remove", () => {
     removeOpen.add(name);
-    redrawCapacity();
+    redrawAccounts();
   }));
   if (!removeOpen.has(name)) return;
   const state = removePosts.get(name);
   const sending = state !== undefined && state.phase === "sending";
-  const box = el("span", "cap-remove-box");
+  const box = el("div", "acct-remove-box");
   const words = removeSessionsWords(name, view);
-  if (words !== null) box.appendChild(el("span", "cap-remove-sessions", words));
-  box.appendChild(el("span", "cap-remove-note", "Type " + name + " to remove it. It is signed out first."));
-  const input = el("input", "cap-remove-name");
+  if (words !== null) box.appendChild(el("span", "acct-remove-sessions", words));
+  box.appendChild(el("span", "acct-remove-note", "Type " + name + " to remove it. It is signed out first."));
+  const input = el("input", "acct-remove-name");
   input.type = "text";
   input.setAttribute("aria-label", "Type " + name + " to remove it");
   input.dataset.removeDraft = name;
-  const send = actionButton("cap-remove-send", "Remove " + name, () => removeAccount(name));
+  const send = actionButton("acct-remove-send", "Remove " + name, () => removeAccount(name));
   const draft = removeDrafts.get(name);
   if (draft !== undefined) input.value = draft.value;
   send.disabled = sending || input.value !== name;
@@ -1116,18 +1130,18 @@ function removeControls(acct, p, view) {
   removeFields.set(name, input);
   box.appendChild(input);
   box.appendChild(send);
-  const cancel = actionButton("cap-remove-cancel", "Cancel", () => {
+  const cancel = actionButton("acct-remove-cancel", "Cancel", () => {
     removeOpen.delete(name);
     removeDrafts.delete(name);
     removePosts.delete(name);
-    redrawCapacity();
+    redrawAccounts();
   });
   cancel.disabled = sending;
   box.appendChild(cancel);
   if (state !== undefined && state.phase === "failed") {
     box.appendChild(el("span", "fail", "Could not remove: " + state.reason));
   }
-  acct.appendChild(box);
+  row.appendChild(box);
 }
 function isSignin(item) {
   return item.reason === "signin";
@@ -1412,16 +1426,6 @@ function outWords(p, cls) {
 function renderCapacity(view) {
   const box = document.getElementById("capacity");
   const cap = view.capacity || {profiles: []};
-  const active = document.activeElement;
-  const held = active && active.dataset && active.dataset.removeDraft !== undefined
-    ? { profile: active.dataset.removeDraft, start: active.selectionStart, end: active.selectionEnd }
-    : null;
-  const present = new Set(cap.profiles.map((p) => p.profile));
-  for (const name of [...removeOpen]) if (!present.has(name)) removeOpen.delete(name);
-  for (const store of [removeDrafts, removePosts]) {
-    for (const name of [...store.keys()]) if (!present.has(name)) store.delete(name);
-  }
-  removeFields = new Map();
   const known = (v) => v !== null && v !== undefined;
   const readings = cap.profiles.filter((p) => p.state !== "unknown" && !signedOut(p));
   const eligible = readings.filter((p) => !excludedProfile(p));
@@ -1446,9 +1450,6 @@ function renderCapacity(view) {
       if (excludedProfile(p)) acct.appendChild(el("span", "cap-excl", "excluded"));
       if (pinnedProfile(p)) acct.appendChild(el("span", "cap-pin-mark", "pinned"));
       acct.appendChild(el("span", "cap-signin", signinWords(p.signin)));
-      exclusionControls(acct, p);
-      pinControls(acct, p);
-      removeControls(acct, p, view);
       nodes.push(acct);
       continue;
     }
@@ -1475,9 +1476,6 @@ function renderCapacity(view) {
     else acct.appendChild(el("span", "cap-pc", known(p.week_left) ? p.week_left + "%" : "week unknown"));
     const words = signinWords(p.signin);
     if (words !== "") acct.appendChild(el("span", "cap-signin", words));
-    exclusionControls(acct, p);
-    pinControls(acct, p);
-    removeControls(acct, p, view);
     nodes.push(acct);
   }
   if (eligible.length) {
@@ -1496,21 +1494,102 @@ function renderCapacity(view) {
     nodes.push(el("span", "cap-none", "every profile excluded"));
   }
   if (cap.no_reading) nodes.push(el("span", "cap-none", cap.no_reading));
+  box.replaceChildren(...nodes);
+}
+// The accounts panel (#1039): one row per capacity profile with its details and the exclude, pin
+// and remove controls. It draws only while open and holds nothing while closed.
+let accountsOpen = false;
+let accountsReturn = null;
+function accountRow(p, view) {
+  const known = (v) => v !== null && v !== undefined;
+  const name = p.profile;
+  const row = el("li", "acct-row" + (excludedProfile(p) ? " acct-excluded" : "") + (pinnedProfile(p) ? " acct-pinned" : ""));
+  const who = el("b", "acct-name", name);
+  who.setAttribute("title", name);
+  row.appendChild(who);
+  if (excludedProfile(p)) row.appendChild(el("span", "acct-excl", "excluded"));
+  if (pinnedProfile(p)) row.appendChild(el("span", "acct-pin-mark", "pinned"));
+  const detail = el("p", "acct-detail");
+  const out = p.state === "out";
+  if (signedOut(p)) detail.appendChild(el("span", "acct-week", "signed out"));
+  else if (p.state === "unknown") detail.appendChild(el("span", "acct-week", "no reading yet"));
+  else if (out) detail.appendChild(outWords(p, "acct-week"));
+  else if (p.state === "reset") detail.appendChild(el("span", "acct-week", "reset, not yet used"));
+  else detail.appendChild(el("span", "acct-week", known(p.week_left) ? p.week_left + "% of the week left" : "week unknown"));
+  if (known(p.five_hour_left)) detail.appendChild(el("span", "acct-five", p.five_hour_left + "% of 5 hours"));
+  if (known(p.next_reset) && !out && Number.isFinite(Date.parse(p.next_reset))) {
+    detail.appendChild(phrase("span", "acct-reset", "resets ", timeEl("weekday", p.next_reset, "")));
+  }
+  const words = signinWords(p.signin);
+  if (words !== "") detail.appendChild(el("span", "acct-signin-words", words));
+  row.appendChild(detail);
+  const act = el("div", "acct-act");
+  row.appendChild(act);
+  exclusionControls(act, p);
+  pinControls(act, p);
+  removeControls(act, row, p, view);
+  return row;
+}
+function renderAccounts(view) {
+  const panel = document.getElementById("accounts");
+  const body = document.getElementById("accounts-body");
+  const cap = view.capacity || {profiles: []};
+  const present = new Set(cap.profiles.map((p) => p.profile));
+  for (const name of [...removeOpen]) if (!present.has(name)) removeOpen.delete(name);
+  for (const store of [removeDrafts, removePosts]) {
+    for (const name of [...store.keys()]) if (!present.has(name)) store.delete(name);
+  }
+  panel.hidden = !accountsOpen;
+  document.getElementById("capacity").setAttribute("aria-expanded", accountsOpen ? "true" : "false");
+  if (!accountsOpen) {
+    body.replaceChildren();
+    return;
+  }
+  const active = document.activeElement;
+  const held = active && active.dataset && active.dataset.removeDraft !== undefined
+    ? { profile: active.dataset.removeDraft, start: active.selectionStart, end: active.selectionEnd }
+    : null;
+  removeFields = new Map();
+  const head = el("div", "acct-head");
+  head.appendChild(el("h2", "sec-h", "Accounts"));
+  head.appendChild(actionButton("acct-close", "Close", closeAccounts));
+  const list = el("ul", "acct-rows");
+  for (const p of cap.profiles) list.appendChild(accountRow(p, view));
+  const parts = [head, list];
   const pin = view.pin;
   if (pin !== null && typeof pin === "object" && pin.in_effect === false) {
-    const parts = [pin.profile + " is pinned but not in effect: " + pin.reason];
-    if (Number.isFinite(Date.parse(pin.until))) parts.push(" until ", timeEl("weekday", pin.until, ""));
-    parts.push(". " + (typeof pin.instead === "string" ? "New sessions use " + pin.instead + "."
+    const note = [pin.profile + " is pinned but not in effect: " + pin.reason];
+    if (Number.isFinite(Date.parse(pin.until))) note.push(" until ", timeEl("weekday", pin.until, ""));
+    note.push(". " + (typeof pin.instead === "string" ? "New sessions use " + pin.instead + "."
       : "New sessions have no profile to use."));
-    nodes.push(phrase("span", "cap-pin-note", ...parts));
+    parts.push(phrase("p", "acct-pin-note", ...note));
   }
-  box.replaceChildren(...nodes);
+  body.replaceChildren(...parts);
   const again = held === null ? undefined : removeFields.get(held.profile);
   if (again !== undefined) {
     again.focus();
     again.setSelectionRange(held.start, held.end);
   }
 }
+function openAccounts() {
+  if (lastView === null) return;
+  accountsReturn = document.activeElement;
+  accountsOpen = true;
+  renderAccounts(lastView);
+  document.getElementById("accounts").focus();
+}
+function closeAccounts() {
+  accountsOpen = false;
+  if (lastView !== null) renderAccounts(lastView);
+  const back = accountsReturn;
+  accountsReturn = null;
+  const target = back !== null && back !== document.body && back.isConnected ? back : document.getElementById("capacity");
+  target.focus();
+}
+document.getElementById("capacity").addEventListener("click", () => {
+  if (accountsOpen) closeAccounts();
+  else openAccounts();
+});
 function renderPromoted(view) {
   const box = document.getElementById("promoted");
   const cap = view.capacity || {profiles: []};
@@ -2945,6 +3024,7 @@ function render(view) {
   renderPromoted(view);
   renderAccountAdd(view);
   renderInbox(view);
+  renderAccounts(view);
   renderDigest(view);
   renderProjects(view);
   renderUnmanaged(view);
@@ -2974,6 +3054,13 @@ window.addEventListener("pagehide", endHold);
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") endHold(); });
 document.addEventListener("keydown", (event) => {
   if (event.ctrlKey || event.altKey || event.metaKey || event.repeat || lastView === null) return;
+  if (accountsOpen) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeAccounts();
+    }
+    return;
+  }
   if (event.key === "Escape") {
     let undone = false;
     for (const state of answers.values()) {
@@ -2994,6 +3081,11 @@ document.addEventListener("keydown", (event) => {
   const focused = event.target && event.target.tagName;
   if (["A", "BUTTON", "SUMMARY", "INPUT", "TEXTAREA", "SELECT"].includes(focused)) return;
   if (event.target && event.target.isContentEditable === true) return;
+  if (event.key === "a") {
+    openAccounts();
+    event.preventDefault();
+    return;
+  }
   if (event.key === "g") {
     openGoal();
     event.preventDefault();

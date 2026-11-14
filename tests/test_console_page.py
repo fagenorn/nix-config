@@ -12,7 +12,9 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from agent_tools.console import capacity as console_capacity
 from agent_tools.console import digest as console_digest
+from agent_tools.console import signin as console_signin
 from agent_tools.console.event_log import Event
 from agent_tools.console.sprints import MAX_REPORT_ISSUES
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
@@ -938,149 +940,6 @@ class CapacityPageTest(unittest.TestCase):
         self.assertEqual([n for n in strip(both) if has_class(n, "cap-when")], [])
         self.assertEqual(full(both["promoted"]).count("out, reset unknown"), 2)
         self.assertNotIn("Resumes ", full(both["statement"]))
-
-    def test_each_account_offers_one_toggle_named_for_its_action(self) -> None:
-        snap = capacity_snap(capacity([
-            profile("a", "ok", week_left=65, excluded=True),
-            profile("b", "ok", week_left=30, excluded=False),
-            profile("c", "unknown", excluded=True),
-        ]))
-        a, b, c = accounts(snap)
-        self.assertTrue(has_class(a, "cap-excluded"))
-        self.assertTrue(has_class(c, "cap-excluded"))
-        self.assertFalse(has_class(b, "cap-excluded"))
-        toggles = []
-        for n in (a, b, c):
-            (toggle,) = [m for m in nodes(n) if has_class(m, "cap-toggle")]
-            toggles.append(full(toggle))
-        self.assertEqual(toggles, ["Include", "Exclude", "Include"])
-        for n in (a, c):
-            (mark,) = [m for m in nodes(n) if has_class(m, "cap-excl")]
-            self.assertEqual(full(mark), "excluded")
-        self.assertEqual([m for m in nodes(b) if has_class(m, "cap-excl")], [])
-        self.assertEqual(bar(a), "65%")
-
-    def test_the_toggle_posts_one_exclusion_with_the_token(self) -> None:
-        for first, body in (
-            (profile("a", "ok", week_left=65, excluded=True), {"profile": "a", "excluded": False}),
-            (profile("b", "ok", week_left=30, excluded=False), {"profile": "b", "excluded": True}),
-        ):
-            (snap,) = render([
-                START,
-                {"frame": {**view([]), "capacity": capacity([first])}},
-                {"click": "cap-toggle"},
-                {"snapshot": True},
-            ])
-            (post,) = [p for p in snap["posts"] if p["url"] == "/api/exclusion"]
-            self.assertEqual(post["method"], "POST")
-            self.assertEqual(post["headers"],
-                             {"X-Console-Token": TOKEN, "Content-Type": "application/json"})
-            self.assertEqual(json.loads(post["body"]), body)
-
-    def test_a_refused_toggle_says_why(self) -> None:
-        (snap,) = render([
-            START,
-            {"frame": {**view([]), "capacity": capacity([
-                profile("a", "ok", week_left=65, excluded=True)])}},
-            {"respond": {"status": 409, "text": "no such profile\n"}},
-            {"click": "cap-toggle"},
-            {"snapshot": True},
-        ])
-        (fail,) = [n for n in nodes(snap["capacity"]) if has_class(n, "fail")]
-        self.assertEqual(full(fail), "Could not include: no such profile")
-
-    def test_each_account_offers_pin_and_the_pinned_one_unpin(self) -> None:
-        snap = capacity_snap(capacity([
-            profile("a", "ok", week_left=65, pinned=True),
-            profile("b", "ok", week_left=30, pinned=False),
-        ]))
-        a, b = accounts(snap)
-        labels = []
-        for n in (a, b):
-            (pin,) = [m for m in nodes(n) if has_class(m, "cap-pin")]
-            labels.append(full(pin))
-        self.assertEqual(labels, ["Unpin", "Pin"])
-        self.assertTrue(has_class(a, "cap-pinned"))
-        self.assertFalse(has_class(b, "cap-pinned"))
-        (mark,) = [m for m in nodes(a) if has_class(m, "cap-pin-mark")]
-        self.assertEqual(full(mark), "pinned")
-        self.assertEqual([m for m in nodes(b) if has_class(m, "cap-pin-mark")], [])
-
-    def test_a_pinned_profile_with_no_reading_is_listed(self) -> None:
-        snap = capacity_snap(capacity([profile("c", "unknown", read_at=None, pinned=True)]))
-        (c,) = accounts(snap)
-        (pin,) = [m for m in nodes(c) if has_class(m, "cap-pin")]
-        self.assertEqual(full(pin), "Unpin")
-
-    def test_the_pin_button_posts_one_pin_with_the_token(self) -> None:
-        for first, body in (
-            (profile("a", "ok", week_left=65, pinned=True), {"profile": "a", "pinned": False}),
-            (profile("b", "ok", week_left=30, pinned=False), {"profile": "b", "pinned": True}),
-        ):
-            (snap,) = render([
-                START,
-                {"frame": {**view([]), "capacity": capacity([first])}},
-                {"click": "cap-pin"},
-                {"snapshot": True},
-            ])
-            (post,) = [p for p in snap["posts"] if p["url"] == "/api/pin"]
-            self.assertEqual(post["method"], "POST")
-            self.assertEqual(post["headers"],
-                             {"X-Console-Token": TOKEN, "Content-Type": "application/json"})
-            self.assertEqual(json.loads(post["body"]), body)
-
-    def test_a_refused_pin_says_why(self) -> None:
-        (snap,) = render([
-            START,
-            {"frame": {**view([]), "capacity": capacity([
-                profile("a", "ok", week_left=65, excluded=True, pinned=False)])}},
-            {"respond": {"status": 409, "text": "excluded; include it first\n"}},
-            {"click": "cap-pin"},
-            {"snapshot": True},
-        ])
-        (fail,) = [n for n in nodes(snap["capacity"]) if has_class(n, "fail")]
-        self.assertEqual(full(fail), "Could not pin: excluded; include it first")
-
-    def test_a_refused_unpin_says_why(self) -> None:
-        (snap,) = render([
-            START,
-            {"frame": {**view([]), "capacity": capacity([
-                profile("a", "ok", week_left=65, pinned=True)])}},
-            {"respond": {"status": 500, "text": "could not write\n"}},
-            {"click": "cap-pin"},
-            {"snapshot": True},
-        ])
-        (fail,) = [n for n in nodes(snap["capacity"]) if has_class(n, "fail")]
-        self.assertEqual(full(fail), "Could not unpin: could not write")
-
-    def test_the_strip_says_when_the_pin_is_not_in_effect(self) -> None:
-        cap = capacity([
-            profile("a", "out", out_until="2026-11-20T09:30:00+00:00", pinned=True),
-            profile("b", "ok", week_left=30, pinned=False),
-        ])
-
-        def last(pin: dict | None) -> dict:
-            frame = {**view([]), "capacity": cap}
-            if pin is not None:
-                frame["pin"] = pin
-            (snap,) = render([START, {"frame": frame}, {"snapshot": True}])
-            return strip(snap)[-1]
-
-        waiting = last({"profile": "a", "in_effect": False, "reason": "out of allowance",
-                        "until": "2026-11-20T09:30:00+00:00", "instead": "b"})
-        self.assertTrue(has_class(waiting, "cap-pin-note"))
-        self.assertEqual(full(waiting),
-                         "a is pinned but not in effect: out of allowance until Fri 09:30. "
-                         "New sessions use b.")
-        nowhere = last({"profile": "a", "in_effect": False, "reason": "signed out",
-                        "until": None, "instead": None})
-        self.assertTrue(has_class(nowhere, "cap-pin-note"))
-        self.assertEqual(full(nowhere),
-                         "a is pinned but not in effect: signed out. "
-                         "New sessions have no profile to use.")
-        for pin in ({"profile": "a", "in_effect": True, "reason": None,
-                     "until": None, "instead": None}, None):
-            self.assertFalse(has_class(last(pin), "cap-pin-note"))
 
     def test_all_out_lists_an_excluded_profile_as_excluded(self) -> None:
         result = render_page({**view([]), "capacity": capacity([
@@ -4673,31 +4532,322 @@ def signed_out_pair() -> dict:
     ], all_out=True, resumes_at="2026-11-14T09:00:00+00:00")
 
 
+NOW_S = 1794398400
+
+
+def real_capacity(now: float, rows: list, excluded=(), pinned=None) -> dict:
+    """The capacity view the console builds from readings and sign-ins, not a hand-built one."""
+    events, signins = [], {}
+    for row in rows:
+        name = row["name"]
+        if "week" in row or "five" in row:
+            refused = row.get("refused", False)
+            status = "rejected" if refused else "allowed"
+            week_reset = row.get("week_reset")
+            seq = len(events) + 1
+            events.append(Event(seq, f"t{seq}", console_capacity.READING, None, {
+                "profile": name, "http_status": 429 if refused else 200, "status": status,
+                "reset": week_reset if refused else None, "binding": "7d" if refused else None,
+                "claim": None, "account": None, "session_id": None,
+                "windows": {
+                    "7d": {"status": status, "utilization": row.get("week"), "reset": week_reset},
+                    "5h": {"status": "allowed", "utilization": row.get("five"),
+                           "reset": row.get("five_reset")},
+                }}))
+        if row.get("signin") is not None:
+            state, end = row["signin"]
+            signins[name] = console_signin.SignIn(
+                state,
+                None if end is None else datetime.fromtimestamp(end, timezone.utc).isoformat(),
+                datetime.fromtimestamp(now, timezone.utc).isoformat(),
+                row.get("ever", state == "signed_in"))
+    return console_capacity.capacity_view(
+        [row["name"] for row in rows], console_capacity.capacity_state(events), now,
+        signins=signins, excluded=frozenset(excluded), pinned=pinned)
+
+
+def panel(snap: dict) -> dict:
+    return snap["accounts_body"]
+
+
+def rows(snap: dict) -> list:
+    return [n for n in nodes(panel(snap)) if has_class(n, "acct-row")]
+
+
+def opened(frame: dict, *steps) -> dict:
+    (snap,) = render([START, {"frame": frame}, {"click": "cap"}, *steps, {"snapshot": True}])
+    return snap
+
+
+def weekday(stamp: str) -> str:
+    return datetime.fromisoformat(stamp).astimezone(timezone.utc).strftime("%a %H:%M")
+
+
+F3 = {**view([]), "capacity": real_capacity(NOW_S, [
+    {"name": "a", "week": .35, "five": .6, "week_reset": NOW_S + 4 * 86400,
+     "five_reset": NOW_S + 3600, "signin": ("signed_in", NOW_S + 12 * 86400)},
+    {"name": "b", "week": .7, "week_reset": NOW_S + 5 * 86400, "refused": True},
+    {"name": "c"},
+], pinned="a"), "profile_sessions": {"a": 2, "b": 0, "c": 0}}
+
+
+def one_profile(row: dict, **extra) -> dict:
+    return {**view([]), "capacity": real_capacity(NOW_S, [row], **extra)}
+
+
+def names(snap: dict) -> list:
+    return [full(n) for n in nodes(panel(snap)) if has_class(n, "acct-name")]
+
+
+def details(row: dict) -> list:
+    (detail,) = [n for n in row["children"] if has_class(n, "acct-detail")]
+    return [full(c) for c in detail["children"]]
+
+
+class AccountsPanelPageTest(unittest.TestCase):
+    def test_the_strip_opens_the_accounts_panel_and_escape_closes_it_returning_focus(self) -> None:
+        closed, open_, after = render([
+            START, {"frame": F3}, {"snapshot": True}, {"click": "cap"}, {"snapshot": True},
+            {"key": "Escape"}, {"snapshot": True},
+        ])
+        self.assertIs(closed["accounts"]["hidden"], True)
+        self.assertEqual(closed["capacity"]["expanded"], "false")
+        self.assertEqual(closed["accounts_body"]["children"], [])
+        self.assertIs(open_["accounts"]["hidden"], False)
+        self.assertEqual(open_["capacity"]["expanded"], "true")
+        self.assertEqual(open_["active"], "acct-panel")
+        self.assertEqual(names(open_), ["a", "b", "c"])
+        self.assertIs(after["accounts"]["hidden"], True)
+        self.assertEqual(after["capacity"]["expanded"], "false")
+        self.assertEqual(after["active"], "cap")
+        self.assertIs(after["key_prevented"], True)
+        self.assertEqual(after["accounts_body"]["children"], [])
+
+    def test_the_a_key_opens_the_panel_and_is_ignored_in_a_field_or_with_a_modifier(self) -> None:
+        opened_, closed, in_field, modified = render([
+            START, {"frame": F3}, {"key": "a"}, {"snapshot": True}, {"key": "Escape"},
+            {"snapshot": True}, {"key": "a", "target": "INPUT"}, {"snapshot": True},
+            {"key": "a", "ctrlKey": True}, {"snapshot": True},
+        ])
+        self.assertIs(opened_["accounts"]["hidden"], False)
+        self.assertIs(opened_["key_prevented"], True)
+        self.assertIs(closed["accounts"]["hidden"], True)
+        self.assertIs(in_field["accounts"]["hidden"], True)
+        self.assertIs(modified["accounts"]["hidden"], True)
+
+    def test_focus_returns_to_the_element_focused_at_opening(self) -> None:
+        with_inbox = {**F3, **frame([ANSWERABLE])}
+        (kept,) = render([
+            START, {"frame": with_inbox}, {"focus_on": "opt"}, {"click": "cap"},
+            {"key": "Escape"}, {"snapshot": True},
+        ])
+        self.assertIn("opt", kept["active"].split())
+        (lost,) = render([
+            START, {"frame": with_inbox}, {"focus_on": "opt"}, {"click": "cap"},
+            {"frame": with_inbox}, {"key": "Escape"}, {"snapshot": True},
+        ])
+        self.assertEqual(lost["active"], "cap")
+
+    def test_while_the_panel_is_open_only_escape_acts(self) -> None:
+        with_inbox = {**F3, **frame([ANSWERABLE])}
+        before, after = render([
+            START, {"frame": with_inbox}, {"snapshot": True}, {"click": "cap"},
+            {"key": "2"}, {"key": "g"}, {"snapshot": True},
+        ])
+        self.assertEqual(picked(after), picked(before))
+        self.assertIs(box_open(after), False)
+        self.assertIs(after["key_prevented"], False)
+
+    def test_escape_closes_the_panel_before_it_undoes_an_answer(self) -> None:
+        (snap,) = render([
+            START, {"frame": {**F3, **frame([ANSWERABLE])}}, {"key": "Enter"},
+            {"click": "cap"}, {"key": "Escape"}, {"snapshot": True},
+        ])
+        self.assertIs(snap["accounts"]["hidden"], True)
+        self.assertIn(WAIT_TEXT, text(snap["inbox"]))
+
+    def test_each_row_holds_the_details_of_its_profile(self) -> None:
+        snap = opened(F3)
+        a, b, c = rows(snap)
+        by_name = {p["profile"]: p for p in F3["capacity"]["profiles"]}
+        self.assertEqual(details(a), [
+            "65% of the week left", "40% of 5 hours",
+            "resets " + weekday(by_name["a"]["next_reset"]), "signed in, ends in 12 days"])
+        out = details(b)
+        self.assertTrue(out[0].startswith("out until " + weekday(by_name["b"]["out_until"])), out)
+        self.assertEqual([n for n in nodes(b) if has_class(n, "acct-reset")], [])
+        self.assertEqual(details(c), ["no reading yet", "sign-in unknown"])
+        for name in nodes(panel(snap)):
+            if has_class(name, "acct-name"):
+                self.assertEqual(name["title"], name["text"])
+        (mark,) = [n for n in nodes(a) if has_class(n, "acct-pin-mark")]
+        self.assertEqual(full(mark), "pinned")
+        self.assertEqual({n["tag"] for n in nodes(a) if has_class(n, "acct-pin")}, {"button"})
+
+    def test_the_strip_holds_no_control(self) -> None:
+        excluded = {**view([]), "capacity": real_capacity(NOW_S, [
+            {"name": "a", "week": .35}, {"name": "b", "week": .7}], excluded=("b",), pinned="a")}
+        for shown in (F3, excluded):
+            (snap,) = render([START, {"frame": shown}, {"snapshot": True}])
+            self.assertEqual(
+                [n for n in nodes(snap["capacity"])[1:] if n["tag"] in ("button", "input", "a")], [])
+
+    def test_the_panel_uses_only_the_page_tokens_and_hides_when_hidden(self) -> None:
+        (style,) = re.findall(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"))
+        rules = style_rules(style)
+
+        def ours(selector: str) -> bool:
+            return selector.startswith(".acct-") or selector.startswith("#accounts")
+
+        (hide,) = [d for s, d in rules if s == ".acct-panel[hidden]"]
+        self.assertEqual(hide.get("display"), "none")
+        declared = {k for s, d in rules if s == ":root" for k in d if k.startswith("--")}
+        ours_values = [v for s, d in rules if ours(s) for v in d.values()]
+        others = " ".join(v for s, d in rules if not ours(s) for v in d.values())
+        sizes = {d["font-size"] for s, d in rules if not ours(s) and "font-size" in d}
+        self.assertTrue(ours_values)
+        for value in ours_values:
+            for token in re.findall(r"var\((--[\w-]+)", value):
+                self.assertIn(token, declared)
+            for literal in re.findall(r"#[0-9a-fA-F]{3,8}\b|rgba?\([^)]*\)", value):
+                self.assertIn(literal, others)
+        for selector, decls in rules:
+            if ours(selector) and "font-size" in decls:
+                self.assertIn(decls["font-size"], sizes, selector)
+
+    def test_each_row_offers_one_exclusion_toggle_named_for_its_action(self) -> None:
+        shown = {**view([]), "capacity": real_capacity(NOW_S, [
+            {"name": "a", "week": .35}, {"name": "b", "week": .7}, {"name": "c"}],
+            excluded=("a", "c"))}
+        a, b, c = rows(opened(shown))
+        self.assertTrue(has_class(a, "acct-excluded"))
+        self.assertTrue(has_class(c, "acct-excluded"))
+        self.assertFalse(has_class(b, "acct-excluded"))
+        toggles = []
+        for n in (a, b, c):
+            (toggle,) = [m for m in nodes(n) if has_class(m, "acct-toggle")]
+            toggles.append(full(toggle))
+        self.assertEqual(toggles, ["Include", "Exclude", "Include"])
+        for n in (a, c):
+            (mark,) = [m for m in nodes(n) if has_class(m, "acct-excl")]
+            self.assertEqual(full(mark), "excluded")
+        self.assertEqual([m for m in nodes(b) if has_class(m, "acct-excl")], [])
+
+    def test_the_toggle_posts_one_exclusion_with_the_token(self) -> None:
+        for name, excluded, body in (
+            ("a", True, {"profile": "a", "excluded": False}),
+            ("b", False, {"profile": "b", "excluded": True}),
+        ):
+            snap = opened(one_profile({"name": name, "week": .35},
+                                      excluded=(name,) if excluded else ()),
+                          {"click": "acct-toggle"})
+            (post,) = [p for p in snap["posts"] if p["url"] == "/api/exclusion"]
+            self.assertEqual(post["method"], "POST")
+            self.assertEqual(post["headers"],
+                             {"X-Console-Token": TOKEN, "Content-Type": "application/json"})
+            self.assertEqual(json.loads(post["body"]), body)
+
+    def test_a_refused_toggle_says_why(self) -> None:
+        snap = opened(one_profile({"name": "a", "week": .35}, excluded=("a",)),
+                      {"respond": {"status": 409, "text": "no such profile\n"}},
+                      {"click": "acct-toggle"})
+        (fail,) = [n for n in nodes(panel(snap)) if has_class(n, "fail")]
+        self.assertEqual(full(fail), "Could not include: no such profile")
+
+    def test_each_row_offers_pin_and_the_pinned_one_unpin(self) -> None:
+        shown = {**view([]), "capacity": real_capacity(NOW_S, [
+            {"name": "a", "week": .35}, {"name": "b", "week": .7}], pinned="a")}
+        a, b = rows(opened(shown))
+        labels = []
+        for n in (a, b):
+            (pin,) = [m for m in nodes(n) if has_class(m, "acct-pin")]
+            labels.append(full(pin))
+        self.assertEqual(labels, ["Unpin", "Pin"])
+        self.assertTrue(has_class(a, "acct-pinned"))
+        self.assertFalse(has_class(b, "acct-pinned"))
+        (mark,) = [m for m in nodes(a) if has_class(m, "acct-pin-mark")]
+        self.assertEqual(full(mark), "pinned")
+        self.assertEqual([m for m in nodes(b) if has_class(m, "acct-pin-mark")], [])
+
+    def test_a_pinned_profile_with_no_reading_has_a_row(self) -> None:
+        (c,) = rows(opened(one_profile({"name": "c"}, pinned="c")))
+        (pin,) = [m for m in nodes(c) if has_class(m, "acct-pin")]
+        self.assertEqual(full(pin), "Unpin")
+
+    def test_the_pin_button_posts_one_pin_with_the_token(self) -> None:
+        for name, pinned, body in (
+            ("a", "a", {"profile": "a", "pinned": False}),
+            ("b", None, {"profile": "b", "pinned": True}),
+        ):
+            snap = opened(one_profile({"name": name, "week": .35}, pinned=pinned),
+                          {"click": "acct-pin"})
+            (post,) = [p for p in snap["posts"] if p["url"] == "/api/pin"]
+            self.assertEqual(post["method"], "POST")
+            self.assertEqual(post["headers"],
+                             {"X-Console-Token": TOKEN, "Content-Type": "application/json"})
+            self.assertEqual(json.loads(post["body"]), body)
+
+    def test_a_refused_pin_says_why(self) -> None:
+        snap = opened(one_profile({"name": "a", "week": .35}, excluded=("a",)),
+                      {"respond": {"status": 409, "text": "excluded; include it first\n"}},
+                      {"click": "acct-pin"})
+        (fail,) = [n for n in nodes(panel(snap)) if has_class(n, "fail")]
+        self.assertEqual(full(fail), "Could not pin: excluded; include it first")
+
+    def test_a_refused_unpin_says_why(self) -> None:
+        snap = opened(one_profile({"name": "a", "week": .35}, pinned="a"),
+                      {"respond": {"status": 500, "text": "could not write\n"}},
+                      {"click": "acct-pin"})
+        (fail,) = [n for n in nodes(panel(snap)) if has_class(n, "fail")]
+        self.assertEqual(full(fail), "Could not unpin: could not write")
+
+    def test_the_panel_says_when_the_pin_is_not_in_effect(self) -> None:
+        capacity_ = real_capacity(NOW_S, [
+            {"name": "a", "week": .35, "week_reset": NOW_S + 86400, "refused": True},
+            {"name": "b", "week": .7}], pinned="a")
+
+        def last(pin: dict | None) -> dict:
+            shown = {**view([]), "capacity": capacity_}
+            if pin is not None:
+                shown["pin"] = pin
+            return panel(opened(shown))["children"][-1]
+
+        waiting = last({"profile": "a", "in_effect": False, "reason": "out of allowance",
+                        "until": "2026-11-20T09:30:00+00:00", "instead": "b"})
+        self.assertTrue(has_class(waiting, "acct-pin-note"))
+        self.assertEqual(full(waiting),
+                         "a is pinned but not in effect: out of allowance until Fri 09:30. "
+                         "New sessions use b.")
+        nowhere = last({"profile": "a", "in_effect": False, "reason": "signed out",
+                        "until": None, "instead": None})
+        self.assertTrue(has_class(nowhere, "acct-pin-note"))
+        self.assertEqual(full(nowhere),
+                         "a is pinned but not in effect: signed out. "
+                         "New sessions have no profile to use.")
+        for pin in ({"profile": "a", "in_effect": True, "reason": None,
+                     "until": None, "instead": None}, None):
+            self.assertFalse(has_class(last(pin), "acct-pin-note"))
+
+
 class RemovePageTest(unittest.TestCase):
     def removal_frame(self, sessions: dict | None = None, extra: dict | None = None) -> dict:
         return {**view([]), **(extra or {}),
-                "capacity": capacity([profile("a", "ok", week_left=65),
-                                      profile("b", "ok", week_left=30)]),
+                "capacity": real_capacity(NOW_S, [{"name": "a", "week": .35},
+                                                  {"name": "b", "week": .7}]),
                 "profile_sessions": sessions or {}}
 
     def opened(self, *steps) -> dict:
-        (snap,) = render([
-            START, {"frame": self.removal_frame({"a": 2})}, {"click": "cap-remove"}, *steps,
-            {"snapshot": True},
-        ])
-        return snap
+        return opened(self.removal_frame({"a": 2}), {"click": "acct-remove"}, *steps)
 
     def remove_node(self, snap: dict, cls: str) -> dict:
-        (found,) = [n for n in nodes(snap["capacity"]) if has_class(n, cls)]
+        (found,) = [n for n in nodes(panel(snap)) if has_class(n, cls)]
         return found
 
     def test_each_account_offers_remove(self) -> None:
-        snap = capacity_snap(capacity([
-            profile("a", "ok", week_left=65),
-            profile("b", "unknown", read_at=None, signin=si("signed_out", None)),
-        ]))
-        for acct in accounts(snap):
-            (remove,) = [m for m in nodes(acct) if has_class(m, "cap-remove")]
+        shown = {**view([]), "capacity": real_capacity(NOW_S, [
+            {"name": "a", "week": .35}, {"name": "b", "signin": ("signed_out", None)}])}
+        for row in rows(opened(shown)):
+            (remove,) = [m for m in nodes(row) if has_class(m, "acct-remove")]
             self.assertEqual(full(remove), "Remove")
 
     def test_remove_asks_for_the_typed_name_and_says_how_many_sessions_run(self) -> None:
@@ -4707,34 +4857,30 @@ class RemovePageTest(unittest.TestCase):
             (0, "No session is running under a."),
         ):
             with self.subTest(count=count):
-                (snap,) = render([
-                    START, {"frame": self.removal_frame({"a": count})},
-                    {"click": "cap-remove"}, {"snapshot": True},
-                ])
-                self.assertEqual(full(self.remove_node(snap, "cap-remove-sessions")), words)
-                self.assertEqual(full(self.remove_node(snap, "cap-remove-note")),
+                snap = opened(self.removal_frame({"a": count}), {"click": "acct-remove"})
+                self.assertEqual(full(self.remove_node(snap, "acct-remove-sessions")), words)
+                self.assertEqual(full(self.remove_node(snap, "acct-remove-note")),
                                  "Type a to remove it. It is signed out first.")
-                send = self.remove_node(snap, "cap-remove-send")
+                send = self.remove_node(snap, "acct-remove-send")
                 self.assertEqual(full(send), "Remove a")
                 self.assertTrue(send["disabled"])
-                name = self.remove_node(snap, "cap-remove-name")
+                name = self.remove_node(snap, "acct-remove-name")
                 self.assertEqual(name["label"], "Type a to remove it")
 
     def test_no_count_for_the_profile_says_no_sentence(self) -> None:
-        (snap,) = render([START, {"frame": self.removal_frame({})},
-                          {"click": "cap-remove"}, {"snapshot": True}])
-        self.assertEqual([n for n in nodes(snap["capacity"])
-                          if has_class(n, "cap-remove-sessions")], [])
+        snap = opened(self.removal_frame({}), {"click": "acct-remove"})
+        self.assertEqual([n for n in nodes(panel(snap))
+                          if has_class(n, "acct-remove-sessions")], [])
 
     def test_the_send_is_enabled_only_by_the_exact_name(self) -> None:
         for typed, disabled in (("A", True), ("a ", True), ("a", False)):
             with self.subTest(typed=typed):
-                snap = self.opened({"type": {"class": "cap-remove-name", "text": typed}})
-                self.assertEqual(self.remove_node(snap, "cap-remove-send")["disabled"], disabled)
+                snap = self.opened({"type": {"class": "acct-remove-name", "text": typed}})
+                self.assertEqual(self.remove_node(snap, "acct-remove-send")["disabled"], disabled)
 
     def test_remove_posts_the_profile_and_the_typed_name_with_the_token(self) -> None:
-        snap = self.opened({"type": {"class": "cap-remove-name", "text": "a"}},
-                           {"click": "cap-remove-send"})
+        snap = self.opened({"type": {"class": "acct-remove-name", "text": "a"}},
+                           {"click": "acct-remove-send"})
         (post,) = [p for p in snap["posts"] if p["url"] == "/api/account-remove"]
         self.assertEqual(post["method"], "POST")
         self.assertEqual(post["headers"],
@@ -4743,38 +4889,35 @@ class RemovePageTest(unittest.TestCase):
 
     def test_a_refused_removal_says_why(self) -> None:
         snap = self.opened(
-            {"type": {"class": "cap-remove-name", "text": "a"}},
+            {"type": {"class": "acct-remove-name", "text": "a"}},
             {"respond": {"status": 502,
                          "text": "the account was not removed: its sign-out failed: exited\n"}},
-            {"click": "cap-remove-send"})
-        (fail,) = [n for n in nodes(snap["capacity"]) if has_class(n, "fail")]
+            {"click": "acct-remove-send"})
+        (fail,) = [n for n in nodes(panel(snap)) if has_class(n, "fail")]
         self.assertEqual(full(fail), "Could not remove: the account was not removed: "
                                      "its sign-out failed: exited")
-        self.remove_node(snap, "cap-remove-box")
+        self.remove_node(snap, "acct-remove-box")
 
     def test_a_removal_closes_the_box(self) -> None:
-        snap = self.opened({"type": {"class": "cap-remove-name", "text": "a"}},
-                           {"click": "cap-remove-send"})
-        self.assertEqual([n for n in nodes(snap["capacity"])
-                          if has_class(n, "cap-remove-box")], [])
+        snap = self.opened({"type": {"class": "acct-remove-name", "text": "a"}},
+                           {"click": "acct-remove-send"})
+        self.assertEqual([n for n in nodes(panel(snap))
+                          if has_class(n, "acct-remove-box")], [])
 
     def typed_and_selected(self, *steps) -> dict:
-        frame = {**self.removal_frame({"a": 1}), "inbox": {"open": [ANSWERABLE], "answered": []}}
-        (snap,) = render([
-            START, {"frame": frame}, {"click": "cap-remove"},
-            {"type": {"class": "cap-remove-name", "text": "ab"}},
-            {"select": {"cls": "cap-remove-name", "start": 0, "end": 1}},
-            *steps,
-            {"snapshot": True},
-        ])
-        return snap
+        shown = {**self.removal_frame({"a": 1}), "inbox": {"open": [ANSWERABLE], "answered": []}}
+        return opened(
+            shown, {"click": "acct-remove"},
+            {"type": {"class": "acct-remove-name", "text": "ab"}},
+            {"select": {"cls": "acct-remove-name", "start": 0, "end": 1}},
+            *steps)
 
     def assert_kept(self, snap: dict) -> None:
-        name = self.remove_node(snap, "cap-remove-name")
+        name = self.remove_node(snap, "acct-remove-name")
         self.assertEqual(name["value"], "ab")
         self.assertTrue(name["focused"])
         self.assertEqual(name["selection"], [0, 1])
-        self.remove_node(snap, "cap-remove-box")
+        self.remove_node(snap, "acct-remove-box")
 
     def test_the_typed_name_its_selection_and_focus_survive_two_frames(self) -> None:
         first = {**self.removal_frame({"a": 1}), "inbox": {"open": [ANSWERABLE], "answered": []}}
@@ -4783,25 +4926,27 @@ class RemovePageTest(unittest.TestCase):
         self.assert_kept(snap)
 
     def test_the_typed_name_its_selection_and_focus_survive_a_local_redraw(self) -> None:
-        self.assert_kept(self.typed_and_selected({"click": "cap-toggle"}))
+        self.assert_kept(self.typed_and_selected({"click": "acct-toggle"}))
 
     def test_a_profile_that_leaves_the_listing_loses_its_open_box_and_name(self) -> None:
-        gone = {**self.removal_frame(), "capacity": capacity([profile("b", "ok", week_left=30)])}
+        gone = {**self.removal_frame(), "capacity": real_capacity(NOW_S, [
+            {"name": "b", "week": .7}])}
         snap, again = render([
-            START, {"frame": self.removal_frame({"a": 1})}, {"click": "cap-remove"},
-            {"type": {"class": "cap-remove-name", "text": "a"}},
+            START, {"frame": self.removal_frame({"a": 1})}, {"click": "cap"},
+            {"click": "acct-remove"},
+            {"type": {"class": "acct-remove-name", "text": "a"}},
             {"frame": gone}, {"frame": self.removal_frame({"a": 1})}, {"snapshot": True},
-            {"click": "cap-remove"}, {"snapshot": True},
+            {"click": "acct-remove"}, {"snapshot": True},
         ])
-        self.assertEqual([n for n in nodes(snap["capacity"])
-                          if has_class(n, "cap-remove-box")], [])
-        self.assertEqual(self.remove_node(again, "cap-remove-name")["value"], "")
+        self.assertEqual([n for n in nodes(panel(snap))
+                          if has_class(n, "acct-remove-box")], [])
+        self.assertEqual(self.remove_node(again, "acct-remove-name")["value"], "")
 
     def test_cancel_closes_the_box_and_forgets_the_name(self) -> None:
         snap = self.opened(
-            {"type": {"class": "cap-remove-name", "text": "a"}},
-            {"click": "cap-remove-cancel"}, {"click": "cap-remove"})
-        self.assertEqual(self.remove_node(snap, "cap-remove-name")["value"], "")
+            {"type": {"class": "acct-remove-name", "text": "a"}},
+            {"click": "acct-remove-cancel"}, {"click": "acct-remove"})
+        self.assertEqual(self.remove_node(snap, "acct-remove-name")["value"], "")
 
 
 class SigninPageTest(unittest.TestCase):
