@@ -1,6 +1,6 @@
 """`capacity_check`: the verify check that the console shows a capacity reading for an account in use (#860).
 
-`python -m agent_tools.console.capacity_check [--url URL] [--max-age SECONDS] [--every | --signin | --accounts]` reads the console's
+`python -m agent_tools.console.capacity_check [--url URL] [--max-age SECONDS] [--every | --signin | --accounts | --page-signin]` reads the console's
 `/api/state` view (default `http://127.0.0.1:27184/api/state`; the URL must be `http` on a loopback
 host, `127.0.0.1` or `localhost`, else exit 2) and looks at `capacity.profiles[].read_at`.
 `--max-age` is a positive integer number of seconds (default 600).
@@ -42,6 +42,16 @@ not a list (no `inbox` object, or no `open` list) is `{"status": "no_inbox"}`, e
 absence is never inferred from missing data. Otherwise a `default` row or that item is
 `{"status": "not_met", "default_row": <bool>, "default_signin": <bool>}`, exit 1; no row is
 `{"status": "pending", "profiles": []}`, exit 75.
+
+`--page-signin` (#1026, exclusive with the other modes, `--max-age` ignored) meets when the owner has
+signed a profile in from the page and its sign-in item is gone. Let S be the profiles whose
+top-level `signin_runs[profile]` is an object with `state` `signed_in` (only `state` is read) and O
+those of S with an open inbox item keyed `signin/<profile>`. A view whose `signin_runs` is not an
+object is `{"status": "not_deployed"}`, exit 75; one whose `inbox.open` is not a list is
+`{"status": "no_inbox"}`, exit 75; an empty S is `{"status": "pending"}`, exit 75 (no sign-in from
+the page yet). Otherwise a profile of S not in O is `{"status": "met", "profiles": <S minus O,
+sorted>}`, exit 0, and when every profile of S is in O `{"status": "not_met", "profiles": <S,
+sorted>}`, exit 1.
 
 A console that is down or predates this change is "not yet", never "not met", and only a reading
 newer than `--max-age` meets the check. A bad argument is exit 2. The check only reads: it sends one
@@ -206,6 +216,28 @@ def accounts_verdict(rows: list[tuple[str, object, object]],
     return 0, {"status": "met", "profiles": [name for name, _, _ in rows]}
 
 
+def page_signin_verdict(body: bytes) -> tuple[int, dict]:
+    """Met when a profile signed in from the page has no open sign-in item, else not yet or not met."""
+    try:
+        document = json.loads(body)
+    except ValueError:
+        document = None
+    runs = document.get("signin_runs") if isinstance(document, dict) else None
+    if not isinstance(runs, dict):
+        return NOT_YET, {"status": "not_deployed"}
+    asks = signin_asks(body)
+    if asks is None:
+        return NOT_YET, {"status": "no_inbox"}
+    signed_in = sorted(name for name, run in runs.items()
+                       if isinstance(run, dict) and run.get("state") == "signed_in")
+    if not signed_in:
+        return NOT_YET, {"status": "pending"}
+    cleared = [name for name in signed_in if f"signin/{name}" not in asks]
+    if cleared:
+        return 0, {"status": "met", "profiles": cleared}
+    return 1, {"status": "not_met", "profiles": signed_in}
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="capacity_check", description=__doc__.splitlines()[0])
     parser.add_argument("--url", type=_loopback_url, default=DEFAULT_URL,
@@ -222,6 +254,9 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--accounts", action="store_true",
                       help="require the listed profiles to be named accounts only: no default "
                            "row and no sign-in item for default")
+    mode.add_argument("--page-signin", action="store_true",
+                      help="require a profile the owner signed in from the page whose sign-in "
+                           "item is gone")
     return parser
 
 
@@ -235,7 +270,9 @@ def main(argv: list[str] | None = None) -> int:
     if rows is None:
         print(json.dumps({"status": "not_deployed"}, sort_keys=True))
         return NOT_YET
-    if args.accounts:
+    if args.page_signin:
+        code, result = page_signin_verdict(body)
+    elif args.accounts:
         code, result = accounts_verdict(rows, signin_asks(body))
     elif args.signin:
         code, result = signin_verdict(rows)

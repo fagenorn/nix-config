@@ -268,7 +268,8 @@ class PageTest(unittest.TestCase):
             {p for _, p in literals},
             {"/api/stream", "/api/looked", "/api/answer", "/api/check-answer", "/api/goal",
              "/api/withdraw", "/api/retry-manager", "/api/approve", "/api/reply",
-             "/api/message", "/api/stop", "/api/round-answer", "/api/continue"},
+             "/api/message", "/api/stop", "/api/round-answer", "/api/continue",
+             "/api/signin", "/api/signin-code", "/api/signin-cancel"},
         )
         self.assertEqual(
             len(re.findall(r"\b(?:fetch|EventSource)\(", self.text)), len(literals)
@@ -277,7 +278,7 @@ class PageTest(unittest.TestCase):
     def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
         # A separate snapshot request can answer after a newer streamed frame
         # and render over it; the stream's first frame is already the snapshot.
-        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 15)
+        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 18)
         self.assertIsNotNone(
             re.search(r'fetch\("/api/looked",\s*\{\s*method:\s*"POST"', self.text)
         )
@@ -288,7 +289,8 @@ class PageTest(unittest.TestCase):
             re.search(r'fetch\("/api/check-answer",\s*\{\s*method:\s*"POST"', self.text)
         )
         for route in ("/api/goal", "/api/withdraw", "/api/retry-manager", "/api/approve",
-                      "/api/reply", "/api/message", "/api/stop", "/api/round-answer"):
+                      "/api/reply", "/api/message", "/api/stop", "/api/round-answer",
+                      "/api/signin", "/api/signin-code", "/api/signin-cancel"):
             self.assertIsNotNone(
                 re.search(rf'fetch\("{route}",\s*\{{\s*method:\s*"POST"', self.text)
             )
@@ -457,8 +459,8 @@ class PageTest(unittest.TestCase):
         h1 = next(n for n in walk(result["statement"]) if n["tag"] == "h1")
         self.assertEqual(h1["cls"], "")
 
-    def test_only_a_note_and_a_typed_confirmation_are_typed(self) -> None:
-        self.assertEqual(self.text.count('createElement("input")'), 1)
+    def test_only_a_note_a_typed_confirmation_and_a_sign_in_code_are_typed(self) -> None:
+        self.assertEqual(self.text.count('createElement("input")'), 2)
         self.assertEqual(self.text.count('createElement("textarea")'), 1)
         for needle in ("<textarea", "contenteditable"):
             with self.subTest(needle=needle):
@@ -491,8 +493,12 @@ class PageTest(unittest.TestCase):
             for size in found:
                 self.assertLess(size, 1.5, selector)
 
-    def test_the_tracker_links_are_the_only_hrefs(self) -> None:
-        self.assertEqual(len(re.findall(r"\.href\s*=", self.text)), 2)
+    def test_the_tracker_and_sign_in_links_are_the_only_hrefs(self) -> None:
+        self.assertEqual(len(re.findall(r"\.href\s*=", self.text)), 3)
+        lines = self.text.splitlines()
+        (at,) = [i for i, row in enumerate(lines) if "link.href = held.link;" in row]
+        self.assertIn("isHttps(", lines[at - 1] + lines[at])
+        self.assertIn(r"/^https:\/\//", self.text)
         self.assertEqual(self.text.count("a.href = item.url;"), 1)
         self.assertEqual(self.text.count("link.href = sprint.tracker_url;"), 1)
         self.assertIn('sprint.tracker_url.startsWith("https:")', self.text)
@@ -4461,9 +4467,25 @@ def si(state: str, days, ask: bool = False) -> dict:
 SIGNIN = {
     "type": "inbox_item", "reason": "signin", "key": "signin/work", "project_id": None,
     "profile": "work", "headline": "Sign in to work again",
-    "command": "CLAUDE_ACCOUNT=work claude", "signin": si("signed_in", 2, ask=True),
+    "action": "signin", "run": None, "signin": si("signed_in", 2, ask=True),
     "answered": False, "waiting_since": "2026-11-12T08:00:00+00:00",
 }
+ANSWER = "{\"attempt\":7,\"link\":\"https://claude.example/a?s=1\"}"
+
+
+def with_run(entry: dict, state: str, attempt: int) -> dict:
+    return {**entry, "run": {"state": state, "at": None, "attempt": attempt}}
+
+
+SIGNED_IN_STEPS = [
+    START, {"frame": frame([SIGNIN])}, {"respond": {"status": 200, "text": ANSWER}},
+    {"click": "signin-start"}, {"frame": frame([with_run(SIGNIN, "running", 7)])},
+]
+
+
+def sign_in_card(snap: dict) -> dict:
+    (card,) = [n for n in nodes(snap["inbox"]) if n["tag"] == "article" and has_class(n, "signin")]
+    return card
 
 
 def classes(snap: dict) -> list:
@@ -4569,20 +4591,160 @@ class SigninPageTest(unittest.TestCase):
         self.assertEqual([n for n in nodes(snap["capacity"]) if has_class(n, "cap-signin")], [])
         self.assertEqual(classes(snap), ["cap-state cap-fine", "cap-acct", "cap-none"])
 
-    def test_a_sign_in_ask_is_a_card_naming_the_profile_and_the_command(self) -> None:
+    def test_a_sign_in_ask_is_a_card_with_the_sign_in_action(self) -> None:
         f = frame([SIGNIN])
         f["statement"]["headline"] = "1 thing needs you"
         (snap,) = render([START, {"frame": f}, {"snapshot": True}])
         (card,) = [n for n in nodes(snap["inbox"]) if n["tag"] == "article" and has_class(n, "signin")]
         self.assertTrue(has_class(card, "card"))
         self.assertIn("Sign in to work again", full(card))
-        self.assertEqual([full(n) for n in nodes(card) if has_class(n, "signin-command")],
-                         ["CLAUDE_ACCOUNT=work claude"])
         self.assertEqual([full(n) for n in nodes(card) if has_class(n, "reason")],
                          ["signed in, ends in 2 days"])
-        self.assertEqual([n for n in nodes(card) if n["tag"] == "button"], [])
+        (start,) = [n for n in nodes(card) if n["tag"] == "button"]
+        self.assertTrue(has_class(start, "signin-start"))
+        self.assertEqual(full(start), "Sign in")
+        self.assertEqual([n for n in nodes(card) if has_class(n, "signin-command")], [])
+        self.assertEqual([n for n in nodes(card) if has_class(n, "signin-cancel")], [])
+        self.assertNotIn("CLAUDE_ACCOUNT", full(card))
         self.assertEqual([n for n in nodes(snap["inbox"]) if has_class(n, "answer")], [])
         self.assertIn("1 thing needs you", full(snap["statement"]))
+
+    def test_pressing_sign_in_posts_the_profile_and_shows_the_link(self) -> None:
+        (snap,) = render(SIGNED_IN_STEPS + [{"snapshot": True}])
+        post = snap["posts"][-1]
+        self.assertEqual((post["url"], post["method"]), ("/api/signin", "POST"))
+        self.assertEqual(post["headers"]["X-Console-Token"], TOKEN)
+        self.assertEqual(json.loads(post["body"]), {"profile": "work"})
+        card = sign_in_card(snap)
+        (link,) = of_class(card, "a", "signin-link")
+        self.assertEqual(link["href"], "https://claude.example/a?s=1")
+        self.assertEqual(full(link), "Open the sign-in page")
+        (code,) = of_class(card, "input", "signin-code")
+        self.assertEqual((code["placeholder"], code["label"]),
+                         ("Code from the sign-in page", "Sign-in code"))
+        self.assertEqual(len(of_class(card, "button", "signin-send")), 1)
+        self.assertEqual(len(of_class(card, "button", "signin-cancel")), 1)
+        self.assertEqual([full(n) for n in of_class(card, "p", "signin-run")],
+                         ["A sign-in is running."])
+
+    def test_a_code_is_sent_to_the_code_route_and_the_field_empties(self) -> None:
+        (snap,) = render(SIGNED_IN_STEPS + [
+            {"type": {"class": "signin-code", "text": "ab#C-1"}},
+            {"click": "signin-send"}, {"snapshot": True}])
+        post = snap["posts"][-1]
+        self.assertEqual(post["url"], "/api/signin-code")
+        self.assertEqual(json.loads(post["body"]), {"profile": "work", "code": "ab#C-1"})
+        self.assertEqual(field(snap, "signin-code")["value"], "")
+
+    def test_a_typed_code_and_its_focus_survive_a_new_frame(self) -> None:
+        one, two = render(SIGNED_IN_STEPS + [
+            {"type": {"class": "signin-code", "text": "ab#C"}},
+            {"select": {"cls": "signin-code", "start": 1, "end": 3}},
+            {"frame": frame([with_run(SIGNIN, "running", 7), check_item("A", "manual-check")])},
+            {"snapshot": True},
+            {"append": {"class": "signin-code", "text": "-1"}},
+            {"click": "signin-send"}, {"snapshot": True}])
+        code = field(one, "signin-code")
+        self.assertEqual((code["value"], code["focused"], code["selection"]),
+                         ("ab#C", True, [1, 3]))
+        self.assertEqual(json.loads(two["posts"][-1]["body"]),
+                         {"profile": "work", "code": "ab#C-1"})
+
+    def test_cancel_posts_the_cancel_route(self) -> None:
+        (snap,) = render(SIGNED_IN_STEPS + [{"click": "signin-cancel"}, {"snapshot": True}])
+        post = snap["posts"][-1]
+        self.assertEqual(post["url"], "/api/signin-cancel")
+        self.assertEqual(json.loads(post["body"]), {"profile": "work"})
+
+    def test_cancel_is_offered_while_a_run_has_no_link(self) -> None:
+        none = {"status": 200, "text": "{\"attempt\":7,\"link\":null}"}
+        one, two = render([
+            START, {"frame": frame([SIGNIN])}, {"respond": none}, {"click": "signin-start"},
+            {"frame": frame([with_run(SIGNIN, "running", 7)])}, {"snapshot": True},
+            {"click": "signin-cancel"}, {"snapshot": True}])
+        card = sign_in_card(one)
+        for cls, wanted in (("signin-cancel", 1), ("signin-start", 1), ("signin-link", 0),
+                            ("signin-code", 0)):
+            with self.subTest(cls=cls):
+                self.assertEqual(len([n for n in nodes(card) if has_class(n, cls)]), wanted)
+        self.assertEqual(two["posts"][-1]["url"], "/api/signin-cancel")
+
+    def test_a_link_that_is_not_https_is_not_shown(self) -> None:
+        bad = {"status": 200, "text": "{\"attempt\":7,\"link\":\"javascript:alert(1)\"}"}
+        (snap,) = render([
+            START, {"frame": frame([SIGNIN])}, {"respond": bad}, {"click": "signin-start"},
+            {"frame": frame([with_run(SIGNIN, "running", 7)])}, {"snapshot": True}])
+        card = sign_in_card(snap)
+        self.assertEqual([n for n in nodes(card) if has_class(n, "signin-link")], [])
+        self.assertEqual(len(of_class(card, "button", "signin-start")), 1)
+
+    def test_an_ended_run_drops_the_held_link_and_offers_sign_in_again(self) -> None:
+        for state, note in (("timed_out", "The sign-in timed out."),
+                            ("cancelled", "The sign-in was cancelled."),
+                            ("failed", "The sign-in did not finish.")):
+            with self.subTest(state=state):
+                (snap,) = render(SIGNED_IN_STEPS + [
+                    {"frame": frame([with_run(SIGNIN, state, 7)])}, {"snapshot": True}])
+                card = sign_in_card(snap)
+                self.assertEqual([n for n in nodes(card) if has_class(n, "signin-link")], [])
+                self.assertEqual([full(n) for n in of_class(card, "p", "signin-run")], [note])
+                self.assertEqual(len(of_class(card, "button", "signin-start")), 1)
+                self.assertEqual([n for n in nodes(card) if has_class(n, "signin-cancel")], [])
+
+    def test_an_ended_run_drops_the_link_without_a_running_frame(self) -> None:
+        one, two = render([
+            START, {"frame": frame([SIGNIN])}, {"respond": {"status": 200, "text": ANSWER}},
+            {"click": "signin-start"}, {"snapshot": True},
+            {"frame": frame([with_run(SIGNIN, "timed_out", 7)])}, {"snapshot": True}])
+        self.assertEqual(len(of_class(sign_in_card(one), "a", "signin-link")), 1)
+        card = sign_in_card(two)
+        self.assertEqual([n for n in nodes(card) if has_class(n, "signin-link")], [])
+        self.assertEqual(len(of_class(card, "button", "signin-start")), 1)
+
+    def test_a_start_answer_after_the_run_ended_holds_nothing(self) -> None:
+        (snap,) = render([
+            START, {"frame": frame([SIGNIN])}, {"hold": True}, {"click": "signin-start"},
+            {"frame": frame([with_run(SIGNIN, "cancelled", 7)])},
+            {"release": {"status": 200, "text": ANSWER}}, {"snapshot": True}])
+        card = sign_in_card(snap)
+        self.assertEqual([n for n in nodes(card) if has_class(n, "signin-link")], [])
+        self.assertEqual(len(of_class(card, "button", "signin-start")), 1)
+        self.assertEqual([full(n) for n in of_class(card, "p", "signin-run")],
+                         ["The sign-in was cancelled."])
+
+    def test_an_older_view_keeps_the_held_link(self) -> None:
+        (snap,) = render(SIGNED_IN_STEPS[:-1] + [
+            {"frame": frame([with_run(SIGNIN, "timed_out", 6)])}, {"snapshot": True}])
+        self.assertEqual(len(of_class(sign_in_card(snap), "a", "signin-link")), 1)
+
+    def test_a_run_that_vanishes_without_an_ending_row_drops_the_held_link(self) -> None:
+        for view_after in (SIGNIN, with_run(SIGNIN, "timed_out", 6)):
+            with self.subTest(run=view_after["run"]):
+                (snap,) = render(SIGNED_IN_STEPS + [
+                    {"frame": frame([view_after])}, {"snapshot": True}])
+                card = sign_in_card(snap)
+                self.assertEqual([n for n in nodes(card) if has_class(n, "signin-link")], [])
+                self.assertEqual(len(of_class(card, "button", "signin-start")), 1)
+                self.assertEqual([n for n in nodes(card) if has_class(n, "signin-cancel")], [])
+
+    def test_a_link_does_not_outlive_its_item(self) -> None:
+        one, two = render(SIGNED_IN_STEPS + [
+            {"frame": frame([])}, {"frame": frame([SIGNIN])}, {"snapshot": True},
+            {"hold": True}, {"click": "signin-start"}, {"frame": frame([])},
+            {"release": {"status": 200, "text": ANSWER}}, {"frame": frame([SIGNIN])},
+            {"snapshot": True}])
+        for snap in (one, two):
+            card = sign_in_card(snap)
+            self.assertEqual([n for n in nodes(card) if has_class(n, "signin-link")], [])
+            self.assertEqual(len(of_class(card, "button", "signin-start")), 1)
+
+    def test_a_refused_start_shows_its_reason(self) -> None:
+        (snap,) = render([
+            START, {"frame": frame([SIGNIN])},
+            {"respond": {"status": 409, "text": "unknown profile\n"}},
+            {"click": "signin-start"}, {"snapshot": True}])
+        self.assertEqual([full(n) for n in of_class(sign_in_card(snap), "span", "signin-failed")],
+                         ["Could not start the sign-in: unknown profile"])
 
     def test_sign_in_cards_sit_between_progress_and_questions(self) -> None:
         (snap,) = render([

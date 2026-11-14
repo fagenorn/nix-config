@@ -1,6 +1,6 @@
 # ADR-console-022 — A profile's sign-in is read from the client's status command
 
-- **Status:** accepted; amended by ADR-console-023
+- **Status:** accepted; amended by ADR-console-023, ADR-console-024
 - **Decided in:** #839, #842, #1010
 
 ## Context
@@ -15,7 +15,7 @@ A profile's login can end, or never have been made, and nothing on the page said
 
 **D3. The schedule.** The reading is made inside each probe job of ADR-console-006, before the probe, under the same in-flight mark, stop event and schedule: 30 seconds after the console starts, then every 10 minutes. A service with a reader and no prober still runs the schedule.
 
-**D4. The ask.** A profile asks the owner when it is signed out, or signed in with a known end three days or less away (an end that has passed included). It is one inbox item, `signin/<profile>`, whose command is `CLAUDE_ACCOUNT=<profile> claude`, placed after the progress items and before the questions (briefs, stalls, progress, sign-in, questions, tracker items), counted in the statement and its headline. A fresh sign-in ends more than three days ahead and closes it.
+**D4. The ask.** A profile asks the owner when it is signed out, or signed in with a known end three days or less away (an end that has passed included). It is one inbox item, `signin/<profile>`, whose command is `CLAUDE_ACCOUNT=<profile> claude`, placed after the progress items and before the questions (briefs, stalls, progress, sign-in, questions, tracker items), counted in the statement and its headline. Amended by ADR-console-024: the item carries a Sign in action instead of the command. A fresh sign-in ends more than three days ahead and closes it.
 
 **D5. Unknown raises nothing.** A status that fails, times out, exits otherwise or cannot be read records `unknown`, one stderr line `console: signin_unknown <profile> <kind>` and nothing else: the last answer wins, so an unknown sign-in closes an open ask and asks none.
 
@@ -25,7 +25,7 @@ A profile's login can end, or never have been made, and nothing on the page said
 
 ## Consequences
 
-- A lapsed or never-made login shows within one interval, with the command to fix it, and three days before an end it asks before anything fails.
+- A lapsed or never-made login shows within one interval, with the action to fix it (ADR-console-024), and three days before an end it asks before anything fails.
 - A signed-out profile with an old capacity reading shows as signed out and no longer counts toward "every profile is out" in the shown capacity, and the launch never picks it (ADR-console-023).
 - Each listed profile costs one status command every 10 minutes, with no request to the model.
 - The log grows by one row per change of state or end.
