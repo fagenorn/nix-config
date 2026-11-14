@@ -19,6 +19,7 @@ from agent_tools.console import account_add, signin, signin_run
 
 from . import console_test_support as support
 from .test_console_signin_run import CODE, FAKE, LINK, until
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 ADD = "/api/account-add"
 SIGNIN_CODE = "/api/signin-code"

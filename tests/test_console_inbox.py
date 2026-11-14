@@ -11,6 +11,7 @@ from agent_tools.claims import forge_markers as fm
 from agent_tools.claims import forge_owner_action as foa
 from agent_tools.console import inbox
 from agent_tools.system.forge_api import ForgeError
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 SLUG, PROJECT = "octo/widgets", "widgets"
 HOLDER = "h1/b1"

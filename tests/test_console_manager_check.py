@@ -18,6 +18,7 @@ from agent_tools.console import manager, manager_check
 from agent_tools.console.manager import StopFailed
 from agent_tools.console.manager_check import GOALS
 from agent_tools.console.sessions import Observation
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 ROOT = Path(__file__).resolve().parents[1]
 WRAPPER = "home/common/verify-pending/checks/console-manager-start"

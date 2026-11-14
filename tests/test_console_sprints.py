@@ -19,6 +19,7 @@ from agent_tools.console.event_log import (BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_
                                            MANAGER_WAITING, SPRINT_CLOSED,
                                            SPRINT_STOP_REQUESTED, SPRINT_REPORTED, Event)
 from agent_tools.console.sprints import Closing, Observed, PendingStop, Report
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 
 class ParseTest(unittest.TestCase):

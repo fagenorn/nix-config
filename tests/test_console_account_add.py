@@ -20,6 +20,7 @@ from agent_tools.console.event_log import Event
 from agent_tools.console.account_add import AddFailed, Adder, adder_for, added, added_state
 from agent_tools.console.account_add import already_exists
 from agent_tools.console.account_add import parse_add_request, refusal
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 LAUNCHER = (Path(__file__).resolve().parents[1]
             / "home/common/claude-code/accounts/bin/claude-account")

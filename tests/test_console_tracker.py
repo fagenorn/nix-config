@@ -17,6 +17,7 @@ from agent_tools.console import console, inbox, service, view
 from agent_tools.system.forge_api import ForgeError
 
 from . import console_test_support as support
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 SLUGS = {"/srv/p00": "octo/p00", "/srv/p01": "octo/p01"}
 DAY = 86400

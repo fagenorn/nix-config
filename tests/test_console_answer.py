@@ -18,6 +18,7 @@ from .forge_world import ForgeWorld
 from .test_console_inbox import act, approve, ask
 from .test_console_tracker import Scripted
 from .test_forge_owner_action import ISSUE, QUESTIONS, SLUG, box_body, comment
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 C = 6803141410
 QS = [{"question": q["question"], "options": q["options"]} for q in QUESTIONS]

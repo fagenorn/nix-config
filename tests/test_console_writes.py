@@ -26,6 +26,7 @@ from .test_console_answer import ASK7 as CHECK_ITEM, C, ITEM, view_of
 from .test_console_stream import open_stream, next_frame
 from .test_console_tracker import Scripted
 from .test_forge_owner_action import ISSUE, SLUG, box_body, comment
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 LOOK = "/api/looked"
 ANSWER = "/api/answer"

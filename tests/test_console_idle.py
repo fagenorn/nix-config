@@ -10,6 +10,7 @@ from agent_tools.console import idle
 from agent_tools.console.sessions import SessionState
 from agent_tools.console.sprints import Manager
 from tests.test_console_view import A, MIN, R, T0, gone, iso, reported, seen, sprint, started
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 NAME = "p00 sprint " + A
 ON = reported(replace(started(A), manager=Manager("started", T0, "work", NAME)), R)

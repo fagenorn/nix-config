@@ -19,6 +19,7 @@ from agent_tools.console.sessions import Observation
 from tests.test_console_manager_check import Time
 from tests.test_console_message_check import serve
 from tests.test_verify_checks import committed_mode
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 ROOT = Path(__file__).resolve().parents[1]
 WRAPPER = "home/common/verify-pending/checks/console-manager-revive"

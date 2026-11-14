@@ -31,6 +31,7 @@ from agent_tools.console.view import derive_view, encode_view, project_states
 
 from . import console_test_support as support
 from .test_console_briefs import PARTS
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 PAGE_FILE = Path(__file__).resolve().parents[1] / "python/agent_tools/console/page.html"
 

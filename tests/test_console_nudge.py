@@ -16,6 +16,7 @@ from agent_tools.console import manager, nudge as nudge_module
 from agent_tools.console.nudge import (NUDGE_TEXT, RELAY, RESTART_TEXT, REVIVE, UNKNOWN_SESSION,
                                        WAKE, Nudge, NudgeFailed, nudge_command, nudger_for,
                                        run_nudge)
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 SID = "a" * 16
 NAME = "owner/p01 sprint " + SID

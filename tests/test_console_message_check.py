@@ -19,6 +19,7 @@ from agent_tools.console.manager import StopFailed
 from agent_tools.console.message_check import GOAL
 from agent_tools.console.sessions import Observation
 from tests.test_console_manager_check import Registry, Time
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 ROOT = Path(__file__).resolve().parents[1]
 WRAPPER = "home/common/verify-pending/checks/console-owner-message"

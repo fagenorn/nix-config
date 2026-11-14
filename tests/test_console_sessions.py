@@ -35,6 +35,7 @@ from agent_tools.console.sessions import (
 )
 
 from . import console_test_support as support
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 FIXTURE = json.loads(
     (Path(__file__).parent / "fixtures" / "console" / "hook-payloads.json").read_text()

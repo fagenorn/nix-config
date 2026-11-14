@@ -24,6 +24,7 @@ import unittest
 from pathlib import Path
 
 from agent_tools.hosts import cache_proxy
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 ACCOUNTS = REPO_ROOT / "home" / "common" / "claude-code" / "accounts"

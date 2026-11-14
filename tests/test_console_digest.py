@@ -20,6 +20,7 @@ from agent_tools.console.event_log import (
 from agent_tools.console.sessions import SessionState
 from agent_tools.console.sprints import sprint_states
 from agent_tools.console.view import InboxRecord
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 CASES = json.loads(
     (Path(__file__).parent / "fixtures" / "console" / "digest-events.json").read_text())["cases"]

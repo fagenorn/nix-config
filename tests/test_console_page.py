@@ -15,6 +15,7 @@ from pathlib import Path
 from agent_tools.console import digest as console_digest
 from agent_tools.console.event_log import Event
 from agent_tools.console.sprints import MAX_REPORT_ISSUES
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PAGE = REPO_ROOT / "python/agent_tools/console/page.html"

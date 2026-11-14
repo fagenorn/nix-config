@@ -18,6 +18,7 @@ from unittest import mock
 from agent_tools.console import exclusion, manager, revive_check, sessions
 from agent_tools.console.event_log import Event
 from agent_tools.console.sessions import Observation
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SID = "a" * 16

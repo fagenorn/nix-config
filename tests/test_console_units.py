@@ -10,6 +10,7 @@ import unittest
 from agent_tools.console import manager, service
 
 from . import test_verify_pending_units as units
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 PORT = 27184
 LAUNCHER = re.compile(r"^/nix/store/[0-9a-z]{32}-agent-tools-console$")

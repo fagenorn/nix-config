@@ -67,6 +67,7 @@ from agent_tools.console.view import (
     read_states,
     registry_changes,
 )
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 
 def state(pid, seq, work=0):
