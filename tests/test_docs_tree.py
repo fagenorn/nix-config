@@ -448,6 +448,36 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("Sign in action", context)
         self.assertNotIn("gives the command to sign in again", context)
 
+    def test_the_console_add_account_decision_is_recorded(self):
+        path = "docs/areas/console/adr/025-the-owner-adds-an-account-from-the-page.md"
+        first = (REPO_ROOT / path).read_text().splitlines()[0]
+        self.assertEqual(first, "# ADR-console-025 — The owner adds an account from the page")
+        adr = self.doc(path)
+        for needle in ("POST /api/account-add", "claude-account add", "account.added",
+                       "accounts_added", "409", "bad account", "default", "0700",
+                       "ADR-console-002", "ADR-console-008", "ADR-console-022",
+                       "ADR-console-024", "ADR-hosts-005", "#1027", "#894"):
+            self.assertIn(needle, adr)
+        for older in ("docs/areas/console/adr/002-the-desk-page-design-rules.md",
+                      "docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md",
+                      "docs/areas/console/adr/024-the-owner-signs-a-profile-in-from-the-page.md",
+                      "docs/areas/console/CONTEXT.md",
+                      "docs/areas/hosts/CONTEXT.md",
+                      "docs/areas/hosts/adr/005-account-profiles-link-shared-config.md"):
+            self.assertIn("ADR-console-025", self.doc(older))
+        self.assertIn("claude-account add", self.doc("docs/areas/hosts/CONTEXT.md"))
+        self.assertIn("POST /api/account-add", self.doc(
+            "docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md"))
+        both = "- **Status:** accepted; amended by ADR-console-024, ADR-console-025"
+        for older, status in (
+                ("docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md", both),
+                ("docs/areas/console/adr/002-the-desk-page-design-rules.md", both),
+                ("docs/areas/console/adr/024-the-owner-signs-a-profile-in-from-the-page.md",
+                 "- **Status:** accepted; amended by ADR-console-025")):
+            line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
+                        if row.startswith("- **Status:**"))
+            self.assertEqual(line, status)
+
     def test_the_launch_choice_decision_is_recorded(self):
         path = "docs/areas/hosts/adr/008-claude-starts-under-the-consoles-profile-choice.md"
         first = (REPO_ROOT / path).read_text().splitlines()[0]

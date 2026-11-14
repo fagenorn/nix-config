@@ -1,7 +1,7 @@
 # ADR-console-024 — The owner signs a profile in from the page
 
-- **Status:** accepted
-- **Decided in:** #842, #1026
+- **Status:** accepted; amended by ADR-console-025
+- **Decided in:** #842, #1026, #1027
 
 ## Context
 
@@ -13,7 +13,7 @@ ADR-console-022 made a signed-out profile, or one whose sign-in ends within thre
 
 **D2. The run.** The console runs `claude-account run auth login` with `CLAUDE_ACCOUNT=<profile>`, with no terminal (the pseudo-terminal only if the host finding of D4 had required it), in its own process group, within the environment of ADR-console-022 D1: the inherited base URL, key and token are removed and `CLAUDE_CACHE_PROXY=0` is set. The client's own login answers; the console reads and writes no credential.
 
-**D3. The link.** `BROWSER` is pointed at a script in the run's private directory that writes its first argument into a FIFO beside it, and the console reads that FIFO. A link is accepted only when it starts with `https://`, is at most 4096 characters long and has only printable characters; any other line is dropped, with one stderr line that names the profile and no part of the line. The link appears in the start answer alone, after a wait of at most 15 seconds, or less if the run ends first; it is in no other answer, view or frame. The page holds it in memory, as the link and the attempt that produced it, and drops it when the newest view shows that attempt ended, or a newer attempt: never by waiting for a `running` frame, because a stream reader may see only the newest view and so never sees one.
+**D3. The link.** `BROWSER` is pointed at a script in the run's private directory that writes its first argument into a FIFO beside it, and the console reads that FIFO. A link is accepted only when it starts with `https://`, is at most 4096 characters long and has only printable characters; any other line is dropped, with one stderr line that names the profile and no part of the line. The link appears in the start answer and in the add answer of ADR-console-025, which starts a sign-in as the start route does, after a wait of at most 15 seconds, or less if the run ends first; it is in no other answer, view or frame (amended by ADR-console-025). The page holds it in memory, as the link and the attempt that produced it, and drops it when the newest view shows that attempt ended, or a newer attempt: never by waiting for a `running` frame, because a stream reader may see only the newest view and so never sees one.
 
 **D4. The code field and the host finding.** The client reads the code that the browser shows the owner from its standard input. On anis-desktop, on 2026-11-13, with client 2.1.322, each run under a throwaway configuration directory: the run saw the link and a return address of `http://localhost:<port>/callback`; a control run with nothing written stayed alive and silent on a pipe and on a pseudo-terminal; a written line (a made-up code and the line ending) was read and rejected on both, the client reacting with a rejection and staying alive, and neither complained of a missing terminal. Both modes read the code, so the console writes the code and a newline to a pipe: no terminal, no output to drain. The pseudo-terminal mode, which takes a carriage return that its default mode turns into a newline, stays as a fallback should a later client stop reading a pipe. A code is 1 to 512 printable characters.
 
