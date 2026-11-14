@@ -1542,6 +1542,7 @@ function accountRow(p, view) {
   const known = (v) => v !== null && v !== undefined;
   const name = p.profile;
   const row = el("li", "acct-row" + (excludedProfile(p) ? " acct-excluded" : "") + (pinnedProfile(p) ? " acct-pinned" : ""));
+  row.dataset.profile = name;
   const who = el("b", "acct-name", name);
   who.setAttribute("title", name);
   row.appendChild(who);
@@ -1551,8 +1552,10 @@ function accountRow(p, view) {
   const out = p.state === "out";
   if (signedOut(p)) detail.appendChild(el("span", "acct-week", "signed out"));
   else if (p.state === "unknown") detail.appendChild(el("span", "acct-week", "no reading yet"));
-  else if (out) detail.appendChild(outWords(p, "acct-week"));
-  else if (p.state === "reset") detail.appendChild(el("span", "acct-week", "reset, not yet used"));
+  else if (out) {
+    detail.appendChild(outWords(p, "acct-week"));
+    if (known(p.week_left)) detail.appendChild(el("span", "acct-week-left", p.week_left + "% of the week left"));
+  } else if (p.state === "reset") detail.appendChild(el("span", "acct-week", "reset, not yet used"));
   else detail.appendChild(el("span", "acct-week", known(p.week_left) ? p.week_left + "% of the week left" : "week unknown"));
   if (known(p.five_hour_left)) detail.appendChild(el("span", "acct-five", p.five_hour_left + "% of 5 hours"));
   if (known(p.next_reset) && !out && Number.isFinite(Date.parse(p.next_reset))) {
@@ -1585,6 +1588,17 @@ function accountRow(p, view) {
   removeControls(act, row, p, view);
   return row;
 }
+// The control of a rebuilt panel that is the one focus was on: the same class inside the same row
+// (a row's profile is its data-profile; the head and the rest sit under none).
+function findControl(node, row, profile, cls) {
+  const here = node.dataset !== undefined && node.dataset.profile !== undefined ? node.dataset.profile : row;
+  if (node.className === cls && here === profile) return node;
+  for (const child of node.children || []) {
+    const found = findControl(child, here, profile, cls);
+    if (found !== null) return found;
+  }
+  return null;
+}
 function renderAccounts(view) {
   const panel = document.getElementById("accounts");
   const body = document.getElementById("accounts-body");
@@ -1607,6 +1621,16 @@ function renderAccounts(view) {
   const typing = active && active.dataset && active.dataset.draft !== undefined
     ? { key: active.dataset.draft, start: active.selectionStart, end: active.selectionEnd }
     : null;
+  let control = null;
+  for (let n = active; n && held === null && typing === null; n = n.parentNode) {
+    if (n === body) {
+      control = { profile: "", cls: active.className };
+      for (let m = active; m !== body; m = m.parentNode) {
+        if (m.dataset !== undefined && m.dataset.profile !== undefined) control.profile = m.dataset.profile;
+      }
+      break;
+    }
+  }
   removeFields = new Map();
   const head = el("div", "acct-head");
   head.appendChild(el("h2", "sec-h", "Accounts"));
@@ -1623,6 +1647,8 @@ function renderAccounts(view) {
     parts.push(phrase("p", "acct-pin-note", ...note));
   }
   body.replaceChildren(...parts);
+  const kept = control === null ? null : findControl(body, "", control.profile, control.cls);
+  if (kept !== null) kept.focus({ preventScroll: true });
   const again = held === null ? undefined : removeFields.get(held.profile);
   if (again !== undefined) {
     again.focus();
@@ -1655,8 +1681,11 @@ function closeAccounts() {
   }
   const back = accountsReturn;
   accountsReturn = null;
-  const target = back !== null && back !== document.body && back.isConnected ? back : document.getElementById("capacity");
-  target.focus();
+  if (back === null || back === document.body) {
+    document.getElementById("accounts").blur();
+    return;
+  }
+  (back.isConnected ? back : document.getElementById("capacity")).focus();
 }
 document.getElementById("capacity").addEventListener("click", () => {
   if (accountsOpen) closeAccounts();

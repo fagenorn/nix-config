@@ -4564,7 +4564,8 @@ def real_capacity(now: float, rows: list, excluded=(), pinned=None) -> dict:
                 "claim": None, "account": None, "session_id": None,
                 "windows": {
                     "7d": {"status": status, "utilization": row.get("week"), "reset": week_reset},
-                    "5h": {"status": "allowed", "utilization": row.get("five"),
+                    "5h": {"status": "rejected" if row.get("five_out") else "allowed",
+                           "utilization": row.get("five"),
                            "reset": row.get("five_reset")},
                 }}))
         if row.get("signin") is not None:
@@ -4620,8 +4621,8 @@ def details(row: dict) -> list:
 class AccountsPanelPageTest(unittest.TestCase):
     def test_the_strip_opens_the_accounts_panel_and_escape_closes_it_returning_focus(self) -> None:
         closed, open_, after = render([
-            START, {"frame": F3}, {"snapshot": True}, {"click": "cap"}, {"snapshot": True},
-            {"key": "Escape"}, {"snapshot": True},
+            START, {"frame": F3}, {"snapshot": True}, {"focus_on": "cap"}, {"click": "cap"},
+            {"snapshot": True}, {"key": "Escape"}, {"snapshot": True},
         ])
         self.assertIs(closed["accounts"]["hidden"], True)
         self.assertEqual(closed["capacity"]["expanded"], "false")
@@ -4647,6 +4648,54 @@ class AccountsPanelPageTest(unittest.TestCase):
         self.assertIs(closed["accounts"]["hidden"], True)
         self.assertIs(in_field["accounts"]["hidden"], True)
         self.assertIs(modified["accounts"]["hidden"], True)
+
+    def test_the_keyboard_flow_survives_a_panel_opened_with_nothing_focused(self) -> None:
+        # A browser's keydown targets the focused element, else the body: after Escape no strip button holds focus.
+        with_inbox = {**F3, **frame([ANSWERABLE])}
+        closed, reopened = render([
+            START, {"frame": with_inbox}, {"key": "a", "follow": True},
+            {"key": "Escape", "follow": True}, {"snapshot": True},
+            {"key": "a", "follow": True}, {"snapshot": True},
+        ])
+        self.assertNotIn("cap", (closed["active"] or "").split())
+        self.assertIs(reopened["accounts"]["hidden"], False)
+        (goal,) = render([
+            START, {"frame": with_inbox}, {"key": "a", "follow": True},
+            {"key": "Escape", "follow": True}, {"key": "g", "follow": True}, {"snapshot": True},
+        ])
+        self.assertIs(box_open(goal), True)
+
+    def test_a_streamed_frame_keeps_the_focused_panel_control(self) -> None:
+        def focused_in(snap: dict) -> list:
+            return [n for n in nodes(panel(snap)) if n["focused"]]
+
+        for cls in ("acct-close", "acct-pin"):
+            (snap,) = render([
+                START, {"frame": F3}, {"click": "cap"}, {"focus_on": cls},
+                {"frame": {**F3, "profile_sessions": {"a": 3, "b": 0, "c": 0}}}, {"snapshot": True},
+            ])
+            (kept,) = focused_in(snap)
+            self.assertIn(cls, kept["cls"].split())
+        # The control is found by its row, not by its class alone: the rows reorder under the focus.
+        cap = F3["capacity"]
+        flipped = {**F3, "capacity": {**cap, "profiles": list(reversed(cap["profiles"]))}}
+        (snap,) = render([
+            START, {"frame": F3}, {"click": "cap"}, {"focus_on": "acct-pin"},
+            {"frame": flipped}, {"snapshot": True},
+        ])
+        (kept,) = focused_in(snap)
+        self.assertIn("acct-pin", kept["cls"].split())
+        (owner,) = [r for r in rows(snap) if kept in nodes(r)]
+        self.assertEqual(full([n for n in nodes(owner) if has_class(n, "acct-name")][0]), "a")
+
+    def test_an_exhausted_account_keeps_its_weekly_figure_in_the_panel(self) -> None:
+        snap = opened(one_profile({
+            "name": "w", "week": .4, "five": 1.0, "five_out": True,
+            "week_reset": NOW_S + 4 * 86400, "five_reset": NOW_S + 3600}))
+        (row,) = rows(snap)
+        out = details(row)
+        self.assertTrue(out[0].startswith("out until "), out)
+        self.assertIn("60% of the week left", out)
 
     def test_focus_returns_to_the_element_focused_at_opening(self) -> None:
         with_inbox = {**F3, **frame([ANSWERABLE])}
@@ -4954,6 +5003,58 @@ class StripPageTest(unittest.TestCase):
         used = sum(group(n) for n in kids) + 16 * (len(kids) - 1)
         budget = 1360 - 2 * 48 - 7 * 9 - 192 - len("Reconnecting…") * 7 - 3 * 28
         self.assertLessEqual(used, budget)
+
+    def test_at_1440_the_rendered_strip_is_one_unclipped_line_beside_the_goal_bar(self) -> None:
+        # Real geometry in headless Chromium; skipped where Playwright or its browser is not installed.
+        try:
+            from playwright.sync_api import Error, sync_playwright
+        except ImportError:
+            self.skipTest("playwright is not installed")
+        worst = real_capacity(NOW_S, [
+            {"name": "work-main", "week": .35, "week_reset": NOW_S + 4 * 86400,
+             "signin": ("signed_in", NOW_S + 2 * 86400)},
+            {"name": "personal", "week": .7, "week_reset": NOW_S + 5 * 86400},
+            {"name": "spare-one", "week": .88, "week_reset": NOW_S + 3 * 86400},
+        ], excluded=("personal",), pinned="work-main")
+        fakes = (
+            "window.EventSource = class { constructor() { window.__src = this; this.l = {}; }"
+            " addEventListener(name, fn) { this.l[name] = fn; } close() {} };"
+            "window.fetch = () => Promise.resolve(new Response(null, {status: 204}));")
+        measure = """() => {
+          const cap = document.getElementById('capacity');
+          const bar = document.getElementById('goal').getBoundingClientRect();
+          const box = cap.getBoundingClientRect();
+          const kids = [...cap.children].map((e) => e.getBoundingClientRect());
+          return {
+            tops: [...new Set([...cap.children].map((e) => e.offsetTop))].length,
+            kids: kids.length,
+            inside: kids.every((r) => r.left >= box.left && r.right <= box.right),
+            fits: cap.scrollWidth <= cap.clientWidth,
+            beside: box.top < bar.bottom && bar.top < box.bottom,
+          };
+        }"""
+        html = PAGE.read_text(encoding="utf-8").replace("__CONSOLE_TOKEN__", "t")
+        with sync_playwright() as pw:
+            try:
+                browser = pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+            except Error as err:
+                self.skipTest(f"no Chromium to launch: {err}")
+            try:
+                page = browser.new_page(viewport={"width": 1440, "height": 900})
+                page.add_init_script(fakes)
+                page.route("http://console.test/", lambda route: route.fulfill(
+                    body=html, content_type="text/html"))
+                page.goto("http://console.test/")
+                page.evaluate("(f) => window.__src.l.view({data: JSON.stringify(f)})",
+                              {**view([]), "capacity": worst})
+                got = page.evaluate(measure)
+            finally:
+                browser.close()
+        self.assertGreater(got["kids"], 3)
+        self.assertEqual(got["tops"], 1, got)
+        self.assertTrue(got["inside"], got)
+        self.assertTrue(got["fits"], got)
+        self.assertTrue(got["beside"], got)
 
     def test_at_1440_the_strip_never_shrinks_and_the_goal_placeholder_stays_one_line(self) -> None:
         rules = self.base_rules()

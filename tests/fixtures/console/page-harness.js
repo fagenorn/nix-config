@@ -5,6 +5,7 @@
 // {focused, clock}, then clock, focus, blur, hide, pagehide. The owner's
 // answer adds {key, ctrlKey?, altKey?, metaKey?, target?} (a keydown on the
 // document; target is the tag name of the focused element, default none),
+// follow: true (the target is the focused element, else a BODY as a browser reports),
 // {click: "<class>"} (the click listeners of the first attached element with
 // that class; none throws), {respond: {status, text}} (queues the answer of
 // the next fetch but /api/looked, default 204 with no text) and
@@ -448,6 +449,7 @@ async function run() {
         key: step.key, ctrlKey: !!step.ctrlKey, altKey: !!step.altKey, metaKey: !!step.metaKey,
         shiftKey: false, repeat: false, preventDefault() { prevented = true; },
         target: own !== null ? own
+          : step.follow === true ? (document.activeElement || { tagName: "BODY", isContentEditable: false })
           : step.target === undefined ? null : { tagName: step.target, isContentEditable: step.editable === true },
       };
       if (own !== null) for (const fn of own.listeners.keydown || []) fn(Object.assign({ type: "keydown" }, event));

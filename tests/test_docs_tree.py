@@ -520,6 +520,10 @@ class DocsTreeTest(unittest.TestCase):
         for needle in ("never shrinks", "ending in an ellipsis"):
             self.assertIn(needle, adr2)
         self.assertNotIn("clips instead", adr2)
+        for words in ("signed in, ends in N days", "signed in, ends today"):
+            self.assertIn(words, adr2)
+        for gone in ("sign-in ends in N days", "sign-in ends today", "a signed-in profile carries none"):
+            self.assertNotIn(gone, adr2)
         for gone in ("Beside each listed profile sits its sign-in", "Then one time:"):
             self.assertNotIn(gone, adr2)
         panel = entry("Accounts panel")
