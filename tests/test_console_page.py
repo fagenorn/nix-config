@@ -4977,6 +4977,21 @@ class SigninRecoveredPageTest(unittest.TestCase):
         self.assertEqual(len(of_class(card, "input", "signin-code")), 1)
         self.assertEqual(len(of_class(card, "button", "signin-cancel")), 1)
 
+    def test_a_typed_code_and_its_focus_survive_a_frame_on_a_recovered_card(self) -> None:
+        run = {"work": {"state": "running", "at": None, "attempt": 7}}
+        one, two = render([
+            START, {"respond": {"status": 200, "text": ANSWER}},
+            {"frame": {**frame([]), "signin_runs": run}},
+            {"type": {"class": "signin-code", "text": "ab#C"}},
+            {"frame": {**frame([check_item("A", "manual-check")]), "signin_runs": run}},
+            {"snapshot": True},
+            {"append": {"class": "signin-code", "text": "-1"}},
+            {"click": "signin-send"}, {"snapshot": True}])
+        code = field(one, "signin-code")
+        self.assertEqual((code["value"], code["focused"]), ("ab#C", True))
+        self.assertEqual(json.loads(two["posts"][-1]["body"]),
+                         {"profile": "work", "code": "ab#C-1"})
+
     def test_an_ended_run_with_no_inbox_item_shows_no_card(self) -> None:
         run = {"work": {"state": "cancelled", "at": None, "attempt": 7}}
         (snap,) = render([START, {"frame": {**frame([]), "signin_runs": run}}, {"snapshot": True}])

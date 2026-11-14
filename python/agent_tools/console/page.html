@@ -2197,7 +2197,8 @@ function renderInbox(view) {
     const profile = key.split("\n")[1];
     if (state.phase !== "sending" && !signins.some((item) => item.profile === profile)) signinPosts.delete(key);
   }
-  const present = new Set(open.map(stateId));
+  // A sign-in card shown with no inbox item keeps its typed code like any open item's draft.
+  const present = new Set([...open, ...signins].map(stateId));
   // A frame that shows a sent item open again supersedes the page's own "sent"; a redraw of the same view does not.
   const reopened = new Set(fresh ? tracked.filter(answerable).map(itemId) : []);
   for (const [id, state] of answers) {
