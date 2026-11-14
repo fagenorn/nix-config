@@ -10,6 +10,7 @@ import socket
 import sys
 import tempfile
 import textwrap
+import threading
 import time
 import unittest
 from contextlib import redirect_stderr
@@ -52,6 +53,9 @@ FAKE = textwrap.dedent('''\
     if mode == "deaf":
         os.close(0)
         record({"deaf": True})
+        time.sleep(600)
+    if mode == "stuck":
+        record({"stuck": True})
         time.sleep(600)
     if mode == "hang":
         child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"])
@@ -148,6 +152,16 @@ class EntryTest(unittest.TestCase):
         self.assertEqual(folded, {"work": Ended("signed_in", "t2", 7)})
         half = ended_state(events[:3])
         self.assertEqual(ended_state(events[3:], half), folded)
+
+    def test_an_older_attempts_late_row_never_replaces_a_newer_result(self):
+        rows = [ended("work", "signed_in", 9), ended("work", "cancelled", 4),
+                ended("work", "failed", 9)]
+        events = [Event(seq=n, at=f"t{n}", kind=kind, project=project, payload=payload)
+                  for n, (kind, project, payload) in enumerate(rows, start=1)]
+        self.assertEqual(ended_state(events[:2]), {"work": Ended("signed_in", "t1", 9)})
+        self.assertEqual(ended_state(events), {"work": Ended("failed", "t3", 9)})
+        self.assertEqual(ended_state(events[1:2], ended_state(events[:1])),
+                         {"work": Ended("signed_in", "t1", 9)})
 
 
 class RunTest(unittest.TestCase):
@@ -274,6 +288,38 @@ class RunTest(unittest.TestCase):
         self.assertEqual(runs.running(), frozenset({"work"}))
         runs.cancel("work")
         until(self, lambda: self.ends)
+
+    def test_a_client_that_stopped_reading_cannot_hold_up_a_cancel(self):
+        self.arrange("stuck")
+        runs = self.make()
+        runs.start("work")
+        self.wait_record("stuck")
+        outcome = []
+
+        def fill():
+            for _ in range(2000):
+                try:
+                    runs.send_code("work", "x" * MAX_CODE_CHARS)
+                except OSError as error:
+                    outcome.append(error)
+                    return
+            outcome.append(None)
+
+        writer = threading.Thread(target=fill, daemon=True)
+        writer.start()
+        writer.join(10)
+        self.assertFalse(writer.is_alive(), "a write to a full input blocked")
+        self.assertIsInstance(outcome[0], BlockingIOError)
+        done = threading.Event()
+
+        def cancel():
+            runs.cancel("work")
+            done.set()
+
+        threading.Thread(target=cancel, daemon=True).start()
+        self.assertTrue(done.wait(5), "cancel waited on the blocked write")
+        until(self, lambda: self.ends)
+        self.assertEqual(self.ends[0][:3], ("work", 1, "cancelled"))
 
     def test_code_and_cancel_need_a_running_sign_in(self):
         self.arrange("code")

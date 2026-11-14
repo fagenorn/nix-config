@@ -39,7 +39,10 @@ The client is spawned in a new session (its pid is its process-group id), in a f
 client exits. `wait_link(profile)` waits at most `link_wait` seconds (`LINK_WAIT`, 15), or until the
 run ends, and returns the link or None. `send_code(profile, code)` and `cancel(profile)` of a profile
 with no live run raise `NotRunning`; a write the live client's input refuses raises its `OSError`
-unchanged, so the caller can tell it from a missing run. `running()` is the profiles with a live run.
+unchanged, so the caller can tell it from a missing run. The write never blocks and never holds the
+runner's lock: the client's input is non-blocking, and a code (at most `MAX_CODE_CHARS` plus the line
+ending, under the pipe's atomic size) the input has no room for raises `BlockingIOError` at once, so
+a client that stopped reading cannot hold up `cancel`, `expire` or any other call. `running()` is the profiles with a live run.
 
 Deadline. `expire()` kills every run with `clock() - started >= deadline` (`LOGIN_DEADLINE`, 600
 seconds) and returns their profiles, sorted; a younger run is untouched. The caller calls it on a
@@ -64,7 +67,9 @@ number of the run's `signin.acted` start row (a positive `int`, never a `bool`).
 
 Fold. `ended_state(events, state=None)` returns `{profile: Ended(outcome, at, attempt)}` from the
 `ENDED` events: only a payload with a non-empty string `profile`, an `outcome` in `OUTCOMES` and a
-positive `int` `attempt` counts; the last valid event per profile wins and `at` is its `at`. Folding
+positive `int` `attempt` counts; the event with the highest `attempt` per profile wins, the later
+one among equal attempts, and `at` is its `at`, so an older attempt's late row never replaces a
+newer attempt's result. Folding
 later events onto an earlier fold gives the fold of all of them.
 
 Requests. `parse_profile_request(body)` takes a UTF-8 JSON object with exactly the member `profile`,
@@ -80,6 +85,7 @@ nowhere else. `runs_for(platform)` is `SignIns` where `manager.supported(platfor
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import os
 import pty
@@ -196,7 +202,9 @@ def ended_state(events: Iterable[Event],
         if event.kind != ENDED or not _valid_end(event.payload):
             continue
         payload = event.payload
-        folded[payload["profile"]] = Ended(payload["outcome"], event.at, payload["attempt"])
+        held = folded.get(payload["profile"])
+        if held is None or payload["attempt"] >= held.attempt:
+            folded[payload["profile"]] = Ended(payload["outcome"], event.at, payload["attempt"])
     return folded
 
 
@@ -234,21 +242,28 @@ class _Client:
     def __init__(self, process: subprocess.Popen, master: int | None):
         self._process = process
         self._master = master
+        self._input_lock = threading.Lock()
         self.pid = process.pid
 
     def send(self, line: str) -> None:
         data = (line + CODE_END[CODE_INPUT]).encode("ascii")
-        if self._master is not None:
-            os.write(self._master, data)
-            return
-        self._process.stdin.write(data)
-        self._process.stdin.flush()
+        with self._input_lock:
+            if self._master is not None:
+                fd = self._master
+            elif self._process.stdin is None or self._process.stdin.closed:
+                raise BrokenPipeError("the client's input is closed")
+            else:
+                fd = self._process.stdin.fileno()
+            os.set_blocking(fd, False)
+            if os.write(fd, data) != len(data):
+                raise BlockingIOError(errno.EAGAIN, "the client's input is full")
 
     def wait(self) -> int:
         code = self._process.wait()
-        if self._process.stdin is not None:
-            with contextlib.suppress(OSError):
-                self._process.stdin.close()
+        with self._input_lock:
+            if self._process.stdin is not None:
+                with contextlib.suppress(OSError):
+                    self._process.stdin.close()
         return code
 
     def kill_group(self) -> None:
@@ -369,7 +384,7 @@ class SignIns:
             run = self._runs.get(profile)
             if run is None or run.exited.is_set():
                 raise NotRunning(profile)
-            run.client.send(code)
+        run.client.send(code)
 
     def cancel(self, profile: str) -> None:
         with self._lock:

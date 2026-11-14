@@ -2030,7 +2030,17 @@ function renderInbox(view) {
   }
   for (const [profile, held] of [...signinLinks]) {
     const shown = signins.find((item) => item.profile === profile);
-    if (shown === undefined || signinEnded(shown.run, held.attempt)) signinLinks.delete(profile);
+    if (shown === undefined) {
+      signinLinks.delete(profile);
+      continue;
+    }
+    const run = shown.run;
+    if (run !== null && typeof run === "object" && run.state === "running" && run.attempt === held.attempt) {
+      held.confirmed = true;
+    } else if (held.confirmed || signinEnded(run, held.attempt)) {
+      // A run once shown running that a later view no longer shows running is gone, even with no ending row (a console restart).
+      signinLinks.delete(profile);
+    }
   }
   for (const [key, state] of [...signinPosts]) {
     const profile = key.split("\n")[1];

@@ -4717,6 +4717,16 @@ class SigninPageTest(unittest.TestCase):
             {"frame": frame([with_run(SIGNIN, "timed_out", 6)])}, {"snapshot": True}])
         self.assertEqual(len(of_class(sign_in_card(snap), "a", "signin-link")), 1)
 
+    def test_a_run_that_vanishes_without_an_ending_row_drops_the_held_link(self) -> None:
+        for view_after in (SIGNIN, with_run(SIGNIN, "timed_out", 6)):
+            with self.subTest(run=view_after["run"]):
+                (snap,) = render(SIGNED_IN_STEPS + [
+                    {"frame": frame([view_after])}, {"snapshot": True}])
+                card = sign_in_card(snap)
+                self.assertEqual([n for n in nodes(card) if has_class(n, "signin-link")], [])
+                self.assertEqual(len(of_class(card, "button", "signin-start")), 1)
+                self.assertEqual([n for n in nodes(card) if has_class(n, "signin-cancel")], [])
+
     def test_a_link_does_not_outlive_its_item(self) -> None:
         one, two = render(SIGNED_IN_STEPS + [
             {"frame": frame([])}, {"frame": frame([SIGNIN])}, {"snapshot": True},
