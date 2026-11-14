@@ -138,7 +138,8 @@ carries no terminal command. `run` is the profile's latest sign-in run from the 
 argument, `{"state": "running" | "signed_in" | "failed" | "timed_out" | "cancelled", "at":
 <ISO string> | null, "attempt": <positive int>}`, and the view's top-level `signin_runs` member
 is that mapping, `{profile: run}`, copied (an empty object when none is given). The sign-in
-link is never in the view: the page holds it from the start answer alone.
+link is never in the view: the page holds it from the start answer, the add answer and the
+link answer of `POST /api/signin-link` alone, each a guarded page request.
 
 The top-level `accounts_added` member (#1027) is the sorted, de-duplicated list of the profile names
 the owner added from the page and the retained log still holds, from the `accounts_added` argument

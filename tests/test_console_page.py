@@ -271,7 +271,7 @@ class PageTest(unittest.TestCase):
              "/api/withdraw", "/api/retry-manager", "/api/approve", "/api/reply",
              "/api/message", "/api/stop", "/api/round-answer", "/api/continue",
              "/api/exclusion", "/api/signin", "/api/signin-code", "/api/signin-cancel",
-             "/api/account-add"},
+             "/api/account-add", "/api/signin-link"},
         )
         self.assertEqual(
             len(re.findall(r"\b(?:fetch|EventSource)\(", self.text)), len(literals)
@@ -280,7 +280,7 @@ class PageTest(unittest.TestCase):
     def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
         # A separate snapshot request can answer after a newer streamed frame
         # and render over it; the stream's first frame is already the snapshot.
-        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 23)
+        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 24)
         self.assertIsNotNone(
             re.search(r'fetch\("/api/looked",\s*\{\s*method:\s*"POST"', self.text)
         )
@@ -293,7 +293,7 @@ class PageTest(unittest.TestCase):
         for route in ("/api/goal", "/api/withdraw", "/api/retry-manager", "/api/approve",
                       "/api/reply", "/api/message", "/api/stop", "/api/round-answer",
                       "/api/signin", "/api/signin-code", "/api/signin-cancel",
-                      "/api/account-add"):
+                      "/api/account-add", "/api/signin-link"):
             self.assertIsNotNone(
                 re.search(rf'fetch\("{route}",\s*\{{\s*method:\s*"POST"', self.text)
             )
@@ -4852,6 +4852,115 @@ class SigninPageTest(unittest.TestCase):
             elif ANSWERABLE["headline"] in text:
                 order.append("tracker")
         self.assertEqual(order, ["progress", "signin", "question", "tracker"])
+
+
+LATER = [START, {"respond": {"status": 200, "text": ANSWER}},
+         {"frame": frame([with_run(SIGNIN, "running", 7)])}]
+
+
+def asks(snap: dict) -> list:
+    return [p for p in snap["posts"] if p["url"] == "/api/signin-link"]
+
+
+def linked(snap: dict) -> list:
+    return [n["href"] for n in of_class(sign_in_card(snap), "a", "signin-link")]
+
+
+class SigninLaterPageTest(unittest.TestCase):
+    def test_a_page_loaded_while_a_sign_in_runs_asks_for_its_link_and_shows_the_code_field(self) -> None:
+        (snap,) = render(LATER + [{"snapshot": True}])
+        (post,) = asks(snap)
+        self.assertEqual(post["method"], "POST")
+        self.assertEqual(post["headers"]["X-Console-Token"], TOKEN)
+        self.assertEqual(json.loads(post["body"]), {"profile": "work"})
+        card = sign_in_card(snap)
+        self.assertEqual(linked(snap), ["https://claude.example/a?s=1"])
+        self.assertEqual(len(of_class(card, "input", "signin-code")), 1)
+        self.assertEqual(len(of_class(card, "button", "signin-cancel")), 1)
+        self.assertEqual(of_class(card, "button", "signin-start"), [])
+
+    def test_the_link_is_asked_once_per_attempt(self) -> None:
+        one, two, three, four = render([
+            START, {"hold": True},
+            {"frame": frame([with_run(SIGNIN, "running", 7)])},
+            {"frame": frame([with_run(SIGNIN, "running", 7), check_item("A", "manual-check")])},
+            {"snapshot": True},
+            {"release": {"status": 409, "text": "no sign-in is running for work\n"}},
+            {"frame": frame([with_run(SIGNIN, "running", 7)])},
+            {"snapshot": True},
+            {"respond": {"status": 200, "text": "{\"attempt\":8,\"link\":null}"}},
+            {"frame": frame([with_run(SIGNIN, "running", 8)])},
+            {"frame": frame([with_run(SIGNIN, "running", 8), check_item("A", "manual-check")])},
+            {"snapshot": True},
+            {"respond": {"status": 200, "text": "{\"attempt\":9,\"link\":\"https://claude.example/c\"}"}},
+            {"frame": frame([with_run(SIGNIN, "running", 9)])},
+            {"snapshot": True}])
+        self.assertEqual(len(asks(one)), 1)
+        self.assertEqual(len(asks(two)), 1)
+        self.assertEqual(len(asks(three)), 2)
+        self.assertEqual(len(asks(four)), 3)
+        self.assertEqual(linked(four), ["https://claude.example/c"])
+
+    def test_an_answer_for_another_attempt_is_not_held(self) -> None:
+        (snap,) = render([
+            START,
+            {"respond": {"status": 200, "text": "{\"attempt\":6,\"link\":\"https://claude.example/old\"}"}},
+            {"frame": frame([with_run(SIGNIN, "running", 7)])}, {"snapshot": True}])
+        self.assertEqual(len(asks(snap)), 1)
+        self.assertEqual(linked(snap), [])
+        self.assertEqual(len(of_class(sign_in_card(snap), "button", "signin-start")), 1)
+        # An older attempt's link is also dropped by the page's own reconcile; a newer one only by this rule.
+        (newer,) = render([
+            START,
+            {"respond": {"status": 200, "text": "{\"attempt\":8,\"link\":\"https://claude.example/new\"}"}},
+            {"frame": frame([with_run(SIGNIN, "running", 7)])}, {"snapshot": True}])
+        self.assertEqual(linked(newer), [])
+        self.assertEqual(len(of_class(sign_in_card(newer), "button", "signin-start")), 1)
+
+    def test_a_refused_ask_leaves_the_sign_in_action(self) -> None:
+        (snap,) = render([
+            START,
+            {"respond": {"status": 409, "text": "no sign-in is running for work\n"}},
+            {"frame": frame([with_run(SIGNIN, "running", 7)])}, {"snapshot": True}])
+        card = sign_in_card(snap)
+        self.assertEqual(len(asks(snap)), 1)
+        self.assertEqual(len(of_class(card, "button", "signin-start")), 1)
+        self.assertEqual(linked(snap), [])
+        self.assertEqual(of_class(card, "span", "signin-failed"), [])
+
+    def test_a_cancel_from_another_page_ends_the_sign_in_here(self) -> None:
+        one, two = render(LATER + [
+            {"snapshot": True}, {"frame": frame([with_run(SIGNIN, "cancelled", 7)])},
+            {"snapshot": True}])
+        self.assertEqual(linked(one), ["https://claude.example/a?s=1"])
+        card = sign_in_card(two)
+        self.assertEqual([n for n in nodes(card) if has_class(n, "signin-link")], [])
+        self.assertEqual(of_class(card, "input", "signin-code"), [])
+        self.assertEqual(of_class(card, "button", "signin-cancel"), [])
+        self.assertEqual(len(of_class(card, "button", "signin-start")), 1)
+        self.assertEqual([full(n) for n in of_class(card, "p", "signin-run")],
+                         ["The sign-in was cancelled."])
+
+    def test_a_page_holding_the_attempts_link_does_not_ask(self) -> None:
+        (snap,) = render(SIGNED_IN_STEPS + [
+            {"frame": frame([with_run(SIGNIN, "running", 7)])}, {"snapshot": True}])
+        self.assertEqual(asks(snap), [])
+
+    def test_a_late_answer_for_an_older_attempt_does_not_replace_the_newer_link(self) -> None:
+        one, two = render([
+            START, {"hold": True},
+            {"frame": frame([with_run(SIGNIN, "running", 7)])},
+            {"respond": {"status": 200, "text": "{\"attempt\":8,\"link\":\"https://claude.example/c\"}"}},
+            {"frame": frame([with_run(SIGNIN, "running", 8)])},
+            {"snapshot": True},
+            {"release": {"status": 200, "text": ANSWER}},
+            {"snapshot": True}])
+        self.assertEqual(linked(one), ["https://claude.example/c"])
+        self.assertEqual(linked(two), ["https://claude.example/c"])
+        self.assertEqual(len(asks(two)), 2)
+        card = sign_in_card(two)
+        self.assertEqual(len(of_class(card, "input", "signin-code")), 1)
+        self.assertEqual(of_class(card, "button", "signin-start"), [])
 
 
 V = {**frame([]), "capacity": capacity([profile("work", "ok", week_left=50, signin=si("signed_in", 9))])}

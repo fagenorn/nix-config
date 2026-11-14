@@ -1018,6 +1018,31 @@ function holdSigninLink(profile, answer, added = false) {
   if (!Number.isInteger(answer.attempt) || answer.attempt < 1) return;
   signinLinks.set(profile, { link, attempt: answer.attempt, added });
 }
+// One ask per profile and attempt, kept after a refusal or a null link: a page that holds no link for a running sign-in asks the console for it once.
+const signinAsked = new Set();
+// The newest view alone says whether the asked attempt still runs.
+function signinStillRunning(profile, attempt) {
+  if (lastView === null || lastView.inbox === undefined) return false;
+  const shown = lastView.inbox.open.find((item) => isSignin(item) && item.profile === profile);
+  if (shown === undefined) return false;
+  const run = shown.run;
+  return run !== null && typeof run === "object" && run.state === "running" && run.attempt === attempt;
+}
+async function askSigninLink(profile, attempt) {
+  signinAsked.add(profile + "\n" + attempt);
+  try {
+    const response = await fetch("/api/signin-link", { method: "POST", headers: stallHeaders(), body: JSON.stringify({ profile }) });
+    if (response.status !== 200) return;
+    const answer = JSON.parse(await response.text());
+    // Rule 1: the answer is for the asked attempt. Rule 2: the newest view still shows that attempt running, so a late answer never overwrites a newer attempt's link.
+    if (answer === null || typeof answer !== "object" || answer.attempt !== attempt) return;
+    if (!signinStillRunning(profile, attempt)) return;
+    holdSigninLink(profile, answer);
+    redraw();
+  } catch (error) {
+    console.error(error);
+  }
+}
 function signinLinkNode(cls, held) {
   const link = el("a", cls, "Open the sign-in page");
   link.target = "_blank";
@@ -2137,6 +2162,16 @@ function renderInbox(view) {
     } else if (held.confirmed || signinEnded(item, held.attempt)) {
       signinLinks.delete(profile);
     }
+  }
+  for (const item of signins) {
+    const run = item.run;
+    if (run === null || typeof run !== "object" || run.state !== "running" || !Number.isInteger(run.attempt)) continue;
+    const have = signinLinks.get(item.profile);
+    if (have !== undefined && have.attempt >= run.attempt) continue;
+    if (signinAsked.has(item.profile + "\n" + run.attempt)) continue;
+    const post = signinPosts.get("start\n" + item.profile);
+    if (post !== undefined && post.phase === "sending") continue;
+    askSigninLink(item.profile, run.attempt);
   }
   held = carryAccountCode(signins) || held;
   for (const [key, state] of [...signinPosts]) {
