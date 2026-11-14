@@ -37,7 +37,8 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .top-in { max-width: 1360px; margin: 0 auto; padding: 8px 48px; display: flex; align-items: center; gap: 28px; min-height: 56px; }
 .brand { font-weight: 600; color: var(--sub1); white-space: nowrap; letter-spacing: -.005em; }
 .conn { color: var(--ov2); font-size: .8125rem; }
-.cap { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 16px; margin-left: auto; min-width: 0; max-width: 100%; padding: 0; background: none; border: 0; font: inherit; font-size: .8125rem; color: var(--sub0); text-align: left; cursor: pointer; }
+.cap { display: flex; flex: 0 1 auto; flex-wrap: nowrap; white-space: nowrap; overflow: hidden; align-items: center; gap: 4px 16px; margin-left: auto; min-width: 0; max-width: 100%; padding: 0; background: none; border: 0; font: inherit; font-size: .8125rem; color: var(--sub0); text-align: left; cursor: pointer; }
+.cap > * { flex: none; }
 .cap-state { display: inline-flex; align-items: center; gap: 7px; font-weight: 600; }
 .cap-fine { color: var(--green); }
 .cap-tight { color: var(--yellow); }
@@ -48,8 +49,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .meter i { display: block; height: 100%; background: var(--sub0); }
 .cap-pc { color: var(--sub1); }
 .cap-signin, .cap-no-reading, .cap-signed-out { color: var(--ov2); }
-.cap-excluded, .cap-excl { color: var(--ov2); }
-.cap-pin-mark, .cap-pin-note { color: var(--sub1); }
+.cap-excluded, .cap-excl, .cap-pin-mark { color: var(--ov2); }
 .acct-toggle, .acct-pin, .acct-remove, .acct-remove-send, .acct-remove-cancel, .acct-close { font: inherit; color: var(--sub1); background: none; border: 1px solid var(--s1); border-radius: 4px; padding: 0 6px; cursor: pointer; }
 .acct-toggle:disabled, .acct-pin:disabled, .acct-remove:disabled, .acct-remove-send:disabled, .acct-remove-cancel:disabled, .acct-close:disabled { cursor: default; opacity: .6; }
 .acct-panel { position: absolute; top: calc(100% + 6px); right: 16px; z-index: 20; width: min(600px, calc(100vw - 32px)); max-height: calc(100vh - 6rem); overflow-y: auto; padding: 12px 16px; background: var(--base); border: 1px solid var(--s1); border-radius: 12px; box-shadow: 0 28px 48px -24px rgba(8, 9, 16, .9); font-size: .84375rem; color: var(--sub0); }
@@ -138,7 +138,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .opt.picked { border-color: var(--lav); background: rgba(183, 189, 248, .10); }
 .opt.picked kbd { background: var(--lav); border-color: var(--lav); color: var(--crust); }
 .goal-project.picked { color: var(--lav); border-color: var(--lav); }
-.goal-bar { position: relative; flex: 0 1 440px; min-width: 12rem; }
+.goal-bar { position: relative; flex: 0 1000 440px; min-width: 12rem; }
 .goal-in { display: flex; align-items: flex-start; gap: 10px; padding: 0 10px 0 12px; background: var(--mantle); border: 1px solid var(--s0); border-radius: 12px; transition: border-color .16s; }
 .goal-in:hover { border-color: var(--s1); }
 .goal-in:focus-within { border-color: var(--lav); }
@@ -302,6 +302,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
   .statement h1 { font-size: 2rem; }
   .top-in { flex-wrap: wrap; }
   .cap { margin-left: 0; }
+  .cap-extra { display: none; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .001ms !important; animation-delay: 0s !important; transition-duration: .001ms !important; }
@@ -1429,9 +1430,18 @@ function renderCapacity(view) {
   const known = (v) => v !== null && v !== undefined;
   const readings = cap.profiles.filter((p) => p.state !== "unknown" && !signedOut(p));
   const eligible = readings.filter((p) => !excludedProfile(p));
-  const listed = cap.profiles.filter((p) => readings.includes(p) || excludedProfile(p) || pinnedProfile(p)
-    || (p.signin !== null && typeof p.signin === "object"));
+  const asks = (p) => p.signin !== null && typeof p.signin === "object" && p.signin.ask === true;
+  const listed = cap.profiles.filter((p) => readings.includes(p) || signedOut(p) || excludedProfile(p)
+    || pinnedProfile(p) || asks(p));
   const nodes = [];
+  let tightest = null;
+  for (const p of eligible) {
+    if (tightest === null) tightest = p;
+    else if (tightest.state !== "out") {
+      if (p.state === "out") tightest = p;
+      else if (known(p.week_left) && (!known(tightest.week_left) || p.week_left < tightest.week_left)) tightest = p;
+    }
+  }
   if (eligible.length) {
     const [tone, word, mark] = cap.all_out ? ["cap-out", "out", "stop-icon"]
       : cap.tight ? ["cap-tight", "tight", "clock-icon"] : ["cap-fine", "fine", "tick-icon"];
@@ -1449,12 +1459,14 @@ function renderCapacity(view) {
       acct.appendChild(who);
       if (excludedProfile(p)) acct.appendChild(el("span", "cap-excl", "excluded"));
       if (pinnedProfile(p)) acct.appendChild(el("span", "cap-pin-mark", "pinned"));
-      acct.appendChild(el("span", "cap-signin", signinWords(p.signin)));
+      if (signedOut(p)) acct.appendChild(el("span", "cap-signin", "signed out"));
+      else if (asks(p)) acct.appendChild(el("span", "cap-signin", signinWords(p.signin)));
       nodes.push(acct);
       continue;
     }
     const acct = el("span", (p.state === "out" ? "cap-acct cap-out" : "cap-acct")
-      + (excludedProfile(p) ? " cap-excluded" : "") + (pinnedProfile(p) ? " cap-pinned" : ""));
+      + (excludedProfile(p) ? " cap-excluded" : "") + (pinnedProfile(p) ? " cap-pinned" : "")
+      + (p === tightest ? " cap-tightest" : ""));
     const shares = [known(p.week_left) ? p.week_left + "% of the week left" : "week unknown"];
     if (known(p.five_hour_left)) shares.push(p.five_hour_left + "% of 5 hours");
     acct.setAttribute("title", shares.join(", "));
@@ -1474,26 +1486,19 @@ function renderCapacity(view) {
     if (p.state === "out") acct.appendChild(outWords(p, ""));
     else if (p.state === "reset") acct.appendChild(el("span", "cap-pc", "reset, not yet used"));
     else acct.appendChild(el("span", "cap-pc", known(p.week_left) ? p.week_left + "%" : "week unknown"));
-    const words = signinWords(p.signin);
-    if (words !== "") acct.appendChild(el("span", "cap-signin", words));
+    if (asks(p)) acct.appendChild(el("span", "cap-signin", signinWords(p.signin)));
     nodes.push(acct);
-  }
-  if (eligible.length) {
-    if (cap.all_out) {
-      if (cap.resumes_at) nodes.push(phrase("span", "cap-when", "resumes ", timeEl("weekday", cap.resumes_at, "")));
-    } else {
-      const stamps = eligible.filter((p) => p.state !== "out").map((p) => p.next_reset)
-        .filter((t) => Number.isFinite(Date.parse(t)));
-      if (stamps.length) {
-        const next = stamps.reduce((a, b) => (Date.parse(b) < Date.parse(a) ? b : a));
-        nodes.push(phrase("span", "cap-when", "resets ", timeEl("weekday", next, "")));
-      }
-    }
   }
   if (cap.profiles.some(excludedProfile) && cap.profiles.every((p) => excludedProfile(p) || signedOut(p))) {
     nodes.push(el("span", "cap-none", "every profile excluded"));
   }
   if (cap.no_reading) nodes.push(el("span", "cap-none", cap.no_reading));
+  if (!nodes.length) nodes.push(el("span", "cap-none", "no accounts"));
+  if (eligible.length) {
+    for (const n of nodes.slice(1)) {
+      if (!/(^| )cap-tightest( |$)/.test(n.className)) n.className += " cap-extra";
+    }
+  }
   box.replaceChildren(...nodes);
 }
 // The accounts panel (#1039): one row per capacity profile with its details and the exclude, pin

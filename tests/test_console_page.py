@@ -251,7 +251,7 @@ class PageTest(unittest.TestCase):
             if selector.split()[0].startswith((".top", ".brand", ".conn", ".goal-", "#goal", ".cap", ".meter"))
             and decls.get("white-space") == "nowrap"
         }
-        self.assertEqual(unwrapped, {".brand", ".cap-acct", ".cap-acct b"})
+        self.assertEqual(unwrapped, {".brand", ".cap", ".cap-acct", ".cap-acct b"})
         (long_name,) = render([
             START,
             {"frame": {**view([]), "capacity": capacity([profile("a" * 60, "ok", week_left=50)])}},
@@ -801,7 +801,7 @@ class CapacityPageTest(unittest.TestCase):
         ], no_reading="1 with no reading yet"))
         self.assertEqual(
             [n["cls"] for n in strip(snap)],
-            ["cap-state cap-fine", "cap-acct", "cap-acct", "cap-when", "cap-none"])
+            ["cap-state cap-fine", "cap-acct cap-extra", "cap-acct cap-tightest", "cap-none cap-extra"])
         state = strip(snap)[0]
         self.assertEqual(full(state), "fine")
         self.assertIn("svg", [c["tag"] for c in state["children"]])
@@ -816,7 +816,8 @@ class CapacityPageTest(unittest.TestCase):
         self.assertEqual(full(pc), "65%")
         self.assertEqual(a["title"], "65% of the week left, 40% of 5 hours")
         self.assertEqual(c["title"], "30% of the week left")
-        self.assertEqual(full(part(snap, "cap-when")), "resets Mon 05:00")
+        self.assertEqual([n for n in nodes(snap["capacity"]) if has_class(n, "cap-when")], [])
+        self.assertNotIn("resets", full(snap["capacity"]))
         self.assertEqual(full(part(snap, "cap-none")), "1 with no reading yet")
 
     def test_tight_reads_tight_and_an_out_account_reads_out_until(self) -> None:
@@ -827,7 +828,7 @@ class CapacityPageTest(unittest.TestCase):
         ], tight=True))
         self.assertEqual(
             [n["cls"] for n in strip(snap)],
-            ["cap-state cap-tight", "cap-acct", "cap-acct cap-out", "cap-when"])
+            ["cap-state cap-tight", "cap-acct cap-extra", "cap-acct cap-out cap-tightest"])
         state = strip(snap)[0]
         self.assertEqual(full(state), "tight")
         self.assertIn("svg", [c["tag"] for c in state["children"]])
@@ -837,7 +838,8 @@ class CapacityPageTest(unittest.TestCase):
         self.assertEqual(b["title"], "55% of the week left, 0% of 5 hours")
         self.assertIn("out until Fri 09:30", full(b))
         self.assertEqual([n for n in nodes(b) if has_class(n, "cap-pc")], [])
-        self.assertEqual(full(part(snap, "cap-when")), "resets Mon 05:00")
+        self.assertEqual([n for n in nodes(snap["capacity"]) if has_class(n, "cap-when")], [])
+        self.assertNotIn("resets", full(snap["capacity"]))
 
     def test_every_account_out_reads_out_in_red_and_when_work_resumes(self) -> None:
         snap = capacity_snap(capacity([
@@ -846,15 +848,21 @@ class CapacityPageTest(unittest.TestCase):
         ], all_out=True, resumes_at="2026-11-13T09:30:00+00:00"))
         self.assertEqual(
             [n["cls"] for n in strip(snap)],
-            ["cap-state cap-out", "cap-acct cap-out", "cap-acct cap-out", "cap-when"])
+            ["cap-state cap-out", "cap-acct cap-out cap-tightest", "cap-acct cap-out cap-extra"])
         state = strip(snap)[0]
         self.assertEqual(full(state), "out")
         self.assertIn("svg", [c["tag"] for c in state["children"]])
         a, b = accounts(snap)
         self.assertEqual(bar(a), "0%")
         self.assertEqual(bars(b), [])
-        self.assertEqual(full(part(snap, "cap-when")), "resumes Fri 09:30")
+        self.assertEqual([n for n in nodes(snap["capacity"]) if has_class(n, "cap-when")], [])
+        self.assertNotIn("resumes", full(snap["capacity"]))
         self.assertNotIn("resets", full(snap["capacity"]))
+        statement = render_page({**view([]), "capacity": capacity([
+            profile("a", "out", week_left=0, out_until="2026-11-13T09:30:00+00:00"),
+            profile("b", "out", out_until="2026-11-13T10:00:00+00:00"),
+        ], all_out=True, resumes_at="2026-11-13T09:30:00+00:00")})["statement"]
+        self.assertIn("Resumes Fri 09:30", full(statement))
         for n in nodes(snap["capacity"]):
             self.assertNotIn("needs", n["cls"])
         text = PAGE.read_text(encoding="utf-8")
@@ -887,7 +895,8 @@ class CapacityPageTest(unittest.TestCase):
             profile("d", "reset", week_left=100, five_hour_left=100),
         ]))
         self.assertEqual(
-            [n["cls"] for n in strip(snap)], ["cap-state cap-fine", "cap-acct", "cap-acct"])
+            [n["cls"] for n in strip(snap)],
+            ["cap-state cap-fine", "cap-acct cap-extra", "cap-acct cap-tightest"])
         c, d = accounts(snap)
         self.assertIn("reset, not yet used", full(c))
         self.assertIn("reset, not yet used", full(d))
@@ -964,12 +973,13 @@ class CapacityPageTest(unittest.TestCase):
             profile("b", "ok", week_left=30, next_reset="2026-11-17T05:00:00+00:00", excluded=False),
         ]))
         self.assertEqual(classes(mixed)[0], "cap-state cap-fine")
-        self.assertEqual(full(part(mixed, "cap-when")), "resets Tue 05:00")
+        self.assertEqual([n for n in nodes(mixed["capacity"]) if has_class(n, "cap-when")], [])
         self.assertEqual([n for n in strip(mixed) if has_class(n, "cap-none")], [])
 
     def test_a_view_without_capacity_still_renders(self) -> None:
         result = render_page(view([]))
-        self.assertEqual(result["capacity"]["children"], [])
+        self.assertEqual([(n["cls"], full(n)) for n in result["capacity"]["children"]],
+                         [("cap-none", "no accounts")])
         self.assertEqual(result["promoted"]["children"], [])
 
 
@@ -1010,14 +1020,15 @@ class PageTimeTest(unittest.TestCase):
             profile("b", "out", out_until="2026-11-13T10:00:00+00:00"),
         ], all_out=True, resumes_at="2026-11-13T09:30:00+00:00")}
         one, two = render([
-            self.begin, {"frame": first}, {"snapshot": True},
+            self.begin, {"frame": first}, {"click": "cap"}, {"snapshot": True},
             {"frame": second}, {"snapshot": True},
         ])
         self.assertIn("waiting 3 h", full(one["inbox"]))
         self.assertIn("read yesterday", full(one["inbox"]))
         self.assertIn("Since you last looked, 1 h ago", full(one["digest"]))
         self.assertIn("5 min ago", full(one["digest"]))
-        self.assertIn("resets Mon 05:00", full(one["capacity"]))
+        self.assertIn("resets Mon 05:00", full(one["accounts_body"]))
+        self.assertNotIn("resets", full(one["capacity"]))
         self.assertIn("out until Fri 09:30", full(one["capacity"]))
         self.assertIn("stated 3 min ago", full(one["projects"]))
         self.assertIn("untouched for 3 days", full(one["projects"]))
@@ -4525,11 +4536,12 @@ def classes(snap: dict) -> list:
 
 
 def signed_out_pair() -> dict:
-    return capacity([
-        profile("a", "out", out_until="2026-11-14T09:00:00+00:00", signin=si("signed_in", 9)),
-        profile("default", "ok", week_left=80, next_reset="2026-11-13T05:00:00+00:00",
-                signin=si("signed_out", None)),
-    ], all_out=True, resumes_at="2026-11-14T09:00:00+00:00")
+    return real_capacity(NOW_S, [
+        {"name": "a", "week": .6, "week_reset": NOW_S + 86400, "refused": True,
+         "signin": ("signed_in", NOW_S + 9 * 86400)},
+        {"name": "default", "week": .2, "week_reset": NOW_S + 2 * 86400,
+         "signin": ("signed_out", None)},
+    ])
 
 
 NOW_S = 1794398400
@@ -4829,6 +4841,150 @@ class AccountsPanelPageTest(unittest.TestCase):
             self.assertFalse(has_class(last(pin), "acct-pin-note"))
 
 
+class StripPageTest(unittest.TestCase):
+    @staticmethod
+    def base_rules() -> list:
+        (style,) = re.findall(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"))
+        base, at = "", 0
+        for found in re.finditer(r"@media [^{]+\{", style):
+            if found.start() < at:
+                continue
+            base += style[at:found.start()]
+            depth, at = 1, found.end()
+            while depth:
+                depth += {"{": 1, "}": -1}.get(style[at], 0)
+                at += 1
+        return style_rules(base + style[at:])
+
+    @staticmethod
+    def shown(cap: dict) -> dict:
+        (snap,) = render([START, {"frame": {**view([]), "capacity": cap}}, {"snapshot": True}])
+        return snap
+
+    def test_each_entry_is_its_name_bar_figure_and_quiet_word(self) -> None:
+        cap = real_capacity(NOW_S, [
+            {"name": "a", "week": .35, "five": .6, "week_reset": NOW_S + 4 * 86400,
+             "signin": ("signed_in", NOW_S + 12 * 86400)},
+            {"name": "b", "week": .7, "week_reset": NOW_S + 5 * 86400},
+            {"name": "c", "week": .5, "week_reset": NOW_S + 2 * 86400, "refused": True},
+        ], excluded=("b",), pinned="a")
+        snap = self.shown(cap)
+        a, b, c = [n for n in strip(snap) if has_class(n, "cap-acct")]
+        shape = lambda n: [(k["tag"], k["cls"]) for k in n["children"]]
+        self.assertEqual(shape(a), [("b", ""), ("span", "cap-pin-mark"), ("span", "meter"), ("span", "cap-pc")])
+        self.assertEqual(full(a["children"][-1]), "65%")
+        self.assertEqual(shape(b), [("b", ""), ("span", "cap-excl"), ("span", "meter"), ("span", "cap-pc")])
+        self.assertEqual(full(b["children"][-1]), "30%")
+        self.assertEqual([k["tag"] for k in c["children"]], ["b", "span", "span"])
+        (out_until,) = [p["out_until"] for p in cap["profiles"] if p["profile"] == "c"]
+        self.assertEqual(full(c["children"][-1]), "out until " + weekday(out_until))
+        self.assertEqual([n for n in nodes(snap["capacity"]) if has_class(n, "cap-when")], [])
+        self.assertEqual([n for n in nodes(snap["capacity"])
+                          if has_class(n, "acct-pin") or has_class(n, "cap-pin")], [])
+
+    def test_sign_in_words_show_only_when_the_sign_in_asks(self) -> None:
+        reading = {"week": .5, "week_reset": NOW_S + 86400}
+        frame_ = {**view([]), "capacity": real_capacity(NOW_S, [
+            {"name": "a", **reading, "signin": ("signed_in", NOW_S + 259200)},
+            {"name": "b", **reading, "signin": ("signed_in", NOW_S + 259201)},
+            {"name": "c", **reading, "signin": ("signed_out", None), "ever": True},
+            {"name": "d", **reading},
+        ])}
+        snap = opened(frame_)
+        self.assertEqual(
+            [full(n) for n in nodes(snap["capacity"]) if has_class(n, "cap-signin")],
+            ["signed in, ends in 3 days", "signed out"])
+        self.assertEqual(
+            [full(n) for n in nodes(panel(snap)) if has_class(n, "acct-signin-words")],
+            ["signed in, ends in 3 days", "signed in, ends in 3 days", "signed out", "sign-in unknown"])
+
+    def test_a_profile_with_no_reading_is_in_the_note_unless_it_asks_or_is_marked(self) -> None:
+        cap = real_capacity(NOW_S, [
+            {"name": "a", "week": .5, "week_reset": NOW_S + 86400},
+            {"name": "b"},
+            {"name": "c", "signin": ("signed_in", NOW_S + 2 * 86400)},
+            {"name": "d"},
+            {"name": "e", "signin": ("signed_in", NOW_S + 20 * 86400)},
+        ], pinned="d")
+        snap = self.shown(cap)
+        self.assertEqual([n["text"] for n in nodes(snap["capacity"]) if n["tag"] == "b"], ["a", "c", "d"])
+        self.assertTrue(cap["no_reading"])
+        self.assertEqual(full(part(snap, "cap-none")), cap["no_reading"])
+
+    def test_three_accounts_fit_one_line_at_1440(self) -> None:
+        rules = self.base_rules()
+        (cap,) = [d for s, d in rules if s == ".cap"]
+        for name, value in {
+            "flex": "0 1 auto", "flex-wrap": "nowrap", "white-space": "nowrap", "overflow": "hidden",
+            "min-width": "0", "max-width": "100%", "font": "inherit", "background": "none",
+            "border": "0", "padding": "0", "text-align": "left", "cursor": "pointer",
+            "font-size": ".8125rem", "color": "var(--sub0)",
+        }.items():
+            self.assertEqual(cap.get(name), value, name)
+        (kids,) = [d for s, d in rules if s == ".cap > *"]
+        self.assertEqual(kids.get("flex"), "none")
+        (goal,) = [d for s, d in rules if s == ".goal-bar"]
+        self.assertEqual(goal.get("flex"), "0 1000 440px")
+        for selector in (".cap-excl", ".cap-pin-mark"):
+            (quiet,) = [d for s, d in rules if s == selector]
+            self.assertEqual(quiet.get("color"), "var(--ov2)", selector)
+
+        worst = real_capacity(NOW_S, [
+            {"name": "work-main", "week": .35, "week_reset": NOW_S + 4 * 86400,
+             "signin": ("signed_in", NOW_S + 2 * 86400)},
+            {"name": "personal", "week": .7, "week_reset": NOW_S + 5 * 86400},
+            {"name": "spare-one", "week": .88, "week_reset": NOW_S + 3 * 86400},
+        ], excluded=("personal",), pinned="work-main")
+        snap = self.shown(worst)
+
+        def width(n: dict) -> int:
+            if n["tag"] == "b":
+                return min(len(n["text"]) * 8, 144)
+            if n["tag"] == "svg":
+                return 16
+            if has_class(n, "meter"):
+                return 34
+            return len(full(n)) * 7
+
+        def group(n: dict) -> int:
+            if not n["children"]:
+                return width(n)
+            return sum(width(c) for c in n["children"]) + 7 * (len(n["children"]) - 1)
+
+        kids = strip(snap)
+        used = sum(group(n) for n in kids) + 16 * (len(kids) - 1)
+        budget = 1360 - 2 * 48 - 7 * 9 - 192 - len("Reconnecting…") * 7 - 3 * 28
+        self.assertLessEqual(used, budget)
+
+    def test_at_480_only_the_summary_word_and_the_tightest_account_show(self) -> None:
+        def rows_(*extra) -> list:
+            return [{"name": "a", "week": .35, "week_reset": NOW_S + 86400},
+                    {"name": "b", "week": .88, "week_reset": NOW_S + 86400},
+                    {"name": "c", "week": .5, "week_reset": NOW_S + 86400}, *extra]
+
+        def kept(snap: dict) -> list:
+            return [n for n in strip(snap) if not has_class(n, "cap-extra")]
+
+        snap = self.shown(real_capacity(NOW_S, rows_()))
+        self.assertEqual([n["cls"] for n in kept(snap)], ["cap-state cap-fine", "cap-acct cap-tightest"])
+        self.assertEqual(kept(snap)[1]["children"][0]["text"], "b")
+        out = self.shown(real_capacity(NOW_S, rows_(
+            {"name": "d", "week": .5, "week_reset": NOW_S + 86400, "refused": True})))
+        self.assertEqual(kept(out)[1]["children"][0]["text"], "d")
+        none = self.shown(real_capacity(NOW_S, [{"name": "a"}, {"name": "b"}]))
+        self.assertEqual(
+            [n for n in nodes(none["capacity"]) if has_class(n, "cap-extra") or has_class(n, "cap-tightest")], [])
+        text_ = PAGE.read_text(encoding="utf-8")
+        style = text_[text_.index("<style>"):text_.index("</style>")]
+        (extra,) = [d for s, d in style_rules(media_block(style, "(max-width: 480px)")) if s == ".cap-extra"]
+        self.assertEqual(extra.get("display"), "none")
+
+    def test_an_empty_strip_still_opens_the_panel(self) -> None:
+        snap = opened({**view([]), "capacity": console_capacity.EMPTY})
+        self.assertEqual([(n["cls"], full(n)) for n in strip(snap)], [("cap-none", "no accounts")])
+        self.assertIs(snap["accounts"]["hidden"], False)
+
+
 class RemovePageTest(unittest.TestCase):
     def removal_frame(self, sessions: dict | None = None, extra: dict | None = None) -> dict:
         return {**view([]), **(extra or {}),
@@ -4951,41 +5107,47 @@ class RemovePageTest(unittest.TestCase):
 
 class SigninPageTest(unittest.TestCase):
     def test_each_listed_profile_shows_its_sign_in_words(self) -> None:
-        snap = capacity_snap(capacity([
-            profile("a", "ok", week_left=60, signin=si("signed_in", 12)),
-            profile("b", "ok", week_left=50, signin=si("signed_in", 1)),
-            profile("c", "ok", week_left=40, signin=si("signed_in", 0)),
-            profile("d", "out", signin=si("signed_in", None)),
-            profile("e", "ok", week_left=30, signin=si("unknown", None)),
-        ]))
+        reading = {"week": .5, "week_reset": NOW_S + 86400}
+        frame_ = {**view([]), "capacity": real_capacity(NOW_S, [
+            {"name": "a", **reading, "signin": ("signed_in", NOW_S + 12 * 86400)},
+            {"name": "b", **reading, "signin": ("signed_in", NOW_S + 86400 + 3600)},
+            {"name": "c", **reading, "signin": ("signed_in", NOW_S + 3600)},
+            {"name": "d", **reading, "refused": True, "signin": ("signed_in", None)},
+            {"name": "e", **reading, "signin": ("unknown", None)},
+        ])}
+        snap = opened(frame_)
         self.assertEqual(
             [full(n) for n in nodes(snap["capacity"]) if has_class(n, "cap-signin")],
+            ["signed in, ends in 1 day", "signed in, ends today"])
+        self.assertEqual(
+            [full(n) for n in nodes(panel(snap)) if has_class(n, "acct-signin-words")],
             ["signed in, ends in 12 days", "signed in, ends in 1 day", "signed in, ends today",
              "signed in", "sign-in unknown"])
 
-    def test_a_profile_without_a_capacity_reading_shows_its_sign_in(self) -> None:
-        snap = capacity_snap(capacity([
-            profile("a", "ok", week_left=60, signin=si("signed_in", 20)),
-            profile("b", "unknown", signin=si("signed_in", 5)),
-            profile("c", "unknown", signin=si("unknown", None)),
-        ], no_reading="2 with no reading yet"))
+    def test_a_profile_without_a_capacity_reading_shows_its_sign_in_only_when_it_asks(self) -> None:
+        snap = capacity_snap(real_capacity(NOW_S, [
+            {"name": "a", "week": .4, "week_reset": NOW_S + 86400,
+             "signin": ("signed_in", NOW_S + 20 * 86400)},
+            {"name": "b", "signin": ("signed_in", NOW_S + 2 * 86400)},
+            {"name": "c", "signin": ("unknown", None)},
+        ]))
         self.assertEqual(classes(snap), [
-            "cap-state cap-fine", "cap-acct", "cap-acct cap-no-reading",
-            "cap-acct cap-no-reading", "cap-none"])
-        _, _, b, c, _ = strip(snap)
+            "cap-state cap-fine", "cap-acct cap-tightest", "cap-acct cap-no-reading cap-extra",
+            "cap-none cap-extra"])
+        b = strip(snap)[2]
         self.assertIn("b", full(b))
-        self.assertIn("signed in, ends in 5 days", full(b))
-        self.assertIn("c", full(c))
-        self.assertIn("sign-in unknown", full(c))
+        self.assertIn("signed in, ends in 2 days", full(b))
+        self.assertEqual([n["text"] for n in nodes(snap["capacity"]) if n["tag"] == "b"], ["a", "b"])
         self.assertEqual(bars(b), [])
-        self.assertEqual(bars(c), [])
 
     def test_a_signed_out_profile_is_listed_as_signed_out(self) -> None:
-        snap = capacity_snap(capacity([
-            profile("a", "ok", week_left=60, signin=si("signed_in", 20)),
-            profile("default", "unknown", signin=si("signed_out", None)),
-        ], no_reading=None))
-        self.assertEqual(classes(snap), ["cap-state cap-fine", "cap-acct", "cap-acct cap-signed-out"])
+        snap = capacity_snap(real_capacity(NOW_S, [
+            {"name": "a", "week": .4, "week_reset": NOW_S + 86400,
+             "signin": ("signed_in", NOW_S + 20 * 86400)},
+            {"name": "default", "signin": ("signed_out", None)},
+        ]))
+        self.assertEqual(classes(snap), [
+            "cap-state cap-fine", "cap-acct cap-tightest", "cap-acct cap-signed-out cap-extra"])
         out = strip(snap)[2]
         self.assertIn("default", full(out))
         self.assertIn("signed out", full(out))
@@ -4997,21 +5159,20 @@ class SigninPageTest(unittest.TestCase):
         self.assertEqual(classes(snap)[0], "cap-state cap-out")
         self.assertEqual(full(strip(snap)[0]), "out")
         (default,) = [n for n in accounts(snap) if "default" in full(n)]
-        self.assertEqual(default["cls"], "cap-acct cap-signed-out")
+        self.assertEqual(default["cls"], "cap-acct cap-signed-out cap-extra")
         self.assertEqual(bars(default), [])
         text = full(snap["capacity"])
         self.assertNotIn("80%", text)
-        self.assertNotIn("Fri 05:00", text)
+        self.assertNotIn(weekday(datetime.fromtimestamp(NOW_S + 2 * 86400, timezone.utc).isoformat()), text)
         self.assertNotIn("resets", text)
 
     def test_a_signed_out_profile_with_an_old_reading_never_makes_the_strip_fine(self) -> None:
-        snap = capacity_snap(capacity([
-            profile("a", "out", out_until="2026-11-14T09:00:00+00:00", signin=si("signed_in", 9)),
-            profile("default", "ok", week_left=80, next_reset="2026-11-13T05:00:00+00:00",
-                    signin=si("signed_out", None)),
-        ], all_out=True, resumes_at="2026-11-14T09:00:00+00:00"))
+        cap = signed_out_pair()
+        snap = capacity_snap(cap)
         self.assertEqual(full(strip(snap)[0]), "out")
-        self.assertEqual(full(part(snap, "cap-when")), "resumes Sat 09:00")
+        self.assertEqual([n for n in nodes(snap["capacity"]) if has_class(n, "cap-when")], [])
+        statement = render_page({**view([]), "capacity": cap})["statement"]
+        self.assertIn("Resumes " + weekday(cap["resumes_at"]), full(statement))
 
     def test_the_all_out_panel_names_a_signed_out_profile_as_signed_out(self) -> None:
         result = render_page({**view([]), "capacity": signed_out_pair()})
@@ -5038,7 +5199,7 @@ class SigninPageTest(unittest.TestCase):
             [profile("a", "ok", week_left=60), profile("b", "unknown")],
             no_reading="1 with no reading yet"))
         self.assertEqual([n for n in nodes(snap["capacity"]) if has_class(n, "cap-signin")], [])
-        self.assertEqual(classes(snap), ["cap-state cap-fine", "cap-acct", "cap-none"])
+        self.assertEqual(classes(snap), ["cap-state cap-fine", "cap-acct cap-tightest", "cap-none cap-extra"])
 
     def test_a_sign_in_ask_is_a_card_with_the_sign_in_action(self) -> None:
         f = frame([SIGNIN])
