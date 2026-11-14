@@ -995,6 +995,11 @@ const signinLinks = new Map();
 const signinPosts = new Map();
 // The profile the header's Add account continuation is for, or null.
 let accountSignin = null;
+// The attempt the add started, whether a frame has shown it running, the link the continuation holds itself, and the outcome the box shows once the run ended.
+let accountAttempt = null;
+let accountConfirmed = false;
+let accountLink = null;
+let accountOutcome = null;
 const SIGNIN_NOTES = new Map([
   ["running", "A sign-in is running."],
   ["timed_out", "The sign-in timed out."],
@@ -1091,6 +1096,11 @@ function signinCard(item) {
   const run = item.run !== null && typeof item.run === "object" ? item.run : null;
   const note = run === null ? undefined : SIGNIN_NOTES.get(run.state);
   if (note !== undefined) card.appendChild(el("p", "signin-run", note));
+  // The Add account control shows this sign-in's link and code field until its run ends: the card sends the owner there.
+  if (accountSignin === item.profile && accountCont !== null) {
+    card.appendChild(el("p", "signin-elsewhere", "Finish this sign-in in Add account at the top of the page."));
+    return card;
+  }
   const held = signinLinks.get(item.profile);
   const linked = held !== undefined && isHttps(held.link);
   const starting = signinPosts.get("start\n" + item.profile);
@@ -2108,25 +2118,12 @@ function keyStrip(current, open) {
   for (const e of entries) strip.appendChild(e);
   return strip;
 }
-// When a frame shows the added profile's sign-in item, the header continuation ends and the card takes over: the typed code moves to the card's draft, and the focus and selection with it.
-function carryAccountCode(signins) {
-  if (accountSignin === null || accountCont === null) return null;
-  const kept = signinLinks.get(accountSignin);
-  const shown = signins.find((item) => item.profile === accountSignin);
-  if (shown === undefined || kept === undefined || !isHttps(kept.link)) return null;
-  const code = accountCont.code;
-  const focused = document.activeElement === code;
-  if (code.value === "" && !focused) return null;
-  const key = stateId(shown) + "\nsignin-code";
-  drafts.set(key, { value: code.value, start: code.selectionStart, end: code.selectionEnd });
-  return focused ? { key, start: code.selectionStart, end: code.selectionEnd } : null;
-}
 function renderInbox(view) {
   const fresh = view !== lastView;
   lastView = view;
   const section = document.getElementById("inbox");
   const active = document.activeElement;
-  let held = active && active.dataset && active.dataset.draft !== undefined
+  const held = active && active.dataset && active.dataset.draft !== undefined
     ? { key: active.dataset.draft, start: active.selectionStart, end: active.selectionEnd }
     : null;
   fields = new Map();
@@ -2169,11 +2166,11 @@ function renderInbox(view) {
     const have = signinLinks.get(item.profile);
     if (have !== undefined && have.attempt >= run.attempt) continue;
     if (signinAsked.has(item.profile + "\n" + run.attempt)) continue;
+    if (accountSignin === item.profile && accountCont !== null) continue;
     const post = signinPosts.get("start\n" + item.profile);
     if (post !== undefined && post.phase === "sending") continue;
     askSigninLink(item.profile, run.attempt);
   }
-  held = carryAccountCode(signins) || held;
   for (const [key, state] of [...signinPosts]) {
     const profile = key.split("\n")[1];
     if (state.phase !== "sending" && !signins.some((item) => item.profile === profile)) signinPosts.delete(key);
@@ -2511,8 +2508,16 @@ const accountState = { phase: "closed", adding: false, codeSending: false, cance
 let accountCont = null;
 const accountBox = document.getElementById("account-add");
 const accountReason = el("span", "account-add-reason");
+const accountOutcomeNote = el("p", "account-add-outcome");
+const OUTCOME_WORDS = new Map([
+  ["failed", (profile) => "The sign-in to " + profile + " did not finish."],
+  ["timed_out", (profile) => "The sign-in to " + profile + " timed out."],
+  ["cancelled", (profile) => "The sign-in to " + profile + " was cancelled."],
+  ["signed_in", (profile) => profile + " is signed in."],
+]);
 const accountName = accountField("account-name", "Account name", "Account name");
 const accountOpen = actionButton("account-add-open", "Add account", () => {
+  accountOutcome = null;
   accountState.phase = "naming";
   accountState.failure = "";
   renderAccountAdd(lastView);
@@ -2540,13 +2545,18 @@ async function accountAddPost() {
     const response = await fetch("/api/account-add", { method: "POST", headers: stallHeaders(), body: JSON.stringify({ name }) });
     if (response.status === 200) {
       const answer = JSON.parse(await response.text());
-      if (answer !== null && typeof answer === "object" && answer.profile === name) {
+      if (answer !== null && typeof answer === "object" && answer.profile === name
+          && Number.isInteger(answer.attempt) && answer.attempt >= 1) {
         holdSigninLink(name, answer, true);
         accountSignin = name;
+        accountAttempt = answer.attempt;
+        accountConfirmed = false;
+        accountOutcome = null;
+        accountLink = isHttps(answer.link) ? answer.link : null;
         accountName.value = "";
         accountState.phase = "closed";
       } else {
-        reason = "the console answered for another account";
+        reason = "the console's answer was not understood";
       }
     } else {
       reason = (await response.text()).trim() || "HTTP " + response.status;
@@ -2557,8 +2567,9 @@ async function accountAddPost() {
   }
   accountState.adding = false;
   accountState.failure = reason === null ? "" : "Could not add the account: " + reason;
-  redraw();
+  // The add box is settled first: a card drawn before it would carry a code field while the continuation holds one too.
   renderAccountAdd(lastView);
+  redraw();
 }
 async function accountSigninPost(flag, prefix, send, onOk, okStatus = 204) {
   const profile = accountSignin;
@@ -2599,43 +2610,64 @@ function beginAccountSignin() {
       method: "POST", headers: stallHeaders(), body: JSON.stringify({ profile }),
     }), async (response, profile) => {
       const answer = JSON.parse(await response.text());
-      // A frame that opened the profile's card meanwhile ended the continuation; the card takes the link all the same.
+      // A continuation that ended meanwhile leaves the link to the profile's card.
       holdSigninLink(profile, answer, accountSignin === profile);
+      if (accountSignin === profile && answer !== null && typeof answer === "object"
+          && answer.attempt === accountAttempt && isHttps(answer.link)) accountLink = answer.link;
       redraw();
     }, 200);
   });
-  accountCont = { note: el("p", "account-add-note", "Sign in to " + accountSignin), link: null, code, send, cancel, fetchLink };
+  accountCont = { note: el("p", "account-add-note", "Added " + accountSignin + ". Its sign-in has started."), link: null, code, send, cancel, fetchLink };
   accountState.phase = "closed";
   accountState.failure = "";
 }
 function endAccountSignin() {
   accountSignin = null;
+  accountAttempt = null;
+  accountConfirmed = false;
+  accountLink = null;
   accountCont = null;
   accountState.codeSending = false;
   accountState.cancelling = false;
   accountState.fetching = false;
   accountState.failure = "";
 }
+// The continuation is settled from the view's run for the added profile alone, never from a held link or from whether its card shows.
+function settleAccountSignin(view) {
+  const runs = view !== null && view.signin_runs !== null && typeof view.signin_runs === "object" ? view.signin_runs : {};
+  const run = runs[accountSignin];
+  if (run !== null && typeof run === "object") {
+    if (run.attempt === accountAttempt && run.state !== "running") {
+      accountOutcome = { profile: accountSignin, state: run.state };
+      endAccountSignin();
+    } else if (run.attempt > accountAttempt) {
+      endAccountSignin();
+    } else if (run.attempt === accountAttempt) {
+      accountConfirmed = true;
+    }
+  } else if (accountConfirmed) {
+    endAccountSignin();
+  }
+}
 // Updates the disabled states and the reason, and begins or ends the continuation; it never replaces an input or assigns lastView.
 function renderAccountAdd(view) {
-  let held = null;
   if (accountSignin !== null) {
-    held = signinLinks.get(accountSignin);
-    if (held === undefined || held.added !== true) {
-      endAccountSignin();
-      held = null;
-    } else if (accountCont === null) beginAccountSignin();
+    settleAccountSignin(view);
+    if (accountSignin !== null && accountCont === null) beginAccountSignin();
   }
   let want = accountState.phase;
   let reason = "";
   if (accountCont !== null) {
-    const linked = isHttps(held.link);
+    const linked = accountLink !== null;
     want = linked ? "signin" : "signin-wait";
     reason = accountState.failure;
-    if (linked && accountCont.link === null) accountCont.link = signinLinkNode("account-add-link", held);
+    if (linked && accountCont.link === null) accountCont.link = signinLinkNode("account-add-link", { link: accountLink });
     accountCont.fetchLink.disabled = accountState.fetching;
     accountCont.send.disabled = accountCont.code.value.trim() === "" || accountState.codeSending;
     accountCont.cancel.disabled = accountState.cancelling;
+  } else if (want === "closed" && accountOutcome !== null && OUTCOME_WORDS.has(accountOutcome.state)) {
+    want = "outcome";
+    accountOutcomeNote.textContent = OUTCOME_WORDS.get(accountOutcome.state)(accountOutcome.profile);
   } else if (want === "naming") {
     const named = accountNameReason(accountName.value.trim(), view);
     accountSend.disabled = accountState.adding || named !== null;
@@ -2646,6 +2678,7 @@ function renderAccountAdd(view) {
     const parts = want === "signin"
       ? [accountCont.note, accountCont.link, accountCont.code, accountCont.send, accountCont.cancel, accountReason]
       : want === "signin-wait" ? [accountCont.note, accountCont.fetchLink, accountCont.cancel, accountReason]
+      : want === "outcome" ? [accountOutcomeNote, accountOpen]
       : want === "naming" ? [accountName, accountSend, accountCancel, accountReason] : [accountOpen];
     accountBox.replaceChildren(...parts);
   }
@@ -2714,8 +2747,8 @@ function render(view) {
   renderGoal();
   renderCapacity(view);
   renderPromoted(view);
-  renderInbox(view);
   renderAccountAdd(view);
+  renderInbox(view);
   renderDigest(view);
   renderProjects(view);
   renderUnmanaged(view);
