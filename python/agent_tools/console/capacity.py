@@ -44,7 +44,7 @@ the reset of the window the refusal names (`binding`, else the first of "7d", "5
 and, when refused, the refusal reset (null when none is known, or when not out); `next_reset` the
 earliest reset still ahead.
 
-`capacity_view(profiles, state, now, signins=None, excluded=frozenset())` returns `{"tight", "all_out", "resumes_at",
+`capacity_view(profiles, state, now, signins=None, excluded=frozenset(), pinned=None)` returns `{"tight", "all_out", "resumes_at",
 "no_reading", "profiles": [<profile_capacity>]}` over
 exactly the named profiles, sorted: the configured ones, so a profile removed with
 `claude-account rm` stops counting at once while its readings stay in the log and the fold. `tight`
@@ -66,6 +66,11 @@ collection, always present, after `"signin"`. An excluded profile is left out of
 the no-reading count, `all_out`, `resumes_at` and `tight` as a signed-out entry is, and stays in
 `profiles` with its reading and sign-in kept. Without `excluded` every result is the same apart
 from that member.
+
+Each entry also carries `"pinned"` (#1029): whether its name is the optional `pinned` name (the
+owner's pin, ADR-console-023), always present, after `"excluded"`. It marks the entry for the
+session-profile rule (`manager.session_profile`) and changes no aggregate: `tight`, `all_out`,
+`resumes_at` and `no_reading` are the same with or without it.
 """
 
 import re
@@ -277,12 +282,14 @@ def profile_capacity(profile: str, reading: Reading | None, now: float) -> dict:
 
 def capacity_view(profiles: Iterable[str], state: CapacityState, now: float,
                   signins: Mapping[str, signin_state.SignIn] | None = None,
-                  excluded: Collection[str] = frozenset()) -> dict:
+                  excluded: Collection[str] = frozenset(),
+                  pinned: str | None = None) -> dict:
     names = sorted(set(profiles))
     signins = signins or {}
     entries = [{**profile_capacity(name, state.readings.get(name), now),
                 "signin": signin_state.profile_signin(signins.get(name), now),
-                "excluded": name in excluded}
+                "excluded": name in excluded,
+                "pinned": name == pinned}
                for name in names]
     considered = [entry for entry in entries
                   if entry["signin"]["state"] != "signed_out" and not entry["excluded"]]

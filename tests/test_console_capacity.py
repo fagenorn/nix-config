@@ -400,6 +400,22 @@ class SigninCapacityTest(unittest.TestCase):
         self.assertIs(ask(SignIn("unknown", None, "t4"), T + 10)["ask"], False)
 
 
+class PinCapacityTest(unittest.TestCase):
+    def test_the_pinned_entry_is_marked_and_changes_no_aggregate(self):
+        state = CapacityState({"work": open_reading(), "home": refused_reading(T + 100, "home")}, {})
+        plain = capacity_view(["home", "work"], state, T)
+        marked = capacity_view(["home", "work"], state, T, pinned="home")
+        self.assertEqual({e["profile"]: e["pinned"] for e in marked["profiles"]},
+                         {"home": True, "work": False})
+        self.assertEqual({e["pinned"] for e in plain["profiles"]}, {False})
+        self.assertEqual(list(marked["profiles"][0])[-3:], ["signin", "excluded", "pinned"])
+        for key in ("tight", "all_out", "resumes_at", "no_reading"):
+            self.assertEqual(marked[key], plain[key])
+        self.assertEqual(
+            [{k: v for k, v in e.items() if k != "pinned"} for e in marked["profiles"]],
+            [{k: v for k, v in e.items() if k != "pinned"} for e in plain["profiles"]])
+
+
 class ExclusionCapacityTest(unittest.TestCase):
     def test_an_excluded_entry_keeps_its_reading_and_sign_in(self):
         state = CapacityState({"work": open_reading(), "home": open_reading_of("home")}, {})
@@ -414,7 +430,7 @@ class ExclusionCapacityTest(unittest.TestCase):
         for name in ("home", "work"):
             without = {k: v for k, v in by_marked[name].items() if k != "excluded"}
             self.assertEqual(without, {k: v for k, v in by_plain[name].items() if k != "excluded"})
-        self.assertEqual(list(by_marked["work"])[-2:], ["signin", "excluded"])
+        self.assertEqual(list(by_marked["work"])[-3:-1], ["signin", "excluded"])
 
     def test_an_excluded_profile_never_gives_room(self):
         out = CapacityState({"work": open_reading(), "spare": refused_reading(T + 100, "spare")}, {})

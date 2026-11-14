@@ -11,8 +11,11 @@ Session profile (#1011). `session_profile(capacity, last_use)` names the profile
 runs under, or None when nothing can be chosen; it never returns a `Wait` and ignores `all_out`.
 An entry marked `excluded` (#1028, the owner's exclusion; it reaches this rule through
 `capacity_view`, not as a parameter) is dropped first, before the room rule and the fallback.
-Room is a profile whose state is `ok` or `reset` and whose sign-in is not `signed_out` (an entry
-without a sign-in reading counts as `unknown`, P1); the most `week_left`, then the most
+Room is a profile whose state is `ok` or `reset`, whose sign-in is not `signed_out` (an entry
+without a sign-in reading counts as `unknown`, P1) and which is not excluded: `has_room(entry)`.
+An entry marked `pinned` (#1029, ADR-console-023; it reaches the rule through `capacity_view`, not
+as a parameter) that has room answers first, whatever the others have left; a pinned entry without
+room changes nothing, and the rule below applies. Otherwise the most `week_left`, then the most
 `five_hour_left` (unknown below 0) wins, then the smallest name. With no room, the signed-in
 profile used most recently (as an instant; a never-used one ranks below every used one, ties to
 the smallest name) answers; with none signed in, None (P2). The entries are the accounts only (the
@@ -263,21 +266,28 @@ def _instant(value) -> float | None:
     return moment.timestamp()
 
 
+def _signin(entry: Mapping) -> str:
+    return (entry.get("signin") or {}).get("state", "unknown")
+
+
+def has_room(entry: Mapping) -> bool:
+    return (entry["state"] in ("ok", "reset") and _signin(entry) != "signed_out"
+            and not entry.get("excluded"))
+
+
 def session_profile(capacity: Mapping, last_use: Mapping[str, str]) -> str | None:
     entries = [entry for entry in capacity["profiles"] if not entry.get("excluded")]
-
-    def signin(entry):
-        return (entry.get("signin") or {}).get("state", "unknown")
-
-    room = [entry for entry in entries
-            if entry["state"] in ("ok", "reset") and signin(entry) != "signed_out"]
+    for entry in entries:
+        if entry.get("pinned") and has_room(entry):
+            return entry["profile"]
+    room = [entry for entry in entries if has_room(entry)]
     if room:
         def key(entry):
             return (entry["week_left"] if entry["week_left"] is not None else -1,
                     entry["five_hour_left"] if entry["five_hour_left"] is not None else -1)
         best = max(key(entry) for entry in room)
         return min(entry["profile"] for entry in room if key(entry) == best)
-    signed_in = [entry["profile"] for entry in entries if signin(entry) == "signed_in"]
+    signed_in = [entry["profile"] for entry in entries if _signin(entry) == "signed_in"]
     if signed_in:
         def rank(name):
             instant = _instant(last_use.get(name))

@@ -28,6 +28,14 @@ an object whose keys are exactly `profile` and `pinned`, `profile` a non-empty s
 Refusal. `Refused` is raised by the service with one of `UNKNOWN` (no such profile), `EXCLUDED`
 (the profile is excluded), `ALREADY_PINNED` or `NOT_PINNED`.
 
+Note. `note(pinned, capacity, chosen)` is None when `pinned` is None; otherwise `{"profile", "in_effect",
+"reason", "until", "instead"}` for the capacity entry named `pinned` (None when absent). `in_effect`
+is whether that entry exists and `manager.has_room` holds. In effect, `reason`, `until` and
+`instead` are None. Otherwise `instead` is `chosen` and `reason` is, first match winning,
+`NOT_LISTED` (no entry), `EXCLUDED_NOW` (the entry is excluded), `SIGNED_OUT` (its sign-in is
+`signed_out`), `OUT` (its state is `out`; `until` is then its `out_until`) or `NO_READING`; `until`
+is None except for `OUT`.
+
 Retention. The kind is not in `KEPT_KINDS`, but the retention pass leaves, whatever its age, the
 newest valid pinning row when no later row unpins the same profile (`event_log.EventLog.retain`):
 by the fold's own validity rule, so the folded pin is the same before and after a pass.
@@ -36,9 +44,10 @@ by the fold's own validity rule, so the folded pin is the same before and after 
 from __future__ import annotations
 
 import json
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
+from agent_tools.console import manager
 from agent_tools.console.event_log import MANAGER_STARTED, PROFILE_PIN, SESSION_SEEN, Event
 
 KIND = PROFILE_PIN
@@ -47,6 +56,11 @@ UNKNOWN = "no such profile"
 EXCLUDED = "excluded; include it first"
 ALREADY_PINNED = "already pinned"
 NOT_PINNED = "not pinned"
+OUT = "out of allowance"
+SIGNED_OUT = "signed out"
+NO_READING = "no reading yet"
+EXCLUDED_NOW = "excluded"
+NOT_LISTED = "not a listed account"
 
 
 class Refused(Exception):
@@ -120,3 +134,25 @@ def parse_request(body: bytes) -> tuple[str, bool]:
     if not isinstance(data["pinned"], bool):
         raise ValueError("pinned is not a bool")
     return profile, data["pinned"]
+
+
+def note(pinned: str | None, capacity: Mapping, chosen: str | None) -> dict | None:
+    if pinned is None:
+        return None
+    found = next((e for e in capacity["profiles"] if e["profile"] == pinned), None)
+    if found is not None and manager.has_room(found):
+        return {"profile": pinned, "in_effect": True, "reason": None, "until": None,
+                "instead": None}
+    until = None
+    if found is None:
+        reason = NOT_LISTED
+    elif found.get("excluded"):
+        reason = EXCLUDED_NOW
+    elif (found.get("signin") or {}).get("state") == "signed_out":
+        reason = SIGNED_OUT
+    elif found["state"] == "out":
+        reason, until = OUT, found.get("out_until")
+    else:
+        reason = NO_READING
+    return {"profile": pinned, "in_effect": False, "reason": reason, "until": until,
+            "instead": chosen}

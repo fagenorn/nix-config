@@ -32,13 +32,15 @@ REFUSAL = ("Nobody watches this session, so the permission prompt was refused: d
 
 
 def cap(*rows, all_out=False, resumes_at=None):
-    def entry(p, s, w, f, signin=None, excluded=False):
+    def entry(p, s, w, f, signin=None, excluded=False, pinned=False):
         row = {"profile": p, "state": s, "week_left": w, "five_hour_left": f,
                "next_reset": None, "out_until": None, "read_at": None}
         if signin is not None:
             row["signin"] = {"state": signin}
         if excluded:
             row["excluded"] = True
+        if pinned:
+            row["pinned"] = True
         return row
     return {"tight": False, "all_out": all_out, "resumes_at": resumes_at,
             "profiles": [entry(*row) for row in rows]}
@@ -333,6 +335,32 @@ class SessionProfileTest(unittest.TestCase):
                 self.assertEqual(manager.session_profile(capacity, last_use), expected)
         self.assertEqual(manager.choose_profile(cap(("a", "ok", 90, 90, None, True)), {}),
                          manager.Wait(None))
+
+    def test_a_pinned_profile_with_room_wins(self):
+        table = [
+            cap(("a", "ok", 90, 90), ("b", "ok", 10, 10, None, False, True)),
+            cap(("a", "ok", 90, 90), ("b", "reset", None, None, "signed_in", False, True)),
+        ]
+        for capacity in table:
+            with self.subTest(capacity=capacity["profiles"]):
+                self.assertEqual(manager.session_profile(capacity, {}), "b")
+        self.assertEqual(manager.choose_profile(table[0], {}), "b")
+
+    def test_a_pinned_profile_without_room_falls_back(self):
+        unknown = (None, None)
+        table = [
+            (cap(("a", "ok", 90, 90), ("b", "out", 0, 0, None, False, True)), "a"),
+            (cap(("a", "ok", 90, 90), ("b", "ok", 99, 99, "signed_out", False, True)), "a"),
+            (cap(("a", "ok", 10, 10), ("b", "unknown", *unknown, "signed_in", False, True)), "a"),
+            (cap(("a", "ok", 10, 10), ("b", "ok", 99, 99, None, True, True)), "a"),
+            (cap(("b", "ok", 99, 99, None, True, True)), None),
+        ]
+        for capacity, expected in table:
+            with self.subTest(capacity=capacity["profiles"]):
+                self.assertEqual(manager.session_profile(capacity, {}), expected)
+        self.assertEqual(manager.choose_profile(
+            cap(("a", "out", 0, 0), ("b", "out", 0, 0, None, False, True),
+                all_out=True, resumes_at="r"), {}), manager.Wait("r"))
 
     def test_with_no_room_the_most_recently_used_signed_in_profile_answers(self):
         unknown = (None, None)
@@ -829,6 +857,37 @@ class PinTest(unittest.TestCase):
         self.assertEqual(pin.pin_launches([
             pinned(1, "work", 1), started(2, "x", "work")]).launched, frozenset())
         self.assertEqual(pin.pin_launches([]), pin.PinLaunches(None, frozenset(), frozenset()))
+
+    def test_the_note_says_why_the_pin_is_not_in_effect(self):
+        out = cap(("a", "ok", 9, 9), ("b", "out", 0, 0, None, False, True))
+        out["profiles"][1]["out_until"] = "2026-11-20T09:30:00+00:00"
+        unknown = (None, None)
+        table = [
+            (None, cap(("a", "ok", 9, 9)), "a", None),
+            ("b", cap(("a", "ok", 9, 9), ("b", "ok", 1, 1, None, False, True)), "b",
+             {"profile": "b", "in_effect": True, "reason": None, "until": None, "instead": None}),
+            ("b", out, "a",
+             {"profile": "b", "in_effect": False, "reason": "out of allowance",
+              "until": "2026-11-20T09:30:00+00:00", "instead": "a"}),
+            ("b", cap(("a", "ok", 9, 9), ("b", "ok", 1, 1, "signed_out", False, True)), "a",
+             {"profile": "b", "in_effect": False, "reason": "signed out",
+              "until": None, "instead": "a"}),
+            ("b", cap(("a", "ok", 9, 9), ("b", "unknown", *unknown, None, False, True)), "a",
+             {"profile": "b", "in_effect": False, "reason": "no reading yet",
+              "until": None, "instead": "a"}),
+            ("b", cap(("a", "ok", 9, 9), ("b", "ok", 1, 1, None, True, True)), "a",
+             {"profile": "b", "in_effect": False, "reason": "excluded",
+              "until": None, "instead": "a"}),
+            ("b", cap(("a", "ok", 9, 9), ("b", "ok", 1, 1, "signed_out", True, True)), "a",
+             {"profile": "b", "in_effect": False, "reason": "excluded",
+              "until": None, "instead": "a"}),
+            ("gone", cap(("a", "ok", 9, 9)), None,
+             {"profile": "gone", "in_effect": False, "reason": "not a listed account",
+              "until": None, "instead": None}),
+        ]
+        for pinned, capacity, chosen, expected in table:
+            with self.subTest(pinned=pinned, capacity=capacity["profiles"]):
+                self.assertEqual(pin.note(pinned, capacity, chosen), expected)
 
     def test_a_request_names_one_profile_and_a_bool(self):
         self.assertEqual(pin.parse_request(b'{"profile":"work","pinned":true}'), ("work", True))
