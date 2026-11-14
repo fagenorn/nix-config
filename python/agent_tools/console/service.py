@@ -62,7 +62,7 @@ route carries no token: it records observations and answers nothing (ADR-console
 A page write (`PAGE_WRITES`, today `POST /api/looked`, `POST /api/answer`, `POST /api/check-answer`,
 `POST /api/goal`, `POST /api/withdraw`, `POST /api/approve`, `POST /api/reply`,
 `POST /api/retry-manager`, `POST /api/message`, `POST /api/stop`, `POST /api/round-answer`, `POST /api/continue`, `POST /api/exclusion`, `POST /api/signin`,
-`POST /api/signin-code`, `POST /api/signin-cancel` and `POST /api/account-add`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
+`POST /api/signin-code`, `POST /api/signin-cancel`, `POST /api/signin-link` and `POST /api/account-add`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
 alone and goes through one guard, `_page_write`, whatever its route. After the loopback `Host`
 check and before any body is read, exactly one `Origin` header must equal `http://<Host>` (else
 403 `text/plain` `origin refused`) and exactly one `X-Console-Token` header must equal the
@@ -127,7 +127,13 @@ waiting for the link outside the service's lock; a failed start is a `signin.act
 `failed`, one stderr line `console: signin_start_failed <profile> <kind>` and 502 `the sign-in could
 not start: <kind>`. The code route answers `204`; a write the client's input refuses is `console:
 signin_code_failed <profile> <Type>` and 502 `the code could not be passed on`, appending nothing.
-The cancel route answers `204`.
+The cancel route answers `204`. `POST /api/signin-link` (#1035) hands a page opened after the start the
+live run's link: the same body rule (`MAX_SIGNIN_BYTES`, `signin_run.parse_profile_request`, 400 `bad
+link`) and the same refusals (`no sign-in is running for <profile>` when no run is live), and it
+answers `200` `application/json` `{"attempt": <int>, "link": <string> | null}` after waiting for the
+link outside the service's lock. It appends no row, starts no client, folds nothing and publishes
+nothing; when the run it was asked of is replaced while it waits it is refused 409 `the sign-in for
+<profile> changed while waiting for its link`, so an attempt is never answered with another run's link.
 
 `POST /api/account-add` (#1027) runs the same checks with `MAX_ACCOUNT_BYTES` (4096) and
 `account_add.parse_add_request`: 400 `bad account`. Under the lock `_adding` (never `_ingest`) the
@@ -214,7 +220,8 @@ profile's earlier reading, its open item and its Sign in action stay. The outcom
 read says signed in, else `failed`. One `signin.ended` row, carrying the attempt of its start, is then
 appended and the view's `signin_runs` is `running` for a live run's attempt, else the folded end. A
 thread `SIGNIN_THREAD` calls `expire_signins()` every `SIGNIN_TICK_SECONDS` to enforce the run
-deadline. No row, stderr line, view or stream frame carries a link or a code.
+deadline. No row, stderr line, view or stream frame carries a link or a code; the link is in the start, add and
+link answers only.
 
 The manager's route, `POST /api/brief`, is not a page write: it carries no token and the sprint's
 secret takes the token's place. After the loopback `Host` check it runs the hook route's body checks
@@ -828,11 +835,12 @@ CHECK_PATH = "/api/check-answer"
 SIGNIN_PATH = "/api/signin"
 SIGNIN_CODE_PATH = "/api/signin-code"
 SIGNIN_CANCEL_PATH = "/api/signin-cancel"
+SIGNIN_LINK_PATH = "/api/signin-link"
 ACCOUNT_ADD_PATH = "/api/account-add"
 PAGE_WRITES: frozenset[str] = frozenset({
     LOOKED_PATH, ANSWER_PATH, CHECK_PATH, GOAL_PATH, WITHDRAW_PATH, APPROVE_PATH, REPLY_PATH,
     RETRY_PATH, MESSAGE_PATH, STOP_PATH, ROUND_ANSWER_PATH, CONTINUE_PATH, EXCLUSION_PATH,
-    SIGNIN_PATH, SIGNIN_CODE_PATH, SIGNIN_CANCEL_PATH, ACCOUNT_ADD_PATH})
+    SIGNIN_PATH, SIGNIN_CODE_PATH, SIGNIN_CANCEL_PATH, SIGNIN_LINK_PATH, ACCOUNT_ADD_PATH})
 MAX_SIGNIN_BYTES = 4096
 MAX_ACCOUNT_BYTES = 4096
 SIGNIN_THREAD = "console-signin-deadline"
@@ -1127,7 +1135,8 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
 
     def _signin_request(self, console: "ConsoleService", route: str) -> bool:
         """Carry out a sign-in write; True when the shared empty 204 is still to be sent."""
-        name = {SIGNIN_PATH: "sign-in", SIGNIN_CODE_PATH: "code", SIGNIN_CANCEL_PATH: "cancel"}[route]
+        name = {SIGNIN_PATH: "sign-in", SIGNIN_CODE_PATH: "code", SIGNIN_CANCEL_PATH: "cancel",
+                SIGNIN_LINK_PATH: "link"}[route]
         body = self._json_body(MAX_SIGNIN_BYTES)
         if body is None:
             return False
@@ -1141,8 +1150,9 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return False
         answer = None
         try:
-            if route == SIGNIN_PATH:
-                attempt, link = console.start_signin(profile)
+            if route in (SIGNIN_PATH, SIGNIN_LINK_PATH):
+                attempt, link = (console.start_signin(profile) if route == SIGNIN_PATH
+                                 else console.signin_link(profile))
                 answer = json.dumps({"attempt": attempt, "link": link}, sort_keys=True,
                                     separators=(",", ":")).encode()
             elif route == SIGNIN_CODE_PATH:
@@ -1608,7 +1618,7 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
             if not self._stop_request(console):
                 return
-        elif route in (SIGNIN_PATH, SIGNIN_CODE_PATH, SIGNIN_CANCEL_PATH):
+        elif route in (SIGNIN_PATH, SIGNIN_CODE_PATH, SIGNIN_CANCEL_PATH, SIGNIN_LINK_PATH):
             self.close_connection = True
             if not self._signin_request(console, route):
                 return
@@ -2247,6 +2257,19 @@ class ConsoleService:
                 attempt = self._signin_live[profile]
             self._publish()
         return attempt, runs.wait_link(profile)
+
+    def signin_link(self, profile: str) -> tuple[int, str | None]:
+        """The live run's attempt and link, for a page opened after the start; no row, no client."""
+        runs = self._signin_refuse_unless_listed(profile)
+        with self._ingest:
+            attempt = self._signin_live.get(profile)
+            if attempt is None or profile not in runs.running():
+                raise sprints.Refused(f"no sign-in is running for {profile}")
+        link = runs.wait_link(profile)
+        with self._ingest:
+            if self._signin_live.get(profile) != attempt:
+                raise sprints.Refused(f"the sign-in for {profile} changed while waiting for its link")
+        return attempt, link
 
     def add_account(self, name: str) -> tuple[int, str | None]:
         """Create the account through the launcher, then start its sign-in; the attempt and link."""
