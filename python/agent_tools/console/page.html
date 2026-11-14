@@ -34,10 +34,10 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .ic .f { fill: currentColor; stroke: none; }
 
 .top { position: sticky; top: 0; z-index: 10; background: var(--base); border-bottom: 1px solid var(--hair); }
-.top-in { max-width: 1360px; margin: 0 auto; padding: 8px 48px; display: flex; align-items: center; gap: 28px; min-height: 56px; }
+.top-in { max-width: 1360px; margin: 0 auto; padding: 8px 48px; display: flex; flex-wrap: wrap; align-items: center; gap: 10px 28px; min-height: 56px; }
 .brand { font-weight: 600; color: var(--sub1); white-space: nowrap; letter-spacing: -.005em; }
 .conn { color: var(--ov2); font-size: .8125rem; }
-.cap { display: flex; flex: 0 1 auto; flex-wrap: nowrap; white-space: nowrap; overflow: hidden; align-items: center; gap: 4px 16px; margin-left: auto; min-width: 0; max-width: 100%; padding: 0; background: none; border: 0; font: inherit; font-size: .8125rem; color: var(--sub0); text-align: left; cursor: pointer; }
+.cap { display: flex; flex: 0 0 auto; flex-wrap: nowrap; white-space: nowrap; overflow: hidden; align-items: center; gap: 4px 16px; margin-left: auto; min-width: 0; max-width: 100%; padding: 0; background: none; border: 0; font: inherit; font-size: .8125rem; color: var(--sub0); text-align: left; cursor: pointer; }
 .cap > * { flex: none; }
 .cap-state { display: inline-flex; align-items: center; gap: 7px; font-weight: 600; }
 .cap-fine { color: var(--green); }
@@ -139,13 +139,13 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .opt.picked { border-color: var(--lav); background: rgba(183, 189, 248, .10); }
 .opt.picked kbd { background: var(--lav); border-color: var(--lav); color: var(--crust); }
 .goal-project.picked { color: var(--lav); border-color: var(--lav); }
-.goal-bar { position: relative; flex: 0 1000 440px; min-width: 12rem; }
+.goal-bar { position: relative; flex: 1 1 12rem; min-width: 12rem; max-width: 440px; }
 .goal-in { display: flex; align-items: flex-start; gap: 10px; padding: 0 10px 0 12px; background: var(--mantle); border: 1px solid var(--s0); border-radius: 12px; transition: border-color .16s; }
 .goal-in:hover { border-color: var(--s1); }
 .goal-in:focus-within { border-color: var(--lav); }
-.goal-in .goal-text { flex: 1 1 auto; min-width: 0; height: 38px; padding: 8px 0; font: inherit; line-height: 22px; color: var(--text); background: none; border: 0; border-radius: 0; resize: none; overflow: hidden; }
+.goal-in .goal-text { flex: 1 1 auto; min-width: 0; height: 38px; padding: 8px 0; font: inherit; line-height: 22px; color: var(--text); background: none; border: 0; border-radius: 0; resize: none; overflow: hidden; text-overflow: ellipsis; }
 .goal-in .goal-text:focus-visible { outline: none; }
-.goal-in .goal-text::placeholder { color: var(--ov2); }
+.goal-in .goal-text::placeholder { color: var(--ov2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .goal-key { margin-top: 9px; }
 .goal-bar.open .goal-in { background: var(--base); border-color: var(--lav); }
 .goal-bar.open .goal-text { height: 82px; overflow: auto; }
@@ -293,7 +293,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
   .card.lead { margin: 0 -8px; padding: 20px 16px; }
   .desk-grid { grid-template-columns: minmax(0, 1fr); padding: 32px 16px 56px; }
   .top-in { padding: 10px 16px; gap: 10px 16px; flex-wrap: wrap; }
-  .goal-bar { order: 3; flex: 1 0 100%; }
+  .goal-bar { order: 3; flex: 1 0 100%; max-width: none; }
   .side { margin-top: 48px; }
   .statement h1 { font-size: 2.375rem; letter-spacing: -.022em; }
   .statement .sub { font-size: 1rem; }

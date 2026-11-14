@@ -251,7 +251,8 @@ class PageTest(unittest.TestCase):
             if selector.split()[0].startswith((".top", ".brand", ".conn", ".goal-", "#goal", ".cap", ".meter"))
             and decls.get("white-space") == "nowrap"
         }
-        self.assertEqual(unwrapped, {".brand", ".cap", ".cap-acct", ".cap-acct b"})
+        self.assertEqual(unwrapped, {".brand", ".cap", ".cap-acct", ".cap-acct b",
+                                    ".goal-in .goal-text::placeholder"})
         (long_name,) = render([
             START,
             {"frame": {**view([]), "capacity": capacity([profile("a" * 60, "ok", week_left=50)])}},
@@ -4915,7 +4916,7 @@ class StripPageTest(unittest.TestCase):
         rules = self.base_rules()
         (cap,) = [d for s, d in rules if s == ".cap"]
         for name, value in {
-            "flex": "0 1 auto", "flex-wrap": "nowrap", "white-space": "nowrap", "overflow": "hidden",
+            "flex-wrap": "nowrap", "white-space": "nowrap", "overflow": "hidden",
             "min-width": "0", "max-width": "100%", "font": "inherit", "background": "none",
             "border": "0", "padding": "0", "text-align": "left", "cursor": "pointer",
             "font-size": ".8125rem", "color": "var(--sub0)",
@@ -4923,8 +4924,6 @@ class StripPageTest(unittest.TestCase):
             self.assertEqual(cap.get(name), value, name)
         (kids,) = [d for s, d in rules if s == ".cap > *"]
         self.assertEqual(kids.get("flex"), "none")
-        (goal,) = [d for s, d in rules if s == ".goal-bar"]
-        self.assertEqual(goal.get("flex"), "0 1000 440px")
         for selector in (".cap-excl", ".cap-pin-mark"):
             (quiet,) = [d for s, d in rules if s == selector]
             self.assertEqual(quiet.get("color"), "var(--ov2)", selector)
@@ -4955,6 +4954,38 @@ class StripPageTest(unittest.TestCase):
         used = sum(group(n) for n in kids) + 16 * (len(kids) - 1)
         budget = 1360 - 2 * 48 - 7 * 9 - 192 - len("Reconnecting…") * 7 - 3 * 28
         self.assertLessEqual(used, budget)
+
+    def test_at_1440_the_strip_never_shrinks_and_the_goal_placeholder_stays_one_line(self) -> None:
+        rules = self.base_rules()
+
+        def rule(selector: str) -> dict:
+            merged: dict = {}
+            for found, decls in rules:
+                if found == selector:
+                    merged.update(decls)
+            return merged
+
+        (style,) = re.findall(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"))
+        narrow = style_rules(media_block(style, "(max-width: 900px)"))
+        groups = {
+            "cap": (rule(".cap"), {
+                "flex": "0 0 auto", "overflow": "hidden", "min-width": "0", "max-width": "100%",
+                "white-space": "nowrap", "flex-wrap": "nowrap"}),
+            "goal-bar": (rule(".goal-bar"), {
+                "flex": "1 1 12rem", "min-width": "12rem", "max-width": "440px"}),
+            "top-in": (rule(".top-in"), {"flex-wrap": "wrap", "gap": "10px 28px"}),
+            "placeholder": (rule(".goal-in .goal-text::placeholder"), {
+                "white-space": "nowrap", "overflow": "hidden", "text-overflow": "ellipsis",
+                "color": "var(--ov2)"}),
+            "placeholder host": (rule(".goal-in .goal-text"), {"text-overflow": "ellipsis"}),
+            "narrow goal-bar": (
+                {k: v for s, d in narrow if s == ".goal-bar" for k, v in d.items()},
+                {"flex": "1 0 100%", "max-width": "none"}),
+        }
+        for name, (declared, wanted) in groups.items():
+            with self.subTest(rule=name):
+                for prop, value in wanted.items():
+                    self.assertEqual(declared.get(prop), value, prop)
 
     def test_at_480_only_the_summary_word_and_the_tightest_account_show(self) -> None:
         def rows_(*extra) -> list:
