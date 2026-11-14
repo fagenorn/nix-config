@@ -213,34 +213,57 @@ class FoldTest(unittest.TestCase):
 
         folded = signin.signin_state(valid + malformed)
 
-        self.assertEqual(folded, {"work": SignIn("signed_out", None, "t3"),
+        self.assertEqual(folded, {"work": SignIn("signed_out", None, "t3", ever=True),
                                   "spare": SignIn("signed_out", None, "t2")})
         self.assertEqual(signin.signin_state(valid[1:] + malformed, signin.signin_state(valid[:1])),
                          folded)
+
+    def test_a_profile_once_signed_in_stays_ever_signed_in(self):
+        readings = [reading(1, "t1", profile="work", state="signed_in", ends_at=iso(E)),
+                    reading(2, "t2", profile="spare", state="signed_out", ends_at=None),
+                    reading(3, "t3", profile="work", state="signed_out", ends_at=None)]
+
+        folded = signin.signin_state(readings)
+        split = signin.signin_state(readings[1:], signin.signin_state(readings[:1]))
+
+        self.assertEqual(folded["work"], SignIn("signed_out", None, "t3", ever=True))
+        self.assertIs(folded["spare"].ever, False)
+        self.assertEqual(split, folded)
 
 
 class ProfileSigninTest(unittest.TestCase):
     def test_the_ask_table(self):
         unknown = {"state": "unknown", "ends_at": None, "days_left": None, "ask": False,
-                   "since": None}
+                   "since": None, "ever_signed_in": False}
         signed_in = SignIn("signed_in", iso(E), "t1")
         rows = [(signed_in, E - 259201, {"state": "signed_in", "ends_at": iso(E), "days_left": 3,
-                                         "ask": False, "since": None}),
+                                         "ask": False, "since": None, "ever_signed_in": True}),
                 (signed_in, E - 259200, {"state": "signed_in", "ends_at": iso(E), "days_left": 3,
-                                         "ask": True, "since": iso(E - 259200)}),
+                                         "ask": True, "since": iso(E - 259200),
+                                         "ever_signed_in": True}),
                 (signed_in, E + 10, {"state": "signed_in", "ends_at": iso(E), "days_left": 0,
-                                     "ask": True, "since": iso(E - 259200)}),
+                                     "ask": True, "since": iso(E - 259200),
+                                     "ever_signed_in": True}),
                 (SignIn("signed_out", None, "t2"), E,
                  {"state": "signed_out", "ends_at": None, "days_left": None, "ask": True,
-                  "since": "t2"}),
+                  "since": "t2", "ever_signed_in": False}),
                 (None, E, unknown),
                 (SignIn("unknown", None, "t3"), E, unknown),
                 (SignIn("signed_in", None, "t4"), E,
                  {"state": "signed_in", "ends_at": None, "days_left": None, "ask": False,
-                  "since": None})]
+                  "since": None, "ever_signed_in": True})]
         for sign, now, expected in rows:
             with self.subTest(sign=sign, now=now):
                 self.assertEqual(signin.profile_signin(sign, now), expected)
+
+    def test_ever_signed_in_is_reported_in_every_state(self):
+        for sign, expected in [(SignIn("signed_out", None, "t2", ever=True), True),
+                               (SignIn("signed_out", None, "t2"), False),
+                               (None, False),
+                               (SignIn("unknown", None, "t3", ever=True), True),
+                               (SignIn("signed_in", None, "t4"), True)]:
+            with self.subTest(sign=sign):
+                self.assertIs(signin.profile_signin(sign, E)["ever_signed_in"], expected)
 
 
 if __name__ == "__main__":

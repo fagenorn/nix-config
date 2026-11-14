@@ -25,9 +25,10 @@ from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- modul
 SIGNIN = "/api/signin"
 CODE_PATH = "/api/signin-code"
 CANCEL = "/api/signin-cancel"
+LINK_PATH = "/api/signin-link"
 NOW = 1794000000
 BODIES = {SIGNIN: {"profile": "work"}, CODE_PATH: {"profile": "work", "code": CODE},
-          CANCEL: {"profile": "work"}}
+          CANCEL: {"profile": "work"}, LINK_PATH: {"profile": "work"}}
 
 
 def iso(seconds):
@@ -252,6 +253,44 @@ class SigninWriteTest(Case):
         self.assertEqual(support.log_rows(self.store), rows)
         self.assertFalse(self.record.exists())
 
+    def test_a_page_loaded_later_receives_the_running_sign_ins_link_without_a_row(self):
+        self.begin()
+        status, _, body = self.post(SIGNIN)
+        attempt = json.loads(body)["attempt"]
+        acted = self.acted_rows()
+        status, headers, body = self.post(LINK_PATH)
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"], "application/json")
+        self.assertEqual(json.loads(body), {"attempt": attempt, "link": LINK})
+        self.assertEqual(self.acted_rows(), acted)
+        self.assertEqual(len(self.invocations()), 1)
+
+    def test_a_link_request_with_no_live_run_is_refused_without_a_row(self):
+        self.begin()
+        rows = support.log_rows(self.store)
+        got = self.post(LINK_PATH, {"profile": "spare"})
+        self.assertEqual((got[0], got[2]), (409, b"no sign-in is running for spare\n"))
+        got = self.post(LINK_PATH, {"profile": "nobody"})
+        self.assertEqual((got[0], got[2]), (409, b"unknown profile\n"))
+        got = self.post(LINK_PATH, raw=b"{}")
+        self.assertEqual((got[0], got[2]), (400, b"bad link\n"))
+        self.assertEqual(support.log_rows(self.store), rows)
+        self.assertFalse(self.record.exists())
+
+    def test_a_request_without_the_token_gets_no_link(self):
+        self.begin()
+        self.post(SIGNIN)
+        json_type = {"Content-Type": "application/json"}
+        own = self.own()
+        for headers, text in (
+                (json_type, b"origin refused\n"),
+                ({"Origin": own["Origin"], **json_type}, b"token refused\n"),
+                ({"Origin": "http://evil.test", "X-Console-Token": own["X-Console-Token"],
+                  **json_type}, b"origin refused\n")):
+            got = self.post(LINK_PATH, headers=headers)
+            self.assertEqual((got[0], got[2]), (403, text))
+            self.assertNotIn(b"SENTINEL-LINK", got[2])
+
     def test_without_runs_the_host_refuses(self):
         self.begin(runs=False)
         rows = support.log_rows(self.store)
@@ -270,6 +309,48 @@ class SigninWriteTest(Case):
 
 
 class SigninRunServiceTest(Case):
+    def test_a_cancel_from_one_page_ends_the_sign_in_for_every_page(self):
+        self.environ["FAKE_MODE"] = "hang"
+        self.begin()
+        attempt = json.loads(self.post(SIGNIN)[2])["attempt"]
+        status, _, body = self.post(LINK_PATH)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["attempt"], attempt)
+        self.post(CANCEL)
+        ended = self.wait_ended(1)
+        self.assertEqual(ended[0][1], {"profile": "work", "outcome": "cancelled",
+                                       "attempt": attempt})
+        run = self.view()["signin_runs"]["work"]
+        self.assertEqual((run["state"], run["attempt"]), ("cancelled", attempt))
+        got = self.post(LINK_PATH)
+        self.assertEqual((got[0], got[2]), (409, b"no sign-in is running for work\n"))
+
+    def test_a_link_request_whose_run_is_replaced_while_it_waits_is_refused(self):
+        self.environ["FAKE_MODE"] = "hang"
+        self.begin()
+        first = json.loads(self.post(SIGNIN)[2])["attempt"]
+        runs = self.svc._signin_runs
+        original = runs.wait_link
+        calls, replaced = [], []
+
+        def wait_link(profile):
+            if not calls:
+                calls.append(1)
+                self.svc.cancel_signin(profile)
+                until(self, lambda: profile not in runs.running()
+                      and self.view()["signin_runs"][profile]["state"] == "cancelled")
+                replaced.append(self.svc.start_signin(profile)[0])
+            return original(profile)
+
+        runs.wait_link = wait_link
+        status, _, body = self.post(LINK_PATH)
+        self.assertEqual((status, body),
+                         (409, b"the sign-in for work changed while waiting for its link\n"))
+        self.assertNotEqual(replaced[0], first)
+        status, _, body = self.post(LINK_PATH)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["attempt"], replaced[0])
+
     def test_the_clients_exit_reads_the_status_at_once_and_a_signed_in_result_closes_the_item(self):
         self.begin()
         self.assertIn("signin/work", self.open_keys())
@@ -411,6 +492,7 @@ class SigninSecrecyTest(Case):
                     {"FAKE_EXIT": "0", "FAKE_LINK": "javascript:SENTINEL-LINK-bad"}), start=1):
                 self.environ.update(extra)
                 self.assertEqual(self.post(SIGNIN)[0], 200)
+                self.assertEqual(self.post(LINK_PATH)[0], 200)
                 self.assertEqual(self.post(CODE_PATH)[0], 204)
                 self.wait_ended(count)
             state = support.request(svc.address, "GET", "/api/state")[2]
