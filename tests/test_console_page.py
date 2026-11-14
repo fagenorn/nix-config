@@ -4688,6 +4688,22 @@ class AccountsPanelPageTest(unittest.TestCase):
         (owner,) = [r for r in rows(snap) if kept in nodes(r)]
         self.assertEqual(full([n for n in nodes(owner) if has_class(n, "acct-name")][0]), "a")
 
+    def test_a_keyboard_pin_or_exclusion_keeps_the_focus_while_it_posts(self) -> None:
+        for cls, url in (("acct-pin", "/api/pin"), ("acct-toggle", "/api/exclusion")):
+            with self.subTest(cls=cls):
+                (snap,) = render([
+                    START, {"frame": F3}, {"click": "cap"}, {"focus_on": cls}, {"hold": True}, {"click": cls},
+                    {"snapshot": True},
+                ])
+                (kept,) = [n for n in nodes(panel(snap)) if n["focused"]]
+                self.assertIn(cls, kept["cls"].split())
+                self.assertEqual(len([p for p in snap["posts"] if p["url"] == url]), 1)
+                (again,) = render([
+                    START, {"frame": F3}, {"click": "cap"}, {"focus_on": cls}, {"hold": True}, {"click": cls},
+                    {"click": cls}, {"snapshot": True},
+                ])
+                self.assertEqual(len([p for p in again["posts"] if p["url"] == url]), 1)
+
     def test_an_exhausted_account_keeps_its_weekly_figure_in_the_panel(self) -> None:
         snap = opened(one_profile({
             "name": "w", "week": .4, "five": 1.0, "five_out": True,

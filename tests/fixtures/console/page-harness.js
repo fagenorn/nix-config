@@ -120,6 +120,7 @@ class Elem {
     if (name === "disabled") this.disabled = true;
   }
   focus() {
+    if (this.disabled === true) return; // a browser does not focus a disabled control
     const was = state.active === this;
     state.active = this;
     state.focusCount += 1;
