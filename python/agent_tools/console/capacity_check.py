@@ -70,21 +70,19 @@ the page yet). Otherwise a profile of S not in O is `{"status": "met", "profiles
 sorted>}`, exit 0, and when every profile of S is in O `{"status": "not_met", "profiles": <S,
 sorted>}`, exit 1.
 
-`--page-add` (#1027, exclusive with the other modes, `--max-age` ignored) meets when an account the
-owner added from the page has the profile the launcher builds and its sign-in is done. Let A be the
-view's top-level `accounts_added`, home `Path.home()` and accounts `$CLAUDE_ACCOUNTS_DIR` or else
-`home/.claude-accounts`. The expected entries are the members `e` of `SHARED` (the launcher's
-`SHARED` array) with `os.path.lexists(home/.claude/e)`, the launcher's own test before it links. A
-view whose `accounts_added` is not a list of strings, or whose `capacity.profiles` is unreadable, is
-`{"status": "not_deployed"}`, exit 75. For each name in sorted A whose `accounts/profiles/<name>` is
-a directory (a missing one is skipped as removed) the profile is malformed unless its mode is
-`0o700`, every expected entry `e` is a symlink there (by `os.lstat`, never followed; a missing
-entry, or a file or directory in its place, is malformed) whose `os.readlink` is
-`str(home/.claude/e)`, and every other symlink in it reads `str(home/.claude/<its name>)`. Any
-malformed profile is `{"status": "not_met", "profiles": [<malformed, sorted>]}`, exit 1. Otherwise
-the well-formed names whose `capacity.profiles` row has `signin.state` `signed_in` give `{"status":
-"met", "profiles": [<those, sorted>]}`, exit 0, and when there are none `{"status": "pending",
-"profiles": [<well-formed present names, sorted>]}`, exit 75.
+`--page-add` (#1027, #1037, exclusive with the other modes, `--max-age` ignored) meets when the
+console's own event log shows an account added from the page whose sign-in the page then started.
+It never asks the console and never looks at a profile, so no account has to stay on the host; the
+`--url` is not used. The log is `--log PATH` or else `state_root()/console/events.sqlite3`
+(`$HOME/.agents/state/console/events.sqlite3`), opened read-only (SQLite `mode=ro` with
+`query_only`): it is never created, written, or given a journal. A profile P is in the set when the
+log holds an `account.added` row whose payload has `by` `owner` and a non-empty string `profile` P,
+and a later row (higher `seq`) of kind `signin.acted` whose payload has `by` `owner`, `action`
+`start`, `outcome` `started` and `profile` P. The row kind `account.added` exists only from #1027,
+so any such row is from a console that has that merge. A non-empty set is `{"status": "met",
+"profiles": [<set, sorted>]}`, exit 0; an empty one `{"status": "pending"}`, exit 75. A log that is
+missing, is not a database or lacks the `events` table is `{"status": "no_log"}`, exit 75. It never
+exits 1: a row that is not there yet may still be recorded.
 
 `--pin` (#1029, exclusive with the other modes, `--max-age` ignored) meets when a new session or
 manager has started under a profile while the owner's page pin of that profile was in force. It
@@ -106,7 +104,7 @@ override, so no reading is "not met".
 
 A console that is down or predates this change is "not yet", never "not met", and only a reading
 newer than `--max-age` meets the check. A bad argument is exit 2. The check only reads: it sends one
-GET, follows no redirect and writes nothing.
+GET (none with `--page-add`), follows no redirect and writes nothing.
 """
 
 from __future__ import annotations
@@ -114,19 +112,21 @@ from __future__ import annotations
 import argparse
 import http.client
 import json
-import os
-import stat
+import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
+
+from agent_tools.project_contract import agent_platform
 
 DEFAULT_URL = "http://127.0.0.1:27184/api/state"
 DEFAULT_MAX_AGE = 600
 LOOPBACK = ("127.0.0.1", "localhost")
 TIMEOUT = 5.0
 NOT_YET = 75
-# The entries the launcher links into a profile: the `SHARED=(...)` array of claude-account.
+# The entries the launcher links into a profile: the `SHARED=(...)` array of claude-account
+# (kept for the accounts sandbox's snapshot, which lists a profile's shared entries).
 SHARED = ("settings.json", "CLAUDE.md", "keybindings.json", "skills", "agents", "commands",
           "plugins", "projects", "file-history", "history.jsonl", "output-styles", "rules")
 
@@ -338,51 +338,48 @@ def page_signin_verdict(body: bytes) -> tuple[int, dict]:
     return 1, {"status": "not_met", "profiles": signed_in}
 
 
-def _links_to(path: str, target: Path) -> bool:
+def default_log() -> Path:
+    """The console's event log: `state_root()/console/events.sqlite3`."""
+    return agent_platform.state_root() / "console" / "events.sqlite3"
+
+
+def _owner(payload: object) -> bool:
+    return isinstance(payload, dict) and payload.get("by") == "owner"
+
+
+def page_add_verdict(log: Path) -> tuple[int, dict]:
+    """Met when the log holds an owner `account.added` row and a later page sign-in start of it."""
     try:
-        return stat.S_ISLNK(os.lstat(path).st_mode) and os.readlink(path) == str(target)
-    except OSError:
-        return False
-
-
-def _well_formed(profile: Path, home: Path, expected: list[str]) -> bool:
-    """The profile the launcher builds: mode 0700, a link to `~/.claude/<e>` for each expected `e`."""
-    base = home / ".claude"
+        connection = sqlite3.connect(f"{log.resolve().as_uri()}?mode=ro", uri=True)
+    except (sqlite3.Error, OSError):
+        return NOT_YET, {"status": "no_log"}
     try:
-        if stat.S_IMODE(os.lstat(profile).st_mode) != 0o700:
-            return False
-        if not all(_links_to(str(profile / entry), base / entry) for entry in expected):
-            return False
-        with os.scandir(profile) as entries:
-            return all(_links_to(entry.path, base / entry.name)
-                       for entry in entries if entry.is_symlink())
-    except OSError:
-        return False
-
-
-def page_add_verdict(body: bytes, home: Path, accounts: Path) -> tuple[int, dict]:
-    """Met when a page-added profile is the launcher's profile and signed in, else not yet or not met."""
-    try:
-        document = json.loads(body)
-    except ValueError:
-        document = None
-    added = document.get("accounts_added") if isinstance(document, dict) else None
-    rows = readings(body)
-    if (not isinstance(added, list) or not all(isinstance(name, str) for name in added)
-            or rows is None):
-        return NOT_YET, {"status": "not_deployed"}
-    expected = [entry for entry in SHARED if os.path.lexists(home / ".claude" / entry)]
-    present = [name for name in sorted(set(added)) if (accounts / "profiles" / name).is_dir()]
-    good = [name for name in present
-            if _well_formed(accounts / "profiles" / name, home, expected)]
-    malformed = [name for name in present if name not in good]
-    if malformed:
-        return 1, {"status": "not_met", "profiles": malformed}
-    signed_in = {name for name, _, signin in rows if _state(signin) == "signed_in"}
-    done = [name for name in good if name in signed_in]
-    if done:
-        return 0, {"status": "met", "profiles": done}
-    return NOT_YET, {"status": "pending", "profiles": good}
+        connection.execute("PRAGMA query_only = ON")
+        rows = connection.execute(
+            "SELECT kind, payload FROM events WHERE kind IN ('account.added', 'signin.acted') "
+            "ORDER BY seq").fetchall()
+    except sqlite3.Error:
+        return NOT_YET, {"status": "no_log"}
+    finally:
+        connection.close()
+    added: set[str] = set()
+    started: set[str] = set()
+    for kind, text in rows:
+        try:
+            payload = json.loads(text)
+        except ValueError:
+            continue
+        profile = payload.get("profile") if isinstance(payload, dict) else None
+        if not _owner(payload) or not isinstance(profile, str) or not profile:
+            continue
+        if kind == "account.added":
+            added.add(profile)
+        elif (payload.get("action") == "start" and payload.get("outcome") == "started"
+              and profile in added):
+            started.add(profile)
+    if started:
+        return 0, {"status": "met", "profiles": sorted(started)}
+    return NOT_YET, {"status": "pending"}
 
 
 def pin_verdict(body: bytes) -> tuple[int, dict]:
@@ -422,11 +419,13 @@ def build_parser() -> argparse.ArgumentParser:
                       help="require a profile the owner signed in from the page whose sign-in "
                            "item is gone")
     mode.add_argument("--page-add", action="store_true",
-                      help="require an account the owner added from the page to be the "
-                           "launcher's profile and signed in")
+                      help="require the console's log to show an account added from the page "
+                           "and that profile's sign-in started from the page")
     mode.add_argument("--pin", action="store_true",
                       help="require a new session or manager started under a profile while the "
                            "owner's pin of it was in force, read from the console's log")
+    parser.add_argument("--log", type=Path, default=None,
+                        help="the console event log for --page-add (default: the console's own)")
     return parser
 
 
@@ -446,6 +445,10 @@ def _exclusion(url: str, body: bytes) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    if args.page_add:
+        code, result = page_add_verdict(args.log or default_log())
+        print(json.dumps(result, sort_keys=True))
+        return code
     body = fetch(args.url)
     if body is None:
         print(json.dumps({"status": "not_running"}, sort_keys=True))
@@ -456,11 +459,7 @@ def main(argv: list[str] | None = None) -> int:
         return NOT_YET
     if args.exclusion:
         return _exclusion(args.url, body)
-    if args.page_add:
-        home = Path.home()
-        accounts = Path(os.environ.get("CLAUDE_ACCOUNTS_DIR") or home / ".claude-accounts")
-        code, result = page_add_verdict(body, home, accounts)
-    elif args.pin:
+    if args.pin:
         code, result = pin_verdict(body)
     elif args.page_signin:
         code, result = page_signin_verdict(body)
