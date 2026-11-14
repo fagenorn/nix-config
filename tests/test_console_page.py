@@ -4963,6 +4963,27 @@ class SigninLaterPageTest(unittest.TestCase):
         self.assertEqual(of_class(card, "button", "signin-start"), [])
 
 
+
+class SigninRecoveredPageTest(unittest.TestCase):
+    def test_a_running_sign_in_with_no_inbox_item_is_recovered_from_the_runs(self) -> None:
+        run = {"work": {"state": "running", "at": None, "attempt": 7}}
+        (snap,) = render([
+            START, {"respond": {"status": 200, "text": ANSWER}},
+            {"frame": {**frame([]), "signin_runs": run}}, {"snapshot": True}])
+        (post,) = asks(snap)
+        self.assertEqual(json.loads(post["body"]), {"profile": "work"})
+        card = sign_in_card(snap)
+        self.assertEqual(linked(snap), ["https://claude.example/a?s=1"])
+        self.assertEqual(len(of_class(card, "input", "signin-code")), 1)
+        self.assertEqual(len(of_class(card, "button", "signin-cancel")), 1)
+
+    def test_an_ended_run_with_no_inbox_item_shows_no_card(self) -> None:
+        run = {"work": {"state": "cancelled", "at": None, "attempt": 7}}
+        (snap,) = render([START, {"frame": {**frame([]), "signin_runs": run}}, {"snapshot": True}])
+        self.assertEqual(asks(snap), [])
+        self.assertEqual([n for n in nodes(snap["inbox"]) if has_class(n, "signin")], [])
+
+
 V = {**frame([]), "capacity": capacity([profile("work", "ok", week_left=50, signin=si("signed_in", 9))])}
 FRESH = {**SIGNIN, "key": "signin/fresh", "profile": "fresh", "headline": "Sign in to fresh",
          "signin": si("signed_out", None, ask=True, ever=False)}
@@ -5047,6 +5068,38 @@ class AddAccountPageTest(unittest.TestCase):
         self.assertEqual(added(snap, "account-add-outcome"), [])
         self.assertEqual(added(snap, "account-code"), [])
         self.assertEqual(len([n for n in added(snap, "account-add-open") if n["tag"] == "button"]), 1)
+
+    def test_a_stale_add_answer_does_not_replace_a_newer_attempts_link(self) -> None:
+        newer = {"fresh": {"state": "running", "at": None, "attempt": 10}}
+        steps = [
+            START, {"frame": V}, {"click": "account-add-open"},
+            {"type": {"class": "account-name", "text": "fresh"}},
+            {"hold": True}, {"click": "account-add-send"},
+            {"respond": {"status": 200, "text": "{\"attempt\":10,\"link\":\"https://claude.example/ten\"}"}},
+            {"frame": with_item(with_run(FRESH, "running", 10), newer)}, {"snapshot": True},
+            {"release": {"status": 200, "text": ADDED}}, {"snapshot": True},
+        ]
+        one, two = render(steps)
+        for snap in (one, two):
+            self.assertEqual(len(asks(snap)), 1)
+            self.assertEqual([n["href"] for n in of_class(sign_in_card(snap), "a", "signin-link")],
+                             ["https://claude.example/ten"])
+            self.assertEqual(len(of_class(sign_in_card(snap), "input", "signin-code")), 1)
+        self.assertEqual(added(two, "account-add-link"), [])
+
+    def test_an_older_attempts_outcome_ends_the_add_box_after_its_run_was_seen_running(self) -> None:
+        older = {"fresh": {"state": "cancelled", "at": "2026-11-14T10:00:00+00:00", "attempt": 8}}
+        one, two = render(NO_ITEM + [
+            {"frame": {**V, "signin_runs": older}}, {"snapshot": True},
+            {"frame": with_item(with_run(FRESH, "cancelled", 8), older)}, {"snapshot": True}])
+        for snap in (one, two):
+            self.assertEqual(added(snap, "account-add-link"), [])
+            self.assertEqual(added(snap, "account-code"), [])
+            self.assertEqual(added(snap, "account-add-outcome"), [])
+            self.assertEqual(len([n for n in added(snap, "account-add-open") if n["tag"] == "button"]), 1)
+        card = sign_in_card(two)
+        self.assertEqual(of_class(card, "p", "signin-elsewhere"), [])
+        self.assertEqual(len(of_class(card, "button", "signin-start")), 1)
 
     def test_the_card_offers_sign_in_in_the_frame_that_ends_the_added_run(self) -> None:
         (snap,) = render(ADD_STEPS + [
