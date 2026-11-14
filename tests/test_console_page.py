@@ -5147,6 +5147,10 @@ class RemovePageTest(unittest.TestCase):
         (found,) = [n for n in nodes(panel(snap)) if has_class(n, cls)]
         return found
 
+    def render_steps(self, *steps) -> list:
+        return render([START, {"frame": self.removal_frame({"a": 2})}, {"click": "cap"},
+                       {"click": "acct-remove"}, *steps])
+
     def test_each_account_offers_remove(self) -> None:
         shown = {**view([]), "capacity": real_capacity(NOW_S, [
             {"name": "a", "week": .35}, {"name": "b", "signin": ("signed_out", None)}])}
@@ -5181,6 +5185,18 @@ class RemovePageTest(unittest.TestCase):
             with self.subTest(typed=typed):
                 snap = self.opened({"type": {"class": "acct-remove-name", "text": typed}})
                 self.assertEqual(self.remove_node(snap, "acct-remove-send")["disabled"], disabled)
+
+    def test_a_keyboard_removal_keeps_the_focus_on_its_buttons_while_it_posts(self) -> None:
+        named = {"type": {"class": "acct-remove-name", "text": "a"}}
+        for cls in ("acct-remove-send", "acct-remove-cancel"):
+            with self.subTest(cls=cls):
+                (snap,) = self.render_steps(
+                    named, {"focus_on": "acct-remove-send"}, {"hold": True}, {"click": "acct-remove-send"},
+                    {"focus_on": cls}, {"click": cls}, {"snapshot": True})
+                (kept,) = [n for n in nodes(panel(snap)) if n["focused"]]
+                self.assertIn(cls, kept["cls"].split())
+                self.assertEqual(len([p for p in snap["posts"] if p["url"] == "/api/account-remove"]), 1)
+                self.assertEqual(len([n for n in nodes(panel(snap)) if has_class(n, "acct-remove-send")]), 1)
 
     def test_remove_posts_the_profile_and_the_typed_name_with_the_token(self) -> None:
         snap = self.opened({"type": {"class": "acct-remove-name", "text": "a"}},
@@ -6031,14 +6047,20 @@ class PanelSigninPageTest(unittest.TestCase):
                     "signin_runs": {"work": {"state": state, "at": None, "attempt": 3}}}
                 (work,) = rows(opened(shown))
                 self.assertEqual([full(n) for n in in_row(work, "p", "signin-run")], [note])
-        for state in ("failed", "running"):
+        # A renewal outside the three-day window still shows how it ended: the outcome is not the ask.
+        for state, note in notes.items():
             with self.subTest(signed_in=state):
                 shown = {**view([]), "capacity": real_capacity(
                     NOW_S, [{"name": "work", "week": .5, "signin": ("signed_in", NOW_S + 12 * 86400)}]),
                     "signin_runs": {"work": {"state": state, "at": None, "attempt": 3}}}
                 (work,) = rows(opened(shown))
-                self.assertEqual([full(n) for n in in_row(work, "p", "signin-run")],
-                                 ["A sign-in is running."] if state == "running" else [])
+                self.assertEqual([full(n) for n in in_row(work, "p", "signin-run")], [note])
+        with self.subTest(signed_in="signed_in"):
+            shown = {**view([]), "capacity": real_capacity(
+                NOW_S, [{"name": "work", "week": .5, "signin": ("signed_in", NOW_S + 12 * 86400)}]),
+                "signin_runs": {"work": {"state": "signed_in", "at": None, "attempt": 3}}}
+            (work,) = rows(opened(shown))
+            self.assertEqual(in_row(work, "p", "signin-run"), [])
 
     def _running_in_panel(self) -> list:
         shown = {**frame([SIGNIN]), "capacity": WORK_CAP}
@@ -6088,6 +6110,28 @@ class PanelSigninPageTest(unittest.TestCase):
         self.assertEqual((code["value"], code["focused"], code["selection"]), ("ab#C", True, [1, 3]))
         (code,) = of_class(sign_in_card(after), "input", "signin-code")
         self.assertEqual(code["value"], "ab#C")
+
+    def test_escape_from_a_typed_code_leaves_no_field_focused(self) -> None:
+        steps, _ = self._running_in_panel()
+        typing, closed = render([
+            *steps, {"type": {"class": "signin-code", "text": "ab#C"}}, {"snapshot": True},
+            {"key": "Escape"}, {"snapshot": True}])
+        self.assertEqual(typing["active"], "signin-code")
+        self.assertIs(closed["accounts"]["hidden"], True)
+        self.assertIsNone(closed["active"])
+        self.assertIsNone(closed["field"])
+
+    def test_a_keyboard_sign_in_keeps_the_focus_while_it_posts(self) -> None:
+        shown = {**view([]), "capacity": real_capacity(NOW_S, [
+            {"name": "b", "week": .5, "signin": ("signed_out", None)}])}
+        for extra in ([], [{"click": "acct-signin"}]):
+            with self.subTest(second_click=bool(extra)):
+                (snap,) = render([
+                    START, {"frame": shown}, {"click": "cap"}, {"focus_on": "acct-signin"},
+                    {"hold": True}, {"click": "acct-signin"}, *extra, {"snapshot": True}])
+                (kept,) = [n for n in nodes(panel(snap)) if n["focused"]]
+                self.assertIn("acct-signin", kept["cls"].split())
+                self.assertEqual(len([p for p in snap["posts"] if p["url"] == "/api/signin"]), 1)
 
     def test_a_sign_in_request_redraws_the_row_with_no_frame(self) -> None:
         refused = {"respond": {"status": 409, "text": "a sign-in is already running"}}

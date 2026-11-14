@@ -51,7 +51,8 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .cap-signin, .cap-no-reading, .cap-signed-out { color: var(--ov2); }
 .cap-excluded, .cap-excl, .cap-pin-mark { color: var(--ov2); }
 .acct-toggle, .acct-pin, .acct-signin, .acct-remove, .acct-remove-send, .acct-remove-cancel, .acct-close { font: inherit; color: var(--sub1); background: none; border: 1px solid var(--s1); border-radius: 4px; padding: 0 6px; cursor: pointer; }
-.acct-toggle:disabled, .acct-pin:disabled, .acct-toggle[aria-disabled="true"], .acct-pin[aria-disabled="true"], .acct-signin:disabled, .acct-remove:disabled, .acct-remove-send:disabled, .acct-remove-cancel:disabled, .acct-close:disabled { cursor: default; opacity: .6; }
+.acct-toggle:disabled, .acct-pin:disabled, .acct-toggle[aria-disabled="true"], .acct-pin[aria-disabled="true"], .acct-signin:disabled, .acct-remove:disabled, .acct-remove-send:disabled, .acct-remove-cancel:disabled, .acct-close:disabled,
+.acct-signin[aria-disabled="true"], .acct-remove-send[aria-disabled="true"], .acct-remove-cancel[aria-disabled="true"] { cursor: default; opacity: .6; }
 .acct-panel { position: absolute; top: calc(100% + 6px); right: 16px; z-index: 20; width: min(600px, calc(100vw - 32px)); max-height: calc(100vh - 6rem); overflow-y: auto; padding: 12px 16px; background: var(--base); border: 1px solid var(--s1); border-radius: 12px; box-shadow: 0 28px 48px -24px rgba(8, 9, 16, .9); font-size: .84375rem; color: var(--sub0); }
 .acct-panel[hidden] { display: none; }
 .acct-panel:focus-visible { outline: none; }
@@ -1127,22 +1128,26 @@ function removeControls(act, row, p, view) {
   const send = actionButton("acct-remove-send", "Remove " + name, () => removeAccount(name));
   const draft = removeDrafts.get(name);
   if (draft !== undefined) input.value = draft.value;
-  send.disabled = sending || input.value !== name;
+  // aria-disabled, not disabled, while a POST is in flight: a disabled button cannot take the focus
+  // renderAccounts restores to it, and removeAccount guards itself. A wrong name still disables it.
+  send.disabled = input.value !== name;
+  if (sending) send.setAttribute("aria-disabled", "true");
   input.addEventListener("input", () => {
     removeDrafts.set(name, { value: input.value, start: input.selectionStart, end: input.selectionEnd });
-    const now = removePosts.get(name);
-    send.disabled = (now !== undefined && now.phase === "sending") || input.value !== name;
+    send.disabled = input.value !== name;
   });
   removeFields.set(name, input);
   box.appendChild(input);
   box.appendChild(send);
   const cancel = actionButton("acct-remove-cancel", "Cancel", () => {
+    const now = removePosts.get(name);
+    if (now !== undefined && now.phase === "sending") return;
     removeOpen.delete(name);
     removeDrafts.delete(name);
     removePosts.delete(name);
     redrawAccounts();
   });
-  cancel.disabled = sending;
+  if (sending) cancel.setAttribute("aria-disabled", "true");
   box.appendChild(cancel);
   if (state !== undefined && state.phase === "failed") {
     box.appendChild(el("span", "fail", "Could not remove: " + state.reason));
@@ -1291,7 +1296,11 @@ function signinStartButton(item, cls) {
       method: "POST", headers: stallHeaders(), body: signinBody(item),
     })));
   const starting = signinPosts.get("start\n" + item.profile);
-  if (starting !== undefined && starting.phase === "sending") start.setAttribute("disabled", "");
+  if (starting !== undefined && starting.phase === "sending") {
+    // The panel's button stays focusable (aria-disabled) so renderAccounts can restore the focus to it; signinPost guards itself.
+    if (cls.split(" ").includes("acct-signin")) start.setAttribute("aria-disabled", "true");
+    else start.setAttribute("disabled", "");
+  }
   return start;
 }
 // The sign-in controls of one profile: the card's, and the panel row's when quiet (never the card's Peach button).
@@ -1571,9 +1580,8 @@ function accountRow(p, view) {
   const item = accountItem(p, view);
   const run = item.run !== null && typeof item.run === "object" ? item.run : null;
   const runNote = run === null ? undefined : SIGNIN_NOTES.get(run.state);
-  if (runNote !== undefined && (run.state === "running" || (p.signin !== null && typeof p.signin === "object" && p.signin.ask === true))) {
-    row.appendChild(el("p", "signin-run", runNote));
-  }
+  // The run's outcome is shown whether or not the sign-in asks: whether a renewal is due is not whether an attempt failed.
+  if (runNote !== undefined) row.appendChild(el("p", "signin-run", runNote));
   const act = el("div", "acct-act");
   row.appendChild(act);
   exclusionControls(act, p);
@@ -1686,6 +1694,9 @@ function closeAccounts() {
   const back = accountsReturn;
   accountsReturn = null;
   if (back === null || back === document.body) {
+    // The page had no focus at opening: whatever holds it now (a field the inbox rebuild focused) lets go.
+    const now = document.activeElement;
+    if (now !== null && now !== undefined && now !== document.body) now.blur();
     document.getElementById("accounts").blur();
     return;
   }
