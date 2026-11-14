@@ -70,7 +70,8 @@ accepted owner action) and `SIGNIN_ENDED` (`signin.ended`, one per finished clie
 `KEPT_KINDS`, and neither carries a link or a code.
 
 `ACCOUNT_ADDED` (`account.added`, one per account the owner adds from the page, #1027) is not in
-`KEPT_KINDS`.
+`KEPT_KINDS`. `ACCOUNT_REMOVAL` (`account.removal`, one per removal the owner confirms on the page,
+#1030) is not in `KEPT_KINDS`.
 
 Another is kept in part (#1011): a session's profile is assigned by its `SESSION_SEEN` and
 `SESSION_PROFILE` rows, and a profile's last use is read from the session's later `SESSION_HOOK` rows
@@ -134,6 +135,7 @@ PROFILE_PIN = "profile.pin"
 SIGNIN_ACTED = "signin.acted"
 SIGNIN_ENDED = "signin.ended"
 ACCOUNT_ADDED = "account.added"
+ACCOUNT_REMOVAL = "account.removal"
 SESSION_HOOK = "session.hook"
 SESSION_SEEN = "session.seen"
 SESSION_PROFILE = "session.profile"
