@@ -14,7 +14,7 @@ The recorded choice of which account profile a project runs under, kept in a per
 _Avoid_: account mapping
 
 **Account profile**:
-A directory under `~/.claude-accounts/profiles/` used as the Claude config directory for one account. The login is the profile's own, while settings, skills and plugins link to the shared ones. The launcher creates it with `claude-account add`, and the console creates it through that same command when the owner adds an account on the page (ADR-console-025).
+A directory under `~/.claude-accounts/profiles/` used as the Claude config directory for one account. The login is the profile's own, while settings, skills and plugins link to the shared ones. The launcher creates it with `claude-account add`, and the console creates it through that same command when the owner adds an account on the page (ADR-console-025). The owner removes it on the console page after typing its name; the console signs it out first and deletes it with `claude-account rm` (ADR-console-026).
 _Avoid_: account
 
 **Cache proxy**:

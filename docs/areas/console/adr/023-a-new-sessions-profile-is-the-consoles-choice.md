@@ -1,7 +1,7 @@
 # ADR-console-023 — A new session's profile is the console's choice, on a route and in a file
 
-- **Status:** accepted
-- **Decided in:** #839, #842, #1011, #1016, #1028, #1029
+- **Status:** accepted; amended by ADR-console-026
+- **Decided in:** #839, #842, #1011, #1016, #1028, #1029, #1030
 
 ## Context
 
