@@ -1233,6 +1233,49 @@ class ProfileChoiceServiceTest(ManagerServiceTest):
         _, _, kind, _, payload = self.manager_rows()[-1]
         self.assertEqual((kind, json.loads(payload)["profile"]), ("manager.started", "home"))
 
+    def work_dir(self):
+        return self.store.parent.parent / "accounts" / "profiles" / "work"
+
+    def test_a_launch_prepared_before_a_removal_is_not_started_under_the_removed_profile(self):
+        dirs = self.two_signed_in()
+        launches = support.Launches()
+        queue = support.Queued()
+        svc = self.start(profile_dirs=dirs, clock=lambda: NOW, choice_file=self.choice,
+                         launcher=launches, dispatch=queue)
+        self.state(svc)
+        self.prepare_then(svc, queue, lambda: shutil.rmtree(self.work_dir()))
+        self.assertEqual([c.profile for c in launches.calls], ["home"])
+        _, _, kind, _, payload = self.manager_rows()[-1]
+        self.assertEqual((kind, json.loads(payload)["profile"]), ("manager.started", "home"))
+
+    def test_a_launch_prepared_before_a_removal_began_is_not_started_under_the_profile_being_removed(self):
+        dirs = self.two_signed_in()
+        launches = support.Launches()
+        queue = support.Queued()
+        entered = threading.Event()
+        release = threading.Event()
+
+        def signer_out(one):
+            entered.set()
+            release.wait(10)
+        svc = self.start(profile_dirs=dirs, clock=lambda: NOW, choice_file=self.choice,
+                         launcher=launches, dispatch=queue,
+                         signin_reader=lambda one: signin.Status("signed_in", None),
+                         account_remover=lambda name: shutil.rmtree(self.work_dir()),
+                         signer_out=signer_out)
+        self.state(svc)
+        remover = threading.Thread(target=lambda: svc.remove_account("work", "work"))
+
+        def begin_removal():
+            remover.start()
+            self.assertTrue(entered.wait(5))
+        self.prepare_then(svc, queue, begin_removal)
+        release.set()
+        remover.join(10)
+        self.assertEqual([c.profile for c in launches.calls], ["home"])
+        _, _, kind, _, payload = self.manager_rows()[-1]
+        self.assertEqual((kind, json.loads(payload)["profile"]), ("manager.started", "home"))
+
     def test_a_launch_prepared_before_a_pin_is_started_under_the_pin(self):
         dirs = self.two_signed_in()
         launches = support.Launches()
