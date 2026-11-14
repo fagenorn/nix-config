@@ -15,6 +15,7 @@ from pathlib import Path
 from agent_tools.console import service
 
 from . import console_test_support as support
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 ROOT = Path(__file__).resolve().parents[1]
 TEMPLATE = ROOT / "home/common/claude-code/console-session-start.sh"

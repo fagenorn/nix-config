@@ -14,6 +14,7 @@ from .test_console_answer import view_of
 from .test_console_messages import GOAL_TEXT, PARTS
 from .test_console_reports import REPORT
 from .test_console_writes import Case
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 BRIEF = "/api/brief"
 APPROVE = "/api/approve"

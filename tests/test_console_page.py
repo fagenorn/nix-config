@@ -15,6 +15,7 @@ from pathlib import Path
 from agent_tools.console import digest as console_digest
 from agent_tools.console.event_log import Event
 from agent_tools.console.sprints import MAX_REPORT_ISSUES
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PAGE = REPO_ROOT / "python/agent_tools/console/page.html"
@@ -269,7 +270,8 @@ class PageTest(unittest.TestCase):
             {"/api/stream", "/api/looked", "/api/answer", "/api/check-answer", "/api/goal",
              "/api/withdraw", "/api/retry-manager", "/api/approve", "/api/reply",
              "/api/message", "/api/stop", "/api/round-answer", "/api/continue",
-             "/api/exclusion", "/api/signin", "/api/signin-code", "/api/signin-cancel"},
+             "/api/exclusion", "/api/signin", "/api/signin-code", "/api/signin-cancel",
+             "/api/account-add"},
         )
         self.assertEqual(
             len(re.findall(r"\b(?:fetch|EventSource)\(", self.text)), len(literals)
@@ -278,7 +280,7 @@ class PageTest(unittest.TestCase):
     def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
         # A separate snapshot request can answer after a newer streamed frame
         # and render over it; the stream's first frame is already the snapshot.
-        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 19)
+        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 23)
         self.assertIsNotNone(
             re.search(r'fetch\("/api/looked",\s*\{\s*method:\s*"POST"', self.text)
         )
@@ -290,7 +292,8 @@ class PageTest(unittest.TestCase):
         )
         for route in ("/api/goal", "/api/withdraw", "/api/retry-manager", "/api/approve",
                       "/api/reply", "/api/message", "/api/stop", "/api/round-answer",
-                      "/api/signin", "/api/signin-code", "/api/signin-cancel"):
+                      "/api/signin", "/api/signin-code", "/api/signin-cancel",
+                      "/api/account-add"):
             self.assertIsNotNone(
                 re.search(rf'fetch\("{route}",\s*\{{\s*method:\s*"POST"', self.text)
             )
@@ -4837,3 +4840,220 @@ class SigninPageTest(unittest.TestCase):
             elif ANSWERABLE["headline"] in text:
                 order.append("tracker")
         self.assertEqual(order, ["progress", "signin", "question", "tracker"])
+
+
+V = {**frame([]), "capacity": capacity([profile("work", "ok", week_left=50, signin=si("signed_in", 9))])}
+FRESH = {**SIGNIN, "key": "signin/fresh", "profile": "fresh", "headline": "Sign in to fresh again",
+         "signin": si("signed_out", None, ask=True)}
+ADDED = "{\"attempt\":9,\"link\":\"https://claude.example/b\",\"profile\":\"fresh\"}"
+RUNNING = {"fresh": {"state": "running", "at": None, "attempt": 9}}
+ENDED = {"fresh": {"state": "cancelled", "at": "2026-11-14T10:00:00+00:00", "attempt": 9}}
+ADD_STEPS = [
+    START, {"frame": V}, {"click": "account-add-open"},
+    {"type": {"class": "account-name", "text": "fresh"}},
+    {"respond": {"status": 200, "text": ADDED}}, {"click": "account-add-send"},
+]
+NO_ITEM = ADD_STEPS + [{"frame": {**V, "signin_runs": RUNNING}}]
+
+
+def with_item(item: dict, runs: dict) -> dict:
+    return {**V, "inbox": {"open": [item], "answered": []},
+            "statement": {**V["statement"], "inbox_items": 1}, "signin_runs": runs}
+
+
+def added(snap: dict, cls: str) -> list:
+    return [n for n in nodes(snap["account_add"]) if has_class(n, cls)]
+
+
+def added_reason(snap: dict) -> str:
+    (reason,) = added(snap, "account-add-reason")
+    return full(reason)
+
+
+class AddAccountPageTest(unittest.TestCase):
+    def test_an_add_posts_the_name_with_the_token(self) -> None:
+        (snap,) = render(ADD_STEPS + [{"snapshot": True}])
+        post = snap["posts"][-1]
+        self.assertEqual((post["url"], post["method"]), ("/api/account-add", "POST"))
+        self.assertEqual(post["headers"]["X-Console-Token"], TOKEN)
+        self.assertEqual(json.loads(post["body"]), {"name": "fresh"})
+
+    def test_an_add_shows_the_new_profiles_sign_in_link(self) -> None:
+        (snap,) = render(ADD_STEPS + [
+            {"frame": with_item(with_run(FRESH, "running", 9), RUNNING)}, {"snapshot": True}])
+        links = of_class(sign_in_card(snap), "a", "signin-link")
+        self.assertEqual([n["href"] for n in links], ["https://claude.example/b"])
+        self.assertEqual(of_class(sign_in_card(snap), "button", "signin-start"), [])
+        self.assertEqual(added(snap, "account-add-link"), [])
+
+    def test_with_no_sign_in_item_the_control_carries_the_link_and_the_code(self) -> None:
+        (snap,) = render(NO_ITEM + [{"snapshot": True}])
+        (note,) = added(snap, "account-add-note")
+        self.assertEqual(full(note), "Sign in to fresh")
+        (link,) = [n for n in added(snap, "account-add-link") if n["tag"] == "a"]
+        self.assertEqual(link["href"], "https://claude.example/b")
+        self.assertEqual(len([n for n in added(snap, "account-code") if n["tag"] == "input"]), 1)
+        (send,) = [n for n in added(snap, "account-code-send") if n["tag"] == "button"]
+        self.assertTrue(send["disabled"])
+        self.assertEqual(len([n for n in added(snap, "account-signin-cancel") if n["tag"] == "button"]), 1)
+        self.assertFalse([n for n in nodes(snap["inbox"]) if has_class(n, "signin")])
+
+    def test_a_code_sent_from_the_control_posts_it_for_the_added_profile(self) -> None:
+        (snap,) = render(NO_ITEM + [
+            {"type": {"class": "account-code", "text": " abc "}},
+            {"respond": {"status": 204, "text": ""}}, {"click": "account-code-send"},
+            {"snapshot": True}])
+        post = snap["posts"][-1]
+        self.assertEqual((post["url"], post["method"]), ("/api/signin-code", "POST"))
+        self.assertEqual(post["headers"]["X-Console-Token"], TOKEN)
+        self.assertEqual(json.loads(post["body"]), {"profile": "fresh", "code": "abc"})
+        (code,) = added(snap, "account-code")
+        self.assertEqual(code["value"], "")
+
+    def test_cancel_from_the_control_posts_the_cancel(self) -> None:
+        (snap,) = render(NO_ITEM + [
+            {"respond": {"status": 204, "text": ""}}, {"click": "account-signin-cancel"},
+            {"snapshot": True}])
+        post = snap["posts"][-1]
+        self.assertEqual((post["url"], post["method"]), ("/api/signin-cancel", "POST"))
+        self.assertEqual(post["headers"]["X-Console-Token"], TOKEN)
+        self.assertEqual(json.loads(post["body"]), {"profile": "fresh"})
+
+    def test_a_refused_code_shows_the_reason_in_the_control(self) -> None:
+        (snap,) = render(NO_ITEM + [
+            {"type": {"class": "account-code", "text": "abc"}},
+            {"respond": {"status": 409, "text": "no sign-in is running for fresh\n"}},
+            {"click": "account-code-send"}, {"snapshot": True}])
+        self.assertEqual(
+            added_reason(snap), "Could not send the code: no sign-in is running for fresh")
+
+    def test_a_link_held_from_an_add_waits_for_its_item(self) -> None:
+        (snap,) = render(NO_ITEM + [
+            {"frame": with_item(with_run(FRESH, "running", 9), RUNNING)}, {"snapshot": True}])
+        links = of_class(sign_in_card(snap), "a", "signin-link")
+        self.assertEqual([n["href"] for n in links], ["https://claude.example/b"])
+        self.assertEqual(added(snap, "account-add-link"), [])
+
+    def test_a_link_held_from_an_add_is_dropped_when_its_run_ended(self) -> None:
+        first, second = render(ADD_STEPS + [
+            {"frame": {**V, "signin_runs": ENDED}}, {"snapshot": True},
+            {"frame": with_item(FRESH, ENDED)}, {"snapshot": True}])
+        self.assertEqual(added(first, "account-add-link"), [])
+        self.assertEqual(len(added(first, "account-add-open")), 1)
+        card = sign_in_card(second)
+        self.assertEqual(of_class(card, "a", "signin-link"), [])
+        self.assertEqual(len(of_class(card, "button", "signin-start")), 1)
+
+    def test_a_continuation_ends_when_a_restart_drops_its_run_from_the_view(self) -> None:
+        (snap,) = render(NO_ITEM + [{"frame": V}, {"snapshot": True}])
+        self.assertEqual(added(snap, "account-add-link"), [])
+        self.assertEqual(len(added(snap, "account-add-open")), 1)
+
+    def test_a_card_opened_after_a_restart_drops_the_dead_link(self) -> None:
+        (snap,) = render(NO_ITEM + [{"frame": with_item(FRESH, {})}, {"snapshot": True}])
+        card = sign_in_card(snap)
+        self.assertEqual(of_class(card, "a", "signin-link"), [])
+        self.assertEqual(len(of_class(card, "button", "signin-start")), 1)
+        self.assertEqual(added(snap, "account-add-link"), [])
+
+    def test_an_invalid_default_or_existing_name_disables_add_with_the_reason(self) -> None:
+        bad = "not an account name: use a-z, 0-9, - and _"
+        for text, reason in (
+            ("Work", bad), ("a.b", bad), ("default", "default is not an account name"),
+            ("work", "account work already exists"),
+        ):
+            with self.subTest(text=text):
+                (snap,) = render([
+                    START, {"frame": V}, {"click": "account-add-open"},
+                    {"type": {"class": "account-name", "text": text}},
+                    {"click": "account-add-send"}, {"snapshot": True}])
+                (send,) = [n for n in added(snap, "account-add-send") if n["tag"] == "button"]
+                self.assertTrue(send["disabled"])
+                self.assertEqual(added_reason(snap), reason)
+                self.assertFalse([p for p in snap["posts"] if p["url"] == "/api/account-add"])
+
+    def test_a_refused_add_shows_the_reason_and_keeps_the_name(self) -> None:
+        steps = list(ADD_STEPS)
+        steps[4] = {"respond": {"status": 409, "text": "account fresh already exists\n"}}
+        (snap,) = render(steps + [{"snapshot": True}])
+        self.assertEqual(
+            added_reason(snap), "Could not add the account: account fresh already exists")
+        (name,) = added(snap, "account-name")
+        self.assertEqual(name["value"], "fresh")
+        self.assertEqual(added(snap, "account-add-link"), [])
+
+    def test_the_typed_name_and_its_focus_survive_a_frame(self) -> None:
+        (snap,) = render([
+            START, {"frame": V}, {"click": "account-add-open"},
+            {"type": {"class": "account-name", "text": "fre"}}, {"frame": V}, {"snapshot": True}])
+        self.assertEqual(snap["field"], {"cls": "account-name", "value": "fre", "start": 3, "end": 3})
+
+    def test_the_typed_code_and_its_focus_survive_a_frame(self) -> None:
+        (snap,) = render(NO_ITEM + [
+            {"type": {"class": "account-code", "text": "ab"}},
+            {"frame": {**V, "signin_runs": RUNNING}}, {"snapshot": True}])
+        self.assertEqual(snap["field"], {"cls": "account-code", "value": "ab", "start": 2, "end": 2})
+
+
+NO_LINK = "{\"attempt\":9,\"link\":null,\"profile\":\"fresh\"}"
+NO_LINK_STEPS = ADD_STEPS[:4] + [{"respond": {"status": 200, "text": NO_LINK}}, ADD_STEPS[5]]
+NO_LINK_RUNNING = NO_LINK_STEPS + [{"frame": {**V, "signin_runs": RUNNING}}]
+
+
+class AddAccountNoLinkPageTest(unittest.TestCase):
+    def test_an_add_with_no_link_keeps_a_way_to_fetch_the_link_and_to_cancel(self) -> None:
+        (snap,) = render(NO_LINK_RUNNING + [{"snapshot": True}])
+        (note,) = added(snap, "account-add-note")
+        self.assertEqual(full(note), "Sign in to fresh")
+        self.assertEqual(len([n for n in added(snap, "account-link-get") if n["tag"] == "button"]), 1)
+        self.assertEqual(len([n for n in added(snap, "account-signin-cancel") if n["tag"] == "button"]), 1)
+        self.assertEqual([n for n in added(snap, "account-add-link") if n["tag"] == "a"], [])
+
+    def test_fetching_the_link_posts_the_signin_and_shows_the_link_and_the_code_field(self) -> None:
+        (snap,) = render(NO_LINK_RUNNING + [
+            {"respond": {"status": 200, "text": ADDED}}, {"click": "account-link-get"},
+            {"snapshot": True}])
+        post = snap["posts"][-1]
+        self.assertEqual((post["url"], post["method"]), ("/api/signin", "POST"))
+        self.assertEqual(post["headers"]["X-Console-Token"], TOKEN)
+        self.assertEqual(json.loads(post["body"]), {"profile": "fresh"})
+        (link,) = [n for n in added(snap, "account-add-link") if n["tag"] == "a"]
+        self.assertEqual(link["href"], "https://claude.example/b")
+        self.assertEqual(len([n for n in added(snap, "account-code") if n["tag"] == "input"]), 1)
+
+    def test_a_link_answered_after_a_frame_opened_the_card_reaches_the_card(self) -> None:
+        (snap,) = render(NO_LINK_RUNNING + [
+            {"hold": True}, {"click": "account-link-get"},
+            {"frame": with_item(with_run(FRESH, "running", 9), RUNNING)},
+            {"release": {"status": 200, "text": ADDED}}, {"snapshot": True}])
+        card = sign_in_card(snap)
+        self.assertEqual(
+            [n["href"] for n in of_class(card, "a", "signin-link")], ["https://claude.example/b"])
+        self.assertEqual(added(snap, "account-add-note"), [])
+
+    def test_a_refused_fetch_shows_the_reason_in_the_control(self) -> None:
+        (snap,) = render(NO_LINK_RUNNING + [
+            {"respond": {"status": 502, "text": "the sign-in could not start\n"}},
+            {"click": "account-link-get"}, {"snapshot": True}])
+        self.assertEqual(
+            added_reason(snap), "Could not get the sign-in link: the sign-in could not start")
+
+    def test_a_card_for_a_run_with_no_held_link_offers_sign_in_and_cancel(self) -> None:
+        (snap,) = render(NO_LINK_RUNNING + [
+            {"frame": with_item(with_run(FRESH, "running", 9), RUNNING)}, {"snapshot": True}])
+        card = sign_in_card(snap)
+        self.assertEqual(of_class(card, "a", "signin-link"), [])
+        self.assertEqual(len(of_class(card, "button", "signin-start")), 1)
+        self.assertEqual(len(of_class(card, "button", "signin-cancel")), 1)
+        self.assertEqual(added(snap, "account-add-note"), [])
+
+
+class AddAccountHandoffPageTest(unittest.TestCase):
+    def test_the_typed_code_and_its_focus_carry_to_the_card_when_its_item_arrives(self) -> None:
+        (snap,) = render(NO_ITEM + [
+            {"type": {"class": "account-code", "text": "ab"}},
+            {"frame": with_item(with_run(FRESH, "running", 9), RUNNING)}, {"snapshot": True}])
+        self.assertEqual(snap["field"], {"cls": "signin-code", "value": "ab", "start": 2, "end": 2})
+        (send,) = of_class(sign_in_card(snap), "button", "signin-send")
+        self.assertFalse(send["disabled"])
+        self.assertEqual(added(snap, "account-code"), [])

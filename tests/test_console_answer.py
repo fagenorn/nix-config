@@ -18,6 +18,7 @@ from .forge_world import ForgeWorld
 from .test_console_inbox import act, approve, ask
 from .test_console_tracker import Scripted
 from .test_forge_owner_action import ISSUE, QUESTIONS, SLUG, box_body, comment
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 C = 6803141410
 QS = [{"question": q["question"], "options": q["options"]} for q in QUESTIONS]
@@ -381,7 +382,8 @@ class CheckAnswerServiceTest(unittest.TestCase):
                                                "/api/reply", "/api/retry-manager",
                                                "/api/message", "/api/stop", "/api/round-answer",
                                                "/api/continue", "/api/exclusion", "/api/signin",
-                                               "/api/signin-code", "/api/signin-cancel"})
+                                               "/api/signin-code", "/api/signin-cancel",
+                                               "/api/account-add"})
         keys = [PAID10["key"], LIVE12["key"]]
         single = {"project_id": P, "key": LIVE12["key"], "answer": "approve", "version": LIVE12["version"],
                   "confirm": "octo/widgets#12"}

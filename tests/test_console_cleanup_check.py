@@ -16,6 +16,7 @@ from unittest import mock
 from agent_tools.console import cleanup_check, nudge
 from agent_tools.system import siblings
 from tests.test_verify_checks import committed_mode
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 ROOT = Path(__file__).resolve().parents[1]
 WRAPPER = "home/common/verify-pending/checks/console-check-cleanup"

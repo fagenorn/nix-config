@@ -1,6 +1,6 @@
 """`capacity_check`: the verify check that the console shows a capacity reading for an account in use (#860).
 
-`python -m agent_tools.console.capacity_check [--url URL] [--max-age SECONDS] [--every | --signin | --accounts | --page-signin | --exclusion]` reads the console's
+`python -m agent_tools.console.capacity_check [--url URL] [--max-age SECONDS] [--every | --signin | --accounts | --page-signin | --page-add | --exclusion]` reads the console's
 `/api/state` view (default `http://127.0.0.1:27184/api/state`; the URL must be `http` on a loopback
 host, `127.0.0.1` or `localhost`, else exit 2) and looks at `capacity.profiles[].read_at`.
 `--max-age` is a positive integer number of seconds (default 600).
@@ -70,6 +70,22 @@ the page yet). Otherwise a profile of S not in O is `{"status": "met", "profiles
 sorted>}`, exit 0, and when every profile of S is in O `{"status": "not_met", "profiles": <S,
 sorted>}`, exit 1.
 
+`--page-add` (#1027, exclusive with the other modes, `--max-age` ignored) meets when an account the
+owner added from the page has the profile the launcher builds and its sign-in is done. Let A be the
+view's top-level `accounts_added`, home `Path.home()` and accounts `$CLAUDE_ACCOUNTS_DIR` or else
+`home/.claude-accounts`. The expected entries are the members `e` of `SHARED` (the launcher's
+`SHARED` array) with `os.path.lexists(home/.claude/e)`, the launcher's own test before it links. A
+view whose `accounts_added` is not a list of strings, or whose `capacity.profiles` is unreadable, is
+`{"status": "not_deployed"}`, exit 75. For each name in sorted A whose `accounts/profiles/<name>` is
+a directory (a missing one is skipped as removed) the profile is malformed unless its mode is
+`0o700`, every expected entry `e` is a symlink there (by `os.lstat`, never followed; a missing
+entry, or a file or directory in its place, is malformed) whose `os.readlink` is
+`str(home/.claude/e)`, and every other symlink in it reads `str(home/.claude/<its name>)`. Any
+malformed profile is `{"status": "not_met", "profiles": [<malformed, sorted>]}`, exit 1. Otherwise
+the well-formed names whose `capacity.profiles` row has `signin.state` `signed_in` give `{"status":
+"met", "profiles": [<those, sorted>]}`, exit 0, and when there are none `{"status": "pending",
+"profiles": [<well-formed present names, sorted>]}`, exit 75.
+
 A console that is down or predates this change is "not yet", never "not met", and only a reading
 newer than `--max-age` meets the check. A bad argument is exit 2. The check only reads: it sends one
 GET, follows no redirect and writes nothing.
@@ -80,8 +96,11 @@ from __future__ import annotations
 import argparse
 import http.client
 import json
+import os
+import stat
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from urllib.parse import urlsplit
 
 DEFAULT_URL = "http://127.0.0.1:27184/api/state"
@@ -89,6 +108,9 @@ DEFAULT_MAX_AGE = 600
 LOOPBACK = ("127.0.0.1", "localhost")
 TIMEOUT = 5.0
 NOT_YET = 75
+# The entries the launcher links into a profile: the `SHARED=(...)` array of claude-account.
+SHARED = ("settings.json", "CLAUDE.md", "keybindings.json", "skills", "agents", "commands",
+          "plugins", "projects", "file-history", "history.jsonl", "output-styles", "rules")
 
 
 def _loopback_url(text: str) -> str:
@@ -298,6 +320,53 @@ def page_signin_verdict(body: bytes) -> tuple[int, dict]:
     return 1, {"status": "not_met", "profiles": signed_in}
 
 
+def _links_to(path: str, target: Path) -> bool:
+    try:
+        return stat.S_ISLNK(os.lstat(path).st_mode) and os.readlink(path) == str(target)
+    except OSError:
+        return False
+
+
+def _well_formed(profile: Path, home: Path, expected: list[str]) -> bool:
+    """The profile the launcher builds: mode 0700, a link to `~/.claude/<e>` for each expected `e`."""
+    base = home / ".claude"
+    try:
+        if stat.S_IMODE(os.lstat(profile).st_mode) != 0o700:
+            return False
+        if not all(_links_to(str(profile / entry), base / entry) for entry in expected):
+            return False
+        with os.scandir(profile) as entries:
+            return all(_links_to(entry.path, base / entry.name)
+                       for entry in entries if entry.is_symlink())
+    except OSError:
+        return False
+
+
+def page_add_verdict(body: bytes, home: Path, accounts: Path) -> tuple[int, dict]:
+    """Met when a page-added profile is the launcher's profile and signed in, else not yet or not met."""
+    try:
+        document = json.loads(body)
+    except ValueError:
+        document = None
+    added = document.get("accounts_added") if isinstance(document, dict) else None
+    rows = readings(body)
+    if (not isinstance(added, list) or not all(isinstance(name, str) for name in added)
+            or rows is None):
+        return NOT_YET, {"status": "not_deployed"}
+    expected = [entry for entry in SHARED if os.path.lexists(home / ".claude" / entry)]
+    present = [name for name in sorted(set(added)) if (accounts / "profiles" / name).is_dir()]
+    good = [name for name in present
+            if _well_formed(accounts / "profiles" / name, home, expected)]
+    malformed = [name for name in present if name not in good]
+    if malformed:
+        return 1, {"status": "not_met", "profiles": malformed}
+    signed_in = {name for name, _, signin in rows if _state(signin) == "signed_in"}
+    done = [name for name in good if name in signed_in]
+    if done:
+        return 0, {"status": "met", "profiles": done}
+    return NOT_YET, {"status": "pending", "profiles": good}
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="capacity_check", description=__doc__.splitlines()[0])
     parser.add_argument("--url", type=_loopback_url, default=DEFAULT_URL,
@@ -320,6 +389,9 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--page-signin", action="store_true",
                       help="require a profile the owner signed in from the page whose sign-in "
                            "item is gone")
+    mode.add_argument("--page-add", action="store_true",
+                      help="require an account the owner added from the page to be the "
+                           "launcher's profile and signed in")
     return parser
 
 
@@ -349,7 +421,11 @@ def main(argv: list[str] | None = None) -> int:
         return NOT_YET
     if args.exclusion:
         return _exclusion(args.url, body)
-    if args.page_signin:
+    if args.page_add:
+        home = Path.home()
+        accounts = Path(os.environ.get("CLAUDE_ACCOUNTS_DIR") or home / ".claude-accounts")
+        code, result = page_add_verdict(body, home, accounts)
+    elif args.page_signin:
         code, result = page_signin_verdict(body)
     elif args.accounts:
         code, result = accounts_verdict(rows, signin_asks(body))

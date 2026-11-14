@@ -3,13 +3,18 @@
 Run: just agent-workflow-tests
 """
 import json
+import os
 import socket
 import subprocess
+import tempfile
 import threading
 import unittest
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
+
+from agent_tools.console import capacity_check
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 ROOT = Path(__file__).resolve().parents[1]
 WRAPPER = "home/common/verify-pending/checks/console-capacity-reading"
@@ -40,7 +45,7 @@ def ago(seconds):
     return (datetime.now(timezone.utc) - timedelta(seconds=seconds)).isoformat()
 
 
-def view(*rows, asks=None, runs=None):
+def view(*rows, asks=None, runs=None, added=None):
     """A console view; a row is `(name, read_at)` or `(name, read_at, signin)`.
 
     `asks` is None for a view with no `inbox`, else the keys of the open sign-in items; `runs` is
@@ -53,6 +58,8 @@ def view(*rows, asks=None, runs=None):
                                        "profile": key.split("/", 1)[1]} for key in asks]}
     if runs is not None:
         document["signin_runs"] = runs
+    if added is not None:
+        document["accounts_added"] = added
     return document
 
 
@@ -88,9 +95,9 @@ def excluded_view(*rows):
 
 
 class CapacityCheckTest(unittest.TestCase):
-    def run_check(self, *args):
+    def run_check(self, *args, env=None):
         done = subprocess.run([ROOT / WRAPPER, *args], cwd=ROOT, capture_output=True, text=True,
-                              timeout=60)
+                              timeout=60, env={**os.environ, **(env or {})})
         return done.returncode, done.stdout
 
     def test_a_fresh_reading_is_met(self):
@@ -308,6 +315,89 @@ class CapacityCheckTest(unittest.TestCase):
         for other in ("--every", "--signin", "--accounts"):
             with self.subTest(other=other):
                 done = subprocess.run([ROOT / WRAPPER, "--page-signin", other], cwd=ROOT,
+                                      capture_output=True, text=True, timeout=60)
+                self.assertEqual(done.returncode, 2)
+                self.assertIn("not allowed with argument", done.stderr)
+
+    def account_tree(self, mode=0o700, target=None, settings="link", skills="link"):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        claude = root / "home" / ".claude"
+        (claude / "skills").mkdir(parents=True)
+        (claude / "settings.json").write_text("{}")
+        profile = root / "accounts" / "profiles" / "fresh"
+        profile.mkdir(parents=True)
+        os.chmod(profile, mode)
+        if settings == "link":
+            (profile / "settings.json").symlink_to(target or str(claude / "settings.json"))
+        elif settings == "file":
+            (profile / "settings.json").write_text("{}")
+        if skills == "link":
+            (profile / "skills").symlink_to(str(claude / "skills"))
+        elif skills == "dir":
+            (profile / "skills").mkdir(mode=0o700)
+        return {"HOME": str(root / "home"), "CLAUDE_ACCOUNTS_DIR": str(root / "accounts")}
+
+    def page_add(self, env, state="signed_in", added=("fresh",)):
+        url = serve(self, view(("fresh", ago(10), {"state": state}), added=list(added)))
+        code, out = self.run_check("--url", url, "--page-add", env=env)
+        return code, json.loads(out)
+
+    def test_page_add_is_met_when_an_added_profile_is_well_formed_and_signed_in(self):
+        self.assertEqual(self.page_add(self.account_tree()),
+                         (0, {"profiles": ["fresh"], "status": "met"}))
+
+    def test_page_add_is_not_yet_before_the_sign_in(self):
+        for state in ("signed_out", "unknown"):
+            with self.subTest(state=state):
+                self.assertEqual(self.page_add(self.account_tree(), state=state),
+                                 (75, {"profiles": ["fresh"], "status": "pending"}))
+
+    def test_page_add_is_not_yet_without_an_added_profile(self):
+        self.assertEqual(self.page_add(self.account_tree(), added=()),
+                         (75, {"profiles": [], "status": "pending"}))
+        self.assertEqual(self.page_add(self.account_tree(), added=("gone",)),
+                         (75, {"profiles": [], "status": "pending"}))
+
+    def test_page_add_on_an_older_console_is_not_yet(self):
+        url = serve(self, view(("fresh", ago(10), {"state": "signed_in"})))
+        code, out = self.run_check("--url", url, "--page-add", env=self.account_tree())
+        self.assertEqual((code, json.loads(out)), (75, {"status": "not_deployed"}))
+
+    def test_page_add_is_not_met_for_a_malformed_profile(self):
+        trees = {"mode": dict(mode=0o755), "target": dict(target="/nix/store/x-settings.json"),
+                 "no link": dict(settings="missing", skills="missing")}
+        for label, kwargs in trees.items():
+            with self.subTest(label=label):
+                self.assertEqual(self.page_add(self.account_tree(**kwargs)),
+                                 (1, {"profiles": ["fresh"], "status": "not_met"}))
+
+    def test_page_add_is_not_met_for_a_stray_link_to_the_wrong_place(self):
+        env = self.account_tree()
+        profile = Path(env["CLAUDE_ACCOUNTS_DIR"]) / "profiles" / "fresh"
+        (profile / "agents").symlink_to("/nix/store/x-agents")
+        self.assertEqual(self.page_add(env), (1, {"profiles": ["fresh"], "status": "not_met"}))
+
+    def test_page_add_is_not_met_when_one_shared_link_is_missing_or_replaced(self):
+        trees = {"settings missing": dict(settings="missing"),
+                 "settings file": dict(settings="file"),
+                 "skills dir": dict(skills="dir"),
+                 "skills missing": dict(skills="missing")}
+        for label, kwargs in trees.items():
+            with self.subTest(label=label):
+                self.assertEqual(self.page_add(self.account_tree(**kwargs)),
+                                 (1, {"profiles": ["fresh"], "status": "not_met"}))
+
+    def test_the_shared_entries_are_the_launchers(self):
+        text = (ROOT / "home/common/claude-code/accounts/bin/claude-account").read_text()
+        listed = text.split("SHARED=(", 1)[1].split(")", 1)[0]
+        self.assertEqual(tuple(listed.split()), capacity_check.SHARED)
+
+    def test_page_add_is_exclusive_with_the_other_modes(self):
+        for other in ("--every", "--signin", "--accounts", "--page-signin"):
+            with self.subTest(other=other):
+                done = subprocess.run([ROOT / WRAPPER, "--page-add", other], cwd=ROOT,
                                       capture_output=True, text=True, timeout=60)
                 self.assertEqual(done.returncode, 2)
                 self.assertIn("not allowed with argument", done.stderr)

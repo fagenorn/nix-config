@@ -60,6 +60,9 @@ Two more rows record the owner's sign-in from the page (#1026): `SIGNIN_ACTED` (
 accepted owner action) and `SIGNIN_ENDED` (`signin.ended`, one per finished client). Neither is in
 `KEPT_KINDS`, and neither carries a link or a code.
 
+`ACCOUNT_ADDED` (`account.added`, one per account the owner adds from the page, #1027) is not in
+`KEPT_KINDS`.
+
 Another is kept in part (#1011): a session's profile is assigned by its `SESSION_SEEN` and
 `SESSION_PROFILE` rows, and a profile's last use is read from the session's later `SESSION_HOOK` rows
 (`manager.profile_use`). The pass therefore leaves, for a session with a `SESSION_HOOK` row inside the
@@ -120,6 +123,7 @@ SIGNIN_READING = "signin.reading"
 PROFILE_EXCLUSION = "profile.exclusion"
 SIGNIN_ACTED = "signin.acted"
 SIGNIN_ENDED = "signin.ended"
+ACCOUNT_ADDED = "account.added"
 SESSION_HOOK = "session.hook"
 SESSION_SEEN = "session.seen"
 SESSION_PROFILE = "session.profile"

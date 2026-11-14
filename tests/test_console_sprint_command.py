@@ -24,6 +24,7 @@ from .test_console_briefs import APPROVE, JSON, PARTS, REPLY
 from .test_console_questions import Q0, Q1, ROUND_ANSWER
 from .test_console_reports import CHECKED, CLOSING, REPORT
 from .test_console_writes import Case
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CONTRACT = REPO_ROOT / "python/agent_tools/console/manager-contract.md"

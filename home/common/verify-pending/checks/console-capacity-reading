@@ -1,5 +1,5 @@
 #!/bin/sh
-# Verify check for issue 860: the console shows a capacity reading for the account in use.
+# Verify check for issue 860 and the later console checks (#1009, #1010, #1016, #1026, #1027).
 # verify-pending runs it from the repository root at the commit the block names, so
 # `python` below is that commit's agent_tools source. Exit 0 met, 1 not met, 75 not yet.
 PYTHONPATH=python exec python3 -m agent_tools.console.capacity_check "$@"

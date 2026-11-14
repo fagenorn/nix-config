@@ -16,6 +16,7 @@ from . import console_test_support as support
 from .test_console_messages import GOAL_TEXT, PARTS
 from .test_console_reports import REPORT
 from .test_console_writes import Case
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 T0 = 1_800_000_000.0
 FAR = 1_900_000_000

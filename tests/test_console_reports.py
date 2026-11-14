@@ -12,6 +12,7 @@ from . import console_test_support as support
 from .test_console_answer import view_of
 from .test_console_briefs import GOAL_TEXT, JSON, PARTS
 from .test_console_writes import Case
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 REPORT_PATH = "/api/report"
 CLOSE_PATH = "/api/close"

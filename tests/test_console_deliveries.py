@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools.console import deliveries
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 L1 = b'{"type":"launched"}\n'
 L2 = b'{"type":"started","agentId":"a1","label":"setup","phase":"Setup"}\n'

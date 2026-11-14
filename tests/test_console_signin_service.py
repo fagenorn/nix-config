@@ -20,6 +20,7 @@ from agent_tools.console import probe, service, signin, signin_run
 from . import console_test_support as support
 from .test_console_signin_run import CODE, FAKE, LINK, LINUX, until
 from .test_console_stream import next_frame, open_stream
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 SIGNIN = "/api/signin"
 CODE_PATH = "/api/signin-code"

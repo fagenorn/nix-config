@@ -490,6 +490,7 @@ async function run() {
         digest: byId("digest") ? node(byId("digest")) : null,
         goal: byId("goal") ? node(byId("goal")) : null,
         capacity: byId("capacity") ? node(byId("capacity")) : null,
+        account_add: byId("account-add") ? node(byId("account-add")) : null,
         promoted: byId("promoted") ? node(byId("promoted")) : null,
         active: state.active && attached(root).includes(state.active) ? state.active.className : null,
         field: field === null || (field.tagName !== "INPUT" && field.tagName !== "TEXTAREA") ? null : {

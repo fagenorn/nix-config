@@ -19,6 +19,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 INSTALLED_RECIPE = "just agent-installed-skill-tests"
 SETTINGS_ENV = "CLAUDE_SETTINGS_PATH"

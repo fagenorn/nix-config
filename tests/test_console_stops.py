@@ -18,6 +18,7 @@ from .test_console_answer import view_of
 from .test_console_briefs import GOAL_TEXT, JSON, PARTS
 from .test_console_reports import REPORT
 from .test_console_writes import Case
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 STOP = "/api/stop"
 MESSAGE = "/api/message"

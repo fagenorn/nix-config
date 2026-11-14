@@ -9,6 +9,7 @@ from pathlib import Path
 
 from agent_tools.console import event_log, exclusion
 from agent_tools.console.event_log import EventLog, EventLogError
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 STAMP = "2026-11-11T00:00:00.000000+00:00"
 

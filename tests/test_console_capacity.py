@@ -29,6 +29,7 @@ from agent_tools.console.view import (
     encode_view,
 )
 from agent_tools.hosts import rate_limits
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 T = 1794400000
 FIXTURES = Path(__file__).parent / "fixtures" / "cache_proxy"

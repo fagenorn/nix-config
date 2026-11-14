@@ -17,6 +17,7 @@ from agent_tools.console import signin
 from agent_tools.console.event_log import Event
 from agent_tools.console.probe import Probe
 from agent_tools.console.signin import SignIn, Status, StatusFailed
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 SID = "0b6f5a3e-2c1d-4e8f-9a7b-1c2d3e4f5a6b"
 CREDENTIAL_NAMES = {".credentials.json", ".claude.json"}

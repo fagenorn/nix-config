@@ -202,6 +202,9 @@ agent-workflow-tests *args:
     tests/test_console_signin.py \
     tests/test_console_signin_run.py \
     tests/test_console_signin_service.py \
+    tests/test_console_account_add.py \
+    tests/test_console_account_service.py \
+    tests/test_console_accounts_sandbox.py \
     tests/test_console_manager_check.py \
     tests/test_console_message_check.py \
     tests/test_console_revive_check.py \

@@ -256,6 +256,14 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .signin-failed { color: var(--red); }
 .signin-link { color: var(--blue); overflow-wrap: anywhere; }
 .signin-code { flex: 1 1 14rem; max-width: 24rem; padding: 4px 8px; font: inherit; color: var(--text); background: var(--mantle); border: 1px solid var(--s1); border-radius: 8px; }
+.account-add { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: .8125rem; color: var(--sub0); }
+.account-add button { font: inherit; color: inherit; background: none; border: 1px solid var(--hair); border-radius: 8px; padding: 2px 10px; cursor: pointer; transition: background-color .16s; }
+.account-add button:hover:enabled { background: rgba(202, 211, 245, .05); }
+.account-add button:disabled { cursor: default; color: var(--ov2); }
+.account-name, .account-code { flex: 1 1 10rem; max-width: 16rem; padding: 4px 8px; font: inherit; color: var(--text); background: var(--mantle); border: 1px solid var(--s1); border-radius: 8px; }
+.account-add-note { margin: 0; color: var(--text); }
+.account-add-link { color: var(--blue); }
+.account-add-reason { color: var(--sub0); }
 .s-working { color: var(--green); }
 .s-waiting_answer, .s-waiting_permission { color: var(--yellow); }
 .s-limit { color: var(--red); }
@@ -286,7 +294,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 </style>
 </head>
 <body>
-<header class="top"><div class="top-in"><span class="brand">Console</span><div class="goal-bar" id="goal" role="group" aria-label="Goal"></div><span class="cap" id="capacity"></span><span class="conn" id="conn" role="status">Reconnecting…</span></div></header>
+<header class="top"><div class="top-in"><span class="brand">Console</span><div class="goal-bar" id="goal" role="group" aria-label="Goal"></div><span class="cap" id="capacity"></span><div class="account-add" id="account-add" role="group" aria-label="Add account"></div><span class="conn" id="conn" role="status">Reconnecting…</span></div></header>
 <div class="desk-grid">
 <main>
 <div class="statement" id="statement"></div>
@@ -985,6 +993,8 @@ function isSignin(item) {
 }
 const signinLinks = new Map();
 const signinPosts = new Map();
+// The profile the header's Add account continuation is for, or null.
+let accountSignin = null;
 const SIGNIN_NOTES = new Map([
   ["running", "A sign-in is running."],
   ["timed_out", "The sign-in timed out."],
@@ -1000,12 +1010,20 @@ function isHttps(link) {
   return typeof link === "string" && /^https:\/\//.test(link);
 }
 // An answer that arrives after its run ended or its item closed is held for no frame: the redraw that follows reconciles it away.
-function holdSigninLink(profile, answer) {
+function holdSigninLink(profile, answer, added = false) {
   if (answer === null || typeof answer !== "object") return;
   const link = answer.link;
-  if (!isHttps(link)) return;
+  // An add holds its attempt with no link: the login runs on, and the page keeps the controls to fetch the link or cancel.
+  if (!isHttps(link) && !(added && link === null)) return;
   if (!Number.isInteger(answer.attempt) || answer.attempt < 1) return;
-  signinLinks.set(profile, { link, attempt: answer.attempt });
+  signinLinks.set(profile, { link, attempt: answer.attempt, added });
+}
+function signinLinkNode(cls, held) {
+  const link = el("a", cls, "Open the sign-in page");
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  if (isHttps(held.link)) link.href = held.link;
+  return link;
 }
 async function signinPost(item, kind, failure, send) {
   const key = kind + "\n" + item.profile;
@@ -1049,11 +1067,12 @@ function signinCard(item) {
   const note = run === null ? undefined : SIGNIN_NOTES.get(run.state);
   if (note !== undefined) card.appendChild(el("p", "signin-run", note));
   const held = signinLinks.get(item.profile);
+  const linked = held !== undefined && isHttps(held.link);
   const starting = signinPosts.get("start\n" + item.profile);
   const sendingCode = signinPosts.get("code\n" + item.profile);
   const cancelling = signinPosts.get("cancel\n" + item.profile);
   const act = el("div", "act");
-  if (held === undefined) {
+  if (!linked) {
     const start = actionButton("signin-start primary needs", "Sign in",
       () => signinPost(item, "start", "Could not start the sign-in: ", () => fetch("/api/signin", {
         method: "POST", headers: stallHeaders(), body: signinBody(item),
@@ -1061,11 +1080,7 @@ function signinCard(item) {
     if (starting !== undefined && starting.phase === "sending") start.setAttribute("disabled", "");
     act.appendChild(start);
   } else {
-    const link = el("a", "signin-link", "Open the sign-in page");
-    link.target = "_blank";
-    link.rel = "noopener noreferrer";
-    if (isHttps(held.link)) link.href = held.link;
-    act.appendChild(link);
+    act.appendChild(signinLinkNode("signin-link", held));
     const input = document.createElement("input");
     input.type = "text";
     input.autocomplete = "off";
@@ -2066,12 +2081,25 @@ function keyStrip(current, open) {
   for (const e of entries) strip.appendChild(e);
   return strip;
 }
+// When a frame shows the added profile's sign-in item, the header continuation ends and the card takes over: the typed code moves to the card's draft, and the focus and selection with it.
+function carryAccountCode(signins) {
+  if (accountSignin === null || accountCont === null) return null;
+  const kept = signinLinks.get(accountSignin);
+  const shown = signins.find((item) => item.profile === accountSignin);
+  if (shown === undefined || kept === undefined || !isHttps(kept.link)) return null;
+  const code = accountCont.code;
+  const focused = document.activeElement === code;
+  if (code.value === "" && !focused) return null;
+  const key = stateId(shown) + "\nsignin-code";
+  drafts.set(key, { value: code.value, start: code.selectionStart, end: code.selectionEnd });
+  return focused ? { key, start: code.selectionStart, end: code.selectionEnd } : null;
+}
 function renderInbox(view) {
   const fresh = view !== lastView;
   lastView = view;
   const section = document.getElementById("inbox");
   const active = document.activeElement;
-  const held = active && active.dataset && active.dataset.draft !== undefined
+  let held = active && active.dataset && active.dataset.draft !== undefined
     ? { key: active.dataset.draft, start: active.selectionStart, end: active.selectionEnd }
     : null;
   fields = new Map();
@@ -2088,20 +2116,27 @@ function renderInbox(view) {
     const shown = key.startsWith("continue\n") || key.startsWith("progress-withdraw\n") ? progress : stalls;
     if (state.phase !== "sending" && !shown.some((item) => item.sprint_id === id)) stallPosts.delete(key);
   }
+  const signinRuns = view.signin_runs !== null && typeof view.signin_runs === "object" ? view.signin_runs : {};
   for (const [profile, held] of [...signinLinks]) {
     const shown = signins.find((item) => item.profile === profile);
+    const run = signinRuns[profile];
+    const live = run !== null && typeof run === "object" && run.state === "running" && run.attempt === held.attempt;
+    // A run once shown running that a later view no longer shows running is gone, even with no ending row (a console restart).
+    if (live) held.confirmed = true;
     if (shown === undefined) {
-      signinLinks.delete(profile);
+      // A link held from an add waits for its item (the status read may have failed) until its run ends or vanishes.
+      if (!held.added || (held.confirmed && !live) || signinEnded(run, held.attempt)) signinLinks.delete(profile);
       continue;
     }
-    const run = shown.run;
-    if (run !== null && typeof run === "object" && run.state === "running" && run.attempt === held.attempt) {
+    held.added = false;
+    const item = shown.run;
+    if (item !== null && typeof item === "object" && item.state === "running" && item.attempt === held.attempt) {
       held.confirmed = true;
-    } else if (held.confirmed || signinEnded(run, held.attempt)) {
-      // A run once shown running that a later view no longer shows running is gone, even with no ending row (a console restart).
+    } else if (held.confirmed || signinEnded(item, held.attempt)) {
       signinLinks.delete(profile);
     }
   }
+  held = carryAccountCode(signins) || held;
   for (const [key, state] of [...signinPosts]) {
     const profile = key.split("\n")[1];
     if (state.phase !== "sending" && !signins.some((item) => item.profile === profile)) signinPosts.delete(key);
@@ -2417,6 +2452,169 @@ const goalIn = el("div", "goal-in");
 goalIn.appendChild(goalText);
 goalIn.appendChild(el("kbd", "goal-key", "g"));
 document.getElementById("goal").appendChild(goalIn);
+function accountNameReason(name, view) {
+  if (name === "") return "";
+  if (!/^[a-z0-9_-]+$/.test(name)) return "not an account name: use a-z, 0-9, - and _";
+  if (name === "default") return "default is not an account name";
+  const profiles = (((view || {}).capacity) || { profiles: [] }).profiles;
+  if (Array.isArray(profiles) && profiles.some((row) => row.profile === name)) return "account " + name + " already exists";
+  return null;
+}
+function accountField(cls, label, placeholder) {
+  const input = el("input", cls);
+  input.type = "text";
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  input.setAttribute("aria-label", label);
+  input.setAttribute("placeholder", placeholder);
+  return input;
+}
+// The control's elements are built once: no frame replaces an input, so a typed name or code keeps its focus and selection.
+const accountState = { phase: "closed", adding: false, codeSending: false, cancelling: false, fetching: false, failure: "", shown: "" };
+let accountCont = null;
+const accountBox = document.getElementById("account-add");
+const accountReason = el("span", "account-add-reason");
+const accountName = accountField("account-name", "Account name", "Account name");
+const accountOpen = actionButton("account-add-open", "Add account", () => {
+  accountState.phase = "naming";
+  accountState.failure = "";
+  renderAccountAdd(lastView);
+  accountName.focus();
+});
+const accountSend = actionButton("account-add-send", "Add", () => accountAddPost());
+const accountCancel = actionButton("account-add-cancel", "Cancel", () => {
+  accountName.value = "";
+  accountState.phase = "closed";
+  accountState.failure = "";
+  renderAccountAdd(lastView);
+});
+accountName.addEventListener("input", () => {
+  accountState.failure = "";
+  renderAccountAdd(lastView);
+});
+async function accountAddPost() {
+  const name = accountName.value.trim();
+  if (accountState.adding || accountNameReason(name, lastView) !== null) return;
+  accountState.adding = true;
+  accountState.failure = "";
+  renderAccountAdd(lastView);
+  let reason = null;
+  try {
+    const response = await fetch("/api/account-add", { method: "POST", headers: stallHeaders(), body: JSON.stringify({ name }) });
+    if (response.status === 200) {
+      const answer = JSON.parse(await response.text());
+      if (answer !== null && typeof answer === "object" && answer.profile === name) {
+        holdSigninLink(name, answer, true);
+        accountSignin = name;
+        accountName.value = "";
+        accountState.phase = "closed";
+      } else {
+        reason = "the console answered for another account";
+      }
+    } else {
+      reason = (await response.text()).trim() || "HTTP " + response.status;
+    }
+  } catch (error) {
+    console.error(error);
+    reason = "the console did not answer";
+  }
+  accountState.adding = false;
+  accountState.failure = reason === null ? "" : "Could not add the account: " + reason;
+  redraw();
+  renderAccountAdd(lastView);
+}
+async function accountSigninPost(flag, prefix, send, onOk, okStatus = 204) {
+  const profile = accountSignin;
+  if (profile === null || accountState[flag]) return;
+  accountState[flag] = true;
+  accountState.failure = "";
+  renderAccountAdd(lastView);
+  let reason = null;
+  try {
+    const response = await send(profile);
+    if (response.status === okStatus) await onOk(response, profile);
+    else reason = (await response.text()).trim() || "HTTP " + response.status;
+  } catch (error) {
+    console.error(error);
+    reason = "the console did not answer";
+  }
+  accountState[flag] = false;
+  if (accountSignin === profile) accountState.failure = reason === null ? "" : prefix + reason;
+  renderAccountAdd(lastView);
+}
+function beginAccountSignin() {
+  const code = accountField("account-code", "Sign-in code", "Code from the sign-in page");
+  code.addEventListener("input", () => renderAccountAdd(lastView));
+  const send = actionButton("account-code-send", "Send code", () => {
+    const value = code.value.trim();
+    if (value === "" || accountState.codeSending) return;
+    accountSigninPost("codeSending", "Could not send the code: ", (profile) => fetch("/api/signin-code", {
+      method: "POST", headers: stallHeaders(), body: JSON.stringify({ profile, code: value }),
+    }), () => { code.value = ""; });
+  });
+  const cancel = actionButton("account-signin-cancel", "Cancel", () => {
+    accountSigninPost("cancelling", "Could not cancel: ", (profile) => fetch("/api/signin-cancel", {
+      method: "POST", headers: stallHeaders(), body: JSON.stringify({ profile }),
+    }), () => {});
+  });
+  const fetchLink = actionButton("account-link-get", "Get sign-in link", () => {
+    accountSigninPost("fetching", "Could not get the sign-in link: ", (profile) => fetch("/api/signin", {
+      method: "POST", headers: stallHeaders(), body: JSON.stringify({ profile }),
+    }), async (response, profile) => {
+      const answer = JSON.parse(await response.text());
+      // A frame that opened the profile's card meanwhile ended the continuation; the card takes the link all the same.
+      holdSigninLink(profile, answer, accountSignin === profile);
+      redraw();
+    }, 200);
+  });
+  accountCont = { note: el("p", "account-add-note", "Sign in to " + accountSignin), link: null, code, send, cancel, fetchLink };
+  accountState.phase = "closed";
+  accountState.failure = "";
+}
+function endAccountSignin() {
+  accountSignin = null;
+  accountCont = null;
+  accountState.codeSending = false;
+  accountState.cancelling = false;
+  accountState.fetching = false;
+  accountState.failure = "";
+}
+// Updates the disabled states and the reason, and begins or ends the continuation; it never replaces an input or assigns lastView.
+function renderAccountAdd(view) {
+  let held = null;
+  if (accountSignin !== null) {
+    held = signinLinks.get(accountSignin);
+    if (held === undefined || held.added !== true) {
+      endAccountSignin();
+      held = null;
+    } else if (accountCont === null) beginAccountSignin();
+  }
+  let want = accountState.phase;
+  let reason = "";
+  if (accountCont !== null) {
+    const linked = isHttps(held.link);
+    want = linked ? "signin" : "signin-wait";
+    reason = accountState.failure;
+    if (linked && accountCont.link === null) accountCont.link = signinLinkNode("account-add-link", held);
+    accountCont.fetchLink.disabled = accountState.fetching;
+    accountCont.send.disabled = accountCont.code.value.trim() === "" || accountState.codeSending;
+    accountCont.cancel.disabled = accountState.cancelling;
+  } else if (want === "naming") {
+    const named = accountNameReason(accountName.value.trim(), view);
+    accountSend.disabled = accountState.adding || named !== null;
+    reason = accountState.adding ? "Adding\u2026" : named || accountState.failure;
+  }
+  if (accountState.shown !== want) {
+    accountState.shown = want;
+    const parts = want === "signin"
+      ? [accountCont.note, accountCont.link, accountCont.code, accountCont.send, accountCont.cancel, accountReason]
+      : want === "signin-wait" ? [accountCont.note, accountCont.fetchLink, accountCont.cancel, accountReason]
+      : want === "naming" ? [accountName, accountSend, accountCancel, accountReason] : [accountOpen];
+    accountBox.replaceChildren(...parts);
+  }
+  if (accountReason.textContent !== reason) accountReason.textContent = reason;
+}
+renderAccountAdd(null);
 let goalPanel = null;
 function buildGoalBox() {
   const box = el("div", "goal-box");
@@ -2480,6 +2678,7 @@ function render(view) {
   renderCapacity(view);
   renderPromoted(view);
   renderInbox(view);
+  renderAccountAdd(view);
   renderDigest(view);
   renderProjects(view);
   renderUnmanaged(view);

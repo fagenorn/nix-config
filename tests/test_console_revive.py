@@ -10,6 +10,7 @@ from agent_tools.console import event_log, revive, sprints
 from agent_tools.console.event_log import (MANAGER_FAILED, MANAGER_STARTED, MANAGER_WAITING,
                                            Event)
 from tests.test_console_sprints import CLOSING, PARTS, REPORT, SID
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 NAME = "p00 sprint " + SID
 BASE = int(datetime(2026, 11, 12, 10, 0, tzinfo=timezone.utc).timestamp() * 1000)

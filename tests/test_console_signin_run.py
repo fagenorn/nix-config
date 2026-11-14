@@ -22,6 +22,7 @@ from agent_tools.console.signin_run import (
     ACTED, ENDED, CODE_END, CODE_INPUT, LINK_WAIT, LOGIN_DEADLINE, MAX_CODE_CHARS, MAX_LINK_CHARS,
     Ended, NotRunning, SignIns, Started, StartFailed, acted, ended, ended_state, login_command,
     login_environment, parse_code_request, parse_profile_request, runs_for, valid_link)
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 LINK = "https://claude.example/oauth/authorize?state=SENTINEL-LINK-7f3a"
 CODE = "SENTINEL-CODE-91c2#x"

@@ -11,6 +11,7 @@ from agent_tools.console import service, sprints, view
 from . import console_test_support as support
 from .test_console_answer import view_of
 from .test_console_writes import Case
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 BRIEF = "/api/brief"
 STATUS = "/api/sprint-status"

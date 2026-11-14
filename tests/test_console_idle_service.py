@@ -15,6 +15,7 @@ from . import console_test_support as support
 from .test_console_questions import ROUND
 from .test_console_reports import REPORT
 from .test_console_revive_service import GOAL, T0, ReviveCase
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 RESET = int(T0) + 3600
 RESUMED = GOAL + " resumed after the quota reset"
