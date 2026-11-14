@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import account_remove, probe, signin, signin_run, sprints
+from agent_tools.console import account_remove, manager, probe, signin, signin_run, sprints
 from agent_tools.console.event_log import EventLog
 
 from . import console_test_support as support
@@ -432,6 +432,72 @@ class RemoveInterleavingTest(Case):
         self.assertNotIn(("start", "work"), self.calls)
         self.assertEqual(
             [p for _, p in self.rows("signin.acted") if p["profile"] == "work"], [])
+
+    def test_the_stored_choice_stops_naming_the_profile_while_its_sign_out_is_blocked(self):
+        self.begin(seed=[signin.entry("work", signin.Status("signed_in", None)),
+                         signin.entry("home", signin.Status("signed_out", None))])
+        self.assertEqual(self.ask(), b'{"profile":"work"}')
+        self.assertEqual(manager.read_choice(self.choice_file), "work")
+        self.during = [lambda: self.calls.append(("stored", manager.read_choice(self.choice_file)))]
+        self.assertEqual(self.remove()[::2], (204, b""))
+        self.assertIn(("stored", None), self.calls)
+
+    def test_a_removal_that_fails_puts_the_stored_choice_back(self):
+        self.begin(seed=[signin.entry("work", signin.Status("signed_in", None)),
+                         signin.entry("home", signin.Status("signed_out", None))])
+        self.assertEqual(self.ask(), b'{"profile":"work"}')
+        self.signout_error = account_remove.SignOutFailed("timed_out")
+        self.during = [lambda: self.calls.append(("stored", manager.read_choice(self.choice_file)))]
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(self.remove()[0], 502)
+        self.assertIn(("stored", None), self.calls)
+        self.assertEqual(manager.read_choice(self.choice_file), "work")
+
+    def stub_runs(self):
+        """A sign-in runner whose run 1 of `work` is live and ended at will by `self.end`."""
+        ended = {}
+        stub = types.SimpleNamespace(
+            running=lambda: frozenset(),
+            start=lambda profile: types.SimpleNamespace(fresh=True, run=1),
+            wait_link=lambda profile: None, close=lambda: None)
+
+        def runs(on_end):
+            ended["on_end"] = on_end
+            return stub
+        self.end = lambda: ended["on_end"]("work", 1, "exited", 0)
+        return runs
+
+    def test_a_sign_in_end_read_in_flight_ends_before_the_sign_out(self):
+        self.begin(runs=self.stub_runs())
+        self.svc.start_signin("work")
+        self.read_gate = {"work": threading.Event()}
+        ending = threading.Thread(target=self.end)
+        ending.start()
+        deadline = time.monotonic() + 5
+        while ("read", "work") not in self.calls and time.monotonic() < deadline:
+            time.sleep(0.01)
+        self.assertIn(("read", "work"), self.calls)
+        answers = []
+        thread = threading.Thread(target=lambda: answers.append(self.remove()))
+        thread.start()
+        thread.join(0.3)
+        self.assertTrue(thread.is_alive())
+        self.assertNotIn(("signout", "work"), self.calls)
+        self.read_gate["work"].set()
+        thread.join(10)
+        ending.join(10)
+        self.assertEqual(answers[0][::2], (204, b""))
+        self.assertGreater(self.calls.index(("signout", "work")),
+                           self.calls.index(("read", "work")))
+
+    def test_a_sign_in_end_read_does_not_start_during_the_removal(self):
+        self.begin(runs=self.stub_runs())
+        self.svc.start_signin("work")
+        self.during = [self.end]
+        self.assertEqual(self.remove()[::2], (204, b""))
+        self.assertNotIn(("read", "work"), self.calls)
+        self.assertEqual([p["outcome"] for _, p in self.rows("signin.ended")], ["failed"])
+
 
     def start_slow_probe(self):
         self.read_gate = {"work": threading.Event()}

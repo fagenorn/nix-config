@@ -9,12 +9,13 @@ one included, because the service judges whether it matches. It raises `ValueErr
 Texts. `UNAVAILABLE` is `removing an account is not available on this host`, `MISMATCH` is `the
 typed name does not match`, `UNKNOWN` is `no such profile`, `running(profile)` is `a sign-in is
 running for <profile>; cancel it first`, `busy(profile)` is `<profile> is still being read; try
-again in a moment` (the drain of a probe or a manager launch of the profile already in flight
+again in a moment` (the drain of a probe or a client run under the profile already in flight
 timed out) and `removing(profile)` is `<profile> is being removed` (a sign-in start refused during a
 removal).
 
 Timeouts. `SIGNOUT_TIMEOUT` and `REMOVE_TIMEOUT` are 30 seconds each; `DRAIN_TIMEOUT` is 15 seconds,
-what a removal waits for a probe or a manager launch of the profile already in flight.
+what a removal waits for a probe or a client run under the profile already in flight (a manager
+launch, nudge, wake, stop or sign-in status read).
 
 Row. `removed(profile, outcome, kind)` is `("account.removal", None, {"by": "owner", "profile":
 profile, "outcome": outcome, "kind": kind})`, one per removal the owner confirms on the page. It

@@ -166,10 +166,12 @@ does not match`; then, under the lock `_adding` and in one block of the ingest l
 among the directories as they are now (`default` never is), `no such profile`, and a profile whose
 sign-in runs, `a sign-in is running for <profile>; cancel it first`. Still in that block the
 profile is marked as being removed: from then until the removal ends the console's own runs leave
-it alone (no probe of it starts, `_session_choice` and a manager launch's choice pass over it, a
-manager launch prepared earlier is chosen again, and `start_signin` refuses `<profile> is being
-removed`), and the removal waits (`account_remove.DRAIN_TIMEOUT`) for the probe and the manager
-launches of it already in flight to end, refusing `<profile> is still being read; try again in a
+it alone (no probe of it starts, `_session_choice` and a manager launch's choice pass over it, the
+stored choice is written again at once, a manager launch prepared earlier is chosen again,
+`start_signin` refuses `<profile> is being removed`, and no manager launch, nudge, wake, full
+listing, stop or sign-in status read of it starts: a nudge or stop fails with the same text, a
+status read records nothing), and the removal waits (`account_remove.DRAIN_TIMEOUT`) for the probe
+and every such client run of it already in flight to end, refusing `<profile> is still being read; try again in a
 moment` (the mark dropped, no row) when they do not. It then runs, with no ingest lock held, the
 sign-out under the profile (`account_remove.sign_out`) and only after it the launcher's own rm. A
 failed sign-out is read again (`console: signin_remove_read_failed ...` when that read fails): a
@@ -182,7 +184,8 @@ account_remove_failed <profile> <kind>` and 502 `the account was signed out but 
 <kind>`. Success is one `append` of, in order, `profile.exclusion` and `profile.pin` rows that lift
 the profile's own exclusion or pin and the `account.removal` row (outcome `removed`, or the
 sign-out's), then the fold, the publish and the choice written again over the profiles now listed;
-the answer is an empty `204`. The mark is dropped on every way out. Any other exception is `console:
+the answer is an empty `204`. The mark is dropped on every way out, and the stored choice is
+written again then. Any other exception is `console:
 account_remove_failed <Type>` (never its message) and 500 `removing the account failed`. A running
 session of the profile is not stopped.
 
@@ -806,6 +809,7 @@ sets the stop flag, then `closing`, wakes every waiter, joins the watcher, the s
 tracker, retention and digest threads and tears the rest down; it is idempotent.
 """
 
+import contextlib
 import dataclasses
 import hmac
 import http.server
@@ -1833,6 +1837,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
     do_PUT = do_DELETE = do_PATCH = do_HEAD = do_OPTIONS = _refuse_method
 
 
+class _ProfileRemoving(Exception):
+    """A client run under a profile was refused because the profile is being removed (#1030)."""
+
+
 class _RetryReservation:
     """A launch reservation made by a retry: it runs only while the sprint still offers retry."""
 
@@ -1886,7 +1894,7 @@ class ConsoleService:
         self._account_remover = account_remover
         self._adding = threading.Lock()
         self._removing: set[str] = set()
-        self._launch_live: collections.Counter[str] = collections.Counter()
+        self._client_live: collections.Counter[str] = collections.Counter()  # client runs under a profile in flight
         self._probe_dispatch = self._on_probe_thread if probe_dispatch is None else probe_dispatch
         self._probe_tick_seconds = probe_tick_seconds
         self._probe_since = clock()
@@ -2325,11 +2333,55 @@ class ConsoleService:
             self._fold(self.log.append([signin.entry(profile, status)]))
             self._publish()
 
+    @contextlib.contextmanager
+    def _client_run(self, profile: str):
+        """Hold the profile's client-run count around one launcher call under it (#1030).
+
+        Raises `_ProfileRemoving` without running anything while the profile is marked as being
+        removed; the removal waits for the count to reach zero before it signs the profile out.
+        """
+        with self._ingest:
+            if profile in self._removing:
+                raise _ProfileRemoving(account_remove.removing(profile))
+            self._client_live[profile] += 1
+        try:
+            yield
+        finally:
+            with self._ingest:
+                self._client_live[profile] -= 1
+                if self._client_live[profile] <= 0:
+                    del self._client_live[profile]
+                self._idle.notify_all()
+
+    def _send_nudge(self, sent: nudge.Nudge) -> None:
+        """The nudger's call under the nudge's profile; `NudgeFailed` while that profile is being removed."""
+        try:
+            with self._client_run(sent.profile):
+                self._nudger(sent)
+        except _ProfileRemoving as error:
+            raise nudge.NudgeFailed(str(error)) from None
+
+    def _stop_one(self, session_id: str, profile: str) -> None:
+        """The stopper's call under the session's profile; `StopFailed` while that profile is being removed."""
+        try:
+            with self._client_run(profile):
+                self._stopper(session_id, profile)
+        except _ProfileRemoving as error:
+            raise manager.StopFailed(str(error)) from None
+
     def _read_signin_now(self, profile: str, when: str) -> signin.Status | None:
-        """The status read at once (`when` is "end" or "add"); a failed read records nothing."""
+        """The status read at once (`when` is "end", "add" or "remove"); a failed read records nothing.
+
+        The removal's own read ("remove") is the only one that runs while the profile is marked as
+        being removed; any other is held in the profile's client-run count and is not run (None)
+        once the mark is set.
+        """
         ticket = self._signin_ticket(profile)
         try:
-            status = self._signin_reader(probe.Probe(profile, str(uuid.uuid4()), self._stop))
+            with (contextlib.nullcontext() if when == "remove" else self._client_run(profile)):
+                status = self._signin_reader(probe.Probe(profile, str(uuid.uuid4()), self._stop))
+        except _ProfileRemoving:
+            return None
         except signin.StatusFailed as error:
             print(f"console: signin_{when}_read_failed {profile} {error.kind}", file=sys.stderr)
             return None
@@ -2438,7 +2490,8 @@ class ConsoleService:
         """Sign the profile out, then remove it through the launcher; refusals are `sprints.Refused`.
 
         The profile is marked as being removed from the checks until the removal ends, the
-        console's own probes and manager launches of it already in flight are waited for, and no
+        console's own probes and client runs under it (manager launches, nudges, wakes, stops and
+        sign-in status reads) already in flight are waited for, and no
         ingest lock is held while the sign-out or the launcher runs.
         """
         if (self._signer_out is None or self._account_remover is None
@@ -2456,9 +2509,10 @@ class ConsoleService:
                         raise sprints.Refused(account_remove.running(profile))
                     self._removing.add(profile)
                     marked = True
+                    self._note_choice(self._session_choice(self._read_profiles()))
                     if not self._idle.wait_for(
                             lambda: profile not in self._probing
-                            and self._launch_live[profile] == 0,
+                            and self._client_live[profile] == 0,
                             timeout=account_remove.DRAIN_TIMEOUT):
                         raise sprints.Refused(account_remove.busy(profile))
                 outcome, kind = self._sign_out_first(profile)
@@ -2487,6 +2541,7 @@ class ConsoleService:
                 if marked:
                     with self._ingest:
                         self._removing.discard(profile)
+                        self._note_choice(self._session_choice(self._read_profiles()))
                         self._idle.notify_all()
 
     def _sign_out_first(self, profile: str) -> tuple[str, str | None]:
@@ -2684,7 +2739,7 @@ class ConsoleService:
             with self._ingest:
                 launch = self._unexcluded_launch(launch, token, prepared_pin)
                 if launch is not None:
-                    self._launch_live[launch.profile] += 1
+                    self._client_live[launch.profile] += 1
             if launch is None:
                 return
             try:
@@ -2697,9 +2752,9 @@ class ConsoleService:
                 self._record_launch(launch, reason, token)
             finally:
                 with self._ingest:
-                    self._launch_live[launch.profile] -= 1
-                    if self._launch_live[launch.profile] <= 0:
-                        del self._launch_live[launch.profile]
+                    self._client_live[launch.profile] -= 1
+                    if self._client_live[launch.profile] <= 0:
+                        del self._client_live[launch.profile]
                     self._idle.notify_all()
         finally:
             with self._ingest:
@@ -2994,7 +3049,10 @@ class ConsoleService:
         if self._full_listing is None:
             return None, None
         try:
-            shown = self._full_listing(profile, cwd)
+            with self._client_run(profile):
+                shown = self._full_listing(profile, cwd)
+        except _ProfileRemoving as error:
+            return None, str(error)
         except nudge.ListingUnreadable as error:
             return None, str(error)
         except Exception as error:
@@ -3079,11 +3137,11 @@ class ConsoleService:
                     return
             if listed:
                 route, listing_failed = nudge.RELAY, None
-                self._nudger(nudge.Nudge(sprint_id, route, name, listed[0], profile, cwd))
+                self._send_nudge(nudge.Nudge(sprint_id, route, name, listed[0], profile, cwd))
             elif known is not None:
                 route = nudge.WAKE
                 self._refresh_settings(sprint_id)
-                self._nudger(nudge.Nudge(sprint_id, route, name, known, profile, cwd, settings))
+                self._send_nudge(nudge.Nudge(sprint_id, route, name, known, profile, cwd, settings))
             else:
                 reason = nudge.UNKNOWN_SESSION
         except Exception as error:
@@ -3241,7 +3299,7 @@ class ConsoleService:
                         and int(self._clock() * 1000) - settled < sprints.STOP_SETTLE_MS):
                     deferred = True
                 else:
-                    manager.stop_listed([name], lambda: listed, self._stopper)
+                    manager.stop_listed([name], lambda: listed, self._stop_one)
             except manager.StopFailed as error:
                 reason = str(error)
             except Exception as error:
@@ -3365,7 +3423,7 @@ class ConsoleService:
                     self._nudging.discard(sprint_id)
                     return
             self._refresh_settings(sprint_id)
-            self._nudger(nudge.Nudge(
+            self._send_nudge(nudge.Nudge(
                 sprint_id, nudge.REVIVE, name, session_id, profile, root, settings))
         except Exception as error:
             reason = (str(error) if isinstance(error, nudge.NudgeFailed)
@@ -3507,7 +3565,7 @@ class ConsoleService:
                         or self._working_now(listed[0])):
                     self._nudging.discard(sprint_id)
                     return
-            self._nudger(nudge.Nudge(sprint_id, nudge.CONTINUE, name, session_id, profile, cwd))
+            self._send_nudge(nudge.Nudge(sprint_id, nudge.CONTINUE, name, session_id, profile, cwd))
         except Exception as error:
             reason = (str(error) if isinstance(error, nudge.NudgeFailed)
                       else f"{type(error).__name__}: {error}")

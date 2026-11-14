@@ -5,12 +5,14 @@ Run: just agent-workflow-tests
 import contextlib
 import io
 import json
+import shutil
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from unittest import mock
 
-from agent_tools.console import console, manager, nudge, service, sessions, sprints
+from agent_tools.console import console, manager, nudge, service, sessions, signin, sprints
 from agent_tools.console.event_log import EventLog
 
 from . import console_test_support as support
@@ -105,6 +107,101 @@ class StopServiceTest(Case):
                 if project["project_id"] == project_id:
                     return project
         self.fail("no project entry")
+
+    def removal_seams(self):
+        """Seams for a removal of `work` that stops at its sign-out until `signout_release` is set (#1030)."""
+        self.signout_entered, self.signout_release = threading.Event(), threading.Event()
+        profile = self.store.parent.parent / "accounts" / "profiles" / "work"
+
+        def signer_out(one):
+            self.signout_entered.set()
+            self.signout_release.wait(10)
+        return dict(signin_reader=lambda one: signin.Status("signed_in", None),
+                    signer_out=signer_out, account_remover=lambda name: shutil.rmtree(profile))
+
+    def start_removal(self, svc):
+        remover = threading.Thread(target=lambda: svc.remove_account("work", "work"))
+        remover.start()
+        return remover
+
+    def finish_removal(self, remover):
+        self.signout_release.set()
+        remover.join(10)
+        self.assertFalse(remover.is_alive())
+
+    def message(self, svc, sid):
+        return support.post_page(svc.address, MESSAGE, self.own(svc, **JSON), json.dumps({
+            "project_id": "owner/p01", "sprint_id": sid, "text": "status?"}).encode())
+
+    def test_a_stop_is_not_run_under_a_profile_being_removed(self):
+        svc = self.begin(**self.removal_seams())
+        sid = self.running(svc)
+        self.stop(svc, sid)
+        remover = self.start_removal(svc)
+        self.assertTrue(self.signout_entered.wait(5))
+        self.now[0] = T0 + 600
+        svc.finish_stops()
+        self.assertEqual(self.stops, [])
+        self.assertEqual([row["reason"] for row in self.rows("manager.stop_failed")],
+                         ["work is being removed"])
+        self.finish_removal(remover)
+
+    def test_a_stop_in_flight_ends_before_the_removal_signs_out(self):
+        started, gate = threading.Event(), threading.Event()
+
+        def stopper(session_id, profile):
+            started.set()
+            gate.wait(10)
+            self.stops.append((session_id, profile))
+        svc = self.begin(stopper=stopper, **self.removal_seams())
+        sid = self.running(svc)
+        self.stop(svc, sid)
+        self.now[0] = T0 + 600
+        stopping = threading.Thread(target=svc.finish_stops)
+        stopping.start()
+        self.assertTrue(started.wait(5))
+        remover = self.start_removal(svc)
+        self.assertFalse(self.signout_entered.wait(0.3))
+        gate.set()
+        stopping.join(10)
+        self.assertEqual(self.stops, [(FIRST, "work")])
+        self.assertTrue(self.signout_entered.wait(5))
+        self.finish_removal(remover)
+
+    def test_a_nudge_is_not_sent_under_a_profile_being_removed(self):
+        svc = self.begin(**self.removal_seams())
+        sid = self.running(svc)
+        sent = len(self.nudges)
+        remover = self.start_removal(svc)
+        self.assertTrue(self.signout_entered.wait(5))
+        self.assertEqual(self.message(svc, sid)[0], 204)
+        self.assertEqual(len(self.nudges), sent)
+        self.assertTrue(any("work is being removed" in row[4] for row in support.log_rows(self.store)))
+        self.finish_removal(remover)
+
+    def test_a_nudge_in_flight_ends_before_the_removal_signs_out(self):
+        started, gate = threading.Event(), threading.Event()
+        blocking = [False]
+
+        def nudger(sent):
+            if blocking[0]:
+                started.set()
+                gate.wait(10)
+            self.nudges.append(sent)
+        svc = self.begin(nudger=nudger, **self.removal_seams())
+        sid = self.running(svc)
+        sent = len(self.nudges)
+        blocking[0] = True
+        messaging = threading.Thread(target=lambda: self.message(svc, sid))
+        messaging.start()
+        self.assertTrue(started.wait(5))
+        remover = self.start_removal(svc)
+        self.assertFalse(self.signout_entered.wait(0.3))
+        gate.set()
+        messaging.join(10)
+        self.assertEqual(len(self.nudges), sent + 1)
+        self.assertTrue(self.signout_entered.wait(5))
+        self.finish_removal(remover)
 
     def test_stop_sends_one_stop_message_and_a_second_stop_is_refused(self):
         svc = self.begin()
