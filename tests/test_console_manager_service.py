@@ -1152,6 +1152,42 @@ class ProfileChoiceServiceTest(ManagerServiceTest):
         self.assertEqual(len(self.pin_rows()), 2)
         self.assertEqual(self.ask(svc)[2], b'{"profile":"work"}')
 
+    def test_the_view_says_when_the_pin_is_not_in_effect(self):
+        dirs = self.two_profiles({"work": self.weekly(0.2), "home": self.exhausted(FAR)})
+        self.seed_signins(work="signed_in", home="signed_in")
+        svc = self.start(profile_dirs=dirs, clock=lambda: NOW, choice_file=self.choice)
+        self.assertIsNone(view_of(svc)["pin"])
+        self.assertEqual(self.pin(svc, "home")[::2], (204, b""))
+        self.assertEqual(view_of(svc)["pin"], {
+            "profile": "home", "in_effect": False, "reason": "out of allowance",
+            "until": datetime.fromtimestamp(FAR, timezone.utc).isoformat(), "instead": "work"})
+        self.assertEqual({e["profile"]: e["pinned"] for e in view_of(svc)["capacity"]["profiles"]},
+                         {"home": True, "work": False})
+        self.assertEqual(self.pin(svc, "work")[::2], (204, b""))
+        self.assertEqual(view_of(svc)["pin"], {
+            "profile": "work", "in_effect": True, "reason": None, "until": None, "instead": None})
+        self.assertEqual(self.pin(svc, "work", False)[::2], (204, b""))
+        self.assertIsNone(view_of(svc)["pin"])
+
+    def test_a_launch_under_the_pin_is_kept_after_unpinning(self):
+        dirs = self.two_signed_in()
+        launches = support.Launches()
+        svc = self.start(profile_dirs=dirs, clock=lambda: NOW, choice_file=self.choice,
+                         launcher=launches)
+        self.assertEqual(view_of(svc)["pin_launches"], [])
+        self.assertEqual(self.pin(svc, "home")[::2], (204, b""))
+        self.state(svc)
+        self.assertEqual([c.profile for c in launches.calls], ["home"])
+        self.assertEqual(self.manager_rows()[-1][2], "manager.started")
+        self.assertEqual(json.loads(self.manager_rows()[-1][4])["profile"], "home")
+        self.assertEqual(self.pin(svc, "home", False)[::2], (204, b""))
+        self.assertIsNone(view_of(svc)["pin"])
+        self.assertEqual(view_of(svc)["pin_launches"], ["home"])
+        svc.close()
+        again = self.start(profile_dirs=dirs, clock=lambda: NOW, choice_file=self.choice,
+                           launcher=launches)
+        self.assertEqual(view_of(again)["pin_launches"], ["home"])
+
     def prepare_then_exclude(self, svc, queue, *profiles):
         """Run the queued launch with each of `profiles` excluded just after the lock that prepared it is released."""
         prepared = svc._prepared_launch

@@ -544,7 +544,9 @@ nothing for a refusal. A pin moves an earlier pin to the new profile. As for an 
 ingest lock the choice file is written first, over the pin the change gives, so a failed write is a
 500 with nothing appended or published, and a failed append puts the file back to the choice over
 the old pin. The pin is folded from the log at construction and by `_fold`, and rebuilt by
-`retain()`, so a restart and a retention pass give the same pin. Every choice path (the route, the
+`retain()`, so a restart and a retention pass give the same pin; the view's `pin_launches` is the
+fold `pin.pin_launches` of the log, kept after an unpin and rebuilt at a restart and a retention
+pass. Every choice path (the route, the
 poll, an exclusion, a manager launch and a launch checked again after an exclusion) is made over
 the folded pin. An exclusion of the pinned profile is refused `pinned; unpin it first`.
 
@@ -1834,6 +1836,7 @@ class ConsoleService:
         self._pinned: str | None = None
         self._signin_ends: dict[str, signin_run.Ended] = {}
         self._accounts_added: frozenset[str] = frozenset()
+        self._pin_launches: pin.PinLaunches = pin.pin_launches([])
         self._signin_live: dict[str, int] = {}
         self._signin_by_run: dict[int, tuple[str, int]] = {}
         self._signin_tickets: dict[str, int] = {}
@@ -1897,6 +1900,7 @@ class ConsoleService:
             self._pinned = pin.pinned_profile(events)
             self._signin_ends = signin_run.ended_state(events)
             self._accounts_added = account_add.added_state(events)
+            self._pin_launches = pin.pin_launches(events)
             self._derive_digest(events)
             self._deliveries = deliveries.delivery_states(events)
             self._moved = idle.last_moved(events)
@@ -1970,15 +1974,18 @@ class ConsoleService:
         return runs
 
     def _publish(self) -> None:
+        cap = capacity.capacity_view(
+            self._profiles, self._capacity, self._clock(), self._signins,
+            excluded=self._excluded, pinned=self._pinned)
         view = encode_view(derive_view(
             self._states.values(), self._inbox, self._health,
             sessions=self._sessions.values(), deliveries=self._deliveries,
             now_ms=int(self._clock() * 1000), sprints=self._sprints,
             digest=digest.digest(self._moments, self._looked, self._now()),
-            capacity=capacity.capacity_view(
-                self._profiles, self._capacity, self._clock(), self._signins,
-                excluded=self._excluded),
+            capacity=cap,
             signin_runs=self._signin_view(), accounts_added=self._accounts_added,
+            pin=pin.note(self._pinned, cap, manager.session_profile(cap, self._use.last)),
+            pin_launches=self._pin_launches.launched,
             managers=self._launcher is not None, pending=self._pending))
         with self._published:
             if view != self._view:
@@ -3724,6 +3731,7 @@ class ConsoleService:
         self._pinned = pin.pinned_profile(appended, self._pinned)
         self._signin_ends = signin_run.ended_state(appended, self._signin_ends)
         self._accounts_added = account_add.added_state(appended, self._accounts_added)
+        self._pin_launches = pin.pin_launches(appended, self._pin_launches)
         self._deliveries = deliveries.delivery_states(appended, self._deliveries)
         self._moved = idle.last_moved(appended, self._moved)
         self._sprints = sprints.sprint_states(appended, self._sprints)
@@ -3751,6 +3759,7 @@ class ConsoleService:
                 self._pinned = pin.pinned_profile(events)
                 self._signin_ends = signin_run.ended_state(events)
                 self._accounts_added = account_add.added_state(events)
+                self._pin_launches = pin.pin_launches(events)
                 self._derive_digest(events)
                 self._publish()
             return removed

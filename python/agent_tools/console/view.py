@@ -53,6 +53,8 @@ Wire format, one object:
      "recent_projects": ["<project id>", ...],
      "digest": <digest> | null,
      "managers": <bool>,
+     "pin": <pin note> | null,
+     "pin_launches": ["<profile>", ...],
      "unstopped": [{"project_id", "sprint_id", "goal", "text", "failed_at"}, ...]}
 
 `digest` is what changed since the owner last looked (see `digest.py`):
@@ -138,6 +140,12 @@ link is never in the view: the page holds it from the start answer alone.
 The top-level `accounts_added` member (#1027) is the sorted, de-duplicated list of the profile names
 the owner added from the page and the retained log still holds, from the `accounts_added` argument
 (`account_add.added_state`; an empty list when none is given).
+
+The top-level `pin` member (#1029) is the pin note `pin.note` gives, copied, from the `pin`
+argument, and null with no pin. The top-level `pin_launches` member is the sorted list of profiles
+under which a new session or manager started while the owner's pin of that profile was in force,
+from the `pin_launches` argument (`pin.pin_launches` over the retained log; an empty list when none
+is given).
 
 A sprint's `state` is `quota` ("waiting on quota until") when its manager is `started` and the
 capacity view holds an `out` entry for the manager's profile (`manager.quota_wait`), unless the
@@ -905,6 +913,8 @@ def derive_view(
     pending: Mapping[str, PendingStop] | None = None,
     signin_runs: Mapping[str, Mapping] | None = None,
     accounts_added: Iterable[str] = (),
+    pin: Mapping | None = None,
+    pin_launches: Iterable[str] = (),
 ) -> dict:
     states = list(states)
     signin_runs = {profile: dict(run) for profile, run in (signin_runs or {}).items()}
@@ -1033,6 +1043,8 @@ def derive_view(
                   "answered": [_inbox_entry(r, health) for r in answered]},
         "signin_runs": signin_runs,
         "accounts_added": sorted(set(accounts_added)),
+        "pin": dict(pin) if pin is not None else None,
+        "pin_launches": sorted(set(pin_launches)),
         "project_count": len(states),
         "entries": entries,
         "unmanaged": [
