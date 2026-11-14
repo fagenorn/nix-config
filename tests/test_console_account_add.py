@@ -16,7 +16,9 @@ import unittest
 from pathlib import Path
 
 from agent_tools.console import account_add, event_log
-from agent_tools.console.account_add import AddFailed, Adder, adder_for, added, already_exists
+from agent_tools.console.event_log import Event
+from agent_tools.console.account_add import AddFailed, Adder, adder_for, added, added_state
+from agent_tools.console.account_add import already_exists
 from agent_tools.console.account_add import parse_add_request, refusal
 
 LAUNCHER = (Path(__file__).resolve().parents[1]
@@ -79,6 +81,20 @@ class RequestTest(unittest.TestCase):
         self.assertEqual(account_add.ADDED, "account.added")
         self.assertEqual(event_log.ACCOUNT_ADDED, "account.added")
         self.assertNotIn("account.added", event_log.KEPT_KINDS)
+
+    def test_added_state_folds_the_added_rows(self):
+        rows = [("account.added", None, {"by": "owner", "profile": "b"}),
+                ("account.added", None, {"by": "owner", "profile": "a"}),
+                ("account.added", None, {"profile": "default"}),
+                ("account.added", None, {"profile": 3}),
+                ("signin.acted", None, {"by": "owner", "profile": "z", "action": "start",
+                                        "outcome": "started"})]
+        events = [Event(seq=n, at=f"t{n}", kind=kind, project=project, payload=payload)
+                  for n, (kind, project, payload) in enumerate(rows, start=1)]
+        self.assertEqual(added_state(events), frozenset({"a", "b"}))
+        later = Event(seq=9, at="t9", kind="account.added", project=None,
+                      payload={"by": "owner", "profile": "c"})
+        self.assertEqual(added_state([later], frozenset({"a"})), frozenset({"a", "c"}))
 
 
 class AdderTest(unittest.TestCase):

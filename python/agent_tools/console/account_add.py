@@ -27,7 +27,11 @@ a successful add.
 
 Row. `added(profile)` is `("account.added", None, {"by": "owner", "profile": profile})`, one per
 account the owner adds from the page; it raises `ValueError` when `refusal(profile)` is not None.
-`ADDED` is `event_log.ACCOUNT_ADDED`. The kind is not in `KEPT_KINDS`.
+`ADDED` is `event_log.ACCOUNT_ADDED`. The kind is not in `KEPT_KINDS`. `added_state(events, state=None)`
+is `state` (default empty) united with the `payload["profile"]` of every `ADDED` event whose payload is
+a dict with a string `profile` that `refusal` accepts, as a frozenset: the view's `accounts_added`
+member, folded by the service and rebuilt from the retained log on a restart or a retention pass.
+An invalid payload is ignored.
 
 Platform. `adder_for(platform)` is `Adder()` where `manager.supported(platform)`, else None.
 """
@@ -37,7 +41,7 @@ from __future__ import annotations
 import json
 import re
 import subprocess
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 
 from agent_tools.console import event_log, manager
 
@@ -77,6 +81,18 @@ def added(profile: str) -> tuple[str, None, dict]:
     if reason is not None:
         raise ValueError(reason)
     return (ADDED, None, {"by": "owner", "profile": profile})
+
+
+def added_state(events: Iterable[event_log.Event],
+                state: frozenset[str] | None = None) -> frozenset[str]:
+    names = set(state or ())
+    for event in events:
+        if event.kind != ADDED or not isinstance(event.payload, dict):
+            continue
+        profile = event.payload.get("profile")
+        if isinstance(profile, str) and refusal(profile) is None:
+            names.add(profile)
+    return frozenset(names)
 
 
 class AddFailed(Exception):

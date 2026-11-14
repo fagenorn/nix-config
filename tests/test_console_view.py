@@ -1777,6 +1777,15 @@ class SigninViewTest(unittest.TestCase):
         bare = derive_view([state("p00", 1)], capacity=signin_capacity(home, spare))
         self.assertEqual(bare["signin_runs"], {})
 
+    def test_the_view_lists_the_accounts_added_from_the_page(self):
+        home = signin_entry("home", "signed_in", False, days_left=20,
+                            ends_at="2026-12-03T09:00:00+00:00")
+        shown = derive_view([state("p00", 1)], capacity=signin_capacity(home),
+                            accounts_added=["b", "a", "b"])
+        self.assertEqual(shown["accounts_added"], ["a", "b"])
+        bare = derive_view([state("p00", 1)], capacity=signin_capacity(home))
+        self.assertEqual(bare["accounts_added"], [])
+
     def test_sign_in_items_follow_progress_and_precede_questions(self):
         ask = signin_entry("spare", "signed_out", True, since="t1")
         records = {("p00", "k1"): InboxRecord(

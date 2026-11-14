@@ -251,6 +251,27 @@ class AccountSigninTest(Case):
         self.assertEqual(view["signin_runs"]["fresh"],
                          {"state": "running", "at": None, "attempt": attempt})
 
+    def test_the_view_lists_an_added_account_after_a_restart(self):
+        self.begin()
+        status, _, _ = self.post({"name": "fresh"})
+        self.assertEqual(status, 200)
+        self.assertEqual(self.view()["accounts_added"], ["fresh"])
+        self.svc.close()
+        self.begin()
+        self.assertEqual(self.view()["accounts_added"], ["fresh"])
+
+    def test_retention_drops_an_expired_added_account_as_a_restart_does(self):
+        svc = self.begin()
+        status, _, _ = self.post({"name": "fresh"})
+        self.assertEqual(status, 200)
+        self.assertEqual(self.view()["accounts_added"], ["fresh"])
+        self.now[0] += 91 * 86400
+        self.assertGreaterEqual(svc.retain(), 1)
+        self.assertEqual(self.view()["accounts_added"], [])
+        svc.close()
+        self.begin()
+        self.assertEqual(self.view()["accounts_added"], [])
+
     def test_a_failed_status_read_still_starts_a_sign_in_the_page_can_finish(self):
         self.read_error = {"fresh": signin.StatusFailed("timeout")}
         self.begin()

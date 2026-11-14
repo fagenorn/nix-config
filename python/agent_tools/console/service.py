@@ -1728,6 +1728,7 @@ class ConsoleService:
         self._capacity = capacity.CapacityState({}, {})
         self._signins: dict[str, signin.SignIn] = {}
         self._signin_ends: dict[str, signin_run.Ended] = {}
+        self._accounts_added: frozenset[str] = frozenset()
         self._signin_live: dict[str, int] = {}
         self._signin_by_run: dict[int, tuple[str, int]] = {}
         self._signin_tickets: dict[str, int] = {}
@@ -1788,6 +1789,7 @@ class ConsoleService:
             self._capacity = capacity.capacity_state(events)
             self._signins = signin.signin_state(events)
             self._signin_ends = signin_run.ended_state(events)
+            self._accounts_added = account_add.added_state(events)
             self._derive_digest(events)
             self._deliveries = deliveries.delivery_states(events)
             self._moved = idle.last_moved(events)
@@ -1868,7 +1870,7 @@ class ConsoleService:
             digest=digest.digest(self._moments, self._looked, self._now()),
             capacity=capacity.capacity_view(
                 self._profiles, self._capacity, self._clock(), self._signins),
-            signin_runs=self._signin_view(),
+            signin_runs=self._signin_view(), accounts_added=self._accounts_added,
             managers=self._launcher is not None, pending=self._pending))
         with self._published:
             if view != self._view:
@@ -3506,6 +3508,7 @@ class ConsoleService:
         self._capacity = capacity.capacity_state(appended, self._capacity)
         self._signins = signin.signin_state(appended, self._signins)
         self._signin_ends = signin_run.ended_state(appended, self._signin_ends)
+        self._accounts_added = account_add.added_state(appended, self._accounts_added)
         self._deliveries = deliveries.delivery_states(appended, self._deliveries)
         self._moved = idle.last_moved(appended, self._moved)
         self._sprints = sprints.sprint_states(appended, self._sprints)
@@ -3530,6 +3533,7 @@ class ConsoleService:
                 self._capacity = capacity.capacity_state(events)
                 self._signins = signin.signin_state(events)
                 self._signin_ends = signin_run.ended_state(events)
+                self._accounts_added = account_add.added_state(events)
                 self._derive_digest(events)
                 self._publish()
             return removed

@@ -135,6 +135,10 @@ argument, `{"state": "running" | "signed_in" | "failed" | "timed_out" | "cancell
 is that mapping, `{profile: run}`, copied (an empty object when none is given). The sign-in
 link is never in the view: the page holds it from the start answer alone.
 
+The top-level `accounts_added` member (#1027) is the sorted, de-duplicated list of the profile names
+the owner added from the page and the retained log still holds, from the `accounts_added` argument
+(`account_add.added_state`; an empty list when none is given).
+
 A sprint's `state` is `quota` ("waiting on quota until") when its manager is `started` and the
 capacity view holds an `out` entry for the manager's profile (`manager.quota_wait`), unless the
 sprint is waiting on you, closing (fresh), done, drafting, stopping or stopped; `state_until` is
@@ -900,6 +904,7 @@ def derive_view(
     managers: bool = True,
     pending: Mapping[str, PendingStop] | None = None,
     signin_runs: Mapping[str, Mapping] | None = None,
+    accounts_added: Iterable[str] = (),
 ) -> dict:
     states = list(states)
     signin_runs = {profile: dict(run) for profile, run in (signin_runs or {}).items()}
@@ -1027,6 +1032,7 @@ def derive_view(
                           + [_inbox_entry(r, health) for r in open_items],
                   "answered": [_inbox_entry(r, health) for r in answered]},
         "signin_runs": signin_runs,
+        "accounts_added": sorted(set(accounts_added)),
         "project_count": len(states),
         "entries": entries,
         "unmanaged": [
