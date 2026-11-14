@@ -1,7 +1,7 @@
 # ADR-console-024 — The owner signs a profile in from the page
 
 - **Status:** accepted; amended by ADR-console-025
-- **Decided in:** #842, #1026, #1027, #1035
+- **Decided in:** #842, #1026, #1027, #1035, #1039
 
 ## Context
 
@@ -23,7 +23,7 @@ ADR-console-022 made a signed-out profile, or one whose sign-in ends within thre
 
 **D7. What is stored.** An accepted write appends one `signin.acted` row with exactly `by` (`owner`), the profile, the action (`start`, `code` or `cancel`) and its outcome (`started`, `running` or `failed` for a start, `sent`, `cancelled`); a refusal appends none. A run's end appends one `signin.ended` row with exactly the profile, the outcome and the `attempt`, the sequence number of the run's start row; the view shows the folded end of each profile. No link or code is in any row, stderr line, view, stream frame, fixture or tracker. This amends ADR-console-022 D4: the item's remedy is the Sign in action, not the command.
 
-**D8. The page.** This amends ADR-console-002. The sign-in card carries the Sign in action instead of a terminal command: the action reads Sign in for a profile no retained reading ever said signed in, and Sign in again otherwise, and the item's headline is "Sign in to <profile>" or "Sign in to <profile> again" alike. Retention keeps each profile's newest signed-in reading as well as its newest reading (ADR-console-022 D2). While a sign-in runs the card carries its link, a field for the code and Cancel. The code field is a third typed thing, beside a brief's reply and a manual check's note, and its draft, selection and focus survive every frame. The sign-in link is the page's second kind of link, beside the tracker link.
+**D8. The page.** This amends ADR-console-002. The sign-in card carries the Sign in action instead of a terminal command: the action reads Sign in for a profile no retained reading ever said signed in, and Sign in again otherwise, and the item's headline is "Sign in to <profile>" or "Sign in to <profile> again" alike. Retention keeps each profile's newest signed-in reading as well as its newest reading (ADR-console-022 D2). While a sign-in runs the card carries its link, a field for the code and Cancel. The code field is a third typed thing, beside a brief's reply and a manual check's note, and its draft, selection and focus survive every frame. The sign-in link is the page's second kind of link, beside the tracker link. The profile's row of the accounts panel carries Sign in or Sign in again too; while the accounts panel is open a running sign-in's link, code field and Cancel show in that row and the card points there (#1039, ADR-console-002).
 
 ## Consequences
 

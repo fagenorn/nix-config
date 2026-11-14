@@ -102,19 +102,23 @@ A refusal because a window is used up, recorded with its window and reset (ADR-c
 _Avoid_: rate limit error
 
 **Capacity strip**:
-The top-bar line that starts with one word, fine, tight or out, beside its icon, then each profile with a reading as its name, a bar and its share of the week left, then the next reset as a weekday and time, or when work resumes once every profile is out. Only the accounts are listed, the named profiles under `profiles/`; the unprofiled `~/.claude` is not one and is never shown. It reads "tight" when one profile has room among two or more while every other reads out, folds profiles with no reading into one note and names a signed-out profile as signed out, outside that note; idle profiles are read too, so the note counts only profiles not yet read (ADR-console-006, ADR-console-002). An excluded profile is shown marked excluded and is not counted in fine, tight or out (ADR-console-023). Each profile on it carries Remove, which asks for its name typed and says how many sessions run under it (ADR-console-026).
+The top-bar strip, kept to one line, that starts with one word, fine, tight or out, beside its icon, then each account with a reading as its name, a bar and one figure, its share of the week left or out until a time. Only the accounts are listed, the named profiles under `profiles/`; the unprofiled `~/.claude` is not one and is never shown. It reads "tight" when one profile has room among two or more while every other reads out, folds profiles with no reading into one note and names a signed-out profile as signed out, outside that note; idle profiles are read too, so the note counts only profiles not yet read (ADR-console-006, ADR-console-002). An excluded profile is shown marked excluded and is not counted in fine, tight or out (ADR-console-023). It holds no button and shows sign-in words only for a signed-out profile or one whose sign-in ends within three days. It opens the accounts panel (ADR-console-002).
 _Avoid_: quota bar
 
+**Accounts panel**:
+The one place that holds every account control and detail: opened from the capacity strip or the `a` key and closed with Escape, one row per account with its allowance details, sign-in end and run status, and Exclude, Pin, Sign in and Remove, then Add account (ADR-console-002, ADR-console-023, ADR-console-024, ADR-console-025, ADR-console-026).
+_Avoid_: settings page, account menu
+
 **Sign-in state**:
-Whether a profile's client is signed in (with the end of that sign-in), signed out, or unknown, read from the client's own status command every 10 minutes on Linux. A signed-out profile, or one whose sign-in ends within three days, is one inbox item that carries the Sign in action: the console runs the client's sign-in with no terminal and shows its link on the page, with a field for a code; an unknown state asks nothing (ADR-console-022, ADR-console-024). A running sign-in's link and code field show on every page of the console, and the action reads Sign in for a profile never signed in, Sign in again otherwise. An account added on the page goes straight into its sign-in (ADR-console-025).
+Whether a profile's client is signed in (with the end of that sign-in), signed out, or unknown, read from the client's own status command every 10 minutes on Linux. A signed-out profile, or one whose sign-in ends within three days, is one inbox item that carries the Sign in action: the console runs the client's sign-in with no terminal and shows its link on the page, with a field for a code; an unknown state asks nothing (ADR-console-022, ADR-console-024). A running sign-in's link and code field show in the profile's row of the accounts panel while it is open, and the action reads Sign in for a profile never signed in, Sign in again otherwise. An account added on the page goes straight into its sign-in (ADR-console-025).
 _Avoid_: login expiry
 
 **Excluded profile**:
-An account the owner keeps out of the console's automatic choice with the Exclude toggle on its capacity strip entry, which reads Include while it is excluded; it is never the profile a new session or a manager gets, its allowance and sign-in are still read, and it is kept in the console's log until included again (ADR-console-023).
+An account the owner keeps out of the console's automatic choice with the Exclude toggle in the accounts panel, which reads Include while it is excluded; it is never the profile a new session or a manager gets, its allowance and sign-in are still read, and it is kept in the console's log until included again (ADR-console-023).
 _Avoid_: disabled profile, paused account
 
 **Pinned profile**:
-The one account the owner pins with Pin on its capacity strip entry (Unpin while pinned); every new session and manager gets it while it has room. Out of allowance, signed out or not yet read, the automatic choice applies and the strip says the pin is not in effect, why and which profile is used instead; it is kept in the console's log until unpinned (ADR-console-023).
+The one account the owner pins with Pin in the accounts panel (Unpin while pinned); every new session and manager gets it while it has room. Out of allowance, signed out or not yet read, the automatic choice applies and the accounts panel says the pin is not in effect, why and which profile is used instead; it is kept in the console's log until unpinned (ADR-console-023).
 _Avoid_: favourite profile, default account
 
 **Console service**:

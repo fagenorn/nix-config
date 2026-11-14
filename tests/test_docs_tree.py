@@ -506,6 +506,39 @@ class DocsTreeTest(unittest.TestCase):
                         if row.startswith("- **Status:**"))
             self.assertEqual(line, status)
 
+    def test_the_accounts_panel_decision_is_recorded(self):
+        base = "docs/areas/console/adr/"
+        adr2 = self.doc(base + "002-the-desk-page-design-rules.md")
+        context = self.doc("docs/areas/console/CONTEXT.md")
+
+        def entry(term):
+            return context[context.index("**" + term + "**:"):].split("_Avoid_")[0]
+
+        for needle in ("#1039", "accounts panel", "one line", "Escape", "the tightest account",
+                       "no button"):
+            self.assertIn(needle, adr2)
+        for gone in ("Beside each listed profile sits its sign-in", "Then one time:"):
+            self.assertNotIn(gone, adr2)
+        panel = entry("Accounts panel")
+        for needle in ("ADR-console-002", "Escape", "Remove"):
+            self.assertIn(needle, panel)
+        strip = entry("Capacity strip")
+        self.assertIn("one line", strip)
+        self.assertNotIn("carries Remove", strip)
+        for term in ("Pinned profile", "Excluded profile"):
+            self.assertIn("accounts panel", entry(term))
+            self.assertNotIn("on its capacity strip entry", entry(term))
+        adr23 = self.doc(base + "023-a-new-sessions-profile-is-the-consoles-choice.md")
+        adr24 = self.doc(base + "024-the-owner-signs-a-profile-in-from-the-page.md")
+        adr25 = self.doc(base + "025-the-owner-adds-an-account-from-the-page.md")
+        adr26 = self.doc(base + "026-the-owner-removes-an-account-from-the-page.md")
+        for adr in (adr23, adr24, adr26):
+            self.assertIn("accounts panel", adr)
+        self.assertIn("#1039", adr23)
+        self.assertNotIn("The page's header carries an Add account control", adr25)
+        self.assertNotIn("Each capacity strip entry carries a Remove control", adr26)
+        self.assertIn("| Accounts panel | Console |", self.doc("docs/CONTEXT-MAP.md"))
+
     def test_the_launch_choice_decision_is_recorded(self):
         path = "docs/areas/hosts/adr/008-claude-starts-under-the-consoles-profile-choice.md"
         first = (REPO_ROOT / path).read_text().splitlines()[0]
