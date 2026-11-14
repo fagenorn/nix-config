@@ -1,6 +1,6 @@
 """`capacity_check`: the verify check that the console shows a capacity reading for an account in use (#860).
 
-`python -m agent_tools.console.capacity_check [--url URL] [--max-age SECONDS] [--every | --signin | --accounts | --page-signin | --page-add | --pin | --exclusion]` reads the console's
+`python -m agent_tools.console.capacity_check [--url URL] [--max-age SECONDS] [--every | --signin | --accounts | --page-signin | --page-add | --pin | --page-remove | --exclusion]` reads the console's
 `/api/state` view (default `http://127.0.0.1:27184/api/state`; the URL must be `http` on a loopback
 host, `127.0.0.1` or `localhost`, else exit 2) and looks at `capacity.profiles[].read_at`.
 `--max-age` is a positive integer number of seconds (default 600).
@@ -102,9 +102,27 @@ No pin needs to be in force when it runs: it never reads the live `pin`, `/api/p
 exits 1: the log cannot show whether a pin had room or whether a session used the `CLAUDE_ACCOUNT`
 override, so no reading is "not met".
 
+`--page-remove` (#1030, exclusive with the other modes, `--max-age` ignored) meets when the owner
+removed an account from the page and it is gone. No state is needed on the host: the console's own
+event log carries the owner action. The log is `--log PATH` or the console's own, opened exactly as
+`--page-add` opens it (a missing log, a file that is not a database or one without the `events`
+table is `{"status": "no_log"}`, exit 75). Rows of kind `account.added` and `account.removal`
+are read in `seq` order; a payload counts only when it is an object whose `by` is `owner` and whose
+`profile` is a non-empty string P. An add puts P in the added set and takes it out of the removed
+set; a removal whose `outcome` is `removed` or `removed_signed_out_already` puts P in the removed
+set only when P is in the added set. An empty removed set is `{"status": "pending"}`, exit 75 (the
+view is not fetched). Then the view is read: no 200 is `{"status": "not_running"}`, exit 75, and no
+`capacity` object `{"status": "not_deployed"}`, exit 75. A removed P is gone when no capacity row
+names it and `profiles_dir() / P` does not exist (`os.path.lexists`), where `profiles_dir()` is
+`$CLAUDE_ACCOUNTS_DIR` or else `~/.claude-accounts`, then `/profiles`. Some gone is `{"status":
+"met", "profiles": [<gone, sorted>]}`, exit 0; otherwise `{"status": "not_met", "profiles":
+[<removed, sorted>]}`, exit 1. It writes nothing, sends one GET at most and touches the accounts
+directory only to look for a name.
+
 A console that is down or predates this change is "not yet", never "not met", and only a reading
 newer than `--max-age` meets the check. A bad argument is exit 2. The check only reads: it sends one
-GET (none with `--page-add`), follows no redirect and writes nothing.
+GET (none with `--page-add`, none with `--page-remove` before a removal is logged), follows no
+redirect and writes nothing.
 """
 
 from __future__ import annotations
@@ -112,9 +130,11 @@ from __future__ import annotations
 import argparse
 import http.client
 import json
+import os
 import sqlite3
 import sys
 from datetime import datetime, timezone
+from collections.abc import Callable
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -347,6 +367,12 @@ def _owner(payload: object) -> bool:
     return isinstance(payload, dict) and payload.get("by") == "owner"
 
 
+def profiles_dir() -> Path:
+    """The launcher's profiles directory, under `$CLAUDE_ACCOUNTS_DIR` or `~/.claude-accounts`."""
+    root = os.environ.get("CLAUDE_ACCOUNTS_DIR") or Path.home() / ".claude-accounts"
+    return Path(root) / "profiles"
+
+
 def page_add_verdict(log: Path) -> tuple[int, dict]:
     """Met when the log holds an owner `account.added` row and a later page sign-in start of it."""
     try:
@@ -380,6 +406,56 @@ def page_add_verdict(log: Path) -> tuple[int, dict]:
     if started:
         return 0, {"status": "met", "profiles": sorted(started)}
     return NOT_YET, {"status": "pending"}
+
+
+REMOVED_OUTCOMES = ("removed", "removed_signed_out_already")
+
+
+def page_remove_verdict(log: Path, body_of: Callable[[], bytes | None],
+                        profiles: Path) -> tuple[int, dict]:
+    """Met when the log shows an owner add then removal of a profile the view and disk lack."""
+    try:
+        connection = sqlite3.connect(f"{log.resolve().as_uri()}?mode=ro", uri=True)
+    except (sqlite3.Error, OSError):
+        return NOT_YET, {"status": "no_log"}
+    try:
+        connection.execute("PRAGMA query_only = ON")
+        rows = connection.execute(
+            "SELECT kind, payload FROM events WHERE kind IN ('account.added', 'account.removal') "
+            "ORDER BY seq").fetchall()
+    except sqlite3.Error:
+        return NOT_YET, {"status": "no_log"}
+    finally:
+        connection.close()
+    added: set[str] = set()
+    removed: set[str] = set()
+    for kind, text in rows:
+        try:
+            payload = json.loads(text)
+        except ValueError:
+            continue
+        profile = payload.get("profile") if isinstance(payload, dict) else None
+        if not _owner(payload) or not isinstance(profile, str) or not profile:
+            continue
+        if kind == "account.added":
+            added.add(profile)
+            removed.discard(profile)
+        elif payload.get("outcome") in REMOVED_OUTCOMES and profile in added:
+            removed.add(profile)
+    if not removed:
+        return NOT_YET, {"status": "pending"}
+    body = body_of()
+    if body is None:
+        return NOT_YET, {"status": "not_running"}
+    listed = readings(body)
+    if listed is None:
+        return NOT_YET, {"status": "not_deployed"}
+    names = {name for name, _, _ in listed}
+    gone = sorted(name for name in removed
+                  if name not in names and not os.path.lexists(profiles / name))
+    if gone:
+        return 0, {"status": "met", "profiles": gone}
+    return 1, {"status": "not_met", "profiles": sorted(removed)}
 
 
 def pin_verdict(body: bytes) -> tuple[int, dict]:
@@ -424,8 +500,13 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--pin", action="store_true",
                       help="require a new session or manager started under a profile while the "
                            "owner's pin of it was in force, read from the console's log")
+    mode.add_argument("--page-remove", action="store_true",
+                      help="require an account the owner added and removed from the page to be "
+                           "gone from the console's view and the profiles directory, read from "
+                           "the console's log")
     parser.add_argument("--log", type=Path, default=None,
-                        help="the console event log for --page-add (default: the console's own)")
+                        help="the console event log for --page-add and --page-remove "
+                             "(default: the console's own)")
     return parser
 
 
@@ -447,6 +528,11 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.page_add:
         code, result = page_add_verdict(args.log or default_log())
+        print(json.dumps(result, sort_keys=True))
+        return code
+    if args.page_remove:
+        code, result = page_remove_verdict(args.log or default_log(), lambda: fetch(args.url),
+                                           profiles_dir())
         print(json.dumps(result, sort_keys=True))
         return code
     body = fetch(args.url)

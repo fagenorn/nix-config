@@ -496,6 +496,102 @@ class CapacityCheckTest(unittest.TestCase):
                 self.assertEqual(done.returncode, 2)
                 self.assertIn("not allowed with argument", done.stderr)
 
+    REMOVED = [
+        ("account.added", None, {"by": "owner", "profile": "zzgone"}),
+        ("account.removal", None, {"by": "owner", "profile": "zzgone", "outcome": "removed",
+                                   "kind": "removed"}),
+    ]
+
+    def page_remove(self, rows, document=None, *, directories=(), url=None):
+        """Run `--page-remove` over a log of `rows`, a stub console and a profiles directory
+        holding `directories`; returns (exit code, parsed output)."""
+        home, log = self.log_home(rows)
+        accounts = home / "accounts"
+        for name in directories:
+            (accounts / "profiles" / name).mkdir(parents=True)
+        if url is None:
+            url = serve(self, document if document is not None else view(("work", ago(5))))
+        code, out = self.run_check("--page-remove", "--url", url,
+                                   env={"HOME": str(home), "CLAUDE_ACCOUNTS_DIR": str(accounts)})
+        return code, json.loads(out)
+
+    def test_page_remove_is_met_when_an_added_profile_was_removed_and_is_gone(self):
+        self.assertEqual(self.page_remove(self.REMOVED),
+                         (0, {"profiles": ["zzgone"], "status": "met"}))
+
+    def test_page_remove_reads_a_removal_of_an_already_signed_out_profile(self):
+        rows = [self.REMOVED[0],
+                ("account.removal", None, {"by": "owner", "profile": "zzgone",
+                                           "outcome": "removed_signed_out_already",
+                                           "kind": "removed"})]
+        self.assertEqual(self.page_remove(rows), (0, {"profiles": ["zzgone"], "status": "met"}))
+
+    def test_page_remove_is_not_met_while_the_directory_or_the_row_stays(self):
+        not_met = (1, {"profiles": ["zzgone"], "status": "not_met"})
+        with self.subTest(case="directory"):
+            self.assertEqual(self.page_remove(self.REMOVED, directories=["zzgone"]), not_met)
+        with self.subTest(case="row"):
+            listed = view(("work", ago(5)), ("zzgone", ago(5)))
+            self.assertEqual(self.page_remove(self.REMOVED, listed), not_met)
+
+    def test_page_remove_is_not_yet_without_an_owner_add_then_removal(self):
+        added = self.REMOVED[0]
+
+        def removal(**changes):
+            payload = {"by": "owner", "profile": "zzgone", "outcome": "removed",
+                       "kind": "removed", **changes}
+            return ("account.removal", None, payload)
+
+        cases = {
+            "no rows": [],
+            "removal without an add": [removal()],
+            "removal that failed to sign out": [added, removal(outcome="signout_failed")],
+            "add after the removal": [added, removal(), added],
+            "removal by someone else": [added, removal(by="manager")],
+            "removal of another profile": [added, removal(profile="other")],
+        }
+        for label, rows in cases.items():
+            with self.subTest(label=label):
+                self.assertEqual(self.page_remove(rows), (75, {"status": "pending"}))
+
+    def test_page_remove_is_not_yet_without_a_log_or_a_console(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        code, out = self.run_check("--page-remove", "--url", serve(self, view(("work", ago(5)))),
+                                   env={"HOME": tmp.name})
+        self.assertEqual((code, json.loads(out)), (75, {"status": "no_log"}))
+        self.assertEqual(self.page_remove(self.REMOVED, url="http://127.0.0.1:1/api/state"),
+                         (75, {"status": "not_running"}))
+        self.assertEqual(self.page_remove(self.REMOVED, {"other": 1}),
+                         (75, {"status": "not_deployed"}))
+
+    def test_page_remove_reads_the_log_without_writing_anything(self):
+        home, log = self.log_home(self.REMOVED)
+        directory = log.parent
+        before_bytes = log.read_bytes()
+        before_mtime = log.stat().st_mtime_ns
+        before_files = sorted(path.name for path in directory.iterdir())
+        os.chmod(log, 0o400)
+        os.chmod(directory, 0o500)
+        self.addCleanup(os.chmod, directory, 0o700)
+        code, out = self.run_check("--page-remove", "--url", serve(self, view(("work", ago(5)))),
+                                   env={"HOME": str(home),
+                                        "CLAUDE_ACCOUNTS_DIR": str(home / "accounts")})
+        self.assertEqual((code, json.loads(out)["status"]), (0, "met"))
+        os.chmod(directory, 0o700)
+        self.assertEqual(log.read_bytes(), before_bytes)
+        self.assertEqual(log.stat().st_mtime_ns, before_mtime)
+        self.assertEqual(sorted(path.name for path in directory.iterdir()), before_files)
+        self.assertFalse((home / "accounts").exists())
+
+    def test_page_remove_is_exclusive_with_the_other_modes(self):
+        for other in ("--pin", "--page-add", "--every"):
+            with self.subTest(other=other):
+                done = subprocess.run([ROOT / WRAPPER, "--page-remove", other], cwd=ROOT,
+                                      capture_output=True, text=True, timeout=60)
+                self.assertEqual(done.returncode, 2)
+                self.assertIn("not allowed with argument", done.stderr)
+
     def test_without_every_one_fresh_profile_still_meets(self):
         url = serve(self, view(("work", ago(60)), ("spare", None)))
         code, out = self.run_check("--url", url)

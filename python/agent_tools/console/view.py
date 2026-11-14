@@ -55,6 +55,7 @@ Wire format, one object:
      "managers": <bool>,
      "pin": <pin note> | null,
      "pin_launches": ["<profile>", ...],
+     "profile_sessions": {"<profile>": <int>, ...},
      "unstopped": [{"project_id", "sprint_id", "goal", "text", "failed_at"}, ...]}
 
 `digest` is what changed since the owner last looked (see `digest.py`):
@@ -152,6 +153,10 @@ argument, and null with no pin. The top-level `pin_launches` member is the sorte
 under which a new session or manager started while the owner's pin of that profile was in force,
 from the `pin_launches` argument (`pin.pin_launches` over the retained log; an empty list when none
 is given).
+
+The top-level `profile_sessions` member (#1030) maps each profile of the capacity view to the number of
+sessions under it that have not ended (`{}` for an empty capacity; a session with no profile counts for
+none): the page states it before a removal, since a running session keeps running.
 
 A sprint's `state` is `quota` ("waiting on quota until") when its manager is `started` and the
 capacity view holds an `out` entry for the manager's profile (`manager.quota_wait`), unless the
@@ -312,6 +317,7 @@ refused, no newline.
 """
 
 import json
+from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
@@ -925,8 +931,11 @@ def derive_view(
     pin_launches: Iterable[str] = (),
 ) -> dict:
     states = list(states)
+    sessions = list(sessions)
     signin_runs = {profile: dict(run) for profile, run in (signin_runs or {}).items()}
     capacity = EMPTY if capacity is None else capacity
+    running = Counter(s.profile for s in sessions if s.state != ENDED)
+    profile_sessions = {e["profile"]: running[e["profile"]] for e in capacity["profiles"]}
     registered = {s.project_id for s in states}
     health = health or {}
     shown = [r for r in (records or {}).values()
@@ -1053,6 +1062,7 @@ def derive_view(
         "accounts_added": sorted(set(accounts_added)),
         "pin": dict(pin) if pin is not None else None,
         "pin_launches": sorted(set(pin_launches)),
+        "profile_sessions": profile_sessions,
         "project_count": len(states),
         "entries": entries,
         "unmanaged": [
