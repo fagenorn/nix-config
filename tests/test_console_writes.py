@@ -131,8 +131,8 @@ class WriteRouteTest(Case):
                          {"/api/looked", "/api/answer", "/api/check-answer", "/api/goal",
                           "/api/withdraw", "/api/approve", "/api/reply",
                           "/api/retry-manager", "/api/message", "/api/stop",
-                          "/api/round-answer", "/api/continue", "/api/signin",
-                          "/api/signin-code", "/api/signin-cancel"})
+                          "/api/round-answer", "/api/continue", "/api/exclusion",
+                          "/api/signin", "/api/signin-code", "/api/signin-cancel"})
         for path in service.PAGE_WRITES:
             with self.subTest(path=path):
                 status, _, body = support.post_page(
@@ -462,7 +462,7 @@ class GoalRouteTest(Case):
 
     def test_every_page_write_route_is_guarded_and_takes_only_post(self):
         svc = self.open()
-        for path in (GOAL, WITHDRAW):
+        for path in (GOAL, WITHDRAW, "/api/exclusion"):
             for method in ("GET", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS"):
                 with self.subTest(path=path, method=method):
                     status, headers, _ = support.request(svc.address, method, path)

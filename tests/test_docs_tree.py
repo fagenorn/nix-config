@@ -427,6 +427,16 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("ADR-console-023", context)
         self.assertIn("binding", context)
 
+    def test_the_profile_exclusion_decision_is_recorded(self):
+        adr = self.doc("docs/areas/console/adr/023-a-new-sessions-profile-is-the-consoles-choice.md")
+        context = self.doc("docs/areas/console/CONTEXT.md")
+        for needle in ("#1028", "POST /api/exclusion", "profile.exclusion", "ADR-console-008", "excluded"):
+            self.assertIn(needle, adr)
+        self.assertNotIn("Pins and exclusions are later inputs", adr)
+        self.assertIn("**Excluded profile**:", context)
+        entry = context[context.index("**Excluded profile**:"):].split("\n\n")[0]
+        self.assertIn("ADR-console-023", entry)
+
     def test_the_console_page_signin_decision_is_recorded(self):
         path = "docs/areas/console/adr/024-the-owner-signs-a-profile-in-from-the-page.md"
         first = (REPO_ROOT / path).read_text().splitlines()[0]

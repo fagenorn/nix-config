@@ -23,7 +23,7 @@ from agent_tools.console.deliveries import (
 from agent_tools.console import event_log
 from agent_tools.console.event_log import Event
 from agent_tools.console.sessions import ENDED, SessionState
-from agent_tools.console.capacity import EMPTY
+from agent_tools.console.capacity import EMPTY, CapacityState, capacity_view
 from agent_tools.console.manager import session_name
 from agent_tools.console.sprints import (
     APPROVED,
@@ -512,6 +512,22 @@ class EncodeTest(unittest.TestCase):
         self.assertEqual(encode_view({"b": 1, "a": "é"}),
                          '{"a":"é","b":1}'.encode("utf-8"))
         self.assertNotIn(b"\n", encode_view(derive_view([state("x\ny", 1)])))
+
+
+class ExclusionViewTest(unittest.TestCase):
+    def test_the_view_marks_an_excluded_profile(self):
+        from tests import test_console_capacity as capacity_tests
+        readings = CapacityState({"work": capacity_tests.open_reading()}, {})
+        names = ["home", "work"]
+        plain = capacity_view(names, readings, capacity_tests.T)
+        capacity = capacity_view(names, readings, capacity_tests.T, excluded={"work"})
+        shown = derive_view([state("p00", 1)], capacity=capacity)
+        self.assertEqual({e["profile"]: e["excluded"] for e in shown["capacity"]["profiles"]},
+                         {"home": False, "work": True})
+        plain_shown = derive_view([state("p00", 1)], capacity=plain)
+        week = {e["profile"]: e["week_left"] for e in plain_shown["capacity"]["profiles"]}
+        self.assertEqual({e["profile"]: e["week_left"] for e in shown["capacity"]["profiles"]}, week)
+        self.assertIsNotNone(week["work"])
 
 
 if __name__ == "__main__":
