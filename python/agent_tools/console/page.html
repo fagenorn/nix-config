@@ -2044,17 +2044,20 @@ function renderInbox(view) {
   const signinRuns = view.signin_runs !== null && typeof view.signin_runs === "object" ? view.signin_runs : {};
   for (const [profile, held] of [...signinLinks]) {
     const shown = signins.find((item) => item.profile === profile);
+    const run = signinRuns[profile];
+    const live = run !== null && typeof run === "object" && run.state === "running" && run.attempt === held.attempt;
+    // A run once shown running that a later view no longer shows running is gone, even with no ending row (a console restart).
+    if (live) held.confirmed = true;
     if (shown === undefined) {
-      // A link held from an add waits for its item (the status read may have failed) until its run ends.
-      if (!held.added || signinEnded(signinRuns[profile], held.attempt)) signinLinks.delete(profile);
+      // A link held from an add waits for its item (the status read may have failed) until its run ends or vanishes.
+      if (!held.added || (held.confirmed && !live) || signinEnded(run, held.attempt)) signinLinks.delete(profile);
       continue;
     }
     held.added = false;
-    const run = shown.run;
-    if (run !== null && typeof run === "object" && run.state === "running" && run.attempt === held.attempt) {
+    const item = shown.run;
+    if (item !== null && typeof item === "object" && item.state === "running" && item.attempt === held.attempt) {
       held.confirmed = true;
-    } else if (held.confirmed || signinEnded(run, held.attempt)) {
-      // A run once shown running that a later view no longer shows running is gone, even with no ending row (a console restart).
+    } else if (held.confirmed || signinEnded(item, held.attempt)) {
       signinLinks.delete(profile);
     }
   }

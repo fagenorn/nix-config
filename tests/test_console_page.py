@@ -4866,6 +4866,18 @@ class AddAccountPageTest(unittest.TestCase):
         self.assertEqual(of_class(card, "a", "signin-link"), [])
         self.assertEqual(len(of_class(card, "button", "signin-start")), 1)
 
+    def test_a_continuation_ends_when_a_restart_drops_its_run_from_the_view(self) -> None:
+        (snap,) = render(NO_ITEM + [{"frame": V}, {"snapshot": True}])
+        self.assertEqual(added(snap, "account-add-link"), [])
+        self.assertEqual(len(added(snap, "account-add-open")), 1)
+
+    def test_a_card_opened_after_a_restart_drops_the_dead_link(self) -> None:
+        (snap,) = render(NO_ITEM + [{"frame": with_item(FRESH, {})}, {"snapshot": True}])
+        card = sign_in_card(snap)
+        self.assertEqual(of_class(card, "a", "signin-link"), [])
+        self.assertEqual(len(of_class(card, "button", "signin-start")), 1)
+        self.assertEqual(added(snap, "account-add-link"), [])
+
     def test_an_invalid_default_or_existing_name_disables_add_with_the_reason(self) -> None:
         bad = "not an account name: use a-z, 0-9, - and _"
         for text, reason in (
