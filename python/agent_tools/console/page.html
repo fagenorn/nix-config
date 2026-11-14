@@ -50,8 +50,8 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .cap-pc { color: var(--sub1); }
 .cap-signin, .cap-no-reading, .cap-signed-out { color: var(--ov2); }
 .cap-excluded, .cap-excl, .cap-pin-mark { color: var(--ov2); }
-.acct-toggle, .acct-pin, .acct-remove, .acct-remove-send, .acct-remove-cancel, .acct-close { font: inherit; color: var(--sub1); background: none; border: 1px solid var(--s1); border-radius: 4px; padding: 0 6px; cursor: pointer; }
-.acct-toggle:disabled, .acct-pin:disabled, .acct-remove:disabled, .acct-remove-send:disabled, .acct-remove-cancel:disabled, .acct-close:disabled { cursor: default; opacity: .6; }
+.acct-toggle, .acct-pin, .acct-signin, .acct-remove, .acct-remove-send, .acct-remove-cancel, .acct-close { font: inherit; color: var(--sub1); background: none; border: 1px solid var(--s1); border-radius: 4px; padding: 0 6px; cursor: pointer; }
+.acct-toggle:disabled, .acct-pin:disabled, .acct-signin:disabled, .acct-remove:disabled, .acct-remove-send:disabled, .acct-remove-cancel:disabled, .acct-close:disabled { cursor: default; opacity: .6; }
 .acct-panel { position: absolute; top: calc(100% + 6px); right: 16px; z-index: 20; width: min(600px, calc(100vw - 32px)); max-height: calc(100vh - 6rem); overflow-y: auto; padding: 12px 16px; background: var(--base); border: 1px solid var(--s1); border-radius: 12px; box-shadow: 0 28px 48px -24px rgba(8, 9, 16, .9); font-size: .84375rem; color: var(--sub0); }
 .acct-panel[hidden] { display: none; }
 .acct-panel:focus-visible { outline: none; }
@@ -65,6 +65,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .acct-act { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin-top: 6px; font-size: .8125rem; }
 .acct-remove-box { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 7px; margin-top: 6px; font-size: .8125rem; color: var(--sub1); }
 .acct-remove-name { font: inherit; color: inherit; background: none; border: 1px solid var(--s1); border-radius: 4px; padding: 0 6px; }
+#accounts .account-add { margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--hair); }
 .acct-pin-note { margin-top: 8px; padding-top: 10px; border-top: 1px solid var(--hair); font-size: .8125rem; color: var(--sub1); }
 
 .desk-grid { max-width: 1360px; margin: 0 auto; padding: 30px 48px 72px; display: grid; grid-template-columns: minmax(0, 1fr) 460px; column-gap: 88px; align-items: start; }
@@ -310,7 +311,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 </style>
 </head>
 <body>
-<header class="top"><div class="top-in"><span class="brand">Console</span><div class="goal-bar" id="goal" role="group" aria-label="Goal"></div><button type="button" class="cap" id="capacity" aria-haspopup="dialog" aria-controls="accounts" aria-expanded="false" aria-keyshortcuts="a" title="Accounts (a)"></button><div class="account-add" id="account-add" role="group" aria-label="Add account"></div><span class="conn" id="conn" role="status">Reconnecting…</span></div><section class="acct-panel" id="accounts" role="dialog" aria-label="Accounts" tabindex="-1" hidden><div class="acct-body" id="accounts-body"></div></section></header>
+<header class="top"><div class="top-in"><span class="brand">Console</span><div class="goal-bar" id="goal" role="group" aria-label="Goal"></div><button type="button" class="cap" id="capacity" aria-haspopup="dialog" aria-controls="accounts" aria-expanded="false" aria-keyshortcuts="a" title="Accounts (a)"></button><span class="conn" id="conn" role="status">Reconnecting…</span></div><section class="acct-panel" id="accounts" role="dialog" aria-label="Accounts" tabindex="-1" hidden><div class="acct-body" id="accounts-body"></div><div class="account-add" id="account-add" role="group" aria-label="Add account"></div></section></header>
 <div class="desk-grid">
 <main>
 <div class="statement" id="statement"></div>
@@ -1260,18 +1261,38 @@ function signinBody(item, code) {
   if (code !== undefined) body.code = code;
   return JSON.stringify(body);
 }
-function signinCard(item) {
-  const card = el("article", "card signin");
-  card.appendChild(el("p", "q", item.headline));
-  card.appendChild(el("span", "reason", signinWords(item.signin)));
+// The panel's row of one profile as the card's item shape, so the card and the row share the request state and the code draft.
+function accountItem(p, view) {
+  const runs = view.signin_runs !== null && typeof view.signin_runs === "object" ? view.signin_runs : {};
+  const run = runs[p.profile];
+  return { type: "inbox_item", reason: "signin", key: "signin/" + p.profile, project_id: null, profile: p.profile,
+    headline: "Sign in to " + p.profile, action: "signin", run: run === undefined ? null : run, signin: p.signin,
+    answered: false, waiting_since: null };
+}
+// True when the newest view shows the profile's run running or this page holds its link.
+function signinLive(profile) {
+  const runs = lastView !== null && lastView.signin_runs !== null && typeof lastView.signin_runs === "object" ? lastView.signin_runs : {};
+  const run = runs[profile];
+  return (run !== null && run !== undefined && typeof run === "object" && run.state === "running") || signinLinks.has(profile);
+}
+function signinListed(profile) {
+  const cap = lastView === null ? null : lastView.capacity;
+  return cap !== null && typeof cap === "object" && Array.isArray(cap.profiles) && cap.profiles.some((p) => p.profile === profile);
+}
+function signinStartButton(item, cls) {
+  const ever = item.signin !== null && typeof item.signin === "object"
+    && item.signin.ever_signed_in === true;
+  const start = actionButton(cls, ever ? "Sign in again" : "Sign in",
+    () => signinPost(item, "start", "Could not start the sign-in: ", () => fetch("/api/signin", {
+      method: "POST", headers: stallHeaders(), body: signinBody(item),
+    })));
+  const starting = signinPosts.get("start\n" + item.profile);
+  if (starting !== undefined && starting.phase === "sending") start.setAttribute("disabled", "");
+  return start;
+}
+// The sign-in controls of one profile: the card's, and the panel row's when quiet (never the card's Peach button).
+function signinAct(item, quiet = false) {
   const run = item.run !== null && typeof item.run === "object" ? item.run : null;
-  const note = run === null ? undefined : SIGNIN_NOTES.get(run.state);
-  if (note !== undefined) card.appendChild(el("p", "signin-run", note));
-  // The Add account control shows this sign-in's link and code field until its run ends: the card sends the owner there.
-  if (accountSignin === item.profile && accountCont !== null) {
-    card.appendChild(el("p", "signin-elsewhere", "Finish this sign-in in Add account at the top of the page."));
-    return card;
-  }
   const held = signinLinks.get(item.profile);
   const linked = held !== undefined && isHttps(held.link);
   const starting = signinPosts.get("start\n" + item.profile);
@@ -1279,14 +1300,7 @@ function signinCard(item) {
   const cancelling = signinPosts.get("cancel\n" + item.profile);
   const act = el("div", "act");
   if (!linked) {
-    const ever = item.signin !== null && typeof item.signin === "object"
-      && item.signin.ever_signed_in === true;
-    const start = actionButton("signin-start primary needs", ever ? "Sign in again" : "Sign in",
-      () => signinPost(item, "start", "Could not start the sign-in: ", () => fetch("/api/signin", {
-        method: "POST", headers: stallHeaders(), body: signinBody(item),
-      })));
-    if (starting !== undefined && starting.phase === "sending") start.setAttribute("disabled", "");
-    act.appendChild(start);
+    act.appendChild(signinStartButton(item, quiet ? "signin-start acct-signin" : "signin-start primary needs"));
   } else {
     act.appendChild(signinLinkNode("signin-link", held));
     const input = document.createElement("input");
@@ -1318,7 +1332,26 @@ function signinCard(item) {
       act.appendChild(el("span", "signin-failed", state.failure + state.reason));
     }
   }
-  card.appendChild(act);
+  return act;
+}
+function signinCard(item) {
+  const card = el("article", "card signin");
+  card.appendChild(el("p", "q", item.headline));
+  card.appendChild(el("span", "reason", signinWords(item.signin)));
+  const run = item.run !== null && typeof item.run === "object" ? item.run : null;
+  const note = run === null ? undefined : SIGNIN_NOTES.get(run.state);
+  if (note !== undefined) card.appendChild(el("p", "signin-run", note));
+  // The Add account control shows this sign-in's link and code field until its run ends: the card sends the owner there.
+  if (accountSignin === item.profile && accountCont !== null) {
+    card.appendChild(el("p", "signin-elsewhere", "Finish this sign-in in Add account in the accounts panel."));
+    return card;
+  }
+  // With the accounts panel open its row holds the running sign-in's controls: the card sends the owner there.
+  if (accountsOpen && signinListed(item.profile) && signinLive(item.profile)) {
+    card.appendChild(el("p", "signin-elsewhere", "Finish this sign-in in the accounts panel."));
+    return card;
+  }
+  card.appendChild(signinAct(item));
   return card;
 }
 function sprintList(entry, sprints) {
@@ -1528,10 +1561,27 @@ function accountRow(p, view) {
   const words = signinWords(p.signin);
   if (words !== "") detail.appendChild(el("span", "acct-signin-words", words));
   row.appendChild(detail);
+  const item = accountItem(p, view);
+  const run = item.run !== null && typeof item.run === "object" ? item.run : null;
+  const runNote = run === null ? undefined : SIGNIN_NOTES.get(run.state);
+  if (runNote !== undefined && (run.state === "running" || (p.signin !== null && typeof p.signin === "object" && p.signin.ask === true))) {
+    row.appendChild(el("p", "signin-run", runNote));
+  }
   const act = el("div", "acct-act");
   row.appendChild(act);
   exclusionControls(act, p);
   pinControls(act, p);
+  const elsewhere = accountSignin === name && accountCont !== null;
+  const live = signinLive(name);
+  if (!elsewhere && !live) {
+    act.appendChild(signinStartButton(item, "acct-signin"));
+    const failed = signinPosts.get("start\n" + name);
+    if (failed !== undefined && failed.phase === "failed") {
+      act.appendChild(el("span", "signin-failed", failed.failure + failed.reason));
+    }
+  }
+  if (elsewhere) row.appendChild(el("p", "signin-elsewhere", "Finish this sign-in in Add account below."));
+  else if (live) row.appendChild(signinAct(item, true));
   removeControls(act, row, p, view);
   return row;
 }
@@ -1554,6 +1604,9 @@ function renderAccounts(view) {
   const held = active && active.dataset && active.dataset.removeDraft !== undefined
     ? { profile: active.dataset.removeDraft, start: active.selectionStart, end: active.selectionEnd }
     : null;
+  const typing = active && active.dataset && active.dataset.draft !== undefined
+    ? { key: active.dataset.draft, start: active.selectionStart, end: active.selectionEnd }
+    : null;
   removeFields = new Map();
   const head = el("div", "acct-head");
   head.appendChild(el("h2", "sec-h", "Accounts"));
@@ -1575,17 +1628,31 @@ function renderAccounts(view) {
     again.focus();
     again.setSelectionRange(held.start, held.end);
   }
+  const code = typing === null ? undefined : fields.get(typing.key);
+  if (code !== undefined) {
+    code.focus();
+    code.setSelectionRange(typing.start, typing.end);
+  }
+}
+function anySigninLive() {
+  if (signinLinks.size > 0) return true;
+  const runs = lastView.signin_runs !== null && typeof lastView.signin_runs === "object" ? lastView.signin_runs : {};
+  return Object.values(runs).some((run) => run !== null && typeof run === "object" && run.state === "running");
 }
 function openAccounts() {
   if (lastView === null) return;
   accountsReturn = document.activeElement;
   accountsOpen = true;
+  if (anySigninLive()) renderInbox(lastView);
   renderAccounts(lastView);
   document.getElementById("accounts").focus();
 }
 function closeAccounts() {
   accountsOpen = false;
-  if (lastView !== null) renderAccounts(lastView);
+  if (lastView !== null) {
+    if (anySigninLive()) renderInbox(lastView);
+    renderAccounts(lastView);
+  }
   const back = accountsReturn;
   accountsReturn = null;
   const target = back !== null && back !== document.body && back.isConnected ? back : document.getElementById("capacity");
@@ -1799,7 +1866,10 @@ function picksComplete(item, state) {
   return item.questions.every((_, i) => typeof state.picks[i] === "number");
 }
 function redraw() {
-  if (lastView !== null) renderInbox(lastView);
+  if (lastView !== null) {
+    renderInbox(lastView);
+    renderAccounts(lastView);
+  }
 }
 function choose(state, qi, oi) {
   if (!choosable(state)) return;
@@ -2417,6 +2487,10 @@ function renderInbox(view) {
     const shown = key.startsWith("continue\n") || key.startsWith("progress-withdraw\n") ? progress : stalls;
     if (state.phase !== "sending" && !shown.some((item) => item.sprint_id === id)) stallPosts.delete(key);
   }
+  // While the accounts panel is open a listed profile keeps its sign-in request state as one with a card does.
+  const profiles = view.capacity !== null && typeof view.capacity === "object" && Array.isArray(view.capacity.profiles)
+    ? view.capacity.profiles : [];
+  const listed = new Set(profiles.map((p) => p.profile));
   for (const [profile, held] of [...signinLinks]) {
     const shown = signins.find((item) => item.profile === profile);
     const run = signinRuns[profile];
@@ -2425,7 +2499,8 @@ function renderInbox(view) {
     if (live) held.confirmed = true;
     if (shown === undefined) {
       // A link held from an add waits for its item (the status read may have failed) until its run ends or vanishes.
-      if (!held.added || (held.confirmed && !live) || signinEnded(run, held.attempt)) signinLinks.delete(profile);
+      const waits = held.added || (accountsOpen && listed.has(profile));
+      if (!waits || (held.confirmed && !live) || signinEnded(run, held.attempt)) signinLinks.delete(profile);
       continue;
     }
     held.added = false;
@@ -2449,10 +2524,12 @@ function renderInbox(view) {
   }
   for (const [key, state] of [...signinPosts]) {
     const profile = key.split("\n")[1];
-    if (state.phase !== "sending" && !signins.some((item) => item.profile === profile)) signinPosts.delete(key);
+    if (state.phase !== "sending" && !signins.some((item) => item.profile === profile)
+      && !(accountsOpen && listed.has(profile))) signinPosts.delete(key);
   }
   // A sign-in card shown with no inbox item keeps its typed code like any open item's draft.
-  const present = new Set([...open, ...signins].map(stateId));
+  // The open panel's rows keep their typed codes the same way.
+  const present = new Set([...open, ...signins, ...(accountsOpen ? profiles.map((p) => accountItem(p, view)) : [])].map(stateId));
   // A frame that shows a sent item open again supersedes the page's own "sent"; a redraw of the same view does not.
   const reopened = new Set(fresh ? tracked.filter(answerable).map(itemId) : []);
   for (const [id, state] of answers) {

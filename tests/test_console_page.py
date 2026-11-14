@@ -5541,7 +5541,7 @@ ADD_STEPS = [
     {"respond": {"status": 200, "text": ADDED}}, {"click": "account-add-send"},
 ]
 NO_ITEM = ADD_STEPS + [{"frame": {**V, "signin_runs": RUNNING}}]
-ELSE = "Finish this sign-in in Add account at the top of the page."
+ELSE = "Finish this sign-in in Add account in the accounts panel."
 
 
 def with_item(item: dict, runs: dict) -> dict:
@@ -5838,3 +5838,271 @@ class AddAccountKeepsCodePageTest(unittest.TestCase):
             {"frame": with_item(with_run(FRESH, "running", 9), RUNNING)}, {"snapshot": True}])
         self.assertEqual(snap["field"], {"cls": "account-code", "value": "ab", "start": 2, "end": 2})
         self.assertEqual(of_class(sign_in_card(snap), "input", "signin-code"), [])
+
+
+QUIET = {**frame([]), "capacity": real_capacity(NOW_S, [
+    {"name": "a", "week": .35, "signin": ("signed_in", NOW_S + 12 * 86400)},
+    {"name": "b", "week": .5, "signin": ("signed_in", NOW_S + 20 * 86400)},
+]), "profile_sessions": {"a": 0, "b": 0}}
+WORK_CAP = real_capacity(NOW_S, [{"name": "work", "week": .5, "signin": ("signed_in", NOW_S + 2 * 86400)}])
+GUARDED = {"X-Console-Token": TOKEN, "Content-Type": "application/json"}
+OPEN_A = [{"click": "cap"}, {"respond": {"status": 200, "text": ANSWER}}, {"click": "acct-signin"}]
+
+
+def row_of(snap: dict, name: str) -> dict:
+    (found,) = [r for r in rows(snap) if full(
+        next(n for n in nodes(r) if has_class(n, "acct-name"))) == name]
+    return found
+
+
+def in_row(row: dict, tag: str, cls: str) -> list:
+    return of_class(row, tag, cls)
+
+
+class PanelSigninPageTest(unittest.TestCase):
+    def test_each_row_offers_sign_in_named_for_its_history(self) -> None:
+        shown = {**view([]), "capacity": real_capacity(NOW_S, [
+            {"name": "a", "week": .35, "signin": ("signed_in", NOW_S + 12 * 86400)},
+            {"name": "b", "week": .5}])}
+        snap = opened(shown)
+        self.assertEqual([full(n) for n in nodes(panel(snap)) if has_class(n, "acct-signin")],
+                         ["Sign in again", "Sign in"])
+        snap = opened(shown, {"click": "acct-signin"})
+        post = snap["posts"][-1]
+        self.assertEqual((post["url"], post["method"], post["headers"]),
+                         ("/api/signin", "POST", GUARDED))
+        self.assertEqual(json.loads(post["body"]), {"profile": "a"})
+
+    def test_a_row_carries_its_sign_in_run_status(self) -> None:
+        notes = {"running": "A sign-in is running.", "failed": "The sign-in did not finish.",
+                 "timed_out": "The sign-in timed out.", "cancelled": "The sign-in was cancelled."}
+        for state, note in notes.items():
+            with self.subTest(state=state):
+                shown = {**view([]), "capacity": real_capacity(NOW_S, [
+                    {"name": "work", "week": .5, "signin": ("signed_out", None), "ever": True}]),
+                    "signin_runs": {"work": {"state": state, "at": None, "attempt": 3}}}
+                (work,) = rows(opened(shown))
+                self.assertEqual([full(n) for n in in_row(work, "p", "signin-run")], [note])
+        for state in ("failed", "running"):
+            with self.subTest(signed_in=state):
+                shown = {**view([]), "capacity": real_capacity(
+                    NOW_S, [{"name": "work", "week": .5, "signin": ("signed_in", NOW_S + 12 * 86400)}]),
+                    "signin_runs": {"work": {"state": state, "at": None, "attempt": 3}}}
+                (work,) = rows(opened(shown))
+                self.assertEqual([full(n) for n in in_row(work, "p", "signin-run")],
+                                 ["A sign-in is running."] if state == "running" else [])
+
+    def _running_in_panel(self) -> list:
+        shown = {**frame([SIGNIN]), "capacity": WORK_CAP}
+        running = {**frame([with_run(SIGNIN, "running", 7)]), "capacity": WORK_CAP,
+                   "signin_runs": {"work": {"state": "running", "at": None, "attempt": 7}}}
+        return [START, {"frame": shown}, *OPEN_A, {"frame": running}], running
+
+    def test_with_the_panel_open_the_running_sign_in_shows_in_its_row_and_the_card_points_there(self) -> None:
+        steps, _ = self._running_in_panel()
+        open_, closed = render([*steps, {"snapshot": True}, {"key": "Escape"}, {"snapshot": True}])
+        (work,) = rows(open_)
+        (link,) = in_row(work, "a", "signin-link")
+        self.assertEqual(link["href"], "https://claude.example/a?s=1")
+        self.assertEqual(len(in_row(work, "input", "signin-code")), 1)
+        self.assertEqual(len(in_row(work, "button", "signin-send")), 1)
+        self.assertEqual(len(in_row(work, "button", "signin-cancel")), 1)
+        card = sign_in_card(open_)
+        self.assertEqual([full(n) for n in of_class(card, "p", "signin-elsewhere")],
+                         ["Finish this sign-in in the accounts panel."])
+        self.assertEqual(of_class(card, "input", "signin-code"), [])
+        card = sign_in_card(closed)
+        (link,) = of_class(card, "a", "signin-link")
+        self.assertEqual(link["href"], "https://claude.example/a?s=1")
+        self.assertEqual(len(of_class(card, "input", "signin-code")), 1)
+        self.assertEqual(closed["accounts_body"]["children"], [])
+
+    def test_opening_the_panel_moves_a_running_sign_in_from_the_card_to_its_row(self) -> None:
+        _, running = self._running_in_panel()
+        before, after = render([
+            START, {"respond": {"status": 200, "text": ANSWER}}, {"frame": running},
+            {"snapshot": True}, {"click": "cap"}, {"snapshot": True}])
+        self.assertEqual(len(of_class(sign_in_card(before), "input", "signin-code")), 1)
+        card = sign_in_card(after)
+        self.assertEqual([full(n) for n in of_class(card, "p", "signin-elsewhere")],
+                         ["Finish this sign-in in the accounts panel."])
+        self.assertEqual(of_class(card, "input", "signin-code"), [])
+        self.assertEqual(len(in_row(row_of(after, "work"), "input", "signin-code")), 1)
+
+    def test_a_typed_code_and_its_focus_survive_a_frame_in_the_panel(self) -> None:
+        steps, running = self._running_in_panel()
+        again = {**running, "statement": {**running["statement"], "headline": "again"}}
+        snap, after = render([
+            *steps, {"type": {"class": "signin-code", "text": "ab#C"}},
+            {"select": {"cls": "signin-code", "start": 1, "end": 3}}, {"frame": again},
+            {"snapshot": True}, {"key": "Escape"}, {"snapshot": True}])
+        (code,) = in_row(row_of(snap, "work"), "input", "signin-code")
+        self.assertEqual((code["value"], code["focused"], code["selection"]), ("ab#C", True, [1, 3]))
+        (code,) = of_class(sign_in_card(after), "input", "signin-code")
+        self.assertEqual(code["value"], "ab#C")
+
+    def test_a_sign_in_request_redraws_the_row_with_no_frame(self) -> None:
+        refused = {"respond": {"status": 409, "text": "a sign-in is already running"}}
+        failed = "Could not start the sign-in: a sign-in is already running"
+        base = [START, {"frame": QUIET}, {"click": "cap"}]
+        with self.subTest("refused_start"):
+            first, second = render([*base, refused, {"click": "acct-signin"}, {"snapshot": True},
+                                    {"frame": QUIET}, {"snapshot": True}])
+            for snap in (first, second):
+                a = row_of(snap, "a")
+                self.assertEqual([full(n) for n in in_row(a, "span", "signin-failed")], [failed])
+                (start,) = in_row(a, "button", "acct-signin")
+                self.assertIs(start["disabled"], False)
+        with self.subTest("refused_start_with_a_card"):
+            shown = {**frame([SIGNIN]), "capacity": WORK_CAP}
+            first, second = render([START, {"frame": shown}, {"click": "cap"}, refused,
+                                    {"click": "acct-signin"}, {"snapshot": True},
+                                    {"frame": shown}, {"snapshot": True}])
+            for snap in (first, second):
+                self.assertEqual(
+                    [full(n) for n in in_row(row_of(snap, "work"), "span", "signin-failed")], [failed])
+        with self.subTest("answer_before_the_stream"):
+            (snap,) = render([*base, *OPEN_A[1:], {"snapshot": True}])
+            a = row_of(snap, "a")
+            (link,) = in_row(a, "a", "signin-link")
+            self.assertEqual(link["href"], "https://claude.example/a?s=1")
+            self.assertEqual(len(in_row(a, "input", "signin-code")), 1)
+            self.assertEqual(len(in_row(a, "button", "signin-cancel")), 1)
+        with self.subTest("link_fetched_for_a_running_sign_in"):
+            running = {**QUIET, "signin_runs": {"a": {"state": "running", "at": None, "attempt": 7}}}
+            (snap,) = render([*base, {"respond": {"status": 200, "text": ANSWER}},
+                              {"frame": running}, {"snapshot": True}])
+            self.assertEqual([json.loads(p["body"]) for p in asks(snap)], [{"profile": "a"}])
+            (link,) = in_row(row_of(snap, "a"), "a", "signin-link")
+            self.assertEqual(link["href"], "https://claude.example/a?s=1")
+        typed = [*base, *OPEN_A[1:], {"type": {"class": "signin-code", "text": "ab#C-1"}}]
+        with self.subTest("code_sent"):
+            (snap,) = render([*typed, {"click": "signin-send"}, {"snapshot": True}])
+            (code,) = in_row(row_of(snap, "a"), "input", "signin-code")
+            self.assertEqual(code["value"], "")
+        with self.subTest("code_refused"):
+            (snap,) = render([*typed, {"respond": {"status": 400, "text": "the code was refused"}},
+                              {"click": "signin-send"}, {"snapshot": True}])
+            a = row_of(snap, "a")
+            self.assertEqual([full(n) for n in in_row(a, "span", "signin-failed")],
+                             ["Could not send the code: the code was refused"])
+            (code,) = in_row(a, "input", "signin-code")
+            self.assertEqual(code["value"], "ab#C-1")
+        with self.subTest("cancel_refused"):
+            (snap,) = render([*typed, {"respond": {"status": 409, "text": "no sign-in is running"}},
+                              {"click": "signin-cancel"}, {"snapshot": True}])
+            self.assertEqual([full(n) for n in in_row(row_of(snap, "a"), "span", "signin-failed")],
+                             ["Could not cancel: no sign-in is running"])
+
+    def test_the_panel_never_draws_peach(self) -> None:
+        nolink = {"respond": {"status": 200, "text": "{\"attempt\":7,\"link\":null}"}}
+        (snap,) = render([
+            START, {"frame": QUIET}, {"click": "cap"}, nolink, {"click": "acct-signin"}, nolink,
+            {"frame": {**QUIET, "signin_runs": {"a": {"state": "running", "at": None, "attempt": 7}}}},
+            {"snapshot": True}])
+        a = row_of(snap, "a")
+        (start,) = in_row(a, "button", "signin-start")
+        self.assertIn("acct-signin", start["cls"].split())
+        self.assertEqual(len(in_row(a, "button", "signin-cancel")), 1)
+        for n in nodes(panel(snap)):
+            self.assertFalse({"primary", "needs"} & set(n["cls"].split()), n["cls"])
+        (style,) = re.findall(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"))
+        for selector, decls in style_rules(style):
+            if ".acct-" in selector or "#accounts" in selector:
+                for value in decls.values():
+                    self.assertNotIn("var(--peach)", value, selector)
+
+    def test_add_account_sits_in_the_panel(self) -> None:
+        html = PAGE.read_text(encoding="utf-8")
+        section = html.index('id="accounts"')
+        self.assertLess(section, html.index('id="account-add"'))
+        self.assertLess(html.index('id="account-add"'), html.index("</section>", section))
+        top_in = html[html.index('<div class="top-in">'):html.index('<section class="acct-panel"')]
+        self.assertNotIn('id="account-add"', top_in)
+        before = {**frame([]), "capacity": real_capacity(NOW_S, [
+            {"name": "work", "week": .5, "signin": ("signed_in", NOW_S + 9 * 86400)}])}
+        after = {**frame([]), "capacity": real_capacity(NOW_S, [
+            {"name": "work", "week": .5, "signin": ("signed_in", NOW_S + 9 * 86400)},
+            {"name": "fresh", "signin": ("signed_out", None), "ever": False}]),
+            "signin_runs": RUNNING}
+        (snap,) = render([
+            START, {"frame": before}, {"click": "cap"}, {"click": "account-add-open"},
+            {"type": {"class": "account-name", "text": "fresh"}},
+            {"respond": {"status": 200, "text": ADDED}}, {"click": "account-add-send"},
+            {"frame": after}, {"snapshot": True}])
+        self.assertIs(snap["accounts"]["hidden"], False)
+        fresh = row_of(snap, "fresh")
+        self.assertEqual([full(n) for n in in_row(fresh, "p", "signin-elsewhere")],
+                         ["Finish this sign-in in Add account below."])
+        self.assertEqual(in_row(fresh, "input", "signin-code"), [])
+
+    def test_the_panel_holds_every_account_control_and_detail(self) -> None:
+        shown = {**view([]), "capacity": real_capacity(NOW_S, [
+            {"name": "a", "week": .35, "five": .6, "week_reset": NOW_S + 4 * 86400,
+             "five_reset": NOW_S + 3600, "signin": ("signed_in", NOW_S + 12 * 86400)},
+            {"name": "b", "signin": ("signed_out", None), "ever": True}],
+            excluded=("b",), pinned="a"), "profile_sessions": {"a": 1, "b": 0}}
+        snap = opened(shown)
+        a, b = rows(snap)
+        def labels(r: dict) -> list:
+            return [full(n) for n in in_row(r, "div", "acct-act")[0]["children"]
+                    if n["tag"] == "button"]
+
+        self.assertEqual(labels(a), ["Exclude", "Unpin", "Sign in again", "Remove"])
+        self.assertEqual(labels(b), ["Include", "Pin", "Sign in again", "Remove"])
+        shown_details = details(a)
+        for want in ("65% of the week left", "40% of 5 hours", "signed in, ends in 12 days"):
+            self.assertIn(want, shown_details)
+        self.assertTrue(any(d.startswith("resets ") for d in shown_details), shown_details)
+        (add,) = [n for n in nodes(snap["account_add"]) if has_class(n, "account-add-open")]
+        self.assertEqual(full(add), "Add account")
+        self.assertEqual(
+            [n for n in nodes(snap["capacity"])[1:] if n["tag"] in ("button", "input", "a")], [])
+        (live,) = render([START, {"frame": QUIET}, {"click": "cap"}, *OPEN_A[1:], {"snapshot": True}])
+        a = row_of(live, "a")
+        for tag, cls in (("a", "signin-link"), ("input", "signin-code"),
+                         ("button", "signin-send"), ("button", "signin-cancel")):
+            self.assertEqual(len(in_row(a, tag, cls)), 1, cls)
+
+    def test_every_panel_control_posts_a_guarded_page_write(self) -> None:
+        from agent_tools.console import service
+        two = {**view([]), "capacity": real_capacity(NOW_S, [
+            {"name": "a", "week": .35, "five": .6, "week_reset": NOW_S + 4 * 86400,
+             "five_reset": NOW_S + 3600, "signin": ("signed_in", NOW_S + 12 * 86400)},
+            {"name": "b", "signin": ("signed_out", None), "ever": True}],
+            excluded=("b",), pinned="a"), "profile_sessions": {"a": 1, "b": 0}}
+        (one,) = render([
+            START, {"frame": two}, {"click": "cap"}, {"click": "acct-toggle"}, {"click": "acct-pin"},
+            {"click": "acct-signin"}, {"click": "acct-remove"},
+            {"type": {"class": "acct-remove-name", "text": "a"}}, {"click": "acct-remove-send"},
+            {"click": "account-add-open"}, {"type": {"class": "account-name", "text": "fresh"}},
+            {"click": "account-add-send"}, {"snapshot": True}])
+        (second,) = render([
+            START, {"frame": QUIET}, {"click": "cap"}, {"respond": {"status": 200, "text": ANSWER}},
+            {"click": "acct-signin"}, {"type": {"class": "signin-code", "text": "ab#C-1"}},
+            {"click": "signin-send"}, {"click": "signin-cancel"},
+            {"respond": {"status": 200, "text": "{\"attempt\":4,\"link\":\"https://claude.example/b?s=2\"}"}},
+            {"frame": {**QUIET, "signin_runs": {
+                "a": {"state": "running", "at": None, "attempt": 7},
+                "b": {"state": "running", "at": None, "attempt": 4}}}},
+            {"snapshot": True}])
+        urls = set()
+        for snap in (one, second):
+            for post in snap["posts"]:
+                if post["url"] == "/api/looked":
+                    continue
+                urls.add(post["url"])
+                self.assertIn(post["url"], service.PAGE_WRITES)
+                self.assertEqual(post["method"], "POST")
+                self.assertEqual(post["headers"], GUARDED)
+        self.assertEqual([(p["url"], json.loads(p["body"])) for p in second["posts"]
+                          if p["url"] != "/api/looked"], [
+            ("/api/signin", {"profile": "a"}),
+            ("/api/signin-code", {"profile": "a", "code": "ab#C-1"}),
+            ("/api/signin-cancel", {"profile": "a"}),
+            ("/api/signin-link", {"profile": "b"})])
+        (link,) = in_row(row_of(second, "b"), "a", "signin-link")
+        self.assertEqual(link["href"], "https://claude.example/b?s=2")
+        self.assertEqual(urls, {"/api/exclusion", "/api/pin", "/api/signin", "/api/account-remove",
+                                "/api/account-add", "/api/signin-code", "/api/signin-cancel",
+                                "/api/signin-link"})
