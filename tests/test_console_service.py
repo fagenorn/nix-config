@@ -24,7 +24,7 @@ from unittest import mock
 
 from agent_tools.console import console as console_module
 from agent_tools.console import capacity, deliveries, digest, probe, service, sessions, signin, sprints
-from agent_tools.console import view
+from agent_tools.console import signin_run, view
 from agent_tools.console.event_log import EventLog
 from agent_tools.console.write_guard import TokenError
 from agent_tools.console.view import derive_view, encode_view, project_states
@@ -1292,6 +1292,18 @@ class SigninServiceTest(Case):
                 contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(console_module.main([]), 1)
         self.assertIs(kwargs["signin_reader"], signin.reader_for(sys.platform))
+
+    def test_the_console_gives_the_service_the_linux_sign_in_runs(self):
+        kwargs = {}
+
+        def fake(*args, **given):
+            kwargs.update(given)
+            raise TokenError("x")
+
+        with mock.patch.object(console_module.service, "ConsoleService", fake), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(console_module.main([]), 1)
+        self.assertIs(kwargs["signin_runs"], signin_run.runs_for(sys.platform))
 
     def test_a_reader_without_a_prober_reads_on_the_loop_thread(self):
         event = threading.Event()

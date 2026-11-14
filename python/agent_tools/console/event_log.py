@@ -56,6 +56,10 @@ valid when its `profile` is a non-empty JSON string and its `excluded` a JSON bo
 is not one), the rule `exclusion.excluded_profiles` folds by, so a newer invalid row never displaces
 the row in force and the folded set is the same before and after a pass.
 
+Two more rows record the owner's sign-in from the page (#1026): `SIGNIN_ACTED` (`signin.acted`, one per
+accepted owner action) and `SIGNIN_ENDED` (`signin.ended`, one per finished client). Neither is in
+`KEPT_KINDS`, and neither carries a link or a code.
+
 Another is kept in part (#1011): a session's profile is assigned by its `SESSION_SEEN` and
 `SESSION_PROFILE` rows, and a profile's last use is read from the session's later `SESSION_HOOK` rows
 (`manager.profile_use`). The pass therefore leaves, for a session with a `SESSION_HOOK` row inside the
@@ -114,6 +118,8 @@ MANAGER_STOPPED = "manager.stopped"
 MANAGER_STOP_FAILED = "manager.stop_failed"
 SIGNIN_READING = "signin.reading"
 PROFILE_EXCLUSION = "profile.exclusion"
+SIGNIN_ACTED = "signin.acted"
+SIGNIN_ENDED = "signin.ended"
 SESSION_HOOK = "session.hook"
 SESSION_SEEN = "session.seen"
 SESSION_PROFILE = "session.profile"

@@ -41,7 +41,8 @@
 // when unset), which is where a time element keeps its exact local time, and
 // its placeholder attribute (null when unset) and its inline style.width (null
 // when unset; Elem.style is a plain object) and its aria-label attribute as
-// label (null when unset). {close: "<details key>"} sets that fold's open to
+// label (null when unset) and, on an A element, its href (null when unset or
+// empty). {close: "<details key>"} sets that fold's open to
 // false (none throws), the mirror of open. An optional "in": "<details key>" on
 // a click, type, append, input, select or focus_on step limits the lookup to the
 // first attached element with the class inside that fold's subtree (an unknown
@@ -361,6 +362,7 @@ function node(n) {
     key: n.dataset.key === undefined ? null : n.dataset.key,
     title: n.attributes.title === undefined ? null : n.attributes.title,
     placeholder: n.attributes.placeholder === undefined ? null : n.attributes.placeholder,
+    href: n.tagName === "A" && n.href ? n.href : null,
     label: n.attributes["aria-label"] === undefined ? null : n.attributes["aria-label"],
     width: n.style.width === undefined ? null : n.style.width,
     open: n.open,

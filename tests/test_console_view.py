@@ -1750,15 +1750,15 @@ def signin_capacity(*entries):
             "profiles": list(entries)}
 
 
-def signin_item(profile, signin):
+def signin_item(profile, signin, run=None):
     return {"type": "inbox_item", "reason": "signin", "key": f"signin/{profile}",
             "project_id": None, "profile": profile, "headline": f"Sign in to {profile} again",
-            "command": f"CLAUDE_ACCOUNT={profile} claude", "signin": signin, "answered": False,
+            "action": "signin", "run": run, "signin": signin, "answered": False,
             "waiting_since": signin["since"]}
 
 
 class SigninViewTest(unittest.TestCase):
-    def test_each_asking_profile_is_one_inbox_item_until_a_fresh_sign_in(self):
+    def test_each_asking_profile_is_one_inbox_item_with_the_sign_in_action(self):
         spare = signin_entry("spare", "signed_out", True, since="t1")
         work = signin_entry("work", "signed_in", True, since="2026-11-10T09:00:00+00:00",
                             days_left=2, ends_at="2026-11-13T09:00:00+00:00")
@@ -1771,12 +1771,27 @@ class SigninViewTest(unittest.TestCase):
         self.assertEqual(shown["statement"]["headline"], "2 things need you")
         self.assertEqual(shown["statement"]["sentence"], view.SIGNIN_SENTENCE)
         self.assertEqual(view.SIGNIN_SENTENCE,
-                         "Sign in again in a terminal with the command shown.")
+                         "Press Sign in, then finish signing in in your browser.")
+        self.assertNotIn("CLAUDE_ACCOUNT", json.dumps(shown))
         fresh = signin_entry("work", "signed_in", False, days_left=30,
                              ends_at="2026-12-13T09:00:00+00:00")
         shown = derive_view([state("p00", 1)], capacity=signin_capacity(home, fresh))
         self.assertEqual(shown["inbox"]["open"], [])
         self.assertEqual(shown["statement"]["headline"], "Nothing needs you")
+
+    def test_an_items_run_is_the_profiles_sign_in_run(self):
+        spare = signin_entry("spare", "signed_out", True, since="t1")
+        home = signin_entry("home", "signed_in", False, days_left=20,
+                            ends_at="2026-12-03T09:00:00+00:00")
+        runs = {"spare": {"state": "timed_out", "at": "t2", "attempt": 4},
+                "home": {"state": "signed_in", "at": "t3", "attempt": 2}}
+        shown = derive_view([state("p00", 1)], capacity=signin_capacity(home, spare),
+                            signin_runs=runs)
+        self.assertEqual(shown["inbox"]["open"], [signin_item(
+            "spare", spare["signin"], {"state": "timed_out", "at": "t2", "attempt": 4})])
+        self.assertEqual(shown["signin_runs"], runs)
+        bare = derive_view([state("p00", 1)], capacity=signin_capacity(home, spare))
+        self.assertEqual(bare["signin_runs"], {})
 
     def test_sign_in_items_follow_progress_and_precede_questions(self):
         ask = signin_entry("spare", "signed_out", True, since="t1")

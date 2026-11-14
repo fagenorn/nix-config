@@ -437,6 +437,27 @@ class DocsTreeTest(unittest.TestCase):
         entry = context[context.index("**Excluded profile**:"):].split("\n\n")[0]
         self.assertIn("ADR-console-023", entry)
 
+    def test_the_console_page_signin_decision_is_recorded(self):
+        path = "docs/areas/console/adr/024-the-owner-signs-a-profile-in-from-the-page.md"
+        first = (REPO_ROOT / path).read_text().splitlines()[0]
+        self.assertEqual(first, "# ADR-console-024 — The owner signs a profile in from the page")
+        adr = self.doc(path)
+        for needle in ("POST /api/signin", "POST /api/signin-code", "POST /api/signin-cancel",
+                       "claude-account run auth login", "BROWSER", "600", "signin.acted",
+                       "signin.ended", "attempt", "ADR-console-002", "ADR-console-008",
+                       "ADR-console-022", "#1026", "#894"):
+            self.assertIn(needle, adr)
+        for older in ("docs/areas/console/adr/002-the-desk-page-design-rules.md",
+                      "docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md",
+                      "docs/areas/console/adr/022-a-profiles-sign-in-is-read-from-the-clients-status-command.md",
+                      "docs/areas/console/CONTEXT.md"):
+            self.assertIn("ADR-console-024", self.doc(older))
+        self.assertNotIn("the command to run in a terminal", self.doc(
+            "docs/areas/console/adr/002-the-desk-page-design-rules.md"))
+        context = self.doc("docs/areas/console/CONTEXT.md")
+        self.assertIn("Sign in action", context)
+        self.assertNotIn("gives the command to sign in again", context)
+
     def test_the_launch_choice_decision_is_recorded(self):
         path = "docs/areas/hosts/adr/008-claude-starts-under-the-consoles-profile-choice.md"
         first = (REPO_ROOT / path).read_text().splitlines()[0]

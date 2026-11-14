@@ -9646,11 +9646,16 @@ class OwnRedOutsideLockTest(unittest.TestCase):
         self.assertIn(read, text)
         for needle in ("only when an open PR already existed and was reused (a PR this step opened has no finished check, so skip this read)",
                        f"so the read counts only when its headRefOid is {SHA}",
-                       "merge-base --is-ancestor origin/dev HEAD succeeds: a head behind its base gets new checks after the sync under the lock",
-                       "a cancelled check does not count), run no lock command and wait for no check",
+                       "merge-base --is-ancestor origin/dev HEAD succeeds). When it is not, the head is behind its base and gets new checks "
+                       "once it is synced, so the failure counts only while another landing holds the lock and this one would wait",
+                       f"forge-claim land status --repo owner/repo --branch dev --sha {SHA} (a Bash timeout of 20 minutes), and it counts "
+                       f"only on the verdict held_by with a lock_sha other than {SHA}",
+                       "a cancelled check does not count), see whether origin/dev is an ancestor of HEAD",
+                       "When the failure counts, run no other lock command and wait for no check",
+                       "and behind (true when the head is behind its base, else false)",
                        "count only the newest run of each check name, the one with the latest startedAt, so a failed attempt whose re-run passed does not count",
-                       "In every other case (another head, a head behind its base, no failed check, checks still running, none reported, "
-                       "or the read failed) return own_red null and go on."):
+                       "In every other case (another head, a head behind its base while no other landing holds the lock, no failed check, "
+                       "checks still running, none reported, or a read failed) return own_red null and go on."):
             self.assertIn(needle, text)
         self.assertLess(text.index("merge-tree --write-tree"), text.index(read))
         self.assertLess(text.index(read), text.index(f"--sha {SHA} --wait\n"))
@@ -9801,6 +9806,188 @@ class OwnRedOutsideLockTest(unittest.TestCase):
                 result, calls = run(patch={"pr": {"own_red": own}})
                 self.assertEqual([(c["label"], c["prompt"]) for c in calls], base)
                 self.assertEqual(result["stage"], "done")
+
+
+
+class WaitByPlaceTest(unittest.TestCase):
+    """#1018: the retries of a lock wait are spent only by a wait that made no progress. A wait that ended first in line, or at a
+    better place than the wait before it, is made again for nothing, and a ceiling of six hours bounds the waits in all."""
+
+    @staticmethod
+    def ran_out(position, **lock):
+        return {"lock": dict({"verdict": "land-contended", "lock_sha": "b" * 40, "waited_s": 3000, "waited_on": [7],
+                              "position": position, "ahead": [] if position == 1 else [7]}, **lock)}
+
+    def waits(self, first, *later):
+        """The run whose pr call and whose land-lock steps answer these places; the step after the last takes the lock."""
+        result, calls = run(replies={f"land-lock-{k}": self.ran_out(place) for k, place in enumerate(later, 1)},
+                            patch={"pr": dict(self.ran_out(first), checks=None)})
+        return result["stage"], [label for label in labels(calls) if label.startswith("land-lock-")]
+
+    def test_a_wait_that_ends_first_in_line_never_stops_land_contended(self):
+        self.assertEqual(self.waits(2, 1, 1, 1, 1), ("done", [f"land-lock-{k}" for k in range(1, 6)]))
+
+    def test_a_wait_whose_place_improved_spends_no_retry(self):
+        self.assertEqual(self.waits(5, 4, 3, 2, 2), ("done", [f"land-lock-{k}" for k in range(1, 6)]))
+
+    def test_a_wait_with_no_progress_still_stops_land_contended(self):
+        for name, places in (("the same place", (2, 2, 2, 2)), ("a worse place", (2, 3, 4, 5)), ("no place read", (None,) * 4),
+                             ("one better place, then none", (3, 2, 2, 2, 2))):
+            with self.subTest(name):
+                self.assertEqual(self.waits(*places), ("land-contended", [f"land-lock-{k}" for k in range(1, len(places))]))
+
+    def test_the_waits_in_all_stop_at_the_ceiling(self):
+        self.assertIn("const LAND_WAIT_MAX_S = 6 * 3600\nconst LAND_WAIT_CALL_S = 3000\n", PROGRAM.read_text(encoding="utf-8"))
+        self.assertEqual(self.waits(*[1] * 12), ("land-contended", [f"land-lock-{k}" for k in range(1, 7)]))  # 7 waits of 50 minutes
+
+    def test_a_reply_that_under_reports_its_wait_does_not_lift_the_ceiling(self):
+        for waited in (0, 1, -5, None):
+            with self.subTest(waited_s=waited):
+                lock = {"lock": {"verdict": "land-contended", "position": 1, "waited_s": waited}}
+                result, calls = run(replies={f"land-lock-{k}": lock for k in range(1, 12)}, patch={"pr": dict(lock, checks=None)})
+                self.assertEqual(result["stage"], "land-contended")
+                self.assertEqual(len([label for label in labels(calls) if label.startswith("land-lock-")]), 6)
+
+    def test_a_retake_judges_each_wait_by_its_own_reply_and_shares_the_ceiling(self):
+        ship = ConflictedSyncOutsideLockTest().ship
+        relocks = lambda out: [label for label in labels(out["calls"]) if label.startswith("land-relock-")]  # noqa: E731
+        # The checks call's wait ended first in line; the waits after it end at place 3 and spend the retries.
+        out = ship(replies={"checks-2": self.ran_out(1), **{f"land-relock-{k}": self.ran_out(3) for k in range(1, 10)}})
+        self.assertEqual((out["result"]["stage"], relocks(out)), ("land-contended", [f"land-relock-{k}" for k in range(1, 5)]))
+        # First in line for ever: seven waits of 50 minutes in all, the checks call's included.
+        out = ship(replies={"checks-2": self.ran_out(1), **{f"land-relock-{k}": self.ran_out(1) for k in range(1, 10)}})
+        self.assertEqual((out["result"]["stage"], relocks(out)), ("land-contended", [f"land-relock-{k}" for k in range(1, 7)]))
+
+    def test_the_lock_replies_carry_the_place(self):
+        _, calls = run(patch={"pr": dict(self.ran_out(1), checks=None)})
+        for label in ("pr", "land-lock-1"):
+            with self.subTest(label=label):
+                self.assertIn("waited_s and waited_on from its output, and position and ahead when it prints them.", prompt(calls, label))
+                lock = member(schema_of(calls, label), "lock")["properties"]
+                self.assertEqual((lock["position"], lock["ahead"]),
+                                 ({"anyOf": [{"type": "integer"}, {"type": "null"}]}, {"type": "array", "items": {"type": "integer"}}))
+
+
+class BehindRedBeforeLockTest(unittest.TestCase):
+    """#1018: a check that had failed at a head behind its base, read while another landing holds the lock, is not left for the
+    sync under the lock: the branch is brought up to date before the lock is asked for, the checks of the new head are waited for
+    with no lock, and a failure that survives goes to the fix wave before the lock, as any check that had failed at the head."""
+
+    PRE = {"own_red": {"head": SHA, "failing": ["shard-3"], "details": "https://ci/run/7", "behind": True}, "lock": None, "checks": None}
+    GREEN = {"state": "passed", "passed": ["ci"], "head": MERGE, "required": ["ci-tests"]}
+    SYNCED = {"merge_commit": MERGE}
+    UP_TO_DATE = "the branch was brought up to date with dev before the lock was asked for"
+
+    @staticmethod
+    def shipped(out):
+        names = labels(out["calls"])
+        return names[names.index("pr"):]
+
+    @staticmethod
+    def releases(calls):
+        return [sha for c in calls for sha in re.findall(r"forge-claim land release --repo owner/repo --branch dev --sha ([0-9a-f]+)", c["prompt"])]
+
+    def test_the_branch_is_synced_and_polled_before_the_lock_and_a_green_head_takes_it(self):
+        out = run_out(replies={"checks-0": self.GREEN, "checks-1": self.GREEN}, patch={"pr": self.PRE, "sync-1": self.SYNCED})
+        result, calls = out["result"], out["calls"]
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual(self.shipped(out), ["pr", "sync-1", "checks-0", "land-push-1", "checks-1", "merge", "hold", "close-out"])
+        # The usual sync step and a poll behind its own renew, which pushes the merge; neither runs a lock command.
+        self.assertIn("git -C /r/.wt/w-issue-9-x merge origin/dev", prompt(calls, "sync-1"))
+        poll = prompt(calls, "checks-0")
+        self.assertIn("forge-claim renew", poll)
+        self.assertIn("if the local branch is ahead of origin/issue-9-x, push it", poll)
+        for label in ("sync-1", "checks-0"):
+            self.assertNotIn("forge-claim land", prompt(calls, label))
+        checks = prompt(calls, "checks-1")
+        self.assertIn(f"Take the cross-host landing lock of the branch dev for PR #42 at the head {MERGE}; {self.UP_TO_DATE}", checks)
+        self.assertIn(f"--sha {MERGE} --wait\n", checks)
+        self.assertEqual(self.releases(calls), [MERGE])
+        self.assertIn(f"--match-head-commit {MERGE}", prompt(calls, "merge"))
+        self.assertIn("shard-3 had failed at a head behind dev and the land lock is held; "
+                      "bringing the branch up to date before the lock is asked for", out["logs"])
+
+    def test_a_failure_that_survives_the_sync_is_fixed_before_the_lock(self):
+        red = {"state": "failed", "head": MERGE, "failing": ["shard-3"], "details": "shard-3 log"}
+        out = run_out(replies={"checks-0": red, "checks-1": dict(self.GREEN, head=FIX)},
+                      patch={"pr": self.PRE, "sync-1": self.SYNCED, "fix-ci": {"start_head": MERGE, "commit": FIX}})
+        calls = out["calls"]
+        self.assertEqual(out["result"]["stage"], "done")
+        self.assertEqual(self.shipped(out), ["pr", "sync-1", "checks-0", "fix-ci", "fix-ci-review", "land-push-1", "checks-1",
+                                             "merge", "hold", "close-out"])
+        fix = prompt(calls, "fix-ci")
+        self.assertIn('failed at ' + MERGE + ': ["shard-3"]. Log tail: shard-3 log.', fix)
+        self.assertIn("The landing lock of the branch dev is not held and was not asked for yet: run no forge-claim command.", fix)
+        self.assertIn(f"at the head {FIX}; a failing check of the branch was fixed before the lock was asked for", prompt(calls, "checks-1"))
+        self.assertEqual(self.releases(calls), [FIX])
+        # One fix wave per delivery, as ever: a check still red under the lock stops it.
+        again = run_out(replies={"checks-0": red, "checks-1": dict(RED, head=FIX)},
+                        patch={"pr": self.PRE, "sync-1": self.SYNCED, "fix-ci": {"start_head": MERGE, "commit": FIX}})
+        self.assertEqual(again["result"]["stage"], "checks")
+
+    def test_that_sync_spends_no_sync_of_the_landing(self):
+        """Behind twice more under the lock: both syncs of the contention budget are still there."""
+        m2, m3 = "e" * 40, "9" * 40
+        out = run_out(replies={"checks-0": self.GREEN, "checks-1": {"state": "behind", "head": MERGE},
+                               "checks-2": {"state": "behind", "head": m2}, "checks-3": dict(self.GREEN, head=m3)},
+                      patch={"pr": self.PRE, "sync-1": self.SYNCED, "sync-2": {"merge_commit": m2}, "sync-3": {"merge_commit": m3}})
+        self.assertEqual(out["result"]["stage"], "done")
+        self.assertEqual([name for name in self.shipped(out) if name.startswith("sync-")], ["sync-1", "sync-2", "sync-3"])
+
+    def test_a_red_check_under_the_lock_after_a_green_sync_before_it_is_still_the_branchs_own(self):
+        """No sync has changed the head under the lock, so the fix step releases the lock before it edits (#1001)."""
+        out = run_out(replies={"checks-0": self.GREEN, "checks-1": dict(RED, head=MERGE), "checks-2": dict(self.GREEN, head=FIX)},
+                      patch={"pr": self.PRE, "sync-1": self.SYNCED, "fix-ci": {"start_head": MERGE, "commit": FIX, "lock_released": True}})
+        self.assertEqual(out["result"]["stage"], "done")
+        fix = prompt(out["calls"], "fix-ci")
+        self.assertIn(f"The landing lock of the branch dev is held for this pull request at {MERGE}", fix)
+        self.assertIn("lock_released", schema_of(out["calls"], "fix-ci")["properties"])
+        self.assertIn("it was released while a failing check of the branch was fixed", prompt(out["calls"], "checks-2"))
+
+    def test_a_poll_that_is_behind_is_no_red_poll_whatever_it_lists_as_failing(self):
+        out = run_out(replies={"checks-0": {"state": "behind", "head": MERGE, "failing": ["shard-3"]}, "checks-1": self.GREEN},
+                      patch={"pr": self.PRE, "sync-1": self.SYNCED})
+        self.assertEqual(out["result"]["stage"], "done")
+        self.assertEqual(self.shipped(out), ["pr", "sync-1", "checks-0", "land-push-1", "checks-1", "merge", "hold", "close-out"])
+        self.assertIn(self.UP_TO_DATE, prompt(out["calls"], "checks-1"))
+
+    def test_a_conflict_met_by_that_sync_is_resolved_outside_the_lock_and_said_so(self):
+        out = run_out(replies={"checks-0": self.GREEN, "checks-1": self.GREEN},
+                      patch={"pr": self.PRE, "sync-1": ABORTED, "sync-resolve-1": {"merge_commit": MERGE}})
+        self.assertEqual(out["result"]["stage"], "done")
+        self.assertEqual(self.shipped(out), ["pr", "sync-1", "sync-resolve-1", "sync-review-1", "checks-0", "land-push-1", "checks-1",
+                                             "merge", "hold", "close-out"])
+        checks = prompt(out["calls"], "checks-1")
+        self.assertIn(f"at the head {MERGE}; a conflict with dev was resolved before the lock was asked for", checks)
+        self.assertNotIn(self.UP_TO_DATE, checks)
+        self.assertEqual(self.releases(out["calls"]), [MERGE])
+        # A stop inside that resolution holds nothing but may release the verified head once, as before any first take.
+        stopped = run_out(patch={"pr": self.PRE, "sync-1": ABORTED, "sync-resolve-1": {"status": "blocked", "notes": "cannot resolve"}})
+        self.assertEqual(stopped["result"]["stage"], "sync")
+        self.assertEqual(self.shipped(stopped), ["pr", "sync-1", "sync-resolve-1", "land-unlock"])
+        self.assertEqual(self.releases(stopped["calls"]), [SHA])
+
+    def test_a_stop_before_the_lock_releases_the_verified_head_once(self):
+        stops = {"the sync is blocked": ({}, {"sync-1": {"status": "blocked", "notes": "dirty tree"}}, "sync"),
+                 "the poll is lost": ({"checks-0": None}, {"sync-1": self.SYNCED}, "checks"),
+                 "the poll names another head": ({"checks-0": dict(self.GREEN, head=FIX)}, {"sync-1": self.SYNCED}, "head-moved")}
+        for name, (replies, patch, stage) in stops.items():
+            with self.subTest(name):
+                out = run_out(replies=replies, patch=dict({"pr": self.PRE}, **patch))
+                self.assertEqual(out["result"]["stage"], stage)
+                self.assertEqual(self.shipped(out)[-1], "land-unlock")
+                self.assertEqual(self.releases(out["calls"]), [SHA])
+                self.assertNotIn("--wait\n", "".join(c["prompt"] for c in out["calls"] if c["label"] != "pr"))
+
+    def test_a_head_that_is_not_behind_or_a_reply_with_a_lock_verdict_is_not_synced_early(self):
+        own = dict(self.PRE["own_red"], behind=False)
+        out = run_out(replies={"checks-1": dict(self.GREEN, head=FIX)},
+                      patch={"pr": dict(self.PRE, own_red=own), "fix-ci": {"start_head": SHA, "commit": FIX}})
+        self.assertEqual(self.shipped(out), ["pr", "fix-ci", "fix-ci-review", "land-push-1", "checks-1", "merge", "hold", "close-out"])
+        base = [(c["label"], c["prompt"]) for c in run()[1]]
+        result, calls = run(patch={"pr": {"own_red": self.PRE["own_red"]}})
+        self.assertEqual([(c["label"], c["prompt"]) for c in calls], base)
+        self.assertEqual(member(schema_of(calls, "pr"), "own_red")["properties"]["behind"], {"type": "boolean"})
 
 
 REVIEWERS = ("reviewer", "reviewer-lite")

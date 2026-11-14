@@ -1811,6 +1811,90 @@ class QueueTest(Base):
         self.assertEqual([op for op, _ in self.queue_calls()], ["create", "create", "delete", "delete"])
         self.assertEqual(self.world.refs(), {REF: A, self.others[13]: D})
 
+    def test_the_first_in_line_takes_a_lock_its_own_poll_saw_released(self):
+        """Issue 1018: the whole poll at 120 finds the lock closed (12 merged) and its takeover
+        loses to 12's release, so the poll ends having read the lock free. The reads between
+        two polls compare with that, see no change, and a waiter behind takes the lock once
+        its grace ends; so the first in line polls again at once instead."""
+        real_cas = fm.cas_ref
+
+        def cas(slug, node, ref, before, after):
+            if ref == REF:
+                self.world.set_ref(REF, None)  # the holder's release lands first
+            return real_cas(slug, node, ref, before, after)
+
+        def forge(elapsed):
+            if elapsed == 120:
+                self.pulls(B, pull(12, state="closed", merged=True, sha=B))
+        clock = self.clock(forge)
+        self.register(13, 10, 0)  # a younger waiter: it would take the lock at its grace's end
+        with mock.patch.object(fm, "cas_ref", cas):
+            code, out = self.wait(clock)
+        self.assertEqual((code, out["verdict"], out["took_over"], out["position"], out["ahead"]),
+                         (0, "acquired", None, 1, []))
+        self.assertLess(out["waited_s"] - 120, land_lock.FREE_GRACE)
+        self.assertEqual(out["waited_s"], 120 + land_lock.FAST_POLL)
+        self.assertEqual(self.world.refs()[REF], A)
+
+    def test_one_failed_poll_does_not_blind_the_first_in_line(self):
+        """Issue 1018: the poll that the release at 140 starts fails once (a transport error, or
+        a swap refused on a lagging read). The first in line keeps reading the lock ref and
+        takes the lock at the next read, before the grace of a waiter behind ends; while the
+        forge is down altogether the failed polls keep their 120-second rate."""
+        real_create = fm.create_ref
+        failed = []
+
+        def create(slug, ref, sha):
+            if ref == REF and not failed:
+                failed.append(True)
+                raise fm.ForgeError("gh_failed", "HTTP 502")
+            return real_create(slug, ref, sha)
+        clock = self.clock(lambda elapsed: self.world.set_ref(REF, None) if elapsed == 140 else None)
+        self.register(13, 10, 0)
+        with mock.patch.object(fm, "create_ref", create):
+            code, out = self.wait(clock)
+        self.assertEqual((code, out["verdict"], out["waited_s"], out["position"]), (0, "acquired", 160, 1))
+        self.assertLess(out["waited_s"] - 140, land_lock.FREE_GRACE)
+        # The forge goes down after the first poll: the read at 20 fails and starts a poll, as before, and from
+        # then on the failed reads start none, so the three failed polls are 120 seconds apart.
+        self.world.reset()
+        self.prepare(B)
+        real_pulls, real_read = fm.commit_pulls, fm.read_ref
+        polls = []
+
+        def pulls(slug, sha):
+            if sha == A:
+                polls.append(clock.now - clock.start)
+            if polls[-1] > 0:
+                raise fm.ForgeError("gh_failed", "HTTP 502")
+            return real_pulls(slug, sha)
+
+        def read(slug, ref):
+            if clock.now > clock.start:
+                raise fm.ForgeError("gh_failed", "HTTP 502")
+            return real_read(slug, ref)
+        clock = self.clock()
+        with mock.patch.object(fm, "commit_pulls", pulls), mock.patch.object(fm, "read_ref", read):
+            code, out = self.wait(clock)
+        self.assertEqual((code, out["verdict"], out["error"], polls), (1, "error", "gh_failed", [0, 20, 140, 260]))
+
+    def test_a_free_lock_that_cannot_be_written_gets_one_fast_retry_then_the_poll_rate(self):
+        """Issue 1018: the lock is free from 40 and every create of it fails. The first in line
+        polls at 40, once more at its next read, and then at the 120-second rate, so the wait
+        does not spend its three failed polls within a minute."""
+        real_create = fm.create_ref
+        creates = []
+
+        def create(slug, ref, sha):
+            if ref == REF:
+                creates.append(clock.now - clock.start)
+                raise fm.ForgeError("gh_failed", "HTTP 502")
+            return real_create(slug, ref, sha)
+        clock = self.clock(lambda elapsed: self.world.set_ref(REF, None) if elapsed == 40 else None)
+        with mock.patch.object(fm, "create_ref", create):
+            code, out = self.wait(clock)
+        self.assertEqual((code, out["verdict"], out["error"], creates), (1, "error", "gh_failed", [40, 60, 180]))
+
     def test_a_dead_first_waiter_is_skipped_after_the_bound(self):
         self.assertEqual(land_lock.QUEUE_LIVE, 390)
         self.register(13, -100, 0)  # never refreshed

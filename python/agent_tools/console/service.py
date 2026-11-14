@@ -61,8 +61,8 @@ route carries no token: it records observations and answers nothing (ADR-console
 
 A page write (`PAGE_WRITES`, today `POST /api/looked`, `POST /api/answer`, `POST /api/check-answer`,
 `POST /api/goal`, `POST /api/withdraw`, `POST /api/approve`, `POST /api/reply`,
-`POST /api/retry-manager`, `POST /api/message`, `POST /api/stop`, `POST /api/round-answer`,
-`POST /api/continue` and `POST /api/exclusion`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
+`POST /api/retry-manager`, `POST /api/message`, `POST /api/stop`, `POST /api/round-answer`, `POST /api/continue`, `POST /api/exclusion`, `POST /api/signin`,
+`POST /api/signin-code` and `POST /api/signin-cancel`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
 alone and goes through one guard, `_page_write`, whatever its route. After the loopback `Host`
 check and before any body is read, exactly one `Origin` header must equal `http://<Host>` (else
 403 `text/plain` `origin refused`) and exactly one `X-Console-Token` header must equal the
@@ -112,7 +112,22 @@ stop_failed <Type>: <message>` and 500 `stop failed`; success is an empty `204`.
 `MAX_ROUND_ANSWER_BYTES` (16384) and `sprints.parse_round_answer`: 400 `bad round answer`,
 `sprints.Refused` is one stderr line `console: round_answer_refused <reason>` and 409 with the
 reason, any other exception is `console: round_answer_failed <Type>: <message>` and 500 `round
-answer failed`; success is an empty `204`. The token is created once in
+answer failed`; success is an empty `204`. `POST /api/signin`, `POST /api/signin-code` and
+`POST /api/signin-cancel` (#1026) run the same checks with `MAX_SIGNIN_BYTES` (4096) and
+`signin_run.parse_profile_request` (start and cancel) or `signin_run.parse_code_request`: 400 `bad
+sign-in`, `bad code` or `bad cancel`; a refusal is one stderr line `console: signin_refused <profile>
+<reason>` and 409 with the reason (`sign-in is not available on this host` when the service has no
+runs, `unknown profile` for a profile that is not listed, `no sign-in is running for <profile>` for a
+code or a cancel with no live run); any other exception is `console: signin_failed <Type>` (never its
+message) and 500 `sign-in failed`. Each accepted write appends exactly one `signin.acted` row and no
+refusal appends one. The start route alone answers with a body: `200` `application/json`
+`{"attempt": <int>, "link": <string> | null}` (the attempt is the `seq` of the started row, and a
+start while a run is live answers that run's attempt and link and starts no second client), after
+waiting for the link outside the service's lock; a failed start is a `signin.acted` row with outcome
+`failed`, one stderr line `console: signin_start_failed <profile> <kind>` and 502 `the sign-in could
+not start: <kind>`. The code route answers `204`; a write the client's input refuses is `console:
+signin_code_failed <profile> <Type>` and 502 `the code could not be passed on`, appending nothing.
+The cancel route answers `204`. The token is created once in
 `page-token` beside the event log and reaches a client only inside `GET /`, where it replaces
 the slot in the page's `console-token` meta tag.
 
@@ -152,8 +167,8 @@ the prober has returned or raised. A round that escapes is one stderr line `cons
 <Type>: <message>`. `close()` sets the stop event every `probe.Probe` carries and joins the probe loop and
 the default dispatch's workers, so a probe still running is killed and reaped (`probe.py`'s Stop) before
 it returns, and a probe not yet started runs nothing. The service starts no client itself and opens no
-credential file: the prober
-and the sign-in reader are the only seams that run a subprocess.
+credential file: the prober,
+the sign-in reader and the sign-in runs are the only seams that run a subprocess.
 
 Sign-in (#1010, ADR-console-022): with a `signin_reader` (`signin.reader_for(sys.platform)` from
 `console.py`; none elsewhere than Linux) the same probe job, under the same in-flight mark, schedule and
@@ -166,6 +181,21 @@ signin_unknown <profile> <Type>` (never its message); both record `unknown`, so 
 and an unknown sign-in asks nothing. A stop set during the read records nothing, and a reader that
 fails never stops the prober of the same job. The published view and the manager's launch choice are
 given the sign-ins, so a signed-out profile is never launched; the quota wait reads the capacity without them.
+
+Sign-in runs (#1026): with `signin_runs` (`signin_run.runs_for(sys.platform)` from `console.py`, called
+once as `signin_runs(on_end=...)`; none elsewhere than Linux) the owner starts a profile's own client
+login from the page. Every status read of a profile takes a ticket first, and a reading is recorded
+only when no reading from a later-ticketed read was recorded before it, so a scheduled read that
+finishes after the exit read never overwrites it. When a run's client ends (on its watcher thread,
+nothing when `close()` ended it) the service reads the profile's status once at once, with the same
+reader and a stop-bound `probe.Probe`, and records the reading by the same rule; a failed end read is
+one stderr line `console: signin_end_read_failed <profile> <kind or Type>` and records nothing, so the
+profile's earlier reading, its open item and its Sign in action stay. The outcome is `timed_out` or
+`cancelled` as the run ended, and for an exit `signed_in` only when the exit status was 0 and that
+read says signed in, else `failed`. One `signin.ended` row, carrying the attempt of its start, is then
+appended and the view's `signin_runs` is `running` for a live run's attempt, else the folded end. A
+thread `SIGNIN_THREAD` calls `expire_signins()` every `SIGNIN_TICK_SECONDS` to enforce the run
+deadline. No row, stderr line, view or stream frame carries a link or a code.
 
 The manager's route, `POST /api/brief`, is not a page write: it carries no token and the sprint's
 secret takes the token's place. After the loopback `Host` check it runs the hook route's body checks
@@ -721,7 +751,7 @@ from urllib.parse import parse_qsl
 from agent_tools.claims import owner_actions
 from agent_tools.console import (
     answer, capacity, deliveries, digest, exclusion, idle, inbox, manager, nudge, probe, revive,
-    sessions, signin, sprints, write_guard)
+    sessions, signin, signin_run, sprints, write_guard)
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
     MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_STOP_FAILED,
@@ -776,9 +806,16 @@ MESSAGE_REPLY_PATH = "/api/message-reply"
 ASK_PATH = "/api/ask"
 ROUND_ANSWER_PATH = "/api/round-answer"
 CHECK_PATH = "/api/check-answer"
+SIGNIN_PATH = "/api/signin"
+SIGNIN_CODE_PATH = "/api/signin-code"
+SIGNIN_CANCEL_PATH = "/api/signin-cancel"
 PAGE_WRITES: frozenset[str] = frozenset({
     LOOKED_PATH, ANSWER_PATH, CHECK_PATH, GOAL_PATH, WITHDRAW_PATH, APPROVE_PATH, REPLY_PATH,
-    RETRY_PATH, MESSAGE_PATH, STOP_PATH, ROUND_ANSWER_PATH, CONTINUE_PATH, EXCLUSION_PATH})
+    RETRY_PATH, MESSAGE_PATH, STOP_PATH, ROUND_ANSWER_PATH, CONTINUE_PATH, EXCLUSION_PATH,
+    SIGNIN_PATH, SIGNIN_CODE_PATH, SIGNIN_CANCEL_PATH})
+MAX_SIGNIN_BYTES = 4096
+SIGNIN_THREAD = "console-signin-deadline"
+SIGNIN_TICK_SECONDS = 1.0
 MAX_ANSWER_BYTES = 4096
 MAX_GOAL_BYTES = 16384
 MAX_WITHDRAW_BYTES = 4096
@@ -1066,6 +1103,59 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             self._refuse(500, f"{name} failed")
             return False
         return True
+
+    def _signin_request(self, console: "ConsoleService", route: str) -> bool:
+        """Carry out a sign-in write; True when the shared empty 204 is still to be sent."""
+        name = {SIGNIN_PATH: "sign-in", SIGNIN_CODE_PATH: "code", SIGNIN_CANCEL_PATH: "cancel"}[route]
+        body = self._json_body(MAX_SIGNIN_BYTES)
+        if body is None:
+            return False
+        try:
+            if route == SIGNIN_CODE_PATH:
+                profile, code = signin_run.parse_code_request(body)
+            else:
+                profile = signin_run.parse_profile_request(body)
+        except ValueError:
+            self._refuse(400, f"bad {name}")
+            return False
+        answer = None
+        try:
+            if route == SIGNIN_PATH:
+                attempt, link = console.start_signin(profile)
+                answer = json.dumps({"attempt": attempt, "link": link}, sort_keys=True,
+                                    separators=(",", ":")).encode()
+            elif route == SIGNIN_CODE_PATH:
+                console.send_signin_code(profile, code)
+            else:
+                console.cancel_signin(profile)
+        except sprints.Refused as error:
+            print(f"console: signin_refused {profile} {error}", file=sys.stderr)
+            self._refuse(409, str(error))
+            return False
+        except signin_run.StartFailed as error:
+            print(f"console: signin_start_failed {profile} {error.kind}", file=sys.stderr)
+            self._refuse(502, f"the sign-in could not start: {error.kind}")
+            return False
+        except OSError as error:
+            if route != SIGNIN_CODE_PATH:
+                print(f"console: signin_failed {type(error).__name__}", file=sys.stderr)
+                self._refuse(500, "sign-in failed")
+                return False
+            print(f"console: signin_code_failed {profile} {type(error).__name__}", file=sys.stderr)
+            self._refuse(502, "the code could not be passed on")
+            return False
+        except Exception as error:
+            print(f"console: signin_failed {type(error).__name__}", file=sys.stderr)
+            self._refuse(500, "sign-in failed")
+            return False
+        if answer is None:
+            return True
+        try:
+            self._send(200, "application/json", answer, ("Connection", "close"))
+            self.wfile.flush()
+        except OSError:
+            pass
+        return False
 
     def _brief_request(self):
         """The manager's route: a brief sent with the sprint's secret; no token, no page."""
@@ -1460,6 +1550,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
             if not self._stop_request(console):
                 return
+        elif route in (SIGNIN_PATH, SIGNIN_CODE_PATH, SIGNIN_CANCEL_PATH):
+            self.close_connection = True
+            if not self._signin_request(console, route):
+                return
         else:
             if (self.headers.get("Content-Length", "0") != "0"
                     or self.headers.get("Transfer-Encoding") is not None):
@@ -1578,6 +1672,7 @@ class ConsoleService:
                  full_listing: Callable[[str, str], Collection[str]] | None = None,
                  prober: Callable[[probe.Probe], None] | None = None,
                  signin_reader: Callable[[probe.Probe], signin.Status] | None = None,
+                 signin_runs: Callable[..., signin_run.SignIns] | None = None,
                  probe_dispatch: Callable[[Callable[[], None]], None] | None = None,
                  probe_tick_seconds: float = PROBE_TICK_SECONDS,
                  choice_file: Path | None = None):
@@ -1626,6 +1721,12 @@ class ConsoleService:
         self._capacity = capacity.CapacityState({}, {})
         self._signins: dict[str, signin.SignIn] = {}
         self._excluded: frozenset[str] = frozenset()
+        self._signin_ends: dict[str, signin_run.Ended] = {}
+        self._signin_live: dict[str, int] = {}
+        self._signin_by_run: dict[int, tuple[str, int]] = {}
+        self._signin_tickets: dict[str, int] = {}
+        self._signin_recorded: dict[str, int] = {}
+        self._signin_thread: threading.Thread | None = None
         self._session_poll_seconds = session_poll_seconds
         self._repo_of = repo_of
         self._sessions: dict[str, sessions.SessionState] = {}
@@ -1658,6 +1759,7 @@ class ConsoleService:
         self._signature = None
         self.log: EventLog | None = None
         self._ingest = threading.Lock()
+        self._signin_runs = None if signin_runs is None else signin_runs(on_end=self._signin_ended)
         self._published = threading.Condition()
         self._view = b""
         self._version = 0
@@ -1680,6 +1782,7 @@ class ConsoleService:
             self._capacity = capacity.capacity_state(events)
             self._signins = signin.signin_state(events)
             self._excluded = exclusion.excluded_profiles(events)
+            self._signin_ends = signin_run.ended_state(events)
             self._derive_digest(events)
             self._deliveries = deliveries.delivery_states(events)
             self._moved = idle.last_moved(events)
@@ -1745,6 +1848,13 @@ class ConsoleService:
         self._moments = digest.keep(digest.moments(events, {}, {}),
                                     digest.window_start(self._looked, self._now()))
 
+    def _signin_view(self) -> dict[str, dict]:
+        runs = {profile: {"state": end.outcome, "at": end.at, "attempt": end.attempt}
+                for profile, end in self._signin_ends.items()}
+        for profile, attempt in self._signin_live.items():
+            runs[profile] = {"state": "running", "at": None, "attempt": attempt}
+        return runs
+
     def _publish(self) -> None:
         view = encode_view(derive_view(
             self._states.values(), self._inbox, self._health,
@@ -1754,6 +1864,7 @@ class ConsoleService:
             capacity=capacity.capacity_view(
                 self._profiles, self._capacity, self._clock(), self._signins,
                 excluded=self._excluded),
+            signin_runs=self._signin_view(),
             managers=self._launcher is not None, pending=self._pending))
         with self._published:
             if view != self._view:
@@ -1962,8 +2073,15 @@ class ConsoleService:
                 raise
         return probes
 
+    def _signin_ticket(self, profile: str) -> int:
+        with self._ingest:
+            ticket = self._signin_tickets.get(profile, 0) + 1
+            self._signin_tickets[profile] = ticket
+            return ticket
+
     def _read_signin(self, one: probe.Probe) -> None:
         """Read the profile's sign-in and record it; a failed read records `unknown`."""
+        ticket = self._signin_ticket(one.profile)
         try:
             status = self._signin_reader(one)
         except signin.StatusFailed as error:
@@ -1976,16 +2094,127 @@ class ConsoleService:
                 print(f"console: signin_unknown {one.profile} {type(error).__name__}",
                       file=sys.stderr)
         if not self._stop.is_set():
-            self._record_signin(one.profile, status)
+            self._record_signin(one.profile, status, ticket)
 
-    def _record_signin(self, profile: str, status: signin.Status) -> None:
+    def _record_signin(self, profile: str, status: signin.Status, ticket: int) -> None:
         with self._ingest:
+            if ticket < self._signin_recorded.get(profile, 0):
+                return
+            self._signin_recorded[profile] = ticket
             folded = self._signins.get(profile)
             if folded is not None and (folded.state, folded.ends_at) == (
                     status.state, status.ends_at):
                 return
             self._fold(self.log.append([signin.entry(profile, status)]))
             self._publish()
+
+    def _read_signin_at_end(self, profile: str) -> signin.Status | None:
+        """The status read once a client has ended; a failed read records nothing."""
+        ticket = self._signin_ticket(profile)
+        try:
+            status = self._signin_reader(probe.Probe(profile, str(uuid.uuid4()), self._stop))
+        except signin.StatusFailed as error:
+            print(f"console: signin_end_read_failed {profile} {error.kind}", file=sys.stderr)
+            return None
+        except Exception as error:
+            print(f"console: signin_end_read_failed {profile} {type(error).__name__}",
+                  file=sys.stderr)
+            return None
+        self._record_signin(profile, status, ticket)
+        return status
+
+    def _signin_ended(self, profile: str, run: int, end: str, returncode: int | None) -> None:
+        """A client ended (called on the run's watcher thread): read once, then one `ended` row."""
+        if self._stop.is_set():
+            return
+        with self._ingest:
+            found = self._signin_by_run.pop(run, None)
+        if found is None:
+            return
+        attempt = found[1]
+        status = None
+        if self._signin_reader is not None:
+            status = self._read_signin_at_end(profile)
+        if end != "exited":
+            outcome = end
+        elif returncode == 0 and status is not None and status.state == "signed_in":
+            outcome = "signed_in"
+        else:
+            outcome = "failed"
+        if self._stop.is_set():
+            return
+        with self._ingest:
+            self._fold(self.log.append([signin_run.ended(profile, outcome, attempt)]))
+            if self._signin_live.get(profile) == attempt:
+                del self._signin_live[profile]
+            self._publish()
+
+    def _signin_refuse_unless_listed(self, profile: str) -> signin_run.SignIns:
+        if self._signin_runs is None:
+            raise sprints.Refused("sign-in is not available on this host")
+        if profile not in self._profiles:
+            raise sprints.Refused("unknown profile")
+        return self._signin_runs
+
+    def _record_signin_action(self, profile: str, action: str, outcome: str) -> Event:
+        appended = self.log.append([signin_run.acted(profile, action, outcome)])
+        self._fold(appended)
+        return appended[0]
+
+    def start_signin(self, profile: str) -> tuple[int, str | None]:
+        """Start the profile's client login, or join the live one; the attempt and the link."""
+        runs = self._signin_refuse_unless_listed(profile)
+        with self._ingest:
+            try:
+                started = runs.start(profile)
+            except signin_run.StartFailed:
+                self._record_signin_action(profile, "start", "failed")
+                self._publish()
+                raise
+            if started.fresh:
+                attempt = self._record_signin_action(profile, "start", "started").seq
+                self._signin_live[profile] = attempt
+                self._signin_by_run[started.run] = (profile, attempt)
+            else:
+                self._record_signin_action(profile, "start", "running")
+                attempt = self._signin_live[profile]
+            self._publish()
+        return attempt, runs.wait_link(profile)
+
+    def send_signin_code(self, profile: str, code: str) -> None:
+        runs = self._signin_refuse_unless_listed(profile)
+        with self._ingest:
+            if profile not in runs.running():
+                raise sprints.Refused(f"no sign-in is running for {profile}")
+            try:
+                runs.send_code(profile, code)
+            except signin_run.NotRunning:
+                raise sprints.Refused(f"no sign-in is running for {profile}") from None
+            self._record_signin_action(profile, "code", "sent")
+            self._publish()
+
+    def cancel_signin(self, profile: str) -> None:
+        runs = self._signin_refuse_unless_listed(profile)
+        with self._ingest:
+            if profile not in runs.running():
+                raise sprints.Refused(f"no sign-in is running for {profile}")
+            try:
+                runs.cancel(profile)
+            except signin_run.NotRunning:
+                raise sprints.Refused(f"no sign-in is running for {profile}") from None
+            self._record_signin_action(profile, "cancel", "cancelled")
+            self._publish()
+
+    def expire_signins(self) -> list[str]:
+        """End every sign-in run past its deadline; the profiles ended."""
+        return [] if self._signin_runs is None else self._signin_runs.expire()
+
+    def _signin_loop(self) -> None:
+        while not self._stop.wait(SIGNIN_TICK_SECONDS):
+            try:
+                self.expire_signins()
+            except Exception as error:
+                print(f"console: signin_expire_failed {type(error).__name__}", file=sys.stderr)
 
     def _run_probe(self, one: probe.Probe) -> None:
         try:
@@ -3319,6 +3548,7 @@ class ConsoleService:
         self._capacity = capacity.capacity_state(appended, self._capacity)
         self._signins = signin.signin_state(appended, self._signins)
         self._excluded = exclusion.excluded_profiles(appended, self._excluded)
+        self._signin_ends = signin_run.ended_state(appended, self._signin_ends)
         self._deliveries = deliveries.delivery_states(appended, self._deliveries)
         self._moved = idle.last_moved(appended, self._moved)
         self._sprints = sprints.sprint_states(appended, self._sprints)
@@ -3343,6 +3573,7 @@ class ConsoleService:
                 self._capacity = capacity.capacity_state(events)
                 self._signins = signin.signin_state(events)
                 self._excluded = exclusion.excluded_profiles(events)
+                self._signin_ends = signin_run.ended_state(events)
                 self._derive_digest(events)
                 self._publish()
             return removed
@@ -3471,6 +3702,10 @@ class ConsoleService:
             self._probe_thread = threading.Thread(
                 target=self._probe_loop, name=PROBE_LOOP_THREAD, daemon=True)
             self._probe_thread.start()
+        if self._signin_runs is not None:
+            self._signin_thread = threading.Thread(
+                target=self._signin_loop, name=SIGNIN_THREAD, daemon=True)
+            self._signin_thread.start()
         self._thread = threading.Thread(
             target=self._server.serve_forever, name="console-http", daemon=True)
         self._thread.start()
@@ -3495,6 +3730,10 @@ class ConsoleService:
             self._digest_thread.join()
         if self._probe_thread is not None:
             self._probe_thread.join()
+        if self._signin_thread is not None:
+            self._signin_thread.join()
+        if self._signin_runs is not None:
+            self._signin_runs.close()
         with self._ingest:
             workers = list(self._probe_workers)
         for worker in workers:
