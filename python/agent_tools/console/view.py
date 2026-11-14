@@ -125,9 +125,14 @@ after the progress entries and before the questions, ordered by profile, and cou
 `inbox_items` and the headline. Its entry is
 
     {"type": "inbox_item", "reason": "signin", "key": "signin/<profile>", "project_id": null,
-     "profile": "<profile>", "headline": "Sign in to <profile> again", "action": "signin",
+     "profile": "<profile>", "headline": "Sign in to <profile>" | "Sign in to <profile> again",
+     "action": "signin",
      "run": <signin_runs.get(profile)> | null, "signin": <the entry's signin>,
      "answered": false, "waiting_since": <signin["since"]>}
+
+The headline is `SIGNIN_HEADLINE` ("... again") when the entry's `signin["ever_signed_in"]` is
+true and `SIGNIN_FIRST_HEADLINE` ("Sign in to <profile>") otherwise, a profile never signed in
+having nothing to sign in to again; the item's `signin` carries `ever_signed_in`.
 
 `SIGNIN_SENTENCE` says what the page offers: its Sign in action, which posts the profile to
 `/api/signin`, then a code to `/api/signin-code` or a cancel to `/api/signin-cancel`. The item
@@ -135,7 +140,8 @@ carries no terminal command. `run` is the profile's latest sign-in run from the 
 argument, `{"state": "running" | "signed_in" | "failed" | "timed_out" | "cancelled", "at":
 <ISO string> | null, "attempt": <positive int>}`, and the view's top-level `signin_runs` member
 is that mapping, `{profile: run}`, copied (an empty object when none is given). The sign-in
-link is never in the view: the page holds it from the start answer alone.
+link is never in the view: the page holds it from the start answer, the add answer and the
+link answer of `POST /api/signin-link` alone, each a guarded page request.
 
 The top-level `accounts_added` member (#1027) is the sorted, de-duplicated list of the profile names
 the owner added from the page and the retained log still holds, from the `accounts_added` argument
@@ -411,6 +417,7 @@ QUESTION_SENTENCE = "Choose an option with its number and press Enter, or answer
 MANAGER_SENTENCE = "Try again to start a new manager, or withdraw the sprint."
 PROGRESS_SENTENCE = "Tell the manager to continue, or withdraw the sprint."
 SIGNIN_HEADLINE = "Sign in to {profile} again"
+SIGNIN_FIRST_HEADLINE = "Sign in to {profile}"
 SIGNIN_SENTENCE = "Press Sign in, then finish signing in in your browser."
 CHOOSE_SENTENCE = "Choose an option with its number and press Enter, or answer on the tracker."
 ANSWER_SENTENCE = "Answer it here, or on the tracker."
@@ -882,9 +889,10 @@ def _progress_entry(sprint: SprintState) -> dict:
 def _signin_entry(entry: Mapping, runs: Mapping[str, Mapping]) -> dict:
     profile = entry["profile"]
     signin = entry["signin"]
+    headline = SIGNIN_HEADLINE if signin.get("ever_signed_in") is True else SIGNIN_FIRST_HEADLINE
     return {"type": "inbox_item", "reason": "signin", "key": f"signin/{profile}",
             "project_id": None, "profile": profile,
-            "headline": SIGNIN_HEADLINE.format(profile=profile),
+            "headline": headline.format(profile=profile),
             "action": "signin", "run": runs.get(profile) or None, "signin": signin,
             "answered": False, "waiting_since": signin["since"]}
 

@@ -39,10 +39,14 @@ Fold. `signin_state(events, state=None)` returns `{profile: SignIn(state, ends_a
 `READING` events: only a payload with a non-empty string `profile`, a `state` in `STATES` and an
 `ends_at` that is null or an ISO string carrying an offset, null unless the state is `signed_in`,
 counts; any other payload is ignored. The last valid event per profile wins and `at` is its `at`.
+`ever` is True once any valid reading of the profile was `signed_in` and never goes back to False:
+each folded value's `ever` is the previous value's `ever` or whether this reading is `signed_in`.
 Folding later events onto an earlier fold gives the fold of all of them.
 
-Ask. `profile_signin(signin, now)` is `{"state", "ends_at", "days_left", "ask", "since"}`. None and
-an `unknown` sign-in are `unknown`, with the rest None and `ask` False. Signed out is `ask` True
+Ask. `profile_signin(signin, now)` is `{"state", "ends_at", "days_left", "ask", "since",
+"ever_signed_in"}`, `ever_signed_in` being, in every case, whether the sign-in is not None and
+its `ever` is True or its state is `signed_in`. None and an `unknown` sign-in are `unknown`, with
+the rest (but `ever_signed_in`) None and `ask` False. Signed out is `ask` True
 with `since` the sign-in's `at`. Signed in with an end E (epoch seconds) has `days_left = max(0,
 int((E - now) // 86400))` and `ask = E - now <= ASK_SECONDS` (259200, three days), `since` being
 the ISO UTC time of `E - ASK_SECONDS` while asking, else None. Signed in without an end has
@@ -85,6 +89,7 @@ class SignIn:
     state: str
     ends_at: str | None
     at: str
+    ever: bool = False
 
 
 class StatusFailed(Exception):
@@ -183,22 +188,27 @@ def signin_state(events: Iterable[Event],
         if event.kind != READING or not _valid(event.payload):
             continue
         payload = event.payload
-        folded[payload["profile"]] = SignIn(payload["state"], payload.get("ends_at"), event.at)
+        previous = folded.get(payload["profile"])
+        ever = (previous is not None and previous.ever) or payload["state"] == "signed_in"
+        folded[payload["profile"]] = SignIn(payload["state"], payload.get("ends_at"), event.at,
+                                            ever)
     return folded
 
 
 def profile_signin(signin: SignIn | None, now: float) -> dict:
+    ever = signin is not None and (signin.ever or signin.state == "signed_in")
     if signin is None or signin.state == "unknown":
         return {"state": "unknown", "ends_at": None, "days_left": None, "ask": False,
-                "since": None}
+                "since": None, "ever_signed_in": ever}
     if signin.state == "signed_out":
         return {"state": "signed_out", "ends_at": None, "days_left": None, "ask": True,
-                "since": signin.at}
+                "since": signin.at, "ever_signed_in": ever}
     if signin.ends_at is None:
         return {"state": "signed_in", "ends_at": None, "days_left": None, "ask": False,
-                "since": None}
+                "since": None, "ever_signed_in": ever}
     end = _offset_time(signin.ends_at).timestamp()
     ask = end - now <= ASK_SECONDS
     since = datetime.fromtimestamp(end - ASK_SECONDS, timezone.utc).isoformat() if ask else None
     return {"state": "signed_in", "ends_at": signin.ends_at,
-            "days_left": max(0, int((end - now) // 86400)), "ask": ask, "since": since}
+            "days_left": max(0, int((end - now) // 86400)), "ask": ask, "since": since,
+            "ever_signed_in": ever}

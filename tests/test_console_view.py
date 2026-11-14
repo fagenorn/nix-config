@@ -1754,11 +1754,11 @@ class ReviveViewTest(unittest.TestCase):
         self.assertEqual(shown["statement"], derive_view([state("p00", 1)])["statement"])
 
 
-def signin_entry(profile, state, ask, since=None, days_left=None, ends_at=None):
+def signin_entry(profile, state, ask, since=None, days_left=None, ends_at=None, ever=False):
     return {"profile": profile, "state": "unknown", "week_left": None, "five_hour_left": None,
             "next_reset": None, "out_until": None, "read_at": None,
             "signin": {"state": state, "ends_at": ends_at, "days_left": days_left, "ask": ask,
-                       "since": since}}
+                       "since": since, "ever_signed_in": ever}}
 
 
 def signin_capacity(*entries):
@@ -1768,7 +1768,8 @@ def signin_capacity(*entries):
 
 def signin_item(profile, signin, run=None):
     return {"type": "inbox_item", "reason": "signin", "key": f"signin/{profile}",
-            "project_id": None, "profile": profile, "headline": f"Sign in to {profile} again",
+            "project_id": None, "profile": profile,
+            "headline": f"Sign in to {profile}" + (" again" if signin["ever_signed_in"] else ""),
             "action": "signin", "run": run, "signin": signin, "answered": False,
             "waiting_since": signin["since"]}
 
@@ -1777,9 +1778,9 @@ class SigninViewTest(unittest.TestCase):
     def test_each_asking_profile_is_one_inbox_item_with_the_sign_in_action(self):
         spare = signin_entry("spare", "signed_out", True, since="t1")
         work = signin_entry("work", "signed_in", True, since="2026-11-10T09:00:00+00:00",
-                            days_left=2, ends_at="2026-11-13T09:00:00+00:00")
+                            days_left=2, ends_at="2026-11-13T09:00:00+00:00", ever=True)
         home = signin_entry("home", "signed_in", False, days_left=20,
-                            ends_at="2026-12-03T09:00:00+00:00")
+                            ends_at="2026-12-03T09:00:00+00:00", ever=True)
         shown = derive_view([state("p00", 1)], capacity=signin_capacity(home, spare, work))
         self.assertEqual(shown["inbox"]["open"], [signin_item("spare", spare["signin"]),
                                                   signin_item("work", work["signin"])])
@@ -1794,6 +1795,14 @@ class SigninViewTest(unittest.TestCase):
         shown = derive_view([state("p00", 1)], capacity=signin_capacity(home, fresh))
         self.assertEqual(shown["inbox"]["open"], [])
         self.assertEqual(shown["statement"]["headline"], "Nothing needs you")
+
+    def test_a_never_signed_in_profile_is_offered_sign_in_not_sign_in_again(self):
+        fresh = signin_entry("fresh", "signed_out", True, since="t1")
+        work = signin_entry("work", "signed_out", True, since="t2", ever=True)
+        shown = derive_view([state("p00", 1)], capacity=signin_capacity(fresh, work))
+        self.assertEqual([i["headline"] for i in shown["inbox"]["open"]],
+                         ["Sign in to fresh", "Sign in to work again"])
+        self.assertEqual(view.SIGNIN_FIRST_HEADLINE, "Sign in to {profile}")
 
     def test_an_items_run_is_the_profiles_sign_in_run(self):
         spare = signin_entry("spare", "signed_out", True, since="t1")

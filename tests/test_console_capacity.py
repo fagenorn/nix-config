@@ -342,9 +342,10 @@ class SigninCapacityTest(unittest.TestCase):
         by_name = {e["profile"]: e for e in shown["profiles"]}
         self.assertEqual(by_name["work"]["signin"], {
             "state": "signed_in", "ends_at": iso(T + 864000), "days_left": 10, "ask": False,
-            "since": None})
+            "since": None, "ever_signed_in": True})
         self.assertEqual(by_name["spare"]["signin"], {
-            "state": "unknown", "ends_at": None, "days_left": None, "ask": False, "since": None})
+            "state": "unknown", "ends_at": None, "days_left": None, "ask": False, "since": None,
+            "ever_signed_in": False})
         self.assertEqual(list(shown), ["tight", "all_out", "resumes_at", "no_reading", "profiles"])
 
     def test_a_signed_out_profile_is_not_a_profile_with_no_reading(self):

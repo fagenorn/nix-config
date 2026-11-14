@@ -46,8 +46,10 @@ owner's answer to it). Like the other manager rows they are not in `KEPT_KINDS`.
 
 One kind is kept in part (#1010): `SIGNIN_READING` (`signin.reading`) is not in `KEPT_KINDS`, but the
 retention pass leaves the newest row of each profile (by sequence number, the profile being the
-payload's `profile`) in place whatever its age, because the console records a sign-in only when it
-changes and a profile signed out for longer than the window would otherwise read as never read.
+payload's `profile`) in place whatever its age, and also the newest row of each profile whose
+`state` is `signed_in`, because the console records a sign-in only when it changes: a profile
+signed out for longer than the window would otherwise read as never read, and one signed out after
+signing in as never signed in.
 
 One kind is kept while in force (#1028): `PROFILE_EXCLUSION` (`profile.exclusion`) is not in
 `KEPT_KINDS`, but the retention pass leaves, whatever its age, the newest valid row of each profile
@@ -318,6 +320,12 @@ class EventLog:
                     "AND NOT (kind = ? AND seq = (SELECT MAX(newer.seq) FROM events AS newer "
                     "WHERE newer.kind = events.kind AND json_extract(newer.payload, '$.profile') "
                     "IS json_extract(events.payload, '$.profile'))) "
+                    "AND NOT (kind = ? AND json_extract(events.payload, '$.state') = 'signed_in' "
+                    "AND seq = (SELECT MAX(newer.seq) FROM events AS newer "
+                    "WHERE newer.kind = events.kind "
+                    "AND json_extract(newer.payload, '$.state') = 'signed_in' "
+                    "AND json_extract(newer.payload, '$.profile') "
+                    "IS json_extract(events.payload, '$.profile'))) "
                     "AND NOT (kind = ? AND json_type(events.payload, '$.excluded') = 'true' "
                     "AND json_type(events.payload, '$.profile') = 'text' "
                     "AND json_extract(events.payload, '$.profile') <> '' "
@@ -348,7 +356,8 @@ class EventLog:
                     "AND hook.at >= ? AND hook.seq > events.seq AND "
                     "json_extract(hook.payload, '$.session_id') "
                     "IS json_extract(events.payload, '$.session_id')))",
-                    (cutoff, *sorted(KEPT_KINDS), SIGNIN_READING, PROFILE_EXCLUSION, PROFILE_PIN,
+                    (cutoff, *sorted(KEPT_KINDS), SIGNIN_READING, SIGNIN_READING, PROFILE_EXCLUSION,
+                     PROFILE_PIN,
                      SESSION_SEEN, SESSION_PROFILE, SESSION_SEEN, SESSION_PROFILE, cutoff,
                      SESSION_HOOK, cutoff)).rowcount
 

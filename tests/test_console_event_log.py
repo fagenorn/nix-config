@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_tools.console import event_log, exclusion, pin
+from agent_tools.console import event_log, exclusion, pin, signin
 from agent_tools.console.event_log import EventLog, EventLogError
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
@@ -562,6 +562,24 @@ class RetentionTest(unittest.TestCase):
         self.assertEqual(self.retain_at(log, NOW), 2)
         self.assertEqual([(r[0], r[2]) for r in rows(self.store)],
                          [(2, event_log.SIGNIN_READING), (3, event_log.SIGNIN_READING)])
+        self.assertEqual(self.retain_at(log, NOW), 0)
+
+    def test_a_pass_keeps_the_newest_signed_in_reading_of_each_profile(self):
+        log = self.open()
+        self.now = OLD
+        reading = lambda profile, state: (event_log.SIGNIN_READING, None, {
+            "profile": profile, "state": state, "ends_at": None})
+        log.append([reading("a", "signed_in")])
+        log.append([reading("a", "signed_in")])
+        log.append([reading("a", "signed_out")])
+        log.append([reading("b", "signed_out")])
+        log.append([("old", None, {})])
+        removed = self.retain_at(log, NOW)
+        self.assertEqual(removed, 2)
+        self.assertEqual([(r[0], r[2]) for r in rows(self.store)],
+                         [(2, event_log.SIGNIN_READING), (3, event_log.SIGNIN_READING),
+                          (4, event_log.SIGNIN_READING)])
+        self.assertIs(signin.signin_state(log.events())["a"].ever, True)
         self.assertEqual(self.retain_at(log, NOW), 0)
 
     def test_a_pass_keeps_the_newest_exclusion_of_each_profile_while_it_is_in_force(self):
