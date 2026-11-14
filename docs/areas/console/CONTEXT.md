@@ -113,6 +113,10 @@ _Avoid_: login expiry
 An account the owner keeps out of the console's automatic choice with the Exclude toggle on its capacity strip entry, which reads Include while it is excluded; it is never the profile a new session or a manager gets, its allowance and sign-in are still read, and it is kept in the console's log until included again (ADR-console-023).
 _Avoid_: disabled profile, paused account
 
+**Pinned profile**:
+The one account the owner pins with Pin on its capacity strip entry (Unpin while pinned); every new session and manager gets it while it has room. Out of allowance, signed out or not yet read, the automatic choice applies and the strip says the pin is not in effect, why and which profile is used instead; it is kept in the console's log until unpinned (ADR-console-023).
+_Avoid_: favourite profile, default account
+
 **Console service**:
 The user service that runs the console on each host. On Linux the systemd unit retries without limit, three seconds apart (`RestartSec`, and `StartLimitIntervalSec = 0` in place of systemd's default start limit), so a console that cannot bind its port because another process holds it keeps retrying and serves within one interval of the port being freed, with no manual restart (#884); launchd's `KeepAlive` does the same on macOS.
 _Avoid_: daemon

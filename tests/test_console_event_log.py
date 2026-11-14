@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_tools.console import event_log, exclusion, signin
+from agent_tools.console import event_log, exclusion, pin, signin
 from agent_tools.console.event_log import EventLog, EventLogError
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
@@ -601,6 +601,33 @@ class RetentionTest(unittest.TestCase):
                          [(2, "profile.exclusion"), (5, "profile.exclusion")])
         self.assertEqual(exclusion.excluded_profiles(log.events()), before)
         self.assertEqual(self.retain_at(log, NOW), 0)
+
+    def test_a_pass_keeps_the_pin_in_force(self):
+        log = self.open()
+        self.now = OLD
+        row = lambda payload: (event_log.PROFILE_PIN, None, payload)
+        log.append([row({"profile": "d", "pinned": True})])
+        log.append([row({"profile": "a", "pinned": True})])
+        log.append([row({"profile": "b", "pinned": True})])
+        log.append([row({"profile": "a", "pinned": False})])
+        log.append([row({"profile": "", "pinned": True})])
+        log.append([row({"profile": "c", "pinned": 1})])
+        log.append([("old", None, {})])
+        self.assertEqual(pin.pinned_profile(log.events()), "b")
+        self.assertEqual(self.retain_at(log, NOW), 6)
+        self.assertEqual([(r[0], r[2]) for r in rows(self.store)], [(3, "profile.pin")])
+        self.assertEqual(pin.pinned_profile(log.events()), "b")
+        self.assertEqual(self.retain_at(log, NOW), 0)
+
+        self.store = Path(self.tmp.name) / "second" / "events.sqlite3"
+        self.now = OLD
+        second = self.open()
+        second.append([row({"profile": "a", "pinned": True})])
+        second.append([row({"profile": "a", "pinned": False})])
+        self.assertIsNone(pin.pinned_profile(second.events()))
+        self.assertEqual(self.retain_at(second, NOW), 2)
+        self.assertEqual(rows(self.store), [])
+        self.assertIsNone(pin.pinned_profile(second.events()))
 
     def test_a_pass_keeps_the_assignment_in_force_of_a_session_with_a_hook_in_the_window(self):
         log = self.open()

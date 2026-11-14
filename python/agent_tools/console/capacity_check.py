@@ -1,6 +1,6 @@
 """`capacity_check`: the verify check that the console shows a capacity reading for an account in use (#860).
 
-`python -m agent_tools.console.capacity_check [--url URL] [--max-age SECONDS] [--every | --signin | --accounts | --page-signin | --page-add | --exclusion]` reads the console's
+`python -m agent_tools.console.capacity_check [--url URL] [--max-age SECONDS] [--every | --signin | --accounts | --page-signin | --page-add | --pin | --exclusion]` reads the console's
 `/api/state` view (default `http://127.0.0.1:27184/api/state`; the URL must be `http` on a loopback
 host, `127.0.0.1` or `localhost`, else exit 2) and looks at `capacity.profiles[].read_at`.
 `--max-age` is a positive integer number of seconds (default 600).
@@ -83,6 +83,24 @@ so any such row is from a console that has that merge. A non-empty set is `{"sta
 "profiles": [<set, sorted>]}`, exit 0; an empty one `{"status": "pending"}`, exit 75. A log that is
 missing, is not a database or lacks the `events` table is `{"status": "no_log"}`, exit 75. It never
 exits 1: a row that is not there yet may still be recorded.
+
+`--pin` (#1029, exclusive with the other modes, `--max-age` ignored) meets when a new session or
+manager has started under a profile while the owner's page pin of that profile was in force. It
+reads only the view's top-level `pin_launches` (the sorted profiles of such launches, which the
+console folds from its event log), and decides in this order, one stdout line of sorted-key JSON:
+
+- the view does not answer 200: `{"status": "not_running"}`, exit 75;
+- no `capacity` object: `{"status": "not_deployed"}`, exit 75;
+- `pin_launches` missing or not a list of strings (the console predates the pin):
+  `{"status": "not_deployed"}`, exit 75;
+- `pin_launches` empty: `{"status": "pending", "profiles": []}`, exit 75 (no launch under a pin
+  is logged yet);
+- otherwise `{"status": "met", "profiles": [<names, sorted and de-duplicated>]}`, exit 0.
+
+No pin needs to be in force when it runs: it never reads the live `pin`, `/api/profile` or the
+`chosen-profile` file, so the owner never has to leave the machine in a special state. It never
+exits 1: the log cannot show whether a pin had room or whether a session used the `CLAUDE_ACCOUNT`
+override, so no reading is "not met".
 
 A console that is down or predates this change is "not yet", never "not met", and only a reading
 newer than `--max-age` meets the check. A bad argument is exit 2. The check only reads: it sends one
@@ -364,6 +382,20 @@ def page_add_verdict(log: Path) -> tuple[int, dict]:
     return NOT_YET, {"status": "pending"}
 
 
+def pin_verdict(body: bytes) -> tuple[int, dict]:
+    """Met when the log shows a launch under the owner's pin; never read from the live pin."""
+    try:
+        document = json.loads(body)
+    except ValueError:
+        document = None
+    launches = document.get("pin_launches") if isinstance(document, dict) else None
+    if not isinstance(launches, list) or not all(isinstance(name, str) for name in launches):
+        return NOT_YET, {"status": "not_deployed"}
+    if not launches:
+        return NOT_YET, {"status": "pending", "profiles": []}
+    return 0, {"status": "met", "profiles": sorted(set(launches))}
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="capacity_check", description=__doc__.splitlines()[0])
     parser.add_argument("--url", type=_loopback_url, default=DEFAULT_URL,
@@ -389,6 +421,9 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--page-add", action="store_true",
                       help="require the console's log to show an account added from the page "
                            "and that profile's sign-in started from the page")
+    mode.add_argument("--pin", action="store_true",
+                      help="require a new session or manager started under a profile while the "
+                           "owner's pin of it was in force, read from the console's log")
     parser.add_argument("--log", type=Path, default=None,
                         help="the console event log for --page-add (default: the console's own)")
     return parser
@@ -424,7 +459,9 @@ def main(argv: list[str] | None = None) -> int:
         return NOT_YET
     if args.exclusion:
         return _exclusion(args.url, body)
-    if args.page_signin:
+    if args.pin:
+        code, result = pin_verdict(body)
+    elif args.page_signin:
         code, result = page_signin_verdict(body)
     elif args.accounts:
         code, result = accounts_verdict(rows, signin_asks(body))

@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import (capacity, console, exclusion, manager, nudge, probe, service,
+from agent_tools.console import (capacity, console, exclusion, manager, nudge, pin, probe, service,
                                  sessions, signin, sprints)
 from agent_tools.console.event_log import GOAL_STATED, EventLog
 
@@ -99,6 +99,12 @@ class ManagerServiceTest(Case):
     def exhausted(reset):
         return {"http_status": 429, "status": "rejected", "windows": {
             "7d": {"status": "rejected", "utilization": 1.0, "reset": reset}}}
+
+    @staticmethod
+    def five_hour_out(week, reset):
+        return {"http_status": 429, "status": "rejected", "windows": {
+            "7d": {"status": "allowed", "utilization": week, "reset": FAR},
+            "5h": {"status": "rejected", "utilization": 1.0, "reset": reset}}}
 
     def test_a_stated_goal_launches_one_manager_with_its_identity(self):
         launches = support.Launches()
@@ -951,8 +957,247 @@ class ProfileChoiceServiceTest(ManagerServiceTest):
         self.assertEqual(len(self.exclusion_rows()), 2)
         self.assertEqual(self.ask(svc)[2], b'{"profile":"work"}')
 
+    PIN = "/api/pin"
+
+    def pin(self, svc, profile, pinned=True, **extra):
+        return self.post(svc, self.PIN, {"profile": profile, "pinned": pinned}, **extra)
+
+    def pin_rows(self):
+        return [r for r in support.log_rows(self.store) if r[2] == "profile.pin"]
+
+    def test_a_pinned_profile_with_room_is_the_choice_until_unpinned(self):
+        dirs = self.two_signed_in()
+        svc = self.start(profile_dirs=dirs, clock=lambda: NOW, choice_file=self.choice)
+        self.assertEqual(self.ask(svc)[2], b'{"profile":"work"}')
+        self.assertEqual(self.pin(svc, "home")[::2], (204, b""))
+        self.assertEqual(self.choice.read_text(), "home\n")
+        self.assertEqual(self.ask(svc)[2], b'{"profile":"home"}')
+        self.assertEqual(self.pin(svc, "home", False)[::2], (204, b""))
+        self.assertEqual(self.choice.read_text(), "work\n")
+        self.assertEqual(self.ask(svc)[2], b'{"profile":"work"}')
+
+    def test_a_pinned_profile_is_the_manager_launch(self):
+        dirs = self.two_signed_in()
+        launches = support.Launches()
+        svc = self.start(profile_dirs=dirs, clock=lambda: NOW, choice_file=self.choice,
+                         launcher=launches)
+        self.assertEqual(self.pin(svc, "home")[::2], (204, b""))
+        self.state(svc)
+        self.assertEqual([c.profile for c in launches.calls], ["home"])
+
+    def test_a_pinned_profile_out_of_allowance_falls_back_and_returns(self):
+        now = [NOW]
+        dirs = self.two_profiles({"work": self.weekly(0.2),
+                                  "home": self.five_hour_out(0.9, NOW + 100)})
+        self.seed_signins(work="signed_in", home="signed_in")
+        svc = self.start(profile_dirs=dirs, clock=lambda: now[0], choice_file=self.choice)
+        self.assertEqual(self.pin(svc, "home")[::2], (204, b""))
+        self.assertEqual(self.ask(svc)[2], b'{"profile":"work"}')
+        self.assertEqual(self.choice.read_text(), "work\n")
+        self.assertEqual(len(self.pin_rows()), 1)
+        now[0] = NOW + 200
+        svc.poll_sessions()
+        entries = view_of(svc)["capacity"]["profiles"]
+        self.assertEqual(manager.session_profile(
+            {"profiles": [{**e, "pinned": False} for e in entries]}, {}), "work")
+        home = {e["profile"]: e for e in entries}["home"]
+        self.assertEqual((home["state"], home["week_left"]), ("ok", 10))
+        self.assertEqual(self.ask(svc)[2], b'{"profile":"home"}')
+        self.assertEqual(self.choice.read_text(), "home\n")
+        self.assertEqual(len(self.pin_rows()), 1)
+
+    def test_a_signed_out_pinned_profile_falls_back_and_returns_after_sign_in(self):
+        now = [NOW]
+        dirs = self.two_profiles({"work": self.weekly(0.2), "home": self.weekly(0.6)})
+        self.seed_signins(work="signed_in", home="signed_out")
+
+        def reader(one):
+            if one.profile == "home" and now[0] == NOW:
+                return signin.Status("signed_out", None)
+            return signin.Status("signed_in", None)
+
+        svc = self.start(profile_dirs=dirs, clock=lambda: now[0], choice_file=self.choice,
+                         signin_reader=reader, probe_dispatch=lambda job: job())
+        self.assertEqual(self.pin(svc, "home")[::2], (204, b""))
+        self.assertEqual(self.ask(svc)[2], b'{"profile":"work"}')
+        self.assertEqual(self.choice.read_text(), "work\n")
+        ((_, _, _, _, payload),) = self.pin_rows()
+        self.assertEqual(payload, '{"pinned":true,"profile":"home"}')
+        now[0] = NOW + 31
+        svc.probe_round()
+        svc.poll_sessions()
+        home = {e["profile"]: e for e in view_of(svc)["capacity"]["profiles"]}["home"]
+        self.assertEqual(home["signin"]["state"], "signed_in")
+        self.assertEqual(self.ask(svc)[2], b'{"profile":"home"}')
+        self.assertEqual(self.choice.read_text(), "home\n")
+        self.assertEqual(len(self.pin_rows()), 1)
+
+    def test_pinning_another_profile_moves_the_pin(self):
+        dirs = self.two_signed_in()
+        svc = self.start(profile_dirs=dirs, clock=lambda: NOW)
+        self.assertEqual(self.pin(svc, "work")[::2], (204, b""))
+        self.assertEqual(self.pin(svc, "home")[::2], (204, b""))
+        self.assertEqual(self.ask(svc)[2], b'{"profile":"home"}')
+        self.assertEqual(len(self.pin_rows()), 2)
+        for action, expected in (
+                (lambda: self.pin(svc, "home"), (409, b"already pinned\n")),
+                (lambda: self.pin(svc, "work", False), (409, b"not pinned\n")),
+                (lambda: self.pin(svc, "nobody"), (409, b"no such profile\n")),
+                (lambda: self.post(svc, self.PIN, b'{"profile":"home","pinned":1}'),
+                 (400, b"bad pin\n"))):
+            with self.subTest(expected=expected):
+                status, _, body = self.assert_unchanged(svc, action)
+                self.assertEqual((status, body), expected)
+        self.assertEqual(len(self.pin_rows()), 2)
+
+    def test_pinning_an_excluded_profile_is_refused(self):
+        dirs = self.two_signed_in()
+        svc = self.start(profile_dirs=dirs, clock=lambda: NOW)
+        self.assertEqual(self.exclude(svc, "home")[::2], (204, b""))
+        status, _, body = self.assert_unchanged(svc, lambda: self.pin(svc, "home"))
+        self.assertEqual((status, body), (409, b"excluded; include it first\n"))
+        self.assertEqual(self.pin_rows(), [])
+        self.assertEqual(self.pin(svc, "work")[::2], (204, b""))
+        status, _, body = self.assert_unchanged(svc, lambda: self.exclude(svc, "work"))
+        self.assertEqual((status, body), (409, b"pinned; unpin it first\n"))
+        self.assertEqual(self.ask(svc)[2], b'{"profile":"work"}')
+
+    def test_a_pin_without_the_origin_or_the_token_is_refused(self):
+        dirs = self.two_profiles({"work": self.weekly(0.2)})
+        svc = self.start(profile_dirs=dirs, clock=lambda: NOW)
+        body = json.dumps({"profile": "home", "pinned": True}).encode()
+        port = svc.address[1]
+        cases = (
+            ({"Origin": f"http://127.0.0.1:{port}", **JSON}, b"token refused\n"),
+            ({"X-Console-Token": self.token(), **JSON}, b"origin refused\n"),
+            (self.own(svc, **{**JSON, "X-Console-Token": "A" * 43}), b"token refused\n"),
+            (self.own(svc, **{**JSON, "Origin": "http://example.test"}), b"origin refused\n"),
+        )
+        for headers, text in cases:
+            with self.subTest(text=text):
+                status, _, got = self.assert_unchanged(svc, lambda: support.post_page(
+                    svc.address, self.PIN, headers, body))
+                self.assertEqual((status, got), (403, text))
+        self.assertEqual(self.ask(svc)[2], b'{"profile":"work"}')
+
+    def test_each_accepted_pin_appends_one_row(self):
+        dirs = self.two_signed_in()
+        svc = self.start(profile_dirs=dirs, clock=lambda: NOW)
+        self.assertEqual(self.pin(svc, "home")[::2], (204, b""))
+        ((_, _, _, project, payload),) = self.pin_rows()
+        self.assertIsNone(project)
+        self.assertEqual(payload, '{"pinned":true,"profile":"home"}')
+        self.assertEqual(self.pin(svc, "home", False)[::2], (204, b""))
+        rows = self.pin_rows()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[1][4], '{"pinned":false,"profile":"home"}')
+
+    def test_a_pin_survives_a_restart_and_the_retention_pass(self):
+        dirs = list(self.profiles(work=0, home=0).values())
+        day = 86400
+        now = [NOW]
+        stamp = lambda: iso(now[0])
+        self.store.parent.mkdir(parents=True, exist_ok=True)
+        log = EventLog(self.store, clock=stamp)
+        try:
+            def at(days, *entries):
+                now[0] = NOW + days * day
+                log.append(list(entries))
+
+            def readings():
+                return [(capacity.READING, None, {"profile": n, **self.weekly(u)})
+                        for n, u in (("work", 0.2), ("home", 0.6))]
+
+            at(0, signin.entry("work", signin.Status("signed_in", None)),
+               signin.entry("home", signin.Status("signed_in", None)),
+               *readings(), pin.entry("work", True), ("old", None, {}))
+            at(1, pin.entry("home", True))
+        finally:
+            log.close()
+        now[0] = NOW + 50 * day
+        svc = self.start(profile_dirs=dirs, clock=lambda: now[0], log_clock=stamp)
+        self.assertEqual(self.ask(svc)[2], b'{"profile":"home"}')
+        now[0] = NOW + 95 * day
+        self.assertGreater(svc.retain(), 0)
+        ((_, _, _, _, payload),) = self.pin_rows()
+        self.assertEqual(payload, '{"pinned":true,"profile":"home"}')
+        svc.close()
+        log = EventLog(self.store, clock=stamp)
+        try:
+            log.append(readings())
+        finally:
+            log.close()
+        again = self.start(profile_dirs=dirs, clock=lambda: now[0], log_clock=stamp)
+        self.assertEqual(self.ask(again)[2], b'{"profile":"home"}')
+
+    def test_a_pin_whose_choice_file_cannot_be_written_appends_nothing(self):
+        dirs = self.two_signed_in()
+        svc = self.start(profile_dirs=dirs, clock=lambda: NOW, choice_file=self.choice)
+        self.ask(svc)
+        self.assertEqual(self.choice.read_text(), "work\n")
+        with mock.patch("agent_tools.console.manager.os.replace", side_effect=OSError("full")):
+            result = self.assert_unchanged(svc, lambda: self.pin(svc, "home"))
+        self.assertEqual((result[0], result[2]), (500, b"pin failed\n"))
+        self.assertEqual(self.choice.read_text(), "work\n")
+        self.assertEqual(self.pin_rows(), [])
+        self.assertEqual(self.pin(svc, "home")[::2], (204, b""))
+        self.assertEqual(self.choice.read_text(), "home\n")
+        self.assertEqual(self.pin(svc, "home", False)[::2], (204, b""))
+        self.assertEqual(self.choice.read_text(), "work\n")
+        with mock.patch.object(svc.log, "append",
+                               side_effect=sqlite3.OperationalError("database is locked")):
+            status, _, body = self.pin(svc, "home")
+        self.assertEqual((status, body), (500, b"pin failed\n"))
+        self.assertEqual(self.choice.read_text(), "work\n")
+        self.assertEqual(len(self.pin_rows()), 2)
+        self.assertEqual(self.ask(svc)[2], b'{"profile":"work"}')
+
+    def test_the_view_says_when_the_pin_is_not_in_effect(self):
+        dirs = self.two_profiles({"work": self.weekly(0.2), "home": self.exhausted(FAR)})
+        self.seed_signins(work="signed_in", home="signed_in")
+        svc = self.start(profile_dirs=dirs, clock=lambda: NOW, choice_file=self.choice)
+        self.assertIsNone(view_of(svc)["pin"])
+        self.assertEqual(self.pin(svc, "home")[::2], (204, b""))
+        self.assertEqual(view_of(svc)["pin"], {
+            "profile": "home", "in_effect": False, "reason": "out of allowance",
+            "until": datetime.fromtimestamp(FAR, timezone.utc).isoformat(), "instead": "work"})
+        self.assertEqual({e["profile"]: e["pinned"] for e in view_of(svc)["capacity"]["profiles"]},
+                         {"home": True, "work": False})
+        self.assertEqual(self.pin(svc, "work")[::2], (204, b""))
+        self.assertEqual(view_of(svc)["pin"], {
+            "profile": "work", "in_effect": True, "reason": None, "until": None, "instead": None})
+        self.assertEqual(self.pin(svc, "work", False)[::2], (204, b""))
+        self.assertIsNone(view_of(svc)["pin"])
+
+    def test_a_launch_under_the_pin_is_kept_after_unpinning(self):
+        dirs = self.two_signed_in()
+        launches = support.Launches()
+        svc = self.start(profile_dirs=dirs, clock=lambda: NOW, choice_file=self.choice,
+                         launcher=launches)
+        self.assertEqual(view_of(svc)["pin_launches"], [])
+        self.assertEqual(self.pin(svc, "home")[::2], (204, b""))
+        self.state(svc)
+        self.assertEqual([c.profile for c in launches.calls], ["home"])
+        self.assertEqual(self.manager_rows()[-1][2], "manager.started")
+        self.assertEqual(json.loads(self.manager_rows()[-1][4])["profile"], "home")
+        self.assertEqual(self.pin(svc, "home", False)[::2], (204, b""))
+        self.assertIsNone(view_of(svc)["pin"])
+        self.assertEqual(view_of(svc)["pin_launches"], ["home"])
+        svc.close()
+        again = self.start(profile_dirs=dirs, clock=lambda: NOW, choice_file=self.choice,
+                           launcher=launches)
+        self.assertEqual(view_of(again)["pin_launches"], ["home"])
+
     def prepare_then_exclude(self, svc, queue, *profiles):
         """Run the queued launch with each of `profiles` excluded just after the lock that prepared it is released."""
+        def exclude_all():
+            for profile in profiles:
+                self.assertEqual(self.exclude(svc, profile)[::2], (204, b""))
+
+        self.prepare_then(svc, queue, exclude_all)
+
+    def prepare_then(self, svc, queue, act):
+        """Run the queued launch with `act()` called just after the lock that prepared it is released."""
         prepared = svc._prepared_launch
         lock = svc._ingest
         state = {"prepared": False}
@@ -965,8 +1210,7 @@ class ProfileChoiceServiceTest(ManagerServiceTest):
                 lock.release()
                 if state["prepared"]:
                     state["prepared"] = False
-                    for profile in profiles:
-                        self.assertEqual(self.exclude(svc, profile)[::2], (204, b""))
+                    act()
 
         def prepared_then_flagged(*args):
             launch = prepared(*args)
@@ -988,6 +1232,33 @@ class ProfileChoiceServiceTest(ManagerServiceTest):
         self.assertEqual([c.profile for c in launches.calls], ["home"])
         _, _, kind, _, payload = self.manager_rows()[-1]
         self.assertEqual((kind, json.loads(payload)["profile"]), ("manager.started", "home"))
+
+    def test_a_launch_prepared_before_a_pin_is_started_under_the_pin(self):
+        dirs = self.two_signed_in()
+        launches = support.Launches()
+        queue = support.Queued()
+        svc = self.start(profile_dirs=dirs, clock=lambda: NOW, choice_file=self.choice,
+                         launcher=launches, dispatch=queue)
+        self.state(svc)
+        self.prepare_then(svc, queue, lambda: self.assertEqual(
+            self.pin(svc, "home")[::2], (204, b"")))
+        self.assertEqual(self.choice.read_text(), "home\n")
+        self.assertEqual([c.profile for c in launches.calls], ["home"])
+        _, _, kind, _, payload = self.manager_rows()[-1]
+        self.assertEqual((kind, json.loads(payload)["profile"]), ("manager.started", "home"))
+
+    def test_a_launch_prepared_under_a_pin_that_is_lifted_is_started_under_the_choice(self):
+        dirs = self.two_signed_in()
+        launches = support.Launches()
+        queue = support.Queued()
+        svc = self.start(profile_dirs=dirs, clock=lambda: NOW, choice_file=self.choice,
+                         launcher=launches, dispatch=queue)
+        self.assertEqual(self.pin(svc, "home")[::2], (204, b""))
+        self.state(svc)
+        self.prepare_then(svc, queue, lambda: self.assertEqual(
+            self.pin(svc, "home", False)[::2], (204, b"")))
+        self.assertEqual(self.choice.read_text(), "work\n")
+        self.assertEqual([c.profile for c in launches.calls], ["work"])
 
     def test_a_launch_prepared_before_the_last_profile_was_excluded_waits(self):
         dirs = self.two_signed_in()

@@ -535,6 +535,21 @@ if __name__ == "__main__":
     unittest.main()
 
 
+class PinViewTest(unittest.TestCase):
+    def test_the_view_carries_the_pin_note(self):
+        note = {"profile": "home", "in_effect": False, "reason": "out of allowance",
+                "until": "2026-11-20T09:30:00+00:00", "instead": "work"}
+        shown = derive_view([state("p00", 1)], pin=note)
+        self.assertEqual(shown["pin"], note)
+        self.assertIsNone(derive_view([state("p00", 1)])["pin"])
+        self.assertIn(b'"pin":{"in_effect":false', encode_view(shown))
+
+    def test_the_view_lists_the_profiles_launched_under_the_pin(self):
+        shown = derive_view([state("p00", 1)], pin_launches=["work", "home", "work"])
+        self.assertEqual(shown["pin_launches"], ["home", "work"])
+        self.assertEqual(derive_view([state("p00", 1)])["pin_launches"], [])
+
+
 class InboxFoldTest(unittest.TestCase):
     def test_a_changed_item_keeps_its_waiting_since(self):
         first = item("p", "k1")

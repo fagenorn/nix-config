@@ -58,6 +58,13 @@ valid when its `profile` is a non-empty JSON string and its `excluded` a JSON bo
 is not one), the rule `exclusion.excluded_profiles` folds by, so a newer invalid row never displaces
 the row in force and the folded set is the same before and after a pass.
 
+One kind is kept while in force (#1029): `PROFILE_PIN` (`profile.pin`) is not in `KEPT_KINDS`, but
+the retention pass leaves, whatever its age, the one row whose `pinned` is JSON `true`, whose
+`profile` is a non-empty JSON string and whose sequence number is the largest among such rows, when
+no row of the kind with a larger sequence number has `pinned` JSON `false` and the same `profile`,
+and removes every other old row of the kind. That is the rule `pin.pinned_profile` folds by, so the
+folded pin is the same before and after a pass.
+
 Two more rows record the owner's sign-in from the page (#1026): `SIGNIN_ACTED` (`signin.acted`, one per
 accepted owner action) and `SIGNIN_ENDED` (`signin.ended`, one per finished client). Neither is in
 `KEPT_KINDS`, and neither carries a link or a code.
@@ -123,6 +130,7 @@ MANAGER_STOPPED = "manager.stopped"
 MANAGER_STOP_FAILED = "manager.stop_failed"
 SIGNIN_READING = "signin.reading"
 PROFILE_EXCLUSION = "profile.exclusion"
+PROFILE_PIN = "profile.pin"
 SIGNIN_ACTED = "signin.acted"
 SIGNIN_ENDED = "signin.ended"
 ACCOUNT_ADDED = "account.added"
@@ -296,7 +304,7 @@ class EventLog:
             return self._transaction(insert)
 
     def retain(self) -> int:
-        """Remove the rows older than the retention window, keeping each profile's newest sign-in reading and exclusion in force; return how many."""
+        """Remove the rows older than the retention window, keeping each profile's newest sign-in reading, exclusion in force and the pin in force; return how many."""
         with self._lock:
             now = datetime.fromisoformat(self._clock())
             cutoff = (now - RETENTION).astimezone(timezone.utc).isoformat(
@@ -327,6 +335,19 @@ class EventLog:
                     "AND json_type(newer.payload, '$.excluded') IN ('true', 'false') "
                     "AND json_extract(newer.payload, '$.profile') = "
                     "json_extract(events.payload, '$.profile'))) "
+                    "AND NOT (kind = ? AND json_type(events.payload, '$.pinned') = 'true' "
+                    "AND json_type(events.payload, '$.profile') = 'text' "
+                    "AND json_extract(events.payload, '$.profile') <> '' "
+                    "AND seq = (SELECT MAX(newer.seq) FROM events AS newer "
+                    "WHERE newer.kind = events.kind "
+                    "AND json_type(newer.payload, '$.pinned') = 'true' "
+                    "AND json_type(newer.payload, '$.profile') = 'text' "
+                    "AND json_extract(newer.payload, '$.profile') <> '') "
+                    "AND NOT EXISTS (SELECT 1 FROM events AS later "
+                    "WHERE later.kind = events.kind AND later.seq > events.seq "
+                    "AND json_type(later.payload, '$.pinned') = 'false' "
+                    "AND json_extract(later.payload, '$.profile') = "
+                    "json_extract(events.payload, '$.profile'))) "
                     "AND NOT (kind IN (?, ?) AND seq = (SELECT MAX(owner.seq) FROM events AS owner "
                     "WHERE owner.kind IN (?, ?) AND owner.at < ? AND "
                     "json_extract(owner.payload, '$.session_id') "
@@ -336,6 +357,7 @@ class EventLog:
                     "json_extract(hook.payload, '$.session_id') "
                     "IS json_extract(events.payload, '$.session_id')))",
                     (cutoff, *sorted(KEPT_KINDS), SIGNIN_READING, SIGNIN_READING, PROFILE_EXCLUSION,
+                     PROFILE_PIN,
                      SESSION_SEEN, SESSION_PROFILE, SESSION_SEEN, SESSION_PROFILE, cutoff,
                      SESSION_HOOK, cutoff)).rowcount
 

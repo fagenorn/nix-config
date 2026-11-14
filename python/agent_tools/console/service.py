@@ -19,6 +19,7 @@ Routes (every response carries `Cache-Control: no-store` and
     POST /api/goal  204, a JSON body, the page states a goal (below)
     POST /api/withdraw 204, a JSON body, the page withdraws a goal (below)
     POST /api/exclusion 204, a JSON body, the page excludes or includes a profile (below)
+    POST /api/pin   204, a JSON body, the page pins or unpins a profile (below)
     POST /api/approve 204, a JSON body, the page approves a brief (below)
     POST /api/reply 204, a JSON body, the page asks a brief for changes (below)
     POST /api/retry-manager 204, a JSON body, the page starts a sprint's manager again (below)
@@ -38,7 +39,7 @@ Routes (every response carries `Cache-Control: no-store` and
     anything else   404
     other methods   405 with `Allow: GET` (`Allow: POST` on `/api/hooks`, `/api/readings`,
                     `/api/looked`, `/api/answer`, `/api/check-answer`, `/api/goal`, `/api/withdraw`,
-                    `/api/approve`, `/api/reply`, `/api/retry-manager`, `/api/message`, `/api/stop`, `/api/exclusion`, `/api/brief`, `/api/report`,
+                    `/api/approve`, `/api/reply`, `/api/retry-manager`, `/api/message`, `/api/stop`, `/api/exclusion`, `/api/pin`, `/api/brief`, `/api/report`,
                     `/api/close`, `/api/inbox`, `/api/message-reply`, `/api/recap`, `/api/ask` and `/api/round-answer`)
 
 Two kinds of write exist. The hook and reading routes append what the proxies and hooks observe:
@@ -61,7 +62,7 @@ route carries no token: it records observations and answers nothing (ADR-console
 
 A page write (`PAGE_WRITES`, today `POST /api/looked`, `POST /api/answer`, `POST /api/check-answer`,
 `POST /api/goal`, `POST /api/withdraw`, `POST /api/approve`, `POST /api/reply`,
-`POST /api/retry-manager`, `POST /api/message`, `POST /api/stop`, `POST /api/round-answer`, `POST /api/continue`, `POST /api/exclusion`, `POST /api/signin`,
+`POST /api/retry-manager`, `POST /api/message`, `POST /api/stop`, `POST /api/round-answer`, `POST /api/continue`, `POST /api/exclusion`, `POST /api/pin`, `POST /api/signin`,
 `POST /api/signin-code`, `POST /api/signin-cancel`, `POST /api/signin-link` and `POST /api/account-add`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
 alone and goes through one guard, `_page_write`, whatever its route. After the loopback `Host`
 check and before any body is read, exactly one `Origin` header must equal `http://<Host>` (else
@@ -495,7 +496,8 @@ is chosen by `manager.choose_profile` over `capacity.capacity_view` of the profi
 at that moment (`_read_profiles`, never the last poll's) with the sign-ins and each profile's last use,
 folded from the log's session rows (`manager.profile_use`, kept after a session leaves; ADR-console-023,
 #1011) and the excluded profiles folded from the log's `profile.exclusion` rows (`exclusion.excluded_profiles`,
-#1028), which `capacity_view` leaves out of the room, and `Wait` appends `manager.waiting`. Otherwise the launcher is called outside the lock, and then,
+#1028), which `capacity_view` leaves out of the room, and the pinned profile (#1029), which it
+answers first while it has room, and `Wait` appends `manager.waiting`. Otherwise the launcher is called outside the lock, and then,
 under it, a sprint that was withdrawn meanwhile has its secret and settings file removed again and
 no row appended, and otherwise, unless the service is stopping, `manager.started {sprint_id, profile, session_name}`
 or `manager.failed {sprint_id, reason}` is appended (the reason of a `LaunchFailed`, else `<Type>:
@@ -506,7 +508,8 @@ settings file. The sprint's secret appears in no row, view or stderr line.
 Profile choice (#1011, ADR-console-023): `GET /api/profile` answers the profile a new session should
 use, `manager.session_profile` over `capacity.capacity_view` of the profile directories read at that
 moment (never the last poll's), the sign-ins, the excluded profiles (folded from the log's
-`profile.exclusion` rows, #1028) and each profile's last use, folded from the log's
+`profile.exclusion` rows, #1028), the pinned profile (folded from the log's `profile.pin` rows,
+#1029) and each profile's last use, folded from the log's
 session rows (`manager.profile_use`, kept after a session leaves and rebuilt on restart). The body
 is exactly `{"profile":"<name>"}` (`json.dumps` with sorted keys and compact separators), and
 `{"profile":null}` when nothing can be chosen; the route needs no token and, like every GET route,
@@ -538,6 +541,21 @@ checked again under the ingest lock immediately before the launcher runs: when i
 excluded since, the choice is made again over the set now in force (a wait row when nothing can be
 chosen), so an exclusion that succeeded is never followed by a launch under that profile that was
 prepared before it.
+
+Pin (#1029): `set_pin(profile, pinned)` (`POST /api/pin`, body `{"profile", "pinned"}` with `pinned`
+a bool, at most `MAX_PIN_BYTES`; a bad body is 400 `bad pin`, a refusal 409 with the reason
+(`no such profile` unless the profile is among the directories as they are now, `excluded; include
+it first`, `already pinned`, `not pinned`: an unpin is checked against the pin alone), any other
+failure 500 `pin failed`) appends one `profile.pin {profile, pinned}` row with no project, and
+nothing for a refusal. A pin moves an earlier pin to the new profile. As for an exclusion, under the
+ingest lock the choice file is written first, over the pin the change gives, so a failed write is a
+500 with nothing appended or published, and a failed append puts the file back to the choice over
+the old pin. The pin is folded from the log at construction and by `_fold`, and rebuilt by
+`retain()`, so a restart and a retention pass give the same pin; the view's `pin_launches` is the
+fold `pin.pin_launches` of the log, kept after an unpin and rebuilt at a restart and a retention
+pass. Every choice path (the route, the
+poll, an exclusion, a manager launch and a launch checked again after an exclusion) is made over
+the folded pin. An exclusion of the pinned profile is refused `pinned; unpin it first`.
 
 Nudges (#889): the service takes `nudger` (`nudge.nudger_for(sys.platform)` from `console.py`; None
 means no nudge is ever made, no reservation, row or listing read) and `listing` (default: read
@@ -776,8 +794,8 @@ from urllib.parse import parse_qsl
 
 from agent_tools.claims import owner_actions
 from agent_tools.console import (
-    account_add, answer, capacity, deliveries, digest, exclusion, idle, inbox, manager, nudge, probe,
-    revive, sessions, signin, signin_run, sprints, write_guard)
+    account_add, answer, capacity, deliveries, digest, exclusion, idle, inbox, manager, nudge, pin,
+    probe, revive, sessions, signin, signin_run, sprints, write_guard)
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
     MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_STOP_FAILED,
@@ -819,6 +837,7 @@ REPLY_PATH = "/api/reply"
 RETRY_PATH = "/api/retry-manager"
 CONTINUE_PATH = "/api/continue"
 EXCLUSION_PATH = "/api/exclusion"
+PIN_PATH = "/api/pin"
 BRIEF_PATH = "/api/brief"
 REPORT_PATH = "/api/report"
 CLOSE_PATH = "/api/close"
@@ -840,7 +859,7 @@ ACCOUNT_ADD_PATH = "/api/account-add"
 PAGE_WRITES: frozenset[str] = frozenset({
     LOOKED_PATH, ANSWER_PATH, CHECK_PATH, GOAL_PATH, WITHDRAW_PATH, APPROVE_PATH, REPLY_PATH,
     RETRY_PATH, MESSAGE_PATH, STOP_PATH, ROUND_ANSWER_PATH, CONTINUE_PATH, EXCLUSION_PATH,
-    SIGNIN_PATH, SIGNIN_CODE_PATH, SIGNIN_CANCEL_PATH, SIGNIN_LINK_PATH, ACCOUNT_ADD_PATH})
+    PIN_PATH, SIGNIN_PATH, SIGNIN_CODE_PATH, SIGNIN_CANCEL_PATH, SIGNIN_LINK_PATH, ACCOUNT_ADD_PATH})
 MAX_SIGNIN_BYTES = 4096
 MAX_ACCOUNT_BYTES = 4096
 SIGNIN_THREAD = "console-signin-deadline"
@@ -866,6 +885,8 @@ MAX_REPLY_BYTES = 16384
 MAX_RETRY_BYTES = 4096
 MAX_CONTINUE_BYTES = 4096
 MAX_EXCLUSION_BYTES = 4096
+MAX_PIN_BYTES = 4096
+_FOLDED = object()
 MAX_HOOK_BYTES = 8 * 1024 * 1024
 READINGS_PATH = "/api/readings"
 MAX_READING_BYTES = 64 * 1024
@@ -1537,6 +1558,28 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return False
         return True
 
+    def _pin_request(self, console: "ConsoleService") -> bool:
+        """Read and carry out the owner's pin or unpin of a profile; False when refused."""
+        body = self._json_body(MAX_PIN_BYTES)
+        if body is None:
+            return False
+        try:
+            profile, pinned = pin.parse_request(body)
+        except ValueError:
+            self._refuse(400, "bad pin")
+            return False
+        try:
+            console.set_pin(profile, pinned)
+        except pin.Refused as error:
+            print(f"console: pin_refused {error}", file=sys.stderr)
+            self._refuse(409, str(error))
+            return False
+        except Exception as error:
+            print(f"console: pin_failed {type(error).__name__}: {error}", file=sys.stderr)
+            self._refuse(500, "pin failed")
+            return False
+        return True
+
     def _stop_request(self, console: "ConsoleService") -> bool:
         """Read and carry out an owner's stop of a sprint; False when it was refused."""
         body = self._json_body(MAX_STOP_BYTES)
@@ -1605,6 +1648,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         elif route == EXCLUSION_PATH:
             self.close_connection = True
             if not self._exclusion_request(console):
+                return
+        elif route == PIN_PATH:
+            self.close_connection = True
+            if not self._pin_request(console):
                 return
         elif route == MESSAGE_PATH:
             self.close_connection = True
@@ -1796,8 +1843,10 @@ class ConsoleService:
         self._capacity = capacity.CapacityState({}, {})
         self._signins: dict[str, signin.SignIn] = {}
         self._excluded: frozenset[str] = frozenset()
+        self._pinned: str | None = None
         self._signin_ends: dict[str, signin_run.Ended] = {}
         self._accounts_added: frozenset[str] = frozenset()
+        self._pin_launches: pin.PinLaunches = pin.pin_launches([])
         self._signin_live: dict[str, int] = {}
         self._signin_by_run: dict[int, tuple[str, int]] = {}
         self._signin_tickets: dict[str, int] = {}
@@ -1858,8 +1907,10 @@ class ConsoleService:
             self._capacity = capacity.capacity_state(events)
             self._signins = signin.signin_state(events)
             self._excluded = exclusion.excluded_profiles(events)
+            self._pinned = pin.pinned_profile(events)
             self._signin_ends = signin_run.ended_state(events)
             self._accounts_added = account_add.added_state(events)
+            self._pin_launches = pin.pin_launches(events)
             self._derive_digest(events)
             self._deliveries = deliveries.delivery_states(events)
             self._moved = idle.last_moved(events)
@@ -1933,15 +1984,18 @@ class ConsoleService:
         return runs
 
     def _publish(self) -> None:
+        cap = capacity.capacity_view(
+            self._profiles, self._capacity, self._clock(), self._signins,
+            excluded=self._excluded, pinned=self._pinned)
         view = encode_view(derive_view(
             self._states.values(), self._inbox, self._health,
             sessions=self._sessions.values(), deliveries=self._deliveries,
             now_ms=int(self._clock() * 1000), sprints=self._sprints,
             digest=digest.digest(self._moments, self._looked, self._now()),
-            capacity=capacity.capacity_view(
-                self._profiles, self._capacity, self._clock(), self._signins,
-                excluded=self._excluded),
+            capacity=cap,
             signin_runs=self._signin_view(), accounts_added=self._accounts_added,
+            pin=pin.note(self._pinned, cap, manager.session_profile(cap, self._use.last)),
+            pin_launches=self._pin_launches.launched,
             managers=self._launcher is not None, pending=self._pending))
         with self._published:
             if view != self._view:
@@ -2463,10 +2517,11 @@ class ConsoleService:
                     return
             with self._ingest:
                 launch = self._prepared_launch(sprint_id, token, listed)
+                prepared_pin = self._pinned
             if launch is None:
                 return
             with self._ingest:
-                launch = self._unexcluded_launch(launch, token)
+                launch = self._unexcluded_launch(launch, token, prepared_pin)
             if launch is None:
                 return
             reason = None
@@ -2521,7 +2576,8 @@ class ConsoleService:
             return None
         choice = manager.choose_profile(
             capacity.capacity_view(self._read_profiles(), self._capacity, self._clock(),
-                                   self._signins, excluded=self._excluded),
+                                   self._signins, excluded=self._excluded,
+                                   pinned=self._pinned),
             self._use.last)
         if isinstance(choice, manager.Wait):
             self._append_manager(MANAGER_WAITING, project_id, {
@@ -2531,13 +2587,15 @@ class ConsoleService:
                                   secret, self._sprint_secrets, takeover=takeover,
                                   seen_after=sprint.manager_seen_seq or 0)
 
-    def _unexcluded_launch(self, launch: manager.Launch, token: object) -> manager.Launch | None:
-        """Under the ingest lock: `launch`, or its replacement when its profile was excluded after it was prepared.
+    def _unexcluded_launch(self, launch: manager.Launch, token: object,
+                           prepared_pin: str | None) -> manager.Launch | None:
+        """Under the ingest lock: `launch`, or its replacement when its profile was excluded or the pin moved after it was prepared.
 
-        The choice is made again over the set now in force; with nothing to choose a wait row is
-        appended (as `_prepared_launch` does) and None returned.
+        `prepared_pin` is the pin in force when it was prepared. The choice is made again over the
+        set and the pin now in force; with nothing to choose a wait row is appended (as
+        `_prepared_launch` does) and None returned.
         """
-        if launch.profile not in self._excluded:
+        if launch.profile not in self._excluded and self._pinned == prepared_pin:
             return launch
         sprint = self._sprints.get(launch.sprint_id)
         if sprint is None:
@@ -2545,7 +2603,8 @@ class ConsoleService:
             return None
         choice = manager.choose_profile(
             capacity.capacity_view(self._read_profiles(), self._capacity, self._clock(),
-                                   self._signins, excluded=self._excluded),
+                                   self._signins, excluded=self._excluded,
+                                   pinned=self._pinned),
             self._use.last)
         if isinstance(choice, manager.Wait):
             marks = {"takeover": True, "goal": sprint.goal} if launch.takeover else {}
@@ -3438,15 +3497,17 @@ class ConsoleService:
             self._note_choice(self._session_choice(self._profiles))
             return appended
 
-    def _session_choice(self, profiles: frozenset[str],
-                        excluded: frozenset[str] | None = None) -> str | None:
+    def _session_choice(self, profiles: frozenset[str], excluded: frozenset[str] | None = None,
+                        pinned: object = _FOLDED) -> str | None:
         """Under the ingest lock: the profile a new session should use, over `profiles`.
 
-        `excluded` is the set the choice is made over, the folded one when None.
+        `excluded` is the set the choice is made over, the folded one when None; `pinned` is the
+        pin it is made over, the folded one when left out and no pin when None.
         """
         return manager.session_profile(
             capacity.capacity_view(profiles, self._capacity, self._clock(), self._signins,
-                                   excluded=self._excluded if excluded is None else excluded),
+                                   excluded=self._excluded if excluded is None else excluded,
+                                   pinned=self._pinned if pinned is _FOLDED else pinned),
             self._use.last)
 
     def set_exclusion(self, profile: str, excluded: bool) -> list[Event]:
@@ -3463,6 +3524,8 @@ class ConsoleService:
                 raise exclusion.Refused(exclusion.UNKNOWN)
             if excluded and profile in self._excluded:
                 raise exclusion.Refused(exclusion.ALREADY_EXCLUDED)
+            if excluded and profile == self._pinned:
+                raise exclusion.Refused(exclusion.PINNED)
             if not excluded and profile not in self._excluded:
                 raise exclusion.Refused(exclusion.ALREADY_INCLUDED)
             after = self._excluded | {profile} if excluded else self._excluded - {profile}
@@ -3473,6 +3536,38 @@ class ConsoleService:
                 self._unreadable.discard("choice")
             try:
                 appended = self.log.append([exclusion.entry(profile, excluded)])
+            except Exception:
+                self._note_choice(self._session_choice(profiles))
+                raise
+            self._apply(appended)
+            return appended
+
+    def set_pin(self, profile: str, pinned: bool) -> list[Event]:
+        """Pin `profile` as the console's choice, or lift its pin; `pin.Refused` when it cannot.
+
+        Under the ingest lock: a pin needs a profile among the directories as they are now, not
+        excluded and not already pinned; an unpin needs the profile to be the pinned one. The
+        choice file is written first, over the pin the change gives, so a failed write appends and
+        publishes nothing; a failed append puts the file back to the choice over the old pin.
+        """
+        with self._ingest:
+            profiles = self._read_profiles()
+            if pinned:
+                if profile not in profiles:
+                    raise pin.Refused(pin.UNKNOWN)
+                if profile in self._excluded:
+                    raise pin.Refused(pin.EXCLUDED)
+                if profile == self._pinned:
+                    raise pin.Refused(pin.ALREADY_PINNED)
+            elif profile != self._pinned:
+                raise pin.Refused(pin.NOT_PINNED)
+            choice = self._session_choice(profiles, pinned=profile if pinned else None)
+            if self._choice_file is not None and choice != self._choice:
+                manager.write_choice(self._choice_file, choice)
+                self._choice = choice
+                self._unreadable.discard("choice")
+            try:
+                appended = self.log.append([pin.entry(profile, pinned)])
             except Exception:
                 self._note_choice(self._session_choice(profiles))
                 raise
@@ -3659,8 +3754,10 @@ class ConsoleService:
         self._capacity = capacity.capacity_state(appended, self._capacity)
         self._signins = signin.signin_state(appended, self._signins)
         self._excluded = exclusion.excluded_profiles(appended, self._excluded)
+        self._pinned = pin.pinned_profile(appended, self._pinned)
         self._signin_ends = signin_run.ended_state(appended, self._signin_ends)
         self._accounts_added = account_add.added_state(appended, self._accounts_added)
+        self._pin_launches = pin.pin_launches(appended, self._pin_launches)
         self._deliveries = deliveries.delivery_states(appended, self._deliveries)
         self._moved = idle.last_moved(appended, self._moved)
         self._sprints = sprints.sprint_states(appended, self._sprints)
@@ -3685,8 +3782,10 @@ class ConsoleService:
                 self._capacity = capacity.capacity_state(events)
                 self._signins = signin.signin_state(events)
                 self._excluded = exclusion.excluded_profiles(events)
+                self._pinned = pin.pinned_profile(events)
                 self._signin_ends = signin_run.ended_state(events)
                 self._accounts_added = account_add.added_state(events)
+                self._pin_launches = pin.pin_launches(events)
                 self._derive_digest(events)
                 self._publish()
             return removed

@@ -15,7 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from agent_tools.console import exclusion, manager, revive_check, sessions
+from agent_tools.console import exclusion, manager, pin, revive_check, sessions
 from agent_tools.console.event_log import Event
 from agent_tools.console.sessions import Observation
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
@@ -32,13 +32,15 @@ REFUSAL = ("Nobody watches this session, so the permission prompt was refused: d
 
 
 def cap(*rows, all_out=False, resumes_at=None):
-    def entry(p, s, w, f, signin=None, excluded=False):
+    def entry(p, s, w, f, signin=None, excluded=False, pinned=False):
         row = {"profile": p, "state": s, "week_left": w, "five_hour_left": f,
                "next_reset": None, "out_until": None, "read_at": None}
         if signin is not None:
             row["signin"] = {"state": signin}
         if excluded:
             row["excluded"] = True
+        if pinned:
+            row["pinned"] = True
         return row
     return {"tight": False, "all_out": all_out, "resumes_at": resumes_at,
             "profiles": [entry(*row) for row in rows]}
@@ -333,6 +335,32 @@ class SessionProfileTest(unittest.TestCase):
                 self.assertEqual(manager.session_profile(capacity, last_use), expected)
         self.assertEqual(manager.choose_profile(cap(("a", "ok", 90, 90, None, True)), {}),
                          manager.Wait(None))
+
+    def test_a_pinned_profile_with_room_wins(self):
+        table = [
+            cap(("a", "ok", 90, 90), ("b", "ok", 10, 10, None, False, True)),
+            cap(("a", "ok", 90, 90), ("b", "reset", None, None, "signed_in", False, True)),
+        ]
+        for capacity in table:
+            with self.subTest(capacity=capacity["profiles"]):
+                self.assertEqual(manager.session_profile(capacity, {}), "b")
+        self.assertEqual(manager.choose_profile(table[0], {}), "b")
+
+    def test_a_pinned_profile_without_room_falls_back(self):
+        unknown = (None, None)
+        table = [
+            (cap(("a", "ok", 90, 90), ("b", "out", 0, 0, None, False, True)), "a"),
+            (cap(("a", "ok", 90, 90), ("b", "ok", 99, 99, "signed_out", False, True)), "a"),
+            (cap(("a", "ok", 10, 10), ("b", "unknown", *unknown, "signed_in", False, True)), "a"),
+            (cap(("a", "ok", 10, 10), ("b", "ok", 99, 99, None, True, True)), "a"),
+            (cap(("b", "ok", 99, 99, None, True, True)), None),
+        ]
+        for capacity, expected in table:
+            with self.subTest(capacity=capacity["profiles"]):
+                self.assertEqual(manager.session_profile(capacity, {}), expected)
+        self.assertEqual(manager.choose_profile(
+            cap(("a", "out", 0, 0), ("b", "out", 0, 0, None, False, True),
+                all_out=True, resumes_at="r"), {}), manager.Wait("r"))
 
     def test_with_no_room_the_most_recently_used_signed_in_profile_answers(self):
         unknown = (None, None)
@@ -777,6 +805,136 @@ class ExclusionTest(unittest.TestCase):
         for name, body in refused.items():
             with self.subTest(name), self.assertRaises(ValueError):
                 exclusion.parse_request(body)
+
+
+class PinTest(unittest.TestCase):
+    def test_the_fold_keeps_one_pin_and_moves_it(self):
+        events = [
+            Event(1, hour(9), "profile.pin", None, {"profile": "work", "pinned": True}),
+            Event(2, hour(10), "profile.pin", None, {"profile": "home", "pinned": True}),
+            Event(3, hour(11), "profile.pin", None, {"profile": "work", "pinned": False}),
+            Event(4, hour(12), "profile.pin", None, {"profile": "home", "pinned": 1}),
+            Event(5, hour(13), "profile.pin", None, {"profile": "", "pinned": True}),
+            Event(6, hour(14), "profile.pin", None, {"pinned": True}),
+            Event(7, hour(15), "session.seen", None, {"profile": "x", "pinned": True}),
+        ]
+        self.assertEqual(pin.pinned_profile(events), "home")
+        self.assertEqual(pin.pinned_profile(events[2:], pin.pinned_profile(events[:2])), "home")
+        self.assertIsNone(pin.pinned_profile(
+            events + [Event(8, hour(16), "profile.pin", None,
+                            {"profile": "home", "pinned": False})]))
+        self.assertIsNone(pin.pinned_profile([]))
+        self.assertEqual(pin.entry("work", True),
+                         ("profile.pin", None, {"profile": "work", "pinned": True}))
+
+    def test_launches_under_the_pin_in_force_are_kept(self):
+        def ev(seq, kind, payload):
+            return Event(seq, hour(seq), kind, None, payload)
+
+        def pinned(seq, profile, value=True):
+            return ev(seq, "profile.pin", {"profile": profile, "pinned": value})
+
+        def seen(seq, sid, profile):
+            return ev(seq, "session.seen", {"session_id": sid, "profile": profile})
+
+        def started(seq, sid, profile):
+            return ev(seq, "manager.started", {"sprint_id": sid, "profile": profile})
+
+        events = [
+            seen(1, "s1", "work"), started(2, "x", "work"), pinned(3, "work"),
+            seen(4, "s1", "work"), seen(5, "s2", "home"), pinned(6, "home"),
+            started(7, "y", "work"), seen(8, "s3", "home"), pinned(9, "home", False),
+            started(10, "z", "home"), seen(11, "s4", "work"),
+        ]
+        state = pin.pin_launches(events)
+        self.assertEqual(state.launched, frozenset({"home"}))
+        self.assertIsNone(state.pinned)
+        self.assertEqual(state.seen, frozenset({"s1", "s2", "s3", "s4"}))
+        self.assertEqual(pin.pin_launches(events[5:], pin.pin_launches(events[:5])), state)
+        self.assertEqual(pin.pin_launches([
+            pinned(1, "work"), started(2, "x", "work"), pinned(3, "work", False)]).launched,
+            frozenset({"work"}))
+        self.assertEqual(pin.pin_launches([
+            pinned(1, "work", 1), started(2, "x", "work")]).launched, frozenset())
+        self.assertEqual(pin.pin_launches([]), pin.PinLaunches(None, frozenset(), frozenset()))
+
+    def test_a_session_that_started_before_the_pin_is_not_a_launch_under_it(self):
+        def ev(seq, kind, payload):
+            return Event(seq, hour(seq), kind, None, payload)
+
+        hook = ev(1, "session.hook", {"session_id": "s1", "event": "SessionStart"})
+        profile = ev(2, "session.profile", {"session_id": "s1", "profile": "home"})
+        pinned = ev(3, "profile.pin", {"profile": "home", "pinned": True})
+        later_seen = ev(4, "session.seen", {"session_id": "s1", "profile": "home"})
+        self.assertEqual(pin.pin_launches([hook, profile, pinned, later_seen]).launched,
+                         frozenset())
+        state = pin.pin_launches([hook, profile, pinned])
+        self.assertEqual(pin.pin_launches([later_seen], state).launched, frozenset())
+
+    def test_a_session_that_started_under_the_pin_is_a_launch_once_its_profile_is_known(self):
+        def ev(seq, kind, payload):
+            return Event(seq, hour(seq), kind, None, payload)
+
+        pinned = ev(1, "profile.pin", {"profile": "home", "pinned": True})
+        hook = ev(2, "session.hook", {"session_id": "s1", "event": "SessionStart"})
+        profile = ev(3, "session.profile", {"session_id": "s1", "profile": "home"})
+        started = pin.pin_launches([pinned, hook])
+        self.assertEqual(started.launched, frozenset())
+        self.assertEqual(pin.pin_launches([profile], started).launched, frozenset({"home"}))
+        unpinned = ev(4, "profile.pin", {"profile": "home", "pinned": False})
+        self.assertEqual(pin.pin_launches([pinned, hook, unpinned, profile]).launched,
+                         frozenset({"home"}))
+        other = ev(3, "session.profile", {"session_id": "s1", "profile": "work"})
+        self.assertEqual(pin.pin_launches([pinned, hook, other, profile]).launched, frozenset())
+        stray = ev(3, "session.profile", {"session_id": "s9", "profile": "home"})
+        self.assertEqual(pin.pin_launches([pinned, stray]).launched, frozenset())
+
+    def test_the_note_says_why_the_pin_is_not_in_effect(self):
+        out = cap(("a", "ok", 9, 9), ("b", "out", 0, 0, None, False, True))
+        out["profiles"][1]["out_until"] = "2026-11-20T09:30:00+00:00"
+        unknown = (None, None)
+        table = [
+            (None, cap(("a", "ok", 9, 9)), "a", None),
+            ("b", cap(("a", "ok", 9, 9), ("b", "ok", 1, 1, None, False, True)), "b",
+             {"profile": "b", "in_effect": True, "reason": None, "until": None, "instead": None}),
+            ("b", out, "a",
+             {"profile": "b", "in_effect": False, "reason": "out of allowance",
+              "until": "2026-11-20T09:30:00+00:00", "instead": "a"}),
+            ("b", cap(("a", "ok", 9, 9), ("b", "ok", 1, 1, "signed_out", False, True)), "a",
+             {"profile": "b", "in_effect": False, "reason": "signed out",
+              "until": None, "instead": "a"}),
+            ("b", cap(("a", "ok", 9, 9), ("b", "unknown", *unknown, None, False, True)), "a",
+             {"profile": "b", "in_effect": False, "reason": "no reading yet",
+              "until": None, "instead": "a"}),
+            ("b", cap(("a", "ok", 9, 9), ("b", "ok", 1, 1, None, True, True)), "a",
+             {"profile": "b", "in_effect": False, "reason": "excluded",
+              "until": None, "instead": "a"}),
+            ("b", cap(("a", "ok", 9, 9), ("b", "ok", 1, 1, "signed_out", True, True)), "a",
+             {"profile": "b", "in_effect": False, "reason": "excluded",
+              "until": None, "instead": "a"}),
+            ("gone", cap(("a", "ok", 9, 9)), None,
+             {"profile": "gone", "in_effect": False, "reason": "not a listed account",
+              "until": None, "instead": None}),
+        ]
+        for pinned, capacity, chosen, expected in table:
+            with self.subTest(pinned=pinned, capacity=capacity["profiles"]):
+                self.assertEqual(pin.note(pinned, capacity, chosen), expected)
+
+    def test_a_request_names_one_profile_and_a_bool(self):
+        self.assertEqual(pin.parse_request(b'{"profile":"work","pinned":true}'), ("work", True))
+        self.assertEqual(pin.parse_request(b'{"pinned":false,"profile":"home"}'), ("home", False))
+        refused = {
+            "no pinned": b'{"profile":"work"}',
+            "integer pinned": b'{"profile":"work","pinned":1}',
+            "empty profile": b'{"profile":"","pinned":true}',
+            "extra key": b'{"profile":"work","pinned":true,"x":1}',
+            "not an object": b"[]",
+            "not utf-8": b"\xff",
+            "long profile": ('{"profile":"%s","pinned":true}' % ("a" * 129)).encode(),
+        }
+        for name, body in refused.items():
+            with self.subTest(name), self.assertRaises(ValueError):
+                pin.parse_request(body)
 
 
 if __name__ == "__main__":

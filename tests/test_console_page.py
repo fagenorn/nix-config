@@ -270,7 +270,7 @@ class PageTest(unittest.TestCase):
             {"/api/stream", "/api/looked", "/api/answer", "/api/check-answer", "/api/goal",
              "/api/withdraw", "/api/retry-manager", "/api/approve", "/api/reply",
              "/api/message", "/api/stop", "/api/round-answer", "/api/continue",
-             "/api/exclusion", "/api/signin", "/api/signin-code", "/api/signin-cancel",
+             "/api/exclusion", "/api/pin", "/api/signin", "/api/signin-code", "/api/signin-cancel",
              "/api/account-add", "/api/signin-link"},
         )
         self.assertEqual(
@@ -280,7 +280,7 @@ class PageTest(unittest.TestCase):
     def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
         # A separate snapshot request can answer after a newer streamed frame
         # and render over it; the stream's first frame is already the snapshot.
-        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 24)
+        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 25)
         self.assertIsNotNone(
             re.search(r'fetch\("/api/looked",\s*\{\s*method:\s*"POST"', self.text)
         )
@@ -292,7 +292,7 @@ class PageTest(unittest.TestCase):
         )
         for route in ("/api/goal", "/api/withdraw", "/api/retry-manager", "/api/approve",
                       "/api/reply", "/api/message", "/api/stop", "/api/round-answer",
-                      "/api/signin", "/api/signin-code", "/api/signin-cancel",
+                      "/api/pin", "/api/signin", "/api/signin-code", "/api/signin-cancel",
                       "/api/account-add", "/api/signin-link"):
             self.assertIsNotNone(
                 re.search(rf'fetch\("{route}",\s*\{{\s*method:\s*"POST"', self.text)
@@ -988,6 +988,99 @@ class CapacityPageTest(unittest.TestCase):
         ])
         (fail,) = [n for n in nodes(snap["capacity"]) if has_class(n, "fail")]
         self.assertEqual(full(fail), "Could not include: no such profile")
+
+    def test_each_account_offers_pin_and_the_pinned_one_unpin(self) -> None:
+        snap = capacity_snap(capacity([
+            profile("a", "ok", week_left=65, pinned=True),
+            profile("b", "ok", week_left=30, pinned=False),
+        ]))
+        a, b = accounts(snap)
+        labels = []
+        for n in (a, b):
+            (pin,) = [m for m in nodes(n) if has_class(m, "cap-pin")]
+            labels.append(full(pin))
+        self.assertEqual(labels, ["Unpin", "Pin"])
+        self.assertTrue(has_class(a, "cap-pinned"))
+        self.assertFalse(has_class(b, "cap-pinned"))
+        (mark,) = [m for m in nodes(a) if has_class(m, "cap-pin-mark")]
+        self.assertEqual(full(mark), "pinned")
+        self.assertEqual([m for m in nodes(b) if has_class(m, "cap-pin-mark")], [])
+
+    def test_a_pinned_profile_with_no_reading_is_listed(self) -> None:
+        snap = capacity_snap(capacity([profile("c", "unknown", read_at=None, pinned=True)]))
+        (c,) = accounts(snap)
+        (pin,) = [m for m in nodes(c) if has_class(m, "cap-pin")]
+        self.assertEqual(full(pin), "Unpin")
+
+    def test_the_pin_button_posts_one_pin_with_the_token(self) -> None:
+        for first, body in (
+            (profile("a", "ok", week_left=65, pinned=True), {"profile": "a", "pinned": False}),
+            (profile("b", "ok", week_left=30, pinned=False), {"profile": "b", "pinned": True}),
+        ):
+            (snap,) = render([
+                START,
+                {"frame": {**view([]), "capacity": capacity([first])}},
+                {"click": "cap-pin"},
+                {"snapshot": True},
+            ])
+            (post,) = [p for p in snap["posts"] if p["url"] == "/api/pin"]
+            self.assertEqual(post["method"], "POST")
+            self.assertEqual(post["headers"],
+                             {"X-Console-Token": TOKEN, "Content-Type": "application/json"})
+            self.assertEqual(json.loads(post["body"]), body)
+
+    def test_a_refused_pin_says_why(self) -> None:
+        (snap,) = render([
+            START,
+            {"frame": {**view([]), "capacity": capacity([
+                profile("a", "ok", week_left=65, excluded=True, pinned=False)])}},
+            {"respond": {"status": 409, "text": "excluded; include it first\n"}},
+            {"click": "cap-pin"},
+            {"snapshot": True},
+        ])
+        (fail,) = [n for n in nodes(snap["capacity"]) if has_class(n, "fail")]
+        self.assertEqual(full(fail), "Could not pin: excluded; include it first")
+
+    def test_a_refused_unpin_says_why(self) -> None:
+        (snap,) = render([
+            START,
+            {"frame": {**view([]), "capacity": capacity([
+                profile("a", "ok", week_left=65, pinned=True)])}},
+            {"respond": {"status": 500, "text": "could not write\n"}},
+            {"click": "cap-pin"},
+            {"snapshot": True},
+        ])
+        (fail,) = [n for n in nodes(snap["capacity"]) if has_class(n, "fail")]
+        self.assertEqual(full(fail), "Could not unpin: could not write")
+
+    def test_the_strip_says_when_the_pin_is_not_in_effect(self) -> None:
+        cap = capacity([
+            profile("a", "out", out_until="2026-11-20T09:30:00+00:00", pinned=True),
+            profile("b", "ok", week_left=30, pinned=False),
+        ])
+
+        def last(pin: dict | None) -> dict:
+            frame = {**view([]), "capacity": cap}
+            if pin is not None:
+                frame["pin"] = pin
+            (snap,) = render([START, {"frame": frame}, {"snapshot": True}])
+            return strip(snap)[-1]
+
+        waiting = last({"profile": "a", "in_effect": False, "reason": "out of allowance",
+                        "until": "2026-11-20T09:30:00+00:00", "instead": "b"})
+        self.assertTrue(has_class(waiting, "cap-pin-note"))
+        self.assertEqual(full(waiting),
+                         "a is pinned but not in effect: out of allowance until Fri 09:30. "
+                         "New sessions use b.")
+        nowhere = last({"profile": "a", "in_effect": False, "reason": "signed out",
+                        "until": None, "instead": None})
+        self.assertTrue(has_class(nowhere, "cap-pin-note"))
+        self.assertEqual(full(nowhere),
+                         "a is pinned but not in effect: signed out. "
+                         "New sessions have no profile to use.")
+        for pin in ({"profile": "a", "in_effect": True, "reason": None,
+                     "until": None, "instead": None}, None):
+            self.assertFalse(has_class(last(pin), "cap-pin-note"))
 
     def test_all_out_lists_an_excluded_profile_as_excluded(self) -> None:
         result = render_page({**view([]), "capacity": capacity([
