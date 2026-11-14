@@ -114,9 +114,10 @@ class Adder:
             raise ValueError(reason)
         env = dict(self._environ) if self._environ is not None else None
         try:
-            done = subprocess.run([*self._command, "add", name], stdin=subprocess.DEVNULL,
-                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env,
-                                  timeout=self._timeout, check=False)
+            done = manager.run_in_own_group(
+                [*self._command, "add", name], stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=env,
+                start_new_session=True, timeout=self._timeout)
         except subprocess.TimeoutExpired as error:
             raise AddFailed("timed_out") from error
         except (FileNotFoundError, PermissionError) as error:

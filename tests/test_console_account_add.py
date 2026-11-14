@@ -140,6 +140,17 @@ class AdderTest(unittest.TestCase):
                     self.assertLess(time.monotonic() - started, 10)
         self.assertIsNone(Adder(command=[sys.executable, "-c", "pass"])("work"))
 
+    def test_a_timeout_ends_the_launchers_descendants(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "wrote"
+            script = f"(sleep 2; touch {marker}) & wait"
+            adder = Adder(command=[BASH, "-c", script, "launcher"], timeout=0.5)
+            with self.assertRaises(AddFailed) as caught:
+                adder("work")
+            self.assertEqual(caught.exception.kind, "timed_out")
+            time.sleep(3)
+            self.assertFalse(marker.exists())
+
     def test_adder_for(self):
         self.assertIsInstance(adder_for("linux"), Adder)
         self.assertIsNone(adder_for("darwin"))

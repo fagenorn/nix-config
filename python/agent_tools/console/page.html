@@ -2562,7 +2562,8 @@ function beginAccountSignin() {
       method: "POST", headers: stallHeaders(), body: JSON.stringify({ profile }),
     }), async (response, profile) => {
       const answer = JSON.parse(await response.text());
-      if (accountSignin === profile) holdSigninLink(profile, answer, true);
+      // A frame that opened the profile's card meanwhile ended the continuation; the card takes the link all the same.
+      holdSigninLink(profile, answer, accountSignin === profile);
       redraw();
     }, 200);
   });

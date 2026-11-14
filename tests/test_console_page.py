@@ -5021,6 +5021,16 @@ class AddAccountNoLinkPageTest(unittest.TestCase):
         self.assertEqual(link["href"], "https://claude.example/b")
         self.assertEqual(len([n for n in added(snap, "account-code") if n["tag"] == "input"]), 1)
 
+    def test_a_link_answered_after_a_frame_opened_the_card_reaches_the_card(self) -> None:
+        (snap,) = render(NO_LINK_RUNNING + [
+            {"hold": True}, {"click": "account-link-get"},
+            {"frame": with_item(with_run(FRESH, "running", 9), RUNNING)},
+            {"release": {"status": 200, "text": ADDED}}, {"snapshot": True}])
+        card = sign_in_card(snap)
+        self.assertEqual(
+            [n["href"] for n in of_class(card, "a", "signin-link")], ["https://claude.example/b"])
+        self.assertEqual(added(snap, "account-add-note"), [])
+
     def test_a_refused_fetch_shows_the_reason_in_the_control(self) -> None:
         (snap,) = render(NO_LINK_RUNNING + [
             {"respond": {"status": 502, "text": "the sign-in could not start\n"}},
