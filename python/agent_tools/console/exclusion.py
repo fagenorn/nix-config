@@ -15,7 +15,7 @@ for an object whose keys are exactly `profile` and `excluded`, `profile` a non-e
 most `MAX_PROFILE` (128) characters and `excluded` a bool; anything else raises `ValueError`.
 
 Refusal. `Refused` is raised by the service with one of `UNKNOWN` (no such profile),
-`ALREADY_EXCLUDED` or `ALREADY_INCLUDED`.
+`ALREADY_EXCLUDED`, `PINNED` (the profile is the pinned one, #1029) or `ALREADY_INCLUDED`.
 
 Retention. The kind is not in `KEPT_KINDS`, but the retention pass leaves the newest valid row of
 each profile in place, whatever its age, when that row excludes the profile
@@ -35,6 +35,7 @@ MAX_PROFILE = 128
 UNKNOWN = "no such profile"
 ALREADY_EXCLUDED = "already excluded"
 ALREADY_INCLUDED = "already included"
+PINNED = "pinned; unpin it first"
 
 
 class Refused(Exception):
