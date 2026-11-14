@@ -1190,6 +1190,14 @@ class ProfileChoiceServiceTest(ManagerServiceTest):
 
     def prepare_then_exclude(self, svc, queue, *profiles):
         """Run the queued launch with each of `profiles` excluded just after the lock that prepared it is released."""
+        def exclude_all():
+            for profile in profiles:
+                self.assertEqual(self.exclude(svc, profile)[::2], (204, b""))
+
+        self.prepare_then(svc, queue, exclude_all)
+
+    def prepare_then(self, svc, queue, act):
+        """Run the queued launch with `act()` called just after the lock that prepared it is released."""
         prepared = svc._prepared_launch
         lock = svc._ingest
         state = {"prepared": False}
@@ -1202,8 +1210,7 @@ class ProfileChoiceServiceTest(ManagerServiceTest):
                 lock.release()
                 if state["prepared"]:
                     state["prepared"] = False
-                    for profile in profiles:
-                        self.assertEqual(self.exclude(svc, profile)[::2], (204, b""))
+                    act()
 
         def prepared_then_flagged(*args):
             launch = prepared(*args)
@@ -1225,6 +1232,33 @@ class ProfileChoiceServiceTest(ManagerServiceTest):
         self.assertEqual([c.profile for c in launches.calls], ["home"])
         _, _, kind, _, payload = self.manager_rows()[-1]
         self.assertEqual((kind, json.loads(payload)["profile"]), ("manager.started", "home"))
+
+    def test_a_launch_prepared_before_a_pin_is_started_under_the_pin(self):
+        dirs = self.two_signed_in()
+        launches = support.Launches()
+        queue = support.Queued()
+        svc = self.start(profile_dirs=dirs, clock=lambda: NOW, choice_file=self.choice,
+                         launcher=launches, dispatch=queue)
+        self.state(svc)
+        self.prepare_then(svc, queue, lambda: self.assertEqual(
+            self.pin(svc, "home")[::2], (204, b"")))
+        self.assertEqual(self.choice.read_text(), "home\n")
+        self.assertEqual([c.profile for c in launches.calls], ["home"])
+        _, _, kind, _, payload = self.manager_rows()[-1]
+        self.assertEqual((kind, json.loads(payload)["profile"]), ("manager.started", "home"))
+
+    def test_a_launch_prepared_under_a_pin_that_is_lifted_is_started_under_the_choice(self):
+        dirs = self.two_signed_in()
+        launches = support.Launches()
+        queue = support.Queued()
+        svc = self.start(profile_dirs=dirs, clock=lambda: NOW, choice_file=self.choice,
+                         launcher=launches, dispatch=queue)
+        self.assertEqual(self.pin(svc, "home")[::2], (204, b""))
+        self.state(svc)
+        self.prepare_then(svc, queue, lambda: self.assertEqual(
+            self.pin(svc, "home", False)[::2], (204, b"")))
+        self.assertEqual(self.choice.read_text(), "work\n")
+        self.assertEqual([c.profile for c in launches.calls], ["work"])
 
     def test_a_launch_prepared_before_the_last_profile_was_excluded_waits(self):
         dirs = self.two_signed_in()

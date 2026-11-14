@@ -2494,10 +2494,11 @@ class ConsoleService:
                     return
             with self._ingest:
                 launch = self._prepared_launch(sprint_id, token, listed)
+                prepared_pin = self._pinned
             if launch is None:
                 return
             with self._ingest:
-                launch = self._unexcluded_launch(launch, token)
+                launch = self._unexcluded_launch(launch, token, prepared_pin)
             if launch is None:
                 return
             reason = None
@@ -2563,13 +2564,15 @@ class ConsoleService:
                                   secret, self._sprint_secrets, takeover=takeover,
                                   seen_after=sprint.manager_seen_seq or 0)
 
-    def _unexcluded_launch(self, launch: manager.Launch, token: object) -> manager.Launch | None:
-        """Under the ingest lock: `launch`, or its replacement when its profile was excluded after it was prepared.
+    def _unexcluded_launch(self, launch: manager.Launch, token: object,
+                           prepared_pin: str | None) -> manager.Launch | None:
+        """Under the ingest lock: `launch`, or its replacement when its profile was excluded or the pin moved after it was prepared.
 
-        The choice is made again over the set now in force; with nothing to choose a wait row is
-        appended (as `_prepared_launch` does) and None returned.
+        `prepared_pin` is the pin in force when it was prepared. The choice is made again over the
+        set and the pin now in force; with nothing to choose a wait row is appended (as
+        `_prepared_launch` does) and None returned.
         """
-        if launch.profile not in self._excluded:
+        if launch.profile not in self._excluded and self._pinned == prepared_pin:
             return launch
         sprint = self._sprints.get(launch.sprint_id)
         if sprint is None:

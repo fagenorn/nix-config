@@ -12,12 +12,15 @@ when its profile is the pinned one, else it changes nothing. Folding later event
 fold gives the fold of all of them.
 
 Launches under the pin. `pin_launches(events, state=None)` returns a `PinLaunches(pinned, seen,
-launched)` folded in order onto `state`: a `KIND` row moves `pinned` by the rule above; a
-`session.seen` row whose `session_id` is a string not yet in `seen` adds it to `seen`, and adds its
-payload's `profile` to `launched` when that is a string equal to the current `pinned`; a later
-`session.seen` row of a session already in `seen` adds nothing; a `manager.started` row whose
-payload `profile` is a string equal to the current `pinned` adds it to `launched`. Every other row,
-and any row while `pinned` is None, adds nothing. `launched` only grows, and folding later events
+launched, awaiting)` folded in order onto `state`: a `KIND` row moves `pinned` by the rule above; a
+`session.hook` or `session.seen` row whose `session_id` is a string not yet in `seen` is the
+session's start: it adds the session to `seen` and, while `pinned` is not None, to `awaiting` as
+`(session, pinned)`; a `session.seen` or `session.profile` row whose `session_id` is in `awaiting`
+and whose payload `profile` is a string removes it from `awaiting` and adds that profile to
+`launched` when it equals the pin the session started under (a `session.hook` row carries no
+profile); a later row of a session already in `seen` starts nothing; a `manager.started` row whose
+payload `profile` is a string equal to the current `pinned` adds it to `launched`. Every other row
+adds nothing, so a session that started before the pin is never a launch under it. `launched` only grows, and folding later events
 onto an earlier state gives the fold of all of them. It is the evidence the host check reads (P9):
 it cannot tell whether the pin had room, nor whether a launch used `CLAUDE_ACCOUNT`.
 
@@ -48,7 +51,8 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 from agent_tools.console import manager
-from agent_tools.console.event_log import MANAGER_STARTED, PROFILE_PIN, SESSION_SEEN, Event
+from agent_tools.console.event_log import (
+    MANAGER_STARTED, PROFILE_PIN, SESSION_HOOK, SESSION_PROFILE, SESSION_SEEN, Event)
 
 KIND = PROFILE_PIN
 MAX_PROFILE = 128
@@ -72,6 +76,7 @@ class PinLaunches:
     pinned: str | None
     seen: frozenset[str]
     launched: frozenset[str]
+    awaiting: frozenset[tuple[str, str]] = frozenset()
 
 
 def entry(profile: str, pinned: bool) -> tuple[str, None, dict]:
@@ -100,25 +105,34 @@ def pinned_profile(events: Iterable[Event], pinned: str | None = None) -> str | 
 
 
 def pin_launches(events: Iterable[Event], state: PinLaunches | None = None) -> PinLaunches:
-    pinned, seen, launched = ((None, frozenset(), frozenset()) if state is None
-                              else (state.pinned, state.seen, state.launched))
-    seen, launched = set(seen), set(launched)
+    pinned, seen, launched, awaiting = (
+        (None, frozenset(), frozenset(), frozenset()) if state is None
+        else (state.pinned, state.seen, state.launched, state.awaiting))
+    seen, launched, awaiting = set(seen), set(launched), dict(awaiting)
     for event in events:
         if event.kind == KIND:
             pinned = _moved(pinned, event)
             continue
         profile = event.payload.get("profile")
-        if event.kind == SESSION_SEEN:
-            session = event.payload.get("session_id")
-            if not isinstance(session, str) or session in seen:
-                continue
+        if event.kind == MANAGER_STARTED:
+            if pinned is not None and isinstance(profile, str) and profile == pinned:
+                launched.add(profile)
+            continue
+        if event.kind not in (SESSION_HOOK, SESSION_SEEN, SESSION_PROFILE):
+            continue
+        session = event.payload.get("session_id")
+        if not isinstance(session, str):
+            continue
+        if event.kind != SESSION_PROFILE and session not in seen:
             seen.add(session)
-            if pinned is not None and isinstance(profile, str) and profile == pinned:
+            if pinned is not None:
+                awaiting[session] = pinned
+        if isinstance(profile, str) and event.kind != SESSION_HOOK:
+            under = awaiting.pop(session, None)
+            if under is not None and profile == under:
                 launched.add(profile)
-        elif event.kind == MANAGER_STARTED:
-            if pinned is not None and isinstance(profile, str) and profile == pinned:
-                launched.add(profile)
-    return PinLaunches(pinned, frozenset(seen), frozenset(launched))
+    return PinLaunches(pinned, frozenset(seen), frozenset(launched),
+                       frozenset(awaiting.items()))
 
 
 def parse_request(body: bytes) -> tuple[str, bool]:

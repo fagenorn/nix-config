@@ -858,6 +858,37 @@ class PinTest(unittest.TestCase):
             pinned(1, "work", 1), started(2, "x", "work")]).launched, frozenset())
         self.assertEqual(pin.pin_launches([]), pin.PinLaunches(None, frozenset(), frozenset()))
 
+    def test_a_session_that_started_before_the_pin_is_not_a_launch_under_it(self):
+        def ev(seq, kind, payload):
+            return Event(seq, hour(seq), kind, None, payload)
+
+        hook = ev(1, "session.hook", {"session_id": "s1", "event": "SessionStart"})
+        profile = ev(2, "session.profile", {"session_id": "s1", "profile": "home"})
+        pinned = ev(3, "profile.pin", {"profile": "home", "pinned": True})
+        later_seen = ev(4, "session.seen", {"session_id": "s1", "profile": "home"})
+        self.assertEqual(pin.pin_launches([hook, profile, pinned, later_seen]).launched,
+                         frozenset())
+        state = pin.pin_launches([hook, profile, pinned])
+        self.assertEqual(pin.pin_launches([later_seen], state).launched, frozenset())
+
+    def test_a_session_that_started_under_the_pin_is_a_launch_once_its_profile_is_known(self):
+        def ev(seq, kind, payload):
+            return Event(seq, hour(seq), kind, None, payload)
+
+        pinned = ev(1, "profile.pin", {"profile": "home", "pinned": True})
+        hook = ev(2, "session.hook", {"session_id": "s1", "event": "SessionStart"})
+        profile = ev(3, "session.profile", {"session_id": "s1", "profile": "home"})
+        started = pin.pin_launches([pinned, hook])
+        self.assertEqual(started.launched, frozenset())
+        self.assertEqual(pin.pin_launches([profile], started).launched, frozenset({"home"}))
+        unpinned = ev(4, "profile.pin", {"profile": "home", "pinned": False})
+        self.assertEqual(pin.pin_launches([pinned, hook, unpinned, profile]).launched,
+                         frozenset({"home"}))
+        other = ev(3, "session.profile", {"session_id": "s1", "profile": "work"})
+        self.assertEqual(pin.pin_launches([pinned, hook, other, profile]).launched, frozenset())
+        stray = ev(3, "session.profile", {"session_id": "s9", "profile": "home"})
+        self.assertEqual(pin.pin_launches([pinned, stray]).launched, frozenset())
+
     def test_the_note_says_why_the_pin_is_not_in_effect(self):
         out = cap(("a", "ok", 9, 9), ("b", "out", 0, 0, None, False, True))
         out["profiles"][1]["out_until"] = "2026-11-20T09:30:00+00:00"
