@@ -964,7 +964,8 @@ function isHttps(link) {
 function holdSigninLink(profile, answer, added = false) {
   if (answer === null || typeof answer !== "object") return;
   const link = answer.link;
-  if (!isHttps(link)) return;
+  // An add holds its attempt with no link: the login runs on, and the page keeps the controls to fetch the link or cancel.
+  if (!isHttps(link) && !(added && link === null)) return;
   if (!Number.isInteger(answer.attempt) || answer.attempt < 1) return;
   signinLinks.set(profile, { link, attempt: answer.attempt, added });
 }
@@ -1017,11 +1018,12 @@ function signinCard(item) {
   const note = run === null ? undefined : SIGNIN_NOTES.get(run.state);
   if (note !== undefined) card.appendChild(el("p", "signin-run", note));
   const held = signinLinks.get(item.profile);
+  const linked = held !== undefined && isHttps(held.link);
   const starting = signinPosts.get("start\n" + item.profile);
   const sendingCode = signinPosts.get("code\n" + item.profile);
   const cancelling = signinPosts.get("cancel\n" + item.profile);
   const act = el("div", "act");
-  if (held === undefined) {
+  if (!linked) {
     const start = actionButton("signin-start primary needs", "Sign in",
       () => signinPost(item, "start", "Could not start the sign-in: ", () => fetch("/api/signin", {
         method: "POST", headers: stallHeaders(), body: signinBody(item),
@@ -2019,12 +2021,25 @@ function keyStrip(current, open) {
   for (const e of entries) strip.appendChild(e);
   return strip;
 }
+// When a frame shows the added profile's sign-in item, the header continuation ends and the card takes over: the typed code moves to the card's draft, and the focus and selection with it.
+function carryAccountCode(signins) {
+  if (accountSignin === null || accountCont === null) return null;
+  const kept = signinLinks.get(accountSignin);
+  const shown = signins.find((item) => item.profile === accountSignin);
+  if (shown === undefined || kept === undefined || !isHttps(kept.link)) return null;
+  const code = accountCont.code;
+  const focused = document.activeElement === code;
+  if (code.value === "" && !focused) return null;
+  const key = stateId(shown) + "\nsignin-code";
+  drafts.set(key, { value: code.value, start: code.selectionStart, end: code.selectionEnd });
+  return focused ? { key, start: code.selectionStart, end: code.selectionEnd } : null;
+}
 function renderInbox(view) {
   const fresh = view !== lastView;
   lastView = view;
   const section = document.getElementById("inbox");
   const active = document.activeElement;
-  const held = active && active.dataset && active.dataset.draft !== undefined
+  let held = active && active.dataset && active.dataset.draft !== undefined
     ? { key: active.dataset.draft, start: active.selectionStart, end: active.selectionEnd }
     : null;
   fields = new Map();
@@ -2061,6 +2076,7 @@ function renderInbox(view) {
       signinLinks.delete(profile);
     }
   }
+  held = carryAccountCode(signins) || held;
   for (const [key, state] of [...signinPosts]) {
     const profile = key.split("\n")[1];
     if (state.phase !== "sending" && !signins.some((item) => item.profile === profile)) signinPosts.delete(key);
@@ -2394,7 +2410,7 @@ function accountField(cls, label, placeholder) {
   return input;
 }
 // The control's elements are built once: no frame replaces an input, so a typed name or code keeps its focus and selection.
-const accountState = { phase: "closed", adding: false, codeSending: false, cancelling: false, failure: "", shown: "" };
+const accountState = { phase: "closed", adding: false, codeSending: false, cancelling: false, fetching: false, failure: "", shown: "" };
 let accountCont = null;
 const accountBox = document.getElementById("account-add");
 const accountReason = el("span", "account-add-reason");
@@ -2447,7 +2463,7 @@ async function accountAddPost() {
   redraw();
   renderAccountAdd(lastView);
 }
-async function accountSigninPost(flag, prefix, send, onOk) {
+async function accountSigninPost(flag, prefix, send, onOk, okStatus = 204) {
   const profile = accountSignin;
   if (profile === null || accountState[flag]) return;
   accountState[flag] = true;
@@ -2456,7 +2472,7 @@ async function accountSigninPost(flag, prefix, send, onOk) {
   let reason = null;
   try {
     const response = await send(profile);
-    if (response.status === 204) onOk();
+    if (response.status === okStatus) await onOk(response, profile);
     else reason = (await response.text()).trim() || "HTTP " + response.status;
   } catch (error) {
     console.error(error);
@@ -2466,8 +2482,7 @@ async function accountSigninPost(flag, prefix, send, onOk) {
   if (accountSignin === profile) accountState.failure = reason === null ? "" : prefix + reason;
   renderAccountAdd(lastView);
 }
-function beginAccountSignin(held) {
-  const link = signinLinkNode("account-add-link", held);
+function beginAccountSignin() {
   const code = accountField("account-code", "Sign-in code", "Code from the sign-in page");
   code.addEventListener("input", () => renderAccountAdd(lastView));
   const send = actionButton("account-code-send", "Send code", () => {
@@ -2482,7 +2497,16 @@ function beginAccountSignin(held) {
       method: "POST", headers: stallHeaders(), body: JSON.stringify({ profile }),
     }), () => {});
   });
-  accountCont = { note: el("p", "account-add-note", "Sign in to " + accountSignin), link, code, send, cancel };
+  const fetchLink = actionButton("account-link-get", "Get sign-in link", () => {
+    accountSigninPost("fetching", "Could not get the sign-in link: ", (profile) => fetch("/api/signin", {
+      method: "POST", headers: stallHeaders(), body: JSON.stringify({ profile }),
+    }), async (response, profile) => {
+      const answer = JSON.parse(await response.text());
+      if (accountSignin === profile) holdSigninLink(profile, answer, true);
+      redraw();
+    }, 200);
+  });
+  accountCont = { note: el("p", "account-add-note", "Sign in to " + accountSignin), link: null, code, send, cancel, fetchLink };
   accountState.phase = "closed";
   accountState.failure = "";
 }
@@ -2491,20 +2515,27 @@ function endAccountSignin() {
   accountCont = null;
   accountState.codeSending = false;
   accountState.cancelling = false;
+  accountState.fetching = false;
   accountState.failure = "";
 }
 // Updates the disabled states and the reason, and begins or ends the continuation; it never replaces an input or assigns lastView.
 function renderAccountAdd(view) {
+  let held = null;
   if (accountSignin !== null) {
-    const held = signinLinks.get(accountSignin);
-    if (held === undefined || held.added !== true) endAccountSignin();
-    else if (accountCont === null) beginAccountSignin(held);
+    held = signinLinks.get(accountSignin);
+    if (held === undefined || held.added !== true) {
+      endAccountSignin();
+      held = null;
+    } else if (accountCont === null) beginAccountSignin();
   }
   let want = accountState.phase;
   let reason = "";
   if (accountCont !== null) {
-    want = "signin";
+    const linked = isHttps(held.link);
+    want = linked ? "signin" : "signin-wait";
     reason = accountState.failure;
+    if (linked && accountCont.link === null) accountCont.link = signinLinkNode("account-add-link", held);
+    accountCont.fetchLink.disabled = accountState.fetching;
     accountCont.send.disabled = accountCont.code.value.trim() === "" || accountState.codeSending;
     accountCont.cancel.disabled = accountState.cancelling;
   } else if (want === "naming") {
@@ -2516,6 +2547,7 @@ function renderAccountAdd(view) {
     accountState.shown = want;
     const parts = want === "signin"
       ? [accountCont.note, accountCont.link, accountCont.code, accountCont.send, accountCont.cancel, accountReason]
+      : want === "signin-wait" ? [accountCont.note, accountCont.fetchLink, accountCont.cancel, accountReason]
       : want === "naming" ? [accountName, accountSend, accountCancel, accountReason] : [accountOpen];
     accountBox.replaceChildren(...parts);
   }

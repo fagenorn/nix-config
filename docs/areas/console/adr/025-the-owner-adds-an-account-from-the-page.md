@@ -19,7 +19,7 @@ ADR-console-024 let the owner sign a profile in from the page, but a profile has
 
 **D5. What is stored.** An added profile appends one `account.added` row with exactly `by` (`owner`) and `profile`; the kind is not kept past retention, and the view's `accounts_added` is folded from the retained rows. A refusal and a failed creation append none. No link is in any row, stderr line, view or stream frame.
 
-**D6. The page.** This amends ADR-console-002. The Add account control sits in the header. The account name is a fourth typed thing and its draft, selection and focus survive every frame. A link held from an add that waits for its item is kept in memory like the sign-in link of ADR-console-024 D3, and while no sign-in item shows the added profile the control carries its sign-in continuation: the link, the code field and Cancel.
+**D6. The page.** This amends ADR-console-002. The Add account control sits in the header. The account name is a fourth typed thing and its draft, selection and focus survive every frame. A link held from an add that waits for its item is kept in memory like the sign-in link of ADR-console-024 D3, and while no sign-in item shows the added profile the control carries its sign-in continuation: the link, the code field and Cancel. An add that answers with no link still holds its attempt, and the continuation then offers Get sign-in link (the start write again, which joins the live run) and Cancel until a link arrives or the run ends. When the profile's sign-in item appears, the card takes over the typed code, its selection and its focus.
 
 **D7. Linux only.** The console adds an account only where it starts a sign-in, which is Linux. The macOS half is held on #894.
 

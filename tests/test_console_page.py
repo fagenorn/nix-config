@@ -278,7 +278,7 @@ class PageTest(unittest.TestCase):
     def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
         # A separate snapshot request can answer after a newer streamed frame
         # and render over it; the stream's first frame is already the snapshot.
-        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 21)
+        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 22)
         self.assertIsNotNone(
             re.search(r'fetch\("/api/looked",\s*\{\s*method:\s*"POST"', self.text)
         )
@@ -4915,3 +4915,57 @@ class AddAccountPageTest(unittest.TestCase):
             {"type": {"class": "account-code", "text": "ab"}},
             {"frame": {**V, "signin_runs": RUNNING}}, {"snapshot": True}])
         self.assertEqual(snap["field"], {"cls": "account-code", "value": "ab", "start": 2, "end": 2})
+
+
+NO_LINK = "{\"attempt\":9,\"link\":null,\"profile\":\"fresh\"}"
+NO_LINK_STEPS = ADD_STEPS[:4] + [{"respond": {"status": 200, "text": NO_LINK}}, ADD_STEPS[5]]
+NO_LINK_RUNNING = NO_LINK_STEPS + [{"frame": {**V, "signin_runs": RUNNING}}]
+
+
+class AddAccountNoLinkPageTest(unittest.TestCase):
+    def test_an_add_with_no_link_keeps_a_way_to_fetch_the_link_and_to_cancel(self) -> None:
+        (snap,) = render(NO_LINK_RUNNING + [{"snapshot": True}])
+        (note,) = added(snap, "account-add-note")
+        self.assertEqual(full(note), "Sign in to fresh")
+        self.assertEqual(len([n for n in added(snap, "account-link-get") if n["tag"] == "button"]), 1)
+        self.assertEqual(len([n for n in added(snap, "account-signin-cancel") if n["tag"] == "button"]), 1)
+        self.assertEqual([n for n in added(snap, "account-add-link") if n["tag"] == "a"], [])
+
+    def test_fetching_the_link_posts_the_signin_and_shows_the_link_and_the_code_field(self) -> None:
+        (snap,) = render(NO_LINK_RUNNING + [
+            {"respond": {"status": 200, "text": ADDED}}, {"click": "account-link-get"},
+            {"snapshot": True}])
+        post = snap["posts"][-1]
+        self.assertEqual((post["url"], post["method"]), ("/api/signin", "POST"))
+        self.assertEqual(post["headers"]["X-Console-Token"], TOKEN)
+        self.assertEqual(json.loads(post["body"]), {"profile": "fresh"})
+        (link,) = [n for n in added(snap, "account-add-link") if n["tag"] == "a"]
+        self.assertEqual(link["href"], "https://claude.example/b")
+        self.assertEqual(len([n for n in added(snap, "account-code") if n["tag"] == "input"]), 1)
+
+    def test_a_refused_fetch_shows_the_reason_in_the_control(self) -> None:
+        (snap,) = render(NO_LINK_RUNNING + [
+            {"respond": {"status": 502, "text": "the sign-in could not start\n"}},
+            {"click": "account-link-get"}, {"snapshot": True}])
+        self.assertEqual(
+            added_reason(snap), "Could not get the sign-in link: the sign-in could not start")
+
+    def test_a_card_for_a_run_with_no_held_link_offers_sign_in_and_cancel(self) -> None:
+        (snap,) = render(NO_LINK_RUNNING + [
+            {"frame": with_item(with_run(FRESH, "running", 9), RUNNING)}, {"snapshot": True}])
+        card = sign_in_card(snap)
+        self.assertEqual(of_class(card, "a", "signin-link"), [])
+        self.assertEqual(len(of_class(card, "button", "signin-start")), 1)
+        self.assertEqual(len(of_class(card, "button", "signin-cancel")), 1)
+        self.assertEqual(added(snap, "account-add-note"), [])
+
+
+class AddAccountHandoffPageTest(unittest.TestCase):
+    def test_the_typed_code_and_its_focus_carry_to_the_card_when_its_item_arrives(self) -> None:
+        (snap,) = render(NO_ITEM + [
+            {"type": {"class": "account-code", "text": "ab"}},
+            {"frame": with_item(with_run(FRESH, "running", 9), RUNNING)}, {"snapshot": True}])
+        self.assertEqual(snap["field"], {"cls": "signin-code", "value": "ab", "start": 2, "end": 2})
+        (send,) = of_class(sign_in_card(snap), "button", "signin-send")
+        self.assertFalse(send["disabled"])
+        self.assertEqual(added(snap, "account-code"), [])
