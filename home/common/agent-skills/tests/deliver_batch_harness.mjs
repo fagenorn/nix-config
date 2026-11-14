@@ -52,6 +52,8 @@ const DEFAULTS = [
   [/^land-sync-fix-/, (l, p) => ({ ...DONE, start_head: (p.match(/merge commit ([0-9a-f]{40})/) || [])[1], commit: SYNC_FIXED })],
   [/^land-record-/, (l, p) => { const head = promptHead(p); return { ok: true, head, lock: { verdict: 'moved', lock_sha: head }, checks: { state: 'passed', head, required: ['ci'], passed: ['ci'] } } }],
   // #913: the resolution of an aborted sync merge, outside the land lock, defaults to a resolved merge commit RESOLVED.
+  // #1022: the second proof of the clean merges a rerun sync step reported.
+  [/^land-sync-prove-/, () => ({ proven: true })],
   [/^land-sync-resolve-/, () => ({ status: 'done', conflicted: true, head: RESOLVED, merge_commit: RESOLVED, resolved_files: ['x.py'], markers_checked: true, tests: ['t'], notes: 'ok' })],
   [/^land-sync-/, () => ({ status: 'current', conflicted: false, head: SHA, notes: 'ok' })],
   // #1001: the PR opened while the issue waited in the land queue, at the same number its land-pr or train-pr reports.
