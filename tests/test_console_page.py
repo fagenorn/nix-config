@@ -4539,8 +4539,9 @@ class PageStandingRulesTest(unittest.TestCase):
             self.assertLessEqual(float(value[:-2]), 16)
 
 
-def si(state: str, days, ask: bool = False) -> dict:
-    return {"state": state, "ends_at": None, "days_left": days, "ask": ask, "since": None}
+def si(state: str, days, ask: bool = False, ever=None) -> dict:
+    return {"state": state, "ends_at": None, "days_left": days, "ask": ask, "since": None,
+            "ever_signed_in": state == "signed_in" if ever is None else ever}
 
 
 SIGNIN = {
@@ -4681,12 +4682,23 @@ class SigninPageTest(unittest.TestCase):
                          ["signed in, ends in 2 days"])
         (start,) = [n for n in nodes(card) if n["tag"] == "button"]
         self.assertTrue(has_class(start, "signin-start"))
-        self.assertEqual(full(start), "Sign in")
+        self.assertEqual(full(start), "Sign in again")
         self.assertEqual([n for n in nodes(card) if has_class(n, "signin-command")], [])
         self.assertEqual([n for n in nodes(card) if has_class(n, "signin-cancel")], [])
         self.assertNotIn("CLAUDE_ACCOUNT", full(card))
         self.assertEqual([n for n in nodes(snap["inbox"]) if has_class(n, "answer")], [])
         self.assertIn("1 thing needs you", full(snap["statement"]))
+
+    def test_the_action_reads_sign_in_again_only_for_a_profile_once_signed_in(self) -> None:
+        first = frame([{**SIGNIN, "signin": si("signed_out", None, ask=True, ever=False)}])
+        second = frame([{**SIGNIN, "signin": si("signed_out", None, ask=True, ever=True)}])
+        one, two = render([START, {"frame": first}, {"snapshot": True},
+                           {"frame": second}, {"snapshot": True}])
+        for snap, words in ((one, "Sign in"), (two, "Sign in again")):
+            (card,) = [n for n in nodes(snap["inbox"])
+                       if n["tag"] == "article" and has_class(n, "signin")]
+            (start,) = [n for n in nodes(card) if has_class(n, "signin-start")]
+            self.assertEqual(full(start), words)
 
     def test_pressing_sign_in_posts_the_profile_and_shows_the_link(self) -> None:
         (snap,) = render(SIGNED_IN_STEPS + [{"snapshot": True}])
@@ -4843,8 +4855,8 @@ class SigninPageTest(unittest.TestCase):
 
 
 V = {**frame([]), "capacity": capacity([profile("work", "ok", week_left=50, signin=si("signed_in", 9))])}
-FRESH = {**SIGNIN, "key": "signin/fresh", "profile": "fresh", "headline": "Sign in to fresh again",
-         "signin": si("signed_out", None, ask=True)}
+FRESH = {**SIGNIN, "key": "signin/fresh", "profile": "fresh", "headline": "Sign in to fresh",
+         "signin": si("signed_out", None, ask=True, ever=False)}
 ADDED = "{\"attempt\":9,\"link\":\"https://claude.example/b\",\"profile\":\"fresh\"}"
 RUNNING = {"fresh": {"state": "running", "at": None, "attempt": 9}}
 ENDED = {"fresh": {"state": "cancelled", "at": "2026-11-14T10:00:00+00:00", "attempt": 9}}

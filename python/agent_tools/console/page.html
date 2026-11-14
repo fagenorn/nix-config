@@ -1073,7 +1073,9 @@ function signinCard(item) {
   const cancelling = signinPosts.get("cancel\n" + item.profile);
   const act = el("div", "act");
   if (!linked) {
-    const start = actionButton("signin-start primary needs", "Sign in",
+    const ever = item.signin !== null && typeof item.signin === "object"
+      && item.signin.ever_signed_in === true;
+    const start = actionButton("signin-start primary needs", ever ? "Sign in again" : "Sign in",
       () => signinPost(item, "start", "Could not start the sign-in: ", () => fetch("/api/signin", {
         method: "POST", headers: stallHeaders(), body: signinBody(item),
       })));
