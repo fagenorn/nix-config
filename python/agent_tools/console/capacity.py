@@ -44,7 +44,7 @@ the reset of the window the refusal names (`binding`, else the first of "7d", "5
 and, when refused, the refusal reset (null when none is known, or when not out); `next_reset` the
 earliest reset still ahead.
 
-`capacity_view(profiles, state, now, signins=None)` returns `{"tight", "all_out", "resumes_at",
+`capacity_view(profiles, state, now, signins=None, excluded=frozenset())` returns `{"tight", "all_out", "resumes_at",
 "no_reading", "profiles": [<profile_capacity>]}` over
 exactly the named profiles, sorted: the configured ones, so a profile removed with
 `claude-account rm` stops counting at once while its readings stay in the log and the fold. `tight`
@@ -60,10 +60,16 @@ no-reading count, `all_out`, `resumes_at` and `tight`, which are evaluated over 
 exactly as above (`tight` still needs at least two of them): its client cannot make a request, so
 an old reading of it gives no room, and it is not a profile that merely has no reading. It stays in
 `profiles`, its reading kept. Without `signins` every result is the same apart from that member.
+
+Each entry also carries `"excluded"` (#1028): whether its name is in the optional `excluded`
+collection, always present, after `"signin"`. An excluded profile is left out of the room count,
+the no-reading count, `all_out`, `resumes_at` and `tight` as a signed-out entry is, and stays in
+`profiles` with its reading and sign-in kept. Without `excluded` every result is the same apart
+from that member.
 """
 
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -270,13 +276,16 @@ def profile_capacity(profile: str, reading: Reading | None, now: float) -> dict:
 
 
 def capacity_view(profiles: Iterable[str], state: CapacityState, now: float,
-                  signins: Mapping[str, signin_state.SignIn] | None = None) -> dict:
+                  signins: Mapping[str, signin_state.SignIn] | None = None,
+                  excluded: Collection[str] = frozenset()) -> dict:
     names = sorted(set(profiles))
     signins = signins or {}
     entries = [{**profile_capacity(name, state.readings.get(name), now),
-                "signin": signin_state.profile_signin(signins.get(name), now)}
+                "signin": signin_state.profile_signin(signins.get(name), now),
+                "excluded": name in excluded}
                for name in names]
-    considered = [entry for entry in entries if entry["signin"]["state"] != "signed_out"]
+    considered = [entry for entry in entries
+                  if entry["signin"]["state"] != "signed_out" and not entry["excluded"]]
     room = sum(entry["state"] in ("ok", "reset") for entry in considered)
     unknown = sum(entry["state"] == "unknown" for entry in considered)
     all_out = bool(considered) and all(entry["state"] == "out" for entry in considered)

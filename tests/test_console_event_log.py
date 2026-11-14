@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent_tools.console import event_log
+from agent_tools.console import event_log, exclusion
 from agent_tools.console.event_log import EventLog, EventLogError
 
 STAMP = "2026-11-11T00:00:00.000000+00:00"
@@ -561,6 +561,26 @@ class RetentionTest(unittest.TestCase):
         self.assertEqual(self.retain_at(log, NOW), 2)
         self.assertEqual([(r[0], r[2]) for r in rows(self.store)],
                          [(2, event_log.SIGNIN_READING), (3, event_log.SIGNIN_READING)])
+        self.assertEqual(self.retain_at(log, NOW), 0)
+
+    def test_a_pass_keeps_the_newest_exclusion_of_each_profile_while_it_is_in_force(self):
+        log = self.open()
+        self.now = OLD
+        row = lambda payload: (event_log.PROFILE_EXCLUSION, None, payload)
+        log.append([row({"profile": "a", "excluded": True})])
+        log.append([row({"profile": "a", "excluded": True})])
+        log.append([row({"profile": "b", "excluded": True})])
+        log.append([row({"profile": "b", "excluded": False})])
+        log.append([row({"profile": "c", "excluded": True})])
+        log.append([row({"profile": "c", "excluded": 0})])
+        log.append([row({"profile": "c"})])
+        log.append([("old", None, {})])
+        before = exclusion.excluded_profiles(log.events())
+        self.assertEqual(before, frozenset({"a", "c"}))
+        self.assertEqual(self.retain_at(log, NOW), 6)
+        self.assertEqual([(r[0], r[2]) for r in rows(self.store)],
+                         [(2, "profile.exclusion"), (5, "profile.exclusion")])
+        self.assertEqual(exclusion.excluded_profiles(log.events()), before)
         self.assertEqual(self.retain_at(log, NOW), 0)
 
     def test_a_pass_keeps_the_assignment_in_force_of_a_session_with_a_hook_in_the_window(self):

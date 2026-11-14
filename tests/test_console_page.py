@@ -269,7 +269,8 @@ class PageTest(unittest.TestCase):
             {"/api/stream", "/api/looked", "/api/answer", "/api/check-answer", "/api/goal",
              "/api/withdraw", "/api/retry-manager", "/api/approve", "/api/reply",
              "/api/message", "/api/stop", "/api/round-answer", "/api/continue",
-             "/api/signin", "/api/signin-code", "/api/signin-cancel", "/api/account-add"},
+             "/api/exclusion", "/api/signin", "/api/signin-code", "/api/signin-cancel",
+             "/api/account-add"},
         )
         self.assertEqual(
             len(re.findall(r"\b(?:fetch|EventSource)\(", self.text)), len(literals)
@@ -278,7 +279,7 @@ class PageTest(unittest.TestCase):
     def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
         # A separate snapshot request can answer after a newer streamed frame
         # and render over it; the stream's first frame is already the snapshot.
-        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 22)
+        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 23)
         self.assertIsNotNone(
             re.search(r'fetch\("/api/looked",\s*\{\s*method:\s*"POST"', self.text)
         )
@@ -936,6 +937,82 @@ class CapacityPageTest(unittest.TestCase):
         self.assertEqual([n for n in strip(both) if has_class(n, "cap-when")], [])
         self.assertEqual(full(both["promoted"]).count("out, reset unknown"), 2)
         self.assertNotIn("Resumes ", full(both["statement"]))
+
+    def test_each_account_offers_one_toggle_named_for_its_action(self) -> None:
+        snap = capacity_snap(capacity([
+            profile("a", "ok", week_left=65, excluded=True),
+            profile("b", "ok", week_left=30, excluded=False),
+            profile("c", "unknown", excluded=True),
+        ]))
+        a, b, c = accounts(snap)
+        self.assertTrue(has_class(a, "cap-excluded"))
+        self.assertTrue(has_class(c, "cap-excluded"))
+        self.assertFalse(has_class(b, "cap-excluded"))
+        toggles = []
+        for n in (a, b, c):
+            (toggle,) = [m for m in nodes(n) if has_class(m, "cap-toggle")]
+            toggles.append(full(toggle))
+        self.assertEqual(toggles, ["Include", "Exclude", "Include"])
+        for n in (a, c):
+            (mark,) = [m for m in nodes(n) if has_class(m, "cap-excl")]
+            self.assertEqual(full(mark), "excluded")
+        self.assertEqual([m for m in nodes(b) if has_class(m, "cap-excl")], [])
+        self.assertEqual(bar(a), "65%")
+
+    def test_the_toggle_posts_one_exclusion_with_the_token(self) -> None:
+        for first, body in (
+            (profile("a", "ok", week_left=65, excluded=True), {"profile": "a", "excluded": False}),
+            (profile("b", "ok", week_left=30, excluded=False), {"profile": "b", "excluded": True}),
+        ):
+            (snap,) = render([
+                START,
+                {"frame": {**view([]), "capacity": capacity([first])}},
+                {"click": "cap-toggle"},
+                {"snapshot": True},
+            ])
+            (post,) = [p for p in snap["posts"] if p["url"] == "/api/exclusion"]
+            self.assertEqual(post["method"], "POST")
+            self.assertEqual(post["headers"],
+                             {"X-Console-Token": TOKEN, "Content-Type": "application/json"})
+            self.assertEqual(json.loads(post["body"]), body)
+
+    def test_a_refused_toggle_says_why(self) -> None:
+        (snap,) = render([
+            START,
+            {"frame": {**view([]), "capacity": capacity([
+                profile("a", "ok", week_left=65, excluded=True)])}},
+            {"respond": {"status": 409, "text": "no such profile\n"}},
+            {"click": "cap-toggle"},
+            {"snapshot": True},
+        ])
+        (fail,) = [n for n in nodes(snap["capacity"]) if has_class(n, "fail")]
+        self.assertEqual(full(fail), "Could not include: no such profile")
+
+    def test_all_out_lists_an_excluded_profile_as_excluded(self) -> None:
+        result = render_page({**view([]), "capacity": capacity([
+            profile("a", "ok", week_left=65, excluded=True),
+            profile("b", "out", out_until="2026-11-20T09:30:00+00:00"),
+        ], all_out=True)})
+        items = [n["text"] for n in nodes(result["promoted"]) if n["tag"] == "li"]
+        self.assertEqual(items, ["a excluded", "b out until Fri 09:30"])
+
+    def test_an_all_excluded_strip_never_reads_fine(self) -> None:
+        snap = capacity_snap(capacity([
+            profile("a", "ok", week_left=65, next_reset="2026-11-16T05:00:00+00:00", excluded=True),
+            profile("b", "ok", week_left=30, next_reset="2026-11-17T05:00:00+00:00", excluded=True),
+        ]))
+        self.assertEqual(classes(snap),
+                         ["cap-acct cap-excluded", "cap-acct cap-excluded", "cap-none"])
+        self.assertEqual(full(part(snap, "cap-none")), "every profile excluded")
+        self.assertNotIn("resets", full(snap["capacity"]))
+        self.assertNotIn("fine", [full(n) for n in strip(snap)])
+        mixed = capacity_snap(capacity([
+            profile("a", "ok", week_left=65, next_reset="2026-11-16T05:00:00+00:00", excluded=True),
+            profile("b", "ok", week_left=30, next_reset="2026-11-17T05:00:00+00:00", excluded=False),
+        ]))
+        self.assertEqual(classes(mixed)[0], "cap-state cap-fine")
+        self.assertEqual(full(part(mixed, "cap-when")), "resets Tue 05:00")
+        self.assertEqual([n for n in strip(mixed) if has_class(n, "cap-none")], [])
 
     def test_a_view_without_capacity_still_renders(self) -> None:
         result = render_page(view([]))

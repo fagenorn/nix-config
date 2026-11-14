@@ -48,6 +48,9 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .meter i { display: block; height: 100%; background: var(--sub0); }
 .cap-pc { color: var(--sub1); }
 .cap-signin, .cap-no-reading, .cap-signed-out { color: var(--ov2); }
+.cap-excluded, .cap-excl { color: var(--ov2); }
+.cap-toggle { font: inherit; color: var(--sub1); background: none; border: 1px solid var(--s1); border-radius: 4px; padding: 0 6px; cursor: pointer; }
+.cap-toggle:disabled { cursor: default; opacity: .6; }
 
 .desk-grid { max-width: 1360px; margin: 0 auto; padding: 30px 48px 72px; display: grid; grid-template-columns: minmax(0, 1fr) 460px; column-gap: 88px; align-items: start; }
 
@@ -939,6 +942,52 @@ function signinWords(s) {
 function signedOut(p) {
   return p.signin !== null && typeof p.signin === "object" && p.signin.state === "signed_out";
 }
+function excludedProfile(p) {
+  return p.excluded === true;
+}
+const exclusionPosts = new Map();
+async function toggleExclusion(p) {
+  const current = exclusionPosts.get(p.profile);
+  if (current !== undefined && current.phase === "sending") return;
+  const excluded = !excludedProfile(p);
+  const state = { phase: "sending", reason: "", failure: excluded ? "Could not exclude: " : "Could not include: " };
+  exclusionPosts.set(p.profile, state);
+  redrawCapacity();
+  let reason = null;
+  try {
+    const response = await fetch("/api/exclusion", {
+      method: "POST",
+      headers: { "X-Console-Token": token, "Content-Type": "application/json" },
+      body: JSON.stringify({profile: p.profile, excluded}),
+    });
+    if (response.status !== 204) {
+      reason = (await response.text()).trim() || "HTTP " + response.status;
+    }
+  } catch (error) {
+    console.error(error);
+    reason = "the console did not answer";
+  }
+  if (exclusionPosts.get(p.profile) !== state) return;
+  if (reason === null) exclusionPosts.delete(p.profile);
+  else {
+    state.phase = "failed";
+    state.reason = reason;
+  }
+  redrawCapacity();
+}
+function redrawCapacity() {
+  if (lastView !== null) renderCapacity(lastView);
+}
+function exclusionControls(acct, p) {
+  const state = exclusionPosts.get(p.profile);
+  const sending = state !== undefined && state.phase === "sending";
+  const toggle = actionButton("cap-toggle", excludedProfile(p) ? "Include" : "Exclude", () => toggleExclusion(p));
+  toggle.disabled = sending;
+  acct.appendChild(toggle);
+  if (state !== undefined && state.phase === "failed") {
+    acct.appendChild(el("span", "fail", state.failure + state.reason));
+  }
+}
 function isSignin(item) {
   return item.reason === "signin";
 }
@@ -1172,10 +1221,11 @@ function renderCapacity(view) {
   const cap = view.capacity || {profiles: []};
   const known = (v) => v !== null && v !== undefined;
   const readings = cap.profiles.filter((p) => p.state !== "unknown" && !signedOut(p));
-  const listed = cap.profiles.filter((p) => readings.includes(p)
+  const eligible = readings.filter((p) => !excludedProfile(p));
+  const listed = cap.profiles.filter((p) => readings.includes(p) || excludedProfile(p)
     || (p.signin !== null && typeof p.signin === "object"));
   const nodes = [];
-  if (readings.length) {
+  if (eligible.length) {
     const [tone, word, mark] = cap.all_out ? ["cap-out", "out", "stop-icon"]
       : cap.tight ? ["cap-tight", "tight", "clock-icon"] : ["cap-fine", "fine", "tick-icon"];
     const state = el("span", "cap-state " + tone);
@@ -1185,21 +1235,26 @@ function renderCapacity(view) {
   }
   for (const p of listed) {
     if (signedOut(p) || !readings.includes(p)) {
-      const acct = el("span", signedOut(p) ? "cap-acct cap-signed-out" : "cap-acct cap-no-reading");
+      const acct = el("span", (signedOut(p) ? "cap-acct cap-signed-out" : "cap-acct cap-no-reading")
+        + (excludedProfile(p) ? " cap-excluded" : ""));
       const who = el("b", "", p.profile);
       who.setAttribute("title", p.profile);
       acct.appendChild(who);
+      if (excludedProfile(p)) acct.appendChild(el("span", "cap-excl", "excluded"));
       acct.appendChild(el("span", "cap-signin", signinWords(p.signin)));
+      exclusionControls(acct, p);
       nodes.push(acct);
       continue;
     }
-    const acct = el("span", p.state === "out" ? "cap-acct cap-out" : "cap-acct");
+    const acct = el("span", (p.state === "out" ? "cap-acct cap-out" : "cap-acct")
+      + (excludedProfile(p) ? " cap-excluded" : ""));
     const shares = [known(p.week_left) ? p.week_left + "% of the week left" : "week unknown"];
     if (known(p.five_hour_left)) shares.push(p.five_hour_left + "% of 5 hours");
     acct.setAttribute("title", shares.join(", "));
     const name = el("b", "", p.profile);
     name.setAttribute("title", p.profile);
     acct.appendChild(name);
+    if (excludedProfile(p)) acct.appendChild(el("span", "cap-excl", "excluded"));
     if (known(p.week_left)) {
       const meter = el("span", "meter");
       meter.setAttribute("aria-hidden", "true");
@@ -1213,19 +1268,23 @@ function renderCapacity(view) {
     else acct.appendChild(el("span", "cap-pc", known(p.week_left) ? p.week_left + "%" : "week unknown"));
     const words = signinWords(p.signin);
     if (words !== "") acct.appendChild(el("span", "cap-signin", words));
+    exclusionControls(acct, p);
     nodes.push(acct);
   }
-  if (readings.length) {
+  if (eligible.length) {
     if (cap.all_out) {
       if (cap.resumes_at) nodes.push(phrase("span", "cap-when", "resumes ", timeEl("weekday", cap.resumes_at, "")));
     } else {
-      const stamps = readings.filter((p) => p.state !== "out").map((p) => p.next_reset)
+      const stamps = eligible.filter((p) => p.state !== "out").map((p) => p.next_reset)
         .filter((t) => Number.isFinite(Date.parse(t)));
       if (stamps.length) {
         const next = stamps.reduce((a, b) => (Date.parse(b) < Date.parse(a) ? b : a));
         nodes.push(phrase("span", "cap-when", "resets ", timeEl("weekday", next, "")));
       }
     }
+  }
+  if (cap.profiles.some(excludedProfile) && cap.profiles.every((p) => excludedProfile(p) || signedOut(p))) {
+    nodes.push(el("span", "cap-none", "every profile excluded"));
   }
   if (cap.no_reading) nodes.push(el("span", "cap-none", cap.no_reading));
   box.replaceChildren(...nodes);
@@ -1237,7 +1296,8 @@ function renderPromoted(view) {
   if (!cap.all_out) return;
   const list = el("ul");
   for (const p of cap.profiles) {
-    if (signedOut(p)) list.appendChild(el("li", "cap-signed-out", p.profile + " signed out"));
+    if (excludedProfile(p)) list.appendChild(el("li", "cap-excluded", p.profile + " excluded"));
+    else if (signedOut(p)) list.appendChild(el("li", "cap-signed-out", p.profile + " signed out"));
     else list.appendChild(phrase("li", "cap-out", p.profile + " ", outWords(p, "")));
   }
   box.appendChild(el("h2", "sec-h", "Capacity"));

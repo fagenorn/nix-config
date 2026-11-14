@@ -102,12 +102,16 @@ A refusal because a window is used up, recorded with its window and reset (ADR-c
 _Avoid_: rate limit error
 
 **Capacity strip**:
-The top-bar line that starts with one word, fine, tight or out, beside its icon, then each profile with a reading as its name, a bar and its share of the week left, then the next reset as a weekday and time, or when work resumes once every profile is out. Only the accounts are listed, the named profiles under `profiles/`; the unprofiled `~/.claude` is not one and is never shown. It reads "tight" when one profile has room among two or more while every other reads out, folds profiles with no reading into one note and names a signed-out profile as signed out, outside that note; idle profiles are read too, so the note counts only profiles not yet read (ADR-console-006, ADR-console-002).
+The top-bar line that starts with one word, fine, tight or out, beside its icon, then each profile with a reading as its name, a bar and its share of the week left, then the next reset as a weekday and time, or when work resumes once every profile is out. Only the accounts are listed, the named profiles under `profiles/`; the unprofiled `~/.claude` is not one and is never shown. It reads "tight" when one profile has room among two or more while every other reads out, folds profiles with no reading into one note and names a signed-out profile as signed out, outside that note; idle profiles are read too, so the note counts only profiles not yet read (ADR-console-006, ADR-console-002). An excluded profile is shown marked excluded and is not counted in fine, tight or out (ADR-console-023).
 _Avoid_: quota bar
 
 **Sign-in state**:
 Whether a profile's client is signed in (with the end of that sign-in), signed out, or unknown, read from the client's own status command every 10 minutes on Linux. A signed-out profile, or one whose sign-in ends within three days, is one inbox item that carries the Sign in action: the console runs the client's sign-in with no terminal and shows its link on the page, with a field for a code; an unknown state asks nothing (ADR-console-022, ADR-console-024). An account added on the page goes straight into its sign-in (ADR-console-025).
 _Avoid_: login expiry
+
+**Excluded profile**:
+An account the owner keeps out of the console's automatic choice with the Exclude toggle on its capacity strip entry, which reads Include while it is excluded; it is never the profile a new session or a manager gets, its allowance and sign-in are still read, and it is kept in the console's log until included again (ADR-console-023).
+_Avoid_: disabled profile, paused account
 
 **Console service**:
 The user service that runs the console on each host. On Linux the systemd unit retries without limit, three seconds apart (`RestartSec`, and `StartLimitIntervalSec = 0` in place of systemd's default start limit), so a console that cannot bind its port because another process holds it keeps retrying and serves within one interval of the port being freed, with no manual restart (#884); launchd's `KeepAlive` does the same on macOS.

@@ -8,6 +8,7 @@ import io
 import json
 import os
 import shutil
+import sqlite3
 import sys
 import tempfile
 import threading
@@ -17,8 +18,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import (capacity, console, manager, nudge, probe, service, sessions,
-                                 signin, sprints)
+from agent_tools.console import (capacity, console, exclusion, manager, nudge, probe, service,
+                                 sessions, signin, sprints)
 from agent_tools.console.event_log import GOAL_STATED, EventLog
 
 from . import console_test_support as support
@@ -776,6 +777,243 @@ class ProfileChoiceServiceTest(ManagerServiceTest):
         _, _, kind, _, payload = support.log_rows(self.store)[-1]
         self.assertEqual(kind, "manager.waiting")
         self.assertIsNone(json.loads(payload)["until"])
+
+    EXCLUSION = "/api/exclusion"
+
+    def exclude(self, svc, profile, excluded=True, **extra):
+        return self.post(svc, self.EXCLUSION, {"profile": profile, "excluded": excluded}, **extra)
+
+    def exclusion_rows(self):
+        return [r for r in support.log_rows(self.store) if r[2] == "profile.exclusion"]
+
+    def two_signed_in(self):
+        dirs = self.two_profiles({"work": self.weekly(0.2), "home": self.weekly(0.6)})
+        self.seed_signins(work="signed_in", home="signed_in")
+        return dirs
+
+    def test_excluding_and_including_switches_the_route_and_the_file(self):
+        dirs = self.two_signed_in()
+        svc = self.start(profile_dirs=dirs, clock=lambda: NOW, choice_file=self.choice)
+        self.assertEqual(self.ask(svc)[2], b'{"profile":"work"}')
+        self.assertEqual(self.exclude(svc, "work")[::2], (204, b""))
+        self.assertEqual(self.choice.read_text(), "home\n")
+        self.assertEqual(self.ask(svc)[2], b'{"profile":"home"}')
+        self.assertEqual(self.exclude(svc, "work", False)[::2], (204, b""))
+        self.assertEqual(self.choice.read_text(), "work\n")
+        self.assertEqual(self.ask(svc)[2], b'{"profile":"work"}')
+
+    def test_an_excluded_profile_is_never_launched(self):
+        dirs = self.two_signed_in()
+        launches = support.Launches()
+        svc = self.start(profile_dirs=dirs, clock=lambda: NOW, choice_file=self.choice,
+                         launcher=launches)
+        self.assertEqual(self.exclude(svc, "work")[::2], (204, b""))
+        self.state(svc)
+        self.assertEqual([c.profile for c in launches.calls], ["home"])
+        svc.close()
+        self.seed_readings({"home": self.exhausted(FAR), "work": self.weekly(0.0)})
+        again_launches = support.Launches()
+        again = self.start(profile_dirs=dirs, clock=lambda: NOW, choice_file=self.choice,
+                           launcher=again_launches)
+        self.state(again)
+        self.assertEqual(again_launches.calls, [])
+        _, _, kind, _, payload = support.log_rows(self.store)[-1]
+        self.assertEqual(kind, "manager.waiting")
+        self.assertEqual(json.loads(payload)["until"],
+                         datetime.fromtimestamp(FAR, timezone.utc).isoformat())
+
+    def test_an_excluded_profile_is_never_the_recently_used_fallback(self):
+        dirs = list(self.profiles(work=0, home=0).values())
+        self.seed_signins(work="signed_in", home="signed_in")
+        for session_id, profile in (("s-1", "home"), ("s-2", "work")):
+            log = EventLog(self.store)
+            try:
+                log.append([(sessions.SEEN, None, {
+                    "session_id": session_id, "cwd": "/srv/p01", "repo": "/srv/p01",
+                    "state": sessions.IDLE, "profile": profile})])
+            finally:
+                log.close()
+        launches = support.Launches()
+        svc = self.start(profile_dirs=dirs, clock=lambda: NOW, launcher=launches,
+                         choice_file=self.choice)
+        svc.poll_sessions()
+        self.assertEqual(self.ask(svc)[2], b'{"profile":"work"}')
+        self.assertEqual(self.exclude(svc, "work")[::2], (204, b""))
+        self.assertEqual(self.ask(svc)[2], b'{"profile":"home"}')
+        self.assertEqual(self.exclude(svc, "home")[::2], (204, b""))
+        self.assertEqual(self.ask(svc)[::2], (200, b'{"profile":null}'))
+        self.assertFalse(self.choice.exists())
+        self.state(svc)
+        self.assertEqual(launches.calls, [])
+        _, _, kind, _, payload = support.log_rows(self.store)[-1]
+        self.assertEqual(kind, "manager.waiting")
+        self.assertIsNone(json.loads(payload)["until"])
+
+    def test_an_exclusion_without_the_origin_or_the_token_is_refused(self):
+        dirs = self.two_profiles({"work": self.weekly(0.2)})
+        svc = self.start(profile_dirs=dirs, clock=lambda: NOW)
+        body = json.dumps({"profile": "work", "excluded": True}).encode()
+        port = svc.address[1]
+        cases = (
+            ({"Origin": f"http://127.0.0.1:{port}", **JSON}, b"token refused\n"),
+            ({"X-Console-Token": self.token(), **JSON}, b"origin refused\n"),
+            (self.own(svc, **{**JSON, "X-Console-Token": "A" * 43}), b"token refused\n"),
+            (self.own(svc, **{**JSON, "Origin": "http://example.test"}), b"origin refused\n"),
+        )
+        for headers, text in cases:
+            with self.subTest(text=text):
+                status, _, got = self.assert_unchanged(svc, lambda: support.post_page(
+                    svc.address, self.EXCLUSION, headers, body))
+                self.assertEqual((status, got), (403, text))
+        self.assertEqual(self.ask(svc)[2], b'{"profile":"work"}')
+
+    def test_each_accepted_toggle_appends_one_row(self):
+        dirs = self.two_signed_in()
+        svc = self.start(profile_dirs=dirs, clock=lambda: NOW)
+        self.assertEqual(self.exclude(svc, "work")[::2], (204, b""))
+        ((_, _, _, project, payload),) = self.exclusion_rows()
+        self.assertIsNone(project)
+        self.assertEqual(payload, '{"excluded":true,"profile":"work"}')
+        for action, expected in (
+                (lambda: self.exclude(svc, "work"), (409, b"already excluded\n")),
+                (lambda: self.exclude(svc, "nobody"), (409, b"no such profile\n")),
+                (lambda: self.exclude(svc, "home", False), (409, b"already included\n")),
+                (lambda: self.post(svc, self.EXCLUSION, b'{"profile":"work","excluded":1}'),
+                 (400, b"bad exclusion\n"))):
+            with self.subTest(expected=expected):
+                status, _, body = self.assert_unchanged(svc, action)
+                self.assertEqual((status, body), expected)
+        self.assertEqual(len(self.exclusion_rows()), 1)
+        self.assertEqual(self.exclude(svc, "work", False)[::2], (204, b""))
+        self.assertEqual(len(self.exclusion_rows()), 2)
+
+    def test_an_exclusion_survives_a_restart_and_the_retention_pass(self):
+        dirs = list(self.profiles(work=0, home=0).values())
+        day = 86400
+        now = [NOW]
+        stamp = lambda: iso(now[0])
+        self.store.parent.mkdir(parents=True, exist_ok=True)
+        log = EventLog(self.store, clock=stamp)
+        try:
+            def at(days, *entries):
+                now[0] = NOW + days * day
+                log.append(list(entries))
+
+            at(0, signin.entry("work", signin.Status("signed_in", None)),
+               signin.entry("home", signin.Status("signed_in", None)),
+               exclusion.entry("home", True), ("old", None, {}))
+            at(1, exclusion.entry("work", True))
+            at(2, exclusion.entry("work", False))
+        finally:
+            log.close()
+        now[0] = NOW + 50 * day
+        svc = self.start(profile_dirs=dirs, clock=lambda: now[0], log_clock=stamp)
+        self.assertEqual(self.ask(svc)[2], b'{"profile":"work"}')
+        now[0] = NOW + 95 * day
+        self.assertEqual(svc.retain(), 3)
+        kinds = [r[2] for r in support.log_rows(self.store)]
+        self.assertEqual(kinds.count("profile.exclusion"), 1)
+        self.assertEqual(self.ask(svc)[2], b'{"profile":"work"}')
+        svc.close()
+        again = self.start(profile_dirs=dirs, clock=lambda: now[0], log_clock=stamp)
+        self.assertEqual(self.ask(again)[2], b'{"profile":"work"}')
+
+    def test_the_view_marks_an_excluded_profile_and_keeps_its_readings(self):
+        dirs = self.two_signed_in()
+        svc = self.start(profile_dirs=dirs, clock=lambda: NOW)
+        self.assertEqual(self.exclude(svc, "work")[::2], (204, b""))
+        entries = {e["profile"]: e for e in view_of(svc)["capacity"]["profiles"]}
+        self.assertTrue(entries["work"]["excluded"])
+        self.assertEqual(entries["work"]["week_left"], 80)
+        self.assertEqual(entries["work"]["signin"]["state"], "signed_in")
+        self.assertFalse(entries["home"]["excluded"])
+
+    def test_an_exclusion_whose_choice_file_cannot_be_written_appends_nothing(self):
+        dirs = self.two_signed_in()
+        svc = self.start(profile_dirs=dirs, clock=lambda: NOW, choice_file=self.choice)
+        self.ask(svc)
+        self.assertEqual(self.choice.read_text(), "work\n")
+        with mock.patch("agent_tools.console.manager.os.replace", side_effect=OSError("full")):
+            result = self.assert_unchanged(svc, lambda: self.exclude(svc, "work"))
+        self.assertEqual((result[0], result[2]), (500, b"exclusion failed\n"))
+        self.assertEqual(self.choice.read_text(), "work\n")
+        self.assertEqual(self.exclusion_rows(), [])
+        self.assertEqual(self.exclude(svc, "work")[::2], (204, b""))
+        self.assertEqual(self.choice.read_text(), "home\n")
+        self.assertEqual(self.exclude(svc, "work", False)[::2], (204, b""))
+        self.assertEqual(self.choice.read_text(), "work\n")
+        with mock.patch.object(svc.log, "append",
+                               side_effect=sqlite3.OperationalError("database is locked")):
+            status, _, body = self.exclude(svc, "work")
+        self.assertEqual((status, body), (500, b"exclusion failed\n"))
+        self.assertEqual(self.choice.read_text(), "work\n")
+        self.assertEqual(len(self.exclusion_rows()), 2)
+        self.assertEqual(self.ask(svc)[2], b'{"profile":"work"}')
+
+    def prepare_then_exclude(self, svc, queue, *profiles):
+        """Run the queued launch with each of `profiles` excluded just after the lock that prepared it is released."""
+        prepared = svc._prepared_launch
+        lock = svc._ingest
+        state = {"prepared": False}
+
+        class ReleaseHook:
+            def __enter__(hook):
+                lock.acquire()
+
+            def __exit__(hook, *exc):
+                lock.release()
+                if state["prepared"]:
+                    state["prepared"] = False
+                    for profile in profiles:
+                        self.assertEqual(self.exclude(svc, profile)[::2], (204, b""))
+
+        def prepared_then_flagged(*args):
+            launch = prepared(*args)
+            state["prepared"] = True
+            return launch
+
+        with mock.patch.object(svc, "_prepared_launch", side_effect=prepared_then_flagged), \
+                mock.patch.object(svc, "_ingest", ReleaseHook()):
+            queue.run_next()
+
+    def test_a_launch_prepared_before_an_exclusion_is_not_started_under_the_excluded_profile(self):
+        dirs = self.two_signed_in()
+        launches = support.Launches()
+        queue = support.Queued()
+        svc = self.start(profile_dirs=dirs, clock=lambda: NOW, choice_file=self.choice,
+                         launcher=launches, dispatch=queue)
+        self.state(svc)
+        self.prepare_then_exclude(svc, queue, "work")
+        self.assertEqual([c.profile for c in launches.calls], ["home"])
+        _, _, kind, _, payload = self.manager_rows()[-1]
+        self.assertEqual((kind, json.loads(payload)["profile"]), ("manager.started", "home"))
+
+    def test_a_launch_prepared_before_the_last_profile_was_excluded_waits(self):
+        dirs = self.two_signed_in()
+        launches = support.Launches()
+        queue = support.Queued()
+        svc = self.start(profile_dirs=dirs, clock=lambda: NOW, choice_file=self.choice,
+                         launcher=launches, dispatch=queue)
+        self.state(svc)
+        self.prepare_then_exclude(svc, queue, "work", "home")
+        self.assertEqual(launches.calls, [])
+        _, _, kind, _, payload = support.log_rows(self.store)[-1]
+        self.assertEqual(kind, "manager.waiting")
+        self.assertIsNone(json.loads(payload)["until"])
+        self.assertEqual(self.manager_rows()[-1][2], "manager.waiting")
+
+    def test_the_excluded_route_answers_the_excluded_profiles_in_name_order(self):
+        dirs = self.two_signed_in()
+        svc = self.start(profile_dirs=dirs, clock=lambda: NOW, choice_file=self.choice)
+        route = "/api/excluded"
+        self.assertEqual(support.request(svc.address, "GET", route)[::2],
+                         (200, b'{"excluded":[]}'))
+        self.assertEqual(self.exclude(svc, "work")[::2], (204, b""))
+        self.assertEqual(self.exclude(svc, "home")[::2], (204, b""))
+        self.assertEqual(support.request(svc.address, "GET", route)[::2],
+                         (200, b'{"excluded":["home","work"]}'))
+        self.assertEqual(
+            support.request(svc.address, "GET", route, host="example.com:80")[0], 403)
 
 
 if __name__ == "__main__":

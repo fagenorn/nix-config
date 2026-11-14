@@ -380,7 +380,7 @@ class CheckAnswerServiceTest(unittest.TestCase):
                                                "/api/goal", "/api/withdraw", "/api/approve",
                                                "/api/reply", "/api/retry-manager",
                                                "/api/message", "/api/stop", "/api/round-answer",
-                                               "/api/continue", "/api/signin",
+                                               "/api/continue", "/api/exclusion", "/api/signin",
                                                "/api/signin-code", "/api/signin-cancel",
                                                "/api/account-add"})
         keys = [PAID10["key"], LIVE12["key"]]

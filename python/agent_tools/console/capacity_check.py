@@ -1,6 +1,6 @@
 """`capacity_check`: the verify check that the console shows a capacity reading for an account in use (#860).
 
-`python -m agent_tools.console.capacity_check [--url URL] [--max-age SECONDS] [--every | --signin | --accounts | --page-signin | --page-add]` reads the console's
+`python -m agent_tools.console.capacity_check [--url URL] [--max-age SECONDS] [--every | --signin | --accounts | --page-signin | --page-add | --exclusion]` reads the console's
 `/api/state` view (default `http://127.0.0.1:27184/api/state`; the URL must be `http` on a loopback
 host, `127.0.0.1` or `localhost`, else exit 2) and looks at `capacity.profiles[].read_at`.
 `--max-age` is a positive integer number of seconds (default 600).
@@ -42,6 +42,23 @@ not a list (no `inbox` object, or no `open` list) is `{"status": "no_inbox"}`, e
 absence is never inferred from missing data. Otherwise a `default` row or that item is
 `{"status": "not_met", "default_row": <bool>, "default_signin": <bool>}`, exit 1; no row is
 `{"status": "pending", "profiles": []}`, exit 75.
+
+`--exclusion` (#1028, exclusive with `--every`, `--signin` and `--accounts`, `--max-age` ignored)
+meets when the console's choice is a profile that is not excluded while another is. It sends two
+GETs, the view and `/api/profile` on the same scheme, host and port, and decides in this order,
+one stdout line of sorted-key JSON:
+
+- the view does not answer 200: `{"status": "not_running"}`, exit 75;
+- no `capacity` object: `{"status": "not_deployed"}`, exit 75;
+- a row whose `excluded` is not a bool (the console predates exclusion):
+  `{"status": "not_deployed"}`, exit 75;
+- `/api/profile` does not answer 200, or its body is not a JSON object whose `profile` is a string
+  or null: `{"status": "no_profile"}`, exit 75;
+- otherwise, with `excluded` the names of the rows marked true in row order and `profile` the
+  answer: no row excluded is `{"status": "pending", "profile": <p>, "excluded": []}`, exit 75;
+  `profile` null is `{"status": "pending", "profile": null, "excluded": [<names>]}`, exit 75;
+  `profile` among the excluded is `{"status": "not_met", "profile": <p>, "excluded": [<names>]}`,
+  exit 1; else `{"status": "met", "profile": <p>, "excluded": [<names>]}`, exit 0.
 
 `--page-signin` (#1026, exclusive with the other modes, `--max-age` ignored) meets when the owner has
 signed a profile in from the page and its sign-in item is gone. Let S be the profiles whose
@@ -152,6 +169,38 @@ def readings(body: bytes) -> list[tuple[str, object, object]] | None:
     return rows
 
 
+def profile_url(url: str) -> str:
+    """`url` with the path `/api/profile` and no query: the same scheme, host and port."""
+    parts = urlsplit(url)
+    return parts._replace(path="/api/profile", query="", fragment="").geturl()
+
+
+def exclusion_rows(body: bytes) -> list[tuple[str, object]] | None:
+    """The `(profile, excluded)` rows of a console view, None when it has no capacity object.
+
+    `excluded` is the row's raw member, None when absent."""
+    rows = readings(body)
+    if rows is None:
+        return None
+    document = json.loads(body)
+    return [(row["profile"], row.get("excluded"))
+            for row in document["capacity"]["profiles"]
+            if isinstance(row, dict) and isinstance(row.get("profile"), str)]
+
+
+def chosen_profile(body: bytes | None) -> tuple[bool, object]:
+    """`(True, profile)` when `body` is a JSON object whose `profile` is a string or null."""
+    try:
+        document = json.loads(body) if body is not None else None
+    except ValueError:
+        return False, None
+    if isinstance(document, dict) and "profile" in document:
+        chosen = document["profile"]
+        if chosen is None or isinstance(chosen, str):
+            return True, chosen
+    return False, None
+
+
 def signin_asks(body: bytes) -> list[str] | None:
     """The key of each open `signin/...` inbox item, in order; None when the inbox is unreadable.
 
@@ -236,6 +285,17 @@ def accounts_verdict(rows: list[tuple[str, object, object]],
         return 1, {"status": "not_met", "default_row": default_row,
                    "default_signin": default_signin}
     return 0, {"status": "met", "profiles": [name for name, _, _ in rows]}
+
+
+def exclusion_verdict(rows: list[tuple[str, object]], chosen: object) -> tuple[int, dict]:
+    """Met when a profile is excluded and the choice names another one."""
+    excluded = [name for name, flag in rows if flag is True]
+    result = {"profile": chosen, "excluded": excluded}
+    if not excluded or chosen is None:
+        return NOT_YET, {"status": "pending", **result}
+    if chosen in excluded:
+        return 1, {"status": "not_met", **result}
+    return 0, {"status": "met", **result}
 
 
 def page_signin_verdict(body: bytes) -> tuple[int, dict]:
@@ -323,6 +383,9 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--accounts", action="store_true",
                       help="require the listed profiles to be named accounts only: no default "
                            "row and no sign-in item for default")
+    mode.add_argument("--exclusion", action="store_true",
+                      help="require the console's choice to be a profile that is not excluded "
+                           "while another is")
     mode.add_argument("--page-signin", action="store_true",
                       help="require a profile the owner signed in from the page whose sign-in "
                            "item is gone")
@@ -330,6 +393,20 @@ def build_parser() -> argparse.ArgumentParser:
                       help="require an account the owner added from the page to be the "
                            "launcher's profile and signed in")
     return parser
+
+
+def _exclusion(url: str, body: bytes) -> int:
+    rows = exclusion_rows(body)
+    if any(not isinstance(flag, bool) for _, flag in rows):
+        code, result = NOT_YET, {"status": "not_deployed"}
+    else:
+        known, chosen = chosen_profile(fetch(profile_url(url)))
+        if known:
+            code, result = exclusion_verdict(rows, chosen)
+        else:
+            code, result = NOT_YET, {"status": "no_profile"}
+    print(json.dumps(result, sort_keys=True))
+    return code
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -342,6 +419,8 @@ def main(argv: list[str] | None = None) -> int:
     if rows is None:
         print(json.dumps({"status": "not_deployed"}, sort_keys=True))
         return NOT_YET
+    if args.exclusion:
+        return _exclusion(args.url, body)
     if args.page_add:
         home = Path.home()
         accounts = Path(os.environ.get("CLAUDE_ACCOUNTS_DIR") or home / ".claude-accounts")

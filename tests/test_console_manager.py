@@ -15,7 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from agent_tools.console import manager, revive_check, sessions
+from agent_tools.console import exclusion, manager, revive_check, sessions
 from agent_tools.console.event_log import Event
 from agent_tools.console.sessions import Observation
 
@@ -31,11 +31,13 @@ REFUSAL = ("Nobody watches this session, so the permission prompt was refused: d
 
 
 def cap(*rows, all_out=False, resumes_at=None):
-    def entry(p, s, w, f, signin=None):
+    def entry(p, s, w, f, signin=None, excluded=False):
         row = {"profile": p, "state": s, "week_left": w, "five_hour_left": f,
                "next_reset": None, "out_until": None, "read_at": None}
         if signin is not None:
             row["signin"] = {"state": signin}
+        if excluded:
+            row["excluded"] = True
         return row
     return {"tight": False, "all_out": all_out, "resumes_at": resumes_at,
             "profiles": [entry(*row) for row in rows]}
@@ -315,6 +317,21 @@ class SessionProfileTest(unittest.TestCase):
         for capacity, last_use, expected in table:
             with self.subTest(capacity=capacity["profiles"], last_use=last_use):
                 self.assertEqual(manager.session_profile(capacity, last_use), expected)
+
+    def test_an_excluded_profile_is_never_chosen(self):
+        unknown = (None, None)
+        table = [
+            (cap(("a", "ok", 90, 90, None, True), ("b", "ok", 10, 10)), {}, "b"),
+            (cap(("a", "ok", 90, 90, None, True)), {}, None),
+            (cap(("a", "unknown", *unknown, "signed_in", True),
+                 ("b", "unknown", *unknown, "signed_in")), {"a": T_LATE, "b": T_EARLY}, "b"),
+            (cap(("a", "unknown", *unknown, "signed_in", True)), {"a": T_LATE}, None),
+        ]
+        for capacity, last_use, expected in table:
+            with self.subTest(capacity=capacity["profiles"], last_use=last_use):
+                self.assertEqual(manager.session_profile(capacity, last_use), expected)
+        self.assertEqual(manager.choose_profile(cap(("a", "ok", 90, 90, None, True)), {}),
+                         manager.Wait(None))
 
     def test_with_no_room_the_most_recently_used_signed_in_profile_answers(self):
         unknown = (None, None)
@@ -721,6 +738,44 @@ class StopTest(unittest.TestCase):
         self.assertEqual(stopped, [
             {"session_id": "s-a", "profile": "work"},
             {"session_id": "s-a", "profile": "p2", "removed": True}])
+
+
+class ExclusionTest(unittest.TestCase):
+    def test_the_fold_keeps_the_last_valid_row_of_each_profile(self):
+        events = [
+            Event(1, hour(9), "profile.exclusion", None, {"profile": "work", "excluded": True}),
+            Event(2, hour(10), "profile.exclusion", None, {"profile": "home", "excluded": True}),
+            Event(3, hour(11), "profile.exclusion", None, {"profile": "work", "excluded": False}),
+            Event(4, hour(12), "profile.exclusion", None, {"profile": "home", "excluded": 0}),
+            Event(5, hour(13), "profile.exclusion", None, {"profile": "", "excluded": False}),
+            Event(6, hour(14), "profile.exclusion", None, {"excluded": False}),
+            Event(7, hour(15), "session.seen", None, {"profile": "home", "excluded": False}),
+        ]
+        self.assertEqual(exclusion.excluded_profiles(events), frozenset({"home"}))
+        self.assertEqual(
+            exclusion.excluded_profiles(events[3:], exclusion.excluded_profiles(events[:3])),
+            frozenset({"home"}))
+        self.assertEqual(exclusion.excluded_profiles([]), frozenset())
+        self.assertEqual(exclusion.entry("work", True),
+                         ("profile.exclusion", None, {"profile": "work", "excluded": True}))
+
+    def test_a_request_names_one_profile_and_a_bool(self):
+        self.assertEqual(exclusion.parse_request(b'{"profile":"work","excluded":true}'),
+                         ("work", True))
+        self.assertEqual(exclusion.parse_request(b'{"excluded":false,"profile":"home"}'),
+                         ("home", False))
+        refused = {
+            "no excluded": b'{"profile":"work"}',
+            "integer excluded": b'{"profile":"work","excluded":1}',
+            "empty profile": b'{"profile":"","excluded":true}',
+            "extra key": b'{"profile":"work","excluded":true,"x":1}',
+            "not an object": b"[]",
+            "not utf-8": b"\xff",
+            "long profile": ('{"profile":"%s","excluded":true}' % ("a" * 129)).encode(),
+        }
+        for name, body in refused.items():
+            with self.subTest(name), self.assertRaises(ValueError):
+                exclusion.parse_request(body)
 
 
 if __name__ == "__main__":

@@ -3,12 +3,14 @@
 Reads no clock: capacity arrives as the `capacity.capacity_view` dict the caller built.
 
 Launch profile (#1011). `choose_profile(capacity, last_use)` returns a profile name or a `Wait`.
-With `capacity["all_out"]` set (every profile that is not signed out reads out) it is
+With `capacity["all_out"]` set (every profile that is neither signed out nor excluded reads out) it is
 `Wait(resumes_at)`; otherwise it is `session_profile(capacity, last_use)`, and `Wait(None)` when
 that names nothing. The per-project account binding is not an input.
 
 Session profile (#1011). `session_profile(capacity, last_use)` names the profile a new session
 runs under, or None when nothing can be chosen; it never returns a `Wait` and ignores `all_out`.
+An entry marked `excluded` (#1028, the owner's exclusion; it reaches this rule through
+`capacity_view`, not as a parameter) is dropped first, before the room rule and the fallback.
 Room is a profile whose state is `ok` or `reset` and whose sign-in is not `signed_out` (an entry
 without a sign-in reading counts as `unknown`, P1); the most `week_left`, then the most
 `five_hour_left` (unknown below 0) wins, then the smallest name. With no room, the signed-in
@@ -262,7 +264,7 @@ def _instant(value) -> float | None:
 
 
 def session_profile(capacity: Mapping, last_use: Mapping[str, str]) -> str | None:
-    entries = capacity["profiles"]
+    entries = [entry for entry in capacity["profiles"] if not entry.get("excluded")]
 
     def signin(entry):
         return (entry.get("signin") or {}).get("state", "unknown")
