@@ -5,6 +5,7 @@ Run: just agent-workflow-tests
 import json
 import os
 import socket
+import sqlite3
 import subprocess
 import tempfile
 import threading
@@ -14,6 +15,8 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
 from agent_tools.console import capacity_check
+from agent_tools.console.event_log import EventLog
+from . import accounts_sandbox
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -319,75 +322,123 @@ class CapacityCheckTest(unittest.TestCase):
                 self.assertEqual(done.returncode, 2)
                 self.assertIn("not allowed with argument", done.stderr)
 
-    def account_tree(self, mode=0o700, target=None, settings="link", skills="link"):
+    # `--page-add` (#1037) reads the console's event log, never the profiles. The rows below are
+    # the ones the console recorded on anis-desktop on 2026-11-14 (events 80704 to 80729).
+    ZZCHECK = [
+        ("account.added", None, {"by": "owner", "profile": "zzcheck"}),
+        ("signin.acted", None, {"action": "start", "by": "owner", "outcome": "started",
+                                "profile": "zzcheck"}),
+        ("signin.acted", None, {"action": "cancel", "by": "owner", "outcome": "cancelled",
+                                "profile": "zzcheck"}),
+        ("signin.ended", None, {"attempt": 2, "outcome": "cancelled", "profile": "zzcheck"}),
+    ]
+
+    def log_home(self, rows):
+        """A temporary HOME whose console log holds `rows`; returns (home, log path)."""
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        home = Path(tmp.name)
+        log = home / ".agents" / "state" / "console" / "events.sqlite3"
+        EventLog(log).append(rows)
+        return home, log
+
+    def page_add(self, rows, *extra):
+        home, log = self.log_home(rows)
+        code, out = self.run_check("--page-add", *extra, env={"HOME": str(home)})
+        return code, json.loads(out)
+
+    def test_page_add_is_met_by_the_recorded_rows_with_no_profile_on_the_host(self):
+        home, log = self.log_home(self.ZZCHECK)
+        self.assertFalse((home / ".claude-accounts").exists())
+        self.assertFalse((home / ".claude").exists())
+        code, out = self.run_check("--page-add", env={"HOME": str(home),
+                                                      "CLAUDE_ACCOUNTS_DIR": str(home / "none")})
+        self.assertEqual((code, json.loads(out)), (0, {"profiles": ["zzcheck"], "status": "met"}))
+
+    def test_page_add_is_met_by_the_log_option_and_needs_no_console(self):
+        home, log = self.log_home(self.ZZCHECK)
+        code, out = self.run_check("--page-add", "--log", str(log),
+                                   "--url", "http://127.0.0.1:1/api/state",
+                                   env={"HOME": str(home / "elsewhere")})
+        self.assertEqual((code, json.loads(out)), (0, {"profiles": ["zzcheck"], "status": "met"}))
+
+    def test_page_add_lists_every_added_profile_with_a_start_after_its_add(self):
+        rows = [*self.ZZCHECK,
+                ("account.added", None, {"by": "owner", "profile": "alpha"}),
+                ("account.added", None, {"by": "owner", "profile": "late"}),
+                ("signin.acted", None, {"action": "start", "by": "owner",
+                                        "outcome": "started", "profile": "alpha"})]
+        self.assertEqual(self.page_add(rows),
+                         (0, {"profiles": ["alpha", "zzcheck"], "status": "met"}))
+
+    def test_page_add_is_not_yet_without_an_add_followed_by_a_page_sign_in_start(self):
+        added = ("account.added", None, {"by": "owner", "profile": "p"})
+
+        def start(**changes):
+            payload = {"action": "start", "by": "owner", "outcome": "started", "profile": "p"}
+            return ("signin.acted", None, {**payload, **changes})
+
+        cases = {
+            "empty log": [],
+            "add only": [added],
+            "start before the add": [start(), added],
+            "start of another profile": [added, start(profile="q")],
+            "start that failed": [added, start(outcome="failed")],
+            "start joining a running one": [added, start(outcome="running")],
+            "start by someone else": [added, start(by="manager")],
+            "code instead of start": [added, start(action="code", outcome="sent")],
+            "cancel only": [added, start(action="cancel", outcome="cancelled")],
+            "start without an add": [start()],
+            "add by someone else": [("account.added", None, {"by": "manager", "profile": "p"}),
+                                    start()],
+            "add with no profile": [("account.added", None, {"by": "owner"}), start()],
+            "add with a non-string profile": [("account.added", None, {"by": "owner",
+                                                                       "profile": 3}),
+                                              start(profile=3)],
+            "other kinds only": [("goal.stated", None, {"profile": "p"})],
+        }
+        for label, rows in cases.items():
+            with self.subTest(label=label):
+                self.assertEqual(self.page_add(rows), (75, {"status": "pending"}))
+
+    def test_page_add_is_not_yet_without_a_readable_log(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         root = Path(tmp.name)
-        claude = root / "home" / ".claude"
-        (claude / "skills").mkdir(parents=True)
-        (claude / "settings.json").write_text("{}")
-        profile = root / "accounts" / "profiles" / "fresh"
-        profile.mkdir(parents=True)
-        os.chmod(profile, mode)
-        if settings == "link":
-            (profile / "settings.json").symlink_to(target or str(claude / "settings.json"))
-        elif settings == "file":
-            (profile / "settings.json").write_text("{}")
-        if skills == "link":
-            (profile / "skills").symlink_to(str(claude / "skills"))
-        elif skills == "dir":
-            (profile / "skills").mkdir(mode=0o700)
-        return {"HOME": str(root / "home"), "CLAUDE_ACCOUNTS_DIR": str(root / "accounts")}
+        (root / "junk").write_text("not a database")
+        empty = sqlite3.connect(root / "empty.sqlite3")
+        empty.execute("CREATE TABLE other (x)")
+        empty.commit()
+        empty.close()
+        for name in ("missing", "junk", "empty.sqlite3"):
+            with self.subTest(name=name):
+                code, out = self.run_check("--page-add", "--log", str(root / name),
+                                           env={"HOME": str(root)})
+                self.assertEqual((code, json.loads(out)), (75, {"status": "no_log"}))
+        self.assertEqual(sorted(path.name for path in root.iterdir()),
+                         ["empty.sqlite3", "junk"])
 
-    def page_add(self, env, state="signed_in", added=("fresh",)):
-        url = serve(self, view(("fresh", ago(10), {"state": state}), added=list(added)))
-        code, out = self.run_check("--url", url, "--page-add", env=env)
-        return code, json.loads(out)
+    def test_page_add_reads_the_log_without_writing_anything(self):
+        home, log = self.log_home(self.ZZCHECK)
+        directory = log.parent
+        before_bytes = log.read_bytes()
+        before_files = sorted(path.name for path in directory.iterdir())
+        os.chmod(log, 0o400)
+        os.chmod(directory, 0o500)
+        self.addCleanup(os.chmod, directory, 0o700)
+        code, out = self.run_check("--page-add", env={"HOME": str(home)})
+        self.assertEqual((code, json.loads(out)["status"]), (0, "met"))
+        os.chmod(directory, 0o700)
+        self.assertEqual(log.read_bytes(), before_bytes)
+        self.assertEqual(sorted(path.name for path in directory.iterdir()), before_files)
 
-    def test_page_add_is_met_when_an_added_profile_is_well_formed_and_signed_in(self):
-        self.assertEqual(self.page_add(self.account_tree()),
-                         (0, {"profiles": ["fresh"], "status": "met"}))
-
-    def test_page_add_is_not_yet_before_the_sign_in(self):
-        for state in ("signed_out", "unknown"):
-            with self.subTest(state=state):
-                self.assertEqual(self.page_add(self.account_tree(), state=state),
-                                 (75, {"profiles": ["fresh"], "status": "pending"}))
-
-    def test_page_add_is_not_yet_without_an_added_profile(self):
-        self.assertEqual(self.page_add(self.account_tree(), added=()),
-                         (75, {"profiles": [], "status": "pending"}))
-        self.assertEqual(self.page_add(self.account_tree(), added=("gone",)),
-                         (75, {"profiles": [], "status": "pending"}))
-
-    def test_page_add_on_an_older_console_is_not_yet(self):
-        url = serve(self, view(("fresh", ago(10), {"state": "signed_in"})))
-        code, out = self.run_check("--url", url, "--page-add", env=self.account_tree())
-        self.assertEqual((code, json.loads(out)), (75, {"status": "not_deployed"}))
-
-    def test_page_add_is_not_met_for_a_malformed_profile(self):
-        trees = {"mode": dict(mode=0o755), "target": dict(target="/nix/store/x-settings.json"),
-                 "no link": dict(settings="missing", skills="missing")}
-        for label, kwargs in trees.items():
-            with self.subTest(label=label):
-                self.assertEqual(self.page_add(self.account_tree(**kwargs)),
-                                 (1, {"profiles": ["fresh"], "status": "not_met"}))
-
-    def test_page_add_is_not_met_for_a_stray_link_to_the_wrong_place(self):
-        env = self.account_tree()
-        profile = Path(env["CLAUDE_ACCOUNTS_DIR"]) / "profiles" / "fresh"
-        (profile / "agents").symlink_to("/nix/store/x-agents")
-        self.assertEqual(self.page_add(env), (1, {"profiles": ["fresh"], "status": "not_met"}))
-
-    def test_page_add_is_not_met_when_one_shared_link_is_missing_or_replaced(self):
-        trees = {"settings missing": dict(settings="missing"),
-                 "settings file": dict(settings="file"),
-                 "skills dir": dict(skills="dir"),
-                 "skills missing": dict(skills="missing")}
-        for label, kwargs in trees.items():
-            with self.subTest(label=label):
-                self.assertEqual(self.page_add(self.account_tree(**kwargs)),
-                                 (1, {"profiles": ["fresh"], "status": "not_met"}))
+    def test_page_add_leaves_the_accounts_directory_untouched(self):
+        home, log = self.log_home(self.ZZCHECK)
+        accounts = home / "accounts"
+        before = accounts_sandbox.accounts_snapshot(accounts)
+        self.run_check("--page-add", env={"HOME": str(home), "CLAUDE_ACCOUNTS_DIR": str(accounts)})
+        self.assertEqual(accounts_sandbox.accounts_snapshot(accounts), before)
+        self.assertFalse(accounts.exists())
 
     def test_the_shared_entries_are_the_launchers(self):
         text = (ROOT / "home/common/claude-code/accounts/bin/claude-account").read_text()
