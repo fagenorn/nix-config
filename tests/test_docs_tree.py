@@ -445,8 +445,12 @@ class DocsTreeTest(unittest.TestCase):
         for needle in ("POST /api/signin", "POST /api/signin-code", "POST /api/signin-cancel",
                        "claude-account run auth login", "BROWSER", "600", "signin.acted",
                        "signin.ended", "attempt", "ADR-console-002", "ADR-console-008",
-                       "ADR-console-022", "#1026", "#894"):
+                       "ADR-console-022", "#1026", "#894", "POST /api/signin-link", "#1035",
+                       "Sign in again", "bad link", "changed while waiting for its link"):
             self.assertIn(needle, adr)
+        self.assertIn("/api/signin-link", self.doc(
+            "docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md"))
+        self.assertIn("Sign in again", self.doc("docs/areas/console/CONTEXT.md"))
         for older in ("docs/areas/console/adr/002-the-desk-page-design-rules.md",
                       "docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md",
                       "docs/areas/console/adr/022-a-profiles-sign-in-is-read-from-the-clients-status-command.md",
@@ -466,7 +470,8 @@ class DocsTreeTest(unittest.TestCase):
         for needle in ("POST /api/account-add", "claude-account add", "account.added",
                        "accounts_added", "409", "bad account", "default", "0700",
                        "ADR-console-002", "ADR-console-008", "ADR-console-022",
-                       "ADR-console-024", "ADR-hosts-005", "#1027", "#894"):
+                       "ADR-console-024", "ADR-hosts-005", "#1027", "#894", "#1035", "outcome",
+                       "ADR-console-024 D1"):
             self.assertIn(needle, adr)
         for older in ("docs/areas/console/adr/002-the-desk-page-design-rules.md",
                       "docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md",
