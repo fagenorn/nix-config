@@ -324,7 +324,8 @@ class RegisterRunTest(Case):
         self.assertEqual(self.post({"path": str(repo)})[0], 204)
         (_, row), = self.rows("registration.ended")
         self.assertEqual(row["result"], "failed")
-        self.assertEqual(row["headline"], f"The adoption plan for {repo.name} failed: timed_out")
+        self.assertEqual(row["headline"],
+                         f"The adoption plan for {repo.name} failed: it took too long and was stopped")
         self.assertEqual(self.view()["registration"]["status"], "done")
 
     def test_a_no_change_plan_runs_the_register_check(self):
