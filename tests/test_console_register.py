@@ -176,6 +176,8 @@ class LinesTest(unittest.TestCase):
             return [{"op": "write-file", "sources": [], "targets": [path]} for path in paths]
 
         end = ", and records the adoption"
+        handoff = {"migration_map": records[0]["targets"][0],
+                   "evidence_record": records[1]["targets"][0]}
         cases = [
             (writes(".agents/runtime/.gitignore", ".gitignore") + records,
              [f"writes .agents/runtime/.gitignore and .gitignore{end}"]),
@@ -189,9 +191,20 @@ class LinesTest(unittest.TestCase):
         ]
         for changes, expected in cases:
             with self.subTest(expected=expected):
-                lines = register.plan_lines(doc(changes=changes))
+                lines = register.plan_lines(doc(changes=changes, handoff=handoff))
                 self.assertEqual(lines, expected)
                 self.assertNotIn(digest, " ".join(lines))
+
+    def test_an_ordinary_file_beside_the_adoptions_records_stays_named(self):
+        digest = "50051d36e5e98d2b6d8b07c7417d1b1f666906b20ccc3dd6a96569665f4f0ade"
+        handoff = {"migration_map": f".agents/knowledge/archive/path-migrations/{digest}.json",
+                   "evidence_record": f".agents/artifacts/evidence/{digest}.json"}
+        paths = [".agents/artifacts/evidence/checklist.md",
+                 ".agents/knowledge/archive/path-migrations/notes.md", handoff["evidence_record"]]
+        changes = [{"op": "write-file", "sources": [], "targets": [path]} for path in paths]
+        self.assertEqual(
+            register.plan_lines(doc(changes=changes, handoff=handoff)),
+            [f"writes {paths[0]} and {paths[1]}, and records the adoption"])
 
     def test_a_move_outside_agents_drops_the_suffix_and_zero_counts_make_no_line(self):
         self.assertEqual(register.plan_lines(doc(changes=[move("a.md", "docs/a.md")])),
