@@ -1323,8 +1323,17 @@ class _Pipe:
         return reply if isinstance(reply, dict) else {}
 
 
+EXEC_ON_PIPE_FDS = (
+    "import os, sys\n"
+    "os.dup2(int(sys.argv[1]), 3)\n"
+    "os.dup2(int(sys.argv[2]), 4)\n"
+    "os.execvp(sys.argv[3], sys.argv[3:])"
+)
+"""Issue 1031: run the browser with the pipes on descriptors 3 and 4. dash's `3<&10` is "Bad fd number", so no shell does it."""
+
+
 def _high_fd(fd: int) -> int:
-    """Move `fd` to a number of 10 or more, so the shell's own redirections to 3 and 4 cannot clash with it."""
+    """Move `fd` to a number of 10 or more, so the launcher's dup2 onto 3 and 4 cannot clash with it."""
     moved = fcntl.fcntl(fd, fcntl.F_DUPFD_CLOEXEC, 10)
     os.close(fd)
     return moved
@@ -1347,7 +1356,7 @@ def chromium_first_screen(url: str, *, width: int, height: int, screenshot: Path
     try:
         try:
             process = subprocess.Popen(
-                ["/bin/sh", "-c", f'exec "$@" 3<&{to_browser_read} 4>&{from_browser_write}', "sh", *browser,
+                [sys.executable, "-I", "-c", EXEC_ON_PIPE_FDS, str(to_browser_read), str(from_browser_write), *browser,
                  "--headless=new", "--remote-debugging-pipe", "--no-first-run", "--no-default-browser-check",
                  "--hide-scrollbars", f"--user-data-dir={profile}", f"--window-size={width},{height}",
                  "about:blank"],

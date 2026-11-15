@@ -2013,6 +2013,26 @@ class ChromiumDriverTest(unittest.TestCase):
         self.assertEqual(methods.count("Runtime.evaluate"), 2)
         self.assertFalse([m for m in methods if m.startswith("Input.")])
 
+    def test_the_browser_is_launched_without_a_shell_that_only_takes_single_digit_descriptors(self):
+        # dash (the CI runner's /bin/sh) refuses `3<&10`: "Bad fd number". The pipes must reach
+        # descriptors 3 and 4 without a shell redirection naming a descriptor of 10 or more.
+        fake = fake_browser(self.tmp, [M_OK])
+        launched = []
+        real = subprocess.Popen
+
+        def spy(argv, *args, **kwargs):
+            launched.append(argv)
+            return real(argv, *args, **kwargs)
+
+        with mock.patch.object(verify_checks.subprocess, "Popen", spy):
+            verify_checks.chromium_first_screen(
+                "http://127.0.0.1:1/", width=1440, height=900, screenshot=self.tmp / "s.png",
+                browser=[str(fake)], timeout=10)
+        self.assertEqual(len(launched), 1)
+        self.assertNotIn(launched[0][0], ("/bin/sh", "sh"))
+        self.assertFalse([part for part in launched[0] if "<&" in part or ">&" in part])
+        self.assertEqual(self.jsonl("calls.jsonl")[0][0], "Target.createTarget")
+
     def test_a_browser_that_dies_raises(self):
         fake = fake_browser(self.tmp, [M_OK], die=True)
         started = time.monotonic()
