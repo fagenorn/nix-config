@@ -576,6 +576,14 @@ class RowTest(unittest.TestCase):
         self.assertEqual(row["project_id"], "sample-owner/sample-app")
         self.assertEqual(register.ended(row)[2], row)
 
+    def test_a_repository_with_no_remote_words_its_default_branch_card_plainly(self):
+        fields = contract_draft.draft("/x/sample-app", {
+            "remotes": [], "default_branch": None, "branches": ["trunk"], "files": [], "texts": {}})
+        row = register.drafting("/x/sample-app", fields)
+        (ask,) = [q["ask"] for q in row["questions"] if q["subject"] == "default-branch"]
+        self.assertIn("It has no remote, so the console cannot tell", ask)
+        self.assertNotIn("Its remote", ask)
+
     def test_ended_takes_thirteen_members_and_checks_the_draft(self):
         row = register.drafting("/x/sample-app", draft_fields())
         self.assertEqual(len(row), 13)

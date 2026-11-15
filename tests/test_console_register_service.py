@@ -1008,7 +1008,7 @@ class DraftRealTest(DraftCase):
         self.assertEqual(question["subject"], "docs-paths")
         self.assertEqual(
             question["why"],
-            "The plan refused the documentation paths: must be a non-empty repository-relative "
+            "The plan refused the documentation: must be a non-empty repository-relative "
             "path with no '..' segment")
         self.assertIs(question["text"], True)
         text = json.dumps(self.view())
