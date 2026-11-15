@@ -26,7 +26,7 @@ Event kinds read:
   idle nudge says nothing.
 - `sprint.nudged` (`event_log.SPRINT_NUDGED`): a held owner's message sent after the quota reset
   speaks when `ok` and `resumed` are exactly true, the event's project is a str and its `sprint_id`
-  names a sprint of the fold before the row; the sentence's goal is that sprint's (the row carries
+  names a sprint of the fold before the row; the sentence's title is that sprint's (the row carries
   none). Any other `sprint.nudged` row says nothing.
 - `manager.no_progress`, `sprint.continued` (`event_log.MANAGER_NO_PROGRESS`, `SPRINT_CONTINUED`):
   say nothing; the inbox item speaks.
@@ -68,22 +68,26 @@ Sentences (exact). `<headline>` is the first question of an item that has
 questions, else the stored question (`view.item_headline`, so a decision never
 reads its fixed boilerplate); `<where>` is the event's project, else the last
 path segment of the session's repository (`view.repo_name`); a session with no
-repository makes no moment. No sentence names an issue, a session or a path.
+repository makes no moment. No sentence names an issue, a session or a path, and none carries a
+goal: `<title>` is `sprints.sprint_title` of the sprint in the fold after the row when the sprint is
+there (so a brief sentence names the title of the brief it reports), else `sprints.goal_title` of
+the row's payload goal; a withdrawal and a held-message resume read the fold before the row (a
+withdrawal removes the sprint).
 
     inbox_appeared   <project_id> needs you: <headline>
     inbox_answered   <project_id> was answered: <headline>
     limit_stop       A session in <where> stopped on a usage limit.
     resumed          A session in <where> resumed work.
     session_ended    A session in <where> ended.
-    sprint_withdrawn The goal for <project_id> was withdrawn: <goal>
-    brief_sent       A brief for <project_id> arrived, version <n>: <goal>
-    brief_approved   The brief for <project_id> was approved, version <n>: <goal>
-    sprint_state     The sprint for <project_id> is now <the sprint's shown state>: <goal>
+    sprint_withdrawn The goal for <project_id> was withdrawn: <title>
+    brief_sent       A brief for <project_id> arrived, version <n>: <title>
+    brief_approved   The brief for <project_id> was approved, version <n>: <title>
+    sprint_state     The sprint for <project_id> is now <the sprint's shown state>: <title>
     answer_differs   An answer for <project_id>: You chose '<answer>' over the recommended '<recommended>': <question>
     sprint_done      The sprint for <project_id> is done: <the closing report's first line>
-    manager_restarted The manager of <goal> was restarted
-    manager_takeover A new manager took over <goal>
-    quota_resumed    <goal> resumed after the quota reset
+    manager_restarted The manager of <title> was restarted
+    manager_takeover A new manager took over <title>
+    quota_resumed    <title> resumed after the quota reset
 
 An inbox payload needs `project_id` (str), `issue` (int, not bool) and
 `question` (str). A withdrawal needs the event's project (str) and a payload `goal` (str); it
@@ -97,7 +101,7 @@ needs the event's project (str), a payload `goal` (str) and `takeover` exactly t
 and neither does a `manager.nudged` or `manager.woken` quota resume.
 A sprint report is judged against the folded sprints before it
 (`moments` folds its own copy of the optional `sprints` argument with
-`sprints.sprint_states`), and the sentence's goal is the sprint's.
+`sprints.sprint_states`), and the sentence's title is the sprint's.
 
 The window (`window_start`, `keep`): moments strictly after the last look, so a
 moment exactly at the look is not shown; with no look stored (a first visit),
@@ -123,7 +127,8 @@ from agent_tools.console.event_log import (
     QUESTION_ANSWERED, SPRINT_CLOSED, SPRINT_NUDGED, SPRINT_REPORTED, Event)
 from agent_tools.console.sessions import (
     ENDED, GONE, HOOK, LIMIT, SEEN, WORKING, SessionState, session_states)
-from agent_tools.console.sprints import MANAGER_SESSION_NAME, SprintState, sprint_states
+from agent_tools.console.sprints import (
+    MANAGER_SESSION_NAME, SprintState, goal_title, sprint_states, sprint_title)
 from agent_tools.console.view import (
     INBOX_CHANGED, INBOX_SEEN, InboxRecord, inbox_records, item_headline, repo_name,
     sprint_state, sprint_waiting)
@@ -226,16 +231,24 @@ def _inbox_moment(event: Event, before: InboxRecord | None) -> tuple[str, str] |
     return None
 
 
-def _brief_moment(event: Event) -> tuple[str, str] | None:
+def _title(sprint_id: object, goal: str, folded: Mapping[str, SprintState]) -> str:
+    """The sprint's title in `folded` when it is there, else the title of the row's `goal`."""
+    if isinstance(sprint_id, str) and sprint_id in folded:
+        return sprint_title(folded[sprint_id])
+    return goal_title(goal)
+
+
+def _brief_moment(event: Event, folded: Mapping[str, SprintState]) -> tuple[str, str] | None:
     version, goal = event.payload.get("version"), event.payload.get("goal")
     if (not isinstance(event.project, str) or not isinstance(version, int)
             or isinstance(version, bool) or not isinstance(goal, str)):
         return None
+    title = _title(event.payload.get("sprint_id"), goal, folded)
     if event.kind == BRIEF_SENT:
         return (BRIEF_SENT_MOMENT,
-                f"A brief for {event.project} arrived, version {version}: {goal}")
+                f"A brief for {event.project} arrived, version {version}: {title}")
     return (BRIEF_APPROVED_MOMENT,
-            f"The brief for {event.project} was approved, version {version}: {goal}")
+            f"The brief for {event.project} was approved, version {version}: {title}")
 
 
 def _answer_moment(event: Event) -> tuple[str, str] | None:
@@ -249,8 +262,8 @@ def _answer_moment(event: Event) -> tuple[str, str] | None:
                             f"recommended '{recommended}': {question}")
 
 
-def _resumed_sentence(goal: str) -> str:
-    return f"{goal} resumed after the quota reset"
+def _resumed_sentence(title: str) -> str:
+    return f"{title} resumed after the quota reset"
 
 
 def _resumed_moment(event: Event, folded: Mapping[str, SprintState]) -> tuple[str, str] | None:
@@ -259,20 +272,21 @@ def _resumed_moment(event: Event, folded: Mapping[str, SprintState]) -> tuple[st
             or sprint_id not in folded or event.payload.get("ok") is not True
             or event.payload.get("resumed") is not True):
         return None
-    return QUOTA_RESUMED, _resumed_sentence(folded[sprint_id].goal)
+    return QUOTA_RESUMED, _resumed_sentence(sprint_title(folded[sprint_id]))
 
 
-def _manager_moment(event: Event) -> tuple[str, str] | None:
+def _manager_moment(event: Event, folded: Mapping[str, SprintState]) -> tuple[str, str] | None:
     goal = event.payload.get("goal")
     if not isinstance(event.project, str) or not isinstance(goal, str):
         return None
+    title = _title(event.payload.get("sprint_id"), goal, folded)
     if (event.kind in (MANAGER_NUDGED, MANAGER_WOKEN) and event.payload.get("ok") is True
             and event.payload.get("resumed") is True):
-        return QUOTA_RESUMED, _resumed_sentence(goal)
+        return QUOTA_RESUMED, _resumed_sentence(title)
     if event.kind == MANAGER_WOKEN and event.payload.get("ok") is True:
-        return MANAGER_RESTARTED, f"The manager of {goal} was restarted"
+        return MANAGER_RESTARTED, f"The manager of {title} was restarted"
     if event.kind == MANAGER_STARTED and event.payload.get("takeover") is True:
-        return MANAGER_TAKEOVER, f"A new manager took over {goal}"
+        return MANAGER_TAKEOVER, f"A new manager took over {title}"
     return None
 
 
@@ -294,7 +308,7 @@ def _report_moment(event: Event, before: Mapping[str, SprintState],
     if was[0] == now[0]:
         return None
     return (SPRINT_STATE_MOMENT,
-            f"The sprint for {event.project} is now {now[1]}: {new.goal}")
+            f"The sprint for {event.project} is now {now[1]}: {sprint_title(new)}")
 
 
 def _closing_moment(event: Event, before: Mapping[str, SprintState],
@@ -321,6 +335,7 @@ def moments(
     for event in events:
         said = None
         payload = event.payload
+        previous, folded = folded, sprint_states([event], folded)
         if event.kind in (HOOK, SEEN, GONE):
             session_id = payload.get("session_id") if isinstance(payload, dict) else None
             before = states.get(session_id) if isinstance(session_id, str) else None
@@ -333,19 +348,19 @@ def moments(
             held = inbox_records([event], held)
             said = _inbox_moment(event, before)
         elif event.kind in (BRIEF_SENT, BRIEF_APPROVED):
-            said = _brief_moment(event)
+            said = _brief_moment(event, folded)
         elif event.kind == QUESTION_ANSWERED:
             said = _answer_moment(event)
         elif event.kind in (MANAGER_NUDGED, MANAGER_WOKEN, MANAGER_STARTED):
-            said = _manager_moment(event)
+            said = _manager_moment(event, folded)
         elif event.kind == SPRINT_NUDGED:
-            said = _resumed_moment(event, folded)
+            said = _resumed_moment(event, previous)
         elif event.kind == GOAL_WITHDRAWN:
             goal = payload.get("goal") if isinstance(payload, dict) else None
             if isinstance(event.project, str) and isinstance(goal, str):
+                title = _title(payload.get("sprint_id"), goal, previous)
                 said = (SPRINT_WITHDRAWN,
-                        f"The goal for {event.project} was withdrawn: {goal}")
-        previous, folded = folded, sprint_states([event], folded)
+                        f"The goal for {event.project} was withdrawn: {title}")
         if event.kind == SPRINT_REPORTED:
             said = _report_moment(event, previous, folded, held)
         elif event.kind == SPRINT_CLOSED:

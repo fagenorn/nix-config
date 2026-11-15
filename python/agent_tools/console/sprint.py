@@ -22,7 +22,8 @@ port (0-65535; default 27184); the command only ever talks to 127.0.0.1.
 
 `sprint brief` reads the sprint's secret from `--secret-file` (the file the console made for the
 sprint; one trailing newline is removed) or the environment, and the brief from `--brief-file` (`-` reads stdin), a JSON
-object, and sends `POST /api/brief` with `{"sprint_id", "secret", "brief"}`, no `Origin`. On success
+object of six parts, `title` first (one line of at most 60 characters), then `done`, `excluded`,
+`slices`, `risks` and `asks`, and sends `POST /api/brief` with `{"sprint_id", "secret", "brief"}`, no `Origin`. On success
 it prints `sprint: brief version <n> sent` and exit 0. The command validates no part of the brief:
 the console decides, in one place.
 
@@ -35,7 +36,9 @@ report: the console decides, in one place.
 JSON object, and sends `POST /api/ask` with `{"sprint_id", "secret", "round"}`, no `Origin`. The
 round is
 
-    {"questions": [{"question": "<text>", "blocks": "<one line>", "options": ["<one line>", ...],
+    {"questions": [{"question": "<the ask, at most 140 characters>",
+                    "context": "<optional, at most 400 characters>", "blocks": "<one line>",
+                    "options": ["<one line, at most 80 characters>", ...],
                     "recommended": "<exact text of one option>"}, ...],
      "blocker": true | false}                   (blocker optional, default false)
 

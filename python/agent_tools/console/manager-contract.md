@@ -17,14 +17,15 @@ If this text is no longer in your context, run `sprint contract` again.
 
 1. Read the goal: it is the text after `The goal:` in your first prompt.
 2. Ground yourself in the project's documents with the `doc-grounded-questions` skill: its language, decisions and standards, and the code the goal touches. Read only.
-3. Write the brief as one JSON object of five parts, each required and none empty:
+3. Write the brief as one JSON object of six parts, each required and none empty:
+   - `title`: one line of at most 60 characters that names the sprint everywhere on the owner's page; the tracker milestone name you will use is such a title.
    - `done`: one text, what done looks like.
    - `excluded`: a list of texts, what the sprint leaves out.
    - `slices`: a list of texts, the vertical slices in delivery order.
    - `risks`: a list of texts.
    - `asks`: a list of texts, what you expect to ask the owner.
 4. Send it with `sprint brief --brief-file -`, the JSON on standard input. It prints `sprint: brief version <n> sent`.
-5. Refused with `the brief has no <part>`: fix that part and send again. Refused with `secret refused` or `this sprint is not open`, or the console unreachable: say so in one line and stop.
+5. Refused with `the brief has no <part>` or `the brief's title is at most 60 characters`: fix that part and send again. Refused with `secret refused` or `this sprint is not open`, or the console unreachable: say so in one line and stop.
 6. End your turn. The owner's answer arrives as a message: read it with `sprint inbox` at the start of your next turn.
 
 ## Every turn
@@ -77,11 +78,19 @@ If this text is no longer in your context, run `sprint contract` again.
 ## Questions
 
 1. Decide every reversible matter inside the approved brief yourself, and answer a delivery's "may I proceed" yourself.
-2. Bring every real choice, one only the owner can make, in one round: collect the questions and send them together with `sprint ask --round-file -`, a JSON object on standard input, `{"questions": [{"question": ..., "blocks": ..., "options": [...], "recommended": ...}]}`:
-   - `question`: the choice in a sentence or two.
+2. Bring every real choice, one only the owner can make, in one round: collect the questions and send them together with `sprint ask --round-file -`, a JSON object on standard input, `{"questions": [{"question": ..., "context": ..., "blocks": ..., "options": [...], "recommended": ...}]}`:
+   - `question`: the ask: one sentence of at most 140 characters, written as the question the owner answers.
+   - `context`: optional, at most 400 characters: the cause and the evidence the owner needs to answer.
    - `blocks`: one line, what waits behind the answer.
-   - `options`: two to four one-line options.
+   - `options`: two to four one-line options of at most 80 characters each.
    - `recommended`: the exact text of the option you recommend.
+
+   A round over a limit is refused with the limit named and nothing is sent, so shorten that member and send again.
+
+   Good: `{"question": "Should the importer keep its checkpoints in SQLite?", "context": "A crash mid-import loses up to an hour of work today; SQLite is already a dependency and a new file format is not.", ...}`
+
+   Bad: one `question` paragraph of about 500 characters holding the cause, the evidence and the ask together, refused with `question 1's ask is over 140 characters`.
+
    It prints `sprint: round <id> sent, <n> questions`.
 3. A sprint has one open round at a time: until every question of it is answered, another round is refused with `a round of questions is already open`. Only a question that stops all work goes out as a further round, with `"blocker": true` beside `questions`.
 4. Go on with whatever no open question blocks. Each answer arrives in `sprint inbox` as a message of kind `answer` carrying the question, the chosen option or the owner's own words: act on it and answer it with `sprint reply` like any message.

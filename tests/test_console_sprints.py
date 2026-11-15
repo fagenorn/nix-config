@@ -85,6 +85,11 @@ class ParseBriefTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     sprints.parse_brief_request(body)
 
+    def test_a_title_key_is_accepted(self):
+        brief = {"title": "x", "done": "x", "slices": ["a"]}
+        body = json.dumps({"sprint_id": SID, "secret": "s", "brief": brief}).encode()
+        self.assertEqual(sprints.parse_brief_request(body), (SID, "s", brief))
+
     def test_approve_and_reply_bodies(self):
         self.assertEqual(
             sprints.parse_approve(
@@ -115,8 +120,8 @@ class ParseBriefTest(unittest.TestCase):
                     parse(json.dumps(value).encode())
 
 
-FULL = {"done": " ship it ", "excluded": ["x"], "slices": ["a", "b"], "risks": ["r"],
-        "asks": ["q"]}
+FULL = {"title": "Ship it", "done": " ship it ", "excluded": ["x"], "slices": ["a", "b"],
+        "risks": ["r"], "asks": ["q"]}
 
 
 class CheckedBriefTest(unittest.TestCase):
@@ -135,6 +140,21 @@ class CheckedBriefTest(unittest.TestCase):
                 self.assertEqual(str(caught.exception), f"the brief has no {part}")
         self.assertEqual(sprints.checked_brief(FULL), {**FULL, "done": "ship it"})
         self.assertEqual(sprints.checked_brief({**FULL, "slices": [" a "]})["slices"], ["a"])
+
+    def test_the_title_is_a_required_one_line_part_of_at_most_60_characters(self):
+        self.assertEqual(sprints.checked_brief({**FULL, "title": " Importer resumes "})["title"],
+                         "Importer resumes")
+        self.assertEqual(sprints.checked_brief({**FULL, "title": "t" * 60})["title"], "t" * 60)
+        with self.assertRaises(sprints.Refused) as caught:
+            sprints.checked_brief({**FULL, "title": "t" * 61})
+        self.assertEqual(str(caught.exception), sprints.TITLE_TOO_LONG)
+        missing = {k: v for k, v in FULL.items() if k != "title"}
+        for brief in (missing, {**FULL, "title": ""}, {**FULL, "title": "a\nb"},
+                      {**FULL, "title": "a\rb"}, {**FULL, "title": 7}):
+            with self.subTest(brief=brief.get("title", "absent")):
+                with self.assertRaises(sprints.Refused) as caught:
+                    sprints.checked_brief(brief)
+                self.assertEqual(str(caught.exception), "the brief has no title")
 
     def test_excluded_risks_and_asks_may_be_empty(self):
         self.assertEqual(sprints.MAY_BE_EMPTY, ("excluded", "risks", "asks"))
@@ -226,7 +246,8 @@ class FoldTest(unittest.TestCase):
              sprints.SprintState("aaaaaaaaaaaaaaaa", "owner/p00", "one", 1, at(1))})
 
 
-PARTS = {"done": "d", "excluded": ["x"], "slices": ["a"], "risks": ["r"], "asks": ["q"]}
+PARTS = {"title": "t", "done": "d", "excluded": ["x"], "slices": ["a"], "risks": ["r"],
+         "asks": ["q"]}
 
 
 def sent(seq, sprint_id, version, parts):
@@ -1131,6 +1152,34 @@ def message_state_of(events):
     return sprints.sprint_states(events)[SID]
 
 
+class TitleTest(unittest.TestCase):
+    def state(self, goal, parts=None):
+        events = [stated(1, "owner/p00", SID, goal)]
+        if parts is not None:
+            events.append(sent(2, SID, 1, parts))
+        return sprints.sprint_states(events)[SID]
+
+    def test_the_title_is_the_briefs_else_the_goals_first_sentence(self):
+        sentence = "Make the importer resumable."
+        self.assertEqual(sprints.sprint_title(self.state(sentence + " Then " + "x" * 1400)),
+                         sentence)
+        self.assertEqual(sprints.sprint_title(self.state("y" * 1400)), "y" * 59 + "…")
+        spaced = {**PARTS, "title": "  Importer   resumes "}
+        self.assertEqual(sprints.sprint_title(self.state("g", spaced)), "Importer resumes")
+        no_title = {k: v for k, v in PARTS.items() if k != "title"}
+        self.assertEqual(sprints.sprint_title(self.state("Fix it now! Then more", no_title)),
+                         "Fix it now!")
+        self.assertEqual(sprints.sprint_title(self.state("g", {**PARTS, "title": "t" * 90})),
+                         "t" * 59 + "…")
+        self.assertEqual(sprints.goal_title("first line\nsecond line."), "first line")
+        self.assertEqual(sprints.goal_title("v1.2 ships"), "v1.2 ships")
+
+    def test_cut_keeps_short_text_and_ends_long_text_with_an_ellipsis(self):
+        self.assertEqual(sprints.cut("abc", 3), "abc")
+        self.assertEqual(sprints.cut("abcd ef", 6), "abcd…")
+        self.assertEqual(len(sprints.cut("z" * 500, 80)), 80)
+
+
 class MessageFoldTest(unittest.TestCase):
     def test_an_approval_a_change_request_and_a_text_each_become_one_message_in_order(self):
         state = message_state_of(message_rows())
@@ -1425,26 +1474,84 @@ class RoundCheckTest(unittest.TestCase):
                          10)
         self.assertEqual(refusal({"questions": [QUESTION], "blocker": "yes"}),
                          "the round's blocker is not true or false")
-        shape = "question 1 is not an object of question, blocks, options and recommended"
+        shape = sprints.QUESTION_SHAPE.format(n=1)
         self.assertEqual(refusal({"questions": [{**QUESTION, "why": "x"}]}), shape)
         self.assertEqual(refusal({"questions": ["text"]}), shape)
         self.assertEqual(refusal({"questions": [{**QUESTION, "options": ["a\nb", "c"]}]}),
                          "question 1 has no valid options")
         self.assertEqual(refusal({"questions": [{**QUESTION, "blocks": ""}]}),
                          "question 1 has no valid blocks")
-        self.assertEqual(refusal({"questions": [{**QUESTION, "question": "q" * 1001}]}),
-                         "question 1 has no valid question")
+        self.assertEqual(refusal({"questions": [{**QUESTION, "question": "q" * 141}]}),
+                         sprints.ASK_TOO_LONG.format(n=1))
         self.assertEqual(refusal({"questions": [{**QUESTION, "question": " "}]}),
                          "question 1 has no valid question")
         self.assertEqual(
-            sprints.checked_round({"questions": [{**QUESTION, "question": "q" * 1000}]})
-            ["questions"][0]["question"], "q" * 1000)
+            sprints.checked_round({"questions": [{**QUESTION, "question": "q" * 140}]})
+            ["questions"][0]["question"], "q" * 140)
         self.assertEqual(refusal({"questions": [{**QUESTION, "options": ["a", " a"],
                                                  "recommended": "a"}]}),
                          "question 1 offers one option twice")
 
 
 ROUND = {"questions": [QUESTION]}
+
+
+class RoundLimitTest(unittest.TestCase):
+    Q = QUESTION
+
+    def refused(self, **changes):
+        return refusal({"questions": [self.Q, {**self.Q, **changes}]})
+
+    def test_each_limit_is_refused_with_the_limit_named(self):
+        cases = [({"question": "q" * 141}, sprints.ASK_TOO_LONG, "140"),
+                 ({"context": "c" * 401}, sprints.CONTEXT_TOO_LONG, "400"),
+                 ({"options": ["o" * 81, "files"]}, sprints.OPTION_TOO_LONG, "80")]
+        for changes, text, number in cases:
+            with self.subTest(changes=list(changes)):
+                got = self.refused(**changes)
+                self.assertEqual(got, text.format(n=2))
+                self.assertIn(number, got)
+        accepted = {"question": "q" * 140, "context": "c" * 400, "options": ["o" * 80, "files"]}
+        got = sprints.checked_round({"questions": [{**self.Q, **accepted}]})["questions"][0]
+        self.assertEqual((len(got["question"]), len(got["context"]), len(got["options"][0])),
+                         (140, 400, 80))
+
+    def test_a_context_is_kept_and_an_absent_one_adds_no_key(self):
+        kept = sprints.checked_round({"questions": [{**self.Q, "context": " why "}]})
+        self.assertEqual(kept["questions"][0]["context"], "why")
+        spanning = sprints.checked_round({"questions": [{**self.Q, "context": "a\nb"}]})
+        self.assertEqual(spanning["questions"][0]["context"], "a\nb")
+        self.assertNotIn("context", sprints.checked_round({"questions": [self.Q]})["questions"][0])
+        for context in ("", None, 7, "  "):
+            with self.subTest(context=context):
+                self.assertEqual(refusal({"questions": [{**self.Q, "context": context}]}),
+                                 sprints.QUESTION_MEMBER.format(n=1, member="context"))
+
+    def test_a_strict_round_names_the_limit_even_past_the_old_caps(self):
+        cases = [({"question": "q" * 1200}, sprints.ASK_TOO_LONG),
+                 ({"context": "c" * 1200}, sprints.CONTEXT_TOO_LONG),
+                 ({"options": ["o" * 600, "files"]}, sprints.OPTION_TOO_LONG),
+                 ({"options": ["o" * 45 + "\n" + "o" * 45, "files"]}, sprints.OPTION_TOO_LONG)]
+        for changes, text in cases:
+            with self.subTest(changes=changes):
+                self.assertEqual(refusal({"questions": [{**self.Q, **changes}]}), text.format(n=1))
+        self.assertEqual(refusal({"questions": [{**self.Q, "options": ["two\nlines", "files"]}]}),
+                         sprints.QUESTION_MEMBER.format(n=1, member="options"))
+
+    def test_without_limits_an_over_limit_round_is_accepted_whole(self):
+        long = {**self.Q, "question": "q" * 600, "context": "c" * 900,
+                "options": ["o" * 120, "files"]}
+        got = sprints.checked_round({"questions": [long]}, limits=False)["questions"][0]
+        self.assertEqual((len(got["question"]), len(got["context"]), len(got["options"][0])),
+                         (600, 900, 120))
+        for changes, member in (({"question": "q" * 1001}, "question"),
+                                ({"options": ["o" * 501, "files"]}, "options"),
+                                ({"context": "c" * 1001}, "context")):
+            with self.subTest(member=member):
+                with self.assertRaises(sprints.Refused) as caught:
+                    sprints.checked_round({"questions": [{**self.Q, **changes}]}, limits=False)
+                self.assertEqual(str(caught.exception),
+                                 sprints.QUESTION_MEMBER.format(n=1, member=member))
 
 
 class RoundParseTest(unittest.TestCase):
@@ -1489,6 +1596,15 @@ def question_state(events):
 
 
 class QuestionFoldTest(unittest.TestCase):
+    def test_a_logged_round_over_the_limits_still_folds_whole(self):
+        long = {**QUESTION, "question": "q" * 600, "context": "c" * 900,
+                "options": ["o" * 120, "files"]}
+        (open_,) = sprints.open_questions(question_state([asked(41, SID, [long])]))
+        self.assertEqual((len(open_.question), len(open_.context), len(open_.options[0])),
+                         (600, 900, 120))
+        plain = sprints.open_questions(question_state([asked(42, SID, [QUESTION])]))
+        self.assertIsNone(plain[0].context)
+
     def test_rounds_and_answers_fold_into_questions_and_messages(self):
         opened = question_state([asked(41, SID, [QUESTION, SECOND])])
         self.assertEqual(

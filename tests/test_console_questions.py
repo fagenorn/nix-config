@@ -124,6 +124,31 @@ class QuestionRouteTest(Case):
         got = self.assert_unchanged(svc, lambda: self.ask(svc, withdrawn, secret))
         self.assertEqual((got[0], got[2]), (409, sprints.NOT_OPEN.encode() + b"\n"))
 
+    def test_a_round_over_a_limit_is_refused_with_the_limit_named_and_logs_nothing(self):
+        svc = self.open()
+        sid = self.approved(svc)
+        secret = self.secret(sid)
+        cases = [({"question": "q" * 141}, sprints.ASK_TOO_LONG, "140"),
+                 ({"question": "q" * 1200}, sprints.ASK_TOO_LONG, "140"),
+                 ({"context": "c" * 401}, sprints.CONTEXT_TOO_LONG, "400"),
+                 ({"options": ["o" * 81, "files"]}, sprints.OPTION_TOO_LONG, "80"),
+                 ({"options": ["o" * 600, "files"]}, sprints.OPTION_TOO_LONG, "80")]
+        for changes, text, number in cases:
+            with self.subTest(changes=[(k, len(str(v))) for k, v in changes.items()]):
+                status, _, body = self.ask(svc, sid, secret, {"questions": [{**Q0, **changes}]})
+                self.assertEqual((status, body), (409, text.format(n=1).encode() + b"\n"))
+                self.assertIn(number.encode(), body)
+        self.assertEqual(self.rows("questions.asked"), [])
+
+    def test_a_round_with_a_context_logs_it_and_the_view_question_keeps_it(self):
+        svc = self.open()
+        sid = self.approved(svc)
+        question = {**Q0, "context": "A crash loses an hour of work."}
+        status, _, body = self.ask(svc, sid, self.secret(sid), {"questions": [question]})
+        self.assertEqual(status, 200, body)
+        (row,) = self.rows("questions.asked")
+        self.assertEqual(row["questions"], [question])
+
     def test_a_second_round_is_refused_while_one_is_open_unless_a_blocker(self):
         svc = self.open()
         sid, first = self.asked(svc)
