@@ -136,8 +136,75 @@ class LinesTest(unittest.TestCase):
             path_references=[{"answer": "rewrite"}, {"answer": "retain"}, {"answer": None}])
         self.assertEqual(register.plan_lines(document), [
             "moves 2 agent files under .agents/", "writes the project contract",
-            "generates 2 files from the contract", "writes 1 other file", "deletes 1 file",
+            "generates 2 files from the contract", "writes .agents/runtime/.gitignore",
+            "deletes x.md",
             "rewrites 2 links", "rewrites 1 path reference"])
+
+    def test_the_files_written_or_deleted_are_named_up_to_three_then_a_count(self):
+        def writes(*paths):
+            return [{"op": "write-file", "sources": [], "targets": [path]} for path in paths]
+
+        def deletes(*paths):
+            return [{"op": "delete-file", "sources": [path], "targets": []} for path in paths]
+
+        contract = {"op": "write-file", "sources": [], "targets": [".agents/project.json"]}
+        cases = [
+            (writes("a.md"), ["writes a.md"]),
+            (writes("a.md", "b.md"), ["writes a.md and b.md"]),
+            (writes("AGENTS.md", "CLAUDE.md", ".agents/instructions/bootstrap.md"),
+             ["writes AGENTS.md, CLAUDE.md and .agents/instructions/bootstrap.md"]),
+            (writes("a", "b", "c", "d"), ["writes a, b, c and 1 more"]),
+            (writes("a", "b", "c", "d", "e", "f"), ["writes a, b, c and 3 more"]),
+            ([contract, *writes("a", "b", "c", "d")],
+             ["writes the project contract", "writes a, b, c and 1 more"]),
+            (deletes("x.md"), ["deletes x.md"]),
+            (deletes("a", "b", "c", "d"), ["deletes a, b, c and 1 more"]),
+        ]
+        for changes, expected in cases:
+            with self.subTest(expected=expected):
+                self.assertEqual(register.plan_lines(doc(changes=changes)), expected)
+
+    def test_the_adoptions_own_records_are_never_named_and_close_the_writes_line(self):
+        digest = "50051d36e5e98d2b6d8b07c7417d1b1f666906b20ccc3dd6a96569665f4f0ade"
+        records = [
+            {"op": "write-file", "sources": [],
+             "targets": [f".agents/knowledge/archive/path-migrations/{digest}.json"]},
+            {"op": "write-file", "sources": [], "targets": [f".agents/artifacts/evidence/{digest}.json"]},
+        ]
+
+        def writes(*paths):
+            return [{"op": "write-file", "sources": [], "targets": [path]} for path in paths]
+
+        end = ", and records the adoption"
+        handoff = {"migration_map": records[0]["targets"][0],
+                   "evidence_record": records[1]["targets"][0]}
+        cases = [
+            (writes(".agents/runtime/.gitignore", ".gitignore") + records,
+             [f"writes .agents/runtime/.gitignore and .gitignore{end}"]),
+            (records, ["records the adoption"]),
+            (records[:1], ["records the adoption"]),
+            (records[1:], ["records the adoption"]),
+            (writes("a", "b", "c", "d", "e") + records, [f"writes a, b, c and 2 more{end}"]),
+            (writes("a", "b", "c") + records[:1], [f"writes a, b and c{end}"]),
+            (writes("a") + records, [f"writes a{end}"]),
+            (writes("a", "b"), ["writes a and b"]),
+        ]
+        for changes, expected in cases:
+            with self.subTest(expected=expected):
+                lines = register.plan_lines(doc(changes=changes, handoff=handoff))
+                self.assertEqual(lines, expected)
+                self.assertNotIn(digest, " ".join(lines))
+
+    def test_an_ordinary_file_beside_the_adoptions_records_stays_named(self):
+        digest = "50051d36e5e98d2b6d8b07c7417d1b1f666906b20ccc3dd6a96569665f4f0ade"
+        handoff = {"migration_map": f".agents/knowledge/archive/path-migrations/{digest}.json",
+                   "evidence_record": f".agents/artifacts/evidence/{digest}.json"}
+        paths = [".agents/artifacts/evidence/checklist.md",
+                 ".agents/knowledge/archive/path-migrations/notes.md", handoff["evidence_record"]]
+        changes = [{"op": "write-file", "sources": [], "targets": [path]} for path in paths]
+        self.assertEqual(
+            register.plan_lines(doc(changes=changes, handoff=handoff)),
+            [f"writes {paths[0]} and {paths[1]}, and records the adoption"])
 
     def test_a_move_outside_agents_drops_the_suffix_and_zero_counts_make_no_line(self):
         self.assertEqual(register.plan_lines(doc(changes=[move("a.md", "docs/a.md")])),
@@ -244,7 +311,7 @@ class SummaryTest(unittest.TestCase):
             "code": "not_integrated", "repair_id": "x",
             "violations": [{"pointer": "", "message": "no  adoption\nrecord"}]}})
         self.assertEqual((refused["result"], refused["headline"]),
-                         ("not_registered", "r was not registered: not_integrated: no adoption record"))
+                         ("not_registered", "r was not registered: no adoption record"))
         bad = register.summary("/srv/r", plan, {"registered": False, "result": "not_conformant",
                                                 "project_id": "o/r"})
         self.assertEqual((bad["result"], bad["headline"]),
@@ -267,15 +334,47 @@ class SummaryTest(unittest.TestCase):
                                                     "violations": [{"pointer": "", "message": "m"}]}})
         self.assertEqual(row["result"], "failed")
         self.assertIsNone(row["outcome"])
-        self.assertTrue(row["headline"].startswith("The adoption plan for r failed: not_a_repository: "))
+        self.assertEqual(row["headline"], "The adoption plan for r failed: m")
 
-    def test_failed_names_its_kind(self):
-        row = register.failed("/srv/r", "timed_out")
-        self.assertEqual(row, {"by": "owner", "root": "/srv/r", "project_id": None,
-                               "result": "failed", "outcome": None,
-                               "headline": "The adoption plan for r failed: timed_out",
-                               "lines": [], "note": None, "plan_id": None, "state": None,
-                               "questions": [], "answered": []})
+    def test_a_plan_error_headline_never_shows_the_code(self):
+        row = register.summary("/srv/r", {"error": {
+            "code": "adopt_failure", "repair_id": "x",
+            "violations": [{"pointer": "", "message": "the installed platform\n manifest was not found"}]}})
+        self.assertEqual(row["headline"], "The adoption plan for r failed: "
+                         "the installed platform manifest was not found")
+        for error in ({"code": "adopt_failure", "repair_id": "x", "violations": []},
+                      {"code": "adopt_failure"},
+                      {"code": "adopt_failure", "violations": [{"pointer": "", "message": ""}]}):
+            with self.subTest(error=error):
+                row = register.summary("/srv/r", {"error": error})
+                self.assertEqual(row["headline"], "The adoption plan for r could not be made.")
+
+    def test_a_refused_registration_shows_the_message_without_the_code(self):
+        plan = plan_doc(outcome="no_change", state="ready")
+        report = {"error": {"code": "not_integrated", "repair_id": "x", "violations": []}}
+        row = register.summary("/srv/r", plan, report)
+        self.assertEqual((row["result"], row["headline"]), ("not_registered", "r was not registered."))
+
+    def test_a_failed_run_says_what_happened_in_words(self):
+        words = {
+            "timed_out": "it took too long and was stopped",
+            "not_installed": "the adoption tool could not be started",
+            "unavailable": "the adoption tool could not be started",
+            "cancelled": "it was cancelled",
+            "failed": "the adoption tool stopped with an error",
+            "unreadable": "the adoption tool gave an answer that could not be read",
+            "ValueError": "it stopped unexpectedly",
+        }
+        for kind in register.RUN_KINDS:
+            self.assertIn(kind, words)
+        for kind, text in words.items():
+            with self.subTest(kind=kind):
+                row = register.failed("/srv/r", kind)
+                self.assertEqual(row, {"by": "owner", "root": "/srv/r", "project_id": None,
+                                       "result": "failed", "outcome": None,
+                                       "headline": f"The adoption plan for r failed: {text}",
+                                       "lines": [], "note": None, "plan_id": None,
+                                       "state": None, "questions": [], "answered": []})
 
 
 class RowTest(unittest.TestCase):
