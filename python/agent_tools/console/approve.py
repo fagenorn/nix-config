@@ -460,7 +460,7 @@ def closed_note(root: str, branch: str) -> str:
 
 
 def _retry_words(step: str) -> str:
-    leading = "P" + register.AGAIN[1:]
+    leading = register.AGAIN[0].upper() + register.AGAIN[1:]
     if step.startswith(leading):
         return "Choose Retry." + step.removeprefix(leading)
     if step.endswith(register.AGAIN):

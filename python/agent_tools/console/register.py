@@ -71,19 +71,24 @@ words of `RUN_WORDS[kind]` (an unknown kind reads `it stopped unexpectedly`), ne
 
 Next step (#1062). Every failed headline ends with a full stop, and every failed row (a plan that
 failed, a refused or unconfirmed registration, a run that raised) carries one plain line in `note`
-saying what the owner can do next, never an error code. `next_step(root, error, verb)` reads the
-error's `repair_id`: `adopt.manifest.*` with the not-found message says the agent platform's files are not installed yet, that
-`just switch` installs them and to press Register again; `adopt.registration.no_remote`
+saying what the owner can do next, never an error code, a command, a hash or a path (#1085). `plain(text)` is
+the text, or the empty string when `FORBIDDEN` (`--plan-id`, `sha256:`, a run of twelve hex digits, an
+absolute path) finds any in it: a child's raw message is shown only through it, so a message that holds one falls back to
+`could not be made.` or `was not registered.`. `next_step(root, error, verb)` reads the
+error's `repair_id`: `adopt.manifest.*` with the not-found message says to switch this computer to its current
+configuration to install the agent platform's files and to choose Try again (`MANIFEST_STEP`, which does not repeat the
+cause the headline gave); `adopt.registration.no_remote`
 says to add the origin remote; `remote_default_unknown` (an origin that exists but advertises no
 default branch) says the origin needs a published default branch, not another origin;
 `adopt.git.remote_unreachable` and
 `fetch_failed` say to check the remote can be reached; `adopt.registration.not_integrated` says to
-merge the adoption into the remote's main branch; each ends with pressing Register again. Any other
-failure names `adopt-project plan --repo-root <path>` (`verify --register` for a registration) as the
-terminal command that shows the full reason. `run_next_step(root, kind, verb="plan")` is the line for
-a run that raised, `verb` being the operation that raised (`plan` or `register`): `timed_out`,
-`not_installed`, `unavailable` and `cancelled` say to press Register again and, if it keeps failing,
-name that verb's command; every other kind names it alone. `failed(root, kind, verb="plan")` for the
+merge the adoption into the remote's main branch; each ends with `AGAIN`, choosing Try again. Any other
+failure is `unknown_step(name, verb)`: `Choose Try again. If it keeps failing, ask an agent to <VERB_WORDS[verb]> <name> in a
+terminal, which shows the full reason.` `run_next_step(root, kind, verb="plan")` is the line for
+a run that raised, `verb` being the operation that raised (`plan`, `register` or `apply`): `unknown_step` for every
+kind. A `needs_migration` row says `<name> needs a migration before it can be adopted.` and a `needs_repair` row
+`<name> needs a repair before it can be adopted.`, each with a note asking an agent to do it in a terminal, then to choose
+Try again. `failed(root, kind, verb="plan")` for the
 `register` verb reads `<name> was not registered: <words>.`, so a registration that raised never
 sends the owner to rerun the plan that had succeeded.
 
@@ -93,9 +98,14 @@ is waiting and no run is under way, else the one inbox item of reason `register_
 `register-confirm/<root>/<at>`, headline `CONFIRM_ASK`, `why` the folder-trust sentence, options
 `CONFIRM_OPTION` then `LATER_OPTION`, values `CONFIRM_VALUE` then `LATER_VALUE`). The page answers it
 with `parse_confirm_request(body)`, exactly `{"root", "choice"}`, `root` a string with no character
-below 0x20 and no 0x7F, `choice` one of `CONFIRM_VALUE` and `LATER_VALUE` (`ValueError` otherwise).
+below 0x20 and no 0x7F, `choice` one of `CONFIRM_VALUE`, `LATER_VALUE` and `TRY_VALUE` (`ValueError` otherwise).
 `dismissed(latest)` is the waiting row with the note `LATER_NOTE`: `Not now` appends it, `waiting` is
-false for it, and the card is gone until the owner presses Register again. `NOT_WAITING` is the text of
+false for it, and the card is gone until the owner presses Register again. The failure card (#1085):
+`failing(latest)` is true when the latest row's `result` is in `FAILED_RESULTS` and its note is neither
+`CONFIRM_NOTE` nor `LATER_NOTE`; `failure_items(latest, *, running)` is `[]` unless the latest row is failing and no
+run is under way, else the one inbox item of reason `register_failed` (key `register-failed/<root>/<at>`, headline
+the row's headline, `why` its note, options `TRY_OPTION` then `LATER_OPTION`, values `TRY_VALUE` then `LATER_VALUE`).
+`parse_confirm_request` takes `TRY_VALUE` as a third choice. `NOT_WAITING` is the text of
 a confirmation for a root that is not the waiting one.
 
 Drafting row (ADR-console-031). `drafting(root, fields, answered=())` is the row of a repository with no
@@ -141,7 +151,7 @@ from __future__ import annotations
 
 import json
 import os
-import shlex
+import re
 import subprocess
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
@@ -178,9 +188,13 @@ RUN_WORDS = {
     "unreadable": "the adoption tool gave an answer that could not be read",
 }
 UNEXPECTED = "it stopped unexpectedly"
-AGAIN = "press Register again."
-MANIFEST_STEP = ("The agent platform's files are not installed on this host yet. Run just switch "
-                 "in a terminal to install them, then " + AGAIN)
+AGAIN = "choose Try again."
+MANIFEST_STEP = ("Switch this computer to its current configuration to install them, then "
+                 + AGAIN)
+VERB_WORDS = {"plan": "plan the adoption of", "register": "register",
+              "apply": "apply the adoption of"}
+FORBIDDEN = re.compile(r"--plan-id|sha256:|[0-9a-f]{12,}|(?:^|[\s(\"'])/\S")
+FAILED_RESULTS = ("failed", "not_registered", "needs_migration", "needs_repair")
 REMOTE_STEP = "Add the repository's origin remote, then " + AGAIN
 DEFAULT_BRANCH_STEP = ("The repository's origin remote needs a published default branch. Push one to "
                        "it, then " + AGAIN)
@@ -205,6 +219,8 @@ CONFIRM_VALUE = "register"
 LATER_OPTION = "Not now"
 LATER_VALUE = "not_now"
 LATER_NOTE = "Not registered. Press Register again to register it."
+TRY_OPTION = "Try again"
+TRY_VALUE = "try_again"
 NOT_WAITING = "that project is not waiting to be registered"
 
 
@@ -343,10 +359,15 @@ def _collapse(text: object) -> str:
     return " ".join(str(text).split())
 
 
+def plain(text: str) -> str:
+    """The text, or "" when it holds a plan id, a hash or an absolute path (a child's raw words)."""
+    return text if FORBIDDEN.search(text) is None else ""
+
+
 def _error_message(error: Mapping) -> str:
     violations = error.get("violations") or []
     if violations and isinstance(violations[0], Mapping):
-        return _collapse(violations[0].get("message") or "")
+        return plain(_collapse(violations[0].get("message") or ""))
     return ""
 
 
@@ -354,17 +375,13 @@ def _sentence(text: str) -> str:
     return text if text.endswith((".", "!", "?")) else text + "."
 
 
-def _full_reason(root: str, verb: str) -> str:
-    command = (f"adopt-project plan --repo-root {shlex.quote(root)}" if verb == "plan"
-               else f"adopt-project verify --register --repo-root {shlex.quote(root)}")
-    return f"Run {command} in a terminal to see the full reason."
+def unknown_step(name: str, verb: str) -> str:
+    return (f"Choose Try again. If it keeps failing, ask an agent to {VERB_WORDS[verb]} {name} in a "
+            "terminal, which shows the full reason.")
 
 
 def run_next_step(root: str, kind: str, verb: str = "plan") -> str:
-    if kind in RETRY_KINDS:
-        return ("Press Register again. If it keeps failing, run "
-                + _full_reason(root, verb).removeprefix("Run "))
-    return _full_reason(root, verb)
+    return unknown_step(name_of(root), verb)
 
 
 def _is_manifest(error: Mapping) -> bool:
@@ -381,7 +398,7 @@ def next_step(root: str, error: Mapping, verb: str) -> str:
     repair_id = str(error.get("repair_id") or "")
     if _is_manifest(error):
         return MANIFEST_STEP
-    return NEXT_STEPS.get(repair_id) or _full_reason(root, verb)
+    return NEXT_STEPS.get(repair_id) or unknown_step(name_of(root), verb)
 
 
 def _row(root: str, project_id: str | None, result: str, outcome: str | None, headline: str,
@@ -422,10 +439,6 @@ def _note(plan: Mapping, document: Mapping) -> str:
     return "The plan is a draft."
 
 
-def _after(command: object, verb: str) -> str:
-    return str(command or "").partition(f"{verb} ")[2].strip()
-
-
 def summary(root: str, plan: Mapping, report: Mapping | None = None,
             draft: list[dict] | None = None) -> dict:
     name = name_of(root)
@@ -462,21 +475,18 @@ def summary(root: str, plan: Mapping, report: Mapping | None = None,
         if report is None:
             return _row(root, project_id, "not_registered", outcome, waiting_headline(name), [],
                         CONFIRM_NOTE, answered=_answered(plan))
-        result = _collapse(report.get("result"))
+        result = plain(_collapse(report.get("result")))
         return _row(root, project_id, "not_registered", outcome,
-                    _sentence(f"{name} was not registered: {result}"), [],
-                    _full_reason(root, "register"))
-    command = plan.get("handoff", {}).get("next_command")
+                    _sentence(f"{name} was not registered: {result}") if result
+                    else f"{name} was not registered.", [], unknown_step(name, "register"))
     if outcome == "migration_required":
-        migration = _after(command, "migrate")
         return _row(root, project_id, "needs_migration", outcome,
-                    f"{name} needs migration {migration} first: run adopt-project migrate "
-                    f"--migration {migration} --repo-root {root}", [], None)
+                    f"{name} needs a migration before it can be adopted.", [],
+                    "Ask an agent to migrate it in a terminal, then " + AGAIN)
     if outcome == "repair_required":
-        repair = _after(command, "repair")
         return _row(root, project_id, "needs_repair", outcome,
-                    f"{name} needs repair {repair} first: run resolve-project resolve "
-                    f"--repo-root {root}", [], None)
+                    f"{name} needs a repair before it can be adopted.", [],
+                    "Ask an agent to repair its project contract in a terminal, then " + AGAIN)
     return failed(root, "unreadable")
 
 
@@ -557,6 +567,28 @@ def confirm_items(latest: Mapping | None, *, running: bool) -> list[dict]:
         "waiting_since": at}]
 
 
+def failing(latest: Mapping | None) -> bool:
+    return (latest is not None and latest.get("result") in FAILED_RESULTS
+            and latest.get("note") not in (CONFIRM_NOTE, LATER_NOTE))
+
+
+def failure_items(latest: Mapping | None, *, running: bool) -> list[dict]:
+    if running or not failing(latest):
+        return []
+    root, at = latest["root"], latest["at"]
+    name = name_of(root)
+    return [{
+        "type": "inbox_item", "reason": "register_failed", "key": f"register-failed/{root}/{at}",
+        "project_id": None, "root": root, "name": name, "title": f"Register {name}",
+        "plan_id": latest["plan_id"], "id": None, "subject": None,
+        "headline": latest["headline"], "why": latest["note"], "lines": [], "refusal": None,
+        "more_questions": 0, "text": False,
+        "questions": [{"question": latest["headline"], "options": [TRY_OPTION, LATER_OPTION],
+                       "chosen": None, "recommended": None, "recommended_index": None}],
+        "values": [TRY_VALUE, LATER_VALUE], "items": [], "answers": [], "answered": False,
+        "waiting_since": at}]
+
+
 def parse_confirm_request(body: bytes) -> tuple[str, str]:
     try:
         value = json.loads(body.decode("utf-8"))
@@ -569,7 +601,7 @@ def parse_confirm_request(body: bytes) -> tuple[str, str]:
         raise ValueError("wrong types")
     if any(ord(char) < 0x20 or ord(char) == 0x7F for char in root):
         raise ValueError("control character")
-    if choice not in (CONFIRM_VALUE, LATER_VALUE):
+    if choice not in (CONFIRM_VALUE, LATER_VALUE, TRY_VALUE):
         raise ValueError("unknown choice")
     return root, choice
 

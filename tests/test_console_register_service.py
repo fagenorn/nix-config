@@ -413,7 +413,7 @@ class RegisterRunTest(Case):
         self.assertEqual(row["result"], "failed")
         self.assertEqual(row["headline"],
                          f"The adoption plan for {repo.name} failed: it took too long and was stopped.")
-        self.assertIn("Press Register again", row["note"])
+        self.assertEqual(row["note"], register.unknown_step(repo.name, "plan"))
         self.assertEqual(self.view()["registration"]["status"], "done")
 
     def test_a_registration_that_raised_names_the_register_command(self):
@@ -425,8 +425,8 @@ class RegisterRunTest(Case):
         self.assertEqual(self.confirm({"root": str(repo), "choice": "register"})[0], 204)
         (_, row), = self.rows("registration.ended")[-1:]
         self.assertEqual(row["result"], "failed")
-        self.assertIn("verify --register --repo-root", row["note"])
-        self.assertNotIn("adopt-project plan", row["note"])
+        self.assertEqual(row["note"], register.unknown_step(repo.name, "register"))
+        self.assertNotIn("plan the adoption", row["note"])
 
     def test_a_no_change_plan_runs_the_register_check(self):
         report = {"registered": True, "project_id": "o/r", "result": "adopted"}

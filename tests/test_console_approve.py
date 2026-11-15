@@ -374,8 +374,8 @@ def report_error(repair, message):
                       "violations": [{"pointer": "", "message": message}]}}
 
 
-FULL_REASON = ("Run adopt-project verify --register --repo-root /srv/r in a terminal to see the "
-               "full reason. Then choose Retry.")
+FULL_REASON = ("Choose Retry. If it keeps failing, ask an agent to register r in a terminal, "
+               "which shows the full reason.")
 UNCHECKED = "the adoption on the remote did not pass the registration's checks"
 
 
@@ -396,11 +396,10 @@ class OutcomeTest(unittest.TestCase):
                      "Add the repository's origin remote, then choose Retry.")),
             (report_error("adopt.manifest.missing", register.MANIFEST_ABSENT),
              refused("the agent platform's files are not installed on this host",
-                     "The agent platform's files are not installed on this host yet. Run just "
-                     "switch in a terminal to install them, then choose Retry.")),
+                     "Switch this computer to its current configuration to install them, then "
+                     "choose Retry.")),
             (report_error("adopt.registration.integration_branch_unresolved", "m"),
-             refused("m", "Run adopt-project verify --register --repo-root /srv/r in a terminal "
-                          "to see the full reason. Then choose Retry.")),
+             refused("m", FULL_REASON)),
             ({"registered": False, "result": "not_conformant"},
              refused(UNCHECKED, FULL_REASON)),
             ({"registered": True}, refused(UNCHECKED, FULL_REASON)),
@@ -417,13 +416,9 @@ class OutcomeTest(unittest.TestCase):
         got = {kind: approve.run_outcome("/srv/r", kind)
                for kind in ("timed_out", "failed", "KeyError")}
         self.assertEqual(got["timed_out"], refused(
-            "it took too long and was stopped",
-            "Choose Retry. If it keeps failing, run adopt-project verify --register --repo-root "
-            "/srv/r in a terminal to see the full reason."))
+            "it took too long and was stopped", FULL_REASON))
         self.assertEqual(got["failed"], refused(
-            "the adoption tool stopped with an error",
-            "Run adopt-project verify --register --repo-root /srv/r in a terminal to see the "
-            "full reason. Then choose Retry."))
+            "the adoption tool stopped with an error", FULL_REASON))
         self.assertEqual(got["KeyError"]["reason"], "it stopped unexpectedly")
         for outcome in got.values():
             self.assertEqual((outcome["result"], outcome["project_id"]),
