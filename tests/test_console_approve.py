@@ -627,6 +627,16 @@ class EntryTest(unittest.TestCase):
         return {**step_payload(step, **over), "at": "t", "pull_state": pull_state,
                 "pull_at": None}
 
+    def test_waiting_and_ready_read_as_one_sentence_in_one_style(self):
+        for state, sentence in (
+                ("open", "The pull request of sample-app is not ready to merge yet."),
+                (None, "The pull request of sample-app is not ready to merge yet."),
+                ("ready", "The pull request of sample-app is ready to merge.")):
+            with self.subTest(state=state):
+                entry = approve.entry(self.adoption("opened", state), running=False,
+                                      name="sample-app")
+                self.assertEqual(entry["headline"], sentence)
+
     def test_the_entry_per_step_and_pull_state(self):
         waits = ("The pull request of r was merged; waiting for develop on origin to carry it "
                  "before registering.")
@@ -652,7 +662,7 @@ class EntryTest(unittest.TestCase):
               "The adoption of r was pushed, but its pull request was not opened: refused.",
               [], "N", None)),
             (self.adoption("opened", "open"),
-             ("opened", "open", "r: waiting for its pull request to be ready to merge",
+             ("opened", "open", "The pull request of r is not ready to merge yet.",
               [], None, url)),
             (self.adoption("opened", "ready"),
              ("opened", "ready", "The pull request of r is ready to merge.",

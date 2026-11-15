@@ -15,7 +15,7 @@ import time
 import unittest
 from pathlib import Path
 
-from agent_tools.console import contract_draft, plan_questions, register
+from agent_tools.console import approve, contract_draft, plan_questions, register
 from agent_tools.console.event_log import Event
 from agent_tools.console.register import Adopter, RunFailed
 
@@ -809,7 +809,8 @@ class RowTest(unittest.TestCase):
 
     def test_view_entry_carries_the_adoption_and_its_action(self):
         latest = {**register.summary("/srv/r", plan_doc(state="ready")), "at": "t"}
-        adoption = {"status": "done", "headline": "The adoption of r was applied."}
+        adoption = {"status": "done", "headline": "The adoption of r was applied.",
+                    "note": None}
         shown = register.view_entry(None, latest, adoption=adoption, approve="retry")
         self.assertEqual((shown["adoption"], shown["approve"]), (adoption, "retry"))
         self.assertEqual(shown["line"], "The adoption of r was applied.")
@@ -817,6 +818,50 @@ class RowTest(unittest.TestCase):
         running = register.view_entry("/srv/r", latest, adoption=adoption, approve="approve")
         self.assertEqual((running["adoption"], running["approve"]), (None, None))
         self.assertEqual(running["line"], "Planning the adoption of r\u2026")
+
+    def opened_adoption(self, pull_state, note=None):
+        found = approve.entry(
+            {"step": "opened", "plan_id": "p1", "root": "/srv/r", "project_id": "o/r",
+             "branch": "adopt-bbbbbbbbbbbb", "commit": "c" * 40, "base": "develop",
+             "pull_request": {"number": 7, "url": "https://example.test/pull/7"},
+             "reason": None, "note": None, "kept": None, "at": "t", "pull_state": pull_state,
+             "pull_at": "t"},
+            running=False, name="r")
+        return {**found, "note": note}
+
+    def drafted_latest(self):
+        full = contract_draft.draft("/x/r", {
+            "remotes": [("origin", "git@github.com:sample-owner/r.git")],
+            "default_branch": "trunk", "branches": ["trunk"], "files": ["README.md"], "texts": {}})
+        return {**register.summary("/srv/r", plan_doc(state="ready", open_questions=0)),
+                "lines": ["moves 1 agent file under .agents/"], "draft": full, "at": "t"}
+
+    def test_view_entry_with_an_adoption_holds_one_sentence_and_no_lines(self):
+        latest = {**register.summary("/srv/r", plan_doc(state="ready")),
+                  "lines": ["moves 1 agent file under .agents/"], "at": "t"}
+        waiting = register.view_entry(None, latest, adoption=self.opened_adoption("open"),
+                                      approve=None)
+        self.assertEqual(waiting["lines"], [])
+        self.assertEqual(waiting["line"], "The pull request of r is not ready to merge yet.")
+        closed = register.view_entry(
+            None, latest, adoption=self.opened_adoption("closed", approve.CLOSED_NOTE),
+            approve=None)
+        self.assertEqual(closed["lines"], [])
+        self.assertEqual(closed["line"], closed["adoption"]["headline"] + " " + approve.CLOSED_NOTE)
+        self.assertEqual(register.view_entry(None, latest)["lines"], latest["lines"])
+
+    def test_view_entry_with_an_adoption_draws_no_draft(self):
+        latest = self.drafted_latest()
+        alone = register.view_entry(None, latest)
+        self.assertTrue(alone["draft"])
+        self.assertTrue(any(entry["more"] for entry in alone["draft"]))
+        self.assertIsNotNone(alone["draft_more"])
+        for state in ("open", "ready"):
+            with self.subTest(state=state):
+                shown = register.view_entry(None, latest, adoption=self.opened_adoption(state),
+                                            approve=None)
+                self.assertIsNone(shown["draft"])
+                self.assertIsNone(shown["draft_more"])
 
 
 FAKE = """#!/bin/sh

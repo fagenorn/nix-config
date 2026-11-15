@@ -322,10 +322,6 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .draft-edit { flex: 1 1 12rem; min-width: 0; max-width: 100%; box-sizing: border-box; padding: 4px 8px; font: inherit; color: var(--text); background: var(--mantle); border: 1px solid var(--s1); border-radius: 8px; }
 .abox .draft-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin-top: 6px; }
 .abox .draft-row input { flex: 1 1 14rem; width: auto; min-width: 0; margin-top: 0; box-sizing: border-box; }
-.register-note { color: var(--ov2); }
-.register-adoption { margin-top: 8px; }
-.register-adoption-lines { padding-left: 1.2em; color: var(--sub0); }
-.register-pr-link { color: var(--blue); }
 .card .q.reg, .rest .q.reg { white-space: pre-line; }
 .s-working { color: var(--green); }
 .s-waiting_answer, .s-waiting_permission { color: var(--yellow); }
@@ -3461,7 +3457,6 @@ function renderAccountAdd(view) {
 renderAccountAdd(null);
 // The register control is built once as well (ADR-console-028 D8): a frame never replaces the path field, only the parts around it.
 const registerState = { phase: "closed", posting: false, failure: "", shown: "" };
-let registerDismissed;
 let registerResultKey = "";
 const registerBox = document.getElementById("register");
 const registerForm = el("div", "register-form");
@@ -3674,33 +3669,6 @@ function drawRegisterResult(registration) {
   registerFields = new Map();
   if (drafted.length > 0) parts.push(...drawDraft({ ...registration, draft: drafted }));
   else registerMore = null;
-  if (registration.status === "done") {
-    const adoption = registration.adoption;
-    if (adoption !== null && typeof adoption === "object") {
-      const inner = [];
-      if (adoption.lines.length > 0) {
-        const list = el("ul", "register-adoption-lines");
-        for (const line of adoption.lines) list.appendChild(el("li", "", line));
-        inner.push(list);
-      }
-      if (adoption.note) inner.push(el("p", "register-note", adoption.note));
-      if (isHttps(adoption.url)) {
-        const link = el("a", "register-pr-link", "Open the pull request");
-        link.rel = "noreferrer";
-        link.href = adoption.url;
-        inner.push(link);
-      }
-      if (inner.length > 0) {
-        const box = el("div", "register-adoption");
-        for (const part of inner) box.appendChild(part);
-        parts.push(box);
-      }
-    }
-    parts.push(actionButton("register-close", "Close", () => {
-      registerDismissed = registration.at;
-      renderRegister(lastView);
-    }));
-  }
   registerResult.replaceChildren(...parts);
 }
 // Swaps parts and updates the disabled state and reason; it never replaces the path field.
@@ -3716,7 +3684,7 @@ function renderRegister(view) {
     registerForm.replaceChildren(...(naming ? [registerPath, registerSend, registerCancel, registerReason] : [registerOpen]));
   }
   if (registerReason.textContent !== reason) registerReason.textContent = reason;
-  const shown = registration !== null && !(registration.status === "done" && registration.at === registerDismissed);
+  const shown = registration !== null;
   if (!shown) {
     closeChange();
     registerMore = null;

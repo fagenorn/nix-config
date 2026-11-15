@@ -507,7 +507,7 @@ class PageTest(unittest.TestCase):
                 self.assertLess(size, 1.5, selector)
 
     def test_the_tracker_and_sign_in_links_are_the_only_hrefs(self) -> None:
-        self.assertEqual(len(re.findall(r"\.href\s*=", self.text)), 5)
+        self.assertEqual(len(re.findall(r"\.href\s*=", self.text)), 4)
         lines = self.text.splitlines()
         (at,) = [i for i, row in enumerate(lines) if "link.href = held.link;" in row]
         self.assertIn("isHttps(", lines[at - 1] + lines[at])
@@ -515,9 +515,8 @@ class PageTest(unittest.TestCase):
         self.assertEqual(self.text.count("a.href = item.url;"), 1)
         self.assertEqual(self.text.count("link.href = sprint.tracker_url;"), 1)
         self.assertEqual(self.text.count("link.href = item.url;"), 1)
-        self.assertEqual(self.text.count("link.href = adoption.url;"), 1)
+        self.assertNotIn("adoption.url", self.text)
         self.assertEqual(self.text.count("if (isHttps(item.url)) {"), 1)
-        self.assertEqual(self.text.count("if (isHttps(adoption.url)) {"), 1)
         self.assertIn('sprint.tracker_url.startsWith("https:")', self.text)
 
 
@@ -6925,7 +6924,8 @@ PUSH_FAILED_ADOPTION = {
             "push, then choose Try again.",
     "url": None}
 FAILED_SHOWN = {**READY_SHOWN, "approve": "retry", "adoption": PUSH_FAILED_ADOPTION,
-                "line": PUSH_FAILED_ADOPTION["headline"]}
+                "lines": [],
+                "line": PUSH_FAILED_ADOPTION["headline"] + " " + PUSH_FAILED_ADOPTION["note"]}
 TRY_ITEM = {
     **APPLY_ITEM, "key": APPLY_ITEM["key"] + "/2026-11-15T08:05:00+00:00",
     "headline": PUSH_FAILED_ADOPTION["headline"], "why": PUSH_FAILED_ADOPTION["note"],
@@ -7028,30 +7028,14 @@ class RegisterControlTest(unittest.TestCase):
         self.assertEqual(registered(snap, "register-close"), [])
         self.assertEqual([n for n in nodes(snap["register"]) if n["tag"] == "li"], [])
 
-    def test_a_done_registration_shows_its_line_and_lines_and_close_hides_it(self) -> None:
+    def test_a_done_registration_shows_its_line_and_lines_and_no_close(self) -> None:
         done = {**frame([]), "registration": REGISTERED}
-        shown, closed, again, fresh = render([
-            START, {"frame": done}, {"snapshot": True},
-            {"click": "register-close"}, {"snapshot": True},
-            {"frame": done}, {"snapshot": True},
-            {"frame": {**frame([]), "registration": {**REGISTERED, "at": "2026-11-15T09:00:00+00:00"}}},
-            {"snapshot": True}])
+        (shown,) = render([START, {"frame": done}, {"snapshot": True}])
         (result,) = registered(shown, "register-result")
         self.assertEqual(
             [full(n) for n in nodes(result)[1:] if n["tag"] in ("p", "li", "button")],
-            [REGISTERED["line"], *REGISTERED["lines"], "Close"])
-        self.assertEqual(full(registered(shown, "register-close")[0]), "Close")
-        for snap in (closed, again):
-            self.assertEqual(registered(snap, "register-result"), [])
-        self.assertEqual(len(registered(fresh, "register-result")), 1)
-
-    def test_close_on_the_register_box_posts_nothing_and_leaves_the_card(self) -> None:
-        (snap,) = render([
-            START, {"frame": cards([CONFIRM_ITEM], WAITING_SHOWN)},
-            {"click": "register-close"}, {"snapshot": True}])
-        self.assertEqual(snap["posts"], [])
-        self.assertEqual(registered(snap, "register-result"), [])
-        self.assertIn("Register it", full(snap["inbox"]))
+            [REGISTERED["line"], *REGISTERED["lines"]])
+        self.assertEqual(registered(shown, "register-close"), [])
 
     def test_with_no_project_the_register_control_still_shows(self) -> None:
         (snap,) = render([START, {"frame": {**frame([]), "registration": None}}, {"snapshot": True}])
@@ -7120,32 +7104,36 @@ class RegisterControlTest(unittest.TestCase):
         self.assertNotIn("adopt-project", shown)
         self.assertNotIn("adopt-project apply", shown)
 
-    def test_an_approved_adoption_shows_its_headline_as_the_one_line_then_its_lines_note_and_link(self) -> None:
-        def drawn(adoption: dict) -> dict:
-            (snap,) = render([
-                START, {"frame": {**frame([]), "registration": {
-                    **READY_SHOWN, "approve": None, "adoption": adoption,
-                    "line": adoption["headline"]}}},
-                {"snapshot": True}])
-            return snap
-        snap = drawn(OPENED_ADOPTION)
-        (line,) = registered(snap, "register-line")
-        self.assertEqual(full(line), OPENED_ADOPTION["headline"])
-        self.assertEqual(registered(snap, "register-adoption-headline"), [])
-        (lines,) = registered(snap, "register-adoption-lines")
-        self.assertEqual([full(n) for n in lines["children"] if n["tag"] == "li"],
-                         OPENED_ADOPTION["lines"])
-        (link,) = [n for n in nodes(registered(snap, "register-adoption")[0]) if n["tag"] == "a"]
-        self.assertTrue(has_class(link, "register-pr-link"))
-        self.assertEqual(full(link), "Open the pull request")
-        self.assertEqual(link["href"], OPENED_ADOPTION["url"])
-        noted = drawn({**OPENED_ADOPTION, "note": "The branch is kept."})
-        self.assertIn("The branch is kept.",
-                      [full(n) for n in registered(noted, "register-note")])
-        for url in (None, "javascript:alert(1)"):
-            plain = drawn({**OPENED_ADOPTION, "url": url})
-            self.assertEqual([n for n in nodes(registered(plain, "register-adoption")[0])
-                              if n["tag"] == "a"], [])
+    def test_an_open_or_ready_adoption_is_one_sentence_with_no_lines_link_or_close(self) -> None:
+        for sentence in ("The pull request of r is not ready to merge yet.",
+                         "The pull request of r is ready to merge."):
+            with self.subTest(sentence=sentence):
+                (snap,) = render([
+                    START, {"frame": {**frame([]), "registration": {
+                        **READY_SHOWN, "approve": None, "lines": [],
+                        "adoption": {**OPENED_ADOPTION, "lines": [], "note": None,
+                                     "url": "https://github.com/o/r/pull/7"},
+                        "line": sentence}}},
+                    {"snapshot": True}])
+                (result,) = registered(snap, "register-result")
+                drawn = [n for n in nodes(result)[1:] if n["tag"] in ("p", "li", "a", "button")]
+                self.assertEqual([(n["tag"], full(n)) for n in drawn], [("p", sentence)])
+                self.assertTrue(has_class(drawn[0], "register-line"))
+
+    def test_an_adoption_with_a_drafted_contract_draws_no_draft_rows(self) -> None:
+        sentence = "The pull request of r is not ready to merge yet."
+        (snap,) = render([
+            START, {"frame": {**frame([]), "registration": {
+                **READY_SHOWN, "approve": None, "lines": [], "draft": None, "draft_more": None,
+                "adoption": {**OPENED_ADOPTION, "lines": [], "note": None,
+                             "url": "https://github.com/o/r/pull/7"},
+                "line": sentence}}},
+            {"snapshot": True}])
+        for name in ("register-draft", "draft-more", "draft-change", "draft-pick"):
+            self.assertEqual(registered(snap, name), [], name)
+        (result,) = registered(snap, "register-result")
+        drawn = [n for n in nodes(result)[1:] if n["tag"] in ("p", "li", "a", "button")]
+        self.assertEqual([(n["tag"], full(n)) for n in drawn], [("p", sentence)])
 
     def test_at_480_the_plan_question_cards_fit(self) -> None:
         try:
@@ -7601,10 +7589,10 @@ class RegisterCardPageTest(unittest.TestCase):
         (result,) = registered(snap, "register-result")
         self.assertEqual(
             [full(n) for n in nodes(result)[1:] if n["tag"] in ("p", "li", "button")],
-            [ASKING["line"], *ASKING["lines"], "Close"])
+            [ASKING["line"], *ASKING["lines"]])
         self.assertEqual(
             sorted(n["cls"] for n in nodes(snap["register"]) if n["tag"] == "button"),
-            ["register-close", "register-open"])
+            ["register-open"])
         self.assertEqual([n for n in nodes(snap["register"]) if has_class(n, "opt")], [])
 
     def test_a_single_option_card_offers_the_option_as_its_action(self) -> None:
@@ -8034,10 +8022,9 @@ class RegisterApplyPageTest(unittest.TestCase):
             labels = {full(n) for n in nodes(snap["register"]) if n["tag"] == "button"}
             self.assertEqual(labels & {"Approve", "Try again", "Apply it", "Apply it again"}, set())
             if shown is FAILED_SHOWN:
-                (note,) = registered(snap, "register-note")
-                self.assertEqual(full(note), PUSH_FAILED_ADOPTION["note"])
+                self.assertEqual(registered(snap, "register-note"), [])
                 (line,) = registered(snap, "register-line")
-                self.assertEqual(full(line), PUSH_FAILED_ADOPTION["headline"])
+                self.assertEqual(full(line), FAILED_SHOWN["line"])
 
     def test_a_refused_apply_shows_its_reason_on_the_card(self) -> None:
         reason = "only a ready plan can be approved"

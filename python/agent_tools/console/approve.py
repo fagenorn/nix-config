@@ -93,8 +93,8 @@ View. `entry(adoption, *, running, name, registering=False)` is the registration
 adoption, else exactly the keys `status`, `step`, `state`, `headline`, `lines`, `note`, `branch`,
 `commit` and `url` (`lines` is `[]` for every step; a failed push reads `The adoption of <name> was
 applied, but its branch was not pushed: <reason>.` and a failed open `The adoption of <name> was
-pushed, but its pull request was not opened: <reason>.`; an open pull request reads `<name>:
-waiting for its pull request to be ready to merge`; `running` gives status `running`, the running
+pushed, but its pull request was not opened: <reason>.`; an open pull request reads `The
+pull request of <name> is not ready to merge yet.`; `running` gives status `running`, the running
 headline and None elsewhere; a
 merged pull request's headline reads its registration: waiting, `registering`, registered or
 refused, and its `note` is None).
@@ -711,7 +711,7 @@ def entry(adoption: Mapping | None, *, running: bool, name: str,
             headline = f"The pull request of {name} was closed without merging."
             note = CLOSED_NOTE
         else:
-            headline = f"{name}: waiting for its pull request to be ready to merge"
+            headline = f"The pull request of {name} is not ready to merge yet."
     return {"status": "done", "step": step, "state": state, "headline": headline,
             "lines": [], "note": note, "branch": branch, "commit": commit,
             "url": pull["url"] if pull else None}

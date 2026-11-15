@@ -650,13 +650,18 @@ def view_entry(running: str | None, latest: Mapping | None, *, again: bool = Fal
         return None
     mine = refusal is not None and refusal["plan_id"] == latest["plan_id"]
     draft = latest.get("draft")
+    if adoption is not None:
+        lines, draft = [], None
+        line = adoption["headline"] + (" " + adoption["note"] if adoption["note"] else "")
+    else:
+        lines, line = latest["lines"], line_of(latest)
     return {"root": latest["root"], "name": name_of(latest["root"]),
             "project_id": latest["project_id"], "status": "done", "result": latest["result"],
             "outcome": latest["outcome"], "headline": latest["headline"],
-            "lines": latest["lines"], "note": latest["note"], "at": latest["at"],
+            "lines": lines, "note": latest["note"], "at": latest["at"],
             "plan_id": latest["plan_id"], "state": latest["state"],
             "questions": latest["questions"], "refusal": refusal["text"] if mine else None,
-            "line": line_of(latest) if adoption is None else adoption["headline"],
+            "line": line,
             "refused": {"id": refusal["id"], "subject": refusal["subject"]} if mine else None,
             "draft": contract_draft.shown(draft) if isinstance(draft, list) else None,
             "draft_more": contract_draft.more_line(draft) if isinstance(draft, list) else None,

@@ -544,7 +544,8 @@ class ApplyCardTest(ApproveCase):
         self.assertEqual(
             self.view()["registration"]["line"],
             "The adoption of reconcile was applied, but its branch was not pushed: remote "
-            "rejected the push.")
+            "rejected the push. Check that the repository's origin can be reached from this "
+            "host and accepts the push, then choose Try again.")
 
     def test_an_unexpected_deferral_failure_is_logged_in_full(self):
         self.ready(apply_result=APPLIED)
@@ -694,11 +695,12 @@ class PlanApproveRunTest(ApproveCase):
         self.assertEqual(self.steps(), ["applied", "opened"])
         self.assertEqual(shown["adoption"], {
             "status": "done", "step": "opened", "state": "open",
-            "headline": "reconcile: waiting for its pull request to be ready to merge",
+            "headline": "The pull request of reconcile is not ready to merge yet.",
             "lines": [],
             "note": None, "branch": BRANCH, "commit": COMMIT, "url": URL})
         self.assertIsNone(shown["approve"])
         self.assertEqual(shown["line"], shown["adoption"]["headline"])
+        self.assertEqual(self.view()["registration"]["lines"], [])
         self.assertTrue(errors.rstrip().endswith("console: plan_approve_ended opened"))
 
     def test_a_failed_gate_is_shown_with_its_reason_and_nothing_is_pushed(self):
@@ -956,7 +958,7 @@ class AdoptionPollTest(ApproveCase):
         self.poll("open")
         self.assertEqual(self.items(), [])
         self.assertEqual(self.adoption()["headline"],
-                         "reconcile: waiting for its pull request to be ready to merge")
+                         "The pull request of reconcile is not ready to merge yet.")
 
     def test_an_unchanged_state_appends_nothing(self):
         self.opened()

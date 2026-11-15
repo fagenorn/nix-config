@@ -2331,6 +2331,20 @@ class RegisterFailureViewTest(unittest.TestCase):
         elsewhere = derive_view([state("p01", 1)], registration=entry)
         self.assertEqual(elsewhere["registration"], entry)
 
+    def test_an_adoption_work_line_is_one_sentence(self):
+        opened = step_payload("opened", plan_id="p1", root="/srv/sample-app",
+                              branch="adopt-bbbbbbbbbbbb", commit="c" * 40,
+                              pull_request={"number": 7,
+                                            "url": "https://github.com/o/sample-app/pull/7"})
+        adoption = approve.entry({**opened, "at": "t", "pull_state": "open", "pull_at": "t"},
+                                 running=False, name="sample-app")
+        latest = {**register.summary("/srv/sample-app", plan_doc(state="ready")),
+                  "lines": ["moves 1 agent file under .agents/"], "at": "t"}
+        entry = register.view_entry(None, latest, adoption=adoption, approve=None)
+        shown = derive_view([], registration=entry)["registration"]
+        self.assertEqual(len(re.findall(r"[.!?](?=\s|$)", shown["line"])), 1)
+        self.assertEqual(shown["lines"], [])
+
     def test_an_open_pull_request_reads_in_words_and_the_statement_says_adoption_under_way(self):
         opened = step_payload("opened", plan_id="p1", root="/srv/sample-app",
                               branch="adopt-bbbbbbbbbbbb", commit="c" * 40,
@@ -2342,7 +2356,7 @@ class RegisterFailureViewTest(unittest.TestCase):
         entry = register.view_entry(None, latest, adoption=adoption, approve=None)
         shown = derive_view([], registration=entry)
         self.assertEqual(shown["registration"]["line"],
-                         "sample-app: waiting for its pull request to be ready to merge")
+                         "The pull request of sample-app is not ready to merge yet.")
         self.assertEqual(shown["registration"]["adoption"]["lines"], [])
         self.assertEqual(shown["registration"]["adoption"]["url"],
                          "https://github.com/o/sample-app/pull/7")
