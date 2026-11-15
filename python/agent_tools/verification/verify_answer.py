@@ -22,12 +22,18 @@ runner never asks that stale identity again. A note is posted as a plain owner c
 is the fixed sentence of `note_body`, never a marker and, because a trusted non-marker comment holding a
 `verify` fence becomes the held block, never one that matches `verify_block.FENCE`.
 
+A prompt that already carries exactly the answer asked for is left alone and the call returns without a write:
+the same box ticked, or for `keep` a `kept` end of it (checked before `GONE`, since the end makes the prompt
+no longer live). Another answer is still `ALREADY`, and an `end` of another reason is still `GONE`. The
+console retries the owner path on a transport failure (ADR-console-032), so a retry after a lost reply
+succeeds instead of answering 409; a note is never idempotent, because it posts.
+
 The checks, in order, each a `Refused` with its text as the reason, before the one write: the arguments
 first (`ValueError`, before any call: `note` is given exactly when `answer` is `note` and is a non-blank
 `str` of at most `MAX_NOTE_CHARS` characters); the parent issue (a reply that is not an object with a
 string `state` is `ForgeError("payload_invalid")`; any state but `open` is `CLOSED`); the prompt, among
 the `TRUSTED` (OWNER, MEMBER) comments only and live in that listing (`GONE`); the answer is one the
-reason takes (`NOT_AN_ANSWER`); the prompt is not already `answered` (`ALREADY`); it is not `ambiguous`,
+reason takes (`NOT_AN_ANSWER`); the prompt is not already `answered` with another answer (`ALREADY`); it is not `ambiguous`,
 both boxes ticked, which the runner keeps pending and still needs the owner to untick one (`AMBIGUOUS`);
 its `content_version` is the `version` the owner saw (`EDITED`), so a prompt whose fields or text were
 edited in place since the owner read it is never answered; a paid approval carries `paid=True`, its typed
@@ -128,6 +134,23 @@ def answered(marker: Marker, markers: Sequence[Marker]) -> bool:
     return verify_owner.answer(marker, *labels(marker)) in ("yes", "no")
 
 
+def _says(prompt: Marker, answer: str) -> bool:
+    """Whether `prompt` already carries exactly `answer`: its box ticked, and for a two-box prompt only that one."""
+    if answer not in BOX_OF:
+        return False
+    boxes = labels(prompt)
+    if answer in ("passed", "failed"):
+        return verify_owner.answer(prompt, *boxes) == ("yes" if BOX_OF[answer] == 0 else "no")
+    return verify_owner.ticked(prompt, boxes[0])
+
+
+def _kept(prompt: Marker | None, markers: Sequence[Marker], comment_id: int) -> bool:
+    """Whether stale prompt `prompt` is already ended as `kept` by an `end` marker of `comment_id`."""
+    return (prompt is not None and is_runner_prompt(prompt) and prompt.fields.get("reason") == STALE
+            and any(m.kind == forge_markers.END_KIND and m.fields.get("of") == str(comment_id)
+                    and m.fields.get("reason") == KEPT for m in markers))
+
+
 def note_body(slug: str, issue: int, comment_id: int, note: str) -> str:
     """The comment that carries an owner's note on prompt `comment_id`."""
     return (f"Owner's note on https://github.com/{slug}/issues/{issue}#issuecomment-{comment_id}, "
@@ -154,11 +177,15 @@ def answer_prompt(slug: str, issue: int, comment_id: int, answer: str, *, versio
         raise Refused(CLOSED)
     markers = forge_markers.list_markers(slug, issue, TRUSTED)
     prompt = next((m for m in markers if m.comment_id == comment_id), None)
+    if answer == "keep" and _kept(prompt, markers, comment_id):
+        return
     if prompt is None or not is_runner_prompt(prompt) or not forge_markers.is_live(prompt, markers):
         raise Refused(GONE)
     if answer not in ANSWERS[prompt.fields["reason"]]:
         raise Refused(NOT_AN_ANSWER)
     if answered(prompt, markers):
+        if _says(prompt, answer):
+            return
         raise Refused(ALREADY)
     if ambiguous(prompt):
         raise Refused(AMBIGUOUS)

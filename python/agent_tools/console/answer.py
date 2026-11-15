@@ -19,7 +19,34 @@ The tick is checked against the tracker as it is now, in this order:
    answered, else `Refused(ALREADY)`.
 3. `forge_markers.edit` is called exactly once with `forge_owner_action.tick_body(body, choices)`.
 
+A prompt already answered with exactly the given `choices` is left alone: the tick returns without
+an edit, so a retry of a tick whose reply was lost succeeds. A prompt answered with other choices
+is still `Refused(ALREADY)`.
+
 A forge error propagates unchanged. `Refused` carries the one-line reason as `str(error)`.
+
+`with_retries(write, clock=, sleep=, on_retry=)` runs `write` again after a transport failure (#1075).
+Only a `ForgeError` whose `transient` is true is retried; any other exception is raised on the attempt
+it came from, unchanged. `started = clock()` is read once and every attempt runs inside
+`forge_api.deadline(started + RETRY_BUDGET_SECONDS, clock)`, so no `gh` call of any attempt runs past
+that deadline and the whole write, waits and calls together, ends within `RETRY_BUDGET_SECONDS` of its
+start. After attempt `n` (1-based) fails, the loop raises when `RETRY_DELAYS` has no delay `n`; else
+it computes `room = deadline - clock() - LAST_TRY_SECONDS`, raises when `room <= 0`, calls
+`on_retry(n, error)` and sleeps `min(delay, room)`: the wait is clamped to the budget and a retry
+keeps at least `LAST_TRY_SECONDS` for its own calls. A sleep that returns a truthy value ends the
+retries. When the retries end, the last `ForgeError` itself is raised.
+
+`tracker_words(error)` is the one plain sentence for a failed write, the first that applies:
+
+1. the error is not a `ForgeError`: `UNEXPECTED_FAILURE`;
+2. its detail carries an HTTP status 500 to 599: `FORGE_DOWN`;
+3. it is transient (a timeout, a missed deadline or a connection failure): `NETWORK_DOWN`;
+4. its code is `gh_missing`: `GH_MISSING`;
+5. its status is 401 or 403: `NOT_SIGNED_IN`;
+6. its status is 404: `NOT_FOUND`;
+7. anything else: `NOT_TAKEN`.
+
+No sentence carries raw tracker text.
 
 `parse_request(body)` reads the page's request body, the one body of `POST /api/answer`
 (`service.py`), sent as `Content-Type: application/json` and at most `service.MAX_ANSWER_BYTES`
@@ -47,7 +74,7 @@ characters. Anything else, a repeated key included, raises `ValueError`.
 """
 
 import json
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.claims import forge_markers as fm
@@ -66,6 +93,18 @@ NOT_AN_ANSWER = "this item does not take that answer"
 CONFIRM = "type the issue reference exactly to approve this check"
 CHECK_ANSWERS = ("passed", "failed", "note", "approve", "keep", "drop")
 MAX_CONFIRM_CHARS = 200
+RETRY_DELAYS: tuple[float, ...] = (1.0, 2.0, 4.0, 8.0, 10.0)
+RETRY_BUDGET_SECONDS: float = 30.0
+LAST_TRY_SECONDS: float = 5.0
+NETWORK_DOWN = "this computer could not reach GitHub. Check the network, then try again."
+FORGE_DOWN = "GitHub had a problem and did not take the answer. Try again in a moment."
+NOT_SIGNED_IN = ("gh is not signed in on this computer, or may not change this repository. "
+                 "Sign it in with gh auth login, then try again.")
+NOT_FOUND = "GitHub no longer finds this issue or its prompt. Open it on GitHub to answer."
+GH_MISSING = ("gh is not installed on this computer. Install it and sign it in with gh auth login, "
+              "then try again.")
+NOT_TAKEN = "GitHub did not take the answer. Try again, or answer it on GitHub."
+UNEXPECTED_FAILURE = "the console ran into a problem it did not expect. Try again, or answer it on GitHub."
 
 
 class Refused(Exception):
@@ -74,6 +113,45 @@ class Refused(Exception):
 
 def _reduced(questions: Sequence[dict]) -> list[tuple[str, list[str]]]:
     return [(q["question"], list(q["options"])) for q in questions]
+
+
+def tracker_words(error: BaseException) -> str:
+    if not isinstance(error, forge_api.ForgeError):
+        return UNEXPECTED_FAILURE
+    found = forge_api.HTTP_STATUS.search(error.detail)
+    status = int(found[1]) if found else None
+    if status is not None and 500 <= status <= 599:
+        return FORGE_DOWN
+    if error.transient:
+        return NETWORK_DOWN
+    if error.code == "gh_missing":
+        return GH_MISSING
+    if status in (401, 403):
+        return NOT_SIGNED_IN
+    if status == 404:
+        return NOT_FOUND
+    return NOT_TAKEN
+
+
+def with_retries(write: Callable[[], None], *, clock: Callable[[], float],
+                 sleep: Callable[[float], object],
+                 on_retry: Callable[[int, forge_api.ForgeError], None] = lambda attempt, error: None) -> None:
+    at = clock() + RETRY_BUDGET_SECONDS
+    with forge_api.deadline(at, clock):
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                return write()
+            except forge_api.ForgeError as error:
+                if not error.transient or attempt > len(RETRY_DELAYS):
+                    raise
+                room = at - clock() - LAST_TRY_SECONDS
+                if room <= 0:
+                    raise
+                on_retry(attempt, error)
+                if sleep(min(RETRY_DELAYS[attempt - 1], room)):
+                    raise
 
 
 def parse_request(body: bytes) -> tuple[str, str, list[int]]:
@@ -136,5 +214,10 @@ def tick_on_tracker(slug: str, issue: int, comment_id: int, questions: list[dict
     if _reduced(foa.verified_questions(marker)) != _reduced(questions):
         raise Refused(CHANGED)
     if foa.answered(marker):
+        verified = foa.verified_questions(marker)
+        if len(verified) == len(choices) and all(
+                0 <= choice < len(q["options"]) and q["chosen"] == q["options"][choice]
+                for q, choice in zip(verified, choices)):
+            return
         raise Refused(ALREADY)
     fm.edit(slug, comment_id, foa.tick_body(marker.body, choices))
