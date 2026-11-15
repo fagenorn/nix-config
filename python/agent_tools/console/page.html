@@ -95,6 +95,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .head .sprint-goal { color: var(--text); overflow-wrap: anywhere; }
 .kind { display: inline-flex; gap: 7px; font-weight: 600; }
 .kind.needs { color: var(--peach); }
+.check-id { font-size: .75rem; font-weight: 600; color: var(--sub1); border: 1px solid var(--s2); border-radius: 999px; padding: 1px 8px; white-space: nowrap; }
 .held { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--hair); font-size: .84375rem; color: var(--sub0); }
 .rest, .done { margin-top: 10px; }
 .rest li, .done li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; padding: 5px 0; font-size: .875rem; color: var(--ov2); }
@@ -1773,9 +1774,14 @@ function kindWords(item) {
   node.appendChild(el("span", "", word));
   return node;
 }
+function checkLabel(item) {
+  return typeof item.check_id === "string" && item.check_id !== "" ? el("span", "check-id", item.check_id) : null;
+}
 function headLine(item) {
   const line = el("p", "head meta");
   line.appendChild(kindWords(item));
+  const label = checkLabel(item);
+  if (label !== null) line.appendChild(label);
   line.appendChild(el("span", "proj", item.project_id));
   if (isQuestion(item)) line.appendChild(el("span", "sprint-goal", item.goal));
   line.appendChild(phrase("span", "wait", "waiting ", timeEl("since", item.waiting_since, "")));
@@ -2450,6 +2456,8 @@ function itemLine(item) {
   const line = el("li", "row");
   const head = el("p", "row-head");
   head.appendChild(kindWords(item));
+  const label = checkLabel(item);
+  if (label !== null) head.appendChild(label);
   head.appendChild(el("b", "", item.headline));
   const lm = phrase("span", "lm", item.project_id + " \u00b7 " + (isQuestion(item) ? item.goal : holds(item)));
   if (item.stale) {
@@ -2474,6 +2482,8 @@ function answeredLine(item) {
   const fold = el("details", "done-item");
   fold.dataset.key = "answered:" + itemId(item);
   const summary = el("summary");
+  const label = checkLabel(item);
+  if (label !== null) summary.appendChild(label);
   summary.appendChild(el("b", "", item.headline));
   const more = moreWords(item);
   if (more !== null) summary.appendChild(more);
