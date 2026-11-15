@@ -27,6 +27,7 @@ Routes (every response carries `Cache-Control: no-store` and
     POST /api/stop  204, a JSON body, the page stops a sprint (below)
     POST /api/register-project 204, a JSON body, the page names a repository to adopt (below)
     POST /api/plan-answer 204, a JSON body, the page answers one question of the adoption plan (below)
+    POST /api/plan-approve 204, a JSON body, the page approves a ready adoption plan (below)
     POST /api/brief 200 application/json, a manager sends a sprint's brief (below)
     POST /api/report 200 application/json, a manager sends a sprint's report (below)
     POST /api/close 200 application/json, a manager sends a sprint's closing report (below)
@@ -66,7 +67,7 @@ A page write (`PAGE_WRITES`, today `POST /api/looked`, `POST /api/answer`, `POST
 `POST /api/goal`, `POST /api/withdraw`, `POST /api/approve`, `POST /api/reply`,
 `POST /api/retry-manager`, `POST /api/message`, `POST /api/stop`, `POST /api/round-answer`, `POST /api/continue`, `POST /api/exclusion`, `POST /api/pin`, `POST /api/signin`,
 `POST /api/signin-code`, `POST /api/signin-cancel`, `POST /api/signin-link`, `POST /api/account-add`, `POST /api/account-remove` and
-`POST /api/register-project` and `POST /api/plan-answer`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
+`POST /api/register-project`, `POST /api/plan-answer` and `POST /api/plan-approve`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
 alone and goes through one guard, `_page_write`, whatever its route. After the loopback `Host`
 check and before any body is read, exactly one `Origin` header must equal `http://<Host>` (else
 403 `text/plain` `origin refused`) and exactly one `X-Console-Token` header must equal the
@@ -221,6 +222,29 @@ run does; a refusal appends nothing and is kept in memory, shown by the view for
 answered until the next run starts. One line `console: plan_answer_ended <result>` (or `refused`)
 ends the run. Any other exception is `console: plan_answer_failed <Type>` and 500 `answering
 failed`. The console never reads or writes the plan store or the registry here.
+
+`POST /api/plan-approve` (#1054, ADR-console-030) runs the same checks with `MAX_PLAN_APPROVE_BYTES`
+(4096) and `approve.parse_approve_request`: 400 `bad plan approval`. The service refuses, each as
+409 with the text, one stderr line `console: plan_approve_refused <reason>`, appending and running
+nothing, in this order: without an adopter or a forge, `approve.UNAVAILABLE`; while any registration,
+answer or approval run is under way (`register.running`); when the shown registration has no plan id
+or another one than the body's, `approve.STALE`; when it is not ready, `approve.NOT_READY`; and when
+the plan's adoption is an opened pull request that is still open or ready (`approve.OPENED`) or was
+merged (`approve.MERGED`). A closed pull request, a failed apply or no adoption at all is approved
+again as a fresh apply. Otherwise the answer is an empty `204` at once and the run is dispatched on
+a tracked thread (`APPROVAL_THREAD`) that `close` joins. The run applies the plan (`Adopter.apply`,
+acknowledging deletions only when the shown plan lists them) and appends `adoption.step` `applied`,
+pushes only the one adoption branch (`approve.push`), then looks for the branch's pull request
+before opening one and, when the open fails, looks once more (a pull request whose answer was lost
+is found, never opened twice) and appends `opened`. A failure appends `apply_failed`,
+`push_failed` or `open_failed` with plain words; the original error (code, detail, traceback) is one
+stderr line `console: plan_approve_error <json>` and never reaches the page. A step in
+`approve.RESUMABLE` is resumed by the next approval (Try again) at the step that failed: apply is
+never run twice for a pushed or kept branch. The console stops between steps and inside every child
+and forge call when it closes, appending nothing for the stopped step, so the next approval resumes.
+The console never merges: it pushes the one branch and opens its pull request, and the forge's
+required checks keep merge safety. One line `console: plan_approve_ended <step or stopped>` ends the
+run. Any other exception is `console: plan_approve_failed <Type>` and 500 `approving failed`.
 
 `POST /api/readings` runs the same checks in the same order (loopback `Host`, no `Origin`,
 `application/json`, a length, at most `MAX_READING_BYTES`), answers `204` and flushes, and only
@@ -865,7 +889,7 @@ from urllib.parse import parse_qsl
 
 from agent_tools.claims import owner_actions
 from agent_tools.console import (
-    account_add, account_remove, answer, capacity, deliveries, digest, exclusion, idle, inbox, manager, nudge, pin,
+    account_add, account_remove, answer, approve, capacity, deliveries, digest, exclusion, idle, inbox, manager, nudge, pin,
     plan_questions, probe, register, revive, sessions, signin, signin_run, sprints, write_guard)
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
@@ -930,16 +954,19 @@ ACCOUNT_ADD_PATH = "/api/account-add"
 ACCOUNT_REMOVE_PATH = "/api/account-remove"
 REGISTER_PATH = "/api/register-project"
 PLAN_ANSWER_PATH = "/api/plan-answer"
+PLAN_APPROVE_PATH = "/api/plan-approve"
 PAGE_WRITES: frozenset[str] = frozenset({
     LOOKED_PATH, ANSWER_PATH, CHECK_PATH, GOAL_PATH, WITHDRAW_PATH, APPROVE_PATH, REPLY_PATH,
     RETRY_PATH, MESSAGE_PATH, STOP_PATH, ROUND_ANSWER_PATH, CONTINUE_PATH, EXCLUSION_PATH,
     PIN_PATH, SIGNIN_PATH, SIGNIN_CODE_PATH, SIGNIN_CANCEL_PATH, SIGNIN_LINK_PATH, ACCOUNT_ADD_PATH,
-    ACCOUNT_REMOVE_PATH, REGISTER_PATH, PLAN_ANSWER_PATH})
+    ACCOUNT_REMOVE_PATH, REGISTER_PATH, PLAN_ANSWER_PATH, PLAN_APPROVE_PATH})
 MAX_SIGNIN_BYTES = 4096
 MAX_ACCOUNT_BYTES = 4096
 MAX_REMOVE_BYTES = 4096
 MAX_REGISTER_BYTES = 4096
 MAX_PLAN_ANSWER_BYTES = 4096
+MAX_PLAN_APPROVE_BYTES = 4096
+APPROVAL_THREAD = "console-adoption-approval"
 SIGNIN_THREAD = "console-signin-deadline"
 SIGNIN_TICK_SECONDS = 1.0
 MAX_ANSWER_BYTES = 4096
@@ -1408,6 +1435,28 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return False
         return True
 
+    def _plan_approve_request(self, console: "ConsoleService") -> bool:
+        """Carry out the plan-approve write; True when the shared 204 is to be sent."""
+        body = self._json_body(MAX_PLAN_APPROVE_BYTES)
+        if body is None:
+            return False
+        try:
+            plan_id = approve.parse_approve_request(body)
+        except ValueError:
+            self._refuse(400, "bad plan approval")
+            return False
+        try:
+            console.approve_plan(plan_id)
+        except sprints.Refused as error:
+            print(f"console: plan_approve_refused {error}", file=sys.stderr)
+            self._refuse(409, str(error))
+            return False
+        except Exception as error:
+            print(f"console: plan_approve_failed {type(error).__name__}", file=sys.stderr)
+            self._refuse(500, "approving failed")
+            return False
+        return True
+
     def _brief_request(self):
         """The manager's route: a brief sent with the sprint's secret; no token, no page."""
         console = self.server.console
@@ -1847,6 +1896,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
             if not self._plan_answer_request(console):
                 return
+        elif route == PLAN_APPROVE_PATH:
+            self.close_connection = True
+            if not self._plan_approve_request(console):
+                return
         else:
             if (self.headers.get("Content-Length", "0") != "0"
                     or self.headers.get("Transfer-Encoding") is not None):
@@ -1974,6 +2027,9 @@ class ConsoleService:
                  signer_out: Callable[[probe.Probe], None] | None = None,
                  account_remover: Callable[[str], None] | None = None,
                  adopter=None,
+                 forge=None,
+                 pusher: Callable[..., None] = approve.push,
+                 approval_dispatch: Callable[[Callable[[], None]], None] | None = None,
                  probe_dispatch: Callable[[Callable[[], None]], None] | None = None,
                  probe_tick_seconds: float = PROBE_TICK_SECONDS,
                  choice_file: Path | None = None):
@@ -1986,6 +2042,13 @@ class ConsoleService:
         self._signer_out = signer_out
         self._account_remover = account_remover
         self._adopter = adopter
+        self._forge = forge
+        self._pusher = pusher
+        self._approving = False
+        self._approval_workers: list[threading.Thread] = []
+        self._approval_dispatch = (
+            self._on_approval_thread if approval_dispatch is None else approval_dispatch)
+        self._adoptions: dict[str, dict] = {}
         self._registering: str | None = None
         self._answering = False
         self._answer_refusal: dict | None = None
@@ -2101,6 +2164,7 @@ class ConsoleService:
             self._signin_ends = signin_run.ended_state(events)
             self._accounts_added = account_add.added_state(events)
             self._registration = register.latest(events)
+            self._adoptions = approve.adoptions(events)
             self._pin_launches = pin.pin_launches(events)
             self._derive_digest(events)
             self._deliveries = deliveries.delivery_states(events)
@@ -2175,7 +2239,20 @@ class ConsoleService:
                 runs[profile] = {"state": "running", "at": None, "attempt": attempt}
         return runs
 
+    def _approval_view(self) -> tuple[dict | None, str | None]:
+        latest = self._registration
+        if latest is None:
+            return None, None
+        plan_id = latest["plan_id"]
+        found = self._adoptions.get(plan_id) if plan_id else None
+        entry = approve.entry(found, running=self._approving, name=register.name_of(latest["root"]))
+        action = approve.action(
+            latest, found, available=self._adopter is not None and self._forge is not None,
+            running=self._registering is not None)
+        return entry, action
+
     def _publish(self) -> None:
+        adoption, action = self._approval_view()
         cap = capacity.capacity_view(
             self._profiles, self._capacity, self._clock(), self._signins,
             excluded=self._excluded, pinned=self._pinned)
@@ -2187,8 +2264,9 @@ class ConsoleService:
             capacity=cap,
             signin_runs=self._signin_view(), accounts_added=self._accounts_added,
             registration=register.view_entry(
-                self._registering, self._registration, again=self._answering,
-                refusal=self._answer_refusal),
+                None if self._approving else self._registering, self._registration,
+                again=self._answering, refusal=self._answer_refusal, adoption=adoption,
+                approve=action),
             pin=pin.note(self._pinned, cap, manager.session_profile(cap, self._use.last)),
             pin_launches=self._pin_launches.launched,
             managers=self._launcher is not None, pending=self._pending))
@@ -2356,6 +2434,13 @@ class ConsoleService:
         with self._ingest:
             self._probe_workers = [w for w in self._probe_workers if w.is_alive()]
             self._probe_workers.append(worker)
+        worker.start()
+
+    def _on_approval_thread(self, job: Callable[[], None]) -> None:
+        worker = threading.Thread(target=job, name=APPROVAL_THREAD, daemon=True)
+        with self._ingest:
+            self._approval_workers = [w for w in self._approval_workers if w.is_alive()]
+            self._approval_workers.append(worker)
         worker.start()
 
     def _probe_profile(self, session_id: str) -> str | None:
@@ -2702,6 +2787,193 @@ class ConsoleService:
     @staticmethod
     def _log_answer_error(record: dict) -> None:
         print(f"console: plan_answer_error {json.dumps(record, sort_keys=True)}", file=sys.stderr)
+
+    def approve_plan(self, plan_id: str) -> None:
+        """Apply, push and open the pull request of the shown ready plan; refusals are `sprints.Refused`."""
+        if self._adopter is None or self._forge is None:
+            raise sprints.Refused(approve.UNAVAILABLE)
+        with self._ingest:
+            if self._registering is not None:
+                raise sprints.Refused(register.running(register.name_of(self._registering)))
+            latest = self._registration
+            if latest is None or latest["plan_id"] != plan_id:
+                raise sprints.Refused(approve.STALE)
+            if latest["state"] != "ready":
+                raise sprints.Refused(approve.NOT_READY)
+            found = self._adoptions.get(plan_id)
+            if found is not None and found["step"] == "opened":
+                if found["pull_state"] in ("open", "ready"):
+                    raise sprints.Refused(approve.OPENED)
+                if found["pull_state"] == "merged":
+                    raise sprints.Refused(approve.MERGED)
+            root = latest["root"]
+            shown = dict(latest)
+            adoption = None if found is None else dict(found)
+            self._registering = root
+            self._approving = True
+            self._publish()
+        try:
+            self._approval_dispatch(lambda: self._run_approval(root, shown, adoption))
+        except BaseException:
+            with self._ingest:
+                self._registering = None
+                self._approving = False
+                self._publish()
+            raise
+
+    @staticmethod
+    def _log_approval_error(record: dict) -> None:
+        print(f"console: plan_approve_error {json.dumps(record, sort_keys=True)}", file=sys.stderr)
+
+    def _log_forge_error(self, stage: str, error: BaseException, where: dict) -> None:
+        record = {"stage": stage, **where}
+        if isinstance(error, ForgeError):
+            record.update({"code": error.code, "detail": error.detail,
+                           "transient": error.transient})
+            self._log_approval_error(record)
+            return
+        record.update({"exception": type(error).__name__, "detail": str(error)})
+        self._log_approval_error(record)
+        traceback.print_exception(error, file=sys.stderr)
+
+    def _step(self, shown: Mapping, plan_id: str, root: str, step: str, **members) -> dict:
+        payload = {"by": "owner", "plan_id": plan_id, "root": root,
+                   "project_id": shown["project_id"], "step": step, "branch": None,
+                   "commit": None, "base": None, "pull_request": None, "reason": None,
+                   "note": None, "kept": None, **members}
+        approve.step_row(payload)
+        return payload
+
+    def _run_approval(self, root: str, shown: dict, adoption: dict | None) -> None:
+        final = None
+        try:
+            final = self._approval_steps(root, shown, adoption)
+        except Exception as error:
+            self._log_approval_error({"stage": "run", "root": root,
+                                      "exception": type(error).__name__, "detail": str(error)})
+            traceback.print_exception(error, file=sys.stderr)
+        appended = False
+        with self._ingest:
+            if final is not None and not self._closed:
+                self._fold(self.log.append([approve.step_row(final)]))
+                appended = True
+            self._registering = None
+            self._approving = False
+            if not self._closed:
+                self._publish()
+        if not self._closed:
+            self.refresh()
+        print(f"console: plan_approve_ended {final['step'] if appended else 'stopped'}",
+              file=sys.stderr)
+
+    def _append_applied(self, payload: dict) -> None:
+        with self._ingest:
+            if not self._closed:
+                self._fold(self.log.append([approve.step_row(payload)]))
+                self._publish()
+
+    def _approval_steps(self, root: str, shown: dict, adoption: dict | None) -> dict | None:
+        """The run's stages; the payload of the last row to append, or None when stopped."""
+        stop = self._stop
+        plan_id = shown["plan_id"]
+        name = register.name_of(root)
+        acknowledge = approve.acknowledges(shown)
+        resume = adoption is not None and adoption["step"] in approve.RESUMABLE
+        if resume:
+            branch, commit, base = adoption["branch"], adoption["commit"], adoption["base"]
+        else:
+            try:
+                result = self._adopter.apply(plan_id, cancel=stop, acknowledge_deletions=acknowledge)
+            except register.RunFailed as error:
+                self._log_approval_error({"stage": "apply", "root": root, "plan_id": plan_id,
+                                          "failure": error.kind, "cause": repr(error.__cause__)})
+                reason, note = approve.run_failure(plan_id, error.kind, acknowledge)
+                return self._step(shown, plan_id, root, "apply_failed",
+                                         reason=approve.reason_of(reason), note=note)
+            except Exception as error:
+                self._log_approval_error({"stage": "apply", "root": root, "plan_id": plan_id,
+                                          "exception": type(error).__name__,
+                                          "detail": str(error)})
+                traceback.print_exception(error, file=sys.stderr)
+                reason, note = approve.run_failure(plan_id, type(error).__name__, acknowledge)
+                return self._step(shown, plan_id, root, "apply_failed",
+                                         reason=approve.reason_of(reason), note=note)
+            if "error" in result:
+                self._log_approval_error({"stage": "apply", "root": root, "plan_id": plan_id,
+                                          "error": result["error"]})
+                kept = approve.retained(plan_id)
+                reason, note = approve.apply_failure(root, plan_id, result["error"], kept,
+                                                     acknowledge)
+                return self._step(shown, plan_id, root, "apply_failed",
+                                         reason=approve.reason_of(reason), note=note, kept=kept)
+            branch, commit = result["branch"], result["commit"]
+            base = result.get("integration_branch")
+            self._append_applied(self._step(
+                shown, plan_id, root, "applied", branch=branch, commit=commit, base=base))
+        if stop.is_set():
+            return None
+        where = {"root": root, "plan_id": plan_id, "branch": branch, "base": base}
+        try:
+            self._pusher(root, branch, cancel=stop)
+        except approve.PushFailed as error:
+            self._log_approval_error({"stage": "push", "root": root, "plan_id": plan_id,
+                                      "branch": branch, "reason": error.reason,
+                                      "detail": error.detail})
+            return self._step(
+                shown, plan_id, root, "push_failed", branch=branch, commit=commit, base=base,
+                reason=error.reason, note=approve.PUSH_NOTE)
+        if stop.is_set():
+            return None
+        slug = self._slug_of(root)
+        pushed = {"branch": branch, "commit": commit, "base": base}
+        if slug is None:
+            return self._step(
+                shown, plan_id, root, "open_failed", **pushed, reason=approve.NO_SLUG,
+                note=(f"Open a pull request for the branch {branch} yourself; the console opens "
+                      "them only on GitHub."))
+        if base is None:
+            return self._step(
+                shown, plan_id, root, "open_failed", **pushed, reason=approve.NO_BASE,
+                note=(f"Open a pull request for the branch {branch} yourself against the "
+                      "repository's integration branch."))
+        try:
+            pull, error = self._pull_request(slug, branch, base, name, shown, stop, where)
+        except approve.Cancelled:
+            return None
+        if pull is None:
+            reason, note = approve.forge_failure(error, branch, base)
+            return self._step(shown, plan_id, root, "open_failed", **pushed,
+                                     reason=approve.reason_of(reason), note=note)
+        return self._step(shown, plan_id, root, "opened", **pushed, pull_request=pull)
+
+    def _pull_request(self, slug: str, branch: str, base: str, name: str, shown: Mapping,
+                      stop: threading.Event, where: dict) -> tuple[dict | None, Exception | None]:
+        """The branch's pull request, found or opened; (None, the failure) when neither worked."""
+        try:
+            found = self._forge.find_pull_request(slug, branch, base, cancel=stop)
+        except approve.Cancelled:
+            raise
+        except Exception as error:
+            self._log_forge_error("find", error, where)
+            return None, error
+        if found is not None:
+            return found, None
+        try:
+            return self._forge.open_pull_request(
+                slug, branch, base, approve.title(name), approve.body(shown), cancel=stop), None
+        except approve.Cancelled:
+            raise
+        except Exception as error:
+            self._log_forge_error("open", error, where)
+            failure = error
+        try:
+            found = self._forge.find_pull_request(slug, branch, base, cancel=stop)
+        except approve.Cancelled:
+            raise
+        except Exception as error:
+            self._log_forge_error("find", error, where)
+            found = None
+        return (found, None) if found is not None else (None, failure)
 
     def remove_account(self, profile: str, typed: str) -> None:
         """Sign the profile out, then remove it through the launcher; refusals are `sprints.Refused`.
@@ -4206,6 +4478,7 @@ class ConsoleService:
         self._signin_ends = signin_run.ended_state(appended, self._signin_ends)
         self._accounts_added = account_add.added_state(appended, self._accounts_added)
         self._registration = register.latest(appended, self._registration)
+        self._adoptions = approve.adoptions(appended, self._adoptions)
         self._pin_launches = pin.pin_launches(appended, self._pin_launches)
         self._deliveries = deliveries.delivery_states(appended, self._deliveries)
         self._moved = idle.last_moved(appended, self._moved)
@@ -4235,6 +4508,7 @@ class ConsoleService:
                 self._signin_ends = signin_run.ended_state(events)
                 self._accounts_added = account_add.added_state(events)
                 self._registration = register.latest(events)
+                self._adoptions = approve.adoptions(events)
                 self._pin_launches = pin.pin_launches(events)
                 self._derive_digest(events)
                 self._publish()
@@ -4398,6 +4672,10 @@ class ConsoleService:
             self._signin_runs.close()
         with self._ingest:
             workers = list(self._probe_workers)
+        for worker in workers:
+            worker.join()
+        with self._ingest:
+            workers = list(self._approval_workers)
         for worker in workers:
             worker.join()
         if self._thread is not None:

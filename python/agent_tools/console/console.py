@@ -51,6 +51,10 @@ It is also given `register.adopter_for(sys.platform)` (#1052), so on Linux the o
 repository on the page and sees what adopting it would change, or registers it when it is adopted
 (`agent_tools.console.register`); elsewhere the route refuses.
 
+It is also given `approve.forge_for(sys.platform)` (#1054), so on Linux the owner approves a ready
+plan and the console pushes its branch and opens its pull request through `gh`; elsewhere the route
+refuses.
+
 The service keeps the console's profile choice for new sessions in `$CLAUDE_ACCOUNTS_DIR/chosen-profile`
 (else `~/.claude-accounts/chosen-profile`) and answers it on `GET /api/profile` (#1011).
 """
@@ -64,7 +68,7 @@ import sys
 import threading
 
 from agent_tools.console import (
-    account_add, account_remove, inbox, manager, nudge, probe, register, service, signin,
+    account_add, account_remove, approve, inbox, manager, nudge, probe, register, service, signin,
     signin_run)
 from agent_tools.console.event_log import EventLogError
 from agent_tools.console.write_guard import TokenError
@@ -101,6 +105,7 @@ def main(argv: list[str] | None = None) -> int:
             signer_out=account_remove.signer_out_for(sys.platform),
             account_remover=account_remove.remover_for(sys.platform),
             adopter=register.adopter_for(sys.platform),
+            forge=approve.forge_for(sys.platform),
             choice_file=service.default_choice_file())
     except TokenError as error:
         print(f"console: page token unusable: {error}", file=sys.stderr)

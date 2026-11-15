@@ -1,0 +1,583 @@
+"""The console's plan-approve write (#1054): the guard, the refusals, the run and the pull request's inbox item.
+
+Each case has its own HOME; every repository and remote is a throwaway, the forge a stand-in.
+
+Run: just agent-workflow-tests
+"""
+
+from __future__ import annotations
+
+import contextlib
+import io
+import json
+import re
+import threading
+import time
+from pathlib import Path
+
+from agent_tools.console import approve, register, register_check, service
+from agent_tools.project_contract import adopt_apply
+from agent_tools.system.forge_api import ForgeError
+
+from . import console_test_support as support
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1052)
+from .test_console_register_service import (
+    DRAFT, PID_A, PID_B, READY, ROOT, Case, Fake, answer_of, git, real_home_state,
+    reconcile_repository)
+
+PATH = "/api/plan-approve"
+BRANCH = "adopt-bbbbbbbbbbbb"
+COMMIT = "c" * 40
+APPLIED = {"branch": BRANCH, "commit": COMMIT, "plan_id": PID_B, "migration_map": "m",
+           "evidence_record": "e", "integration_branch": "develop"}
+GATE = {"error": {
+    "code": "verification_failed", "repair_id": "adopt.gate.cold-clone-resolves",
+    "violations": [{"pointer": "/verification/commit_gates/cold-clone-resolves",
+                    "message": "a pre-commit gate did not pass"}]}}
+STALE_ERROR = {"error": {
+    "code": "plan_stale", "repair_id": "adopt.plan.inputs_changed",
+    "violations": [{"pointer": "/plan/input_digest",
+                    "message": "the repository no longer hashes to the plan's input digest"}]}}
+WITH_DELETION = {**READY, "changes": [
+    *READY["changes"], {"op": "delete-file", "sources": ["old.md"], "targets": []}]}
+APPLIED_LINE = f"Applied on the branch {BRANCH} as one commit, cccccccccccc."
+URL = "https://github.com/fixture/r/pull/7"
+ERROR_LINE = "console: plan_approve_error "
+PLAIN_WORDS = ("adopt.", "verification_failed", "HTTP", "422", "gh_failed", "Traceback")
+
+
+class StandInForge:
+    def __init__(self, states=None, open_raises=None, lost=None, find_raises=None,
+                 open_block=False, linger=0.0):
+        self.linger = linger
+        self.states = states or {}
+        self.open_raises = open_raises or []
+        self.lost = lost or []
+        self.find_raises = find_raises or []
+        self.open_block = open_block
+        self.calls = []
+        self.pulls: dict[tuple[str, str], int] = {}
+        self.closed: set[int] = set()
+        self.next_number = 7
+        self.entered = threading.Event()
+
+    def find_pull_request(self, slug, head, base, cancel=None):
+        self.calls.append(("find", slug, head, base))
+        if self.find_raises:
+            error = self.find_raises.pop(0)
+            if isinstance(error, BaseException):
+                raise error
+        number = self.pulls.get((head, base))
+        if number is None or number in self.closed:
+            return None
+        return {"number": number, "url": f"https://github.com/{slug}/pull/{number}"}
+
+    def open_pull_request(self, slug, head, base, title, body, cancel=None):
+        self.calls.append(("open", slug, head, base, title, body))
+        if self.open_raises:
+            raise self.open_raises.pop(0)
+        number = self.next_number
+        self.next_number += 1
+        self.pulls[(head, base)] = number
+        if self.lost:
+            raise self.lost.pop(0)
+        if self.open_block:
+            self.entered.set()
+            (cancel or threading.Event()).wait(10)
+            time.sleep(self.linger)
+            raise approve.Cancelled()
+        return {"number": number, "url": f"https://github.com/{slug}/pull/{number}"}
+
+    def pull_request_state(self, slug, number, cancel=None):
+        self.calls.append(("state", slug, number))
+        found = self.states.get(number, "open")
+        if isinstance(found, BaseException):
+            raise found
+        return found
+
+    def mark_closed(self, number):
+        self.closed.add(number)
+
+
+class Pusher:
+    def __init__(self, raises=None, wait_for_stop=False):
+        self.raises = raises or []
+        self.wait_for_stop = wait_for_stop
+        self.calls = []
+        self.entered = threading.Event()
+
+    def __call__(self, root, branch, cancel=None):
+        self.calls.append((root, branch))
+        self.entered.set()
+        if self.raises:
+            raise self.raises.pop(0)
+        if self.wait_for_stop:
+            (cancel or threading.Event()).wait(10)
+
+
+class ApproveCase(Case):
+    def setUp(self):
+        super().setUp()
+        self.forge = StandInForge()
+        self.pusher = Pusher()
+        self.fake = None
+        self.kwargs = {}
+
+    def start(self, fake, **kwargs):
+        self.fake = fake
+        self.kwargs = {"forge": self.forge, "pusher": self.pusher,
+                       "slug_of": lambda root: "fixture/r", "dispatch": None, **kwargs}
+        return self.begin(fake, **self.kwargs)
+
+    def restart(self, fake=None):
+        self.svc.close()
+        return self.begin(self.fake if fake is None else fake, **self.kwargs)
+
+    def ready(self, plan=READY, **fake_arguments):
+        fake = Fake(plan=plan, **fake_arguments)
+        self.start(fake)
+        self.repo = reconcile_repository(self.parent)
+        self.shown = self.registered(self.repo)
+        return fake
+
+    def approve(self, body=None, headers=None, raw=None):
+        payload = json.dumps(body).encode() if raw is None else raw
+        sent = self.own(**{"Content-Type": "application/json"}) if headers is None else headers
+        return support.post_page(self.svc.address, PATH, sent, payload)
+
+    def approve_plan(self, plan_id=PID_B):
+        return self.approve({"plan_id": plan_id})
+
+    def until(self, *steps, bound=120):
+        return self.wait_for(
+            lambda r: r["adoption"] is not None and r["adoption"]["status"] == "done"
+            and r["adoption"]["step"] in steps, bound)
+
+    def run_approval(self, *steps, plan_id=PID_B):
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            self.assertEqual(self.approve_plan(plan_id)[::2], (204, b""))
+            shown = self.until(*steps)
+            for worker in self.approval_threads():
+                worker.join(30)
+        return shown, errors.getvalue()
+
+    def refused(self, plan_id, text):
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            status, _, body = self.approve_plan(plan_id)
+        self.assertEqual((status, body), (409, text.encode() + b"\n"))
+        self.assertIn(f"console: plan_approve_refused {text}", errors.getvalue())
+
+    def steps(self):
+        return [found["step"] for _, found in self.rows("adoption.step")]
+
+    def opens(self):
+        return [call for call in self.forge.calls if call[0] == "open"]
+
+    def heads(self):
+        return git(self.parent / "origin.git", "for-each-ref", "--format=%(refname) %(objectname)")
+
+    def approval_threads(self):
+        return [thread for thread in threading.enumerate()
+                if thread.name == service.APPROVAL_THREAD and thread.is_alive()]
+
+    def adoption(self):
+        return self.view()["registration"]["adoption"]
+
+
+class PlanApproveGuardTest(ApproveCase):
+    def test_the_write_is_refused_without_the_token_or_from_another_origin_and_runs_nothing(self):
+        fake = self.ready(apply_result=APPLIED)
+        json_type = {"Content-Type": "application/json"}
+        token = self.token_file.read_text().strip()
+        own = f"http://127.0.0.1:{self.svc.address[1]}"
+        before = support.log_rows(self.store)
+        for headers, text in (
+                ({"Origin": own, **json_type}, b"token refused\n"),
+                ({"Origin": own, "X-Console-Token": "wrong", **json_type}, b"token refused\n"),
+                ({"Origin": "http://evil.example", "X-Console-Token": token, **json_type},
+                 b"origin refused\n")):
+            with self.subTest(text=text):
+                status, _, body = self.approve({"plan_id": PID_B}, headers=headers)
+                self.assertEqual((status, body), (403, text))
+        self.assertEqual(support.log_rows(self.store), before)
+        self.assertEqual(fake.applied, [])
+        self.assertEqual(self.rows("adoption.step"), [])
+
+
+class PlanApproveRefusalTest(ApproveCase):
+    def nothing_ran(self, fake):
+        self.assertEqual(fake.applied, [])
+        self.assertEqual(self.pusher.calls, [])
+        self.assertEqual(self.forge.calls, [])
+        self.assertEqual(self.rows("adoption.step"), [])
+
+    def test_bodies_are_refused_as_bad_plan_approval(self):
+        fake = self.ready(apply_result=APPLIED)
+        for raw in (b"[]", b"{}", b'{"plan_id": 1}', json.dumps({"plan_id": PID_B, "x": 1}).encode()):
+            with self.subTest(raw=raw):
+                status, _, body = self.approve(raw=raw)
+                self.assertEqual((status, body), (400, b"bad plan approval\n"))
+        status, _, body = self.approve(
+            raw=b"{}", headers=self.own(**{"Content-Type": "text/plain"}))
+        self.assertEqual((status, body), (415, b"json only\n"))
+        status, _, body = self.approve(raw=b'{"plan_id": "' + b"a" * 4990 + b'"}')
+        self.assertEqual((status, body), (413, b"too large\n"))
+        self.nothing_ran(fake)
+
+    def test_without_a_forge_the_host_refuses(self):
+        fake = Fake(plan=READY, apply_result=APPLIED)
+        self.start(fake, forge=None)
+        self.shown = self.registered(reconcile_repository(self.parent))
+        self.refused(PID_B, approve.UNAVAILABLE)
+        self.assertEqual(approve.UNAVAILABLE,
+                         "approving an adoption is not available on this host")
+        self.nothing_ran(fake)
+
+    def test_without_an_adopter_the_host_refuses(self):
+        self.fake = None
+        self.kwargs = {"forge": self.forge, "pusher": self.pusher, "dispatch": None}
+        self.begin(None, **self.kwargs)
+        self.refused(PID_B, approve.UNAVAILABLE)
+        self.assertEqual(self.pusher.calls, [])
+        self.assertEqual(self.forge.calls, [])
+
+    def test_an_approval_while_a_run_is_under_way_is_refused(self):
+        gate = threading.Event()
+        fake = self.ready(apply_result=APPLIED, apply_block=gate)
+        self.addCleanup(gate.set)
+        self.assertEqual(self.approve_plan()[0], 204)
+        self.refused(PID_B, "a registration is already running for reconcile")
+        gate.set()
+        self.until("opened")
+        self.assertEqual(len(fake.applied), 1)
+
+    def test_an_approval_for_another_plan_id_is_stale(self):
+        fake = self.ready(apply_result=APPLIED)
+        self.refused("sha256:" + "c" * 64, approve.STALE)
+        self.nothing_ran(fake)
+
+    def test_an_approval_with_no_registration_is_stale(self):
+        fake = Fake(plan=READY, apply_result=APPLIED)
+        self.start(fake)
+        self.refused(PID_B, approve.STALE)
+        self.nothing_ran(fake)
+
+    def test_a_draft_plan_is_not_ready(self):
+        fake = self.ready(plan=DRAFT, apply_result=APPLIED)
+        self.refused(PID_A, approve.NOT_READY)
+        self.nothing_ran(fake)
+
+    def test_an_opened_plan_is_refused_after_a_restart(self):
+        self.ready(apply_result=APPLIED)
+        self.run_approval("opened")
+        self.restart()
+        shown = self.view()["registration"]
+        self.assertEqual((shown["adoption"]["step"], shown["approve"]), ("opened", None))
+        self.refused(PID_B, approve.OPENED)
+
+    def test_a_merged_plan_is_refused_as_merged(self):
+        self.ready(apply_result=APPLIED)
+        self.run_approval("opened")
+        with self.svc._ingest:
+            self.svc._adoptions[PID_B] = {**self.svc._adoptions[PID_B], "pull_state": "merged"}
+        self.refused(PID_B, approve.MERGED)
+
+
+class PlanApproveRunTest(ApproveCase):
+    def test_the_view_says_applying_while_the_run_is_under_way(self):
+        gate = threading.Event()
+        self.ready(apply_result=APPLIED, apply_block=gate)
+        self.addCleanup(gate.set)
+        self.assertEqual(self.approve_plan()[0], 204)
+        shown = self.view()["registration"]
+        self.assertEqual(shown["status"], "done")
+        self.assertEqual(shown["adoption"]["status"], "running")
+        self.assertEqual(shown["adoption"]["headline"],
+                         "Applying the adoption of reconcile and opening its pull request…")
+        self.assertIsNone(shown["approve"])
+        gate.set()
+        self.assertEqual(self.until("opened")["adoption"]["status"], "done")
+
+    def test_a_green_apply_pushes_and_opens_one_pull_request_against_the_integration_branch(self):
+        fake = self.ready(apply_result=APPLIED)
+        shown, errors = self.run_approval("opened")
+        self.assertEqual(fake.applied, [(PID_B, False)])
+        self.assertEqual(self.pusher.calls, [(str(self.repo), BRANCH)])
+        self.assertEqual(self.forge.calls, [
+            ("find", "fixture/r", BRANCH, "develop"),
+            ("open", "fixture/r", BRANCH, "develop", "Adopt reconcile onto the agent platform",
+             approve.body(self.shown))])
+        self.assertEqual(self.steps(), ["applied", "opened"])
+        self.assertEqual(shown["adoption"], {
+            "status": "done", "step": "opened", "state": "open",
+            "headline": "Waiting for the pull request of reconcile to be ready to merge.",
+            "lines": [APPLIED_LINE, f"Pushed {BRANCH} to origin.",
+                      "Opened pull request #7 against develop."],
+            "note": None, "branch": BRANCH, "commit": COMMIT, "url": URL})
+        self.assertIsNone(shown["approve"])
+        self.assertTrue(errors.rstrip().endswith("console: plan_approve_ended opened"))
+
+    def test_a_failed_gate_is_shown_with_its_reason_and_nothing_is_pushed(self):
+        fake = self.ready(apply_result=GATE)
+        kept = self.home / ".agents/state/adopt/worktrees" / ("b" * 64)
+        kept.mkdir(parents=True)
+        record = adopt_apply.failure_record_path("b" * 64)
+        record.write_text(json.dumps({"branch": BRANCH, "worktree": str(kept)}))
+        before = self.heads()
+        shown, errors = self.run_approval("apply_failed")
+        adoption = shown["adoption"]
+        self.assertEqual(
+            adoption["headline"],
+            "The adoption of reconcile was not applied: the cold-clone-resolves check did not "
+            "pass.")
+        self.assertEqual(adoption["lines"],
+                         [f"Apply kept its worktree at {kept} and its branch {BRANCH}."])
+        self.assertTrue(adoption["note"].startswith("Fix what failed in the repository"))
+        self.assertEqual((self.pusher.calls, self.forge.calls), ([], []))
+        self.assertEqual(self.heads(), before)
+        self.assertEqual(self.steps(), ["apply_failed"])
+        self.assertEqual(shown["approve"], "approve")
+        logged = [line for line in errors.splitlines() if line.startswith(ERROR_LINE)]
+        self.assertEqual(len(logged), 1)
+        self.assertIn('"stage": "apply"', logged[0])
+        self.assertIn("adopt.gate.cold-clone-resolves", logged[0])
+        for text in (adoption["headline"], *adoption["lines"], adoption["note"]):
+            for word in PLAIN_WORDS:
+                self.assertNotIn(word, text)
+        self.assertEqual(len(fake.applied), 1)
+
+    def test_a_drifted_plan_says_to_register_again_and_nothing_is_pushed(self):
+        self.ready(apply_result=STALE_ERROR)
+        shown, _ = self.run_approval("apply_failed")
+        adoption = shown["adoption"]
+        self.assertEqual(
+            adoption["headline"],
+            "The adoption of reconcile was not applied: the repository changed since this plan "
+            "was made.")
+        self.assertEqual(adoption["note"],
+                         "Register the repository again to make a new plan, then approve that one.")
+        self.assertEqual(adoption["lines"], [])
+        self.assertEqual((self.pusher.calls, self.forge.calls), ([], []))
+
+    def test_a_run_that_failed_ends_in_words_and_nothing_is_pushed(self):
+        fake = self.ready(apply_raises=register.RunFailed("timed_out"))
+        shown, _ = self.run_approval("apply_failed")
+        adoption = shown["adoption"]
+        self.assertTrue(adoption["headline"].endswith(": it took too long and was stopped."))
+        self.assertTrue(adoption["note"].startswith("Press Approve again."))
+        fake.apply_raises = KeyError("x")
+        shown, errors = self.run_approval("apply_failed")
+        self.assertTrue(shown["adoption"]["headline"].endswith(": it stopped unexpectedly."))
+        self.assertTrue(any(line.startswith(ERROR_LINE) and '"exception": "KeyError"' in line
+                            for line in errors.splitlines()))
+        self.assertEqual((self.pusher.calls, self.forge.calls), ([], []))
+        self.assertEqual(len(fake.applied), 2)
+
+    def test_a_refused_push_keeps_the_branch_and_try_again_resumes_at_the_push(self):
+        self.pusher.raises = [approve.PushFailed("remote rejected the push", "stderr detail")]
+        fake = self.ready(apply_result=APPLIED)
+        shown, errors = self.run_approval("push_failed")
+        adoption = shown["adoption"]
+        self.assertEqual(adoption["headline"],
+                         f"The branch {BRANCH} was not pushed: remote rejected the push.")
+        self.assertEqual(adoption["lines"], [APPLIED_LINE])
+        self.assertEqual(adoption["note"], approve.PUSH_NOTE)
+        self.assertEqual(shown["approve"], "retry")
+        self.assertEqual(self.forge.calls, [])
+        self.assertEqual(self.steps(), ["applied", "push_failed"])
+        self.assertTrue(any(line.startswith(ERROR_LINE) and '"stage": "push"' in line
+                            for line in errors.splitlines()))
+        shown, _ = self.run_approval("opened")
+        self.assertEqual(len(fake.applied), 1)
+        self.assertEqual(len(self.pusher.calls), 2)
+        self.assertEqual(shown["adoption"]["step"], "opened")
+        self.assertEqual(len(self.opens()), 1)
+
+    def test_a_refused_pull_request_is_shown_in_words_and_logged_in_full(self):
+        self.forge.open_raises = [ForgeError("gh_failed", "gh: Validation Failed (HTTP 422)")]
+        fake = self.ready(apply_result=APPLIED)
+        shown, errors = self.run_approval("open_failed")
+        adoption = shown["adoption"]
+        self.assertEqual(
+            adoption["headline"],
+            f"The pull request for {BRANCH} was not opened: the forge refused the pull request.")
+        self.assertEqual(
+            adoption["note"],
+            f"Check on the forge that {BRANCH} differs from develop and has no pull request open "
+            "already, then press Try again.")
+        for text in (adoption["headline"], *adoption["lines"], adoption["note"]):
+            for word in ("HTTP", "422", "gh_failed"):
+                self.assertNotIn(word, text)
+        logged = [line for line in errors.splitlines() if line.startswith(ERROR_LINE)]
+        self.assertEqual(len(logged), 1)
+        for part in ('"stage": "open"', '"code": "gh_failed"', "HTTP 422"):
+            self.assertIn(part, logged[0])
+        self.assertEqual(shown["approve"], "retry")
+        self.assertEqual([call[0] for call in self.forge.calls], ["find", "open", "find"])
+        shown, _ = self.run_approval("opened")
+        self.assertEqual(len(self.pusher.calls), 2)
+        self.assertEqual(len(self.opens()), 2)
+        self.assertEqual(shown["adoption"]["step"], "opened")
+        self.assertEqual(len(fake.applied), 1)
+
+    def test_a_pull_request_whose_answer_was_lost_is_found_not_opened_twice(self):
+        self.forge.lost = [ForgeError("gh_timeout", "api")]
+        self.forge.find_raises = [None, ForgeError("gh_timeout", "api")]
+        fake = self.ready(apply_result=APPLIED)
+        shown, _ = self.run_approval("open_failed")
+        self.assertTrue(shown["adoption"]["headline"].endswith(
+            ": the forge took too long to answer."))
+        self.assertEqual(shown["approve"], "retry")
+        self.restart()
+        shown, _ = self.run_approval("opened")
+        self.assertEqual(len(self.opens()), 1)
+        self.assertEqual(shown["adoption"]["url"], URL)
+        self.assertEqual(len(fake.applied), 1)
+        self.assertEqual(self.svc._adoptions[PID_B]["pull_request"], {"number": 7, "url": URL})
+
+    def test_an_origin_that_is_not_on_github_opens_nothing(self):
+        self.ready(apply_result=APPLIED)
+        self.kwargs["slug_of"] = lambda root: None
+        self.restart()
+        shown, _ = self.run_approval("open_failed")
+        self.assertEqual(
+            shown["adoption"]["headline"],
+            f"The pull request for {BRANCH} was not opened: the repository's origin is not on "
+            "GitHub.")
+        self.assertEqual(self.forge.calls, [])
+        self.assertEqual(len(self.pusher.calls), 1)
+
+    def test_deletions_are_acknowledged_only_when_the_page_showed_them(self):
+        fake = self.ready(plan=WITH_DELETION, apply_result=APPLIED)
+        self.assertTrue(any(line.startswith("deletes ") for line in self.shown["lines"]))
+        self.run_approval("opened")
+        self.assertEqual(fake.applied, [(PID_B, True)])
+
+    def test_plain_lines_acknowledge_nothing(self):
+        fake = self.ready(apply_result=APPLIED)
+        self.run_approval("opened")
+        self.assertEqual(fake.applied, [(PID_B, False)])
+
+
+class PlanApproveCloseTest(ApproveCase):
+    def test_closing_between_the_push_and_the_pull_request_opens_nothing_and_resumes(self):
+        self.pusher.wait_for_stop = True
+        fake = self.ready(apply_result=APPLIED)
+        self.assertEqual(self.approve_plan()[0], 204)
+        self.assertTrue(self.pusher.entered.wait(30))
+        self.svc.close()
+        self.assertEqual(self.approval_threads(), [])
+        self.assertEqual(self.forge.calls, [])
+        self.assertEqual(self.steps(), ["applied"])
+        self.pusher.wait_for_stop = False
+        self.restart()
+        self.assertEqual(self.view()["registration"]["approve"], "retry")
+        self.run_approval("opened")
+        self.assertEqual(len(fake.applied), 1)
+        self.assertEqual(len(self.opens()), 1)
+
+    def test_closing_during_a_forge_call_stops_it_and_a_retry_finds_its_pull_request(self):
+        self.forge.open_block = True
+        self.forge.linger = 1.0
+        fake = self.ready(apply_result=APPLIED)
+        self.assertEqual(self.approve_plan()[0], 204)
+        self.assertTrue(self.forge.entered.wait(30))
+        started = time.monotonic()
+        self.svc.close()
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual(self.approval_threads(), [])
+        self.assertEqual(self.steps(), ["applied"])
+        self.forge.open_block = False
+        self.forge.linger = 0.0
+        self.restart()
+        shown, _ = self.run_approval("opened")
+        self.assertEqual(shown["adoption"]["url"], URL)
+        self.assertEqual(len(self.opens()), 1)
+        self.assertEqual(len(fake.applied), 1)
+
+
+class PlanApproveRealTest(ApproveCase):
+    def setUp(self):
+        super().setUp()
+        self.before = real_home_state()
+        contract = json.loads((ROOT / register_check.CONTRACT_SOURCE).read_text("utf-8"))
+        contract["bindings"]["vcs"]["commit"]["signed"] = False
+        contract["bindings"]["commands"]["nix-build"]["argv"] = ["true"]
+        source = self.parent / "contract.json"
+        source.write_text(json.dumps(contract), "utf-8")
+        self.repo = register_check.adopted_repository(
+            self.parent / "approve", "fixture/console-approve", source)
+        for name, text in ((".claude/odd.md", "# odd\n"), (".claude/specs/a.md", "# a\n")):
+            (self.repo / name).parent.mkdir(parents=True, exist_ok=True)
+            (self.repo / name).write_text(text)
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "legacy")
+        self.remote = self.parent / "approve" / "origin.git"
+        self.start(register.Adopter(), pusher=approve.push,
+                   slug_of=lambda root: "fixture/console-approve")
+        self.shown = self.become_ready()
+        self.status0 = git(self.repo, "status", "--porcelain")
+        self.head0 = git(self.repo, "rev-parse", "HEAD").strip()
+        self.branch0 = git(self.repo, "branch", "--show-current")
+        self.main0 = git(self.remote, "rev-parse", "refs/heads/main").strip()
+        self.addCleanup(self.untouched)
+
+    def untouched(self):
+        self.assertEqual(json.loads(self.registry.read_text())["projects"], [])
+        self.assertEqual(real_home_state(), self.before)
+
+    def become_ready(self):
+        shown = self.registered(self.repo)
+        for _ in range(4):
+            if shown["state"] == "ready":
+                return shown
+            question = shown["questions"][0]
+            plan_id = shown["plan_id"]
+            given = {"id": question["id"], "subject": question["subject"],
+                     "value": question["options"][0]["value"]}
+            self.assertEqual(self.answer(answer_of(plan_id, given))[0], 204)
+            shown = self.wait_for(lambda r: r["status"] == "done"
+                                  and (r["plan_id"] != plan_id or r["refusal"] is not None))
+        if shown["state"] != "ready":
+            self.fail("the plan never became ready")
+        return shown
+
+    def refs(self):
+        return git(self.remote, "for-each-ref", "--format=%(refname) %(objectname)").splitlines()
+
+    def test_approving_a_ready_throwaway_plan_applies_pushes_one_branch_and_requests_one_pull_request(self):
+        shown, _ = self.run_approval("opened", "apply_failed", plan_id=self.shown["plan_id"])
+        adoption = shown["adoption"]
+        if adoption["step"] == "apply_failed":
+            self.fail(f"{adoption['headline']} {adoption['note']}")
+        found = re.fullmatch(r"Applied on the branch (adopt-[0-9a-f]{12}) as one commit, "
+                             r"([0-9a-f]{12})\.", adoption["lines"][0])
+        self.assertIsNotNone(found)
+        branch, prefix = found.groups()
+        tip = git(self.repo, "rev-parse", branch).strip()
+        self.assertTrue(tip.startswith(prefix))
+        self.assertEqual(tip, adoption["commit"])
+        self.assertEqual(git(self.repo, "rev-list", "--count", f"{self.head0}..{branch}").strip(),
+                         "1")
+        self.assertEqual(git(self.repo, "status", "--porcelain"), self.status0)
+        self.assertEqual(git(self.repo, "rev-parse", "HEAD").strip(), self.head0)
+        self.assertEqual(git(self.repo, "branch", "--show-current"), self.branch0)
+        self.assertEqual(sorted(self.refs()),
+                         sorted([f"refs/heads/main {self.main0}", f"refs/heads/{branch} {tip}"]))
+        self.assertEqual(self.opens(), [
+            ("open", "fixture/console-approve", branch, "main",
+             "Adopt repo onto the agent platform", approve.body(self.shown))])
+
+    def test_a_plan_that_drifted_since_it_was_planned_is_refused_in_plain_words_and_nothing_is_pushed(self):
+        (self.repo / ".claude/late.md").write_text("# late\n")
+        git(self.repo, "add", "-A")
+        git(self.repo, "commit", "-q", "-m", "late")
+        shown, _ = self.run_approval("opened", "apply_failed", plan_id=self.shown["plan_id"])
+        adoption = shown["adoption"]
+        self.assertEqual(adoption["step"], "apply_failed")
+        self.assertTrue(adoption["headline"].endswith(
+            "the repository changed since this plan was made."))
+        self.assertEqual(self.refs(), [f"refs/heads/main {self.main0}"])
+        self.assertEqual(self.forge.calls, [])

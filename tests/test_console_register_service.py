@@ -120,15 +120,19 @@ def real_home_state() -> tuple:
 
 class Fake:
     def __init__(self, plan=None, report=None, block=None, raises=None, raises_on=None,
-                 register_raises=None):
+                 register_raises=None, apply_result=None, apply_block=None, apply_raises=None):
         self.document = plan
         self.report = report
         self.block = block
         self.raises = raises
         self.raises_on = raises_on
         self.register_raises = register_raises
+        self.apply_result = apply_result
+        self.apply_block = apply_block
+        self.apply_raises = apply_raises
         self.calls = []
         self.answers = []
+        self.applied = []
 
     def _run(self, verb, root, cancel):
         self.calls.append((verb, root))
@@ -153,6 +157,14 @@ class Fake:
         if self.register_raises is not None:
             raise self.register_raises
         return self.report
+
+    def apply(self, plan_id, cancel=None, acknowledge_deletions=False):
+        self.applied.append((plan_id, acknowledge_deletions))
+        if self.apply_block is not None:
+            self.apply_block.wait(30)
+        if self.apply_raises is not None:
+            raise self.apply_raises
+        return self.apply_result
 
 
 class Case(unittest.TestCase):
