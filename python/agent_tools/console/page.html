@@ -175,8 +175,11 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .goal-project { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
 .goal-status:empty { display: none; }
 .goal-act { display: flex; flex: none; gap: 8px; }
-.sprints { flex: 1 0 100%; padding: 0 0 0 16px; }
-.sprint { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; font-size: .8125rem; color: var(--sub0); }
+.sprint-blocks { display: flex; flex-direction: column; gap: 12px; margin-top: 12px; }
+.sprint { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; min-width: 0; padding: 12px 16px; border: 1px solid var(--hair); border-radius: 12px; overflow-wrap: anywhere; font-size: .8125rem; color: var(--sub0); }
+.sp-who { display: flex; flex-direction: column; min-width: 0; }
+.sp-project { font-size: .75rem; color: var(--ov2); }
+.sp-now { flex: 1 0 100%; color: var(--text); }
 .sprint .title-line { color: var(--text); font-weight: 500; overflow-wrap: anywhere; }
 .sprint-goal-full { color: var(--text); overflow-wrap: anywhere; }
 .sprint .age, .sprint .manager, .sprint .until, .sprint .status-age { color: var(--ov2); }
@@ -190,11 +193,11 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .pip.pip-delivery { border: 1.5px solid var(--green); background: var(--green); box-shadow: inset 0 0 0 1.5px var(--base); }
 .pip.pip-queued { border: 1.5px solid var(--s2); }
 .pip.pip-held { background: linear-gradient(90deg, var(--yellow) 0 3.5px, transparent 3.5px 5.5px, var(--yellow) 5.5px 9px); border-radius: 1.5px; }
-.sprint-state { font-weight: 600; }
+.sprint-ball { font-weight: 600; }
 .st-go { color: var(--green); }
 .st-wait { color: var(--yellow); }
 .st-dim { color: var(--ov2); }
-.sprint-state.needs, .sic.needs { color: var(--peach); }
+.sprint-ball.needs, .sic.needs { color: var(--peach); }
 .sic { display: flex; align-self: start; padding-top: 2px; }
 .sprint-detail { flex: 1 0 100%; font-size: .8125rem; }
 .sprint-detail summary { cursor: pointer; color: var(--ov2); }
@@ -228,10 +231,15 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .item-detail { margin-left: auto; }
 .item-detail summary { cursor: pointer; list-style: none; padding: 4px 12px; border-radius: 8px; color: var(--sub1); }
 .item-detail summary::-webkit-details-marker { display: none; }
-.finished { flex: 1 0 100%; padding: 0 0 0 16px; font-size: .8125rem; }
-.finished summary { cursor: pointer; color: var(--ov2); }
-.sprint .closing-line { color: var(--text); overflow-wrap: anywhere; }
-.sprint .closing-counts { color: var(--ov2); }
+.finished-list { margin-top: 16px; font-size: .8125rem; }
+.finished-list > summary { cursor: pointer; color: var(--ov2); }
+.finished-list > ul { margin-top: 4px; }
+.finished-line summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 10px; padding: 3px 0; cursor: pointer; color: var(--sub0); }
+.finished-line .title-line { color: var(--text); overflow-wrap: anywhere; }
+.finished-line .ended { color: var(--ov2); }
+.closing-report { padding: 2px 0 8px 16px; color: var(--sub0); overflow-wrap: anywhere; }
+.closing-report p { margin-top: 4px; white-space: pre-wrap; }
+.closing-report .closing-counts { color: var(--ov2); }
 #digest { margin-top: 40px; max-width: 44rem; }
 #digest:empty { margin-top: 0; }
 .sec-h { font: 600 .9375rem/1.4 var(--ui); color: var(--text); }
@@ -464,19 +472,15 @@ function untouchedDays(lastActivity) {
   const days = Math.floor((Date.now() - Date.parse(lastActivity)) / 86400000);
   return Number.isFinite(days) && days >= 1 ? days : 0;
 }
-function isClosed(sprint) {
-  return sprint.closing !== null && typeof sprint.closing === "object";
-}
 function sprintDetail(sprint) {
   const fold = el("details", "sprint-detail");
   fold.dataset.key = "sprint:" + sprint.sprint_id;
   fold.appendChild(el("summary", "", "Detail"));
   fold.appendChild(el("p", "sprint-goal-full", sprint.goal));
-  const ended = isClosed(sprint);
-  if (!ended && typeof sprint.progress_text === "string") {
+  if (typeof sprint.progress_text === "string") {
     fold.appendChild(el("p", "progress", sprint.progress_text));
   }
-  if (!ended && typeof sprint.status === "string") {
+  if (typeof sprint.status === "string") {
     const list = el("ul", "sprint-issues");
     for (const issue of sprint.issues || []) {
       const row = el("li");
@@ -497,20 +501,7 @@ function sprintDetail(sprint) {
     }
     fold.appendChild(list);
   }
-  const closing = sprint.closing;
-  if (closing !== null && typeof closing === "object") {
-    if (typeof closing.summary === "string") fold.appendChild(el("p", "closing-summary", closing.summary));
-    for (const [label, key] of [["Landed", "landed"], ["Held", "held"], ["Dropped", "dropped"]]) {
-      const numbers = Array.isArray(closing[key]) ? closing[key] : [];
-      if (numbers.length > 0) {
-        fold.appendChild(el("p", "closing-" + key, label + ": " + numbers.map((n) => "#" + n).join(", ")));
-      }
-    }
-    if (typeof closing.differently === "string" && closing.differently !== "") {
-      fold.appendChild(el("p", "differently", "Would do differently: " + closing.differently));
-    }
-  }
-  if (!ended && typeof sprint.next === "string") fold.appendChild(el("p", "next", "Next: " + sprint.next));
+  if (typeof sprint.next === "string") fold.appendChild(el("p", "next", "Next: " + sprint.next));
   if (typeof sprint.milestone === "string") {
     fold.appendChild(el("p", "milestone", "Milestone: " + sprint.milestone));
   }
@@ -524,24 +515,14 @@ function sprintDetail(sprint) {
   if (older.length > 0) fold.appendChild(messageList(older));
   return fold;
 }
-const SPRINT_LOOKS = new Map([
-  ["drafting", { icon: "lines-icon", mark: "sic-lines", tone: "st-dim" }],
-  ["starting", { icon: "play-icon", mark: "sic-play", tone: "st-go" }],
-  ["on_track", { icon: "play-icon", mark: "sic-play", tone: "st-go" }],
-  ["waiting", { icon: "pause-icon", mark: "sic-pause", tone: "needs" }],
-  ["quiet", { icon: "dashed-icon", mark: "sic-dashed", tone: "st-wait" }],
-  ["quota", { icon: "clock-icon", mark: "sic-clock", tone: "st-wait" }],
-  ["closing", { icon: "check-icon", mark: "sic-closing", tone: "st-go" }],
-  ["done", { icon: "tick-icon", mark: "sic-tick", tone: "st-dim" }],
-  ["stopping", { icon: "pause-icon", mark: "sic-pause", tone: "st-wait" }],
-  ["stopped", { icon: "tick-icon", mark: "sic-tick", tone: "st-dim" }],
+const BALL_LOOKS = new Map([
+  ["manager", { icon: "play-icon", mark: "sic-play", tone: "st-go" }],
+  ["owner", { icon: "pause-icon", mark: "sic-pause", tone: "needs" }],
+  ["nobody", { icon: "dashed-icon", mark: "sic-dashed", tone: "st-wait" }],
 ]);
-function sprintLook(sprint) {
-  const look = SPRINT_LOOKS.get(sprint.state);
-  if (look === undefined) throw new Error("unknown sprint state " + JSON.stringify(sprint.state));
-  if (sprint.state !== "waiting" && sprint.manager_state === "waiting") {
-    return { icon: "clock-icon", mark: "sic-clock", tone: "st-wait" };
-  }
+function ballLook(sprint) {
+  const look = BALL_LOOKS.get(sprint.ball);
+  if (look === undefined) throw new Error("unknown sprint ball " + JSON.stringify(sprint.ball));
   return look;
 }
 function pipGroup(stage) {
@@ -655,14 +636,17 @@ function drawSprint(item, entry, sprint) {
     : Array.from(acts.children).find((c) => c.className === "sprint-more");
   const moreWasOpen = moreBefore !== undefined && moreBefore.open === true;
   item.replaceChildren();
-  const look = sprintLook(sprint);
+  const look = ballLook(sprint);
   const head = el("div", "sp-head");
   const mark = el("span", "sic " + look.mark + " " + look.tone);
   mark.appendChild(icon(look.icon));
   head.appendChild(mark);
-  head.appendChild(el("span", "title-line", sprint.title));
+  const who = el("span", "sp-who");
+  who.appendChild(el("span", "sp-project", entry.project_id));
+  who.appendChild(el("span", "title-line", sprint.title));
+  head.appendChild(who);
   const progress = sprint.progress;
-  if (!isClosed(sprint) && progress !== null && typeof progress === "object" && progress.total > 0) {
+  if (progress !== null && typeof progress === "object" && progress.total > 0) {
     const prog = el("span", "sp-prog");
     const pips = el("span", "pips");
     pips.setAttribute("role", "img");
@@ -675,28 +659,14 @@ function drawSprint(item, entry, sprint) {
     prog.appendChild(el("span", "pip-count", progress.landed + " of " + progress.total));
     head.appendChild(prog);
   }
+  head.appendChild(el("p", "sp-now", sprint.now_text));
   const words = el("p", "sp-status");
-  words.appendChild(el("span", "sprint-state " + look.tone, sprint.state_text));
+  words.appendChild(el("span", "sprint-ball " + look.tone, sprint.ball_text));
   if (typeof sprint.state_until === "string") {
     words.appendChild(timeEl("weekday", sprint.state_until, "until"));
   }
-  const closing = sprint.closing;
-  if (closing !== null && typeof closing === "object") {
-    if (typeof closing.first_line === "string") {
-      words.appendChild(el("span", "closing-line", closing.first_line));
-    }
-    if (typeof closing.counts_text === "string") {
-      words.appendChild(el("span", "closing-counts", closing.counts_text));
-    }
-  }
-  if (!isClosed(sprint) && typeof sprint.status === "string") {
-    words.appendChild(el("span", "status", sprint.status));
-    if (typeof sprint.status_at === "string") {
-      words.appendChild(timeEl("ago", sprint.status_at, "status-age"));
-    }
-  }
-  for (const session of sprint.sessions || []) {
-    words.appendChild(el("span", "manager-now s-" + session.state, "manager " + session.state_text));
+  if (typeof sprint.status_at === "string") {
+    words.appendChild(phrase("span", "status-age", "reported ", timeEl("ago", sprint.status_at, "")));
   }
   const age = el("span", "age");
   age.appendChild(el("span", "", "stated "));
@@ -735,9 +705,7 @@ function drawSprint(item, entry, sprint) {
     item.appendChild(el("span", "unreachable", sprint.reach_text));
   }
   const controls = el("div", "sprint-acts");
-  if (typeof sprint.ended_at !== "string" && sprint.state !== "stopped") {
-    controls.appendChild(tellBox(item, entry, sprint));
-  }
+  controls.appendChild(tellBox(item, entry, sprint));
   const more = el("details", "sprint-more");
   more.dataset.key = "more:" + sprint.sprint_id;
   if (moreWasOpen) more.open = true;
@@ -1446,15 +1414,6 @@ function signinCard(item) {
   card.appendChild(signinAct(item));
   return card;
 }
-function sprintList(entry, sprints) {
-  const list = el("ul", "sprints");
-  for (const sprint of sprints) {
-    const item = el("li", "sprint");
-    fillSprint(item, entry, sprint);
-    list.appendChild(item);
-  }
-  return list;
-}
 function projectLine(entry) {
   const line = el("li", entry.quiet ? "line quiet" : "line");
   const words = [];
@@ -1474,15 +1433,6 @@ function projectLine(entry) {
                             entry.outside_sprints, entry.root));
   if (entry.quiet) {
     line.appendChild(actionButton("give-goal", "Give it a goal", () => openGoalFor(entry.project_id)));
-  }
-  if (entry.sprints && entry.sprints.length > 0) line.appendChild(sprintList(entry, entry.sprints));
-  const finished = entry.finished_sprints;
-  if (finished !== null && typeof finished === "object" && Array.isArray(finished.sprints)) {
-    const fold = el("details", "finished");
-    fold.dataset.key = "finished:" + entry.project_id;
-    fold.appendChild(el("summary", "", finished.label + " (" + finished.count + ")"));
-    fold.appendChild(sprintList(entry, finished.sprints));
-    line.appendChild(fold);
   }
   return line;
 }
@@ -3026,19 +2976,74 @@ function renderDigest(view) {
   fold.appendChild(more);
   section.appendChild(fold);
 }
-function workCount(view) {
-  let sprints = 0;
-  let projects = 0;
+// Every sprint of every project, in view order: running ones drawn as blocks (each with its project's entry), ended ones as lines of the finished list.
+function collectSprints(view) {
+  const running = [];
+  const ended = [];
   for (const entry of view.entries) {
-    for (const one of entry.type === "quiet_group" ? entry.projects : [entry]) {
-      const n = one.sprints ? one.sprints.length : 0;
-      sprints += n;
-      if (n > 0) projects += 1;
+    for (const project of entry.type === "quiet_group" ? entry.projects : [entry]) {
+      const finished = project.finished_sprints;
+      const all = (project.sprints || []).concat(
+        finished !== null && finished !== undefined && Array.isArray(finished.sprints) ? finished.sprints : []);
+      for (const sprint of all) {
+        if (typeof sprint.ended_at === "string") ended.push(sprint);
+        else running.push({ entry: project, sprint });
+      }
     }
   }
-  if (sprints === 0) return "";
-  return sprints + (sprints === 1 ? " sprint" : " sprints") + " across " + projects
+  ended.sort((x, y) => {
+    const by = Date.parse(y.ended_at) - Date.parse(x.ended_at);
+    if (Number.isFinite(by) && by !== 0) return by;
+    return x.sprint_id < y.sprint_id ? -1 : x.sprint_id > y.sprint_id ? 1 : 0;
+  });
+  return { running, ended };
+}
+function workCount(view) {
+  const sprints = collectSprints(view).running;
+  const projects = new Set(sprints.map((one) => one.entry.project_id)).size;
+  if (sprints.length === 0) return "";
+  return sprints.length + (sprints.length === 1 ? " sprint" : " sprints") + " across " + projects
     + (projects === 1 ? " project" : " projects");
+}
+function closingReport(sprint) {
+  const box = el("div", "closing-report");
+  const closing = sprint.closing;
+  if (closing === null || typeof closing !== "object") {
+    box.appendChild(el("p", "closing-none", "No closing report."));
+    return box;
+  }
+  if (typeof closing.summary === "string") box.appendChild(el("p", "closing-summary", closing.summary));
+  if (typeof closing.differently === "string" && closing.differently !== "") {
+    box.appendChild(el("p", "differently", "Would do differently: " + closing.differently));
+  }
+  if (typeof closing.counts_text === "string") box.appendChild(el("p", "closing-counts", closing.counts_text));
+  return box;
+}
+function finishedLine(sprint) {
+  const item = el("li", "finished-line");
+  item.dataset.sprintId = sprint.sprint_id;
+  const fold = el("details");
+  fold.dataset.key = "ended:" + sprint.sprint_id;
+  const summary = el("summary");
+  summary.appendChild(el("span", "title-line", sprint.title));
+  const closing = sprint.closing;
+  const counted = closing !== null && typeof closing === "object" && typeof closing.counts_text === "string";
+  summary.appendChild(el("span", "outcome", counted ? closing.counts_text : sprint.state_text));
+  summary.appendChild(phrase("span", "ended", "ended ", timeEl("ago", sprint.ended_at, "")));
+  fold.appendChild(summary);
+  fold.appendChild(closingReport(sprint));
+  fold.appendChild(el("div", "finished-messages"));
+  item.appendChild(fold);
+  return item;
+}
+function finishedList(ended) {
+  const fold = el("details", "finished-list");
+  fold.dataset.key = "finished";
+  fold.appendChild(el("summary", "", "Finished sprints (" + ended.length + ")"));
+  const list = el("ul");
+  for (const sprint of ended) list.appendChild(finishedLine(sprint));
+  fold.appendChild(list);
+  return fold;
 }
 function renderProjects(view) {
   sprintRedraw += 1;
@@ -3063,23 +3068,18 @@ function drawProjects(view) {
     section.appendChild(el("p", "empty", "No project is registered yet."));
     return;
   }
+  const { running, ended } = collectSprints(view);
   const list = el("ul");
   list.id = "list";
   const live = new Set();
   const retryable = new Set();
   const stoppable = new Set();
-  for (const entry of view.entries) {
-    for (const project of entry.type === "quiet_group" ? entry.projects : [entry]) {
-      const finished = project.finished_sprints;
-      const shown = (project.sprints || []).concat(
-        finished !== null && finished !== undefined && Array.isArray(finished.sprints) ? finished.sprints : []);
-      for (const sprint of shown) {
-        live.add(sprint.sprint_id);
-        if (sprint.retry === true) retryable.add(sprint.sprint_id);
-        if (sprint.stoppable === true) stoppable.add(sprint.sprint_id);
-      }
-    }
+  for (const { sprint } of running) {
+    live.add(sprint.sprint_id);
+    if (sprint.retry === true) retryable.add(sprint.sprint_id);
+    if (sprint.stoppable === true) stoppable.add(sprint.sprint_id);
   }
+  for (const sprint of ended) live.add(sprint.sprint_id);
   for (const id of [...retries.keys()]) {
     if (!retryable.has(id)) retries.delete(id);
   }
@@ -3101,6 +3101,15 @@ function drawProjects(view) {
   for (const id of [...tellOpen]) {
     if (!live.has(id)) tellOpen.delete(id);
   }
+  if (running.length > 0) {
+    const blocks = el("ul", "sprint-blocks");
+    for (const { entry, sprint } of running) {
+      const item = el("li", "sprint");
+      fillSprint(item, entry, sprint);
+      blocks.appendChild(item);
+    }
+    section.appendChild(blocks);
+  }
   for (const entry of view.entries) {
     if (entry.type === "quiet_group") {
       const fold = el("details", "quietfold");
@@ -3120,6 +3129,7 @@ function drawProjects(view) {
     }
   }
   section.appendChild(list);
+  if (ended.length > 0) section.appendChild(finishedList(ended));
   if (heldTell !== null) {
     const again = Array.from(document.querySelectorAll("textarea.tell"))
       .find((area) => area.dataset.tell === heldTell.id);
