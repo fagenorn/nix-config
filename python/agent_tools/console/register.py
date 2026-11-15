@@ -458,7 +458,7 @@ def summary(root: str, plan: Mapping, report: Mapping | None = None,
                         f"{name} is registered as {report.get('project_id')}.", [], None)
         if report is None:
             return _row(root, project_id, "not_registered", outcome, waiting_headline(name), [],
-                        CONFIRM_NOTE)
+                        CONFIRM_NOTE, answered=_answered(plan))
         result = _collapse(report.get("result"))
         return _row(root, project_id, "not_registered", outcome,
                     _sentence(f"{name} was not registered: {result}"), [],

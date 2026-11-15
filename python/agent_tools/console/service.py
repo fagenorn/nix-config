@@ -2985,7 +2985,8 @@ class ConsoleService:
                 self._grant_trust("register", root, project)
             except Exception as error:
                 print(f"console: trust_grant_failed {type(error).__name__}", file=sys.stderr)
-            self._run_registration(root, entries, confirmed=True)
+            self._run_registration(root, entries, confirmed=True,
+                                   answers=latest["answered"], draft=latest["draft"])
 
         try:
             self._dispatch(run)
@@ -3004,7 +3005,13 @@ class ConsoleService:
             raise sprints.Refused(register.NOT_WAITING)
         return latest
 
-    def _run_registration(self, root: str, entries: list[dict], *, confirmed: bool = False) -> None:
+    def _run_registration(self, root: str, entries: list[dict], *, confirmed: bool = False,
+                          answers: list[dict] | None = None, draft: list[dict] | None = None) -> None:
+        """Plan and, when confirmed, register; a confirmed run plans with the waiting row's answers.
+
+        The Register card can follow an answer run, and a plan without those answers goes back to
+        `reconcile` (a `retain` answer adds no operation), so `register` would never run.
+        """
         verb = "plan"
         try:
             if not os.path.lexists(os.path.join(root, ".agents/project.json")):
@@ -3012,7 +3019,8 @@ class ConsoleService:
                 fields = contract_draft.draft(root, reading, entries=entries)
                 payload = self._plan_draft(root, fields, [])
             else:
-                plan = self._adopter.plan(root, cancel=self._stop)
+                plan = (self._plan_with(root, draft, answers) if answers or draft
+                        else self._adopter.plan(root, cancel=self._stop))
                 report = None
                 if confirmed and plan.get("plan", {}).get("outcome") == "no_change":
                     verb = "register"

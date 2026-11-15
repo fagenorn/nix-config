@@ -577,6 +577,29 @@ class RegisterTrustTest(Case):
         (_, row), = self.rows("registration.ended")[-1:]
         self.assertEqual(row["result"], "registered")
 
+    def test_register_it_after_an_answer_run_plans_with_the_answers_and_registers(self):
+        nothing = {**NO_CHANGE, "decisions": {"open": [], "recommended": [], "answered": [A1]}}
+
+        class Answered(Fake):
+            def plan(self, root, cancel=None, answers=(), contract=None):
+                super().plan(root, cancel, answers, contract)
+                return nothing if answers else DRAFT
+
+        self.svc.close()
+        fake = Answered(report={"registered": True, "project_id": "o/r"})
+        self.begin(fake)
+        self.assertEqual(self.post({"path": str(self.repo)})[0], 204)
+        self.wait_done(self.repo)
+        self.assertEqual(self.answer(answer_of(PID_A, A1))[0], 204)
+        shown = self.wait_for(lambda r: r["status"] == "done" and r["outcome"] == "no_change")
+        self.assertEqual(shown["note"], register.CONFIRM_NOTE)
+        self.assertEqual(self.confirm({"root": str(self.repo), "choice": "register"})[0], 204)
+        self.assertEqual(fake.answers, [[], [A1], [A1]])
+        self.assertEqual([c for c in fake.calls if c[0] == "register"],
+                         [("register", str(self.repo))])
+        (_, row), = self.rows("registration.ended")[-1:]
+        self.assertEqual(row["result"], "registered")
+
     def test_not_now_writes_no_trust_and_removes_the_card(self):
         self.waiting()
         before = self.contents()
