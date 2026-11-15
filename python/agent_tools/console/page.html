@@ -82,6 +82,8 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .card { padding: 0 0 18px; }
 .card.lead { background: var(--s0); border: 1px solid var(--hair); border-radius: 16px; padding: 22px 32px 20px; margin: 0 -32px; box-shadow: 0 28px 48px -30px rgba(8, 9, 16, .9), 0 3px 8px -3px rgba(8, 9, 16, .45); }
 .card .q { margin-top: 10px; font: 600 1.5rem/1.3 var(--display); letter-spacing: -.012em; text-wrap: balance; }
+.card .q.reg { font-size: 1.25rem; }
+.rest .q.reg { margin: 6px 0 0; font: 600 1rem/1.4 var(--display); letter-spacing: -.012em; text-wrap: balance; }
 .more { font-size: .8125rem; color: var(--ov2); }
 .card .more { display: block; margin-top: 4px; }
 .card .context { margin-top: 8px; font-size: .9375rem; line-height: 1.5; color: var(--sub0); overflow-wrap: anywhere; }
@@ -119,6 +121,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .done-item { flex: 1 0 100%; min-width: 0; }
 .keys { margin-top: 18px; display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: .8125rem; color: var(--ov2); }
 .keys span { display: inline-flex; align-items: center; gap: 6px; }
+.row-head .keys { flex-basis: 100%; margin-top: 6px; }
 .done-item summary, .check-more summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; cursor: pointer; list-style: none; padding: 4px 12px; margin: 0 -12px; border-radius: 10px; font-size: .875rem; color: var(--ov2); transition: background-color .16s; }
 .done-item summary { flex-wrap: nowrap; }
 .done-item summary > b { flex: 0 1000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -323,7 +326,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .register-adoption { margin-top: 8px; }
 .register-adoption-lines { padding-left: 1.2em; color: var(--sub0); }
 .register-pr-link { color: var(--blue); }
-.card .q.reg, .row-head b.reg { white-space: pre-line; }
+.card .q.reg, .rest .q.reg { white-space: pre-line; }
 .s-working { color: var(--green); }
 .s-waiting_answer, .s-waiting_permission { color: var(--yellow); }
 .s-limit { color: var(--red); }
@@ -343,6 +346,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
   .statement .sub { font-size: 1rem; }
 }
 @media (max-width: 480px) {
+  .card .q.reg, .rest .q.reg { font-size: 1rem; }
   .desk-grid { padding: 24px 16px 48px; }
   .statement h1 { font-size: 2rem; }
   .top-in { flex-wrap: wrap; }
@@ -1942,6 +1946,7 @@ const drafts = new Map();
 let fields = new Map();
 let lastView = null;
 let currentId = null;
+let keyHint = null;
 function itemId(item) {
   return item.project_id + "#" + item.key;
 }
@@ -2039,7 +2044,7 @@ function currentEntry(open) {
     if (choosable(state)) return { item, state };
   }
   for (const item of open) {
-    if (!decision(item)) continue;
+    if (!decision(item) && !textCard(item)) continue;
     const state = answerState(item);
     if (choosable(state)) return { item, state };
   }
@@ -2402,7 +2407,6 @@ function approveLine(item, state, lead) {
     nodes.push(el("span", "", "A newer brief replaced version " + old + "; nothing was approved."));
   }
   const approve = actionButton(lead ? "approve primary needs" : "approve", "Approve", () => { if (startApproval(item, state)) redraw(); });
-  if (itemId(item) === currentId) approve.appendChild(el("kbd", "", "Enter"));
   nodes.push(approve);
   return nodes;
 }
@@ -2474,7 +2478,6 @@ function actionLine(item, state, lead) {
   const act = el("div", "act");
   if (!statusLine(act, state, item) && (item.questions.length > 0 || !textCard(item))) {
     const send = actionButton(lead ? "send primary needs" : "send", "Send answer", () => { if (start(item, state)) redraw(); });
-    if (itemId(item) === currentId) send.appendChild(el("kbd", "", "Enter"));
     if (!picksComplete(item, state) || planBusy(item, state)) send.setAttribute("disabled", "");
     act.appendChild(send);
   }
@@ -2502,14 +2505,15 @@ function draftField(field, key, onInput) {
   fields.set(key, field);
   return field;
 }
-function typedArea(cls, label) {
+function typedArea(cls, label, placeholder) {
   const area = document.createElement("textarea");
   area.className = cls;
   area.setAttribute("aria-label", label);
+  area.setAttribute("placeholder", placeholder);
   return area;
 }
 function noteBox(item, state, box) {
-  const area = typedArea("note-text", "Note");
+  const area = typedArea("note-text", "Note", "Write a note");
   const send = actionButton("ans-note", "Send note", () => {
     const text = area.value;
     if (text.trim() === "") return;
@@ -2520,7 +2524,7 @@ function noteBox(item, state, box) {
   return send;
 }
 function wordsBox(item, state, box) {
-  const area = typedArea("words-text", "Answer in your own words");
+  const area = typedArea("words-text", "Answer in your own words", "Answer in your own words");
   const send = actionButton("ans-words", "Send my words", () => {
     const text = area.value;
     if (text.trim() === "") return;
@@ -2533,16 +2537,17 @@ function wordsBox(item, state, box) {
   send.disabled = pending || area.value.trim() === "";
   box.appendChild(send);
 }
-function draftInput(cls) {
+function draftInput(cls, placeholder) {
   const input = el("input", cls);
   input.type = "text";
   input.autocomplete = "off";
   input.spellcheck = false;
   input.setAttribute("aria-label", "Your answer");
+  input.setAttribute("placeholder", placeholder);
   return input;
 }
 function draftBox(item, state, box) {
-  const input = draftInput("draft-text");
+  const input = draftInput("draft-text", typeof item.placeholder === "string" && item.placeholder !== "" ? item.placeholder : "Type your answer");
   const row = el("div", "draft-row");
   // The pending answer carries the text it was sent with, so the field is read-only until it is undone or settled.
   const pending = !choosable(state) || planBusy(item, state);
@@ -2687,19 +2692,25 @@ function leadItem(item) {
 }
 function itemLine(item) {
   const line = el("li", "row");
-  const head = el("p", "row-head");
-  head.appendChild(kindWords(item));
-  const label = checkLabel(item);
-  if (label !== null) head.appendChild(label);
-  head.appendChild(el("b", isRegister(item) ? "reg" : "", item.headline));
-  const lm = phrase("span", "lm", isRegister(item) ? item.title : item.project_id + " \u00b7 " + (isQuestion(item) ? item.title : holds(item)));
-  if (item.stale) {
-    lm.appendChild(el("span", "", " \u00b7 "));
-    lm.appendChild(phrase("span", "read-at", "read ", timeEl("ago", item.read_at, "")));
+  if (isRegister(item)) {
+    // A register row reads like its lead card: title, then the ask (ADR-console-030 D5).
+    line.appendChild(headLine(item));
+    line.appendChild(el("p", "q reg", item.headline));
+  } else {
+    const head = el("p", "row-head");
+    head.appendChild(kindWords(item));
+    const label = checkLabel(item);
+    if (label !== null) head.appendChild(label);
+    head.appendChild(el("b", "", item.headline));
+    const lm = phrase("span", "lm", item.project_id + " \u00b7 " + (isQuestion(item) ? item.title : holds(item)));
+    if (item.stale) {
+      lm.appendChild(el("span", "", " \u00b7 "));
+      lm.appendChild(phrase("span", "read-at", "read ", timeEl("ago", item.read_at, "")));
+    }
+    head.appendChild(lm);
+    head.appendChild(phrase("span", "lw", "waiting ", timeEl("since", item.waiting_since, "")));
+    line.appendChild(head);
   }
-  head.appendChild(lm);
-  head.appendChild(phrase("span", "lw", "waiting ", timeEl("since", item.waiting_since, "")));
-  line.appendChild(head);
   if (isQuestion(item) && typeof item.context === "string") line.appendChild(el("p", "context", item.context));
   const more = moreWords(item);
   if (more !== null) line.appendChild(more);
@@ -2756,9 +2767,13 @@ function keyStrip(current, open) {
     if (current.state.reply.phase !== "sending") entry([el("kbd", "", "Enter")], " approve");
   } else if (current !== null) {
     const questions = current.item.questions;
-    const n = Math.min(9, questions[Math.min(current.state.q, questions.length - 1)].options.length);
-    entry(n > 1 ? [el("kbd", "", "1"), el("span", "", "\u2013"), el("kbd", "", String(n))] : [el("kbd", "", "1")], " choose");
-    if (picksComplete(current.item, current.state)) entry([el("kbd", "", "Enter")], " send answer");
+    if (questions.length > 0) {
+      const n = Math.min(9, questions[Math.min(current.state.q, questions.length - 1)].options.length);
+      entry(n > 1 ? [el("kbd", "", "1"), el("span", "", "\u2013"), el("kbd", "", String(n))] : [el("kbd", "", "1")], " choose");
+    }
+    if (textCard(current.item)) {
+      entry([el("kbd", "", "Enter")], questions.length > 0 ? " sends your choice or what you typed" : " sends what you typed");
+    } else if (picksComplete(current.item, current.state)) entry([el("kbd", "", "Enter")], " send answer");
   }
   if (open.some((item) => { const s = answers.get(stateId(item)); return s !== undefined && s.phase === "waiting"; })) {
     entry([el("kbd", "", "Esc")], " undo");
@@ -2871,16 +2886,27 @@ function renderInbox(view) {
   }
   const current = currentEntry(open);
   currentId = current === null ? null : itemId(current.item);
+  // The element that holds each open item's card, so the key hint lands on the card it acts on.
+  const cardOf = new Map();
   placeBriefCards(section, briefs);
+  for (const item of briefs) cardOf.set(stateId(item), briefRecord(item.sprint_id));
   for (const item of stalls) section.appendChild(stallCard(item));
   for (const item of progress) section.appendChild(progressCard(item));
   for (const item of signins) section.appendChild(signinCard(item));
   for (const item of open.filter(isAdoption)) section.appendChild(adoptionCard(item));
-  if (briefs.length === 0 && tracked.length > 0) section.appendChild(leadItem(tracked[0]));
+  if (briefs.length === 0 && tracked.length > 0) {
+    const lead = leadItem(tracked[0]);
+    cardOf.set(stateId(tracked[0]), lead);
+    section.appendChild(lead);
+  }
   const rows = briefs.length === 0 ? tracked.slice(1) : tracked;
   if (rows.length > 0) {
     const rest = el("ul", "rest");
-    for (const item of rows) rest.appendChild(itemLine(item));
+    for (const item of rows) {
+      const line = itemLine(item);
+      cardOf.set(stateId(item), line);
+      rest.appendChild(line);
+    }
     section.appendChild(rest);
   }
   const answered = view.inbox.answered;
@@ -2889,10 +2915,22 @@ function renderInbox(view) {
     for (const item of answered) done.appendChild(answeredLine(item));
     section.appendChild(done);
   }
-  const strip = keyStrip(current, open);
-  if (strip !== null) section.appendChild(strip);
   for (const fold of document.querySelectorAll("#inbox details")) {
     if (wasOpen.has(fold.dataset.key)) fold.open = true;
+  }
+  // The one key hint sits on the current card (else on the first waiting one); a brief card outlives a render, so the last hint is removed first.
+  if (keyHint !== null) keyHint.remove();
+  keyHint = null;
+  const strip = keyStrip(current, open);
+  if (strip !== null) {
+    const owner = current !== null ? current.item : open.find((item) => { const s = answers.get(stateId(item)); return s !== undefined && s.phase === "waiting"; });
+    const host = owner === undefined ? undefined : cardOf.get(stateId(owner));
+    if (host !== undefined) {
+      // A brief after the first sits in a closed row: its hint goes on the row's summary, which always shows.
+      const folded = host.card !== undefined && host.card.parentNode === host.row && !host.row.open;
+      (folded ? host.rowHead : host.card !== undefined ? host.card : host).appendChild(strip);
+      keyHint = strip;
+    }
   }
   const again = held === null ? undefined : fields.get(held.key);
   if (again !== undefined) {
@@ -3458,7 +3496,7 @@ async function postChange(registration, change, value) {
 function changeBox(registration, entry, change) {
   const box = el("div", "draft-edit-box");
   const key = draftKey(entry.field);
-  const input = entry.text === true ? draftInput("draft-text draft-edit") : null;
+  const input = entry.text === true ? draftInput("draft-text draft-edit", "Type the new value") : null;
   const submit = () => {
     const value = change.choice !== null ? change.choice : input.value.trim();
     if (!send.disabled) postChange(registration, change, value);
@@ -3793,12 +3831,30 @@ document.addEventListener("keydown", (event) => {
   if (current === null) return;
   const { item, state } = current;
   if (event.key === "Enter") {
-    if (isBrief(item) ? startApproval(item, state) : start(item, state)) {
+    if (textCard(item)) {
+      const key = itemId(item) + "\ndraft";
+      const typed = draftOf(key).value.trim();
+      if (typed !== "") {
+        if (startDraft(item, state, typed)) {
+          event.preventDefault();
+          redraw();
+        }
+      } else if (item.questions.length > 0 && picksComplete(item, state)) {
+        if (start(item, state)) {
+          event.preventDefault();
+          redraw();
+        }
+      } else {
+        const field = fields.get(key);
+        if (field !== undefined) field.focus();
+        event.preventDefault();
+      }
+    } else if (isBrief(item) ? startApproval(item, state) : start(item, state)) {
       event.preventDefault();
       redraw();
     }
   } else if (/^[1-9]$/.test(event.key)) {
-    if (isBrief(item)) return;
+    if (isBrief(item) || item.questions.length === 0) return;
     const qi = Math.min(state.q, item.questions.length - 1);
     const oi = Number(event.key) - 1;
     if (oi >= item.questions[qi].options.length) return;

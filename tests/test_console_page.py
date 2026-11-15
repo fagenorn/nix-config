@@ -2184,12 +2184,12 @@ class PageInboxGlanceTest(unittest.TestCase):
 class PageCardTest(unittest.TestCase):
     def test_the_first_open_item_is_one_card_for_each_kind(self) -> None:
         cases = [
-            ([ANSWERABLE], "Decision", "owner/p00", "Which host?", "Send answer", True),
-            ([BRIEF], "Brief", "owner/p01", "owner/p01 brief, version 2", "Approve", True),
-            ([check_item("M", "manual-check")], "Check", "owner/p00", "Question M?", "Passed", False),
-            ([check_item("L", "approval")], "Approval", "owner/p00", "Question L?", "Approve", False),
+            ([ANSWERABLE], "Decision", "owner/p00", "Which host?", "Send answer"),
+            ([BRIEF], "Brief", "owner/p01", "owner/p01 brief, version 2", "Approve"),
+            ([check_item("M", "manual-check")], "Check", "owner/p00", "Question M?", "Passed"),
+            ([check_item("L", "approval")], "Approval", "owner/p00", "Question L?", "Approve"),
         ]
-        for open_items, word, project, heading, label, enter in cases:
+        for open_items, word, project, heading, label in cases:
             with self.subTest(kind=word):
                 (snap,) = render([START, {"frame": frame(open_items)}, {"snapshot": True}])
                 card = snap["inbox"]["children"][0]
@@ -2208,8 +2208,7 @@ class PageCardTest(unittest.TestCase):
                 self.assertEqual(len(primaries), 1)
                 self.assertEqual(primaries[0]["tag"], "button")
                 self.assertEqual(primaries[0]["text"], label)
-                self.assertEqual([full(c) for c in primaries[0]["children"] if c["tag"] == "kbd"],
-                                 ["Enter"] if enter else [])
+                self.assertEqual([c for c in primaries[0]["children"] if c["tag"] == "kbd"], [])
 
     def test_the_lead_card_holds_its_held_work_under_the_options_and_its_link_under_detail(self) -> None:
         lead = item("A", held_work=3, headline="Which host?", questions=ANSWERABLE["questions"])
@@ -2245,8 +2244,7 @@ class PageCardTest(unittest.TestCase):
         self.assertEqual([n for n in nodes(card) if n["key"] == "detail:owner/p00#K"], [])
         entered = [n for n in nodes(snap["inbox"]) if n["tag"] == "button"
                    and any(c["tag"] == "kbd" and full(c) == "Enter" for c in n["children"])]
-        self.assertEqual([n["text"] for n in entered], ["Send answer"])
-        self.assertFalse(has_class(entered[0], "primary"))
+        self.assertEqual(entered, [])
 
     def test_with_a_brief_waiting_the_brief_is_the_one_raised_card(self) -> None:
         (snap,) = render([START, {"frame": frame([BRIEF, ANSWERABLE])}, {"snapshot": True}])
@@ -4652,7 +4650,9 @@ class PageKeyStripTest(unittest.TestCase):
                     self.assertEqual(strips, [])
                     continue
                 (strip,) = strips
-                self.assertIs(snap["inbox"]["children"][-1], strip)
+                holders = [n for n in nodes(snap["inbox"]) if has_class(n, "card") or has_class(n, "row")]
+                self.assertTrue([h for h in holders if id(strip) in {id(n) for n in nodes(h)}])
+                self.assertIsNot(snap["inbox"]["children"][-1], strip)
                 self.assertEqual([n["text"] for n in nodes(strip) if n["tag"] == "kbd"], expected)
                 for word in words:
                     self.assertIn(word, full(strip))
@@ -7154,7 +7154,8 @@ class DraftedContractPageTest(unittest.TestCase):
             {"respond": {"status": 204, "text": ""}}, {"click": "ans-draft"},
             {"clock": 5000}, {"snapshot": True}])
         (field,) = [n for n in nodes(empty["inbox"]) if has_class(n, "draft-text")]
-        self.assertEqual((field["tag"], field["label"]), ("input", "Your answer"))
+        self.assertEqual((field["tag"], field["label"], field["placeholder"]),
+                         ("input", "Your answer", "Type your answer"))
         (send,) = [n for n in nodes(empty["inbox"]) if has_class(n, "ans-draft")]
         self.assertEqual(full(send), "Send")
         self.assertTrue(send["disabled"])
@@ -7566,6 +7567,159 @@ class RegisterCardPageTest(unittest.TestCase):
         self.assertIn(text, full(row))
         self.assertNotIn("null", full(row))
         self.assertEqual([n for n in nodes(row) if n.get("href")], [])
+
+
+T0P = {**T0, "placeholder": "owner/name"}
+T_BRANCH = register_item(3, {
+    "id": "contract-draft", "subject": "default-branch",
+    "ask": "Which branch is the default branch of r?\nIt has no remote, so the console cannot tell: "
+           "choose a branch or type its name.",
+    "options": [{"value": "trunk", "label": "trunk"}], "recommended": None, "why": None},
+    text=True, placeholder="a branch name")
+
+
+def keys_of(snap: dict) -> list:
+    return [n for n in nodes(snap["inbox"]) if has_class(n, "keys")]
+
+
+class RegisterCardKeysPageTest(unittest.TestCase):
+    def test_every_card_text_field_has_a_placeholder(self) -> None:
+        items = [T0P, T_BRANCH]
+        self.assertEqual(len({i["key"] for i in items}), len(items))
+        registers, managers, checks = render([
+            START, {"frame": cards(items)}, {"snapshot": True},
+            {"frame": frame([Q0, Q1])}, {"snapshot": True},
+            {"frame": frame([check_item("M", "manual-check", answers=["passed", "failed", "note"])])},
+            {"snapshot": True}])
+        for snap in (registers, managers, checks):
+            fields = [n for n in nodes(snap["inbox"]) if n["tag"] in ("input", "textarea")]
+            self.assertTrue(fields)
+            for field in fields:
+                if not has_class(field, "confirm-text"):
+                    self.assertTrue(field["placeholder"], field["cls"])
+        self.assertEqual([n["placeholder"] for n in nodes(registers["inbox"]) if has_class(n, "draft-text")],
+                         ["owner/name", "a branch name"])
+        self.assertEqual([n["placeholder"] for n in nodes(managers["inbox"]) if has_class(n, "words-text")],
+                         ["Answer in your own words"] * 2)
+        self.assertEqual([n["placeholder"] for n in nodes(checks["inbox"]) if has_class(n, "note-text")],
+                         ["Write a note"])
+        (bare,) = [n for n in nodes(render([START, {"frame": cards([T0])}, {"snapshot": True}])[-1]["inbox"])
+                   if has_class(n, "draft-text")]
+        self.assertEqual(bare["placeholder"], "Type your answer")
+
+    def test_enter_on_a_text_card_sends_the_typed_value(self) -> None:
+        first, second = render([
+            START, {"frame": cards([T0P])}, {"key": "Enter"}, {"snapshot": True},
+            {"type": {"class": "draft-text", "text": "sample-owner/sample-app"}},
+            {"blur_on": "draft-text"}, {"respond": {"status": 204, "text": ""}}, {"key": "Enter"},
+            {"clock": 5000}, {"snapshot": True}])
+        self.assertEqual(first["posts"], [])
+        self.assertEqual(first["field"]["cls"], "draft-text")
+        (post,) = second["posts"]
+        self.assertEqual(post["url"], "/api/plan-answer")
+        self.assertEqual(posted(post), {"plan_id": PLAN_A, "id": "contract-draft",
+                                        "subject": "project-id", "value": "sample-owner/sample-app"})
+
+    def test_exactly_one_key_hint_sits_on_the_current_card(self) -> None:
+        items = [T0P, R0]
+        self.assertEqual(len({i["key"] for i in items}), len(items))
+        (snap,) = render([START, {"frame": cards(items)}, {"snapshot": True}])
+        (strip,) = keys_of(snap)
+        (lead,) = [n for n in nodes(snap["inbox"]) if has_class(n, "lead")]
+        self.assertIn(id(strip), {id(n) for n in nodes(lead)})
+        self.assertIn("sends what you typed", full(strip))
+        enters = [n for n in nodes(snap["inbox"]) if n["tag"] == "button"
+                  and any(c["tag"] == "kbd" and full(c) == "Enter" for c in n["children"])]
+        self.assertEqual(enters, [])
+        self.assertIsNot(snap["inbox"]["children"][-1], strip)
+
+    def test_digits_on_a_text_card_without_options_do_nothing(self) -> None:
+        (snap,) = render([START, {"frame": cards([T0P])}, {"key": "1"}, {"key": "Enter"},
+                          {"snapshot": True}])
+        self.assertEqual(snap["posts"], [])
+
+    def test_every_register_card_reads_title_ask_options_hint_in_order(self) -> None:
+        items = [R0, T_BRANCH]
+        self.assertEqual(len({i["key"] for i in items}), len(items))
+        (snap,) = render([START, {"frame": cards(items)}, {"snapshot": True}])
+        (lead,) = [n for n in nodes(snap["inbox"]) if has_class(n, "lead")]
+        (row,) = [n for n in nodes(snap["inbox"]) if n["tag"] == "li" and has_class(n, "row")]
+        for name, card, hint in (("lead", lead, True), ("row", row, False)):
+            with self.subTest(card=name):
+                order = nodes(card)
+
+                def at(test) -> int:
+                    return next(i for i, n in enumerate(order) if test(n))
+                title = at(lambda n: has_class(n, "sprint-title"))
+                ask = at(lambda n: has_class(n, "q") and has_class(n, "reg"))
+                field = at(lambda n: has_class(n, "opt") or has_class(n, "draft-text"))
+                found = [title, ask, field]
+                if hint:
+                    found.append(at(lambda n: has_class(n, "keys")))
+                self.assertEqual(found, sorted(set(found)))
+                self.assertEqual(full(order[title]), "Register r")
+
+    def test_register_asks_are_set_small_enough_to_read_at_480(self) -> None:
+        (style,) = re.findall(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"))
+        small = [d for s, d in style_rules(media_block(style, "(max-width: 480px)")) if s == ".card .q.reg"]
+        self.assertTrue(small)
+        self.assertLessEqual(float(small[-1]["font-size"].removesuffix("rem")), 1.0)
+        top = re.sub(r"(?s)@media[^{]*\{.*?\}\s*\}", "", style)
+        self.assertEqual([d["font-size"] for s, d in style_rules(top) if s == ".card .q.reg" and "font-size" in d],
+                         ["1.25rem"])
+        self.assertTrue([d for s, d in style_rules(top) if s == ".rest .q.reg" and d.get("font", "").startswith("600 1rem/1.4 ")])
+
+    def test_at_480_a_typical_ask_takes_at_most_three_lines(self) -> None:
+        try:
+            from playwright.sync_api import Error, sync_playwright
+        except ImportError:
+            self.skipTest("playwright is not installed")
+        fakes = (
+            "window.EventSource = class { constructor() { window.__src = this; this.l = {}; }"
+            " addEventListener(name, fn) { this.l[name] = fn; } close() {} };"
+            "window.fetch = () => Promise.resolve(new Response(null, {status: 204}));")
+        measure = """() => {
+          const el = document.querySelector('.card.lead .q.reg');
+          return el.getBoundingClientRect().height / parseFloat(getComputedStyle(el).lineHeight);
+        }"""
+        html = PAGE.read_text(encoding="utf-8").replace("__CONSOLE_TOKEN__", "t")
+        with sync_playwright() as pw:
+            try:
+                browser = pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+            except Error as err:
+                self.skipTest(f"no Chromium to launch: {err}")
+            try:
+                page = browser.new_page(viewport={"width": 480, "height": 900})
+                page.add_init_script(fakes)
+                page.route("http://console.test/", lambda route: route.fulfill(
+                    body=html, content_type="text/html"))
+                page.goto("http://console.test/")
+                page.evaluate("(f) => window.__src.l.view({data: JSON.stringify(f)})", cards([T_BRANCH]))
+                lines = page.evaluate(measure)
+            finally:
+                browser.close()
+        self.assertLessEqual(round(lines), 3)
+
+    def test_a_repeated_frame_leaves_one_key_hint(self) -> None:
+        (snap,) = render([START, {"frame": frame([BRIEF])}, {"frame": frame([BRIEF])},
+                          {"frame": frame([BRIEF])}, {"snapshot": True}])
+        (strip,) = keys_of(snap)
+        (card,) = [n for n in nodes(snap["inbox"]) if has_class(n, "brief") and has_class(n, "lead")]
+        self.assertIn(id(strip), {id(n) for n in nodes(card)})
+        self.assertEqual([n["text"] for n in nodes(strip) if n["tag"] == "kbd"], ["Enter"])
+
+    def test_when_the_first_brief_waits_the_hint_moves_to_the_next_brief(self) -> None:
+        (snap,) = render([START, {"frame": frame([BRIEF, BRIEF_B])}, {"key": "Enter"},
+                          {"snapshot": True}])
+        (strip,) = keys_of(snap)
+        self.assertIn(id(strip), {id(n) for n in visible(snap["inbox"])})
+        (row,) = [n for n in nodes(snap["inbox"]) if n["tag"] == "details" and n["key"] == KEY_B]
+        (summary,) = [c for c in row["children"] if c["tag"] == "summary"]
+        self.assertIn(id(strip), {id(n) for n in nodes(summary)})
+        self.assertEqual([n["text"] for n in nodes(strip) if n["tag"] == "kbd"][0], "Enter")
+        self.assertIn("approve", full(strip))
+        (lead,) = [n for n in nodes(snap["inbox"]) if has_class(n, "brief") and has_class(n, "lead")]
+        self.assertNotIn(id(strip), {id(n) for n in nodes(lead)})
 
 
 class RegisterRetryPageTest(unittest.TestCase):
