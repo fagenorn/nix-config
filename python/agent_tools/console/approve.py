@@ -244,6 +244,8 @@ LEGACY_WORDS = (
      "choose Apply it again.", RETAINED_NOTE),
     ("Switch this computer to its current configuration to install them, then choose Apply it "
      "again.", MANIFEST_NOTE),
+    ("Switch this computer to its current configuration to install them, then choose Retry.",
+     register.MANIFEST_STEP.removesuffix(register.AGAIN) + RETRY_AGAIN),
 )
 NOT_INTEGRATED = "adopt.registration.not_integrated"
 UNCHECKED = "the adoption on the remote did not pass the registration's checks"
@@ -432,7 +434,7 @@ def retry_entries(adoptions: Mapping[str, Mapping],
             "key": f"register-retry/{found['plan_id']}/{registration['at']}",
             "project_id": None, "root": found["root"], "name": name,
             "title": f"Register {name}", "plan_id": found["plan_id"], "id": None,
-            "subject": None, "headline": headline, "why": registration["note"],
+            "subject": None, "headline": headline, "why": current_note(registration["note"]),
             "refusal": None, "more_questions": 0,
             "questions": [{"question": headline, "options": [RETRY_OPTION], "chosen": None,
                            "recommended": None, "recommended_index": None}],
@@ -701,7 +703,8 @@ def entry(adoption: Mapping | None, *, running: bool, name: str,
             elif result == "registered":
                 headline = registered_line(name, registration["project_id"])
             elif result == "refused":
-                headline = refused_line(name, registration["reason"], registration["note"])
+                headline = refused_line(name, registration["reason"],
+                                         current_note(registration["note"]))
             else:
                 headline = waiting_line(name, adoption["base"])
         elif state == "closed":

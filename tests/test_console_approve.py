@@ -777,6 +777,22 @@ class RetryEntryTest(unittest.TestCase):
         self.assertEqual([i["plan_id"] for i in approve.retry_entries(found, running={"p1"})],
                          ["p0"])
 
+    def test_a_stored_retry_note_in_the_old_manifest_words_reads_in_the_new_words(self):
+        old = ("Switch this computer to its current configuration to install them, then choose "
+               "Retry.")
+        new = "Run just switch on this computer to install them, then choose Retry."
+        events = [step_event(1, "a", plan_id="p1", root="/srv/r", project_id=None),
+                  pull_event(2, "b", "p1", 7, "merged"),
+                  registration_event(3, "t5", plan_id="p1", result="refused", project_id=None,
+                                     reason="the agent platform's files are not installed on "
+                                            "this host", note=old)]
+        found = approve.adoptions(events)
+        self.assertEqual(approve.current_note(old), new)
+        self.assertEqual(approve.retry_entries(found)[0]["why"], new)
+        card = approve.entry(found["p1"], running=False, name="r")
+        self.assertTrue(card["headline"].endswith(" " + new), card["headline"])
+        self.assertEqual(found["p1"]["registration"]["note"], old)
+
 
 class ApplyItemTest(unittest.TestCase):
     LATEST = {"root": "/srv/sample-app", "plan_id": "p", "state": "ready",
