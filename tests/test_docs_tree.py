@@ -546,6 +546,29 @@ class DocsTreeTest(unittest.TestCase):
         self.assertNotIn("Each capacity strip entry carries a Remove control", adr26)
         self.assertIn("| Accounts panel | Console |", self.doc("docs/CONTEXT-MAP.md"))
 
+    def test_the_same_account_decision_is_recorded(self):
+        base = "docs/areas/console/adr/"
+        adr22 = self.doc(base + "022-a-profiles-sign-in-is-read-from-the-clients-status-command.md")
+        adr23 = self.doc(base + "023-a-new-sessions-profile-is-the-consoles-choice.md")
+        adr2 = self.doc(base + "002-the-desk-page-design-rules.md")
+        context = self.doc("docs/areas/console/CONTEXT.md")
+
+        def entry(term):
+            return context[context.index("**" + term + "**:"):].split("_Avoid_")[0]
+
+        for needle in ("#1036", "email", "`account`", "`account_seq`", "accounts panel"):
+            self.assertIn(needle, adr22)
+        self.assertNotIn("The address, organisation and plan the client also prints are dropped", adr22)
+        for needle in ("#1036", "same account", "counted once", "newest reading", "earlier account"):
+            self.assertIn(needle, adr23)
+        for needle in ("#1036", "dimmed", "same account as"):
+            self.assertIn(needle, adr2)
+        for needle in ("counted once", "dimmed"):
+            self.assertIn(needle, entry("Capacity strip"))
+        for needle in ("same account as", "ADR-console-023"):
+            self.assertIn(needle, entry("Sign-in state"))
+        self.assertIn("account it is signed in to", entry("Accounts panel"))
+
     def test_the_launch_choice_decision_is_recorded(self):
         path = "docs/areas/hosts/adr/008-claude-starts-under-the-consoles-profile-choice.md"
         first = (REPO_ROOT / path).read_text().splitlines()[0]

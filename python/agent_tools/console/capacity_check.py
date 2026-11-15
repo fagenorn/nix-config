@@ -1,6 +1,6 @@
 """`capacity_check`: the verify check that the console shows a capacity reading for an account in use (#860).
 
-`python -m agent_tools.console.capacity_check [--url URL] [--max-age SECONDS] [--every | --signin | --accounts | --page-signin | --page-add | --pin | --page-remove | --exclusion]` reads the console's
+`python -m agent_tools.console.capacity_check [--url URL] [--max-age SECONDS] [--every | --signin | --accounts | --page-signin | --page-add | --pin | --page-remove | --exclusion | --account-names]` reads the console's
 `/api/state` view (default `http://127.0.0.1:27184/api/state`; the URL must be `http` on a loopback
 host, `127.0.0.1` or `localhost`, else exit 2) and looks at `capacity.profiles[].read_at`.
 `--max-age` is a positive integer number of seconds (default 600).
@@ -118,6 +118,19 @@ names it and `profiles_dir() / P` does not exist (`os.path.lexists`), where `pro
 "met", "profiles": [<gone, sorted>]}`, exit 0; otherwise `{"status": "not_met", "profiles":
 [<removed, sorted>]}`, exit 1. It writes nothing, sends one GET at most and touches the accounts
 directory only to look for a name.
+
+`--account-names` (#1036, exclusive with the other modes, `--max-age` ignored) meets when every
+signed-in profile carries the name its client reports and the Sign in again action. It decides in
+this order, after the `not_running` and `not_deployed` answers above, one stdout line of sorted-key
+JSON. The rows are the `capacity.profiles` objects with a string `profile`; a row without an
+`account` member means the console predates the name: `{"status": "not_deployed"}`, exit 75. S is
+the rows whose `signin` is an object with `state` `signed_in`; an empty S is `{"status": "pending",
+"profiles": []}`, exit 75. The rows of S whose `account` is not a non-empty string or whose
+`signin.ever_signed_in` is not `true` are missing: any is `{"status": "pending", "profiles":
+[<missing names, row order>]}`, exit 75, because a signed-in profile gets its name at its next
+reading, within 10 minutes. Otherwise `{"status": "met", "profiles": <len S>, "accounts": <number
+of distinct accounts in S>}`, exit 0. It never exits 1 and prints no account string, because its
+stdout is posted on the tracker.
 
 A console that is down or predates this change is "not yet", never "not met", and only a reading
 newer than `--max-age` meets the check. A bad argument is exit 2. The check only reads: it sends one
@@ -358,6 +371,29 @@ def page_signin_verdict(body: bytes) -> tuple[int, dict]:
     return 1, {"status": "not_met", "profiles": signed_in}
 
 
+def account_names_verdict(body: bytes) -> tuple[int, dict]:
+    """Met when every signed-in row names its account and has `ever_signed_in`; prints no name."""
+    try:
+        document = json.loads(body)
+    except ValueError:
+        document = None
+    capacity = document.get("capacity") if isinstance(document, dict) else None
+    listed = capacity.get("profiles") if isinstance(capacity, dict) else None
+    rows = [row for row in listed if isinstance(row, dict) and isinstance(row.get("profile"), str)
+            ] if isinstance(listed, list) else []
+    if any("account" not in row for row in rows):
+        return NOT_YET, {"status": "not_deployed"}
+    signed_in = [row for row in rows
+                 if isinstance(row.get("signin"), dict) and row["signin"].get("state") == "signed_in"]
+    missing = [row["profile"] for row in signed_in
+               if not (isinstance(row["account"], str) and row["account"])
+               or row["signin"].get("ever_signed_in") is not True]
+    if not signed_in or missing:
+        return NOT_YET, {"status": "pending", "profiles": missing}
+    return 0, {"status": "met", "profiles": len(signed_in),
+               "accounts": len({row["account"] for row in signed_in})}
+
+
 def default_log() -> Path:
     """The console's event log: `state_root()/console/events.sqlite3`."""
     return agent_platform.state_root() / "console" / "events.sqlite3"
@@ -504,6 +540,9 @@ def build_parser() -> argparse.ArgumentParser:
                       help="require an account the owner added and removed from the page to be "
                            "gone from the console's view and the profiles directory, read from "
                            "the console's log")
+    mode.add_argument("--account-names", action="store_true",
+                      help="require every signed-in profile to carry the account name its client "
+                           "reports and the Sign in again action; prints no name")
     parser.add_argument("--log", type=Path, default=None,
                         help="the console event log for --page-add and --page-remove "
                              "(default: the console's own)")
@@ -545,7 +584,9 @@ def main(argv: list[str] | None = None) -> int:
         return NOT_YET
     if args.exclusion:
         return _exclusion(args.url, body)
-    if args.pin:
+    if args.account_names:
+        code, result = account_names_verdict(body)
+    elif args.pin:
         code, result = pin_verdict(body)
     elif args.page_signin:
         code, result = page_signin_verdict(body)

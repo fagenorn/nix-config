@@ -15,7 +15,8 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-from agent_tools.console import probe, service, signin, signin_run
+from agent_tools.console import capacity, probe, service, signin, signin_run
+from agent_tools.console.event_log import EventLog
 
 from . import console_test_support as support
 from .test_console_signin_run import CODE, FAKE, LINK, LINUX, until
@@ -196,6 +197,25 @@ class SigninWriteTest(Case):
                        "outcome": "cancelled"})
         self.assertEqual([payload for _, payload in self.acted_rows()], expected)
 
+    def test_a_signed_in_profile_that_does_not_ask_signs_in_again(self):
+        self.answers["work"] = signin.Status("signed_in", iso(NOW + 20 * 86400))
+        self.begin()
+        self.assertNotIn("signin/work", self.open_keys())
+        unguarded = {"Origin": self.own()["Origin"], "Content-Type": "application/json"}
+
+        refused = self.post(SIGNIN, headers=unguarded)
+        self.assertEqual((refused[0], refused[2]), (403, b"token refused\n"))
+        self.assertEqual(self.acted_rows(), [])
+        self.assertFalse(self.record.exists())
+
+        self.assertEqual(self.post(SIGNIN)[0], 200)
+        self.assertEqual(self.acted_rows()[-1][1],
+                         {"by": "owner", "profile": "work", "action": "start",
+                          "outcome": "started"})
+        self.assertEqual(len(self.invocations()), 1)
+        self.post(CANCEL)
+        self.wait_ended()
+
     def test_the_start_answers_the_link_and_a_pasted_code_reaches_the_client(self):
         self.begin()
         status, headers, body = self.post(SIGNIN)
@@ -366,6 +386,134 @@ class SigninRunServiceTest(Case):
         self.assertNotIn("signin/work", self.open_keys())
         self.assertEqual(self.view()["signin_runs"]["work"]["state"], "signed_in")
 
+    def test_a_sign_in_that_ends_on_another_account_records_the_new_account(self):
+        self.store.parent.mkdir(parents=True, exist_ok=True)
+        log = EventLog(self.store)
+        try:
+            seeded = log.append(capacity.report_entries(capacity.parse_report({
+                "http_status": 200, "status": "allowed", "reset": NOW + 86400, "binding": None,
+                "claim": None, "account": "acct-x", "session_id": None,
+                "windows": {"7d": {"status": "allowed", "utilization": 0.5,
+                                   "reset": NOW + 86400}}}), "work"))[0].seq
+        finally:
+            log.close()
+        self.answers["work"] = signin.Status("signed_in", iso(NOW + 30 * 86400),
+                                             "a@example.invalid")
+        self.begin()
+        before = self.reading_rows("work")
+        self.assertEqual((before[-1]["account"], before[-1]["account_seq"]),
+                         ("a@example.invalid", 0))
+
+        self.post(SIGNIN)
+        self.answers["work"] = signin.Status("signed_in", iso(NOW + 30 * 86400),
+                                             "b@example.invalid")
+        self.post(CODE_PATH)
+        ended = self.wait_ended()
+
+        after = self.reading_rows("work")
+        self.assertEqual(len(after), len(before) + 1)
+        self.assertEqual(after[-1], {"profile": "work", "state": "signed_in",
+                                     "ends_at": iso(NOW + 30 * 86400),
+                                     "account": "b@example.invalid", "account_seq": seeded,
+                                     "left_account": "a@example.invalid",
+                                     "left_reading": "acct-x"})
+        self.assertEqual(ended[0][1]["outcome"], "signed_in")
+
+    def test_a_request_under_the_new_account_before_the_status_read_is_not_the_left_one(self):
+        self.store.parent.mkdir(parents=True, exist_ok=True)
+        log = EventLog(self.store)
+        try:
+            def logged(account):
+                return log.append(capacity.report_entries(capacity.parse_report({
+                    "http_status": 200, "status": "allowed", "reset": NOW + 86400,
+                    "binding": None, "claim": None, "account": account, "session_id": None,
+                    "windows": {"7d": {"status": "allowed", "utilization": 0.5,
+                                       "reset": NOW + 86400}}}), "work"))[0].seq
+            logged("acct-x")
+            newest = logged("acct-y")
+        finally:
+            log.close()
+        ends = iso(NOW + 30 * 86400)
+        self.answers["work"] = signin.Status("signed_in", ends, "a@example.invalid")
+        self.begin()
+        self.post(SIGNIN)
+        self.answers["work"] = signin.Status("signed_in", ends, "b@example.invalid")
+        self.post(CODE_PATH)
+        self.wait_ended()
+        last = self.reading_rows("work")[-1]
+        self.assertEqual((last["account"], last["account_seq"], last["left_account"],
+                          last["left_reading"]), ("b@example.invalid", newest,
+                                                  "a@example.invalid", "acct-x"))
+
+    def test_the_view_names_the_new_account_after_a_sign_in(self):
+        self.answers["work"] = signin.Status("signed_in", iso(NOW + 30 * 86400),
+                                             "a@example.invalid")
+        self.answers["spare"] = signin.Status("signed_in", iso(NOW + 30 * 86400),
+                                              "b@example.invalid")
+        self.begin()
+        by = {e["profile"]: e for e in self.view()["capacity"]["profiles"]}
+        self.assertEqual(by["work"]["account"], "a@example.invalid")
+        self.assertEqual((by["work"]["same_account_as"], by["spare"]["same_account_as"]), ([], []))
+
+        self.post(SIGNIN)
+        self.answers["work"] = signin.Status("signed_in", iso(NOW + 30 * 86400),
+                                             "b@example.invalid")
+        self.post(CODE_PATH)
+        self.wait_ended()
+
+        by = {e["profile"]: e for e in self.view()["capacity"]["profiles"]}
+        self.assertEqual(by["work"]["account"], "b@example.invalid")
+        self.assertEqual(by["work"]["same_account_as"], ["spare"])
+        self.assertEqual(by["spare"]["same_account_as"], ["work"])
+        self.assertIsNone(by["spare"]["duplicate_of"])
+        self.assertEqual(by["work"]["duplicate_of"], "spare")
+
+    def test_a_switch_leaves_the_old_accounts_reading_behind_and_replays_the_same(self):
+        self.store.parent.mkdir(parents=True, exist_ok=True)
+        log = EventLog(self.store)
+        try:
+            capacity_log = lambda document, profile: log.append(  # noqa: E731
+                capacity.report_entries(capacity.parse_report(document), profile))
+            capacity_log({
+                "http_status": 429, "status": "rejected", "reset": NOW + 7200, "binding": "7d",
+                "claim": None, "account": None, "session_id": None,
+                "windows": {"7d": {"status": "rejected", "utilization": 1.0,
+                                   "reset": NOW + 7200}}}, "work")
+            spare_seq = capacity_log({
+                "http_status": 200, "status": "allowed", "reset": NOW + 86400, "binding": None,
+                "claim": None, "account": None, "session_id": None,
+                "windows": {"7d": {"status": "allowed", "utilization": 0.5,
+                                   "reset": NOW + 86400}}}, "spare")[0].seq
+        finally:
+            log.close()
+        ends = iso(NOW + 30 * 86400)
+        self.answers["work"] = signin.Status("signed_in", ends, "a@example.invalid")
+        self.answers["spare"] = signin.Status("signed_in", ends, "b@example.invalid")
+        self.begin()
+        before = self.view()["capacity"]
+        self.assertIs(before["all_out"], False)
+        self.assertEqual({e["profile"]: e["state"] for e in before["profiles"]}["spare"], "ok")
+
+        self.post(SIGNIN, {"profile": "spare"})
+        self.answers["spare"] = signin.Status("signed_in", ends, "a@example.invalid")
+        self.post(CODE_PATH, {"profile": "spare", "code": CODE})
+        self.wait_ended()
+
+        self.assertEqual(self.reading_rows("spare")[-1]["account_seq"], spare_seq)
+        shown = self.view()["capacity"]
+        by = {e["profile"]: e for e in shown["profiles"]}
+        self.assertEqual(by["spare"]["same_account_as"], ["work"])
+        self.assertEqual(by["work"]["duplicate_of"], "spare")
+        self.assertEqual((by["spare"]["state"], by["work"]["state"]), ("out", "out"))
+        self.assertIs(shown["all_out"], True)
+        self.assertEqual(shown["resumes_at"], iso(NOW + 7200))
+        log = EventLog(self.store)
+        events = log.events()
+        log.close()
+        replayed = capacity.capacity_view(["spare", "work"], capacity.capacity_state(events),
+                                          self.now[0], signin.signin_state(events))
+        self.assertEqual(json.loads(json.dumps(replayed)), shown)
+
     def test_an_older_scheduled_reading_never_overwrites_the_exit_reading(self):
         svc = self.begin()
         self.post(SIGNIN)
@@ -467,6 +615,26 @@ class SigninRunServiceTest(Case):
 
 
 class SigninSecrecyTest(Case):
+    def test_the_account_name_never_reaches_stderr(self):
+        sentinel = signin.Status("signed_in", iso(NOW + 30 * 86400),
+                                 "SENTINEL-ACCOUNT@example.invalid")
+        self.answers = {"work": sentinel, "spare": sentinel}
+        buffer = io.StringIO()
+        with contextlib.redirect_stderr(buffer):
+            self.begin()
+            self.script = [(signin.StatusFailed("timed_out"), None)]
+            self.now[0] += 600
+            self.svc.probe_round()
+            self.environ["FAKE_EXIT"] = "1"
+            self.post(SIGNIN)
+            self.post(CODE_PATH)
+            self.wait_ended()
+
+        self.assertIn("SENTINEL-ACCOUNT", json.dumps([[str(column) for column in row]
+                                                      for row in support.log_rows(self.store)]))
+        self.assertTrue(buffer.getvalue())
+        self.assertNotIn("SENTINEL-ACCOUNT", buffer.getvalue())
+
     def test_sign_in_material_is_in_no_log_row_stderr_line_state_or_stream_frame(self):
         buffer = io.StringIO()
         frames = []

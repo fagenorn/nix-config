@@ -16,29 +16,60 @@ device, `stdout` piped), in its own session, within `timeout` (`STATUS_TIMEOUT`,
 `probe.stop` is set it is passed as `cancel=`, as `probe.run_probe` does. It opens no file of its
 own besides the temporary directory.
 
-Parse. `parse_status(returncode, stdout)` returns a `Status(state, ends_at)`. A return code that is
+Parse. `parse_status(returncode, stdout)` returns a `Status(state, ends_at, account)`. A return code that is
 neither 0 nor 1 is `StatusFailed("exited")`. Otherwise stdout must decode as UTF-8 JSON to an
 object whose `loggedIn` is a bool, else `unreadable`. `(0, loggedIn true)` is `signed_in`, its
 `ends_at` None when `loginExpiresAt` is absent or null, else that string (a trailing `Z` read as
 `+00:00`, an offset required) as `astimezone(utc).isoformat()`; any other value, or a string that
 does not parse, is `unreadable`. `(1, loggedIn false)` is `signed_out` with `ends_at` None whatever
-`loginExpiresAt` holds. `(0, false)` and `(1, true)` are `unreadable`. Every other member (the
-address, the organisation, the plan) is dropped, never stored.
+`loginExpiresAt` holds. `(0, false)` and `(1, true)` are `unreadable`. The address (the document's
+top-level `email`) is kept as `account` for `(0, loggedIn true)` only when `valid_account(email)`
+(#1036); an absent, null or invalid `email` leaves `account` None and never changes the state or
+raises, and `signed_out` always has `account` None. Every other member (the organisation, the plan,
+any token-shaped member) is dropped, never stored. `valid_account(value)` is True only for a `str` of
+1 to `MAX_ACCOUNT_CHARS` (320) characters, each in 0x21 to 0x7E.
 
 Failures are `StatusFailed(kind)` with `kind` one of `KINDS`, and `str(error) == kind`:
 `not_installed` (`claude-account` is not on `PATH`), `timed_out`, `unavailable` (any other
 `OSError`), `exited`, `unreadable`. `reader_for(platform)` is `read_status` where
 `manager.supported(platform)`, else None.
 
-Event. `entry(profile, status)` is `("signin.reading", None, {"profile", "state", "ends_at"})`,
-`READING` being the kind. The kind is not in `KEPT_KINDS`, but retention leaves the newest row of each
+Event. `entry(profile, status, folded=None, reading_seq=None, reading_account=None, left_seq=None)` is
+`("signin.reading", None, {"profile", "state", "ends_at", "account", "account_seq"})` with two more
+members, `left_account` and `left_reading`, only while they are set, `READING` being the kind. `account` is
+`status.account` when the status is `signed_in`, the folded sign-in's `account` when the status is
+`unknown` and there is a folded sign-in (a failed read does not forget the account), else None.
+`account_seq` is where the profile's capacity readings begin for that account: on a switch it is
+`reading_seq` (the profile's newest capacity reading's seq, 0 when there is none), else the folded
+`account_seq` when it is not None, else 0. A switch is a non-None `account` that differs from the
+folded sign-in's `account` when there is a folded sign-in and either its `account_seq` is not None
+or its state is `signed_out`; a row from before #1036 (no `account_seq`) followed by a first account
+is no switch, so the deploy invalidates no reading. Every row carries its own boundary.
+`left_account` is the account the profile left, and `left_reading` the proxy's account id
+(`reading_account`) that the reading taken under it carried, None when it carried none: set when the
+status's `account` differs from the folded sign-in's non-None `account` (a switch, or a sign-out) and
+`left_seq`, the seq of that reading, is above the folded `account_seq` (0 when None), that is when the
+profile has a reading taken under the account it leaves; `left_seq` is `reading_seq` when None, and 0
+when there is no such reading. The caller names that reading, not the newest one:
+`capacity.left_candidate` picks it, because the newest may already have been taken under the account
+the profile is moving to. Otherwise the two are carried unchanged from the folded sign-in, None when
+there is none, also when a profile leaves an account with no reading under it, so the attribution
+recorded at the previous switch is kept. A late reply of the left account is told
+apart from the new account's by that id (`capacity.capacity_view`). The kind is not in `KEPT_KINDS`, but retention leaves the newest row of each
 profile in place (`event_log.SIGNIN_READING`): only changes are recorded, so an unchanged sign-in
 would otherwise vanish once its one row aged out.
 
-Fold. `signin_state(events, state=None)` returns `{profile: SignIn(state, ends_at, at)}` from the
-`READING` events: only a payload with a non-empty string `profile`, a `state` in `STATES` and an
-`ends_at` that is null or an ISO string carrying an offset, null unless the state is `signed_in`,
-counts; any other payload is ignored. The last valid event per profile wins and `at` is its `at`.
+Fold. `signin_state(events, state=None)` returns `{profile: SignIn(state, ends_at, at, ever,
+account, account_seq, left_account, left_reading)}` from the `READING` events: only a payload with a non-empty string `profile`,
+a `state` in `STATES`, an `ends_at` that is null or an ISO string carrying an offset, null unless the
+state is `signed_in`, an `account` that is absent, null or a `valid_account` string while the state
+is `signed_in` or `unknown`, a `left_account` that is absent, null or a `valid_account` string,
+a `left_reading` that is absent, null or a string of 1 to 64 characters from letters, digits and
+`-`, and an `account_seq` that is absent, null or a non-bool `int` of at least
+0, counts; any other payload is ignored. `account`, `account_seq`, `left_account` and `left_reading` are the payload's values (None
+when absent, so a row from before #1036 folds with them all None); the fold detects nothing itself, so
+the newest row alone, the one retention keeps, folds to the same `account` and `account_seq` as the
+whole log. The last valid event per profile wins and `at` is its `at`.
 `ever` is True once any valid reading of the profile was `signed_in` and never goes back to False:
 each folded value's `ever` is the previous value's `ever` or whether this reading is `signed_in`.
 Folding later events onto an earlier fold gives the fold of all of them.
@@ -57,6 +88,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import tempfile
 from collections.abc import Callable, Iterable, Mapping
@@ -69,9 +101,11 @@ from agent_tools.console.event_log import SIGNIN_READING, Event
 READING = SIGNIN_READING
 STATES = ("signed_in", "signed_out", "unknown")
 STATUS_TIMEOUT = 30
+MAX_ACCOUNT_CHARS = 320
 ASK_SECONDS = 259200
 KINDS = ("not_installed", "timed_out", "unavailable", "exited", "unreadable")
 
+_ID = re.compile(r"[A-Za-z0-9-]{1,64}")
 _DROPPED_ENV = ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN")
 
 
@@ -79,6 +113,7 @@ _DROPPED_ENV = ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN
 class Status:
     state: str
     ends_at: str | None
+    account: str | None = None
 
 
 UNKNOWN = Status("unknown", None)
@@ -90,6 +125,10 @@ class SignIn:
     ends_at: str | None
     at: str
     ever: bool = False
+    account: str | None = None
+    account_seq: int | None = None
+    left_account: str | None = None
+    left_reading: str | None = None
 
 
 class StatusFailed(Exception):
@@ -119,6 +158,12 @@ def _offset_time(value: str) -> datetime | None:
     return parsed if parsed.utcoffset() is not None else None
 
 
+def valid_account(value: object) -> bool:
+    """True only for a `str` of 1 to `MAX_ACCOUNT_CHARS` characters, each printable ASCII."""
+    return (isinstance(value, str) and 1 <= len(value) <= MAX_ACCOUNT_CHARS
+            and all(0x21 <= ord(char) <= 0x7E for char in value))
+
+
 def parse_status(returncode: int, stdout: bytes) -> Status:
     if returncode not in (0, 1):
         raise StatusFailed("exited")
@@ -133,13 +178,15 @@ def parse_status(returncode: int, stdout: bytes) -> Status:
         raise StatusFailed("unreadable")
     if not logged_in:
         return Status("signed_out", None)
+    email = document.get("email")
+    account = email if valid_account(email) else None
     end = document.get("loginExpiresAt")
     if end is None:
-        return Status("signed_in", None)
+        return Status("signed_in", None, account)
     parsed = _offset_time(end) if isinstance(end, str) else None
     if parsed is None:
         raise StatusFailed("unreadable")
-    return Status("signed_in", parsed.astimezone(timezone.utc).isoformat())
+    return Status("signed_in", parsed.astimezone(timezone.utc).isoformat(), account)
 
 
 def read_status(one: probe.Probe, *, run=manager.run_in_own_group,
@@ -164,8 +211,37 @@ def reader_for(platform: str) -> Callable[[probe.Probe], Status] | None:
     return read_status if manager.supported(platform) else None
 
 
-def entry(profile: str, status: Status) -> tuple[str, None, dict]:
-    return (READING, None, {"profile": profile, "state": status.state, "ends_at": status.ends_at})
+def entry(profile: str, status: Status, folded: SignIn | None = None,
+          reading_seq: int | None = None,
+          reading_account: str | None = None,
+          left_seq: int | None = None) -> tuple[str, None, dict]:
+    """The `signin.reading` entry for `status`, carrying the account and where its readings begin."""
+    account = None
+    if status.state == "signed_in":
+        account = status.account
+    elif status.state == "unknown" and folded is not None:
+        account = folded.account
+    switch = (account is not None and folded is not None and account != folded.account
+              and (folded.account_seq is not None or folded.state == "signed_out"))
+    if switch:
+        account_seq = reading_seq if reading_seq is not None else 0
+    elif folded is not None and folded.account_seq is not None:
+        account_seq = folded.account_seq
+    else:
+        account_seq = 0
+    left_account, left_reading = ((folded.left_account, folded.left_reading)
+                                  if folded is not None else (None, None))
+    if folded is not None and folded.account is not None and account != folded.account:
+        held = reading_seq if left_seq is None else left_seq
+        if held is not None and held > (folded.account_seq or 0):
+            left_account, left_reading = folded.account, reading_account
+    payload = {"profile": profile, "state": status.state, "ends_at": status.ends_at,
+               "account": account, "account_seq": account_seq}
+    if left_account is not None:
+        payload["left_account"] = left_account
+        if left_reading is not None:
+            payload["left_reading"] = left_reading
+    return (READING, None, payload)
 
 
 def _valid(payload: dict) -> bool:
@@ -174,6 +250,19 @@ def _valid(payload: dict) -> bool:
         return False
     state = payload.get("state")
     if state not in STATES:
+        return False
+    account = payload.get("account")
+    if account is not None and not (valid_account(account) and state in ("signed_in", "unknown")):
+        return False
+    left = payload.get("left_account")
+    if left is not None and not valid_account(left):
+        return False
+    left_reading = payload.get("left_reading")
+    if left_reading is not None and not (isinstance(left_reading, str)
+                                         and _ID.fullmatch(left_reading)):
+        return False
+    seq = payload.get("account_seq")
+    if seq is not None and (not isinstance(seq, int) or isinstance(seq, bool) or seq < 0):
         return False
     end = payload.get("ends_at")
     if end is None:
@@ -191,7 +280,10 @@ def signin_state(events: Iterable[Event],
         previous = folded.get(payload["profile"])
         ever = (previous is not None and previous.ever) or payload["state"] == "signed_in"
         folded[payload["profile"]] = SignIn(payload["state"], payload.get("ends_at"), event.at,
-                                            ever)
+                                            ever, payload.get("account"),
+                                            payload.get("account_seq"),
+                                            payload.get("left_account"),
+                                            payload.get("left_reading"))
     return folded
 
 

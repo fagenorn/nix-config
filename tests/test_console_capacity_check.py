@@ -206,6 +206,57 @@ class CapacityCheckTest(unittest.TestCase):
     def test_signin_and_every_together_are_refused(self):
         self.assertEqual(self.run_check("--every", "--signin")[0], 2)
 
+    @staticmethod
+    def named(*rows):
+        """A view whose rows are `(name, state, ever_signed_in, account)`; `account` None is a null."""
+        return {"capacity": {"profiles": [
+            {"profile": name, "signin": {"state": state, "ever_signed_in": ever}, "account": account}
+            for name, state, ever, account in rows]}}
+
+    def test_account_names_is_met_when_every_signed_in_profile_names_its_account(self):
+        url = serve(self, self.named(("work", "signed_in", True, "w@example.invalid"),
+                                     ("spare", "signed_in", True, "w@example.invalid"),
+                                     ("default", "signed_out", False, None)))
+        code, out = self.run_check("--url", url, "--account-names")
+        self.assertEqual((code, json.loads(out)), (0, {"status": "met", "profiles": 2,
+                                                       "accounts": 1}))
+
+    def test_account_names_is_pending_on_a_signed_in_profile_without_a_name(self):
+        cases = [([("work", "signed_in", True, None)], ["work"]),
+                 ([("work", "signed_in", False, "w@x.invalid")], ["work"]),
+                 ([("work", "signed_out", False, None), ("spare", "signed_out", True, None)], [])]
+        for rows, names in cases:
+            with self.subTest(rows=rows):
+                code, out = self.run_check("--url", serve(self, self.named(*rows)),
+                                           "--account-names")
+                self.assertEqual((code, json.loads(out)),
+                                 (75, {"status": "pending", "profiles": names}))
+
+    def test_account_names_on_an_older_console_is_not_deployed(self):
+        document = self.named(("work", "signed_in", True, "w@example.invalid"))
+        del document["capacity"]["profiles"][0]["account"]
+        code, out = self.run_check("--url", serve(self, document), "--account-names")
+        self.assertEqual((code, json.loads(out)), (75, {"status": "not_deployed"}))
+
+    def test_account_names_prints_no_account(self):
+        sentinel = "SENTINEL-ACCOUNT@example.invalid"
+        for rows, expected in (
+                ([("work", "signed_in", True, sentinel), ("spare", "signed_in", True, sentinel)],
+                 0),
+                ([("work", "signed_in", True, sentinel), ("spare", "signed_in", False, sentinel)],
+                 75)):
+            with self.subTest(expected=expected):
+                code, out = self.run_check("--url", serve(self, self.named(*rows)),
+                                           "--account-names")
+                self.assertEqual(code, expected)
+                self.assertNotIn("SENTINEL-ACCOUNT", out)
+
+    def test_account_names_is_exclusive_with_the_other_modes(self):
+        for other in ("--every", "--signin", "--accounts", "--exclusion", "--page-signin",
+                      "--page-add", "--pin", "--page-remove"):
+            with self.subTest(other=other):
+                self.assertEqual(self.run_check(other, "--account-names")[0], 2)
+
     def test_accounts_is_met_with_named_profiles_only(self):
         url = serve(self, view(("spare", None), ("work", ago(60)), asks=["signin/spare"]))
         code, out = self.run_check("--url", url, "--accounts")

@@ -1,5 +1,6 @@
 """The console's capacity fold (#860): parsing the proxy's report, the reset-aware reading, the view."""
 
+import dataclasses
 import json
 import unittest
 from datetime import datetime, timezone
@@ -18,6 +19,7 @@ from agent_tools.console.capacity import (
     report_entries,
 )
 from agent_tools.console.event_log import Event
+from agent_tools.console import signin
 from agent_tools.console.signin import SignIn
 from agent_tools.console.view import (
     ALL_OUT_HEADLINE,
@@ -401,6 +403,233 @@ class SigninCapacityTest(unittest.TestCase):
         self.assertIs(ask(SignIn("unknown", None, "t4"), T + 10)["ask"], False)
 
 
+def S(account, seq=0):
+    return SignIn("signed_in", None, "t", True, account, seq)
+
+
+def seen(reading, seq, at=None):
+    return dataclasses.replace(reading, seq=seq, **({} if at is None else {"at": at}))
+
+
+def by_name(shown):
+    return {e["profile"]: e for e in shown["profiles"]}
+
+
+class DuplicateAccountCapacityTest(unittest.TestCase):
+    A = "a@example.invalid"
+
+    def test_two_profiles_on_one_account_are_flagged_and_count_once(self):
+        state = CapacityState({
+            "p1": seen(open_reading_of("p1"), 2, "t2"),
+            "p2": seen(open_reading_of("p2"), 1, "t1"),
+            "p3": refused_reading(T + 100, "p3")}, {})
+        signins = {"p1": S(self.A), "p2": S(self.A), "p3": S("c@example.invalid")}
+        shown = capacity_view(["p1", "p2", "p3"], state, T, signins)
+        by = by_name(shown)
+        self.assertEqual((by["p1"]["account"], by["p1"]["same_account_as"],
+                          by["p1"]["duplicate_of"]), (self.A, ["p2"], None))
+        self.assertEqual((by["p2"]["same_account_as"], by["p2"]["duplicate_of"]), (["p1"], "p1"))
+        self.assertEqual(by["p2"]["read_at"], by["p1"]["read_at"])
+        self.assertEqual((by["p3"]["account"], by["p3"]["same_account_as"],
+                          by["p3"]["duplicate_of"]), ("c@example.invalid", [], None))
+        self.assertIs(shown["tight"], True)
+
+    def test_a_stale_duplicate_never_gives_room(self):
+        signins = {"p1": S(self.A), "p2": S(self.A)}
+        state = CapacityState({"p1": seen(refused_reading(T + 100, "p1"), 2),
+                               "p2": seen(open_reading_of("p2"), 1)}, {})
+        shown = capacity_view(["p1", "p2"], state, T, signins)
+        for entry in shown["profiles"]:
+            self.assertEqual((entry["state"], entry["out_until"]), ("out", iso(T + 100)))
+        self.assertIs(shown["all_out"], True)
+        self.assertEqual(shown["resumes_at"], iso(T + 100))
+        self.assertEqual(manager.choose_profile(shown, {}), manager.Wait(iso(T + 100)))
+        only = CapacityState({"p1": seen(open_reading_of("p1"), 2)}, {})
+        shown = capacity_view(["p1", "p2"], only, T, signins)
+        self.assertIsNone(shown["no_reading"])
+        self.assertEqual((by_name(shown)["p2"]["duplicate_of"], by_name(shown)["p2"]["state"]),
+                         ("p1", "ok"))
+
+    def test_a_pinned_alias_reads_the_accounts_newest_reading(self):
+        signins = {"p1": S(self.A), "p2": S(self.A)}
+        state = CapacityState({"p1": seen(refused_reading(T + 100, "p1"), 2),
+                               "p2": seen(open_reading_of("p2"), 1)}, {})
+        shown = capacity_view(["p1", "p2"], state, T, signins, pinned="p2")
+        by = by_name(shown)
+        self.assertEqual(by["p1"]["duplicate_of"], "p2")
+        self.assertEqual((by["p2"]["state"], by["p2"]["out_until"]), ("out", iso(T + 100)))
+        self.assertIs(manager.has_room(by["p2"]), False)
+        self.assertIs(shown["all_out"], True)
+        self.assertEqual(manager.choose_profile(shown, {}), manager.Wait(iso(T + 100)))
+
+    def test_an_excluded_aliass_newer_refusal_still_counts(self):
+        signins = {"p1": S(self.A), "p2": S(self.A)}
+        state = CapacityState({"p1": seen(refused_reading(T + 100, "p1"), 2),
+                               "p2": seen(open_reading_of("p2"), 1)}, {})
+        shown = capacity_view(["p1", "p2"], state, T, signins, excluded={"p1"})
+        by = by_name(shown)
+        self.assertEqual(by["p1"]["duplicate_of"], "p2")
+        self.assertEqual(by["p2"]["state"], "out")
+        self.assertIs(shown["all_out"], True)
+        self.assertEqual(shown["resumes_at"], iso(T + 100))
+
+    def test_the_counted_entry_is_the_included_then_pinned_then_smallest(self):
+        state = CapacityState({"a": open_reading_of("a"), "b": open_reading_of("b")}, {})
+        signins = {"a": S(self.A), "b": S(self.A)}
+        table = [
+            ({"excluded": {"a"}}, "a", "b"),
+            ({"pinned": "b"}, "a", "b"),
+            ({}, "b", "a"),
+        ]
+        for extra, duplicate, counted in table:
+            with self.subTest(extra=extra):
+                by = by_name(capacity_view(["a", "b"], state, T, signins, **extra))
+                self.assertEqual(by[duplicate]["duplicate_of"], counted)
+                self.assertIsNone(by[counted]["duplicate_of"])
+
+    def test_a_reading_from_the_previous_account_does_not_count(self):
+        signins = {"p1": S(self.A, 0), "p2": S(self.A, 5)}
+        readings = {"p1": seen(refused_reading(T + 100, "p1"), 3),
+                    "p2": seen(open_reading_of("p2"), 5)}
+        shown = capacity_view(["p1", "p2"], CapacityState(readings, {}), T, signins)
+        self.assertEqual([e["state"] for e in shown["profiles"]], ["out", "out"])
+        self.assertIs(shown["all_out"], True)
+        alone = capacity_view(["p2"], CapacityState(readings, {}), T, signins)
+        self.assertEqual(by_name(alone)["p2"]["state"], "unknown")
+        self.assertEqual(alone["no_reading"], "1 with no reading yet")
+        readings["p2"] = seen(open_reading_of("p2"), 6)
+        shown = capacity_view(["p1", "p2"], CapacityState(readings, {}), T, signins)
+        self.assertEqual([e["state"] for e in shown["profiles"]], ["ok", "ok"])
+        self.assertIs(shown["all_out"], False)
+
+    def test_without_shared_accounts_nothing_changes(self):
+        state = CapacityState({"work": open_reading_of("work"),
+                               "spare": refused_reading(T + 100, "spare"),
+                               "home": open_reading_of("home")}, {})
+        signins = {"work": S("w@example.invalid"),
+                   "spare": SignIn("unknown", None, "t", False, "x@example.invalid", 0)}
+        shown = capacity_view(["home", "spare", "work"], state, T, signins)
+        by = by_name(shown)
+        self.assertEqual(list(by["work"])[-6:], ["signin", "excluded", "pinned", "account",
+                                                 "same_account_as", "duplicate_of"])
+        self.assertEqual(by["work"]["account"], "w@example.invalid")
+        self.assertEqual(by["spare"]["account"], "x@example.invalid")
+        self.assertIsNone(by["home"]["account"])
+        self.assertEqual([e["same_account_as"] for e in shown["profiles"]], [[], [], []])
+        self.assertEqual([e["duplicate_of"] for e in shown["profiles"]], [None, None, None])
+        bare = {name: SignIn(one.state, None, "t", True) for name, one in signins.items()}
+        plain = capacity_view(["home", "spare", "work"], state, T, bare)
+        for key in ("tight", "all_out", "resumes_at", "no_reading"):
+            self.assertEqual(shown[key], plain[key])
+        keep = ("profile", "state", "week_left", "five_hour_left", "next_reset", "out_until",
+                "read_at")
+        self.assertEqual([{k: e[k] for k in keep} for e in shown["profiles"]],
+                         [{k: e[k] for k in keep} for e in plain["profiles"]])
+
+
+def owned(reading, account, seq):
+    return dataclasses.replace(reading, account=account, seq=seq)
+
+
+def refusal_report(account, reset):
+    return report(account=account, http_status=429, status="rejected", reset=reset, binding="7d",
+                  windows={"7d": window("rejected", 1.0, reset)})
+
+
+class AccountIdentityCapacityTest(unittest.TestCase):
+    A = "a@example.invalid"
+    B = "b@example.invalid"
+    X = "acct-x"
+    Y = "acct-y"
+
+    def test_a_switching_aliass_newer_refusal_stays_with_its_account(self):
+        refusal = owned(refused_reading(T + 100, "p2"), self.X, 2)
+        signins = {"p1": S(self.A),
+                   "p2": SignIn("signed_in", None, "t", True, self.B, 2, self.A, self.X)}
+        state = CapacityState({"p1": owned(open_reading_of("p1"), self.X, 1), "p2": refusal}, {})
+        by = by_name(capacity_view(["p1", "p2"], state, T, signins))
+        self.assertEqual((by["p1"]["state"], by["p1"]["out_until"]), ("out", iso(T + 100)))
+        self.assertIs(manager.has_room(by["p1"]), False)
+        self.assertEqual(by["p2"]["state"], "unknown")
+        later = owned(open_reading_of("p2"), self.Y, 3)
+        kept = CapacityState({"p1": state.readings["p1"], "p2": later}, {},
+                             {"p2": {self.X: refusal, self.Y: later}})
+        by = by_name(capacity_view(["p1", "p2"], kept, T, signins))
+        self.assertEqual((by["p1"]["state"], by["p2"]["state"]), ("out", "ok"))
+
+    def test_a_late_reply_of_the_left_account_never_overwrites_the_new_ones(self):
+        events = [
+            event(1, READING, {**report(account=self.X, reset=T + 3600), "profile": "p1"}),
+            event(2, READING, {**report(account=self.Y, reset=T + 3600), "profile": "p3"}),
+            event(3, READING, {**report(account=self.X, reset=T + 3600), "profile": "p2"}),
+            event(4, READING, {**refusal_report(self.Y, T + 100), "profile": "p2"}),
+            event(5, READING, {**report(account=self.X, reset=T + 3600), "profile": "p2"}),
+        ]
+        signins = {"p1": S(self.A),
+                   "p2": SignIn("signed_in", None, "t", True, self.B, 3, self.A, self.X),
+                   "p3": S(self.B)}
+        shown = capacity_view(["p1", "p2", "p3"], capacity_state(events), T, signins)
+        by = by_name(shown)
+        self.assertEqual((by["p2"]["state"], by["p3"]["state"]), ("out", "out"))
+        self.assertEqual(by["p3"]["out_until"], iso(T + 100))
+        self.assertEqual(by["p1"]["state"], "ok")
+        self.assertEqual(by["p1"]["read_at"], "t5")
+
+    def test_the_left_reading_is_the_oldest_one_taken_after_the_boundary(self):
+        a_reading = owned(open_reading_of("p"), self.X, 10)
+        b_reading = owned(refused_reading(T + 100, "p"), self.Y, 20)
+        state = CapacityState({"p": b_reading}, {}, {"p": {self.X: a_reading, self.Y: b_reading}})
+        self.assertEqual(capacity.left_candidate(state, "p", S(self.A, 0)), a_reading)
+        self.assertIsNone(capacity.left_candidate(state, "p", S(self.A, 20)))
+        later = SignIn("signed_in", None, "t", True, self.B, 5, self.A, self.X)
+        self.assertEqual(capacity.left_candidate(state, "p", later), b_reading)
+        self.assertIsNone(capacity.left_candidate(CapacityState({}, {}), "p", None))
+
+    def test_a_left_account_signed_back_in_to_skips_nothing(self):
+        a_reading = owned(open_reading_of("p"), self.X, 50)
+        b_reading = owned(refused_reading(T + 100, "p"), self.Y, 60)
+        state = CapacityState({"p": b_reading}, {}, {"p": {self.X: a_reading, self.Y: b_reading}})
+        back = SignIn("signed_in", None, "t", True, self.A, 5, self.A, self.X)
+        left = capacity.left_candidate(state, "p", back)
+        self.assertEqual(left, a_reading)
+        row = signin.entry("p", signin.Status("signed_in", None, self.B), back,
+                           state.readings["p"].seq, left.account, left.seq)[2]
+        self.assertEqual((row["account_seq"], row["left_account"], row["left_reading"]),
+                         (60, self.A, self.X))
+        away = SignIn("signed_in", None, "t", True, self.B, 5, self.A, self.X)
+        self.assertEqual(capacity.left_candidate(state, "p", away), b_reading)
+
+    def test_new_account_readings_still_count_after_an_early_request_under_it(self):
+        events = [
+            event(10, READING, {**report(account=self.X, reset=T + 3600), "profile": "p"}),
+            event(20, READING, {**refusal_report(self.Y, T + 100), "profile": "p"}),
+        ]
+        state = capacity_state(events)
+        left = capacity.left_candidate(state, "p", S(self.A, 0))
+        row = signin.entry("p", signin.Status("signed_in", None, self.B), S(self.A, 0),
+                           state.readings["p"].seq, left.account, left.seq)[2]
+        self.assertEqual((row["account_seq"], row["left_account"], row["left_reading"]),
+                         (20, self.A, self.X))
+        signins = {"p": SignIn("signed_in", None, "t", True, self.B, 20, self.A, self.X),
+                   "q": S(self.B)}
+        events.append(event(30, READING, {**refusal_report(self.Y, T + 200), "profile": "p"}))
+        by = by_name(capacity_view(["p", "q"], capacity_state(events), T, signins))
+        self.assertEqual((by["p"]["state"], by["p"]["out_until"]), ("out", iso(T + 200)))
+        self.assertEqual(by["q"]["out_until"], iso(T + 200))
+
+    def test_a_status_read_that_failed_keeps_the_known_account_grouping(self):
+        signins = {"p1": S(self.A), "p2": SignIn("unknown", None, "t", True, self.A, 0)}
+        state = CapacityState({"p1": seen(refused_reading(T + 100, "p1"), 2),
+                               "p2": seen(open_reading_of("p2"), 1)}, {})
+        shown = capacity_view(["p1", "p2"], state, T, signins)
+        by = by_name(shown)
+        self.assertEqual((by["p2"]["account"], by["p2"]["same_account_as"],
+                          by["p2"]["duplicate_of"]), (self.A, ["p1"], "p1"))
+        self.assertEqual(by["p2"]["state"], "out")
+        self.assertIs(shown["all_out"], True)
+        self.assertEqual(manager.choose_profile(shown, {}), manager.Wait(iso(T + 100)))
+
+
 class PinCapacityTest(unittest.TestCase):
     def test_the_pinned_entry_is_marked_and_changes_no_aggregate(self):
         state = CapacityState({"work": open_reading(), "home": refused_reading(T + 100, "home")}, {})
@@ -409,7 +638,7 @@ class PinCapacityTest(unittest.TestCase):
         self.assertEqual({e["profile"]: e["pinned"] for e in marked["profiles"]},
                          {"home": True, "work": False})
         self.assertEqual({e["pinned"] for e in plain["profiles"]}, {False})
-        self.assertEqual(list(marked["profiles"][0])[-3:], ["signin", "excluded", "pinned"])
+        self.assertEqual(list(marked["profiles"][0])[-6:-3], ["signin", "excluded", "pinned"])
         for key in ("tight", "all_out", "resumes_at", "no_reading"):
             self.assertEqual(marked[key], plain[key])
         self.assertEqual(
@@ -431,7 +660,7 @@ class ExclusionCapacityTest(unittest.TestCase):
         for name in ("home", "work"):
             without = {k: v for k, v in by_marked[name].items() if k != "excluded"}
             self.assertEqual(without, {k: v for k, v in by_plain[name].items() if k != "excluded"})
-        self.assertEqual(list(by_marked["work"])[-3:-1], ["signin", "excluded"])
+        self.assertEqual(list(by_marked["work"])[-6:-4], ["signin", "excluded"])
 
     def test_an_excluded_profile_never_gives_room(self):
         out = CapacityState({"work": open_reading(), "spare": refused_reading(T + 100, "spare")}, {})

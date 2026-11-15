@@ -4574,7 +4574,7 @@ def real_capacity(now: float, rows: list, excluded=(), pinned=None) -> dict:
                 state,
                 None if end is None else datetime.fromtimestamp(end, timezone.utc).isoformat(),
                 datetime.fromtimestamp(now, timezone.utc).isoformat(),
-                row.get("ever", state == "signed_in"))
+                row.get("ever", state == "signed_in"), account=row.get("account"))
     return console_capacity.capacity_view(
         [row["name"] for row in rows], console_capacity.capacity_state(events), now,
         signins=signins, excluded=frozenset(excluded), pinned=pinned)
@@ -4907,6 +4907,60 @@ class AccountsPanelPageTest(unittest.TestCase):
             self.assertFalse(has_class(last(pin), "acct-pin-note"))
 
 
+class AccountNamePageTest(unittest.TestCase):
+    @staticmethod
+    def texts(row: dict, cls: str) -> list:
+        return [full(n) for n in nodes(row) if has_class(n, cls)]
+
+    @staticmethod
+    def two(first: str, second: str) -> dict:
+        signed = ("signed_in", NOW_S + 12 * 86400)
+        return {**view([]), "capacity": real_capacity(NOW_S, [
+            {"name": "p1", "week": .35, "signin": signed, "account": first},
+            {"name": "p2", "week": .5, "signin": signed, "account": second}])}
+
+    def test_each_row_names_its_account(self) -> None:
+        shown = {**view([]), "capacity": real_capacity(NOW_S, [
+            {"name": "a", "week": .35, "signin": ("signed_in", NOW_S + 12 * 86400),
+             "account": "a@example.invalid"},
+            {"name": "b", "week": .5, "signin": ("signed_in", NOW_S + 20 * 86400),
+             "account": "b@example.invalid"},
+            {"name": "c", "signin": ("signed_out", None), "ever": True}])}
+        snap = opened(shown)
+        self.assertEqual(self.texts(row_of(snap, "a"), "acct-account"), ["a@example.invalid"])
+        self.assertEqual(self.texts(row_of(snap, "b"), "acct-account"), ["b@example.invalid"])
+        self.assertEqual(self.texts(row_of(snap, "c"), "acct-account"), [])
+        self.assertEqual(self.texts(panel(snap), "acct-same"), [])
+
+    def test_a_sign_in_to_another_account_renames_the_row_and_flags_both(self) -> None:
+        before = self.two("a@example.invalid", "b@example.invalid")
+        after = self.two("a@example.invalid", "a@example.invalid")
+        one, two = render([START, {"frame": before}, {"click": "cap"}, {"snapshot": True},
+                           {"frame": after}, {"snapshot": True}])
+        self.assertEqual(len([n for n in strip(one) if has_class(n, "cap-acct")]), 2)
+        self.assertEqual(self.texts(panel(one), "acct-same"), [])
+        self.assertEqual(self.texts(row_of(two, "p2"), "acct-account"), ["a@example.invalid"])
+        self.assertEqual(self.texts(row_of(two, "p1"), "acct-same"), ["same account as p2"])
+        self.assertEqual(self.texts(row_of(two, "p2"), "acct-same"), ["same account as p1"])
+        on_strip = [full(n) for n in nodes(two["capacity"]) if n["tag"] == "b"]
+        self.assertEqual(on_strip, [p["profile"] for p in after["capacity"]["profiles"]
+                                    if p["duplicate_of"] is None])
+        self.assertEqual(on_strip, ["p1"])
+
+    def test_the_all_out_panel_names_a_shared_account_once(self) -> None:
+        signed = ("signed_in", NOW_S + 20 * 86400)
+        cap = real_capacity(NOW_S, [
+            {"name": "p2", "week": .5, "signin": signed, "account": "a@example.invalid"},
+            {"name": "p1", "week": 1.0, "week_reset": NOW_S + 86400, "signin": signed,
+             "account": "a@example.invalid"}])
+        self.assertIs(cap["all_out"], True)
+        result = render_page({**view([]), "capacity": cap})
+        items = [full(n) for n in nodes(result["promoted"]) if n["tag"] == "li"]
+        self.assertEqual(len(items), 1)
+        self.assertTrue(items[0].startswith("p1 "), items)
+        self.assertFalse([i for i in items if i.startswith("p2 ")])
+
+
 class StripPageTest(unittest.TestCase):
     @staticmethod
     def base_rules() -> list:
@@ -5071,6 +5125,66 @@ class StripPageTest(unittest.TestCase):
         self.assertTrue(got["inside"], got)
         self.assertTrue(got["fits"], got)
         self.assertTrue(got["beside"], got)
+
+    def test_an_excluded_accounts_bar_is_dimmed(self) -> None:
+        rules = self.base_rules()
+        (dim,) = [d for s, d in rules if s == ".cap-excluded .meter i"]
+        self.assertEqual(dim.get("background"), "var(--s2)")
+        (fill,) = [d for s, d in rules if s == ".meter i"]
+        self.assertEqual(fill.get("background"), "var(--sub0)")
+        snap = self.shown(real_capacity(NOW_S, [
+            {"name": "a", "week": .35}, {"name": "b", "week": .7}], excluded=("b",)))
+        _, b = [n for n in strip(snap) if has_class(n, "cap-acct")]
+        self.assertEqual([(k["tag"], k["cls"]) for k in b["children"]],
+                         [("b", ""), ("span", "cap-excl"), ("span", "meter"), ("span", "cap-pc")])
+        self.assertEqual(full(b["children"][1]), "excluded")
+
+    def test_at_1440_an_excluded_accounts_bar_is_dimmed_and_keeps_its_word(self) -> None:
+        try:
+            from playwright.sync_api import Error, sync_playwright
+        except ImportError:
+            self.skipTest("playwright is not installed")
+        worst = real_capacity(NOW_S, [
+            {"name": "work-main", "week": .35, "week_reset": NOW_S + 4 * 86400,
+             "signin": ("signed_in", NOW_S + 2 * 86400)},
+            {"name": "personal", "week": .7, "week_reset": NOW_S + 5 * 86400},
+            {"name": "spare-one", "week": .88, "week_reset": NOW_S + 3 * 86400},
+        ], excluded=("personal",), pinned="work-main")
+        fakes = (
+            "window.EventSource = class { constructor() { window.__src = this; this.l = {}; }"
+            " addEventListener(name, fn) { this.l[name] = fn; } close() {} };"
+            "window.fetch = () => Promise.resolve(new Response(null, {status: 204}));")
+        measure = """() => {
+          const fill = (sel) => getComputedStyle(document.querySelector(sel)).backgroundColor;
+          const word = document.querySelector('.cap-excluded .cap-excl');
+          return {
+            excluded: fill('.cap-excluded .meter i'),
+            other: fill('.cap-acct:not(.cap-excluded) .meter i'),
+            word: word.textContent,
+            display: getComputedStyle(word).display,
+          };
+        }"""
+        html = PAGE.read_text(encoding="utf-8").replace("__CONSOLE_TOKEN__", "t")
+        with sync_playwright() as pw:
+            try:
+                browser = pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+            except Error as err:
+                self.skipTest(f"no Chromium to launch: {err}")
+            try:
+                page = browser.new_page(viewport={"width": 1440, "height": 900})
+                page.add_init_script(fakes)
+                page.route("http://console.test/", lambda route: route.fulfill(
+                    body=html, content_type="text/html"))
+                page.goto("http://console.test/")
+                page.evaluate("(f) => window.__src.l.view({data: JSON.stringify(f)})",
+                              {**view([]), "capacity": worst})
+                got = page.evaluate(measure)
+            finally:
+                browser.close()
+        self.assertEqual(got["excluded"], "rgb(91, 96, 120)", got)
+        self.assertEqual(got["other"], "rgb(165, 173, 203)", got)
+        self.assertEqual(got["word"], "excluded", got)
+        self.assertNotEqual(got["display"], "none", got)
 
     def test_at_1440_the_strip_never_shrinks_and_the_goal_placeholder_stays_one_line(self) -> None:
         rules = self.base_rules()

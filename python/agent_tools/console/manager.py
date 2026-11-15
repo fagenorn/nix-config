@@ -10,7 +10,11 @@ that names nothing. The per-project account binding is not an input.
 Session profile (#1011). `session_profile(capacity, last_use)` names the profile a new session
 runs under, or None when nothing can be chosen; it never returns a `Wait` and ignores `all_out`.
 An entry marked `excluded` (#1028, the owner's exclusion; it reaches this rule through
-`capacity_view`, not as a parameter) is dropped first, before the room rule and the fallback.
+`capacity_view`, not as a parameter) is dropped first, before the room rule and the fallback, and
+so is an entry with `duplicate_of` set (#1036, one account signed in under two profiles; it reaches
+the rule through `capacity_view`, which gives every entry of the account the account's newest
+reading): one account's allowance is never counted twice and a pin picks the profile, never the
+reading.
 Room is a profile whose state is `ok` or `reset`, whose sign-in is not `signed_out` (an entry
 without a sign-in reading counts as `unknown`, P1) and which is not excluded: `has_room(entry)`.
 An entry marked `pinned` (#1029, ADR-console-023; it reaches the rule through `capacity_view`, not
@@ -276,7 +280,8 @@ def has_room(entry: Mapping) -> bool:
 
 
 def session_profile(capacity: Mapping, last_use: Mapping[str, str]) -> str | None:
-    entries = [entry for entry in capacity["profiles"] if not entry.get("excluded")]
+    entries = [entry for entry in capacity["profiles"]
+               if not (entry.get("excluded") or entry.get("duplicate_of"))]
     for entry in entries:
         if entry.get("pinned") and has_room(entry):
             return entry["profile"]

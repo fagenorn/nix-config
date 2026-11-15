@@ -47,6 +47,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .cap-acct b { font-weight: 600; color: var(--sub1); max-width: 9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .meter { display: block; flex: none; width: 34px; height: 4px; border-radius: 2px; background: var(--s1); overflow: hidden; }
 .meter i { display: block; height: 100%; background: var(--sub0); }
+.cap-excluded .meter i { background: var(--s2); }
 .cap-pc { color: var(--sub1); }
 .cap-signin, .cap-no-reading, .cap-signed-out { color: var(--ov2); }
 .cap-excluded, .cap-excl, .cap-pin-mark { color: var(--ov2); }
@@ -62,6 +63,8 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .acct-row:first-child { border-top: 0; }
 .acct-name { display: inline-block; max-width: 16rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; margin-right: 8px; font-weight: 600; color: var(--sub1); }
 .acct-excl, .acct-pin-mark { margin-right: 8px; color: var(--ov2); }
+.acct-account { color: var(--sub1); overflow-wrap: anywhere; }
+.acct-same { color: var(--text); }
 .acct-detail { display: flex; flex-wrap: wrap; gap: 2px 14px; margin-top: 2px; font-size: .8125rem; color: var(--sub0); }
 .acct-act { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin-top: 6px; font-size: .8125rem; }
 .acct-remove-box { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 7px; margin-top: 6px; font-size: .8125rem; color: var(--sub1); }
@@ -963,6 +966,8 @@ function signedOut(p) {
 function excludedProfile(p) {
   return p.excluded === true;
 }
+// A profile signed in to an account another profile already stands for is not counted again.
+function counted(p) { return typeof p.duplicate_of !== "string"; }
 const exclusionPosts = new Map();
 async function toggleExclusion(p) {
   const current = exclusionPosts.get(p.profile);
@@ -1481,11 +1486,11 @@ function renderCapacity(view) {
   const box = document.getElementById("capacity");
   const cap = view.capacity || {profiles: []};
   const known = (v) => v !== null && v !== undefined;
-  const readings = cap.profiles.filter((p) => p.state !== "unknown" && !signedOut(p));
+  const readings = cap.profiles.filter((p) => counted(p) && p.state !== "unknown" && !signedOut(p));
   const eligible = readings.filter((p) => !excludedProfile(p));
   const asks = (p) => p.signin !== null && typeof p.signin === "object" && p.signin.ask === true;
-  const listed = cap.profiles.filter((p) => readings.includes(p) || signedOut(p) || excludedProfile(p)
-    || pinnedProfile(p) || asks(p));
+  const listed = cap.profiles.filter((p) => counted(p) && (readings.includes(p) || signedOut(p)
+    || excludedProfile(p) || pinnedProfile(p) || asks(p)));
   const nodes = [];
   let tightest = null;
   for (const p of eligible) {
@@ -1583,6 +1588,14 @@ function accountRow(p, view) {
   }
   const words = signinWords(p.signin);
   if (words !== "") detail.appendChild(el("span", "acct-signin-words", words));
+  if (typeof p.account === "string" && p.account !== "") {
+    const account = el("span", "acct-account", p.account);
+    account.setAttribute("title", p.account);
+    detail.appendChild(account);
+  }
+  if (Array.isArray(p.same_account_as) && p.same_account_as.length) {
+    detail.appendChild(el("span", "acct-same", "same account as " + p.same_account_as.join(", ")));
+  }
   row.appendChild(detail);
   const item = accountItem(p, view);
   const run = item.run !== null && typeof item.run === "object" ? item.run : null;
@@ -1719,7 +1732,7 @@ function renderPromoted(view) {
   box.replaceChildren();
   if (!cap.all_out) return;
   const list = el("ul");
-  for (const p of cap.profiles) {
+  for (const p of cap.profiles.filter(counted)) {
     if (excludedProfile(p)) list.appendChild(el("li", "cap-excluded", p.profile + " excluded"));
     else if (signedOut(p)) list.appendChild(el("li", "cap-signed-out", p.profile + " signed out"));
     else list.appendChild(phrase("li", "cap-out", p.profile + " ", outWords(p, "")));

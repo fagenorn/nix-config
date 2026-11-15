@@ -336,6 +336,14 @@ class SessionProfileTest(unittest.TestCase):
         self.assertEqual(manager.choose_profile(cap(("a", "ok", 90, 90, None, True)), {}),
                          manager.Wait(None))
 
+    def test_a_duplicate_profile_is_never_chosen(self):
+        c = cap(("a", "out", 0, 0, "signed_in"), ("b", "ok", 80, 80, "signed_in"))
+        c["profiles"][1]["duplicate_of"] = "a"
+        d = cap(("a", "ok", 10, 10, "signed_in"), ("b", "ok", 90, 90, "signed_in"))
+        d["profiles"][1]["duplicate_of"] = "a"
+        self.assertEqual(manager.session_profile(c, {"b": T_LATE}), "a")
+        self.assertEqual(manager.session_profile(d, {}), "a")
+
     def test_a_pinned_profile_with_room_wins(self):
         table = [
             cap(("a", "ok", 90, 90), ("b", "ok", 10, 10, None, False, True)),
