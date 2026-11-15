@@ -14,7 +14,7 @@ import time
 import unittest
 from pathlib import Path
 
-from agent_tools.console import register
+from agent_tools.console import plan_questions, register
 from agent_tools.console.event_log import Event
 from agent_tools.console.register import Adopter, RunFailed
 
@@ -211,11 +211,19 @@ class LinesTest(unittest.TestCase):
                          ["moves 1 agent file"])
 
 
+PLAN_ID = "sha256:" + "a" * 64
+
+
 def plan_doc(outcome="reconcile", state="draft", open_questions=0, blockers=(),
-             next_command=None, project_id="o/r", **extra):
-    return doc(plan={"state": state, "outcome": outcome, "project_id": project_id,
-                     "blockers": list(blockers)},
-               decisions={"open": [{"id": f"q{i}"} for i in range(open_questions)]},
+             next_command=None, project_id="o/r", plan_id=PLAN_ID, answered=(),
+             decisions_open=None, **extra):
+    header = {"state": state, "outcome": outcome, "project_id": project_id,
+              "blockers": list(blockers)}
+    if plan_id is not None:
+        header["plan_id"] = plan_id
+    opened = (list(decisions_open) if decisions_open is not None
+              else [{"id": f"q{i}"} for i in range(open_questions)])
+    return doc(plan=header, decisions={"open": opened, "answered": list(answered)},
                handoff={"next_command": next_command}, **extra)
 
 
@@ -229,6 +237,45 @@ class SummaryTest(unittest.TestCase):
         self.assertEqual(row["by"], "owner")
         self.assertEqual(row["root"], "/srv/r")
         self.assertEqual(row["project_id"], "o/r")
+
+    def test_a_planned_row_carries_the_plan_id_state_questions_and_answers(self):
+        answered = [{"id": "candidate-class", "subject": ".claude/odd.md",
+                     "value": "archive-history"}]
+        doc_ = plan_doc(open_questions=0, answered=answered, decisions_open=[
+            {"id": "candidate-class", "subject": ".claude/x.md", "value": "archive-history"}])
+        row = register.summary("/srv/r", doc_)
+        self.assertEqual(row["plan_id"], "sha256:" + "a" * 64)
+        self.assertEqual(row["state"], "draft")
+        self.assertEqual(row["questions"], plan_questions.questions(doc_))
+        self.assertEqual(len(row["questions"]), 1)
+        self.assertEqual(row["answered"], answered)
+        self.assertEqual(set(row), register.MEMBERS | register.EXTRA)
+
+    def test_other_rows_carry_the_defaults(self):
+        rows = [register.summary("/srv/r", plan_doc(outcome="no_change", state="ready"),
+                                 {"registered": True, "project_id": "o/r"}),
+                register.summary("/srv/r", plan_doc(outcome="migration_required",
+                                                    state="not_applicable",
+                                                    next_command="migrate m")),
+                register.failed("/srv/r", "timed_out")]
+        for row in rows:
+            with self.subTest(result=row["result"]):
+                self.assertEqual((row["plan_id"], row["state"], row["questions"], row["answered"]),
+                                 (None, None, [], []))
+
+    def test_a_no_change_plan_without_a_report_names_its_terminal_handoff(self):
+        nc = {"plan": {"state": "ready", "outcome": "no_change", "project_id": "o/r",
+                       "blockers": [], "plan_id": "sha256:" + "c" * 64},
+              "decisions": {"open": [], "answered": []},
+              "handoff": {"next_command": "adopt-project verify --register --repo-root /srv/r"}}
+        for document in (register.summary("/srv/r", nc),
+                         register.summary("/srv/r", {**nc, "handoff": {"next_command": None}})):
+            self.assertEqual((document["result"], document["outcome"], document["lines"],
+                              document["note"], document["plan_id"]),
+                             ("not_registered", "no_change", [], None, None))
+            self.assertEqual(document["headline"],
+                             "r needs no adoption change and is not registered yet: run "
+                             "adopt-project verify --register --repo-root /srv/r")
 
     def test_one_open_question_is_singular(self):
         row = register.summary("/srv/r", plan_doc(open_questions=1))
@@ -245,7 +292,10 @@ class SummaryTest(unittest.TestCase):
 
     def test_a_ready_plan_and_a_blocked_draft(self):
         ready = register.summary("/srv/r", plan_doc(state="ready"))
-        self.assertEqual(ready["note"], "The plan is ready to apply.")
+        self.assertEqual(ready["note"], "The plan is ready to apply: run adopt-project apply "
+                         "--plan-id sha256:" + "a" * 64)
+        self.assertEqual(register.summary("/srv/r", plan_doc(state="ready", plan_id=None))["note"],
+                         "The plan is ready to apply.")
         blocked = register.summary("/srv/r", plan_doc(
             blockers=[{"id": "g", "message": "the tree is\n dirty"}]))
         self.assertEqual(blocked["note"], "The plan is a draft: the tree is dirty")
@@ -323,7 +373,9 @@ class SummaryTest(unittest.TestCase):
                 self.assertEqual(row, {"by": "owner", "root": "/srv/r", "project_id": None,
                                        "result": "failed", "outcome": None,
                                        "headline": f"The adoption plan for r failed: {text}.",
-                                       "lines": [], "note": register.run_next_step("/srv/r", kind)})
+                                       "lines": [], "note": register.run_next_step("/srv/r", kind),
+                                       "plan_id": None, "state": None, "questions": [],
+                                       "answered": []})
 
     def test_a_headline_that_already_ends_in_a_full_stop_gets_no_second(self):
         row = register.summary("/srv/r", {"error": {"code": "adopt_failure", "repair_id": "x",
@@ -442,17 +494,44 @@ class RowTest(unittest.TestCase):
         self.assertEqual(register.latest(events), {**p2, "at": "t3"})
         self.assertEqual(register.latest([], {"a": 1}), {"a": 1})
 
+    def test_ended_takes_the_twelve_members_and_still_reads_a_legacy_row(self):
+        p = register.summary("/srv/a", plan_doc(open_questions=1))
+        legacy = {k: p[k] for k in register.MEMBERS}
+        self.assertEqual(register.ended(p)[2], p)
+        self.assertEqual(register.ended(legacy)[2], legacy)
+        self.assertEqual(register.latest([Event(1, "t1", register.ENDED, None, legacy)]),
+                         {**legacy, **register.DEFAULTS, "at": "t1"})
+        for bad in ({**p, "answered": [{"id": "x"}]},
+                    {**p, "answered": [{"id": "x", "subject": "s", "value": 1}]},
+                    {**p, "questions": "q"}, {**p, "plan_id": 3},
+                    {k: v for k, v in p.items() if k != "state"}):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                register.ended(bad)
+
+    def test_view_entry_again_and_refusal(self):
+        self.assertEqual(register.view_entry("/srv/r", None, again=True)["headline"],
+                         "Planning the adoption of r again with your answer\u2026")
+        latest = {**register.summary("/srv/r", plan_doc(open_questions=1)), "at": "t"}
+        self.assertEqual(register.view_entry(
+            None, latest, refusal={"plan_id": latest["plan_id"], "text": "T"})["refusal"], "T")
+        self.assertIsNone(register.view_entry(
+            None, latest, refusal={"plan_id": "sha256:other", "text": "T"})["refusal"])
+        self.assertIsNone(register.view_entry(
+            "/srv/r", latest, refusal={"plan_id": latest["plan_id"], "text": "T"})["refusal"])
+
     def test_view_entry_running_done_none(self):
         self.assertEqual(register.view_entry("/srv/r", None), {
             "root": "/srv/r", "name": "r", "project_id": None, "status": "running",
             "result": None, "outcome": None, "headline": "Planning the adoption of r…",
-            "lines": [], "note": None, "at": None})
+            "lines": [], "note": None, "at": None, "plan_id": None, "state": None,
+            "questions": [], "refusal": None})
         latest = {**register.summary("/srv/r", plan_doc(state="ready")), "at": "t"}
         self.assertEqual(register.view_entry(None, latest), {
             "root": "/srv/r", "name": "r", "project_id": "o/r", "status": "done",
             "result": "planned", "outcome": "reconcile",
-            "headline": latest["headline"], "lines": [], "note": "The plan is ready to apply.",
-            "at": "t"})
+            "headline": latest["headline"], "lines": [],
+            "note": "The plan is ready to apply: run adopt-project apply --plan-id " + PLAN_ID,
+            "at": "t", "plan_id": PLAN_ID, "state": "ready", "questions": [], "refusal": None})
         self.assertIsNone(register.view_entry(None, None))
 
 
@@ -485,6 +564,15 @@ class AdopterTest(unittest.TestCase):
         adopter.register("/r")
         self.assertEqual(self.args.read_text().splitlines(),
                          ["plan --repo-root /r --format json", "verify --repo-root /r --register"])
+
+    def test_plan_sends_every_answer_in_order(self):
+        self.adopter().plan("/r", answers=[
+            {"id": "candidate-class", "subject": ".claude/odd.md", "value": "archive-history"},
+            {"id": "path-reference", "subject": "tools/show.sh:1:5", "value": "rewrite"}])
+        self.assertEqual(self.args.read_text().splitlines()[-1],
+                         "plan --repo-root /r --format json --answer candidate-class "
+                         ".claude/odd.md archive-history --answer path-reference "
+                         "tools/show.sh:1:5 rewrite")
 
     def test_exit_0_and_2_return_the_object(self):
         for code in (0, 2):

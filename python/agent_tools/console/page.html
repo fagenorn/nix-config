@@ -302,6 +302,11 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .register-headline { font-size: .84375rem; color: var(--text); }
 .register-lines { padding-left: 1.2em; color: var(--sub0); }
 .register-note { color: var(--ov2); }
+.register-question { margin: 8px 0 0; }
+.register-ask { color: var(--text); }
+.register-why, .register-refusal { color: var(--sub0); }
+.register-options { display: flex; flex-wrap: wrap; gap: 4px 8px; }
+.register-option { white-space: normal; text-align: left; max-width: 100%; }
 .s-working { color: var(--green); }
 .s-waiting_answer, .s-waiting_permission { color: var(--yellow); }
 .s-limit { color: var(--red); }
@@ -3198,7 +3203,7 @@ function renderAccountAdd(view) {
 }
 renderAccountAdd(null);
 // The register control is built once as well (ADR-console-028 D8): a frame never replaces the path field, only the parts around it.
-const registerState = { phase: "closed", posting: false, failure: "", shown: "" };
+const registerState = { phase: "closed", posting: false, failure: "", shown: "", answering: false, answerFailure: null };
 let registerDismissed;
 let registerResultKey = "";
 const registerBox = document.getElementById("register");
@@ -3247,6 +3252,25 @@ async function registerPost() {
   registerState.failure = reason === null ? "" : reason;
   renderRegister(lastView);
 }
+// An open question is answered with one write (ADR-console-029 D8); the failure is kept with the plan id it was for.
+async function answerPost(registration, question, option) {
+  if (registerState.answering) return;
+  registerState.answering = true;
+  registerState.answerFailure = null;
+  renderRegister(lastView);
+  let reason = null;
+  try {
+    const body = JSON.stringify({ plan_id: registration.plan_id, id: question.id, subject: question.subject, value: option.value });
+    const response = await fetch("/api/plan-answer", { method: "POST", headers: stallHeaders(), body });
+    if (response.status !== 204) reason = (await response.text()).trim() || "HTTP " + response.status;
+  } catch (error) {
+    console.error(error);
+    reason = "the console did not answer";
+  }
+  registerState.answering = false;
+  registerState.answerFailure = reason === null ? null : { plan_id: registration.plan_id, text: reason };
+  renderRegister(lastView);
+}
 // The registration's words are the view's: the page shows them verbatim and composes none.
 function drawRegisterResult(registration) {
   const parts = [el("p", "register-headline", registration.headline)];
@@ -3257,6 +3281,25 @@ function drawRegisterResult(registration) {
   }
   if (registration.note) parts.push(el("p", "register-note", registration.note));
   if (registration.status === "done") {
+    const failure = registerState.answerFailure;
+    const refusal = failure !== null && failure.plan_id === registration.plan_id ? failure.text : registration.refusal;
+    if (refusal) parts.push(el("p", "register-refusal", refusal));
+    for (const question of registration.questions || []) {
+      const box = el("div", "register-question");
+      box.appendChild(el("p", "register-ask", question.ask));
+      if (typeof question.why === "string" && question.why !== "") {
+        box.appendChild(el("p", "register-why", question.why));
+      } else {
+        const options = el("div", "register-options");
+        for (const option of question.options) {
+          const button = actionButton("register-option", option.label, () => answerPost(registration, question, option));
+          button.disabled = registerState.answering;
+          options.appendChild(button);
+        }
+        box.appendChild(options);
+      }
+      parts.push(box);
+    }
     parts.push(actionButton("register-close", "Close", () => {
       registerDismissed = registration.at;
       renderRegister(lastView);
@@ -3278,7 +3321,7 @@ function renderRegister(view) {
   }
   if (registerReason.textContent !== reason) registerReason.textContent = reason;
   const shown = registration !== null && !(registration.status === "done" && registration.at === registerDismissed);
-  const key = shown ? JSON.stringify(registration) : "";
+  const key = shown ? JSON.stringify([registration, registerState.answering, registerState.answerFailure]) : "";
   if (key !== registerResultKey) {
     registerResultKey = key;
     if (shown) {

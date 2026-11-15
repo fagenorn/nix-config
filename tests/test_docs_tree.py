@@ -499,7 +499,8 @@ class DocsTreeTest(unittest.TestCase):
         both = ("- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
                 "ADR-console-028")
         for older, status in (
-                ("docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md", both),
+                ("docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md",
+                 both + ", ADR-console-029"),
                 ("docs/areas/console/adr/002-the-desk-page-design-rules.md", both),
                 ("docs/areas/console/adr/024-the-owner-signs-a-profile-in-from-the-page.md",
                  "- **Status:** accepted; amended by ADR-console-025")):
@@ -530,10 +531,44 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("POST /api/register-project", self.doc(adr008))
         status = ("- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
                   "ADR-console-028")
-        for older in (adr008, adr002):
+        for older, expected in ((adr008, status + ", ADR-console-029"), (adr002, status)):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
                         if row.startswith("- **Status:**"))
-            self.assertEqual(line, status)
+            self.assertEqual(line, expected)
+
+    def test_the_plan_answer_decision_is_recorded(self):
+        path = ("docs/areas/console/adr/"
+                "029-the-owner-answers-the-adoptions-questions-on-the-page.md")
+        first = (REPO_ROOT / path).read_text().splitlines()[0]
+        self.assertEqual(first,
+                         "# ADR-console-029 — The owner answers the adoption's questions on the page")
+        adr = self.doc(path)
+        for needle in ("POST /api/plan-answer", "PAGE_WRITES", "bad plan answer", "409", "204",
+                       "4096", "300", "registration.ended", "--answer",
+                       "adopt.decisions.invalid_answer", "adopt.decisions.unmatched_answer",
+                       "The plan refused that answer", "The plan was not made again",
+                       "cannot be answered here", "that plan is no longer the one shown",
+                       "again with your answer", "adopt-project apply --plan-id",
+                       "needs no adoption change and is not registered yet",
+                       "console: plan_answer_error", "ADR-console-002", "ADR-console-008",
+                       "ADR-console-028", "ADR-project-contract-004", "#1053"):
+            self.assertIn(needle, adr)
+        adr008 = "docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md"
+        adr028 = "docs/areas/console/adr/028-the-owner-registers-a-project-from-the-page.md"
+        for needle in ("POST /api/plan-answer", "ADR-console-029"):
+            self.assertIn(needle, self.doc(adr008))
+        self.assertIn("ADR-console-029", self.doc(adr028))
+        context = self.doc("docs/areas/console/CONTEXT.md")
+        self.assertIn("ADR-console-029", context)
+        self.assertIn("**Plan question**:", context)
+        self.assertIn("| Plan question | Console |", self.doc("docs/CONTEXT-MAP.md"))
+        for older, expected in (
+                (adr008, "- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
+                         "ADR-console-028, ADR-console-029"),
+                (adr028, "- **Status:** accepted; amended by ADR-console-029")):
+            line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
+                        if row.startswith("- **Status:**"))
+            self.assertEqual(line, expected)
 
     def test_the_accounts_panel_decision_is_recorded(self):
         base = "docs/areas/console/adr/"

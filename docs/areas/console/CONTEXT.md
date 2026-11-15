@@ -128,3 +128,7 @@ _Avoid_: daemon
 **Registration**:
 The owner's request, from the page, that the console plan a repository's adoption and, when it is already adopted, record it in the fleet registry; the page shows its result in plain lines (ADR-console-028).
 _Avoid_: import, onboarding
+
+**Plan question**:
+One open question of a repository's adoption plan, shown on the page as a short question with exactly the answers the plan offers, or one line saying why it cannot be answered there (ADR-console-029).
+_Avoid_: adoption prompt, open decision

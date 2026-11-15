@@ -29,6 +29,9 @@ from . import console_test_support as support
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1052)
 
 PATH = "/api/register-project"
+ANSWER = "/api/plan-answer"
+PID_A = "sha256:" + "a" * 64
+PID_B = "sha256:" + "b" * 64
 ROOT = Path(__file__).resolve().parent.parent
 GIT_ENV = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
 PLANNED = {
@@ -42,6 +45,14 @@ PLANNED = {
 }
 NO_CHANGE = {**PLANNED, "plan": {"state": "ready", "outcome": "no_change", "project_id": "o/r",
                                  "blockers": []}, "changes": [], "decisions": {"open": []}}
+A1 = {"id": "candidate-class", "subject": ".claude/odd.md", "value": "archive-history"}
+DRAFT = {**PLANNED,
+         "plan": {"state": "draft", "outcome": "reconcile", "project_id": "o/r", "blockers": [],
+                  "plan_id": PID_A},
+         "decisions": {"open": [{"id": "candidate-class", "subject": ".claude/odd.md",
+                                 "value": "archive-history"}], "recommended": [], "answered": []}}
+READY = {**DRAFT, "plan": {**DRAFT["plan"], "state": "ready", "plan_id": PID_B},
+         "decisions": {"open": [], "recommended": [], "answered": [A1]}}
 
 
 def git(path, *arguments):
@@ -77,6 +88,18 @@ def reconcile_repository(parent: Path) -> Path:
     return root
 
 
+def answer_repository(parent: Path) -> Path:
+    root = register_check.adopted_repository(
+        parent, "fixture/console-answer", ROOT / register_check.CONTRACT_SOURCE)
+    for name, text in ((".claude/odd.md", "# odd\n"), (".claude/specs/a.md", "# a\n"),
+                       ("tools/show.sh", "cat .claude/specs/a.md\n")):
+        (root / name).parent.mkdir(parents=True, exist_ok=True)
+        (root / name).write_text(text)
+    git(root, "add", "-A")
+    git(root, "commit", "-q", "-m", "legacy")
+    return root
+
+
 def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -96,13 +119,16 @@ def real_home_state() -> tuple:
 
 
 class Fake:
-    def __init__(self, plan=None, report=None, block=None, raises=None, register_raises=None):
+    def __init__(self, plan=None, report=None, block=None, raises=None, raises_on=None,
+                 register_raises=None):
         self.document = plan
         self.report = report
         self.block = block
         self.raises = raises
+        self.raises_on = raises_on
         self.register_raises = register_raises
         self.calls = []
+        self.answers = []
 
     def _run(self, verb, root, cancel):
         self.calls.append((verb, root))
@@ -111,8 +137,15 @@ class Fake:
         if self.raises is not None:
             raise self.raises
 
-    def plan(self, root, cancel=None):
+    def plan(self, root, cancel=None, answers=()):
+        self.answers.append(list(answers))
         self._run("plan", root, cancel)
+        if self.raises_on:
+            error = self.raises_on.pop(0)
+            if error is not None:
+                raise error
+        if isinstance(self.document, list):
+            return self.document.pop(0)
         return self.document
 
     def register(self, root, cancel=None):
@@ -152,6 +185,24 @@ class Case(unittest.TestCase):
         payload = json.dumps(body).encode() if raw is None else raw
         sent = self.own(**{"Content-Type": "application/json"}) if headers is None else headers
         return support.post_page(self.svc.address, PATH, sent, payload)
+
+    def answer(self, body=None, headers=None, raw=None):
+        payload = json.dumps(body).encode() if raw is None else raw
+        sent = self.own(**{"Content-Type": "application/json"}) if headers is None else headers
+        return support.post_page(self.svc.address, ANSWER, sent, payload)
+
+    def registered(self, root):
+        self.assertEqual(self.post({"path": str(root)})[0], 204)
+        return self.wait_done(root)
+
+    def wait_for(self, predicate, bound=120):
+        end = time.monotonic() + bound
+        while time.monotonic() < end:
+            found = self.view()["registration"]
+            if found is not None and predicate(found):
+                return found
+            time.sleep(0.1)
+        self.fail("the registration never reached the expected state")
 
     def rows(self, kind):
         return [(row[0], json.loads(row[4])) for row in support.log_rows(self.store)
@@ -410,6 +461,364 @@ class RegisterRunTest(Case):
             if not listed:
                 time.sleep(0.1)
         self.assertTrue(listed)
+        self.assertEqual(real_home_state(), before)
+
+
+def answer_of(plan_id, given):
+    return {"plan_id": plan_id, **given}
+
+
+def timed_out():
+    try:
+        raise register.RunFailed("timed_out") from TimeoutError("child ran 300 s")
+    except register.RunFailed as error:
+        return error
+
+
+REFUSED = {"code": "adopt_failure", "repair_id": "adopt.decisions.invalid_answer",
+           "violations": [{"pointer": "/decisions/answered",
+                           "message": "the answer is not the one this candidate's open question "
+                                      "offers"}]}
+REFUSED_TEXT = ("The plan refused that answer: the answer is not the one this candidate's open "
+                "question offers")
+
+
+class PlanAnswerGuardTest(Case):
+    def test_the_write_is_refused_without_the_token_or_from_another_origin_and_runs_nothing(self):
+        fake = Fake(plan=DRAFT)
+        svc = self.begin(fake)
+        json_type = {"Content-Type": "application/json"}
+        own = f"http://127.0.0.1:{svc.address[1]}"
+        token = self.token_file.read_text().strip()
+        before = support.log_rows(self.store)
+        version = svc.version
+        for headers, text in (
+                ({"Origin": own, **json_type}, b"token refused\n"),
+                ({"Origin": "http://evil.test", "X-Console-Token": token, **json_type},
+                 b"origin refused\n"),
+                ({"X-Console-Token": token, **json_type}, b"origin refused\n")):
+            with self.subTest(text=text):
+                status, _, body = self.answer(answer_of(PID_A, A1), headers=headers)
+                self.assertEqual((status, body), (403, text))
+        self.assertEqual(support.log_rows(self.store), before)
+        self.assertEqual(svc.version, version)
+        self.assertEqual(fake.calls, [])
+
+    def test_bodies_are_refused_as_bad_plan_answer(self):
+        fake = Fake(plan=DRAFT)
+        self.begin(fake)
+        before = support.log_rows(self.store)
+        good = answer_of(PID_A, A1)
+        bodies = [[], {k: v for k, v in good.items() if k != "value"}, {**good, "extra": "x"},
+                  {**good, "value": 1}, {**good, "subject": ""}, {**good, "subject": "a\u0007b"}]
+        for body in bodies:
+            with self.subTest(body=body):
+                status, _, text = self.answer(body)
+                self.assertEqual((status, text), (400, b"bad plan answer\n"))
+        status, _, text = self.answer({**good, "value": "a" * 4100})
+        self.assertEqual((status, text), (413, b"too large\n"))
+        status, _, text = self.answer(
+            good, headers=self.own(**{"Content-Type": "text/plain"}))
+        self.assertEqual((status, text), (415, b"json only\n"))
+        self.assertEqual(fake.calls, [])
+        self.assertEqual(support.log_rows(self.store), before)
+
+
+class PlanAnswerRefusalTest(Case):
+    def refused(self, body, reason):
+        before = support.log_rows(self.store)
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            status, _, text = self.answer(body)
+        self.assertEqual((status, text), (409, reason.encode() + b"\n"))
+        self.assertIn(f"console: plan_answer_refused {reason}", errors.getvalue())
+        self.assertEqual(support.log_rows(self.store), before)
+
+    def test_without_an_adopter_the_host_refuses(self):
+        fake = Fake(plan=DRAFT)
+        self.begin(None)
+        self.refused(answer_of(PID_A, A1),
+                     "answering the adoption's questions is not available on this host")
+        self.assertEqual(fake.calls, [])
+
+    def test_with_no_plan_shown_the_answer_is_stale(self):
+        fake = Fake(plan=DRAFT)
+        self.begin(fake)
+        self.refused(answer_of(PID_A, A1),
+                     "that plan is no longer the one shown; answer the plan shown now")
+        self.assertEqual(fake.calls, [])
+
+    def test_an_answer_for_another_plan_id_is_stale(self):
+        fake = Fake(plan=DRAFT)
+        self.begin(fake)
+        repo = git_repo(self.parent / "r")
+        self.registered(repo)
+        self.refused(answer_of(PID_B, A1),
+                     "that plan is no longer the one shown; answer the plan shown now")
+        self.assertEqual(fake.answers, [[]])
+        self.assertEqual(fake.calls, [("plan", str(repo))])
+
+    def test_a_row_with_no_plan_id_is_stale(self):
+        fake = Fake(plan=PLANNED)
+        self.begin(fake)
+        repo = git_repo(self.parent / "r")
+        self.registered(repo)
+        self.refused(answer_of(PID_A, A1),
+                     "that plan is no longer the one shown; answer the plan shown now")
+        self.assertEqual(fake.calls, [("plan", str(repo))])
+
+    def test_an_answer_while_a_run_is_under_way_is_refused(self):
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        fake = Fake(plan=DRAFT, block=gate)
+        self.begin(fake, dispatch=None)
+        repo = git_repo(self.parent / "r")
+        self.assertEqual(self.post({"path": str(repo)})[0], 204)
+        self.refused(answer_of(PID_A, A1), f"a registration is already running for {repo.name}")
+
+
+class PlanAnswerRunTest(Case):
+    def test_an_answer_reruns_the_plan_and_the_view_shows_the_new_one(self):
+        fake = Fake(plan=[DRAFT, READY])
+        self.begin(fake)
+        repo = git_repo(self.parent / "r")
+        self.registered(repo)
+        self.assertEqual(self.answer(answer_of(PID_A, A1))[::2], (204, b""))
+        self.wait_for(lambda r: r["status"] == "done" and r["plan_id"] == PID_B)
+        self.assertEqual(fake.answers, [[], [A1]])
+        self.assertEqual(fake.calls, [("plan", str(repo)), ("plan", str(repo))])
+        shown = self.view()["registration"]
+        self.assertEqual((shown["state"], shown["questions"]), ("ready", []))
+        self.assertEqual(
+            shown["note"], f"The plan is ready to apply: run adopt-project apply --plan-id {PID_B}")
+        rows = self.rows("registration.ended")
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[-1][1]["answered"], [A1])
+
+    def test_every_answer_given_so_far_is_sent_again(self):
+        a2 = {"id": "path-reference", "subject": "tools/show.sh:1:5", "value": "rewrite"}
+        second = {**DRAFT, "plan": {**DRAFT["plan"], "plan_id": PID_B},
+                  "decisions": {"open": [{"id": "path-reference", "subject": "tools/show.sh:1:5",
+                                          "answers": ["rewrite", "retain"]}],
+                                "recommended": [], "answered": [A1]}}
+        fake = Fake(plan=[DRAFT, second, READY])
+        self.begin(fake)
+        repo = git_repo(self.parent / "r")
+        self.registered(repo)
+        self.assertEqual(self.answer(answer_of(PID_A, A1))[0], 204)
+        self.wait_for(lambda r: r["status"] == "done" and r["plan_id"] == PID_B)
+        self.assertEqual(self.answer(answer_of(PID_B, a2))[0], 204)
+        self.assertEqual(fake.answers[-1], [A1, a2])
+
+    def test_the_answer_run_shows_its_own_running_headline(self):
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        fake = Fake(plan=[DRAFT, READY])
+        self.begin(fake, dispatch=None)
+        repo = git_repo(self.parent / "r")
+        other = git_repo(self.parent / "r2")
+        self.registered(repo)
+        fake.block = gate
+        self.assertEqual(self.answer(answer_of(PID_A, A1))[0], 204)
+        shown = self.view()["registration"]
+        self.assertEqual(shown["status"], "running")
+        self.assertEqual(shown["headline"],
+                         f"Planning the adoption of {repo.name} again with your answer…")
+        status, _, body = self.post({"path": str(other)})
+        self.assertEqual(
+            (status, body), (409, f"a registration is already running for {repo.name}\n".encode()))
+        gate.set()
+        self.wait_for(lambda r: r["status"] == "done" and r["plan_id"] == PID_B)
+
+    def refused_run(self, fake, repo):
+        """Register, answer under a held stderr, and return the shown view and its stderr."""
+        self.begin(fake)
+        self.registered(repo)
+        before = self.view()["registration"]
+        count = len(self.rows("registration.ended"))
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            self.assertEqual(self.answer(answer_of(PID_A, A1))[0], 204)
+            self.wait_for(lambda r: r["refusal"] is not None)
+        self.assertEqual(len(self.rows("registration.ended")), count)
+        return before, errors.getvalue()
+
+    @staticmethod
+    def records(errors):
+        lines = [line for line in errors.splitlines()
+                 if line.startswith("console: plan_answer_error ")]
+        return [json.loads(line.partition("console: plan_answer_error ")[2]) for line in lines]
+
+    def test_a_refused_answer_appends_nothing_and_shows_why(self):
+        repo = git_repo(self.parent / "r")
+        before, errors = self.refused_run(Fake(plan=[DRAFT, {"error": REFUSED}]), repo)
+        self.assertEqual(self.view()["registration"], {**before, "refusal": REFUSED_TEXT})
+        self.assertEqual(self.records(errors), [{"root": str(repo), "error": REFUSED}])
+
+    def test_a_failed_rerun_keeps_the_plan(self):
+        repo = git_repo(self.parent / "r")
+        _, errors = self.refused_run(
+            Fake(plan=[DRAFT, READY], raises_on=[None, timed_out()]), repo)
+        self.assertEqual(self.view()["registration"]["refusal"],
+                         "The plan was not made again: it took too long and was stopped")
+        (record,) = self.records(errors)
+        self.assertEqual((record["root"], record["failure"]), (str(repo), "timed_out"))
+        self.assertIn("child ran 300 s", record["cause"])
+
+    def test_an_error_that_is_not_a_refused_answer_shows_its_message_not_its_code(self):
+        repo = git_repo(self.parent / "r")
+        other = {"code": "adopt_failure", "repair_id": "adopt.some.repair",
+                 "violations": [{"pointer": "/x", "message": "the store is unreadable"}]}
+        self.refused_run(Fake(plan=[DRAFT, {"error": other}]), repo)
+        self.assertEqual(self.view()["registration"]["refusal"],
+                         "The plan was not made again: the store is unreadable")
+
+    def test_the_next_answer_clears_the_refusal(self):
+        repo = git_repo(self.parent / "r")
+        unchanged = {**READY, "plan": {**READY["plan"], "plan_id": PID_A}}
+        self.refused_run(Fake(plan=[DRAFT, {"error": REFUSED}, unchanged]), repo)
+        self.assertEqual(self.answer(answer_of(PID_A, A1))[0], 204)
+        shown = self.wait_for(lambda r: r["status"] == "done" and r["refusal"] is None)
+        self.assertEqual((shown["plan_id"], shown["state"]), (PID_A, "ready"))
+        self.assertEqual(len(self.rows("registration.ended")), 2)
+
+    def test_an_unexpected_failure_is_logged_before_it_is_shortened(self):
+        repo = git_repo(self.parent / "r")
+        _, errors = self.refused_run(
+            Fake(plan=[DRAFT, READY],
+                 raises_on=[None, RuntimeError("store unreadable at /x")]), repo)
+        self.assertEqual(self.view()["registration"]["refusal"],
+                         "The plan was not made again: it stopped unexpectedly")
+        self.assertEqual(self.records(errors), [
+            {"root": str(repo), "exception": "RuntimeError", "detail": "store unreadable at /x"}])
+        self.assertIn("Traceback (most recent call last)", errors)
+
+    def test_an_answer_that_leaves_nothing_to_adopt_shows_the_terminal_handoff_and_registers_nothing(
+            self):
+        repo = git_repo(self.parent / "r")
+        nothing = {**NO_CHANGE, "handoff": {
+            "next_command": f"adopt-project verify --register --repo-root {repo}"}}
+        fake = Fake(plan=[DRAFT, nothing], report={"registered": True, "project_id": "o/r"})
+        self.begin(fake)
+        self.registered(repo)
+        state = home_state(self.home)
+        self.assertEqual(self.answer(answer_of(PID_A, A1))[::2], (204, b""))
+        shown = self.wait_for(lambda r: r["status"] == "done" and r["outcome"] == "no_change")
+        self.assertEqual((shown["result"], shown["plan_id"], shown["questions"]),
+                         ("not_registered", None, []))
+        self.assertEqual(
+            shown["headline"],
+            f"{repo.name} needs no adoption change and is not registered yet: run "
+            f"adopt-project verify --register --repo-root {repo}")
+        self.assertEqual(fake.calls, [("plan", str(repo)), ("plan", str(repo))])
+        self.assertEqual(len(self.rows("registration.ended")), 2)
+        self.assertEqual(home_state(self.home), state)
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            status, _, body = self.answer(answer_of(PID_A, A1))
+        self.assertEqual((status, body), (
+            409, b"that plan is no longer the one shown; answer the plan shown now\n"))
+
+
+class PlanAnswerRealTest(Case):
+    def setUp(self):
+        super().setUp()
+        self.before = real_home_state()
+        self.repo = answer_repository(self.parent)
+        self.head = git(self.repo, "rev-parse", "HEAD")
+        self.begin(register.Adopter(), dispatch=None)
+        self.addCleanup(self.untouched)
+
+    def untouched(self):
+        self.assertEqual(git(self.repo, "status", "--porcelain"), "")
+        self.assertEqual(git(self.repo, "rev-parse", "HEAD"), self.head)
+        self.assertEqual(json.loads(self.registry.read_text())["projects"], [])
+        self.assertEqual(real_home_state(), self.before)
+
+    def answered(self, plan_id, question, subject, value):
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            self.assertEqual(
+                self.answer(answer_of(plan_id, {"id": question, "subject": subject,
+                                                "value": value}))[0], 204)
+            return self.wait_for(
+                lambda r: r["status"] == "done"
+                and (r["plan_id"] != plan_id or r["refusal"] is not None))
+
+    def test_a_throwaway_repository_shows_one_plain_question_per_subject(self):
+        reg = self.registered(self.repo)
+        self.assertEqual(reg["questions"], [
+            {"id": "candidate-class", "subject": ".claude/odd.md",
+             "ask": "What should happen to .claude/odd.md? No rule covers this agent file.",
+             "options": [{"value": "archive-history",
+                          "label": "Archive it under .agents/knowledge/archive/adopted/"}],
+             "recommended": None, "why": None},
+            {"id": "path-reference", "subject": "tools/show.sh:1:5",
+             "ask": "tools/show.sh line 1 names .claude/specs/a.md, which this plan moves. "
+                    "Should it follow the move?",
+             "options": [{"value": "rewrite", "label": "Change it to .agents/artifacts/specs/a.md"},
+                         {"value": "retain", "label": "Leave it as it is"}],
+             "recommended": None, "why": None}])
+        self.assertEqual(reg["state"], "draft")
+        self.assertTrue(reg["plan_id"].startswith("sha256:"))
+
+    def test_answering_both_questions_on_a_throwaway_repository_makes_the_plan_ready(self):
+        first = self.registered(self.repo)
+        second = self.answered(first["plan_id"], "candidate-class", ".claude/odd.md",
+                               "archive-history")
+        self.assertEqual([q["subject"] for q in second["questions"]], ["tools/show.sh:1:5"])
+        reg = self.answered(second["plan_id"], "path-reference", "tools/show.sh:1:5", "rewrite")
+        self.assertEqual((reg["state"], reg["questions"]), ("ready", []))
+        self.assertEqual(
+            reg["note"], f"The plan is ready to apply: run adopt-project apply --plan-id {reg['plan_id']}")
+        stored = (self.home / ".agents/state/adopt/plans"
+                  / (reg["plan_id"].partition(":")[2] + ".json"))
+        document = json.loads(stored.read_text())
+        self.assertEqual(document["plan"]["state"], "ready")
+        self.assertEqual(
+            {(a["id"], a["subject"], a["value"]) for a in document["decisions"]["answered"]},
+            {("candidate-class", ".claude/odd.md", "archive-history"),
+             ("path-reference", "tools/show.sh:1:5", "rewrite")})
+
+    def test_a_refused_answer_leaves_the_stored_plan_unchanged(self):
+        reg = self.registered(self.repo)
+        snapshot = home_state(self.home)
+        rows = self.rows("registration.ended")
+        shown = self.answered(reg["plan_id"], "candidate-class", ".claude/odd.md",
+                              "retain-product")
+        self.assertEqual(shown["refusal"], REFUSED_TEXT)
+        self.assertEqual(home_state(self.home), snapshot)
+        self.assertEqual(self.rows("registration.ended"), rows)
+        self.assertEqual((shown["plan_id"], shown["questions"]),
+                         (reg["plan_id"], reg["questions"]))
+        shown = self.answered(reg["plan_id"], "candidate-class", ".claude/none.md",
+                              "archive-history")
+        self.assertEqual(
+            shown["refusal"],
+            "The plan refused that answer: the answered subject is not an undecided candidate of "
+            "this inspection")
+        self.assertEqual(home_state(self.home), snapshot)
+
+
+class PlanAnswerSecretTest(Case):
+    def test_a_secret_shaped_file_says_why_it_cannot_be_answered_here(self):
+        before = real_home_state()
+        root = register_check.adopted_repository(
+            self.parent, "fixture/console-answer", ROOT / register_check.CONTRACT_SOURCE)
+        (root / ".claude/secrets").mkdir(parents=True)
+        (root / ".claude/secrets/key.md").write_text("# key\n")
+        git(root, "add", "-A")
+        git(root, "commit", "-q", "-m", "secret")
+        self.begin(register.Adopter(), dispatch=None)
+        reg = self.registered(root)
+        (question,) = [q for q in reg["questions"] if q["subject"] == ".claude/secrets/key.md"]
+        self.assertEqual(question["options"], [])
+        self.assertEqual(
+            question["why"],
+            ".claude/secrets/key.md looks like a secret, so it cannot be answered here: remove it "
+            "from the repository in its own commit, then register the repository again.")
+        self.assertEqual(reg["state"], "draft")
+        self.assertEqual(json.loads(self.registry.read_text())["projects"], [])
         self.assertEqual(real_home_state(), before)
 
 

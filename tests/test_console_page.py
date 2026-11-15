@@ -278,7 +278,7 @@ class PageTest(unittest.TestCase):
              "/api/message", "/api/stop", "/api/round-answer", "/api/continue",
              "/api/exclusion", "/api/pin", "/api/signin", "/api/signin-code", "/api/signin-cancel",
              "/api/account-add", "/api/signin-link", "/api/account-remove",
-             "/api/register-project"},
+             "/api/register-project", "/api/plan-answer"},
         )
         self.assertEqual(
             len(re.findall(r"\b(?:fetch|EventSource)\(", self.text)), len(literals)
@@ -287,7 +287,7 @@ class PageTest(unittest.TestCase):
     def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
         # A separate snapshot request can answer after a newer streamed frame
         # and render over it; the stream's first frame is already the snapshot.
-        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 27)
+        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 28)
         self.assertIsNotNone(
             re.search(r'fetch\("/api/looked",\s*\{\s*method:\s*"POST"', self.text)
         )
@@ -6693,6 +6693,30 @@ REGISTERED = {**REGISTERING, "status": "done", "result": "planned", "outcome": "
               "headline": "What adopting r would change: it has agent files or a contract to bring up to date",
               "lines": ["moves 2 agent files under .agents/", "writes the project contract"],
               "note": "The plan has 1 open question."}
+Q_CANDIDATE = {
+    "id": "candidate-class", "subject": ".claude/odd.md",
+    "ask": "What should happen to .claude/odd.md? No rule covers this agent file.",
+    "options": [{"value": "archive-history",
+                 "label": "Archive it under .agents/knowledge/archive/adopted/"}],
+    "recommended": None, "why": None}
+Q_REFERENCE = {
+    "id": "path-reference", "subject": "tools/show.sh:1:5",
+    "ask": "tools/show.sh line 1 names .claude/specs/a.md, which this plan moves. "
+           "Should it follow the move?",
+    "options": [{"value": "rewrite", "label": "Change it to .agents/artifacts/specs/a.md"},
+                {"value": "retain", "label": "Leave it as it is"}],
+    "recommended": None, "why": None}
+Q_SECRET = {
+    "id": "candidate-class", "subject": ".claude/secrets/key.md",
+    "ask": "What should happen to .claude/secrets/key.md? No rule covers this agent file.",
+    "options": [], "recommended": None,
+    "why": ".claude/secrets/key.md looks like a secret, so it cannot be answered here: remove it "
+           "from the repository in its own commit, then register the repository again."}
+PLAN_A = "sha256:" + "a" * 64
+ASKING = {**REGISTERED, "plan_id": PLAN_A, "state": "draft", "refusal": None,
+          "note": "The plan has 3 open questions.",
+          "questions": [Q_CANDIDATE, Q_REFERENCE, Q_SECRET]}
+ASKED = [START, {"frame": {**frame([]), "registration": ASKING}}]
 REGISTER_OPEN = [START, {"frame": {**frame([]), "registration": None}}, {"click": "register-open"}]
 REGISTER_TYPED = REGISTER_OPEN + [{"type": {"class": "register-path", "text": "/srv/r"}}]
 
@@ -6810,5 +6834,114 @@ class RegisterControlTest(unittest.TestCase):
             finally:
                 browser.close()
         self.assertGreater(got["kids"], 5)
+        self.assertTrue(got["fits"], got)
+        self.assertTrue(got["inside"], got)
+
+    def test_open_questions_show_as_asks_with_their_options_or_why(self) -> None:
+        (snap,) = render(ASKED + [{"snapshot": True}])
+        self.assertEqual([full(n) for n in registered(snap, "register-ask")],
+                         [q["ask"] for q in ASKING["questions"]])
+        self.assertEqual([full(n) for n in registered(snap, "register-option")],
+                         ["Archive it under .agents/knowledge/archive/adopted/",
+                          "Change it to .agents/artifacts/specs/a.md", "Leave it as it is"])
+        self.assertEqual([full(n) for n in registered(snap, "register-why")], [Q_SECRET["why"]])
+        self.assertEqual(len(registered(snap, "register-question")), 3)
+        self.assertEqual(registered(snap, "register-refusal"), [])
+        (result,) = registered(snap, "register-result")
+        self.assertEqual(
+            [full(n) for n in nodes(result)[1:] if n["tag"] in ("p", "li", "button")],
+            [ASKING["headline"], *ASKING["lines"], ASKING["note"],
+             Q_CANDIDATE["ask"], "Archive it under .agents/knowledge/archive/adopted/",
+             Q_REFERENCE["ask"], "Change it to .agents/artifacts/specs/a.md", "Leave it as it is",
+             Q_SECRET["ask"], Q_SECRET["why"], "Close"])
+
+    def test_choosing_an_option_posts_the_answer_with_the_shown_plan_id(self) -> None:
+        (snap,) = render(ASKED + [{"respond": {"status": 204, "text": ""}},
+                                  {"click": "register-option"}, {"snapshot": True}])
+        (post,) = snap["posts"]
+        self.assertEqual(post["url"], "/api/plan-answer")
+        self.assertEqual(json.loads(post["body"]), {
+            "plan_id": PLAN_A, "id": "candidate-class", "subject": ".claude/odd.md",
+            "value": "archive-history"})
+        self.assertEqual(registered(snap, "register-refusal"), [])
+
+    def test_options_are_disabled_while_an_answer_posts(self) -> None:
+        held, released = render(ASKED + [
+            {"hold": True}, {"click": "register-option"}, {"snapshot": True},
+            {"click": "register-option"},
+            {"release": {"status": 204, "text": ""}}, {"snapshot": True}])
+        options = registered(held, "register-option")
+        self.assertEqual(len(options), 3)
+        self.assertTrue(all(n["disabled"] is True for n in options))
+        self.assertEqual(len(released["posts"]), 1)
+        self.assertTrue(all(n["disabled"] is False for n in registered(released, "register-option")))
+
+    def test_a_refused_write_shows_its_reason_under_the_note(self) -> None:
+        reason = "that plan is no longer the one shown; answer the plan shown now\n"
+        other = {**ASKING, "plan_id": "sha256:" + "b" * 64}
+        first, second = render(ASKED + [
+            {"respond": {"status": 409, "text": reason}}, {"click": "register-option"},
+            {"snapshot": True},
+            {"frame": {**frame([]), "registration": other}}, {"snapshot": True}])
+        (shown,) = registered(first, "register-refusal")
+        self.assertEqual(full(shown), reason.strip())
+        self.assertEqual(registered(second, "register-refusal"), [])
+
+    def test_the_views_refusal_is_shown(self) -> None:
+        text = ("The plan refused that answer: the answer is not the one this candidate's "
+                "open question offers")
+        (snap,) = render([START, {"frame": {**frame([]), "registration": {**ASKING, "refusal": text}}},
+                          {"snapshot": True}])
+        (shown,) = registered(snap, "register-refusal")
+        self.assertEqual(full(shown), text)
+
+    def test_a_running_or_older_registration_shows_no_question(self) -> None:
+        for registration in (REGISTERING, REGISTERED):
+            (snap,) = render([START, {"frame": {**frame([]), "registration": registration}},
+                              {"snapshot": True}])
+            self.assertEqual(registered(snap, "register-question"), [])
+
+    def test_at_480_the_questions_fit(self) -> None:
+        try:
+            from playwright.sync_api import Error, sync_playwright
+        except ImportError:
+            self.skipTest("playwright is not installed")
+        fakes = (
+            "window.EventSource = class { constructor() { window.__src = this; this.l = {}; }"
+            " addEventListener(name, fn) { this.l[name] = fn; } close() {} };"
+            "window.fetch = () => Promise.resolve(new Response(null, {status: 204}));")
+        measure = """() => {
+          const box = document.getElementById('register');
+          const edge = document.documentElement.clientWidth;
+          const kids = [...box.querySelectorAll('*')].map((e) => e.getBoundingClientRect());
+          return {fits: box.scrollWidth <= box.clientWidth, kids: kids.length,
+                  inside: kids.every((r) => r.right <= edge)};
+        }"""
+        deep = "a-long-directory-name/" * 3
+        long_reference = {
+            **Q_REFERENCE, "subject": f"{deep}show.sh:1:5",
+            "ask": f"{deep}show.sh line 1 names .claude/{deep}a.md, which this plan moves. "
+                   "Should it follow the move?",
+            "options": [{"value": "rewrite", "label": f"Change it to .agents/artifacts/{deep}a.md"},
+                        {"value": "retain", "label": "Leave it as it is"}]}
+        asking = {**ASKING, "questions": [Q_CANDIDATE, long_reference, Q_SECRET]}
+        html = PAGE.read_text(encoding="utf-8").replace("__CONSOLE_TOKEN__", "t")
+        with sync_playwright() as pw:
+            try:
+                browser = pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+            except Error as err:
+                self.skipTest(f"no Chromium to launch: {err}")
+            try:
+                page = browser.new_page(viewport={"width": 480, "height": 900})
+                page.add_init_script(fakes)
+                page.route("http://console.test/", lambda route: route.fulfill(
+                    body=html, content_type="text/html"))
+                page.goto("http://console.test/")
+                page.evaluate("(f) => window.__src.l.view({data: JSON.stringify(f)})",
+                              {**view([]), "registration": asking})
+                got = page.evaluate(measure)
+            finally:
+                browser.close()
+        self.assertGreater(got["kids"], 10)
         self.assertTrue(got["fits"], got)
         self.assertTrue(got["inside"], got)
