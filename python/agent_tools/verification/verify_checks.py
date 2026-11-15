@@ -1176,6 +1176,11 @@ def _strings(value: object, path: str = "") -> Iterator[tuple[str, str]]:
     return _walk_strings(value, path, {id(entry) for entry in _sprint_entries(value)})
 
 
+def _collapse(text: str) -> str:
+    """Issue 1031: `text` as rendered prose, every run of whitespace one space, the ends trimmed."""
+    return " ".join(text.split())
+
+
 def _short(value: object, low: int, high: int, *, stripped: bool = False) -> bool:
     return isinstance(value, str) and low <= len((value.strip() if stripped else value)) <= high
 
@@ -1253,10 +1258,12 @@ def browser_command() -> list[str]:
 MEASURE_JS = """(() => {
   const lead = document.querySelector(".lead");
   const ask = lead && lead.querySelector("h2.q");
+  const title = lead && lead.querySelector(".head .sprint-title");
   const box = (node) => { const r = node.getBoundingClientRect(); return {top: r.top, bottom: r.bottom}; };
   return {
     viewport: {width: window.innerWidth, height: window.innerHeight},
     lead: ask ? {
+      title: title ? title.textContent : null,
       ask: Object.assign({text: ask.textContent,
                           clipped: ask.scrollHeight > ask.clientHeight + 1 || ask.scrollWidth > ask.clientWidth + 1},
                          box(ask)),
@@ -1431,18 +1438,24 @@ def console_first_screen(port: int, *, browser: Sequence[str] | None = None, tim
     lead = measure.get("lead")
     ask = lead.get("ask") if isinstance(lead, dict) else None
     ask_text = ask.get("text") if isinstance(ask, dict) and isinstance(ask.get("text"), str) else None
-    chosen = next((c for c in candidates if ask_text is not None and ask_text.strip() == str(c.get("headline")).strip()), None)
+    title_text = lead.get("title") if isinstance(lead, dict) and isinstance(lead.get("title"), str) else None
+    asked = [c for c in candidates if ask_text is not None and ask_text.strip() == str(c.get("headline")).strip()]
+    chosen = next((c for c in asked if title_text is not None and title_text.strip() == str(c.get("title")).strip()),
+                  asked[0] if asked else None)
     if chosen is None:
         return 75, {"verdict": "not_yet", "lead": "other", "screenshot": str(screenshot)}
     problems: list[dict] = []
+    if title_text is None or title_text.strip() != str(chosen.get("title")).strip():
+        problems.append({"member": "lead_title"})
     if ask["top"] < 0 or ask["bottom"] > FOLD or ask.get("clipped"):
         problems.append({"member": "fold_ask"})
     options = lead.get("options") if isinstance(lead.get("options"), list) else []
     if ([str(option.get("text", "")).strip() for option in options] != chosen["questions"][0]["options"]
             or any(option.get("bottom", FOLD + 1) > FOLD for option in options)):
         problems.append({"member": "fold_options"})
-    text = measure.get("text") if isinstance(measure.get("text"), str) else ""
-    if any(sprint["goal"][NEEDLE] in text for sprint in long_sprints.values()):
+    text = _collapse(measure.get("text") if isinstance(measure.get("text"), str) else "")
+    needles = (_collapse(sprint["goal"][NEEDLE]) for sprint in long_sprints.values())
+    if any(needle and needle in text for needle in needles):
         problems.append({"member": "visible_goal"})
     if not problems:
         return 0, {"verdict": "met", "port": port, "screenshot": str(screenshot), "viewport": measure.get("viewport")}

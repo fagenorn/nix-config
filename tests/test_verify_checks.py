@@ -1958,7 +1958,8 @@ while True:
 '''
 
 M_OK = {"viewport": {"width": 1440, "height": 900},
-        "lead": {"ask": {"text": "Which store keeps the checkpoints?", "top": 120, "bottom": 168, "clipped": False},
+        "lead": {"title": "Importer resumes after a crash",
+                 "ask": {"text": "Which store keeps the checkpoints?", "top": 120, "bottom": 168, "clipped": False},
                  "options": [{"text": "sqlite", "top": 300, "bottom": 340},
                              {"text": "files", "top": 350, "bottom": 390}]},
         "text": "Importer resumes after a crash\nWhich store keeps the checkpoints?"}
@@ -1976,7 +1977,8 @@ def with_lead(measure, **changes):
     lead = json.loads(json.dumps(measure["lead"]))
     ask = {**lead["ask"], **changes.get("ask", {})}
     options = changes.get("options", lead["options"])
-    return {**measure, "lead": {"ask": ask, "options": options}, **({"text": changes["text"]} if "text" in changes else {})}
+    return {**measure, "lead": {"title": changes.get("title", lead["title"]), "ask": ask, "options": options},
+            **({"text": changes["text"]} if "text" in changes else {})}
 
 
 class ChromiumDriverTest(unittest.TestCase):
@@ -2098,6 +2100,32 @@ class ConsoleFirstScreenTest(unittest.TestCase):
     def test_goal_text_on_the_rendered_page_is_not_met(self):
         code, report = self.check([{**M_OK, "text": "Seen: " + self.GOAL}])
         self.assertEqual(code, 1)
+        self.assertIn({"member": "visible_goal"}, report["problems"])
+
+    def test_a_lead_without_or_with_another_sprint_title_is_not_met(self):
+        for name, title in (("no title", None), ("another title", "Exporter streams rows")):
+            with self.subTest(name):
+                code, report = self.check([with_lead(M_OK, title=title)])
+                self.assertEqual(code, 1, report)
+                self.assertIn({"member": "lead_title"}, report["problems"])
+
+    def test_the_lead_is_matched_to_the_candidate_with_its_own_title(self):
+        v = self.view()
+        twin = json.loads(json.dumps(v["inbox"]["open"][0]))
+        twin.update(sprint_id="b" * 16, title="Exporter streams rows")
+        v["entries"][0]["sprints"].append({"sprint_id": "b" * 16, "title": "Exporter streams rows", "goal": self.GOAL})
+        v["inbox"]["open"].insert(0, twin)
+        code, report = self.check([M_OK], v)
+        self.assertEqual(code, 0, report)
+
+    def test_a_rendered_goal_with_collapsed_whitespace_is_not_met(self):
+        goal = self.GOAL[:210] + "\n\n  " + "word  \n  and\tmore " * 6 + self.GOAL[260:]
+        v = self.view()
+        v["entries"][0]["sprints"][0]["goal"] = goal
+        rendered = " ".join(goal.split())
+        self.assertNotIn(goal[200:300], rendered)
+        code, report = self.check([{**M_OK, "text": "Seen: " + rendered}], v)
+        self.assertEqual(code, 1, report)
         self.assertIn({"member": "visible_goal"}, report["problems"])
 
     def test_a_page_led_by_another_item_is_not_yet(self):
