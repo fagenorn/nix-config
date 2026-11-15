@@ -132,3 +132,7 @@ _Avoid_: import, onboarding
 **Plan question**:
 One open question of a repository's adoption plan, shown on the page as an inbox item titled `Register <name>`, a question card with exactly the answers the plan offers, or one line saying why it cannot be answered there (ADR-console-029).
 _Avoid_: adoption prompt, open decision
+
+**Drafted contract**:
+The project contract the console drafts for a repository that has none, from its remote and its tracked files; every value it set is shown with where it came from and can be changed before the plan is applied; it lives in the console's state and the stored plan until `adopt-project apply` writes it (ADR-console-030).
+_Avoid_: generated contract, default contract

@@ -1,6 +1,6 @@
 # ADR-console-028 — The owner registers a project from the page
 
-- **Status:** accepted; amended by ADR-console-029
+- **Status:** accepted; amended by ADR-console-029, ADR-console-030
 - **Decided in:** #1052
 
 ## Context
