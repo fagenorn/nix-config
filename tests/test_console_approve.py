@@ -279,7 +279,9 @@ class WordsTest(unittest.TestCase):
             "Register the repository again to make a new plan, then apply that one."))
         self.assertEqual(words(error(repair_id="adopt.worktree.dirty")), (
             "an uncommitted change in the repository overlaps what the plan changes",
-            "Commit or set aside the uncommitted change in r, then choose Apply it again."))
+            "Set aside the uncommitted change in r, then choose Apply it again. To keep the "
+            "change instead, commit it, then register the repository again to make a new "
+            "plan."))
         self.assertEqual(words(error(repair_id="adopt.worktree.retained"), KEPT), (
             "an earlier attempt of this plan is still kept",
             "A leftover copy of the adoption is kept on this computer; ask an agent to remove "

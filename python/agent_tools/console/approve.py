@@ -570,8 +570,9 @@ def apply_failure(name: str, error: Mapping, kept: Mapping | None) -> tuple[str,
                 "Register the repository again to make a new plan, then apply that one.")
     if repair == "adopt.worktree.dirty":
         return ("an uncommitted change in the repository overlaps what the plan changes",
-                f"Commit or set aside the uncommitted change in {name}, then choose Apply it "
-                "again.")
+                f"Set aside the uncommitted change in {name}, then choose Apply it again. To "
+                "keep the change instead, commit it, then register the repository again to make "
+                "a new plan.")
     if repair == "adopt.worktree.retained":
         return ("an earlier attempt of this plan is still kept",
                 "A leftover copy of the adoption is kept on this computer; ask an agent to "
