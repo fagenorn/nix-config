@@ -1,6 +1,6 @@
 # ADR-console-028 — The owner registers a project from the page
 
-- **Status:** accepted
+- **Status:** accepted; amended by ADR-console-029
 - **Decided in:** #1052
 
 ## Context
@@ -33,7 +33,7 @@ A project reaches the page only once it is in the fleet registry, and getting it
 - `rewrites N link(s)`;
 - `rewrites N path reference(s)`.
 
-The plan document itself is never shown. The headline names the outcome in plain words. For `bootstrap` it is `What adopting <name> would change: it has no agent files or project contract yet`, and for `reconcile` it is `What adopting <name> would change: it has agent files or a contract to bring up to date`. The note is `The plan has N open question(s).` for a draft with questions, `The plan is a draft: <first blocker>` (or `The plan is a draft.`) for a draft without, and `The plan is ready to apply.` for a ready plan.
+The plan document itself is never shown. The headline names the outcome in plain words. For `bootstrap` it is `What adopting <name> would change: it has no agent files or project contract yet`, and for `reconcile` it is `What adopting <name> would change: it has agent files or a contract to bring up to date`. The note is `The plan has N open question(s).` for a draft with questions, `The plan is a draft: <first blocker>` (or `The plan is a draft.`) for a draft without, and `The plan is ready to apply.` for a ready plan. A ready plan's note is amended by ADR-console-029 D5.
 
 **D5. Already adopted.** A `no_change` plan is followed at once by `adopt-project verify --register --repo-root <root>`, the same check the terminal runs. It reads one pinned commit of origin (ADR-project-contract-005), and the project then reaches the page through the registry watcher like any registration. A refusal is one line, `<name> was not registered: <code>: <message>` (for example `not_integrated`), or `<name> was not registered: <result>` when the report says it registered nothing. Success reads `<name> is registered as <project id>.`
 
@@ -41,14 +41,14 @@ The plan document itself is never shown. The headline names the outcome in plain
 
 **D7. What is stored.** A run that ends appends one `registration.ended` row with exactly `by` (`owner`), `root`, `project_id`, `result` (`planned`, `registered`, `not_registered`, `needs_migration`, `needs_repair` or `failed`), `outcome`, `headline`, `lines` and `note`. The row is not in `KEPT_KINDS`: it is removed by the retention of ADR-console-009. A refusal appends none. The view's top-level `registration` member is the latest row with its `at` and `status` `done`, or, while a run is under way, `status` `running` with the headline `Planning the adoption of <name>…`. It is null otherwise.
 
-**D8. The page.** This amends ADR-console-002. A quiet Register project control sits at the foot of the side column, under the projects and shown with an empty fleet too. It opens a one-line path field with Register and Cancel. The typed path is a draft whose text, selection and focus survive every frame. A refused write shows its reason beside the control. The latest result shows beneath it (headline, lines, note) with a Close that hides it on this page until another result arrives.
+**D8. The page.** This amends ADR-console-002. A quiet Register project control sits at the foot of the side column, under the projects and shown with an empty fleet too. It opens a one-line path field with Register and Cancel. The typed path is a draft whose text, selection and focus survive every frame. A refused write shows its reason beside the control. The latest result shows beneath it (headline, lines, note) with a Close that hides it on this page until another result arrives. The plan's open questions show under the note (ADR-console-029 D8).
 
 **D9. Linux only.** The console registers only where it runs its other owner commands, which is Linux.
 
 ## Consequences
 
 - The owner can see what adopting a repository would change, and register an adopted one, with no terminal.
-- Out of scope: answering the plan's questions, applying a plan and migrating from the page. Each stays a terminal command, and the page names it.
+- Out of scope: applying a plan and migrating from the page; answering the plan's questions is ADR-console-029. Each stays a terminal command, and the page names it.
 - Tests sandbox HOME (one per case) and every repository, so no case reads or writes the real fleet registry.
 - The host check restores what it registered.
 - The check restores only after the view shows the run is no longer running, and names what it leaves when it cannot see that.

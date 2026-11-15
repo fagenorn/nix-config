@@ -72,6 +72,7 @@
 | Owner prompt | Verification |
 | Owner-action marker | Claims |
 | Pinned profile | Console |
+| Plan question | Console |
 | Plan-gated floor | Guard |
 | Platform manifest | Project contract |
 | Prefix reorder | Hosts |
