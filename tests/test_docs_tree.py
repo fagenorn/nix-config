@@ -572,6 +572,20 @@ class DocsTreeTest(unittest.TestCase):
                         if row.startswith("- **Status:**"))
             self.assertEqual(line, expected)
 
+    def test_the_contract_draft_seam_is_recorded(self):
+        path = ("docs/areas/project-contract/adr/"
+                "006-a-drafted-contract-enters-the-plan-as-a-file-it-writes.md")
+        text = (REPO_ROOT / path).read_text()
+        self.assertEqual(
+            text.splitlines()[0],
+            "# ADR-project-contract-006 \u2014 A drafted contract enters the "
+            "adoption plan as a file it writes")
+        for needle in ("--contract-draft", "adopt.draft.invalid",
+                       "adopt.draft.contract_present", "adopt.draft.id_taken",
+                       "plan_id", "apply", "ADR-project-contract-004",
+                       "ADR-project-contract-005", "#1067"):
+            self.assertIn(needle, text)
+
     def test_the_accounts_panel_decision_is_recorded(self):
         base = "docs/areas/console/adr/"
         adr2 = self.doc(base + "002-the-desk-page-design-rules.md")

@@ -163,6 +163,23 @@ def stored_answers(document: dict) -> list[dict]:
     return answered
 
 
+def stored_draft(document: dict) -> dict | None:
+    """The drafted contract the stored plan carries, if it carries one.
+
+    `apply` re-derives with it, so a stored value that is not a JSON object is
+    refused here rather than handed to the shared derivation.
+    """
+    plan = document["plan"]
+    if "contract_draft" not in plan:
+        return None
+    draft = plan["contract_draft"]
+    if not isinstance(draft, dict):
+        raise refuse(
+            "adopt_failure", "adopt.plan.malformed", "/plan/contract_draft",
+            "the stored plan's drafted contract is not a JSON object")
+    return draft
+
+
 def validate_operations(root: Path, operations: list[object]) -> None:
     """Every operation is a known kind of the right arity over contained paths.
 

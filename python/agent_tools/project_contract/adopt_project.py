@@ -71,6 +71,28 @@ and a `pre-commit` hook run after it, the same count over the commit against
 its parent is proved again once the commit exists, and a failure there refuses
 `adopt.commit.new_broken_link` with the worktree and branch retained.
 
+`plan --contract-draft FILE` plans the adoption of a checkout that has no
+project contract by carrying one drafted outside it (#1067). The file holds one
+JSON object, the contract as the draft's author wants it, and must lie outside
+the checkout. It enters the plan as the one file the adoption writes: the
+planned `.agents/project.json` is the draft with the running platform's
+interval added when it declares none, always the first operation, and the
+draft, exactly as given, is the plan's `contract_draft` member and the
+eleventh input of `plan_id` (its keys in canonical sorted order, the only order
+a stored plan keeps, and so the order of the bytes written), so `apply --plan-id` re-derives with the stored
+draft and refuses a draft changed after planning as `plan_stale`
+(`adopt.plan.inputs_changed`). Every check the resolver makes runs on the bytes
+the plan would write, in a scratch copy of the base revision's tree that
+holds them, so the checkout itself is never written and a draft the resolver
+refuses is refused by the plan, not by `apply`. A refusal is exit 2 with one
+error object of code `adopt_failure` and nothing stored: `adopt.draft.contract_present` (the
+checkout already carries a contract file), `adopt.draft.unreadable` (the file
+cannot be read as one JSON object), `adopt.draft.inside_checkout` (the file
+lies in the checkout), `adopt.draft.invalid` (the resolver's own
+`{pointer, message}` violations) and `adopt.draft.id_taken` (the drafted
+project id is registered for another checkout). A plan without the flag is
+unchanged, in its document and its `plan_id`.
+
 A schema-1 contract is routed as `migration_required` with the
 `bindings-deploy.retire` step (issue 579 P11); `resolve_project` states the
 schema that refuses it.
@@ -135,13 +157,16 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 
 from agent_tools.project_contract import (adopt_apply, adopt_inspection, adopt_links,
                                           adopt_migrate, adopt_planning, adopt_references,
                                           adopt_verify, agent_platform)
+from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.system.siblings import sibling_argv
 
 
@@ -251,8 +276,8 @@ class Composition:
         self.overlap = overlap
 
 
-def compose_plan(root: Path, manifest: dict,
-                 answered: list[dict]) -> Composition:
+def compose_plan(root: Path, manifest: dict, answered: list[dict],
+                 draft: dict | None = None) -> Composition:
     """The one derivation both `plan` and `apply` read a repository through.
 
     `apply` re-runs exactly this to recompute the input digest and regenerate
@@ -261,11 +286,28 @@ def compose_plan(root: Path, manifest: dict,
     `answered` is the operator's answers to open `candidate-class`,
     `path-reference` and `reference-policy` questions and its `reference-format`
     declarations, applied before anything else is derived, so they enter
-    `plan_id`.
+    `plan_id`. `draft` is a contract drafted for a checkout that has none: it
+    stands where the checkout's own contract would, is resolved as the file the
+    plan writes, and enters `plan_id`.
     """
+    if draft is not None:
+        contract_path = root / adopt_inspection.CONTRACT_FILENAME
+        if (adopt_inspection.read_bytes_bounded(contract_path) is not None
+                or os.path.lexists(contract_path)):
+            raise adopt_inspection.refuse(
+                "adopt_failure", "adopt.draft.contract_present", "",
+                "the checkout already has a project contract, so a drafted "
+                "one cannot be planned")
+    if draft is not None:
+        # The stored plan is canonical JSON, which sorts every key, so the
+        # draft is put in that order before anything is derived from it:
+        # `apply` re-derives from the stored draft and must write the bytes
+        # `plan` hashed.
+        draft = json.loads(json.dumps(draft, sort_keys=True))
     inventory = inspect_repository(root)
     found = adopt_inspection.classify_inventory(root, inventory)
-    contract_source = load_contract_source(root)
+    contract_source = (draft if draft is not None
+                       else load_contract_source(root))
     answered, references = adopt_planning.apply_answers(
         root, found, inventory, answered,
         adopt_planning.reference_excluded(contract_source),
@@ -294,14 +336,23 @@ def compose_plan(root: Path, manifest: dict,
         root, inventory.base_revision, found.moves,
         [path for path, _ in adopt_planning.evidence_record_members(found)],
         adopt_planning.generated_targets(contract_source))
-    exit_code, payload = run_resolver(root, "resolve")
-    contract_resolves = exit_code == 0
-    repair_id = (None if contract_resolves
-                 else adopt_inspection.resolver_repair_id(payload))
-    projections_drift = (
-        not contract_resolves
-        and adopt_inspection.resolver_error_code(payload)
-        == "invalid_projection")
+    if draft is not None:
+        written = adopt_inspection.authored_bytes(
+            adopt_planning.amended_contract(
+                draft, adopt_planning.derived_interval(
+                    manifest["platform_version"]), found))
+        projections_drift = resolve_draft(root, inventory.base_revision,
+                                          written)
+        contract_resolves, repair_id, payload = True, None, None
+    else:
+        exit_code, payload = run_resolver(root, "resolve")
+        contract_resolves = exit_code == 0
+        repair_id = (None if contract_resolves
+                     else adopt_inspection.resolver_repair_id(payload))
+        projections_drift = (
+            not contract_resolves
+            and adopt_inspection.resolver_error_code(payload)
+            == "invalid_projection")
     # What the planned amendment can still put right, which is exactly what it
     # writes. `amended_contract` *adds* `platform` when the member is absent
     # and never rewrites an authored one, so only the absent case may forgive a
@@ -313,14 +364,23 @@ def compose_plan(root: Path, manifest: dict,
     # plan already carries.
     amendment_writes_platform = (contract_source is not None
                                  and "platform" not in contract_source)
-    unfixable = [] if projections_drift else [
+    unfixable = [] if projections_drift or draft is not None else [
         pointer for pointer
         in adopt_inspection.resolver_violation_pointers(payload)
         if not (amendment_writes_platform
                 and pointer.startswith("/platform"))]
 
     contract_id = None
-    if contract_resolves and isinstance(payload, dict):
+    if draft is not None:
+        # The resolver accepted the id as a non-empty string. Taking it from
+        # the draft bypasses `derive_identity`'s collision check, so the
+        # registry is asked here.
+        contract_id = draft["project"]["id"]
+        if adopt_planning.registry_collision(contract_id, root):
+            raise adopt_inspection.refuse(
+                "adopt_failure", "adopt.draft.id_taken", "/project/id",
+                "the project id is already registered for another checkout")
+    elif contract_resolves and isinstance(payload, dict):
         project = payload.get("project")
         if isinstance(project, dict) and isinstance(project.get("id"), str):
             contract_id = project["id"]
@@ -344,14 +404,14 @@ def compose_plan(root: Path, manifest: dict,
     plan_id = adopt_planning.compute_plan_id(
         project_id, inventory.base_revision, platform_block, evidence,
         decisions["answered"], links.summary, path_references,
-        reference_policies, reference_formatting)
+        reference_policies, reference_formatting, draft)
 
     ready_gates = adopt_planning.evaluate_ready_gates(
         root, found, contract_source, contract_resolves, unfixable, untracked,
         decisions, links.summary)
     head, tail, contents = adopt_planning.build_operations(
         root, found, manifest, contract_source, plan_id, links,
-        reference_files)
+        reference_files, drafted=draft is not None)
 
     agent_surface = any(
         entry["lifecycle_class"] != "runtime-residue"
@@ -367,9 +427,11 @@ def compose_plan(root: Path, manifest: dict,
     pending_work = bool(substantive) or projections_drift or any(
         entry["action"] == "needs-decision" for entry in evidence)
 
+    # A draft is not the checkout's own contract: the checkout has none, so
+    # the outcome is routed on the legacy surface alone.
     outcome, forward_migration = adopt_planning.route_outcome(
-        manifest, contract_source, contract_resolves, agent_surface,
-        pending_work)
+        manifest, None if draft is not None else contract_source,
+        contract_resolves, agent_surface, pending_work)
 
     if adopt_inspection.outcome_is_appliable(outcome):
         state = "ready" if all(gate["status"] == "passed"
@@ -440,6 +502,9 @@ def compose_plan(root: Path, manifest: dict,
         },
     }
 
+    if draft is not None:
+        document["plan"]["contract_draft"] = draft
+
     return Composition(document, contents, adopt_inspection.dirty_targets(
         found))
 
@@ -449,7 +514,9 @@ def command_plan(args: argparse.Namespace) -> int:
     root = adopt_inspection.require_repository(args.repo_root)
     answers = [{"id": question, "subject": subject, "value": value}
                for question, subject, value in args.answer]
-    document = compose_plan(root, manifest, answers).document
+    draft = (load_contract_draft(args.contract_draft, root)
+             if args.contract_draft is not None else None)
+    document = compose_plan(root, manifest, answers, draft).document
     # Before the write, never after: storing is what binds this id to this
     # checkout, and the binding a stored document already carries is never
     # re-pointed at a second one (D15, D16).
@@ -459,6 +526,52 @@ def command_plan(args: argparse.Namespace) -> int:
     if args.format == "human":
         return emit_human(document)
     return emit_json(document)
+
+
+def load_contract_draft(path: str, root: Path) -> dict:
+    """The drafted contract: one JSON object in a file outside the checkout."""
+    resolved = Path(path).resolve()
+    if resolved == root or root in resolved.parents:
+        raise adopt_inspection.refuse(
+            "adopt_failure", "adopt.draft.inside_checkout", "",
+            "the drafted contract must lie outside the checkout")
+    data = adopt_inspection.read_bytes_bounded(resolved)
+    try:
+        if data is None:
+            raise ValueError("unreadable")
+        draft = json.loads(data, object_pairs_hook=reject_duplicate_keys,
+                           parse_constant=reject_nonfinite_literal)
+    except (ValueError, UnicodeDecodeError):
+        draft = None
+    if not isinstance(draft, dict):
+        raise adopt_inspection.refuse(
+            "adopt_failure", "adopt.draft.unreadable", "",
+            "the drafted contract could not be read as one JSON object")
+    return draft
+
+
+def resolve_draft(root: Path, base_revision: str, written: bytes) -> bool:
+    """Run the resolver on the bytes a drafted plan would write.
+
+    The checkout is never written: the base revision's tree is exported into a
+    scratch directory and the contract placed there. Returns whether only the
+    projections are out of date, which the plan's own regeneration operations
+    repair; any other refusal is the draft's.
+    """
+    with tempfile.TemporaryDirectory() as scratch:
+        tree = Path(scratch) / "tree"
+        adopt_inspection.export_commit(root, base_revision, tree)
+        contract = tree / adopt_inspection.CONTRACT_FILENAME
+        contract.parent.mkdir(parents=True, exist_ok=True)
+        contract.write_bytes(written)
+        exit_code, payload = run_resolver(tree, "resolve")
+    if exit_code == 0:
+        return False
+    if adopt_inspection.resolver_error_code(payload) == "invalid_projection":
+        return True
+    raise adopt_inspection.AdoptError("adopt_failure", "adopt.draft.invalid", [
+        {"pointer": violation["pointer"], "message": violation["message"]}
+        for violation in payload["error"]["violations"]])
 
 
 def load_contract_source(root: Path) -> dict | None:
@@ -585,6 +698,7 @@ def command_apply(args: argparse.Namespace) -> int:
     digest = adopt_apply.plan_digest(args.plan_id)
     document = adopt_apply.load_stored_plan(digest)
     answers = adopt_apply.stored_answers(document)
+    draft = adopt_apply.stored_draft(document)
     stored_plan = document["plan"]
     if stored_plan["state"] != "ready":
         raise adopt_inspection.refuse(
@@ -616,7 +730,7 @@ def command_apply(args: argparse.Namespace) -> int:
             "a retained worktree for this plan still exists and is never "
             "deleted without an acknowledged cleanup")
 
-    composed = compose_plan(root, manifest, answers)
+    composed = compose_plan(root, manifest, answers, draft)
     if composed.document["plan"]["plan_id"] != stored_plan["plan_id"]:
         raise adopt_inspection.refuse(
             "plan_stale", "adopt.plan.inputs_changed", "/plan/input_digest",
@@ -828,6 +942,10 @@ def build_parser() -> argparse.ArgumentParser:
                            "declare a reference-format command (a command "
                            "id of the contract, run by apply over a class's "
                            "reference-edited files); repeatable")
+    plan.add_argument("--contract-draft", metavar="FILE", default=None,
+                      help="plan the adoption of a checkout with no contract "
+                           "using the contract drafted in FILE, one JSON "
+                           "object in a file outside the checkout")
     apply_plan = subparsers.add_parser(
         "apply", help="carry out a stored ready plan in an isolated worktree")
     # Two flags and no more: naming the content-addressed id is the exact-plan

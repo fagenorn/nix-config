@@ -1225,6 +1225,8 @@ def documented_plan_id(doc: object) -> str:
         "reference_policies": doc["reference_policies"],
         "reference_formatting": doc["reference_formatting"],
     }
+    if "contract_draft" in doc["plan"]:
+        source["contract_draft"] = doc["plan"]["contract_draft"]
     payload = json.dumps(source, sort_keys=True,
                          separators=(",", ":")).encode("utf-8")
     return "sha256:" + hashlib.sha256(payload).hexdigest()
@@ -1322,6 +1324,225 @@ class PlanIdentityTest(AdoptTestCase):
 # --------------------------------------------------------------------------
 # Inspection boundary
 # --------------------------------------------------------------------------
+
+
+def drafted_contract() -> dict:
+    """A contract that is valid and self-contained for a README-only checkout.
+
+    Every commit gate of `apply` passes on any host: the commands run `true`,
+    no standards path is declared, the architecture is the tracked README, the
+    tracker is opted out (`cli: gh` derives a missing-cli state on a host
+    without it) and the commit is not signed (the sandbox has no key).
+    """
+    draft = host_independent(fixture_contract())
+    draft["projections"] = []
+    del draft["platform"]
+    for command in draft["bindings"]["commands"].values():
+        command["argv"] = ["true"]
+    draft["bindings"]["paths"]["standards"] = []
+    draft["capabilities"]["knowledge.standards"] = {"support": "unsupported"}
+    draft["bindings"]["paths"]["architecture"] = ["README.md"]
+    draft["capabilities"]["tracker"] = {"support": "unsupported"}
+    draft["bindings"]["vcs"]["commit"]["signed"] = False
+    return draft
+
+
+class ContractDraftTest(AdoptTestCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.draft = drafted_contract()
+        self.version = json.loads(MANIFEST.read_text())["platform_version"]
+        self.scratch = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, self.scratch, ignore_errors=True)
+
+    def draft_file(self, draft: object = None, name: str = "draft.json") -> str:
+        path = self.scratch / name
+        path.write_text(json.dumps(self.draft if draft is None else draft),
+                        encoding="utf-8")
+        return str(path)
+
+    def stored_plans(self) -> list[str]:
+        directory = self.home / ".agents/state/adopt/plans"
+        return sorted(path.name for path in directory.glob("*")) \
+            if directory.exists() else []
+
+    def written(self) -> bytes:
+        # The plan keeps the draft in canonical (sorted) key order, the only
+        # order its stored form has, and appends the interval it adds.
+        return adopt_inspection.authored_bytes(
+            {**json.loads(json.dumps(self.draft, sort_keys=True)),
+             "platform": adopt_planning.derived_interval(self.version)})
+
+    def test_a_draft_plans_the_contract_write_and_reaches_ready(self):
+        root = bootstrap_repo(self.home)
+        path = self.draft_file()
+        self.assert_read_only(root, 0, "plan", "--repo-root", str(root),
+                              "--contract-draft", path, "--format", "json")
+        code, doc, err = self.plan(root, "--contract-draft", path)
+        self.assertEqual(code, 0, err)
+        self.assertEqual(doc["plan"]["state"], "ready")
+        self.assertEqual(doc["plan"]["outcome"], "bootstrap")
+        self.assertEqual(doc["plan"]["blockers"], [])
+        self.assertEqual(doc["plan"]["contract_draft"], self.draft)
+        self.assertEqual(doc["plan"]["project_id"], "fixture/target")
+        self.assertEqual(doc["changes"][0], {
+            "op": "write-file", "sources": [".agents/project.json"],
+            "targets": [".agents/project.json"], "before": None,
+            "after": sha256_hash(self.written()),
+            "approval_class": adopt_inspection.approval_class_for(
+                "write-file")})
+        self.assertEqual(doc["decisions"]["open"], [])
+
+    def test_every_resolver_check_runs_on_the_draft(self):
+        def outside(draft):
+            draft["bindings"]["paths"]["architecture"] = ["../outside"]
+
+        def range_refused(draft):
+            draft["platform"] = {"min_inclusive": "99.0.0",
+                                 "max_exclusive": "100.0.0"}
+
+        def malformed(draft):
+            draft["bindings"]["paths"]["artifacts"]["specs"] = []
+
+        for name, mutate in (("a", outside), ("b", range_refused),
+                             ("c", malformed)):
+            with self.subTest(name):
+                root = bootstrap_repo(self.home)
+                draft = drafted_contract()
+                mutate(draft)
+                before = self.stored_plans()
+                code, doc, err = self.plan(
+                    root, "--contract-draft", self.draft_file(draft))
+                self.assertEqual(code, 2, err)
+                self.assertEqual(doc["error"]["repair_id"],
+                                 "adopt.draft.invalid")
+                violations = doc["error"]["violations"]
+                if name == "a":
+                    self.assertIn(
+                        {"pointer": "/bindings/paths/architecture/0",
+                         "message": "must be a non-empty repository-relative "
+                                    "path with no '..' segment"}, violations)
+                elif name == "b":
+                    self.assertTrue(any(v["pointer"] == "/platform"
+                                        for v in violations), violations)
+                else:
+                    self.assertTrue(any(
+                        v["pointer"].startswith(
+                            "/bindings/paths/artifacts/specs")
+                        for v in violations), violations)
+                self.assertEqual(self.stored_plans(), before)
+
+    def test_a_checkout_with_a_contract_refuses_a_draft(self):
+        root = adopted_repo(self.home)
+        code, doc, err = self.plan(root, "--contract-draft",
+                                   self.draft_file())
+        self.assertEqual(code, 2, err)
+        self.assertEqual(doc["error"]["repair_id"],
+                         "adopt.draft.contract_present")
+
+    def test_an_unreadable_or_inside_draft_is_refused(self):
+        root = bootstrap_repo(self.home)
+        (self.scratch / "array.json").write_text("[1]", encoding="utf-8")
+        (self.scratch / "text.json").write_text("not json", encoding="utf-8")
+        for path in (str(self.scratch / "missing.json"),
+                     str(self.scratch / "array.json"),
+                     str(self.scratch / "text.json")):
+            with self.subTest(path):
+                code, doc, err = self.plan(root, "--contract-draft", path)
+                self.assertEqual(code, 2, err)
+                self.assertEqual(doc["error"]["repair_id"],
+                                 "adopt.draft.unreadable")
+        inside = root / "draft.json"
+        inside.write_text(json.dumps(self.draft), encoding="utf-8")
+        before = git(root, "status", "--porcelain")
+        snapshot = tree_snapshot(root)
+        code, out, err = run("plan", "--repo-root", str(root),
+                             "--contract-draft", str(inside),
+                             home=self.home)
+        self.assertEqual(code, 2, err)
+        self.assertEqual(json.loads(out)["error"]["repair_id"],
+                         "adopt.draft.inside_checkout")
+        self.assertEqual(git(root, "status", "--porcelain"), before)
+        self.assertEqual(tree_snapshot(root), snapshot)
+
+    def test_the_draft_enters_the_plan_id(self):
+        root = bootstrap_repo(self.home)
+        path = self.draft_file()
+        _, first, _ = self.plan(root, "--contract-draft", path)
+        _, again, _ = self.plan(root, "--contract-draft", path)
+        other = drafted_contract()
+        other["project"]["name"] = "other"
+        _, changed, _ = self.plan(
+            root, "--contract-draft", self.draft_file(other, "other.json"))
+        self.assertEqual(first["plan"]["plan_id"], again["plan"]["plan_id"])
+        self.assertNotEqual(first["plan"]["plan_id"],
+                            changed["plan"]["plan_id"])
+        for doc in (first, changed):
+            self.assertEqual(documented_plan_id(doc), doc["plan"]["plan_id"])
+
+    def test_a_plan_without_a_draft_is_unchanged(self):
+        root = bootstrap_repo(
+            self.home, remotes=("https://github.com/fixture/target.git",))
+        code, doc, err = self.plan(root)
+        self.assertEqual(code, 0, err)
+        self.assertNotIn("contract_draft", doc["plan"])
+        self.assertEqual(doc["plan"]["state"], "draft")
+        self.assertEqual(doc["plan"]["blockers"], [{
+            "id": "contract-valid-after-amendment",
+            "message": "the contract is absent, or carries violations the "
+                       "planned amendment does not address"}])
+        self.assertEqual(documented_plan_id(doc), doc["plan"]["plan_id"])
+
+    def test_apply_writes_the_drafted_contract_in_its_worktree(self):
+        root = bootstrap_repo(self.home)
+        code, doc, err = self.plan(root, "--contract-draft",
+                                   self.draft_file())
+        self.assertEqual(code, 0, err)
+        self.assertEqual(doc["plan"]["state"], "ready")
+        code, out, err = run("apply", "--plan-id", doc["plan"]["plan_id"],
+                             home=self.home)
+        self.assertEqual(code, 0, err)
+        branch = json.loads(out)["branch"]
+        self.assertEqual(git(root, "show", f"{branch}:.agents/project.json"),
+                         self.written().decode("utf-8"))
+        self.assertFalse((root / ".agents/project.json").exists())
+
+    def test_a_changed_stored_draft_refuses_apply(self):
+        root = bootstrap_repo(self.home)
+        _, doc, _ = self.plan(root, "--contract-draft", self.draft_file())
+        digest = doc["plan"]["plan_id"].split(":", 1)[1]
+        stored = self.home / ".agents/state/adopt/plans" / (digest + ".json")
+        document = json.loads(stored.read_text(encoding="utf-8"))
+        document["plan"]["contract_draft"]["project"]["name"] = "tampered"
+        stored.write_text(json.dumps(document), encoding="utf-8")
+        code, out, err = run("apply", "--plan-id", doc["plan"]["plan_id"],
+                             home=self.home)
+        self.assertEqual(code, 2, err)
+        self.assertEqual(json.loads(out)["error"]["repair_id"],
+                         "adopt.plan.inputs_changed")
+
+    def test_a_drafted_id_registered_for_another_checkout_is_refused(self):
+        root = bootstrap_repo(self.home)
+        other = Path(tempfile.mkdtemp()).resolve()
+        self.addCleanup(shutil.rmtree, other, ignore_errors=True)
+        install_registry(self.home, [{"project_id": "fixture/target",
+                                      "root": str(other)}])
+        before = self.stored_plans()
+        code, doc, err = self.plan(root, "--contract-draft",
+                                   self.draft_file())
+        self.assertEqual(code, 2, err)
+        self.assertEqual(doc["error"]["repair_id"], "adopt.draft.id_taken")
+        self.assertEqual(doc["error"]["violations"], [{
+            "pointer": "/project/id",
+            "message": "the project id is already registered for another "
+                       "checkout"}])
+        self.assertEqual(self.stored_plans(), before)
+        install_registry(self.home, [{"project_id": "fixture/target",
+                                      "root": str(root)}])
+        code, doc, err = self.plan(root, "--contract-draft",
+                                   self.draft_file())
+        self.assertEqual(code, 0, err)
+        self.assertEqual(doc["plan"]["state"], "ready")
 
 
 class InspectionBoundaryTest(AdoptTestCase):
