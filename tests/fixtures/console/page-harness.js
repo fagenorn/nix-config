@@ -37,7 +37,7 @@
 // had preventDefault called (null before any key step). A click step skips a
 // disabled element. The fake setTimeout/clearTimeout fire when a clock step
 // reaches their due time. Each step settles pending promises before the next. A snapshot holds the trees
-// of the inbox, statement, projects, unmanaged, digest, goal, capacity and
+// of the inbox, statement, projects, unmanaged, register, digest, goal, capacity and
 // promoted sections; every serialized node carries its title attribute (null
 // when unset), which is where a time element keeps its exact local time, and
 // its placeholder attribute (null when unset) and its inline style.width (null
@@ -512,6 +512,7 @@ async function run() {
         goal: byId("goal") ? node(byId("goal")) : null,
         capacity: byId("capacity") ? node(byId("capacity")) : null,
         account_add: byId("account-add") ? node(byId("account-add")) : null,
+        register: byId("register") ? node(byId("register")) : null,
         accounts: byId("accounts") ? node(byId("accounts")) : null,
         accounts_body: byId("accounts-body") ? node(byId("accounts-body")) : null,
         promoted: byId("promoted") ? node(byId("promoted")) : null,
