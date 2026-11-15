@@ -323,5 +323,73 @@ class DisposeRefusalTest(DisposeCase):
         self.assertEqual(self.driver.dispose(GROUND, WHY, [self.token()])["state"], "failed")
 
 
+PARKED_FOR_MS = 33_009_000  # the real park this crashed on: nine hours ten minutes
+
+
+class DisposeCustodyTest(DisposeCase):
+    """Custody across a disposition (the crash after issue 1050): the fixtures above dispose
+    on the clock reading they parked at, inside the core's parked custody window."""
+
+    def test_a_release_parked_past_the_custody_window_is_disposed(self):
+        tid = self.parked()
+        self.clock.advance(PARKED_FOR_MS)
+        store = self.driver.store()
+        probe = store.acquire(tid, executor_id="probe", ttl_ms=1000,
+                              subject_path=str(self.project.root))
+        self.assertIsNone(store.renew(probe.custody).custody)  # a renewal here quiesces
+        self.assertEqual(self.load(tid).events[-1]["reason"], "quiesced")
+        result = self.driver.dispose(GROUND, WHY, [self.token()])
+        self.assertEqual((result["state"], result["next"]), ("failed", "disposed"))
+        after = self.load(tid)
+        self.assertEqual([e["reason"] for e in after.events if e["type"] == "lease_released"][-1],
+                         "terminal")
+        self.assertIsNone(self.driver.store().inspect_lease(after.concurrency_keys[0])["holder"])
+        self.watch.effects = [("satisfied", "deployed")]
+        _, successor = rs.release(self.driver, rs.candidate(version="v1.2.4"))
+        self.assertEqual((successor["state"], successor["next"]), ("succeeded", "done"))
+
+    def test_an_inspection_that_raises_refuses_and_gives_custody_up(self):
+        tid = self.parked()
+        self.clock.advance(PARKED_FOR_MS)
+        token = self.token()
+        for shape in ("raise", "malformed"):
+            with self.subTest(shape=shape):
+                if shape == "raise":
+                    patch = mock.patch.object(self.watch, "crash_next_inspect", True)
+                else:
+                    patch = mock.patch.object(self.watch, "inspect", lambda request: {})
+                with patch:
+                    refusal = self.assertRefusal("inspection_failed", self.driver.dispose,
+                                                 GROUND, WHY, [self.token()])
+                self.assertTrue(refusal.detail.startswith("deploy could not be inspected"),
+                                refusal.detail)
+                self.assertIn("preview the disposition again", refusal.detail)
+                self.assertStillParked(tid)
+                self.assertEqual(self.load(tid).events[-1]["reason"], "released")
+        self.assertNotIn("failure_disposed", [e["type"] for e in self.load(tid).events])
+        self.assertRefusal("confirmation_stale", self.driver.dispose, GROUND, WHY, [token])
+        self.assertEqual(self.driver.dispose(GROUND, WHY, [self.token()])["state"], "failed")
+
+    def test_custody_lost_during_an_inspection_refuses_and_a_new_token_disposes(self):
+        tid = self.parked()
+        token = self.token()
+        inspect = self.watch.inspect
+
+        def slow(request):
+            self.clock.advance(release_driver.CUSTODY_TTL_MS + 1)
+            return inspect(request)
+
+        with mock.patch.object(self.watch, "inspect", slow):
+            refusal = self.assertRefusal("custody_lost", self.driver.dispose, GROUND, WHY,
+                                         [token])
+        self.assertIn("custody has lapsed", refusal.detail)
+        self.assertIn("preview the disposition again", refusal.detail)
+        held = self.load(tid)
+        self.assertEqual((held.state, held.terminal), ("attention_required", None))
+        self.assertNotIn("failure_disposed", [e["type"] for e in held.events])
+        self.assertRefusal("confirmation_stale", self.driver.dispose, GROUND, WHY, [token])
+        self.assertEqual(self.driver.dispose(GROUND, WHY, [self.token()])["state"], "failed")
+
+
 if __name__ == "__main__":
     unittest.main()
