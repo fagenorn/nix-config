@@ -144,23 +144,33 @@ _NO_SWAP = (errno.ENOSYS, errno.EINVAL, errno.ENOTSUP, errno.EXDEV)
 _LOCK = threading.Lock()
 
 
-def trust_key(root: str) -> str | None:
+def _git_line(root: str, *args: str) -> str | None:
     try:
         done = subprocess.run(
-            ["git", "-C", root, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+            ["git", "-C", root, "rev-parse", "--path-format=absolute", *args],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
             timeout=GIT_TIMEOUT, check=False)
     except (OSError, ValueError, subprocess.SubprocessError):
         return None
     if done.returncode != 0:
         return None
-    common = os.fsdecode(done.stdout).rstrip("\n")
-    if not common:
+    return os.fsdecode(done.stdout).rstrip("\n") or None
+
+
+def trust_key(root: str) -> str | None:
+    """The directory the client keys trust by: the main checkout, as the launcher computes it.
+
+    A common directory named `.git` keys by its parent; any other one (a submodule or a
+    `--separate-git-dir` checkout) keys by the checkout's own top level, as `claude-account` does.
+    """
+    common = _git_line(root, "--git-common-dir")
+    if common is None:
         return None
     path = Path(common)
     if path.name == ".git":
-        path = path.parent
-    return os.path.realpath(path)
+        return os.path.realpath(path.parent)
+    top = _git_line(root, "--show-toplevel")
+    return os.path.realpath(top if top is not None else root)
 
 
 def targets(home: Path | None, profile_dirs: Iterable[Path]) -> list[tuple[str, Path]]:
@@ -392,7 +402,8 @@ def _write(path: Path, key: str, edit: Callable[[dict, str], dict],
                     try:
                         displaced = _read(Path(name))
                     except (_Refused, OSError):
-                        swap(Path(name), path)
+                        _restore(path, name, ours)
+                        name = ""
                         raise
                     if held is not None:
                         _unlink(held)

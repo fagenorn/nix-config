@@ -177,6 +177,69 @@ class GrantTest(FileCase):
                 self.assertEqual(path.read_text(encoding="utf-8"), foreign)
         self.assertEqual(leftovers(self.dir, ".claude.json.trust-"), [])
 
+    def _unreadable_displaced(self, swap_wrapper):
+        """Grant over a client write whose displaced document then cannot be read."""
+        self.arrange({"projects": {}})
+        foreign = json.dumps({"projects": {}, "clientField": 1})
+        real_read = folder_trust._read
+        unread = []
+
+        def hook(attempt):
+            if attempt == 0:
+                atomic_write(self.path, foreign)
+
+        def read(path):
+            if Path(path).name.startswith(folder_trust.TEMP_PREFIX) and not unread:
+                unread.append(1)
+                raise OSError(errno.EIO, "unreadable")
+            return real_read(path)
+
+        stderr = io.StringIO()
+        with mock.patch.object(folder_trust, "_read", new=read), \
+                mock.patch.object(folder_trust, "swap", new=swap_wrapper(folder_trust.swap)), \
+                contextlib.redirect_stderr(stderr):
+            result = folder_trust.grant(self.path, "/r", before_swap=hook)
+        return result, foreign, stderr.getvalue()
+
+    def test_a_displaced_document_is_kept_when_the_rollback_swap_fails(self):
+        def failing_second(real):
+            calls = []
+
+            def wrapper(a, b):
+                calls.append(1)
+                if len(calls) == 2:
+                    raise OSError(errno.ENOSPC, "full")
+                return real(a, b)
+            return wrapper
+
+        result, foreign, stderr = self._unreadable_displaced(failing_second)
+        self.assertEqual(result, "failed")
+        kept = leftovers(self.dir, folder_trust.KEPT_PREFIX)
+        self.assertEqual(len(kept), 1)
+        self.assertEqual((self.dir / kept[0]).read_text(encoding="utf-8"), foreign)
+        self.assertIn(f"folder_trust: kept {kept[0]}", stderr)
+        self.assertEqual(leftovers(self.dir, ".claude.json.trust-"), kept)
+
+    def test_a_writer_replacing_the_file_before_the_rollback_swap_is_kept(self):
+        def writing_second(real):
+            calls = []
+
+            def wrapper(a, b):
+                calls.append(1)
+                if len(calls) == 2:
+                    atomic_write(self.path, json.dumps({"newer": 1}))
+                return real(a, b)
+            return wrapper
+
+        result, foreign, stderr = self._unreadable_displaced(writing_second)
+        self.assertEqual(result, "failed")
+        kept = leftovers(self.dir, folder_trust.KEPT_PREFIX)
+        self.assertEqual(len(kept), 1)
+        self.assertEqual(json.loads((self.dir / kept[0]).read_text(encoding="utf-8")),
+                         {"newer": 1})
+        self.assertEqual(self.path.read_text(encoding="utf-8"), foreign)
+        self.assertEqual(leftovers(self.dir, ".claude.json.trust-"), kept)
+
     def test_the_mode_is_kept_and_a_new_file_is_0600(self):
         self.arrange({"projects": {}}, mode=0o640)
         self.assertEqual(folder_trust.grant(self.path, "/r"), "granted")
@@ -266,6 +329,28 @@ class KeyTest(unittest.TestCase):
             self.assertEqual(folder_trust.trust_key(str(repo)), expected)
             self.assertIsNone(folder_trust.trust_key(str(plain)))
             self.assertIsNone(folder_trust.trust_key(str(base / "missing")))
+
+
+class ExternalGitDirKeyTest(unittest.TestCase):
+    def test_a_submodule_and_a_separate_git_dir_are_keyed_by_their_checkout(self):
+        with tempfile.TemporaryDirectory() as raw:
+            base = Path(raw)
+            library = base / "library"
+            library.mkdir()
+            git("init", "-q", cwd=library)
+            git("commit", "-q", "--allow-empty", "-m", "x", cwd=library)
+            super_repo = base / "super"
+            super_repo.mkdir()
+            git("init", "-q", cwd=super_repo)
+            git("-c", "protocol.file.allow=always", "submodule", "add", "-q", str(library), "sub",
+                cwd=super_repo)
+            separate = base / "separate"
+            separate.mkdir()
+            git("init", "-q", f"--separate-git-dir={base / 'meta'}", cwd=separate)
+            for checkout in (super_repo / "sub", separate):
+                with self.subTest(checkout=checkout.name):
+                    self.assertEqual(folder_trust.trust_key(str(checkout)),
+                                     os.path.realpath(checkout))
 
 
 class RowTest(unittest.TestCase):
