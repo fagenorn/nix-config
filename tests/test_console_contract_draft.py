@@ -17,6 +17,8 @@ from pathlib import Path
 from agent_tools import canonical
 from agent_tools.console import contract_draft as cd
 
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1052)
+
 ROOT = Path(__file__).resolve().parent.parent
 GIT_ENV = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
 MANIFEST = ROOT / "home" / "common" / "agent-skills" / "platform-manifest.json"

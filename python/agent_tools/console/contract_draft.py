@@ -1,6 +1,6 @@
 """The console's drafted project contract for a repository that has none (#1067).
 
-Decided in ADR-console-030. A repository with no `.agents/project.json` is registered with a contract
+Decided in ADR-console-031. A repository with no `.agents/project.json` is registered with a contract
 the console drafts from what the repository says and what the owner answers. This module reads the
 repository, drafts the 29 fields of the contract, words the open ones as cards, takes the owner's
 answers, and renders the wire-format contract that `adopt-project plan --contract-draft` takes. It

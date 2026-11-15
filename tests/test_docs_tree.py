@@ -620,6 +620,9 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("**Drafted contract**:", context)
         self.assertIn("ADR-console-031", context)
         self.assertIn("| Drafted contract | Console |", self.doc("docs/CONTEXT-MAP.md"))
+        module = self.doc("python/agent_tools/console/contract_draft.py")
+        self.assertIn("Decided in ADR-console-031.", module)
+        self.assertNotIn("ADR-console-030", module)
         for older, expected in (
                 ("docs/areas/console/adr/028-the-owner-registers-a-project-from-the-page.md",
                  "- **Status:** accepted; amended by ADR-console-029, ADR-console-030, "
