@@ -2023,8 +2023,17 @@ function begin(item, state, pending) {
 function roundBody(item, answer) {
   return { project_id: item.project_id, sprint_id: item.sprint_id, round: item.round, question: item.index, ...answer };
 }
+// A plan's answer replans it and replaces every one of its questions, so one answer at a time stands for a plan until a frame shows its outcome.
+function planBusy(item, state) {
+  if (!isRegister(item)) return false;
+  for (const other of answers.values()) {
+    if (other === state || other.pending === null || other.pending === undefined || !other.pending.plan) continue;
+    if (other.pending.body.plan_id === item.plan_id && ["waiting", "sending", "sent"].includes(other.phase)) return true;
+  }
+  return false;
+}
 function start(item, state) {
-  if (!choosable(state) || !picksComplete(item, state)) return false;
+  if (!choosable(state) || !picksComplete(item, state) || planBusy(item, state)) return false;
   if (isQuestion(item)) return begin(item, state, { round: true, body: roundBody(item, { choice: state.picks[0] }) });
   if (isRegister(item)) {
     const body = { plan_id: item.plan_id, id: item.id, subject: item.subject, value: item.values[state.picks[0]] };
@@ -2376,7 +2385,7 @@ function actionLine(item, state, lead) {
   if (!statusLine(act, state, item)) {
     const send = actionButton(lead ? "send primary needs" : "send", "Send answer", () => { if (start(item, state)) redraw(); });
     if (itemId(item) === currentId) send.appendChild(el("kbd", "", "Enter"));
-    if (!picksComplete(item, state)) send.setAttribute("disabled", "");
+    if (!picksComplete(item, state) || planBusy(item, state)) send.setAttribute("disabled", "");
     act.appendChild(send);
   }
   if (lead && !isQuestion(item) && !isRegister(item)) act.appendChild(detailFold(item));
@@ -2712,6 +2721,14 @@ function renderInbox(view) {
     if (state.kind === "brief") {
       if (!present.has(id)) dropBriefState(id, state, briefs);
       continue;
+    }
+    // A plan answer still in flight whose question left the view (the plan running again) and came back has its outcome in that frame, which supersedes the late acknowledgment.
+    if (state.pending && state.pending.plan && state.phase === "sending") {
+      if (!present.has(id)) state.vanished = true;
+      else if (state.vanished) {
+        answers.delete(id);
+        continue;
+      }
     }
     const gone = !present.has(id) && state.phase !== "waiting" && state.phase !== "sending";
     if (gone || (state.phase === "sent" && reopened.has(id))) answers.delete(id);

@@ -7023,3 +7023,31 @@ class RegisterCardPageTest(unittest.TestCase):
         self.assertIn(text, full(row))
         self.assertNotIn("null", full(row))
         self.assertEqual([n for n in nodes(row) if n.get("href")], [])
+
+
+class RegisterAnswerTransitionTest(unittest.TestCase):
+    def test_a_second_question_of_the_plan_cannot_be_answered_while_one_is_outstanding(self) -> None:
+        (snap,) = render([
+            START, {"frame": cards([R0, R2])}, {"key": "1"}, {"key": "Enter"},
+            {"key": "1"}, {"key": "Enter"}, {"clock": 20000}, {"snapshot": True}])
+        (post,) = snap["posts"]
+        self.assertEqual(posted(post)["id"], "path-reference")
+        (row,) = rows_of(snap)
+        (send,) = [n for n in nodes(row) if has_class(n, "send")]
+        self.assertTrue(send["disabled"])
+
+    def test_a_refusal_frame_supersedes_the_late_acknowledgment_of_a_held_answer(self) -> None:
+        text = "The plan refused that answer: no"
+        refused = {**ASKING, "refusal": text, "refused": {"id": Q_REFERENCE["id"], "subject": Q_REFERENCE["subject"]}}
+        running = {**REGISTERING, "plan_id": None}
+        (snap,) = render([
+            START, {"frame": cards([R0])}, {"hold": True}, {"key": "1"}, {"key": "Enter"},
+            {"clock": 5000}, {"frame": cards([], running)},
+            {"frame": cards([{**R0, "refusal": text}], refused)},
+            {"release": {"status": 204, "text": ""}}, {"snapshot": True}])
+        shown = full(snap["inbox"])
+        self.assertNotIn("Answered, planning again", shown)
+        self.assertIn(text, shown)
+        options = [n for n in nodes(snap["inbox"]) if has_class(n, "opt")]
+        self.assertEqual(len(options), 2)
+        self.assertFalse(any(n["disabled"] for n in options))
