@@ -280,7 +280,7 @@ class PageTest(unittest.TestCase):
              "/api/exclusion", "/api/pin", "/api/signin", "/api/signin-code", "/api/signin-cancel",
              "/api/account-add", "/api/signin-link", "/api/account-remove",
              "/api/register-project", "/api/plan-answer", "/api/plan-approve",
-             "/api/adoption-register", "/api/plan-defer"},
+             "/api/adoption-register", "/api/plan-defer", "/api/register-confirm"},
         )
         self.assertEqual(
             len(re.findall(r"\b(?:fetch|EventSource)\(", self.text)), len(literals)
@@ -289,7 +289,7 @@ class PageTest(unittest.TestCase):
     def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
         # A separate snapshot request can answer after a newer streamed frame
         # and render over it; the stream's first frame is already the snapshot.
-        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 31)
+        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 32)
         self.assertIsNotNone(
             re.search(r'fetch\("/api/looked",\s*\{\s*method:\s*"POST"', self.text)
         )
@@ -6905,6 +6905,23 @@ TRY_ITEM = {
     "values": ["retry", "not_now"]}
 
 
+CONFIRM_TEXT = "Registering lets agents run in this folder with the folder's own settings and hooks."
+WAITING_SHOWN = {**REGISTERED, "result": "not_registered", "outcome": "no_change",
+                 "headline": "r is already adopted and is not registered yet.", "lines": [],
+                 "note": "Choose Register it to register it.",
+                 "line": "r is already adopted and is not registered yet. Choose Register it to register it."}
+CONFIRM_ITEM = {
+    "type": "inbox_item", "reason": "register_confirm",
+    "key": "register-confirm//srv/r/2026-11-15T08:00:00+00:00",
+    "project_id": None, "root": "/srv/r", "name": "r", "title": "Register r",
+    "plan_id": None, "id": None, "subject": None, "headline": "Register this project?",
+    "why": CONFIRM_TEXT, "lines": [], "refusal": None, "more_questions": 0, "text": False,
+    "questions": [{"question": "Register this project?", "options": ["Register it", "Not now"],
+                   "chosen": None, "recommended": None, "recommended_index": None}],
+    "values": ["register", "not_now"], "items": [], "answers": [], "answered": False,
+    "waiting_since": "2026-11-15T08:00:00+00:00"}
+
+
 def cards(items: list, registration: dict = ASKING) -> dict:
     return {**frame(items), "registration": registration}
 
@@ -6981,6 +6998,14 @@ class RegisterControlTest(unittest.TestCase):
         for snap in (closed, again):
             self.assertEqual(registered(snap, "register-result"), [])
         self.assertEqual(len(registered(fresh, "register-result")), 1)
+
+    def test_close_on_the_register_box_posts_nothing_and_leaves_the_card(self) -> None:
+        (snap,) = render([
+            START, {"frame": cards([CONFIRM_ITEM], WAITING_SHOWN)},
+            {"click": "register-close"}, {"snapshot": True}])
+        self.assertEqual(snap["posts"], [])
+        self.assertEqual(registered(snap, "register-result"), [])
+        self.assertIn("Register it", full(snap["inbox"]))
 
     def test_with_no_project_the_register_control_still_shows(self) -> None:
         (snap,) = render([START, {"frame": {**frame([]), "registration": None}}, {"snapshot": True}])
@@ -7465,6 +7490,33 @@ class RegisterRetryPageTest(unittest.TestCase):
                        {"clock": 5000}, {"snapshot": True}])[-1]
         (post,) = snap["posts"]
         self.assertEqual(post["url"], "/api/plan-answer")
+
+
+class RegisterConfirmPageTest(unittest.TestCase):
+    ANSWER = [{"respond": {"status": 204, "text": ""}}, {"clock": 5000}, {"snapshot": True}]
+
+    def test_the_card_offers_register_it_and_not_now(self) -> None:
+        (snap,) = render([START, {"frame": cards([CONFIRM_ITEM], WAITING_SHOWN)}, {"snapshot": True}])
+        (lead,) = [n for n in nodes(snap["inbox"]) if has_class(n, "lead")]
+        self.assertEqual([full(n) for n in nodes(lead) if has_class(n, "opt")],
+                         ["1Register it", "2Not now"])
+        self.assertIn(CONFIRM_TEXT, full(lead))
+
+    def test_register_it_posts_the_root_and_register(self) -> None:
+        (snap,) = render([START, {"frame": cards([CONFIRM_ITEM], WAITING_SHOWN)},
+                          {"key": "1"}, {"key": "Enter"}, *self.ANSWER])
+        (post,) = snap["posts"]
+        self.assertEqual(post["url"], "/api/register-confirm")
+        self.assertEqual(posted(post), {"root": "/srv/r", "choice": "register"})
+        self.assertIn("Answered, registering", full(snap["inbox"]))
+
+    def test_not_now_posts_the_root_and_not_now(self) -> None:
+        (snap,) = render([START, {"frame": cards([CONFIRM_ITEM], WAITING_SHOWN)},
+                          {"key": "2"}, {"key": "Enter"}, *self.ANSWER])
+        (post,) = snap["posts"]
+        self.assertEqual(post["url"], "/api/register-confirm")
+        self.assertEqual(posted(post), {"root": "/srv/r", "choice": "not_now"})
+        self.assertIn("Answered, not now", full(snap["inbox"]))
 
 
 class RegisterApplyPageTest(unittest.TestCase):

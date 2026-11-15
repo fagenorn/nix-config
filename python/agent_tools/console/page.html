@@ -1949,9 +1949,13 @@ function isRetry(item) {
 function isApply(item) {
   return item.reason === "register_apply";
 }
-// An open question of an adoption plan (ADR-console-029 D10), a refused registration's Retry (ADR-console-028 D10) or the apply card (ADR-console-030 D9): a card like a manager question.
+// An already-adopted repository waiting to be registered (ADR-console-033): a question card whose first option grants its folder trust and registers it and whose second sets it aside.
+function isConfirm(item) {
+  return item.reason === "register_confirm";
+}
+// An open question of an adoption plan (ADR-console-029 D10), a refused registration's Retry (ADR-console-028 D10), the apply card (ADR-console-030 D9) or the Register card (ADR-console-033): a card like a manager question.
 function isRegister(item) {
-  return item.reason === "register" || isRetry(item) || isApply(item);
+  return item.reason === "register" || isRetry(item) || isApply(item) || isConfirm(item);
 }
 function wordsKey(item) {
   return itemId(item) + "\nwords";
@@ -2085,6 +2089,11 @@ function start(item, state) {
     if (value === "retry") return begin(item, state, { adopt: true, body, words: "Answered, trying again" });
     return begin(item, state, { defer: true, body, words: "Set aside until the plan changes" });
   }
+  if (isConfirm(item)) {
+    const choice = item.values[state.picks[0]];
+    const body = { root: item.root, choice };
+    return begin(item, state, { confirm: true, body, words: choice === "register" ? "Answered, registering" : "Answered, not now" });
+  }
   if (isRegister(item)) {
     const body = { plan_id: item.plan_id, id: item.id, subject: item.subject, value: item.values[state.picks[0]] };
     return begin(item, state, { plan: true, body });
@@ -2154,11 +2163,13 @@ async function sendAnswer(id, state, item) {
           ? await fetch("/api/plan-approve", { method: "POST", headers, body })
           : state.pending.defer
             ? await fetch("/api/plan-defer", { method: "POST", headers, body })
-            : state.pending.plan
-              ? await postPlanAnswer(state.pending.body)
-              : state.pending.check
-                ? await fetch("/api/check-answer", { method: "POST", headers, body })
-                : await fetch("/api/answer", { method: "POST", headers, body });
+            : state.pending.confirm
+              ? await fetch("/api/register-confirm", { method: "POST", headers, body })
+              : state.pending.plan
+                ? await postPlanAnswer(state.pending.body)
+                : state.pending.check
+                  ? await fetch("/api/check-answer", { method: "POST", headers, body })
+                  : await fetch("/api/answer", { method: "POST", headers, body });
     if (response.status !== 204) {
       reason = (await response.text()).trim() || NO_REASON;
       state.again = response.status >= 500;

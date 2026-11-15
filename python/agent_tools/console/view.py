@@ -279,6 +279,14 @@ sits right after the plan questions and before the tracker items, in the order g
 once in `inbox_items` and the headline; it is never cut. While one is open the sentence is
 `REGISTER_SENTENCE`, in the slot the retry items use. Without `apply_items` the view is unchanged.
 
+Each confirm item a caller passes (`confirm_items`; #1078, ADR-console-033) is one entry of
+`inbox.open` too: the Register card of an already-adopted repository, as `register.confirm_items`
+builds it. It has reason `register_confirm`, key `register-confirm/<root>/<at>`, `plan_id` null,
+the options `Register it` and `Not now` with the values `register` and `not_now`, and the
+folder-trust sentence as its `why`. It is copied as given and not filtered by the registered
+projects, sits right after the apply items, and counts once in `inbox_items` and the headline.
+While one is open the sentence is `REGISTER_SENTENCE`. Without `confirm_items` the view is unchanged.
+
 A project entry is `{"type": "project", "project_id", "root", "quiet",
 "open_work", "last_activity", "sprints": [<sprint entry>, ...],
 "finished_sprints": null | {"label": "Finished sprints", "count": <int>,
@@ -1077,6 +1085,7 @@ def derive_view(
     adoption_items: Iterable[Mapping] = (),
     retry_items: Iterable[Mapping] = (),
     apply_items: Iterable[Mapping] = (),
+    confirm_items: Iterable[Mapping] = (),
 ) -> dict:
     states = list(states)
     sessions = list(sessions)
@@ -1123,9 +1132,10 @@ def derive_view(
     adoptions = [dict(item) for item in adoption_items]
     retries = [dict(item) for item in retry_items]
     applies = [dict(item) for item in apply_items]
+    confirms = [dict(item) for item in confirm_items]
     registering = _register_entries(registration)
     open_count = (len(briefs) + len(stalls) + len(unprogressed) + len(signins) + len(adoptions)
-                  + len(asked) + len(retries) + len(registering) + len(applies)
+                  + len(asked) + len(retries) + len(registering) + len(applies) + len(confirms)
                   + len(open_items))
     all_out = bool(capacity["all_out"])
     if all_out:
@@ -1144,7 +1154,7 @@ def derive_view(
         sentence = ADOPTION_SENTENCE
     elif asked:
         sentence = QUESTION_SENTENCE
-    elif retries or applies or any(e["questions"] for e in registering):
+    elif retries or applies or confirms or any(e["questions"] for e in registering):
         sentence = REGISTER_SENTENCE
     elif any(e["text"] for e in registering):
         sentence = REGISTER_TYPE_SENTENCE
@@ -1221,6 +1231,7 @@ def derive_view(
                           + retries
                           + registering
                           + applies
+                          + confirms
                           + [_inbox_entry(r, health) for r in open_items],
                   "answered": [_inbox_entry(r, health) for r in answered]},
         "signin_runs": signin_runs,

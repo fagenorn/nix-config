@@ -29,6 +29,7 @@ Routes (every response carries `Cache-Control: no-store` and
     POST /api/plan-answer 204, a JSON body, the page answers one question of the adoption plan (below)
     POST /api/plan-approve 204, a JSON body, the page approves a ready adoption plan (below)
     POST /api/plan-defer 204, a JSON body, the page answers Not now to an adoption's apply card (below)
+    POST /api/register-confirm 204, a JSON body, the page answers the Register card of an adopted repository (below)
     POST /api/brief 200 application/json, a manager sends a sprint's brief (below)
     POST /api/report 200 application/json, a manager sends a sprint's report (below)
     POST /api/close 200 application/json, a manager sends a sprint's closing report (below)
@@ -69,7 +70,7 @@ A page write (`PAGE_WRITES`, today `POST /api/looked`, `POST /api/answer`, `POST
 `POST /api/retry-manager`, `POST /api/message`, `POST /api/stop`, `POST /api/round-answer`, `POST /api/continue`, `POST /api/exclusion`, `POST /api/pin`, `POST /api/signin`,
 `POST /api/signin-code`, `POST /api/signin-cancel`, `POST /api/signin-link`, `POST /api/account-add`, `POST /api/account-remove` and
 `POST /api/register-project`, `POST /api/plan-answer`, `POST /api/plan-approve`,
-`POST /api/adoption-register` and `POST /api/plan-defer`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
+`POST /api/adoption-register`, `POST /api/plan-defer` and `POST /api/register-confirm`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
 alone and goes through one guard, `_page_write`, whatever its route. After the loopback `Host`
 check and before any body is read, exactly one `Origin` header must equal `http://<Host>` (else
 403 `text/plain` `origin refused`) and exactly one `X-Console-Token` header must equal the
@@ -204,12 +205,28 @@ service refuses, each as 409 with the text, one stderr line `console: registrati
 `register.refusal` rejects (not a full path, not a directory, not the top of a checkout, already
 registered); and, under the ingest lock, a second registration while one runs
 (`register.running`). Otherwise the answer is an empty `204` at once and the run is dispatched: the
-adopter's plan, and for a `no_change` plan its register check, each a child that ends before the
-next starts. One `registration.ended` row (also for a failed child) is appended, unless the
+adopter's plan. A `no_change` plan runs no register check: its row is the waiting row, `register.summary`
+with no report (#1078, ADR-console-033), and the Register card waits for the owner (below). One
+`registration.ended` row (also for a failed child) is appended, unless the
 service is closed, in the same ingest section that clears the running mark, so the view's
 `registration` stays `running` until no child of the run is left. The registry is written only by
 the register child, never by the console. Any other exception is `console: registration_failed
 <Type>` and 500 `registering failed`.
+
+`POST /api/register-confirm` (#1078, ADR-console-033) is the answer to the Register card
+(`register.confirm_items`) of a repository that is already adopted. It runs the same checks with
+`MAX_REGISTER_CONFIRM_BYTES` (4096) and `register.parse_confirm_request`: 400 `bad registration
+approval`. The service refuses, each as 409 with the text, one stderr line `console:
+register_confirm_refused <reason>`, appending and running nothing, in this order: without an adopter,
+`register.UNAVAILABLE`; while a run is under way, `register.running`; when the shown registration is
+not the waiting row (`register.waiting`) or names another root, `register.NOT_WAITING`. `not_now`
+appends the waiting row again with the note `register.LATER_NOTE` (`register.dismissed`), which
+writes no trust and runs no child, and answers `204`. `register` also refuses an unreadable registry
+and a root the registry already holds, as the first write does, and otherwise answers `204` at once
+and dispatches the run: the folder's trust is granted in every profile (`_grant_trust`, cause
+`register`, ADR-console-033), then the plan runs again and, for a `no_change` plan, the register
+child. Nothing is granted or registered before this answer. Any other exception is `console:
+register_confirm_failed <Type>` and 500 `registering failed`.
 
 A checkout with no `.agents/project.json` (ADR-console-031) is drafted instead of planned: the run
 reads it (`draft_reader`, `contract_draft.read` by default), drafts the contract from the fleet
@@ -1054,12 +1071,13 @@ PLAN_ANSWER_PATH = "/api/plan-answer"
 PLAN_APPROVE_PATH = "/api/plan-approve"
 ADOPTION_REGISTER_PATH = "/api/adoption-register"
 PLAN_DEFER_PATH = "/api/plan-defer"
+REGISTER_CONFIRM_PATH = "/api/register-confirm"
 PAGE_WRITES: frozenset[str] = frozenset({
     LOOKED_PATH, ANSWER_PATH, CHECK_PATH, GOAL_PATH, WITHDRAW_PATH, APPROVE_PATH, REPLY_PATH,
     RETRY_PATH, MESSAGE_PATH, STOP_PATH, ROUND_ANSWER_PATH, CONTINUE_PATH, EXCLUSION_PATH,
     PIN_PATH, SIGNIN_PATH, SIGNIN_CODE_PATH, SIGNIN_CANCEL_PATH, SIGNIN_LINK_PATH, ACCOUNT_ADD_PATH,
     ACCOUNT_REMOVE_PATH, REGISTER_PATH, PLAN_ANSWER_PATH, PLAN_APPROVE_PATH,
-    ADOPTION_REGISTER_PATH, PLAN_DEFER_PATH})
+    ADOPTION_REGISTER_PATH, PLAN_DEFER_PATH, REGISTER_CONFIRM_PATH})
 MAX_SIGNIN_BYTES = 4096
 MAX_ACCOUNT_BYTES = 4096
 MAX_REMOVE_BYTES = 4096
@@ -1068,6 +1086,7 @@ MAX_PLAN_ANSWER_BYTES = 4096
 MAX_PLAN_APPROVE_BYTES = 4096
 MAX_ADOPTION_REGISTER_BYTES = 4096
 MAX_PLAN_DEFER_BYTES = 4096
+MAX_REGISTER_CONFIRM_BYTES = 4096
 APPROVAL_THREAD = "console-adoption-approval"
 SIGNIN_THREAD = "console-signin-deadline"
 SIGNIN_TICK_SECONDS = 1.0
@@ -1606,6 +1625,28 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return False
         return True
 
+    def _register_confirm_request(self, console: "ConsoleService") -> bool:
+        """Carry out the Register card's answer; True when the shared 204 is to be sent."""
+        body = self._json_body(MAX_REGISTER_CONFIRM_BYTES)
+        if body is None:
+            return False
+        try:
+            root, choice = register.parse_confirm_request(body)
+        except ValueError:
+            self._refuse(400, "bad registration approval")
+            return False
+        try:
+            console.confirm_registration(root, choice)
+        except sprints.Refused as error:
+            print(f"console: register_confirm_refused {error}", file=sys.stderr)
+            self._refuse(409, str(error))
+            return False
+        except Exception as error:
+            print(f"console: register_confirm_failed {type(error).__name__}", file=sys.stderr)
+            self._refuse(500, "registering failed")
+            return False
+        return True
+
     def _brief_request(self):
         """The manager's route: a brief sent with the sprint's secret; no token, no page."""
         console = self.server.console
@@ -2057,6 +2098,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
             if not self._plan_defer_request(console):
                 return
+        elif route == REGISTER_CONFIRM_PATH:
+            self.close_connection = True
+            if not self._register_confirm_request(console):
+                return
         else:
             if (self.headers.get("Content-Length", "0") != "0"
                     or self.headers.get("Transfer-Encoding") is not None):
@@ -2454,6 +2499,8 @@ class ConsoleService:
             adoption_items=approve.inbox_entries(self._adoptions),
             retry_items=approve.retry_entries(self._adoptions, self._enrolling),
             apply_items=apply_items,
+            confirm_items=register.confirm_items(
+                self._registration, running=self._registering is not None),
             pin=pin.note(self._pinned, cap, manager.session_profile(cap, self._use.last)),
             pin_launches=self._pin_launches.launched,
             managers=self._launcher is not None, pending=self._pending))
@@ -2908,7 +2955,56 @@ class ConsoleService:
                 self._publish()
             raise
 
-    def _run_registration(self, root: str, entries: list[dict]) -> None:
+    def confirm_registration(self, root: str, choice: str) -> None:
+        """Answer the Register card of an adopted repository; refusals are `sprints.Refused`."""
+        if self._adopter is None:
+            raise sprints.Refused(register.UNAVAILABLE)
+        with self._ingest:
+            latest = self._check_waiting(root)
+            if choice == register.LATER_VALUE:
+                self._fold(self.log.append([register.ended(register.dismissed(latest))]))
+                self._publish()
+                return
+        entries = read_fleet(self.registry)
+        if entries is None:
+            if os.path.lexists(self.registry):
+                raise sprints.Refused(register.registry_unreadable())
+            entries = []
+        reason, _ = register.refusal(root, entries, home=os.environ.get("HOME", ""))
+        if reason is not None:
+            raise sprints.Refused(reason)
+        project = latest["project_id"] or register.name_of(root)
+        with self._ingest:
+            if self._check_waiting(root)["at"] != latest["at"]:
+                raise sprints.Refused(register.NOT_WAITING)
+            self._registering = root
+            self._publish()
+
+        def run() -> None:
+            try:
+                self._grant_trust("register", root, project)
+            except Exception as error:
+                print(f"console: trust_grant_failed {type(error).__name__}", file=sys.stderr)
+            self._run_registration(root, entries, confirmed=True)
+
+        try:
+            self._dispatch(run)
+        except BaseException:
+            with self._ingest:
+                self._registering = None
+                self._publish()
+            raise
+
+    def _check_waiting(self, root: str) -> dict:
+        """The registration row waiting on its Register card for `root`, held under the ingest lock."""
+        if self._registering is not None:
+            raise sprints.Refused(register.running(register.name_of(self._registering)))
+        latest = self._registration
+        if not register.waiting(latest) or latest["root"] != root:
+            raise sprints.Refused(register.NOT_WAITING)
+        return latest
+
+    def _run_registration(self, root: str, entries: list[dict], *, confirmed: bool = False) -> None:
         verb = "plan"
         try:
             if not os.path.lexists(os.path.join(root, ".agents/project.json")):
@@ -2918,7 +3014,7 @@ class ConsoleService:
             else:
                 plan = self._adopter.plan(root, cancel=self._stop)
                 report = None
-                if plan.get("plan", {}).get("outcome") == "no_change":
+                if confirmed and plan.get("plan", {}).get("outcome") == "no_change":
                     verb = "register"
                     report = self._adopter.register(root, cancel=self._stop)
                 payload = register.summary(root, plan, report)
