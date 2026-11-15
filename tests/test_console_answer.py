@@ -3,18 +3,21 @@
 Run: just agent-workflow-tests
 """
 import json
+import subprocess
 import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from agent_tools.claims import forge_markers as fm
 from agent_tools.console import answer, inbox, service, view
+from agent_tools.system import forge_api
 from agent_tools.system.forge_api import ForgeError
 from agent_tools.verification import verify_answer
 
 from . import console_test_support as support
-from .forge_world import ForgeWorld
+from .forge_world import NETWORK_DOWN as DIAL_FAILURE, ForgeWorld
 from .test_console_inbox import act, approve, ask
 from .test_console_tracker import Scripted
 from .test_forge_owner_action import ISSUE, QUESTIONS, SLUG, box_body, comment
@@ -95,6 +98,13 @@ class TickOnTrackerTest(unittest.TestCase):
         self.assertEqual(str(caught.exception), answer.ALREADY)
         self.assertEqual(patches(self.world), [])
 
+    def test_a_prompt_already_ticked_with_the_same_choices_is_left_alone(self):
+        ticked = box_body(ticks={(0, 1), (1, 0)})
+        self.world.comment_store(SLUG, ISSUE, [comment(C, ticked)])
+        self.assertIsNone(answer.tick_on_tracker(SLUG, ISSUE, C, QS, [1, 0]))
+        self.assertEqual(patches(self.world), [])
+        self.assertEqual(self.world.stored()[0]["body"], ticked)
+
     def test_a_refused_edit_raises_the_forge_error_and_changes_nothing(self):
         self.world.comment_store(SLUG, ISSUE, [comment(C, box_body())], fail_once=["edit"])
         with self.assertRaises(ForgeError) as caught:
@@ -124,6 +134,178 @@ CONFLICT = items(8, C + 2, fm.render(
 
 def view_of(svc):
     return json.loads(svc.view_bytes)
+
+
+class FakeClock:
+    """A clock the tests move: `sleep` adds to `now` and records the wait."""
+
+    def __init__(self):
+        self.now = 1000.0
+        self.slept: list[float] = []
+
+    def __call__(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.slept.append(seconds)
+        self.now += seconds
+
+
+def dropped():
+    return ForgeError("gh_failed", DIAL_FAILURE, transient=True)
+
+
+class RetryTest(unittest.TestCase):
+    def setUp(self):
+        self.clk = FakeClock()
+        self.retries = []
+
+    def run_retries(self, write, sleep=None):
+        return answer.with_retries(write, clock=self.clk, sleep=sleep or self.clk.sleep,
+                                   on_retry=lambda attempt, error: self.retries.append((attempt, error)))
+
+    def failing(self, advance=0.0, until=None):
+        raised, calls = [], []
+
+        def write():
+            calls.append(1)
+            self.clk.now += advance
+            if until is not None and self.clk.now >= until:
+                return
+            raised.append(dropped())
+            raise raised[-1]
+        return write, raised, calls
+
+    def test_a_network_failure_is_retried_on_the_backoff_and_then_succeeds(self):
+        raised, calls = [], []
+
+        def write():
+            calls.append(1)
+            if len(calls) < 3:
+                raised.append(dropped())
+                raise raised[-1]
+        self.assertIsNone(self.run_retries(write))
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(self.clk.slept, [1.0, 2.0])
+        self.assertEqual([attempt for attempt, _ in self.retries], [1, 2])
+        for (_, error), expected in zip(self.retries, raised):
+            self.assertIs(error, expected)
+
+    def test_a_lasting_network_failure_ends_within_the_budget_with_the_last_error(self):
+        write, raised, calls = self.failing()
+        with self.assertRaises(ForgeError) as caught:
+            self.run_retries(write)
+        self.assertIs(caught.exception, raised[5])
+        self.assertEqual(len(calls), 6)
+        self.assertEqual(self.clk.slept, [1.0, 2.0, 4.0, 8.0, 10.0])
+        self.assertLessEqual(self.clk.now - 1000.0, answer.RETRY_BUDGET_SECONDS)
+
+    def test_the_budget_counts_the_time_each_attempt_takes(self):
+        write, _, calls = self.failing(advance=10.0)
+        with self.assertRaises(ForgeError):
+            self.run_retries(write)
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(self.clk.slept, [1.0, 2.0])
+
+    def test_the_last_wait_is_cut_to_leave_time_for_the_last_try(self):
+        write, _, calls = self.failing(advance=0.25)
+        with self.assertRaises(ForgeError):
+            self.run_retries(write)
+        self.assertEqual(len(calls), 6)
+        self.assertEqual(self.clk.slept, [1.0, 2.0, 4.0, 8.0, 8.75])
+        self.assertEqual(self.clk.now, 1025.25)
+
+    def test_a_network_back_after_twenty_seconds_is_caught_by_the_last_try(self):
+        write, _, calls = self.failing(advance=0.25, until=1020.0)
+        self.assertIsNone(self.run_retries(write))
+        self.assertEqual(len(calls), 6)
+        self.assertEqual(self.clk.slept, [1.0, 2.0, 4.0, 8.0, 8.75])
+
+    def test_a_slow_attempt_spends_the_budget_and_runs_no_call_past_it(self):
+        timeouts, runs = [], []
+
+        def run(argv, *, timeout, **kwargs):
+            timeouts.append(timeout)
+            runs.append(1)
+            if len(runs) <= 2:
+                self.clk.now += 12.0
+                return subprocess.CompletedProcess(argv, 0, "{}", "")
+            self.clk.now += timeout
+            raise subprocess.TimeoutExpired(argv, timeout)
+        writes = []
+
+        def write():
+            writes.append(1)
+            forge_api.run_gh(["api", "a"])
+            forge_api.run_gh(["api", "b"])
+            forge_api.run_gh(["api", "-X", "PATCH", "c"])
+        with mock.patch.object(forge_api.subprocess, "run", run):
+            with self.assertRaises(ForgeError) as caught:
+                self.run_retries(write)
+        self.assertEqual(caught.exception.code, "gh_timeout")
+        self.assertEqual(timeouts, [30.0, 18.0, 6.0])
+        self.assertEqual(self.clk.now, 1030.0)
+        self.assertEqual(len(writes), 1)
+        self.assertEqual(self.clk.slept, [])
+
+    def test_a_failure_that_is_not_transient_is_raised_at_once(self):
+        for error in (ForgeError("gh_failed", "gh: Not Found (HTTP 404)"),
+                      ForgeError("gh_missing", "No such file"), answer.Refused(answer.CHANGED),
+                      RuntimeError("boom")):
+            with self.subTest(error=repr(error)):
+                self.clk = FakeClock()
+                self.retries = []
+                calls = []
+
+                def write():
+                    calls.append(1)
+                    raise error
+                with self.assertRaises(type(error)) as caught:
+                    self.run_retries(write)
+                self.assertIs(caught.exception, error)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(self.clk.slept, [])
+                self.assertEqual(self.retries, [])
+
+    def test_a_sleep_that_reports_a_stop_ends_the_retries(self):
+        write, _, calls = self.failing()
+        slept = []
+
+        def stop(seconds):
+            slept.append(seconds)
+            return True
+        with self.assertRaises(ForgeError):
+            self.run_retries(write, sleep=stop)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(slept, [1.0])
+
+
+class WordsTest(unittest.TestCase):
+    def test_each_failure_reads_as_a_plain_sentence(self):
+        table = [
+            (ForgeError("gh_failed", DIAL_FAILURE, transient=True), answer.NETWORK_DOWN),
+            (ForgeError("gh_timeout", "api repos/o/r/issues/1"), answer.NETWORK_DOWN),
+            (ForgeError("gh_timeout", "deadline passed: api x"), answer.NETWORK_DOWN),
+            (ForgeError("gh_failed", "gh: Server Error (HTTP 502)", transient=True), answer.FORGE_DOWN),
+            (ForgeError("gh_failed", "gh: Server Error (HTTP 503)"), answer.FORGE_DOWN),
+            (ForgeError("gh_failed", "gh: Forbidden (HTTP 403)"), answer.NOT_SIGNED_IN),
+            (ForgeError("gh_failed", "gh: Bad credentials (HTTP 401)"), answer.NOT_SIGNED_IN),
+            (ForgeError("gh_failed", "gh: Not Found (HTTP 404)"), answer.NOT_FOUND),
+            (ForgeError("gh_missing", "[Errno 2] No such file or directory: 'gh'"), answer.GH_MISSING),
+            (ForgeError("payload_invalid", "issue 12 has no readable state"), answer.NOT_TAKEN),
+            (ForgeError("gh_failed", "gh: Validation Failed (HTTP 422)"), answer.NOT_TAKEN),
+            (RuntimeError("boom"), answer.UNEXPECTED_FAILURE),
+        ]
+        for error, sentence in table:
+            with self.subTest(error=str(error)):
+                self.assertEqual(answer.tracker_words(error), sentence)
+
+    def test_no_sentence_carries_raw_tracker_text(self):
+        for name in ("NETWORK_DOWN", "FORGE_DOWN", "NOT_SIGNED_IN", "NOT_FOUND", "GH_MISSING",
+                     "NOT_TAKEN", "UNEXPECTED_FAILURE"):
+            for needle in ("gh_", "dial", "tcp", "socket", "HTTP", "Errno"):
+                with self.subTest(name=name, needle=needle):
+                    self.assertNotIn(needle, getattr(answer, name))
 
 
 class AnswerServiceTest(unittest.TestCase):
