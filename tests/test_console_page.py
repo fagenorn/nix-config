@@ -2834,7 +2834,8 @@ def message_entry(mid: int, kind: str, state: str, **extra: object) -> dict:
     return {
         "id": mid, "kind": kind, "version": 2 if kind != "text" else None,
         "text": TELL_TEXT if kind == "text" else None, "at": "2026-11-12T10:05:00+00:00",
-        "state": state, "state_text": state, "read_at": None, "reply": None, "reply_at": None,
+        "state": state, "state_text": state, "action_text": None, "read_at": None,
+        "reply": None, "reply_at": None, "new": False,
         **extra,
     }
 
@@ -2848,8 +2849,8 @@ class PageMessageTest(unittest.TestCase):
     def messages(self) -> list:
         return [
             message_entry(3, "text", "sent"),
-            message_entry(4, "approved", "delivered"),
-            message_entry(5, "text", "read", text="a third note", reply=REPLY_TEXT,
+            message_entry(4, "approved", "picked_up"),
+            message_entry(5, "text", "replied", text="a third note", reply=REPLY_TEXT,
                           reply_at="2026-11-12T10:07:00+00:00"),
         ]
 
@@ -2861,11 +2862,11 @@ class PageMessageTest(unittest.TestCase):
         ])
         (line,) = sprint_lines(snap)
         shown = full(line)
-        for expected in (TELL_TEXT, "Approved version 2", "a third note", "sent", "delivered",
-                         "read", "Manager: " + REPLY_TEXT):
+        for expected in (TELL_TEXT, "Approved version 2", "a third note", "sent", "picked_up",
+                         "replied", "Manager: " + REPLY_TEXT):
             self.assertIn(expected, shown)
         states = [n for n in nodes(line) if has_class(n, "message-state")]
-        self.assertEqual([full(n) for n in states], ["sent", "delivered", "read"])
+        self.assertEqual(sorted(full(n) for n in states), ["picked_up", "replied", "sent"])
         (reply,) = [n for n in nodes(line) if has_class(n, "message-reply")]
         self.assertEqual(full(reply), "Manager: " + REPLY_TEXT)
         third = [n for n in nodes(line) if n["tag"] == "li" and "a third note" in full(n)][-1]
@@ -2944,7 +2945,7 @@ class PageMessageTest(unittest.TestCase):
         self.assertEqual([n for n in nodes(line) if has_class(n, "fail")], [])
 
     def test_a_typed_message_keeps_its_focus_and_selection_across_frames(self) -> None:
-        sent = message_entry(3, "text", "delivered")
+        sent = message_entry(3, "text", "picked_up")
         before, after, more = render([
             START, {"frame": with_sprints([SPRINT])}, {"click": "tell-open"},
             {"type": {"class": "tell", "text": TELL_TEXT}},
@@ -2970,6 +2971,184 @@ class PageMessageTest(unittest.TestCase):
         ])
         self.assertIsNone(gone["active"])
         self.assertEqual([n for n in nodes(back["projects"]) if has_class(n, "tell")], [])
+
+
+NUDGE_ACTION_TEXT = "Tell the manager again to nudge it, or withdraw the sprint under More."
+HINT_TEXT = "The manager picks it up within a minute."
+EARLIER_KEY = "earlier:" + "a" * 16
+LIFE_SPRINT = {**REPORTED, "tell_text": HINT_TEXT, "stoppable": True}
+
+
+def life_entry(mid: int, state: str, state_text: str, **extra: object) -> dict:
+    return message_entry(mid, "text", state, state_text=state_text, text="note " + str(mid),
+                         **extra)
+
+
+def life_frame(messages: list, **extra: object) -> dict:
+    return with_sprints([{**LIFE_SPRINT, "messages": messages, "reach_text": None, **extra}])
+
+
+class PageMessageLifeTest(unittest.TestCase):
+    def test_only_the_latest_exchange_shows_and_older_ones_sit_behind_a_closed_fold(self) -> None:
+        messages = [
+            life_entry(3, "picked_up", "picked up"),
+            life_entry(4, "picked_up", "picked up"),
+            life_entry(5, "replied", "replied", reply=REPLY_TEXT),
+        ]
+        before, after = render([
+            START, {"frame": life_frame(messages)}, {"snapshot": True},
+            {"open": EARLIER_KEY}, {"snapshot": True},
+        ])
+        (line,) = sprint_lines(before)
+        shown = visible_text(line)
+        for expected in ("note 5", "replied", "Manager: " + REPLY_TEXT):
+            self.assertIn(expected, shown)
+        for gone in ("note 3", "note 4"):
+            self.assertNotIn(gone, shown)
+        (fold,) = of_class(line, "details", "sprint-earlier")
+        self.assertFalse(fold["open"])
+        self.assertEqual(fold["key"], EARLIER_KEY)
+        (summary,) = [c for c in fold["children"] if c["tag"] == "summary"]
+        self.assertEqual(full(summary), "Earlier messages (2)")
+        (line,) = sprint_lines(after)
+        for expected in ("note 3", "note 4", "note 5"):
+            self.assertIn(expected, visible_text(line))
+        detail = [n for n in nodes(line) if n["tag"] == "details" and n["key"] == DETAIL_KEY]
+        self.assertEqual([n for d in detail for n in nodes(d) if has_class(n, "message")], [])
+
+    def test_a_single_message_has_no_earlier_fold(self) -> None:
+        (snap,) = render([
+            START, {"frame": life_frame([life_entry(3, "sent", "sent")])}, {"snapshot": True},
+        ])
+        (line,) = sprint_lines(snap)
+        self.assertEqual(of_class(line, "details", "sprint-earlier"), [])
+        self.assertEqual(len(of_class(line, "div", "sprint-exchange")), 1)
+
+    def test_each_message_state_reads_its_words_and_not_picked_up_names_its_action(self) -> None:
+        cases = [
+            ("sent", "sent, the manager picks it up within a minute", {}),
+            ("picked_up", "picked up", {}),
+            ("replied", "replied", {"reply": REPLY_TEXT}),
+            ("not_picked_up", "not picked up after 5 min", {"action_text": NUDGE_ACTION_TEXT}),
+        ]
+        snaps = render([
+            step for state, words, extra in cases
+            for step in ({"frame": life_frame([life_entry(3, state, words, **extra)])},
+                         {"snapshot": True})
+        ])
+        for snap, (state, words, extra) in zip(snaps, cases):
+            (line,) = sprint_lines(snap)
+            (exchange,) = of_class(line, "div", "sprint-exchange")
+            self.assertEqual([full(n) for n in of_class(exchange, "span", "message-state")],
+                             [words])
+            actions = [full(n) for n in of_class(exchange, "p", "message-action")]
+            self.assertEqual(actions, [NUDGE_ACTION_TEXT] if state == "not_picked_up" else [])
+            self.assertNotIn("delivered", full(line))
+
+    def test_a_new_reply_is_marked_new_in_its_block(self) -> None:
+        reply = {"reply": REPLY_TEXT, "reply_at": "2026-11-12T10:07:00+00:00"}
+        fresh, old = render([
+            START, {"frame": life_frame([life_entry(3, "replied", "replied", new=True, **reply)])},
+            {"snapshot": True},
+            {"frame": life_frame([life_entry(3, "replied", "replied", new=False, **reply)])},
+            {"snapshot": True},
+        ])
+        (line,) = sprint_lines(fresh)
+        self.assertEqual([full(n) for n in of_class(line, "span", "message-new")], ["new"])
+        (line,) = sprint_lines(old)
+        self.assertEqual(of_class(line, "span", "message-new"), [])
+
+    def test_the_tell_box_says_what_will_happen_before_sending(self) -> None:
+        (snap,) = render([
+            START, {"frame": with_sprints([LIFE_SPRINT])}, {"click": "tell-open"}, {"snapshot": True},
+        ])
+        (line,) = sprint_lines(snap)
+        (box,) = of_class(line, "div", "sprint-tell")
+        (hint,) = of_class(box, "p", "tell-hint")
+        self.assertEqual(full(hint), HINT_TEXT)
+        self.assertEqual([p for p in snap["posts"] if p["url"] == "/api/message"], [])
+
+    def test_a_new_reply_is_announced_under_the_statement_and_not_counted(self) -> None:
+        said = "New reply from the manager of " + TITLE
+        statement = {"inbox_items": 1, "headline": "1 thing needs you",
+                     "sentence": "One question is waiting."}
+        full_view = {**with_sprints([LIFE_SPRINT]), "statement": {**view([])["statement"], **statement},
+                     "new_replies_text": said}
+        bare_view = {**full_view, "new_replies_text": None}
+        told, quiet = render([
+            START, {"frame": full_view}, {"snapshot": True},
+            {"frame": bare_view}, {"snapshot": True},
+        ])
+        statement_node = told["statement"]
+        (h1,) = [n for n in nodes(statement_node) if n["tag"] == "h1"]
+        self.assertEqual(full(h1), "1 thing needs you")
+        self.assertTrue(has_class(h1, "needs"))
+        kids = [c for c in statement_node["children"] if c["tag"] in ("h1", "p")]
+        (note,) = [c for c in kids if has_class(c, "new-replies")]
+        self.assertEqual(full(note), said)
+        self.assertGreater(kids.index(note), max(i for i, c in enumerate(kids) if has_class(c, "sub")))
+        self.assertEqual([n for n in nodes(quiet["statement"]) if has_class(n, "new-replies")], [])
+
+    def test_a_reply_to_a_sprint_that_then_ended_opens_from_its_finished_line(self) -> None:
+        mark = "c" * 16
+        reply = {"reply": REPLY_TEXT, "reply_at": "2026-11-12T10:07:00+00:00"}
+
+        def frame_with(fresh: bool) -> dict:
+            messages = [life_entry(3, "picked_up", "picked up"),
+                        life_entry(4, "replied", "replied", new=fresh, **reply)]
+            ended = {**ended_sprint("c", 10 * 60000, CLOSING), "messages": messages,
+                     "tell_text": None}
+            return {**with_sprints([ended]),
+                    "new_replies_text": "New reply from the manager of Sprint c" if fresh else None}
+
+        closed, listed, opened = render([
+            START, {"frame": frame_with(True)}, {"snapshot": True},
+            {"open": "finished"}, {"snapshot": True},
+            {"open": "ended:" + mark}, {"snapshot": True},
+        ])
+        (note,) = [n for n in nodes(closed["statement"]) if has_class(n, "new-replies")]
+        self.assertEqual(full(note), "New reply from the manager of Sprint c")
+        for snap in (closed, listed, opened):
+            (fold,) = of_class(snap["projects"], "details", "finished-list")
+            (summary,) = [c for c in fold["children"] if c["tag"] == "summary"]
+            self.assertEqual(summary["text"], "Finished sprints (1)")
+            self.assertEqual([full(n) for n in of_class(summary, "span", "message-new")],
+                             ["new reply"])
+        (line,) = of_class(listed["projects"], "li", "finished-line")
+        head = [n for n in nodes(line) if n["tag"] == "summary"][0]
+        self.assertEqual([full(n) for n in of_class(head, "span", "message-new")], ["new reply"])
+        self.assertNotIn(REPLY_TEXT, visible_text(listed["projects"]))
+        (line,) = of_class(opened["projects"], "li", "finished-line")
+        (body,) = of_class(line, "div", "finished-messages")
+        self.assertEqual([c["cls"] for c in body["children"]],
+                         ["sprint-exchange", "sprint-earlier"])
+        (report,) = of_class(line, "div", "closing-report")
+        flat = nodes(line)
+        (exchange,) = of_class(line, "div", "sprint-exchange")
+        self.assertLess(flat.index(report), flat.index(exchange))
+        self.assertEqual([full(n) for n in of_class(exchange, "p", "message-reply")],
+                         ["Manager: " + REPLY_TEXT])
+        self.assertEqual([full(n) for n in of_class(exchange, "span", "message-new")], ["new"])
+        (earlier,) = of_class(line, "details", "sprint-earlier")
+        self.assertFalse(earlier["open"])
+        (esum,) = [c for c in earlier["children"] if c["tag"] == "summary"]
+        self.assertEqual(full(esum), "Earlier messages (1)")
+        self.assertEqual(of_class(line, "button", "tell-open"), [])
+        (plain,) = render([START, {"frame": frame_with(False)}, {"open": "finished"},
+                           {"open": "ended:" + mark}, {"snapshot": True}])
+        self.assertEqual(nodes_of_class(plain["projects"], "message-new"), [])
+        self.assertEqual(nodes_of_class(plain["statement"], "new-replies"), [])
+
+    def test_the_new_marks_are_never_peach(self) -> None:
+        text = PAGE.read_text(encoding="utf-8")
+        found = 0
+        for body in re.findall(r"(?s)<style>(.*?)</style>", text):
+            css = re.sub(r"(?s)/\*.*?\*/", "", body)
+            for selector, rule in re.findall(r"([^{}]+)\{([^{}]*)\}", css):
+                if ".new-replies" in selector or ".message-new" in selector:
+                    found += 1
+                    self.assertNotIn("var(--peach)", rule)
+        self.assertGreater(found, 0)
 
 
 MORE_KEY = "more:" + "a" * 16
@@ -3085,12 +3264,12 @@ class PageSprintControlsTest(unittest.TestCase):
         self.assertEqual(in_line(line, "button", "withdraw"), [])
         self.assertEqual([n for n in visible(line) if n["tag"] == "textarea"], [])
 
-    def test_the_newest_message_shows_and_the_rest_sit_in_detail(self) -> None:
+    def test_the_newest_message_shows_and_the_rest_sit_in_the_earlier_fold(self) -> None:
         many = {**SPRINT, "messages": PageMessageTest.messages(None), "reach_text": None}
         one = {**SPRINT, "messages": [message_entry(3, "text", "sent")], "reach_text": None}
         closed, opened, single = render([
             START, {"frame": with_sprints([many])}, {"snapshot": True},
-            {"open": DETAIL_KEY}, {"snapshot": True},
+            {"open": EARLIER_KEY}, {"snapshot": True},
             {"frame": with_sprints([one])}, {"snapshot": True},
         ])
         (line,) = sprint_lines(closed)

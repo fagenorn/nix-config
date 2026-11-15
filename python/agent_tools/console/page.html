@@ -211,6 +211,14 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .sprint-messages li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 10px; color: var(--sub0); }
 .message-state, .message-reply { color: var(--ov2); }
 .message-reply { flex: 1 0 100%; padding-left: 16px; color: var(--sub0); overflow-wrap: anywhere; }
+.message-action { flex: 1 0 100%; padding-left: 16px; color: var(--sub0); }
+.sprint-exchange { flex: 1 0 100%; }
+.sprint-earlier { flex: 1 0 100%; font-size: .8125rem; }
+.sprint-earlier summary { cursor: pointer; color: var(--ov2); }
+.message-new { font-weight: 600; color: var(--text); }
+.new-replies { margin-top: 8px; font-size: .9375rem; color: var(--sub0); max-width: 44rem; }
+.tell-hint { color: var(--ov2); font-size: .8125rem; }
+.finished-messages { padding: 0 0 8px 16px; }
 .unreachable { color: var(--ov2); }
 .sprint-tell { flex: 1 0 100%; display: flex; flex-direction: column; align-items: flex-start; gap: 4px; }
 .sprint-tell label { color: var(--ov2); }
@@ -511,8 +519,6 @@ function sprintDetail(sprint) {
     link.href = sprint.tracker_url;
     fold.appendChild(link);
   }
-  const older = (sprint.messages || []).slice(0, -1);
-  if (older.length > 0) fold.appendChild(messageList(older));
   return fold;
 }
 const BALL_LOOKS = new Map([
@@ -547,12 +553,35 @@ function messageList(messages) {
     const row = el("li", "message");
     row.appendChild(el("span", "message-text", messageLabel(message)));
     row.appendChild(el("span", "message-state", message.state_text));
+    if (message.new === true) row.appendChild(el("span", "message-new", "new"));
+    if (typeof message.action_text === "string") {
+      row.appendChild(el("p", "message-action", message.action_text));
+    }
     if (typeof message.reply === "string") {
       row.appendChild(el("p", "message-reply", "Manager: " + message.reply));
     }
     list.appendChild(row);
   }
   return list;
+}
+// The newest message with its state and reply; the older ones sit behind one closed fold.
+function messageLife(parent, sprint, earlierWasOpen) {
+  const messages = sprint.messages || [];
+  if (messages.length === 0) return;
+  const exchange = el("div", "sprint-exchange");
+  exchange.appendChild(messageList(messages.slice(-1)));
+  parent.appendChild(exchange);
+  const older = messages.slice(0, -1);
+  if (older.length === 0) return;
+  const fold = el("details", "sprint-earlier");
+  fold.dataset.key = "earlier:" + sprint.sprint_id;
+  if (earlierWasOpen) fold.open = true;
+  fold.appendChild(el("summary", "", "Earlier messages (" + older.length + ")"));
+  fold.appendChild(messageList(older));
+  parent.appendChild(fold);
+}
+function hasNewReply(sprint) {
+  return (sprint.messages || []).some((message) => message.new === true);
 }
 function refillRows(id) {
   const latest = latestSprints.get(id);
@@ -588,6 +617,7 @@ function tellBox(item, entry, sprint) {
     return opener;
   }
   const box = el("div", "sprint-tell");
+  if (typeof sprint.tell_text === "string") box.appendChild(el("p", "tell-hint", sprint.tell_text));
   const label = el("label", "tell-label");
   label.appendChild(el("span", "", "Tell the manager"));
   const area = el("textarea", "tell");
@@ -635,6 +665,8 @@ function drawSprint(item, entry, sprint) {
   const moreBefore = acts === undefined ? undefined
     : Array.from(acts.children).find((c) => c.className === "sprint-more");
   const moreWasOpen = moreBefore !== undefined && moreBefore.open === true;
+  const earlierBefore = Array.from(item.children).find((c) => c.className === "sprint-earlier");
+  const earlierWasOpen = earlierBefore !== undefined && earlierBefore.open === true;
   item.replaceChildren();
   const look = ballLook(sprint);
   const head = el("div", "sp-head");
@@ -689,7 +721,6 @@ function drawSprint(item, entry, sprint) {
   if (sprint.retry === true && retrying !== undefined && retrying.phase === "failed") {
     item.appendChild(el("span", "fail", "Could not retry: " + retrying.reason));
   }
-  const messages = sprint.messages || [];
   const stopButton = sprint.stoppable === true ? stopControls(item, entry, sprint) : null;
   if (typeof sprint.stop_text === "string") {
     item.appendChild(el("span", "stop-fail", sprint.stop_text));
@@ -700,7 +731,7 @@ function drawSprint(item, entry, sprint) {
   if (state !== undefined && state.phase === "failed") {
     item.appendChild(el("span", "fail", "Could not withdraw: " + state.reason));
   }
-  if (messages.length > 0) item.appendChild(messageList(messages.slice(-1)));
+  messageLife(item, sprint, earlierWasOpen);
   if (typeof sprint.reach_text === "string") {
     item.appendChild(el("span", "unreachable", sprint.reach_text));
   }
@@ -1445,6 +1476,7 @@ function renderStatement(view) {
   for (const stopped of Array.isArray(view.unstopped) ? view.unstopped : []) {
     nodes.push(el("p", "unstopped", stopped.text));
   }
+  if (typeof view.new_replies_text === "string") nodes.push(el("p", "new-replies", view.new_replies_text));
   box.replaceChildren(...nodes);
 }
 const TICK_MS = 30000;
@@ -3030,16 +3062,21 @@ function finishedLine(sprint) {
   const counted = closing !== null && typeof closing === "object" && typeof closing.counts_text === "string";
   summary.appendChild(el("span", "outcome", counted ? closing.counts_text : sprint.state_text));
   summary.appendChild(phrase("span", "ended", "ended ", timeEl("ago", sprint.ended_at, "")));
+  if (hasNewReply(sprint)) summary.appendChild(el("span", "message-new", "new reply"));
   fold.appendChild(summary);
   fold.appendChild(closingReport(sprint));
-  fold.appendChild(el("div", "finished-messages"));
+  const messages = el("div", "finished-messages");
+  messageLife(messages, sprint, false);
+  fold.appendChild(messages);
   item.appendChild(fold);
   return item;
 }
 function finishedList(ended) {
   const fold = el("details", "finished-list");
   fold.dataset.key = "finished";
-  fold.appendChild(el("summary", "", "Finished sprints (" + ended.length + ")"));
+  const summary = el("summary", "", "Finished sprints (" + ended.length + ")");
+  if (ended.some(hasNewReply)) summary.appendChild(el("span", "message-new", "new reply"));
+  fold.appendChild(summary);
   const list = el("ul");
   for (const sprint of ended) list.appendChild(finishedLine(sprint));
   fold.appendChild(list);
