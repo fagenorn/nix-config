@@ -25,6 +25,7 @@ Routes (every response carries `Cache-Control: no-store` and
     POST /api/retry-manager 204, a JSON body, the page starts a sprint's manager again (below)
     POST /api/message 204, a JSON body, the page sends the owner's message to a sprint (below)
     POST /api/stop  204, a JSON body, the page stops a sprint (below)
+    POST /api/register-project 204, a JSON body, the page names a repository to adopt (below)
     POST /api/brief 200 application/json, a manager sends a sprint's brief (below)
     POST /api/report 200 application/json, a manager sends a sprint's report (below)
     POST /api/close 200 application/json, a manager sends a sprint's closing report (below)
@@ -63,7 +64,8 @@ route carries no token: it records observations and answers nothing (ADR-console
 A page write (`PAGE_WRITES`, today `POST /api/looked`, `POST /api/answer`, `POST /api/check-answer`,
 `POST /api/goal`, `POST /api/withdraw`, `POST /api/approve`, `POST /api/reply`,
 `POST /api/retry-manager`, `POST /api/message`, `POST /api/stop`, `POST /api/round-answer`, `POST /api/continue`, `POST /api/exclusion`, `POST /api/pin`, `POST /api/signin`,
-`POST /api/signin-code`, `POST /api/signin-cancel`, `POST /api/signin-link`, `POST /api/account-add` and `POST /api/account-remove`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
+`POST /api/signin-code`, `POST /api/signin-cancel`, `POST /api/signin-link`, `POST /api/account-add`, `POST /api/account-remove` and
+`POST /api/register-project`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
 alone and goes through one guard, `_page_write`, whatever its route. After the loopback `Host`
 check and before any body is read, exactly one `Origin` header must equal `http://<Host>` (else
 403 `text/plain` `origin refused`) and exactly one `X-Console-Token` header must equal the
@@ -188,6 +190,20 @@ the answer is an empty `204`. The mark is dropped on every way out, and the stor
 written again then. Any other exception is `console:
 account_remove_failed <Type>` (never its message) and 500 `removing the account failed`. A running
 session of the profile is not stopped.
+
+`POST /api/register-project` (#1052, ADR-console-028) runs the same checks with
+`MAX_REGISTER_BYTES` (4096) and `register.parse_register_request`: 400 `bad registration`. The
+service refuses, each as 409 with the text, one stderr line `console: registration_refused
+<reason>`, appending and running nothing: without an adopter, `register.UNAVAILABLE`; a path
+`register.refusal` rejects (not a full path, not a directory, not the top of a checkout, already
+registered); and, under the ingest lock, a second registration while one runs
+(`register.running`). Otherwise the answer is an empty `204` at once and the run is dispatched: the
+adopter's plan, and for a `no_change` plan its register check, each a child that ends before the
+next starts. One `registration.ended` row (also for a failed child) is appended, unless the
+service is closed, in the same ingest section that clears the running mark, so the view's
+`registration` stays `running` until no child of the run is left. The registry is written only by
+the register child, never by the console. Any other exception is `console: registration_failed
+<Type>` and 500 `registering failed`.
 
 `POST /api/readings` runs the same checks in the same order (loopback `Host`, no `Origin`,
 `application/json`, a length, at most `MAX_READING_BYTES`), answers `204` and flushes, and only
@@ -832,7 +848,7 @@ from urllib.parse import parse_qsl
 from agent_tools.claims import owner_actions
 from agent_tools.console import (
     account_add, account_remove, answer, capacity, deliveries, digest, exclusion, idle, inbox, manager, nudge, pin,
-    probe, revive, sessions, signin, signin_run, sprints, write_guard)
+    probe, register, revive, sessions, signin, signin_run, sprints, write_guard)
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
     MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_STOP_FAILED,
@@ -894,14 +910,16 @@ SIGNIN_CANCEL_PATH = "/api/signin-cancel"
 SIGNIN_LINK_PATH = "/api/signin-link"
 ACCOUNT_ADD_PATH = "/api/account-add"
 ACCOUNT_REMOVE_PATH = "/api/account-remove"
+REGISTER_PATH = "/api/register-project"
 PAGE_WRITES: frozenset[str] = frozenset({
     LOOKED_PATH, ANSWER_PATH, CHECK_PATH, GOAL_PATH, WITHDRAW_PATH, APPROVE_PATH, REPLY_PATH,
     RETRY_PATH, MESSAGE_PATH, STOP_PATH, ROUND_ANSWER_PATH, CONTINUE_PATH, EXCLUSION_PATH,
     PIN_PATH, SIGNIN_PATH, SIGNIN_CODE_PATH, SIGNIN_CANCEL_PATH, SIGNIN_LINK_PATH, ACCOUNT_ADD_PATH,
-    ACCOUNT_REMOVE_PATH})
+    ACCOUNT_REMOVE_PATH, REGISTER_PATH})
 MAX_SIGNIN_BYTES = 4096
 MAX_ACCOUNT_BYTES = 4096
 MAX_REMOVE_BYTES = 4096
+MAX_REGISTER_BYTES = 4096
 SIGNIN_THREAD = "console-signin-deadline"
 SIGNIN_TICK_SECONDS = 1.0
 MAX_ANSWER_BYTES = 4096
@@ -1325,6 +1343,28 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         except OSError:
             pass
         return False
+
+    def _register_request(self, console: "ConsoleService") -> bool:
+        """Carry out the register-project write; True when the shared 204 is to be sent."""
+        body = self._json_body(MAX_REGISTER_BYTES)
+        if body is None:
+            return False
+        try:
+            path = register.parse_register_request(body)
+        except ValueError:
+            self._refuse(400, "bad registration")
+            return False
+        try:
+            console.register_project(path)
+        except sprints.Refused as error:
+            print(f"console: registration_refused {error}", file=sys.stderr)
+            self._refuse(409, str(error))
+            return False
+        except Exception as error:
+            print(f"console: registration_failed {type(error).__name__}", file=sys.stderr)
+            self._refuse(500, "registering failed")
+            return False
+        return True
 
     def _brief_request(self):
         """The manager's route: a brief sent with the sprint's secret; no token, no page."""
@@ -1757,6 +1797,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
             if not self._removal_request(console):
                 return
+        elif route == REGISTER_PATH:
+            self.close_connection = True
+            if not self._register_request(console):
+                return
         else:
             if (self.headers.get("Content-Length", "0") != "0"
                     or self.headers.get("Transfer-Encoding") is not None):
@@ -1883,6 +1927,7 @@ class ConsoleService:
                  account_adder: Callable[[str], None] | None = None,
                  signer_out: Callable[[probe.Probe], None] | None = None,
                  account_remover: Callable[[str], None] | None = None,
+                 adopter=None,
                  probe_dispatch: Callable[[Callable[[], None]], None] | None = None,
                  probe_tick_seconds: float = PROBE_TICK_SECONDS,
                  choice_file: Path | None = None):
@@ -1894,6 +1939,8 @@ class ConsoleService:
         self._account_adder = account_adder
         self._signer_out = signer_out
         self._account_remover = account_remover
+        self._adopter = adopter
+        self._registering: str | None = None
         self._adding = threading.Lock()
         self._removing: set[str] = set()
         self._client_live: collections.Counter[str] = collections.Counter()  # client runs under a profile in flight
@@ -2005,6 +2052,7 @@ class ConsoleService:
             self._pinned = pin.pinned_profile(events)
             self._signin_ends = signin_run.ended_state(events)
             self._accounts_added = account_add.added_state(events)
+            self._registration = register.latest(events)
             self._pin_launches = pin.pin_launches(events)
             self._derive_digest(events)
             self._deliveries = deliveries.delivery_states(events)
@@ -2090,6 +2138,7 @@ class ConsoleService:
             digest=digest.digest(self._moments, self._looked, self._now()),
             capacity=cap,
             signin_runs=self._signin_view(), accounts_added=self._accounts_added,
+            registration=register.view_entry(self._registering, self._registration),
             pin=pin.note(self._pinned, cap, manager.session_profile(cap, self._use.last)),
             pin_launches=self._pin_launches.launched,
             managers=self._launcher is not None, pending=self._pending))
@@ -2492,6 +2541,52 @@ class ConsoleService:
                 self._publish()
         self._read_signin_now(name, "add")
         return self.start_signin(name)
+
+    def register_project(self, path: str) -> None:
+        """Dispatch the adoption plan of a repository; refusals are `sprints.Refused`."""
+        if self._adopter is None:
+            raise sprints.Refused(register.UNAVAILABLE)
+        entries = read_fleet(self.registry)
+        if entries is None:
+            if os.path.lexists(self.registry):
+                raise sprints.Refused(register.registry_unreadable())
+            entries = []
+        reason, root = register.refusal(path, entries, home=os.environ.get("HOME", ""))
+        if reason is not None:
+            raise sprints.Refused(reason)
+        with self._ingest:
+            if self._registering is not None:
+                raise sprints.Refused(register.running(register.name_of(self._registering)))
+            self._registering = str(root)
+            self._publish()
+        try:
+            self._dispatch(lambda: self._run_registration(str(root)))
+        except BaseException:
+            with self._ingest:
+                self._registering = None
+                self._publish()
+            raise
+
+    def _run_registration(self, root: str) -> None:
+        try:
+            plan = self._adopter.plan(root, cancel=self._stop)
+            report = None
+            if plan.get("plan", {}).get("outcome") == "no_change":
+                report = self._adopter.register(root, cancel=self._stop)
+            payload = register.summary(root, plan, report)
+        except register.RunFailed as error:
+            payload = register.failed(root, error.kind)
+        except Exception as error:
+            payload = register.failed(root, type(error).__name__)
+        with self._ingest:
+            if not self._closed:
+                self._fold(self.log.append([register.ended(payload)]))
+            self._registering = None
+            if not self._closed:
+                self._publish()
+        if not self._closed:
+            self.refresh()
+        print(f"console: registration_ended {payload['result']}", file=sys.stderr)
 
     def remove_account(self, profile: str, typed: str) -> None:
         """Sign the profile out, then remove it through the launcher; refusals are `sprints.Refused`.
@@ -3995,6 +4090,7 @@ class ConsoleService:
         self._pinned = pin.pinned_profile(appended, self._pinned)
         self._signin_ends = signin_run.ended_state(appended, self._signin_ends)
         self._accounts_added = account_add.added_state(appended, self._accounts_added)
+        self._registration = register.latest(appended, self._registration)
         self._pin_launches = pin.pin_launches(appended, self._pin_launches)
         self._deliveries = deliveries.delivery_states(appended, self._deliveries)
         self._moved = idle.last_moved(appended, self._moved)
@@ -4023,6 +4119,7 @@ class ConsoleService:
                 self._pinned = pin.pinned_profile(events)
                 self._signin_ends = signin_run.ended_state(events)
                 self._accounts_added = account_add.added_state(events)
+                self._registration = register.latest(events)
                 self._pin_launches = pin.pin_launches(events)
                 self._derive_digest(events)
                 self._publish()

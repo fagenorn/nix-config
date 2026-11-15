@@ -83,6 +83,7 @@
 | Quiet project | Console |
 | Raise label | Guard |
 | Receipt | Release |
+| Registration | Console |
 | Release profile | Release |
 | Removal | Project contract |
 | Report | Console |

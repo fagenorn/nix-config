@@ -152,6 +152,11 @@ The top-level `accounts_added` member (#1027) is the sorted, de-duplicated list 
 the owner added from the page and the retained log still holds, from the `accounts_added` argument
 (`account_add.added_state`; an empty list when none is given).
 
+The top-level `registration` member (#1052, ADR-console-028) is the entry `register.view_entry`
+gives, copied, from the `registration` argument, and null when none is given: `{"root", "name",
+"project_id", "status": "running" | "done", "result", "outcome", "headline", "lines", "note",
+"at"}`, the owner's latest registration of a repository from the page.
+
 The top-level `pin` member (#1029) is the pin note `pin.note` gives, copied, from the `pin`
 argument, and null with no pin. The top-level `pin_launches` member is the sorted list of profiles
 under which a new session or manager started while the owner's pin of that profile was in force,
@@ -959,6 +964,7 @@ def derive_view(
     accounts_added: Iterable[str] = (),
     pin: Mapping | None = None,
     pin_launches: Iterable[str] = (),
+    registration: Mapping | None = None,
 ) -> dict:
     states = list(states)
     sessions = list(sessions)
@@ -1090,6 +1096,7 @@ def derive_view(
                   "answered": [_inbox_entry(r, health) for r in answered]},
         "signin_runs": signin_runs,
         "accounts_added": sorted(set(accounts_added)),
+        "registration": dict(registration) if registration is not None else None,
         "pin": dict(pin) if pin is not None else None,
         "pin_launches": sorted(set(pin_launches)),
         "profile_sessions": profile_sessions,

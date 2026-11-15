@@ -277,7 +277,8 @@ class PageTest(unittest.TestCase):
              "/api/withdraw", "/api/retry-manager", "/api/approve", "/api/reply",
              "/api/message", "/api/stop", "/api/round-answer", "/api/continue",
              "/api/exclusion", "/api/pin", "/api/signin", "/api/signin-code", "/api/signin-cancel",
-             "/api/account-add", "/api/signin-link", "/api/account-remove"},
+             "/api/account-add", "/api/signin-link", "/api/account-remove",
+             "/api/register-project"},
         )
         self.assertEqual(
             len(re.findall(r"\b(?:fetch|EventSource)\(", self.text)), len(literals)
@@ -286,7 +287,7 @@ class PageTest(unittest.TestCase):
     def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
         # A separate snapshot request can answer after a newer streamed frame
         # and render over it; the stream's first frame is already the snapshot.
-        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 26)
+        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 27)
         self.assertIsNotNone(
             re.search(r'fetch\("/api/looked",\s*\{\s*method:\s*"POST"', self.text)
         )
@@ -6678,3 +6679,136 @@ class LapsedResetPageTest(unittest.TestCase):
 def opened_at(frame: dict) -> dict:
     (snap,) = render([LapsedResetPageTest.at_now, {"frame": frame}, {"click": "cap"}, {"snapshot": True}])
     return snap
+
+
+def registered(snap: dict, cls: str) -> list:
+    return [n for n in nodes(snap["register"]) if has_class(n, cls)]
+
+
+REGISTERING = {"root": "/srv/r", "name": "r", "project_id": None, "status": "running",
+               "result": None, "outcome": None, "at": None,
+               "headline": "Planning the adoption of r…", "lines": [], "note": None}
+REGISTERED = {**REGISTERING, "status": "done", "result": "planned", "outcome": "reconcile",
+              "at": "2026-11-15T08:00:00+00:00",
+              "headline": "What adopting r would change: it has agent files or a contract to bring up to date",
+              "lines": ["moves 2 agent files under .agents/", "writes the project contract"],
+              "note": "The plan has 1 open question."}
+REGISTER_OPEN = [START, {"frame": {**frame([]), "registration": None}}, {"click": "register-open"}]
+REGISTER_TYPED = REGISTER_OPEN + [{"type": {"class": "register-path", "text": "/srv/r"}}]
+
+
+class RegisterControlTest(unittest.TestCase):
+    def test_register_sits_at_the_foot_of_the_side_column(self) -> None:
+        html = PAGE.read_text(encoding="utf-8")
+        self.assertLess(html.index('id="unmanaged"'), html.index('id="register"'))
+        self.assertLess(html.index('id="register"'), html.index("</aside>"))
+
+    def test_the_control_opens_a_path_field_that_register_enables(self) -> None:
+        shut, opened, typed = render([
+            START, {"frame": {**frame([]), "registration": None}}, {"snapshot": True},
+            {"click": "register-open"}, {"snapshot": True},
+            {"type": {"class": "register-path", "text": "/srv/r"}}, {"snapshot": True}])
+        self.assertEqual(len(registered(shut, "register-open")), 1)
+        self.assertEqual(registered(shut, "register-path"), [])
+        (field,) = registered(opened, "register-path")
+        self.assertEqual((field["tag"], field["label"], field["placeholder"]),
+                         ("input", "Repository path", "Path of a repository on this host"))
+        (send,) = registered(opened, "register-send")
+        self.assertEqual(full(send), "Register")
+        self.assertIs(send["disabled"], True)
+        self.assertEqual(full(registered(opened, "register-cancel")[0]), "Cancel")
+        self.assertIs(registered(typed, "register-send")[0]["disabled"], False)
+
+    def test_a_typed_path_survives_a_frame(self) -> None:
+        (snap,) = render(REGISTER_TYPED + [
+            {"frame": {**frame([]), "registration": None}}, {"snapshot": True}])
+        self.assertEqual(snap["field"], {"cls": "register-path", "value": "/srv/r", "start": 6, "end": 6})
+
+    def test_a_refused_write_shows_its_reason_and_keeps_the_path(self) -> None:
+        (snap,) = render(REGISTER_TYPED + [
+            {"respond": {"status": 409, "text": "/srv/r is not the top of a git checkout\n"}},
+            {"click": "register-send"}, {"snapshot": True}])
+        (reason,) = registered(snap, "register-reason")
+        self.assertEqual(full(reason), "/srv/r is not the top of a git checkout")
+        self.assertEqual(registered(snap, "register-path")[0]["value"], "/srv/r")
+        (post,) = snap["posts"]
+        self.assertEqual(post["url"], "/api/register-project")
+        self.assertEqual(json.loads(post["body"]), {"path": "/srv/r"})
+
+    def test_an_accepted_write_closes_the_field(self) -> None:
+        (snap,) = render(REGISTER_TYPED + [
+            {"respond": {"status": 204, "text": ""}}, {"click": "register-send"}, {"snapshot": True}])
+        self.assertEqual(registered(snap, "register-path"), [])
+        self.assertEqual(len(registered(snap, "register-open")), 1)
+
+    def test_a_running_registration_shows_its_headline_only(self) -> None:
+        (snap,) = render([START, {"frame": {**frame([]), "registration": REGISTERING}},
+                          {"snapshot": True}])
+        (headline,) = registered(snap, "register-headline")
+        self.assertEqual(full(headline), "Planning the adoption of r…")
+        self.assertEqual(registered(snap, "register-close"), [])
+        self.assertEqual([n for n in nodes(snap["register"]) if n["tag"] == "li"], [])
+
+    def test_a_done_registration_shows_headline_lines_and_note_and_close_hides_it(self) -> None:
+        done = {**frame([]), "registration": REGISTERED}
+        shown, closed, again, fresh = render([
+            START, {"frame": done}, {"snapshot": True},
+            {"click": "register-close"}, {"snapshot": True},
+            {"frame": done}, {"snapshot": True},
+            {"frame": {**frame([]), "registration": {**REGISTERED, "at": "2026-11-15T09:00:00+00:00"}}},
+            {"snapshot": True}])
+        (result,) = registered(shown, "register-result")
+        self.assertEqual(
+            [full(n) for n in nodes(result)[1:] if n["tag"] in ("p", "li", "button")],
+            [REGISTERED["headline"], *REGISTERED["lines"], REGISTERED["note"], "Close"])
+        self.assertEqual(full(registered(shown, "register-close")[0]), "Close")
+        for snap in (closed, again):
+            self.assertEqual(registered(snap, "register-result"), [])
+        self.assertEqual(len(registered(fresh, "register-result")), 1)
+
+    def test_with_no_project_the_register_control_still_shows(self) -> None:
+        (snap,) = render([START, {"frame": {**frame([]), "registration": None}}, {"snapshot": True}])
+        self.assertIn("No project is registered yet.", full(snap["projects"]))
+        self.assertEqual(len(registered(snap, "register-open")), 1)
+
+    def test_at_480_the_register_control_fits(self) -> None:
+        try:
+            from playwright.sync_api import Error, sync_playwright
+        except ImportError:
+            self.skipTest("playwright is not installed")
+        fakes = (
+            "window.EventSource = class { constructor() { window.__src = this; this.l = {}; }"
+            " addEventListener(name, fn) { this.l[name] = fn; } close() {} };"
+            "window.fetch = () => Promise.resolve(new Response(null, {status: 204}));")
+        measure = """() => {
+          const box = document.getElementById('register');
+          const edge = document.documentElement.clientWidth;
+          const kids = [...box.querySelectorAll('*')].map((e) => e.getBoundingClientRect());
+          return {fits: box.scrollWidth <= box.clientWidth, kids: kids.length,
+                  inside: kids.every((r) => r.right <= edge)};
+        }"""
+        wide = {**REGISTERED, "root": "/home/anis/Projects/" + "a-long-directory-name/" * 3,
+                "lines": ["moves 2 agent files under .agents/", "writes the project contract",
+                          "rewrites 14 links in /home/anis/Projects/a-long-directory-name/README.md"]}
+        html = PAGE.read_text(encoding="utf-8").replace("__CONSOLE_TOKEN__", "t")
+        with sync_playwright() as pw:
+            try:
+                browser = pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+            except Error as err:
+                self.skipTest(f"no Chromium to launch: {err}")
+            try:
+                page = browser.new_page(viewport={"width": 480, "height": 900})
+                page.add_init_script(fakes)
+                page.route("http://console.test/", lambda route: route.fulfill(
+                    body=html, content_type="text/html"))
+                page.goto("http://console.test/")
+                page.evaluate("(f) => window.__src.l.view({data: JSON.stringify(f)})",
+                              {**view([]), "registration": wide})
+                page.click(".register-open")
+                page.fill(".register-path", "/home/anis/Projects/" + "a-long-directory-name/" * 3)
+                got = page.evaluate(measure)
+            finally:
+                browser.close()
+        self.assertGreater(got["kids"], 5)
+        self.assertTrue(got["fits"], got)
+        self.assertTrue(got["inside"], got)

@@ -291,6 +291,17 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .account-add-note { margin: 0; color: var(--text); }
 .account-add-link { color: var(--blue); }
 .account-add-reason { color: var(--sub0); }
+.register { margin-top: 24px; font-size: .8125rem; color: var(--sub0); }
+.register-form { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.register button { font: inherit; color: inherit; background: none; border: 1px solid var(--hair); border-radius: 8px; padding: 2px 10px; cursor: pointer; transition: background-color .16s; }
+.register button:hover:enabled { background: rgba(202, 211, 245, .05); }
+.register button:disabled { cursor: default; color: var(--ov2); }
+.register-path { flex: 1 1 12rem; min-width: 0; max-width: 100%; padding: 4px 8px; font: inherit; color: var(--text); background: var(--mantle); border: 1px solid var(--s1); border-radius: 8px; }
+.register-result { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--hair); overflow-wrap: anywhere; }
+.register-result p, .register-result ul { margin: 0 0 6px; }
+.register-headline { font-size: .84375rem; color: var(--text); }
+.register-lines { padding-left: 1.2em; color: var(--sub0); }
+.register-note { color: var(--ov2); }
 .s-working { color: var(--green); }
 .s-waiting_answer, .s-waiting_permission { color: var(--yellow); }
 .s-limit { color: var(--red); }
@@ -333,6 +344,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 <aside class="side" aria-label="Projects">
 <section id="projects"></section>
 <section id="unmanaged"></section>
+<section class="register" id="register" aria-label="Register project"></section>
 </aside>
 </div>
 <template id="quiet-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M12.5 9.5A5 5 0 0 1 6.5 3.5a5 5 0 1 0 6 6z"/></svg></template>
@@ -3185,6 +3197,99 @@ function renderAccountAdd(view) {
   if (accountReason.textContent !== reason) accountReason.textContent = reason;
 }
 renderAccountAdd(null);
+// The register control is built once as well (ADR-console-028 D8): a frame never replaces the path field, only the parts around it.
+const registerState = { phase: "closed", posting: false, failure: "", shown: "" };
+let registerDismissed;
+let registerResultKey = "";
+const registerBox = document.getElementById("register");
+const registerForm = el("div", "register-form");
+const registerResult = el("div", "register-result");
+const registerReason = el("span", "register-reason");
+const registerPath = accountField("register-path", "Repository path", "Path of a repository on this host");
+const registerOpen = actionButton("register-open", "Register project", () => {
+  registerState.phase = "naming";
+  registerState.failure = "";
+  renderRegister(lastView);
+  registerPath.focus();
+});
+const registerSend = actionButton("register-send", "Register", () => registerPost());
+const registerCancel = actionButton("register-cancel", "Cancel", () => {
+  registerPath.value = "";
+  registerState.phase = "closed";
+  registerState.failure = "";
+  renderRegister(lastView);
+});
+registerPath.addEventListener("input", () => {
+  registerState.failure = "";
+  renderRegister(lastView);
+});
+registerBox.appendChild(registerForm);
+async function registerPost() {
+  const path = registerPath.value.trim();
+  if (registerState.posting || path === "") return;
+  registerState.posting = true;
+  registerState.failure = "";
+  renderRegister(lastView);
+  let reason = null;
+  try {
+    const response = await fetch("/api/register-project", { method: "POST", headers: stallHeaders(), body: JSON.stringify({ path }) });
+    if (response.status === 204) {
+      registerPath.value = "";
+      registerState.phase = "closed";
+    } else {
+      reason = (await response.text()).trim() || "HTTP " + response.status;
+    }
+  } catch (error) {
+    console.error(error);
+    reason = "the console did not answer";
+  }
+  registerState.posting = false;
+  registerState.failure = reason === null ? "" : reason;
+  renderRegister(lastView);
+}
+// The registration's words are the view's: the page shows them verbatim and composes none.
+function drawRegisterResult(registration) {
+  const parts = [el("p", "register-headline", registration.headline)];
+  if (registration.lines.length > 0) {
+    const list = el("ul", "register-lines");
+    for (const line of registration.lines) list.appendChild(el("li", "", line));
+    parts.push(list);
+  }
+  if (registration.note) parts.push(el("p", "register-note", registration.note));
+  if (registration.status === "done") {
+    parts.push(actionButton("register-close", "Close", () => {
+      registerDismissed = registration.at;
+      renderRegister(lastView);
+    }));
+  }
+  registerResult.replaceChildren(...parts);
+}
+// Swaps parts and updates the disabled state and reason; it never replaces the path field.
+function renderRegister(view) {
+  const registration = view !== null && view !== undefined && view.registration ? view.registration : null;
+  const naming = registerState.phase === "naming";
+  if (naming) {
+    registerSend.disabled = registerState.posting || registerPath.value.trim() === "";
+  }
+  const reason = naming ? (registerState.posting ? "Registering\u2026" : registerState.failure) : "";
+  if (registerState.shown !== registerState.phase) {
+    registerState.shown = registerState.phase;
+    registerForm.replaceChildren(...(naming ? [registerPath, registerSend, registerCancel, registerReason] : [registerOpen]));
+  }
+  if (registerReason.textContent !== reason) registerReason.textContent = reason;
+  const shown = registration !== null && !(registration.status === "done" && registration.at === registerDismissed);
+  const key = shown ? JSON.stringify(registration) : "";
+  if (key !== registerResultKey) {
+    registerResultKey = key;
+    if (shown) {
+      drawRegisterResult(registration);
+      registerBox.appendChild(registerResult);
+    } else {
+      registerResult.remove();
+    }
+  }
+}
+renderRegister(null);
 let goalPanel = null;
 function buildGoalBox() {
   const box = el("div", "goal-box");
@@ -3253,6 +3358,7 @@ function render(view) {
   renderDigest(view);
   renderProjects(view);
   renderUnmanaged(view);
+  renderRegister(view);
   for (const fold of document.querySelectorAll("details")) {
     if (wasOpen.has(fold.dataset.key)) fold.open = true;
   }
