@@ -2567,7 +2567,7 @@ class ConsoleService:
             pin=pin.note(self._pinned, cap, manager.session_profile(cap, self._use.last)),
             pin_launches=self._pin_launches.launched,
             managers=self._launcher is not None, pending=self._pending,
-            nudges=self._nudger is not None))
+            nudges=self._nudger is not None, looked=self._looked))
         with self._published:
             if view != self._view:
                 self._view = view

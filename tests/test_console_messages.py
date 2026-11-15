@@ -16,7 +16,7 @@ from agent_tools.console.event_log import EventLog
 from . import console_test_support as support
 from .test_console_answer import view_of
 from .test_console_view import (
-    message_at, message_row, message_rows, messaged_row, nudged_row, state)
+    MESSAGE_SID, message_at, message_row, message_rows, messaged_row, nudged_row, state)
 from .test_console_writes import Case
 from agent_tools.console import event_log
 from agent_tools.console.sprints import sprint_states
@@ -849,3 +849,115 @@ class MessagePickupServiceTest(MessageRouteTest):
         svc = self.start(nudger=lambda n: None)
         (sprint,) = view_of(svc)["entries"][0]["sprints"]
         self.assertEqual(sprint["tell_text"], "The manager picks it up within a minute.")
+
+
+def view_with(folded, looked, now_ms):
+    return derive_view([state("p00", 1)], sprints=folded, now_ms=now_ms, looked=looked)
+
+
+def replied_rows():
+    return message_rows(messaged_row(3, TEXT),
+                        message_row(4, event_log.SPRINT_ANSWERED,
+                                    {"message": 3, "reply": ANSWER}))
+
+
+class NewReplyViewTest(unittest.TestCase):
+    """A reply after the owner's last look is new, announced apart from the count (#1086)."""
+
+    NOW = AT + 7 * 60_000
+
+    def view(self, rows, looked):
+        return view_with(sprint_states(rows), looked, self.NOW)
+
+    def messages(self, view):
+        return view["entries"][0]["sprints"][0]["messages"]
+
+    def test_a_reply_after_the_last_look_is_new_and_announced_outside_the_count(self):
+        view = self.view(replied_rows(), message_at(3))
+        (message,) = self.messages(view)
+        self.assertIs(message["new"], True)
+        self.assertEqual(view["new_replies"], [{
+            "project_id": "p00", "sprint_id": MESSAGE_SID, "title": "make the importer resumable",
+            "message_id": 3, "reply_at": message_at(4)}])
+        self.assertEqual(view["new_replies_text"],
+                         "New reply from the manager of make the importer resumable")
+        self.assertEqual(view["statement"]["inbox_items"], 0)
+        self.assertEqual(view["statement"]["headline"], "Nothing needs you")
+
+    def test_a_reply_at_or_before_the_last_look_is_not_new(self):
+        for looked in (message_at(4), message_at(5)):
+            with self.subTest(looked=looked):
+                view = self.view(replied_rows(), looked)
+                self.assertIs(self.messages(view)[0]["new"], False)
+                self.assertEqual(view["new_replies"], [])
+                self.assertIsNone(view["new_replies_text"])
+
+    def test_with_no_look_stored_a_reply_is_new(self):
+        self.assertIs(self.messages(self.view(replied_rows(), None))[0]["new"], True)
+
+    def test_replies_on_two_sprints_read_as_a_count(self):
+        other = "b" * 16
+
+        def row(seq, kind, payload):
+            return dataclasses.replace(
+                message_row(seq, kind, payload),
+                payload={"sprint_id": other, **payload})
+        rows = replied_rows() + [
+            row(5, event_log.GOAL_STATED, {"goal": "tidy the exporter"}),
+            row(6, event_log.MANAGER_STARTED, {"profile": "work", "session_name": "n"}),
+            row(7, event_log.SPRINT_MESSAGED, {"goal": "g", "text": TEXT}),
+            row(8, event_log.SPRINT_ANSWERED, {"message": 7, "reply": ANSWER})]
+        view = self.view(rows, message_at(3))
+        self.assertEqual(view["new_replies_text"], "2 new replies from managers")
+        self.assertEqual([r["reply_at"] for r in view["new_replies"]],
+                         [message_at(4), message_at(8)])
+        self.assertEqual([r["sprint_id"] for r in view["new_replies"]], [MESSAGE_SID, other])
+
+    def test_a_message_without_a_reply_is_never_new(self):
+        view = self.view(message_rows(messaged_row(3, TEXT)), None)
+        self.assertIs(self.messages(view)[0]["new"], False)
+        self.assertEqual(view["new_replies"], [])
+
+    def test_a_reply_then_finish_is_announced_and_kept_on_the_ended_sprint(self):
+        (sprint,) = sprint_states(replied_rows()).values()
+        folded = {sprint.sprint_id: dataclasses.replace(sprint, stopped_at=message_at(6))}
+        project = lambda view: view["entries"][0]
+        for now_ms, where in ((AT + 7 * 60_000, lambda p: p["sprints"]),
+                              (AT + 7 * 60_000 + 2 * 86_400_000,
+                               lambda p: p["finished_sprints"]["sprints"])):
+            with self.subTest(now_ms=now_ms):
+                view = view_with(folded, message_at(3), now_ms)
+                (entry,) = where(project(view))
+                self.assertIsNotNone(entry["ended_at"])
+                self.assertIs(entry["messages"][0]["new"], True)
+                self.assertEqual([r["message_id"] for r in view["new_replies"]], [3])
+                self.assertEqual(view["new_replies_text"],
+                                 "New reply from the manager of make the importer resumable")
+                looked = view_with(folded, message_at(7), now_ms)
+                (entry,) = where(project(looked))
+                self.assertIs(entry["messages"][0]["new"], False)
+                self.assertEqual(looked["new_replies"], [])
+                self.assertIsNone(looked["new_replies_text"])
+
+
+class NewReplyServiceTest(MessageRouteTest):
+    def test_a_look_after_the_reply_clears_new(self):
+        svc = self.open()
+        sid = self.settled(svc)
+        self.inbox(svc, sid, self.secret(sid))
+        (text,) = [m for m in self.sprint_state(svc, sid).messages if m.kind == "text"]
+        self.assertEqual(self.answer(svc, sid, self.secret(sid), text.message_id, ANSWER)[0], 200)
+
+        def shown():
+            view = view_of(svc)
+            (message,) = [m for m in view["entries"][0]["sprints"][0]["messages"]
+                          if m["id"] == text.message_id]
+            return view, message
+        view, message = shown()
+        self.assertIs(message["new"], True)
+        self.assertIsInstance(view["new_replies_text"], str)
+        self.assertEqual(support.post_page(svc.address, "/api/looked", self.own(svc))[0], 204)
+        view, message = shown()
+        self.assertIs(message["new"], False)
+        self.assertEqual(view["new_replies"], [])
+        self.assertIsNone(view["new_replies_text"])

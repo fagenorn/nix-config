@@ -43,6 +43,8 @@ Wire format, one object:
 
     {"statement": {"inbox_items": <open items>, "headline": "<headline>",
                    "sentence": "<sentence>", "stale": <bool>},
+     "new_replies": [{"project_id", "sprint_id", "title", "message_id", "reply_at"}, ...],
+     "new_replies_text": "<text>" | null,
      "capacity": {"tight": <bool>, "all_out": <bool>, "resumes_at": <ISO time> | null,
                   "no_reading": "<n> with no reading yet" | null,
                   "profiles": [<profile capacity>, ...]},
@@ -355,7 +357,7 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
                        "state": "sent" | "picked_up" | "replied" | "not_picked_up",
                        "state_text": "<text>", "action_text": "<text>" | null,
                        "read_at": "<time>" | null, "reply": <str> | null,
-                       "reply_at": "<time>" | null}
+                       "reply_at": "<time>" | null, "new": <bool>}
     <line> = {"label": "Outside sprints", "working": <int>, "waiting": <int>,
               "summary": "<text>", "sessions": [<session entry>, ...]}
     <session entry> = {"session_id", "name", "state", "state_text", "cwd",
@@ -468,6 +470,14 @@ and the sprint's manager is a `started` row, else the turn form (`PICKUP_TURN_TE
 pick-up, else `TURN_ACTION_TEXT`. `tell_text` is null for an ended sprint, else `TELL_MINUTE_TEXT` or
 `TELL_TURN_TEXT` by the same pick-up (the page adds no colour to any of them). `reach_text` is `UNREACHABLE_TEXT` once `sprints.unreachable` holds, else null; it never
 changes `retry` and never hides a message.
+`new` is true exactly when the message has a `reply_at` and `derive_view(..., looked=<ISO time>)`
+(the owner's last look; the service passes its own) is None or earlier than `reply_at`, compared as
+aware datetimes. `new_replies` (always present, possibly empty) lists every message entry with `new`
+true across the built project entries (their `sprints`, ended ones included, and
+`finished_sprints.sprints`; a sprint of an unregistered project is never built, so never listed),
+ordered by `(reply_at, message_id)`. `new_replies_text` is null with none, `NEW_REPLY_TEXT` over
+the sprint's title with one and `NEW_REPLIES_TEXT` over the count with more. A reply never changes
+`statement`: it is not an inbox item, and a later look clears `new` with no other write.
 `recent_projects` is every registered project id, newest `last_seq` first, then `project_id`
 (always present, possibly empty); it derives from the states alone.
 `encode_view` writes sorted keys, compact separators, non-ASCII kept, NaN
@@ -587,6 +597,8 @@ SHOWN_MESSAGES = 10
 REGISTERED = "project.registered"
 UNREGISTERED = "project.unregistered"
 FOLD_AFTER = 3
+NEW_REPLY_TEXT = "New reply from the manager of {title}"
+NEW_REPLIES_TEXT = "{n} new replies from managers"
 HEADLINE = "Nothing needs you"
 OUTSIDE_LABEL = "Outside sprints"
 CLOSING_OUTCOME_TEXT = {LANDED: "landed", HELD: "held for verification", DROPPED: "dropped"}
@@ -963,7 +975,15 @@ def sprint_now(state: SprintState, quota: Wait | None,
     return report.status
 
 
-def _message_entry(message: Message, now_ms: int | None, minute: bool, retry: bool) -> dict:
+def _is_new(message: Message, looked: str | None) -> bool:
+    if message.reply_at is None:
+        return False
+    return looked is None or (datetime.fromisoformat(message.reply_at)
+                              > datetime.fromisoformat(looked))
+
+
+def _message_entry(message: Message, now_ms: int | None, minute: bool, retry: bool,
+                   looked: str | None = None) -> dict:
     shown = message_state(message, now_ms)
     pickup = PICKUP_MINUTE_TEXT if minute else PICKUP_TURN_TEXT
     text = {PICKED_UP: PICKED_UP_TEXT, REPLIED: REPLIED_TEXT, NOT_PICKED_UP: NOT_PICKED_UP_TEXT,
@@ -975,7 +995,7 @@ def _message_entry(message: Message, now_ms: int | None, minute: bool, retry: bo
     return {"id": message.message_id, "kind": message.kind, "version": message.version,
             "text": message.text, "at": message.at, "state": shown, "state_text": text,
             "action_text": action, "read_at": message.read_at, "reply": message.reply,
-            "reply_at": message.reply_at}
+            "reply_at": message.reply_at, "new": _is_new(message, looked)}
 
 
 def _closing_entry(closing: Closing) -> dict:
@@ -998,7 +1018,7 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
                   sessions: Sequence[SessionState],
                   deliveries: Mapping[str, Sequence[DeliveryState]],
                   records: Sequence[InboxRecord] = (), capacity: Mapping = EMPTY,
-                  nudges: bool = True) -> dict:
+                  nudges: bool = True, looked: str | None = None) -> dict:
     stated_ms = _millis(state.stated_at)
     elapsed = 0 if now_ms is None else now_ms - stated_ms
     report = state.report
@@ -1054,7 +1074,7 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
         "waiting": waiting,
         "sessions": [_session_entry(s, deliveries, now_ms, _SPRINT_STATE_TEXT)
                      for s in _ordered(sessions)],
-        "messages": [_message_entry(m, now_ms, minute, retry)
+        "messages": [_message_entry(m, now_ms, minute, retry, looked)
                      for m in state.messages[-SHOWN_MESSAGES:]],
         "tell_text": (None if ended is not None
                       else TELL_MINUTE_TEXT if minute else TELL_TURN_TEXT),
@@ -1077,10 +1097,10 @@ def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
                    records: Sequence[InboxRecord] = (),
                    finished: Sequence[SprintState] = (),
                    capacity: Mapping = EMPTY,
-                   nudges: bool = True) -> dict:
+                   nudges: bool = True, looked: str | None = None) -> dict:
     def entries(group: Sequence[SprintState]) -> list[dict]:
         return [_sprint_entry(s, now_ms, managers, (sprint_sessions or {}).get(s.sprint_id, ()),
-                              deliveries, records, capacity, nudges) for s in group]
+                              deliveries, records, capacity, nudges, looked) for s in group]
 
     return {
         "type": "project",
@@ -1258,6 +1278,7 @@ def derive_view(
     trust_items: Iterable[Mapping] = (),
     failure_items: Iterable[Mapping] = (),
     nudges: bool = True,
+    looked: str | None = None,
 ) -> dict:
     states = list(states)
     sessions = list(sessions)
@@ -1383,12 +1404,20 @@ def derive_view(
     entries = [_project_entry(s, owned.get(s.project_id, ()), runs, now_ms,
                               drafted.get(s.project_id, ()), managers, in_sprint,
                               open_by_project.get(s.project_id, ()),
-                              finished.get(s.project_id, ()), capacity, nudges)
+                              finished.get(s.project_id, ()), capacity, nudges, looked)
                for s in active]
     quiet_entries = [_project_entry(s, (), runs, now_ms, (), managers, in_sprint,
                                     finished=finished.get(s.project_id, ()), capacity=capacity,
-                                    nudges=nudges)
+                                    nudges=nudges, looked=looked)
                      for s in quiet]
+    new_replies = sorted(
+        ({"project_id": project["project_id"], "sprint_id": sprint["sprint_id"],
+          "title": sprint["title"], "message_id": message["id"], "reply_at": message["reply_at"]}
+         for project in (*entries, *quiet_entries)
+         for sprint in (*project["sprints"],
+                        *(project["finished_sprints"] or {"sprints": ()})["sprints"])
+         for message in sprint["messages"] if message["new"]),
+        key=lambda r: (datetime.fromisoformat(r["reply_at"]), r["message_id"]))
     if len(quiet_entries) <= FOLD_AFTER:
         entries.extend(quiet_entries)
     else:
@@ -1402,6 +1431,11 @@ def derive_view(
         "statement": {"inbox_items": open_count,
                       "headline": _headline(open_count, bool(stale_projects), all_out),
                       "sentence": sentence, "stale": bool(stale_projects)},
+        "new_replies": new_replies,
+        "new_replies_text": (None if not new_replies else
+                             NEW_REPLY_TEXT.format(title=new_replies[0]["title"])
+                             if len(new_replies) == 1
+                             else NEW_REPLIES_TEXT.format(n=len(new_replies))),
         "capacity": capacity,
         "inbox": {"open": [_brief_entry(s) for s in briefs] + [_stall_entry(s) for s in stalls]
                           + [_progress_entry(s) for s in unprogressed]

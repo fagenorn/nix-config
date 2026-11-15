@@ -1743,7 +1743,8 @@ class SprintMessageViewTest(unittest.TestCase):
         self.assertEqual(entry["messages"], [{
             "id": 3, "kind": "text", "version": None, "text": self.TEXT, "at": message_at(3),
             "state": "sent", "state_text": "sent, the manager picks it up within a minute",
-            "action_text": None, "read_at": None, "reply": None, "reply_at": None}])
+            "action_text": None, "read_at": None, "reply": None, "reply_at": None,
+            "new": False}])
         self.assertIsNone(entry["reach_text"])
         entry = message_entry(message_rows(sent_row, nudged_row(4, 3, True)))
         self.assertEqual(entry["messages"][0]["state"], "sent")
