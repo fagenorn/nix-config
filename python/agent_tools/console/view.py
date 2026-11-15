@@ -246,6 +246,24 @@ or `read_at`. `REGISTER_SENTENCE` ("Choose an option with its number and press E
 the page offers; `REGISTER_STEP_SENTENCE` ("Each one says what to do next.") stands when no plan
 question offers an answer and nothing else is open.
 
+Each retry item a caller passes (`retry_items`; #1055, ADR-console-028 D10) is one entry of
+`inbox.open` too: a registration the remote refused after its adoption merged, offering the one
+option `Retry`. It is copied as given and not filtered by the registered projects (the project is
+not registered yet), sits after the manager questions and before the plan questions, in the order
+given, and counts in `inbox_items` and the headline. Its entry is
+
+    {"type": "inbox_item", "reason": "register_retry", "key": "register-retry/<plan id>/<at>",
+     "project_id": null, "root", "name", "title": "Register <name>", "plan_id", "id": null,
+     "subject": null, "headline": "<name> was not registered: <reason>.", "why": "<note>",
+     "refusal": null, "more_questions": 0,
+     "questions": [{"question": "<headline>", "options": ["Retry"], "chosen": null,
+                    "recommended": null, "recommended_index": null}],
+     "values": ["retry"], "items": [], "answers": [], "answered": false,
+     "waiting_since": "<at>"}
+
+While one is open the sentence is `REGISTER_SENTENCE`, at the slot it already has (after
+`QUESTION_SENTENCE`, before `CHOOSE_SENTENCE`). Without `retry_items` the view is unchanged.
+
 A project entry is `{"type": "project", "project_id", "root", "quiet",
 "open_work", "last_activity", "sprints": [<sprint entry>, ...],
 "finished_sprints": null | {"label": "Finished sprints", "count": <int>,
@@ -1041,6 +1059,7 @@ def derive_view(
     pin_launches: Iterable[str] = (),
     registration: Mapping | None = None,
     adoption_items: Iterable[Mapping] = (),
+    retry_items: Iterable[Mapping] = (),
 ) -> dict:
     states = list(states)
     sessions = list(sessions)
@@ -1085,9 +1104,10 @@ def derive_view(
                       if isinstance(e.get("signin"), Mapping) and e["signin"].get("ask")),
                      key=lambda e: e["profile"])
     adoptions = [dict(item) for item in adoption_items]
+    retries = [dict(item) for item in retry_items]
     registering = _register_entries(registration)
     open_count = (len(briefs) + len(stalls) + len(unprogressed) + len(signins) + len(adoptions)
-                  + len(asked) + len(registering) + len(open_items))
+                  + len(asked) + len(retries) + len(registering) + len(open_items))
     all_out = bool(capacity["all_out"])
     if all_out:
         sentence = ALL_OUT_SENTENCE
@@ -1105,7 +1125,7 @@ def derive_view(
         sentence = ADOPTION_SENTENCE
     elif asked:
         sentence = QUESTION_SENTENCE
-    elif any(e["questions"] for e in registering):
+    elif retries or any(e["questions"] for e in registering):
         sentence = REGISTER_SENTENCE
     elif any(r.item["reason"] == "decision" and r.item["questions"] for r in open_items):
         sentence = CHOOSE_SENTENCE
@@ -1177,6 +1197,7 @@ def derive_view(
                           + [_signin_entry(e, signin_runs) for e in signins]
                           + adoptions
                           + [_question_entry(s, q) for s, q in asked]
+                          + retries
                           + registering
                           + [_inbox_entry(r, health) for r in open_items],
                   "answered": [_inbox_entry(r, health) for r in answered]},
