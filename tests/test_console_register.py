@@ -164,6 +164,48 @@ class LinesTest(unittest.TestCase):
             with self.subTest(expected=expected):
                 self.assertEqual(register.plan_lines(doc(changes=changes)), expected)
 
+    def test_the_adoptions_own_records_are_never_named_and_close_the_writes_line(self):
+        digest = "50051d36e5e98d2b6d8b07c7417d1b1f666906b20ccc3dd6a96569665f4f0ade"
+        records = [
+            {"op": "write-file", "sources": [],
+             "targets": [f".agents/knowledge/archive/path-migrations/{digest}.json"]},
+            {"op": "write-file", "sources": [], "targets": [f".agents/artifacts/evidence/{digest}.json"]},
+        ]
+
+        def writes(*paths):
+            return [{"op": "write-file", "sources": [], "targets": [path]} for path in paths]
+
+        end = ", and records the adoption"
+        handoff = {"migration_map": records[0]["targets"][0],
+                   "evidence_record": records[1]["targets"][0]}
+        cases = [
+            (writes(".agents/runtime/.gitignore", ".gitignore") + records,
+             [f"writes .agents/runtime/.gitignore and .gitignore{end}"]),
+            (records, ["records the adoption"]),
+            (records[:1], ["records the adoption"]),
+            (records[1:], ["records the adoption"]),
+            (writes("a", "b", "c", "d", "e") + records, [f"writes a, b, c and 2 more{end}"]),
+            (writes("a", "b", "c") + records[:1], [f"writes a, b and c{end}"]),
+            (writes("a") + records, [f"writes a{end}"]),
+            (writes("a", "b"), ["writes a and b"]),
+        ]
+        for changes, expected in cases:
+            with self.subTest(expected=expected):
+                lines = register.plan_lines(doc(changes=changes, handoff=handoff))
+                self.assertEqual(lines, expected)
+                self.assertNotIn(digest, " ".join(lines))
+
+    def test_an_ordinary_file_beside_the_adoptions_records_stays_named(self):
+        digest = "50051d36e5e98d2b6d8b07c7417d1b1f666906b20ccc3dd6a96569665f4f0ade"
+        handoff = {"migration_map": f".agents/knowledge/archive/path-migrations/{digest}.json",
+                   "evidence_record": f".agents/artifacts/evidence/{digest}.json"}
+        paths = [".agents/artifacts/evidence/checklist.md",
+                 ".agents/knowledge/archive/path-migrations/notes.md", handoff["evidence_record"]]
+        changes = [{"op": "write-file", "sources": [], "targets": [path]} for path in paths]
+        self.assertEqual(
+            register.plan_lines(doc(changes=changes, handoff=handoff)),
+            [f"writes {paths[0]} and {paths[1]}, and records the adoption"])
+
     def test_a_move_outside_agents_drops_the_suffix_and_zero_counts_make_no_line(self):
         self.assertEqual(register.plan_lines(doc(changes=[move("a.md", "docs/a.md")])),
                          ["moves 1 agent file"])
