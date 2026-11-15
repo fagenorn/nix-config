@@ -55,6 +55,7 @@ latest with status `done`, else None.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
@@ -140,7 +141,7 @@ def refusal(path: str, entries: Iterable[Mapping], *, home: str,
     expanded = expand(path, home)
     if not expanded.startswith("/"):
         return (RELATIVE, None)
-    if not Path(expanded).is_dir():
+    if not os.path.isdir(expanded):
         return (not_directory(expanded), None)
     root = toplevel(expanded)
     if root is None:

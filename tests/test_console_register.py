@@ -66,6 +66,22 @@ class RefusalTest(unittest.TestCase):
                 with self.subTest(path=path):
                     self.assertEqual(register.refusal(path, entries, home=str(tmp)), expected)
 
+    def test_a_path_the_host_cannot_stat_is_not_a_directory(self):
+        with tempfile.TemporaryDirectory() as raw:
+            tmp = Path(raw).resolve()
+            locked = tmp / "locked"
+            (locked / "inner").mkdir(parents=True)
+            too_long = str(tmp / ("a" * 300))
+            cases = [too_long, str(locked / "inner")]
+            locked.chmod(0)
+            try:
+                for path in cases:
+                    with self.subTest(path=path[-20:]):
+                        self.assertEqual(register.refusal(path, [], home=str(tmp)),
+                                         (register.not_directory(path), None))
+            finally:
+                locked.chmod(0o700)
+
     def test_a_tilde_path_expands_to_home(self):
         with tempfile.TemporaryDirectory() as raw:
             tmp = Path(raw).resolve()
