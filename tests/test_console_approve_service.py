@@ -170,6 +170,7 @@ class ApproveCase(Case):
         self.start(fake)
         self.repo = reconcile_repository(self.parent, contract=True)
         self.shown = self.registered(self.repo)
+        self.planned = self.settled_row(self.repo)
         return fake
 
     def approve(self, body=None, headers=None, raw=None):
@@ -180,19 +181,24 @@ class ApproveCase(Case):
     def approve_plan(self, plan_id=PID_B):
         return self.approve({"plan_id": plan_id})
 
-    def until(self, *steps, bound=120):
-        return self.wait_for(
-            lambda r: r["adoption"] is not None and r["adoption"]["status"] == "done"
-            and r["adoption"]["step"] in steps, bound)
+    def until(self, *steps, after=0, bound=120):
+        end = time.monotonic() + bound
+        while time.monotonic() < end:
+            found = self.steps()
+            if len(found) > after and found[-1] in steps and not self.svc._approving:
+                return self.view()["registration"]
+            time.sleep(0.05)
+        self.fail("the approval never reached the expected step")
 
     def run_approval(self, *steps, plan_id=PID_B):
         errors = io.StringIO()
         with contextlib.redirect_stderr(errors):
+            after = len(self.steps())
             self.assertEqual(self.approve_plan(plan_id)[::2], (204, b""))
-            shown = self.until(*steps)
+            self.until(*steps, after=after)
             for worker in self.approval_threads():
                 worker.join(30)
-        return shown, errors.getvalue()
+        return self.view()["registration"], errors.getvalue()
 
     def refused(self, plan_id, text):
         errors = io.StringIO()
@@ -213,6 +219,11 @@ class ApproveCase(Case):
     def approval_threads(self):
         return [thread for thread in threading.enumerate()
                 if thread.name == service.APPROVAL_THREAD and thread.is_alive()]
+
+    def card_words(self):
+        """The one apply card's headline, lines and note, which replace the reduced adoption."""
+        (card,) = self.apply_cards()
+        return {"headline": card["headline"], "lines": card["lines"], "note": card["why"]}
 
     def adoption(self):
         return self.view()["registration"]["adoption"]
@@ -288,7 +299,9 @@ class ApplyCardTest(ApproveCase):
         self.assertEqual(card["headline"], "Apply this adoption?")
         self.assertEqual(card["questions"][0]["options"], ["Apply it", "Not now"])
         self.assertEqual(card["values"], ["apply", "not_now"])
-        self.assertEqual(card["lines"], self.shown["lines"])
+        self.assertEqual(card["lines"], self.planned["lines"])
+        self.assertEqual(card["lines"], ["moves 1 agent file under .agents/"])
+        self.assertEqual(self.shown["line"], "Register reconcile: needs you")
         self.assertEqual(card["key"], f"register-apply/{PID_B}/{self.shown['at']}")
         view = self.view()
         self.assertIn(card, view["inbox"]["open"])
@@ -362,7 +375,11 @@ class ApplyCardTest(ApproveCase):
         (card,) = self.apply_cards()
         self.assertEqual(card["questions"][0]["options"], ["Try again", "Not now"])
         self.assertEqual(card["values"], ["retry", "not_now"])
-        self.assertEqual(card["headline"], shown["adoption"]["headline"])
+        self.assertEqual(
+            card["headline"],
+            "The adoption of reconcile was applied, but its branch was not pushed: remote "
+            "rejected the push.")
+        self.assertEqual(shown["line"], "Register reconcile: needs you")
         self.assertEqual(card["why"], approve.PUSH_NOTE)
         self.assertEqual(card["lines"], [])
         self.run_approval("opened", plan_id=card["plan_id"])
@@ -394,15 +411,36 @@ class ApplyCardTest(ApproveCase):
         (card,) = self.apply_cards()
         self.assertEqual(card["questions"][0]["options"], ["Apply it again", "Not now"])
         self.assertEqual(card["values"], ["apply", "not_now"])
-        self.assertEqual(card["why"], shown["adoption"]["note"])
+        self.assertEqual(card["why"], "Fix what failed in the repository, then register the "
+                                      "repository again.")
+        self.assertEqual(shown["line"], "Register reconcile: needs you")
+
+    def test_a_signing_failure_is_one_card_in_plain_words(self):
+        self.ready(apply_result={"error": {
+            "code": "verification_failed", "repair_id": "adopt.commit.signing_unavailable",
+            "violations": [{"pointer": "", "message": "the contract asks for a signed commit "
+                                                      "and this host could not sign one"}]}})
+        self.run_approval("apply_failed")
+        (card,) = self.apply_cards()
+        shown = self.view()["registration"]
+        self.assertIn("signed commits", card["headline"])
+        self.assertIn("signing key", card["why"])
+        self.assertEqual(shown["line"], "Register reconcile: needs you")
+        raw = re.compile(r"--plan-id|sha256:|[0-9a-f]{12,}|(?:^|[\s(\"'])/\S")
+        for text in (card["headline"], card["why"], *card["lines"], shown["line"]):
+            self.assertIsNone(raw.search(text), text)
 
     def test_not_now_on_a_failed_step_hides_it_and_keeps_the_work_line(self):
         self.pusher.raises = [approve.PushFailed("remote rejected the push", "d")]
         self.ready(apply_result=APPLIED)
         shown, _ = self.run_approval("push_failed")
+        self.assertEqual(shown["line"], "Register reconcile: needs you")
         self.assertEqual(self.defer()[0], 204)
         self.assertEqual(self.apply_cards(), [])
-        self.assertEqual(self.view()["registration"]["line"], shown["line"])
+        self.assertEqual(
+            self.view()["registration"]["line"],
+            "The adoption of reconcile was applied, but its branch was not pushed: remote "
+            "rejected the push.")
 
     def test_an_unexpected_deferral_failure_is_logged_in_full(self):
         self.ready(apply_result=APPLIED)
@@ -422,7 +460,7 @@ class ApplyCardTest(ApproveCase):
         self.restart()
         (card,) = self.apply_cards()
         self.assertEqual(card["why"], approve.PUSH_NOTE)
-        self.assertEqual(self.adoption()["note"], approve.PUSH_NOTE)
+        self.assertEqual(self.view()["registration"]["line"], "Register reconcile: needs you")
         self.assertEqual(self.rows("adoption.step")[-1][1]["note"], OLD_PUSH_NOTE)
 
 
@@ -548,7 +586,7 @@ class PlanApproveRunTest(ApproveCase):
         self.assertEqual(self.forge.calls, [
             ("find", "fixture/r", BRANCH, "develop"),
             ("open", "fixture/r", BRANCH, "develop", "Adopt reconcile onto the agent platform",
-             approve.body(self.shown))])
+             approve.body(self.planned))])
         self.assertEqual(self.steps(), ["applied", "opened"])
         self.assertEqual(shown["adoption"], {
             "status": "done", "step": "opened", "state": "open",
@@ -567,7 +605,8 @@ class PlanApproveRunTest(ApproveCase):
         record.write_text(json.dumps({"branch": BRANCH, "worktree": str(kept)}))
         before = self.heads()
         shown, errors = self.run_approval("apply_failed")
-        adoption = shown["adoption"]
+        adoption = self.card_words()
+        self.assertEqual(shown["line"], "Register reconcile: needs you")
         self.assertEqual(
             adoption["headline"],
             "The adoption of reconcile was not applied: the cold-clone-resolves check did not "
@@ -592,8 +631,8 @@ class PlanApproveRunTest(ApproveCase):
 
     def test_a_drifted_plan_says_to_register_again_and_nothing_is_pushed(self):
         self.ready(apply_result=STALE_ERROR)
-        shown, _ = self.run_approval("apply_failed")
-        adoption = shown["adoption"]
+        self.run_approval("apply_failed")
+        adoption = self.card_words()
         self.assertEqual(
             adoption["headline"],
             "The adoption of reconcile was not applied: the repository changed since this plan "
@@ -605,13 +644,13 @@ class PlanApproveRunTest(ApproveCase):
 
     def test_a_run_that_failed_ends_in_words_and_nothing_is_pushed(self):
         fake = self.ready(apply_raises=register.RunFailed("timed_out"))
-        shown, _ = self.run_approval("apply_failed")
-        adoption = shown["adoption"]
+        self.run_approval("apply_failed")
+        adoption = self.card_words()
         self.assertTrue(adoption["headline"].endswith(": it took too long and was stopped."))
         self.assertTrue(adoption["note"].startswith("Choose Apply it again."))
         fake.apply_raises = KeyError("x")
-        shown, errors = self.run_approval("apply_failed")
-        self.assertTrue(shown["adoption"]["headline"].endswith(": it stopped unexpectedly."))
+        _, errors = self.run_approval("apply_failed")
+        self.assertTrue(self.card_words()["headline"].endswith(": it stopped unexpectedly."))
         self.assertTrue(any(line.startswith(ERROR_LINE) and '"exception": "KeyError"' in line
                             for line in errors.splitlines()))
         self.assertEqual((self.pusher.calls, self.forge.calls), ([], []))
@@ -621,7 +660,7 @@ class PlanApproveRunTest(ApproveCase):
         self.pusher.raises = [approve.PushFailed("remote rejected the push", "stderr detail")]
         fake = self.ready(apply_result=APPLIED)
         shown, errors = self.run_approval("push_failed")
-        adoption = shown["adoption"]
+        adoption = self.card_words()
         self.assertEqual(
             adoption["headline"],
             "The adoption of reconcile was applied, but its branch was not pushed: remote "
@@ -643,7 +682,7 @@ class PlanApproveRunTest(ApproveCase):
         self.forge.open_raises = [ForgeError("gh_failed", "gh: Validation Failed (HTTP 422)")]
         fake = self.ready(apply_result=APPLIED)
         shown, errors = self.run_approval("open_failed")
-        adoption = shown["adoption"]
+        adoption = self.card_words()
         self.assertEqual(
             adoption["headline"],
             "The adoption of reconcile was pushed, but its pull request was not opened: the "
@@ -672,7 +711,7 @@ class PlanApproveRunTest(ApproveCase):
         self.forge.find_raises = [None, ForgeError("gh_timeout", "api")]
         fake = self.ready(apply_result=APPLIED)
         shown, _ = self.run_approval("open_failed")
-        self.assertTrue(shown["adoption"]["headline"].endswith(
+        self.assertTrue(self.card_words()["headline"].endswith(
             ": the forge took too long to answer."))
         self.assertEqual(shown["approve"], "retry")
         self.restart()
@@ -708,7 +747,8 @@ class PlanApproveRunTest(ApproveCase):
 
     def test_deletions_are_acknowledged_only_when_the_page_showed_them(self):
         fake = self.ready(plan=WITH_DELETION, apply_result=APPLIED)
-        self.assertTrue(any(line.startswith("deletes ") for line in self.shown["lines"]))
+        self.assertTrue(any(line.startswith("deletes ") for line in self.planned["lines"]))
+        self.assertEqual(self.apply_cards()[0]["lines"], self.planned["lines"])
         self.run_approval("opened")
         self.assertEqual(fake.applied, [(PID_B, True)])
 
@@ -750,14 +790,15 @@ class AdoptionPollTest(ApproveCase):
         self.poll("ready")
         self.poll("closed")
         self.assertEqual(self.items(), [])
-        self.assertEqual(self.adoption()["headline"],
+        self.assertEqual(self.card_words()["headline"],
                          "The pull request of reconcile was closed without merging.")
+        self.assertEqual(self.view()["registration"]["line"], "Register reconcile: needs you")
 
     def test_a_closed_adoption_asks_for_a_clean_up_and_is_approved_again_with_the_same_plan(self):
         fake = self.opened()
         self.poll("ready")
         self.poll("closed")
-        self.assertEqual(self.adoption()["note"], approve.CLOSED_NOTE)
+        self.assertEqual(self.card_words()["note"], approve.CLOSED_NOTE)
         self.assertEqual(self.view()["registration"]["approve"], "approve")
         self.forge.mark_closed(7)
         shown = self.registered(self.repo)
@@ -1206,6 +1247,7 @@ class PlanApproveRealTest(ApproveCase):
         self.start(register.Adopter(), pusher=approve.push,
                    slug_of=lambda root: "fixture/console-approve")
         self.shown = self.become_ready()
+        self.planned = self.settled_row(self.repo)
         self.status0 = git(self.repo, "status", "--porcelain")
         self.head0 = git(self.repo, "rev-parse", "HEAD").strip()
         self.branch0 = git(self.repo, "branch", "--show-current")
@@ -1237,9 +1279,10 @@ class PlanApproveRealTest(ApproveCase):
 
     def test_approving_a_ready_throwaway_plan_applies_pushes_one_branch_and_requests_one_pull_request(self):
         shown, _ = self.run_approval("opened", "apply_failed", plan_id=self.shown["plan_id"])
-        adoption = shown["adoption"]
-        if adoption["step"] == "apply_failed":
+        if self.steps()[-1] == "apply_failed":
+            adoption = self.card_words()
             self.fail(f"{adoption['headline']} {adoption['note']}")
+        adoption = shown["adoption"]
         branch = adoption["branch"]
         self.assertRegex(branch, r"adopt-[0-9a-f]{12}")
         tip = git(self.repo, "rev-parse", branch).strip()
@@ -1253,16 +1296,16 @@ class PlanApproveRealTest(ApproveCase):
                          sorted([f"refs/heads/main {self.main0}", f"refs/heads/{branch} {tip}"]))
         self.assertEqual(self.opens(), [
             ("open", "fixture/console-approve", branch, "main",
-             "Adopt repo onto the agent platform", approve.body(self.shown))])
+             "Adopt repo onto the agent platform", approve.body(self.planned))])
 
     def test_a_plan_that_drifted_since_it_was_planned_is_refused_in_plain_words_and_nothing_is_pushed(self):
         (self.repo / ".claude/late.md").write_text("# late\n")
         git(self.repo, "add", "-A")
         git(self.repo, "commit", "-q", "-m", "late")
         shown, _ = self.run_approval("opened", "apply_failed", plan_id=self.shown["plan_id"])
-        adoption = shown["adoption"]
-        self.assertEqual(adoption["step"], "apply_failed")
-        self.assertTrue(adoption["headline"].endswith(
+        self.assertEqual(self.steps()[-1], "apply_failed")
+        self.assertEqual(shown["approve"], "approve")
+        self.assertTrue(self.card_words()["headline"].endswith(
             "the repository changed since this plan was made."))
         self.assertEqual(self.refs(), [f"refs/heads/main {self.main0}"])
         self.assertEqual(self.forge.calls, [])
@@ -1293,8 +1336,8 @@ class MergedRegistrationTest(ApproveCase):
         self.assertEqual(self.registrations(), [{
             "plan_id": PID_B, "number": 7, "result": "registered", "project_id": "o/r",
             "reason": None, "note": None}])
-        self.assertEqual(self.adoption()["headline"], "reconcile is registered as o/r.")
         view = self.view()
+        self.assertIsNone(view["registration"])
         self.assertIn("o/r was registered.", [m["sentence"] if isinstance(m, dict) else m
                                                for m in view["digest"]["recent"]])
         self.assertEqual(view["statement"]["inbox_items"], 0)
@@ -1331,7 +1374,7 @@ class MergedRegistrationTest(ApproveCase):
         self.assertEqual(self.register_calls(), [])
         self.assertEqual(self.registrations(), [])
         self.assertEqual(json.loads(self.registry.read_text())["projects"], [])
-        self.assertEqual(self.adoption()["headline"],
+        self.assertEqual(self.card_words()["headline"],
                          "The pull request of reconcile was closed without merging.")
         self.assertEqual(self.retry_items(), [])
 
@@ -1345,8 +1388,7 @@ class MergedRegistrationTest(ApproveCase):
         (row,) = self.registrations()
         self.assertEqual((row["result"], row["reason"], row["note"]), ("refused", reason, note))
         view = self.view()
-        self.assertEqual(view["registration"]["line"],
-                         f"reconcile was not registered: {reason}. {note}")
+        self.assertEqual(view["registration"]["line"], "Register reconcile: needs you")
         self.assertIsNone(view["registration"]["approve"])
         (item,) = self.retry_items()
         self.assertEqual(item["title"], "Register reconcile")
@@ -1565,8 +1607,7 @@ class MergedRegistrationRealTest(MergedRealCase):
         self.assertTrue(self.listed("fixture/console-merged"))
         self.assertEqual([row["result"] for row in self.registrations()],
                          ["waiting", "registered"])
-        self.assertEqual(self.adoption()["headline"],
-                         "repo is registered as fixture/console-merged.")
+        self.assertIsNone(self.view()["registration"])
         recent = self.view()["digest"]["recent"]
         self.assertIn("fixture/console-merged was registered.",
                       [m["sentence"] if isinstance(m, dict) else m for m in recent])

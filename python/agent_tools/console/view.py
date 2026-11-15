@@ -64,8 +64,8 @@ Wire format, one object:
 null when `derive_view` is given none.
 
 The headline is "1 thing needs you" or "<n> things need you" for open items (a waiting brief is one,
-and so is each open question of the registration's plan, and each retry or apply card, see
-below), else
+and so is each open question of the registration's plan, and each retry, apply, confirm,
+failure or trust card, see below), else
 `ALL_OUT_HEADLINE` when every profile is out of usage, else `STALE_HEADLINE` when a registered
 project's tracker cannot be read, else "Nothing needs you". The sentence is `ALL_OUT_SENTENCE`
 when every profile is out of usage, else `STALE_SENTENCE` naming those projects when any is
@@ -73,13 +73,15 @@ stale, else `BRIEF_SENTENCE` when any brief is open, else `MANAGER_SENTENCE` whe
 stalled, else `PROGRESS_SENTENCE` when a manager stopped making progress, else `SIGNIN_SENTENCE`
 when a profile's sign-in asks, else `ADOPTION_SENTENCE` when an adoption's pull request is ready to
 merge, else `QUESTION_SENTENCE` when any manager question is open, else
-`REGISTER_SENTENCE` when a plan question, a retry, apply, confirm or trust item offers an option (the page
+`REGISTER_SENTENCE` when a plan question, a retry, apply, confirm, failure or trust item offers an option (the page
 can answer it), else
 `REGISTER_TYPE_SENTENCE` when a plan question takes a typed answer (`text`), else
 `CHOOSE_SENTENCE` when an open item is a decision with questions (the page can answer it), else
 `ANSWER_SENTENCE` when an open item has answers (a verification prompt the page can answer), else
 `REGISTER_STEP_SENTENCE` when only plan questions with no offered answer are open, else
-`NEEDS_SENTENCE` when something is open, else the registered-project count. The
+`NEEDS_SENTENCE` when something is open, else, with no project registered, `ADOPTING_SENTENCE` ("An adoption is
+under way; nothing is waiting on you.") when the view's `registration` (below) is running or holds
+an adoption, else the registered-project count. The
 all-out promotion never changes `inbox_items`, and the statement keeps exactly its four keys.
 `capacity` is the `capacity_view` the caller passes (`capacity.py` defines its members), else the
 empty capacity, the same bytes as `capacity_view` over no profile. `stale` is true
@@ -184,6 +186,13 @@ contract's lines (`contract_draft.shown`, ADR-console-031) when the latest row h
 null; `draft_more` is the counted line for the shown settings outside the main ones
 (`contract_draft.more_line`), null when there are none or no draft. `adoption` is the approved adoption's `approve.entry` (#1054) and `approve` the action the
 page offers (`approve`, `retry` or null); the `line` is the adoption's headline while there is one.
+The member is the entry given, copied, under three rules (#1085, ADR-console-035). It is null when
+the given entry is null, or is `done` and its `root` is the root of a registered project: the
+project's entry and the digest say so, and a finished result of a root now registered has nothing
+left to say. Else, when any retry, apply, confirm or failure item has a reason in `ASKING_REASONS`
+and the entry's `root`, a card already says what is asked, so the entry's `line` is
+`NEEDS_LINE` ("Register <name>: needs you"), its `lines` are `[]` and its `note` and `adoption`
+null. Otherwise it is a plain copy. A plan question (reason `register`) never reduces the line.
 
 The top-level `pin` member (#1029) is the pin note `pin.note` gives, copied, from the `pin`
 argument, and null with no pin. The top-level `pin_launches` member is the sorted list of profiles
@@ -289,6 +298,14 @@ the options `Register it` and `Not now` with the values `register` and `not_now`
 folder-trust sentence as its `why`. It is copied as given and not filtered by the registered
 projects, sits right after the apply items, and counts once in `inbox_items` and the headline.
 While one is open the sentence is `REGISTER_SENTENCE`. Without `confirm_items` the view is unchanged.
+
+Each failure item a caller passes (`failure_items`; #1085, ADR-console-035) is one entry of
+`inbox.open` too: a registration that failed in plain words, as `register.failure_items` builds it.
+It has reason `register_failed`, key `register-failed/<root>/<at>`, the options `Try again` and
+`Not now` with the values `try_again` and `not_now`, the failure's headline and its next step as
+`why`. It is copied as given, sits right after the confirm items and before the tracker items, and
+counts once in `inbox_items` and the headline. While one is open the sentence is
+`REGISTER_SENTENCE`. Without `failure_items` the view is unchanged.
 
 Each trust item a caller passes (`trust_items`; #1078, ADR-console-034) is one entry of `inbox.open`
 too: a profile whose folder trust could not be read back, as `folder_trust.items` builds it. It has
@@ -552,6 +569,9 @@ ADOPTION_SENTENCE = "Open the pull request to merge the adoption."
 REGISTER_TITLE = "Register {name}"
 REGISTER_SENTENCE = "Choose an option with its number and press Enter."
 REGISTER_STEP_SENTENCE = "Each one says what to do next."
+ADOPTING_SENTENCE = "An adoption is under way; nothing is waiting on you."
+ASKING_REASONS = ("register_failed", "register_apply", "register_retry", "register_confirm")
+NEEDS_LINE = "Register {name}: needs you"
 REGISTER_TYPE_SENTENCE = "Type the answer on its card and press Enter."
 CHOOSE_SENTENCE = "Choose an option with its number and press Enter, or answer on the tracker."
 ANSWER_SENTENCE = "Answer it here, or on the tracker."
@@ -957,9 +977,9 @@ def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
     }
 
 
-def _sentence(count: int) -> str:
+def _sentence(count: int, adopting: bool = False) -> str:
     if count == 0:
-        return "No project is registered yet."
+        return ADOPTING_SENTENCE if adopting else "No project is registered yet."
     noun = "project" if count == 1 else "projects"
     return f"{count} registered {noun}, and nothing is waiting on you."
 
@@ -1070,6 +1090,19 @@ def _register_entries(registration: Mapping | None) -> list[dict]:
             for index, q in enumerate(questions)]
 
 
+def _shown_registration(registration: Mapping | None, states: list[ProjectState],
+                        cards: Iterable[Mapping]) -> dict | None:
+    if registration is None:
+        return None
+    root = registration.get("root")
+    if registration.get("status") == "done" and any(s.root == root for s in states):
+        return None
+    if any(c.get("reason") in ASKING_REASONS and c.get("root") == root for c in cards):
+        return {**registration, "line": NEEDS_LINE.format(name=registration["name"]),
+                "lines": [], "note": None, "adoption": None}
+    return dict(registration)
+
+
 def _headline(open_count: int, stale: bool, all_out: bool) -> str:
     if open_count == 1:
         return "1 thing needs you"
@@ -1102,6 +1135,7 @@ def derive_view(
     apply_items: Iterable[Mapping] = (),
     confirm_items: Iterable[Mapping] = (),
     trust_items: Iterable[Mapping] = (),
+    failure_items: Iterable[Mapping] = (),
 ) -> dict:
     states = list(states)
     sessions = list(sessions)
@@ -1150,10 +1184,16 @@ def derive_view(
     applies = [dict(item) for item in apply_items]
     confirms = [dict(item) for item in confirm_items]
     trusts = [dict(item) for item in trust_items]
+    failures = [dict(item) for item in failure_items]
     registering = _register_entries(registration)
+    shown_registration = _shown_registration(registration, states,
+                                             (*retries, *applies, *confirms, *failures))
+    adopting = (shown_registration is not None
+                and (shown_registration.get("status") == "running"
+                     or shown_registration.get("adoption") is not None))
     open_count = (len(briefs) + len(stalls) + len(unprogressed) + len(signins) + len(adoptions)
                   + len(asked) + len(retries) + len(registering) + len(applies) + len(confirms)
-                  + len(trusts) + len(open_items))
+                  + len(failures) + len(trusts) + len(open_items))
     all_out = bool(capacity["all_out"])
     if all_out:
         sentence = ALL_OUT_SENTENCE
@@ -1171,7 +1211,7 @@ def derive_view(
         sentence = ADOPTION_SENTENCE
     elif asked:
         sentence = QUESTION_SENTENCE
-    elif retries or applies or confirms or trusts or any(e["questions"] for e in registering):
+    elif retries or applies or confirms or failures or trusts or any(e["questions"] for e in registering):
         sentence = REGISTER_SENTENCE
     elif any(e["text"] for e in registering):
         sentence = REGISTER_TYPE_SENTENCE
@@ -1184,7 +1224,7 @@ def derive_view(
     elif open_count:
         sentence = NEEDS_SENTENCE
     else:
-        sentence = _sentence(len(states))
+        sentence = _sentence(len(states), adopting)
     by_id = {state.project_id: state for state in states}
     runs: dict[str, list[DeliveryState]] = {}
     for delivery in (deliveries or {}).values():
@@ -1250,11 +1290,12 @@ def derive_view(
                           + registering
                           + applies
                           + confirms
+                          + failures
                           + [_inbox_entry(r, health) for r in open_items],
                   "answered": [_inbox_entry(r, health) for r in answered]},
         "signin_runs": signin_runs,
         "accounts_added": sorted(set(accounts_added)),
-        "registration": dict(registration) if registration is not None else None,
+        "registration": shown_registration,
         "pin": dict(pin) if pin is not None else None,
         "pin_launches": sorted(set(pin_launches)),
         "profile_sessions": profile_sessions,

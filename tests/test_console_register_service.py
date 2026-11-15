@@ -21,7 +21,7 @@ import time
 import unittest
 from pathlib import Path
 
-from agent_tools.console import folder_trust, register, register_check
+from agent_tools.console import event_log, folder_trust, register, register_check
 from agent_tools.project_contract import agent_platform
 
 from . import accounts_sandbox
@@ -244,6 +244,24 @@ class Case(unittest.TestCase):
     def view(self):
         return json.loads(self.svc.view_bytes)
 
+    def confirm_cards(self):
+        return [i for i in self.view()["inbox"]["open"] if i["reason"] == "register_confirm"]
+
+    def settled_row(self, root, bound=120):
+        """The stored payload of the root's last ended registration, once the run has finished.
+
+        It observes completion through the log and the service's run mark, not through the view,
+        which a card or a registered project reduces or drops (ADR-console-035).
+        """
+        end = time.monotonic() + bound
+        while time.monotonic() < end:
+            found = [payload for _, payload in self.rows(event_log.REGISTRATION_ENDED)
+                     if payload.get("root") == str(root)]
+            if self.svc._registering is None and found:
+                return found[-1]
+            time.sleep(0.05)
+        self.fail("no registration result")
+
     def wait_done(self, root, bound=120):
         end = time.monotonic() + bound
         while time.monotonic() < end:
@@ -421,7 +439,8 @@ class RegisterRunTest(Case):
         self.begin(fake)
         repo = git_repo(self.parent / "r")
         self.assertEqual(self.post({"path": str(repo)})[0], 204)
-        self.assertEqual(self.wait_done(repo)["note"], register.CONFIRM_NOTE)
+        self.assertEqual(self.settled_row(repo)["note"], register.CONFIRM_NOTE)
+        self.assertEqual(len(self.confirm_cards()), 1)
         self.assertEqual(self.confirm({"root": str(repo), "choice": "register"})[0], 204)
         (_, row), = self.rows("registration.ended")[-1:]
         self.assertEqual(row["result"], "failed")
@@ -488,11 +507,13 @@ class RegisterRunTest(Case):
         self.begin(register.Adopter(), dispatch=None, profile_dirs=[work], trust_home=self.home)
         status, _, body = self.post({"path": str(root)})
         self.assertEqual((status, body), (204, b""))
-        self.assertEqual(self.wait_done(root)["note"], register.CONFIRM_NOTE)
+        self.assertEqual(self.settled_row(root)["note"], register.CONFIRM_NOTE)
+        self.assertEqual(len(self.confirm_cards()), 1)
         self.assertEqual(json.loads(self.registry.read_text())["projects"], [])
         status, _, body = self.confirm({"root": str(root), "choice": "register"})
         self.assertEqual((status, body), (204, b""))
-        self.wait_for(lambda r: r["status"] == "done" and r["result"] == "registered")
+        self.assertEqual(self.settled_row(root)["result"], "registered")
+        self.assertIsNone(self.view()["registration"])
         (_, row), = self.rows("registration.ended")[-1:]
         self.assertEqual(row["result"], "registered")
         self.assertEqual(row["headline"], f"{root.name} is registered as fixture/console-register.")
@@ -554,9 +575,9 @@ class RegisterTrustTest(Case):
 
     def test_no_trust_is_written_before_the_register_card_is_answered(self):
         before = self.contents()
-        shown = self.waiting()
-        self.assertEqual((shown["result"], shown["note"]),
-                         ("not_registered", register.CONFIRM_NOTE))
+        self.waiting()
+        row = self.settled_row(self.repo)
+        self.assertEqual((row["result"], row["note"]), ("not_registered", register.CONFIRM_NOTE))
         self.assertEqual(self.fake.calls, [("plan", str(self.repo))])
         self.assertEqual(self.contents(), before)
         self.assertEqual(self.rows("trust.granted"), [])
@@ -591,8 +612,9 @@ class RegisterTrustTest(Case):
         self.assertEqual(self.post({"path": str(self.repo)})[0], 204)
         self.wait_done(self.repo)
         self.assertEqual(self.answer(answer_of(PID_A, A1))[0], 204)
-        shown = self.wait_for(lambda r: r["status"] == "done" and r["outcome"] == "no_change")
-        self.assertEqual(shown["note"], register.CONFIRM_NOTE)
+        self.wait_for(lambda r: r["status"] == "done" and r["outcome"] == "no_change")
+        self.assertEqual(self.settled_row(self.repo)["note"], register.CONFIRM_NOTE)
+        self.assertEqual(len(self.card()), 1)
         self.assertEqual(self.confirm({"root": str(self.repo), "choice": "register"})[0], 204)
         self.assertEqual(fake.answers, [[], [A1], [A1]])
         self.assertEqual([c for c in fake.calls if c[0] == "register"],
@@ -916,12 +938,14 @@ class PlanAnswerRunTest(Case):
         self.registered(repo)
         state = home_state(self.home)
         self.assertEqual(self.answer(answer_of(PID_A, A1))[::2], (204, b""))
-        shown = self.wait_for(lambda r: r["status"] == "done" and r["outcome"] == "no_change")
+        self.wait_for(lambda r: r["status"] == "done" and r["outcome"] == "no_change")
+        shown = self.settled_row(repo)
         self.assertEqual((shown["result"], shown["plan_id"], shown["questions"]),
                          ("not_registered", None, []))
         self.assertEqual(shown["headline"],
                          f"{repo.name} is already adopted and is not registered yet.")
         self.assertEqual(shown["note"], "Choose Register it to register it.")
+        self.assertEqual(len(self.confirm_cards()), 1)
         self.assertEqual(fake.calls, [("plan", str(repo)), ("plan", str(repo))])
         self.assertEqual(len(self.rows("registration.ended")), 2)
         self.assertEqual(home_state(self.home), state)

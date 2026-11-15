@@ -10,7 +10,7 @@ from agent_tools.claims import forge_markers as fm
 from agent_tools.claims import forge_owner_action as foa
 from agent_tools.console import digest
 from agent_tools.console import contract_draft
-from agent_tools.console import folder_trust, inbox, register
+from agent_tools.console import approve, folder_trust, inbox, register
 from agent_tools.console import view
 from agent_tools.console.deliveries import (
     DELIVERY_GONE,
@@ -43,6 +43,7 @@ from agent_tools.console.sprints import (
     sprint_title,
 )
 from agent_tools.console.view import (
+    ADOPTING_SENTENCE,
     ALL_OUT_SENTENCE,
     BRIEF_SENTENCE,
     CHOOSE_SENTENCE,
@@ -72,6 +73,8 @@ from agent_tools.console.view import (
     registry_changes,
 )
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
+from .test_console_approve import step_payload
+from .test_console_register import plan_doc
 
 
 def state(pid, seq, work=0):
@@ -2257,6 +2260,84 @@ class RegisterConfirmTest(unittest.TestCase):
         self.assertEqual(shown["statement"]["inbox_items"], 1)
         self.assertEqual(shown["statement"]["sentence"], REGISTER_SENTENCE)
         self.assertEqual(register.confirm_items(self.WAITING, running=True), [])
+
+
+class RegisterFailureViewTest(unittest.TestCase):
+    ROOT = "/srv/fail-app"
+
+    def test_a_failed_plan_is_one_counted_card_and_the_work_line_says_needs_you(self):
+        manifest = {"error": {"code": "x", "repair_id": "adopt.manifest.missing", "violations": [
+            {"pointer": "", "message": register.MANIFEST_ABSENT}]}}
+        latest = {**register.summary(self.ROOT, manifest), "at": "2026-11-15T08:00:00+00:00"}
+        shown = derive_view([], registration=register.view_entry(None, latest),
+                            failure_items=register.failure_items(latest, running=False))
+        (card,) = shown["inbox"]["open"]
+        self.assertEqual(card["reason"], "register_failed")
+        self.assertEqual(card["title"], "Register fail-app")
+        self.assertEqual(shown["statement"]["inbox_items"], 1)
+        self.assertEqual(shown["statement"]["headline"], "1 thing needs you")
+        self.assertEqual(shown["statement"]["sentence"], REGISTER_SENTENCE)
+        line = shown["registration"]
+        self.assertEqual(line["line"], "Register fail-app: needs you")
+        self.assertEqual(line["lines"], [])
+        self.assertIsNone(line["note"])
+        self.assertIsNone(line["adoption"])
+        self.assertEqual((card["headline"] + " " + card["why"]).count("not installed"), 1)
+        sentences = lambda text: set(text.split(". "))  # noqa: E731
+        self.assertEqual(sentences(card["headline"]) & sentences(card["why"]), set())
+
+    def test_an_apply_card_reduces_the_work_line_and_a_plan_question_does_not(self):
+        entry = {**reg([]), "root": "/srv/r", "name": "r", "line": "x", "lines": ["writes a"],
+                 "note": "n", "adoption": {"status": "done", "headline": "h"}}
+        card = {**APPLY_ITEM, "root": "/srv/r"}
+        shown = derive_view([], registration=entry, apply_items=[card])["registration"]
+        self.assertEqual((shown["line"], shown["lines"], shown["note"], shown["adoption"]),
+                         ("Register r: needs you", [], None, None))
+        asked = derive_view([], registration={**entry, "questions": [ASK_A]})
+        self.assertEqual(asked["inbox"]["open"][0]["reason"], "register")
+        self.assertEqual(asked["registration"]["line"], "x")
+        self.assertEqual(derive_view([], registration=entry)["registration"], entry)
+
+    def test_a_registered_root_leaves_only_its_project_and_digest_line(self):
+        opened = step_payload("opened", plan_id="p1", root="/srv/p00", project_id="p00")
+        adoption = approve.entry({**opened, "pull_state": "merged", "pull_at": "t",
+                                  "at": "t", "registration": {
+                                      "result": "registered", "project_id": "p00",
+                                      "reason": None, "note": None}},
+                                 running=False, name="p00")
+        entry = {**reg([]), "root": "/srv/p00", "name": "p00", "project_id": "p00",
+                 "line": adoption["headline"], "adoption": adoption}
+        moment = Event(1, "2026-11-15T09:00:00+00:00", event_log.ADOPTION_REGISTRATION, None,
+                       {"plan_id": "p1", "number": 7, "result": "registered",
+                        "project_id": "p00", "reason": None, "note": None})
+        d = digest.digest(digest.moments([moment], {}, {}), None,
+                          datetime(2026, 11, 15, 10, 0, tzinfo=timezone.utc))
+        shown = derive_view([state("p00", 1)], registration=entry, digest=d)
+        self.assertIsNone(shown["registration"])
+        self.assertEqual([e["project_id"] for e in shown["entries"]], ["p00"])
+        self.assertIn("p00 was registered.", [m["sentence"] for m in shown["digest"]["recent"]])
+        elsewhere = derive_view([state("p01", 1)], registration=entry)
+        self.assertEqual(elsewhere["registration"], entry)
+
+    def test_an_open_pull_request_reads_in_words_and_the_statement_says_adoption_under_way(self):
+        opened = step_payload("opened", plan_id="p1", root="/srv/sample-app",
+                              branch="adopt-bbbbbbbbbbbb", commit="c" * 40,
+                              pull_request={"number": 7,
+                                            "url": "https://github.com/o/sample-app/pull/7"})
+        adoption = approve.entry({**opened, "at": "t", "pull_state": "open", "pull_at": "t"},
+                                 running=False, name="sample-app")
+        latest = {**register.summary("/srv/sample-app", plan_doc(state="ready")), "at": "t"}
+        entry = register.view_entry(None, latest, adoption=adoption, approve=None)
+        shown = derive_view([], registration=entry)
+        self.assertEqual(shown["registration"]["line"],
+                         "sample-app: waiting for its pull request to be ready to merge")
+        self.assertEqual(shown["registration"]["adoption"]["lines"], [])
+        self.assertEqual(shown["registration"]["adoption"]["url"],
+                         "https://github.com/o/sample-app/pull/7")
+        text = " ".join([shown["registration"]["line"], *shown["registration"]["adoption"]["lines"]])
+        self.assertIsNone(re.search(r"[0-9a-f]{12,}", text))
+        self.assertEqual(shown["statement"]["sentence"], ADOPTING_SENTENCE)
+        self.assertNotEqual(shown["statement"]["sentence"], "No project is registered yet.")
 
 
 class TrustItemTest(unittest.TestCase):

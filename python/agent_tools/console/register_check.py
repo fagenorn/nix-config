@@ -31,13 +31,16 @@ directory with a throwaway project id `console-check/register-<hex>`, and POSTs 
   dispatched a run.
 - A 204, or no answer at all, may have dispatched a run. The check polls the view every second until
   `registration.root` is the posted root and its `status` is `done`, at most `--wait` seconds (else
-  `not_met`, reason `no result`). The adopted fixture first ends in the waiting row, which
-  `register.waiting` accepts (ADR-console-034): the check answers the Register card as the owner's page
-  does, with `POST /api/register-confirm {"root": <root>, "choice": "register"}` (same headers, same
-  refusal rules as the first POST), and polls again, for a done row of this root whose `at` differs
-  from the waiting row's. A `result` other than `registered` is `not_met` with the `headline` as the
-  reason. After `registered` it polls at most 30 s for the project id among the view's project
-  entries, quiet groups included (else `not_met`, reason `not listed`).
+  `not_met`, reason `no result`), or the project id is among the view's project entries. The adopted
+  fixture first ends in the waiting row (ADR-console-034), which the view reduces to
+  a Register card in `inbox.open` (reason `register_confirm`, this root): the check answers the card
+  it found open in the document it saw done, as the owner's page does, with `POST /api/register-confirm
+  {"root": <root>, "choice": "register"}` (same headers, same refusal rules as the first POST), and
+  polls again, for a done row of this root whose `at` differs from the waiting row's, or the project
+  id listed. A listed project is `met` (the view drops a registered root's result, ADR-console-035); a
+  `result` other than `registered` is `not_met` with the `headline` as the reason; otherwise it polls
+  at most 30 s for the project id among the view's project entries, quiet groups included (else
+  `not_met`, reason `not listed`).
 
 Two sprint rules govern what it leaves behind. S1: the check leaves no trace of itself, so it removes
 the throwaway directory, its registry entry, its folder-trust entries and every stored plan whose
@@ -277,6 +280,13 @@ def _listed(document: Mapping, project_id: str) -> bool:
     return False
 
 
+def _asking(document: Mapping, root: str) -> bool:
+    inbox = document.get("inbox")
+    cards = inbox.get("open") if isinstance(inbox, dict) else None
+    return any(isinstance(c, dict) and c.get("reason") == "register_confirm"
+               and c.get("root") == str(root) for c in cards or ())
+
+
 def _poll(fetch: Callable[[str], Answer], url: str, poll: float, bound: float,
           ready: Callable[[dict], bool]) -> bool:
     end = time.monotonic() + bound
@@ -388,18 +398,22 @@ def _exercise(args, token: str, fetch, post, root: Path, project_id: str, poll: 
         return 1, {"status": "not_met", "reason": f"refused {status} {_text(body)}"}
     state = base + STATE_PATH
     found: dict = {}
+    asked: list[bool] = []
+    listed: list[bool] = []
 
     def done(document: dict) -> bool:
         registration = document.get("registration")
         if (isinstance(registration, dict) and registration.get("root") == str(root)
                 and registration.get("status") == "done"):
             found.update(registration)
+            asked.append(_asking(document, str(root)))
+            listed.append(_listed(document, project_id))
             return True
-        return False
+        return _listed(document, project_id)
 
     if not _poll(fetch, state, poll, args.wait, done):
         return 1, {"status": "not_met", "reason": "no result"}
-    if register.waiting(found):
+    if asked and asked[-1]:
         waited = found.get("at")
         headers = {"Origin": base, write_guard.TOKEN_HEADER: token,
                    "Content-Type": "application/json"}
@@ -411,18 +425,20 @@ def _exercise(args, token: str, fetch, post, root: Path, project_id: str, poll: 
         if status is not None and status != 204:
             return 1, {"status": "not_met", "reason": f"refused {status} {_text(body)}"}
         found.clear()
+        listed.clear()
 
         def answered(document: dict) -> bool:
             registration = document.get("registration")
             if (isinstance(registration, dict) and registration.get("root") == str(root)
                     and registration.get("status") == "done" and registration.get("at") != waited):
                 found.update(registration)
+                listed.append(_listed(document, project_id))
                 return True
-            return False
+            return _listed(document, project_id)
 
         if not _poll(fetch, state, poll, args.wait, answered):
             return 1, {"status": "not_met", "reason": "no result"}
-    if found.get("result") != "registered":
+    if found and not (listed and listed[-1]) and found.get("result") != "registered":
         return 1, {"status": "not_met", "reason": str(found.get("headline"))}
     if not _poll(fetch, state, poll, LISTED_SECONDS, lambda d: _listed(d, project_id)):
         return 1, {"status": "not_met", "reason": "not listed"}
