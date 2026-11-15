@@ -106,8 +106,8 @@ class Pusher:
         self.calls = []
         self.entered = threading.Event()
 
-    def __call__(self, root, branch, cancel=None):
-        self.calls.append((root, branch))
+    def __call__(self, root, branch, commit, cancel=None):
+        self.calls.append((root, branch, commit))
         self.entered.set()
         if self.raises:
             raise self.raises.pop(0)
@@ -305,7 +305,7 @@ class PlanApproveRunTest(ApproveCase):
         fake = self.ready(apply_result=APPLIED)
         shown, errors = self.run_approval("opened")
         self.assertEqual(fake.applied, [(PID_B, False)])
-        self.assertEqual(self.pusher.calls, [(str(self.repo), BRANCH)])
+        self.assertEqual(self.pusher.calls, [(str(self.repo), BRANCH, COMMIT)])
         self.assertEqual(self.forge.calls, [
             ("find", "fixture/r", BRANCH, "develop"),
             ("open", "fixture/r", BRANCH, "develop", "Adopt reconcile onto the agent platform",
@@ -392,7 +392,7 @@ class PlanApproveRunTest(ApproveCase):
                             for line in errors.splitlines()))
         shown, _ = self.run_approval("opened")
         self.assertEqual(len(fake.applied), 1)
-        self.assertEqual(len(self.pusher.calls), 2)
+        self.assertEqual(self.pusher.calls, [(str(self.repo), BRANCH, COMMIT)] * 2)
         self.assertEqual(shown["adoption"]["step"], "opened")
         self.assertEqual(len(self.opens()), 1)
 
@@ -551,6 +551,16 @@ class AdoptionPollTest(ApproveCase):
         self.assertEqual(self.forge.calls, [("state", "fixture/r", 7)])
         self.assertEqual([i["url"] for i in self.items()], [URL])
 
+    def test_the_poll_reads_the_repository_the_pull_request_was_opened_in(self):
+        self.opened()
+        for moved in (lambda root: None, lambda root: "other/unrelated"):
+            self.kwargs["slug_of"] = moved
+            self.restart()
+            self.forge.calls.clear()
+            self.poll("ready")
+            self.assertEqual(self.forge.calls, [("state", "fixture/r", 7)])
+        self.assertEqual([i["url"] for i in self.items()], [URL])
+
     def test_a_pull_request_that_is_no_longer_ready_closes_the_item(self):
         self.opened()
         self.poll("ready")
@@ -615,6 +625,28 @@ class PlanApproveCloseTest(ApproveCase):
         self.assertEqual(self.forge.calls, [])
         self.assertEqual(self.steps(), ["applied"])
         self.pusher.wait_for_stop = False
+        self.restart()
+        self.assertEqual(self.view()["registration"]["approve"], "retry")
+        self.run_approval("opened")
+        self.assertEqual(len(fake.applied), 1)
+        self.assertEqual(len(self.opens()), 1)
+
+    def test_closing_after_apply_succeeded_keeps_its_row_and_a_restart_resumes_at_the_push(self):
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        fake = self.ready(apply_result=APPLIED, apply_block=gate)
+        self.assertEqual(self.approve_plan()[0], 204)
+        closing = threading.Thread(target=self.svc.close)
+        closing.start()
+        end = time.monotonic() + 30
+        while time.monotonic() < end and not self.svc._closed:
+            time.sleep(0.01)
+        self.assertTrue(self.svc._closed)
+        gate.set()
+        closing.join(30)
+        self.assertFalse(closing.is_alive())
+        self.assertEqual(self.pusher.calls, [])
+        self.assertEqual(self.steps(), ["applied"])
         self.restart()
         self.assertEqual(self.view()["registration"]["approve"], "retry")
         self.run_approval("opened")

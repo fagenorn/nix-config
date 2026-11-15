@@ -234,14 +234,16 @@ merged (`approve.MERGED`). A closed pull request, a failed apply or no adoption 
 again as a fresh apply. Otherwise the answer is an empty `204` at once and the run is dispatched on
 a tracked thread (`APPROVAL_THREAD`) that `close` joins. The run applies the plan (`Adopter.apply`,
 acknowledging deletions only when the shown plan lists them) and appends `adoption.step` `applied`,
-pushes only the one adoption branch (`approve.push`), then looks for the branch's pull request
+pushes only the one adoption branch, at the commit apply recorded (`approve.push`), then looks for the branch's pull request
 before opening one and, when the open fails, looks once more (a pull request whose answer was lost
 is found, never opened twice) and appends `opened`. A failure appends `apply_failed`,
 `push_failed` or `open_failed` with plain words; the original error (code, detail, traceback) is one
 stderr line `console: plan_approve_error <json>` and never reaches the page. A step in
 `approve.RESUMABLE` is resumed by the next approval (Try again) at the step that failed: apply is
 never run twice for a pushed or kept branch. The console stops between steps and inside every child
-and forge call when it closes, appending nothing for the stopped step, so the next approval resumes.
+and forge call when it closes, appending nothing for the stopped step, so the next approval resumes;
+the one exception is the `applied` row, which is appended even when the close has begun, because
+apply has already made its branch and a restarted console must not offer a fresh apply.
 The console never merges: it pushes the one branch and opens its pull request, and the forge's
 required checks keep merge safety. One line `console: plan_approve_ended <step or stopped>` ends the
 run. Any other exception is `console: plan_approve_failed <Type>` and 500 `approving failed`.
@@ -521,7 +523,8 @@ Adoption pull requests (#1054): when the service is given a `forge`, a thread, `
 started by `start()`, calls `poll_adoptions()` at once and then every `adoption_seconds`
 (`ADOPTION_SECONDS`, two minutes). One poll reads, through `forge.pull_request_state(slug, number,
 cancel=...)`, the pull request of each adoption whose step is `opened` and whose state is still
-`open` or `ready` (`approve.waiting`), one after another and never inside the ingest lock; the
+`open` or `ready` (`approve.waiting`), in the repository its recorded link names
+(`approve.pull_slug`, never the checkout's origin of the day), one after another and never inside the ingest lock; the
 stop flag cancels the call in flight and a read finished after the stop appends nothing. Only a
 state that differs from the folded one is appended, as one `adoption.pull_request` row, and the
 view is published, so a ready pull request is one inbox item (`approve.inbox_entries`, see
@@ -2887,9 +2890,11 @@ class ConsoleService:
               file=sys.stderr)
 
     def _append_applied(self, payload: dict) -> None:
+        # Apply has already made its branch, so its row is kept even when `close` has begun: the
+        # log is closed only after every approval worker is joined.
         with self._ingest:
+            self._fold(self.log.append([approve.step_row(payload)]))
             if not self._closed:
-                self._fold(self.log.append([approve.step_row(payload)]))
                 self._publish()
 
     def _approval_steps(self, root: str, shown: dict, adoption: dict | None) -> dict | None:
@@ -2934,7 +2939,7 @@ class ConsoleService:
             return None
         where = {"root": root, "plan_id": plan_id, "branch": branch, "base": base}
         try:
-            self._pusher(root, branch, cancel=stop)
+            self._pusher(root, branch, commit, cancel=stop)
         except approve.PushFailed as error:
             self._log_approval_error({"stage": "push", "root": root, "plan_id": plan_id,
                                       "branch": branch, "reason": error.reason,
@@ -4626,7 +4631,7 @@ class ConsoleService:
         for entry in waiting:
             if self._stop.is_set():
                 return
-            slug = self._slug_of(entry["root"])
+            slug = approve.pull_slug(entry["pull_request"])
             if slug is None:
                 continue
             number = entry["pull_request"]["number"]

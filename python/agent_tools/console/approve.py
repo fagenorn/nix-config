@@ -33,6 +33,10 @@ entries with step `opened` and `pull_state` `open` or `ready`, ordered by `plan_
 adoption of <project_id or name> is ready to merge`, with the pull request's `url` and `number`,
 `answered` False and `waiting_since` the `pull_at`.
 
+`pull_slug(pull_request)` is the `owner/repo` of an opened step's recorded link (None when the
+link is not a GitHub pull request link of that number): the poll reads the repository the pull
+request was opened in, never the checkout's origin of the day.
+
 Words. Every reason and note is plain: none holds an error code, a repair id, an HTTP status, a run
 kind or an exception name. `branch_of(plan_id)` is the branch apply creates for the plan.
 `forge_failure(error, branch, base)` is `(reason, note)` for a failed pull request lookup or open, by
@@ -61,10 +65,13 @@ object whose `branch` and `worktree` are strings and whose worktree is a directo
 never raises.
 
 Runners. The console never merges: the forge's required checks keep merge safety, and `GitHubForge`
-has no method that merges. `push(root, branch, cancel=None, *, timeout=PUSH_TIMEOUT, environ=None)`
-pushes only the one adoption branch, by the one refspec `refs/heads/<branch>:refs/heads/<branch>`,
-never forced and with `--no-follow-tags`, so no tag rides along whatever the repository's config
-says; it refuses a branch that is not `adopt-<12 hex>` before any process, runs git in its own
+has no method that merges. `push(root, branch, commit, cancel=None, *, timeout=PUSH_TIMEOUT, environ=None)`
+pushes only the one adoption branch, at the one commit apply recorded, by the one refspec
+`<commit>:refs/heads/<branch>`: the local branch is never read, so a branch that moved after
+apply (a failed push, then more commits) publishes nothing the apply gates did not run on. It is
+never forced and has `--no-follow-tags`, so no tag rides along whatever the repository's config
+says; it refuses a branch that is not `adopt-<12 hex>` and a commit that is not 40 lowercase hex
+digits before any process, runs git in its own
 group with prompts off (`GIT_TERMINAL_PROMPT=0`), and raises `PushFailed` (`reason` the page's
 words, `detail` git's stderr for the log only, `str(error) == reason`) on a refusal, a timeout, a
 cancel or a git that could not be started. `gh_json(argv, cancel=None, *, timeout, environ=None)`
@@ -105,6 +112,8 @@ PULL_STATES = ("open", "ready", "merged", "closed")
 STEP_MEMBERS = {"by", "plan_id", "root", "project_id", "step", "branch", "commit", "base",
                 "pull_request", "reason", "note", "kept"}
 BRANCH = re.compile(r"adopt-[0-9a-f]{12}")
+COMMIT = re.compile(r"[0-9a-f]{40}")
+PULL_URL = re.compile(r"https://github\.com/([^/\s]+/[^/\s]+)/pull/([0-9]+)")
 REASON_CHARS = 200
 RECORD_BYTES = 65536
 UNAVAILABLE = "approving an adoption is not available on this host"
@@ -241,6 +250,18 @@ def inbox_entries(adoptions: Mapping[str, Mapping]) -> list[dict]:
                           "is ready to merge"),
              "url": found["pull_request"]["url"], "number": found["pull_request"]["number"],
              "answered": False, "waiting_since": found["pull_at"]} for found in ready]
+
+
+def pull_slug(pull_request: Mapping) -> str | None:
+    """The repository an opened pull request lives in, read from its recorded link.
+
+    The link was built from the slug the pull request was found or opened under (`_pull_request`),
+    so it, not the checkout's origin today, names the repository to poll.
+    """
+    found = PULL_URL.fullmatch(pull_request["url"])
+    if found is None or int(found.group(2)) != pull_request["number"]:
+        return None
+    return found.group(1)
 
 
 def branch_of(plan_id: str) -> str:
@@ -458,15 +479,17 @@ class PushFailed(Exception):
         self.detail = detail
 
 
-def push(root: str, branch: str, cancel: threading.Event | None = None, *,
+def push(root: str, branch: str, commit: str, cancel: threading.Event | None = None, *,
          timeout: float = PUSH_TIMEOUT, environ: Mapping[str, str] | None = None) -> None:
     if BRANCH.fullmatch(branch) is None:
         raise PushFailed("that branch is not an adoption branch")
+    if COMMIT.fullmatch(commit) is None:
+        raise PushFailed("that is not the commit apply recorded")
     env = {**(environ if environ is not None else os.environ), "GIT_TERMINAL_PROMPT": "0"}
     try:
         done = manager.run_in_own_group(
             ["git", "-C", root, "push", "--quiet", "--no-follow-tags", "origin",
-             f"refs/heads/{branch}:refs/heads/{branch}"],
+             f"{commit}:refs/heads/{branch}"],
             timeout=timeout, cancel=cancel, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
             stderr=subprocess.PIPE, env=env, start_new_session=True)
     except subprocess.TimeoutExpired as error:

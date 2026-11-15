@@ -378,6 +378,18 @@ class TitleBodyTest(unittest.TestCase):
             "required checks pass.")
 
 
+class PullSlugTest(unittest.TestCase):
+    def test_the_repository_is_read_from_the_recorded_link(self):
+        self.assertEqual(approve.pull_slug({"number": 7, "url": "https://github.com/o/r/pull/7"}),
+                         "o/r")
+
+    def test_a_link_that_is_not_a_pull_request_link_of_that_number_names_no_repository(self):
+        for url in ("https://example.test/pull/7", "https://github.com/o/r/pull/8",
+                    "https://github.com/o/r/issues/7", "https://github.com/o/r/pull/7/files", ""):
+            with self.subTest(url=url):
+                self.assertIsNone(approve.pull_slug({"number": 7, "url": url}))
+
+
 class InboxEntryTest(unittest.TestCase):
     def test_only_a_ready_pull_request_is_an_item(self):
         events = [
@@ -489,8 +501,9 @@ class PushTest(unittest.TestCase):
         return git("for-each-ref", "--format=%(refname) %(objectname)",
                    cwd=self.remote).splitlines()
 
-    def push(self, branch=ADOPTION, **kwargs):
-        return approve.push(str(self.root), branch, environ=GIT_ENV, **kwargs)
+    def push(self, branch=ADOPTION, commit=None, **kwargs):
+        commit = self.sha(ADOPTION) if commit is None else commit
+        return approve.push(str(self.root), branch, commit, environ=GIT_ENV, **kwargs)
 
     def test_the_push_sends_exactly_the_one_branch(self):
         before = git("status", "--porcelain", cwd=self.root)
@@ -499,6 +512,24 @@ class PushTest(unittest.TestCase):
                          [f"refs/heads/{ADOPTION} {self.sha(ADOPTION)}",
                           f"refs/heads/main {self.main}"])
         self.assertEqual(git("status", "--porcelain", cwd=self.root), before)
+
+    def test_a_branch_that_moved_after_apply_publishes_only_the_recorded_commit(self):
+        recorded = self.sha(ADOPTION)
+        git("checkout", "-q", ADOPTION, cwd=self.root)
+        git("commit", "-q", "--allow-empty", "-m", "later", cwd=self.root)
+        git("checkout", "-q", "main", cwd=self.root)
+        self.assertNotEqual(self.sha(ADOPTION), recorded)
+        self.push(commit=recorded)
+        self.assertEqual(sorted(self.refs()),
+                         [f"refs/heads/{ADOPTION} {recorded}", f"refs/heads/main {self.main}"])
+
+    def test_a_commit_that_is_not_a_full_hash_is_refused_before_any_process(self):
+        before = self.refs()
+        for commit in (ADOPTION, "main", self.sha(ADOPTION)[:12], self.sha(ADOPTION).upper(), ""):
+            with self.subTest(commit=commit), self.assertRaises(approve.PushFailed) as refused:
+                self.push(commit=commit)
+            self.assertEqual(refused.exception.reason, "that is not the commit apply recorded")
+        self.assertEqual(self.refs(), before)
 
     def test_tags_never_follow_the_branch(self):
         git("config", "push.followTags", "true", cwd=self.root)
@@ -537,24 +568,24 @@ class PushTest(unittest.TestCase):
         seen = self.fake / "seen"
         fake_bin(self.fake, "git",
                  f'echo "$GIT_TERMINAL_PROMPT" > {seen}.prompt\necho "$@" > {seen}.args\n')
-        approve.push(str(self.root), ADOPTION,
+        approve.push(str(self.root), ADOPTION, self.sha(ADOPTION),
                      environ={**os.environ, "PATH": f"{self.fake}:{os.environ['PATH']}"})
         self.assertEqual(Path(f"{seen}.prompt").read_text().strip(), "0")
         self.assertEqual(
             Path(f"{seen}.args").read_text().strip(),
             f"-C {self.root} push --quiet --no-follow-tags origin "
-            f"refs/heads/{ADOPTION}:refs/heads/{ADOPTION}")
+            f"{self.sha(ADOPTION)}:refs/heads/{ADOPTION}")
 
     def test_a_push_that_takes_too_long_reads_in_words(self):
         fake_bin(self.fake, "git", "sleep 5\n")
         with self.assertRaises(approve.PushFailed) as slow:
-            approve.push(str(self.root), ADOPTION, timeout=0.5,
+            approve.push(str(self.root), ADOPTION, self.sha(ADOPTION), timeout=0.5,
                          environ={"PATH": f"{self.fake}:{os.environ['PATH']}"})
         self.assertEqual(slow.exception.reason, "it took too long and was stopped")
         empty = sandbox_dir()
         self.addCleanup(shutil.rmtree, empty, ignore_errors=True)
         with self.assertRaises(approve.PushFailed) as missing:
-            approve.push(str(self.root), ADOPTION, environ={"PATH": str(empty)})
+            approve.push(str(self.root), ADOPTION, self.sha(ADOPTION), environ={"PATH": str(empty)})
         self.assertEqual(missing.exception.reason, "git could not be started")
 
 
