@@ -48,7 +48,6 @@ STALE_ERROR = {"error": {
                     "message": "the repository no longer hashes to the plan's input digest"}]}}
 WITH_DELETION = {**READY, "changes": [
     *READY["changes"], {"op": "delete-file", "sources": ["old.md"], "targets": []}]}
-APPLIED_LINE = f"Applied on the branch {BRANCH} as one commit, cccccccccccc."
 URL = "https://github.com/fixture/r/pull/7"
 NOT_INTEGRATED = {"error": {
     "code": "not_integrated", "repair_id": "adopt.registration.not_integrated",
@@ -553,9 +552,8 @@ class PlanApproveRunTest(ApproveCase):
         self.assertEqual(self.steps(), ["applied", "opened"])
         self.assertEqual(shown["adoption"], {
             "status": "done", "step": "opened", "state": "open",
-            "headline": "Waiting for the pull request of reconcile to be ready to merge.",
-            "lines": [APPLIED_LINE, f"Pushed {BRANCH} to origin.",
-                      "Opened pull request #7 against develop."],
+            "headline": "reconcile: waiting for its pull request to be ready to merge",
+            "lines": [],
             "note": None, "branch": BRANCH, "commit": COMMIT, "url": URL})
         self.assertIsNone(shown["approve"])
         self.assertEqual(shown["line"], shown["adoption"]["headline"])
@@ -574,9 +572,11 @@ class PlanApproveRunTest(ApproveCase):
             adoption["headline"],
             "The adoption of reconcile was not applied: the cold-clone-resolves check did not "
             "pass.")
-        self.assertEqual(adoption["lines"],
-                         [f"Apply kept its worktree at {kept} and its branch {BRANCH}."])
-        self.assertTrue(adoption["note"].startswith("Fix what failed in the repository"))
+        self.assertEqual(adoption["lines"], [])
+        self.assertEqual(
+            adoption["note"],
+            "Fix what failed in the repository, then register the repository again. "
+            + approve.KEPT_SENTENCE)
         self.assertEqual((self.pusher.calls, self.forge.calls), ([], []))
         self.assertEqual(self.heads(), before)
         self.assertEqual(self.steps(), ["apply_failed"])
@@ -622,9 +622,11 @@ class PlanApproveRunTest(ApproveCase):
         fake = self.ready(apply_result=APPLIED)
         shown, errors = self.run_approval("push_failed")
         adoption = shown["adoption"]
-        self.assertEqual(adoption["headline"],
-                         f"The branch {BRANCH} was not pushed: remote rejected the push.")
-        self.assertEqual(adoption["lines"], [APPLIED_LINE])
+        self.assertEqual(
+            adoption["headline"],
+            "The adoption of reconcile was applied, but its branch was not pushed: remote "
+            "rejected the push.")
+        self.assertEqual(adoption["lines"], [])
         self.assertEqual(adoption["note"], approve.PUSH_NOTE)
         self.assertEqual(shown["approve"], "retry")
         self.assertEqual(self.forge.calls, [])
@@ -644,11 +646,12 @@ class PlanApproveRunTest(ApproveCase):
         adoption = shown["adoption"]
         self.assertEqual(
             adoption["headline"],
-            f"The pull request for {BRANCH} was not opened: the forge refused the pull request.")
+            "The adoption of reconcile was pushed, but its pull request was not opened: the "
+            "forge refused the pull request.")
         self.assertEqual(
             adoption["note"],
-            f"Check on the forge that {BRANCH} differs from develop and has no pull request open "
-            "already, then choose Try again.")
+            "Check on the forge that the adoption's branch differs from develop and has no pull "
+            "request open already, then choose Try again.")
         for text in (adoption["headline"], *adoption["lines"], adoption["note"]):
             for word in ("HTTP", "422", "gh_failed"):
                 self.assertNotIn(word, text)
@@ -683,13 +686,25 @@ class PlanApproveRunTest(ApproveCase):
         self.ready(apply_result=APPLIED)
         self.kwargs["slug_of"] = lambda root: None
         self.restart()
-        shown, _ = self.run_approval("open_failed")
+        self.run_approval("open_failed")
+        (card,) = self.apply_cards()
+        self.assertEqual(card["why"], approve.NO_SLUG_NOTE)
         self.assertEqual(
-            shown["adoption"]["headline"],
-            f"The pull request for {BRANCH} was not opened: the repository's origin is not on "
-            "GitHub.")
+            card["headline"],
+            "The adoption of reconcile was pushed, but its pull request was not opened: the "
+            "repository's origin is not on GitHub.")
+        for text in (card["why"], card["headline"]):
+            self.assertIsNone(re.search(
+                r"--plan-id|sha256:|[0-9a-f]{12,}|(?:^|[\s(\"'])/\S", text))
         self.assertEqual(self.forge.calls, [])
         self.assertEqual(len(self.pusher.calls), 1)
+
+    def test_a_contract_with_no_integration_branch_names_no_branch(self):
+        self.ready(apply_result={k: v for k, v in APPLIED.items() if k != "integration_branch"})
+        self.run_approval("open_failed")
+        (card,) = self.apply_cards()
+        self.assertEqual(card["why"], approve.NO_BASE_NOTE)
+        self.assertNotIn(BRANCH, card["why"])
 
     def test_deletions_are_acknowledged_only_when_the_page_showed_them(self):
         fake = self.ready(plan=WITH_DELETION, apply_result=APPLIED)
@@ -738,11 +753,11 @@ class AdoptionPollTest(ApproveCase):
         self.assertEqual(self.adoption()["headline"],
                          "The pull request of reconcile was closed without merging.")
 
-    def test_a_closed_adoption_names_its_branch_and_is_approved_again_with_the_same_plan(self):
+    def test_a_closed_adoption_asks_for_a_clean_up_and_is_approved_again_with_the_same_plan(self):
         fake = self.opened()
         self.poll("ready")
         self.poll("closed")
-        self.assertEqual(self.adoption()["note"], approve.closed_note(str(self.repo), BRANCH))
+        self.assertEqual(self.adoption()["note"], approve.CLOSED_NOTE)
         self.assertEqual(self.view()["registration"]["approve"], "approve")
         self.forge.mark_closed(7)
         shown = self.registered(self.repo)
@@ -797,7 +812,7 @@ class AdoptionPollTest(ApproveCase):
         self.poll("open")
         self.assertEqual(self.items(), [])
         self.assertEqual(self.adoption()["headline"],
-                         "Waiting for the pull request of reconcile to be ready to merge.")
+                         "reconcile: waiting for its pull request to be ready to merge")
 
     def test_an_unchanged_state_appends_nothing(self):
         self.opened()
@@ -1051,7 +1066,7 @@ class TrustGrantTest(ApproveCase):
         self.run_approval("opened")
         (card,) = self.trust_cards()
         self.assertEqual(card["title"], "Trust o/r")
-        self.assertEqual(card["why"], folder_trust.failed_words(self.key, "solo"))
+        self.assertEqual(card["why"], folder_trust.failed_words("o/r", "solo"))
         self.svc._trust_granter = folder_trust.grant
         self.assertEqual(self.check({"root": self.key, "profile": "solo"})[::2], (204, b""))
         rows = self.trust_rows()
@@ -1225,12 +1240,9 @@ class PlanApproveRealTest(ApproveCase):
         adoption = shown["adoption"]
         if adoption["step"] == "apply_failed":
             self.fail(f"{adoption['headline']} {adoption['note']}")
-        found = re.fullmatch(r"Applied on the branch (adopt-[0-9a-f]{12}) as one commit, "
-                             r"([0-9a-f]{12})\.", adoption["lines"][0])
-        self.assertIsNotNone(found)
-        branch, prefix = found.groups()
+        branch = adoption["branch"]
+        self.assertRegex(branch, r"adopt-[0-9a-f]{12}")
         tip = git(self.repo, "rev-parse", branch).strip()
-        self.assertTrue(tip.startswith(prefix))
         self.assertEqual(tip, adoption["commit"])
         self.assertEqual(git(self.repo, "rev-list", "--count", f"{self.head0}..{branch}").strip(),
                          "1")

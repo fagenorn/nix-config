@@ -58,27 +58,40 @@ again` on a failed apply and on a closed pull request; none says `press` or `App
 stored row is never rewritten. Every reason and note is plain: none holds an error code, a repair
 id, an HTTP status, a run kind or an exception name.
 `branch_of(plan_id)` is the branch apply creates for the plan.
-`forge_failure(error, branch, base)` is `(reason, note)` for a failed pull request lookup or open, by
+`forge_failure(error, base)` is `(reason, note)` for a failed pull request lookup or open, by
 the first rule that matches: not a `ForgeError` (`UNEXPECTED`), `gh_missing`, `gh_timeout`, a
 transient `gh_failed`, an HTTP 401 or 403, 422 or 404 read from gh's message, else the forge answered
-in a way the console does not understand. `apply_failure(root, plan_id, error, kept, acknowledge)` is
-`(reason, note)` for an apply error object: `plan_stale`; the dirty, retained and unavailable
-worktree repairs; a failed `adopt.gate.*` gate; an uninstalled platform manifest; else the error's
-first violation message and the terminal command (`terminal_note`). `run_failure(plan_id, kind,
-acknowledge)` words a failed run by `register.RUN_WORDS`, with a retry note for `RETRY_KINDS`.
+in a way the console does not understand. `apply_failure(name, error, kept)` is `(reason, note)`
+for an apply error object, by the first rule that matches: `plan_stale`; the dirty, retained and
+unavailable worktree repairs; `SIGNING_REPAIR` (`adopt.commit.signing_unavailable`); `COMMIT_REPAIR`
+(`adopt.commit.failed`); a failed `adopt.gate.*` gate; an uninstalled platform manifest; a repair id
+with a prefix of `APPLY_REASONS`; else `it could not be applied`. It reads no violation message, so a
+formatter's output, a worktree path or a plan id never reaches a card (the service logs them). A
+note that follows a kept worktree (`kept` not None) ends in `KEPT_SENTENCE`, which asks an agent to
+remove the leftover copy before Apply it again; no note carries a path, a branch, a hash or a
+command. `run_failure(name, kind)` words a failed run by `register.RUN_WORDS` with the note `Choose
+Apply it again. If it keeps failing, ask an agent to apply the adoption of <name> in a terminal,
+which shows the full reason.`
 `registration_outcome(root, report)` reads the answer of `verify --register` as exactly `{result,
 project_id, reason, note}`: `not_integrated` is `waiting` (never refused), a green report is
 `registered`, any other is `refused` in plain words ending in `Retry` (`retry_note`; the retry
-words replace the register words, never a code, a repair id or `Register again`); `run_outcome(root,
-kind)` words a failed run the same way. `reason_of(text)` whitespace-collapses and cuts to
-`REASON_CHARS` characters, a cut text ending in the ellipsis. `closed_note` tells the owner what to
-do after a pull request was closed. The line words are `applied_line`, `pushed_line`,
-`opened_line`, `kept_line`, `running_headline`, `waiting_line`, `registering_line`,
-`registered_line` and `refused_line`.
+words replace the register words, never a code, a repair id or `Register again`; a violation
+message that holds a path, a hash or a plan id is dropped through `register.plain`, so the reason
+is `it could not be registered`); `run_outcome(root, kind)` words a failed run the same way.
+`reason_of(text)` whitespace-collapses and cuts to `REASON_CHARS` characters, a cut text ending in
+the ellipsis. `CLOSED_NOTE` asks an agent to delete the adoption's branch after a pull request was
+closed; `NO_SLUG_NOTE` and `NO_BASE_NOTE` ask the owner to open the pull request by hand and
+choose `Not now` (the console cannot open it, so Try again would fail the same way). The line words
+are `running_headline`, `waiting_line`, `registering_line`, `registered_line` and `refused_line`;
+no entry has a line of its own.
 
 View. `entry(adoption, *, running, name, registering=False)` is the registration's `adoption` member: None for no
 adoption, else exactly the keys `status`, `step`, `state`, `headline`, `lines`, `note`, `branch`,
-`commit` and `url` (`running` gives status `running`, the running headline and None elsewhere; a
+`commit` and `url` (`lines` is `[]` for every step; a failed push reads `The adoption of <name> was
+applied, but its branch was not pushed: <reason>.` and a failed open `The adoption of <name> was
+pushed, but its pull request was not opened: <reason>.`; an open pull request reads `<name>:
+waiting for its pull request to be ready to merge`; `running` gives status `running`, the running
+headline and None elsewhere; a
 merged pull request's headline reads its registration: waiting, `registering`, registered or
 refused, and its `note` is None).
 `action(latest, adoption, *, available, running)` is the action the card offers: `approve` for a
@@ -112,7 +125,8 @@ says; it refuses a branch that is not `adopt-<12 hex>` and a commit that is not 
 digits before any process, runs git in its own
 group with prompts off (`GIT_TERMINAL_PROMPT=0`), and raises `PushFailed` (`reason` the page's
 words, `detail` git's stderr for the log only, `str(error) == reason`) on a refusal, a timeout, a
-cancel or a git that could not be started. `gh_json(argv, cancel=None, *, timeout, environ=None)`
+cancel or a git that could not be started; `reason` is `PUSH_REFUSED` for every non-zero git exit,
+whatever git printed. `gh_json(argv, cancel=None, *, timeout, environ=None)`
 is the console's cancellable `gh` runner: it runs `gh` in its own group with no `GITHUB_TOKEN` or
 `GH_TOKEN`, so a set `cancel` (the console is closing) ends the call and its process and raises
 `Cancelled`, and its failures are the `ForgeError`s of `forge_api` (`gh_timeout`, `gh_missing`,
@@ -168,6 +182,24 @@ OPEN_NOTE = ("Check that gh is signed in on this host and can open pull requests
              "repository, then choose Try again.")
 NO_SLUG = "the repository's origin is not on GitHub"
 NO_BASE = "the project contract names no integration branch"
+NO_SLUG_NOTE = ("Open a pull request for the adoption's branch yourself on the forge that hosts "
+                "origin, then choose Not now.")
+NO_BASE_NOTE = ("Open a pull request for the adoption's branch yourself against the branch the "
+                "project merges into, then choose Not now.")
+PUSH_REFUSED = "origin refused the push or could not be reached"
+CLOSED_NOTE = ("Ask an agent to delete the adoption's branch on this computer and on origin, then "
+               "choose Apply it again.")
+KEPT_SENTENCE = ("A leftover copy of the adoption is kept on this computer; ask an agent to "
+                 "remove it before you choose Apply it again.")
+SIGNING_REPAIR = "adopt.commit.signing_unavailable"
+COMMIT_REPAIR = "adopt.commit.failed"
+APPLY_REASONS = (
+    ("adopt.format.", "a formatter the project declares did not run cleanly"),
+    ("adopt.operation.", "one of the plan's changes could not be written"),
+    ("adopt.plan.", "the stored plan could not be used"),
+    ("adopt.resolver.", "the project contract could not be read"),
+    ("adopt.commit.", "the adoption commit did not pass its own checks"),
+)
 APPLIED_NOTE = "Choose Try again to push the branch and open its pull request."
 MERGED = "the pull request of this plan was already merged"
 NOT_REFUSED = "that registration is not waiting for a retry"
@@ -454,11 +486,6 @@ def branch_of(plan_id: str) -> str:
     return f"adopt-{adopt_apply.plan_digest(plan_id)[:12]}"
 
 
-def closed_note(root: str, branch: str) -> str:
-    return (f"Delete the branch {branch} with git -C {root} branch -D {branch} and git -C {root} "
-            f"push origin --delete {branch}, then choose Apply it again.")
-
-
 def _retry_words(step: str) -> str:
     leading = register.AGAIN[0].upper() + register.AGAIN[1:]
     if step.startswith(leading):
@@ -488,7 +515,7 @@ def registration_outcome(root: str, report: object) -> dict:
         violations = error.get("violations")
         first = ""
         if isinstance(violations, list) and violations and isinstance(violations[0], Mapping):
-            first = _collapse(violations[0].get("message") or "")
+            first = register.plain(_collapse(violations[0].get("message") or ""))
         if (str(error.get("repair_id") or "").startswith(register.MANIFEST_PREFIX)
                 and first == register.MANIFEST_ABSENT):
             reason = "the agent platform's files are not installed on this host"
@@ -503,12 +530,12 @@ def registration_outcome(root: str, report: object) -> dict:
             "note": retry_note(root, {})}
 
 
-def forge_failure(error: BaseException, branch: str, base: str) -> tuple[str, str]:
+def forge_failure(error: BaseException, base: str) -> tuple[str, str]:
     if not isinstance(error, forge_api.ForgeError):
         return (register.UNEXPECTED, OPEN_NOTE)
     if error.code == "gh_missing":
         return ("gh is not installed on this host",
-                "Install gh and sign it in with gh auth login, then choose Try again.")
+                "Install gh on this computer and sign it in, then choose Try again.")
     if error.code == "gh_timeout":
         return ("the forge took too long to answer",
                 "Choose Try again; the console first looks for a pull request the forge may have "
@@ -521,88 +548,67 @@ def forge_failure(error: BaseException, branch: str, base: str) -> tuple[str, st
         status = int(found.group(1)) if found else None
         if status in (401, 403):
             return ("gh is not signed in, or may not open pull requests on this repository",
-                    "Sign gh in with gh auth login on this host with access to the repository, "
-                    "then choose Try again.")
+                    "Sign gh in on this computer with an account that may open pull requests on "
+                    "the repository, then choose Try again.")
         if status == 422:
             return ("the forge refused the pull request",
-                    f"Check on the forge that {branch} differs from {base} and has no pull "
-                    "request open already, then choose Try again.")
+                    f"Check on the forge that the adoption's branch differs from {base} and has "
+                    "no pull request open already, then choose Try again.")
         if status == 404:
             return ("the forge does not know the repository or the branch",
-                    f"Check that origin is the GitHub repository and that {branch} reached it, "
-                    "then choose Try again.")
+                    "Check that origin is the GitHub repository and that the adoption's branch "
+                    "reached it, then choose Try again.")
     return ("the forge answered in a way the console does not understand", OPEN_NOTE)
 
 
-def terminal_note(plan_id: str, acknowledge: bool) -> str:
-    flag = " --acknowledge-deletions" if acknowledge else ""
-    return (f"Run adopt-project apply --plan-id {plan_id}{flag} in a terminal to see the full "
-            "reason.")
-
-
-def apply_failure(root: str, plan_id: str, error: Mapping, kept: Mapping | None,
-                  acknowledge: bool) -> tuple[str, str]:
+def apply_failure(name: str, error: Mapping, kept: Mapping | None) -> tuple[str, str]:
     repair = error.get("repair_id") or ""
+    leftover = " " + KEPT_SENTENCE if kept is not None else ""
+    commit_note = register.unknown_step(name, "apply").replace("Try again", "Apply it again", 1)
     if error.get("code") == "plan_stale":
         return ("the repository changed since this plan was made",
                 "Register the repository again to make a new plan, then apply that one.")
     if repair == "adopt.worktree.dirty":
         return ("an uncommitted change in the repository overlaps what the plan changes",
-                f"Commit or set aside the uncommitted change in {root}, then choose Apply it "
+                f"Commit or set aside the uncommitted change in {name}, then choose Apply it "
                 "again.")
     if repair == "adopt.worktree.retained":
-        note = (f"Remove the kept worktree with git worktree remove {kept['worktree']} and "
-                f"delete the branch {kept['branch']}, then choose Apply it again." if kept
-                else terminal_note(plan_id, acknowledge))
-        return ("an earlier attempt of this plan is still kept", note)
+        return ("an earlier attempt of this plan is still kept",
+                "A leftover copy of the adoption is kept on this computer; ask an agent to "
+                "remove it, then choose Apply it again.")
     if repair == "adopt.worktree.unavailable":
-        branch = branch_of(plan_id)
         return ("the adoption's branch or worktree could not be created",
-                f"If the branch {branch} is left from an earlier attempt, delete it with git -C "
-                f"{root} branch -D {branch}, then choose Apply it again.")
+                "If a branch from an earlier attempt of this adoption is left, ask an agent to "
+                "delete it, then choose Apply it again.")
+    if repair == SIGNING_REPAIR:
+        return ("the project asks for signed commits and this computer could not sign the "
+                "adoption commit",
+                "Set up a signing key on this computer, or turn signed commits off in the "
+                "project's settings, then choose Apply it again." + leftover)
+    if repair == COMMIT_REPAIR:
+        return ("the adoption commit could not be made", commit_note + leftover)
     if repair.startswith(GATE_PREFIX):
-        note = (f"Fix what failed in the repository (the kept worktree at {kept['worktree']} "
-                f"shows it), remove that worktree and the branch {kept['branch']}, then "
-                "register the repository again." if kept
-                else terminal_note(plan_id, acknowledge))
-        return (f"the {repair[len(GATE_PREFIX):]} check did not pass", note)
+        return (f"the {repair[len(GATE_PREFIX):]} check did not pass",
+                "Fix what failed in the repository, then register the repository again."
+                + leftover)
     if repair.startswith(register.MANIFEST_PREFIX):
         return ("the agent platform's files are not installed on this host yet",
-                "Run just switch in a terminal to install them, then choose Apply it again.")
-    violations = error.get("violations") or []
-    message = ""
-    if violations and isinstance(violations[0], Mapping):
-        message = _collapse(violations[0].get("message") or "")
-    return (message or "it could not be applied", terminal_note(plan_id, acknowledge))
+                "Switch this computer to its current configuration to install them, then choose "
+                "Apply it again.")
+    for prefix, words in APPLY_REASONS:
+        if repair.startswith(prefix):
+            return (words, commit_note + leftover)
+    return ("it could not be applied", commit_note + leftover)
 
 
-def run_failure(plan_id: str, kind: str, acknowledge: bool) -> tuple[str, str]:
-    reason = register.RUN_WORDS.get(kind, register.UNEXPECTED)
-    if kind in register.RETRY_KINDS:
-        return (reason, "Choose Apply it again. If it keeps failing, r"
-                + terminal_note(plan_id, acknowledge)[1:])
-    return (reason, terminal_note(plan_id, acknowledge))
+def run_failure(name: str, kind: str) -> tuple[str, str]:
+    return (register.RUN_WORDS.get(kind, register.UNEXPECTED),
+            register.unknown_step(name, "apply").replace("Try again", "Apply it again", 1))
 
 
 def reason_of(text: object) -> str:
     words = _collapse(text)
     return words if len(words) <= REASON_CHARS else words[:REASON_CHARS - 1] + "…"
-
-
-def applied_line(branch: str, commit: str) -> str:
-    return f"Applied on the branch {branch} as one commit, {commit[:12]}."
-
-
-def pushed_line(branch: str) -> str:
-    return f"Pushed {branch} to origin."
-
-
-def opened_line(number: int, base: str) -> str:
-    return f"Opened pull request #{number} against {base}."
-
-
-def kept_line(kept: Mapping) -> str:
-    return f"Apply kept its worktree at {kept['worktree']} and its branch {kept['branch']}."
 
 
 def waiting_line(name: str, base: str) -> str:
@@ -642,24 +648,19 @@ def entry(adoption: Mapping | None, *, running: bool, name: str,
     reason = adoption["reason"] or ""
     pull = adoption["pull_request"]
     state = adoption["pull_state"]
-    applied = applied_line(branch, commit) if branch and commit else None
-    kept = adoption["kept"]
     note = current_note(adoption["note"])
-    lines: list[str]
     if step == "applied":
         headline = f"The adoption of {name} was applied, but its branch is not pushed yet."
-        lines, note = [applied], APPLIED_NOTE
+        note = APPLIED_NOTE
     elif step == "apply_failed":
         headline = _sentence(f"The adoption of {name} was not applied: {reason}")
-        lines = [kept_line(kept)] if kept else []
     elif step == "push_failed":
-        headline = _sentence(f"The branch {branch} was not pushed: {reason}")
-        lines = [applied]
+        headline = _sentence(
+            f"The adoption of {name} was applied, but its branch was not pushed: {reason}")
     elif step == "open_failed":
-        headline = _sentence(f"The pull request for {branch} was not opened: {reason}")
-        lines = [applied, pushed_line(branch)]
+        headline = _sentence(
+            f"The adoption of {name} was pushed, but its pull request was not opened: {reason}")
     else:
-        lines = [applied, pushed_line(branch), opened_line(pull["number"], adoption["base"])]
         note = None
         if state == "ready":
             headline = f"The pull request of {name} is ready to merge."
@@ -676,11 +677,11 @@ def entry(adoption: Mapping | None, *, running: bool, name: str,
                 headline = waiting_line(name, adoption["base"])
         elif state == "closed":
             headline = f"The pull request of {name} was closed without merging."
-            note = closed_note(adoption["root"], branch)
+            note = CLOSED_NOTE
         else:
-            headline = f"Waiting for the pull request of {name} to be ready to merge."
+            headline = f"{name}: waiting for its pull request to be ready to merge"
     return {"status": "done", "step": step, "state": state, "headline": headline,
-            "lines": lines, "note": note, "branch": branch, "commit": commit,
+            "lines": [], "note": note, "branch": branch, "commit": commit,
             "url": pull["url"] if pull else None}
 
 
@@ -756,9 +757,7 @@ def push(root: str, branch: str, commit: str, cancel: threading.Event | None = N
     if done.returncode == 0:
         return
     stderr = (done.stderr or b"").decode("utf-8", errors="replace")
-    lines = [line for line in stderr.splitlines() if line.strip()]
-    raise PushFailed(reason_of(lines[-1]) if lines else "git refused the push",
-                     stderr[:DETAIL_CHARS])
+    raise PushFailed(PUSH_REFUSED, stderr[:DETAIL_CHARS])
 
 
 class Cancelled(Exception):

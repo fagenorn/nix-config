@@ -3434,7 +3434,7 @@ class ConsoleService:
             except register.RunFailed as error:
                 self._log_approval_error({"stage": "apply", "root": root, "plan_id": plan_id,
                                           "failure": error.kind, "cause": repr(error.__cause__)})
-                reason, note = approve.run_failure(plan_id, error.kind, acknowledge)
+                reason, note = approve.run_failure(name, error.kind)
                 return self._step(shown, plan_id, root, "apply_failed",
                                          reason=approve.reason_of(reason), note=note)
             except Exception as error:
@@ -3442,15 +3442,14 @@ class ConsoleService:
                                           "exception": type(error).__name__,
                                           "detail": str(error)})
                 traceback.print_exception(error, file=sys.stderr)
-                reason, note = approve.run_failure(plan_id, type(error).__name__, acknowledge)
+                reason, note = approve.run_failure(name, type(error).__name__)
                 return self._step(shown, plan_id, root, "apply_failed",
                                          reason=approve.reason_of(reason), note=note)
             if "error" in result:
                 self._log_approval_error({"stage": "apply", "root": root, "plan_id": plan_id,
                                           "error": result["error"]})
                 kept = approve.retained(plan_id)
-                reason, note = approve.apply_failure(root, plan_id, result["error"], kept,
-                                                     acknowledge)
+                reason, note = approve.apply_failure(name, result["error"], kept)
                 return self._step(shown, plan_id, root, "apply_failed",
                                          reason=approve.reason_of(reason), note=note, kept=kept)
             branch, commit = result["branch"], result["commit"]
@@ -3477,19 +3476,17 @@ class ConsoleService:
         if slug is None:
             return self._step(
                 shown, plan_id, root, "open_failed", **pushed, reason=approve.NO_SLUG,
-                note=(f"Open a pull request for the branch {branch} yourself; the console opens "
-                      "them only on GitHub."))
+                note=approve.NO_SLUG_NOTE)
         if base is None:
             return self._step(
                 shown, plan_id, root, "open_failed", **pushed, reason=approve.NO_BASE,
-                note=(f"Open a pull request for the branch {branch} yourself against the "
-                      "repository's integration branch."))
+                note=approve.NO_BASE_NOTE)
         try:
             pull, error = self._pull_request(slug, branch, base, name, shown, stop, where)
         except approve.Cancelled:
             return None
         if pull is None:
-            reason, note = approve.forge_failure(error, branch, base)
+            reason, note = approve.forge_failure(error, base)
             return self._step(shown, plan_id, root, "open_failed", **pushed,
                                      reason=approve.reason_of(reason), note=note)
         return self._step(shown, plan_id, root, "opened", **pushed, pull_request=pull)

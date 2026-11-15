@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -28,6 +29,10 @@ PID = "sha256:" + "b" * 64
 BRANCH = "adopt-bbbbbbbbbbbb"
 COMMIT = "c" * 40
 KEPT = {"branch": BRANCH, "worktree": "/h/.agents/state/adopt/worktrees/bbb"}
+# What no reason, note, headline or line may show (written out here, not read from register).
+INVARIANT = re.compile(r"--plan-id|sha256:|[0-9a-f]{12,}|(?:^|[\s(\"'])/\S")
+BANNED = ("git ", "gh auth", "just switch", "adopt-project", PID, BRANCH, COMMIT,
+          KEPT["worktree"], "/srv/r")
 
 
 def step_payload(step="opened", plan_id="p1", **over):
@@ -201,14 +206,26 @@ class FoldTest(unittest.TestCase):
         self.assertEqual([e["plan_id"] for e in approve.waiting(found)], ["p1", "p2"])
 
 
+FORGE_ERRORS = (
+    KeyError("x"), ForgeError("gh_missing", "x"), ForgeError("gh_timeout", "api"),
+    ForgeError("gh_failed", "error connecting to api.github.com", transient=True),
+    ForgeError("gh_failed", "gh: Bad credentials (HTTP 401)"),
+    ForgeError("gh_failed", "gh: Forbidden (HTTP 403)"),
+    ForgeError("gh_failed", "gh: Validation Failed (HTTP 422)"),
+    ForgeError("gh_failed", "gh: Not Found (HTTP 404)"),
+    ForgeError("payload_invalid", "x"), ForgeError("gh_failed", "gh: odd (HTTP 418)"))
+
+
 class WordsTest(unittest.TestCase):
     def test_each_forge_failure_reads_its_reason_and_next_step(self):
         again = "then choose Try again."
+        sign_in = ("Sign gh in on this computer with an account that may open pull requests on "
+                   "the repository, " + again)
         cases = [
             (KeyError("x"), (register.UNEXPECTED, approve.OPEN_NOTE)),
             (ForgeError("gh_missing", "x"),
              ("gh is not installed on this host",
-              "Install gh and sign it in with gh auth login, " + again)),
+              "Install gh on this computer and sign it in, " + again)),
             (ForgeError("gh_timeout", "api"),
              ("the forge took too long to answer",
               "Choose Try again; the console first looks for a pull request the forge may have "
@@ -217,21 +234,17 @@ class WordsTest(unittest.TestCase):
              ("the forge could not be reached",
               "Check this host's network connection, " + again)),
             (ForgeError("gh_failed", "gh: Bad credentials (HTTP 401)"),
-             ("gh is not signed in, or may not open pull requests on this repository",
-              "Sign gh in with gh auth login on this host with access to the repository, "
-              + again)),
+             ("gh is not signed in, or may not open pull requests on this repository", sign_in)),
             (ForgeError("gh_failed", "gh: Forbidden (HTTP 403)"),
-             ("gh is not signed in, or may not open pull requests on this repository",
-              "Sign gh in with gh auth login on this host with access to the repository, "
-              + again)),
+             ("gh is not signed in, or may not open pull requests on this repository", sign_in)),
             (ForgeError("gh_failed", "gh: Validation Failed (HTTP 422)"),
              ("the forge refused the pull request",
-              f"Check on the forge that {BRANCH} differs from develop and has no pull request "
-              "open already, " + again)),
+              "Check on the forge that the adoption's branch differs from develop and has no "
+              "pull request open already, " + again)),
             (ForgeError("gh_failed", "gh: Not Found (HTTP 404)"),
              ("the forge does not know the repository or the branch",
-              f"Check that origin is the GitHub repository and that {BRANCH} reached it, "
-              + again)),
+              "Check that origin is the GitHub repository and that the adoption's branch "
+              "reached it, " + again)),
             (ForgeError("payload_invalid", "x"),
              ("the forge answered in a way the console does not understand",
               approve.OPEN_NOTE)),
@@ -241,7 +254,7 @@ class WordsTest(unittest.TestCase):
         ]
         for error, expected in cases:
             with self.subTest(error=repr(error)):
-                got = approve.forge_failure(error, BRANCH, "develop")
+                got = approve.forge_failure(error, "develop")
                 self.assertEqual(got, expected)
                 for text in got:
                     for word in ("HTTP", "401", "403", "404", "422", "gh_", "payload_invalid",
@@ -253,85 +266,101 @@ class WordsTest(unittest.TestCase):
             violations = [] if message is None else [{"pointer": "", "message": message}]
             return {"code": code, "repair_id": repair_id, "violations": violations}
 
-        def words(err, kept=None, acknowledge=False):
-            return approve.apply_failure("/srv/r", PID, err, kept, acknowledge)
+        def words(err, kept=None):
+            return approve.apply_failure("r", err, kept)
 
-        terminal = (f"Run adopt-project apply --plan-id {PID} in a terminal to see the full "
-                    "reason.")
+        leftover = ("A leftover copy of the adoption is kept on this computer; ask an agent to "
+                    "remove it before you choose Apply it again.")
+        commit_note = ("Choose Apply it again. If it keeps failing, ask an agent to apply the "
+                       "adoption of r in a terminal, which shows the full reason.")
+        self.assertEqual(approve.KEPT_SENTENCE, leftover)
         self.assertEqual(words(error("plan_stale", "adopt.plan.inputs_changed")), (
             "the repository changed since this plan was made",
             "Register the repository again to make a new plan, then apply that one."))
         self.assertEqual(words(error(repair_id="adopt.worktree.dirty")), (
             "an uncommitted change in the repository overlaps what the plan changes",
-            "Commit or set aside the uncommitted change in /srv/r, then choose Apply it again."))
+            "Commit or set aside the uncommitted change in r, then choose Apply it again."))
         self.assertEqual(words(error(repair_id="adopt.worktree.retained"), KEPT), (
             "an earlier attempt of this plan is still kept",
-            f"Remove the kept worktree with git worktree remove {KEPT['worktree']} and delete "
-            f"the branch {BRANCH}, then choose Apply it again."))
-        self.assertEqual(words(error(repair_id="adopt.worktree.retained")), (
-            "an earlier attempt of this plan is still kept", terminal))
+            "A leftover copy of the adoption is kept on this computer; ask an agent to remove "
+            "it, then choose Apply it again."))
         self.assertEqual(words(error(repair_id="adopt.worktree.unavailable")), (
             "the adoption's branch or worktree could not be created",
-            f"If the branch {BRANCH} is left from an earlier attempt, delete it with git -C "
-            f"/srv/r branch -D {BRANCH}, then choose Apply it again."))
+            "If a branch from an earlier attempt of this adoption is left, ask an agent to "
+            "delete it, then choose Apply it again."))
+        self.assertEqual(words(error(repair_id="adopt.commit.failed"), KEPT), (
+            "the adoption commit could not be made", commit_note + " " + leftover))
+        self.assertEqual(words(error(repair_id="adopt.commit.failed")), (
+            "the adoption commit could not be made", commit_note))
         self.assertEqual(words(error(repair_id="adopt.gate.no-new-broken-link"), KEPT), (
             "the no-new-broken-link check did not pass",
-            f"Fix what failed in the repository (the kept worktree at {KEPT['worktree']} shows "
-            f"it), remove that worktree and the branch {BRANCH}, then register the repository "
-            "again."))
+            "Fix what failed in the repository, then register the repository again. "
+            + leftover))
         self.assertEqual(words(error(repair_id="adopt.gate.no-new-broken-link")), (
-            "the no-new-broken-link check did not pass", terminal))
-        self.assertEqual(words(error(repair_id="adopt.manifest.missing")), (
+            "the no-new-broken-link check did not pass",
+            "Fix what failed in the repository, then register the repository again."))
+        self.assertEqual(words(error(repair_id="adopt.manifest.missing"), KEPT), (
             "the agent platform's files are not installed on this host yet",
-            "Run just switch in a terminal to install them, then choose Apply it again."))
+            "Switch this computer to its current configuration to install them, then choose "
+            "Apply it again."))
+        for repair, reason in (
+                ("adopt.format.failed", "a formatter the project declares did not run cleanly"),
+                ("adopt.operation.failed", "one of the plan's changes could not be written"),
+                ("adopt.plan.unknown_id", "the stored plan could not be used"),
+                ("adopt.resolver.failed", "the project contract could not be read"),
+                ("adopt.commit.unresolved_policy",
+                 "the adoption commit did not pass its own checks")):
+            with self.subTest(repair=repair):
+                self.assertEqual(words(error(repair_id=repair)), (reason, commit_note))
+                self.assertEqual(words(error(repair_id=repair), KEPT),
+                                 (reason, commit_note + " " + leftover))
         self.assertEqual(words(error(message="a  pre-commit\ngate")),
-                         ("a pre-commit gate", terminal))
-        self.assertEqual(words(error()), ("it could not be applied", terminal))
-        self.assertTrue(words(error(), acknowledge=True)[1].endswith(
-            "--acknowledge-deletions in a terminal to see the full reason."))
-        self.assertTrue(approve.terminal_note("p", True).endswith(
-            " --acknowledge-deletions in a terminal to see the full reason."))
+                         ("it could not be applied", commit_note))
+        self.assertEqual(words(error(), KEPT),
+                         ("it could not be applied", commit_note + " " + leftover))
+        self.assertEqual(words(error()), ("it could not be applied", commit_note))
 
     def test_a_run_failure_reads_in_words(self):
-        self.assertEqual(approve.run_failure(PID, "timed_out", False), (
-            "it took too long and was stopped",
-            f"Choose Apply it again. If it keeps failing, run adopt-project apply --plan-id {PID} "
-            "in a terminal to see the full reason."))
-        self.assertEqual(approve.run_failure(PID, "failed", False), (
-            "the adoption tool stopped with an error", approve.terminal_note(PID, False)))
-        self.assertEqual(approve.run_failure(PID, "Boom", False)[0], "it stopped unexpectedly")
+        note = ("Choose Apply it again. If it keeps failing, ask an agent to apply the adoption "
+                "of r in a terminal, which shows the full reason.")
+        self.assertEqual(approve.run_failure("r", "timed_out"),
+                         ("it took too long and was stopped", note))
+        self.assertEqual(approve.run_failure("r", "failed"),
+                         ("the adoption tool stopped with an error", note))
+        self.assertEqual(approve.run_failure("r", "Boom"), ("it stopped unexpectedly", note))
 
     def test_each_note_names_the_option_of_its_card(self):
-        again = []
-        for error in (KeyError("x"), ForgeError("gh_missing", "x"), ForgeError("gh_timeout", "a"),
-                      ForgeError("gh_failed", "e", transient=True),
-                      ForgeError("gh_failed", "gh: Bad credentials (HTTP 401)"),
-                      ForgeError("gh_failed", "gh: Forbidden (HTTP 403)"),
-                      ForgeError("gh_failed", "gh: Validation Failed (HTTP 422)"),
-                      ForgeError("gh_failed", "gh: Not Found (HTTP 404)"),
-                      ForgeError("payload_invalid", "x"),
-                      ForgeError("gh_failed", "gh: odd (HTTP 418)")):
-            again.append(approve.forge_failure(error, BRANCH, "develop")[1])
+        again = [approve.forge_failure(error, "develop")[1] for error in FORGE_ERRORS]
         again += [approve.PUSH_NOTE, approve.OPEN_NOTE, approve.APPLIED_NOTE]
         for note in again:
             with self.subTest(note=note):
                 self.assertIn("Try again", note)
+        not_now = [approve.NO_SLUG_NOTE, approve.NO_BASE_NOTE]
+        for note in not_now:
+            with self.subTest(note=note):
+                self.assertIn("Not now", note)
+                self.assertNotIn("Try again", note)
         apply_it = []
         for repair, kept in (("adopt.worktree.dirty", None), ("adopt.worktree.retained", KEPT),
                              ("adopt.worktree.unavailable", None),
+                             (approve.SIGNING_REPAIR, KEPT), (approve.COMMIT_REPAIR, None),
                              (register.MANIFEST_PREFIX + "missing", None)):
             apply_it.append(approve.apply_failure(
-                "/srv/r", PID, {"code": "verification_failed", "repair_id": repair,
-                                "violations": []}, kept, False)[1])
-        apply_it += [approve.run_failure(PID, kind, False)[1] for kind in register.RETRY_KINDS]
-        apply_it.append(approve.closed_note("/srv/r", BRANCH))
+                "r", {"code": "verification_failed", "repair_id": repair,
+                      "violations": []}, kept)[1])
+        apply_it += [approve.run_failure("r", kind)[1] for kind in register.RETRY_KINDS]
+        apply_it.append(approve.CLOSED_NOTE)
         for note in apply_it:
             with self.subTest(note=note):
                 self.assertIn("Apply it again", note)
-        for note in again + apply_it:
+        for note in again + not_now + apply_it:
             with self.subTest(note=note):
                 self.assertNotIn("press", note.lower())
                 self.assertNotIn("Approve", note)
+        self.assertEqual(
+            approve.CLOSED_NOTE,
+            "Ask an agent to delete the adoption's branch on this computer and on origin, then "
+            "choose Apply it again.")
 
     def test_no_reason_or_note_shows_a_code_or_kind(self):
         texts = []
@@ -339,12 +368,12 @@ class WordsTest(unittest.TestCase):
                        "adopt.worktree.unavailable", "adopt.gate.g", "adopt.manifest.x", ""):
             for kept in (None, KEPT):
                 texts += approve.apply_failure(
-                    "/srv/r", PID, {"code": "plan_stale", "repair_id": repair,
-                                    "violations": []}, kept, False)
-        texts += approve.apply_failure("/srv/r", PID, {"code": "plan_stale", "repair_id": "",
-                                                       "violations": []}, None, False)
+                    "r", {"code": "plan_stale", "repair_id": repair,
+                          "violations": []}, kept)
+        texts += approve.apply_failure("r", {"code": "plan_stale", "repair_id": "",
+                                             "violations": []}, None)
         for kind in (*register.RUN_KINDS, "KeyError"):
-            texts += approve.run_failure(PID, kind, False)
+            texts += approve.run_failure("r", kind)
         for text in texts:
             for word in ("adopt.", "plan_stale", "verification_failed", "KeyError", "timed_out",
                          "not_installed", "unreadable", "Error"):
@@ -355,18 +384,106 @@ class WordsTest(unittest.TestCase):
         cut = approve.reason_of("x" * 300)
         self.assertEqual((len(cut), cut[-1]), (200, "…"))
 
-    def test_line_words(self):
-        self.assertEqual(approve.applied_line(BRANCH, COMMIT),
-                         f"Applied on the branch {BRANCH} as one commit, {'c' * 12}.")
-        self.assertEqual(approve.pushed_line(BRANCH), f"Pushed {BRANCH} to origin.")
-        self.assertEqual(approve.opened_line(7, "develop"),
-                         "Opened pull request #7 against develop.")
-        self.assertEqual(approve.kept_line(KEPT),
-                         f"Apply kept its worktree at {KEPT['worktree']} and its branch "
-                         f"{BRANCH}.")
+    def test_the_running_headline_and_the_plan_branch(self):
         self.assertEqual(approve.running_headline("r"),
                          "Applying the adoption of r and opening its pull request…")
         self.assertEqual(approve.branch_of(PID), BRANCH)
+
+
+class ApplyWordsTest(unittest.TestCase):
+    SIGNING = {"code": "verification_failed", "repair_id": "adopt.commit.signing_unavailable",
+               "violations": [{"pointer": "", "message": "the contract asks for a signed commit "
+                                                         "and this host could not sign one"}]}
+
+    def assert_plain(self, text):
+        self.assertIsNone(INVARIANT.search(text), text)
+        for banned in BANNED:
+            self.assertNotIn(banned, text)
+
+    def test_a_signing_failure_names_its_cause_and_next_step(self):
+        reason = ("the project asks for signed commits and this computer could not sign the "
+                  "adoption commit")
+        note = ("Set up a signing key on this computer, or turn signed commits off in the "
+                "project's settings, then choose Apply it again.")
+        got_kept = approve.apply_failure("r", self.SIGNING, KEPT)
+        got_none = approve.apply_failure("r", self.SIGNING, None)
+        self.assertEqual(got_none, (reason, note))
+        self.assertEqual(got_kept, (reason, note + " " + approve.KEPT_SENTENCE))
+        self.assertNotIn("leftover", got_none[1])
+        adoption = {**step_payload("apply_failed", reason=got_kept[0], note=got_kept[1],
+                                   kept=KEPT, branch=None, commit=None),
+                    "at": "t", "pull_state": None, "pull_at": None}
+        self.assertEqual(
+            approve.entry(adoption, running=False, name="r")["headline"],
+            "The adoption of r was not applied: the project asks for signed commits and this "
+            "computer could not sign the adoption commit.")
+
+    def test_no_failure_card_or_line_shows_a_command_hash_or_path(self):
+        texts = [approve.CLOSED_NOTE, approve.NO_SLUG_NOTE, approve.NO_BASE_NOTE,
+                 approve.PUSH_REFUSED, approve.PUSH_NOTE, approve.OPEN_NOTE, approve.APPLIED_NOTE]
+        for repair in ("adopt.worktree.dirty", "adopt.worktree.retained",
+                       "adopt.worktree.unavailable", approve.SIGNING_REPAIR,
+                       approve.COMMIT_REPAIR, "adopt.gate.no-new-broken-link",
+                       register.MANIFEST_PREFIX + "missing", "adopt.format.failed",
+                       "adopt.operation.failed", "adopt.plan.unknown_id",
+                       "adopt.resolver.failed", "adopt.commit.unresolved_policy",
+                       "adopt.zzz.unknown", ""):
+            for kept in (None, KEPT):
+                texts += approve.apply_failure(
+                    "r", {"code": "x", "repair_id": repair, "violations": []}, kept)
+        texts += approve.apply_failure(
+            "r", {"code": "plan_stale", "repair_id": "", "violations": []}, KEPT)
+        for kind in (*register.RUN_KINDS, "KeyError"):
+            texts += approve.run_failure("r", kind)
+        for error in FORGE_ERRORS:
+            texts += approve.forge_failure(error, "develop")
+        for text in texts:
+            with self.subTest(text=text):
+                self.assert_plain(text)
+        rows = [("applied", None, {}),
+                ("apply_failed", None, {"reason": "it broke", "note": "N", "kept": KEPT,
+                                        "branch": None, "commit": None}),
+                ("push_failed", None, {"reason": approve.PUSH_REFUSED,
+                                       "note": approve.PUSH_NOTE}),
+                ("open_failed", None, {"reason": "the forge refused the pull request",
+                                       "note": approve.OPEN_NOTE}),
+                *(("opened", state, {}) for state in ("open", "ready", "merged", "closed"))]
+        for step, state, over in rows:
+            with self.subTest(step=step, state=state):
+                adoption = {**step_payload(step, **over), "at": "t", "pull_state": state,
+                            "pull_at": None}
+                got = approve.entry(adoption, running=False, name="r")
+                self.assertEqual(got["lines"], [])
+                self.assert_plain(got["headline"])
+                if got["note"] is not None:
+                    self.assert_plain(got["note"])
+
+    def test_raw_diagnostics_never_reach_a_card(self):
+        def error(repair, message):
+            return {"code": "x", "repair_id": repair,
+                    "violations": [{"pointer": "", "message": message}]}
+
+        errors = [
+            {**error("adopt.format.failed",
+                     "the declared formatter 'fmt' exited 1; stderr ends: "
+                     "/h/.agents/state/adopt/worktrees/" + "b" * 64 + "/x.nix: bad"),
+             "code": "verification_failed"},
+            error("adopt.operation.failed", "could not write /srv/r/.claude/x"),
+            error("adopt.plan.unknown_id", "no plan " + PID),
+            error("adopt.zzz.unknown", "branch adopt-bbbbbbbbbbbb exists")]
+        reasons = ["a formatter the project declares did not run cleanly",
+                   "one of the plan's changes could not be written",
+                   "the stored plan could not be used", "it could not be applied"]
+        for err, reason in zip(errors, reasons):
+            with self.subTest(reason=reason):
+                got = approve.apply_failure("r", err, None)
+                self.assertEqual(got[0], reason)
+                for text in got:
+                    self.assert_plain(text)
+        outcome = approve.registration_outcome("/srv/r", {"error": error(
+            "adopt.git.fetch_failed",
+            "fatal: '/srv/remote.git' does not appear to be a git repository")})
+        self.assertEqual(outcome["reason"], "it could not be registered")
 
 
 def report_error(repair, message):
@@ -444,44 +561,40 @@ class EntryTest(unittest.TestCase):
                 "pull_at": None}
 
     def test_the_entry_per_step_and_pull_state(self):
-        applied = f"Applied on the branch {BRANCH} as one commit, {'c' * 12}."
-        pushed = f"Pushed {BRANCH} to origin."
-        opened = "Opened pull request #7 against develop."
-        closed = (f"Delete the branch {BRANCH} with git -C /srv/r branch -D {BRANCH} and git -C "
-                  f"/srv/r push origin --delete {BRANCH}, then choose Apply it again.")
         waits = ("The pull request of r was merged; waiting for develop on origin to carry it "
                  "before registering.")
         url = "https://example.test/pull/7"
         table = [
             (self.adoption("applied"),
              ("applied", None, "The adoption of r was applied, but its branch is not pushed yet.",
-              [applied], approve.APPLIED_NOTE, None)),
+              [], approve.APPLIED_NOTE, None)),
             (self.adoption("apply_failed", reason="it broke", note="N", kept=KEPT,
                            branch=None, commit=None),
              ("apply_failed", None, "The adoption of r was not applied: it broke.",
-              [approve.kept_line(KEPT)], "N", None)),
+              [], "N", None)),
             (self.adoption("apply_failed", reason="it broke.", note="N", branch=None,
                            commit=None),
              ("apply_failed", None, "The adoption of r was not applied: it broke.", [], "N",
               None)),
             (self.adoption("push_failed", reason="no route", note="N"),
-             ("push_failed", None, f"The branch {BRANCH} was not pushed: no route.",
-              [applied], "N", None)),
+             ("push_failed", None,
+              "The adoption of r was applied, but its branch was not pushed: no route.",
+              [], "N", None)),
             (self.adoption("open_failed", reason="refused", note="N"),
              ("open_failed", None,
-              f"The pull request for {BRANCH} was not opened: refused.", [applied, pushed],
-              "N", None)),
+              "The adoption of r was pushed, but its pull request was not opened: refused.",
+              [], "N", None)),
             (self.adoption("opened", "open"),
-             ("opened", "open", "Waiting for the pull request of r to be ready to merge.",
-              [applied, pushed, opened], None, url)),
+             ("opened", "open", "r: waiting for its pull request to be ready to merge",
+              [], None, url)),
             (self.adoption("opened", "ready"),
              ("opened", "ready", "The pull request of r is ready to merge.",
-              [applied, pushed, opened], None, url)),
+              [], None, url)),
             (self.adoption("opened", "merged"),
-             ("opened", "merged", waits, [applied, pushed, opened], None, url)),
+             ("opened", "merged", waits, [], None, url)),
             (self.adoption("opened", "closed"),
              ("opened", "closed", "The pull request of r was closed without merging.",
-              [applied, pushed, opened], closed, url)),
+              [], approve.CLOSED_NOTE, url)),
         ]
         for adoption, (step, state, headline, lines, note, link) in table:
             with self.subTest(step=step, state=state):
@@ -494,7 +607,6 @@ class EntryTest(unittest.TestCase):
                     ("done", step, state, headline, lines, note, link))
                 self.assertEqual((got["branch"], got["commit"]),
                                  (adoption["branch"], adoption["commit"]))
-        self.assertEqual(approve.closed_note("/srv/r", BRANCH), closed)
 
     def test_a_merged_adoption_reads_its_registration_state(self):
         waits = ("The pull request of r was merged; waiting for develop on origin to carry it "
@@ -519,9 +631,7 @@ class EntryTest(unittest.TestCase):
                 self.assertIsNone(got["note"])
                 self.assertEqual(set(got), {"status", "step", "state", "headline", "lines",
                                             "note", "branch", "commit", "url"})
-                self.assertEqual(got["lines"], [
-                    f"Applied on the branch {BRANCH} as one commit, {'c' * 12}.",
-                    f"Pushed {BRANCH} to origin.", "Opened pull request #7 against develop."])
+                self.assertEqual(got["lines"], [])
 
     def test_none_and_running(self):
         self.assertIsNone(approve.entry(None, running=False, name="r"))
@@ -660,7 +770,7 @@ class ApplyItemTest(unittest.TestCase):
                     "Apply it again", "apply", since)])
         self.assertEqual(
             approve.entry(closed, running=False, name="sample-app")["note"],
-            approve.closed_note("/srv/sample-app", BRANCH))
+            approve.CLOSED_NOTE)
 
     def test_no_action_or_a_deferred_plan_is_no_item(self):
         self.assertEqual(approve.apply_items(self.LATEST, None, None, None), [])
@@ -894,20 +1004,17 @@ class PushTest(unittest.TestCase):
             self.assertEqual(str(refused.exception), refused.exception.reason)
         self.assertEqual(self.refs(), before)
 
-    def test_a_refused_push_raises_its_last_stderr_line(self):
-        git("remote", "set-url", "origin", str(self.tmp / "missing.git"), cwd=self.root)
-        done = subprocess.run(
-            ["git", "-C", str(self.root), "push", "--quiet", "origin",
-             f"refs/heads/{ADOPTION}:refs/heads/{ADOPTION}"],
-            env=GIT_ENV, text=True, capture_output=True, stdin=subprocess.DEVNULL)
-        last = [line for line in done.stderr.splitlines() if line.strip()][-1].strip()
+    def test_a_rejected_push_reads_in_fixed_words_and_logs_git_output(self):
+        remote = self.tmp / "remote.git"
+        git("init", "-q", "--bare", str(remote))
+        fake_bin(remote / "hooks", "pre-receive", "exit 1\n")
+        git("remote", "set-url", "origin", str(remote), cwd=self.root)
+        branch = "adopt-" + "b" * 12
         with self.assertRaises(approve.PushFailed) as refused:
-            self.push()
-        reason = refused.exception.reason
-        self.assertEqual(reason, last)
-        self.assertNotIn("\n", reason)
-        self.assertLessEqual(len(reason), 200)
-        self.assertIn(last, refused.exception.detail)
+            approve.push(str(self.root), branch, self.sha(ADOPTION), environ=GIT_ENV)
+        self.assertEqual(refused.exception.reason, approve.PUSH_REFUSED)
+        self.assertEqual(str(refused.exception), approve.PUSH_REFUSED)
+        self.assertIn("remote.git", refused.exception.detail)
 
     def test_the_push_runs_with_prompts_off(self):
         seen = self.fake / "seen"

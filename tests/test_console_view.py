@@ -2264,13 +2264,15 @@ class TrustItemTest(unittest.TestCase):
         "root": "/home/o/repo", "project": "repo", "profile": "work",
         "at": "2026-11-15T10:00:00+00:00"}}
 
-    def test_a_failed_profile_is_a_card_with_its_terminal_command(self):
+    def test_a_failed_profile_is_a_card_with_plain_words(self):
         shown = derive_view([], trust_items=folder_trust.items(self.FAILED))
         (card,) = shown["inbox"]["open"]
         self.assertEqual(card["reason"], "trust_failed")
-        self.assertEqual(card["why"], "Run this in a terminal: cd /home/o/repo && "
-                                      "CLAUDE_ACCOUNT=work claude, then accept the prompt and "
-                                      "type /exit.")
+        self.assertEqual(
+            card["why"],
+            "Open Claude Code in the repo folder under the work profile, accept its trust prompt "
+            "and close it, then choose Check again.")
+        self.assertEqual(card["command"], "cd /home/o/repo && CLAUDE_ACCOUNT=work claude")
         self.assertEqual(card["questions"][0]["options"], ["Check again"])
         self.assertEqual(card["values"], ["check"])
         self.assertEqual(shown["statement"]["inbox_items"], 1)
