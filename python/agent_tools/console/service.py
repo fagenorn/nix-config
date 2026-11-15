@@ -593,7 +593,8 @@ raises `answer.Refused` with `NOT_OPEN` when the project is not registered, no r
 `(project_id, key)` exists, or the item is answered, is not a decision, or has no questions; with
 `CHOOSE` unless `choices` is a list of one `int` (not `bool`) per question within its options; with
 `SENDING` while another answer to the same item runs. The tick runs through `answer.with_retries`
-(#1075), with the service's clock and `write_sleep` (default `self._stop.wait`, so closing the
+(#1075), with the service's `monotonic` clock (default `time.monotonic`, so a step of the system
+clock never lengthens or ends the retries) and `write_sleep` (default `self._stop.wait`, so closing the
 service ends the retries): a transport failure is tried again within the `answer.RETRY_BUDGET_SECONDS`
 deadline, each retry writing one `answer_tick_retry` stderr line, and the slot stays in `_sending`
 for the whole retry, so a second answer meanwhile is `SENDING`. A `ForgeError` of the tick propagates
@@ -619,7 +620,7 @@ item without one is never approved): every live or paid approval needs its typed
 multi-item route exists. A note posts the owner's text and leaves the item open; any other word marks
 the item answered at once, as `answer` does and with the same generation bookkeeping, when the record
 still exists, is unanswered and names the same comment. `owner_path` runs through the same
-`answer.with_retries` as the tick, with the same deadline, `write_sleep` and `SENDING` slot, except
+`answer.with_retries` as the tick, with the same deadline, `monotonic` clock, `write_sleep` and `SENDING` slot, except
 that a note is tried once: posting it again would post the text twice. A failure of `owner_path`
 propagates, only after the retries when it is a transport failure, and appends nothing.
 
@@ -2130,6 +2131,7 @@ class ConsoleService:
                  tick: Callable[[str, int, int, list[dict], list[int]], None] = answer.tick_on_tracker,
                  owner_path: Callable[..., None] = verify_answer.answer_prompt,
                  write_sleep: Callable[[float], object] | None = None,
+                 monotonic: Callable[[], float] = time.monotonic,
                  launcher: Callable[[manager.Launch], None] | None = None,
                  dispatch: Callable[[Callable[[], None]], None] | None = None,
                  nudger: Callable[[nudge.Nudge], None] | None = None,
@@ -2254,6 +2256,7 @@ class ConsoleService:
         self._closing = False
         self._stop = threading.Event()
         self._write_sleep = self._stop.wait if write_sleep is None else write_sleep
+        self._monotonic = monotonic
         self._watcher: threading.Thread | None = None
         self._signature = None
         self.log: EventLog | None = None
@@ -2486,7 +2489,7 @@ class ConsoleService:
         try:
             answer.with_retries(
                 lambda: self._tick(item["repo"], item["issue"], item["comment_id"], questions, choices),
-                clock=self._clock, sleep=self._write_sleep, on_retry=_retry_line(project_id, key))
+                clock=self._monotonic, sleep=self._write_sleep, on_retry=_retry_line(project_id, key))
             sent = True
         finally:
             with self._ingest:
@@ -2520,7 +2523,7 @@ class ConsoleService:
             if answer_word == "note":
                 write()
             else:
-                answer.with_retries(write, clock=self._clock, sleep=self._write_sleep,
+                answer.with_retries(write, clock=self._monotonic, sleep=self._write_sleep,
                                     on_retry=_retry_line(project_id, key))
             sent = True
         finally:

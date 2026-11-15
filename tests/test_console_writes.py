@@ -390,7 +390,7 @@ class AnswerRouteTest(Case):
     def test_a_lasting_network_drop_is_retried_within_thirty_seconds_then_told_in_plain_words(self):
         self.clk = FakeClock()
         tick, calls = self.failing_tick(dropped())
-        svc = self.open(tick=tick, clock=self.clk, write_sleep=self.clk.sleep)
+        svc = self.open(tick=tick, monotonic=self.clk, write_sleep=self.clk.sleep)
         out = []
         got = self.assert_unchanged(svc, lambda: out.append(self.post_answer(svc)) or out[-1][0])
         (status, _, body), stderr = out[-1]
@@ -406,11 +406,39 @@ class AnswerRouteTest(Case):
     def test_the_retries_stop_at_the_thirty_second_budget(self):
         self.clk = FakeClock()
         tick, calls = self.failing_tick(dropped(), advance=10.0)
-        svc = self.open(tick=tick, clock=self.clk, write_sleep=self.clk.sleep)
+        svc = self.open(tick=tick, monotonic=self.clk, write_sleep=self.clk.sleep)
         (status, _, body), _ = self.post_answer(svc)
         self.assertEqual((status, body), (502, (answer.NETWORK_DOWN + "\n").encode()))
         self.assertEqual(len(calls), 3)
         self.assertEqual(self.clk.slept, [1.0, 2.0])
+
+    def test_a_system_clock_step_never_changes_the_retry_limit_on_either_answer_route(self):
+        word = {"project_id": "owner/p00", "key": CHECK_ITEM["key"], "answer": "passed",
+                "version": CHECK_ITEM["version"]}
+        for name, step in (("backward", -1000.0), ("forward", 1000.0)):
+            for route in ("answer", "check"):
+                with self.subTest(step=name, route=route):
+                    mono, wall, calls = FakeClock(), FakeClock(), []
+
+                    def attempt(*args, **kwargs):
+                        calls.append(args)
+                        mono.now += 10.0
+                        wall.now += step
+                        raise dropped()
+
+                    if route == "answer":
+                        svc = self.open(tick=attempt, clock=wall, monotonic=mono,
+                                        write_sleep=mono.sleep)
+                        (status, _, body), _ = self.post_answer(svc)
+                    else:
+                        svc = self.open(tracker=Scripted([CHECK_ITEM]), owner_path=attempt,
+                                        clock=wall, monotonic=mono, write_sleep=mono.sleep)
+                        status, _, body = support.post_page(
+                            svc.address, CHECK, self.headers(svc), json.dumps(word).encode())
+                    self.assertEqual((status, body), (502, (answer.NETWORK_DOWN + "\n").encode()))
+                    self.assertEqual(len(calls), 3)
+                    self.assertEqual(mono.slept, [1.0, 2.0])
+                    svc.close()
 
     def test_a_refusal_that_is_not_a_network_error_is_not_retried_and_reads_plainly(self):
         table = [
