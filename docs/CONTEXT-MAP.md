@@ -50,6 +50,7 @@
 | Drafted contract | Console |
 | Excluded profile | Console |
 | Fleet registry | Project contract |
+| Folder trust | Console |
 | Goal | Console |
 | Held issue | Verification |
 | Held work | Console |

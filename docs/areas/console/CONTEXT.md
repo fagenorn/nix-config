@@ -137,6 +137,10 @@ _Avoid_: adoption prompt, open decision
 The project contract the console drafts for a repository that has none, from its remote and its tracked files; every value it set is shown with where it came from and can be changed before the plan is applied; it lives in the console's state and the stored plan until `adopt-project apply` writes it (ADR-console-031).
 _Avoid_: generated contract, default contract
 
+**Folder trust**:
+The client's per-profile record, `projects[<git root>].hasTrustDialogAccepted` in the profile's `.claude.json`, that lets a background session run in a folder; the console writes it, for every profile, only when the owner approves a registration, and a profile added later gets every registered project (ADR-console-033).
+_Avoid_: workspace trust, permission
+
 **Approved adoption**:
 A ready adoption plan the owner approved on the page by choosing `Apply it` on its question card: the console applies it in its own worktree, pushes its one branch, opens its pull request and raises one inbox item while the pull request is ready to merge; the owner merges it on the forge (ADR-console-030).
 _Avoid_: auto-adoption, auto-merge
