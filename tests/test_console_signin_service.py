@@ -417,6 +417,75 @@ class SigninRunServiceTest(Case):
                                      "account": "b@example.invalid", "account_seq": seeded})
         self.assertEqual(ended[0][1]["outcome"], "signed_in")
 
+    def test_the_view_names_the_new_account_after_a_sign_in(self):
+        self.answers["work"] = signin.Status("signed_in", iso(NOW + 30 * 86400),
+                                             "a@example.invalid")
+        self.answers["spare"] = signin.Status("signed_in", iso(NOW + 30 * 86400),
+                                              "b@example.invalid")
+        self.begin()
+        by = {e["profile"]: e for e in self.view()["capacity"]["profiles"]}
+        self.assertEqual(by["work"]["account"], "a@example.invalid")
+        self.assertEqual((by["work"]["same_account_as"], by["spare"]["same_account_as"]), ([], []))
+
+        self.post(SIGNIN)
+        self.answers["work"] = signin.Status("signed_in", iso(NOW + 30 * 86400),
+                                             "b@example.invalid")
+        self.post(CODE_PATH)
+        self.wait_ended()
+
+        by = {e["profile"]: e for e in self.view()["capacity"]["profiles"]}
+        self.assertEqual(by["work"]["account"], "b@example.invalid")
+        self.assertEqual(by["work"]["same_account_as"], ["spare"])
+        self.assertEqual(by["spare"]["same_account_as"], ["work"])
+        self.assertIsNone(by["spare"]["duplicate_of"])
+        self.assertEqual(by["work"]["duplicate_of"], "spare")
+
+    def test_a_switch_leaves_the_old_accounts_reading_behind_and_replays_the_same(self):
+        self.store.parent.mkdir(parents=True, exist_ok=True)
+        log = EventLog(self.store)
+        try:
+            capacity_log = lambda document, profile: log.append(  # noqa: E731
+                capacity.report_entries(capacity.parse_report(document), profile))
+            capacity_log({
+                "http_status": 429, "status": "rejected", "reset": NOW + 7200, "binding": "7d",
+                "claim": None, "account": None, "session_id": None,
+                "windows": {"7d": {"status": "rejected", "utilization": 1.0,
+                                   "reset": NOW + 7200}}}, "work")
+            spare_seq = capacity_log({
+                "http_status": 200, "status": "allowed", "reset": NOW + 86400, "binding": None,
+                "claim": None, "account": None, "session_id": None,
+                "windows": {"7d": {"status": "allowed", "utilization": 0.5,
+                                   "reset": NOW + 86400}}}, "spare")[0].seq
+        finally:
+            log.close()
+        ends = iso(NOW + 30 * 86400)
+        self.answers["work"] = signin.Status("signed_in", ends, "a@example.invalid")
+        self.answers["spare"] = signin.Status("signed_in", ends, "b@example.invalid")
+        self.begin()
+        before = self.view()["capacity"]
+        self.assertIs(before["all_out"], False)
+        self.assertEqual({e["profile"]: e["state"] for e in before["profiles"]}["spare"], "ok")
+
+        self.post(SIGNIN, {"profile": "spare"})
+        self.answers["spare"] = signin.Status("signed_in", ends, "a@example.invalid")
+        self.post(CODE_PATH, {"profile": "spare", "code": CODE})
+        self.wait_ended()
+
+        self.assertEqual(self.reading_rows("spare")[-1]["account_seq"], spare_seq)
+        shown = self.view()["capacity"]
+        by = {e["profile"]: e for e in shown["profiles"]}
+        self.assertEqual(by["spare"]["same_account_as"], ["work"])
+        self.assertEqual(by["work"]["duplicate_of"], "spare")
+        self.assertEqual((by["spare"]["state"], by["work"]["state"]), ("out", "out"))
+        self.assertIs(shown["all_out"], True)
+        self.assertEqual(shown["resumes_at"], iso(NOW + 7200))
+        log = EventLog(self.store)
+        events = log.events()
+        log.close()
+        replayed = capacity.capacity_view(["spare", "work"], capacity.capacity_state(events),
+                                          self.now[0], signin.signin_state(events))
+        self.assertEqual(json.loads(json.dumps(replayed)), shown)
+
     def test_an_older_scheduled_reading_never_overwrites_the_exit_reading(self):
         svc = self.begin()
         self.post(SIGNIN)

@@ -71,6 +71,20 @@ Each entry also carries `"pinned"` (#1029): whether its name is the optional `pi
 owner's pin, ADR-console-023), always present, after `"excluded"`. It marks the entry for the
 session-profile rule (`manager.session_profile`) and changes no aggregate: `tight`, `all_out`,
 `resumes_at` and `no_reading` are the same with or without it.
+Each entry also carries three members after `"pinned"` (#1036), always present, in this order.
+`"account"` is the account name the entry's sign-in reading holds when its state is "signed_in",
+else None. `"same_account_as"` is the sorted names of the other entries with the same non-null
+account, `[]` when none. `"duplicate_of"` is, for every entry of an account shared by two or more
+entries other than the counted one, the counted entry's name, else None. A profile's reading counts
+only when it was taken under its current account: it is dropped when its sign-in has an
+`account_seq` and the reading's `seq` is not above it (a profile that switched account has no
+reading until its next one), shared account or not. The account's reading is the counted reading
+with the highest `seq` among all of the group's entries, excluded and pinned ones included, and
+every entry of the group takes its capacity members from it, so which profile took the reading
+never decides what the account has left. The counted entry is the minimum by (excluded, not
+pinned, name); choosing it never changes the reading, it only decides which profile is launched and
+drawn. Every aggregate is evaluated over the entries that are not signed out, not excluded and not
+a duplicate, so one account's allowance is counted once.
 """
 
 import re
@@ -286,13 +300,41 @@ def capacity_view(profiles: Iterable[str], state: CapacityState, now: float,
                   pinned: str | None = None) -> dict:
     names = sorted(set(profiles))
     signins = signins or {}
-    entries = [{**profile_capacity(name, state.readings.get(name), now),
-                "signin": signin_state.profile_signin(signins.get(name), now),
-                "excluded": name in excluded,
-                "pinned": name == pinned}
-               for name in names]
+    counted: dict[str, Reading | None] = {}
+    entries = []
+    for name in names:
+        reading = state.readings.get(name)
+        one = signins.get(name)
+        if (reading is not None and one is not None and one.account_seq is not None
+                and reading.seq <= one.account_seq):
+            reading = None
+        counted[name] = reading
+        entries.append({**profile_capacity(name, reading, now),
+                        "signin": signin_state.profile_signin(one, now),
+                        "excluded": name in excluded,
+                        "pinned": name == pinned,
+                        "account": one.account if one is not None and one.state == "signed_in"
+                        else None,
+                        "same_account_as": [],
+                        "duplicate_of": None})
+    groups: dict[str, list[dict]] = {}
+    for entry in entries:
+        if entry["account"] is not None:
+            groups.setdefault(entry["account"], []).append(entry)
+    for group in groups.values():
+        if len(group) < 2:
+            continue
+        held = [counted[e["profile"]] for e in group if counted[e["profile"]] is not None]
+        newest = max(held, key=lambda r: r.seq) if held else None
+        keeper = min(group, key=lambda e: (e["excluded"], not e["pinned"], e["profile"]))
+        for entry in group:
+            entry.update(profile_capacity(entry["profile"], newest, now))
+            entry["same_account_as"] = sorted(e["profile"] for e in group if e is not entry)
+            if entry is not keeper:
+                entry["duplicate_of"] = keeper["profile"]
     considered = [entry for entry in entries
-                  if entry["signin"]["state"] != "signed_out" and not entry["excluded"]]
+                  if entry["signin"]["state"] != "signed_out" and not entry["excluded"]
+                  and entry["duplicate_of"] is None]
     room = sum(entry["state"] in ("ok", "reset") for entry in considered)
     unknown = sum(entry["state"] == "unknown" for entry in considered)
     all_out = bool(considered) and all(entry["state"] == "out" for entry in considered)
