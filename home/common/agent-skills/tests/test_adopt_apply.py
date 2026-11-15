@@ -1617,6 +1617,37 @@ class CommitGateTest(ApplyTestCase):
         base = git(root, "rev-parse", "HEAD").strip()
         self.assert_retained(root, plan_id, base, "adopt.commit.failed")
 
+    def test_a_missing_identity_with_a_working_signer_stays_commit_failed(self):
+        """A commit that fails for want of an author or committer identity is
+        not a signing failure: the signer here works, so the repair is the
+        identity and the id stays `adopt.commit.failed`."""
+        root = apply_repo(self.home, signed=True)
+        tools = Path(tempfile.mkdtemp())
+        signer = tools / "signer"
+        signer.write_text(
+            "#!/bin/sh\n"
+            "cat >/dev/null\n"
+            "printf '\\n[GNUPG:] SIG_CREATED D 1 8 00 1700000000 X\\n' >&2\n"
+            "printf -- '-----BEGIN PGP SIGNATURE-----\\n\\nx\\n"
+            "-----END PGP SIGNATURE-----\\n'\n", "utf-8")
+        signer.chmod(0o755)
+        git(root, "config", "gpg.format", "openpgp")
+        git(root, "config", "gpg.program", str(signer))
+        git(root, "config", "user.signingkey", "DEADBEEF")
+        plan_id = self.ready_plan(root)["plan"]["plan_id"]
+        base = git(root, "rev-parse", "HEAD").strip()
+        git(root, "config", "--unset", "user.name")
+        git(root, "config", "--unset", "user.email")
+        git(root, "config", "user.useConfigOnly", "true")
+        environment = {
+            key: value for key, value in os.environ.items()
+            if not key.startswith(("GIT_AUTHOR_", "GIT_COMMITTER_"))
+            and key != "EMAIL"}
+        environment.update(GIT_CONFIG_GLOBAL=os.devnull,
+                           GIT_CONFIG_SYSTEM=os.devnull)
+        with mock.patch.dict(os.environ, environment, clear=True):
+            self.assert_retained(root, plan_id, base, "adopt.commit.failed")
+
     def test_a_second_apply_over_the_retained_worktree_refuses(self):
         root = apply_repo(self.home, verification=("false",))
         plan_id = self.ready_plan(root)["plan"]["plan_id"]

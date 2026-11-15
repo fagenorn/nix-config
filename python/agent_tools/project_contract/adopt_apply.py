@@ -836,7 +836,18 @@ def signing_works(worktree: Path) -> bool:
     `user.signingkey` settings as `git commit -S`, runs no hook and moves no
     ref, so a failure here is the signer and a success there means the commit
     failed for another reason (a hook, an empty identity).
+
+    `commit-tree` builds its author and committer lines strictly before it
+    signs, so a host with no usable identity would fail the probe exactly as it
+    failed the commit, whatever the signer does. The identity is asked first
+    through `git var`, which applies the same strict rule: one that cannot be
+    resolved is the commit's failure, not the signer's, and is answered `True`
+    (the signer is not what stopped the commit).
     """
+    for role in ("GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"):
+        identity, _ = run_git(worktree, "var", role)
+        if identity != 0:
+            return True
     code, _ = run_git(worktree, "commit-tree", "-S", "-m",
                       "adopt signing probe", "HEAD^{tree}")
     return code == 0
