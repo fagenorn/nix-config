@@ -26,6 +26,7 @@ Routes (every response carries `Cache-Control: no-store` and
     POST /api/message 204, a JSON body, the page sends the owner's message to a sprint (below)
     POST /api/stop  204, a JSON body, the page stops a sprint (below)
     POST /api/register-project 204, a JSON body, the page names a repository to adopt (below)
+    POST /api/plan-answer 204, a JSON body, the page answers one question of the adoption plan (below)
     POST /api/brief 200 application/json, a manager sends a sprint's brief (below)
     POST /api/report 200 application/json, a manager sends a sprint's report (below)
     POST /api/close 200 application/json, a manager sends a sprint's closing report (below)
@@ -65,7 +66,7 @@ A page write (`PAGE_WRITES`, today `POST /api/looked`, `POST /api/answer`, `POST
 `POST /api/goal`, `POST /api/withdraw`, `POST /api/approve`, `POST /api/reply`,
 `POST /api/retry-manager`, `POST /api/message`, `POST /api/stop`, `POST /api/round-answer`, `POST /api/continue`, `POST /api/exclusion`, `POST /api/pin`, `POST /api/signin`,
 `POST /api/signin-code`, `POST /api/signin-cancel`, `POST /api/signin-link`, `POST /api/account-add`, `POST /api/account-remove` and
-`POST /api/register-project`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
+`POST /api/register-project` and `POST /api/plan-answer`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
 alone and goes through one guard, `_page_write`, whatever its route. After the loopback `Host`
 check and before any body is read, exactly one `Origin` header must equal `http://<Host>` (else
 403 `text/plain` `origin refused`) and exactly one `X-Console-Token` header must equal the
@@ -204,6 +205,22 @@ service is closed, in the same ingest section that clears the running mark, so t
 `registration` stays `running` until no child of the run is left. The registry is written only by
 the register child, never by the console. Any other exception is `console: registration_failed
 <Type>` and 500 `registering failed`.
+
+`POST /api/plan-answer` (#1053, ADR-console-029) runs the same checks with `MAX_PLAN_ANSWER_BYTES`
+(4096) and `plan_questions.parse_answer_request`: 400 `bad plan answer`. The service refuses, each
+as 409 with the text, one stderr line `console: plan_answer_refused <reason>`, appending and
+running nothing, in this order: without an adopter, `plan_questions.UNAVAILABLE`; while any
+registration or answer run is under way (one mark, `register.running`); and when the shown
+registration has no plan id or another one than the body's, `plan_questions.STALE`. Otherwise the
+answer is an empty `204` at once and the run is dispatched: the adopter's plan again with every
+answer the shown row holds, then the new one, and never the register child (no registry write from
+an answer run). The original of a planner error, a failed child or any other exception is one
+stderr line `console: plan_answer_error <json>` (with the traceback for an unexpected exception)
+before it is shortened for the page. A plan appends one `registration.ended` row, as the first
+run does; a refusal appends nothing and is kept in memory, shown by the view for the plan it
+answered until the next run starts. One line `console: plan_answer_ended <result>` (or `refused`)
+ends the run. Any other exception is `console: plan_answer_failed <Type>` and 500 `answering
+failed`. The console never reads or writes the plan store or the registry here.
 
 `POST /api/readings` runs the same checks in the same order (loopback `Host`, no `Origin`,
 `application/json`, a length, at most `MAX_READING_BYTES`), answers `204` and flushes, and only
@@ -837,6 +854,7 @@ import sys
 import os
 import threading
 import time
+import traceback
 import uuid
 import collections
 from collections import OrderedDict
@@ -848,7 +866,7 @@ from urllib.parse import parse_qsl
 from agent_tools.claims import owner_actions
 from agent_tools.console import (
     account_add, account_remove, answer, capacity, deliveries, digest, exclusion, idle, inbox, manager, nudge, pin,
-    probe, register, revive, sessions, signin, signin_run, sprints, write_guard)
+    plan_questions, probe, register, revive, sessions, signin, signin_run, sprints, write_guard)
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
     MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_STOP_FAILED,
@@ -911,15 +929,17 @@ SIGNIN_LINK_PATH = "/api/signin-link"
 ACCOUNT_ADD_PATH = "/api/account-add"
 ACCOUNT_REMOVE_PATH = "/api/account-remove"
 REGISTER_PATH = "/api/register-project"
+PLAN_ANSWER_PATH = "/api/plan-answer"
 PAGE_WRITES: frozenset[str] = frozenset({
     LOOKED_PATH, ANSWER_PATH, CHECK_PATH, GOAL_PATH, WITHDRAW_PATH, APPROVE_PATH, REPLY_PATH,
     RETRY_PATH, MESSAGE_PATH, STOP_PATH, ROUND_ANSWER_PATH, CONTINUE_PATH, EXCLUSION_PATH,
     PIN_PATH, SIGNIN_PATH, SIGNIN_CODE_PATH, SIGNIN_CANCEL_PATH, SIGNIN_LINK_PATH, ACCOUNT_ADD_PATH,
-    ACCOUNT_REMOVE_PATH, REGISTER_PATH})
+    ACCOUNT_REMOVE_PATH, REGISTER_PATH, PLAN_ANSWER_PATH})
 MAX_SIGNIN_BYTES = 4096
 MAX_ACCOUNT_BYTES = 4096
 MAX_REMOVE_BYTES = 4096
 MAX_REGISTER_BYTES = 4096
+MAX_PLAN_ANSWER_BYTES = 4096
 SIGNIN_THREAD = "console-signin-deadline"
 SIGNIN_TICK_SECONDS = 1.0
 MAX_ANSWER_BYTES = 4096
@@ -1366,6 +1386,28 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return False
         return True
 
+    def _plan_answer_request(self, console: "ConsoleService") -> bool:
+        """Carry out the plan-answer write; True when the shared 204 is to be sent."""
+        body = self._json_body(MAX_PLAN_ANSWER_BYTES)
+        if body is None:
+            return False
+        try:
+            plan_id, question, subject, value = plan_questions.parse_answer_request(body)
+        except ValueError:
+            self._refuse(400, "bad plan answer")
+            return False
+        try:
+            console.answer_plan(plan_id, question, subject, value)
+        except sprints.Refused as error:
+            print(f"console: plan_answer_refused {error}", file=sys.stderr)
+            self._refuse(409, str(error))
+            return False
+        except Exception as error:
+            print(f"console: plan_answer_failed {type(error).__name__}", file=sys.stderr)
+            self._refuse(500, "answering failed")
+            return False
+        return True
+
     def _brief_request(self):
         """The manager's route: a brief sent with the sprint's secret; no token, no page."""
         console = self.server.console
@@ -1801,6 +1843,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
             if not self._register_request(console):
                 return
+        elif route == PLAN_ANSWER_PATH:
+            self.close_connection = True
+            if not self._plan_answer_request(console):
+                return
         else:
             if (self.headers.get("Content-Length", "0") != "0"
                     or self.headers.get("Transfer-Encoding") is not None):
@@ -1941,6 +1987,8 @@ class ConsoleService:
         self._account_remover = account_remover
         self._adopter = adopter
         self._registering: str | None = None
+        self._answering = False
+        self._answer_refusal: dict | None = None
         self._adding = threading.Lock()
         self._removing: set[str] = set()
         self._client_live: collections.Counter[str] = collections.Counter()  # client runs under a profile in flight
@@ -2138,7 +2186,9 @@ class ConsoleService:
             digest=digest.digest(self._moments, self._looked, self._now()),
             capacity=cap,
             signin_runs=self._signin_view(), accounts_added=self._accounts_added,
-            registration=register.view_entry(self._registering, self._registration),
+            registration=register.view_entry(
+                self._registering, self._registration, again=self._answering,
+                refusal=self._answer_refusal),
             pin=pin.note(self._pinned, cap, manager.session_profile(cap, self._use.last)),
             pin_launches=self._pin_launches.launched,
             managers=self._launcher is not None, pending=self._pending))
@@ -2587,6 +2637,68 @@ class ConsoleService:
         if not self._closed:
             self.refresh()
         print(f"console: registration_ended {payload['result']}", file=sys.stderr)
+
+    def answer_plan(self, plan_id: str, question: str, subject: str, value: str) -> None:
+        """Plan the shown registration again with one more answer; refusals are `sprints.Refused`."""
+        if self._adopter is None:
+            raise sprints.Refused(plan_questions.UNAVAILABLE)
+        with self._ingest:
+            if self._registering is not None:
+                raise sprints.Refused(register.running(register.name_of(self._registering)))
+            latest = self._registration
+            if latest is None or latest["plan_id"] != plan_id:
+                raise sprints.Refused(plan_questions.STALE)
+            root = latest["root"]
+            answers = [*latest["answered"], {"id": question, "subject": subject, "value": value}]
+            self._registering = root
+            self._answering = True
+            self._answer_refusal = None
+            self._publish()
+        try:
+            self._dispatch(lambda: self._run_answer(root, plan_id, answers))
+        except BaseException:
+            with self._ingest:
+                self._registering = None
+                self._answering = False
+                self._publish()
+            raise
+
+    def _run_answer(self, root: str, plan_id: str, answers: list[dict]) -> None:
+        payload = None
+        text = None
+        try:
+            plan = self._adopter.plan(root, cancel=self._stop, answers=answers)
+            if "error" in plan:
+                self._log_answer_error({"root": root, "error": plan["error"]})
+                text = plan_questions.refusal_text(plan["error"])
+            else:
+                payload = register.summary(root, plan)
+        except register.RunFailed as error:
+            self._log_answer_error(
+                {"root": root, "failure": error.kind, "cause": repr(error.__cause__)})
+            text = plan_questions.rerun_failed(error.kind)
+        except Exception as error:
+            self._log_answer_error(
+                {"root": root, "exception": type(error).__name__, "detail": str(error)})
+            traceback.print_exception(error, file=sys.stderr)
+            text = plan_questions.rerun_failed(type(error).__name__)
+        with self._ingest:
+            if payload is not None and not self._closed:
+                self._fold(self.log.append([register.ended(payload)]))
+            elif payload is None:
+                self._answer_refusal = {"plan_id": plan_id, "text": text}
+            self._registering = None
+            self._answering = False
+            if not self._closed:
+                self._publish()
+        if not self._closed:
+            self.refresh()
+        print(f"console: plan_answer_ended {payload['result'] if payload else 'refused'}",
+              file=sys.stderr)
+
+    @staticmethod
+    def _log_answer_error(record: dict) -> None:
+        print(f"console: plan_answer_error {json.dumps(record, sort_keys=True)}", file=sys.stderr)
 
     def remove_account(self, profile: str, typed: str) -> None:
         """Sign the profile out, then remove it through the launcher; refusals are `sprints.Refused`.

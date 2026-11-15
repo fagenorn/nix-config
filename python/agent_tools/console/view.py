@@ -152,10 +152,12 @@ The top-level `accounts_added` member (#1027) is the sorted, de-duplicated list 
 the owner added from the page and the retained log still holds, from the `accounts_added` argument
 (`account_add.added_state`; an empty list when none is given).
 
-The top-level `registration` member (#1052, ADR-console-028) is the entry `register.view_entry`
-gives, copied, from the `registration` argument, and null when none is given: `{"root", "name",
-"project_id", "status": "running" | "done", "result", "outcome", "headline", "lines", "note",
-"at"}`, the owner's latest registration of a repository from the page.
+The top-level `registration` member (#1052, ADR-console-028, #1053, ADR-console-029) is the entry
+`register.view_entry` gives, copied, from the `registration` argument, and null when none is given:
+`{"root", "name", "project_id", "status": "running" | "done", "result", "outcome", "headline",
+"lines", "note", "at", "plan_id", "state", "questions", "refusal"}`, the owner's latest
+registration of a repository from the page (fourteen keys), with the plan's plain open questions
+and, when the plan refused the last answer, the refusal's text.
 
 The top-level `pin` member (#1029) is the pin note `pin.note` gives, copied, from the `pin`
 argument, and null with no pin. The top-level `pin_launches` member is the sorted list of profiles
