@@ -917,7 +917,7 @@ class DocsTreeTest(unittest.TestCase):
         self.assertNotIn('withdraw, messages and "Tell the manager" stay under the two lines', rules)
         message = self.doc(
             "docs/areas/console/adr/016-what-the-owner-says-to-a-sprint-reaches-its-manager.md")
-        for needle in ("opens its field on demand", 'the rest in its "Detail" fold'):
+        for needle in ("opens its field on demand", 'under a closed "Earlier messages (n)" fold'):
             self.assertIn(needle, message)
 
     def test_the_console_brief_decision_is_recorded(self):

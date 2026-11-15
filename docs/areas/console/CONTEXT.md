@@ -46,7 +46,7 @@ The one agent a sprint has: it writes the brief and the reports and never writes
 _Avoid_: owner, worker, agent, bot
 
 **Message**:
-What the owner says to one sprint: an approval, a change request, free text or the answer to a question. The console stores it, the manager reads it with `sprint inbox`, and the sprint line shows it as sent, delivered or read, with the manager's reply under it (ADR-console-016).
+What the owner says to one sprint: an approval, a change request, free text or the answer to a question. The console stores it, the manager reads it with `sprint inbox`, and its sprint shows where it stands: sent (with when the manager picks it up: within a minute when it runs on Linux, else at its next turn), picked up (`sprint inbox` returned it), replied (the manager's reply under it), or not picked up after five minutes, with what the owner can do about it. Only the latest exchange shows, older ones on demand; a reply stays new until the owner's next look and is announced under the statement, outside the count (ADR-console-016).
 _Avoid_: chat, comment
 
 **Question round**:
@@ -66,7 +66,7 @@ The manager's fixed-shape account after each batch and on any change of state: a
 _Avoid_: update, log
 
 **Sprint**:
-One goal, later its issues and its outcome, in one project (#834), shown under its project as one line with its state (drafting the brief, starting, on track, waiting on you, waiting on quota until <time>, quiet and may be stuck, closing, done, stopping or stopped by you), its progress and its manager's status; its manager session is listed inside it, and a manager that failed to start or is missing offers a retry. An ended sprint folds into its project's Finished sprints a day after it ends. It is named by its brief's title (else its goal's first sentence), and only its own detail carries the goal (ADR-console-011, ADR-console-013, ADR-console-014, ADR-console-015, ADR-console-018, ADR-console-027).
+One goal, later its issues and its outcome, in one project (#834). A running sprint is one block in the Work column naming its project, its title, one sentence of what it is doing now, who has the ball ("manager working", "waiting on you" or "nothing running, may be stuck") and its progress, with its own controls; its manager session and report detail are listed inside it, and a manager that failed to start or is missing offers a retry. Waiting on you covers a brief or question that waits on the owner and a manager waiting for an answer or a permission in its terminal. Ended sprints are lines of the one Finished sprints list, the closing report and the sprint's last exchange opening from its line. It is named by its brief's title (else its goal's first sentence), and only its own detail carries the goal (ADR-console-011, ADR-console-013, ADR-console-014, ADR-console-015, ADR-console-018, ADR-console-027).
 _Avoid_: job, run
 
 **Session**:
