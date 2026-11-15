@@ -1,29 +1,92 @@
-"""The check of the console's project registration (#1052), Task 3 holding only the fixture builder.
+"""`register_check`: the verify check that the page registers a repository and the host is restored (#1052).
 
-`CONTRACT_SOURCE` is the pinned schema-2 contract, relative to a checkout root.
+`python -m agent_tools.console.register_check [--url URL] [--token-file PATH] [--contract PATH] [--wait SECONDS]`
+exercises the console's register-project write (ADR-console-028) on the host where it runs. It builds
+a throwaway adopted repository (`adopted_repository`), asks the running console to register it as the
+owner's page would, waits for the run to settle, then restores what the run changed. The URL is `http`
+on `127.0.0.1` or `localhost` (default `http://127.0.0.1:27184`), else exit 2; `--token-file`
+defaults to `state_root()/console/page-token`; `--contract` is the pinned schema-2 contract
+(`CONTRACT_SOURCE`, relative to the checkout root the wrapper runs from); `--wait` is the seconds to
+wait for the registration result (default `SETTLE_SECONDS`, 670).
 
-`adopted_repository(parent, project_id, contract_source, *, environ=None)` builds, at `parent/"repo"`,
-a conformant, adopted repository on `main` and returns its resolved root: the contract is
-`contract_source` with the project id and name, the artifact paths, the rejections, `release`
-unsupported and both review commands `true`, so that no capability depends on the host; the
-instruction source and both projections are written by the `resolve-project write-projections`
-child (a non-zero exit raises `RuntimeError`); each standards path holds one file; the runtime
-`.gitignore` is force-added; the two adoption records are committed as `adopt`. Its `origin` is a
-bare `parent/"origin.git"` holding `main`. Every git call ignores the user's and the system's git
-configuration, and `environ` (default: the process's) is the resolver child's environment.
+Output is exactly one stdout line of JSON with sorted keys; the exits are 0 met, 1 not met, 75 not
+yet, 2 usage. In this order:
+
+1. the view (`/api/state`) does not answer 200: `{"status": "not_running"}`, 75;
+2. the view JSON has no `registration` key (the console predates the write): `{"status":
+   "not_deployed"}`, 75;
+3. the token file is unreadable: `{"status": "no_token"}`, 75;
+4. the registry is present but unreadable: `{"status": "registry_unreadable"}`, 75.
+
+Then it snapshots the registry (`before`), builds the fixture in a fresh `console-register-check-*`
+directory with a throwaway project id `console-check/register-<hex>`, and POSTs `{"path": <root>}` to
+`/api/register-project` with the console's own `Origin`, the token header and a socket timeout of
+`POST_TIMEOUT` (60 s). A fixture that cannot be built is `{"status": "no_fixture", "reason":
+<exception type>}`, 75.
+
+- A status from 400 to 499 is a definite refusal: nothing was dispatched. A 409 whose text starts with
+  `a registration is already running` is `{"status": "busy"}`, 75 (another run owns the console); any
+  other is `{"status": "not_met", "reason": "refused <status> <text>"}`, 1.
+- A 5xx, or any other status but 204, is `not_met` with the same reason, though it may have
+  dispatched a run.
+- A 204, or no answer at all, may have dispatched a run. The check polls the view every second until
+  `registration.root` is the posted root and its `status` is `done`, at most `--wait` seconds (else
+  `not_met`, reason `no result`). A `result` other than `registered` is `not_met` with the
+  `headline` as the reason. After `registered` it polls at most 30 s for the project id among the
+  view's project entries, quiet groups included (else `not_met`, reason `not listed`).
+
+Two sprint rules govern what it leaves behind. S1: the check leaves no trace of itself, so it removes
+the throwaway directory, its registry entry and every stored plan whose `handoff.repo_root` is its
+root. S2: it never writes the registry except to remove its own entry, and it writes nothing else.
+
+The settle gate. No restore happens while the console's run may still write. Every outcome after the
+POST, except a definite refusal and a fixture failure, polls the view until it answers 200 and its
+`registration` is not this root `running`, for at most `settle` seconds counted from when the POST
+returned. This is sound because the console appends the ended row and clears `running` only after
+both children (the plan and the verify) have returned, and `manager.run_in_own_group` reaps the
+whole group before returning; and a POST that has returned, even by timeout, has outlasted the
+console's bounded pre-dispatch work, so the console has either started the run or never will. A gate
+that is not passed in time restores nothing and answers `{"status": "unsettled", "project_id": <id>,
+"root": <root>}`, 1, which takes precedence over the verdict: it names the leftover so the owner can
+remove it, because a cleanup before then could be undone by a late registry or plan write. A console
+that dies with no `close` while a child runs leaves that child unbounded; the view then does not
+answer 200 and the gate reports `unsettled`.
+
+Restore runs after the gate: the registry entry is removed under `registry_transaction()`, plans are
+deleted, the directory is removed, and the registry must equal `before` (by project id), else
+`{"status": "not_restored"}`, 1 replaces any answer. Met is `{"status": "met", "project_id": <id>,
+"root": <root>, "restored": true}`, 0.
 """
 
 from __future__ import annotations
 
+import argparse
+import http.client
 import json
 import os
+import secrets
+import shutil
 import subprocess
-from collections.abc import Mapping
+import sys
+import tempfile
+import time
+from collections.abc import Callable, Mapping
 from pathlib import Path
+from urllib.parse import urlsplit
 
+from agent_tools.console import register, service, write_guard
+from agent_tools.project_contract import agent_platform
 from agent_tools.system import siblings
 
 CONTRACT_SOURCE = Path("home/common/agent-skills/tests/fixtures/project-contract-schema-2.json")
+SETTLE_SECONDS = 2 * register.RUN_TIMEOUT + register.GIT_TIMEOUT + 60
+POST_TIMEOUT = 60
+LISTED_SECONDS = 30
+FETCH_TIMEOUT = 5.0
+NOT_YET = 75
+LOOPBACK = ("127.0.0.1", "localhost")
+REGISTER_PATH = "/api/register-project"
+STATE_PATH = "/api/state"
 DIGEST = "a1" * 32
 GIT_ENV = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
            "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
@@ -113,3 +176,217 @@ def adopted_repository(parent: Path, project_id: str, contract_source: Path, *,
     _git(root, "remote", "add", "origin", str(bare))
     _git(root, "push", "--quiet", "origin", "main")
     return root
+
+
+Answer = tuple[int | None, bytes]
+
+
+def _request(method: str, url: str, headers: Mapping[str, str], body: bytes | None,
+             timeout: float) -> Answer:
+    parts = urlsplit(url)
+    path = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
+    connection = http.client.HTTPConnection(parts.hostname, parts.port, timeout=timeout)
+    try:
+        connection.request(method, path, body=body, headers=dict(headers))
+        response = connection.getresponse()
+        return response.status, response.read()
+    except (OSError, http.client.HTTPException):
+        return None, b""
+    finally:
+        connection.close()
+
+
+def default_fetch(url: str) -> Answer:
+    return _request("GET", url, {}, None, FETCH_TIMEOUT)
+
+
+def default_post(url: str, headers: Mapping[str, str], body: bytes) -> Answer:
+    return _request("POST", url, headers, body, POST_TIMEOUT)
+
+
+def _loopback_url(text: str) -> str:
+    try:
+        parts = urlsplit(text)
+        parts.port  # noqa: B018  raises ValueError on a bad port
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a URL: {text}") from None
+    if parts.scheme != "http" or parts.hostname not in LOOPBACK:
+        raise argparse.ArgumentTypeError("the URL must be http on 127.0.0.1 or localhost")
+    return text
+
+
+def _seconds(text: str) -> float:
+    try:
+        value = float(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number: {text}") from None
+    if not value > 0:
+        raise argparse.ArgumentTypeError("must be positive")
+    return value
+
+
+def parser() -> argparse.ArgumentParser:
+    result = argparse.ArgumentParser(prog="register_check", description=__doc__.splitlines()[0])
+    result.add_argument("--url", type=_loopback_url,
+                        default=f"http://127.0.0.1:{service.DEFAULT_PORT}")
+    result.add_argument("--token-file", type=Path, default=None)
+    result.add_argument("--contract", type=Path, default=CONTRACT_SOURCE)
+    result.add_argument("--wait", type=_seconds, default=SETTLE_SECONDS)
+    return result
+
+
+def _json_object(answer: Answer) -> dict | None:
+    status, body = answer
+    if status != 200:
+        return None
+    try:
+        document = json.loads(body)
+    except ValueError:
+        return None
+    return document if isinstance(document, dict) else None
+
+
+def _is_running(document: Mapping, root: str) -> bool:
+    registration = document.get("registration")
+    return (isinstance(registration, dict) and registration.get("root") == root
+            and registration.get("status") == "running")
+
+
+def _listed(document: Mapping, project_id: str) -> bool:
+    for entry in document.get("entries") or ():
+        if not isinstance(entry, dict):
+            continue
+        members = entry["projects"] if entry.get("type") == "quiet_group" else (entry,)
+        if any(isinstance(m, dict) and m.get("project_id") == project_id for m in members):
+            return True
+    return False
+
+
+def _poll(fetch: Callable[[str], Answer], url: str, poll: float, bound: float,
+          ready: Callable[[dict], bool]) -> bool:
+    end = time.monotonic() + bound
+    while True:
+        document = _json_object(fetch(url))
+        if document is not None and ready(document):
+            return True
+        if time.monotonic() >= end:
+            return False
+        time.sleep(poll)
+
+
+def _restore(tmp: Path, root: Path | None, project_id: str, before: list[dict]) -> bool:
+    try:
+        if any(entry["project_id"] == project_id
+               for entry in service.read_fleet(agent_platform.registry_path()) or []):
+            with agent_platform.registry_transaction() as entries:
+                agent_platform.write_registry(
+                    [entry for entry in entries if entry["project_id"] != project_id])
+    except Exception as error:  # noqa: BLE001 -- the comparison below decides
+        print(f"register_check: {type(error).__name__}", file=sys.stderr)
+    if root is not None:
+        for plan in (agent_platform.state_root() / "adopt" / "plans").glob("*.json"):
+            try:
+                handoff = json.loads(plan.read_text("utf-8")).get("handoff")
+                if isinstance(handoff, dict) and handoff.get("repo_root") == str(root):
+                    plan.unlink()
+            except (OSError, ValueError, AttributeError):
+                continue
+    shutil.rmtree(tmp, ignore_errors=True)
+    after = service.read_fleet(agent_platform.registry_path()) or []
+    return (sorted(after, key=lambda e: e["project_id"])
+            == sorted(before, key=lambda e: e["project_id"]))
+
+
+def _text(body: bytes) -> str:
+    return body.decode("utf-8", "replace").strip()
+
+
+def _exercise(args, token: str, fetch, post, root: Path, project_id: str, poll: float,
+              reached: list[float]) -> tuple[int, dict]:
+    parts = urlsplit(args.url)
+    base = f"http://{parts.netloc}"
+    status, body = post(
+        base + REGISTER_PATH,
+        {"Origin": base, write_guard.TOKEN_HEADER: token, "Content-Type": "application/json"},
+        json.dumps({"path": str(root)}).encode("utf-8"))
+    if status is not None and 400 <= status <= 499:
+        if status == 409 and _text(body).startswith("a registration is already running"):
+            return NOT_YET, {"status": "busy"}
+        return 1, {"status": "not_met", "reason": f"refused {status} {_text(body)}"}
+    reached.append(time.monotonic())
+    if status is not None and status != 204:
+        return 1, {"status": "not_met", "reason": f"refused {status} {_text(body)}"}
+    state = base + STATE_PATH
+    found: dict = {}
+
+    def done(document: dict) -> bool:
+        registration = document.get("registration")
+        if (isinstance(registration, dict) and registration.get("root") == str(root)
+                and registration.get("status") == "done"):
+            found.update(registration)
+            return True
+        return False
+
+    if not _poll(fetch, state, poll, args.wait, done):
+        return 1, {"status": "not_met", "reason": "no result"}
+    if found.get("result") != "registered":
+        return 1, {"status": "not_met", "reason": str(found.get("headline"))}
+    if not _poll(fetch, state, poll, LISTED_SECONDS, lambda d: _listed(d, project_id)):
+        return 1, {"status": "not_met", "reason": "not listed"}
+    return 0, {"status": "met", "project_id": project_id, "root": str(root), "restored": True}
+
+
+def main(argv: list[str] | None = None, *, fetch=None, post=None, tmp_root=None,
+         project_id: str | None = None, poll: float = 1.0, settle: float = SETTLE_SECONDS) -> int:
+    args = parser().parse_args(argv)
+    fetch = fetch or default_fetch
+    post = post or default_post
+    code, result = _decide(args, fetch, post, tmp_root, project_id, poll, settle)
+    print(json.dumps(result, sort_keys=True))
+    return code
+
+
+def _decide(args, fetch, post, tmp_root, project_id, poll, settle) -> tuple[int, dict]:
+    state = f"http://{urlsplit(args.url).netloc}{STATE_PATH}"
+    answer = fetch(state)
+    if answer[0] != 200:
+        return NOT_YET, {"status": "not_running"}
+    document = _json_object(answer)
+    if document is None or "registration" not in document:
+        return NOT_YET, {"status": "not_deployed"}
+    token_file = args.token_file or agent_platform.state_root() / "console" / "page-token"
+    try:
+        token = token_file.read_text("utf-8").strip()
+    except (OSError, ValueError):
+        return NOT_YET, {"status": "no_token"}
+    registry = agent_platform.registry_path()
+    before = service.read_fleet(registry)
+    if before is None and os.path.lexists(registry):
+        return NOT_YET, {"status": "registry_unreadable"}
+    before = before or []
+    tmp = Path(tempfile.mkdtemp(prefix="console-register-check-", dir=tmp_root))
+    pid = project_id or "console-check/register-" + secrets.token_hex(4)
+    root: Path | None = None
+    reached: list[float] = []
+    verdict: tuple[int, dict] = (1, {"status": "not_met"})
+    settled = True
+    try:
+        try:
+            root = adopted_repository(tmp, pid, args.contract)
+        except Exception as error:  # noqa: BLE001 -- any builder failure is "no fixture"
+            return NOT_YET, {"status": "no_fixture", "reason": type(error).__name__}
+        verdict = _exercise(args, token, fetch, post, root, pid, poll, reached)
+    finally:
+        if reached:
+            settled = _poll(fetch, state, poll, settle - (time.monotonic() - reached[0]),
+                            lambda d: not _is_running(d, str(root)))
+        restored = _restore(tmp, root, pid, before) if settled else True
+    if not settled:
+        return 1, {"status": "unsettled", "project_id": pid, "root": str(root)}
+    if not restored:
+        return 1, {"status": "not_restored"}
+    return verdict
+
+
+if __name__ == "__main__":
+    sys.exit(main())
