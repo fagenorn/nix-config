@@ -2546,7 +2546,11 @@ class ConsoleService:
         """Dispatch the adoption plan of a repository; refusals are `sprints.Refused`."""
         if self._adopter is None:
             raise sprints.Refused(register.UNAVAILABLE)
-        entries = read_fleet(self.registry) or []
+        entries = read_fleet(self.registry)
+        if entries is None:
+            if os.path.lexists(self.registry):
+                raise sprints.Refused(register.registry_unreadable())
+            entries = []
         reason, root = register.refusal(path, entries, home=os.environ.get("HOME", ""))
         if reason is not None:
             raise sprints.Refused(reason)
@@ -2555,7 +2559,13 @@ class ConsoleService:
                 raise sprints.Refused(register.running(register.name_of(self._registering)))
             self._registering = str(root)
             self._publish()
-        self._dispatch(lambda: self._run_registration(str(root)))
+        try:
+            self._dispatch(lambda: self._run_registration(str(root)))
+        except BaseException:
+            with self._ingest:
+                self._registering = None
+                self._publish()
+            raise
 
     def _run_registration(self, root: str) -> None:
         try:

@@ -20,7 +20,9 @@ runs `git -C <path> rev-parse --show-toplevel` with no shell, `stdin` and `stder
 `GIT_TIMEOUT` (10 seconds), and returns the resolved path only when the exit is 0 and the printed
 top, resolved, equals it; otherwise (an `OSError` or a timeout included) it returns None and never
 raises. `running(name)` is the text of a second registration for the same repository, decided by the
-service. `UNAVAILABLE` is `registering a project is not available on this host`.
+service. `registry_unreadable()` is the text of a registration refused because the fleet registry
+exists but cannot be read (an absent registry is an empty fleet), also decided by the service.
+`UNAVAILABLE` is `registering a project is not available on this host`.
 
 Runner. `Adopter(command=None, environ=None, timeout=RUN_TIMEOUT)` runs
 `[*command, "plan", "--repo-root", root, "--format", "json"]` (`plan`) or
@@ -89,6 +91,10 @@ def not_toplevel(path: str) -> str:
 
 def already_registered(path: str, project_id: str) -> str:
     return f"{path} is already registered as {project_id}"
+
+
+def registry_unreadable() -> str:
+    return "the project registry exists but cannot be read, so no registration was started"
 
 
 def running(name: str) -> str:

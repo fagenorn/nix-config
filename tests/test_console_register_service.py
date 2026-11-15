@@ -242,6 +242,19 @@ class RegisterRefusalTest(Case):
         self.assertEqual((status, body), (409, f"{repo} is already registered as o/r\n".encode()))
         self.assertEqual(fake.calls, [])
 
+    def test_an_unreadable_registry_refuses_and_an_absent_one_is_an_empty_fleet(self):
+        repo = git_repo(self.parent / "r")
+        fake = Fake(plan=PLANNED)
+        self.begin(fake)
+        self.registry.write_text("{not json")
+        status, _, body = self.post({"path": str(repo)})
+        self.assertEqual((status, body), (409, (register.registry_unreadable() + "\n").encode()))
+        self.assertEqual(fake.calls, [])
+        self.registry.unlink()
+        self.assertEqual(self.post({"path": str(repo)})[0], 204)
+        self.wait_done(repo)
+        self.assertEqual(fake.calls, [("plan", str(repo.resolve()))])
+
     def test_without_an_adopter_the_host_refuses(self):
         self.begin(None)
         status, _, body = self.post({"path": "rel"})
@@ -285,6 +298,24 @@ class RegisterRunTest(Case):
         while not fake.calls and time.monotonic() < deadline:
             time.sleep(0.02)
         self.assertEqual(fake.calls, [("plan", str(first.resolve()))])
+
+    def test_a_dispatch_that_fails_frees_the_reservation(self):
+        calls = []
+
+        def dispatch(job):
+            calls.append(job)
+            if len(calls) == 1:
+                raise RuntimeError("cannot start a thread")
+            job()
+
+        fake = Fake(plan=PLANNED)
+        self.begin(fake, dispatch=dispatch)
+        repo = git_repo(self.parent / "r")
+        self.assertEqual(self.post({"path": str(repo)})[0], 500)
+        self.assertIsNone(self.view()["registration"])
+        self.assertEqual(fake.calls, [])
+        self.assertEqual(self.post({"path": str(repo)})[0], 204)
+        self.assertEqual(self.wait_done(repo)["result"], "planned")
 
     def test_a_failed_child_is_shown_as_failed(self):
         fake = Fake(raises=register.RunFailed("timed_out"))

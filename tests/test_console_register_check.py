@@ -16,6 +16,7 @@ import subprocess
 import tempfile
 import threading
 import unittest
+import unittest.mock
 from pathlib import Path
 
 from agent_tools.console import register, register_check
@@ -172,6 +173,62 @@ class SettleTest(Case):
         self.assertEqual(register_check.parser().parse_args([]).wait,
                          register_check.SETTLE_SECONDS)
         self.assertGreater(register_check.POST_TIMEOUT, register.GIT_TIMEOUT)
+
+
+class RestoreTest(Case):
+    PID = "console-check/register-leftover"
+
+    def registered_run(self):
+        """A stubbed console that registers, leaving one stored plan behind; the output."""
+        seeded([])
+        self.token()
+        box = [None]
+        plans = agent_platform.state_root() / "adopt/plans"
+        self.plan = plans / "leftover.json"
+
+        def post(url, headers, body):
+            box[0] = json.loads(body)["path"]
+            plans.mkdir(parents=True, exist_ok=True)
+            self.plan.write_text(json.dumps({"handoff": {"repo_root": box[0]}}))
+            return 204, b""
+
+        def fetch(url):
+            if box[0] is None:
+                return view(None)
+            return 200, json.dumps({
+                "registration": {"root": box[0], "status": "done", "result": "registered",
+                                 "headline": "registered"},
+                "entries": [{"project_id": self.PID}]}).encode()
+
+        return self.run_check(["--wait", "1", "--contract", CONTRACT], fetch=fetch, post=post,
+                              project_id=self.PID, poll=0.05, settle=5)
+
+    def test_a_plan_that_cannot_be_deleted_is_not_restored_and_is_named(self):
+        real = Path.unlink
+
+        def unlink(path, *args, **kwargs):
+            if path.name == "leftover.json":
+                raise PermissionError("held")
+            return real(path, *args, **kwargs)
+
+        with unittest.mock.patch.object(Path, "unlink", unlink):
+            code, out = self.registered_run()
+        self.assertEqual(
+            (code, out), (1, {"status": "not_restored", "leftovers": [str(self.plan)]}))
+
+    def test_a_directory_that_cannot_be_removed_is_not_restored_and_is_named(self):
+        with unittest.mock.patch.object(register_check.shutil, "rmtree"):
+            code, out = self.registered_run()
+        self.assertEqual(code, 1)
+        self.assertEqual(out["status"], "not_restored")
+        self.assertEqual(len(out["leftovers"]), 1)
+        self.assertTrue(Path(out["leftovers"][0]).is_dir())
+        shutil.rmtree(out["leftovers"][0])
+
+    def test_a_clean_restore_is_met(self):
+        code, out = self.registered_run()
+        self.assertEqual((code, out["status"], out["restored"]), (0, "met", True))
+        self.assertFalse(self.plan.exists())
 
 
 class StubTest(Case):

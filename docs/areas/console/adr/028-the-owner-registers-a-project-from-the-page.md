@@ -18,7 +18,7 @@ A project reaches the page only once it is in the fleet registry, and getting it
 3. `type the full path of the repository, starting with / or ~` (a leading `~` expands to the console's HOME);
 4. `<path> is not a directory on this host`;
 5. `<path> is not the top of a git checkout` (`git -C <path> rev-parse --show-toplevel`, resolved, must equal the resolved path, bounded at 10 seconds);
-6. `<path> is already registered as <project id>` (a fleet registry entry whose resolved root equals it);
+6. `<path> is already registered as <project id>` (a fleet registry entry whose resolved root equals it); a registry file that exists but cannot be read is refused first, as `the project registry exists but cannot be read, so no registration was started`, and an absent one is an empty fleet;
 7. `a registration is already running for <name>`.
 
 **D3. The plan run.** The console runs `adopt-project plan --repo-root <root> --format json` as a child (no shell, its own process group, `stdin` from the null device, 300 seconds, cancelled when the console closes) on a thread of its own, off the request path. The plan edits nothing in the repository (ADR-project-contract-004).

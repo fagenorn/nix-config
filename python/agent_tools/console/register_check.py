@@ -53,8 +53,10 @@ that dies with no `close` while a child runs leaves that child unbounded; the vi
 answer 200 and the gate reports `unsettled`.
 
 Restore runs after the gate: the registry entry is removed under `registry_transaction()`, plans are
-deleted, the directory is removed, and the registry must equal `before` (by project id), else
-`{"status": "not_restored"}`, 1 replaces any answer. Met is `{"status": "met", "project_id": <id>,
+deleted, the directory is removed, and the registry must equal `before` (by project id) with the directory
+gone and no matching plan left, else `{"status": "not_restored", "leftovers": [<path>, ...]}`, 1
+replaces any answer; the leftovers name each plan or directory that could not be removed and the
+registry when it differs. Met is `{"status": "met", "project_id": <id>,
 "root": <root>, "restored": true}`, 0.
 """
 
@@ -274,7 +276,9 @@ def _poll(fetch: Callable[[str], Answer], url: str, poll: float, bound: float,
         time.sleep(poll)
 
 
-def _restore(tmp: Path, root: Path | None, project_id: str, before: list[dict]) -> bool:
+def _restore(tmp: Path, root: Path | None, project_id: str, before: list[dict]) -> list[str]:
+    """Remove what the run left; the paths still left, the registry's included, else an empty list."""
+    leftovers: list[str] = []
     try:
         if any(entry["project_id"] == project_id
                for entry in service.read_fleet(agent_platform.registry_path()) or []):
@@ -289,12 +293,20 @@ def _restore(tmp: Path, root: Path | None, project_id: str, before: list[dict]) 
                 handoff = json.loads(plan.read_text("utf-8")).get("handoff")
                 if isinstance(handoff, dict) and handoff.get("repo_root") == str(root):
                     plan.unlink()
-            except (OSError, ValueError, AttributeError):
+            except FileNotFoundError:
+                continue
+            except OSError:
+                leftovers.append(str(plan))
+            except (ValueError, AttributeError):
                 continue
     shutil.rmtree(tmp, ignore_errors=True)
+    if os.path.lexists(tmp):
+        leftovers.append(str(tmp))
     after = service.read_fleet(agent_platform.registry_path()) or []
-    return (sorted(after, key=lambda e: e["project_id"])
-            == sorted(before, key=lambda e: e["project_id"]))
+    if (sorted(after, key=lambda e: e["project_id"])
+            != sorted(before, key=lambda e: e["project_id"])):
+        leftovers.append(str(agent_platform.registry_path()))
+    return leftovers
 
 
 def _text(body: bytes) -> str:
@@ -380,11 +392,11 @@ def _decide(args, fetch, post, tmp_root, project_id, poll, settle) -> tuple[int,
         if reached:
             settled = _poll(fetch, state, poll, settle - (time.monotonic() - reached[0]),
                             lambda d: not _is_running(d, str(root)))
-        restored = _restore(tmp, root, pid, before) if settled else True
+        leftovers = _restore(tmp, root, pid, before) if settled else []
     if not settled:
         return 1, {"status": "unsettled", "project_id": pid, "root": str(root)}
-    if not restored:
-        return 1, {"status": "not_restored"}
+    if leftovers:
+        return 1, {"status": "not_restored", "leftovers": leftovers}
     return verdict
 
 
