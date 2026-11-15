@@ -24,7 +24,9 @@ git log origin/<default>..origin/<integration> --first-parent --merges \
 
 Split fields on `%x1f`, records on `%x1e`.
 
-Single-branch (`<integration> == <default>`): the range is `<prev-tag>..origin/<default>` and `--merges` is dropped, since direct commits are the release units. Write the tag that `git describe --tags --abbrev=0 origin/<default>` prints into the command; a shell variable does not survive to a later call. With no tag yet that command exits non-zero and prints nothing, and the range is `origin/<default>`.
+After a `failed` release the range is `<last-succeeded-tag>..origin/<integration>` (the tag before the failed version), still `--first-parent --merges`: `origin/<default>..` omits that release's merges. Say that version never fully deployed.
+
+Single-branch (`<integration> == <default>`): the range is `<prev-tag>..origin/<default>` and `--merges` is dropped. `<prev-tag>` is Phase 0's; with no tag yet the range is `origin/<default>`.
 
 For each merge, resolve the PR only when `capabilities.tracker` permits it:
 
@@ -33,7 +35,7 @@ ${GH_PREFIX}gh pr list --search "<merge-sha>" --state merged \
   --json number,title,url,labels,body -q '.[0]'
 ```
 
-An empty result means no PR: note it, keep the merge and use a commit URL. Read the PR body: it carries the intent.
+An empty result means no PR: note it, keep the merge and use a commit URL.
 
 ## Step 2 — Categorise each merge
 
@@ -48,8 +50,6 @@ Walk the table in order; stop at the first match.
 | Does it fix a defect or restore expected behaviour? | **Fixes** |
 | Is it operator-invisible — pure refactor, test hardening, internal docs, dependency bump? | **Internal** |
 
-- Five highlights means you're padding; demote to Features/Improvements.
-- A merge appears in two buckets only when one of them is Deploy notes. Otherwise pick the primary operator impact.
 - "Decommission X" / "retire Y" / "remove Z" is usually Deploy notes, even when the user-visible message is just "fewer endpoints".
 - ADR commits and spec/plan docs are Internal, unless they encode a behaviour change operators need; then categorise by the behaviour.
 - **Don't synthesise from the merge subject alone.** Subjects look like `merge: <slug> — <terse desc> (issue-N → <integration>)`; the operator-facing meaning lives in the PR body and the diff.
@@ -61,7 +61,6 @@ Walk the table in order; stop at the first match.
 | Bad | Good |
 |---|---|
 | `c7d3002a merge: <slug> — <terse desc> (issue-N → <integration>)` | `<What changed, in the words an operator would search for> — <the consequence they'd notice> ([#N](https://github.com/<passed-repo-slug>/pull/N))` |
-| `Various fixes and improvements` | (delete; if you're tempted to write this, you haven't read enough merges yet) |
 
 - Lead with the change, not the issue number; no SHA — the PR link is enough.
 - Link the PR inline with the **full URL**, never a bare `#N`.
@@ -148,7 +147,7 @@ Worked example (MAJOR on the 1.0+ track):
 - New required env var `<Key>` — the app refuses to start without it. Set it before deploying.
 - Migration drops `<table>.<column>` — no shim; downstream consumers must read `<replacement>`.
 ```
-→ Two entries needing operator action, neither backward-compatible: **MAJOR**. On a `v0.x` predecessor, **MINOR**.
+→ Both need operator action and neither is backward-compatible: **MAJOR**; on `v0.x`, **MINOR**.
 
 When the rubric is ambiguous:
 

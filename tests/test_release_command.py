@@ -256,6 +256,43 @@ class TransactionCommandTest(ReleaseCommandCase):
         self.assertIsNotNone(status["release"]["receipt"])
         self.assertFalse(any(c["argv"][:2] == ["release", "create"] for c in self.world.calls()))
 
+    def test_a_release_parked_after_an_effect_is_disposed_by_preview_then_run(self):
+        """Issue 1050: the tag is published, the GitHub release can never be created."""
+        self.world.invoke_ready(create_exit=1, create_stderr="gh: HTTP 422")
+        self.world.not_found("gh", ROWS["tag.ref"]["argv"][1:])
+        self.world.not_found("gh", ROWS["release.view"]["argv"][1:])
+        self.run_with([c["token"] for c in self.preview()["confirmations"]])
+        self.world.respond_json("gh", ROWS["tag.ref"]["argv"][1:],
+                                {"object": {"type": "tag", "sha": CANONICAL["tag_object"]}})
+        self.world.respond_json("gh", ROWS["tag.object"]["argv"][1:],
+                                {"object": {"type": "commit", "sha": CANONICAL["commit"]}})
+        _, resume, _ = self.run_release("transaction", "preview")
+        confirms = [part for c in resume["confirmations"] for part in ("--confirm", c["token"])]
+        code, result, err = self.run_release("transaction", "run", *confirms, cwd=self.root)
+        self.assertEqual((code, result["next"]), (0, "attention"), err)
+        code, document, _ = self.run_release("transaction", "preview", *self.candidate())
+        self.assertEqual((code, document["error"]["code"]), (3, "release_in_flight"))
+        self.assertIn("--dispose no_recovery_path", document["error"]["detail"])
+        dispose = ["--dispose", "no_recovery_path"]
+        for argv, refusal in (([*dispose], "reference_required"),
+                              (["--reference", "why"], "dispose_invalid"),
+                              ([*dispose, "--reference", "why", *self.candidate()],
+                               "dispose_invalid")):
+            code, document, _ = self.run_release("transaction", "preview", *argv)
+            self.assertEqual((code, document["error"]["code"]), (3, refusal))
+        dispose += ["--reference", "the release can never be created"]
+        code, document, err = self.run_release("transaction", "preview", *dispose)
+        self.assertEqual((code, document["mode"]), (0, "dispose"), err)
+        token = document["confirmations"][0]["token"]
+        code, refused, _ = self.run_release("transaction", "run", *dispose, cwd=self.root)
+        self.assertEqual((code, refused["error"]["code"]), (3, "confirmation_required"))
+        code, result, err = self.run_release("transaction", "run", *dispose, "--confirm", token,
+                                             cwd=self.root)
+        self.assertEqual((code, result["state"], result["next"]), (0, "failed", "disposed"), err)
+        _, status, _ = self.run_release("transaction", "status")
+        self.assertEqual((status["release"]["state"], status["release"]["disposition"]["reference"]),
+                         ("failed", "the release can never be created"))
+
     def test_typed_refusals(self):
         code, document, _ = self.run_release("transaction", "preview", "--commit", "1" * 40)
         self.assertEqual((code, document["error"]["code"]), (3, "candidate_required"))

@@ -236,7 +236,30 @@ class ShipReleaseContractsTest(unittest.TestCase):
                 self.assertEqual(args.area, "transaction")
                 actions.add(args.action)
         self.assertEqual(actions, {"status", "preview", "run", "abandon"})
-        self.assertEqual(len(lines), 6)
+        self.assertEqual(len(lines), 7)
+
+    def test_a_release_parked_after_an_effect_is_disposed_on_the_users_yes(self):
+        """Issue 1050: the dispose form parses, sits in Phase 5 behind an explicit yes, and
+        the notes after a failed release start at the last succeeded version."""
+        from agent_tools.release import release
+        phase5 = self.skill.split("## Phase 5", 1)[1]
+        line, = [line for line in phase5.splitlines() if line.startswith("release transaction ")]
+        args = release.build_parser().parse_args(shlex.split(line)[1:])
+        self.assertEqual((args.action, args.dispose, args.reference),
+                         ("preview", "no_recovery_path", "<why>"))
+        for needle in ("on the user's explicit yes to its token, dispose it",
+                       "`run` the same with `--confirm <token>`",
+                       "then release the fix as a new version", "Never delete a tag."):
+            self.assertIn(needle, phase5)
+        self.assertNotIn("fix forward", self.skill)
+        phase1 = self.skill.split("## Phase 1", 1)[1].split("\n## ", 1)[0]
+        self.assertIn("After a `failed` release, CHANGELOG Step 1 names the range.", phase1)
+        step1 = self.changelog.split("## Step 1", 1)[1].split("\n## ", 1)[0]
+        self.assertIn(
+            "After a `failed` release the range is `<last-succeeded-tag>..origin/<integration>` "
+            "(the tag before the failed version), still `--first-parent --merges`: "
+            "`origin/<default>..` omits that release's merges. Say that version never fully "
+            "deployed.", step1)
 
     def test_status_is_read_before_nothing_to_release(self):
         phase0 = self.skill.split("## Phase 0", 1)[1].split("\n## ", 1)[0]
