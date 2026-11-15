@@ -16,9 +16,8 @@ question cannot be answered on the page (`NO_ANSWER` for an unknown id). `recomm
 `path_references`, `reference_policies`, `value`, `answers` or `subject` never raises: each is read
 with a default of `[]`, None or `""`.
 
-Single answer (#1065). A question whose plan offers exactly one answer ends its `ask` with a line
-break and `ONLY_ANSWER` (`This is the only thing the adoption can do with this file.`), so it never
-reads as a choice with a missing option; its button stays the action. The page shows the line break.
+Single answer (#1065, #1079). A question whose plan offers exactly one answer keeps its plain ask; the
+page sets that answer as the card's action (ADR-console-033).
 
 Wording. `candidate-class` asks what should happen to the subject; `archive-history` reads `Archive
 it under .agents/knowledge/archive/adopted/` and `retain-product` reads `Keep it where it is`. A
@@ -74,7 +73,6 @@ POLICY_LABELS = {
     "rewrite": "Change every path that can follow the move",
     "retain": "Leave these files as they are",
 }
-ONLY_ANSWER = "This is the only thing the adoption can do with this file."
 PROJECT_ASK = "Which project is this repository?"
 PROJECT_UNKNOWN = (
     "The plan cannot tell which project this is, so it cannot be answered here: give the repository "
@@ -92,8 +90,6 @@ def _options(answers: list, labels: Mapping[str, str]) -> list[dict]:
 
 
 def _question(entry: Mapping, ask: str, options: list, recommended, why) -> dict:
-    if len(options) == 1:
-        ask = f"{ask}\n{ONLY_ANSWER}"
     return {
         "id": entry.get("id", ""),
         "subject": entry.get("subject", ""),

@@ -1986,7 +1986,12 @@ function recommendedIndex(q) {
   if (Number.isInteger(i) && i >= 0 && i < q.options.length) return i;
   return q.options.indexOf(q.recommended);
 }
+// An adoption question the plan answers one way (ADR-console-033): no list to choose from, so the option is the card's action and starts picked.
+function soleOption(item) {
+  return item.reason === "register" && !textCard(item) && item.questions.length === 1 && item.questions[0].options.length === 1;
+}
 function startPicks(item) {
+  if (soleOption(item)) return [0];
   return item.questions.map((q) => {
     const chosen = q.options.indexOf(q.chosen);
     if (chosen >= 0) return chosen;
@@ -2477,7 +2482,8 @@ function statusLine(act, state, item) {
 function actionLine(item, state, lead) {
   const act = el("div", "act");
   if (!statusLine(act, state, item) && (item.questions.length > 0 || !textCard(item))) {
-    const send = actionButton(lead ? "send primary needs" : "send", "Send answer", () => { if (start(item, state)) redraw(); });
+    const words = soleOption(item) ? item.questions[0].options[0] : "Send answer";
+    const send = actionButton(lead ? "send primary needs" : "send", words, () => { if (start(item, state)) redraw(); });
     if (!picksComplete(item, state) || planBusy(item, state)) send.setAttribute("disabled", "");
     act.appendChild(send);
   }
@@ -2634,6 +2640,7 @@ function answerBox(item, state, lead) {
     if (item.questions.length > 1) {
       box.appendChild(el("p", live && itemId(item) === currentId && qi === now ? "meta now" : "meta", q.question));
     }
+    if (soleOption(item)) return;
     const list = el("ul", "opts");
     q.options.forEach((option, oi) => {
       const button = el("button", state.picks[qi] === oi ? "opt picked" : "opt");
@@ -2767,11 +2774,15 @@ function keyStrip(current, open) {
     if (current.state.reply.phase !== "sending") entry([el("kbd", "", "Enter")], " approve");
   } else if (current !== null) {
     const questions = current.item.questions;
-    if (questions.length > 0) {
+    if (soleOption(current.item)) {
+      if (picksComplete(current.item, current.state)) entry([el("kbd", "", "Enter")], " sends this answer");
+    } else if (questions.length > 0) {
       const n = Math.min(9, questions[Math.min(current.state.q, questions.length - 1)].options.length);
       entry(n > 1 ? [el("kbd", "", "1"), el("span", "", "\u2013"), el("kbd", "", String(n))] : [el("kbd", "", "1")], " choose");
     }
-    if (textCard(current.item)) {
+    if (soleOption(current.item)) {
+      // Its one strip entry is above.
+    } else if (textCard(current.item)) {
       entry([el("kbd", "", "Enter")], questions.length > 0 ? " sends your choice or what you typed" : " sends what you typed");
     } else if (picksComplete(current.item, current.state)) entry([el("kbd", "", "Enter")], " send answer");
   }

@@ -6801,8 +6801,7 @@ REGISTERED = {**REGISTERING, "status": "done", "result": "planned", "outcome": "
               "note": "The plan has 1 open question.", "line": "Register r: 1 question open"}
 Q_CANDIDATE = {
     "id": "candidate-class", "subject": ".claude/odd.md",
-    "ask": "What should happen to .claude/odd.md? No rule covers this agent file.\n"
-           "This is the only thing the adoption can do with this file.",
+    "ask": "What should happen to .claude/odd.md? No rule covers this agent file.",
     "options": [{"value": "archive-history",
                  "label": "Archive it under .agents/knowledge/archive/adopted/"}],
     "recommended": None, "why": None}
@@ -7536,13 +7535,28 @@ class RegisterCardPageTest(unittest.TestCase):
             ["register-close", "register-open"])
         self.assertEqual([n for n in nodes(snap["register"]) if has_class(n, "opt")], [])
 
-    def test_a_second_plan_question_row_keeps_its_options_and_send(self) -> None:
+    def test_a_single_option_card_offers_the_option_as_its_action(self) -> None:
+        first, second = render([START, {"frame": cards([R2])}, {"snapshot": True},
+                                {"respond": {"status": 204, "text": ""}},
+                                {"key": "Enter"}, {"clock": 5000}, {"snapshot": True}])
+        (lead,) = [n for n in nodes(first["inbox"]) if has_class(n, "lead")]
+        self.assertEqual(count(first, "opt"), 0)
+        (send,) = [n for n in nodes(lead) if has_class(n, "send")]
+        self.assertEqual(full(send), "Archive it under .agents/knowledge/archive/adopted/")
+        self.assertTrue(has_class(send, "primary"))
+        (strip,) = [n for n in nodes(first["inbox"]) if has_class(n, "keys")]
+        self.assertIn("sends this answer", full(strip))
+        self.assertEqual([full(n) for n in nodes(strip) if n["tag"] == "kbd"], ["Enter"])
+        self.assertNotIn("only thing", full(first["inbox"]))
+        (post,) = [p for p in second["posts"] if p["url"] == "/api/plan-answer"]
+        self.assertEqual(json.loads(post["body"])["value"], "archive-history")
+
+    def test_a_second_plan_question_row_offers_its_single_option_as_the_action(self) -> None:
         (snap,) = render([START, {"frame": cards([R0, R2])}, {"snapshot": True}])
         (row,) = rows_of(snap)
-        self.assertEqual([full(n) for n in nodes(row) if has_class(n, "opt")],
-                         ["1Archive it under .agents/knowledge/archive/adopted/"])
+        self.assertEqual([n for n in nodes(row) if has_class(n, "opt")], [])
         (send,) = [n for n in nodes(row) if has_class(n, "send")]
-        self.assertTrue(full(send).startswith("Send answer"))
+        self.assertEqual(full(send), "Archive it under .agents/knowledge/archive/adopted/")
         self.assertIn("Register r", full(row))
         self.assertIn(Q_CANDIDATE["ask"], full(row))
         self.assertNotIn("null", full(row))
