@@ -84,6 +84,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .card .q { margin-top: 10px; font: 600 1.5rem/1.3 var(--display); letter-spacing: -.012em; text-wrap: balance; }
 .more { font-size: .8125rem; color: var(--ov2); }
 .card .more { display: block; margin-top: 4px; }
+.card .context { margin-top: 8px; font-size: .9375rem; line-height: 1.5; color: var(--sub0); overflow-wrap: anywhere; }
 .card .opts { margin-top: 6px; padding-left: 18px; list-style: disc; color: var(--sub0); font-size: .84375rem; }
 .rest .opts, .done .opts { flex-basis: 100%; margin: 0; padding-left: 18px; list-style: disc; color: var(--sub0); font-size: .84375rem; }
 .rest .meta, .done .meta { flex-basis: 100%; margin: 0; font-size: .8125rem; color: var(--ov2); }
@@ -92,10 +93,11 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .card .meta { margin-top: 8px; font-size: .8125rem; color: var(--ov2); }
 .card .head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 0; font-size: .84375rem; color: var(--sub0); }
 .head .wait { margin-left: auto; }
-.head .sprint-goal { color: var(--text); overflow-wrap: anywhere; }
+.head .sprint-title { color: var(--text); overflow-wrap: anywhere; }
 .kind { display: inline-flex; gap: 7px; font-weight: 600; }
 .kind.needs { color: var(--peach); }
 .held { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--hair); font-size: .84375rem; color: var(--sub0); }
+.held.blocks { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .rest, .done { margin-top: 10px; }
 .rest li, .done li { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; padding: 5px 0; font-size: .875rem; color: var(--ov2); }
 .rest b, .done b { font-weight: 600; color: var(--sub0); }
@@ -157,7 +159,10 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .goal-filter { min-width: 0; }
 .goal-filter, .reply-text { width: 100%; font: inherit; color: var(--text); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; padding: 6px 10px; }
 .reply-text { min-height: 6em; resize: vertical; }
-.brief .goal-line { margin-top: 6px; font-size: 1.0625rem; overflow-wrap: anywhere; }
+.brief .title-line { margin-top: 6px; font-size: 1.0625rem; overflow-wrap: anywhere; }
+.brief .brief-goal { margin-top: 6px; font-size: .84375rem; }
+.brief .brief-goal summary { cursor: pointer; color: var(--ov2); }
+.brief .brief-goal p { color: var(--text); overflow-wrap: anywhere; }
 .brief .parts p { margin-top: 10px; }
 .brief .parts ul { margin-top: 4px; padding-left: 18px; list-style: disc; color: var(--sub0); font-size: .84375rem; }
 .reply { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; margin-top: 12px; }
@@ -168,7 +173,8 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .goal-act { display: flex; flex: none; gap: 8px; }
 .sprints { flex: 1 0 100%; padding: 0 0 0 16px; }
 .sprint { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; font-size: .8125rem; color: var(--sub0); }
-.sprint .goal-line { color: var(--text); font-weight: 500; overflow-wrap: anywhere; }
+.sprint .title-line { color: var(--text); font-weight: 500; overflow-wrap: anywhere; }
+.sprint-goal-full { color: var(--text); overflow-wrap: anywhere; }
 .sprint .age, .sprint .manager, .sprint .until, .sprint .status-age { color: var(--ov2); }
 .sp-head { flex: 1 0 100%; display: grid; grid-template-columns: 16px minmax(0, 1fr) fit-content(40%); column-gap: 12px; row-gap: 2px; align-items: start; }
 .sp-status { grid-column: 2 / -1; display: flex; flex-wrap: wrap; gap: 0 8px; }
@@ -417,6 +423,7 @@ function sprintDetail(sprint) {
   const fold = el("details", "sprint-detail");
   fold.dataset.key = "sprint:" + sprint.sprint_id;
   fold.appendChild(el("summary", "", "Detail"));
+  fold.appendChild(el("p", "sprint-goal-full", sprint.goal));
   const ended = isClosed(sprint);
   if (!ended && typeof sprint.progress_text === "string") {
     fold.appendChild(el("p", "progress", sprint.progress_text));
@@ -605,7 +612,7 @@ function drawSprint(item, entry, sprint) {
   const mark = el("span", "sic " + look.mark + " " + look.tone);
   mark.appendChild(icon(look.icon));
   head.appendChild(mark);
-  head.appendChild(el("span", "goal-line", sprint.goal));
+  head.appendChild(el("span", "title-line", sprint.title));
   const progress = sprint.progress;
   if (!isClosed(sprint) && progress !== null && typeof progress === "object" && progress.total > 0) {
     const prog = el("span", "sp-prog");
@@ -669,12 +676,9 @@ function drawSprint(item, entry, sprint) {
   if (typeof sprint.stop_text === "string") {
     item.appendChild(el("span", "stop-fail", sprint.stop_text));
   }
-  const hasClosing = closing !== null && typeof closing === "object";
-  if (typeof sprint.status === "string" || hasClosing || (sprint.sessions || []).length > 0 || messages.length > 1) {
-    const fold = sprintDetail(sprint);
-    if (wasOpen) fold.open = true;
-    item.appendChild(fold);
-  }
+  const fold = sprintDetail(sprint);
+  if (wasOpen) fold.open = true;
+  item.appendChild(fold);
   if (state !== undefined && state.phase === "failed") {
     item.appendChild(el("span", "fail", "Could not withdraw: " + state.reason));
   }
@@ -1777,12 +1781,12 @@ function headLine(item) {
   const line = el("p", "head meta");
   line.appendChild(kindWords(item));
   line.appendChild(el("span", "proj", item.project_id));
-  if (isQuestion(item)) line.appendChild(el("span", "sprint-goal", item.goal));
+  if (isQuestion(item)) line.appendChild(el("span", "sprint-title", item.title));
   line.appendChild(phrase("span", "wait", "waiting ", timeEl("since", item.waiting_since, "")));
   return line;
 }
 function heldLine(item) {
-  if (isQuestion(item)) return el("p", "held", "Blocks: " + item.blocks + (item.blocker ? " \u00b7 stops all work" : ""));
+  if (isQuestion(item)) return el("p", "held blocks", "Blocks: " + item.blocks + (item.blocker ? " \u00b7 stops all work" : ""));
   const line = phrase("p", "held", holds(item));
   if (item.stale) {
     line.appendChild(el("span", "", " \u00b7 "));
@@ -1862,11 +1866,16 @@ function check(item) {
 function answerable(item) {
   return decision(item) || check(item);
 }
+function recommendedIndex(q) {
+  const i = q.recommended_index;
+  if (Number.isInteger(i) && i >= 0 && i < q.options.length) return i;
+  return q.options.indexOf(q.recommended);
+}
 function startPicks(item) {
   return item.questions.map((q) => {
     const chosen = q.options.indexOf(q.chosen);
     if (chosen >= 0) return chosen;
-    const recommended = q.options.indexOf(q.recommended);
+    const recommended = recommendedIndex(q);
     return recommended >= 0 ? recommended : null;
   });
 }
@@ -2121,13 +2130,33 @@ async function sendReply(rec) {
   }
   redraw();
 }
+function sprintGoal(sprintId) {
+  if (lastView === null || !Array.isArray(lastView.entries)) return null;
+  for (const entry of lastView.entries) {
+    for (const project of entry.type === "quiet_group" ? entry.projects : [entry]) {
+      const finished = project.finished_sprints;
+      const shown = (project.sprints || []).concat(
+        finished !== null && finished !== undefined && Array.isArray(finished.sprints) ? finished.sprints : []);
+      for (const sprint of shown) {
+        if (sprint.sprint_id === sprintId && typeof sprint.goal === "string") return sprint.goal;
+      }
+    }
+  }
+  return null;
+}
 function briefRecord(sprintId) {
   let rec = briefCards.get(sprintId);
   if (rec === undefined) {
     const card = el("article", "card brief");
     const top = el("p", "head meta");
     const head = el("h2", "q");
-    const goal = el("p", "goal-line");
+    const title = el("p", "title-line");
+    const goalSlot = el("div", "brief-goal-slot");
+    const goalFold = el("details", "brief-goal");
+    goalFold.dataset.key = "brief-goal:" + sprintId;
+    goalFold.appendChild(el("summary", "", "The goal"));
+    const goalText = el("p");
+    goalFold.appendChild(goalText);
     const parts = el("div", "parts");
     const act = el("div", "act");
     const field = el("textarea", "reply-text");
@@ -2138,13 +2167,13 @@ function briefRecord(sprintId) {
     const rowHead = el("summary", "row-head");
     row.appendChild(rowHead);
     rec = {
-      card, top, head, goal, parts, act, field, status: el("p", "act"), item: null,
+      card, top, head, title, goalSlot, goalFold, goalText, parts, act, field, status: el("p", "act"), item: null,
       row, rowHead, seen: null,
     };
     rec.send = actionButton("reply-send", "Ask for changes", () => sendReply(rec));
     const box = el("div", "reply");
     for (const part of [field, rec.send, rec.status]) box.appendChild(part);
-    for (const part of [top, head, goal, parts, act, box]) card.appendChild(part);
+    for (const part of [top, head, title, goalSlot, parts, act, box]) card.appendChild(part);
     briefCards.set(sprintId, rec);
   }
   return rec;
@@ -2169,7 +2198,7 @@ function drawBrief(rec, item, lead) {
   } else {
     rec.top.replaceChildren();
     rec.rowHead.replaceChildren(
-      kindWords(item), el("b", "", item.goal), el("span", "lm", item.project_id),
+      kindWords(item), el("b", "", item.title), el("span", "lm", item.project_id),
       phrase("span", "lw", "waiting ", timeEl("since", item.waiting_since, "")),
     );
     // A row opens itself once per change of its approval or reply phase; the owner's own open or close stands between.
@@ -2179,7 +2208,10 @@ function drawBrief(rec, item, lead) {
     rec.seen = pair;
   }
   rec.head.textContent = item.project_id + " brief, version " + item.version;
-  rec.goal.textContent = item.goal;
+  rec.title.textContent = item.title;
+  const goal = sprintGoal(item.sprint_id);
+  rec.goalText.textContent = goal === null ? "" : goal;
+  rec.goalSlot.replaceChildren(...(goal === null ? [] : [rec.goalFold]));
   rec.parts.replaceChildren(
     el("p", "meta", "What done looks like"), el("p", "", parts.done),
     ...listPart("Excluded", parts.excluded), ...listPart("Slices", parts.slices),
@@ -2404,7 +2436,7 @@ function answerBox(item, state, lead) {
       button.appendChild(el("kbd", "", String(oi + 1)));
       button.setAttribute("aria-pressed", String(state.picks[qi] === oi));
       button.appendChild(el("span", "ot", option === q.chosen ? "chosen: " + option : option));
-      if (option === q.recommended) button.appendChild(el("span", "rec", "Recommended"));
+      if (oi === recommendedIndex(q)) button.appendChild(el("span", "rec", "Recommended"));
       button.addEventListener("click", () => {
         if (!choosable(state)) return;
         choose(state, qi, oi);
@@ -2432,6 +2464,7 @@ function leadItem(item) {
   const card = el("article", "card lead");
   card.appendChild(headLine(item));
   card.appendChild(el("h2", "q", item.headline));
+  if (isQuestion(item) && typeof item.context === "string") card.appendChild(el("p", "context", item.context));
   const more = moreWords(item);
   if (more !== null) card.appendChild(more);
   const state = boxState(item);
@@ -2451,7 +2484,7 @@ function itemLine(item) {
   const head = el("p", "row-head");
   head.appendChild(kindWords(item));
   head.appendChild(el("b", "", item.headline));
-  const lm = phrase("span", "lm", item.project_id + " \u00b7 " + (isQuestion(item) ? item.goal : holds(item)));
+  const lm = phrase("span", "lm", item.project_id + " \u00b7 " + (isQuestion(item) ? item.title : holds(item)));
   if (item.stale) {
     lm.appendChild(el("span", "", " \u00b7 "));
     lm.appendChild(phrase("span", "read-at", "read ", timeEl("ago", item.read_at, "")));
@@ -2459,6 +2492,7 @@ function itemLine(item) {
   head.appendChild(lm);
   head.appendChild(phrase("span", "lw", "waiting ", timeEl("since", item.waiting_since, "")));
   line.appendChild(head);
+  if (isQuestion(item) && typeof item.context === "string") line.appendChild(el("p", "context", item.context));
   const more = moreWords(item);
   if (more !== null) line.appendChild(more);
   const state = boxState(item);
