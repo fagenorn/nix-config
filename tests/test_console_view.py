@@ -2162,3 +2162,43 @@ class RetryItemViewTest(unittest.TestCase):
         self.assertEqual(shown["inbox"]["open"], [RETRY_ITEM])
         self.assertEqual(shown["statement"]["inbox_items"], 1)
         self.assertEqual(shown["statement"]["headline"], "1 thing needs you")
+
+
+APPLY_ITEM = {
+    "type": "inbox_item", "reason": "register_apply",
+    "key": f"register-apply/{PID}/2026-11-15T08:00:00+00:00",
+    "project_id": None, "root": "/srv/sample-app", "name": "sample-app",
+    "title": "Register sample-app", "plan_id": PID, "id": None, "subject": None,
+    "headline": "Apply this adoption?", "why": None, "lines": ["writes the project contract"],
+    "refusal": None, "more_questions": 0,
+    "questions": [{"question": "Apply this adoption?", "options": ["Apply it", "Not now"],
+                   "chosen": None, "recommended": None, "recommended_index": None}],
+    "text": False, "values": ["apply", "not_now"], "items": [], "answers": [],
+    "answered": False, "waiting_since": "2026-11-15T08:00:00+00:00"}
+
+
+class ApplyItemViewTest(unittest.TestCase):
+    def test_an_apply_item_is_one_counted_entry_with_the_registration_cards(self):
+        shown = derive_view([state("p", 1)], RegisterItemViewTest.decision(self),
+                            registration=reg([ASK_A]), retry_items=[RETRY_ITEM],
+                            apply_items=[APPLY_ITEM])
+        self.assertEqual([e["key"] for e in shown["inbox"]["open"]],
+                         [RETRY_ITEM["key"], f"register/{PID}/0", APPLY_ITEM["key"], "k1"])
+        self.assertEqual(shown["statement"]["inbox_items"], 4)
+        self.assertEqual(shown["statement"]["headline"], "4 things need you")
+        third = shown["inbox"]["open"][2]
+        self.assertEqual(third, APPLY_ITEM)
+        self.assertIsNot(third, APPLY_ITEM)
+
+    def test_an_apply_item_sets_the_register_sentence(self):
+        records = RegisterItemViewTest.decision(self)
+        without = derive_view([state("p", 1)], records)
+        self.assertEqual(without["statement"]["sentence"], CHOOSE_SENTENCE)
+        shown = derive_view([state("p", 1)], records, apply_items=[APPLY_ITEM])
+        self.assertEqual(shown["statement"]["sentence"], REGISTER_SENTENCE)
+
+    def test_an_apply_item_needs_no_registered_project(self):
+        shown = derive_view([], apply_items=[APPLY_ITEM])
+        self.assertEqual(shown["inbox"]["open"], [APPLY_ITEM])
+        self.assertEqual(shown["statement"]["inbox_items"], 1)
+        self.assertEqual(shown["statement"]["headline"], "1 thing needs you")
