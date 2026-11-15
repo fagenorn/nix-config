@@ -61,8 +61,26 @@ without a `plan_id`: D5). A `no_change` plan with no report (only an answer run 
 --register --repo-root <root>` (D5). A failed plan's headline is `The adoption plan for <name> failed:
 <message>`, or `... could not be made.` when the error has no message; a refused registration's is
 `<name> was not registered: <message>`, or `... was not registered.`; neither shows the error code
-(#1057). `failed(root, kind)` is the same shape for a run that raised, its headline ending in the
+(#1057). `failed(root, kind, verb="plan")` is the same shape for a run that raised, its headline ending in the
 words of `RUN_WORDS[kind]` (an unknown kind reads `it stopped unexpectedly`), never the kind word.
+
+Next step (#1062). Every failed headline ends with a full stop, and every failed row (a plan that
+failed, a refused or unconfirmed registration, a run that raised) carries one plain line in `note`
+saying what the owner can do next, never an error code. `next_step(root, error, verb)` reads the
+error's `repair_id`: `adopt.manifest.*` says the agent platform's files are not installed yet, that
+`just switch` installs them and to press Register again; `adopt.registration.no_remote`
+says to add the origin remote; `remote_default_unknown` (an origin that exists but advertises no
+default branch) says the origin needs a published default branch, not another origin;
+`adopt.git.remote_unreachable` and
+`fetch_failed` say to check the remote can be reached; `adopt.registration.not_integrated` says to
+merge the adoption into the remote's main branch; each ends with pressing Register again. Any other
+failure names `adopt-project plan --repo-root <path>` (`verify --register` for a registration) as the
+terminal command that shows the full reason. `run_next_step(root, kind, verb="plan")` is the line for
+a run that raised, `verb` being the operation that raised (`plan` or `register`): `timed_out`,
+`not_installed`, `unavailable` and `cancelled` say to press Register again and, if it keeps failing,
+name that verb's command; every other kind names it alone. `failed(root, kind, verb="plan")` for the
+`register` verb reads `<name> was not registered: <words>.`, so a registration that raised never
+sends the owner to rerun the plan that had succeeded.
 
 Row. `ended(payload)` is `("registration.ended", None, payload)` and raises `ValueError` unless the
 members are exactly `MEMBERS` (a legacy row) or exactly `MEMBERS | EXTRA`, `by` is `owner`,
@@ -83,6 +101,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import subprocess
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
@@ -116,6 +135,24 @@ RUN_WORDS = {
     "unreadable": "the adoption tool gave an answer that could not be read",
 }
 UNEXPECTED = "it stopped unexpectedly"
+AGAIN = "press Register again."
+MANIFEST_STEP = ("The agent platform's files are not installed on this host yet. Run just switch "
+                 "in a terminal to install them, then " + AGAIN)
+REMOTE_STEP = "Add the repository's origin remote, then " + AGAIN
+DEFAULT_BRANCH_STEP = ("The repository's origin remote needs a published default branch. Push one to "
+                       "it, then " + AGAIN)
+UNREACHABLE_STEP = ("Check that the repository's remote can be reached from this host, then "
+                    + AGAIN)
+INTEGRATED_STEP = "The adoption is not on the remote's main branch yet. Merge it, then " + AGAIN
+RETRY_KINDS = ("timed_out", "not_installed", "unavailable", "cancelled")
+NEXT_STEPS = {
+    "adopt.registration.no_remote": REMOTE_STEP,
+    "adopt.registration.remote_default_unknown": DEFAULT_BRANCH_STEP,
+    "adopt.git.remote_unreachable": UNREACHABLE_STEP,
+    "adopt.git.fetch_failed": UNREACHABLE_STEP,
+    "adopt.registration.not_integrated": INTEGRATED_STEP,
+}
+MANIFEST_PREFIX = "adopt.manifest."
 
 
 def not_directory(path: str) -> str:
@@ -256,6 +293,30 @@ def _error_message(error: Mapping) -> str:
     return ""
 
 
+def _sentence(text: str) -> str:
+    return text if text.endswith((".", "!", "?")) else text + "."
+
+
+def _full_reason(root: str, verb: str) -> str:
+    command = (f"adopt-project plan --repo-root {shlex.quote(root)}" if verb == "plan"
+               else f"adopt-project verify --register --repo-root {shlex.quote(root)}")
+    return f"Run {command} in a terminal to see the full reason."
+
+
+def run_next_step(root: str, kind: str, verb: str = "plan") -> str:
+    if kind in RETRY_KINDS:
+        return ("Press Register again. If it keeps failing, run "
+                + _full_reason(root, verb).removeprefix("Run "))
+    return _full_reason(root, verb)
+
+
+def next_step(root: str, error: Mapping, verb: str) -> str:
+    repair_id = str(error.get("repair_id") or "")
+    if repair_id.startswith(MANIFEST_PREFIX):
+        return MANIFEST_STEP
+    return NEXT_STEPS.get(repair_id) or _full_reason(root, verb)
+
+
 def _row(root: str, project_id: str | None, result: str, outcome: str | None, headline: str,
          lines: list[str], note: str | None, *, plan_id: str | None = None,
          state: str | None = None, questions: Iterable[dict] = (),
@@ -294,9 +355,9 @@ def summary(root: str, plan: Mapping, report: Mapping | None = None) -> dict:
     name = name_of(root)
     if "error" in plan:
         message = _error_message(plan["error"])
-        text = (f"The adoption plan for {name} failed: {message}" if message
+        text = (_sentence(f"The adoption plan for {name} failed: {message}") if message
                 else f"The adoption plan for {name} could not be made.")
-        return _row(root, None, "failed", None, text, [], None)
+        return _row(root, None, "failed", None, text, [], next_step(root, plan["error"], "plan"))
     header = plan["plan"]
     outcome = header["outcome"]
     project_id = report.get("project_id") if report is not None else header.get("project_id")
@@ -309,9 +370,10 @@ def summary(root: str, plan: Mapping, report: Mapping | None = None) -> dict:
     if outcome == "no_change":
         if report is not None and "error" in report:
             message = _error_message(report["error"])
-            text = (f"{name} was not registered: {message}" if message
+            text = (_sentence(f"{name} was not registered: {message}") if message
                     else f"{name} was not registered.")
-            return _row(root, project_id, "not_registered", outcome, text, [], None)
+            return _row(root, project_id, "not_registered", outcome, text, [],
+                        next_step(root, report["error"], "register"))
         if report is not None and report.get("registered") is True:
             return _row(root, project_id, "registered", outcome,
                         f"{name} is registered as {report.get('project_id')}.", [], None)
@@ -324,7 +386,8 @@ def summary(root: str, plan: Mapping, report: Mapping | None = None) -> dict:
                         [], None)
         result = _collapse(report.get("result"))
         return _row(root, project_id, "not_registered", outcome,
-                    f"{name} was not registered: {result}", [], None)
+                    _sentence(f"{name} was not registered: {result}"), [],
+                    _full_reason(root, "register"))
     command = plan.get("handoff", {}).get("next_command")
     if outcome == "migration_required":
         migration = _after(command, "migrate")
@@ -339,10 +402,11 @@ def summary(root: str, plan: Mapping, report: Mapping | None = None) -> dict:
     return failed(root, "unreadable")
 
 
-def failed(root: str, kind: str) -> dict:
-    return _row(root, None, "failed", None,
-                f"The adoption plan for {name_of(root)} failed: {RUN_WORDS.get(kind, UNEXPECTED)}",
-                [], None)
+def failed(root: str, kind: str, verb: str = "plan") -> dict:
+    words = RUN_WORDS.get(kind, UNEXPECTED)
+    headline = (f"{name_of(root)} was not registered: {words}." if verb == "register"
+                else f"The adoption plan for {name_of(root)} failed: {words}.")
+    return _row(root, None, "failed", None, headline, [], run_next_step(root, kind, verb))
 
 
 def _extras_valid(payload: Mapping) -> bool:

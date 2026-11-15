@@ -119,12 +119,14 @@ def real_home_state() -> tuple:
 
 
 class Fake:
-    def __init__(self, plan=None, report=None, block=None, raises=None, raises_on=None):
+    def __init__(self, plan=None, report=None, block=None, raises=None, raises_on=None,
+                 register_raises=None):
         self.document = plan
         self.report = report
         self.block = block
         self.raises = raises
         self.raises_on = raises_on
+        self.register_raises = register_raises
         self.calls = []
         self.answers = []
 
@@ -148,6 +150,8 @@ class Fake:
 
     def register(self, root, cancel=None):
         self._run("register", root, cancel)
+        if self.register_raises is not None:
+            raise self.register_raises
         return self.report
 
 
@@ -375,8 +379,19 @@ class RegisterRunTest(Case):
         (_, row), = self.rows("registration.ended")
         self.assertEqual(row["result"], "failed")
         self.assertEqual(row["headline"],
-                         f"The adoption plan for {repo.name} failed: it took too long and was stopped")
+                         f"The adoption plan for {repo.name} failed: it took too long and was stopped.")
+        self.assertIn("Press Register again", row["note"])
         self.assertEqual(self.view()["registration"]["status"], "done")
+
+    def test_a_registration_that_raised_names_the_register_command(self):
+        fake = Fake(plan=NO_CHANGE, register_raises=register.RunFailed("unreadable"))
+        self.begin(fake)
+        repo = git_repo(self.parent / "r")
+        self.assertEqual(self.post({"path": str(repo)})[0], 204)
+        (_, row), = self.rows("registration.ended")
+        self.assertEqual(row["result"], "failed")
+        self.assertIn("verify --register --repo-root", row["note"])
+        self.assertNotIn("adopt-project plan", row["note"])
 
     def test_a_no_change_plan_runs_the_register_check(self):
         report = {"registered": True, "project_id": "o/r", "result": "adopted"}

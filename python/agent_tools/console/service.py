@@ -2618,16 +2618,18 @@ class ConsoleService:
             raise
 
     def _run_registration(self, root: str) -> None:
+        verb = "plan"
         try:
             plan = self._adopter.plan(root, cancel=self._stop)
             report = None
             if plan.get("plan", {}).get("outcome") == "no_change":
+                verb = "register"
                 report = self._adopter.register(root, cancel=self._stop)
             payload = register.summary(root, plan, report)
         except register.RunFailed as error:
-            payload = register.failed(root, error.kind)
+            payload = register.failed(root, error.kind, verb)
         except Exception as error:
-            payload = register.failed(root, type(error).__name__)
+            payload = register.failed(root, type(error).__name__, verb)
         with self._ingest:
             if not self._closed:
                 self._fold(self.log.append([register.ended(payload)]))
