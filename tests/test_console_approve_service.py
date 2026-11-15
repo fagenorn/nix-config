@@ -14,6 +14,7 @@ import re
 import threading
 import time
 from pathlib import Path
+from unittest import mock
 
 from agent_tools.console import approve, register, register_check, service
 from agent_tools.console import event_log
@@ -28,6 +29,9 @@ from .test_console_register_service import (
 
 PATH = "/api/plan-approve"
 RETRY_PATH = "/api/adoption-register"
+DEFER_PATH = "/api/plan-defer"
+OLD_PUSH_NOTE = ("Check that the repository's origin can be reached from this host and accepts the "
+                 "push, then press Try again.")
 BRANCH = "adopt-bbbbbbbbbbbb"
 COMMIT = "c" * 40
 APPLIED = {"branch": BRANCH, "commit": COMMIT, "plan_id": PID_B, "migration_map": "m",
@@ -251,6 +255,18 @@ class ApproveCase(Case):
             worker.join(30)
         return status
 
+    def apply_cards(self):
+        return [i for i in self.view()["inbox"]["open"] if i["reason"] == "register_apply"]
+
+    def defer(self, plan_id=PID_B, raw=None, headers=None):
+        payload = json.dumps({"plan_id": plan_id}).encode() if raw is None else raw
+        sent = self.own(**{"Content-Type": "application/json"}) if headers is None else headers
+        status, _, body = support.post_page(self.svc.address, DEFER_PATH, sent, payload)
+        return status, body
+
+    def deferrals(self):
+        return [payload for _, payload in self.rows("adoption.deferred")]
+
     def settled(self, count, bound=120):
         end = time.monotonic() + bound
         while time.monotonic() < end:
@@ -261,6 +277,152 @@ class ApproveCase(Case):
                 return found
             time.sleep(0.05)
         self.fail("the registration never settled")
+
+
+class ApplyCardTest(ApproveCase):
+    def test_a_ready_plan_is_one_apply_card_counted_in_the_statement(self):
+        self.ready(apply_result=APPLIED)
+        (card,) = self.apply_cards()
+        self.assertEqual(card["title"], "Register reconcile")
+        self.assertEqual(card["headline"], "Apply this adoption?")
+        self.assertEqual(card["questions"][0]["options"], ["Apply it", "Not now"])
+        self.assertEqual(card["values"], ["apply", "not_now"])
+        self.assertEqual(card["lines"], self.shown["lines"])
+        self.assertEqual(card["key"], f"register-apply/{PID_B}/{self.shown['at']}")
+        view = self.view()
+        self.assertIn(card, view["inbox"]["open"])
+        self.assertEqual(view["statement"]["inbox_items"], len(view["inbox"]["open"]))
+
+    def test_apply_it_dispatches_the_approve_write_and_the_work_line_says_applying(self):
+        gate = threading.Event()
+        self.ready(apply_result=APPLIED, apply_block=gate)
+        self.addCleanup(gate.set)
+        (card,) = self.apply_cards()
+        self.assertEqual(self.approve_plan(card["plan_id"])[0], 204)
+        self.assertEqual(self.apply_cards(), [])
+        self.assertEqual(self.view()["registration"]["line"],
+                         "Applying the adoption of reconcile and opening its pull request…")
+        gate.set()
+        self.until("opened")
+        for worker in self.approval_threads():
+            worker.join(30)
+        self.assertEqual(self.fake.applied, [(PID_B, False)])
+        self.assertEqual(self.apply_cards(), [])
+
+    def test_not_now_removes_the_card_until_the_plan_id_changes(self):
+        self.ready(apply_result=APPLIED)
+        before = self.view()["statement"]["inbox_items"]
+        self.assertEqual(self.defer(), (204, b""))
+        self.assertEqual(self.apply_cards(), [])
+        view = self.view()
+        self.assertEqual(view["statement"]["inbox_items"], before - 1)
+        self.assertEqual(view["registration"]["line"], "Register reconcile: ready to apply")
+        self.assertEqual(self.deferrals(), [{"plan_id": PID_B}])
+        self.svc.refresh()
+        self.svc.poll_adoptions()
+        self.assertEqual(self.apply_cards(), [])
+        self.fake.document = {**READY, "plan": {**READY["plan"], "plan_id": PID_A}}
+        self.registered(self.repo)
+        (card,) = self.apply_cards()
+        self.assertEqual(card["plan_id"], PID_A)
+
+    def test_not_now_holds_across_a_restart_and_registering_the_same_plan_again(self):
+        self.ready(apply_result=APPLIED)
+        self.assertEqual(self.defer()[0], 204)
+        self.restart()
+        self.assertEqual(self.apply_cards(), [])
+        self.registered(self.repo)
+        self.assertEqual(self.apply_cards(), [])
+        self.assertEqual(self.deferrals(), [{"plan_id": PID_B}])
+
+    def test_not_now_refusals(self):
+        self.ready(apply_result=APPLIED)
+        own = f"http://127.0.0.1:{self.svc.address[1]}"
+        before = len(support.log_rows(self.store))
+        status, body = self.defer(headers={"Origin": own, "Content-Type": "application/json"})
+        self.assertEqual(status, 403)
+        self.assertEqual(len(self.apply_cards()), 1)
+        self.assertEqual(self.defer(raw=b"{}"), (400, b"bad plan deferral\n"))
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            self.assertEqual(self.defer(PID_A), (409, approve.DEFER_STALE.encode() + b"\n"))
+        self.assertIn(f"console: plan_defer_refused {approve.DEFER_STALE}", errors.getvalue())
+        self.assertEqual(len(support.log_rows(self.store)), before)
+        self.assertEqual(self.defer()[0], 204)
+        after = len(support.log_rows(self.store))
+        self.assertEqual(self.defer(), (409, approve.NOT_OFFERED.encode() + b"\n"))
+        self.assertEqual(len(support.log_rows(self.store)), after)
+        self.assertEqual(len(self.deferrals()), 1)
+
+    def test_a_failed_push_is_one_try_again_card_that_resumes_at_the_push(self):
+        self.pusher.raises = [approve.PushFailed("remote rejected the push", "d")]
+        fake = self.ready(apply_result=APPLIED)
+        shown, _ = self.run_approval("push_failed")
+        (card,) = self.apply_cards()
+        self.assertEqual(card["questions"][0]["options"], ["Try again", "Not now"])
+        self.assertEqual(card["values"], ["retry", "not_now"])
+        self.assertEqual(card["headline"], shown["adoption"]["headline"])
+        self.assertEqual(card["why"], approve.PUSH_NOTE)
+        self.assertEqual(card["lines"], [])
+        self.run_approval("opened", plan_id=card["plan_id"])
+        self.assertEqual(len(fake.applied), 1)
+        self.assertEqual(self.pusher.calls, [(str(self.repo), BRANCH, COMMIT)] * 2)
+        self.assertEqual(len(self.opens()), 1)
+        self.assertEqual(self.apply_cards(), [])
+
+    def test_a_failed_pull_request_is_one_try_again_card_that_resumes_at_the_open(self):
+        self.forge.open_raises = [ForgeError("gh_failed", "gh: Validation Failed (HTTP 422)")]
+        fake = self.ready(apply_result=APPLIED)
+        self.run_approval("open_failed")
+        self.assertEqual(self.pusher.calls, [(str(self.repo), BRANCH, COMMIT)])
+        (card,) = self.apply_cards()
+        self.assertEqual(card["questions"][0]["options"], ["Try again", "Not now"])
+        for word in ("HTTP", "422", "gh_failed"):
+            self.assertNotIn(word, card["why"])
+        self.pusher.raises = [approve.PushFailed("remote rejected the push", "d")]
+        shown, _ = self.run_approval("opened", "push_failed", plan_id=card["plan_id"])
+        self.assertEqual(shown["adoption"]["step"], "opened")
+        self.assertEqual(self.pusher.calls, [(str(self.repo), BRANCH, COMMIT)])
+        self.assertEqual(len(fake.applied), 1)
+        self.assertEqual(self.steps()[-1], "opened")
+        self.assertEqual(self.apply_cards(), [])
+
+    def test_a_failed_apply_offers_apply_it_again(self):
+        self.ready(apply_result=GATE)
+        shown, _ = self.run_approval("apply_failed")
+        (card,) = self.apply_cards()
+        self.assertEqual(card["questions"][0]["options"], ["Apply it again", "Not now"])
+        self.assertEqual(card["values"], ["apply", "not_now"])
+        self.assertEqual(card["why"], shown["adoption"]["note"])
+
+    def test_not_now_on_a_failed_step_hides_it_and_keeps_the_work_line(self):
+        self.pusher.raises = [approve.PushFailed("remote rejected the push", "d")]
+        self.ready(apply_result=APPLIED)
+        shown, _ = self.run_approval("push_failed")
+        self.assertEqual(self.defer()[0], 204)
+        self.assertEqual(self.apply_cards(), [])
+        self.assertEqual(self.view()["registration"]["line"], shown["line"])
+
+    def test_an_unexpected_deferral_failure_is_logged_in_full(self):
+        self.ready(apply_result=APPLIED)
+        errors = io.StringIO()
+        with mock.patch.object(self.svc, "defer_plan", side_effect=RuntimeError("the log is gone")):
+            with contextlib.redirect_stderr(errors):
+                self.assertEqual(self.defer(), (500, b"deferring failed\n"))
+        self.assertIn("console: plan_defer_failed RuntimeError: the log is gone", errors.getvalue())
+        self.assertIn("Traceback (most recent call last)", errors.getvalue())
+
+    def test_a_failure_row_in_the_old_words_is_shown_in_the_card_words(self):
+        self.pusher.raises = [approve.PushFailed("remote rejected the push", "d")]
+        self.ready(apply_result=APPLIED)
+        self.run_approval("push_failed")
+        last = self.rows("adoption.step")[-1][1]
+        self.svc.log.append([approve.step_row({**last, "note": OLD_PUSH_NOTE})])
+        self.restart()
+        (card,) = self.apply_cards()
+        self.assertEqual(card["why"], approve.PUSH_NOTE)
+        self.assertEqual(self.adoption()["note"], approve.PUSH_NOTE)
+        self.assertEqual(self.rows("adoption.step")[-1][1]["note"], OLD_PUSH_NOTE)
 
 
 class PlanApproveGuardTest(ApproveCase):
@@ -495,7 +657,7 @@ class PlanApproveRunTest(ApproveCase):
         self.assertEqual(shown["approve"], "retry")
         self.assertEqual([call[0] for call in self.forge.calls], ["find", "open", "find"])
         shown, _ = self.run_approval("opened")
-        self.assertEqual(len(self.pusher.calls), 2)
+        self.assertEqual(len(self.pusher.calls), 1)
         self.assertEqual(len(self.opens()), 2)
         self.assertEqual(shown["adoption"]["step"], "opened")
         self.assertEqual(len(fake.applied), 1)

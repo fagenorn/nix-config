@@ -28,6 +28,7 @@ Routes (every response carries `Cache-Control: no-store` and
     POST /api/register-project 204, a JSON body, the page names a repository to adopt (below)
     POST /api/plan-answer 204, a JSON body, the page answers one question of the adoption plan (below)
     POST /api/plan-approve 204, a JSON body, the page approves a ready adoption plan (below)
+    POST /api/plan-defer 204, a JSON body, the page answers Not now to an adoption's apply card (below)
     POST /api/brief 200 application/json, a manager sends a sprint's brief (below)
     POST /api/report 200 application/json, a manager sends a sprint's report (below)
     POST /api/close 200 application/json, a manager sends a sprint's closing report (below)
@@ -67,8 +68,8 @@ A page write (`PAGE_WRITES`, today `POST /api/looked`, `POST /api/answer`, `POST
 `POST /api/goal`, `POST /api/withdraw`, `POST /api/approve`, `POST /api/reply`,
 `POST /api/retry-manager`, `POST /api/message`, `POST /api/stop`, `POST /api/round-answer`, `POST /api/continue`, `POST /api/exclusion`, `POST /api/pin`, `POST /api/signin`,
 `POST /api/signin-code`, `POST /api/signin-cancel`, `POST /api/signin-link`, `POST /api/account-add`, `POST /api/account-remove` and
-`POST /api/register-project`, `POST /api/plan-answer`, `POST /api/plan-approve` and
-`POST /api/adoption-register`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
+`POST /api/register-project`, `POST /api/plan-answer`, `POST /api/plan-approve`,
+`POST /api/adoption-register` and `POST /api/plan-defer`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
 alone and goes through one guard, `_page_write`, whatever its route. After the loopback `Host`
 check and before any body is read, exactly one `Origin` header must equal `http://<Host>` (else
 403 `text/plain` `origin refused`) and exactly one `X-Console-Token` header must equal the
@@ -261,8 +262,9 @@ before opening one and, when the open fails, looks once more (a pull request who
 is found, never opened twice) and appends `opened`. A failure appends `apply_failed`,
 `push_failed` or `open_failed` with plain words; the original error (code, detail, traceback) is one
 stderr line `console: plan_approve_error <json>` and never reaches the page. A step in
-`approve.RESUMABLE` is resumed by the next approval (Try again) at the step that failed: apply is
-never run twice for a pushed or kept branch. The console stops between steps and inside every child
+`approve.RESUMABLE` is resumed by the next approval (the card's Try again or Apply it again) at the step that
+failed: apply is never run twice for a pushed or kept branch, and an `open_failed` step resumes at
+the open without pushing again. The console stops between steps and inside every child
 and forge call when it closes, appending nothing for the stopped step, so the next approval resumes;
 the one exception is the `applied` row, which is appended even when the close has begun, because
 apply has already made its branch and a restarted console must not offer a fresh apply.
@@ -280,6 +282,17 @@ refused registration, `approve.NOT_REFUSED`. Otherwise the answer is an empty `2
 is dispatched on a tracked thread (`APPROVAL_THREAD`) that `close` joins, and the run appends its
 outcome whatever it is (an identical refusal included, so the card is fresh). Any other exception
 is `console: adoption_register_failed <Type>` and 500 `registering failed`.
+
+`POST /api/plan-defer` (#1073, ADR-console-030) is the `Not now` of the apply card. It runs the
+same checks with `MAX_PLAN_DEFER_BYTES` (4096) and `approve.parse_approve_request`: 400
+`bad plan deferral`. The service refuses, each as 409 with the text, one stderr line
+`console: plan_defer_refused <reason>`, appending and running nothing, in this order: when the
+shown registration has no plan id or another one than the body's, `approve.DEFER_STALE`; when no
+apply card is offered for that plan, `approve.NOT_OFFERED`. Otherwise it appends one
+`adoption.deferred` row, which is folded into `_deferred` at start and on append, and the answer is
+an empty `204`. A plan in `_deferred` gets no apply card until the shown plan id is another one; the
+work line is unchanged. It runs nothing else. Any other exception is
+`console: plan_defer_failed <Type>: <message>`, then its traceback, and 500 `deferring failed`.
 
 `POST /api/readings` runs the same checks in the same order (loopback `Host`, no `Origin`,
 `application/json`, a length, at most `MAX_READING_BYTES`), answers `204` and flushes, and only
@@ -1024,12 +1037,13 @@ REGISTER_PATH = "/api/register-project"
 PLAN_ANSWER_PATH = "/api/plan-answer"
 PLAN_APPROVE_PATH = "/api/plan-approve"
 ADOPTION_REGISTER_PATH = "/api/adoption-register"
+PLAN_DEFER_PATH = "/api/plan-defer"
 PAGE_WRITES: frozenset[str] = frozenset({
     LOOKED_PATH, ANSWER_PATH, CHECK_PATH, GOAL_PATH, WITHDRAW_PATH, APPROVE_PATH, REPLY_PATH,
     RETRY_PATH, MESSAGE_PATH, STOP_PATH, ROUND_ANSWER_PATH, CONTINUE_PATH, EXCLUSION_PATH,
     PIN_PATH, SIGNIN_PATH, SIGNIN_CODE_PATH, SIGNIN_CANCEL_PATH, SIGNIN_LINK_PATH, ACCOUNT_ADD_PATH,
     ACCOUNT_REMOVE_PATH, REGISTER_PATH, PLAN_ANSWER_PATH, PLAN_APPROVE_PATH,
-    ADOPTION_REGISTER_PATH})
+    ADOPTION_REGISTER_PATH, PLAN_DEFER_PATH})
 MAX_SIGNIN_BYTES = 4096
 MAX_ACCOUNT_BYTES = 4096
 MAX_REMOVE_BYTES = 4096
@@ -1037,6 +1051,7 @@ MAX_REGISTER_BYTES = 4096
 MAX_PLAN_ANSWER_BYTES = 4096
 MAX_PLAN_APPROVE_BYTES = 4096
 MAX_ADOPTION_REGISTER_BYTES = 4096
+MAX_PLAN_DEFER_BYTES = 4096
 APPROVAL_THREAD = "console-adoption-approval"
 SIGNIN_THREAD = "console-signin-deadline"
 SIGNIN_TICK_SECONDS = 1.0
@@ -1552,6 +1567,29 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return False
         return True
 
+    def _plan_defer_request(self, console: "ConsoleService") -> bool:
+        """Carry out the Not now write; True when the shared 204 is to be sent."""
+        body = self._json_body(MAX_PLAN_DEFER_BYTES)
+        if body is None:
+            return False
+        try:
+            plan_id = approve.parse_approve_request(body)
+        except ValueError:
+            self._refuse(400, "bad plan deferral")
+            return False
+        try:
+            console.defer_plan(plan_id)
+        except sprints.Refused as error:
+            print(f"console: plan_defer_refused {error}", file=sys.stderr)
+            self._refuse(409, str(error))
+            return False
+        except Exception as error:
+            print(f"console: plan_defer_failed {type(error).__name__}: {error}", file=sys.stderr)
+            traceback.print_exception(error, file=sys.stderr)
+            self._refuse(500, "deferring failed")
+            return False
+        return True
+
     def _brief_request(self):
         """The manager's route: a brief sent with the sprint's secret; no token, no page."""
         console = self.server.console
@@ -1999,6 +2037,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
             if not self._adoption_register_request(console):
                 return
+        elif route == PLAN_DEFER_PATH:
+            self.close_connection = True
+            if not self._plan_defer_request(console):
+                return
         else:
             if (self.headers.get("Content-Length", "0") != "0"
                     or self.headers.get("Transfer-Encoding") is not None):
@@ -2152,6 +2194,7 @@ class ConsoleService:
         self._approval_dispatch = (
             self._on_approval_thread if approval_dispatch is None else approval_dispatch)
         self._adoptions: dict[str, dict] = {}
+        self._deferred: frozenset[str] = frozenset()
         self._registering: str | None = None
         self._answering = False
         self._answer_refusal: dict | None = None
@@ -2270,6 +2313,7 @@ class ConsoleService:
             self._accounts_added = account_add.added_state(events)
             self._registration = register.latest(events)
             self._adoptions = approve.adoptions(events)
+            self._deferred = approve.deferrals(events)
             self._pin_launches = pin.pin_launches(events)
             self._derive_digest(events)
             self._deliveries = deliveries.delivery_states(events)
@@ -2344,10 +2388,10 @@ class ConsoleService:
                 runs[profile] = {"state": "running", "at": None, "attempt": attempt}
         return runs
 
-    def _approval_view(self) -> tuple[dict | None, str | None]:
+    def _approval_view(self) -> tuple[dict | None, str | None, list[dict]]:
         latest = self._registration
         if latest is None:
-            return None, None
+            return None, None, []
         plan_id = latest["plan_id"]
         found = self._adoptions.get(plan_id) if plan_id else None
         entry = approve.entry(found, running=self._approving, name=register.name_of(latest["root"]),
@@ -2355,10 +2399,11 @@ class ConsoleService:
         action = approve.action(
             latest, found, available=self._adopter is not None and self._forge is not None,
             running=self._registering is not None)
-        return entry, action
+        return entry, action, approve.apply_items(
+            latest, found, entry, action, deferred=self._deferred)
 
     def _publish(self) -> None:
-        adoption, action = self._approval_view()
+        adoption, action, apply_items = self._approval_view()
         cap = capacity.capacity_view(
             self._profiles, self._capacity, self._clock(), self._signins,
             excluded=self._excluded, pinned=self._pinned)
@@ -2375,6 +2420,7 @@ class ConsoleService:
                 approve=action),
             adoption_items=approve.inbox_entries(self._adoptions),
             retry_items=approve.retry_entries(self._adoptions, self._enrolling),
+            apply_items=apply_items,
             pin=pin.note(self._pinned, cap, manager.session_profile(cap, self._use.last)),
             pin_launches=self._pin_launches.launched,
             managers=self._launcher is not None, pending=self._pending))
@@ -2447,6 +2493,16 @@ class ConsoleService:
             appended = self.log.append([(digest.LOOKED, None, {})])
             self._apply(appended)
             return appended
+
+    def defer_plan(self, plan_id: str) -> None:
+        """Record `Not now` for the shown plan's apply card; see the module docstring."""
+        with self._ingest:
+            latest = self._registration
+            if latest is None or latest["plan_id"] != plan_id:
+                raise sprints.Refused(approve.DEFER_STALE)
+            if not self._approval_view()[2]:
+                raise sprints.Refused(approve.NOT_OFFERED)
+            self._apply(self.log.append([approve.deferral_row(plan_id)]))
 
     def answer(self, project_id: str, key: str, choices: list[int]) -> None:
         """Tick `choices` on the tracker and mark the item answered; see the module docstring."""
@@ -3107,15 +3163,16 @@ class ConsoleService:
         if stop.is_set():
             return None
         where = {"root": root, "plan_id": plan_id, "branch": branch, "base": base}
-        try:
-            self._pusher(root, branch, commit, cancel=stop)
-        except approve.PushFailed as error:
-            self._log_approval_error({"stage": "push", "root": root, "plan_id": plan_id,
-                                      "branch": branch, "reason": error.reason,
-                                      "detail": error.detail})
-            return self._step(
-                shown, plan_id, root, "push_failed", branch=branch, commit=commit, base=base,
-                reason=error.reason, note=approve.PUSH_NOTE)
+        if not (resume and adoption["step"] == "open_failed"):
+            try:
+                self._pusher(root, branch, commit, cancel=stop)
+            except approve.PushFailed as error:
+                self._log_approval_error({"stage": "push", "root": root, "plan_id": plan_id,
+                                          "branch": branch, "reason": error.reason,
+                                          "detail": error.detail})
+                return self._step(
+                    shown, plan_id, root, "push_failed", branch=branch, commit=commit, base=base,
+                    reason=error.reason, note=approve.PUSH_NOTE)
         if stop.is_set():
             return None
         slug = self._slug_of(root)
@@ -4673,6 +4730,7 @@ class ConsoleService:
         self._accounts_added = account_add.added_state(appended, self._accounts_added)
         self._registration = register.latest(appended, self._registration)
         self._adoptions = approve.adoptions(appended, self._adoptions)
+        self._deferred = approve.deferrals(appended, self._deferred)
         self._pin_launches = pin.pin_launches(appended, self._pin_launches)
         self._deliveries = deliveries.delivery_states(appended, self._deliveries)
         self._moved = idle.last_moved(appended, self._moved)
@@ -4703,6 +4761,7 @@ class ConsoleService:
                 self._accounts_added = account_add.added_state(events)
                 self._registration = register.latest(events)
                 self._adoptions = approve.adoptions(events)
+                self._deferred = approve.deferrals(events)
                 self._pin_launches = pin.pin_launches(events)
                 self._derive_digest(events)
                 self._publish()
