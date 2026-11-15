@@ -31,7 +31,7 @@ COMMIT = "c" * 40
 KEPT = {"branch": BRANCH, "worktree": "/h/.agents/state/adopt/worktrees/bbb"}
 # What no reason, note, headline or line may show (written out here, not read from register).
 INVARIANT = re.compile(r"--plan-id|sha256:|[0-9a-f]{12,}|(?:^|[\s(\"'])/\S")
-BANNED = ("git ", "gh auth", "just switch", "adopt-project", PID, BRANCH, COMMIT,
+BANNED = ("git ", "gh auth", "adopt-project", PID, BRANCH, COMMIT,
           KEPT["worktree"], "/srv/r")
 
 
@@ -269,11 +269,9 @@ class WordsTest(unittest.TestCase):
         def words(err, kept=None):
             return approve.apply_failure("r", err, kept)
 
-        leftover = ("A leftover copy of the adoption is kept on this computer; ask an agent to "
-                    "remove it before you choose Apply it again.")
         commit_note = ("Choose Apply it again. If it keeps failing, ask an agent to apply the "
                        "adoption of r in a terminal, which shows the full reason.")
-        self.assertEqual(approve.KEPT_SENTENCE, leftover)
+        self.assertFalse(hasattr(approve, "KEPT_SENTENCE"))
         self.assertEqual(words(error("plan_stale", "adopt.plan.inputs_changed")), (
             "the repository changed since this plan was made",
             "Register the repository again to make a new plan, then apply that one."))
@@ -283,28 +281,23 @@ class WordsTest(unittest.TestCase):
             "change instead, commit it, then register the repository again to make a new "
             "plan."))
         self.assertEqual(words(error(repair_id="adopt.worktree.retained"), KEPT), (
-            "an earlier attempt of this plan is still kept",
-            "A leftover copy of the adoption is kept on this computer; ask an agent to remove "
-            "it, then choose Apply it again."))
+            "an earlier attempt of this plan is still kept", approve.RETAINED_NOTE))
         self.assertEqual(words(error(repair_id="adopt.worktree.unavailable")), (
-            "the adoption's branch or worktree could not be created",
-            "If a branch from an earlier attempt of this adoption is left, ask an agent to "
-            "delete it, then choose Apply it again."))
+            "the adoption's branch or worktree could not be created", commit_note))
         self.assertEqual(words(error(repair_id="adopt.commit.failed"), KEPT), (
-            "the adoption commit could not be made", commit_note + " " + leftover))
+            "the adoption commit could not be made", commit_note))
         self.assertEqual(words(error(repair_id="adopt.commit.failed")), (
             "the adoption commit could not be made", commit_note))
-        self.assertEqual(words(error(repair_id="adopt.gate.no-new-broken-link"), KEPT), (
-            "the no-new-broken-link check did not pass",
-            "Fix what failed in the repository, then register the repository again. "
-            + leftover))
-        self.assertEqual(words(error(repair_id="adopt.gate.no-new-broken-link")), (
-            "the no-new-broken-link check did not pass",
-            "Fix what failed in the repository, then register the repository again."))
-        self.assertEqual(words(error(repair_id="adopt.manifest.missing"), KEPT), (
-            "the agent platform's files are not installed on this host yet",
-            "Switch this computer to its current configuration to install them, then choose "
-            "Apply it again."))
+        for kept in (KEPT, None):
+            self.assertEqual(words(error(repair_id="adopt.gate.no-new-broken-link"), kept), (
+                "the no-new-broken-link check did not pass",
+                "Fix what failed in the repository, then register the repository again."))
+            self.assertEqual(words(error(repair_id="adopt.manifest.missing"), kept), (
+                "the agent platform's files are not installed on this host yet",
+                "Run just switch on this computer to install them, then choose Apply it "
+                "again."))
+        self.assertEqual(approve.MANIFEST_NOTE, "Run just switch on this computer to install "
+                                                "them, then choose Apply it again.")
         for repair, reason in (
                 ("adopt.format.failed", "a formatter the project declares did not run cleanly"),
                 ("adopt.operation.failed", "one of the plan's changes could not be written"),
@@ -314,12 +307,10 @@ class WordsTest(unittest.TestCase):
                  "the adoption commit did not pass its own checks")):
             with self.subTest(repair=repair):
                 self.assertEqual(words(error(repair_id=repair)), (reason, commit_note))
-                self.assertEqual(words(error(repair_id=repair), KEPT),
-                                 (reason, commit_note + " " + leftover))
+                self.assertEqual(words(error(repair_id=repair), KEPT), (reason, commit_note))
         self.assertEqual(words(error(message="a  pre-commit\ngate")),
                          ("it could not be applied", commit_note))
-        self.assertEqual(words(error(), KEPT),
-                         ("it could not be applied", commit_note + " " + leftover))
+        self.assertEqual(words(error(), KEPT), ("it could not be applied", commit_note))
         self.assertEqual(words(error()), ("it could not be applied", commit_note))
 
     def test_a_failed_discard_on_apply_it_again_offers_it_again(self):
@@ -416,16 +407,14 @@ class ApplyWordsTest(unittest.TestCase):
             self.assertNotIn(banned, text)
 
     def test_a_signing_failure_names_its_cause_and_next_step(self):
-        reason = ("the project asks for signed commits and this computer could not sign the "
-                  "adoption commit")
-        note = ("Set up a signing key on this computer, then choose Apply it again. To turn "
-                "signed commits off in the project's settings instead, commit that change, then "
-                "register the repository again to make a new plan.")
         got_kept = approve.apply_failure("r", self.SIGNING, KEPT)
         got_none = approve.apply_failure("r", self.SIGNING, None)
-        self.assertEqual(got_none, (reason, note))
-        self.assertEqual(got_kept, (reason, note + " " + approve.KEPT_SENTENCE))
-        self.assertNotIn("leftover", got_none[1])
+        self.assertEqual(got_none, (approve.SIGNING_REASON, approve.SIGNING_NOTE))
+        self.assertEqual(got_kept, (approve.SIGNING_REASON, approve.SIGNING_NOTE))
+        self.assertEqual(approve.SIGNING_REASON, "the project asks for signed commits and this "
+                                                 "computer could not sign the adoption commit")
+        self.assertEqual(approve.SIGNING_NOTE, "Set up a signing key on this computer, then "
+                                               "choose Apply it again.")
         adoption = {**step_payload("apply_failed", reason=got_kept[0], note=got_kept[1],
                                    kept=KEPT, branch=None, commit=None),
                     "at": "t", "pull_state": None, "pull_at": None}
@@ -433,6 +422,68 @@ class ApplyWordsTest(unittest.TestCase):
             approve.entry(adoption, running=False, name="r")["headline"],
             "The adoption of r was not applied: the project asks for signed commits and this "
             "computer could not sign the adoption commit.")
+
+    def test_every_apply_note_is_at_most_two_sentences(self):
+        notes = []
+        for repair in ("adopt.worktree.dirty", "adopt.worktree.retained",
+                       "adopt.worktree.unavailable", approve.SIGNING_REPAIR,
+                       approve.COMMIT_REPAIR, "adopt.gate.no-new-broken-link",
+                       register.MANIFEST_PREFIX + "missing", "adopt.format.failed",
+                       "adopt.operation.failed", "adopt.plan.unknown_id",
+                       "adopt.resolver.failed", "adopt.commit.unresolved_policy",
+                       "adopt.zzz.unknown", "", approve.DISCARD_REPAIR):
+            for kept in (None, KEPT):
+                notes.append(approve.apply_failure(
+                    "r", {"code": "x", "repair_id": repair, "violations": []}, kept)[1])
+        notes.append(approve.apply_failure(
+            "r", {"code": "plan_stale", "repair_id": "", "violations": []}, KEPT)[1])
+        for kind in register.RUN_KINDS:
+            notes.append(approve.run_failure("r", kind)[1])
+        for note in notes:
+            with self.subTest(note=note):
+                self.assertLessEqual(len(re.findall(r"[.!?](?=\s|$)", note)), 2)
+                self.assertNotIn("leftover", note)
+
+    def test_a_signing_failure_is_one_sentence_and_offers_turn_signed_commits_off(self):
+        latest = {"plan_id": PID, "root": "/x/r", "at": "t1", "lines": [],
+                  "draft": [{"field": "commit-signed", "label": "signed commits",
+                             "value": "yes", "source": "x", "options": [], "text": False,
+                             "reason": None, "ask": None}]}
+        adoption = {**step_payload("apply_failed", reason=approve.SIGNING_REASON,
+                                   note=approve.SIGNING_NOTE, kept=KEPT, branch=None,
+                                   commit=None),
+                    "at": "t", "pull_state": None, "pull_at": None}
+        entry = approve.entry(adoption, running=False, name="r")
+        items = approve.apply_items(latest, adoption, entry, "approve")
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["questions"][0]["options"],
+                         ["Apply it again", "Turn signed commits off", "Not now"])
+        self.assertEqual(items[0]["values"], ["apply", "signing_off", "not_now"])
+        self.assertEqual(items[0]["why"], approve.SIGNING_NOTE)
+        self.assertEqual(approve.SIGNING_OFF_OPTION, "Turn signed commits off")
+        self.assertEqual(approve.SIGNING_OFF_VALUE, "signing_off")
+        self.assertEqual(approve.SIGNING_FIELD, "commit-signed")
+        for draft in (None, [{**latest["draft"][0], "value": "no"}]):
+            with self.subTest(draft=draft):
+                items = approve.apply_items({**latest, "draft": draft}, adoption, entry,
+                                            "approve")
+                self.assertEqual(items[0]["questions"][0]["options"],
+                                 ["Apply it again", "Not now"])
+                self.assertEqual(items[0]["values"], ["apply", "not_now"])
+
+    def test_a_stored_note_in_the_old_words_reads_in_the_new_words(self):
+        old_signing = ("Set up a signing key on this computer, then choose Apply it again. To "
+                       "turn signed commits off in the project's settings instead, commit that "
+                       "change, then register the repository again to make a new plan.")
+        old_kept = (" A leftover copy of the adoption is kept on this computer; ask an agent to "
+                    "remove it before you choose Apply it again.")
+        self.assertEqual(approve.current_note(old_signing + old_kept), approve.SIGNING_NOTE)
+        self.assertEqual(approve.current_note(
+            "A leftover copy of the adoption is kept on this computer; ask an agent to remove "
+            "it, then choose Apply it again."), approve.RETAINED_NOTE)
+        self.assertEqual(approve.current_note(
+            "Switch this computer to its current configuration to install them, then choose "
+            "Apply it again."), approve.MANIFEST_NOTE)
 
     def test_no_failure_card_or_line_shows_a_command_hash_or_path(self):
         texts = [approve.CLOSED_NOTE, approve.NO_SLUG_NOTE, approve.NO_BASE_NOTE,
@@ -529,8 +580,8 @@ class OutcomeTest(unittest.TestCase):
                      "Add the repository's origin remote, then choose Retry.")),
             (report_error("adopt.manifest.missing", register.MANIFEST_ABSENT),
              refused("the agent platform's files are not installed on this host",
-                     "Switch this computer to its current configuration to install them, then "
-                     "choose Retry.")),
+                     "Run just switch on this computer to install them, then choose "
+                     "Retry.")),
             (report_error("adopt.registration.integration_branch_unresolved", "m"),
              refused("m", FULL_REASON)),
             ({"registered": False, "result": "not_conformant"},

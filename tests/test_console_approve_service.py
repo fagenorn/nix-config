@@ -26,8 +26,8 @@ from agent_tools.system.forge_api import ForgeError
 from . import console_test_support as support
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1052)
 from .test_console_register_service import (
-    DRAFT, PID_A, PID_B, READY, ROOT, Case, Fake, answer_of, git, real_home_state,
-    reconcile_repository)
+    DRAFT, PID_A, PID_B, READ_NO_BUILD, READY, ROOT, Case, Fake, answer_of, git,
+    real_home_state, reconcile_repository)
 
 PATH = "/api/plan-approve"
 RETRY_PATH = "/api/adoption-register"
@@ -432,11 +432,56 @@ class ApplyCardTest(ApproveCase):
         (card,) = self.apply_cards()
         shown = self.view()["registration"]
         self.assertIn("signed commits", card["headline"])
-        self.assertIn("signing key", card["why"])
+        self.assertEqual(card["why"], approve.SIGNING_NOTE)
+        self.assertEqual(card["questions"][0]["options"], ["Apply it again", "Not now"])
         self.assertEqual(shown["line"], "Register reconcile: needs you")
         raw = re.compile(r"--plan-id|sha256:|[0-9a-f]{12,}|(?:^|[\s(\"'])/\S")
         for text in (card["headline"], card["why"], *card["lines"], shown["line"]):
             self.assertIsNone(raw.search(text), text)
+
+    def test_turn_signed_commits_off_after_a_kept_copy_leaves_nothing_of_the_old_plan(self):
+        later = {**READY, "plan": {**READY["plan"], "plan_id": PID_A}}
+        fake = Fake(plan=[READY, later], apply_result=SIGNING)
+        self.start(fake, draft_reader=lambda root: READ_NO_BUILD)
+        self.repo = reconcile_repository(self.parent)
+        drafting = self.registered(self.repo)
+        for field, value in (("commit-signed", "yes"), ("build-command", "none"),
+                             ("test-command", "none")):
+            before = drafting["plan_id"]
+            errors = io.StringIO()
+            with contextlib.redirect_stderr(errors):
+                status, _, _ = self.answer(answer_of(before, {
+                    "id": "contract-draft", "subject": field, "value": value}))
+                self.assertEqual(status, 204)
+                drafting = self.wait_for(
+                    lambda r: r["status"] == "done" and r["plan_id"] != before)
+        self.assertEqual(drafting["plan_id"], PID_B)
+        self.run_approval("apply_failed")
+        self.kept(PID_B)
+        (card,) = self.apply_cards()
+        self.assertEqual(card["questions"][0]["options"],
+                         ["Apply it again", "Turn signed commits off", "Not now"])
+        self.assertEqual(card["values"], ["apply", "signing_off", "not_now"])
+        before_tree = self.repository_state()
+        planned = len(fake.order)
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            status, _, _ = self.answer(answer_of(PID_B, {
+                "id": "contract-draft", "subject": "commit-signed", "value": "no"}))
+            self.assertEqual(status, 204)
+            self.wait_for(lambda r: r["status"] == "done" and r["plan_id"] == PID_A)
+        self.assertEqual(fake.order[planned:], [("discard", PID_B), ("plan", str(self.repo))])
+        last = self.rows(event_log.REGISTRATION_ENDED)[-1][1]
+        fields = {f["field"]: f["value"] for f in last["draft"]}
+        self.assertEqual(fields["commit-signed"], "no")
+        self.assertEqual(self.repository_state(), before_tree)
+
+    def repository_state(self):
+        status = git(self.repo, "status", "--porcelain")
+        files = {str(path.relative_to(self.repo)): path.read_bytes()
+                 for path in sorted(self.repo.rglob("*"))
+                 if path.is_file() and ".git" not in path.relative_to(self.repo).parts}
+        return status, files
 
     def kept(self, plan_id):
         """A copy a failed apply left: the directory and the record `approve.retained` reads."""
@@ -673,8 +718,7 @@ class PlanApproveRunTest(ApproveCase):
         self.assertEqual(adoption["lines"], [])
         self.assertEqual(
             adoption["note"],
-            "Fix what failed in the repository, then register the repository again. "
-            + approve.KEPT_SENTENCE)
+            "Fix what failed in the repository, then register the repository again.")
         self.assertEqual((self.pusher.calls, self.forge.calls), ([], []))
         self.assertEqual(self.heads(), before)
         self.assertEqual(self.steps(), ["apply_failed"])

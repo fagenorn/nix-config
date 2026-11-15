@@ -440,6 +440,13 @@ class NextStepTest(unittest.TestCase):
                 self.assertEqual(register.summary("/srv/r", {"error": other})["note"],
                                  register.MANIFEST_STEP)
 
+    def test_a_failed_plan_for_a_missing_platform_names_just_switch(self):
+        plan = {"error": {"code": "x", "repair_id": "adopt.manifest.missing", "violations": [
+            {"pointer": "", "message": register.MANIFEST_ABSENT}]}}
+        row = register.summary("/x/r", plan)
+        self.assertEqual(row["note"], "Run just switch on this computer to install them, then "
+                                      "choose Try again.")
+
     def test_any_other_manifest_failure_keeps_its_own_reason(self):
         cases = (
             ("adopt.manifest.invalid", "the installed platform manifest is not valid JSON"),
@@ -482,7 +489,7 @@ class NextStepTest(unittest.TestCase):
 
     def test_no_failure_text_names_a_command_hash_or_path(self):
         forbidden = re.compile(r"--plan-id|sha256:|[0-9a-f]{12,}|(?:^|[\s(\"'])/\S")
-        banned = ("adopt-project", "resolve-project", "just switch", "in a terminal:")
+        banned = ("adopt-project", "resolve-project", "in a terminal:")
         root = "/srv/a b/app"
         rows = [register.failed(root, kind, verb)
                 for kind in (*register.RUN_KINDS, "ValueError") for verb in ("plan", "register")]
@@ -586,6 +593,18 @@ class FailureCardTest(unittest.TestCase):
                      b'{"root": "/r\\u0007", "choice": "try_again"}'):
             with self.subTest(body=body), self.assertRaises(ValueError):
                 register.parse_confirm_request(body)
+
+
+class LegacyNoteTest(unittest.TestCase):
+    def test_latest_reads_an_old_manifest_note_in_the_new_words(self):
+        old = ("Switch this computer to its current configuration to install them, then choose "
+               "Try again.")
+        self.assertEqual(register.LEGACY_NOTES, {old: register.MANIFEST_STEP})
+        row = register.summary("/srv/a", {"error": {
+            "code": "x", "repair_id": "adopt.manifest.missing", "violations": [
+                {"pointer": "", "message": register.MANIFEST_ABSENT}]}})
+        found = register.latest([Event(1, "t1", register.ENDED, None, {**row, "note": old})])
+        self.assertEqual(found["note"], register.MANIFEST_STEP)
 
 
 class RowTest(unittest.TestCase):

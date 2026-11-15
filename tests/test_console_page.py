@@ -6953,8 +6953,7 @@ CONFIRM_ITEM = {
 
 FAILED_HEADLINE = ("The adoption plan for r could not start: the agent platform's files are not "
                    "installed on this host.")
-FAILED_WHY = ("Switch this computer to its current configuration to install them, then choose "
-              "Try again.")
+FAILED_WHY = "Run just switch on this computer to install them, then choose Try again."
 FAILED_ITEM = {
     "type": "inbox_item", "reason": "register_failed",
     "key": "register-failed//srv/r/2026-11-15T08:00:00+00:00",
@@ -8002,6 +8001,19 @@ class RegisterApplyPageTest(unittest.TestCase):
         (post,) = snap["posts"]
         self.assertEqual(post["url"], "/api/plan-defer")
         self.assertEqual(posted(post), {"plan_id": PLAN_A})
+
+    def test_turn_signed_commits_off_posts_the_draft_change(self) -> None:
+        item = {**APPLY_ITEM, "questions": [{**APPLY_ITEM["questions"][0], "options": [
+            "Apply it again", "Turn signed commits off", "Not now"]}],
+            "values": ["apply", "signing_off", "not_now"]}
+        (snap,) = render([START, {"frame": cards([item], READY_SHOWN)},
+                          {"respond": {"status": 204, "text": ""}}, {"key": "2"},
+                          {"key": "Enter"}, {"clock": 5000}, {"snapshot": True}])
+        (post,) = snap["posts"]
+        self.assertEqual(post["url"], "/api/plan-answer")
+        self.assertEqual(posted(post), {"plan_id": item["plan_id"], "id": "contract-draft",
+                                        "subject": "commit-signed", "value": "no"})
+        self.assertIn("Answered, turning signed commits off", full(snap["inbox"]))
 
     def test_a_failed_step_card_offers_try_again(self) -> None:
         (snap,) = render([START, {"frame": cards([TRY_ITEM], FAILED_SHOWN)}, {"snapshot": True}])

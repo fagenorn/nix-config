@@ -64,13 +64,16 @@ transient `gh_failed`, an HTTP 401 or 403, 422 or 404 read from gh's message, el
 in a way the console does not understand. `apply_failure(name, error, kept)` is `(reason, note)`
 for an apply error object, by the first rule that matches: `plan_stale`; the dirty, retained and
 unavailable worktree repairs; `DISCARD_REPAIR` (`adopt.discard.failed`, a copy that could not be
-removed, noted `RETAINED_NOTE`); `SIGNING_REPAIR` (`adopt.commit.signing_unavailable`); `COMMIT_REPAIR`
-(`adopt.commit.failed`); a failed `adopt.gate.*` gate; an uninstalled platform manifest; a repair id
-with a prefix of `APPLY_REASONS`; else `it could not be applied`. It reads no violation message, so a
-formatter's output, a worktree path or a plan id never reaches a card (the service logs them). A
-note that follows a kept worktree (`kept` not None) ends in `KEPT_SENTENCE`, which asks an agent to
-remove the leftover copy before Apply it again; no note carries a path, a branch, a hash or a
-command. `run_failure(name, kind)` words a failed run by `register.RUN_WORDS` with the note `Choose
+removed, noted `RETAINED_NOTE`); `SIGNING_REPAIR` (`adopt.commit.signing_unavailable`, reason
+`SIGNING_REASON`, note `SIGNING_NOTE`); `COMMIT_REPAIR` (`adopt.commit.failed`); a failed
+`adopt.gate.*` gate; an uninstalled platform manifest (`MANIFEST_NOTE`, which names `just switch`);
+a repair id with a prefix of `APPLY_REASONS`; else `it could not be applied`. It reads no violation
+message, so a formatter's output, a worktree path or a plan id never reaches a card (the service
+logs them). `kept` is not read: no note mentions a leftover copy except `RETAINED_NOTE`, none asks an
+agent to remove anything, and every note is at most two sentences. A signing failure whose plan
+holds a drafted `commit-signed` of `yes` offers a third option, `SIGNING_OFF_OPTION` (value
+`SIGNING_OFF_VALUE`), which the page sends as a draft change to `no`; no note carries a path, a
+branch, a hash or a command other than `just switch`. `run_failure(name, kind)` words a failed run by `register.RUN_WORDS` with the note `Choose
 Apply it again. If it keeps failing, ask an agent to apply the adoption of <name> in a terminal,
 which shows the full reason.`
 `registration_outcome(root, report)` reads the answer of `verify --register` as exactly `{result,
@@ -190,13 +193,16 @@ NO_BASE_NOTE = ("Open a pull request for the adoption's branch yourself against 
 PUSH_REFUSED = "origin refused the push or could not be reached"
 CLOSED_NOTE = ("Ask an agent to delete the adoption's branch on this computer and on origin, then "
                "choose Apply it again.")
-KEPT_SENTENCE = ("A leftover copy of the adoption is kept on this computer; ask an agent to "
-                 "remove it before you choose Apply it again.")
 DISCARD_REPAIR = "adopt.discard.failed"
 DISCARD_REASON = "the copy that the last attempt left on this computer could not be removed"
 RETAINED_NOTE = ("Choose Apply it again to remove the copy that attempt left on this computer and "
                  "apply the plan again.")
 SIGNING_REPAIR = "adopt.commit.signing_unavailable"
+SIGNING_REASON = ("the project asks for signed commits and this computer could not sign the "
+                  "adoption commit")
+SIGNING_NOTE = "Set up a signing key on this computer, then choose Apply it again."
+SIGNING_FIELD = "commit-signed"
+MANIFEST_NOTE = "Run just switch on this computer to install them, then choose Apply it again."
 COMMIT_REPAIR = "adopt.commit.failed"
 APPLY_REASONS = (
     ("adopt.format.", "a formatter the project declares did not run cleanly"),
@@ -215,9 +221,11 @@ APPLY_ASK = "Apply this adoption?"
 APPLY_OPTION = "Apply it"
 APPLY_AGAIN_OPTION = "Apply it again"
 TRY_AGAIN_OPTION = "Try again"
+SIGNING_OFF_OPTION = "Turn signed commits off"
 NOT_NOW_OPTION = "Not now"
 APPLY_VALUE = "apply"
 NOT_NOW_VALUE = "not_now"
+SIGNING_OFF_VALUE = "signing_off"
 DEFER_STALE = "that plan is no longer the one shown"
 NOT_OFFERED = "that plan is not waiting for an answer"
 # Notes a console of an earlier release stored, by the words they used for the buttons then.
@@ -227,6 +235,15 @@ LEGACY_WORDS = (
     ("then press Approve again.", "then choose Apply it again."),
     ("Press Approve again. If it keeps failing,", "Choose Apply it again. If it keeps failing,"),
     ("then approve that one.", "then apply that one."),
+    ("Set up a signing key on this computer, then choose Apply it again. To turn signed commits "
+     "off in the project's settings instead, commit that change, then register the repository "
+     "again to make a new plan.", SIGNING_NOTE),
+    (" A leftover copy of the adoption is kept on this computer; ask an agent to remove it "
+     "before you choose Apply it again.", ""),
+    ("A leftover copy of the adoption is kept on this computer; ask an agent to remove it, then "
+     "choose Apply it again.", RETAINED_NOTE),
+    ("Switch this computer to its current configuration to install them, then choose Apply it "
+     "again.", MANIFEST_NOTE),
 )
 NOT_INTEGRATED = "adopt.registration.not_integrated"
 UNCHECKED = "the adoption on the remote did not pass the registration's checks"
@@ -424,12 +441,20 @@ def retry_entries(adoptions: Mapping[str, Mapping],
     return items
 
 
+def _signing_draft(latest: Mapping) -> bool:
+    draft = latest.get("draft")
+    return isinstance(draft, list) and any(
+        isinstance(row, Mapping) and row.get("field") == SIGNING_FIELD and row.get("value") == "yes"
+        for row in draft)
+
+
 def apply_items(latest: Mapping | None, adoption: Mapping | None, entry: Mapping | None,
                 action: str | None, *, deferred: Collection[str] = frozenset()) -> list[dict]:
     if latest is None or action is None or latest["plan_id"] in deferred:
         return []
     plan_id = latest["plan_id"]
     name = register.name_of(latest["root"])
+    signing_off = False
     if action == "approve" and adoption is None:
         key, ask, why = (f"register-apply/{plan_id}/{latest['at']}", APPLY_ASK,
                          folder_trust.TRUST_SENTENCE)
@@ -440,19 +465,25 @@ def apply_items(latest: Mapping | None, adoption: Mapping | None, entry: Mapping
         if action == "approve":
             first, value = APPLY_AGAIN_OPTION, APPLY_VALUE
             since = adoption["pull_at"] or adoption["at"]
+            signing_off = (adoption["step"] == "apply_failed"
+                           and adoption["reason"] == SIGNING_REASON and _signing_draft(latest))
         else:
             first, value, since = TRY_AGAIN_OPTION, RETRY_VALUE, adoption["at"]
     else:
         return []
+    options, values = [first, NOT_NOW_OPTION], [value, NOT_NOW_VALUE]
+    if signing_off:
+        options, values = ([first, SIGNING_OFF_OPTION, NOT_NOW_OPTION],
+                           [value, SIGNING_OFF_VALUE, NOT_NOW_VALUE])
     return [{
         "type": "inbox_item", "reason": "register_apply", "key": key,
         "project_id": None, "root": latest["root"], "name": name,
         "title": f"Register {name}", "plan_id": plan_id, "id": None, "subject": None,
         "headline": ask, "why": why, "lines": lines, "refusal": None,
         "more_questions": 0, "text": False,
-        "questions": [{"question": ask, "options": [first, NOT_NOW_OPTION], "chosen": None,
+        "questions": [{"question": ask, "options": options, "chosen": None,
                        "recommended": None, "recommended_index": None}],
-        "values": [value, NOT_NOW_VALUE], "items": [], "answers": [], "answered": False,
+        "values": values, "items": [], "answers": [], "answered": False,
         "waiting_since": since}]
 
 
@@ -568,7 +599,6 @@ def forge_failure(error: BaseException, base: str) -> tuple[str, str]:
 
 def apply_failure(name: str, error: Mapping, kept: Mapping | None) -> tuple[str, str]:
     repair = error.get("repair_id") or ""
-    leftover = " " + KEPT_SENTENCE if kept is not None else ""
     commit_note = register.unknown_step(name, "apply").replace("Try again", "Apply it again", 1)
     if error.get("code") == "plan_stale":
         return ("the repository changed since this plan was made",
@@ -579,35 +609,25 @@ def apply_failure(name: str, error: Mapping, kept: Mapping | None) -> tuple[str,
                 "keep the change instead, commit it, then register the repository again to make "
                 "a new plan.")
     if repair == "adopt.worktree.retained":
-        return ("an earlier attempt of this plan is still kept",
-                "A leftover copy of the adoption is kept on this computer; ask an agent to "
-                "remove it, then choose Apply it again.")
+        return ("an earlier attempt of this plan is still kept", RETAINED_NOTE)
     if repair == DISCARD_REPAIR:
         return (DISCARD_REASON, RETAINED_NOTE)
     if repair == "adopt.worktree.unavailable":
-        return ("the adoption's branch or worktree could not be created",
-                "If a branch from an earlier attempt of this adoption is left, ask an agent to "
-                "delete it, then choose Apply it again.")
+        return ("the adoption's branch or worktree could not be created", commit_note)
     if repair == SIGNING_REPAIR:
-        return ("the project asks for signed commits and this computer could not sign the "
-                "adoption commit",
-                "Set up a signing key on this computer, then choose Apply it again. To turn "
-                "signed commits off in the project's settings instead, commit that change, then "
-                "register the repository again to make a new plan." + leftover)
+        return (SIGNING_REASON, SIGNING_NOTE)
     if repair == COMMIT_REPAIR:
-        return ("the adoption commit could not be made", commit_note + leftover)
+        return ("the adoption commit could not be made", commit_note)
     if repair.startswith(GATE_PREFIX):
         return (f"the {repair[len(GATE_PREFIX):]} check did not pass",
-                "Fix what failed in the repository, then register the repository again."
-                + leftover)
+                "Fix what failed in the repository, then register the repository again.")
     if repair.startswith(register.MANIFEST_PREFIX):
         return ("the agent platform's files are not installed on this host yet",
-                "Switch this computer to its current configuration to install them, then choose "
-                "Apply it again.")
+                MANIFEST_NOTE)
     for prefix, words in APPLY_REASONS:
         if repair.startswith(prefix):
-            return (words, commit_note + leftover)
-    return ("it could not be applied", commit_note + leftover)
+            return (words, commit_note)
+    return ("it could not be applied", commit_note)
 
 
 def run_failure(name: str, kind: str) -> tuple[str, str]:

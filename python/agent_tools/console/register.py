@@ -72,13 +72,14 @@ words of `RUN_WORDS[kind]` (an unknown kind reads `it stopped unexpectedly`), ne
 
 Next step (#1062). Every failed headline ends with a full stop, and every failed row (a plan that
 failed, a refused or unconfirmed registration, a run that raised) carries one plain line in `note`
-saying what the owner can do next, never an error code, a command, a hash or a path (#1085). `plain(text)` is
+saying what the owner can do next, never an error code, a hash or a path, and no command but `just switch` (#1085). `plain(text)` is
 the text, or the empty string when `FORBIDDEN` (`--plan-id`, `sha256:`, a run of twelve hex digits, an
 absolute path) finds any in it: a child's raw message is shown only through it, so a message that holds one falls back to
 `could not be made.` or `was not registered.`. `next_step(root, error, verb)` reads the
-error's `repair_id`: `adopt.manifest.*` with the not-found message says to switch this computer to its current
-configuration to install the agent platform's files and to choose Try again (`MANIFEST_STEP`, which does not repeat the
-cause the headline gave); `adopt.registration.no_remote`
+error's `repair_id`: `adopt.manifest.*` with the not-found message says to run `just switch` on this computer to
+install the agent platform's files and to choose Try again (`MANIFEST_STEP`, which does not repeat the
+cause the headline gave; `LEGACY_NOTES` shows a stored note in the earlier words as it is today and `latest`
+applies it, never rewriting the log); `adopt.registration.no_remote`
 says to add the origin remote; `remote_default_unknown` (an origin that exists but advertises no
 default branch) says the origin needs a published default branch, not another origin;
 `adopt.git.remote_unreachable` and
@@ -190,8 +191,12 @@ RUN_WORDS = {
 }
 UNEXPECTED = "it stopped unexpectedly"
 AGAIN = "choose Try again."
-MANIFEST_STEP = ("Switch this computer to its current configuration to install them, then "
-                 + AGAIN)
+MANIFEST_STEP = "Run just switch on this computer to install them, then " + AGAIN
+# A note an earlier release stored for its manifest step, shown in today's words and never rewritten.
+LEGACY_NOTES = {
+    "Switch this computer to its current configuration to install them, then choose Try again.":
+        MANIFEST_STEP,
+}
 DISCARD_STEP = ("Choose Try again to remove the copy the last attempt left on this computer and "
                 "plan again.")
 VERB_WORDS = {"plan": "plan the adoption of", "register": "register",
@@ -538,6 +543,8 @@ def latest(events: Iterable[event_log.Event], state: dict | None = None) -> dict
         except ValueError:
             continue
         found = {**DEFAULTS, **payload, "at": event.at}
+        if isinstance(found["note"], str) and found["note"] in LEGACY_NOTES:
+            found["note"] = LEGACY_NOTES[found["note"]]
         if isinstance(found["draft"], list) and isinstance(found["root"], str):
             found["draft"] = contract_draft.refresh(found["root"], found["draft"])
             if found["result"] == "drafting":
