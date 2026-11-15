@@ -325,7 +325,8 @@ class RegisterRunTest(Case):
         (_, row), = self.rows("registration.ended")
         self.assertEqual(row["result"], "failed")
         self.assertEqual(row["headline"],
-                         f"The adoption plan for {repo.name} failed: it took too long and was stopped")
+                         f"The adoption plan for {repo.name} failed: it took too long and was stopped.")
+        self.assertIn("Press Register again", row["note"])
         self.assertEqual(self.view()["registration"]["status"], "done")
 
     def test_a_no_change_plan_runs_the_register_check(self):

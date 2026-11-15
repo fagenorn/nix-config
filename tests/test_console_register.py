@@ -261,11 +261,11 @@ class SummaryTest(unittest.TestCase):
             "code": "not_integrated", "repair_id": "x",
             "violations": [{"pointer": "", "message": "no  adoption\nrecord"}]}})
         self.assertEqual((refused["result"], refused["headline"]),
-                         ("not_registered", "r was not registered: no adoption record"))
+                         ("not_registered", "r was not registered: no adoption record."))
         bad = register.summary("/srv/r", plan, {"registered": False, "result": "not_conformant",
                                                 "project_id": "o/r"})
         self.assertEqual((bad["result"], bad["headline"]),
-                         ("not_registered", "r was not registered: not_conformant"))
+                         ("not_registered", "r was not registered: not_conformant."))
 
     def test_migration_and_repair_name_their_command(self):
         mig = register.summary("/srv/r", plan_doc(outcome="migration_required", state="not_applicable",
@@ -284,14 +284,14 @@ class SummaryTest(unittest.TestCase):
                                                     "violations": [{"pointer": "", "message": "m"}]}})
         self.assertEqual(row["result"], "failed")
         self.assertIsNone(row["outcome"])
-        self.assertEqual(row["headline"], "The adoption plan for r failed: m")
+        self.assertEqual(row["headline"], "The adoption plan for r failed: m.")
 
     def test_a_plan_error_headline_never_shows_the_code(self):
         row = register.summary("/srv/r", {"error": {
             "code": "adopt_failure", "repair_id": "x",
             "violations": [{"pointer": "", "message": "the installed platform\n manifest was not found"}]}})
         self.assertEqual(row["headline"], "The adoption plan for r failed: "
-                         "the installed platform manifest was not found")
+                         "the installed platform manifest was not found.")
         for error in ({"code": "adopt_failure", "repair_id": "x", "violations": []},
                       {"code": "adopt_failure"},
                       {"code": "adopt_failure", "violations": [{"pointer": "", "message": ""}]}):
@@ -322,8 +322,96 @@ class SummaryTest(unittest.TestCase):
                 row = register.failed("/srv/r", kind)
                 self.assertEqual(row, {"by": "owner", "root": "/srv/r", "project_id": None,
                                        "result": "failed", "outcome": None,
-                                       "headline": f"The adoption plan for r failed: {text}",
-                                       "lines": [], "note": None})
+                                       "headline": f"The adoption plan for r failed: {text}.",
+                                       "lines": [], "note": register.run_next_step("/srv/r", kind)})
+
+    def test_a_headline_that_already_ends_in_a_full_stop_gets_no_second(self):
+        row = register.summary("/srv/r", {"error": {"code": "adopt_failure", "repair_id": "x",
+                                                    "violations": [{"pointer": "", "message": "m."}]}})
+        self.assertEqual(row["headline"], "The adoption plan for r failed: m.")
+
+
+def adopt_error(repair_id, message="m"):
+    return {"error": {"code": "adopt_failure", "repair_id": repair_id,
+                      "violations": [{"pointer": "", "message": message}]}}
+
+
+NO_CHANGE = {"plan": {"outcome": "no_change", "state": "ready"}}
+MANIFEST_STEP = ("The agent platform's files are not installed on this host yet. Run just switch "
+                 "in a terminal to install them, then press Register again.")
+PLAN_COMMAND = "adopt-project plan --repo-root /srv/r"
+REGISTER_COMMAND = "adopt-project verify --register --repo-root /srv/r"
+CODE_WORDS = ("adopt.", "platform.", "adopt_failure", "not_integrated", "timed_out", "not_installed")
+
+
+class NextStepTest(unittest.TestCase):
+    def test_a_missing_platform_manifest_says_just_switch_and_register_again(self):
+        for repair_id in ("adopt.manifest.invalid", "adopt.manifest.forward_step_missing",
+                          "adopt.manifest.forward_step_ambiguous"):
+            with self.subTest(repair_id=repair_id):
+                row = register.summary("/srv/r", adopt_error(
+                    repair_id, "the installed platform manifest was not found"))
+                self.assertEqual(row["headline"], "The adoption plan for r failed: "
+                                 "the installed platform manifest was not found.")
+                self.assertEqual(row["note"], MANIFEST_STEP)
+
+    def test_each_refused_registration_has_its_own_next_step(self):
+        again = "then press Register again."
+        cases = {
+            "adopt.registration.no_remote": f"Add the repository's origin remote, {again}",
+            "adopt.registration.remote_default_unknown":
+                f"Add the repository's origin remote, {again}",
+            "adopt.git.remote_unreachable":
+                f"Check that the repository's remote can be reached from this host, {again}",
+            "adopt.git.fetch_failed":
+                f"Check that the repository's remote can be reached from this host, {again}",
+            "adopt.registration.not_integrated":
+                "The adoption is not on the remote's main branch yet. Merge it, " + again,
+        }
+        for repair_id, step in cases.items():
+            with self.subTest(repair_id=repair_id):
+                row = register.summary("/srv/r", NO_CHANGE, adopt_error(repair_id, "why"))
+                self.assertEqual((row["result"], row["headline"], row["note"]),
+                                 ("not_registered", "r was not registered: why.", step))
+
+    def test_an_unlisted_failure_names_the_terminal_command_for_its_kind(self):
+        plan = register.summary("/srv/r", adopt_error("adopt.something.else"))
+        self.assertEqual(plan["note"], f"Run {PLAN_COMMAND} in a terminal to see the full reason.")
+        for error in ({"code": "adopt_failure"}, adopt_error("adopt.registration.integration_branch_unresolved")["error"]):
+            with self.subTest(error=error):
+                reg = register.summary("/srv/r", NO_CHANGE, {"error": error})
+                self.assertEqual(reg["note"],
+                                 f"Run {REGISTER_COMMAND} in a terminal to see the full reason.")
+        none = register.summary("/srv/r", NO_CHANGE, {"registered": False, "result": "x"})
+        self.assertEqual(none["note"], f"Run {REGISTER_COMMAND} in a terminal to see the full reason.")
+        unreadable = register.summary("/srv/r", {"plan": {"outcome": "odd"}})
+        self.assertEqual(unreadable["note"], register.run_next_step("/srv/r", "unreadable"))
+
+    def test_every_run_kind_names_the_terminal_command(self):
+        retry = "Press Register again. If it keeps failing, run "
+        for kind in register.RUN_KINDS:
+            with self.subTest(kind=kind):
+                note = register.failed("/srv/r", kind)["note"]
+                self.assertIn(PLAN_COMMAND, note)
+                if kind in ("timed_out", "not_installed", "unavailable", "cancelled"):
+                    self.assertTrue(note.startswith(retry), note)
+                else:
+                    self.assertEqual(note, f"Run {PLAN_COMMAND} in a terminal to see the full reason.")
+        self.assertIn(PLAN_COMMAND, register.failed("/srv/r", "ValueError")["note"])
+
+    def test_the_path_is_quoted_for_a_terminal(self):
+        self.assertIn("--repo-root '/srv/my repo'", register.failed("/srv/my repo", "failed")["note"])
+
+    def test_no_headline_or_next_step_shows_an_internal_code(self):
+        rows = [register.failed("/srv/r", kind) for kind in (*register.RUN_KINDS, "ValueError")]
+        for repair_id in ("adopt.manifest.invalid", "adopt.registration.no_remote",
+                          "adopt.git.fetch_failed", "adopt.registration.not_integrated", "adopt.x"):
+            rows.append(register.summary("/srv/r", adopt_error(repair_id)))
+            rows.append(register.summary("/srv/r", NO_CHANGE, adopt_error(repair_id)))
+        for row in rows:
+            for text in (row["headline"], row["note"]):
+                for word in CODE_WORDS:
+                    self.assertNotIn(word, text)
 
 
 class RowTest(unittest.TestCase):
