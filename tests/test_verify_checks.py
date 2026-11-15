@@ -1907,3 +1907,230 @@ class FirstScreenStateTest(unittest.TestCase):
         for name, v in (("finished", finished), ("quiet group", quiet)):
             with self.subTest(name):
                 self.assertEqual(verify_checks.first_screen_state(v), (0, {"verdict": "met", "questions": 1}))
+
+
+FAKE_BROWSER = r'''#!%(python)s
+import base64, json, os, sys
+from pathlib import Path
+
+here = Path(__file__).resolve().parent
+with open(here / "argv.jsonl", "a") as log:
+    log.write(json.dumps(sys.argv) + "\n")
+if %(die)r:
+    sys.exit(1)
+measures = json.loads(%(measures)r)
+buffer = b""
+evaluations = 0
+while True:
+    while b"\0" not in buffer:
+        chunk = os.read(3, 65536)
+        if not chunk:
+            sys.exit(0)
+        buffer += chunk
+    raw, buffer = buffer.split(b"\0", 1)
+    message = json.loads(raw)
+    method, session = message["method"], message.get("sessionId")
+    with open(here / "calls.jsonl", "a") as log:
+        log.write(json.dumps([method, session]) + "\n")
+    result = {}
+    if method == "Target.createTarget":
+        result = {"targetId": "T"}
+    elif method == "Target.attachToTarget":
+        result = {"sessionId": "S"}
+    elif method == "Runtime.evaluate":
+        result = {"result": {"type": "object", "value": measures[min(evaluations, len(measures) - 1)]}}
+        evaluations += 1
+    elif method == "Page.captureScreenshot":
+        result = {"data": base64.b64encode(b"\x89PNG fake").decode()}
+    reply = {"id": message["id"], "result": result}
+    if session:
+        reply["sessionId"] = session
+    out = [reply]
+    if method == "Page.navigate":
+        out.append({"method": "Page.loadEventFired", "params": {}, "sessionId": "S"})
+    for member in out:
+        os.write(4, json.dumps(member).encode() + b"\0")
+    if method == "Browser.close":
+        sys.exit(0)
+'''
+
+M_OK = {"viewport": {"width": 1440, "height": 900},
+        "lead": {"ask": {"text": "Which store keeps the checkpoints?", "top": 120, "bottom": 168, "clipped": False},
+                 "options": [{"text": "sqlite", "top": 300, "bottom": 340},
+                             {"text": "files", "top": 350, "bottom": 390}]},
+        "text": "Importer resumes after a crash\nWhich store keeps the checkpoints?"}
+M_EMPTY = {**M_OK, "lead": None}
+
+
+def fake_browser(tmp, measures, *, die=False):
+    path = Path(tmp) / "browser"
+    path.write_text(FAKE_BROWSER % {"python": sys.executable, "die": die, "measures": json.dumps(measures)})
+    path.chmod(0o755)
+    return path
+
+
+def with_lead(measure, **changes):
+    lead = json.loads(json.dumps(measure["lead"]))
+    ask = {**lead["ask"], **changes.get("ask", {})}
+    options = changes.get("options", lead["options"])
+    return {**measure, "lead": {"ask": ask, "options": options}, **({"text": changes["text"]} if "text" in changes else {})}
+
+
+class ChromiumDriverTest(unittest.TestCase):
+    """`chromium_first_screen` (issue 1031): DevTools over the browser's pipe, no input sent."""
+
+    def setUp(self):
+        handle = tempfile.TemporaryDirectory()
+        self.addCleanup(handle.cleanup)
+        self.tmp = Path(handle.name)
+
+    def jsonl(self, name):
+        return [json.loads(line) for line in (self.tmp / name).read_text().splitlines()]
+
+    def test_the_driver_speaks_the_pipe_and_waits_for_the_lead(self):
+        fake = fake_browser(self.tmp, [M_EMPTY, M_OK])
+        measure = verify_checks.chromium_first_screen(
+            "http://127.0.0.1:1/", width=1440, height=900, screenshot=self.tmp / "s.png",
+            browser=[str(fake)], timeout=10)
+        self.assertEqual(measure, M_OK)
+        self.assertEqual((self.tmp / "s.png").read_bytes(), b"\x89PNG fake")
+        argv = self.jsonl("argv.jsonl")[0]
+        for flag in ("--headless=new", "--remote-debugging-pipe", "--window-size=1440,900"):
+            self.assertIn(flag, argv)
+        profile = [a for a in argv if a.startswith("--user-data-dir=")]
+        self.assertEqual(len(profile), 1)
+        self.assertFalse(Path(profile[0].split("=", 1)[1]).exists())
+        calls = self.jsonl("calls.jsonl")
+        methods = [method for method, _ in calls]
+        self.assertEqual(methods[:2], ["Target.createTarget", "Target.attachToTarget"])
+        self.assertEqual(calls[2:4], [["Emulation.setDeviceMetricsOverride", "S"], ["Page.navigate", "S"]])
+        self.assertEqual(methods[-1], "Browser.close")
+        self.assertEqual(methods.count("Runtime.evaluate"), 2)
+        self.assertFalse([m for m in methods if m.startswith("Input.")])
+
+    def test_a_browser_that_dies_raises(self):
+        fake = fake_browser(self.tmp, [M_OK], die=True)
+        started = time.monotonic()
+        with self.assertRaises(verify_checks.BrowserError):
+            verify_checks.chromium_first_screen(
+                "http://127.0.0.1:1/", width=1440, height=900, screenshot=self.tmp / "s.png",
+                browser=[str(fake)], timeout=10)
+        self.assertLess(time.monotonic() - started, 10)
+
+    def test_the_browser_comes_from_path_else_nix_shell(self):
+        with mock.patch("shutil.which", return_value=None):
+            self.assertEqual(verify_checks.browser_command(), ["nix", "shell", "n#chromium", "--command", "chromium"])
+        with mock.patch("shutil.which", return_value="/run/current-system/sw/bin/chromium"):
+            self.assertEqual(verify_checks.browser_command(), ["/run/current-system/sw/bin/chromium"])
+
+
+class ConsoleFirstScreenTest(unittest.TestCase):
+    """`console-first-screen` (issue 1031): the live first screen at 1440x900 against the fold."""
+
+    GOAL = FirstScreenStateTest.GOAL
+    view = FirstScreenStateTest.view
+    SID = FirstScreenStateTest.SID
+    TITLE = FirstScreenStateTest.TITLE
+
+    def setUp(self):
+        handle = tempfile.TemporaryDirectory()
+        self.addCleanup(handle.cleanup)
+        self.tmp = Path(handle.name)
+
+    def serve(self, view):
+        body = json.dumps(view).encode()
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200 if self.path == "/api/state" else 404)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return server.server_address[1]
+
+    def check(self, measures, view=None, *, timeout=10, die=False):
+        port = self.serve(view if view is not None else self.view())
+        fake = fake_browser(self.tmp, measures, die=die)
+        return verify_checks.console_first_screen(port, browser=[str(fake)], timeout=timeout, out_dir=self.tmp)
+
+    def test_a_whole_ask_and_options_above_the_fold_is_met(self):
+        code, report = self.check([M_OK])
+        self.assertEqual(code, 0, report)
+        self.assertEqual(report["verdict"], "met")
+        self.assertEqual(report["screenshot"], str(self.tmp / "first-screen-1440.png"))
+        self.assertTrue((self.tmp / "first-screen-1440.png").exists())
+        self.assertEqual(report["viewport"], {"width": 1440, "height": 900})
+
+    def test_an_ask_or_option_below_the_fold_is_not_met(self):
+        second_low = [{"text": "sqlite", "top": 300, "bottom": 340}, {"text": "files", "top": 350, "bottom": 920}]
+        one_option = [{"text": "sqlite", "top": 300, "bottom": 340}]
+        cases = (("ask below", with_lead(M_OK, ask={"bottom": 950}), "fold_ask"),
+                 ("ask clipped", with_lead(M_OK, ask={"clipped": True}), "fold_ask"),
+                 ("option below", with_lead(M_OK, options=second_low), "fold_options"),
+                 ("one option", with_lead(M_OK, options=one_option), "fold_options"))
+        for name, measure, member in cases:
+            with self.subTest(name):
+                code, report = self.check([measure])
+                self.assertEqual(code, 1, report)
+                self.assertEqual(report["verdict"], "not_met")
+                self.assertIn({"member": member}, report["problems"])
+
+    def test_goal_text_on_the_rendered_page_is_not_met(self):
+        code, report = self.check([{**M_OK, "text": "Seen: " + self.GOAL}])
+        self.assertEqual(code, 1)
+        self.assertIn({"member": "visible_goal"}, report["problems"])
+
+    def test_a_page_led_by_another_item_is_not_yet(self):
+        other = with_lead(M_OK, ask={"text": "Approve the brief?"})
+        for name, measure, timeout in (("no lead", M_EMPTY, 2), ("another ask", other, 10)):
+            with self.subTest(name):
+                code, report = self.check([measure], timeout=timeout)
+                self.assertEqual(code, 75, report)
+                self.assertEqual(report["lead"], "other")
+
+    def test_no_long_goal_question_never_starts_the_browser(self):
+        v = self.view()
+        v["inbox"]["open"] = []
+        code, report = self.check([M_OK], v)
+        self.assertEqual(code, 75, report)
+        self.assertFalse((self.tmp / "argv.jsonl").exists())
+
+    def test_a_failing_state_never_starts_the_browser(self):
+        v = self.view()
+        v["inbox"]["open"][0]["goal"] = self.GOAL
+        code, report = self.check([M_OK], v)
+        self.assertEqual(code, 1)
+        self.assertEqual(report["verdict"], "not_met")
+        self.assertFalse((self.tmp / "argv.jsonl").exists())
+
+    def test_no_browser_is_reported(self):
+        code, report = self.check([M_OK], die=True)
+        self.assertEqual(code, 1)
+        self.assertEqual(report["verdict"], "no_browser")
+
+    def test_no_console_is_unreachable(self):
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        code, report = verify_checks.console_first_screen(port, browser=["/nonexistent"], out_dir=self.tmp)
+        self.assertEqual(code, 1)
+        self.assertEqual(report["verdict"], "unreachable")
+
+    def test_the_wrapper_is_committed_and_the_docstring_names_the_check(self):
+        port = self.serve(self.view())
+        fake = fake_browser(self.tmp, [M_OK])
+        result = run_from_root([str(ROOT / CHECKS / "console-first-screen"), "--port", str(port),
+                                "--browser", str(fake)])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["verdict"], "met")
+        self.assertEqual(committed_mode(f"{CHECKS}/console-first-screen"), "100755")
+        for needle in ("console-first-screen --port N", "verify_checks.console_first_screen"):
+            self.assertIn(needle, verify_checks.__doc__)
