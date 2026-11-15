@@ -181,8 +181,10 @@ an effect (abandon instead) and `profile_drift`, whose repair here is to restore
 `dispose` then refuses `confirmation_stale` for any token but the previewed one and
 `confirmation_required` for none, and acquires custody; an acquisition ordinal other than the
 one the token was computed for (another acquisition came between) gives custody up and
-refuses `confirmation_stale`. It inspects every declared action again under the held fence;
-when every one now reads `satisfied` it gives custody up and refuses `recovered` (resume it
+refuses `confirmation_stale`. It inspects every declared action again under the held fence
+and never renews custody: the core's `renew` quiesces a release parked longer than 900000 ms
+with no action in flight, so a renewal would give up the custody the disposition needs. When
+every action now reads `satisfied` it gives custody up and refuses `recovered` (resume it
 with no candidate), so a release that has since recovered is never sealed `failed`. It issues
 one grant
 named by the token (actor `operator`, kind `human`, authority class `release`, the
@@ -190,7 +192,11 @@ transaction's) and calls `dispose_failed` with `{ground, reference, occurred_at:
 successor: null, units: []}`. A core refusal (an action `in_progress` or `unknown` after the
 inspection is `effect_uncertain`; a grant that is not a human's at the class is
 `human_required` or `authority_class_mismatch`) gives custody up and refuses `dispose_refused`
-with the core's reason first in the detail. The result is the `run` document with `next`
+with the core's reason first in the detail; any other core refusal does the same with its
+class name first. An inspection whose adapter raises or answers outside the result shape
+gives custody up (an inspection is a read) and refuses `inspection_failed`, and custody lost
+before the seal refuses `custody_lost` with nothing disposed; both say to preview again,
+since the acquisition spent the token. The result is the `run` document with `next`
 `disposed`, state `failed` and the sealed `receipt_digest`, plus `disposition`; it makes no
 lock or sync call. The version stays reserved, and the next new release takes the next
 ordinal. A candidate refused `release_in_flight` by a release parked after an effect is told
@@ -209,7 +215,7 @@ the core's views, null until terminal. Legacy state is classified by `release_cu
 import json
 import os
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -219,8 +225,9 @@ from agent_tools.release import (release_adapter, release_cutover, release_lock,
                                  release_profile, release_sync, release_verification)
 from agent_tools.canonical import telemetry_digest
 from agent_tools.release.transaction_core import (
-    CreationConflict, DispositionRefused, GrantInvalid, InvocationRefused, LeaseUnavailable, ProofRefused,
-    TransactionBusy, TransactionError, TransactionStore)
+    CreationConflict, DispositionRefused, EffectResultInvalid, GrantInvalid, InvocationRefused,
+    LeaseUnavailable, ProofRefused, StaleCustody, TransactionBusy, TransactionError,
+    TransactionStore)
 from agent_tools.release.transaction_disposition import FAILURE_REASON
 from agent_tools.release.transaction_recovery import no_effect
 from agent_tools.release.transaction_history import TERMINALS, Custody, Transaction
@@ -817,12 +824,8 @@ class Driver:
         try:
             for unit in held.proof_plan["units"]:
                 if _view(held, unit["name"]) is not None:
-                    store.renew(custody)
-                    held = store.inspect_action(
-                        custody, name=unit["name"], effect=router,
-                        parameters=release_profile.thaw(unit["parameters"]))
+                    held = self._reinspect(store, custody, router, unit)
             if all(view["status"] == "satisfied" for view in held.actions):
-                store.release(custody)
                 raise Refusal("recovered", f"every declared action of {held.transaction_id} "
                               "now reads satisfied, so it is not disposed: resume it with no "
                               "candidate")
@@ -831,12 +834,51 @@ class Driver:
             disposed = store.dispose_failed(custody, grant_id=expected, disposition={
                 "ground": ground, "reference": reference, "occurred_at": None,
                 "successor": None, "units": []})
+        except Refusal:
+            self._give_up(store, custody)
+            raise
+        except StaleCustody as lost:
+            raise Refusal("custody_lost", f"custody was lost before the disposition was sealed, "
+                          f"so nothing is disposed ({lost}): preview the disposition again and "
+                          "confirm its new token"[:REFUSAL_DETAIL_LIMIT]) from lost
         except (DispositionRefused, InvocationRefused) as refused:
-            store.release(custody)
+            self._give_up(store, custody)
             raise Refusal("dispose_refused", f"{refused.reason}: {refused}"[
                 :REFUSAL_DETAIL_LIMIT]) from refused
+        except TransactionError as error:
+            self._give_up(store, custody)
+            raise Refusal("dispose_refused", f"{type(error).__name__}: {error}"[
+                :REFUSAL_DETAIL_LIMIT]) from error
         return {**self._result(disposed, "disposed"),
                 "disposition": {"ground": ground, "reference": reference}, "legacy": None}
+
+    @staticmethod
+    def _reinspect(store: TransactionStore, custody: Custody, router: "_Router",
+                   unit: Mapping[str, Any]) -> Transaction:
+        """Inspect one declared action for a disposition. Custody is not renewed first: the
+        core's `renew` gives custody up (`quiesced`) once a release is parked longer than its
+        window with no action in flight, which is the release a disposition closes. An adapter
+        that raises or answers outside the result shape refuses `inspection_failed`."""
+        name = unit["name"]
+        try:
+            return store.inspect_action(custody, name=name, effect=router,
+                                        parameters=release_profile.thaw(unit["parameters"]))
+        except EffectResultInvalid as error:
+            failure = error
+        except TransactionError:
+            raise
+        except Exception as error:
+            failure = error
+        raise Refusal("inspection_failed", f"{name} could not be inspected, so nothing is "
+                      "disposed: repair the read, then preview the disposition again for a new "
+                      f"token ({type(failure).__name__}: {failure})"[
+                          :REFUSAL_DETAIL_LIMIT]) from failure
+
+    @staticmethod
+    def _give_up(store: TransactionStore, custody: Custody) -> None:
+        """Release a disposition's custody on a refusal; one already lost stays lost."""
+        with suppress(TransactionError):
+            store.release(custody)
 
     def status(self) -> dict[str, Any]:
         shape = self.shape_refusal()
