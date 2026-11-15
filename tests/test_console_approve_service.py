@@ -126,7 +126,8 @@ class ApproveCase(Case):
     def start(self, fake, **kwargs):
         self.fake = fake
         self.kwargs = {"forge": self.forge, "pusher": self.pusher,
-                       "slug_of": lambda root: "fixture/r", "dispatch": None, **kwargs}
+                       "slug_of": lambda root: "fixture/r", "dispatch": None,
+                       "adoption_seconds": 3600, **kwargs}
         return self.begin(fake, **self.kwargs)
 
     def restart(self, fake=None):
@@ -459,6 +460,148 @@ class PlanApproveRunTest(ApproveCase):
         fake = self.ready(apply_result=APPLIED)
         self.run_approval("opened")
         self.assertEqual(fake.applied, [(PID_B, False)])
+
+
+class AdoptionPollTest(ApproveCase):
+    def opened(self, **forge_arguments):
+        fake = self.ready(apply_result=APPLIED)
+        self.run_approval("opened")
+        return fake
+
+    def items(self):
+        return [i for i in self.view()["inbox"]["open"] if i["reason"] == "adoption"]
+
+    def pulls(self):
+        return self.rows("adoption.pull_request")
+
+    def poll(self, state, number=7):
+        self.forge.states[number] = state
+        self.svc.poll_adoptions()
+
+    def test_a_ready_pull_request_raises_one_inbox_item_with_its_link(self):
+        self.opened()
+        self.poll("ready")
+        pulls = self.pulls()
+        self.assertEqual(len(pulls), 1)
+        self.assertEqual(self.items(), [{
+            "type": "inbox_item", "reason": "adoption", "key": f"adoption/{PID_B}",
+            "project_id": "o/r", "name": "reconcile",
+            "headline": "The adoption of o/r is ready to merge", "url": URL, "number": 7,
+            "answered": False, "waiting_since": self.svc._adoptions[PID_B]["pull_at"]}])
+        self.assertEqual(self.view()["statement"]["inbox_items"], 1)
+        self.assertEqual(self.adoption()["headline"],
+                         "The pull request of reconcile is ready to merge.")
+        self.assertEqual(self.forge.calls[-1], ("state", "fixture/r", 7))
+
+    def test_a_merged_pull_request_closes_the_item(self):
+        self.opened()
+        self.poll("ready")
+        self.poll("merged")
+        self.assertEqual(self.items(), [])
+        self.assertEqual(self.adoption()["headline"], "The pull request of reconcile was merged.")
+        self.assertEqual(self.adoption()["note"], approve.merged_note(str(self.repo), "develop"))
+
+    def test_a_closed_pull_request_closes_the_item(self):
+        self.opened()
+        self.poll("ready")
+        self.poll("closed")
+        self.assertEqual(self.items(), [])
+        self.assertEqual(self.adoption()["headline"],
+                         "The pull request of reconcile was closed without merging.")
+
+    def test_a_closed_adoption_names_its_branch_and_is_approved_again_with_the_same_plan(self):
+        fake = self.opened()
+        self.poll("ready")
+        self.poll("closed")
+        self.assertEqual(self.adoption()["note"], approve.closed_note(str(self.repo), BRANCH))
+        self.assertEqual(self.view()["registration"]["approve"], "approve")
+        self.forge.mark_closed(7)
+        shown = self.registered(self.repo)
+        self.assertEqual((shown["plan_id"], shown["approve"]), (PID_B, "approve"))
+        self.run_approval("opened")
+        self.assertEqual(len(fake.applied), 2)
+        self.assertEqual(len(self.opens()), 2)
+        self.assertEqual(self.svc._adoptions[PID_B]["pull_request"]["number"], 8)
+        self.assertEqual(self.adoption()["state"], "open")
+        self.assertEqual(self.items(), [])
+
+    def test_a_merged_adoption_is_not_approved_again(self):
+        fake = self.opened()
+        self.poll("ready")
+        self.poll("merged")
+        self.assertIsNone(self.view()["registration"]["approve"])
+        self.assertEqual(self.adoption()["note"], approve.merged_note(str(self.repo), "develop"))
+        steps = self.steps()
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            status, _, body = self.approve_plan()
+        self.assertEqual((status, body), (409, approve.MERGED.encode() + b"\n"))
+        self.assertEqual(len(fake.applied), 1)
+        self.assertEqual(self.steps(), steps)
+
+    def test_a_found_pull_request_is_the_one_polled(self):
+        self.forge.lost = [ForgeError("gh_timeout", "api")]
+        self.forge.find_raises = [None, ForgeError("gh_timeout", "api")]
+        self.ready(apply_result=APPLIED)
+        self.run_approval("open_failed")
+        self.restart()
+        self.run_approval("opened")
+        self.forge.calls.clear()
+        self.poll("ready")
+        self.assertEqual(self.forge.calls, [("state", "fixture/r", 7)])
+        self.assertEqual([i["url"] for i in self.items()], [URL])
+
+    def test_a_pull_request_that_is_no_longer_ready_closes_the_item(self):
+        self.opened()
+        self.poll("ready")
+        self.poll("open")
+        self.assertEqual(self.items(), [])
+        self.assertEqual(self.adoption()["headline"],
+                         "Waiting for the pull request of reconcile to be ready to merge.")
+
+    def test_an_unchanged_state_appends_nothing(self):
+        self.opened()
+        self.poll("open")
+        self.assertEqual(self.pulls(), [])
+        self.poll("ready")
+        self.poll("ready")
+        self.assertEqual(len(self.pulls()), 1)
+
+    def test_a_finished_pull_request_is_read_no_more(self):
+        self.opened()
+        self.poll("merged")
+        self.forge.calls.clear()
+        self.svc.poll_adoptions()
+        self.assertEqual([c for c in self.forge.calls if c[0] == "state"], [])
+
+    def test_a_failed_read_keeps_the_item_and_logs_one_line(self):
+        self.opened()
+        self.poll("ready")
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            self.poll(ForgeError("gh_timeout", "api"))
+        lines = [l for l in errors.getvalue().splitlines()
+                 if l.startswith("console: adoption_poll_failed sha256:")]
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(len(self.items()), 1)
+        self.assertEqual(len(self.pulls()), 1)
+
+    def test_the_item_survives_a_restart(self):
+        self.opened()
+        self.poll("ready")
+        before = self.items()
+        self.assertEqual(len(before), 1)
+        self.restart()
+        self.assertEqual(self.items(), before)
+
+    def test_the_poll_thread_reads_at_once_when_started(self):
+        self.opened()
+        self.forge.calls.clear()
+        self.restart()
+        end = time.monotonic() + 10
+        while time.monotonic() < end and ("state", "fixture/r", 7) not in self.forge.calls:
+            time.sleep(0.05)
+        self.assertIn(("state", "fixture/r", 7), self.forge.calls)
 
 
 class PlanApproveCloseTest(ApproveCase):

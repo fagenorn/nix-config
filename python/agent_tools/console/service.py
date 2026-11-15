@@ -517,6 +517,20 @@ nothing. An exception escaping a poll is one stderr line
 `console: tracker_poll_failed <Type>: <message>` and the loop goes on. Without a tracker no
 thread starts and nothing is read.
 
+Adoption pull requests (#1054): when the service is given a `forge`, a thread, `ADOPTION_THREAD`,
+started by `start()`, calls `poll_adoptions()` at once and then every `adoption_seconds`
+(`ADOPTION_SECONDS`, two minutes). One poll reads, through `forge.pull_request_state(slug, number,
+cancel=...)`, the pull request of each adoption whose step is `opened` and whose state is still
+`open` or `ready` (`approve.waiting`), one after another and never inside the ingest lock; the
+stop flag cancels the call in flight and a read finished after the stop appends nothing. Only a
+state that differs from the folded one is appended, as one `adoption.pull_request` row, and the
+view is published, so a ready pull request is one inbox item (`approve.inbox_entries`, see
+`view.py`) until it is merged, closed or reads open again; a merged or closed one is read no
+more. A failed read is one stderr line `console: adoption_poll_failed <plan_id> <Type>:
+<message>` and the item stays as it was. An exception escaping a round is one stderr line
+`console: adoption_poll_loop_failed <Type>: <message>` and the loop goes on. The console never
+merges: the owner does, on the forge.
+
 Answers (#862, ADR-console-010): `answer(project_id, key, choices)` ticks one option under each
 question of a decision item on the tracker, through `tick` (default `answer.tick_on_tracker`;
 `tick(slug, issue, comment_id, questions, choices)`), and marks the item answered at once. It
@@ -1000,6 +1014,8 @@ SESSION_POLL_SECONDS = 5.0
 SESSION_THREAD = "console-session-poll"
 TRACKER_SECONDS = 120.0
 TRACKER_THREAD = "console-tracker-poll"
+ADOPTION_SECONDS = 120.0
+ADOPTION_THREAD = "console-adoption-poll"
 RETENTION_SECONDS = 86400.0
 RETENTION_THREAD = "console-retention"
 DIGEST_SECONDS = 60.0
@@ -2003,6 +2019,7 @@ class ConsoleService:
                  repo_of: Callable[[str], str | None] = sessions.main_checkout,
                  tracker: Callable[..., list[dict]] | None = None,
                  tracker_seconds: float = TRACKER_SECONDS,
+                 adoption_seconds: float = ADOPTION_SECONDS,
                  slug_of: Callable[[str], str | None] = owner_actions.checkout_slug,
                  branch_pattern_of: Callable[[str], str | None] = deliveries.configured_branch_pattern,
                  activity: Callable[[str], float | None] = inbox.local_activity,
@@ -2117,6 +2134,8 @@ class ConsoleService:
         self._session_poller: threading.Thread | None = None
         self._tracker = tracker
         self._tracker_seconds = tracker_seconds
+        self._adoption_seconds = adoption_seconds
+        self._adoption_thread: threading.Thread | None = None
         self._slug_of = slug_of
         self._branch_pattern_of = branch_pattern_of
         self._patterns: dict[str, str] = {}
@@ -2267,6 +2286,7 @@ class ConsoleService:
                 None if self._approving else self._registering, self._registration,
                 again=self._answering, refusal=self._answer_refusal, adoption=adoption,
                 approve=action),
+            adoption_items=approve.inbox_entries(self._adoptions),
             pin=pin.note(self._pinned, cap, manager.session_profile(cap, self._use.last)),
             pin_launches=self._pin_launches.launched,
             managers=self._launcher is not None, pending=self._pending))
@@ -4597,6 +4617,51 @@ class ConsoleService:
         record = self._inbox.get((project_id, item["key"]))
         return record.item if record is not None and record.item["answered"] else item
 
+    def poll_adoptions(self) -> None:
+        """One read of every adopted pull request still waiting; see the module docstring."""
+        if self._forge is None:
+            return
+        with self._ingest:
+            waiting = approve.waiting(self._adoptions)
+        for entry in waiting:
+            if self._stop.is_set():
+                return
+            slug = self._slug_of(entry["root"])
+            if slug is None:
+                continue
+            number = entry["pull_request"]["number"]
+            try:
+                state = self._forge.pull_request_state(slug, number, cancel=self._stop)
+            except approve.Cancelled:
+                return
+            except Exception as error:
+                print(f"console: adoption_poll_failed {entry['plan_id']} "
+                      f"{type(error).__name__}: {error}", file=sys.stderr)
+                continue
+            if self._stop.is_set():
+                return
+            with self._ingest:
+                found = self._adoptions.get(entry["plan_id"])
+                if (found is None or found["step"] != "opened"
+                        or found["pull_request"]["number"] != number
+                        or found["pull_state"] == state):
+                    continue
+                appended = self.log.append(
+                    [approve.pull_row(entry["plan_id"], number, found["pull_request"]["url"],
+                                      state)])
+                self._fold(appended)
+                self._publish()
+
+    def _adopt(self) -> None:
+        while True:
+            try:
+                self.poll_adoptions()
+            except Exception as error:
+                print(f"console: adoption_poll_loop_failed {type(error).__name__}: {error}",
+                      file=sys.stderr)
+            if self._stop.wait(self._adoption_seconds):
+                return
+
     def _track(self) -> None:
         while True:
             try:
@@ -4628,6 +4693,10 @@ class ConsoleService:
             self._tracker_thread = threading.Thread(
                 target=self._track, name=TRACKER_THREAD, daemon=True)
             self._tracker_thread.start()
+        if self._forge is not None:
+            self._adoption_thread = threading.Thread(
+                target=self._adopt, name=ADOPTION_THREAD, daemon=True)
+            self._adoption_thread.start()
         self._retention_thread = threading.Thread(
             target=self._retain_loop, name=RETENTION_THREAD, daemon=True)
         self._retention_thread.start()
@@ -4660,6 +4729,8 @@ class ConsoleService:
             self._session_poller.join()
         if self._tracker_thread is not None:
             self._tracker_thread.join()
+        if self._adoption_thread is not None:
+            self._adoption_thread.join()
         if self._retention_thread is not None:
             self._retention_thread.join()
         if self._digest_thread is not None:

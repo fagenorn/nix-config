@@ -94,6 +94,13 @@ def ids(entries):
     return [entry["project_id"] for entry in entries]
 
 
+ADOPTION_ITEM = {
+    "type": "inbox_item", "reason": "adoption", "key": "adoption/sha256:" + "b" * 64,
+    "project_id": "o/r", "name": "r", "headline": "The adoption of o/r is ready to merge",
+    "url": "https://github.com/o/r/pull/7", "number": 7, "answered": False,
+    "waiting_since": "2026-01-01T00:00:00Z"}
+
+
 class FoldTableTest(unittest.TestCase):
     def test_quiet_projects_past_three_fold_into_one_group(self):
         table = [
@@ -1978,6 +1985,28 @@ class SigninViewTest(unittest.TestCase):
         briefed_too = derive_view([state("p00", 1)], records, capacity=signin_capacity(ask),
                                   sprints={A: asked(started(A)), c: briefed(sprint(c), at="t5")})
         self.assertEqual(briefed_too["statement"]["sentence"], BRIEF_SENTENCE)
+
+    def test_adoption_items_follow_sign_ins_and_precede_questions(self):
+        ask = signin_entry("spare", "signed_out", True, since="t1")
+        one = asked(started(A))
+        one = dataclasses.replace(one, questions=one.questions[:1])
+        shown = derive_view([state("p00", 1)], sprints={A: one},
+                            capacity=signin_capacity(ask), adoption_items=[ADOPTION_ITEM])
+        self.assertEqual([e["reason"] for e in shown["inbox"]["open"]],
+                         ["signin", "adoption", "question"])
+        self.assertEqual(shown["statement"]["inbox_items"], 3)
+        self.assertEqual(shown["statement"]["sentence"], view.SIGNIN_SENTENCE)
+
+    def test_an_adoption_item_sets_its_sentence_and_needs_no_registered_project(self):
+        shown = derive_view([], adoption_items=[ADOPTION_ITEM])
+        self.assertEqual(shown["statement"]["inbox_items"], 1)
+        self.assertEqual(shown["statement"]["sentence"],
+                         "Open the pull request to merge the adoption.")
+        self.assertEqual(shown["inbox"]["open"], [ADOPTION_ITEM])
+        self.assertIsNot(shown["inbox"]["open"][0], ADOPTION_ITEM)
+        asked_too = derive_view([state("p00", 1)], sprints={A: asked(started(A))},
+                                adoption_items=[ADOPTION_ITEM])
+        self.assertEqual(asked_too["statement"]["sentence"], view.ADOPTION_SENTENCE)
 
     def test_a_capacity_without_sign_in_raises_nothing(self):
         shown = derive_view([state("p00", 1)], capacity=out())
