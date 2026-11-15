@@ -39,9 +39,13 @@ or 2 returns the parsed stdout object. A failed run raises `RunFailed(kind)`, `s
 Plain lines. `plan_lines(document)` is the D4 list of ADR-console-028, each line only when its count
 is above zero, in this order: `moves N agent file(s)` (followed by ` under .agents/` when every move
 target starts with `.agents/`), `writes the project contract`, `generates N file(s) from the
-contract`, `writes <paths>` (the non-contract files), `deletes <paths>`, `rewrites N link(s)` and
+contract`, `writes <paths>` (the non-contract files other than the adoption's own records), `records the adoption`
+(when the plan writes any record), `deletes <paths>`, `rewrites N link(s)` and
 `rewrites N path reference(s)` (the references answered `rewrite` or `extend`). `<paths>` names up to
-three paths, as `a`, `a and b`, `a, b and c`, and from four on `a, b, c and N more` (#1057). It is a
+three paths, as `a`, `a and b`, `a, b and c`, and from four on `a, b, c and N more` (#1057). The adoption's own records, the files under
+`MIGRATION_MAP_DIR` and `EVIDENCE_RECORD_DIR`, are never named: a plan that writes any ends its
+`writes` line with `, and records the adoption`, or is the line `records the adoption` when it writes
+nothing else, and `NAMED` counts only the named files (#1060). It is a
 pure function of the document. `summary(root, plan, report=None)` is the row payload (`by`, `root`,
 `project_id`, `result`, `outcome`, `headline`, `lines`, `note`) with the D4 to D6 texts; message
 text is whitespace-collapsed. A failed plan's headline is `The adoption plan for <name> failed:
@@ -68,6 +72,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
 from agent_tools.console import event_log, manager
+from agent_tools.project_contract.adopt_inspection import EVIDENCE_RECORD_DIR, MIGRATION_MAP_DIR
 from agent_tools.system import siblings
 
 ENDED = event_log.REGISTRATION_ENDED
@@ -85,6 +90,7 @@ OUTCOME_TEXT = {
 MEMBERS = {"by", "root", "project_id", "result", "outcome", "headline", "lines", "note"}
 CONTRACT = ".agents/project.json"
 NAMED = 3
+RECORD_DIRS = (MIGRATION_MAP_DIR + "/", EVIDENCE_RECORD_DIR + "/")
 RUN_WORDS = {
     "timed_out": "it took too long and was stopped",
     "not_installed": "the adoption tool could not be started",
@@ -192,7 +198,9 @@ def plan_lines(document: Mapping) -> list[str]:
     contract = any(CONTRACT in op["targets"] for op in writes)
     moved = sum(len(op["sources"]) for op in moves)
     generated = sum(len(op["targets"]) for op in changes if op["op"] == "regenerate-projection")
-    other = [path for op in writes if CONTRACT not in op["targets"] for path in op["targets"]]
+    written = [path for op in writes if CONTRACT not in op["targets"] for path in op["targets"]]
+    other = [path for path in written if not path.startswith(RECORD_DIRS)]
+    recorded = len(other) != len(written)
     deleted = [path for op in changes if op["op"] == "delete-file" for path in op["sources"]]
     rewrites = document["link_rewrites"]
     links = rewrites["inbound"]["links"] + rewrites["outbound"]["links"]
@@ -207,7 +215,9 @@ def plan_lines(document: Mapping) -> list[str]:
     if generated:
         lines.append(f"generates {_count(generated, 'file')} from the contract")
     if other:
-        lines.append(f"writes {_named(other)}")
+        lines.append(f"writes {_named(other)}" + (", and records the adoption" if recorded else ""))
+    elif recorded:
+        lines.append("records the adoption")
     if deleted:
         lines.append(f"deletes {_named(deleted)}")
     if links:
