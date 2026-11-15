@@ -241,8 +241,10 @@ manager that row replaces, unless the row's int `seen_after` (the `manager_seen_
 when the launch began) is below the seq of the latest seen row: that row was written while the
 launcher was still returning, so it names the new manager and is kept.
 
-`message_state(message)` is `READ` when `read_at` is set, else `DELIVERED` when `delivered_at` is,
-else `SENT`; `unread(state)` is the messages without `read_at`, in id order; `unreachable(state)` is
+`message_state(message, now_ms)` is the first that holds of: `REPLIED` when `reply` is set,
+`PICKED_UP` when `read_at` is set, `NOT_PICKED_UP` when `now_ms` is not None and at least
+`NOT_PICKED_UP_AFTER_MS` have passed since the message's `at`, else `SENT`; `delivered_at` never
+changes the shown state, it only feeds the service's re-nudge. `unread(state)` is the messages without `read_at`, in id order; `unreachable(state)` is
 true once `failed_nudges` reaches `UNREACHABLE_AFTER`. `checked_message(text)` refuses
 `EMPTY_MESSAGE` for a blank text and `MESSAGE_TOO_LONG` above `MAX_MESSAGE_CHARS`, and returns the
 text unchanged. `parse_message(body)` reads the owner's write and returns `(project_id, sprint_id,
@@ -552,8 +554,21 @@ MESSAGE_TEXT = "text"
 MESSAGE_ANSWER = "answer"
 MESSAGE_STOP = "stop"
 SENT = "sent"
-DELIVERED = "delivered"
-READ = "read"
+PICKED_UP = "picked_up"
+REPLIED = "replied"
+NOT_PICKED_UP = "not_picked_up"
+NOT_PICKED_UP_AFTER_MS = 300_000
+PICKUP_MINUTE_TEXT = "the manager picks it up within a minute"
+PICKUP_TURN_TEXT = "the manager picks it up at its next turn"
+TELL_MINUTE_TEXT = "The manager picks it up within a minute."
+TELL_TURN_TEXT = "The manager picks it up at its next turn."
+PICKED_UP_TEXT = "picked up"
+REPLIED_TEXT = "replied"
+NOT_PICKED_UP_TEXT = "not picked up after 5 min"
+RETRY_ACTION_TEXT = "Press Retry to start a new manager."
+NUDGE_ACTION_TEXT = "Tell the manager again to nudge it, or withdraw the sprint under More."
+TURN_ACTION_TEXT = ("It waits for the manager's next turn; "
+                    "withdraw the sprint under More if none comes.")
 MANAGER_SESSION_NAME = re.compile(r"(?P<project>.+) sprint (?P<sprint>[0-9a-f]{16})")
 
 _MINUTE_MS = 60_000
@@ -1085,10 +1100,14 @@ def checked_message(text: str) -> str:
     return text
 
 
-def message_state(message: Message) -> str:
+def message_state(message: Message, now_ms: int | None) -> str:
+    if message.reply is not None:
+        return REPLIED
     if message.read_at is not None:
-        return READ
-    return DELIVERED if message.delivered_at is not None else SENT
+        return PICKED_UP
+    if now_ms is not None and now_ms - _ms(message.at) >= NOT_PICKED_UP_AFTER_MS:
+        return NOT_PICKED_UP
+    return SENT
 
 
 def unread(state: SprintState) -> tuple[Message, ...]:

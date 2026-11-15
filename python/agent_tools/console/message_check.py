@@ -92,6 +92,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from agent_tools.console import manager
+from agent_tools.console.sprints import PICKED_UP, REPLIED
 from agent_tools.console.manager_check import (
     DEFAULT_URL,
     NOT_YET,
@@ -289,7 +290,7 @@ def _start(args, registry, stop, remove, clock, sleep) -> int:
             if approvals:
                 phase, pause = "read", READ_POLL_SECONDS
                 message = approvals[0]
-                if message.get("state") == "read":
+                if message.get("state") in (PICKED_UP, REPLIED):
                     seconds = _seconds(message.get("read_at"), message.get("at"))
                     if seconds is None:
                         return settle(1, "the read time is unreadable", None)

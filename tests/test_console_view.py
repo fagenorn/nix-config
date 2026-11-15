@@ -1657,6 +1657,7 @@ class SprintViewTest(unittest.TestCase):
             "progress": None, "progress_text": None, "status": None, "status_at": None,
             "next": None, "milestone": None, "tracker_url": None, "issues": [], "waiting": 0,
             "sessions": [], "messages": [], "reach_text": None,
+            "tell_text": "The manager picks it up at its next turn.",
             "stoppable": True, "ended_at": None, "stop_text": None, "closing": None,
             "state_until": None}])
 
@@ -1736,23 +1737,21 @@ def message_entry(rows):
 class SprintMessageViewTest(unittest.TestCase):
     TEXT = "leave the importer's schema alone"
 
-    def test_a_messages_state_moves_from_sent_to_delivered_to_read(self):
+    def test_a_messages_state_moves_from_sent_to_picked_up(self):
         sent_row = messaged_row(3, self.TEXT)
-        base = {"id": 3, "kind": "text", "version": None, "text": self.TEXT,
-                "at": message_at(3)}
         entry = message_entry(message_rows(sent_row))
         self.assertEqual(entry["messages"], [{
-            **base, "state": "sent", "state_text": "sent", "read_at": None, "reply": None,
-            "reply_at": None}])
+            "id": 3, "kind": "text", "version": None, "text": self.TEXT, "at": message_at(3),
+            "state": "sent", "state_text": "sent, the manager picks it up within a minute",
+            "action_text": None, "read_at": None, "reply": None, "reply_at": None}])
         self.assertIsNone(entry["reach_text"])
         entry = message_entry(message_rows(sent_row, nudged_row(4, 3, True)))
-        self.assertEqual(entry["messages"][0]["state"], "delivered")
-        self.assertEqual(entry["messages"][0]["state_text"], "delivered")
+        self.assertEqual(entry["messages"][0]["state"], "sent")
         entry = message_entry(message_rows(
             sent_row, nudged_row(4, 3, True),
             message_row(5, event_log.SPRINT_READ, {"through": 3})))
-        self.assertEqual(entry["messages"][0]["state"], "read")
-        self.assertEqual(entry["messages"][0]["state_text"], "read")
+        self.assertEqual(entry["messages"][0]["state"], "picked_up")
+        self.assertEqual(entry["messages"][0]["state_text"], "picked up")
         self.assertEqual(entry["messages"][0]["read_at"], message_at(5))
 
     def test_two_failed_nudges_show_manager_not_reachable_and_keep_the_messages(self):

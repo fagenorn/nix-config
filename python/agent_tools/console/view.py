@@ -343,6 +343,7 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
                       "sessions": [<session entry>, ...],
                       "messages": [<message entry>, ...],
                       "reach_text": "manager not reachable" | null,
+                      "tell_text": "<text>" | null,
                       "stoppable": <bool>, "ended_at": "<time>" | null,
                       "stop_text": "<text>" | null,
                       "closing": null | {"at", "summary", "first_line", "differently",
@@ -351,8 +352,8 @@ only. `unmanaged` is always present, possibly empty, sorted by `root`.
                       "state_until": "<time>" | null}
     <message entry> = {"id": <int>, "kind": "approved" | "changes" | "text" | "stop",
                        "version": <int> | null, "text": <str> | null, "at": "<time>",
-                       "state": "sent" | "delivered" | "read",
-                       "state_text": "sent" | "delivered" | "read",
+                       "state": "sent" | "picked_up" | "replied" | "not_picked_up",
+                       "state_text": "<text>", "action_text": "<text>" | null,
                        "read_at": "<time>" | null, "reply": <str> | null,
                        "reply_at": "<time>" | null}
     <line> = {"label": "Outside sprints", "working": <int>, "waiting": <int>,
@@ -456,8 +457,16 @@ project's `outside_sprints`, and is counted in none of its numbers or its summar
 a session waiting for an answer or a permission reads "waiting for an answer" or "waiting for a
 permission".
 `messages` are the `SHOWN_MESSAGES` (10) newest of the sprint's messages (`SprintState.messages`),
-oldest first; `state` and `state_text` are `sprints.message_state` (the page adds no colour to
-them). `reach_text` is `UNREACHABLE_TEXT` once `sprints.unreachable` holds, else null; it never
+oldest first. `state` is `sprints.message_state` over `now_ms`: `replied` once the manager answered,
+else `picked_up` once it read the message, else `not_picked_up` five minutes after the message was
+sent, else `sent`; a nudge never changes it. The pick-up is the minute form (`PICKUP_MINUTE_TEXT`)
+exactly when `derive_view(..., nudges=True)` (default; the service passes whether it has a nudger)
+and the sprint's manager is a `started` row, else the turn form (`PICKUP_TURN_TEXT`). `state_text` is
+`"sent, "` and the pick-up for `sent`, else `PICKED_UP_TEXT`, `REPLIED_TEXT` or
+`NOT_PICKED_UP_TEXT`. `action_text` is null unless the message is `not_picked_up`; then
+`RETRY_ACTION_TEXT` when the sprint's `retry` is true, else `NUDGE_ACTION_TEXT` with the minute
+pick-up, else `TURN_ACTION_TEXT`. `tell_text` is null for an ended sprint, else `TELL_MINUTE_TEXT` or
+`TELL_TURN_TEXT` by the same pick-up (the page adds no colour to any of them). `reach_text` is `UNREACHABLE_TEXT` once `sprints.unreachable` holds, else null; it never
 changes `retry` and never hides a message.
 `recent_projects` is every registered project id, newest `last_seq` first, then `project_id`
 (always present, possibly empty); it derives from the states alone.
@@ -516,7 +525,10 @@ from agent_tools.console.sprints import (
     MAX_CONTEXT_CHARS,
     MAX_OPTION_CHARS,
     NO_PROGRESS_TEXT,
+    NUDGE_ACTION_TEXT,
     NONE,
+    NOT_PICKED_UP,
+    NOT_PICKED_UP_TEXT,
     NOW_ANSWER_TEXT,
     NOW_BRIEF_TEXT,
     NOW_DRAFTING_TEXT,
@@ -526,10 +538,18 @@ from agent_tools.console.sprints import (
     NOW_STOPPING_TEXT,
     ON_TRACK,
     ON_TRACK_TEXT,
+    PICKED_UP,
+    PICKED_UP_TEXT,
+    PICKUP_MINUTE_TEXT,
+    PICKUP_TURN_TEXT,
     QUIET,
     QUIET_TEXT,
     QUOTA,
     QUOTA_TEXT,
+    REPLIED,
+    REPLIED_TEXT,
+    RETRY_ACTION_TEXT,
+    SENT,
     STARTED,
     STARTING,
     STARTING_TEXT,
@@ -538,6 +558,9 @@ from agent_tools.console.sprints import (
     STOPPED_TEXT,
     STOPPING,
     STOPPING_TEXT,
+    TELL_MINUTE_TEXT,
+    TELL_TURN_TEXT,
+    TURN_ACTION_TEXT,
     UNSTOPPED_TEXT,
     WAITING,
     WAITING_TEXT,
@@ -940,11 +963,19 @@ def sprint_now(state: SprintState, quota: Wait | None,
     return report.status
 
 
-def _message_entry(message: Message) -> dict:
-    shown = message_state(message)
+def _message_entry(message: Message, now_ms: int | None, minute: bool, retry: bool) -> dict:
+    shown = message_state(message, now_ms)
+    pickup = PICKUP_MINUTE_TEXT if minute else PICKUP_TURN_TEXT
+    text = {PICKED_UP: PICKED_UP_TEXT, REPLIED: REPLIED_TEXT, NOT_PICKED_UP: NOT_PICKED_UP_TEXT,
+            SENT: "sent, " + pickup}[shown]
+    action = None
+    if shown == NOT_PICKED_UP:
+        action = (RETRY_ACTION_TEXT if retry else NUDGE_ACTION_TEXT if minute
+                  else TURN_ACTION_TEXT)
     return {"id": message.message_id, "kind": message.kind, "version": message.version,
-            "text": message.text, "at": message.at, "state": shown, "state_text": shown,
-            "read_at": message.read_at, "reply": message.reply, "reply_at": message.reply_at}
+            "text": message.text, "at": message.at, "state": shown, "state_text": text,
+            "action_text": action, "read_at": message.read_at, "reply": message.reply,
+            "reply_at": message.reply_at}
 
 
 def _closing_entry(closing: Closing) -> dict:
@@ -966,7 +997,8 @@ def _finished(state: SprintState, now_ms: int | None) -> bool:
 def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
                   sessions: Sequence[SessionState],
                   deliveries: Mapping[str, Sequence[DeliveryState]],
-                  records: Sequence[InboxRecord] = (), capacity: Mapping = EMPTY) -> dict:
+                  records: Sequence[InboxRecord] = (), capacity: Mapping = EMPTY,
+                  nudges: bool = True) -> dict:
     stated_ms = _millis(state.stated_at)
     elapsed = 0 if now_ms is None else now_ms - stated_ms
     report = state.report
@@ -990,6 +1022,7 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
     ended = ended_at(state)
     listed = [s.state for s in sessions]
     ball = sprint_ball(state, now_ms, waiting, listed)
+    minute = nudges and state.manager is not None and state.manager.state == STARTED
     return {
         "type": "sprint",
         "sprint_id": state.sprint_id,
@@ -1021,7 +1054,10 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
         "waiting": waiting,
         "sessions": [_session_entry(s, deliveries, now_ms, _SPRINT_STATE_TEXT)
                      for s in _ordered(sessions)],
-        "messages": [_message_entry(m) for m in state.messages[-SHOWN_MESSAGES:]],
+        "messages": [_message_entry(m, now_ms, minute, retry)
+                     for m in state.messages[-SHOWN_MESSAGES:]],
+        "tell_text": (None if ended is not None
+                      else TELL_MINUTE_TEXT if minute else TELL_TURN_TEXT),
         "reach_text": UNREACHABLE_TEXT if unreachable(state) else None,
         "stoppable": (state.stop_at is None and state.stopped_at is None and ended is None),
         "ended_at": ended,
@@ -1040,10 +1076,11 @@ def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
                    sprint_sessions: Mapping[str, Sequence[SessionState]] | None = None,
                    records: Sequence[InboxRecord] = (),
                    finished: Sequence[SprintState] = (),
-                   capacity: Mapping = EMPTY) -> dict:
+                   capacity: Mapping = EMPTY,
+                   nudges: bool = True) -> dict:
     def entries(group: Sequence[SprintState]) -> list[dict]:
         return [_sprint_entry(s, now_ms, managers, (sprint_sessions or {}).get(s.sprint_id, ()),
-                              deliveries, records, capacity) for s in group]
+                              deliveries, records, capacity, nudges) for s in group]
 
     return {
         "type": "project",
@@ -1220,6 +1257,7 @@ def derive_view(
     confirm_items: Iterable[Mapping] = (),
     trust_items: Iterable[Mapping] = (),
     failure_items: Iterable[Mapping] = (),
+    nudges: bool = True,
 ) -> dict:
     states = list(states)
     sessions = list(sessions)
@@ -1345,10 +1383,11 @@ def derive_view(
     entries = [_project_entry(s, owned.get(s.project_id, ()), runs, now_ms,
                               drafted.get(s.project_id, ()), managers, in_sprint,
                               open_by_project.get(s.project_id, ()),
-                              finished.get(s.project_id, ()), capacity)
+                              finished.get(s.project_id, ()), capacity, nudges)
                for s in active]
     quiet_entries = [_project_entry(s, (), runs, now_ms, (), managers, in_sprint,
-                                    finished=finished.get(s.project_id, ()), capacity=capacity)
+                                    finished=finished.get(s.project_id, ()), capacity=capacity,
+                                    nudges=nudges)
                      for s in quiet]
     if len(quiet_entries) <= FOLD_AFTER:
         entries.extend(quiet_entries)

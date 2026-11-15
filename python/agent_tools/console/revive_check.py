@@ -62,7 +62,7 @@ spent:
   again on the next poll; any other status is not met `the console refused the message: <status>
   <text>`). A resumed run never posts a second message in phase `read`.
 - `read`: wait until the sprint row's newest message of kind `text` carrying `MESSAGE` is in state
-  `read`; a non-null `reach_text` is not met with that text.
+  `picked_up` or `replied`; a non-null `reach_text` is not met with that text.
 
 The deadlines are wall-clock times in the state file, so they hold across resumed runs, and they
 are checked on every poll, the first of a resumed run included, before any wait: in `back`,
@@ -132,6 +132,7 @@ from agent_tools.console.manager_check import (
     default_registry,
 )
 from agent_tools.console.sessions import DEFAULT_PROFILE
+from agent_tools.console.sprints import PICKED_UP, REPLIED
 
 DEFAULT_BUDGET = 540
 DEFAULT_DEADLINE = 180
@@ -419,7 +420,7 @@ def _start(args, registry, stop, remove, clock, sleep) -> int:
                 sent = [m for m in row.get("messages") or []
                         if isinstance(m, dict) and m.get("kind") == "text"
                         and m.get("text") == MESSAGE]
-                if sent and sent[-1].get("state") == "read":
+                if sent and sent[-1].get("state") in (PICKED_UP, REPLIED):
                     return settle(0, None)
                 if row.get("reach_text") is not None:
                     return settle(1, row["reach_text"])

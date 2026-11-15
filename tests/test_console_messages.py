@@ -5,7 +5,9 @@ Run: just agent-workflow-tests
 import contextlib
 import io
 import json
+import dataclasses
 import time
+import unittest
 from datetime import datetime, timezone
 
 from agent_tools.console import manager, nudge, sessions, sprints, write_guard
@@ -13,7 +15,12 @@ from agent_tools.console.event_log import EventLog
 
 from . import console_test_support as support
 from .test_console_answer import view_of
+from .test_console_view import (
+    message_at, message_row, message_rows, messaged_row, nudged_row, state)
 from .test_console_writes import Case
+from agent_tools.console import event_log
+from agent_tools.console.sprints import sprint_states
+from agent_tools.console.view import derive_view
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 BRIEF = "/api/brief"
@@ -727,3 +734,118 @@ class NudgeServiceTest(MessageRouteTest):
         self.queued.run_next()
         self.assertEqual(held, [True, True])
 
+
+
+AT = int(datetime.fromisoformat(message_at(3)).timestamp() * 1000)
+FIVE_MIN = 300_000
+MINUTE_TEXT = "the manager picks it up within a minute"
+TURN_TEXT = "the manager picks it up at its next turn"
+
+
+def life(rows, now_ms, nudges=True):
+    return derive_view([state("p00", 1)], sprints=sprint_states(rows), now_ms=now_ms,
+                       nudges=nudges)["entries"][0]["sprints"][0]
+
+
+class MessageLifeViewTest(unittest.TestCase):
+    """A message reads sent, picked up, replied or not picked up (#1086)."""
+
+    def test_a_message_reads_sent_with_its_pickup_then_picked_up_then_replied(self):
+        rows = message_rows(messaged_row(3, TEXT))
+        (sent,) = life(rows, AT + 60_000)["messages"]
+        self.assertEqual((sent["state"], sent["state_text"], sent["action_text"]),
+                         ("sent", "sent, " + MINUTE_TEXT, None))
+        rows.append(message_row(4, event_log.SPRINT_READ, {"through": 3}))
+        (read,) = life(rows, AT + 60_000)["messages"]
+        self.assertEqual((read["state"], read["state_text"]), ("picked_up", "picked up"))
+        rows.append(message_row(5, event_log.SPRINT_ANSWERED, {"message": 3, "reply": ANSWER}))
+        (replied,) = life(rows, AT + 60_000)["messages"]
+        self.assertEqual((replied["state"], replied["state_text"], replied["reply"]),
+                         ("replied", "replied", ANSWER))
+
+    def test_without_a_nudger_or_a_started_manager_the_pickup_is_the_next_turn(self):
+        rows = message_rows(messaged_row(3, TEXT))
+        turn = life(rows, AT + 60_000, nudges=False)
+        self.assertEqual(turn["messages"][0]["state_text"], "sent, " + TURN_TEXT)
+        self.assertEqual(turn["tell_text"], "The manager picks it up at its next turn.")
+        bare = [message_row(1, event_log.GOAL_STATED, {"goal": "make the importer resumable"}),
+                messaged_row(3, TEXT)]
+        turn = life(bare, AT + 60_000)
+        self.assertEqual(turn["messages"][0]["state_text"], "sent, " + TURN_TEXT)
+        self.assertEqual(turn["tell_text"], "The manager picks it up at its next turn.")
+        self.assertEqual(life(rows, AT + 60_000)["tell_text"],
+                         "The manager picks it up within a minute.")
+
+    def test_an_unread_message_reads_not_picked_up_at_five_minutes_with_an_action(self):
+        # A briefed sprint: a started manager with no brief this old would be missing, and offer Retry.
+        parts = {"done": "d", "excluded": ["x"], "slices": ["a"], "risks": ["r"], "asks": ["q"]}
+        brief = message_row(2, event_log.BRIEF_SENT, {"version": 1, "goal": "g", "brief": parts})
+        rows = message_rows(brief, messaged_row(3, TEXT))
+        self.assertEqual(life(rows, AT + FIVE_MIN - 1)["messages"][0]["state"], "sent")
+        late = life(rows, AT + FIVE_MIN)["messages"][0]
+        self.assertEqual((late["state"], late["state_text"], late["action_text"]),
+                         ("not_picked_up", "not picked up after 5 min",
+                          "Tell the manager again to nudge it, or withdraw the sprint under More."))
+        turn = life(rows, AT + FIVE_MIN, nudges=False)["messages"][0]
+        self.assertEqual(
+            turn["action_text"],
+            "It waits for the manager's next turn; withdraw the sprint under More if none comes.")
+        failed = [message_row(1, event_log.GOAL_STATED, {"goal": "make the importer resumable"}),
+                  message_row(2, event_log.MANAGER_FAILED, {"reason": "boom"}),
+                  messaged_row(3, TEXT)]
+        retry = life(failed, AT + FIVE_MIN)
+        self.assertTrue(retry["retry"])
+        self.assertEqual(retry["messages"][0]["action_text"],
+                         "Press Retry to start a new manager.")
+        read = message_rows(messaged_row(3, TEXT),
+                            message_row(4, event_log.SPRINT_READ, {"through": 3}))
+        picked = life(read, AT + 2 * FIVE_MIN)["messages"][0]
+        self.assertEqual((picked["state"], picked["action_text"]), ("picked_up", None))
+
+    def test_a_nudged_but_unread_message_never_reads_delivered(self):
+        nudged = message_rows(messaged_row(3, TEXT), nudged_row(4, 3, True))
+        self.assertEqual(life(nudged, AT + 60_000)["messages"][0]["state"], "sent")
+        row_sets = [
+            (message_rows(messaged_row(3, TEXT)), AT + 60_000),
+            (message_rows(messaged_row(3, TEXT),
+                          message_row(4, event_log.SPRINT_READ, {"through": 3})), AT + 60_000),
+            (message_rows(messaged_row(3, TEXT),
+                          message_row(4, event_log.SPRINT_READ, {"through": 3}),
+                          message_row(5, event_log.SPRINT_ANSWERED,
+                                      {"message": 3, "reply": ANSWER})), AT + 60_000),
+            (message_rows(messaged_row(3, TEXT)), AT + FIVE_MIN),
+            (nudged, AT + 60_000), (nudged, AT + FIVE_MIN)]
+        for rows, now_ms in row_sets:
+            for nudges in (True, False):
+                for message in life(rows, now_ms, nudges)["messages"]:
+                    self.assertNotIn(message["state"], ("delivered", "read"))
+                    self.assertNotIn(message["state_text"], ("delivered", "read"))
+
+    def test_an_ended_sprint_offers_no_tell_text(self):
+        folded = sprint_states(message_rows(messaged_row(3, TEXT)))
+        (sprint,) = folded.values()
+        folded = {sprint.sprint_id: dataclasses.replace(sprint, stopped_at=message_at(6))}
+        entry = derive_view([state("p00", 1)], sprints=folded,
+                            now_ms=AT + 60_000)["entries"][0]["sprints"][0]
+        self.assertIsNotNone(entry["ended_at"])
+        self.assertIsNone(entry["tell_text"])
+
+
+class MessagePickupServiceTest(MessageRouteTest):
+    def test_the_service_words_the_pickup_by_whether_it_has_a_nudger(self):
+        svc = self.open()
+        sid = self.settled(svc)
+        (sprint,) = view_of(svc)["entries"][0]["sprints"]
+        self.assertEqual(sprint["tell_text"], "The manager picks it up at its next turn.")
+        svc.close()
+        log = EventLog(self.store)
+        log.append([("manager.started", "owner/p01", {
+            "sprint_id": sid, "profile": "work", "session_name": "m"})])
+        log.close()
+        svc = self.start()
+        (sprint,) = view_of(svc)["entries"][0]["sprints"]
+        self.assertEqual(sprint["tell_text"], "The manager picks it up at its next turn.")
+        svc.close()
+        svc = self.start(nudger=lambda n: None)
+        (sprint,) = view_of(svc)["entries"][0]["sprints"]
+        self.assertEqual(sprint["tell_text"], "The manager picks it up within a minute.")
