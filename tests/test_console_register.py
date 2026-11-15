@@ -360,7 +360,8 @@ class NextStepTest(unittest.TestCase):
         cases = {
             "adopt.registration.no_remote": f"Add the repository's origin remote, {again}",
             "adopt.registration.remote_default_unknown":
-                f"Add the repository's origin remote, {again}",
+                "The repository's origin remote needs a published default branch. "
+                f"Push one to it, {again}",
             "adopt.git.remote_unreachable":
                 f"Check that the repository's remote can be reached from this host, {again}",
             "adopt.git.fetch_failed":
@@ -398,6 +399,15 @@ class NextStepTest(unittest.TestCase):
                 else:
                     self.assertEqual(note, f"Run {PLAN_COMMAND} in a terminal to see the full reason.")
         self.assertIn(PLAN_COMMAND, register.failed("/srv/r", "ValueError")["note"])
+
+    def test_a_registration_that_raised_names_the_register_command(self):
+        for kind in register.RUN_KINDS:
+            with self.subTest(kind=kind):
+                row = register.failed("/srv/r", kind, "register")
+                self.assertEqual(row["headline"],
+                                 f"r was not registered: {register.RUN_WORDS[kind]}.")
+                self.assertIn(REGISTER_COMMAND, row["note"])
+                self.assertNotIn(PLAN_COMMAND, row["note"])
 
     def test_the_path_is_quoted_for_a_terminal(self):
         self.assertIn("--repo-root '/srv/my repo'", register.failed("/srv/my repo", "failed")["note"])

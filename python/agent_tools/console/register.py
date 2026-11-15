@@ -52,21 +52,26 @@ pure function of the document. `summary(root, plan, report=None)` is the row pay
 text is whitespace-collapsed. A failed plan's headline is `The adoption plan for <name> failed:
 <message>`, or `... could not be made.` when the error has no message; a refused registration's is
 `<name> was not registered: <message>`, or `... was not registered.`; neither shows the error code
-(#1057). `failed(root, kind)` is the same shape for a run that raised, its headline ending in the
+(#1057). `failed(root, kind, verb="plan")` is the same shape for a run that raised, its headline ending in the
 words of `RUN_WORDS[kind]` (an unknown kind reads `it stopped unexpectedly`), never the kind word.
 
 Next step (#1062). Every failed headline ends with a full stop, and every failed row (a plan that
 failed, a refused or unconfirmed registration, a run that raised) carries one plain line in `note`
 saying what the owner can do next, never an error code. `next_step(root, error, verb)` reads the
 error's `repair_id`: `adopt.manifest.*` says the agent platform's files are not installed yet, that
-`just switch` installs them and to press Register again; `adopt.registration.no_remote` and
-`remote_default_unknown` say to add the origin remote; `adopt.git.remote_unreachable` and
+`just switch` installs them and to press Register again; `adopt.registration.no_remote`
+says to add the origin remote; `remote_default_unknown` (an origin that exists but advertises no
+default branch) says the origin needs a published default branch, not another origin;
+`adopt.git.remote_unreachable` and
 `fetch_failed` say to check the remote can be reached; `adopt.registration.not_integrated` says to
 merge the adoption into the remote's main branch; each ends with pressing Register again. Any other
 failure names `adopt-project plan --repo-root <path>` (`verify --register` for a registration) as the
-terminal command that shows the full reason. `run_next_step(root, kind)` is the line for a run that
-raised: `timed_out`, `not_installed`, `unavailable` and `cancelled` say to press Register again and,
-if it keeps failing, name the plan command; every other kind names it alone.
+terminal command that shows the full reason. `run_next_step(root, kind, verb="plan")` is the line for
+a run that raised, `verb` being the operation that raised (`plan` or `register`): `timed_out`,
+`not_installed`, `unavailable` and `cancelled` say to press Register again and, if it keeps failing,
+name that verb's command; every other kind names it alone. `failed(root, kind, verb="plan")` for the
+`register` verb reads `<name> was not registered: <words>.`, so a registration that raised never
+sends the owner to rerun the plan that had succeeded.
 
 Row. `ended(payload)` is `("registration.ended", None, payload)` and raises `ValueError` unless the
 members are exactly the eight above, `by` is `owner`, `result` is one of `RESULTS` and `lines` is a
@@ -117,13 +122,15 @@ AGAIN = "press Register again."
 MANIFEST_STEP = ("The agent platform's files are not installed on this host yet. Run just switch "
                  "in a terminal to install them, then " + AGAIN)
 REMOTE_STEP = "Add the repository's origin remote, then " + AGAIN
+DEFAULT_BRANCH_STEP = ("The repository's origin remote needs a published default branch. Push one to "
+                       "it, then " + AGAIN)
 UNREACHABLE_STEP = ("Check that the repository's remote can be reached from this host, then "
                     + AGAIN)
 INTEGRATED_STEP = "The adoption is not on the remote's main branch yet. Merge it, then " + AGAIN
 RETRY_KINDS = ("timed_out", "not_installed", "unavailable", "cancelled")
 NEXT_STEPS = {
     "adopt.registration.no_remote": REMOTE_STEP,
-    "adopt.registration.remote_default_unknown": REMOTE_STEP,
+    "adopt.registration.remote_default_unknown": DEFAULT_BRANCH_STEP,
     "adopt.git.remote_unreachable": UNREACHABLE_STEP,
     "adopt.git.fetch_failed": UNREACHABLE_STEP,
     "adopt.registration.not_integrated": INTEGRATED_STEP,
@@ -279,11 +286,11 @@ def _full_reason(root: str, verb: str) -> str:
     return f"Run {command} in a terminal to see the full reason."
 
 
-def run_next_step(root: str, kind: str) -> str:
+def run_next_step(root: str, kind: str, verb: str = "plan") -> str:
     if kind in RETRY_KINDS:
         return ("Press Register again. If it keeps failing, run "
-                + _full_reason(root, "plan").removeprefix("Run "))
-    return _full_reason(root, "plan")
+                + _full_reason(root, verb).removeprefix("Run "))
+    return _full_reason(root, verb)
 
 
 def next_step(root: str, error: Mapping, verb: str) -> str:
@@ -357,10 +364,11 @@ def summary(root: str, plan: Mapping, report: Mapping | None = None) -> dict:
     return failed(root, "unreadable")
 
 
-def failed(root: str, kind: str) -> dict:
-    return _row(root, None, "failed", None,
-                f"The adoption plan for {name_of(root)} failed: {RUN_WORDS.get(kind, UNEXPECTED)}.",
-                [], run_next_step(root, kind))
+def failed(root: str, kind: str, verb: str = "plan") -> dict:
+    words = RUN_WORDS.get(kind, UNEXPECTED)
+    headline = (f"{name_of(root)} was not registered: {words}." if verb == "register"
+                else f"The adoption plan for {name_of(root)} failed: {words}.")
+    return _row(root, None, "failed", None, headline, [], run_next_step(root, kind, verb))
 
 
 def ended(payload: Mapping) -> tuple[str, None, dict]:
