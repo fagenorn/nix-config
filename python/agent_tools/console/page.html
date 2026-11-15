@@ -2117,8 +2117,19 @@ function fireAnswer(id) {
 function postPlanAnswer(body) {
   return fetch("/api/plan-answer", { method: "POST", headers: stallHeaders(), body: JSON.stringify(body) });
 }
+const NO_REASON = "the console did not say why.";
+function trackerAnswer(state) {
+  return state.pending !== undefined && state.pending !== null
+    && !state.pending.round && !state.pending.retry && !state.pending.plan;
+}
+function sendAgain(item, state) {
+  if (state.phase !== "failed" || state.again !== true || !trackerAnswer(state)) return false;
+  sendAnswer(itemId(item), state, item);
+  return true;
+}
 async function sendAnswer(id, state, item) {
   state.phase = "sending";
+  state.again = false;
   redraw();
   let reason = null;
   try {
@@ -2134,11 +2145,13 @@ async function sendAnswer(id, state, item) {
             ? await fetch("/api/check-answer", { method: "POST", headers, body })
             : await fetch("/api/answer", { method: "POST", headers, body });
     if (response.status !== 204) {
-      reason = (await response.text()).trim() || "HTTP " + response.status;
+      reason = (await response.text()).trim() || NO_REASON;
+      state.again = response.status >= 500;
     }
   } catch (error) {
     console.error(error);
     reason = "the console did not answer";
+    state.again = true;
   }
   if (answers.get(id) !== state) return;
   if (reason === null && state.pending.body.answer === "note") {
@@ -2423,7 +2436,12 @@ function statusLine(act, state, item) {
   } else if (state.phase === "sent") {
     act.appendChild(el("span", "", isRetry(item) ? "Answered, registering again" : isRegister(item) ? "Answered, planning again" : "Answered, waiting for the agent to pick it up"));
   } else {
-    if (state.phase === "failed") act.appendChild(el("span", "fail", "Could not send: " + state.reason));
+    if (state.phase === "failed") {
+      act.appendChild(el("span", "fail", "Could not send: " + state.reason));
+      if (state.again === true && trackerAnswer(state)) {
+        act.appendChild(actionButton("try-again answer-again", "Try again", () => { if (sendAgain(item, state)) redraw(); }));
+      }
+    }
     if (state.notice) act.appendChild(el("span", "", state.notice));
     return false;
   }
