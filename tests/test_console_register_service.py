@@ -62,20 +62,23 @@ def git(path, *arguments):
     return done.stdout
 
 
-def git_repo(path: Path) -> Path:
+def git_repo(path: Path, *, contract: bool = True) -> Path:
     path.mkdir(parents=True, exist_ok=True)
     git(path, "init", "-q", "-b", "main")
     git(path, "config", "user.name", "t")
     git(path, "config", "user.email", "t@example.invalid")
     git(path, "config", "commit.gpgsign", "false")
     (path / "README.md").write_text("# x\n")
+    if contract:
+        (path / ".agents").mkdir()
+        (path / ".agents/project.json").write_text("{}\n")
     git(path, "add", "-A")
     git(path, "commit", "-q", "-m", "one")
     return path.resolve()
 
 
 def reconcile_repository(parent: Path) -> Path:
-    root = git_repo(parent / "reconcile")
+    root = git_repo(parent / "reconcile", contract=False)
     for name, text in ((".claude/specs/a.md", "# spec a\n"), (".claude/plans/b.md", "# plan b\n")):
         (root / name).parent.mkdir(parents=True, exist_ok=True)
         (root / name).write_text(text)
@@ -129,6 +132,7 @@ class Fake:
         self.register_raises = register_raises
         self.calls = []
         self.answers = []
+        self.contracts = []
 
     def _run(self, verb, root, cancel):
         self.calls.append((verb, root))
@@ -137,7 +141,10 @@ class Fake:
         if self.raises is not None:
             raise self.raises
 
-    def plan(self, root, cancel=None, answers=()):
+    def plan(self, root, cancel=None, answers=(), contract=None):
+        self.contracts.append((
+            contract, contract is not None and os.path.exists(contract),
+            contract is None or not Path(contract).resolve().is_relative_to(Path(root).resolve())))
         self.answers.append(list(answers))
         self._run("plan", root, cancel)
         if self.raises_on:
@@ -172,6 +179,12 @@ class Case(unittest.TestCase):
         support.write_registry(self.registry, [])
         self.parent = Path(tempfile.mkdtemp()).resolve()
         self.addCleanup(shutil.rmtree, self.parent, True)
+        allowed = os.environ.get("GIT_ALLOW_PROTOCOL")
+        os.environ["GIT_ALLOW_PROTOCOL"] = "file"
+        if allowed is None:
+            self.addCleanup(os.environ.pop, "GIT_ALLOW_PROTOCOL", None)
+        else:
+            self.addCleanup(os.environ.__setitem__, "GIT_ALLOW_PROTOCOL", allowed)
 
     def begin(self, adopter, **kwargs):
         self.svc = support.service(self, self.store, self.registry, adopter=adopter, **kwargs)
@@ -413,7 +426,7 @@ class RegisterRunTest(Case):
         again = self.begin(Fake())
         self.assertEqual(json.loads(again.view_bytes)["registration"], first)
 
-    def test_an_unadopted_repository_shows_its_plan_and_the_real_home_is_untouched(self):
+    def test_an_unadopted_repository_shows_its_draft_and_the_real_home_is_untouched(self):
         before = real_home_state()
         repo = reconcile_repository(self.parent)
         head = git(repo, "rev-parse", "HEAD")
@@ -421,18 +434,18 @@ class RegisterRunTest(Case):
         status, _, body = self.post({"path": str(repo)})
         self.assertEqual((status, body), (204, b""))
         reg = self.wait_done(repo)
-        self.assertEqual((reg["result"], reg["outcome"]), ("planned", "reconcile"))
+        self.assertEqual((reg["result"], reg["outcome"]), ("drafting", None))
         self.assertEqual(
-            reg["headline"],
-            f"What adopting {repo.name} would change: it has agent files or a contract to bring up to date")
-        stored = list((self.home / ".agents/state/adopt/plans").iterdir())
-        self.assertEqual(len(stored), 1)
-        document = json.loads(stored[0].read_text())
-        self.assertEqual(reg["lines"], register.plan_lines(document))
-        self.assertTrue(reg["lines"][0].startswith("moves 2 agent file"))
-        n = len(document["decisions"]["open"])
-        self.assertGreaterEqual(n, 1)
-        self.assertEqual(reg["note"], f"The plan has {n} open question{'s' if n != 1 else ''}.")
+            reg["headline"], f"What the console read from {repo.name}: it has no project contract yet")
+        self.assertEqual([q["subject"] for q in reg["questions"]],
+                         ["project-id", "tracker", "build-command", "test-command"])
+        self.assertTrue(reg["questions"][0]["ask"].endswith(
+            "Its remote does not name a project: type its id, as owner/name."))
+        self.assertIn("default branch: main (read from its remote)",
+                      [d["line"] for d in reg["draft"]])
+        self.assertEqual(reg["note"], "The draft has 4 open questions.")
+        self.assertFalse((self.home / ".agents/state/adopt/plans").exists()
+                         and list((self.home / ".agents/state/adopt/plans").iterdir()))
         self.assertEqual(git(repo, "status", "--porcelain"), "")
         self.assertEqual(git(repo, "rev-parse", "HEAD"), head)
         self.assertEqual(json.loads(self.registry.read_text())["projects"], [])
@@ -855,6 +868,245 @@ class PlanAnswerRealTest(Case):
             "The plan refused that answer: the answered subject is not an undecided candidate of "
             "this inspection")
         self.assertEqual(home_state(self.home), snapshot)
+
+
+def sample_repository(parent: Path, *, remote: bool) -> Path:
+    root = parent / "sample-app"
+    root.mkdir(parents=True)
+    git(root, "init", "-q", "-b", "trunk")
+    git(root, "config", "user.name", "t")
+    git(root, "config", "user.email", "t@example.invalid")
+    git(root, "config", "commit.gpgsign", "false")
+    (root / "README.md").write_text("# sample\n")
+    git(root, "add", "-A")
+    git(root, "commit", "-q", "-m", "one")
+    if remote:
+        bare = parent / "origin.git"
+        git(parent, "clone", "-q", "--bare", str(root), str(bare))
+        url = "https://github.com/sample-owner/sample-app.git"
+        git(root, "remote", "add", "origin", url)
+        git(root, "config", f"url.{bare}.insteadOf", url)
+    return root.resolve()
+
+
+def checkout_state(root: Path) -> tuple:
+    files = sorted(
+        (str(path.relative_to(root)), digest(path)) for path in root.rglob("*")
+        if path.is_file() and ".git" not in path.relative_to(root).parts)
+    return (git(root, "status", "--porcelain"), git(root, "rev-parse", "HEAD^{tree}"), files)
+
+
+READ_ALL = {
+    "remotes": [("origin", "https://github.com/sample-owner/sample-app.git")],
+    "default_branch": "trunk", "branches": ["trunk"], "files": ["README.md", "justfile"],
+    "texts": {"justfile": "build:\n\techo b\ntest:\n\techo t\n"}}
+READ_NO_BUILD = {**READ_ALL, "files": ["README.md"], "texts": {}}
+NO_REMOTE_ASK = ("Which project is this repository?\n"
+                 "It has no remote that names it: type its id, as owner/name.")
+
+
+def taken_entry(project_id, parent):
+    other = Path(tempfile.mkdtemp(dir=parent)).resolve()
+    return {"project_id": project_id, "root": str(other)}
+
+
+class DraftCase(Case):
+    def draft_answer(self, plan_id, field, value):
+        status, _, body = self.answer(answer_of(
+            plan_id, {"id": "contract-draft", "subject": field, "value": value}))
+        return status, body.decode().strip()
+
+    def answered_draft(self, plan_id, field, value):
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            self.assertEqual(self.draft_answer(plan_id, field, value)[0], 204)
+            return self.wait_for(lambda r: r["status"] == "done" and r["plan_id"] != plan_id)
+
+    def register_items(self):
+        return [i for i in self.view()["inbox"]["open"] if i["reason"] == "register"]
+
+    def refusal_of(self, plan_id, field, value):
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            status, text = self.draft_answer(plan_id, field, value)
+        self.assertEqual(status, 409)
+        return text
+
+
+class DraftRealTest(DraftCase):
+    def setUp(self):
+        super().setUp()
+        self.before = real_home_state()
+        self.repo = sample_repository(self.parent, remote=True)
+        self.begin(register.Adopter(), dispatch=None)
+        self.addCleanup(self.untouched)
+
+    def untouched(self):
+        self.assertEqual(json.loads(self.registry.read_text())["projects"], [])
+        self.assertEqual(real_home_state(), self.before)
+
+    def ready(self):
+        first = self.registered(self.repo)
+        second = self.answered_draft(first["plan_id"], "build-command", "none")
+        return self.answered_draft(second["plan_id"], "test-command", "none")
+
+    def test_a_repository_with_no_contract_is_drafted_from_its_remote(self):
+        reg = self.registered(self.repo)
+        self.assertEqual(reg["result"], "drafting")
+        for line in ("project id: sample-owner/sample-app (read from its remote)",
+                     "project name: sample-app (read from its remote)",
+                     "default branch: trunk (read from its remote)",
+                     "issue tracker: GitHub, as sample-owner/sample-app (read from its remote)"):
+            self.assertIn(line, [d["line"] for d in reg["draft"]])
+        items = self.register_items()
+        self.assertEqual([i["subject"] for i in items], ["build-command", "test-command"])
+        self.assertEqual({i["title"] for i in items}, {"Register sample-app"})
+        self.assertEqual(self.view()["statement"]["inbox_items"], 2)
+
+    def test_answering_the_cards_makes_the_plan_ready_with_the_contract_line(self):
+        reg = self.ready()
+        self.assertEqual((reg["state"], reg["note"]), ("ready", "The plan is ready."))
+        self.assertIn("writes the project contract", reg["lines"])
+        self.assertEqual(reg["questions"], [])
+        self.assertEqual(reg["line"], "Register sample-app: ready to apply")
+        stored = (self.home / ".agents/state/adopt/plans"
+                  / (reg["plan_id"].partition(":")[2] + ".json"))
+        document = json.loads(stored.read_text())
+        draft = document["plan"]["contract_draft"]
+        self.assertEqual(draft["project"], {"id": "sample-owner/sample-app", "name": "sample-app"})
+        self.assertEqual(draft["bindings"]["vcs"]["default_branch"], "trunk")
+        self.assertEqual(draft["bindings"]["tracker"]["kind"], "github")
+        self.assertEqual(draft["bindings"]["tracker"]["repo_slug"], "sample-owner/sample-app")
+
+    def test_the_checkout_is_unchanged_before_approval(self):
+        before = checkout_state(self.repo)
+        self.ready()
+        self.assertEqual(checkout_state(self.repo), before)
+        self.assertFalse((self.repo / ".agents").exists())
+        drafts = self.home / ".agents/state/console/drafts"
+        self.assertEqual(list(drafts.iterdir()) if drafts.is_dir() else [], [])
+
+    def test_a_drafted_value_the_resolver_refuses_is_a_card_with_its_plain_reason(self):
+        reg = self.ready()
+        shown = self.answered_draft(reg["plan_id"], "docs-paths", "../outside")
+        self.assertEqual(shown["result"], "drafting")
+        (question,) = shown["questions"]
+        self.assertEqual(question["subject"], "docs-paths")
+        self.assertEqual(
+            question["why"],
+            "The plan refused the documentation paths: must be a non-empty repository-relative "
+            "path with no '..' segment")
+        self.assertIs(question["text"], True)
+        text = json.dumps(self.view())
+        for word in ("adopt.draft", "contract.paths", "unsafe_path", "/bindings"):
+            self.assertNotIn(word, text)
+
+
+class DraftNoRemoteTest(DraftCase):
+    def setUp(self):
+        super().setUp()
+        support.write_registry(self.registry, [taken_entry("someone/taken", self.parent)])
+        self.repo = sample_repository(self.parent, remote=False)
+        self.begin(register.Adopter(), dispatch=None)
+
+    def test_the_project_id_card_has_a_text_field(self):
+        self.registered(self.repo)
+        (item,) = [i for i in self.register_items() if i["subject"] == "project-id"]
+        self.assertIs(item["text"], True)
+        self.assertEqual(item["questions"], [])
+        self.assertEqual(item["headline"], NO_REMOTE_ASK)
+
+    def test_a_typed_id_that_breaks_the_id_rule_is_refused_in_plain_words(self):
+        reg = self.registered(self.repo)
+        rows = self.rows("registration.ended")
+        self.assertEqual(
+            self.refusal_of(reg["plan_id"], "project-id", "not an id"),
+            "a project id is two names joined by one slash, like owner/name, with no spaces")
+        self.assertEqual(self.rows("registration.ended"), rows)
+
+    def test_a_typed_id_registered_for_another_checkout_is_refused(self):
+        reg = self.registered(self.repo)
+        self.assertEqual(self.refusal_of(reg["plan_id"], "project-id", "someone/taken"),
+                         "someone/taken is already registered for another checkout")
+        shown = self.answered_draft(reg["plan_id"], "project-id", "sample-owner/sample-app")
+        self.assertIn("project id: sample-owner/sample-app (set by you)",
+                      [d["line"] for d in shown["draft"]])
+        self.assertNotIn("project-id", [i["subject"] for i in self.register_items()])
+
+    def test_the_id_card_keeps_its_no_remote_sentence_after_another_answer(self):
+        reg = self.registered(self.repo)
+        shown = self.answered_draft(reg["plan_id"], "tracker", "none")
+        self.assertEqual(shown["result"], "drafting")
+        (item,) = [i for i in self.register_items() if i["subject"] == "project-id"]
+        self.assertEqual(item["headline"], NO_REMOTE_ASK)
+
+    def test_an_unreadable_command_is_refused_in_plain_words(self):
+        reg = self.registered(self.repo)
+        rows = self.rows("registration.ended")
+        for value in ('echo "unterminated', "echo trailing\\"):
+            self.assertEqual(
+                self.refusal_of(reg["plan_id"], "build-command", value),
+                "the command could not be read: close every quote and do not end it with a "
+                "backslash")
+        self.assertEqual(self.rows("registration.ended"), rows)
+        self.assertIn("build-command", [i["subject"] for i in self.register_items()])
+
+
+class DraftRunTest(DraftCase):
+    def test_a_checkout_with_a_contract_is_planned_without_a_draft(self):
+        fake = Fake(plan=PLANNED)
+        self.begin(fake)
+        self.registered(git_repo(self.parent / "r"))
+        self.assertEqual(fake.contracts, [(None, False, True)])
+
+    def draft_file_after(self, fake):
+        self.begin(fake, draft_reader=lambda root: READ_ALL)
+        self.registered(git_repo(self.parent / "r", contract=False))
+        self.assertEqual(fake.contracts[0][1:], (True, True))
+        self.assertFalse(os.path.exists(fake.contracts[0][0]))
+
+    def test_the_draft_file_is_outside_the_checkout_and_removed_after_the_run(self):
+        self.draft_file_after(Fake(plan=PLANNED))
+
+    def test_the_draft_file_is_removed_after_a_run_that_raised(self):
+        self.draft_file_after(Fake(raises=register.RunFailed("timed_out")))
+
+    def test_an_answer_to_a_plan_with_no_draft_is_refused(self):
+        self.begin(Fake(plan=DRAFT))
+        self.registered(git_repo(self.parent / "r"))
+        self.assertEqual(self.refusal_of(PID_A, "project-id", "a/b"),
+                         "that plan has no drafted contract to change")
+
+    def test_a_remote_id_registered_for_another_checkout_reopens_the_id_card(self):
+        support.write_registry(
+            self.registry, [taken_entry("sample-owner/sample-app", self.parent)])
+        fake = Fake(plan=PLANNED)
+        self.begin(fake, draft_reader=lambda root: READ_ALL)
+        reg = self.registered(git_repo(self.parent / "r", contract=False))
+        self.assertEqual(reg["result"], "drafting")
+        (question,) = reg["questions"]
+        self.assertEqual(question["subject"], "project-id")
+        self.assertEqual(question["why"],
+                         "sample-owner/sample-app is already registered for another checkout")
+        self.assertIs(question["text"], True)
+        self.assertEqual(fake.calls, [])
+
+    def test_the_id_is_checked_again_before_the_plan_runs(self):
+        fake = Fake(plan=READY)
+        self.begin(fake, draft_reader=lambda root: READ_NO_BUILD)
+        reg = self.registered(git_repo(self.parent / "r", contract=False))
+        self.assertEqual(len(reg["questions"]), 2)
+        self.assertEqual(fake.calls, [])
+        support.write_registry(
+            self.registry, [taken_entry("sample-owner/sample-app", self.parent)])
+        reg = self.answered_draft(reg["plan_id"], "build-command", "none")
+        reg = self.answered_draft(reg["plan_id"], "test-command", "none")
+        self.assertEqual(reg["result"], "drafting")
+        (question,) = reg["questions"]
+        self.assertEqual(question["subject"], "project-id")
+        self.assertEqual(question["why"],
+                         "sample-owner/sample-app is already registered for another checkout")
+        self.assertEqual(fake.calls, [])
 
 
 class PlanAnswerSecretTest(Case):
