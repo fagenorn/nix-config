@@ -232,8 +232,8 @@ Sign-in (#1010, ADR-console-022): with a `signin_reader` (`signin.reader_for(sys
 `console.py`; none elsewhere than Linux) the same probe job, under the same in-flight mark, schedule and
 stop event, first reads the profile's sign-in with the same `probe.Probe`, then runs the prober when
 there is one; a service with a reader and no prober still runs the loop and its rounds. The answer is
-appended as one `signin.reading` row only when its `(state, ends_at)` differs from the folded one (a
-profile with no folded sign-in counts as different), then folded and published. A `signin.StatusFailed`
+appended as one `signin.reading` row only when its `(state, ends_at, account)` differs from the folded
+one (a profile with no folded sign-in counts as different), then folded and published. A `signin.StatusFailed`
 is one stderr line `console: signin_unknown <profile> <kind>`, any other exception `console:
 signin_unknown <profile> <Type>` (never its message); both record `unknown`, so the last answer wins
 and an unknown sign-in asks nothing. A stop set during the read records nothing, and a reader that
@@ -2327,10 +2327,12 @@ class ConsoleService:
                 return
             self._signin_recorded[profile] = ticket
             folded = self._signins.get(profile)
-            if folded is not None and (folded.state, folded.ends_at) == (
-                    status.state, status.ends_at):
+            newest = self._capacity.readings.get(profile)
+            row = signin.entry(profile, status, folded, newest.seq if newest is not None else None)
+            if folded is not None and (folded.state, folded.ends_at, folded.account) == (
+                    row[2]["state"], row[2]["ends_at"], row[2]["account"]):
                 return
-            self._fold(self.log.append([signin.entry(profile, status)]))
+            self._fold(self.log.append([row]))
             self._publish()
 
     @contextlib.contextmanager

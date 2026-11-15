@@ -55,6 +55,12 @@ def signed_in_with(end):
     return json.dumps(document).encode()
 
 
+def with_email(value):
+    document = json.loads(SIGNED_IN)
+    document["email"] = value
+    return json.dumps(document).encode()
+
+
 class Recorder:
     def __init__(self, returncode=0, stdout=b"", error=None):
         self.calls = []
@@ -96,11 +102,12 @@ class StatusCommandTest(unittest.TestCase):
 
 class ParseStatusTest(unittest.TestCase):
     def test_recorded_outputs_are_read(self):
-        rows = [(0, SIGNED_IN, Status("signed_in", "2026-12-05T20:21:35.023000+00:00")),
+        rows = [(0, SIGNED_IN, Status("signed_in", "2026-12-05T20:21:35.023000+00:00",
+                                      "owner@example.invalid")),
                 (1, SIGNED_OUT, Status("signed_out", None)),
-                (0, signed_in_with(None), Status("signed_in", None)),
+                (0, signed_in_with(None), Status("signed_in", None, "owner@example.invalid")),
                 (0, signed_in_with("2026-12-05T22:21:35+02:00"),
-                 Status("signed_in", "2026-12-05T20:21:35+00:00"))]
+                 Status("signed_in", "2026-12-05T20:21:35+00:00", "owner@example.invalid"))]
         for returncode, stdout, expected in rows:
             with self.subTest(returncode=returncode, stdout=stdout[:60]):
                 self.assertEqual(signin.parse_status(returncode, stdout), expected)
@@ -124,15 +131,41 @@ class ParseStatusTest(unittest.TestCase):
                     signin.parse_status(returncode, stdout)
                 self.assertEqual(raised.exception.kind, "exited")
 
-    def test_only_the_flag_and_the_end_are_kept(self):
-        self.assertEqual([f.name for f in dataclasses.fields(Status)], ["state", "ends_at"])
+    def test_the_account_is_the_address_the_status_prints(self):
+        end = "2026-12-05T20:21:35.023000+00:00"
+        self.assertEqual(signin.parse_status(0, SIGNED_IN),
+                         Status("signed_in", end, "owner@example.invalid"))
+        self.assertEqual(signin.parse_status(1, SIGNED_OUT), Status("signed_out", None, None))
+        longest = "x" * 308 + "@example.inv"
+        self.assertEqual(len(longest), 320)
+        self.assertEqual(signin.parse_status(0, with_email(longest)),
+                         Status("signed_in", end, longest))
+        for value in (None, "", 5, "a b@example.invalid", "x" * 321, "\u00e9@example.invalid"):
+            with self.subTest(email=value):
+                self.assertEqual(signin.parse_status(0, with_email(value)),
+                                 Status("signed_in", end, None))
+        document = json.loads(SIGNED_IN)
+        del document["email"]
+        self.assertEqual(signin.parse_status(0, json.dumps(document).encode()),
+                         Status("signed_in", end, None))
 
-        entry = signin.entry("work", signin.parse_status(0, SIGNED_IN))
+    def test_only_the_flag_the_end_and_the_account_are_kept(self):
+        self.assertEqual([f.name for f in dataclasses.fields(Status)],
+                         ["state", "ends_at", "account"])
+        doc = json.loads(SIGNED_IN)
+        for key in ("orgId", "orgName", "subscriptionType", "planTier", "configDirectory"):
+            doc[key] = "SENTINEL-ORG"
+        doc["accessToken"] = "SENTINEL-TOKEN"
+        doc["refreshToken"] = "SENTINEL-TOKEN"
+        doc["oauthAccount"] = {"emailAddress": "SENTINEL-NESTED"}
+
+        entry = signin.entry("work", signin.parse_status(0, json.dumps(doc).encode()))
 
         self.assertEqual(entry, ("signin.reading", None,
                                  {"profile": "work", "state": "signed_in",
-                                  "ends_at": "2026-12-05T20:21:35.023000+00:00"}))
-        self.assertNotIn("owner@example.invalid", json.dumps(entry))
+                                  "ends_at": "2026-12-05T20:21:35.023000+00:00",
+                                  "account": "owner@example.invalid", "account_seq": 0}))
+        self.assertNotIn("SENTINEL", json.dumps(entry))
 
 
 class ReadStatusTest(unittest.TestCase):
@@ -141,7 +174,8 @@ class ReadStatusTest(unittest.TestCase):
 
         status = signin.read_status(Probe("work", SID), run=fake, environ=ENVIRON, timeout=7)
 
-        self.assertEqual(status, Status("signed_in", "2026-12-05T20:21:35.023000+00:00"))
+        self.assertEqual(status, Status("signed_in", "2026-12-05T20:21:35.023000+00:00",
+                                        "owner@example.invalid"))
         self.assertEqual(len(fake.calls), 1)
         argv, kwargs = fake.calls[0]
         self.assertEqual(argv, signin.status_command())
@@ -229,6 +263,79 @@ class FoldTest(unittest.TestCase):
         self.assertEqual(folded["work"], SignIn("signed_out", None, "t3", ever=True))
         self.assertIs(folded["spare"].ever, False)
         self.assertEqual(split, folded)
+
+
+    def test_the_account_is_folded_and_a_bad_one_is_ignored(self):
+        def work(seq, **payload):
+            return reading(seq, f"t{seq}", profile="work", **payload)
+
+        rows = [work(1, state="signed_in", ends_at=iso(E), account="a@example.invalid",
+                     account_seq=0),
+                work(2, state="signed_in", ends_at=iso(E), account="b@example.invalid",
+                     account_seq=0),
+                work(3, state="signed_in", ends_at=iso(E), account="", account_seq=0),
+                work(4, state="signed_out", ends_at=None, account="c@example.invalid",
+                     account_seq=0),
+                work(5, state="signed_in", ends_at=iso(E), account=5, account_seq=0),
+                work(6, state="signed_in", ends_at=iso(E), account="d@example.invalid",
+                     account_seq=True),
+                work(7, state="signed_in", ends_at=iso(E), account="d@example.invalid",
+                     account_seq=-1),
+                work(8, state="signed_in", ends_at=iso(E), account="d@example.invalid",
+                     account_seq="3"),
+                reading(9, "t9", profile="home", state="unknown", ends_at=None,
+                        account="h@example.invalid", account_seq=4),
+                reading(10, "t10", profile="spare", state="signed_in", ends_at=None)]
+
+        folded = signin.signin_state(rows)
+
+        self.assertEqual(folded, {
+            "work": SignIn("signed_in", iso(E), "t2", ever=True, account="b@example.invalid",
+                           account_seq=0),
+            "home": SignIn("unknown", None, "t9", ever=False, account="h@example.invalid",
+                           account_seq=4),
+            "spare": SignIn("signed_in", None, "t10", ever=True)})
+        self.assertEqual(signin.signin_state(rows[2:], signin.signin_state(rows[:2])), folded)
+
+    def test_the_newest_row_alone_folds_to_the_same_account_and_boundary(self):
+        rows = [reading(1, "t1", profile="work", state="signed_in", ends_at=None,
+                        account="a@example.invalid", account_seq=0),
+                reading(8, "t8", profile="work", state="signed_in", ends_at=None,
+                        account="b@example.invalid", account_seq=7),
+                reading(9, "t9", profile="work", state="signed_in", ends_at=iso(E),
+                        account="b@example.invalid", account_seq=7)]
+
+        whole = signin.signin_state(rows)["work"]
+        newest = signin.signin_state(rows[-1:])["work"]
+
+        self.assertEqual((whole.account, whole.account_seq),
+                         (newest.account, newest.account_seq))
+        self.assertEqual((newest.account, newest.account_seq), ("b@example.invalid", 7))
+
+
+class EntryTest(unittest.TestCase):
+    def test_a_switch_sets_the_boundary_and_every_other_row_carries_it(self):
+        a, b = "a@example.invalid", "b@example.invalid"
+        rows = [
+            (None, Status("signed_in", None, a), 7, (a, 0)),
+            (SignIn("signed_in", None, "t", True, a, 0), Status("signed_in", None, b), 7, (b, 7)),
+            (SignIn("signed_in", None, "t", True, a, 0), Status("signed_in", None, b), None,
+             (b, 0)),
+            (SignIn("signed_in", None, "t", True, a, 4), Status("signed_in", iso(E), a), 9,
+             (a, 4)),
+            (SignIn("signed_in", None, "t", True, a, 4), signin.UNKNOWN, 9, (a, 4)),
+            (SignIn("signed_in", None, "t", True, a, 4), Status("signed_out", None), 9,
+             (None, 4)),
+            (SignIn("signed_out", None, "t", True, None, 4), Status("signed_in", None, a), 9,
+             (a, 9)),
+            (SignIn("signed_in", None, "t", True), Status("signed_in", None, a), 9, (a, 0)),
+            (SignIn("signed_out", None, "t", True), Status("signed_in", None, a), 9, (a, 9)),
+        ]
+        for folded, status, reading_seq, expected in rows:
+            with self.subTest(folded=folded, status=status, reading_seq=reading_seq):
+                payload = signin.entry("work", status, folded=folded,
+                                       reading_seq=reading_seq)[2]
+                self.assertEqual((payload["account"], payload["account_seq"]), expected)
 
 
 class ProfileSigninTest(unittest.TestCase):

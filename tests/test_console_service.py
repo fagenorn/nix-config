@@ -1179,8 +1179,10 @@ class SigninServiceTest(Case):
         self.now[0] = NOW + 30
         svc.probe_round()
         self.assertEqual(self.rows(), [
-            {"profile": "spare", "state": "signed_out", "ends_at": None},
-            {"profile": "work", "state": "signed_in", "ends_at": self.ends(10)}])
+            {"profile": "spare", "state": "signed_out", "ends_at": None,
+             "account": None, "account_seq": 0},
+            {"profile": "work", "state": "signed_in", "ends_at": self.ends(10),
+             "account": None, "account_seq": 0}])
         self.assertEqual(self.entry(svc, "work")["signin"]["days_left"], 9)
         self.now[0] = NOW + 630
         svc.probe_round()
