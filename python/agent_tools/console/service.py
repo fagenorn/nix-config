@@ -2328,8 +2328,10 @@ class ConsoleService:
             self._signin_recorded[profile] = ticket
             folded = self._signins.get(profile)
             newest = self._capacity.readings.get(profile)
+            left = capacity.left_candidate(self._capacity, profile, folded)
             row = signin.entry(profile, status, folded, newest.seq if newest is not None else None,
-                               newest.account if newest is not None else None)
+                               left.account if left is not None else None,
+                               left.seq if left is not None else 0)
             if folded is not None and (folded.state, folded.ends_at, folded.account) == (
                     row[2]["state"], row[2]["ends_at"], row[2]["account"]):
                 return

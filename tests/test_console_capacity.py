@@ -19,6 +19,7 @@ from agent_tools.console.capacity import (
     report_entries,
 )
 from agent_tools.console.event_log import Event
+from agent_tools.console import signin
 from agent_tools.console.signin import SignIn
 from agent_tools.console.view import (
     ALL_OUT_HEADLINE,
@@ -573,6 +574,34 @@ class AccountIdentityCapacityTest(unittest.TestCase):
         self.assertEqual(by["p3"]["out_until"], iso(T + 100))
         self.assertEqual(by["p1"]["state"], "ok")
         self.assertEqual(by["p1"]["read_at"], "t5")
+
+    def test_the_left_reading_is_the_oldest_one_taken_after_the_boundary(self):
+        a_reading = owned(open_reading_of("p"), self.X, 10)
+        b_reading = owned(refused_reading(T + 100, "p"), self.Y, 20)
+        state = CapacityState({"p": b_reading}, {}, {"p": {self.X: a_reading, self.Y: b_reading}})
+        self.assertEqual(capacity.left_candidate(state, "p", S(self.A, 0)), a_reading)
+        self.assertIsNone(capacity.left_candidate(state, "p", S(self.A, 20)))
+        later = SignIn("signed_in", None, "t", True, self.B, 5, self.A, self.X)
+        self.assertEqual(capacity.left_candidate(state, "p", later), b_reading)
+        self.assertIsNone(capacity.left_candidate(CapacityState({}, {}), "p", None))
+
+    def test_new_account_readings_still_count_after_an_early_request_under_it(self):
+        events = [
+            event(10, READING, {**report(account=self.X, reset=T + 3600), "profile": "p"}),
+            event(20, READING, {**refusal_report(self.Y, T + 100), "profile": "p"}),
+        ]
+        state = capacity_state(events)
+        left = capacity.left_candidate(state, "p", S(self.A, 0))
+        row = signin.entry("p", signin.Status("signed_in", None, self.B), S(self.A, 0),
+                           state.readings["p"].seq, left.account, left.seq)[2]
+        self.assertEqual((row["account_seq"], row["left_account"], row["left_reading"]),
+                         (20, self.A, self.X))
+        signins = {"p": SignIn("signed_in", None, "t", True, self.B, 20, self.A, self.X),
+                   "q": S(self.B)}
+        events.append(event(30, READING, {**refusal_report(self.Y, T + 200), "profile": "p"}))
+        by = by_name(capacity_view(["p", "q"], capacity_state(events), T, signins))
+        self.assertEqual((by["p"]["state"], by["p"]["out_until"]), ("out", iso(T + 200)))
+        self.assertEqual(by["q"]["out_until"], iso(T + 200))
 
     def test_a_status_read_that_failed_keeps_the_known_account_grouping(self):
         signins = {"p1": S(self.A), "p2": SignIn("unknown", None, "t", True, self.A, 0)}

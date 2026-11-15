@@ -34,7 +34,7 @@ Failures are `StatusFailed(kind)` with `kind` one of `KINDS`, and `str(error) ==
 `OSError`), `exited`, `unreadable`. `reader_for(platform)` is `read_status` where
 `manager.supported(platform)`, else None.
 
-Event. `entry(profile, status, folded=None, reading_seq=None, reading_account=None)` is
+Event. `entry(profile, status, folded=None, reading_seq=None, reading_account=None, left_seq=None)` is
 `("signin.reading", None, {"profile", "state", "ends_at", "account", "account_seq"})` with two more
 members, `left_account` and `left_reading`, only while they are set, `READING` being the kind. `account` is
 `status.account` when the status is `signed_in`, the folded sign-in's `account` when the status is
@@ -46,12 +46,15 @@ folded sign-in's `account` when there is a folded sign-in and either its `accoun
 or its state is `signed_out`; a row from before #1036 (no `account_seq`) followed by a first account
 is no switch, so the deploy invalidates no reading. Every row carries its own boundary.
 `left_account` is the account the profile left, and `left_reading` the proxy's account id
-(`reading_account`, the id of the profile's newest capacity reading) that reading carried, None
-when it carried none: set when the status's `account` differs from the folded sign-in's non-None
-`account` (a switch, or a sign-out) and `reading_seq` is above the folded `account_seq` (0 when
-None), that is when the profile has a reading taken under the account it leaves; otherwise
-carried unchanged from the folded sign-in, None when there is none, and when a profile leaves an
-account with no reading under it the two are cleared. A late reply of the left account is told
+(`reading_account`) that the reading taken under it carried, None when it carried none: set when the
+status's `account` differs from the folded sign-in's non-None `account` (a switch, or a sign-out) and
+`left_seq`, the seq of that reading, is above the folded `account_seq` (0 when None), that is when the
+profile has a reading taken under the account it leaves; `left_seq` is `reading_seq` when None, and 0
+when there is no such reading. The caller names that reading, not the newest one:
+`capacity.left_candidate` picks it, because the newest may already have been taken under the account
+the profile is moving to. Otherwise the two are carried unchanged from the folded sign-in, None when
+there is none, also when a profile leaves an account with no reading under it, so the attribution
+recorded at the previous switch is kept. A late reply of the left account is told
 apart from the new account's by that id (`capacity.capacity_view`). The kind is not in `KEPT_KINDS`, but retention leaves the newest row of each
 profile in place (`event_log.SIGNIN_READING`): only changes are recorded, so an unchanged sign-in
 would otherwise vanish once its one row aged out.
@@ -210,7 +213,8 @@ def reader_for(platform: str) -> Callable[[probe.Probe], Status] | None:
 
 def entry(profile: str, status: Status, folded: SignIn | None = None,
           reading_seq: int | None = None,
-          reading_account: str | None = None) -> tuple[str, None, dict]:
+          reading_account: str | None = None,
+          left_seq: int | None = None) -> tuple[str, None, dict]:
     """The `signin.reading` entry for `status`, carrying the account and where its readings begin."""
     account = None
     if status.state == "signed_in":
@@ -228,8 +232,9 @@ def entry(profile: str, status: Status, folded: SignIn | None = None,
     left_account, left_reading = ((folded.left_account, folded.left_reading)
                                   if folded is not None else (None, None))
     if folded is not None and folded.account is not None and account != folded.account:
-        taken = reading_seq is not None and reading_seq > (folded.account_seq or 0)
-        left_account, left_reading = (folded.account, reading_account) if taken else (None, None)
+        held = reading_seq if left_seq is None else left_seq
+        if held is not None and held > (folded.account_seq or 0):
+            left_account, left_reading = folded.account, reading_account
     payload = {"profile": profile, "state": status.state, "ends_at": status.ends_at,
                "account": account, "account_seq": account_seq}
     if left_account is not None:

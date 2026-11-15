@@ -46,6 +46,10 @@ the reset of the window the refusal names (`binding`, else the first of "7d", "5
 and, when refused, the refusal reset (null when none is known, or when not out); `next_reset` the
 earliest reset still ahead.
 
+`left_candidate(state, profile, folded)` is the reading the profile took under the account it is
+about to leave (`signin.entry`'s `left_seq` and `reading_account`): the oldest reading it holds above
+the folded `account_seq` that does not carry the folded `left_reading` id, else None.
+
 `capacity_view(profiles, state, now, signins=None, excluded=frozenset(), pinned=None)` returns `{"tight", "all_out", "resumes_at",
 "no_reading", "profiles": [<profile_capacity>]}` over
 exactly the named profiles, sorted: the configured ones, so a profile removed with
@@ -312,6 +316,22 @@ def _pool(state: CapacityState, name: str) -> list[Reading]:
     if last is not None and all(held.seq != last.seq for held in pool):
         pool.append(last)
     return pool
+
+
+def left_candidate(state: CapacityState, name: str,
+                   folded: signin_state.SignIn | None) -> Reading | None:
+    """The reading the profile took under the account it is about to leave, else None.
+
+    The oldest of the readings it holds above the folded sign-in's `account_seq` and not carrying
+    its `left_reading` id: the profile was on that account when the boundary was set, so its first
+    reading after it was taken there, while a newer one may already be the next account's (the
+    account changed before the status was read).
+    """
+    boundary = (folded.account_seq or 0) if folded is not None else 0
+    skip = folded.left_reading if folded is not None else None
+    return min((r for r in _pool(state, name)
+                if r.seq > boundary and (skip is None or r.account != skip)),
+               key=lambda r: r.seq, default=None)
 
 
 def _left(one: signin_state.SignIn | None) -> tuple[str, str | None] | None:

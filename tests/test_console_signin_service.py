@@ -419,6 +419,32 @@ class SigninRunServiceTest(Case):
                                      "left_reading": "acct-x"})
         self.assertEqual(ended[0][1]["outcome"], "signed_in")
 
+    def test_a_request_under_the_new_account_before_the_status_read_is_not_the_left_one(self):
+        self.store.parent.mkdir(parents=True, exist_ok=True)
+        log = EventLog(self.store)
+        try:
+            def logged(account):
+                return log.append(capacity.report_entries(capacity.parse_report({
+                    "http_status": 200, "status": "allowed", "reset": NOW + 86400,
+                    "binding": None, "claim": None, "account": account, "session_id": None,
+                    "windows": {"7d": {"status": "allowed", "utilization": 0.5,
+                                       "reset": NOW + 86400}}}), "work"))[0].seq
+            logged("acct-x")
+            newest = logged("acct-y")
+        finally:
+            log.close()
+        ends = iso(NOW + 30 * 86400)
+        self.answers["work"] = signin.Status("signed_in", ends, "a@example.invalid")
+        self.begin()
+        self.post(SIGNIN)
+        self.answers["work"] = signin.Status("signed_in", ends, "b@example.invalid")
+        self.post(CODE_PATH)
+        self.wait_ended()
+        last = self.reading_rows("work")[-1]
+        self.assertEqual((last["account"], last["account_seq"], last["left_account"],
+                          last["left_reading"]), ("b@example.invalid", newest,
+                                                  "a@example.invalid", "acct-x"))
+
     def test_the_view_names_the_new_account_after_a_sign_in(self):
         self.answers["work"] = signin.Status("signed_in", iso(NOW + 30 * 86400),
                                              "a@example.invalid")

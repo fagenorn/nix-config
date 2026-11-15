@@ -363,6 +363,24 @@ class EntryTest(unittest.TestCase):
                                  expected)
         self.assertNotIn("left_account", signin.entry("work", Status("signed_in", None, a))[2])
 
+    def test_a_departure_with_no_reading_under_the_account_keeps_the_recorded_attribution(self):
+        a, b, c, x = "a@example.invalid", "b@example.invalid", "c@example.invalid", "acct-x"
+        moved = SignIn("signed_in", None, "t", True, b, 20, a, x)
+        for status in (Status("signed_in", None, c), Status("signed_out", None)):
+            with self.subTest(status=status):
+                payload = signin.entry("work", status, folded=moved, reading_seq=20,
+                                       reading_account=x, left_seq=0)[2]
+                self.assertEqual((payload["left_account"], payload["left_reading"]), (a, x))
+
+    def test_the_left_reading_is_the_one_named_not_the_newest(self):
+        a, b, x, y = "a@example.invalid", "b@example.invalid", "acct-x", "acct-y"
+        folded = SignIn("signed_in", None, "t", True, a, 0)
+        payload = signin.entry("work", Status("signed_in", None, b), folded=folded,
+                               reading_seq=20, reading_account=x, left_seq=10)[2]
+        self.assertEqual((payload["account_seq"], payload["left_account"],
+                          payload["left_reading"]), (20, a, x))
+        self.assertNotEqual(payload["left_reading"], y)
+
     def test_the_left_account_is_folded_and_a_bad_one_is_ignored(self):
         def work(seq, **payload):
             return reading(seq, f"t{seq}", profile="work", state="signed_in", ends_at=None,
