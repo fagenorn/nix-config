@@ -91,11 +91,18 @@ of dicts with exactly the string keys `id`, `subject` and `value` (ADR-console-0
 `event_log.REGISTRATION_ENDED`, not in `KEPT_KINDS`. `latest(events, state=None)` is the last valid
 `ENDED` payload over `DEFAULTS` with `at` added, else `state`: the view's `registration` member,
 folded by the service. `view_entry(running, latest, *, again=False, refusal=None)` is that member,
-always the same fourteen keys: the `running` entry (headline `Planning the adoption of <name>…`, or
+always the same sixteen keys: the `running` entry (headline `Planning the adoption of <name>…`, or
 `again_headline(name)`, `Planning the adoption of <name> again with your answer…`, when `again`)
 while a run is under way, with `plan_id`, `state` and `refusal` None and `questions` `[]`; else the
 latest with status `done`, its `plan_id`, `state` and `questions`, and `refusal` the text of the
-given `{"plan_id", "text"}` only when its `plan_id` is the latest's; else None (D4).
+given `{"plan_id", "text", "id", "subject"}` only when its `plan_id` is the latest's, and `refused`
+its `{"id", "subject"}` under the same match (the question the refused answer was for); else None
+(D4). `line` (`line_of(latest)` for a finished entry) is the entry's state in one line (D6, D7):
+the running headline while a run is under way; for a plan with open questions `Register <name>: 1
+question open` or `<N> questions open`, counting every question, answerable or not; for a ready
+plan `Register <name>: ready to apply`, whatever the note says; for any other plan the note, else
+the headline; for any other result the headline, then a space and the note when it is a non-empty
+string.
 """
 
 from __future__ import annotations
@@ -463,25 +470,39 @@ def again_headline(name: str) -> str:
     return f"Planning the adoption of {name} again with your answer…"
 
 
+def line_of(latest: Mapping) -> str:
+    """The one line a finished entry says: open questions, ready, the note or the headline."""
+    if latest["result"] == "planned":
+        name = name_of(latest["root"])
+        if latest["questions"]:
+            return f"Register {name}: {_count(len(latest['questions']), 'question')} open"
+        if latest["state"] == "ready":
+            return f"Register {name}: ready to apply"
+        return latest["note"] or latest["headline"]
+    note = latest["note"]
+    return f"{latest['headline']} {note}" if isinstance(note, str) and note else latest["headline"]
+
+
 def view_entry(running: str | None, latest: Mapping | None, *, again: bool = False,
                refusal: Mapping | None = None) -> dict | None:
     if running is not None:
         name = name_of(running)
+        headline = again_headline(name) if again else f"Planning the adoption of {name}\u2026"
         return {"root": running, "name": name, "project_id": None, "status": "running",
-                "result": None, "outcome": None,
-                "headline": again_headline(name) if again else f"Planning the adoption of {name}…",
+                "result": None, "outcome": None, "headline": headline,
                 "lines": [], "note": None, "at": None, "plan_id": None, "state": None,
-                "questions": [], "refusal": None}
+                "questions": [], "refusal": None, "line": headline, "refused": None}
     if latest is None:
         return None
-    shown = (refusal["text"] if refusal is not None and refusal["plan_id"] == latest["plan_id"]
-             else None)
+    mine = refusal is not None and refusal["plan_id"] == latest["plan_id"]
     return {"root": latest["root"], "name": name_of(latest["root"]),
             "project_id": latest["project_id"], "status": "done", "result": latest["result"],
             "outcome": latest["outcome"], "headline": latest["headline"],
             "lines": latest["lines"], "note": latest["note"], "at": latest["at"],
             "plan_id": latest["plan_id"], "state": latest["state"],
-            "questions": latest["questions"], "refusal": shown}
+            "questions": latest["questions"], "refusal": refusal["text"] if mine else None,
+            "line": line_of(latest),
+            "refused": {"id": refusal["id"], "subject": refusal["subject"]} if mine else None}
 
 
 class RunFailed(Exception):

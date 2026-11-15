@@ -542,25 +542,62 @@ class RowTest(unittest.TestCase):
                          "Planning the adoption of r again with your answer\u2026")
         latest = {**register.summary("/srv/r", plan_doc(open_questions=1)), "at": "t"}
         self.assertEqual(register.view_entry(
-            None, latest, refusal={"plan_id": latest["plan_id"], "text": "T"})["refusal"], "T")
+            None, latest, refusal={"plan_id": latest["plan_id"], "text": "T", "id": "q0",
+                     "subject": ""})["refusal"], "T")
         self.assertIsNone(register.view_entry(
-            None, latest, refusal={"plan_id": "sha256:other", "text": "T"})["refusal"])
+            None, latest, refusal={"plan_id": "sha256:other", "text": "T", "id": "q0",
+                     "subject": ""})["refusal"])
         self.assertIsNone(register.view_entry(
-            "/srv/r", latest, refusal={"plan_id": latest["plan_id"], "text": "T"})["refusal"])
+            "/srv/r", latest, refusal={"plan_id": latest["plan_id"], "text": "T", "id": "q0",
+                                   "subject": ""})["refusal"])
+
+    def test_view_entry_names_the_refused_question(self):
+        latest = {**register.summary("/srv/r", plan_doc(open_questions=1)), "at": "t"}
+        given = {"plan_id": latest["plan_id"], "text": "T", "id": "q0", "subject": ""}
+        shown = register.view_entry(None, latest, refusal=given)
+        self.assertEqual((shown["refusal"], shown["refused"]), ("T", {"id": "q0", "subject": ""}))
+        other = register.view_entry(None, latest, refusal={**given, "plan_id": "sha256:other"})
+        self.assertEqual((other["refusal"], other["refused"]), (None, None))
+        running = register.view_entry("/srv/r", latest, refusal=given)
+        self.assertEqual((running["refusal"], running["refused"]), (None, None))
+
+    def test_view_entry_line_says_the_state_in_one_line(self):
+        def row(doc, extra=None):
+            return {**register.summary("/srv/r", doc, extra), "at": "t"}
+
+        def line(latest):
+            return register.view_entry(None, latest)["line"]
+
+        failed = {**register.failed("/srv/r", "timed_out"), "at": "t"}
+        blocker = row(plan_doc(blockers=[{"message": "a blocker"}]))
+        registered = row(plan_doc(outcome="no_change", state="ready"),
+                         {"registered": True, "project_id": "o/r"})
+        self.assertEqual(
+            [line(row(plan_doc(open_questions=2))), line(row(plan_doc(open_questions=1))),
+             line(row(plan_doc(state="ready"))), line(blocker), line(failed), line(registered)],
+            ["Register r: 2 questions open", "Register r: 1 question open",
+             "Register r: ready to apply", "The plan is a draft: a blocker",
+             f"{failed['headline']} {failed['note']}", "r is registered as o/r."])
+        self.assertEqual(register.view_entry("/srv/r", None)["line"],
+                         "Planning the adoption of r\u2026")
+        self.assertEqual(register.view_entry("/srv/r", None, again=True)["line"],
+                         "Planning the adoption of r again with your answer\u2026")
 
     def test_view_entry_running_done_none(self):
         self.assertEqual(register.view_entry("/srv/r", None), {
             "root": "/srv/r", "name": "r", "project_id": None, "status": "running",
             "result": None, "outcome": None, "headline": "Planning the adoption of r…",
             "lines": [], "note": None, "at": None, "plan_id": None, "state": None,
-            "questions": [], "refusal": None})
+            "questions": [], "refusal": None, "line": "Planning the adoption of r\u2026",
+            "refused": None})
         latest = {**register.summary("/srv/r", plan_doc(state="ready")), "at": "t"}
         self.assertEqual(register.view_entry(None, latest), {
             "root": "/srv/r", "name": "r", "project_id": "o/r", "status": "done",
             "result": "planned", "outcome": "reconcile",
             "headline": latest["headline"], "lines": [],
             "note": "The plan is ready.",
-            "at": "t", "plan_id": PLAN_ID, "state": "ready", "questions": [], "refusal": None})
+            "at": "t", "plan_id": PLAN_ID, "state": "ready", "questions": [], "refusal": None,
+            "line": "Register r: ready to apply", "refused": None})
         self.assertIsNone(register.view_entry(None, None))
 
 

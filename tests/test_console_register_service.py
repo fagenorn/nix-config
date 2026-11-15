@@ -651,8 +651,17 @@ class PlanAnswerRunTest(Case):
     def test_a_refused_answer_appends_nothing_and_shows_why(self):
         repo = git_repo(self.parent / "r")
         before, errors = self.refused_run(Fake(plan=[DRAFT, {"error": REFUSED}]), repo)
-        self.assertEqual(self.view()["registration"], {**before, "refusal": REFUSED_TEXT})
+        self.assertEqual(self.view()["registration"], {
+            **before, "refusal": REFUSED_TEXT,
+            "refused": {"id": A1["id"], "subject": A1["subject"]}})
         self.assertEqual(self.records(errors), [{"root": str(repo), "error": REFUSED}])
+
+    def test_a_refused_answer_names_its_question(self):
+        repo = git_repo(self.parent / "r")
+        self.refused_run(Fake(plan=[DRAFT, {"error": REFUSED}]), repo)
+        shown = self.view()["registration"]
+        self.assertEqual(shown["refused"], {"id": A1["id"], "subject": A1["subject"]})
+        self.assertEqual(shown["refusal"], REFUSED_TEXT)
 
     def test_a_failed_rerun_keeps_the_plan(self):
         repo = git_repo(self.parent / "r")
