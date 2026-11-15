@@ -655,7 +655,7 @@ class ReviveViewServiceTest(ReviveCase):
         self.tick(svc, 480)
         live = self.live(svc)
         (stall,) = [i for i in live["inbox"]["open"] if i["reason"] == "manager"]
-        self.assertEqual(stall["headline"], "managers keep failing on " + GOAL)
+        self.assertEqual(stall["headline"], "managers keep failing on " + PARTS["title"])
         self.assertEqual(stall["last_reason"], revive.GONE_AGAIN_TEXT)
         self.assertEqual(live["statement"]["inbox_items"], 1)
         (shown,) = [sp for e in live["entries"] if e["project_id"] == "owner/p01"

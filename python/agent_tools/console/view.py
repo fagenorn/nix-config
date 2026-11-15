@@ -56,7 +56,7 @@ Wire format, one object:
      "pin": <pin note> | null,
      "pin_launches": ["<profile>", ...],
      "profile_sessions": {"<profile>": <int>, ...},
-     "unstopped": [{"project_id", "sprint_id", "goal", "text", "failed_at"}, ...]}
+     "unstopped": [{"project_id", "sprint_id", "title", "text", "failed_at"}, ...]}
 
 `digest` is what changed since the owner last looked (see `digest.py`):
 `{"since": <last look> | null, "first_visit": <bool>, "recent": [<moment>, ...],
@@ -94,15 +94,19 @@ entry of `inbox.open`, before every tracker item, ordered by `waiting_since` the
 counts in `inbox_items` and the headline. Its entry is
 
     {"type": "inbox_item", "reason": "brief", "key": "brief/<sprint id>", "project_id",
-     "sprint_id", "goal", "version": <int>, "brief": {"done", "excluded", "slices", "risks",
-     "asks"}, "answered": false, "waiting_since": "<time the brief was sent>"}
+     "sprint_id", "title", "version": <int>, "brief": {"title", "done", "excluded", "slices",
+     "risks", "asks"}, "answered": false, "waiting_since": "<time the brief was sent>"}
+
+Every item names its sprint by `title` (`sprints.sprint_title`: the brief's title, else the goal's
+first sentence, at most 60 characters) and none carries the goal: the sprint entry is the only
+place the goal text is on the wire (ADR-console-027).
 
 A stalled sprint (a shown sprint whose `stalled` is not None, `sprints.py`) is one entry of
 `inbox.open`, after the briefs and before every tracker item, ordered by `waiting_since` then
 `sprint_id`, and counts in `inbox_items` and the headline. Its entry is
 
     {"type": "inbox_item", "reason": "manager", "key": "manager/<sprint id>", "project_id",
-     "sprint_id", "goal", "headline": "managers keep failing on <goal>", "last_reason": <str>,
+     "sprint_id", "title", "headline": "managers keep failing on <title>", "last_reason": <str>,
      "answered": false, "waiting_since": "<time the sprint stalled>"}
 
 `MANAGER_SENTENCE` says what the page offers. The sentence precedence is all out, stale, briefs, stalls,
@@ -113,7 +117,7 @@ one entry of `inbox.open`, after the stalls and before the questions, ordered by
 `(no_progress_at, sprint_id)`, and counts in `inbox_items` and the headline. Its entry is
 
     {"type": "inbox_item", "reason": "progress", "key": "progress/<sprint id>", "project_id",
-     "sprint_id", "goal", "headline": "the manager has stopped making progress on <goal>",
+     "sprint_id", "title", "headline": "the manager has stopped making progress on <title>",
      "last_status": <report status> | null, "answered": false,
      "waiting_since": "<time the stop was noticed>"}
 
@@ -174,10 +178,18 @@ one entry of `inbox.open` too, after the briefs and before every tracker item, o
 is none. Its entry is
 
     {"type": "inbox_item", "reason": "question", "key": "question/<sprint id>/<round>/<index>",
-     "project_id", "sprint_id", "goal", "round": <int>, "index": <int>, "blocker": <bool>,
-     "blocks": "<text>", "headline": "<question>", "more_questions": 0,
-     "questions": [{"question", "options": [<str>, ...], "chosen": null, "recommended": "<option>"}],
+     "project_id", "sprint_id", "title", "round": <int>, "index": <int>, "blocker": <bool>,
+     "blocks": "<text>", "headline": "<ask>", "context": "<text>" | null, "more_questions": 0,
+     "questions": [{"question": "<ask>", "options": [<str>, ...], "chosen": null,
+                    "recommended": "<option>", "recommended_index": <int>}],
      "items": [], "answers": [], "answered": false, "waiting_since": "<time it was asked>"}
+
+The texts are shown cut, never refused, though a round logged before the limits can exceed them
+(ADR-console-027): the ask and the headline to `MAX_ASK_CHARS` (140), `context` to
+`MAX_CONTEXT_CHARS` (400), each option and the recommendation to `MAX_OPTION_CHARS` (80), each
+with `sprints.cut`. `recommended_index` is the recommendation's index among the logged options, so
+it names the right option even when two cut options read the same; the owner's answer is still an
+option index into the full logged options.
 
 `QUESTION_SENTENCE` ("Choose an option with its number and press Enter, or answer in your own
 words.") says what the page offers.
@@ -190,7 +202,7 @@ A project entry is `{"type": "project", "project_id", "root", "quiet",
 "projects": [<project entry>]}`. `project_count` counts registered projects
 only. `unmanaged` is always present, possibly empty, sorted by `root`.
 
-    <sprint entry> = {"type": "sprint", "sprint_id", "goal",
+    <sprint entry> = {"type": "sprint", "sprint_id", "title", "goal",
                       "state": "drafting" | "starting" | "on_track" | "waiting" | "quota" | "quiet"
                                | "closing" | "done" | "stopping" | "stopped",
                       "state_text": "<text>", "stated_at", "age_text", "manager_text": <text> | null,
@@ -358,6 +370,9 @@ from agent_tools.console.sprints import (
     FINISHED_AFTER_MS,
     HELD,
     LANDED,
+    MAX_ASK_CHARS,
+    MAX_CONTEXT_CHARS,
+    MAX_OPTION_CHARS,
     NO_PROGRESS_TEXT,
     NONE,
     ON_TRACK,
@@ -385,11 +400,14 @@ from agent_tools.console.sprints import (
     SprintState,
     age_text,
     closing_text,
+    cut,
     ended_at,
+    goal_title,
     manager_status,
     message_state,
     open_questions,
     progress_text,
+    sprint_title,
     unreachable,
 )
 
@@ -765,6 +783,7 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
     return {
         "type": "sprint",
         "sprint_id": state.sprint_id,
+        "title": sprint_title(state),
         "goal": state.goal,
         "state": name,
         "state_text": text,
@@ -861,33 +880,44 @@ def _brief_entry(sprint: SprintState) -> dict:
     brief = sprint.brief
     return {"type": "inbox_item", "reason": "brief", "key": f"brief/{sprint.sprint_id}",
             "project_id": sprint.project_id, "sprint_id": sprint.sprint_id,
-            "goal": sprint.goal, "version": brief.version, "brief": brief.parts,
+            "title": sprint_title(sprint), "version": brief.version, "brief": brief.parts,
             "answered": False, "waiting_since": brief.sent_at}
 
 
 def _question_entry(sprint: SprintState, question: Question) -> dict:
+    ask = cut(question.question, MAX_ASK_CHARS)
+    context = question.context
     return {"type": "inbox_item", "reason": "question",
             "key": f"question/{sprint.sprint_id}/{question.round_id}/{question.index}",
-            "project_id": sprint.project_id, "sprint_id": sprint.sprint_id, "goal": sprint.goal,
+            "project_id": sprint.project_id, "sprint_id": sprint.sprint_id,
+            "title": sprint_title(sprint),
             "round": question.round_id, "index": question.index, "blocker": question.blocker,
-            "blocks": question.blocks, "headline": question.question, "more_questions": 0,
-            "questions": [{"question": question.question, "options": list(question.options),
-                           "chosen": None, "recommended": question.recommended}],
+            "blocks": question.blocks, "headline": ask,
+            "context": None if context is None else cut(context, MAX_CONTEXT_CHARS),
+            "more_questions": 0,
+            "questions": [{"question": ask,
+                           "options": [cut(o, MAX_OPTION_CHARS) for o in question.options],
+                           "chosen": None, "recommended": cut(question.recommended,
+                                                              MAX_OPTION_CHARS),
+                           "recommended_index": question.options.index(question.recommended)}],
             "items": [], "answers": [], "answered": False, "waiting_since": question.at}
 
 
 def _stall_entry(sprint: SprintState) -> dict:
+    title = sprint_title(sprint)
     return {"type": "inbox_item", "reason": "manager", "key": f"manager/{sprint.sprint_id}",
-            "project_id": sprint.project_id, "sprint_id": sprint.sprint_id, "goal": sprint.goal,
-            "headline": f"managers keep failing on {sprint.goal}", "last_reason": sprint.stalled,
+            "project_id": sprint.project_id, "sprint_id": sprint.sprint_id,
+            "title": title, "headline": f"managers keep failing on {title}",
+            "last_reason": sprint.stalled,
             "answered": False, "waiting_since": sprint.stalled_at}
 
 
 def _progress_entry(sprint: SprintState) -> dict:
     report = sprint.report
+    title = sprint_title(sprint)
     return {"type": "inbox_item", "reason": "progress", "key": f"progress/{sprint.sprint_id}",
-            "project_id": sprint.project_id, "sprint_id": sprint.sprint_id, "goal": sprint.goal,
-            "headline": NO_PROGRESS_TEXT.format(goal=sprint.goal),
+            "project_id": sprint.project_id, "sprint_id": sprint.sprint_id,
+            "title": title, "headline": NO_PROGRESS_TEXT.format(title=title),
             "last_status": None if report is None else report.status,
             "answered": False, "waiting_since": sprint.no_progress_at}
 
@@ -1074,7 +1104,8 @@ def derive_view(
         "digest": dict(digest) if digest is not None else None,
         "managers": managers,
         "unstopped": [
-            {"project_id": stop.project_id, "sprint_id": stop.sprint_id, "goal": stop.goal,
+            {"project_id": stop.project_id, "sprint_id": stop.sprint_id,
+             "title": goal_title(stop.goal),
              "text": UNSTOPPED_TEXT.format(reason=stop.reason), "failed_at": stop.failed_at}
             for stop in sorted(
                 (p for p in (pending or {}).values()

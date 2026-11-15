@@ -143,7 +143,7 @@ first). A `sprint.continued` with `no_progress_at` set clears it and sets `idle_
 changes nothing otherwise. A `sprint.reported` row that is accepted also sets `idle_nudges` to 0 and
 `no_progress_at` to `None` and keeps `idle_nudged_at`: the spacing is about nudges. The new
 constants are `QUOTA` (a view state), `QUOTA_TEXT` (the manager's waiting text, `waiting on quota
-until`), `NO_PROGRESS_TEXT` (`the manager has stopped making progress on {goal}`) and `NOT_STUCK`
+until`), `NO_PROGRESS_TEXT` (`the manager has stopped making progress on {title}`) and `NOT_STUCK`
 (the service's refusal of a continue with no item open). `parse_continue(body)` reads the owner's
 continue write, exactly `parse_withdraw`'s shape and refusals, and returns `(project_id,
 sprint_id)`. `idle` (which this module does not import) reads these fields.
@@ -437,7 +437,7 @@ STALLED = "stalled"
 STALLED_TEXT = "managers keep failing"
 QUOTA = "quota"
 QUOTA_TEXT = MANAGER_WAITING_TEXT
-NO_PROGRESS_TEXT = "the manager has stopped making progress on {goal}"
+NO_PROGRESS_TEXT = "the manager has stopped making progress on {title}"
 NOT_STUCK = "this sprint's manager is not waiting for you"
 REPORT_MEMBERS = ("status", "phase", "milestone", "tracker_url", "issues", "inbox", "next")
 REPORT_PHASES = ("running", "closing", "done")

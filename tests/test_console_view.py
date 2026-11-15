@@ -39,6 +39,7 @@ from agent_tools.console.sprints import (
     SprintState,
     first_line,
     sprint_states,
+    sprint_title,
 )
 from agent_tools.console.view import (
     ALL_OUT_SENTENCE,
@@ -889,11 +890,102 @@ def sprint(sid, pid="p00", seq=5, goal="make the importer resumable"):
     return SprintState(sid, pid, goal, seq, T0)
 
 
-PARTS = {"done": "ship it", "excluded": ["x"], "slices": ["a"], "risks": ["r"], "asks": ["q"]}
+PARTS = {"title": "Ship the importer", "done": "ship it", "excluded": ["x"], "slices": ["a"],
+         "risks": ["r"], "asks": ["q"]}
 
 
 def briefed(sprint, version=1, decision=NONE, reply=None, at="t9"):
     return dataclasses.replace(sprint, brief=Brief(version, PARTS, at, decision, reply))
+
+
+GOAL = "Make the importer resumable after a crash. " + "g" * 1357
+TITLE = "Importer resumes after a crash"
+
+
+def first_screen_view(**extra):
+    """A view of four sprints of one project, each with a different open item, all with `GOAL`."""
+    names = ("brief", "stall", "idle", "stop")
+    ids = {name: chr(ord("a") + n) * 16 for n, name in enumerate(names)}
+    sprints = {
+        ids["brief"]: sprint(ids["brief"], seq=8, goal=GOAL),
+        ids["stall"]: dataclasses.replace(sprint(ids["stall"], seq=7, goal=GOAL), stalled="x",
+                                          stalled_at=T0),
+        ids["idle"]: dataclasses.replace(sprint(ids["idle"], seq=6, goal=GOAL), no_progress_at=T0),
+        ids["stop"]: sprint(ids["stop"], seq=5, goal=GOAL)}
+    sprints[ids["brief"]] = briefed(sprints[ids["brief"]])
+    pending = {ids["stop"]: PendingStop(ids["stop"], "p00", GOAL, T0, "boom", T0)}
+    return derive_view([state("p00", 1)], sprints=sprints, pending=pending, **extra), ids
+
+
+class FirstScreenViewTest(unittest.TestCase):
+    def test_a_long_goal_is_carried_only_by_its_sprint_entry(self):
+        sid = "a" * 16
+        s = briefed(sprint(sid, goal=GOAL), decision=APPROVED)
+        s = dataclasses.replace(s, brief=dataclasses.replace(
+            s.brief, parts={**PARTS, "title": TITLE}))
+        s = dataclasses.replace(s, questions=(
+            Question(7, 0, "t9", False, "Which store keeps the checkpoints?", "the resume slice",
+                     ("sqlite", "files"), "files", context="A crash loses an hour of work."),))
+        view = derive_view([state("p00", 1)], sprints={sid: s})
+        text = encode_view(view).decode()
+        self.assertEqual(text.count(GOAL), 1)
+        (shown,) = view["entries"][0]["sprints"]
+        self.assertEqual((shown["title"], shown["goal"]), (TITLE, GOAL))
+        (asking,) = view["inbox"]["open"]
+        self.assertEqual(asking["title"], TITLE)
+        self.assertEqual(asking["context"], "A crash loses an hour of work.")
+        self.assertNotIn("goal", asking)
+
+    def test_every_item_names_the_sprint_by_its_title(self):
+        view, ids = first_screen_view()
+        items = {i["reason"]: i for i in view["inbox"]["open"]}
+        self.assertEqual(sorted(items), ["brief", "manager", "progress"])
+        title = sprint_title(sprint("z" * 16, goal=GOAL))
+        for found in (*items.values(), *view["unstopped"]):
+            with self.subTest(found.get("reason", "unstopped")):
+                self.assertLessEqual(len(found["title"]), 60)
+                self.assertNotIn("goal", found)
+        self.assertEqual(items["brief"]["title"], "Ship the importer")
+        self.assertEqual(items["manager"]["title"], title)
+        self.assertEqual(items["manager"]["headline"], "managers keep failing on " + title)
+        self.assertEqual(items["progress"]["headline"],
+                         "the manager has stopped making progress on " + title)
+        self.assertEqual(view["unstopped"][0]["title"], title)
+        shown = sum(len(e["sprints"]) for e in view["entries"])
+        self.assertEqual(shown, 4)
+        self.assertEqual(encode_view(view).decode().count(GOAL), shown)
+
+    def test_a_sprint_without_a_brief_is_named_by_its_goals_first_sentence(self):
+        sid = "a" * 16
+        view = derive_view([state("p00", 1)], sprints={sid: sprint(sid, goal=GOAL)})
+        self.assertEqual(view["entries"][0]["sprints"][0]["title"],
+                         "Make the importer resumable after a crash.")
+
+    def asking(self, question):
+        sid = "a" * 16
+        s = dataclasses.replace(sprint(sid), questions=(question,))
+        (found,) = derive_view([state("p00", 1)], sprints={sid: s})["inbox"]["open"]
+        return found
+
+    def test_a_logged_question_over_the_limits_shows_cut(self):
+        long_option = "o" * 120
+        found = self.asking(Question(7, 0, "t9", False, "q" * 600, "the slice",
+                                     (long_option, "files"), long_option, context="c" * 900))
+        (shown,) = found["questions"]
+        self.assertEqual(len(found["headline"]), 140)
+        self.assertTrue(found["headline"].endswith("…"))
+        self.assertEqual(len(found["context"]), 400)
+        self.assertEqual(len(shown["options"][0]), 80)
+        self.assertEqual(shown["recommended"], shown["options"][0])
+        self.assertEqual(shown["recommended_index"], 0)
+
+    def test_a_recommendation_keeps_its_index_when_cut_options_collide(self):
+        options = ("o" * 85 + "a", "o" * 85 + "b")
+        found = self.asking(Question(7, 0, "t9", False, "Which?", "the slice", options,
+                                     options[1]))
+        (shown,) = found["questions"]
+        self.assertEqual(shown["options"], ["o" * 79 + "…", "o" * 79 + "…"])
+        self.assertEqual(shown["recommended_index"], 1)
 
 
 class BriefViewTest(unittest.TestCase):
@@ -902,7 +994,7 @@ class BriefViewTest(unittest.TestCase):
         view = derive_view([state("p00", 1)], sprints={sid: briefed(sprint(sid), version=2)})
         self.assertEqual(view["inbox"]["open"], [{
             "type": "inbox_item", "reason": "brief", "key": "brief/" + sid,
-            "project_id": "p00", "sprint_id": sid, "goal": "make the importer resumable",
+            "project_id": "p00", "sprint_id": sid, "title": "Ship the importer",
             "version": 2, "brief": PARTS, "answered": False, "waiting_since": "t9"}])
         self.assertEqual(view["statement"]["inbox_items"], 1)
         self.assertEqual(view["statement"]["headline"], "1 thing needs you")
@@ -1148,9 +1240,9 @@ class SprintQuotaViewTest(unittest.TestCase):
                                       no_progress_at=iso(R + 30 * MIN))
         shown = line(stopped, R + 31 * MIN)
         expected = {"type": "inbox_item", "reason": "progress", "key": "progress/" + A,
-                    "project_id": "p00", "sprint_id": A, "goal": "make the importer resumable",
+                    "project_id": "p00", "sprint_id": A, "title": "Ship the importer",
                     "headline": "the manager has stopped making progress on "
-                                "make the importer resumable",
+                                "Ship the importer",
                     "last_status": "two slices are building", "answered": False,
                     "waiting_since": iso(R + 30 * MIN)}
         self.assertEqual(shown["inbox"]["open"], [expected])
@@ -1299,11 +1391,12 @@ def answer_question(sprint_state, index):
 
 def question_entry(index, text, options, recommended, blocks, sid=A):
     return {"type": "inbox_item", "reason": "question", "key": f"question/{sid}/41/{index}",
-            "project_id": "p00", "sprint_id": sid, "goal": "make the importer resumable",
+            "project_id": "p00", "sprint_id": sid, "title": "Ship the importer",
             "round": 41, "index": index, "blocker": False, "blocks": blocks,
-            "headline": text, "more_questions": 0,
+            "headline": text, "context": None, "more_questions": 0,
             "questions": [{"question": text, "options": options, "chosen": None,
-                           "recommended": recommended}],
+                           "recommended": recommended,
+                           "recommended_index": options.index(recommended)}],
             "items": [], "answers": [], "answered": False, "waiting_since": T0}
 
 
@@ -1513,7 +1606,7 @@ class SprintEndViewTest(unittest.TestCase):
             "e" * 16: PendingStop("e" * 16, "p00", goal, T0, "zzz", T0)}
         view = derive_view([state("p00", 1)], pending=pending)
         self.assertEqual(view["unstopped"], [
-            {"project_id": "p00", "sprint_id": sid, "goal": goal, "failed_at": at,
+            {"project_id": "p00", "sprint_id": sid, "title": goal, "failed_at": at,
              "text": f"The manager of a withdrawn goal could not be stopped: {reason}; "
                      "trying again"}
             for sid, reason, at in (("b" * 16, "boom", T0), ("e" * 16, "zzz", T0),
@@ -1526,7 +1619,8 @@ class SprintViewTest(unittest.TestCase):
         view = derive_view([state("p00", 1)], sprints={"a" * 16: sprint("a" * 16)},
                            now_ms=T0_MS + 3 * 60_000)
         self.assertEqual(view["entries"][0]["sprints"], [{
-            "type": "sprint", "sprint_id": "a" * 16, "goal": "make the importer resumable",
+            "type": "sprint", "sprint_id": "a" * 16,
+            "title": "make the importer resumable", "goal": "make the importer resumable",
             "state": "drafting", "state_text": "drafting the brief", "stated_at": T0,
             "age_text": "stated 3 min ago", "manager_text": "no manager has picked this up",
             "manager_state": "none", "manager_until": None, "retry": True,
@@ -1709,7 +1803,7 @@ class ReviveViewTest(unittest.TestCase):
         shown = derive_view([state("p00", 1)], sprints=folded)
         self.assertEqual(shown["inbox"]["open"], [{
             "type": "inbox_item", "reason": "manager", "key": "manager/" + self.SID,
-            "project_id": "p00", "sprint_id": self.SID, "goal": self.GOAL,
+            "project_id": "p00", "sprint_id": self.SID, "title": self.GOAL,
             "headline": "managers keep failing on " + self.GOAL, "last_reason": "r",
             "answered": False, "waiting_since": "2026-11-12T10:03:00.000000+00:00"}])
         self.assertEqual(shown["statement"]["inbox_items"], 1)
