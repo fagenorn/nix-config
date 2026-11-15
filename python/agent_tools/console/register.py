@@ -25,7 +25,8 @@ exists but cannot be read (an absent registry is an empty fleet), also decided b
 `UNAVAILABLE` is `registering a project is not available on this host`.
 
 Runner. `Adopter(command=None, environ=None, timeout=RUN_TIMEOUT)` runs
-`[*command, "plan", "--repo-root", root, "--format", "json"]` (`plan`) or
+`[*command, "plan", "--repo-root", root, "--format", "json"]` (`plan`, followed by `--answer <id>
+<subject> <value>` for each of its `answers`, in the given order: ADR-console-029 D4) or
 `[*command, "verify", "--repo-root", root, "--register"]` (`register`), the command defaulting to the
 `adopt_project` sibling module. Each runs with no shell, in its own process group
 (`manager.run_in_own_group`), `stdin` and `stderr` to `DEVNULL`, `stdout` piped, `env=dict(environ)`
@@ -42,16 +43,30 @@ target starts with `.agents/`), `writes the project contract`, `generates N file
 contract`, `writes N other file(s)`, `deletes N file(s)`, `rewrites N link(s)` and `rewrites N path
 reference(s)` (the references answered `rewrite` or `extend`). It is a pure function of the document
 and never includes a path of it. `summary(root, plan, report=None)` is the row payload (`by`, `root`,
-`project_id`, `result`, `outcome`, `headline`, `lines`, `note`) with the D4 to D6 texts; message
-text is whitespace-collapsed. `failed(root, kind)` is the same shape for a run that raised.
+`project_id`, `result`, `outcome`, `headline`, `lines`, `note`, and the `EXTRA` members `plan_id`,
+`state`, `questions`, `answered`) with the D4 to D6 texts; message text is whitespace-collapsed. A
+`bootstrap` or `reconcile` plan carries its header's `plan_id` and `state`, its
+`plan_questions.questions`, and its answered decisions as `{id, subject, value}` (ADR-console-029
+D1); every other row carries `DEFAULTS` (None, None, `[]`, `[]`). A ready plan's note is `The plan
+is ready to apply: run adopt-project apply --plan-id <plan_id>` (`The plan is ready to apply.`
+without a `plan_id`: D5). A `no_change` plan with no report (only an answer run passes none) is
+`not_registered` and says `<name> needs no adoption change and is not registered yet: run
+<command>`, the command being the plan's `handoff.next_command` or else `adopt-project verify
+--register --repo-root <root>` (D5). `failed(root, kind)` is the same shape for a run that raised.
 
 Row. `ended(payload)` is `("registration.ended", None, payload)` and raises `ValueError` unless the
-members are exactly the eight above, `by` is `owner`, `result` is one of `RESULTS` and `lines` is a
-list of strings. `ENDED` is `event_log.REGISTRATION_ENDED`, not in `KEPT_KINDS`. `latest(events,
-state=None)` is the last valid `ENDED` payload with `at` added, else `state`: the view's
-`registration` member, folded by the service. `view_entry(running, latest)` is that member: the
-`running` entry (headline `Planning the adoption of <name>…`) while a run is under way, else the
-latest with status `done`, else None.
+members are exactly `MEMBERS` (a legacy row) or exactly `MEMBERS | EXTRA`, `by` is `owner`,
+`result` is one of `RESULTS` and `lines` is a list of strings; for twelve members also unless
+`plan_id` and `state` are strings or None, `questions` is a list of dicts and `answered` is a list
+of dicts with exactly the string keys `id`, `subject` and `value` (ADR-console-029 D1). `ENDED` is
+`event_log.REGISTRATION_ENDED`, not in `KEPT_KINDS`. `latest(events, state=None)` is the last valid
+`ENDED` payload over `DEFAULTS` with `at` added, else `state`: the view's `registration` member,
+folded by the service. `view_entry(running, latest, *, again=False, refusal=None)` is that member,
+always the same fourteen keys: the `running` entry (headline `Planning the adoption of <name>…`, or
+`again_headline(name)`, `Planning the adoption of <name> again with your answer…`, when `again`)
+while a run is under way, with `plan_id`, `state` and `refusal` None and `questions` `[]`; else the
+latest with status `done`, its `plan_id`, `state` and `questions`, and `refusal` the text of the
+given `{"plan_id", "text"}` only when its `plan_id` is the latest's; else None (D4).
 """
 
 from __future__ import annotations
@@ -62,7 +77,7 @@ import subprocess
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
-from agent_tools.console import event_log, manager
+from agent_tools.console import event_log, manager, plan_questions
 from agent_tools.system import siblings
 
 ENDED = event_log.REGISTRATION_ENDED
@@ -78,6 +93,8 @@ OUTCOME_TEXT = {
     "reconcile": "it has agent files or a contract to bring up to date",
 }
 MEMBERS = {"by", "root", "project_id", "result", "outcome", "headline", "lines", "note"}
+EXTRA = {"plan_id", "state", "questions", "answered"}
+DEFAULTS = {"plan_id": None, "state": None, "questions": [], "answered": []}
 CONTRACT = ".agents/project.json"
 
 
@@ -207,13 +224,25 @@ def _error_text(error: Mapping) -> str:
 
 
 def _row(root: str, project_id: str | None, result: str, outcome: str | None, headline: str,
-         lines: list[str], note: str | None) -> dict:
+         lines: list[str], note: str | None, *, plan_id: str | None = None,
+         state: str | None = None, questions: Iterable[dict] = (),
+         answered: Iterable[dict] = ()) -> dict:
     return {"by": "owner", "root": root, "project_id": project_id, "result": result,
-            "outcome": outcome, "headline": headline, "lines": lines, "note": note}
+            "outcome": outcome, "headline": headline, "lines": lines, "note": note,
+            "plan_id": plan_id, "state": state, "questions": list(questions),
+            "answered": list(answered)}
+
+
+def _answered(document: Mapping) -> list[dict]:
+    return [{"id": a["id"], "subject": a["subject"], "value": a["value"]}
+            for a in document.get("decisions", {}).get("answered", [])]
 
 
 def _note(plan: Mapping, document: Mapping) -> str:
     if plan.get("state") == "ready":
+        if plan.get("plan_id"):
+            return ("The plan is ready to apply: run adopt-project apply "
+                    f"--plan-id {plan['plan_id']}")
         return "The plan is ready to apply."
     questions = len(document.get("decisions", {}).get("open", []))
     if questions:
@@ -239,7 +268,9 @@ def summary(root: str, plan: Mapping, report: Mapping | None = None) -> dict:
     if outcome in OUTCOME_TEXT:
         return _row(root, project_id, "planned", outcome,
                     f"What adopting {name} would change: {OUTCOME_TEXT[outcome]}",
-                    plan_lines(plan), _note(header, plan))
+                    plan_lines(plan), _note(header, plan), plan_id=header.get("plan_id"),
+                    state=header.get("state"), questions=plan_questions.questions(plan),
+                    answered=_answered(plan))
     if outcome == "no_change":
         if report is not None and "error" in report:
             text = f"{name} was not registered: {_error_text(report['error'])}"
@@ -247,7 +278,14 @@ def summary(root: str, plan: Mapping, report: Mapping | None = None) -> dict:
         if report is not None and report.get("registered") is True:
             return _row(root, project_id, "registered", outcome,
                         f"{name} is registered as {report.get('project_id')}.", [], None)
-        result = _collapse(report.get("result")) if report is not None else "no report"
+        if report is None:
+            next_command = plan.get("handoff", {}).get("next_command")
+            run = (next_command if isinstance(next_command, str) and next_command
+                   else f"adopt-project verify --register --repo-root {root}")
+            return _row(root, project_id, "not_registered", outcome,
+                        f"{name} needs no adoption change and is not registered yet: run {run}",
+                        [], None)
+        result = _collapse(report.get("result"))
         return _row(root, project_id, "not_registered", outcome,
                     f"{name} was not registered: {result}", [], None)
     command = plan.get("handoff", {}).get("next_command")
@@ -269,10 +307,23 @@ def failed(root: str, kind: str) -> dict:
                 f"The adoption plan for {name_of(root)} failed: {kind}", [], None)
 
 
+def _extras_valid(payload: Mapping) -> bool:
+    answered = payload["answered"]
+    return (all(payload[key] is None or isinstance(payload[key], str)
+                for key in ("plan_id", "state"))
+            and isinstance(payload["questions"], list)
+            and all(isinstance(q, dict) for q in payload["questions"])
+            and isinstance(answered, list)
+            and all(isinstance(a, dict) and set(a) == {"id", "subject", "value"}
+                    and all(isinstance(v, str) for v in a.values()) for a in answered))
+
+
 def ended(payload: Mapping) -> tuple[str, None, dict]:
-    if (not isinstance(payload, Mapping) or set(payload) != MEMBERS or payload["by"] != "owner"
+    if (not isinstance(payload, Mapping) or set(payload) not in (MEMBERS, MEMBERS | EXTRA)
+            or payload["by"] != "owner"
             or payload["result"] not in RESULTS or not isinstance(payload["lines"], list)
-            or not all(isinstance(line, str) for line in payload["lines"])):
+            or not all(isinstance(line, str) for line in payload["lines"])
+            or (set(payload) != MEMBERS and not _extras_valid(payload))):
         raise ValueError("not a registration row")
     return (ENDED, None, dict(payload))
 
@@ -286,23 +337,33 @@ def latest(events: Iterable[event_log.Event], state: dict | None = None) -> dict
             _, _, payload = ended(event.payload)
         except ValueError:
             continue
-        found = {**payload, "at": event.at}
+        found = {**DEFAULTS, **payload, "at": event.at}
     return found
 
 
-def view_entry(running: str | None, latest: Mapping | None) -> dict | None:
+def again_headline(name: str) -> str:
+    return f"Planning the adoption of {name} again with your answer…"
+
+
+def view_entry(running: str | None, latest: Mapping | None, *, again: bool = False,
+               refusal: Mapping | None = None) -> dict | None:
     if running is not None:
         name = name_of(running)
         return {"root": running, "name": name, "project_id": None, "status": "running",
                 "result": None, "outcome": None,
-                "headline": f"Planning the adoption of {name}…", "lines": [], "note": None,
-                "at": None}
+                "headline": again_headline(name) if again else f"Planning the adoption of {name}…",
+                "lines": [], "note": None, "at": None, "plan_id": None, "state": None,
+                "questions": [], "refusal": None}
     if latest is None:
         return None
+    shown = (refusal["text"] if refusal is not None and refusal["plan_id"] == latest["plan_id"]
+             else None)
     return {"root": latest["root"], "name": name_of(latest["root"]),
             "project_id": latest["project_id"], "status": "done", "result": latest["result"],
             "outcome": latest["outcome"], "headline": latest["headline"],
-            "lines": latest["lines"], "note": latest["note"], "at": latest["at"]}
+            "lines": latest["lines"], "note": latest["note"], "at": latest["at"],
+            "plan_id": latest["plan_id"], "state": latest["state"],
+            "questions": latest["questions"], "refusal": shown}
 
 
 class RunFailed(Exception):
@@ -319,8 +380,11 @@ class Adopter:
         self._environ = environ
         self._timeout = timeout
 
-    def plan(self, root: str, cancel=None) -> dict:
-        return self._run(["plan", "--repo-root", root, "--format", "json"], cancel)
+    def plan(self, root: str, cancel=None, answers: Sequence[Mapping[str, str]] = ()) -> dict:
+        arguments = ["plan", "--repo-root", root, "--format", "json"]
+        for answer in answers:
+            arguments += ["--answer", answer["id"], answer["subject"], answer["value"]]
+        return self._run(arguments, cancel)
 
     def register(self, root: str, cancel=None) -> dict:
         return self._run(["verify", "--repo-root", root, "--register"], cancel)
