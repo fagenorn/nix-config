@@ -282,7 +282,45 @@ class DisposeRefusalTest(DisposeCase):
             dataclasses.replace(self.project, contract={
                 **self.project.contract, "release": {"profiles": {"railway": profile}}}),
             clock=self.clock, registry=self.driver.registry)
-        self.assertRefusal("profile_drift", drifted.preview_dispose, GROUND, WHY)
+        refusal = self.assertRefusal("profile_drift", drifted.preview_dispose, GROUND, WHY)
+        self.assertTrue(refusal.detail.endswith(": restore that profile"), refusal.detail)
+        self.assertNotIn("abandon", refusal.detail)
+        resume = self.assertRefusal("profile_drift", drifted.preview, None)
+        self.assertTrue(resume.detail.endswith(
+            ": restore that profile or abandon the release"), resume.detail)
+
+    def test_a_release_whose_actions_all_read_satisfied_since_is_resumed_not_disposed(self):
+        tid = self.parked()
+        self.watch.effects = [("satisfied", "deployed")]
+        refusal = self.assertRefusal("recovered", self.driver.dispose, GROUND, WHY,
+                                     [self.token()])
+        self.assertIn("resume it with no candidate", refusal.detail)
+        self.assertStillParked(tid)
+        types = [e["type"] for e in self.load(tid).events]
+        self.assertNotIn("failure_disposed", types)
+        self.assertNotIn(self.token(), [g["grant_id"] for g in self.load(tid).grants])
+        resumed = self.driver.run(None, [])
+        self.assertEqual((resumed["state"], resumed["next"]), ("succeeded", "done"))
+
+    def test_an_acquisition_between_the_token_check_and_custody_is_stale(self):
+        tid = self.parked()
+        token = self.token()
+        acquire = release_driver.Driver._acquire
+
+        def racing(driver, store, transaction):
+            other = store.acquire(tid, executor_id="other", ttl_ms=1000,
+                                  subject_path=str(self.project.root))
+            store.release(other.custody)
+            return acquire(driver, store, transaction)
+
+        with mock.patch.object(release_driver.Driver, "_acquire", racing):
+            refusal = self.assertRefusal("confirmation_stale", self.driver.dispose,
+                                         GROUND, WHY, [token])
+        self.assertIn("preview again", refusal.detail)
+        self.assertStillParked(tid)
+        self.assertNotIn("grant_issued", [e["type"] for e in self.load(tid).events
+                                          if e.get("grant_id") == token])
+        self.assertEqual(self.driver.dispose(GROUND, WHY, [self.token()])["state"], "failed")
 
 
 if __name__ == "__main__":

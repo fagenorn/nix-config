@@ -253,8 +253,13 @@ class ShipReleaseContractsTest(unittest.TestCase):
             self.assertIn(needle, phase5)
         self.assertNotIn("fix forward", self.skill)
         phase1 = self.skill.split("## Phase 1", 1)[1].split("\n## ", 1)[0]
-        self.assertIn("After a `failed` release, start the range at the last `succeeded` "
-                      "version and say the failed one was never fully deployed.", phase1)
+        self.assertIn("After a `failed` release, CHANGELOG Step 1 names the range.", phase1)
+        step1 = self.changelog.split("## Step 1", 1)[1].split("\n## ", 1)[0]
+        self.assertIn(
+            "After a `failed` release the range is `<last-succeeded-tag>..origin/<integration>` "
+            "(the tag before the failed version), still `--first-parent --merges`: "
+            "`origin/<default>..` omits that release's merges. Say that version never fully "
+            "deployed.", step1)
 
     def test_status_is_read_before_nothing_to_release(self):
         phase0 = self.skill.split("## Phase 0", 1)[1].split("\n## ", 1)[0]

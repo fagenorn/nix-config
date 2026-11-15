@@ -177,9 +177,14 @@ another reference yields a new one. Both verbs refuse, before any write: `ground
 for any ground but `no_recovery_path` (`successor_succeeded` needs `roll_forward`, which the
 driver does not expose), `reference_required` for a blank reference, `no_release` with no
 nonterminal release, `not_parked` outside `attention_required`, `no_effect` when no action had
-an effect (abandon instead) and `profile_drift` as a resume does. `dispose` then refuses
-`confirmation_stale` for any token but the previewed one and `confirmation_required` for none,
-acquires custody, inspects every declared action again under the held fence, issues one grant
+an effect (abandon instead) and `profile_drift`, whose repair here is to restore that profile.
+`dispose` then refuses `confirmation_stale` for any token but the previewed one and
+`confirmation_required` for none, and acquires custody; an acquisition ordinal other than the
+one the token was computed for (another acquisition came between) gives custody up and
+refuses `confirmation_stale`. It inspects every declared action again under the held fence;
+when every one now reads `satisfied` it gives custody up and refuses `recovered` (resume it
+with no candidate), so a release that has since recovered is never sealed `failed`. It issues
+one grant
 named by the token (actor `operator`, kind `human`, authority class `release`, the
 transaction's) and calls `dispose_failed` with `{ground, reference, occurred_at: null,
 successor: null, units: []}`. A core refusal (an action `in_progress` or `unknown` after the
@@ -523,19 +528,20 @@ class Driver:
                            f'--dispose {DISPOSE_GROUND} --reference "<why>", then release '
                            "transaction run with the same arguments and --confirm <token>")
             raise Refusal("release_in_flight", detail)
-        self._require_profile(transaction)
+        self._require_profile(transaction, "restore that profile or abandon the release")
         plan_digest = telemetry_digest({
             "transaction_id": transaction.transaction_id,
             "proof_plan_digest": transaction.events[0]["proof_plan_digest"]})
         document = self._document("resume", plan_digest, stored, None, transaction, None)
         return _Plan("resume", document, None, plan_digest, stored, ordinal, transaction, None)
 
-    def _require_profile(self, transaction: Transaction) -> None:
+    def _require_profile(self, transaction: Transaction, repair: str) -> None:
+        """Refuse `profile_drift`, ending with the caller's `repair`: only a resume can offer
+        `abandon`, which a release parked after an effect refuses."""
         if transaction.subject["profile_digest"] != self.compiled["digest"]:
             raise Refusal("profile_drift", f"{transaction.transaction_id} was created under "
                           f"profile digest {transaction.subject['profile_digest']}, not the "
-                          f"current {self.compiled['digest']}: restore that profile or "
-                          "abandon the release")
+                          f"current {self.compiled['digest']}: {repair}")
 
     def _observe(self, candidate: Mapping[str, Any]) -> dict[str, Any]:
         return release_verification.observe(
@@ -772,7 +778,7 @@ class Driver:
         if no_effect(transaction.events):
             raise Refusal("no_effect", f"no action of {transaction.transaction_id} had an "
                           "effect: abandon it instead")
-        self._require_profile(transaction)
+        self._require_profile(transaction, "restore that profile")
         stored = _candidate(transaction)
         document = {
             "schema_version": SCHEMA_VERSION, "mode": "dispose",
@@ -804,13 +810,22 @@ class Driver:
             raise Refusal("confirmation_required", "confirm: " + DISPOSE_ACTION)
         store, router = self.store(), self._router()
         custody, held = self._acquire(store, transaction)
+        if _openings(held) != _next_acquisition(transaction):
+            store.release(custody)
+            raise Refusal("confirmation_stale", "the release was acquired since the preview, "
+                          f"so {expected} is no confirmation of this disposition: preview again")
         try:
             for unit in held.proof_plan["units"]:
                 if _view(held, unit["name"]) is not None:
                     store.renew(custody)
-                    store.inspect_action(
+                    held = store.inspect_action(
                         custody, name=unit["name"], effect=router,
                         parameters=release_profile.thaw(unit["parameters"]))
+            if all(view["status"] == "satisfied" for view in held.actions):
+                store.release(custody)
+                raise Refusal("recovered", f"every declared action of {held.transaction_id} "
+                              "now reads satisfied, so it is not disposed: resume it with no "
+                              "candidate")
             store.issue_grant(custody, grant_id=expected, actor=OPERATOR,
                               actor_kind=DISPOSE_ACTOR_KIND, authority_class=AUTHORITY_CLASS)
             disposed = store.dispose_failed(custody, grant_id=expected, disposition={

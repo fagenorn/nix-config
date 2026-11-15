@@ -50,7 +50,7 @@ A nonterminal `release` (any state outside `succeeded`, `failed`, `rolled_back`,
 
 ## Phase 1 — Changelog
 
-**Read [`CHANGELOG.md`](./CHANGELOG.md) first**: it owns the rubric and template. Assemble the body, the release notes, for the range `<prev-tag>..<commit>` (no tag: all of `<commit>`), where `<commit>` is `git rev-parse origin/<integration>`. After a `failed` release, start the range at the last `succeeded` version and say the failed one was never fully deployed. Write it with the file-writing tool to `<notes-path>`, a path outside both working trees, and pass it by path (`worktrees/SKILL.md`, `## Shell forms the isolation checker refuses`). The title: one line under 70 characters synthesising the body. Create no tracked `CHANGELOG.md` unless asked.
+**Read [`CHANGELOG.md`](./CHANGELOG.md) first**: it owns the rubric and template. Assemble the body, the release notes, for the range `<prev-tag>..<commit>` (no tag: all of `<commit>`), where `<commit>` is `git rev-parse origin/<integration>`. After a `failed` release, CHANGELOG Step 1 names the range. Write it with the file-writing tool to `<notes-path>`, a path outside both working trees, and pass it by path (`worktrees/SKILL.md`, `## Shell forms the isolation checker refuses`). The title: one line under 70 characters synthesising the body. Create no tracked `CHANGELOG.md` unless asked.
 
 ## Phase 2 — Version
 
