@@ -143,14 +143,16 @@ class RailwayWorld:
                    exit: int = 0, stdout: str | None = None) -> None:
         """Every check run of the commit, history included, oldest first.
 
-        A run is `(status, conclusion)` or `(status, conclusion, name)`; its id is its position,
-        so a later run of the same name is a re-run that supersedes the earlier one.
+        A run is `(status, conclusion)`, `(status, conclusion, name)` or `(status, conclusion,
+        name, suite)`; its id is its position, so a later run of the same name in the same
+        check suite (or with no suite at all) is a re-run that supersedes the earlier one.
         """
         argv = ["api", "-X", "GET", f"repos/{SLUG}/commits/{commit}/check-runs", "-f",
                 "per_page=100", "-f", "filter=all"]
         payload = {"total_count": len(runs) if total is None else total,
                    "check_runs": [{"id": index + 1, "name": run[2] if len(run) > 2 else f"job-{index}",
-                                   "status": run[0], "conclusion": run[1]}
+                                   "status": run[0], "conclusion": run[1],
+                                   **({"check_suite": {"id": run[3]}} if len(run) > 3 else {})}
                                   for index, run in enumerate(runs)]}
         self._answer("gh", argv, json.dumps(payload) if stdout is None else stdout, exit, "", 0)
 
@@ -161,14 +163,14 @@ class RailwayWorld:
         self._answer("gh", argv, json.dumps(payload) if stdout is None else stdout, exit, "", 0)
 
     def compare(self, base: str, head: str, *files: object, status: str = "ahead",
-                behind: int = 0, merge_base: str | None = None, exit: int = 0,
+                ahead: int = 1, behind: int = 0, merge_base: str | None = None, exit: int = 0,
                 stdout: str | None = None) -> None:
         """GitHub's comparison of two commits; a file is a name or `(name, previous name)`."""
         argv = ["api", "-X", "GET", f"repos/{SLUG}/compare/{base}...{head}"]
         entries = [{"filename": f, "status": "modified"} if isinstance(f, str)
                    else {"filename": f[0], "status": "renamed", "previous_filename": f[1]}
                    for f in files]
-        payload = {"status": status, "ahead_by": 1, "behind_by": behind,
+        payload = {"status": status, "ahead_by": ahead, "behind_by": behind,
                    "merge_base_commit": {"sha": base if merge_base is None else merge_base},
                    "files": entries}
         self._answer("gh", argv, json.dumps(payload) if stdout is None else stdout, exit, "", 0)

@@ -422,6 +422,12 @@ def _check_runs(repository: str, commit: str, deadline: float
     `checks_incomplete` or `checks_rerun`. A re-run is never `complete`: CI that failed, caused
     Railway's skip and then turned green leaves the older serving row without the candidate's
     changes, and no reading shows that the skip was about unchanged watch paths instead.
+
+    A check is one name within one check suite (`check_suite.id`, absent read as one shared
+    suite): a re-run adds a run of the same name to the same suite, while two workflows that
+    each publish a job of one name have a suite each and are two checks, not a re-run. A new
+    workflow run of the same commit is a new suite, so its earlier failure stays the latest
+    of its own check and reads `failed`.
     """
     status, payload, _ = release_merge.gh(check_runs_argv(repository, commit), deadline)
     runs = payload.get("check_runs") if isinstance(payload, dict) else None
@@ -434,12 +440,15 @@ def _check_runs(repository: str, commit: str, deadline: float
                        for run in runs)):
         return "checks_unread", None
     conclusions: dict[str, int] = {}
-    latest: dict[str, dict[str, Any]] = {}
+    latest: dict[tuple[int | None, str], dict[str, Any]] = {}
     for run in runs:
         label = run["conclusion"] or run["status"]
         conclusions[label] = conclusions.get(label, 0) + 1
-        if run["name"] not in latest or run["id"] > latest[run["name"]]["id"]:
-            latest[run["name"]] = run
+        suite = run.get("check_suite")
+        suite = suite.get("id") if isinstance(suite, dict) else None
+        check = (suite if type(suite) is int else None, run["name"])
+        if check not in latest or run["id"] > latest[check]["id"]:
+            latest[check] = run
     facts = {"total": total, "conclusions": conclusions}
     if any(run["status"] == "completed" and run["conclusion"] is not None
            and run["conclusion"] not in BENIGN_CONCLUSIONS for run in latest.values()):

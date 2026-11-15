@@ -252,6 +252,41 @@ class SkipTest(unittest.TestCase):
                                           ("completed", "failure", "ci")),
                          ("diverged", "skipped_after_ci_failure"))
 
+    def test_one_job_name_in_two_check_suites_is_two_checks_not_a_re_run(self):
+        """Regression (nodo-prod v0.51.1): two workflows each publish a job named `lint`, each
+        in its own check suite; nothing was re-run, so the CI route is complete."""
+        self.assertEqual(self.skipped_api(GREEN + ("lint", 118372805136), GREEN + ("build", 5),
+                                          GREEN + ("lint", 118373146276)),
+                         ("satisfied", "skipped"))
+        self.assertEqual(self.detail(), "complete")
+
+    def test_a_second_run_of_a_name_within_one_check_suite_is_a_re_run(self):
+        self.assertEqual(self.skipped_api(("completed", "failure", "lint", 7),
+                                          GREEN + ("lint", 7), GREEN + ("lint", 8)),
+                         ("unknown", "skip_unexplained"))
+        self.assertEqual(self.detail(), "checks_rerun")
+        self.setUp()
+        self.assertEqual(self.skipped_api(GREEN + ("lint", 7), GREEN + ("lint", 7)),
+                         ("unknown", "skip_unexplained"))
+        self.assertEqual(self.detail(), "checks_rerun")
+
+    def test_a_failure_in_one_suite_is_not_hidden_by_a_green_namesake_in_another(self):
+        """A new workflow run of the commit is a new suite: the failed one stays its own
+        check's latest run."""
+        self.assertEqual(self.skipped_api(("completed", "failure", "lint", 7),
+                                          GREEN + ("lint", 8)),
+                         ("diverged", "skipped_after_ci_failure"))
+
+    def test_a_malformed_check_suite_is_read_as_no_suite(self):
+        payload = {"total_count": 2, "check_runs": [
+            {"id": 1, "name": "lint", "status": "completed", "conclusion": "success",
+             "check_suite": {"id": "7"}},
+            {"id": 2, "name": "lint", "status": "completed", "conclusion": "success",
+             "check_suite": None}]}
+        self.assertEqual(self.skipped_api(stdout=json.dumps(payload)),
+                         ("unknown", "skip_unexplained"))
+        self.assertEqual(self.detail(), "checks_rerun")
+
     def test_a_full_page_of_green_checks_is_still_over_the_limit(self):
         self.assertEqual(self.skipped_api(*[GREEN] * 101), ("unknown", "skip_unexplained"))
         self.assertEqual(self.detail(), "checks_over_limit")
@@ -316,14 +351,9 @@ class SkipTest(unittest.TestCase):
         self.assertIn("-X", self.reads("check-runs")[0])
 
 
-NODO_DELTA = (
-    "docs/areas/database-security-posture/ADR-INDEX.md",
-    "docs/operations/deploy.md",
-    "src/Nodo.Infrastructure/Data/MigrationDbContextFactory.cs",
-    "src/Nodo.Infrastructure/Data/StartupDbRetry.cs",
-    "src/Nodo.Infrastructure/DependencyInjection.cs",
-    "tests/Nodo.Infrastructure.Tests/Data/StartupDbRetryTests.cs",
-)
+NODO_DELTA = ("docs/operations/deploy.md", "docs/areas/data/adr/001-pooler.md",
+              "src/Infrastructure/Data/Retry.cs", "src/Infrastructure/DependencyInjection.cs",
+              "tests/Infrastructure.Tests/Data/RetryTests.cs")
 
 
 class WatchPathSkipTest(unittest.TestCase):
@@ -370,7 +400,7 @@ class WatchPathSkipTest(unittest.TestCase):
                               ((GREEN,), {"total": 150}), ((), {"exit": 1, "stdout": ""})):
             with self.subTest(runs=runs, options=options):
                 self.world.check_runs(MERGE, *runs, **options)
-                self.assertEqual(self.admin(), ("satisfied", "skipped"))
+                self.assertEqual(self.admin(ahead=7), ("satisfied", "skipped"))
                 self.assertEqual(self.evidence(), ("watch_paths_unchanged", None))
         self.assertEqual(self.compares()[0], adapter.compare_argv(SLUG, BASE_TIP, MERGE))
         self.assertIn(f"github:{SLUG}/compare/{BASE_TIP}...{MERGE}", self.last["references"])
