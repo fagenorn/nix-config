@@ -25,6 +25,7 @@
 | Adapter | Release |
 | Adoption | Project contract |
 | Answered item | Console |
+| Approved adoption | Console |
 | Base policy | Guard |
 | Blocking edge | Claims |
 | Cache proxy | Hosts |

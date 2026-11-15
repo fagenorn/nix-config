@@ -408,6 +408,33 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("ADR-console-022", self.doc(
             "docs/areas/console/adr/006-capacity-readings-arrive-from-the-proxy.md"))
 
+    def test_the_console_approval_decision_is_recorded(self):
+        path = ("docs/areas/console/adr/"
+                "030-the-owner-approves-a-ready-adoption-and-the-console-opens-its-pull-request.md")
+        first = (REPO_ROOT / path).read_text().splitlines()[0]
+        self.assertEqual(
+            first,
+            "# ADR-console-030 — The owner approves a ready adoption on the page and the console "
+            "opens its pull request")
+        adr = self.doc(path)
+        for needle in ("POST /api/plan-approve", "bad plan approval", "--acknowledge-deletions",
+                       "--no-follow-tags", "mergeable_state", "unstable", "find_pull_request",
+                       "adoption.step", "adoption.pull_request", "never merges", "ADR-console-008",
+                       "ADR-console-029", "ADR-project-contract-004", "#1054"):
+            self.assertIn(needle, adr)
+        for older, needle in (
+                ("docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md",
+                 "POST /api/plan-approve"),
+                ("docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md",
+                 "ADR-console-030"),
+                ("docs/areas/console/adr/028-the-owner-registers-a-project-from-the-page.md",
+                 "ADR-console-030"),
+                ("docs/areas/console/adr/029-the-owner-answers-the-adoptions-questions-on-the-page.md",
+                 "ADR-console-030")):
+            self.assertIn(needle, self.doc(older))
+        self.assertIn("**Approved adoption**", self.doc("docs/areas/console/CONTEXT.md"))
+        self.assertIn("| Approved adoption | Console |", self.doc("docs/CONTEXT-MAP.md"))
+
     def test_the_console_profile_choice_decision_is_recorded(self):
         path = "docs/areas/console/adr/023-a-new-sessions-profile-is-the-consoles-choice.md"
         first = (REPO_ROOT / path).read_text().splitlines()[0]
@@ -500,7 +527,7 @@ class DocsTreeTest(unittest.TestCase):
                 "ADR-console-028")
         for older, status in (
                 ("docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md",
-                 both + ", ADR-console-029"),
+                 both + ", ADR-console-029, ADR-console-030"),
                 ("docs/areas/console/adr/002-the-desk-page-design-rules.md", both),
                 ("docs/areas/console/adr/024-the-owner-signs-a-profile-in-from-the-page.md",
                  "- **Status:** accepted; amended by ADR-console-025")):
@@ -531,7 +558,7 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("POST /api/register-project", self.doc(adr008))
         status = ("- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
                   "ADR-console-028")
-        for older, expected in ((adr008, status + ", ADR-console-029"), (adr002, status)):
+        for older, expected in ((adr008, status + ", ADR-console-029, ADR-console-030"), (adr002, status)):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
                         if row.startswith("- **Status:**"))
             self.assertEqual(line, expected)
@@ -564,8 +591,9 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("| Plan question | Console |", self.doc("docs/CONTEXT-MAP.md"))
         for older, expected in (
                 (adr008, "- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
-                         "ADR-console-028, ADR-console-029"),
-                (adr028, "- **Status:** accepted; amended by ADR-console-029")):
+                         "ADR-console-028, ADR-console-029, ADR-console-030"),
+                (adr028, "- **Status:** accepted; amended by ADR-console-029, "
+                         "ADR-console-030")):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
                         if row.startswith("- **Status:**"))
             self.assertEqual(line, expected)

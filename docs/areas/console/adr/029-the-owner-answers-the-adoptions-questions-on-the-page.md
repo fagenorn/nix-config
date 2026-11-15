@@ -1,6 +1,6 @@
 # ADR-console-029 — The owner answers the adoption's questions on the page
 
-- **Status:** accepted
+- **Status:** accepted; amended by ADR-console-030
 - **Decided in:** #1053
 
 ## Context
@@ -28,7 +28,7 @@ Success is an empty `204` once the run is dispatched.
 
 **D4. The run.** `adopt-project plan --repo-root <root> --format json` runs with one `--answer ID SUBJECT VALUE` per entry of the shown row's `answered`, then the new answer. It runs under ADR-console-028 D3's bounds (no shell, its own process group, `stdin` from the null device, 300 seconds, cancelled when the console closes), on a thread of its own. The console judges no answer: the plan accepts or refuses it. While it runs, the view's `registration` is `running` with the headline `Planning the adoption of <name> again with your answer…`.
 
-**D5. The result.** A plan appends one new `registration.ended` row (D1), and the page shows its change lines and what is still open. A ready plan's note is `The plan is ready to apply: run adopt-project apply --plan-id <plan id>`, which amends ADR-console-028 D4 for every ready row. Applying stays a terminal command. An answer can leave nothing to adopt: a plan whose outcome is `no_change` appends a `not_registered` row whose headline is `<name> needs no adoption change and is not registered yet: run <the plan's handoff.next_command>`, and the answer run never registers the repository.
+**D5. The result.** A plan appends one new `registration.ended` row (D1), and the page shows its change lines and what is still open. A ready plan's note is `The plan is ready to apply: run adopt-project apply --plan-id <plan id>`, which amends ADR-console-028 D4 for every ready row; ADR-console-030 amends the note (`The plan is ready: press Approve to apply it and open its pull request, or run adopt-project apply --plan-id <plan id> in a terminal.`). Applying is ADR-console-030. An answer can leave nothing to adopt: a plan whose outcome is `no_change` appends a `not_registered` row whose headline is `<name> needs no adoption change and is not registered yet: run <the plan's handoff.next_command>`, and the answer run never registers the repository.
 
 **D6. A refusal.**
 
