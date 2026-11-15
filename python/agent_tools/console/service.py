@@ -156,7 +156,11 @@ failed add is one stderr line `console: account_add_failed <name> <kind>` and 50
 not be created: <kind>`, appending nothing. An added profile appends one `account.added` row
 `{"by": "owner", "profile": <name>}`, joins the service's profiles at once, and its sign-in status is
 read once (a failed read is one stderr line `console: signin_add_read_failed <profile> <kind or
-Type>` and records nothing) before the sign-in starts as the start route starts it. A sign-in that
+Type>` and records nothing) before the sign-in starts as the start route starts it. Before that the
+new profile is granted every registered project's folder trust (`_grant_trust`, cause `account`, one
+`trust.granted` row per project, no lock held), after the adder returned, so the adder's 30 second
+deadline bounds creation only; an unreadable registry grants nothing (`console:
+trust_account_registry_unreadable <name>`) and no grant fails the add. A sign-in that
 cannot start leaves the row and the profile, appends the start route's `failed` row and answers
 502 `the account was added; its sign-in could not start: <kind>`, with `console: signin_start_failed
 <name> <kind>`. Any other exception is `console: account_add_failed <Type>` (never its message) and
@@ -2973,8 +2977,31 @@ class ConsoleService:
                 self._profiles = listed
                 self._fold(self.log.append([account_add.added(name)]))
                 self._publish()
+        self._grant_registered_projects(name)
         self._read_signin_now(name, "add")
         return self.start_signin(name)
+
+    def _grant_registered_projects(self, name: str) -> None:
+        """Grant a page-added profile every registered project's folder trust (#1078).
+
+        Runs after the adder returned, so the add deadline bounds creation only, and before the
+        sign-in starts. Nothing here fails the add: an unreadable registry grants nothing.
+        """
+        entries = read_fleet(self.registry)
+        if entries is None:
+            if os.path.lexists(self.registry):
+                print(f"console: trust_account_registry_unreadable {name}", file=sys.stderr)
+            return
+        found = [d for d in self._profile_dirs() if sessions.account_name(d) == name]
+        if not found:
+            return
+        for entry in entries:
+            try:
+                self._grant_trust("account", entry["root"], entry["project_id"],
+                                  profiles=[(name, found[0] / ".claude.json")])
+            except Exception as error:
+                print(f"console: trust_account_failed {name} {type(error).__name__}",
+                      file=sys.stderr)
 
     def register_project(self, path: str) -> None:
         """Dispatch the adoption plan of a repository; refusals are `sprints.Refused`."""
