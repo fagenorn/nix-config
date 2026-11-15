@@ -8,8 +8,10 @@ stale prompt, or posts a note) and never records a result. `verify_pending appro
 (`verify_run.approve_all_live`) remains the CLI's bulk path and is not touched.
 
 A runner prompt is an `owner-action` marker of a `verify-*` reason that carries `block` and `check`
-(`is_runner_prompt`); the decision marker of a batch carries neither and is not one. The answers each
-reason takes (`ANSWERS`): a manual check (ASK) takes `passed`, `failed` or `note`; a verdict (DECISION)
+(`is_runner_prompt`); the decision marker of a batch carries neither and is not one.
+`ask_check_id(sentence)` is the check id an ask prompt's sentence names, read back through
+`verify_owner.ask_sentence`, else `""`; the console's inbox reader uses it to head a manual check by its
+own question (#1046). The answers each reason takes (`ANSWERS`): a manual check (ASK) takes `passed`, `failed` or `note`; a verdict (DECISION)
 takes `passed` or `failed`; an approval (APPROVE) takes `approve`; a stale check (STALE) takes `keep` or
 `drop`; an act prompt (ACT) has no box and takes none.
 
@@ -100,6 +102,14 @@ def labels(marker: Marker) -> tuple[str, ...]:
     if reason == STALE:
         return (verify_owner.waive_label(marker.fields.get("host", "")),)
     return ()
+
+
+def ask_check_id(sentence: str) -> str:
+    """The check id an ask prompt's `sentence` names, else `""`."""
+    candidate = sentence.partition(":")[0]
+    if candidate and not any(ch.isspace() for ch in candidate) and sentence == verify_owner.ask_sentence(candidate):
+        return candidate
+    return ""
 
 
 def ambiguous(marker: Marker) -> bool:

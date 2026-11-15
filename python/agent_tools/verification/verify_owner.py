@@ -21,6 +21,8 @@ keeps the `owner-action` label while one live marker stands) counts only a trust
 `MEMBER`) author's marker, leaves every other `owner-action` marker live and never touches
 `agent:human-required` (D8). A decision whose post was lost is posted by the next pass (D13), and
 `--report` touches nothing (D12). `apply_labels` removes a label an answered prompt `clears`.
+`ask_sentence(ac)` is an ask prompt's first sentence; the console reads the check id back from it
+(`verify_answer.ask_check_id`).
 """
 import hashlib
 import json
@@ -78,6 +80,11 @@ def last_report(markers: Iterable[Marker], host: str) -> str:
 def box(label: str, ticked: bool = False) -> str:
     """One check box line of a prompt."""
     return f"- [{'x' if ticked else ' '}] {label}"
+
+
+def ask_sentence(ac: str) -> str:
+    """The first sentence of an ask prompt for criterion `ac`."""
+    return f"{ac}: the owner's answer is needed."
 
 
 def ticked(marker: Marker, label: str) -> bool:
