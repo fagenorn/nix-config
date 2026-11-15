@@ -496,12 +496,41 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("claude-account add", self.doc("docs/areas/hosts/CONTEXT.md"))
         self.assertIn("POST /api/account-add", self.doc(
             "docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md"))
-        both = "- **Status:** accepted; amended by ADR-console-024, ADR-console-025"
+        both = ("- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
+                "ADR-console-028")
         for older, status in (
                 ("docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md", both),
                 ("docs/areas/console/adr/002-the-desk-page-design-rules.md", both),
                 ("docs/areas/console/adr/024-the-owner-signs-a-profile-in-from-the-page.md",
                  "- **Status:** accepted; amended by ADR-console-025")):
+            line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
+                        if row.startswith("- **Status:**"))
+            self.assertEqual(line, status)
+
+    def test_the_register_project_decision_is_recorded(self):
+        path = "docs/areas/console/adr/028-the-owner-registers-a-project-from-the-page.md"
+        first = (REPO_ROOT / path).read_text().splitlines()[0]
+        self.assertEqual(first, "# ADR-console-028 — The owner registers a project from the page")
+        adr = self.doc(path)
+        for needle in ("POST /api/register-project", "PAGE_WRITES", "bad registration", "409",
+                       "204", "registration.ended", "registration", "adopt-project plan",
+                       "adopt-project verify --register", "no_change", "migration_required",
+                       "repair_required", "draft", "300", "not the top of a git checkout",
+                       "already registered", "a registration is already running",
+                       "ADR-console-002", "ADR-console-008", "ADR-project-contract-004",
+                       "ADR-project-contract-005", "#1052",
+                       "it has no agent files or project contract yet",
+                       "it has agent files or a contract to bring up to date"):
+            self.assertIn(needle, adr)
+        self.assertIn("| Registration | Console |", self.doc("docs/CONTEXT-MAP.md"))
+        adr008 = "docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md"
+        adr002 = "docs/areas/console/adr/002-the-desk-page-design-rules.md"
+        for older in (adr008, adr002, "docs/areas/console/CONTEXT.md"):
+            self.assertIn("ADR-console-028", self.doc(older))
+        self.assertIn("POST /api/register-project", self.doc(adr008))
+        status = ("- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
+                  "ADR-console-028")
+        for older in (adr008, adr002):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
                         if row.startswith("- **Status:**"))
             self.assertEqual(line, status)
