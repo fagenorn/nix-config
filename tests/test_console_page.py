@@ -2053,7 +2053,7 @@ class PageInboxGlanceTest(unittest.TestCase):
         (snap,) = render([START, {"frame": frame([first, second])}, {"snapshot": True}])
         inbox = snap["inbox"]
         (head,) = [n for n in nodes(inbox) if n["tag"] == "h2" and has_class(n, "q")]
-        self.assertEqual(head["text"], "Which database?")
+        self.assertEqual(full(head), "Which database?")
         self.assertEqual(full(inbox).count("and 2 more questions"), 1)
         (rest,) = [n for n in nodes(inbox) if has_class(n, "rest")]
         self.assertNotIn("more question", full(rest))
@@ -2207,7 +2207,7 @@ class PageCardTest(unittest.TestCase):
                 primaries = [n for n in nodes(card) if has_class(n, "primary")]
                 self.assertEqual(len(primaries), 1)
                 self.assertEqual(primaries[0]["tag"], "button")
-                self.assertEqual(primaries[0]["text"], label)
+                self.assertEqual(full(primaries[0]), label)
                 self.assertEqual([c for c in primaries[0]["children"] if c["tag"] == "kbd"], [])
 
     def test_the_lead_card_holds_its_held_work_under_the_options_and_its_link_under_detail(self) -> None:
@@ -7925,6 +7925,169 @@ class RegisterFailurePageTest(unittest.TestCase):
         self.assertEqual(len([n for n in nodes(option) if n["tag"] == "wbr"]), 2)
         plain = [n for n in nodes(lead) if has_class(n, "ot") and full(n) == "Not now"]
         self.assertEqual([n for n in nodes(plain[0]) if n["tag"] == "wbr"], [])
+
+
+class PathWrapPageTest(unittest.TestCase):
+    ID = "example/sample-app"
+    ID_ITEM = {**ADOPTION_ITEM, "project_id": ID,
+               "headline": f"The adoption of {ID} is ready to merge"}
+    SOLE = "Change it to .agents/artifacts/specs/design.md"
+    SOLE_ITEM = register_item(3, {**Q_REFERENCE, "options": [{"value": "rewrite", "label": SOLE}]})
+    ID_FAILED = {**FAILED_ITEM, "headline": f"The adoption plan for {ID} could not start: try again."}
+    PICK_LINE = "design specs are kept in .agents/artifacts/specs"
+    PICK_DRAFT = {
+        **DRAFTED, "draft_more": "1 more setting",
+        "draft": [DRAFTED["draft"][0],
+                  {"field": "specs-path", "line": PICK_LINE, "value": ".agents/artifacts/specs",
+                   "options": [{"value": ".agents/artifacts/plans",
+                                "label": "Keep them under .agents/artifacts/plans"},
+                               {"value": "none", "label": "Not kept anywhere"}],
+                   "text": True, "more": True, "placeholder": "the path"}]}
+
+    @staticmethod
+    def segs(n: dict) -> list:
+        return [full(c) for c in nodes(n) if has_class(c, "seg")]
+
+    @staticmethod
+    def wbrs(n: dict) -> int:
+        return len([c for c in nodes(n) if c["tag"] == "wbr"])
+
+    def test_a_project_id_in_the_ready_card_breaks_only_at_its_slash(self) -> None:
+        (snap,) = render([START, {"frame": cards([self.ID_ITEM], READY_SHOWN)}, {"snapshot": True}])
+        (card,) = [n for n in nodes(snap["inbox"]) if has_class(n, "adoption")]
+        (q,) = [n for n in nodes(card) if n["tag"] == "p" and has_class(n, "q")]
+        self.assertEqual(self.segs(q), ["example/", "sample-app"])
+        self.assertEqual(self.wbrs(q), 1)
+        self.assertEqual(full(q), self.ID_ITEM["headline"])
+        (meta,) = [n for n in nodes(card) if n["tag"] == "p" and has_class(n, "meta")]
+        self.assertEqual(self.segs(meta), ["example/", "sample-app"])
+
+    def test_a_sole_option_button_breaks_only_at_slashes(self) -> None:
+        (snap,) = render([START, {"frame": cards([self.SOLE_ITEM], ASKING)}, {"snapshot": True}])
+        (send,) = [n for n in nodes(snap["inbox"]) if n["tag"] == "button" and has_class(n, "send")]
+        self.assertEqual(self.segs(send), [".agents/", "artifacts/", "specs/", "design.md"])
+        self.assertEqual(self.wbrs(send), 3)
+        self.assertEqual(full(send), self.SOLE)
+
+    def test_a_register_ask_and_title_break_only_at_slashes(self) -> None:
+        (snap,) = render([START, {"frame": cards([self.ID_FAILED], FAILED_REGISTRATION)},
+                          {"snapshot": True}])
+        (ask,) = [n for n in nodes(snap["inbox"]) if n["tag"] == "h2" and has_class(n, "reg")]
+        self.assertEqual(self.segs(ask), ["example/", "sample-app"])
+        self.assertEqual(full(ask), self.ID_FAILED["headline"])
+
+    def test_an_expanded_draft_breaks_its_paths_only_at_slashes(self) -> None:
+        shown, changing = render([
+            START, {"frame": cards([], self.PICK_DRAFT)}, {"open": "draft-more"}, {"snapshot": True},
+            {"click": "draft-pick"}, {"snapshot": True}])
+        (pick,) = registered(shown, "draft-pick")
+        self.assertEqual(self.segs(pick), [".agents/", "artifacts/", "specs"])
+        self.assertEqual(self.wbrs(pick), 2)
+        self.assertEqual(full(pick), self.PICK_LINE)
+        self.assertEqual(pick["label"], "Change: " + self.PICK_LINE)
+        options = registered(changing, "draft-option")
+        self.assertEqual([full(n) for n in options],
+                         ["Keep them under .agents/artifacts/plans", "Not kept anywhere"])
+        self.assertEqual(self.segs(options[0]), [".agents/", "artifacts/", "plans"])
+        self.assertEqual(self.segs(options[1]), [])
+
+    def test_a_segment_is_an_atomic_inline_block(self) -> None:
+        style = PAGE.read_text(encoding="utf-8")
+        style = style[style.index("<style>"):style.index("</style>")]
+        base = style_rules(style[:style.index("@media")])
+        seg = {}
+        for selector, decls in base:
+            if selector == ".seg":
+                seg.update(decls)
+        self.assertEqual({k: seg.get(k) for k in ("display", "max-width", "overflow-wrap")},
+                         {"display": "inline-block", "max-width": "100%", "overflow-wrap": "anywhere"})
+
+    def test_every_card_ask_uses_the_full_width(self) -> None:
+        style = PAGE.read_text(encoding="utf-8")
+        style = style[style.index("<style>"):style.index("</style>")]
+        base = style_rules(style[:style.index("@media")])
+        for selector in (".card .q", ".card .q.reg", ".rest .q.reg"):
+            with self.subTest(selector=selector):
+                wraps = [d.get("text-wrap") for s, d in base if s == selector and "text-wrap" in d]
+                self.assertNotIn("balance", wraps)
+        self.assertIn("pretty", [d.get("text-wrap") for s, d in base if s == ".card .q"])
+
+    def test_at_480_no_path_or_id_breaks_inside_a_segment(self) -> None:
+        try:
+            from playwright.sync_api import Error, sync_playwright
+        except ImportError:
+            self.skipTest("playwright is not installed")
+        fakes = (
+            "window.EventSource = class { constructor() { window.__src = this; this.l = {}; }"
+            " addEventListener(name, fn) { this.l[name] = fn; } close() {} };"
+            "window.fetch = () => Promise.resolve(new Response(null, {status: 204}));")
+        measure = """() => {
+          const tops = (range) => [...new Set([...range.getClientRects()].map((r) => Math.round(r.top)))];
+          const lines = (node) => {
+            const range = document.createRange();
+            range.selectNodeContents(node);
+            return tops(range).length;
+          };
+          const room = (node) => {
+            let up = node.parentElement;
+            while (up && getComputedStyle(up).display.startsWith('inline')) up = up.parentElement;
+            const css = getComputedStyle(up);
+            return up.clientWidth - parseFloat(css.paddingLeft) - parseFloat(css.paddingRight);
+          };
+          const natural = (seg) => {
+            const keep = [seg.style.maxWidth, seg.style.whiteSpace];
+            seg.style.maxWidth = 'none';
+            seg.style.whiteSpace = 'nowrap';
+            const width = seg.getBoundingClientRect().width;
+            [seg.style.maxWidth, seg.style.whiteSpace] = keep;
+            return width;
+          };
+          const segs = [...document.querySelectorAll('.seg')].map((seg) => ({
+            text: seg.textContent, lines: lines(seg), natural: natural(seg), room: room(seg)}));
+          const asks = [];
+          for (const q of document.querySelectorAll('#inbox .q')) {
+            const range = document.createRange();
+            range.selectNodeContents(q);
+            const byTop = new Map();
+            for (const r of range.getClientRects()) {
+              const key = Math.round(r.top);
+              const got = byTop.get(key) || [Infinity, -Infinity];
+              byTop.set(key, [Math.min(got[0], r.left), Math.max(got[1], r.right)]);
+            }
+            if (byTop.size < 2) continue;
+            const widest = Math.max(...[...byTop.values()].map(([a, b]) => b - a));
+            asks.push({text: q.textContent, widest, width: q.clientWidth});
+          }
+          return {segs, asks};
+        }"""
+        items = [self.ID_ITEM, self.SOLE_ITEM, self.ID_FAILED]
+        html = PAGE.read_text(encoding="utf-8").replace("__CONSOLE_TOKEN__", "t")
+        with sync_playwright() as pw:
+            try:
+                browser = pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+            except Error as err:
+                self.skipTest(f"no Chromium to launch: {err}")
+            try:
+                page = browser.new_page(viewport={"width": 480, "height": 900})
+                page.add_init_script(fakes)
+                page.route("http://console.test/", lambda route: route.fulfill(
+                    body=html, content_type="text/html"))
+                page.goto("http://console.test/")
+                page.evaluate("(f) => window.__src.l.view({data: JSON.stringify(f)})",
+                              {**view([]), **cards(items, self.PICK_DRAFT)})
+                page.evaluate("() => { document.querySelector('#register .draft-more').open = true; }")
+                got = page.evaluate(measure)
+            finally:
+                browser.close()
+        found = {s["text"] for s in got["segs"]}
+        for text in ("example/", "sample-app", ".agents/", "artifacts/", "specs"):
+            self.assertIn(text, found)
+        oversized = [s for s in got["segs"] if s["natural"] > s["room"]]
+        self.assertEqual(oversized, [])
+        for seg in got["segs"]:
+            self.assertEqual(seg["lines"], 1, seg)
+        for ask in got["asks"]:
+            self.assertGreaterEqual(ask["widest"], 0.85 * ask["width"], ask)
 
 
 TRUST_ITEM = {
