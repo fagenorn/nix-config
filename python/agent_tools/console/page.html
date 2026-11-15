@@ -1424,7 +1424,7 @@ function renderStatement(view) {
   const box = document.getElementById("statement");
   const h1 = el("h1", view.statement.inbox_items > 0 ? "needs" : "", view.statement.headline);
   const nodes = [h1, el("p", "sub", view.statement.sentence)];
-  const cap = view.capacity;
+  const cap = view.capacity ? settledCapacity(view.capacity) : view.capacity;
   if (cap && cap.all_out && cap.resumes_at) nodes.push(phrase("p", "sub", "Resumes ", timeEl("weekday", cap.resumes_at, "")));
   for (const stopped of Array.isArray(view.unstopped) ? view.unstopped : []) {
     nodes.push(el("p", "unstopped", stopped.text));
@@ -1483,9 +1483,43 @@ function outWords(p, cls) {
   if (p.out_until === null || p.out_until === undefined) return phrase("span", cls, "out, reset unknown");
   return phrase("span", cls, "out until ", timeEl("weekday", p.out_until, ""));
 }
+// A frame is drawn when it arrives, and a reset can pass after that (#1045): a profile whose next reset
+// (its out_until when out) has gone by reads as reset, with the figures and the time from before it dropped,
+// until a frame says more.
+function lapsedReset(p) {
+  const stamp = p.state === "out" ? p.out_until : p.next_reset;
+  if (stamp === null || stamp === undefined) return false;
+  const at = Date.parse(stamp);
+  return Number.isFinite(at) && at <= Date.now();
+}
+function settled(p) {
+  return lapsedReset(p)
+    ? {...p, state: "reset", week_left: null, five_hour_left: null, next_reset: null, out_until: null} : p;
+}
+// The capacity as the page's clock reads it: lapsed profiles settled and, when an out one lapsed, the
+// aggregates the server computed over them (tight, all_out, resumes_at) worked out again the way it does.
+function settledCapacity(source) {
+  const cap = {...(source || {profiles: []})};
+  const lapsedOut = cap.profiles.some((p) => p.state === "out" && lapsedReset(p));
+  cap.profiles = cap.profiles.map(settled);
+  if (!lapsedOut) return cap;
+  const considered = cap.profiles.filter((p) => !signedOut(p) && !excludedProfile(p) && counted(p));
+  const room = considered.filter((p) => p.state === "ok" || p.state === "reset").length;
+  cap.all_out = considered.length > 0 && considered.every((p) => p.state === "out");
+  cap.tight = considered.length >= 2 && room === 1
+    && considered.every((p) => p.state === "ok" || p.state === "reset" || p.state === "out");
+  const until = considered.map((p) => p.out_until).filter((u) => u !== null && u !== undefined).sort();
+  cap.resumes_at = cap.all_out && until.length ? until[0] : null;
+  return cap;
+}
+let lapsedDrawn = "";
+function lapsedNow(view) {
+  const profiles = view !== null && view.capacity && Array.isArray(view.capacity.profiles) ? view.capacity.profiles : [];
+  return profiles.filter(lapsedReset).map((p) => p.profile + "\n" + (p.state === "out" ? p.out_until : p.next_reset)).join("\n");
+}
 function renderCapacity(view) {
   const box = document.getElementById("capacity");
-  const cap = view.capacity || {profiles: []};
+  const cap = settledCapacity(view.capacity);
   const known = (v) => v !== null && v !== undefined;
   const readings = cap.profiles.filter((p) => counted(p) && p.state !== "unknown" && !signedOut(p));
   const eligible = readings.filter((p) => !excludedProfile(p));
@@ -1564,7 +1598,8 @@ function renderCapacity(view) {
 // and remove controls. It draws only while open and holds nothing while closed.
 let accountsOpen = false;
 let accountsReturn = null;
-function accountRow(p, view) {
+function accountRow(shown, view) {
+  const p = settled(shown);
   const known = (v) => v !== null && v !== undefined;
   const name = p.profile;
   const row = el("li", "acct-row" + (excludedProfile(p) ? " acct-excluded" : "") + (pinnedProfile(p) ? " acct-pinned" : ""));
@@ -1729,7 +1764,7 @@ document.getElementById("capacity").addEventListener("click", () => {
 });
 function renderPromoted(view) {
   const box = document.getElementById("promoted");
-  const cap = view.capacity || {profiles: []};
+  const cap = settledCapacity(view.capacity);
   box.replaceChildren();
   if (!cap.all_out) return;
   const list = el("ul");
@@ -3190,6 +3225,13 @@ function render(view) {
 }
 function tick() {
   for (const t of document.querySelectorAll("time")) t.textContent = timeWords(t.dataset.form, t.dataset.stamp);
+  const lapsed = lapsedNow(lastView);
+  if (lapsed !== lapsedDrawn) {
+    lapsedDrawn = lapsed;
+    renderStatement(lastView);
+    renderPromoted(lastView);
+    redrawAccounts();
+  }
   setTimeout(tick, TICK_MS);
 }
 setTimeout(tick, TICK_MS);
