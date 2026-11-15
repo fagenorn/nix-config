@@ -594,6 +594,37 @@ class PlanAnswerRunTest(Case):
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[-1][1]["answered"], [A1])
 
+    def test_answering_an_item_reruns_the_plan_and_removes_that_item(self):
+        first = {"id": "candidate-class", "subject": ".claude/odd.md",
+                 "value": "archive-history"}
+        second = {"id": "path-reference", "subject": "tools/show.sh:1:5",
+                  "answers": ["rewrite", "retain"]}
+        two = {**DRAFT, "decisions": {"open": [first, second], "recommended": [],
+                                      "answered": []}}
+        one = {**DRAFT, "plan": {**DRAFT["plan"], "plan_id": PID_B},
+               "decisions": {"open": [second], "recommended": [], "answered": [A1]}}
+        fake = Fake(plan=[two, one])
+        self.begin(fake)
+        self.registered(git_repo(self.parent / "r"))
+        shown = self.view()
+        self.assertEqual([i["key"] for i in shown["inbox"]["open"]],
+                         [f"register/{PID_A}/0", f"register/{PID_A}/1"])
+        self.assertEqual(shown["statement"]["inbox_items"], 2)
+        self.assertEqual(self.answer(answer_of(PID_A, A1))[0], 204)
+        self.wait_for(lambda r: r["status"] == "done" and r["plan_id"] == PID_B)
+        shown = self.view()
+        self.assertEqual([i["key"] for i in shown["inbox"]["open"]], [f"register/{PID_B}/0"])
+        self.assertEqual(shown["inbox"]["open"][0]["subject"], "tools/show.sh:1:5")
+        self.assertEqual(shown["statement"]["inbox_items"], 1)
+        self.assertEqual(fake.answers[-1], [A1])
+
+    def test_a_refused_answer_keeps_the_item_with_its_plain_reason(self):
+        self.refused_run(Fake(plan=[DRAFT, {"error": REFUSED}]), git_repo(self.parent / "r"))
+        shown = self.view()
+        (entry,) = shown["inbox"]["open"]
+        self.assertEqual((entry["key"], entry["refusal"]), (f"register/{PID_A}/0", REFUSED_TEXT))
+        self.assertEqual(shown["statement"]["inbox_items"], 1)
+
     def test_every_answer_given_so_far_is_sent_again(self):
         a2 = {"id": "path-reference", "subject": "tools/show.sh:1:5", "value": "rewrite"}
         second = {**DRAFT, "plan": {**DRAFT["plan"], "plan_id": PID_B},
@@ -770,6 +801,24 @@ class PlanAnswerRealTest(Case):
              "recommended": None, "why": None}])
         self.assertEqual(reg["state"], "draft")
         self.assertTrue(reg["plan_id"].startswith("sha256:"))
+
+    def test_a_throwaway_repository_asks_two_counted_register_items(self):
+        self.registered(self.repo)
+        shown = self.view()
+        items = [i for i in shown["inbox"]["open"] if i["reason"] == "register"]
+        self.assertEqual(len(items), 2)
+        for entry in items:
+            self.assertEqual(entry["title"], f"Register {self.repo.name}")
+        self.assertEqual(
+            [i["headline"] for i in items],
+            ["What should happen to .claude/odd.md? No rule covers this agent file.\n"
+             "This is the only thing the adoption can do with this file.",
+             "tools/show.sh line 1 names .claude/specs/a.md, which this plan moves. "
+             "Should it follow the move?"])
+        self.assertEqual(items[1]["questions"][0]["options"],
+                         ["Change it to .agents/artifacts/specs/a.md", "Leave it as it is"])
+        self.assertEqual(shown["statement"]["inbox_items"], 2)
+        self.assertEqual(shown["statement"]["headline"], "2 things need you")
 
     def test_answering_both_questions_on_a_throwaway_repository_makes_the_plan_ready(self):
         first = self.registered(self.repo)
