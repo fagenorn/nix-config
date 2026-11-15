@@ -605,9 +605,17 @@ class RowTest(unittest.TestCase):
         entry = register.view_entry(None, {**row, "at": "t"})
         self.assertEqual(entry["line"], "Register sample-app: 1 question open")
         self.assertEqual(entry["draft"], contract_draft.shown(fields))
+        self.assertEqual(entry["draft_more"], contract_draft.more_line(draft_fields()))
         running = register.view_entry("/x/sample-app", None)
         self.assertIsNone(running["draft"])
-        self.assertEqual(len(running), 19)
+        self.assertIsNone(running["draft_more"])
+        self.assertEqual(len(running), 20)
+        self.assertEqual(len(entry), 20)
+        full = contract_draft.draft("/x/sample-app", {
+            "remotes": [("origin", "git@github.com:sample-owner/sample-app.git")],
+            "default_branch": "trunk", "branches": ["trunk"], "files": ["README.md"], "texts": {}})
+        shown = register.view_entry(None, {**register.drafting("/x/sample-app", full), "at": "t"})
+        self.assertEqual(shown["draft_more"], "and 22 more settings at their usual values")
 
     def test_the_draft_id_follows_the_values(self):
         one = draft_fields()
@@ -670,7 +678,8 @@ class RowTest(unittest.TestCase):
             "result": None, "outcome": None, "headline": "Planning the adoption of r…",
             "lines": [], "note": None, "at": None, "plan_id": None, "state": None,
             "questions": [], "refusal": None, "line": "Planning the adoption of r\u2026",
-            "refused": None, "draft": None, "adoption": None, "approve": None})
+            "refused": None, "draft": None, "draft_more": None, "adoption": None,
+            "approve": None})
         latest = {**register.summary("/srv/r", plan_doc(state="ready")), "at": "t"}
         self.assertEqual(register.view_entry(None, latest), {
             "root": "/srv/r", "name": "r", "project_id": "o/r", "status": "done",
@@ -679,7 +688,7 @@ class RowTest(unittest.TestCase):
             "note": "The plan is ready.",
             "at": "t", "plan_id": PLAN_ID, "state": "ready", "questions": [], "refusal": None,
             "line": "Register r: ready to apply", "refused": None, "draft": None,
-            "adoption": None, "approve": None})
+            "draft_more": None, "adoption": None, "approve": None})
         self.assertIsNone(register.view_entry(None, None))
 
     def test_view_entry_carries_the_adoption_and_its_action(self):
