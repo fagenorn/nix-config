@@ -22,12 +22,14 @@ content only — still resolves.
 from __future__ import annotations
 
 import json
+import os
 import posixpath
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path, PurePosixPath
+from unittest import mock
 
 from agent_tools.project_contract import (adopt_apply, adopt_inspection, adopt_links,
                                           adopt_planning, resolve_project)
@@ -99,7 +101,8 @@ MOVED = {
 
 def apply_repo(home: Path, *, verification: tuple[str, ...] = ("true",),
                signed: bool = False,
-               commands: dict[str, list[str]] | None = None) -> Path:
+               commands: dict[str, list[str]] | None = None,
+               integration_branch: str | None = None) -> Path:
     """This repository's shape at base, with cheap verification commands.
 
     A valid schema-1 contract without `platform`, the three legacy artifact
@@ -131,6 +134,8 @@ def apply_repo(home: Path, *, verification: tuple[str, ...] = ("true",),
     # no apply case is about release, so the fixture opts out of it to keep the
     # verdicts host-independent.
     contract["release"] = "unsupported"
+    if integration_branch is not None:
+        contract["bindings"]["vcs"]["integration_branch"] = integration_branch
     scaffold(root, contract, home)
     # The projections were rendered from a contract that still declared
     # `platform`; dropping the member afterwards leaves them in sync, because a
@@ -149,6 +154,8 @@ def apply_repo(home: Path, *, verification: tuple[str, ...] = ("true",),
     git(root, "remote", "add", "origin",
         "https://github.com/fixture/target.git")
     commit(root)
+    if integration_branch is not None:
+        git(root, "branch", integration_branch)
     return root
 
 
@@ -291,6 +298,9 @@ class ApplyTestCase(unittest.TestCase):
         self.assertTrue(self.worktree(plan_id).is_dir())
         evidence = self.state(
             "adopt", "worktrees", self.digest(plan_id) + ".failure.json")
+        with mock.patch.dict(os.environ, {"HOME": str(self.home)}):
+            self.assertEqual(
+                adopt_apply.failure_record_path(self.digest(plan_id)), evidence)
         self.assertTrue(evidence.is_file())
         record = json.loads(evidence.read_text("utf-8"))
         self.assertEqual(record["plan_id"], plan_id)
@@ -328,7 +338,10 @@ class ApplySuccessTest(ApplyTestCase):
     def test_the_result_names_the_branch_commit_plan_and_two_records(self):
         self.assertEqual(sorted(self.result),
                          ["branch", "commit", "evidence_record",
-                          "migration_map", "plan_id"])
+                          "integration_branch", "migration_map", "plan_id"])
+        self.assertEqual(
+            self.result["integration_branch"],
+            fixture_contract()["bindings"]["vcs"]["integration_branch"])
         self.assertEqual(self.result["plan_id"], self.plan_id)
         self.assertEqual(self.branch, f"adopt-{self.digest(self.plan_id)[:12]}")
         self.assertEqual(
@@ -337,6 +350,13 @@ class ApplySuccessTest(ApplyTestCase):
         self.assertEqual(
             self.result["migration_map"],
             self.document["handoff"]["migration_map"])
+
+    def test_the_integration_branch_is_the_contracts_own(self):
+        home = make_home()
+        root = apply_repo(home, integration_branch="develop")
+        document = self.ready_plan(root)
+        result = self.succeed(root, document["plan"]["plan_id"])
+        self.assertEqual(result["integration_branch"], "develop")
 
     def test_exactly_one_commit_on_a_new_branch(self):
         self.assertEqual(

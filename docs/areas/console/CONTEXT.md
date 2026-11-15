@@ -132,3 +132,7 @@ _Avoid_: import, onboarding
 **Plan question**:
 One open question of a repository's adoption plan, shown on the page as an inbox item titled `Register <name>`, a question card with exactly the answers the plan offers, or one line saying why it cannot be answered there (ADR-console-029).
 _Avoid_: adoption prompt, open decision
+
+**Approved adoption**:
+A ready adoption plan the owner approved on the page: the console applies it in its own worktree, pushes its one branch, opens its pull request and raises one inbox item while the pull request is ready to merge; the owner merges it on the forge (ADR-console-030).
+_Avoid_: auto-adoption, auto-merge

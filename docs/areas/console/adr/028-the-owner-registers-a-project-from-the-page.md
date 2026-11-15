@@ -1,6 +1,6 @@
 # ADR-console-028 — The owner registers a project from the page
 
-- **Status:** accepted; amended by ADR-console-029
+- **Status:** accepted; amended by ADR-console-029, ADR-console-030
 - **Decided in:** #1052
 
 ## Context
@@ -49,7 +49,7 @@ A project reaches the page only once it is in the fleet registry, and getting it
 ## Consequences
 
 - The owner can see what adopting a repository would change, and register an adopted one, with no terminal.
-- Out of scope: applying a plan and migrating from the page; answering the plan's questions is ADR-console-029. Each stays a terminal command, and the page names it.
+- Out of scope: migrating from the page, which stays a terminal command the page names. Answering the plan's questions is ADR-console-029, and applying a plan from the page is ADR-console-030.
 - Tests sandbox HOME (one per case) and every repository, so no case reads or writes the real fleet registry.
 - The host check restores what it registered.
 - The check restores only after the view shows the run is no longer running, and names what it leaves when it cannot see that.
