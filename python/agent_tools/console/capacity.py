@@ -24,9 +24,11 @@ number with 0 <= u <= 10 and not a bool | null, "reset": int as above | null}`. 
 anywhere, is dropped and never stored. These bounds are exactly those the proxy's producer
 normalizes to, so every document it can produce passes unchanged.
 
-`capacity_state` folds readings onto the last reading per profile and the account each profile was
-last seen with (`accounts[account] = profile`, last wins); other kinds and malformed payloads are
-ignored.
+`capacity_state` folds readings onto the last reading per profile (`readings`), the newest reading
+per profile and proxy account id (`kept[profile][account]`, the id None among them), and the
+profile each id was last seen with (`accounts[account] = profile`, last wins); other kinds and
+malformed payloads are ignored. `CapacityState(readings, accounts)` leaves `kept` empty, and a
+profile then holds only its last reading.
 
 `profile_capacity` returns `{"profile", "state", "week_left", "five_hour_left", "next_reset",
 "out_until", "read_at"}`, every time an ISO 8601 UTC string. A window's effective reset is its own
@@ -72,15 +74,21 @@ owner's pin, ADR-console-023), always present, after `"excluded"`. It marks the 
 session-profile rule (`manager.session_profile`) and changes no aggregate: `tight`, `all_out`,
 `resumes_at` and `no_reading` are the same with or without it.
 Each entry also carries three members after `"pinned"` (#1036), always present, in this order.
-`"account"` is the account name the entry's sign-in reading holds when its state is "signed_in",
-else None. `"same_account_as"` is the sorted names of the other entries with the same non-null
+`"account"` is the account name the entry's sign-in reading holds when its state is "signed_in" or
+"unknown" (a failed status read does not forget it), else None. `"same_account_as"` is the sorted names of the other entries with the same non-null
 account, `[]` when none. `"duplicate_of"` is, for every entry of an account shared by two or more
 entries other than the counted one, the counted entry's name, else None. A profile's reading counts
-only when it was taken under its current account: it is dropped when its sign-in has an
-`account_seq` and the reading's `seq` is not above it (a profile that switched account has no
-reading until its next one), shared account or not. The account's reading is the counted reading
-with the highest `seq` among all of the group's entries, excluded and pinned ones included, and
-every entry of the group takes its capacity members from it, so which profile took the reading
+only when it was taken under its current account: of the readings the profile holds (`kept` and
+the last) a reading is dropped when its sign-in has an `account_seq` and the reading's `seq` is
+not above it (a profile that switched account has no reading until its next one), or when the
+sign-in names a `left_account` other than its account and the reading carries the proxy account id
+`left_reading` (a late reply of the account it left), shared account or not; the profile's counted
+reading is the newest left. A reading that was taken under the account a profile left (the
+reading with that id, or with `seq` equal to `account_seq` when the id is None) belongs to that
+`left_account`, whichever profile has it now. The account's reading is the newest, by `seq`, of
+the counted readings of all of the group's entries, excluded and pinned ones included, and the
+readings left under it by profiles that moved away, and every entry of the group takes its
+capacity members from it, so which profile took the reading
 never decides what the account has left. The counted entry is the minimum by (excluded, not
 pinned, name); choosing it never changes the reading, it only decides which profile is launched and
 drawn. Every aggregate is evaluated over the entries that are not signed out, not excluded and not
@@ -89,7 +97,7 @@ a duplicate, so one account's allowance is counted once.
 
 import re
 from collections.abc import Collection, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 from agent_tools.console import signin as signin_state
@@ -124,6 +132,7 @@ class Reading:
 class CapacityState:
     readings: dict[str, Reading]
     accounts: dict[str, str]
+    kept: dict[str, dict[str | None, Reading]] = field(default_factory=dict)
 
 
 def _token(value: object, name: str) -> str | None:
@@ -223,6 +232,7 @@ def report_entries(report: dict, profile: str) -> list[tuple[str, None, dict]]:
 def capacity_state(events: Iterable[Event], state: CapacityState | None = None) -> CapacityState:
     readings = dict(state.readings) if state else {}
     accounts = dict(state.accounts) if state else {}
+    kept = {name: dict(held) for name, held in state.kept.items()} if state else {}
     for event in events:
         if event.kind != READING:
             continue
@@ -237,9 +247,10 @@ def capacity_state(events: Iterable[Event], state: CapacityState | None = None) 
             profile, report["account"], report["session_id"], report["http_status"],
             report["status"], report["reset"], report["binding"], report["claim"],
             report["windows"], event.seq, event.at)
+        kept.setdefault(profile, {})[report["account"]] = readings[profile]
         if report["account"] is not None:
             accounts[report["account"]] = profile
-    return CapacityState(readings, accounts)
+    return CapacityState(readings, accounts, kept)
 
 
 def _iso(seconds: int | None) -> str | None:
@@ -294,6 +305,37 @@ def profile_capacity(profile: str, reading: Reading | None, now: float) -> dict:
     }
 
 
+def _pool(state: CapacityState, name: str) -> list[Reading]:
+    """Every reading the profile holds: its newest per proxy account id, and its last."""
+    pool = list(state.kept.get(name, {}).values())
+    last = state.readings.get(name)
+    if last is not None and all(held.seq != last.seq for held in pool):
+        pool.append(last)
+    return pool
+
+
+def _left(one: signin_state.SignIn | None) -> tuple[str, str | None] | None:
+    """The account the profile left and the proxy account id its readings carried, else None."""
+    if one is None or one.left_account is None or one.left_account == one.account:
+        return None
+    return one.left_account, one.left_reading
+
+
+def _current(reading: Reading, one: signin_state.SignIn | None,
+             left: tuple[str, str | None] | None) -> bool:
+    """Whether the reading was taken under the profile's current account."""
+    if one is not None and one.account_seq is not None and reading.seq <= one.account_seq:
+        return False
+    return not (left is not None and left[1] is not None and reading.account == left[1])
+
+
+def _of_left(reading: Reading, one: signin_state.SignIn, left: tuple[str, str | None]) -> bool:
+    """Whether the reading was taken under the account the profile left."""
+    if left[1] is not None:
+        return reading.account == left[1]
+    return reading.seq == one.account_seq
+
+
 def capacity_view(profiles: Iterable[str], state: CapacityState, now: float,
                   signins: Mapping[str, signin_state.SignIn] | None = None,
                   excluded: Collection[str] = frozenset(),
@@ -301,30 +343,32 @@ def capacity_view(profiles: Iterable[str], state: CapacityState, now: float,
     names = sorted(set(profiles))
     signins = signins or {}
     counted: dict[str, Reading | None] = {}
+    left_readings: dict[str, list[Reading]] = {}
     entries = []
     for name in names:
-        reading = state.readings.get(name)
         one = signins.get(name)
-        if (reading is not None and one is not None and one.account_seq is not None
-                and reading.seq <= one.account_seq):
-            reading = None
-        counted[name] = reading
-        entries.append({**profile_capacity(name, reading, now),
+        left = _left(one)
+        pool = _pool(state, name)
+        counted[name] = max((r for r in pool if _current(r, one, left)), key=lambda r: r.seq,
+                            default=None)
+        if left is not None:
+            left_readings.setdefault(left[0], []).extend(
+                r for r in pool if _of_left(r, one, left))
+        entries.append({**profile_capacity(name, counted[name], now),
                         "signin": signin_state.profile_signin(one, now),
                         "excluded": name in excluded,
                         "pinned": name == pinned,
-                        "account": one.account if one is not None and one.state == "signed_in"
-                        else None,
+                        "account": one.account if one is not None
+                        and one.state in ("signed_in", "unknown") else None,
                         "same_account_as": [],
                         "duplicate_of": None})
     groups: dict[str, list[dict]] = {}
     for entry in entries:
         if entry["account"] is not None:
             groups.setdefault(entry["account"], []).append(entry)
-    for group in groups.values():
-        if len(group) < 2:
-            continue
+    for account, group in groups.items():
         held = [counted[e["profile"]] for e in group if counted[e["profile"]] is not None]
+        held.extend(left_readings.get(account, ()))
         newest = max(held, key=lambda r: r.seq) if held else None
         keeper = min(group, key=lambda e: (e["excluded"], not e["pinned"], e["profile"]))
         for entry in group:

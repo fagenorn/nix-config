@@ -337,6 +337,47 @@ class EntryTest(unittest.TestCase):
                                        reading_seq=reading_seq)[2]
                 self.assertEqual((payload["account"], payload["account_seq"]), expected)
 
+    def test_leaving_an_account_records_where_its_readings_went(self):
+        a, b, x, z = "a@example.invalid", "b@example.invalid", "acct-x", "acct-z"
+        held = SignIn("signed_in", None, "t", True, a, 4)
+        away = SignIn("signed_out", None, "t", True, None, 4, a, x)
+        rows = [
+            (SignIn("signed_in", None, "t", True, a, 0), Status("signed_in", None, b), 7, x,
+             (a, x)),
+            (SignIn("signed_in", None, "t", True, a, 0), Status("signed_in", None, b), 7, None,
+             (a, None)),
+            (SignIn("signed_in", None, "t", True, a, 0), Status("signed_in", None, b), None, x,
+             (None, None)),
+            (held, Status("signed_in", None, b), 4, x, (None, None)),
+            (dataclasses.replace(held, left_account=z, left_reading=z), signin.UNKNOWN, 9, x,
+             (z, z)),
+            (held, Status("signed_out", None), 9, x, (a, x)),
+            (away, Status("signed_in", None, b), 9, "acct-y", (a, x)),
+            (None, Status("signed_in", None, a), 9, x, (None, None)),
+        ]
+        for folded, status, reading_seq, reading_account, expected in rows:
+            with self.subTest(folded=folded, status=status, reading_seq=reading_seq):
+                payload = signin.entry("work", status, folded=folded, reading_seq=reading_seq,
+                                       reading_account=reading_account)[2]
+                self.assertEqual((payload.get("left_account"), payload.get("left_reading")),
+                                 expected)
+        self.assertNotIn("left_account", signin.entry("work", Status("signed_in", None, a))[2])
+
+    def test_the_left_account_is_folded_and_a_bad_one_is_ignored(self):
+        def work(seq, **payload):
+            return reading(seq, f"t{seq}", profile="work", state="signed_in", ends_at=None,
+                           account="b@example.invalid", account_seq=3, **payload)
+
+        rows = [work(1, left_account="a@example.invalid", left_reading="acct-x"),
+                work(2, left_account="", left_reading="acct-x"),
+                work(3, left_account="a@example.invalid", left_reading="has space"),
+                work(4, left_account=5)]
+        self.assertEqual(signin.signin_state(rows[:1])["work"].left_account, "a@example.invalid")
+        self.assertEqual(signin.signin_state(rows[:1])["work"].left_reading, "acct-x")
+        self.assertEqual(signin.signin_state(rows[1:]), {})
+        self.assertEqual(signin.signin_state(rows[1:], signin.signin_state(rows[:1])),
+                         signin.signin_state(rows[:1]))
+
 
 class ProfileSigninTest(unittest.TestCase):
     def test_the_ask_table(self):

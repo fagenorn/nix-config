@@ -512,7 +512,7 @@ class DuplicateAccountCapacityTest(unittest.TestCase):
         self.assertEqual(list(by["work"])[-6:], ["signin", "excluded", "pinned", "account",
                                                  "same_account_as", "duplicate_of"])
         self.assertEqual(by["work"]["account"], "w@example.invalid")
-        self.assertIsNone(by["spare"]["account"])
+        self.assertEqual(by["spare"]["account"], "x@example.invalid")
         self.assertIsNone(by["home"]["account"])
         self.assertEqual([e["same_account_as"] for e in shown["profiles"]], [[], [], []])
         self.assertEqual([e["duplicate_of"] for e in shown["profiles"]], [None, None, None])
@@ -524,6 +524,67 @@ class DuplicateAccountCapacityTest(unittest.TestCase):
                 "read_at")
         self.assertEqual([{k: e[k] for k in keep} for e in shown["profiles"]],
                          [{k: e[k] for k in keep} for e in plain["profiles"]])
+
+
+def owned(reading, account, seq):
+    return dataclasses.replace(reading, account=account, seq=seq)
+
+
+def refusal_report(account, reset):
+    return report(account=account, http_status=429, status="rejected", reset=reset, binding="7d",
+                  windows={"7d": window("rejected", 1.0, reset)})
+
+
+class AccountIdentityCapacityTest(unittest.TestCase):
+    A = "a@example.invalid"
+    B = "b@example.invalid"
+    X = "acct-x"
+    Y = "acct-y"
+
+    def test_a_switching_aliass_newer_refusal_stays_with_its_account(self):
+        refusal = owned(refused_reading(T + 100, "p2"), self.X, 2)
+        signins = {"p1": S(self.A),
+                   "p2": SignIn("signed_in", None, "t", True, self.B, 2, self.A, self.X)}
+        state = CapacityState({"p1": owned(open_reading_of("p1"), self.X, 1), "p2": refusal}, {})
+        by = by_name(capacity_view(["p1", "p2"], state, T, signins))
+        self.assertEqual((by["p1"]["state"], by["p1"]["out_until"]), ("out", iso(T + 100)))
+        self.assertIs(manager.has_room(by["p1"]), False)
+        self.assertEqual(by["p2"]["state"], "unknown")
+        later = owned(open_reading_of("p2"), self.Y, 3)
+        kept = CapacityState({"p1": state.readings["p1"], "p2": later}, {},
+                             {"p2": {self.X: refusal, self.Y: later}})
+        by = by_name(capacity_view(["p1", "p2"], kept, T, signins))
+        self.assertEqual((by["p1"]["state"], by["p2"]["state"]), ("out", "ok"))
+
+    def test_a_late_reply_of_the_left_account_never_overwrites_the_new_ones(self):
+        events = [
+            event(1, READING, {**report(account=self.X, reset=T + 3600), "profile": "p1"}),
+            event(2, READING, {**report(account=self.Y, reset=T + 3600), "profile": "p3"}),
+            event(3, READING, {**report(account=self.X, reset=T + 3600), "profile": "p2"}),
+            event(4, READING, {**refusal_report(self.Y, T + 100), "profile": "p2"}),
+            event(5, READING, {**report(account=self.X, reset=T + 3600), "profile": "p2"}),
+        ]
+        signins = {"p1": S(self.A),
+                   "p2": SignIn("signed_in", None, "t", True, self.B, 3, self.A, self.X),
+                   "p3": S(self.B)}
+        shown = capacity_view(["p1", "p2", "p3"], capacity_state(events), T, signins)
+        by = by_name(shown)
+        self.assertEqual((by["p2"]["state"], by["p3"]["state"]), ("out", "out"))
+        self.assertEqual(by["p3"]["out_until"], iso(T + 100))
+        self.assertEqual(by["p1"]["state"], "ok")
+        self.assertEqual(by["p1"]["read_at"], "t5")
+
+    def test_a_status_read_that_failed_keeps_the_known_account_grouping(self):
+        signins = {"p1": S(self.A), "p2": SignIn("unknown", None, "t", True, self.A, 0)}
+        state = CapacityState({"p1": seen(refused_reading(T + 100, "p1"), 2),
+                               "p2": seen(open_reading_of("p2"), 1)}, {})
+        shown = capacity_view(["p1", "p2"], state, T, signins)
+        by = by_name(shown)
+        self.assertEqual((by["p2"]["account"], by["p2"]["same_account_as"],
+                          by["p2"]["duplicate_of"]), (self.A, ["p1"], "p1"))
+        self.assertEqual(by["p2"]["state"], "out")
+        self.assertIs(shown["all_out"], True)
+        self.assertEqual(manager.choose_profile(shown, {}), manager.Wait(iso(T + 100)))
 
 
 class PinCapacityTest(unittest.TestCase):

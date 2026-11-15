@@ -392,7 +392,7 @@ class SigninRunServiceTest(Case):
         try:
             seeded = log.append(capacity.report_entries(capacity.parse_report({
                 "http_status": 200, "status": "allowed", "reset": NOW + 86400, "binding": None,
-                "claim": None, "account": None, "session_id": None,
+                "claim": None, "account": "acct-x", "session_id": None,
                 "windows": {"7d": {"status": "allowed", "utilization": 0.5,
                                    "reset": NOW + 86400}}}), "work"))[0].seq
         finally:
@@ -414,7 +414,9 @@ class SigninRunServiceTest(Case):
         self.assertEqual(len(after), len(before) + 1)
         self.assertEqual(after[-1], {"profile": "work", "state": "signed_in",
                                      "ends_at": iso(NOW + 30 * 86400),
-                                     "account": "b@example.invalid", "account_seq": seeded})
+                                     "account": "b@example.invalid", "account_seq": seeded,
+                                     "left_account": "a@example.invalid",
+                                     "left_reading": "acct-x"})
         self.assertEqual(ended[0][1]["outcome"], "signed_in")
 
     def test_the_view_names_the_new_account_after_a_sign_in(self):
