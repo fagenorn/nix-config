@@ -1,0 +1,308 @@
+"""A repeatable screenshot set of the console's sprint states (#1086).
+
+Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
+
+Contract:
+- `STATES` names the nine screens the sprint block, the finished list and the message life
+  must read well on; `WIDTHS` are the two viewport widths each is shot at. `capture` writes
+  `<state>-<width>.png` for every pair, so a full run writes 18 files.
+- Each state is a fresh fixture console: a registry of three projects (`owner/web`,
+  `owner/api`, `owner/docs`) and an event log seeded for that state with event times relative
+  to one clock reading, served by the real `ConsoleService` on a loopback port. Nothing is
+  written through the service, nothing is mocked in the page, and the launcher is an inert
+  stand-in that records what it is given and starts nothing (without one the view would say
+  managers are not available on this host).
+- The sandbox rule: every path the fixture touches lies under one temporary root, and
+  `main` points `HOME`, `CLAUDE_ACCOUNTS_DIR`, `CLAUDE_CONFIG_DIR`, `XDG_STATE_HOME` and
+  `XDG_CONFIG_HOME` under another for the run, so the owner's real accounts directory and real
+  registry are never read or written. The temporary roots are removed after each state.
+- `main(["--out", dir])` prints each written path. It returns 1 (and says so) when any shot's
+  `document.documentElement.scrollWidth` exceeds its width, 2 with a one-line reason when
+  Playwright or Chromium is missing, else 0. Playwright is imported inside `capture` only,
+  so the fixture half of this module needs nothing beyond the standard library.
+"""
+from __future__ import annotations
+
+import argparse
+import os
+import sys
+import tempfile
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+
+from agent_tools.console import manager
+from agent_tools.console.event_log import EventLog
+from agent_tools.console.service import ConsoleService
+
+from .console_test_support import write_registry
+
+STATES = ("live-several", "waiting-on-you", "stuck", "message-sent", "message-picked-up",
+          "message-replied", "message-not-picked-up", "finished-list", "nothing-running")
+WIDTHS = (1440, 480)
+HEIGHT = 900
+MINUTE = 60.0
+PROJECTS = ("owner/web", "owner/api", "owner/docs")
+TRACKER_URL = "https://github.com/owner/web/issues"
+TELL_TEXT = "leave the importer's schema alone"
+REPLY_TEXT = "kept the schema; moved the change to the reader"
+
+
+class Unavailable(Exception):
+    """Playwright or its Chromium is not here; the message is the one-line reason."""
+
+
+@dataclass(frozen=True)
+class Fixture:
+    root: Path
+    store: Path
+    registry: Path
+    token: Path
+    secrets: Path
+    home: Path
+    accounts: Path
+    config: Path
+    state: Path
+    projects: tuple[Path, ...]
+
+
+@dataclass(frozen=True)
+class Shot:
+    state: str
+    width: int
+    path: Path
+    scroll_width: int
+
+
+def sandbox_environ(root: Path) -> dict[str, str]:
+    root = Path(root)
+    return {"HOME": str(root / "home"),
+            "CLAUDE_ACCOUNTS_DIR": str(root / "accounts"),
+            "CLAUDE_CONFIG_DIR": str(root / "config"),
+            "XDG_STATE_HOME": str(root / "state"),
+            "XDG_CONFIG_HOME": str(root / "xdg-config")}
+
+
+def _iso(seconds: float) -> str:
+    return datetime.fromtimestamp(seconds, timezone.utc).isoformat(timespec="microseconds")
+
+
+class _Seed:
+    """One event log whose every row carries the time its writer chose, `ago` seconds before now."""
+
+    def __init__(self, log: EventLog, at: list[str], now_s: float):
+        self.log = log
+        self._at = at
+        self.now_s = now_s
+        self.count = 0
+
+    def put(self, ago: float, kind: str, project: str, payload: Mapping):
+        self._at[0] = _iso(self.now_s - ago)
+        return self.log.append([(kind, project, payload)])[0]
+
+    def sprint(self, project: str, title: str, *, started: float, report: float | None = None,
+               landed: bool = False, asks: bool = False, close: float | None = None,
+               stop: float | None = None) -> tuple[str, str]:
+        """One approved sprint with a started manager; returns `(sprint_id, goal)`."""
+        self.count += 1
+        sid = f"{self.count:016x}"
+        goal = f"{title}."
+        base = {"sprint_id": sid, "goal": goal}
+        self.put(started, "goal.stated", project, base)
+        self.put(started - 10, "manager.started", project, {
+            "sprint_id": sid, "profile": "work-main",
+            "session_name": manager.session_name(project, sid)})
+        self.put(started - 40, "brief.sent", project, {**base, "version": 1, "brief": {
+            "title": title, "done": f"{title}, merged and checked.",
+            "slices": ["the first slice", "the second slice"], "excluded": [],
+            "risks": ["a partial write"], "asks": []}})
+        approved = self.put(started - 60, "brief.approved", project, {**base, "version": 1})
+        self.put(started - 70, "sprint.read", project, {"sprint_id": sid, "through": approved.seq})
+        stage = "landed" if landed else "building"
+        if report is not None:
+            self.put(report, "sprint.reported", project, {**base, "report": {
+                "status": f"Working on {title.lower()}", "phase": "running",
+                "milestone": "the first slice is in review", "tracker_url": TRACKER_URL,
+                "issues": [{"issue": 12, "stage": stage}, {"issue": 13, "stage": stage}],
+                "inbox": [], "next": "merge the first slice"}})
+        if asks:
+            self.put(MINUTE * 4, "questions.asked", project, {**base, "blocker": False, "questions": [{
+                "question": "Which store should the checkpoint use?",
+                "blocks": "the first slice",
+                "options": ["the existing database", "a new file"],
+                "recommended": "the existing database"}]})
+        if close is not None:
+            self.put(close, "sprint.closed", project, {**base, "closing": {
+                "summary": f"{title} landed.\nBoth slices merged and the checks are green.",
+                "issues": [{"issue": 12, "stage": "landed"}, {"issue": 13, "stage": "landed"},
+                           {"issue": 14, "stage": "dropped"}],
+                "differently": "Would split the second slice sooner."}})
+        if stop is not None:
+            self.put(stop, "sprint.stop_requested", project, base)
+            self.put(stop - 20, "manager.stopped", project, {"sprint_id": sid})
+        return sid, goal
+
+    def message(self, project: str, sid: str, goal: str, *, sent: float, read: float | None = None,
+                replied: float | None = None) -> None:
+        base = {"sprint_id": sid}
+        said = self.put(sent, "sprint.messaged", project, {**base, "goal": goal, "text": TELL_TEXT})
+        if read is not None:
+            self.put(read, "sprint.read", project, {**base, "through": said.seq})
+        if replied is not None:
+            self.put(replied, "sprint.answered", project,
+                     {**base, "message": said.seq, "reply": REPLY_TEXT})
+
+
+def _seed_state(seed: _Seed, state: str) -> None:
+    web, api = PROJECTS[0], PROJECTS[1]
+    if state == "live-several":
+        seed.sprint(api, "Keep the importer fast", started=60 * MINUTE, report=45 * MINUTE)
+        seed.sprint(api, "Retire the old exporter", started=5 * 60 * MINUTE,
+                    report=3 * 60 * MINUTE, landed=True, close=2 * 60 * MINUTE)
+        seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE,
+                    asks=True)
+        seed.sprint(web, "Fix the settings page", started=20 * MINUTE, report=2 * MINUTE)
+    elif state == "waiting-on-you":
+        seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE,
+                    asks=True)
+    elif state == "stuck":
+        seed.sprint(web, "Add resumable uploads", started=60 * MINUTE, report=45 * MINUTE)
+    elif state.startswith("message-"):
+        sid, goal = seed.sprint(web, "Add resumable uploads", started=20 * MINUTE,
+                                report=2 * MINUTE)
+        if state == "message-sent":
+            seed.message(web, sid, goal, sent=30)
+        elif state == "message-picked-up":
+            seed.message(web, sid, goal, sent=90, read=40)
+        elif state == "message-replied":
+            seed.message(web, sid, goal, sent=3 * MINUTE, read=2.5 * MINUTE, replied=MINUTE)
+        else:
+            seed.message(web, sid, goal, sent=6 * MINUTE)
+    elif state == "finished-list":
+        seed.sprint(web, "Add resumable uploads", started=40 * MINUTE, report=2 * MINUTE)
+        seed.sprint(api, "Retire the old exporter", started=5 * 60 * MINUTE,
+                    report=3 * 60 * MINUTE, landed=True, close=2 * 60 * MINUTE)
+        seed.sprint(web, "Try a new cache", started=4 * 60 * MINUTE, report=3.5 * 60 * MINUTE,
+                    stop=3 * 60 * MINUTE)
+    elif state != "nothing-running":
+        raise ValueError(f"unknown state {state!r}")
+
+
+def build_fixture(root: Path, state: str, now_s: float) -> Fixture:
+    root = Path(root)
+    environ = sandbox_environ(root)
+    home, accounts, config, state_dir = (
+        Path(environ[name]) for name in ("HOME", "CLAUDE_ACCOUNTS_DIR", "CLAUDE_CONFIG_DIR",
+                                         "XDG_STATE_HOME"))
+    projects = tuple(root / "projects" / name.split("/")[1] for name in PROJECTS)
+    for directory in (home, accounts, config, state_dir, *projects):
+        directory.mkdir(parents=True, exist_ok=True)
+    console = state_dir / "console"
+    fixture = Fixture(
+        root=root, store=console / "events.sqlite3", registry=state_dir / "fleet" / "registry.json",
+        token=console / "token", secrets=console / "sprint-secrets", home=home,
+        accounts=accounts, config=config, state=state_dir, projects=projects)
+    write_registry(fixture.registry, [
+        {"project_id": name, "root": str(path)} for name, path in zip(PROJECTS, projects)])
+    at = [_iso(now_s)]
+    log = EventLog(fixture.store, clock=lambda: at[0])
+    try:
+        _seed_state(_Seed(log, at, now_s), state)
+    finally:
+        log.close()
+    return fixture
+
+
+def start_service(fixture: Fixture, now_s: float, launches: list | None = None) -> ConsoleService:
+    def launcher(launch: manager.Launch) -> None:
+        if launches is not None:
+            launches.append(launch)
+
+    service = ConsoleService(
+        fixture.store, fixture.registry, port=0, session_dirs=lambda: [],
+        profile_dirs=lambda: [], token_path=fixture.token, sprint_secrets=fixture.secrets,
+        session_poll_seconds=3600, nudger=lambda nudge: None, launcher=launcher,
+        activity=lambda root: None, slug_of=lambda root: None,
+        branch_pattern_of=lambda repo: None, dispatch=lambda job: job())
+    service.start()
+    return service
+
+
+def capture(out: Path, states: Sequence[str] = STATES,
+            widths: Sequence[int] = WIDTHS) -> list[Shot]:
+    try:
+        from playwright.sync_api import Error, sync_playwright
+    except ImportError as error:
+        raise Unavailable("playwright is not installed") from error
+    out = Path(out)
+    out.mkdir(parents=True, exist_ok=True)
+    taken: list[Shot] = []
+    with sync_playwright() as pw:
+        try:
+            browser = pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+        except Error as error:
+            raise Unavailable(f"no Chromium to launch: {' '.join(str(error).split())[:120]}") from error
+        try:
+            for state in states:
+                with tempfile.TemporaryDirectory(prefix="console-shots-") as tmp:
+                    now_s = datetime.now(timezone.utc).timestamp()
+                    service = start_service(build_fixture(Path(tmp).resolve(), state, now_s), now_s)
+                    try:
+                        host, port = service.address
+                        for width in widths:
+                            taken.append(_shoot(browser, f"http://{host}:{port}/", state, width, out))
+                    finally:
+                        service.close()
+        finally:
+            browser.close()
+    return taken
+
+
+def _shoot(browser, url: str, state: str, width: int, out: Path) -> Shot:
+    page = browser.new_page(viewport={"width": width, "height": HEIGHT})
+    try:
+        page.goto(url)
+        page.wait_for_selector("#projects h2")
+        if state == "finished-list":
+            page.click('details[data-key="finished"] > summary')
+            page.click('details[data-key^="ended:"] > summary')
+        scroll_width = page.evaluate("document.documentElement.scrollWidth")
+        path = out / f"{state}-{width}.png"
+        page.screenshot(path=str(path), full_page=True)
+    finally:
+        page.close()
+    return Shot(state, width, path, scroll_width)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="console-screenshots",
+        description="Shoot the console's sprint states against a fixture console.")
+    parser.add_argument("--out", required=True, help="the directory the PNG files go to")
+    args = parser.parse_args(argv)
+    saved = {name: os.environ.get(name) for name in sandbox_environ(Path("."))}
+    with tempfile.TemporaryDirectory(prefix="console-shots-env-") as tmp:
+        os.environ.update(sandbox_environ(Path(tmp).resolve()))
+        try:
+            taken = capture(Path(args.out))
+        except Unavailable as error:
+            print(f"console-screenshots: {error}", file=sys.stderr)
+            return 2
+        finally:
+            for name, value in saved.items():
+                if value is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = value
+    for shot in taken:
+        print(shot.path)
+    wide = [shot for shot in taken if shot.scroll_width > shot.width]
+    for shot in wide:
+        print(f"console-screenshots: {shot.path.name} scrolls sideways "
+              f"({shot.scroll_width} > {shot.width})")
+    return 1 if wide else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
