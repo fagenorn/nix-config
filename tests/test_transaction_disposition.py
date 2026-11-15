@@ -218,7 +218,11 @@ class DisposeTest(DisposeCase):
     def test_no_recovery_path_fails_with_a_sealed_known_state_receipt(self):
         self.parked()
         self.grant()
-        after = self.dispose()
+        self.declined("human_required", self.dispose)
+        self.human("h-beta", authority_class="release:beta")
+        self.declined("authority_class_mismatch", lambda: self.dispose("h-beta"))
+        self.human()
+        after = self.dispose("h-1")
         self.assertEqual([e["type"] for e in after.events[-4:]],
                          ["failure_disposed", "transitioned", "lease_released", "receipt_sealed"])
         disposed, moved = dict(after.events[-4]), dict(after.events[-3])
@@ -227,7 +231,7 @@ class DisposeTest(DisposeCase):
         snapshot = {self.act("build", n=1): "target_satisfied",
                     self.act("start", n=2): "diverged"}
         self.assertEqual({k: v for k, v in disposed.items() if k not in ("seq", "type", "at")}, {
-            "grant_id": "g-1", "ground": "no_recovery_path",
+            "grant_id": "h-1", "ground": "no_recovery_path",
             "reference": "ops://no_recovery_path", "occurred_at": None, "successor": None,
             "successor_receipt": None, "qualifier": "final_state_known",
             "effect_snapshot": snapshot, "units": [], "fence": plain(self.custody.fence)})
@@ -365,8 +369,8 @@ class DisposeTest(DisposeCase):
 
     def test_hand_edited_dispositions_are_state_invalid(self):
         self.parked()
-        self.grant()
-        self.dispose()
+        self.human()
+        self.dispose("h-1")
         document = self.state_doc(self.transaction_id)
         index = next(i for i, e in enumerate(document["events"])
                      if e["type"] == "failure_disposed")
@@ -469,8 +473,8 @@ class UnobservableTest(DisposeCase):
                                             contradicts_ground=False)
         self.start_with(RECOVERY, key="known", keys=("key:known",))
         self.parked()
-        self.grant()
-        known = self.dispose().terminal["receipt_digest"]
+        self.human()
+        known = self.dispose("h-1").terminal["receipt_digest"]
         self.assertRefusedUnchanged(StateInvalid, lambda: self.store.record_post_terminal(
             known, observation=seen, contradicts_ground=True))
         self.assertEqual(self.store.record_post_terminal(
@@ -495,8 +499,8 @@ class UnobservableTest(DisposeCase):
 
     def test_a_canonically_reserialized_bad_observation_value_fails_its_listing(self):
         self.parked()
-        self.grant()
-        known = self.dispose().terminal["receipt_digest"]
+        self.human()
+        known = self.dispose("h-1").terminal["receipt_digest"]
         seen = {"outcome": "satisfied", "reason": "r", "reference": "ops://x"}
         self.store.record_post_terminal(known, observation=seen, contradicts_ground=False)
         path = self.root / "observations" / known.removeprefix("sha256:") / "1.json"

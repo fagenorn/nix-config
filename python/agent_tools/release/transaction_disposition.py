@@ -7,9 +7,10 @@ vocabularies, the `DispositionRefused` reasons and their one construction path
 differ only through `writer` and `now_ms`: it returns the first `(reason, detail)` of
 `DISPOSITION_REFUSAL_REASONS`, in that order. A disposition is a strict JSON object of
 exactly `ground`, `reference`, `occurred_at`, `successor` and `units`. A known-state ground
-(`KNOWN_STATE_GROUNDS`) records `final_state_known` with no units; an observability ground
-(`OBSERVABILITY_GROUNDS`) needs a fresh human grant at the transaction's authority class and
-lists exactly the actions with effect, each destroyed with the authority or possibly live
+(`KNOWN_STATE_GROUNDS`) records `final_state_known` with no units. `no_recovery_path`, the
+manual disposition, and every observability ground (`OBSERVABILITY_GROUNDS`) need a fresh human
+grant at the transaction's authority class (issue 1050); `successor_succeeded` is proved by the
+successor's sealed receipt and takes any fresh grant. An observability ground lists exactly the actions with effect, each destroyed with the authority or possibly live
 with a residue bound and a recheck, whose latest inspection is `unknown`, under the held
 fence and after the ground occurred. `failure_disposed` records the grant, the disposition,
 the successor's receipt digest, the qualifier (`effects_unobservable` when some unit is
@@ -174,9 +175,9 @@ def failure_refusal(document: dict, grant_id: Any, disposition: Any, *, now_ms: 
     can name it); for `successor_succeeded`, `successor_not_succeeded` when the successor is
     not a linked child or, with `writer`, `successor` (`{transaction_id, state,
     receipt_digest}`, None for no such transaction) is not that child sealed `succeeded`.
-    Then, for an observability ground only: `human_required` and
+    Then, for every ground but `successor_succeeded` (issue 1050): `human_required` and
     `authority_class_mismatch` for the latest such grant's `actor_kind` and `authority_class`
-    against the `created` event's; `units_mismatch` unless the units are the actions with
+    against the `created` event's. Then, for an observability ground only: `units_mismatch` unless the units are the actions with
     effect in declaration order; `inspection_not_exhausted` for a possibly-live unit whose
     latest inspection is not `unknown`, not under the held fence or not after `occurred_at`."""
     state, events = document["state"], document["events"]
@@ -208,7 +209,7 @@ def failure_refusal(document: dict, grant_id: Any, disposition: Any, *, now_ms: 
                 or successor["receipt_digest"] is None):
             return "successor_not_succeeded", (f"successor {child} is not a linked child "
                                                f"sealed succeeded")
-    if ground in KNOWN_STATE_GROUNDS:
+    if ground == "successor_succeeded":
         return None
     grant = _fresh_grant_event(events, grant_id, held)
     if grant["actor_kind"] != "human":
@@ -217,6 +218,8 @@ def failure_refusal(document: dict, grant_id: Any, disposition: Any, *, now_ms: 
         return "authority_class_mismatch", (f"grant {grant_id} authority_class "
                                             f"{grant['authority_class']} is not "
                                             f"{events[0]['authority_class']}")
+    if ground in KNOWN_STATE_GROUNDS:
+        return None
     effected = [identity for identity, fold in actions.items()
                 if effect_class(fold) != "no_effect"]
     listed = [unit["unit"] for unit in disposition["units"]]
