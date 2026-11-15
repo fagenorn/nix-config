@@ -275,9 +275,9 @@ open nor withdrawn is 404 `this sprint is not known`; else 200 `application/json
 Briefs (#887): `send_brief(sprint_id, secret, brief)`, under the ingest lock, raises
 `Refused(NOT_OPEN)` unless the sprint is open, `SecretRefused` unless `sprints.read_secret` holds a
 secret equal (`hmac.compare_digest`) to the presented one, then applies `sprints.checked_brief`
-(the secret is checked before the parts); it appends exactly one `brief.sent` row
-`{"sprint_id", "version", "goal", "brief"}` with the version one above the folded brief's (1 for
-none), folds and publishes, and returns the version. A brief after an approval or a reply replaces
+(the six parts, `title` first; the secret is checked before the parts); it appends exactly one
+`brief.sent` row `{"sprint_id", "version", "goal", "brief"}` with the version one above the folded
+brief's (1 for none), folds and publishes, and returns the version. A brief after an approval or a reply replaces
 the decision: the sprint waits again. `approve_brief(project_id, sprint_id, version)` and
 `reply_brief(project_id, sprint_id, version, reply)`, under the lock, raise `Refused(NOT_OPEN)`
 unless the sprint is open and belongs to that project, `NOT_WAITING` when it has no brief, `REPLACED`
@@ -339,7 +339,9 @@ exception is `console: ask_failed <Type>: <message>` and 500 `ask failed`; succe
 `application/json` `{"questions":<n>,"round":<id>}` (sorted keys, compact). `ask_questions(sprint_id,
 secret, round_)`, under the ingest lock, is `_manager_sprint` (`NOT_OPEN`, then `SecretRefused`),
 `Refused(NOT_STARTED)` unless the sprint's brief is approved, `Refused(ENDED)` unless
-`sprints.takes_questions` (a stopped, closed or ended sprint asks no more), `sprints.checked_round`, then
+`sprints.takes_questions` (a stopped, closed or ended sprint asks no more), `sprints.checked_round`
+(each ask, context and option within its limit, else `Refused` names the limit and nothing is
+logged), then
 `Refused(ROUND_OPEN)` when a question is open and the round is not a blocker; it appends exactly one
 `questions.asked` row `{"sprint_id", "goal", "blocker", "questions"}` (the checked round), folds,
 publishes and returns the row's `seq` (the round's id) and the question count; it nudges nobody.

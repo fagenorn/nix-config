@@ -5,7 +5,7 @@ Six event kinds carry a sprint (`event_log.GOAL_STATED`, `GOAL_WITHDRAWN`, `BRIE
 column. A goal row carries `{"sprint_id": <id>, "goal": <text>}` (a withdrawal repeats the stated
 text); the brief and report rows carry
 
-    brief.sent      {"sprint_id", "version": <int>, "goal": <str>, "brief": {<the five parts>}}
+    brief.sent      {"sprint_id", "version": <int>, "goal": <str>, "brief": {<the six parts>}}
     brief.approved  {"sprint_id", "version": <int>, "goal": <str>}
     brief.replied   {"sprint_id", "version": <int>, "goal": <str>, "reply": <str>}
     sprint.reported {"sprint_id", "goal": <str>, "report": {<the seven REPORT_MEMBERS>}}
@@ -64,11 +64,18 @@ Registration events change nothing here: a goal row outlives the registration ro
 removes, and the view alone shows sprints only under registered projects. Folding `a + b` equals
 folding `b` onto the fold of `a`.
 
-A brief is the five `PARTS`: `done` a text, `slices` a non-empty list of texts, and `excluded`,
-`risks` and `asks` lists of texts that may be empty (`MAY_BE_EMPTY`). `checked_brief(brief)` checks
-them in `PARTS` order and refuses with `Refused("the brief has no <part>")` the first that is
-missing, of the wrong type, empty when it must not be, or holding a text empty after stripping; it
-returns a new dict of the five parts with every text stripped. `checked_reply(text)`
+A brief is the six `PARTS`: `title` one line of at most `MAX_TITLE_CHARS` characters naming the
+sprint, `done` a text, `slices` a non-empty list of texts, and `excluded`, `risks` and `asks` lists
+of texts that may be empty (`MAY_BE_EMPTY`). `checked_brief(brief)` checks them in `PARTS` order
+(so `title` first) and refuses with `Refused("the brief has no <part>")` the first that is
+missing, of the wrong type, empty when it must not be, or holding a text empty after stripping
+(a `title` holding a line break is also "no title"), and a title over the limit with
+`TITLE_TOO_LONG`; it returns a new dict of the six parts with every text stripped.
+`sprint_title(state)` is the latest brief's title (whitespace collapsed, cut by `cut` to
+`MAX_TITLE_CHARS`) when it is a non-empty string, else `goal_title(goal)`: the goal's first line up
+to the first `.`, `!` or `?` followed by whitespace or the end (else the whole line), cut the same
+way, so a logged brief without a title still has a name. `cut(text, limit)` is the text when it fits,
+else its first `limit - 1` characters, stripped, and an ellipsis. `checked_reply(text)`
 keeps the text exactly and refuses `EMPTY_REPLY` when its strip is empty, then `REPLY_TOO_LONG` over
 `MAX_REPLY_CHARS` code points. `SecretRefused` (a `Refused`) is the service's refusal of a wrong
 secret; it maps to 403.
@@ -249,29 +256,38 @@ them, both kept (`event_log.QUESTIONS_ASKED`, `QUESTION_ANSWERED`; each with the
 project column):
 
     questions.asked   {"sprint_id", "goal": <str>, "blocker": <bool>,
-                       "questions": [{"question", "blocks", "options": [<str>], "recommended"}]}
+                       "questions": [{"question", "context"?, "blocks", "options": [<str>],
+                                      "recommended"}]}
     question.answered {"sprint_id", "goal": <str>, "round": <int>, "index": <int>,
                        "question": <str>, "answer": <str>, "chosen": <str> | null,
                        "recommended": <str>, "differs": <bool>}
 
 The round the manager sends (inside the ask request) and the owner's answer (the page's write) are
 
-    {"questions": [{"question": "<text>", "blocks": "<one line>", "options": ["<one line>", ...],
+    {"questions": [{"question": "<the ask>", "context": "<why, optional>",
+                    "blocks": "<one line>", "options": ["<one line>", ...],
                     "recommended": "<exact text of one option>"}, ...],
      "blocker": true | false}                   (blocker optional, default false)
     {"project_id", "sprint_id", "round": <int >= 1>, "question": <int >= 0>, "choice": <int >= 0>}
     {"project_id", "sprint_id", "round": <int >= 1>, "question": <int >= 0>, "text": "<words>"}
 
 A round has one to `MAX_ROUND_QUESTIONS` questions, each with `MIN_OPTIONS` to `MAX_OPTIONS`
-options. `checked_round(round)` refuses with `Refused` the first failure, in this order:
+options. A question's `question` is its ask, at most `MAX_ASK_CHARS`; its optional `context`, at most
+`MAX_CONTEXT_CHARS` and free to span lines, is the why; each option is at most `MAX_OPTION_CHARS`.
+`checked_round(round, limits=True)` refuses with `Refused` the first failure, in this order:
 `NO_QUESTIONS` (`questions` not a list, or empty), `TOO_MANY_QUESTIONS`, `BAD_BLOCKER` (`blocker`
 present and not a bool); then, per question (`n` counts from 1): `QUESTION_SHAPE` (not an object, or
-a key outside `question, blocks, options, recommended`), `QUESTION_MEMBER` for `question` (a string,
-non-empty after stripping, at most `MAX_QUESTION_CHARS` code points after stripping) and for
-`blocks` (one line), `OPTION_COUNT`, `QUESTION_MEMBER` for `options` (an option that is not one
-line), `OPTION_TWICE` (two options equal after stripping) and `NO_RECOMMENDATION` (`recommended` not
-a string whose strip equals one stripped option). It returns a new `{"blocker": <bool>,
-"questions": [{"question", "blocks", "options", "recommended"}]}` with every text stripped.
+a key outside `question, context, blocks, options, recommended`), `QUESTION_MEMBER` for `question`
+(not a string non-empty after stripping), `ASK_TOO_LONG`, `QUESTION_MEMBER` for `context` (present
+and not a string non-empty after stripping), `CONTEXT_TOO_LONG`, `QUESTION_MEMBER` for `blocks`
+(one line), `OPTION_COUNT`, `QUESTION_MEMBER` for `options` (an option not a string non-empty after
+stripping), `OPTION_TOO_LONG`, `QUESTION_MEMBER` for `options` again (an option with a line break or
+over `MAX_LINE_CHARS`), `OPTION_TWICE` (two options equal after stripping) and `NO_RECOMMENDATION`
+(`recommended` not a string whose strip equals one stripped option). With `limits=False` the three
+limit steps are replaced by today's caps: a `QUESTION_MEMBER` for a `question` or `context` over
+`MAX_QUESTION_CHARS` (an option's cap is `MAX_LINE_CHARS`). It returns a new `{"blocker": <bool>,
+"questions": [{"question", "blocks", "options", "recommended"}]}` with every text stripped, a
+question carrying `"context"` only when the round gave one.
 `parse_ask_request(body)` reads the manager's `{"sprint_id", "secret", "round"}` (exactly those
 keys) and returns `(sprint_id, secret, round)`, `round` an object whose keys are a subset of
 `questions, blocker`; `parse_round_answer(body)` reads the page's body, exactly one of `choice` and
@@ -280,7 +296,8 @@ None. Both are `ValueError` on anything else, a repeated key, NaN or nesting too
 
 The fold keeps each open sprint's `Question`s on `SprintState.questions`, ordered by `(round_id,
 index)`. A `questions.asked` row changes a sprint only when it is open, its brief is approved
-(`STARTING`) and `checked_round` accepts the row's `questions` and `blocker` (absent: false); each
+(`STARTING`) and `checked_round(..., limits=False)` accepts the row's `questions` and `blocker`
+(absent: false), so a logged round over a limit folds whole and renders cut; each
 checked question is then added with `round_id` the row's `seq`, its `index` and `at`. The fold does
 not enforce one open round; the service does. A `question.answered` row applies only when its `round`
 and `index` (ints, not bools) name an unanswered question of the sprint, its `answer` is a string and
@@ -398,7 +415,7 @@ from agent_tools.console.sessions import SEEN
 MAX_GOAL_CHARS = 2000
 MAX_REPLY_CHARS = 2000
 MAX_MESSAGE_CHARS = 2000
-PARTS = ("done", "excluded", "slices", "risks", "asks")
+PARTS = ("title", "done", "excluded", "slices", "risks", "asks")
 MAY_BE_EMPTY = ("excluded", "risks", "asks")
 NONE = "none"
 APPROVED = "approved"
@@ -443,6 +460,10 @@ MIN_OPTIONS = 2
 MAX_OPTIONS = 4
 MAX_ROUND_QUESTIONS = 10
 MAX_QUESTION_CHARS = 1000
+MAX_TITLE_CHARS = 60
+MAX_ASK_CHARS = 140
+MAX_CONTEXT_CHARS = 400
+MAX_OPTION_CHARS = 80
 MAX_REPORT_ISSUES = 200
 ON_TRACK = "on_track"
 ON_TRACK_TEXT = "on track"
@@ -493,7 +514,13 @@ UNKNOWN_MESSAGE = "this message is not known"
 NO_QUESTIONS = "the round has no questions"
 TOO_MANY_QUESTIONS = "a round has at most 10 questions"
 BAD_BLOCKER = "the round's blocker is not true or false"
-QUESTION_SHAPE = "question {n} is not an object of question, blocks, options and recommended"
+QUESTION_SHAPE = ("question {n} is not an object of question, context, blocks, options and "
+                  "recommended")
+TITLE_TOO_LONG = f"the brief's title is at most {MAX_TITLE_CHARS} characters"
+ASK_TOO_LONG = (f"question {{n}}'s ask is over {MAX_ASK_CHARS} characters: keep it to the question "
+                "the owner answers and move the rest into context")
+CONTEXT_TOO_LONG = f"question {{n}}'s context is over {MAX_CONTEXT_CHARS} characters"
+OPTION_TOO_LONG = f"question {{n}} has an option over {MAX_OPTION_CHARS} characters"
 QUESTION_MEMBER = "question {n} has no valid {member}"
 OPTION_COUNT = "question {n} needs two to four options"
 OPTION_TWICE = "question {n} offers one option twice"
@@ -628,6 +655,7 @@ class Question:
     chosen: str | None = None
     differs: bool | None = None
     answered_at: str | None = None
+    context: str | None = None
 
 
 @dataclass(frozen=True)
@@ -850,11 +878,39 @@ def _text(value: object) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
+def cut(text: str, limit: int) -> str:
+    """`text` when it fits `limit`, else its first `limit - 1` characters, stripped, and "…"."""
+    return text if len(text) <= limit else text[:limit - 1].rstrip() + "…"
+
+
+def goal_title(goal: str) -> str:
+    """The first sentence of a goal's first line, cut to `MAX_TITLE_CHARS`."""
+    lines = goal.strip().splitlines()
+    line = lines[0] if lines else ""
+    found = re.match(r"(.+?[.!?])(?=\s|$)", line)
+    return cut(found.group(1) if found else line, MAX_TITLE_CHARS)
+
+
+def sprint_title(state: "SprintState") -> str:
+    """The brief's title, else the goal's first sentence; at most `MAX_TITLE_CHARS` long."""
+    parts = state.brief.parts if state.brief is not None else None
+    title = parts.get("title") if isinstance(parts, dict) else None
+    if isinstance(title, str) and title.strip():
+        return cut(" ".join(title.split()), MAX_TITLE_CHARS)
+    return goal_title(state.goal)
+
+
 def checked_brief(brief: dict) -> dict:
     checked: dict = {}
     for part in PARTS:
         value = brief.get(part)
-        if part == "done":
+        if part == "title":
+            if not _text(value) or "\n" in value or "\r" in value:
+                raise Refused(MISSING_PART.format(part=part))
+            if len(value.strip()) > MAX_TITLE_CHARS:
+                raise Refused(TITLE_TOO_LONG)
+            checked[part] = value.strip()
+        elif part == "done":
             if not _text(value):
                 raise Refused(MISSING_PART.format(part=part))
             checked[part] = value.strip()
@@ -910,18 +966,34 @@ def checked_report(report: dict) -> dict:
             "inbox": sorted(set(report["inbox"])), "next": report["next"].strip()}
 
 
-def _checked_question(n: int, question: object) -> dict:
-    if not isinstance(question, dict) or not set(question) <= {"question", "blocks", "options",
-                                                                "recommended"}:
+def _checked_question(n: int, question: object, limits: bool) -> dict:
+    if not isinstance(question, dict) or not set(question) <= {"question", "context", "blocks",
+                                                                "options", "recommended"}:
         raise Refused(QUESTION_SHAPE.format(n=n))
     text, blocks = question.get("question"), question.get("blocks")
-    if not _text(text) or len(text.strip()) > MAX_QUESTION_CHARS:
+    if not _text(text):
         raise Refused(QUESTION_MEMBER.format(n=n, member="question"))
+    if limits and len(text.strip()) > MAX_ASK_CHARS:
+        raise Refused(ASK_TOO_LONG.format(n=n))
+    if not limits and len(text.strip()) > MAX_QUESTION_CHARS:
+        raise Refused(QUESTION_MEMBER.format(n=n, member="question"))
+    context = question.get("context")
+    if "context" in question:
+        if not _text(context):
+            raise Refused(QUESTION_MEMBER.format(n=n, member="context"))
+        if limits and len(context.strip()) > MAX_CONTEXT_CHARS:
+            raise Refused(CONTEXT_TOO_LONG.format(n=n))
+        if not limits and len(context.strip()) > MAX_QUESTION_CHARS:
+            raise Refused(QUESTION_MEMBER.format(n=n, member="context"))
     if not _line(blocks):
         raise Refused(QUESTION_MEMBER.format(n=n, member="blocks"))
     options = question.get("options")
     if not isinstance(options, list) or not MIN_OPTIONS <= len(options) <= MAX_OPTIONS:
         raise Refused(OPTION_COUNT.format(n=n))
+    if not all(_text(option) for option in options):
+        raise Refused(QUESTION_MEMBER.format(n=n, member="options"))
+    if limits and any(len(option.strip()) > MAX_OPTION_CHARS for option in options):
+        raise Refused(OPTION_TOO_LONG.format(n=n))
     if not all(_line(option) for option in options):
         raise Refused(QUESTION_MEMBER.format(n=n, member="options"))
     stripped = [option.strip() for option in options]
@@ -930,11 +1002,14 @@ def _checked_question(n: int, question: object) -> dict:
     recommended = question.get("recommended")
     if not isinstance(recommended, str) or recommended.strip() not in stripped:
         raise Refused(NO_RECOMMENDATION.format(n=n))
-    return {"question": text.strip(), "blocks": blocks.strip(), "options": stripped,
-            "recommended": recommended.strip()}
+    checked = {"question": text.strip(), "blocks": blocks.strip(), "options": stripped,
+               "recommended": recommended.strip()}
+    if "context" in question:
+        checked["context"] = context.strip()
+    return checked
 
 
-def checked_round(round_: dict) -> dict:
+def checked_round(round_: dict, *, limits: bool = True) -> dict:
     questions = round_.get("questions")
     if not isinstance(questions, list) or not questions:
         raise Refused(NO_QUESTIONS)
@@ -944,7 +1019,7 @@ def checked_round(round_: dict) -> dict:
     if not isinstance(blocker, bool):
         raise Refused(BAD_BLOCKER)
     return {"blocker": blocker,
-            "questions": [_checked_question(n, question)
+            "questions": [_checked_question(n, question, limits)
                           for n, question in enumerate(questions, 1)]}
 
 
@@ -1113,11 +1188,12 @@ def _folded_question(state: SprintState, event: Event) -> SprintState:
             return state
         try:
             checked = checked_round({"questions": payload.get("questions"),
-                                     "blocker": payload.get("blocker", False)})
+                                     "blocker": payload.get("blocker", False)}, limits=False)
         except Refused:
             return state
         added = tuple(Question(event.seq, index, event.at, checked["blocker"], row["question"],
-                               row["blocks"], tuple(row["options"]), row["recommended"])
+                               row["blocks"], tuple(row["options"]), row["recommended"],
+                               context=row.get("context"))
                       for index, row in enumerate(checked["questions"]))
         return replace(state, questions=(*state.questions, *added))
     round_id, index = payload.get("round"), payload.get("index")

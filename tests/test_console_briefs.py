@@ -18,7 +18,8 @@ STATUS = "/api/sprint-status"
 APPROVE = "/api/approve"
 REPLY = "/api/reply"
 GOAL_TEXT = "make the importer resumable"
-PARTS = {"done": "the importer resumes after a crash", "excluded": ["no new formats"],
+PARTS = {"title": "Importer resumes after a crash",
+         "done": "the importer resumes after a crash", "excluded": ["no new formats"],
          "slices": ["checkpoint", "resume"], "risks": ["partial writes"],
          "asks": ["which store?"]}
 JSON = {"Content-Type": "application/json"}
@@ -156,6 +157,18 @@ class BriefRouteTest(Case):
         self.assertIn(f"console: brief_refused {sid} secret refused", err.getvalue())
         self.assertNotIn("A" * 43, err.getvalue())
         self.assertNotIn(right, err.getvalue())
+
+    def test_a_brief_whose_title_is_over_60_characters_is_refused_and_logs_nothing(self):
+        svc = self.open()
+        sid = self.sprint(svc)
+        right = self.secret(sid)
+        self.refused(svc, lambda: self.brief(svc, sid, right, {**PARTS, "title": "t" * 61}), 409,
+                     sprints.TITLE_TOO_LONG.encode())
+        self.refused(svc, lambda: self.brief(
+            svc, sid, right, {k: v for k, v in PARTS.items() if k != "title"}), 409,
+            b"the brief has no title")
+        self.assertEqual([row for row in support.log_rows(self.store) if row[2] == "brief.sent"],
+                         [])
 
     def test_a_brief_from_a_page_or_without_json_is_refused(self):
         svc = self.open()
