@@ -39,7 +39,8 @@ def all_sprints(view):
 class ScreenshotFixtureTest(unittest.TestCase):
     def test_every_fixture_path_is_temporary_and_never_a_real_one(self) -> None:
         real_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
-        protected = [*accounts_sandbox.real_accounts_dirs(), real_home / ".local" / "state"]
+        real_registry = real_home / ".agents" / "state" / "fleet" / "registry.json"
+        protected = [*accounts_sandbox.real_accounts_dirs(), real_home / ".agents" / "state"]
         for state in shots.STATES:
             with self.subTest(state=state), tempfile.TemporaryDirectory() as tmp:
                 root = Path(tmp).resolve()
@@ -48,6 +49,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
                 for path in paths:
                     self.assertTrue(path.resolve().is_relative_to(root), path)
                 self.assertFalse(accounts_sandbox.overlaps(paths, protected))
+                self.assertNotEqual(fixture.registry.resolve(), real_registry.resolve())
                 for value in shots.sandbox_environ(root).values():
                     self.assertTrue(Path(value).resolve().is_relative_to(root), value)
                 self.assertEqual(
