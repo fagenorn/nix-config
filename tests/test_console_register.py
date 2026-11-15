@@ -18,6 +18,8 @@ from agent_tools.console import register
 from agent_tools.console.event_log import Event
 from agent_tools.console.register import Adopter, RunFailed
 
+from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1052)
+
 GIT_ENV = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
 
 
