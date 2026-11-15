@@ -453,6 +453,29 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("**Merged adoption**:", context)
         self.assertIn("| Approved adoption | Console |", self.doc("docs/CONTEXT-MAP.md"))
 
+    def test_the_apply_card_decision_is_recorded(self):
+        approval = self.doc(
+            "docs/areas/console/adr/"
+            "030-the-owner-approves-a-ready-adoption-and-the-console-opens-its-pull-request.md")
+        answers = self.doc(
+            "docs/areas/console/adr/029-the-owner-answers-the-adoptions-questions-on-the-page.md")
+        writes = self.doc(
+            "docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md")
+        context = self.doc("docs/areas/console/CONTEXT.md")
+        for needle in ("#1073", "**D11.", "Apply this adoption?", "Apply it", "Apply it again",
+                       "Try again", "Not now", "POST /api/plan-defer", "bad plan deferral",
+                       "that plan is no longer the one shown",
+                       "that plan is not waiting for an answer", "adoption.deferred",
+                       "without pushing again", "register_apply"):
+            self.assertIn(needle, approval)
+        for gone in ("shows Approve", "the Approve button"):
+            self.assertNotIn(gone, approval)
+        self.assertNotIn("Approve button", answers)
+        self.assertIn("ADR-console-030 D9", answers)
+        self.assertIn("POST /api/plan-defer", writes)
+        self.assertIn("ADR-console-030 D11", writes)
+        self.assertIn("choosing `Apply it`", context)
+
     def test_the_console_profile_choice_decision_is_recorded(self):
         path = "docs/areas/console/adr/023-a-new-sessions-profile-is-the-consoles-choice.md"
         first = (REPO_ROOT / path).read_text().splitlines()[0]
