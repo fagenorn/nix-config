@@ -1937,6 +1937,13 @@ class SigninViewTest(unittest.TestCase):
         bare = derive_view([state("p00", 1)], capacity=signin_capacity(home))
         self.assertEqual(bare["accounts_added"], [])
 
+    def test_the_view_carries_the_registration(self):
+        entry = {"root": "/r", "name": "r", "status": "done", "lines": ["a"]}
+        shown = derive_view([], registration=entry)["registration"]
+        self.assertEqual(shown, entry)
+        self.assertIsNot(shown, entry)
+        self.assertIsNone(derive_view([])["registration"])
+
     def test_the_view_counts_the_running_sessions_of_each_profile(self):
         def under(sid, status, profile):
             return SessionState(sid, "/srv/p00", "/srv/p00", status, None, 1, "t1", None, profile)
