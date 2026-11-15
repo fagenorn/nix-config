@@ -6856,6 +6856,19 @@ class RegisterControlTest(unittest.TestCase):
              Q_REFERENCE["ask"], "Change it to .agents/artifacts/specs/a.md", "Leave it as it is",
              Q_SECRET["ask"], Q_SECRET["why"], "Close"])
 
+    def test_a_ready_plan_shows_only_that_it_is_ready(self) -> None:
+        plan_id = "sha256:" + "3f9a" * 16
+        ready = {**REGISTERED, "state": "ready", "plan_id": plan_id, "questions": [],
+                 "answered": [], "note": "The plan is ready."}
+        (snap,) = render([START, {"frame": {**frame([]), "registration": ready}}, {"snapshot": True}])
+        (result,) = registered(snap, "register-result")
+        shown = full(result)
+        self.assertIn("The plan is ready.", shown)
+        self.assertNotIn(plan_id, shown)
+        self.assertNotIn("sha256", shown)
+        self.assertNotIn("adopt-project", shown)
+        self.assertNotIn("apply", shown)
+
     def test_close_stands_outside_the_question_list_after_its_last_answer(self) -> None:
         (snap,) = render(ASKED + [{"snapshot": True}])
         (result,) = registered(snap, "register-result")

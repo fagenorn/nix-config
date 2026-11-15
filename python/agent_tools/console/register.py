@@ -59,16 +59,16 @@ is ready.` with no command and no plan id (#1065). A `no_change` plan with no re
 <command>`, the command being the plan's `handoff.next_command` or else `adopt-project verify
 --register --repo-root <root>` (D5). A failed plan's headline is `The adoption plan for <name> failed:
 <message>`, or `... could not be made.` when the error has no message, or, when the error's
-`repair_id` is `adopt.manifest.*`, `The adoption plan for <name> could not start: the agent
+`repair_id` is `adopt.manifest.*` and its message says the manifest was not found, `The adoption plan for <name> could not start: the agent
 platform's files are not installed on this host.` (#1065); a refused registration's is
 `<name> was not registered: <message>`, or `... was not registered.`, and for that `repair_id` it is
-`<name> was not registered: ` and the same words; neither shows the error code (#1057). `failed(root, kind, verb="plan")` is the same shape for a run that raised, its headline ending in the
+`<name> was not registered: ` and the same words; any other `adopt.manifest.*` failure keeps its own message; neither shows the error code (#1057). `failed(root, kind, verb="plan")` is the same shape for a run that raised, its headline ending in the
 words of `RUN_WORDS[kind]` (an unknown kind reads `it stopped unexpectedly`), never the kind word.
 
 Next step (#1062). Every failed headline ends with a full stop, and every failed row (a plan that
 failed, a refused or unconfirmed registration, a run that raised) carries one plain line in `note`
 saying what the owner can do next, never an error code. `next_step(root, error, verb)` reads the
-error's `repair_id`: `adopt.manifest.*` says the agent platform's files are not installed yet, that
+error's `repair_id`: `adopt.manifest.*` with the not-found message says the agent platform's files are not installed yet, that
 `just switch` installs them and to press Register again; `adopt.registration.no_remote`
 says to add the origin remote; `remote_default_unknown` (an origin that exists but advertises no
 default branch) says the origin needs a published default branch, not another origin;
@@ -154,6 +154,7 @@ NEXT_STEPS = {
     "adopt.registration.not_integrated": INTEGRATED_STEP,
 }
 MANIFEST_PREFIX = "adopt.manifest."
+MANIFEST_ABSENT = "the installed platform manifest was not found"
 PLATFORM_MISSING = "the agent platform's files are not installed on this host."
 
 
@@ -313,7 +314,13 @@ def run_next_step(root: str, kind: str, verb: str = "plan") -> str:
 
 
 def _is_manifest(error: Mapping) -> bool:
-    return str(error.get("repair_id") or "").startswith(MANIFEST_PREFIX)
+    """True only for a manifest refusal whose reason is that the file is absent.
+
+    `adopt.manifest.*` also covers an unreadable or invalid manifest and a missing or
+    ambiguous migration step, which `just switch` may not cure: those keep their own words.
+    """
+    return (str(error.get("repair_id") or "").startswith(MANIFEST_PREFIX)
+            and _error_message(error) == MANIFEST_ABSENT)
 
 
 def next_step(root: str, error: Mapping, verb: str) -> str:

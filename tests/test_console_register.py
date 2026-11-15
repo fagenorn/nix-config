@@ -416,6 +416,26 @@ class NextStepTest(unittest.TestCase):
                 self.assertNotIn("manifest", reg["headline"])
                 self.assertEqual(reg["note"], MANIFEST_STEP)
 
+    def test_any_other_manifest_failure_keeps_its_own_reason(self):
+        cases = (
+            ("adopt.manifest.invalid", "the installed platform manifest is not valid JSON"),
+            ("adopt.manifest.invalid", "the installed platform manifest could not be read"),
+            ("adopt.manifest.invalid", "the manifest's platform version is not strict SemVer"),
+            ("adopt.manifest.forward_step_missing",
+             "no migration steps forward from the project's declared schema"),
+            ("adopt.manifest.forward_step_ambiguous",
+             "more than one migration steps forward from the project's declared schema"),
+        )
+        for repair_id, message in cases:
+            with self.subTest(repair_id=repair_id, message=message):
+                row = register.summary("/srv/r", adopt_error(repair_id, message))
+                self.assertEqual(row["headline"], f"The adoption plan for r failed: {message}.")
+                self.assertEqual(row["note"],
+                                 f"Run {PLAN_COMMAND} in a terminal to see the full reason.")
+                reg = register.summary("/srv/r", NO_CHANGE, adopt_error(repair_id, message))
+                self.assertEqual(reg["headline"], f"r was not registered: {message}.")
+                self.assertNotIn("just switch", row["note"] + reg["note"])
+
     def test_each_refused_registration_has_its_own_next_step(self):
         again = "then press Register again."
         cases = {
