@@ -48,6 +48,7 @@ let
     "context-map-lint" = "delivery.context_map_lint";
     "diff-scope" = "delivery.diff_scope";
     "fallback-audit" = "project_contract.fallback_audit";
+    "folder-trust" = "console.folder_trust";
     "forge-claim" = "claims.forge_claim";
     "forge-issue" = "claims.forge_issue";
     "guard-policy" = "guard.guard_policy";

@@ -71,7 +71,8 @@ let
           --replace-fail 'GIT=git' 'GIT=${pkgs.git}/bin/git' \
           --replace-fail 'CURL=curl' 'CURL=${pkgs.curl}/bin/curl' \
           --replace-fail 'DEFAULT_CLAUDE_BIN=' 'DEFAULT_CLAUDE_BIN=${claudeUnwrapped}/bin/claude' \
-          --replace-fail 'CACHE_PROXY_URL=' 'CACHE_PROXY_URL=${cacheProxyUrl}'
+          --replace-fail 'CACHE_PROXY_URL=' 'CACHE_PROXY_URL=${cacheProxyUrl}' \
+          --replace-fail 'FOLDER_TRUST=' 'FOLDER_TRUST=${agentTools.launchers.folder-trust}'
         patchShebangs "$out/bin"
         HOME="$(mktemp -d)" "$out/bin/claude-account" status
       '';

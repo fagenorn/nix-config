@@ -13,6 +13,7 @@ import io
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -20,6 +21,7 @@ from unittest import mock
 
 from agent_tools.console import event_log, folder_trust
 from agent_tools.console.event_log import Event
+from . import console_test_support as support
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 
@@ -321,6 +323,103 @@ class WordsTest(unittest.TestCase):
             [("default", Path("/h/.claude.json")), ("work", Path("/a/profiles/work/.claude.json"))])
         self.assertEqual(folder_trust.targets(None, [Path("/a/profiles/work")]),
                          [("work", Path("/a/profiles/work/.claude.json"))])
+
+
+class CommandTest(unittest.TestCase):
+    """`folder-trust grant-registered --profile <name>` run as the module, in a sandboxed HOME."""
+
+    def setUp(self):
+        holder = tempfile.TemporaryDirectory()
+        self.addCleanup(holder.cleanup)
+        self.base = Path(holder.name)
+        self.home = self.base / "home"
+        self.accounts = self.base / "accounts"
+        self.home.mkdir()
+        (self.home / ".claude.json").write_text("{}", encoding="utf-8")
+        self.env = {**os.environ, "HOME": str(self.home), "CLAUDE_ACCOUNTS_DIR": str(self.accounts),
+                    "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "python")}
+
+    def repo(self, name: str) -> Path:
+        repo = self.base / name
+        repo.mkdir()
+        git("init", "-q", cwd=repo)
+        return repo
+
+    def register(self, **projects: Path) -> None:
+        support.write_registry(
+            self.home / ".agents/state/fleet/registry.json",
+            [{"project_id": project_id, "root": str(root)} for project_id, root in projects.items()])
+
+    def profile(self, name: str, document=None) -> Path:
+        directory = self.accounts / "profiles" / name
+        directory.mkdir(parents=True)
+        (directory / ".claude.json").write_text(
+            json.dumps({"oauthAccount": {"x": 1}} if document is None else document),
+            encoding="utf-8")
+        return directory / ".claude.json"
+
+    def run_command(self, *argv: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            [sys.executable, "-m", "agent_tools.console.folder_trust", *argv], env=self.env,
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, check=False)
+
+    def test_grant_registered_sets_every_registered_root_in_the_named_profile_only(self):
+        a, b = self.repo("a"), self.repo("b")
+        self.register(alpha=a, beta=b)
+        work, other = self.profile("work"), self.profile("other")
+        other_before = other.read_bytes()
+        home_before = (self.home / ".claude.json").read_bytes()
+        done = self.run_command("grant-registered", "--profile", "work")
+        self.assertEqual((done.returncode, done.stdout), (0, "alpha: granted\nbeta: granted\n"),
+                         done.stderr)
+        document = json.loads(work.read_text(encoding="utf-8"))
+        self.assertEqual(document["oauthAccount"], {"x": 1})
+        for repo in (a, b):
+            self.assertIs(
+                document["projects"][os.path.realpath(repo)]["hasTrustDialogAccepted"], True)
+        self.assertEqual(other.read_bytes(), other_before)
+        self.assertEqual((self.home / ".claude.json").read_bytes(), home_before)
+
+    def test_a_failed_project_prints_its_command_and_exits_1(self):
+        a = self.repo("a")
+        self.register(alpha=a)
+        self.profile("work", {"projects": []})
+        done = self.run_command("grant-registered", "--profile", "work")
+        key = os.path.realpath(a)
+        self.assertEqual(done.returncode, 1)
+        self.assertEqual(
+            done.stdout.splitlines(),
+            ["alpha: failed",
+             f"  Run this in a terminal: cd {key} && CLAUDE_ACCOUNT=work claude, "
+             "then accept the prompt and type /exit."])
+
+    def test_an_absent_registry_is_nothing_and_a_bad_name_is_exit_2(self):
+        self.profile("work")
+        done = self.run_command("grant-registered", "--profile", "work")
+        self.assertEqual((done.returncode, done.stdout), (0, ""), done.stderr)
+        bad = self.run_command("grant-registered", "--profile=default")
+        self.assertEqual((bad.returncode, bad.stderr),
+                         (2, "folder-trust: default is not an account name\n"))
+        missing = self.run_command("grant-registered", "--profile=ghost")
+        self.assertEqual((missing.returncode, missing.stderr), (2, "folder-trust: no account ghost\n"))
+
+    def test_an_unreadable_registry_is_exit_1(self):
+        self.profile("work")
+        path = self.home / ".agents/state/fleet/registry.json"
+        path.parent.mkdir(parents=True)
+        path.write_text("not json", encoding="utf-8")
+        done = self.run_command("grant-registered", "--profile=work")
+        self.assertEqual((done.returncode, done.stderr),
+                         (1, "folder-trust: the project registry cannot be read\n"))
+
+    def test_a_profile_named_like_an_option_is_granted(self):
+        a = self.repo("a")
+        self.register(alpha=a)
+        target = self.profile("-h")
+        done = self.run_command("grant-registered", "--profile=-h")
+        self.assertEqual((done.returncode, done.stdout), (0, "alpha: granted\n"), done.stderr)
+        self.assertIs(json.loads(target.read_text(encoding="utf-8"))["projects"][
+            os.path.realpath(a)]["hasTrustDialogAccepted"], True)
 
 
 if __name__ == "__main__":

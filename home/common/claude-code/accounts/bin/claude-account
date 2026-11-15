@@ -21,6 +21,11 @@ GIT=git
 CURL=curl
 DEFAULT_CLAUDE_BIN=
 
+# The folder-trust command (#1078): `add` has it grant every registered project's
+# folder trust in the new profile. Empty here, so a source copy grants nothing;
+# the Nix build writes in the command's store path.
+FOLDER_TRUST=
+
 # The cache proxy's URL. Empty here, so a source copy never routes; the Nix
 # build writes in the URL of the port it gives the cache-proxy service.
 CACHE_PROXY_URL=
@@ -282,6 +287,12 @@ cmd_add() {
   valid_name "$name" || die "'$name' is not an account name (use a-z, 0-9, - and _)"
   [ -d "$(profile_dir "$name")" ] && die "account '$name' already exists"
   sync_profile "$name"
+  # The console sets CLAUDE_ACCOUNT_SKIP_FOLDER_TRUST: it grants every registered
+  # project itself after the add. `--profile=` because a valid name may begin with `-`.
+  if [ -n "$FOLDER_TRUST" ] && [ "${CLAUDE_ACCOUNT_SKIP_FOLDER_TRUST:-}" != 1 ]; then
+    "$FOLDER_TRUST" grant-registered "--profile=$name" ||
+      echo "claude-account: some registered projects are not trusted in '$name' yet; run the commands above" >&2
+  fi
   echo "Created account '$name'. Bind a project to it with /account $name; its first launch asks you to sign in."
 }
 

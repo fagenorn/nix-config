@@ -15,8 +15,11 @@ otherwise.
 Adder. `Adder(command=("claude-account",), environ=None, timeout=ADD_TIMEOUT)` called with a name
 first refuses a name that `refusal` refuses, with `ValueError`, before any process starts. It then
 runs `[*command, "add", name]` with no shell, `stdin` from `DEVNULL`, `stdout` and `stderr` to
-`DEVNULL`, `env=dict(environ)` when `environ` is given (else the console's own), and `timeout`
-(`ADD_TIMEOUT`, 30 seconds). Exit 0 returns None. The launcher's `add` is the one implementation of
+`DEVNULL`, `env` the `environ` given (else the console's own) with `SKIP_TRUST_ENV` set to `1`, and `timeout`
+(`ADD_TIMEOUT`, 30 seconds). `SKIP_TRUST_ENV` is `CLAUDE_ACCOUNT_SKIP_FOLDER_TRUST`: the launcher's
+`add` then grants no folder trust itself, because the console grants every registered project after
+the add, outside the timeout, and reads each grant back (#1078); the variable marks nothing
+trusted. Exit 0 returns None. The launcher's `add` is the one implementation of
 profile creation: nothing here makes a directory or a link.
 
 Failures. A failed run raises `AddFailed(kind)`, `str(error) == kind`, `kind` one of `KINDS`:
@@ -39,6 +42,7 @@ Platform. `adder_for(platform)` is `Adder()` where `manager.supported(platform)`
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from collections.abc import Iterable, Mapping, Sequence
@@ -47,6 +51,7 @@ from agent_tools.console import event_log, manager
 
 ADDED = event_log.ACCOUNT_ADDED
 ADD_TIMEOUT = 30
+SKIP_TRUST_ENV = "CLAUDE_ACCOUNT_SKIP_FOLDER_TRUST"
 NAME = re.compile(r"[a-z0-9_-]+")
 INVALID = "not an account name: use a-z, 0-9, - and _"
 DEFAULT = "default is not an account name"
@@ -112,7 +117,7 @@ class Adder:
         reason = refusal(name)
         if reason is not None:
             raise ValueError(reason)
-        env = dict(self._environ) if self._environ is not None else None
+        env = {**(os.environ if self._environ is None else self._environ), SKIP_TRUST_ENV: "1"}
         try:
             done = manager.run_in_own_group(
                 [*self._command, "add", name], stdin=subprocess.DEVNULL,

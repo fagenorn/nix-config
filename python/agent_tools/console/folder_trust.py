@@ -74,10 +74,23 @@ Words. `TRUST_SENTENCE` is the sentence the page shows. `command(root, profile)`
 `cd <root> && CLAUDE_ACCOUNT=<profile> claude` (the root through `shlex.quote`) and
 `failed_words(root, profile)` is `Run this in a terminal: <command>, then accept the prompt and
 type /exit.`
+
+Command. `folder-trust grant-registered --profile <name>` (module `main(argv=None) -> int`) grants
+every registered project's trust in the one profile `<name>`, for the launcher's `add` (the
+`--profile=<name>` form is used there, because a valid name may begin with `-`). A `<name>` that
+`account_add.refusal` refuses prints `folder-trust: <reason>` on stderr and exits 2, as does a
+profile directory under `CLAUDE_ACCOUNTS_DIR` (default `$HOME/.claude-accounts`) that does not exist
+(`folder-trust: no account <name>`). Only `<that directory>/.claude.json` is written, never
+`~/.claude.json` or another profile. The registry is `agent_platform.registry_path()`: absent exits 0
+with no output; one that is not a valid registry prints `folder-trust: the project registry cannot be
+read` and exits 1. For each project in order the key is `trust_key(root)` (None is `failed` with no
+write), else `grant` runs; stdout gets one `<project_id>: <result>` line and, for `failed`, a second
+line `  <failed_words(key or root, name)>`. The exit status is 1 when any result is `failed`, else 0.
 """
 
 from __future__ import annotations
 
+import argparse
 import ctypes
 import errno
 import json
@@ -92,6 +105,7 @@ from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 
 from agent_tools.console import account_add, event_log, sessions
+from agent_tools.project_contract import agent_platform
 
 GRANTED = "granted"
 ALREADY = "already"
@@ -467,3 +481,47 @@ def command(root: str, profile: str) -> str:
 
 def failed_words(root: str, profile: str) -> str:
     return f"Run this in a terminal: {command(root, profile)}, then accept the prompt and type /exit."
+
+
+def _accounts_dir() -> Path:
+    configured = os.environ.get("CLAUDE_ACCOUNTS_DIR")
+    return Path(configured) if configured else Path(os.environ["HOME"]) / ".claude-accounts"
+
+
+def _grant_registered(name: str) -> int:
+    reason = account_add.refusal(name)
+    if reason is not None:
+        print(f"folder-trust: {reason}", file=sys.stderr)
+        return 2
+    profile = _accounts_dir() / "profiles" / name
+    if not profile.is_dir():
+        print(f"folder-trust: no account {name}", file=sys.stderr)
+        return 2
+    try:
+        projects = agent_platform.read_registry()
+    except (agent_platform.PlatformManifestError, OSError, RuntimeError, KeyError):
+        print("folder-trust: the project registry cannot be read", file=sys.stderr)
+        return 1
+    status = 0
+    for entry in projects:
+        key = trust_key(entry["root"])
+        result = FAILED if key is None else grant(profile / ".claude.json", key)
+        print(f"{entry['project_id']}: {result}")
+        if result == FAILED:
+            print(f"  {failed_words(key or entry['root'], name)}")
+            status = 1
+    return status
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="folder-trust", description=__doc__.splitlines()[0])
+    commands = parser.add_subparsers(dest="command", required=True)
+    registered = commands.add_parser(
+        "grant-registered", help="grant every registered project's folder trust in one profile")
+    registered.add_argument("--profile", required=True, metavar="NAME")
+    arguments = parser.parse_args(argv)
+    return _grant_registered(arguments.profile)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
