@@ -51,6 +51,9 @@ It is also given `register.adopter_for(sys.platform)` (#1052), so on Linux the o
 repository on the page and sees what adopting it would change, or registers it when it is adopted
 (`agent_tools.console.register`); elsewhere the route refuses.
 
+It is also given `trust_home=Path.home()` (#1078), so the owner's Apply approval grants the folder's
+client trust in `~/.claude.json` as well as in every profile (`agent_tools.console.folder_trust`).
+
 It is also given `approve.forge_for(sys.platform)` (#1054), so on Linux the owner approves a ready
 plan and the console pushes its branch and opens its pull request through `gh`; elsewhere the route
 refuses.
@@ -66,6 +69,7 @@ import signal
 import sqlite3
 import sys
 import threading
+from pathlib import Path
 
 from agent_tools.console import (
     account_add, account_remove, approve, inbox, manager, nudge, probe, register, service, signin,
@@ -105,7 +109,7 @@ def main(argv: list[str] | None = None) -> int:
             signer_out=account_remove.signer_out_for(sys.platform),
             account_remover=account_remove.remover_for(sys.platform),
             adopter=register.adopter_for(sys.platform),
-            forge=approve.forge_for(sys.platform),
+            forge=approve.forge_for(sys.platform), trust_home=Path.home(),
             choice_file=service.default_choice_file())
     except TokenError as error:
         print(f"console: page token unusable: {error}", file=sys.stderr)

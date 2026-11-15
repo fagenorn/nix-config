@@ -257,7 +257,14 @@ or another one than the body's, `approve.STALE`; when it is not ready, `approve.
 the plan's adoption is an opened pull request that is still open or ready (`approve.OPENED`) or was
 merged (`approve.MERGED`). A closed pull request, a failed apply or no adoption at all is approved
 again as a fresh apply. Otherwise the answer is an empty `204` at once and the run is dispatched on
-a tracked thread (`APPROVAL_THREAD`) that `close` joins. The run applies the plan (`Adopter.apply`,
+a tracked thread (`APPROVAL_THREAD`) that `close` joins. A fresh approval (no adoption yet) first
+grants the folder's client trust (#1078, ADR-console-033): `folder_trust.grant` for the main
+checkout's key in `~/.claude.json` (when the service was given a `trust_home`) and in every profile,
+one `trust.granted` owner-action row (cause `apply`; one profile and its result per entry, no file
+content) and one stderr line `console: trust_granted <cause> <project> <n granted> <n already> <n
+failed>`; a failed grant never stops the run, and a resumed approval (Try again, Apply it again)
+grants nothing. `close` waits for a grant under way, so its row is kept, and a grant that starts
+after `close` began writes nothing (`console: trust_grant_skipped closing`). The run applies the plan (`Adopter.apply`,
 acknowledging deletions only when the shown plan lists them) and appends `adoption.step` `applied`,
 pushes only the one adoption branch, at the commit apply recorded (`approve.push`), then looks for the branch's pull request
 before opening one and, when the open fails, looks once more (a pull request whose answer was lost
@@ -972,7 +979,7 @@ import traceback
 import uuid
 import collections
 from collections import OrderedDict
-from collections.abc import Callable, Collection, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qsl
@@ -980,7 +987,7 @@ from urllib.parse import parse_qsl
 from agent_tools.claims import owner_actions
 from agent_tools.console import (
     account_add, account_remove, answer, approve, capacity, contract_draft, deliveries, digest, exclusion, idle, inbox,
-    manager, nudge, pin, plan_questions, probe, register, revive, sessions, signin, signin_run, sprints, write_guard)
+    folder_trust, manager, nudge, pin, plan_questions, probe, register, revive, sessions, signin, signin_run, sprints, write_guard)
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
     MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_STOP_FAILED,
@@ -2190,6 +2197,8 @@ class ConsoleService:
                  draft_reader: Callable[[str], dict] = contract_draft.read,
                  forge=None,
                  pusher: Callable[..., None] = approve.push,
+                 trust_home: Path | None = None,
+                 trust_granter: Callable[[Path, str], str] = folder_trust.grant,
                  approval_dispatch: Callable[[Callable[[], None]], None] | None = None,
                  probe_dispatch: Callable[[Callable[[], None]], None] | None = None,
                  probe_tick_seconds: float = PROBE_TICK_SECONDS,
@@ -2206,6 +2215,9 @@ class ConsoleService:
         self._draft_reader = draft_reader
         self._forge = forge
         self._pusher = pusher
+        self._trust_home = None if trust_home is None else Path(trust_home)
+        self._trust_granter = trust_granter
+        self._grants_running = 0
         self._approving = False
         self._enrolling: set[str] = set()
         self._approval_workers: list[threading.Thread] = []
@@ -2305,6 +2317,7 @@ class ConsoleService:
         self.log: EventLog | None = None
         self._ingest = threading.Lock()
         self._idle = threading.Condition(self._ingest)
+        self._grants_done = threading.Condition(self._ingest)
         self._signin_runs = None if signin_runs is None else signin_runs(on_end=self._signin_ended)
         self._published = threading.Condition()
         self._view = b""
@@ -3121,9 +3134,56 @@ class ConsoleService:
         approve.step_row(payload)
         return payload
 
+    def _grant_trust(self, cause: str, root: str, project: str,
+                     profiles: Sequence[tuple[str, Path]] | None = None) -> list[tuple[str, str]]:
+        """Grant the folder's client trust in every target and log one `trust.granted` row.
+
+        The row is kept even when `close` has begun, the files being written already; a grant that
+        starts after `close` began writes nothing. `close` waits for every grant under way.
+        """
+        with self._ingest:
+            if self._closed:
+                print("console: trust_grant_skipped closing", file=sys.stderr)
+                return []
+            self._grants_running += 1
+        try:
+            found = (folder_trust.targets(self._trust_home, self._profile_dirs())
+                     if profiles is None else list(profiles))
+            if not found:
+                return []
+            key = folder_trust.trust_key(root)
+            results = []
+            for name, path in found:
+                if key is None:
+                    results.append((name, folder_trust.FAILED))
+                    continue
+                try:
+                    results.append((name, self._trust_granter(path, key)))
+                except Exception as error:
+                    print(f"console: trust_grant_error {name} {type(error).__name__}",
+                          file=sys.stderr)
+                    results.append((name, folder_trust.FAILED))
+            row = folder_trust.granted_row(
+                cause, project, key if key is not None else os.path.realpath(root), results)
+            with self._ingest:
+                self._fold(self.log.append([row]))
+                if not self._closed:
+                    self._publish()
+            counts = [sum(1 for _, result in results if result == one)
+                      for one in folder_trust.RESULTS]
+            print(f"console: trust_granted {cause} {project} {counts[0]} {counts[1]} {counts[2]}",
+                  file=sys.stderr)
+            return results
+        finally:
+            with self._ingest:
+                self._grants_running -= 1
+                self._grants_done.notify_all()
+
     def _run_approval(self, root: str, shown: dict, adoption: dict | None) -> None:
         final = None
         try:
+            if adoption is None:
+                self._grant_trust("apply", root, shown["project_id"] or register.name_of(root))
             final = self._approval_steps(root, shown, adoption)
         except Exception as error:
             self._log_approval_error({"stage": "run", "root": root,
@@ -5132,4 +5192,6 @@ class ConsoleService:
             self._server.shutdown()
         self._server.server_close()
         with self._ingest:
+            while self._grants_running:
+                self._grants_done.wait()
             self.log.close()
