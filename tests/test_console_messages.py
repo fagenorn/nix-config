@@ -830,6 +830,53 @@ class MessageLifeViewTest(unittest.TestCase):
         self.assertIsNotNone(entry["ended_at"])
         self.assertIsNone(entry["tell_text"])
 
+    def test_an_ended_sprint_points_at_no_control_and_promises_no_pickup(self):
+        parts = {"done": "d", "excluded": ["x"], "slices": ["a"], "risks": ["r"], "asks": ["q"]}
+        brief = message_row(2, event_log.BRIEF_SENT, {"version": 1, "goal": "g", "brief": parts})
+        rows = message_rows(brief, messaged_row(3, TEXT))
+        (sprint,) = sprint_states(rows).values()
+        folded = {sprint.sprint_id: dataclasses.replace(sprint, stopped_at=message_at(6))}
+
+        def ended(now_ms):
+            return derive_view([state("p00", 1)], sprints=folded,
+                               now_ms=now_ms)["entries"][0]["sprints"][0]
+        (sent,) = ended(AT + 60_000)["messages"]
+        self.assertEqual((sent["state"], sent["state_text"], sent["action_text"]),
+                         ("sent", "sent", None))
+        entry = ended(AT + FIVE_MIN)
+        self.assertIsNotNone(entry["ended_at"])
+        (late,) = entry["messages"]
+        self.assertEqual((late["state"], late["state_text"], late["action_text"]),
+                         ("not_picked_up", "not picked up after 5 min", None))
+
+
+class MessageWindowViewTest(unittest.TestCase):
+    """A reply to a message older than the shown ten is never cut from the view (#1086)."""
+
+    def rows(self):
+        sent = [messaged_row(seq, "note %d" % seq) for seq in range(3, 15)]
+        return message_rows(*sent, message_row(15, event_log.SPRINT_ANSWERED,
+                                               {"message": 3, "reply": ANSWER}))
+
+    def view(self, looked):
+        return derive_view([state("p00", 1)], sprints=sprint_states(self.rows()),
+                           now_ms=AT + 20 * 60_000, looked=looked)
+
+    def test_a_new_reply_to_the_oldest_of_twelve_messages_stays_shown_and_announced(self):
+        view = self.view(message_at(14))
+        shown = view["entries"][0]["sprints"][0]["messages"]
+        self.assertEqual([m["id"] for m in shown], [3, *range(5, 15)])
+        self.assertEqual([m["id"] for m in shown if m["new"]], [3])
+        self.assertEqual([r["message_id"] for r in view["new_replies"]], [3])
+        self.assertEqual(view["new_replies_text"],
+                         "New reply from the manager of make the importer resumable")
+
+    def test_an_old_reply_already_looked_at_is_cut_with_the_other_old_messages(self):
+        view = self.view(message_at(15))
+        shown = view["entries"][0]["sprints"][0]["messages"]
+        self.assertEqual([m["id"] for m in shown], list(range(5, 15)))
+        self.assertEqual(view["new_replies"], [])
+
 
 class MessagePickupServiceTest(MessageRouteTest):
     def test_the_service_words_the_pickup_by_whether_it_has_a_nudger(self):

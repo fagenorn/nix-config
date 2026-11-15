@@ -179,7 +179,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .sprint { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; min-width: 0; padding: 12px 16px; border: 1px solid var(--hair); border-radius: 12px; overflow-wrap: anywhere; font-size: .8125rem; color: var(--sub0); }
 .sp-who { display: flex; flex-direction: column; min-width: 0; }
 .sp-project { font-size: .75rem; color: var(--ov2); }
-.sp-now { flex: 1 0 100%; color: var(--text); }
+.sp-now { flex: 1 0 100%; grid-column: 2 / -1; color: var(--text); }
 .sprint .title-line { color: var(--text); font-weight: 500; overflow-wrap: anywhere; }
 .sprint-goal-full { color: var(--text); overflow-wrap: anywhere; }
 .sprint .age, .sprint .manager, .sprint .until, .sprint .status-age { color: var(--ov2); }
@@ -216,6 +216,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .sprint-earlier { flex: 1 0 100%; font-size: .8125rem; }
 .sprint-earlier summary { cursor: pointer; color: var(--ov2); }
 .message-new { font-weight: 600; color: var(--text); }
+.finished-list > summary .message-new, .sprint-earlier summary .message-new { margin-left: 10px; }
 .new-replies { margin-top: 8px; font-size: .9375rem; color: var(--sub0); max-width: 44rem; }
 .tell-hint { color: var(--ov2); font-size: .8125rem; }
 .finished-messages { padding: 0 0 8px 16px; }
@@ -248,6 +249,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .closing-report { padding: 2px 0 8px 16px; color: var(--sub0); overflow-wrap: anywhere; }
 .closing-report p { margin-top: 4px; white-space: pre-wrap; }
 .closing-report .closing-counts { color: var(--ov2); }
+.closing-report .tracker { display: inline-block; margin-top: 4px; color: var(--lav); text-underline-offset: 3px; }
 #digest { margin-top: 40px; max-width: 44rem; }
 #digest:empty { margin-top: 0; }
 .sec-h { font: 600 .9375rem/1.4 var(--ui); color: var(--text); }
@@ -480,6 +482,13 @@ function untouchedDays(lastActivity) {
   const days = Math.floor((Date.now() - Date.parse(lastActivity)) / 86400000);
   return Number.isFinite(days) && days >= 1 ? days : 0;
 }
+function trackerLink(sprint) {
+  if (typeof sprint.tracker_url !== "string" || !sprint.tracker_url.startsWith("https:")) return null;
+  const link = el("a", "tracker", "Open on the tracker");
+  link.rel = "noreferrer";
+  link.href = sprint.tracker_url;
+  return link;
+}
 function sprintDetail(sprint) {
   const fold = el("details", "sprint-detail");
   fold.dataset.key = "sprint:" + sprint.sprint_id;
@@ -513,12 +522,8 @@ function sprintDetail(sprint) {
   if (typeof sprint.milestone === "string") {
     fold.appendChild(el("p", "milestone", "Milestone: " + sprint.milestone));
   }
-  if (typeof sprint.tracker_url === "string" && sprint.tracker_url.startsWith("https:")) {
-    const link = el("a", "tracker", "Open on the tracker");
-    link.rel = "noreferrer";
-    link.href = sprint.tracker_url;
-    fold.appendChild(link);
-  }
+  const tracker = trackerLink(sprint);
+  if (tracker !== null) fold.appendChild(tracker);
   return fold;
 }
 const BALL_LOOKS = new Map([
@@ -576,7 +581,9 @@ function messageLife(parent, sprint, earlierWasOpen) {
   const fold = el("details", "sprint-earlier");
   fold.dataset.key = "earlier:" + sprint.sprint_id;
   if (earlierWasOpen) fold.open = true;
-  fold.appendChild(el("summary", "", "Earlier messages (" + older.length + ")"));
+  const summary = el("summary", "", "Earlier messages (" + older.length + ")");
+  if (older.some((message) => message.new === true)) summary.appendChild(el("span", "message-new", "new reply"));
+  fold.appendChild(summary);
   fold.appendChild(messageList(older));
   parent.appendChild(fold);
 }
@@ -3049,6 +3056,14 @@ function closingReport(sprint) {
     box.appendChild(el("p", "differently", "Would do differently: " + closing.differently));
   }
   if (typeof closing.counts_text === "string") box.appendChild(el("p", "closing-counts", closing.counts_text));
+  for (const [label, key] of [["Landed", "landed"], ["Held", "held"], ["Dropped", "dropped"]]) {
+    const numbers = Array.isArray(closing[key]) ? closing[key] : [];
+    if (numbers.length > 0) {
+      box.appendChild(el("p", "closing-" + key, label + ": " + numbers.map((n) => "#" + n).join(", ")));
+    }
+  }
+  const tracker = trackerLink(sprint);
+  if (tracker !== null) box.appendChild(tracker);
   return box;
 }
 function finishedLine(sprint) {

@@ -124,6 +124,7 @@ class ScreenshotCaptureTest(unittest.TestCase):
             out = Path(tmp) / "out"
             taken = shots.capture(out)
             self.assertEqual([s for s in taken if s.width == 480 and s.scroll_width > 480], [])
+            self.assertEqual([s for s in taken if s.squeezed], [])
             self.assertEqual(shots.main(["--out", str(out)]), 0)
             names = sorted(p.name for p in out.iterdir())
             self.assertEqual(

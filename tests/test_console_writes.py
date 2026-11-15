@@ -559,7 +559,8 @@ class GoalRouteTest(Case):
             "manager_state": "unavailable", "manager_until": None, "retry": False,
             "progress": None, "progress_text": None, "status": None, "status_at": None,
             "next": None, "milestone": None, "tracker_url": None, "issues": [], "waiting": 0,
-            "sessions": [], "messages": [], "reach_text": None,
+            "sessions": [], "messages": [],
+            "tell_text": "The manager picks it up at its next turn.", "reach_text": None,
             "stoppable": True, "ended_at": None, "stop_text": None, "closing": None,
             "state_until": None}])
         self.assertEqual(view_of(svc)["recent_projects"][0], "owner/p01")

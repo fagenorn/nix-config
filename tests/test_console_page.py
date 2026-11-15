@@ -3139,6 +3139,37 @@ class PageMessageLifeTest(unittest.TestCase):
         self.assertEqual(nodes_of_class(plain["projects"], "message-new"), [])
         self.assertEqual(nodes_of_class(plain["statement"], "new-replies"), [])
 
+    def test_a_new_reply_on_an_older_message_is_marked_on_the_closed_earlier_fold(self) -> None:
+        reply = {"reply": REPLY_TEXT, "reply_at": "2026-11-12T10:07:00+00:00"}
+
+        def frame_with(fresh: bool) -> dict:
+            return life_frame([life_entry(3, "replied", "replied", new=fresh, **reply),
+                               life_entry(4, "picked_up", "picked up"),
+                               life_entry(5, "sent", "sent")])
+
+        fresh, old = render([
+            START, {"frame": frame_with(True)}, {"snapshot": True},
+            {"frame": frame_with(False)}, {"snapshot": True},
+        ])
+        (line,) = sprint_lines(fresh)
+        (fold,) = of_class(line, "details", "sprint-earlier")
+        self.assertFalse(fold["open"])
+        (summary,) = [c for c in fold["children"] if c["tag"] == "summary"]
+        self.assertEqual([full(n) for n in of_class(summary, "span", "message-new")], ["new reply"])
+        (exchange,) = of_class(line, "div", "sprint-exchange")
+        self.assertEqual(of_class(exchange, "span", "message-new"), [])
+        (line,) = sprint_lines(old)
+        (fold,) = of_class(line, "details", "sprint-earlier")
+        self.assertEqual(of_class(fold, "span", "message-new"), [])
+
+    def test_a_new_reply_mark_in_a_summary_is_set_off_from_the_words_before_it(self) -> None:
+        # The harness applies no CSS: the summaries are not flex boxes, so the span needs its own margin.
+        style = re.findall(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"))[0]
+        rules = style_rules(style)
+        for selector in (".finished-list > summary .message-new", ".sprint-earlier summary .message-new"):
+            merged = {k: v for s, d in rules if s == selector for k, v in d.items()}
+            self.assertEqual(merged.get("margin-left"), "10px", selector)
+
     def test_the_new_marks_are_never_peach(self) -> None:
         text = PAGE.read_text(encoding="utf-8")
         found = 0
@@ -3898,6 +3929,33 @@ class PageSprintEndTest(unittest.TestCase):
         for stale_text in ("two slices are building", "start the resume slice", "in delivery"):
             self.assertNotIn(stale_text, full(row))
 
+    def test_an_opened_finished_line_names_its_landed_held_and_dropped_issues_and_the_tracker(
+            self) -> None:
+        closing = {**CLOSING, "landed": [12, 14], "held": [15], "dropped": [13]}
+        done = {**DONE_SPRINT, "closing": closing, "tracker_url": "https://github.com/o/p/milestone/3"}
+        bad = {**done, "tracker_url": "javascript:alert(1)"}
+        bare = {**DONE_SPRINT, "closing": {**CLOSING, "landed": [], "held": [], "dropped": []},
+                "tracker_url": None}
+        good, refused, none = render([
+            step for frame in (done, bad, bare)
+            for step in ({"frame": with_sprints([frame])}, {"open": "finished"},
+                         {"open": "ended:" + "a" * 16}, {"snapshot": True})
+        ])
+        (row,) = of_class(good["projects"], "li", "finished-line")
+        self.assertEqual(
+            [(full(n), n["cls"]) for n in of_class(row, "p", "closing-landed")
+             + of_class(row, "p", "closing-held") + of_class(row, "p", "closing-dropped")],
+            [("Landed: #12, #14", "closing-landed"), ("Held: #15", "closing-held"),
+             ("Dropped: #13", "closing-dropped")])
+        (link,) = of_class(row, "a", "tracker")
+        self.assertEqual(link["href"], "https://github.com/o/p/milestone/3")
+        (row,) = of_class(refused["projects"], "li", "finished-line")
+        self.assertEqual(of_class(row, "a", "tracker"), [])
+        (row,) = of_class(none["projects"], "li", "finished-line")
+        self.assertEqual([n for key in ("landed", "held", "dropped")
+                          for n in of_class(row, "p", "closing-" + key)], [])
+        self.assertEqual(of_class(row, "a", "tracker"), [])
+
     def test_a_stopped_sprint_reads_its_counts_or_stopped_by_you(self) -> None:
         stopped = {**DONE_SPRINT, "state": "stopped", "state_text": "stopped by you"}
         bare = {**stopped, "closing": None}
@@ -4108,6 +4166,12 @@ class PageSprintGlanceTest(unittest.TestCase):
             found = re.match(r"^16px minmax\(0, 1fr\) fit-content\((\d+)%\)$", value)
             self.assertIsNotNone(found, value)
             self.assertLessEqual(int(found.group(1)), 50)
+
+    def test_the_now_sentence_spans_the_text_columns_of_the_head_grid(self) -> None:
+        # Grid auto-placement would put it in the 16px icon column; the harness applies no CSS.
+        style = re.findall(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"))[0]
+        merged = {k: v for s, d in style_rules(style) if s == ".sp-now" for k, v in d.items()}
+        self.assertEqual(merged.get("grid-column"), "2 / -1")
 
     def test_an_unknown_sprint_ball_fails_loud(self) -> None:
         for ball in ("bogus", "constructor", None):

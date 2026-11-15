@@ -17,7 +17,9 @@ Contract:
   `XDG_CONFIG_HOME` under another for the run, so the owner's real accounts directory and real
   registry are never read or written. The temporary roots are removed after each state.
 - `main(["--out", dir])` prints each written path. It returns 1 (and says so) when any shot's
-  `document.documentElement.scrollWidth` exceeds its width, 2 with a one-line reason when
+  `document.documentElement.scrollWidth` exceeds its width or any sprint's "what it is doing
+  now" sentence is drawn narrower than half its head (it was once squeezed into the icon
+  column, which the sideways check misses), 2 with a one-line reason when
   Playwright or Chromium is missing, else 0. Playwright is imported inside `capture` only,
   so the fixture half of this module needs nothing beyond the standard library.
 """
@@ -73,6 +75,7 @@ class Shot:
     width: int
     path: Path
     scroll_width: int
+    squeezed: int = 0
 
 
 def sandbox_environ(root: Path) -> dict[str, str]:
@@ -268,11 +271,14 @@ def _shoot(browser, url: str, state: str, width: int, out: Path) -> Shot:
             page.click('details[data-key="finished"] > summary')
             page.click('details[data-key^="ended:"] > summary')
         scroll_width = page.evaluate("document.documentElement.scrollWidth")
+        squeezed = page.evaluate(
+            "Array.from(document.querySelectorAll('.sp-now')).filter("
+            "(n) => n.clientWidth < n.parentElement.clientWidth / 2).length")
         path = out / f"{state}-{width}.png"
         page.screenshot(path=str(path), full_page=True)
     finally:
         page.close()
-    return Shot(state, width, path, scroll_width)
+    return Shot(state, width, path, scroll_width, squeezed)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -301,7 +307,11 @@ def main(argv: list[str] | None = None) -> int:
     for shot in wide:
         print(f"console-screenshots: {shot.path.name} scrolls sideways "
               f"({shot.scroll_width} > {shot.width})")
-    return 1 if wide else 0
+    squeezed = [shot for shot in taken if shot.squeezed > 0]
+    for shot in squeezed:
+        print(f"console-screenshots: {shot.path.name} squeezes the now sentence "
+              f"({shot.squeezed} narrower than half its head)")
+    return 1 if wide or squeezed else 0
 
 
 if __name__ == "__main__":
