@@ -219,14 +219,20 @@ the register child, never by the console. Any other exception is `console: regis
 <Type>` and 500 `registering failed`.
 
 `POST /api/register-confirm` (#1078, ADR-console-034) is the answer to the Register card
-(`register.confirm_items`) of a repository that is already adopted. It runs the same checks with
+(`register.confirm_items`) of a repository that is already adopted, and (#1085, ADR-console-035) to
+the failure card (`register.failure_items`) of a registration that failed. It runs the same checks with
 `MAX_REGISTER_CONFIRM_BYTES` (4096) and `register.parse_confirm_request`: 400 `bad registration
 approval`. The service refuses, each as 409 with the text, one stderr line `console:
 register_confirm_refused <reason>`, appending and running nothing, in this order: without an adopter,
 `register.UNAVAILABLE`; while a run is under way, `register.running`; when the shown registration is
-not the waiting row (`register.waiting`) or names another root, `register.NOT_WAITING`. `not_now`
-appends the waiting row again with the note `register.LATER_NOTE` (`register.dismissed`), which
-writes no trust and runs no child, and answers `204`. `register` also refuses an unreadable registry
+not the row the choice answers (`register` the waiting row, `try_again` the failing one,
+`register.failing`, `not_now` either) or names another root, `register.NOT_WAITING`. `not_now`
+appends that row again with the note `register.LATER_NOTE` (`register.dismissed`), which
+writes no trust and runs no child, and answers `204`. `try_again` takes the same path as
+`POST /api/register-project` (the fleet read, `register.refusal`, the running mark, the plan, and for a
+`no_change` plan the Register card as today), with the shown row re-checked by its `at` under the ingest
+lock before the mark is set; it grants no folder trust and never runs the register child directly.
+`register` also refuses an unreadable registry
 and a root the registry already holds, as the first write does, and otherwise answers `204` at once
 and dispatches the run: the folder's trust is granted in every profile (`_grant_trust`, cause
 `register`, ADR-console-034), then the plan runs again and, for a `no_change` plan, the register
@@ -2556,6 +2562,8 @@ class ConsoleService:
             trust_items=folder_trust.items(self._trust_failures),
             confirm_items=register.confirm_items(
                 self._registration, running=self._registering is not None),
+            failure_items=register.failure_items(
+                self._registration, running=self._registering is not None),
             pin=pin.note(self._pinned, cap, manager.session_profile(cap, self._use.last)),
             pin_launches=self._pin_launches.launched,
             managers=self._launcher is not None, pending=self._pending))
@@ -3034,11 +3042,11 @@ class ConsoleService:
             raise
 
     def confirm_registration(self, root: str, choice: str) -> None:
-        """Answer the Register card of an adopted repository; refusals are `sprints.Refused`."""
+        """Answer the Register card or the failure card of a repository; refusals are `sprints.Refused`."""
         if self._adopter is None:
             raise sprints.Refused(register.UNAVAILABLE)
         with self._ingest:
-            latest = self._check_waiting(root)
+            latest = self._check_answerable(root, choice)
             if choice == register.LATER_VALUE:
                 self._fold(self.log.append([register.ended(register.dismissed(latest))]))
                 self._publish()
@@ -3053,12 +3061,15 @@ class ConsoleService:
             raise sprints.Refused(reason)
         project = latest["project_id"] or register.name_of(root)
         with self._ingest:
-            if self._check_waiting(root)["at"] != latest["at"]:
+            if self._check_answerable(root, choice)["at"] != latest["at"]:
                 raise sprints.Refused(register.NOT_WAITING)
             self._registering = root
             self._publish()
 
         def run() -> None:
+            if choice == register.TRY_VALUE:
+                self._run_registration(root, entries)
+                return
             try:
                 self._grant_trust("register", root, project)
             except Exception as error:
@@ -3074,12 +3085,19 @@ class ConsoleService:
                 self._publish()
             raise
 
-    def _check_waiting(self, root: str) -> dict:
-        """The registration row waiting on its Register card for `root`, held under the ingest lock."""
+    def _check_answerable(self, root: str, choice: str) -> dict:
+        """The registration row `choice` answers for `root`, held under the ingest lock.
+
+        `register` answers the waiting row, `try_again` the failing one and `not_now` either.
+        """
         if self._registering is not None:
             raise sprints.Refused(register.running(register.name_of(self._registering)))
         latest = self._registration
-        if not register.waiting(latest) or latest["root"] != root:
+        if latest is None or latest["root"] != root:
+            raise sprints.Refused(register.NOT_WAITING)
+        asks = ((choice in (register.CONFIRM_VALUE, register.LATER_VALUE) and register.waiting(latest))
+                or (choice in (register.TRY_VALUE, register.LATER_VALUE) and register.failing(latest)))
+        if not asks:
             raise sprints.Refused(register.NOT_WAITING)
         return latest
 

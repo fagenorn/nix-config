@@ -679,6 +679,58 @@ REFUSED_TEXT = ("The plan refused that answer: the answer is not the one this ca
                 "question offers")
 
 
+class RegisterFailureCardTest(Case):
+    """A failed registration is one Try again card the service answers (#1085, ADR-console-035)."""
+
+    FAILED = {"error": {"code": "x", "repair_id": "adopt.manifest.missing", "violations": [
+        {"pointer": "", "message": "the installed platform manifest was not found"}]}}
+
+    def failed(self):
+        self.fake = Fake(plan=self.FAILED)
+        self.begin(self.fake)
+        repo = git_repo(self.parent / "fail-app")
+        self.assertEqual(self.post({"path": str(repo)})[0], 204)
+        return repo, self.settled_row(repo)
+
+    def failure_cards(self):
+        return [i for i in self.view()["inbox"]["open"] if i["reason"] == "register_failed"]
+
+    def test_a_failed_plan_is_one_card_and_the_work_line_says_needs_you(self):
+        repo, row = self.failed()
+        self.assertEqual(row["result"], "failed")
+        view = self.view()
+        self.assertEqual(view["statement"]["inbox_items"], 1)
+        (card,) = self.failure_cards()
+        self.assertEqual([o["label"] if isinstance(o, dict) else o
+                          for o in card["questions"][0]["options"]], ["Try again", "Not now"])
+        self.assertEqual(view["registration"]["line"], "Register fail-app: needs you")
+
+    def test_try_again_plans_again_and_not_now_removes_the_card(self):
+        repo, _ = self.failed()
+        before = len(self.rows(event_log.REGISTRATION_ENDED))
+        self.assertEqual(self.confirm({"root": str(repo), "choice": "try_again"})[0], 204)
+        self.settled_row(repo)
+        self.assertEqual([c[0] for c in self.fake.calls], ["plan", "plan"])
+        self.assertEqual(len(self.rows(event_log.REGISTRATION_ENDED)), before + 1)
+        self.assertEqual(self.confirm({"root": str(repo), "choice": "not_now"})[0], 204)
+        self.assertEqual(self.failure_cards(), [])
+        self.assertEqual(self.view()["inbox"]["open"], [])
+        self.assertEqual(self.rows(event_log.REGISTRATION_ENDED)[-1][1]["note"],
+                         register.LATER_NOTE)
+        self.assertEqual([c[0] for c in self.fake.calls], ["plan", "plan"])
+
+    def test_a_try_again_for_a_row_that_did_not_fail_is_refused(self):
+        self.fake = Fake(plan=NO_CHANGE, report={"registered": True, "project_id": "o/r"})
+        self.begin(self.fake)
+        repo = git_repo(self.parent / "r")
+        self.assertEqual(self.post({"path": str(repo)})[0], 204)
+        self.assertEqual(self.settled_row(repo)["note"], register.CONFIRM_NOTE)
+        calls = list(self.fake.calls)
+        status, _, body = self.confirm({"root": str(repo), "choice": "try_again"})
+        self.assertEqual((status, body), (409, (register.NOT_WAITING + "\n").encode()))
+        self.assertEqual(self.fake.calls, calls)
+
+
 class PlanAnswerGuardTest(Case):
     def test_the_write_is_refused_without_the_token_or_from_another_origin_and_runs_nothing(self):
         fake = Fake(plan=DRAFT)
