@@ -3,7 +3,9 @@
 Everything between the inventory and the document: the project's identity and
 its open questions (D35), the `.gitignore` amendment, the ordered typed
 operations, the seven routing rules (D10), the ready gates, and the
-content-addressed `plan_id` (D15).
+content-addressed `plan_id` (D15). A contract drafted for a checkout that has
+none (#1067) is planned as the file the adoption writes: `build_operations`
+puts its write first and `compute_plan_id` takes the draft as an eleventh input.
 
 Every closed set, hash and path predicate it works over comes from
 `adopt_inspection`, so the two halves cannot disagree about the vocabulary.
@@ -535,7 +537,8 @@ def amended_contract(source: dict, interval: dict,
     artifacts = paths.get("artifacts")
     if isinstance(artifacts, dict):
         for key in ("specs", "plans"):
-            if artifacts.get(key) in relocations:
+            if (isinstance(artifacts.get(key), str)
+                    and artifacts[key] in relocations):
                 artifacts[key] = relocations[artifacts[key]]
     rejections = paths.get("rejections")
     if isinstance(rejections, list):
@@ -649,7 +652,8 @@ def check_reference_writes(changes: list[dict],
 def build_operations(root: Path, found: Candidates, manifest: dict,
                      contract_source: dict | None,
                      plan_id: str, links: LinkRewrites,
-                     reference_files: dict[str, tuple[str, str]]
+                     reference_files: dict[str, tuple[str, str]],
+                     drafted: bool = False
                      ) -> tuple[list[dict], list[dict], dict[str, bytes]]:
     """The typed operations either side of the adoption's own bookkeeping.
 
@@ -683,7 +687,15 @@ def build_operations(root: Path, found: Candidates, manifest: dict,
     # Compared as values, never as bytes: `contract_source` is the file this
     # parsed, so a contract the amendment leaves unchanged is no work however
     # it happens to be formatted, and only a real change is re-serialized.
-    if amended is not None and amended != contract_source:
+    if drafted and amended is not None:
+        # A drafted contract is a file the checkout does not have, so the
+        # write is unconditional: it is the adoption's first operation.
+        after = authored_bytes(amended)
+        operations.append(operation(
+            "write-file", [CONTRACT_FILENAME], [CONTRACT_FILENAME], None,
+            sha256_hash(after)))
+        contents[CONTRACT_FILENAME] = after
+    elif amended is not None and amended != contract_source:
         current = read_bytes_bounded(root / CONTRACT_FILENAME)
         after = authored_bytes(amended)
         if current is not None:
@@ -1027,12 +1039,15 @@ def compute_plan_id(project_id: str | None, base_revision: str,
                     answered: list[dict], link_rewrites: dict,
                     path_references: list[dict],
                     reference_policies: list[dict],
-                    reference_formatting: list[dict]) -> str:
-    """D15's content address over exactly ten inputs: the project id, the
+                    reference_formatting: list[dict],
+                    contract_draft: dict | None = None) -> str:
+    """D15's content address over exactly ten inputs, eleven with a drafted
+    contract (#1067): the project id, the
     base revision, the platform block, the evidence, the answered decisions,
     the schema version, the `link_rewrites` summary (#345), the
     `path_references` rows (#350), the `reference_policies` rows (#372) and
-    the `reference_formatting` rows (#376).
+    the `reference_formatting` rows (#376), then the drafted contract exactly
+    as given, which only a plan made with one has.
 
     The manifest's `migrations` array is deliberately *not* one of them (D36):
     it can only route toward `migration_required` or `repair_required`, and
@@ -1053,6 +1068,8 @@ def compute_plan_id(project_id: str | None, base_revision: str,
         "reference_policies": reference_policies,
         "reference_formatting": reference_formatting,
     }
+    if contract_draft is not None:
+        source["contract_draft"] = contract_draft
     return "sha256:" + hashlib.sha256(canonical_json(source)).hexdigest()
 
 

@@ -208,6 +208,17 @@ service is closed, in the same ingest section that clears the running mark, so t
 the register child, never by the console. Any other exception is `console: registration_failed
 <Type>` and 500 `registering failed`.
 
+A checkout with no `.agents/project.json` (ADR-console-031) is drafted instead of planned: the run
+reads it (`draft_reader`, `contract_draft.read` by default), drafts the contract from the fleet
+entries the request already read, and, while any field of the draft is open, appends one
+`drafting` row and runs no child. When none is open the registry is read again (a project id the
+registry gained since the draft was read reopens the project-id card, with no child), and otherwise
+the draft is written as JSON to a file `console/drafts/<name>.json` under the state root (mode 0600,
+never inside the checkout) that the adopter's plan takes as `--contract-draft`; the file is removed
+after the child returns, on every outcome. A plan the resolver refused for a drafted value reopens
+that value's card with the plan's plain reason; any other result is the plan's row, carrying the
+draft. A drafted checkout is never registered by the run: only the adopted one is.
+
 `POST /api/plan-answer` (#1053, ADR-console-029) runs the same checks with `MAX_PLAN_ANSWER_BYTES`
 (4096) and `plan_questions.parse_answer_request`: 400 `bad plan answer`. The service refuses, each
 as 409 with the text, one stderr line `console: plan_answer_refused <reason>`, appending and
@@ -223,6 +234,16 @@ run does; a refusal appends nothing and is kept in memory, naming the answered q
 subject), shown by the view for the plan it answered until the next run starts. One line `console: plan_answer_ended <result>` (or `refused`)
 ends the run. Any other exception is `console: plan_answer_failed <Type>` and 500 `answering
 failed`. The console never reads or writes the plan store or the registry here.
+
+An answer with the question id `contract-draft` (ADR-console-031) changes one field of the shown
+row's draft instead of answering the plan. Beyond the three refusals above the service refuses,
+each as 409 with the text, appending and running nothing: a row with no draft
+(`contract_draft.NO_DRAFT`), an unreadable registry (`register.registry_unreadable`), and any value
+`contract_draft.set_value` refuses (the id rule, a project id registered for another checkout, a
+command that cannot be read, JSON that does not parse). Otherwise the answer is a `204` and the run
+drafts the plan again from the changed fields as a registration does, appending a `drafting` row
+or the plan's row. An answer of any other question to a row that holds a draft plans it with the
+draft file the same way, and the plan's row carries the draft.
 
 `POST /api/plan-approve` (#1054, ADR-console-030) runs the same checks with `MAX_PLAN_APPROVE_BYTES`
 (4096) and `approve.parse_approve_request`: 400 `bad plan approval`. The service refuses, each as
@@ -923,6 +944,7 @@ import socketserver
 import sys
 import os
 import threading
+import tempfile
 import time
 import traceback
 import uuid
@@ -935,8 +957,8 @@ from urllib.parse import parse_qsl
 
 from agent_tools.claims import owner_actions
 from agent_tools.console import (
-    account_add, account_remove, answer, approve, capacity, deliveries, digest, exclusion, idle, inbox, manager, nudge, pin,
-    plan_questions, probe, register, revive, sessions, signin, signin_run, sprints, write_guard)
+    account_add, account_remove, answer, approve, capacity, contract_draft, deliveries, digest, exclusion, idle, inbox,
+    manager, nudge, pin, plan_questions, probe, register, revive, sessions, signin, signin_run, sprints, write_guard)
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
     MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_STOP_FAILED,
@@ -2105,6 +2127,7 @@ class ConsoleService:
                  signer_out: Callable[[probe.Probe], None] | None = None,
                  account_remover: Callable[[str], None] | None = None,
                  adopter=None,
+                 draft_reader: Callable[[str], dict] = contract_draft.read,
                  forge=None,
                  pusher: Callable[..., None] = approve.push,
                  approval_dispatch: Callable[[Callable[[], None]], None] | None = None,
@@ -2120,6 +2143,7 @@ class ConsoleService:
         self._signer_out = signer_out
         self._account_remover = account_remover
         self._adopter = adopter
+        self._draft_reader = draft_reader
         self._forge = forge
         self._pusher = pusher
         self._approving = False
@@ -2779,22 +2803,27 @@ class ConsoleService:
             self._registering = str(root)
             self._publish()
         try:
-            self._dispatch(lambda: self._run_registration(str(root)))
+            self._dispatch(lambda: self._run_registration(str(root), entries))
         except BaseException:
             with self._ingest:
                 self._registering = None
                 self._publish()
             raise
 
-    def _run_registration(self, root: str) -> None:
+    def _run_registration(self, root: str, entries: list[dict]) -> None:
         verb = "plan"
         try:
-            plan = self._adopter.plan(root, cancel=self._stop)
-            report = None
-            if plan.get("plan", {}).get("outcome") == "no_change":
-                verb = "register"
-                report = self._adopter.register(root, cancel=self._stop)
-            payload = register.summary(root, plan, report)
+            if not os.path.lexists(os.path.join(root, ".agents/project.json")):
+                reading = self._draft_reader(root)
+                fields = contract_draft.draft(root, reading, entries=entries)
+                payload = self._plan_draft(root, fields, [])
+            else:
+                plan = self._adopter.plan(root, cancel=self._stop)
+                report = None
+                if plan.get("plan", {}).get("outcome") == "no_change":
+                    verb = "register"
+                    report = self._adopter.register(root, cancel=self._stop)
+                payload = register.summary(root, plan, report)
         except register.RunFailed as error:
             payload = register.failed(root, error.kind, verb)
         except Exception as error:
@@ -2820,13 +2849,30 @@ class ConsoleService:
             if latest is None or latest["plan_id"] != plan_id:
                 raise sprints.Refused(plan_questions.STALE)
             root = latest["root"]
-            answers = [*latest["answered"], {"id": question, "subject": subject, "value": value}]
+            changed = None
+            if question == contract_draft.QUESTION_ID:
+                if latest["draft"] is None:
+                    raise sprints.Refused(contract_draft.NO_DRAFT)
+                entries = read_fleet(self.registry)
+                if entries is None:
+                    if os.path.lexists(self.registry):
+                        raise sprints.Refused(register.registry_unreadable())
+                    entries = []
+                changed, refusal = contract_draft.set_value(
+                    latest["draft"], subject, value, entries=entries, root=root)
+                if refusal is not None:
+                    raise sprints.Refused(refusal)
+                answers = list(latest["answered"])
+            else:
+                answers = [*latest["answered"], {"id": question, "subject": subject, "value": value}]
+            asked = {"id": question, "subject": subject}
+            draft = latest["draft"]
             self._registering = root
             self._answering = True
             self._answer_refusal = None
             self._publish()
         try:
-            self._dispatch(lambda: self._run_answer(root, plan_id, answers))
+            self._dispatch(lambda: self._run_answer(root, plan_id, answers, asked, draft, changed))
         except BaseException:
             with self._ingest:
                 self._registering = None
@@ -2834,16 +2880,76 @@ class ConsoleService:
                 self._publish()
             raise
 
-    def _run_answer(self, root: str, plan_id: str, answers: list[dict]) -> None:
+    def _write_draft(self, fields: list[dict]) -> Path:
+        directory = agent_platform.ensure_directory(agent_platform.state_root() / "console" / "drafts")
+        handle, name = tempfile.mkstemp(dir=directory, suffix=".json")
+        try:
+            with os.fdopen(handle, "w") as stream:
+                stream.write(json.dumps(contract_draft.contract(fields), sort_keys=True))
+        except BaseException:
+            Path(name).unlink(missing_ok=True)
+            raise
+        return Path(name)
+
+    def _plan_with(self, root: str, fields: list[dict] | None, answers: list[dict]) -> dict:
+        """The adopter's plan, with the drafted contract as a file that is gone when it returns."""
+        if fields is None:
+            return self._adopter.plan(root, cancel=self._stop, answers=answers)
+        path = self._write_draft(fields)
+        try:
+            return self._adopter.plan(root, cancel=self._stop, answers=answers, contract=str(path))
+        finally:
+            path.unlink(missing_ok=True)
+
+    def _plan_draft(self, root: str, fields: list[dict], answers: list[dict],
+                    *, refusals: bool = False) -> dict:
+        """The row of a drafted checkout: its open cards, else its plan (ADR-console-031).
+
+        With `refusals`, a plan error that names no drafted value is returned as the plan document,
+        not as a failed row.
+        """
+        if contract_draft.open_fields(fields):
+            return register.drafting(root, fields, answers)
+        entries = read_fleet(self.registry)
+        if entries is None:
+            if os.path.lexists(self.registry):
+                raise register.RunFailed("unreadable")
+            entries = []
+        held = contract_draft.taken_id(fields, entries, root)
+        if held is not None:
+            return register.drafting(
+                root, contract_draft.mark_refused(fields, "project-id", held), answers)
+        plan = self._plan_with(root, fields, answers)
+        if "error" in plan:
+            refused = contract_draft.refused_field(plan["error"])
+            if refused is not None:
+                return register.drafting(
+                    root, contract_draft.mark_refused(fields, *refused), answers)
+            if refusals:
+                return plan
+        return register.summary(root, plan, None, draft=fields)
+
+    def _run_answer(self, root: str, plan_id: str, answers: list[dict], asked: dict,
+                    draft: list[dict] | None = None, changed: list[dict] | None = None) -> None:
         payload = None
         text = None
         try:
-            plan = self._adopter.plan(root, cancel=self._stop, answers=answers)
-            if "error" in plan:
-                self._log_answer_error({"root": root, "error": plan["error"]})
-                text = plan_questions.refusal_text(plan["error"])
+            if changed is not None:
+                result = self._plan_draft(root, changed, answers, refusals=True)
             else:
-                payload = register.summary(root, plan)
+                result = self._plan_with(root, draft, answers)
+                refused = (contract_draft.refused_field(result["error"])
+                           if draft is not None and "error" in result else None)
+                if refused is not None:
+                    result = register.drafting(
+                        root, contract_draft.mark_refused(draft, *refused), answers)
+                elif "error" not in result:
+                    result = register.summary(root, result, draft=draft)
+            if "error" in result:
+                self._log_answer_error({"root": root, "error": result["error"]})
+                text = plan_questions.refusal_text(result["error"])
+            else:
+                payload = result
         except register.RunFailed as error:
             self._log_answer_error(
                 {"root": root, "failure": error.kind, "cause": repr(error.__cause__)})
@@ -2860,7 +2966,7 @@ class ConsoleService:
             elif payload is None:
                 self._answer_refusal = {
                     "plan_id": plan_id, "text": text,
-                    "id": answers[-1]["id"], "subject": answers[-1]["subject"]}
+                    "id": asked["id"], "subject": asked["subject"]}
             self._registering = None
             self._answering = False
             if not self._closed:

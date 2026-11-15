@@ -163,7 +163,7 @@ class ApproveCase(Case):
     def ready(self, plan=READY, fake_class=Fake, **fake_arguments):
         fake = fake_class(plan=plan, **fake_arguments)
         self.start(fake)
-        self.repo = reconcile_repository(self.parent)
+        self.repo = reconcile_repository(self.parent, contract=True)
         self.shown = self.registered(self.repo)
         return fake
 
@@ -306,7 +306,7 @@ class PlanApproveRefusalTest(ApproveCase):
     def test_without_a_forge_the_host_refuses(self):
         fake = Fake(plan=READY, apply_result=APPLIED)
         self.start(fake, forge=None)
-        self.shown = self.registered(reconcile_repository(self.parent))
+        self.shown = self.registered(reconcile_repository(self.parent, contract=True))
         self.refused(PID_B, approve.UNAVAILABLE)
         self.assertEqual(approve.UNAVAILABLE,
                          "approving an adoption is not available on this host")

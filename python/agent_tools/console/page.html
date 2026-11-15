@@ -301,6 +301,16 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .register-result p, .register-result ul { margin: 0 0 6px; }
 .register-line { font-size: .84375rem; color: var(--text); }
 .register-lines { padding-left: 1.2em; color: var(--sub0); }
+.register-draft { list-style: none; padding-left: 0; color: var(--sub0); }
+.register-draft li { margin-bottom: 6px; }
+.draft-line { margin-right: 8px; }
+.draft-edit-box { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 4px; }
+.draft-options { display: flex; flex-wrap: wrap; flex-basis: 100%; gap: 4px 8px; }
+.register .draft-option { max-width: 100%; text-align: left; overflow-wrap: anywhere; }
+.register .draft-option.picked { color: var(--text); border-color: var(--s1); }
+.draft-edit { flex: 1 1 12rem; min-width: 0; max-width: 100%; box-sizing: border-box; padding: 4px 8px; font: inherit; color: var(--text); background: var(--mantle); border: 1px solid var(--s1); border-radius: 8px; }
+.abox .draft-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin-top: 6px; }
+.abox .draft-row input { flex: 1 1 14rem; width: auto; min-width: 0; margin-top: 0; box-sizing: border-box; }
 .register-note { color: var(--ov2); }
 .register-refusal { color: var(--sub0); }
 .register-adoption { margin-top: 8px; }
@@ -1948,8 +1958,12 @@ function decision(item) {
 function check(item) {
   return (item.answers || []).length > 0 && !item.answered;
 }
+// A drafted-contract question the owner answers by typing; with no options it has no question to pick from.
+function textCard(item) {
+  return isRegister(item) && item.text === true && !item.answered;
+}
 function answerable(item) {
-  return decision(item) || check(item);
+  return decision(item) || check(item) || textCard(item);
 }
 function recommendedIndex(q) {
   const i = q.recommended_index;
@@ -2067,6 +2081,11 @@ function start(item, state) {
   const body = { project_id: state.project_id, key: state.key, choices: item.questions.map((_, i) => state.picks[i]) };
   return begin(item, state, { check: false, body });
 }
+function startDraft(item, state, text) {
+  if (!choosable(state) || !textCard(item) || planBusy(item, state)) return false;
+  const body = { plan_id: item.plan_id, id: item.id, subject: item.subject, value: text };
+  return begin(item, state, { plan: true, body });
+}
 function startWords(item, state, text) {
   if (!choosable(state) || !isQuestion(item)) return false;
   return begin(item, state, { round: true, body: roundBody(item, { text }) });
@@ -2095,6 +2114,9 @@ function fireAnswer(id) {
   }
   sendAnswer(id, state, item);
 }
+function postPlanAnswer(body) {
+  return fetch("/api/plan-answer", { method: "POST", headers: stallHeaders(), body: JSON.stringify(body) });
+}
 async function sendAnswer(id, state, item) {
   state.phase = "sending";
   redraw();
@@ -2107,7 +2129,7 @@ async function sendAnswer(id, state, item) {
       : state.pending.retry
         ? await fetch("/api/adoption-register", { method: "POST", headers, body })
         : state.pending.plan
-          ? await fetch("/api/plan-answer", { method: "POST", headers, body })
+          ? await postPlanAnswer(state.pending.body)
           : state.pending.check
             ? await fetch("/api/check-answer", { method: "POST", headers, body })
             : await fetch("/api/answer", { method: "POST", headers, body });
@@ -2124,7 +2146,7 @@ async function sendAnswer(id, state, item) {
     state.phase = "choosing";
     state.notice = "Note sent.";
   } else if (reason === null) {
-    dropDrafts(id, ["note", "confirm", "words"]);
+    dropDrafts(id, ["note", "confirm", "words", "draft"]);
     state.phase = "sent";
   } else {
     state.phase = "failed";
@@ -2409,7 +2431,7 @@ function statusLine(act, state, item) {
 }
 function actionLine(item, state, lead) {
   const act = el("div", "act");
-  if (!statusLine(act, state, item)) {
+  if (!statusLine(act, state, item) && (item.questions.length > 0 || !textCard(item))) {
     const send = actionButton(lead ? "send primary needs" : "send", "Send answer", () => { if (start(item, state)) redraw(); });
     if (itemId(item) === currentId) send.appendChild(el("kbd", "", "Enter"));
     if (!picksComplete(item, state) || planBusy(item, state)) send.setAttribute("disabled", "");
@@ -2469,6 +2491,36 @@ function wordsBox(item, state, box) {
   area.disabled = pending;
   send.disabled = pending || area.value.trim() === "";
   box.appendChild(send);
+}
+function draftInput(cls) {
+  const input = el("input", cls);
+  input.type = "text";
+  input.autocomplete = "off";
+  input.spellcheck = false;
+  input.setAttribute("aria-label", "Your answer");
+  return input;
+}
+function draftBox(item, state, box) {
+  const input = draftInput("draft-text");
+  const row = el("div", "draft-row");
+  // The pending answer carries the text it was sent with, so the field is read-only until it is undone or settled.
+  const pending = !choosable(state) || planBusy(item, state);
+  const submit = () => {
+    const text = input.value.trim();
+    if (text === "" || pending) return;
+    if (startDraft(item, state, text)) redraw();
+  };
+  const send = actionButton("ans-draft", "Send", submit);
+  input.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter") return;
+    event.preventDefault();
+    submit();
+  });
+  row.appendChild(draftField(input, itemId(item) + "\ndraft", (value) => { send.disabled = pending || value.trim() === ""; }));
+  input.disabled = !choosable(state);
+  send.disabled = pending || input.value.trim() === "";
+  row.appendChild(send);
+  box.appendChild(row);
 }
 function confirmBox(item, box, approve) {
   box.appendChild(el("p", "meta", "Type " + item.confirm + " to approve."));
@@ -2556,6 +2608,7 @@ function answerBox(item, state, lead) {
     if (held !== null) box.appendChild(held);
   }
   if (isQuestion(item)) wordsBox(item, state, box);
+  if (textCard(item)) draftBox(item, state, box);
   box.appendChild(actionLine(item, state, lead));
   return box;
 }
@@ -2764,6 +2817,7 @@ function renderInbox(view) {
     if (!briefs.some((b) => b.sprint_id === id)) replaced.delete(id);
   }
   for (const key of Array.from(drafts.keys())) {
+    if (key.startsWith("draft:")) continue;
     const id = key.split("\n")[0];
     const state = answers.get(id);
     const busy = state !== undefined && (state.phase === "waiting" || state.phase === "sending");
@@ -3313,6 +3367,124 @@ async function registerPost() {
   registerState.failure = reason === null ? "" : reason;
   renderRegister(lastView);
 }
+// The open Change entry of the registration's drafted contract: one at a time, its typed text in `drafts` under "draft:" + field.
+let registerChange = null;
+// What an accepted Change sent, by field and plan: a plan that later refuses it leaves this as the retry's starting value.
+const registerSent = new Map();
+let registerFields = new Map();
+function draftKey(field) {
+  return "draft:" + field;
+}
+function closeChange() {
+  if (registerChange !== null) drafts.delete(draftKey(registerChange.field));
+  registerChange = null;
+}
+function openChange(entry, retry) {
+  closeChange();
+  const value = typeof retry === "string" ? retry : typeof entry.value === "string" ? entry.value : "";
+  const choice = typeof retry === "string" && entry.text !== true ? retry : null;
+  registerChange = { field: entry.field, choice, posting: false, failure: "" };
+  drafts.set(draftKey(entry.field), { value, start: value.length, end: value.length });
+  renderRegister(lastView);
+  const input = registerFields.get(draftKey(entry.field));
+  if (input !== undefined) input.focus();
+}
+async function postChange(registration, change, value) {
+  change.posting = true;
+  change.failure = "";
+  renderRegister(lastView);
+  let reason = null;
+  try {
+    const response = await postPlanAnswer({ plan_id: registration.plan_id, id: "contract-draft", subject: change.field, value });
+    if (response.status !== 204) reason = (await response.text()).trim() || "HTTP " + response.status;
+  } catch (error) {
+    console.error(error);
+    reason = "the console did not answer";
+  }
+  if (registerChange !== change) return;
+  change.posting = false;
+  if (reason === null) {
+    registerSent.set(change.field, { plan_id: registration.plan_id, value });
+    closeChange();
+  } else change.failure = reason;
+  renderRegister(lastView);
+}
+function changeBox(registration, entry, change) {
+  const box = el("div", "draft-edit-box");
+  const key = draftKey(entry.field);
+  const input = entry.text === true ? draftInput("draft-text draft-edit") : null;
+  const submit = () => {
+    const value = change.choice !== null ? change.choice : input.value.trim();
+    if (!send.disabled) postChange(registration, change, value);
+  };
+  const send = actionButton("draft-send", "Send", submit);
+  const ready = () => !change.posting && (change.choice !== null || (input !== null && input.value.trim() !== ""));
+  const picks = [];
+  if (Array.isArray(entry.options) && entry.options.length > 0) {
+    const list = el("div", "draft-options");
+    for (const option of entry.options) {
+      const button = actionButton(change.choice === option.value ? "draft-option picked" : "draft-option", option.label, () => {
+        change.choice = option.value;
+        renderRegister(lastView);
+      });
+      button.setAttribute("aria-pressed", String(change.choice === option.value));
+      button.disabled = change.posting;
+      picks.push(button);
+      list.appendChild(button);
+    }
+    box.appendChild(list);
+  }
+  if (input !== null) {
+    draftField(input, key, () => {
+      // Typing replaces a chosen option as the answer.
+      if (change.choice !== null) {
+        change.choice = null;
+        for (const button of picks) {
+          button.className = "draft-option";
+          button.setAttribute("aria-pressed", "false");
+        }
+      }
+      send.disabled = !ready();
+    });
+    registerFields.set(key, input);
+    input.disabled = change.posting;
+    input.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter") return;
+      event.preventDefault();
+      submit();
+    });
+    box.appendChild(input);
+  }
+  send.disabled = !ready();
+  box.appendChild(send);
+  box.appendChild(actionButton("draft-cancel", "Cancel", () => {
+    closeChange();
+    renderRegister(lastView);
+  }));
+  if (change.failure !== "") box.appendChild(el("p", "fail", change.failure));
+  return box;
+}
+function drawDraft(registration) {
+  const list = el("ul", "register-draft");
+  for (const entry of registration.draft) {
+    const row = el("li");
+    row.appendChild(el("span", "draft-line", entry.line));
+    // A Change the console accepted and the plan then refused: the refusal is on the entry it changed, and Change starts from what was sent.
+    const refused = registration.refused;
+    const refusedHere = typeof registration.refusal === "string" && refused !== null && typeof refused === "object"
+      && refused.id === "contract-draft" && refused.subject === entry.field;
+    if (registerChange !== null && registerChange.field === entry.field) {
+      row.appendChild(changeBox(registration, entry, registerChange));
+    } else {
+      const sent = registerSent.get(entry.field);
+      const retry = refusedHere && sent !== undefined && sent.plan_id === registration.plan_id ? sent.value : undefined;
+      row.appendChild(actionButton("draft-change", "Change", () => openChange(entry, retry)));
+      if (refusedHere) row.appendChild(el("p", "fail draft-refusal", registration.refusal));
+    }
+    list.appendChild(row);
+  }
+  return list;
+}
 // A ready plan is approved with one write (ADR-console-030); the failure is kept with the plan id it was for.
 async function approvePost(registration) {
   if (registerState.approving) return;
@@ -3341,6 +3513,10 @@ function drawRegisterResult(registration) {
     for (const line of registration.lines) list.appendChild(el("li", "", line));
     parts.push(list);
   }
+  const drafted = Array.isArray(registration.draft) ? registration.draft : [];
+  if (registerChange !== null && !drafted.some((entry) => entry.field === registerChange.field)) closeChange();
+  registerFields = new Map();
+  if (drafted.length > 0) parts.push(drawDraft({ ...registration, draft: drafted }));
   if (registration.status === "done") {
     const failure = registerState.approveFailure;
     if (failure !== null && failure.plan_id === registration.plan_id) parts.push(el("p", "register-refusal", failure.text));
@@ -3392,12 +3568,22 @@ function renderRegister(view) {
   }
   if (registerReason.textContent !== reason) registerReason.textContent = reason;
   const shown = registration !== null && !(registration.status === "done" && registration.at === registerDismissed);
-  const key = shown ? JSON.stringify([registration, registerState.approving, registerState.approveFailure]) : "";
+  if (!shown) closeChange();
+  const key = shown ? JSON.stringify([registration, registerState.approving, registerState.approveFailure]) + "\n" + JSON.stringify(registerChange) : "";
   if (key !== registerResultKey) {
     registerResultKey = key;
     if (shown) {
+      const active = document.activeElement;
+      const held = active && active.dataset && typeof active.dataset.draft === "string" && active.dataset.draft.startsWith("draft:")
+        ? { key: active.dataset.draft, start: active.selectionStart, end: active.selectionEnd }
+        : null;
       drawRegisterResult(registration);
       registerBox.appendChild(registerResult);
+      const again = held === null ? undefined : registerFields.get(held.key);
+      if (again !== undefined) {
+        again.focus();
+        again.setSelectionRange(held.start, held.end);
+      }
     } else {
       registerResult.remove();
     }

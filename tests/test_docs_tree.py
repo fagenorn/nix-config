@@ -547,7 +547,7 @@ class DocsTreeTest(unittest.TestCase):
                 ("docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md",
                  both + ", ADR-console-029, ADR-console-030"),
                 ("docs/areas/console/adr/002-the-desk-page-design-rules.md",
-                 both + ", ADR-console-029"),
+                 both + ", ADR-console-029, ADR-console-031"),
                 ("docs/areas/console/adr/024-the-owner-signs-a-profile-in-from-the-page.md",
                  "- **Status:** accepted; amended by ADR-console-025")):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
@@ -578,7 +578,7 @@ class DocsTreeTest(unittest.TestCase):
         status = ("- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
                   "ADR-console-028")
         for older, expected in ((adr008, status + ", ADR-console-029, ADR-console-030"),
-                                (adr002, status + ", ADR-console-029")):
+                                (adr002, status + ", ADR-console-029, ADR-console-031")):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
                         if row.startswith("- **Status:**"))
             self.assertEqual(line, expected)
@@ -613,10 +613,61 @@ class DocsTreeTest(unittest.TestCase):
                 (adr008, "- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
                          "ADR-console-028, ADR-console-029, ADR-console-030"),
                 (adr028, "- **Status:** accepted; amended by ADR-console-029, "
-                         "ADR-console-030; extended by #1055 (D10, D11)")):
+                         "ADR-console-030, ADR-console-031; extended by #1055 (D10, D11)")):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
                         if row.startswith("- **Status:**"))
             self.assertEqual(line, expected)
+
+    def test_the_drafted_contract_decision_is_recorded(self):
+        path = ("docs/areas/console/adr/"
+                "031-a-repository-with-no-contract-is-registered-with-a-drafted-contract.md")
+        first = (REPO_ROOT / path).read_text().splitlines()[0]
+        self.assertEqual(first, "# ADR-console-031 \u2014 A repository with no contract is "
+                                "registered with a drafted contract")
+        adr = self.doc(path)
+        for needle in ("#1067", "contract-draft", "POST /api/plan-answer", "--contract-draft",
+                       "writes the project contract",
+                       "a project id is two names joined by one slash, like owner/name, "
+                       "with no spaces",
+                       "is already registered for another checkout", "The plan refused the",
+                       "the command could not be read", "the console's starting value",
+                       "adopt.draft.id_taken", "ADR-console-028", "ADR-console-029",
+                       "ADR-project-contract-006"):
+            self.assertIn(needle, adr)
+        context = self.doc("docs/areas/console/CONTEXT.md")
+        self.assertIn("**Drafted contract**:", context)
+        self.assertIn("ADR-console-031", context)
+        self.assertIn("| Drafted contract | Console |", self.doc("docs/CONTEXT-MAP.md"))
+        module = self.doc("python/agent_tools/console/contract_draft.py")
+        self.assertIn("Decided in ADR-console-031.", module)
+        self.assertNotIn("ADR-console-030", module)
+        for older, expected in (
+                ("docs/areas/console/adr/028-the-owner-registers-a-project-from-the-page.md",
+                 "- **Status:** accepted; amended by ADR-console-029, ADR-console-030, "
+                 "ADR-console-031; extended by #1055 (D10, D11)"),
+                ("docs/areas/console/adr/"
+                 "029-the-owner-answers-the-adoptions-questions-on-the-page.md",
+                 "- **Status:** accepted; amended by ADR-console-030, ADR-console-031"),
+                ("docs/areas/console/adr/002-the-desk-page-design-rules.md",
+                 "- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
+                 "ADR-console-028, ADR-console-029, ADR-console-031")):
+            line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
+                        if row.startswith("- **Status:**"))
+            self.assertEqual(line, expected)
+
+    def test_the_contract_draft_seam_is_recorded(self):
+        path = ("docs/areas/project-contract/adr/"
+                "006-a-drafted-contract-enters-the-plan-as-a-file-it-writes.md")
+        text = (REPO_ROOT / path).read_text()
+        self.assertEqual(
+            text.splitlines()[0],
+            "# ADR-project-contract-006 \u2014 A drafted contract enters the "
+            "adoption plan as a file it writes")
+        for needle in ("--contract-draft", "adopt.draft.invalid",
+                       "adopt.draft.contract_present", "adopt.draft.id_taken",
+                       "plan_id", "apply", "ADR-project-contract-004",
+                       "ADR-project-contract-005", "#1067"):
+            self.assertIn(needle, text)
 
     def test_the_accounts_panel_decision_is_recorded(self):
         base = "docs/areas/console/adr/"

@@ -73,6 +73,7 @@ stalled, else `PROGRESS_SENTENCE` when a manager stopped making progress, else `
 when a profile's sign-in asks, else `ADOPTION_SENTENCE` when an adoption's pull request is ready to
 merge, else `QUESTION_SENTENCE` when any manager question is open, else
 `REGISTER_SENTENCE` when a plan question offers an option (the page can answer it), else
+`REGISTER_TYPE_SENTENCE` when a plan question takes a typed answer (`text`), else
 `CHOOSE_SENTENCE` when an open item is a decision with questions (the page can answer it), else
 `ANSWER_SENTENCE` when an open item has answers (a verification prompt the page can answer), else
 `REGISTER_STEP_SENTENCE` when only plan questions with no offered answer are open, else
@@ -173,12 +174,13 @@ the owner added from the page and the retained log still holds, from the `accoun
 The top-level `registration` member (#1052, ADR-console-028, #1053, ADR-console-029) is the entry
 `register.view_entry` gives, copied, from the `registration` argument, and null when none is given:
 `{"root", "name", "project_id", "status": "running" | "done", "result", "outcome", "headline",
-"lines", "note", "at", "plan_id", "state", "questions", "refusal", "line", "refused", "adoption",
-"approve"}`, the owner's latest registration of a repository from the page (eighteen keys), with the
-plan's plain open questions and, when the plan refused the last answer, the refusal's text and the
-question it answered (`refused`, `{"id", "subject"}`). `adoption` is the approved adoption's
-`approve.entry` (#1054) and `approve` the action the page offers (`approve`, `retry` or null); the
-`line` is the adoption's headline while there is one.
+"lines", "note", "at", "plan_id", "state", "questions", "refusal", "line", "refused", "draft",
+"adoption", "approve"}`, the owner's latest registration of a repository from the page (nineteen
+keys), with the plan's plain open questions and, when the plan refused the last answer, the
+refusal's text and the question it answered (`refused`, `{"id", "subject"}`); `draft` is the drafted
+contract's lines (`contract_draft.shown`, ADR-console-031) when the latest row holds a draft, else
+null. `adoption` is the approved adoption's `approve.entry` (#1054) and `approve` the action the
+page offers (`approve`, `retry` or null); the `line` is the adoption's headline while there is one.
 
 The top-level `pin` member (#1029) is the pin note `pin.note` gives, copied, from the `pin`
 argument, and null with no pin. The top-level `pin_launches` member is the sorted list of profiles
@@ -231,7 +233,7 @@ entry is
     {"type": "inbox_item", "reason": "register", "key": "register/<plan id>/<index>",
      "project_id": null, "root", "name", "title": "Register <name>", "plan_id", "id", "subject",
      "headline": "<ask>", "why": "<text>" | null, "refusal": "<text>" | null,
-     "more_questions": 0,
+     "more_questions": 0, "text": <bool>,
      "questions": [] | [{"question": "<ask>", "options": ["<label>", ...], "chosen": null,
                          "recommended": null, "recommended_index": null}],
      "values": ["<value>", ...], "items": [], "answers": [], "answered": false,
@@ -240,10 +242,12 @@ entry is
 `key` is the plan id and the question's index, so an answer that makes a new plan replaces the
 items; `options` are the plan's labels and `values` the values they send, in order, and nothing is
 preselected. A question the plan offers no answer to has `questions` `[]`, `values` `[]` and its
-`why`, and still counts. `refusal` is the registration's refusal on the question
+`why`, and still counts; `text` is true for a drafted-contract question the owner answers by typing
+(a text question with no options is still an item, ADR-console-031). `refusal` is the registration's refusal on the question
 `registration.refused` names and null on every other. The items are never cut and carry no `stale`
 or `read_at`. `REGISTER_SENTENCE` ("Choose an option with its number and press Enter.") says what
-the page offers; `REGISTER_STEP_SENTENCE` ("Each one says what to do next.") stands when no plan
+the page offers; `REGISTER_TYPE_SENTENCE` ("Type the answer on its card and press Enter.") stands
+when no register item offers options but one takes a typed answer; `REGISTER_STEP_SENTENCE` ("Each one says what to do next.") stands when no plan
 question offers an answer and nothing else is open.
 
 Each retry item a caller passes (`retry_items`; #1055, ADR-console-028 D10) is one entry of
@@ -517,6 +521,7 @@ ADOPTION_SENTENCE = "Open the pull request to merge the adoption."
 REGISTER_TITLE = "Register {name}"
 REGISTER_SENTENCE = "Choose an option with its number and press Enter."
 REGISTER_STEP_SENTENCE = "Each one says what to do next."
+REGISTER_TYPE_SENTENCE = "Type the answer on its card and press Enter."
 CHOOSE_SENTENCE = "Choose an option with its number and press Enter, or answer on the tracker."
 ANSWER_SENTENCE = "Answer it here, or on the tracker."
 STALE_SENTENCE = ("The tracker could not be read for {projects}; "
@@ -1021,7 +1026,7 @@ def _register_entries(registration: Mapping | None) -> list[dict]:
              "subject": q["subject"], "headline": q["ask"], "why": q["why"],
              "refusal": (registration.get("refusal")
                          if refused == {"id": q["id"], "subject": q["subject"]} else None),
-             "more_questions": 0,
+             "more_questions": 0, "text": q.get("text") is True,
              "questions": [] if not q["options"] else [{
                  "question": q["ask"], "options": [o["label"] for o in q["options"]],
                  "chosen": None, "recommended": None, "recommended_index": None}],
@@ -1127,6 +1132,8 @@ def derive_view(
         sentence = QUESTION_SENTENCE
     elif retries or any(e["questions"] for e in registering):
         sentence = REGISTER_SENTENCE
+    elif any(e["text"] for e in registering):
+        sentence = REGISTER_TYPE_SENTENCE
     elif any(r.item["reason"] == "decision" and r.item["questions"] for r in open_items):
         sentence = CHOOSE_SENTENCE
     elif any(r.item.get("answers") for r in open_items):

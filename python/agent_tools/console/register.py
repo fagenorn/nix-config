@@ -26,7 +26,8 @@ exists but cannot be read (an absent registry is an empty fleet), also decided b
 
 Runner. `Adopter(command=None, environ=None, timeout=RUN_TIMEOUT, apply_timeout=APPLY_TIMEOUT)` runs
 `[*command, "plan", "--repo-root", root, "--format", "json"]` (`plan`, followed by `--answer <id>
-<subject> <value>` for each of its `answers`, in the given order: ADR-console-029 D4) or
+<subject> <value>` for each of its `answers`, in the given order: ADR-console-029 D4, then
+`--contract-draft <contract>` when `contract` is given: ADR-console-031) or
 `[*command, "verify", "--repo-root", root, "--register"]` (`register`) or `[*command, "apply",
 "--plan-id", plan_id]` with `--acknowledge-deletions` added when asked (`apply`, #1054), the command
 defaulting to the `adopt_project` sibling module. Each runs with no shell, in its own process group
@@ -50,12 +51,13 @@ own records, the two files the plan's `handoff` names as `migration_map` and `ev
 other file, even beside them, stays named), are never named: a plan that writes any ends its `writes`
 line with `, and records the adoption`, or is the line `records the adoption` when it writes nothing
 else, and `NAMED` counts only the named files (#1060). It is a
-pure function of the document. `summary(root, plan, report=None)` is the row payload (`by`, `root`,
-`project_id`, `result`, `outcome`, `headline`, `lines`, `note`, and the `EXTRA` members `plan_id`,
-`state`, `questions`, `answered`) with the D4 to D6 texts; message text is whitespace-collapsed. A
+pure function of the document. `summary(root, plan, report=None, draft=None)` is the row payload
+(`by`, `root`, `project_id`, `result`, `outcome`, `headline`, `lines`, `note`, the `EXTRA` members
+`plan_id`, `state`, `questions`, `answered`, and `draft`) with the D4 to D6 texts; message text is whitespace-collapsed. A
 `bootstrap` or `reconcile` plan carries its header's `plan_id` and `state`, its
 `plan_questions.questions`, and its answered decisions as `{id, subject, value}` (ADR-console-029
-D1); every other row carries `DEFAULTS` (None, None, `[]`, `[]`). A ready plan's note is `The plan
+D1) and the `draft` it was given (the drafted contract's fields, ADR-console-031); every other row
+carries `DEFAULTS` (None, None, `[]`, `[]`, None). A ready plan's note is `The plan
 is ready.` with no command and no plan id (#1065; ADR-console-030 keeps it, the page offers Approve beside it). A `no_change` plan with no report (only an answer run passes none) is
 `not_registered` and says `<name> needs no adoption change and is not registered yet: run
 <command>`, the command being the plan's `handoff.next_command` or else `adopt-project verify
@@ -85,29 +87,40 @@ name that verb's command; every other kind names it alone. `failed(root, kind, v
 `register` verb reads `<name> was not registered: <words>.`, so a registration that raised never
 sends the owner to rerun the plan that had succeeded.
 
+Drafting row (ADR-console-031). `drafting(root, fields, answered=())` is the row of a repository with no
+project contract: `result` and `state` `drafting`, `project_id` the draft's project-id value (None
+when it has none), `headline` `What the console read from <name>: it has no project contract yet`,
+`note` `The draft has <N> open question(s).` (singular for one), `plan_id`
+`contract_draft.draft_id(root, fields)` (so it changes with any value), `questions`
+`contract_draft.questions(fields)`, `answered` as given and `draft` the fields. It names no repair id
+or code.
+
 Row. `ended(payload)` is `("registration.ended", None, payload)` and raises `ValueError` unless the
-members are exactly `MEMBERS` (a legacy row) or exactly `MEMBERS | EXTRA`, `by` is `owner`,
+members are exactly `MEMBERS` (a legacy row), `MEMBERS | EXTRA` or `MEMBERS | EXTRA | {"draft"}`
+(thirteen members), `by` is `owner`,
 `result` is one of `RESULTS` and `lines` is a list of strings; for twelve members also unless
 `plan_id` and `state` are strings or None, `questions` is a list of dicts and `answered` is a list
-of dicts with exactly the string keys `id`, `subject` and `value` (ADR-console-029 D1). `ENDED` is
+of dicts with exactly the string keys `id`, `subject` and `value` (ADR-console-029 D1); for thirteen
+also unless `draft` is None or a list of dicts whose keys are exactly `FIELD_KEYS`. `ENDED` is
 `event_log.REGISTRATION_ENDED`, not in `KEPT_KINDS`. `latest(events, state=None)` is the last valid
 `ENDED` payload over `DEFAULTS` with `at` added, else `state`: the view's `registration` member,
 folded by the service. `view_entry(running, latest, *, again=False, refusal=None, adoption=None,
-approve=None)` is that member, always the same eighteen keys: the `running` entry (headline `Planning the adoption of <name>…`, or
+approve=None)` is that member, always the same nineteen keys: the `running` entry (headline `Planning the adoption of <name>…`, or
 `again_headline(name)`, `Planning the adoption of <name> again with your answer…`, when `again`)
 while a run is under way, with `plan_id`, `state` and `refusal` None and `questions` `[]`; else the
 latest with status `done`, its `plan_id`, `state` and `questions`, and `refusal` the text of the
 given `{"plan_id", "text", "id", "subject"}` only when its `plan_id` is the latest's, and `refused`
-its `{"id", "subject"}` under the same match (the question the refused answer was for); else None
-(D4). The keys `adoption` and `approve` are None in the `running` entry and carry the given values
-(the `approve.entry` object and the action the page offers, #1054) in the `done` entry. `line` is
-the entry's state in one line (D6, D7): the running headline while a run is under way; the given
-adoption's headline when there is one (the adoption is then the plan's latest state, so a ready
-plan never says `ready to apply` beside an applied branch); else `line_of(latest)`: for a plan with
-open questions `Register <name>: 1 question open` or `<N> questions open`, counting every
-question, answerable or not; for a ready plan `Register <name>: ready to apply`, whatever the note
-says; for any other plan the note, else the headline; for any other result the headline, then a
-space and the note when it is a non-empty string.
+its `{"id", "subject"}` under the same match (the question the refused answer was for), and `draft`
+`contract_draft.shown(draft)` when the latest row holds a draft list (None for the running entry and
+for any other row); else None (D4). The keys `adoption` and `approve` are None in the `running` entry
+and carry the given values (the `approve.entry` object and the action the page offers, #1054) in the
+`done` entry. `line` is the entry's state in one line (D6, D7): the running headline while a run is
+under way; the given adoption's headline when there is one (the adoption is then the plan's latest
+state, so a ready plan never says `ready to apply` beside an applied branch); else `line_of(latest)`:
+for a plan or a drafting row with open questions `Register <name>: 1 question open` or `<N> questions
+open`, counting every question, answerable or not; for a ready plan `Register <name>: ready to
+apply`, whatever the note says; for any other plan the note, else the headline; for any other result
+the headline, then a space and the note when it is a non-empty string.
 """
 
 from __future__ import annotations
@@ -119,14 +132,15 @@ import subprocess
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
-from agent_tools.console import event_log, manager, plan_questions
+from agent_tools.console import contract_draft, event_log, manager, plan_questions
 from agent_tools.system import siblings
 
 ENDED = event_log.REGISTRATION_ENDED
 RUN_TIMEOUT = 300
 APPLY_TIMEOUT = 1800
 GIT_TIMEOUT = 10
-RESULTS = ("planned", "registered", "not_registered", "needs_migration", "needs_repair", "failed")
+RESULTS = ("planned", "registered", "not_registered", "needs_migration", "needs_repair", "failed",
+           "drafting")
 RUN_KINDS = ("not_installed", "timed_out", "unavailable", "failed", "unreadable", "cancelled")
 UNAVAILABLE = "registering a project is not available on this host"
 EMPTY = "type the path of a repository"
@@ -137,7 +151,8 @@ OUTCOME_TEXT = {
 }
 MEMBERS = {"by", "root", "project_id", "result", "outcome", "headline", "lines", "note"}
 EXTRA = {"plan_id", "state", "questions", "answered"}
-DEFAULTS = {"plan_id": None, "state": None, "questions": [], "answered": []}
+DEFAULTS = {"plan_id": None, "state": None, "questions": [], "answered": [], "draft": None}
+FIELD_KEYS = contract_draft.FIELD_KEYS
 CONTRACT = ".agents/project.json"
 NAMED = 3
 RUN_WORDS = {
@@ -346,11 +361,22 @@ def next_step(root: str, error: Mapping, verb: str) -> str:
 def _row(root: str, project_id: str | None, result: str, outcome: str | None, headline: str,
          lines: list[str], note: str | None, *, plan_id: str | None = None,
          state: str | None = None, questions: Iterable[dict] = (),
-         answered: Iterable[dict] = ()) -> dict:
+         answered: Iterable[dict] = (), draft: list[dict] | None = None) -> dict:
     return {"by": "owner", "root": root, "project_id": project_id, "result": result,
             "outcome": outcome, "headline": headline, "lines": lines, "note": note,
             "plan_id": plan_id, "state": state, "questions": list(questions),
-            "answered": list(answered)}
+            "answered": list(answered), "draft": draft}
+
+
+def drafting(root: str, fields: list[dict], answered: Sequence[Mapping] = ()) -> dict:
+    """The row of a repository with no contract: the draft the console made and its open fields."""
+    project_id = next((f["value"] for f in fields if f["field"] == "project-id"), None)
+    questions = contract_draft.questions(fields)
+    return _row(root, project_id, "drafting", None,
+                f"What the console read from {name_of(root)}: it has no project contract yet", [],
+                f"The draft has {_count(len(questions), 'open question')}.",
+                plan_id=contract_draft.draft_id(root, fields), state="drafting",
+                questions=questions, answered=answered, draft=fields)
 
 
 def _answered(document: Mapping) -> list[dict]:
@@ -374,7 +400,8 @@ def _after(command: object, verb: str) -> str:
     return str(command or "").partition(f"{verb} ")[2].strip()
 
 
-def summary(root: str, plan: Mapping, report: Mapping | None = None) -> dict:
+def summary(root: str, plan: Mapping, report: Mapping | None = None,
+            draft: list[dict] | None = None) -> dict:
     name = name_of(root)
     if "error" in plan:
         message = _error_message(plan["error"])
@@ -392,7 +419,7 @@ def summary(root: str, plan: Mapping, report: Mapping | None = None) -> dict:
                     f"What adopting {name} would change: {OUTCOME_TEXT[outcome]}",
                     plan_lines(plan), _note(header, plan), plan_id=header.get("plan_id"),
                     state=header.get("state"), questions=plan_questions.questions(plan),
-                    answered=_answered(plan))
+                    answered=_answered(plan), draft=draft)
     if outcome == "no_change":
         if report is not None and "error" in report:
             message = _error_message(report["error"])
@@ -438,9 +465,14 @@ def failed(root: str, kind: str, verb: str = "plan") -> dict:
     return _row(root, None, "failed", None, headline, [], run_next_step(root, kind, verb))
 
 
+def _draft_valid(draft: object) -> bool:
+    return draft is None or (isinstance(draft, list) and all(
+        isinstance(f, dict) and set(f) == FIELD_KEYS for f in draft))
+
+
 def _extras_valid(payload: Mapping) -> bool:
     answered = payload["answered"]
-    return (all(payload[key] is None or isinstance(payload[key], str)
+    return (_draft_valid(payload.get("draft")) and all(payload[key] is None or isinstance(payload[key], str)
                 for key in ("plan_id", "state"))
             and isinstance(payload["questions"], list)
             and all(isinstance(q, dict) for q in payload["questions"])
@@ -450,7 +482,7 @@ def _extras_valid(payload: Mapping) -> bool:
 
 
 def ended(payload: Mapping) -> tuple[str, None, dict]:
-    if (not isinstance(payload, Mapping) or set(payload) not in (MEMBERS, MEMBERS | EXTRA)
+    if (not isinstance(payload, Mapping) or set(payload) not in (MEMBERS, MEMBERS | EXTRA, MEMBERS | EXTRA | {"draft"})
             or payload["by"] != "owner"
             or payload["result"] not in RESULTS or not isinstance(payload["lines"], list)
             or not all(isinstance(line, str) for line in payload["lines"])
@@ -478,7 +510,7 @@ def again_headline(name: str) -> str:
 
 def line_of(latest: Mapping) -> str:
     """The one line a finished entry says: open questions, ready, the note or the headline."""
-    if latest["result"] == "planned":
+    if latest["result"] in ("planned", "drafting"):
         name = name_of(latest["root"])
         if latest["questions"]:
             return f"Register {name}: {_count(len(latest['questions']), 'question')} open"
@@ -499,10 +531,11 @@ def view_entry(running: str | None, latest: Mapping | None, *, again: bool = Fal
                 "result": None, "outcome": None, "headline": headline,
                 "lines": [], "note": None, "at": None, "plan_id": None, "state": None,
                 "questions": [], "refusal": None, "line": headline, "refused": None,
-                "adoption": None, "approve": None}
+                "draft": None, "adoption": None, "approve": None}
     if latest is None:
         return None
     mine = refusal is not None and refusal["plan_id"] == latest["plan_id"]
+    draft = latest.get("draft")
     return {"root": latest["root"], "name": name_of(latest["root"]),
             "project_id": latest["project_id"], "status": "done", "result": latest["result"],
             "outcome": latest["outcome"], "headline": latest["headline"],
@@ -511,6 +544,7 @@ def view_entry(running: str | None, latest: Mapping | None, *, again: bool = Fal
             "questions": latest["questions"], "refusal": refusal["text"] if mine else None,
             "line": line_of(latest) if adoption is None else adoption["headline"],
             "refused": {"id": refusal["id"], "subject": refusal["subject"]} if mine else None,
+            "draft": contract_draft.shown(draft) if isinstance(draft, list) else None,
             "adoption": adoption, "approve": approve}
 
 
@@ -530,10 +564,13 @@ class Adopter:
         self._timeout = timeout
         self._apply_timeout = apply_timeout
 
-    def plan(self, root: str, cancel=None, answers: Sequence[Mapping[str, str]] = ()) -> dict:
+    def plan(self, root: str, cancel=None, answers: Sequence[Mapping[str, str]] = (),
+             contract: str | None = None) -> dict:
         arguments = ["plan", "--repo-root", root, "--format", "json"]
         for answer in answers:
             arguments += ["--answer", answer["id"], answer["subject"], answer["value"]]
+        if contract is not None:
+            arguments += ["--contract-draft", contract]
         return self._run(arguments, cancel, self._timeout)
 
     def register(self, root: str, cancel=None, *, integration_branch: str | None = None,

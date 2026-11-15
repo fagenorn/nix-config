@@ -2049,7 +2049,7 @@ def register_item(index, ask):
             "refusal": None, "more_questions": 0,
             "questions": [{"question": ask["ask"], "options": [o["label"] for o in ask["options"]],
                            "chosen": None, "recommended": None, "recommended_index": None}],
-            "values": [o["value"] for o in ask["options"]],
+            "text": False, "values": [o["value"] for o in ask["options"]],
             "items": [], "answers": [], "answered": False,
             "waiting_since": "2026-11-15T08:00:00+00:00"}
 
@@ -2066,6 +2066,26 @@ class RegisterItemViewTest(unittest.TestCase):
                          [register_item(0, ASK_A), register_item(1, ASK_B)])
         self.assertEqual(shown["statement"]["inbox_items"], 2)
         self.assertEqual(shown["statement"]["headline"], "2 things need you")
+
+    def test_a_text_question_is_a_counted_register_item_with_a_text_field(self):
+        ask = {"id": "contract-draft", "subject": "project-id",
+               "ask": "Which project is this repository?\nIt has no remote that names it: type "
+                      "its id, as owner/name.",
+               "options": [], "recommended": None, "why": None, "text": True}
+        shown = derive_view([], registration=reg([ask]))
+        (entry,) = shown["inbox"]["open"]
+        self.assertEqual((entry["text"], entry["questions"], entry["why"]), (True, [], None))
+        self.assertEqual(shown["statement"]["inbox_items"], 1)
+        self.assertEqual(shown["statement"]["sentence"], "Type the answer on its card and press Enter.")
+        self.assertEqual(shown["statement"]["sentence"], view.REGISTER_TYPE_SENTENCE)
+
+    def test_the_registration_carries_its_draft_lines(self):
+        lines = [{"field": "project-id", "line": "Project id: o/r (read from the remote)",
+                  "value": "o/r", "options": [], "text": True}]
+        shown = derive_view([], registration=reg([ASK_A], draft=lines))
+        self.assertEqual(shown["registration"]["draft"], lines)
+        (entry,) = shown["inbox"]["open"]
+        self.assertIs(entry["text"], False)
 
     def test_a_question_with_no_offered_answer_is_an_item_with_its_why_and_no_options(self):
         shown = derive_view([], registration=reg([ASK_WHY]))

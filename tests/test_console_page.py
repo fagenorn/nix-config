@@ -7047,6 +7047,190 @@ class RegisterControlTest(unittest.TestCase):
         self.assertTrue(got["inside"], got)
 
 
+Q_TEXT = {"id": "contract-draft", "subject": "project-id",
+          "ask": "What is the project id? It is not read from a remote.",
+          "options": [], "recommended": None, "why": None}
+T0 = register_item(0, Q_TEXT, text=True)
+DRAFTED = {**ASKING, "questions": [Q_TEXT],
+           "draft": [{"field": "default-branch", "line": "default branch: trunk (read from its remote)",
+                      "value": "trunk", "options": [], "text": True},
+                     {"field": "release",
+                      "line": "release profile: unsupported (the console's starting value)",
+                      "value": "unsupported",
+                      "options": [{"value": "unsupported", "label": "It makes no releases"}],
+                      "text": True}]}
+
+
+class DraftedContractPageTest(unittest.TestCase):
+    def test_a_text_card_shows_a_field_and_sends_the_typed_answer(self) -> None:
+        empty, sent = render([
+            START, {"frame": cards([T0])}, {"snapshot": True},
+            {"type": {"class": "draft-text", "text": " sample-owner/sample-app "}},
+            {"respond": {"status": 204, "text": ""}}, {"click": "ans-draft"},
+            {"clock": 5000}, {"snapshot": True}])
+        (field,) = [n for n in nodes(empty["inbox"]) if has_class(n, "draft-text")]
+        self.assertEqual((field["tag"], field["label"]), ("input", "Your answer"))
+        (send,) = [n for n in nodes(empty["inbox"]) if has_class(n, "ans-draft")]
+        self.assertEqual(full(send), "Send")
+        self.assertTrue(send["disabled"])
+        self.assertNotIn("Send answer", full(empty["inbox"]))
+        (post,) = sent["posts"]
+        self.assertEqual(post["url"], "/api/plan-answer")
+        self.assertEqual(posted(post), {"plan_id": PLAN_A, "id": "contract-draft",
+                                        "subject": "project-id", "value": "sample-owner/sample-app"})
+        self.assertIn("Answered, planning again", full(sent["inbox"]))
+
+    def test_enter_in_the_field_sends_and_a_refusal_keeps_the_typed_text(self) -> None:
+        (snap,) = render([
+            START, {"frame": cards([T0])},
+            {"type": {"class": "draft-text", "text": "sample-owner/sample-app"}},
+            {"respond": {"status": 409, "text": "that id is held\n"}},
+            {"key": "Enter", "on": "draft-text"},
+            {"clock": 5000}, {"snapshot": True}])
+        self.assertEqual(len(snap["posts"]), 1)
+        self.assertIn("Could not send: that id is held", full(snap["inbox"]))
+        (field,) = [n for n in nodes(snap["inbox"]) if has_class(n, "draft-text")]
+        self.assertEqual(field["value"], "sample-owner/sample-app")
+
+    def test_the_typed_answer_survives_a_frame(self) -> None:
+        (snap,) = render([
+            START, {"frame": cards([T0])},
+            {"type": {"class": "draft-text", "text": "sample-owner/sample-app"}},
+            {"select": {"cls": "draft-text", "start": 2, "end": 5}},
+            {"frame": cards([register_item(0, Q_TEXT, text=True)])}, {"snapshot": True}])
+        self.assertEqual(snap["field"], {"cls": "draft-text", "value": "sample-owner/sample-app",
+                                         "start": 2, "end": 5})
+
+    def test_each_drafted_value_shows_with_a_change_control(self) -> None:
+        (snap,) = render([START, {"frame": cards([], DRAFTED)}, {"snapshot": True}])
+        shown = full(snap["register"])
+        for entry in DRAFTED["draft"]:
+            self.assertIn(entry["line"], shown)
+        self.assertEqual([full(n) for n in registered(snap, "draft-change")], ["Change", "Change"])
+        (drafted,) = registered(snap, "register-draft")
+        self.assertEqual(len([n for n in nodes(drafted) if n["tag"] == "li"]), 2)
+
+    def test_change_sends_the_typed_value_and_a_failure_keeps_it(self) -> None:
+        opened, sent = render([
+            START, {"frame": cards([], DRAFTED)}, {"click": "draft-change"}, {"snapshot": True},
+            {"respond": {"status": 409, "text": "not a branch\n"}},
+            {"type": {"class": "draft-edit", "text": " main "}},
+            {"click": "draft-send"}, {"snapshot": True}])
+        (field,) = registered(opened, "draft-edit")
+        self.assertEqual(field["value"], "trunk")
+        self.assertEqual([full(n) for n in registered(opened, "draft-send")], ["Send"])
+        self.assertEqual([full(n) for n in registered(opened, "draft-cancel")], ["Cancel"])
+        self.assertEqual(len(registered(opened, "draft-change")), 1)
+        (post,) = sent["posts"]
+        self.assertEqual(post["url"], "/api/plan-answer")
+        self.assertEqual(posted(post), {"plan_id": PLAN_A, "id": "contract-draft",
+                                        "subject": "default-branch", "value": "main"})
+        self.assertIn("not a branch", full(sent["register"]))
+        (field,) = registered(sent, "draft-edit")
+        self.assertEqual(field["value"], " main ")
+
+    def test_an_accepted_change_closes_the_entry(self) -> None:
+        (snap,) = render([
+            START, {"frame": cards([], DRAFTED)}, {"click": "draft-change"},
+            {"type": {"class": "draft-edit", "text": "main"}},
+            {"respond": {"status": 204, "text": ""}}, {"click": "draft-send"}, {"snapshot": True}])
+        self.assertEqual(len(snap["posts"]), 1)
+        self.assertEqual(registered(snap, "draft-edit"), [])
+        self.assertEqual(len(registered(snap, "draft-change")), 2)
+
+    def test_a_change_the_plan_refuses_after_the_204_shows_why_and_keeps_the_value_for_retry(self) -> None:
+        refused = {**DRAFTED, "questions": [], "refusal": "planning timed out, try again",
+                   "refused": {"id": "contract-draft", "subject": "default-branch"}}
+        opened, shown, retry = render([
+            START, {"frame": cards([], DRAFTED)}, {"click": "draft-change"},
+            {"type": {"class": "draft-edit", "text": "main"}},
+            {"respond": {"status": 204, "text": ""}}, {"click": "draft-send"}, {"snapshot": True},
+            {"frame": cards([], refused)}, {"snapshot": True},
+            {"click": "draft-change"}, {"snapshot": True}])
+        self.assertEqual(registered(opened, "draft-refusal"), [])
+        (line,) = registered(shown, "draft-refusal")
+        self.assertEqual(full(line), "planning timed out, try again")
+        self.assertEqual(len(registered(shown, "draft-change")), 2)
+        (field,) = registered(retry, "draft-edit")
+        self.assertEqual(field["value"], "main")
+        self.assertEqual(registered(retry, "draft-refusal"), [])
+
+    def test_change_on_an_option_entry_offers_the_option_and_the_current_value(self) -> None:
+        (snap,) = render([
+            START, {"frame": cards([], DRAFTED)}, {"click": "draft-change"}, {"click": "draft-change"},
+            {"snapshot": True}])
+        (field,) = registered(snap, "draft-edit")
+        self.assertEqual(field["value"], "unsupported")
+        self.assertEqual([full(n) for n in registered(snap, "draft-option")], ["It makes no releases"])
+        self.assertEqual(len(registered(snap, "draft-change")), 1)
+
+    def test_an_option_is_sent_as_the_choice(self) -> None:
+        other = {**DRAFTED, "draft": [DRAFTED["draft"][0], {**DRAFTED["draft"][1], "value": "tagged"}]}
+        (snap,) = render([
+            START, {"frame": cards([], other)}, {"click": "draft-change"}, {"click": "draft-change"},
+            {"click": "draft-option"}, {"respond": {"status": 204, "text": ""}},
+            {"click": "draft-send"}, {"snapshot": True}])
+        (post,) = snap["posts"]
+        self.assertEqual(posted(post), {"plan_id": PLAN_A, "id": "contract-draft",
+                                        "subject": "release", "value": "unsupported"})
+
+    def test_the_open_entry_and_its_typed_text_survive_a_frame_and_cancel_closes_it(self) -> None:
+        kept, closed = render([
+            START, {"frame": cards([], DRAFTED)}, {"click": "draft-change"},
+            {"type": {"class": "draft-edit", "text": "main"}},
+            {"frame": cards([], {**DRAFTED, "at": "2026-11-15T09:00:00+00:00"})}, {"snapshot": True},
+            {"click": "draft-cancel"}, {"snapshot": True}])
+        self.assertEqual(kept["field"], {"cls": "draft-text draft-edit", "value": "main",
+                                         "start": 4, "end": 4})
+        self.assertEqual(registered(closed, "draft-edit"), [])
+        self.assertEqual(len(registered(closed, "draft-change")), 2)
+
+    def test_at_480_a_draft_and_a_text_card_fit(self) -> None:
+        try:
+            from playwright.sync_api import Error, sync_playwright
+        except ImportError:
+            self.skipTest("playwright is not installed")
+        fakes = (
+            "window.EventSource = class { constructor() { window.__src = this; this.l = {}; }"
+            " addEventListener(name, fn) { this.l[name] = fn; } close() {} };"
+            "window.fetch = () => Promise.resolve(new Response(null, {status: 204}));")
+        measure = """() => {
+          const edge = document.documentElement.clientWidth;
+          const parts = ['inbox', 'register'].map((id) => document.getElementById(id));
+          const kids = parts.flatMap((p) => [...p.querySelectorAll('*')].map((e) => e.getBoundingClientRect()));
+          return {fits: parts.every((p) => p.scrollWidth <= p.clientWidth), kids: kids.length,
+                  inside: kids.every((r) => r.right <= edge),
+                  page: document.documentElement.scrollWidth <= edge};
+        }"""
+        deep = "a-long-directory-name/" * 3
+        entries = [{"field": f"field-{n}", "line": f"field {n}: {deep}value-{n} (read from {deep})",
+                    "value": f"{deep}value-{n}", "options": [], "text": True} for n in range(27)]
+        entries[1]["options"] = [{"value": "x", "label": f"A long option {deep}"}]
+        drafted = {**DRAFTED, "draft": entries}
+        asking = {**view([]), "inbox": {"open": [T0], "answered": []}, "registration": drafted}
+        html = PAGE.read_text(encoding="utf-8").replace("__CONSOLE_TOKEN__", "t")
+        with sync_playwright() as pw:
+            try:
+                browser = pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+            except Error as err:
+                self.skipTest(f"no Chromium to launch: {err}")
+            try:
+                page = browser.new_page(viewport={"width": 480, "height": 900})
+                page.add_init_script(fakes)
+                page.route("http://console.test/", lambda route: route.fulfill(
+                    body=html, content_type="text/html"))
+                page.goto("http://console.test/")
+                page.evaluate("(f) => window.__src.l.view({data: JSON.stringify(f)})", asking)
+                page.locator(".draft-change").nth(1).click()
+                got = page.evaluate(measure)
+            finally:
+                browser.close()
+        self.assertGreater(got["kids"], 10)
+        self.assertTrue(got["fits"], got)
+        self.assertTrue(got["inside"], got)
+        self.assertTrue(got["page"], got)
+
+
 class RegisterCardPageTest(unittest.TestCase):
     def test_plan_questions_are_question_cards_with_numbered_options(self) -> None:
         (snap,) = render([START, {"frame": cards([R0, R1])}, {"snapshot": True}])
