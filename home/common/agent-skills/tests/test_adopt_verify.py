@@ -538,6 +538,36 @@ class RemoteRegistrationTest(VerifyTestCase):
         self.assertEqual(self.registry()["projects"], [
             {"project_id": "fixture/target", "root": str(root)}])
 
+    def test_the_named_plan_registers_when_its_evidence_record_is_on_the_remote(self):
+        root = verifiable_repo(self.home)
+        publish(root)
+        report = self.report(root, "--register", "--plan-id", "sha256:" + "a1" * 32)
+        self.assertIs(report["registered"], True)
+        self.assertEqual(sorted(report), VERIFY_MEMBERS)
+        self.assertEqual(self.registry()["projects"], [
+            {"project_id": "fixture/target", "root": str(root)}])
+
+    def test_another_plans_evidence_record_refuses_before_anything_is_written(self):
+        root = verifiable_repo(self.home)
+        publish(root)
+        payload = self.refuse(root, "not_integrated", "--register",
+                              "--plan-id", "sha256:" + "b2" * 32)
+        self.assertEqual(payload["error"]["repair_id"],
+                         "adopt.registration.not_integrated")
+        self.assertFalse(self.registry_path().exists())
+
+    def test_the_plan_id_is_accepted_once_and_only_with_register(self):
+        for extra, repair_id in (
+                (("--plan-id", "sha256:aa"), "adopt.verify.plan_id_without_register"),
+                (("--register", "--plan-id", "sha256:aa", "--plan-id", "sha256:aa"),
+                 "adopt.verify.plan_id_repeated")):
+            with self.subTest(repair_id=repair_id):
+                exit_code, payload, err = self.verify(Path(tempfile.mkdtemp()), *extra)
+                self.assertEqual(exit_code, 2, err or payload)
+                self.assertEqual(
+                    (payload["error"]["code"], payload["error"]["repair_id"]),
+                    ("adopt_failure", repair_id))
+
     def test_an_integration_branch_missing_on_origin_refuses(self):
         root = verifiable_repo(self.home, integration_branch="dev")
         publish(root, ("HEAD~1:main",))

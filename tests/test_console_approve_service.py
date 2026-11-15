@@ -131,7 +131,8 @@ class RegistryFake(Fake):
         super().__init__(**fake_arguments)
         self.registry = registry
 
-    def register(self, root, cancel=None):
+    def register(self, root, cancel=None, **operands):
+        self.register_operands.append(operands)
         self._run("register", root, cancel)
         if self.register_raises is not None:
             raise self.register_raises
@@ -854,6 +855,13 @@ class MergedRegistrationTest(ApproveCase):
                                                for m in view["digest"]["recent"]])
         self.assertEqual(view["statement"]["inbox_items"], 0)
 
+    def test_the_registration_names_the_recorded_integration_branch_and_the_plan(self):
+        fake = self.merged(GREEN)
+        self.poll("merged")
+        self.assertEqual(self.svc._adoptions[PID_B]["base"], APPLIED["integration_branch"])
+        self.assertEqual(fake.register_operands,
+                         [{"integration_branch": "develop", "plan_id": PID_B}])
+
     def test_before_the_remote_carries_the_adoption_the_registration_waits_and_retries_on_the_next_look(self):
         fake = self.merged(NOT_INTEGRATED)
         self.poll("merged")
@@ -982,7 +990,7 @@ class MergedRegistrationTest(ApproveCase):
         fake = self.merged(None)
         service_ = self.svc
 
-        def stopping(root, cancel=None):
+        def stopping(root, cancel=None, **operands):
             fake.calls.append(("register", root))
             service_._stop.set()
             raise register.RunFailed("cancelled")
@@ -1053,7 +1061,9 @@ class MergedRegistrationTest(ApproveCase):
         self.assertTrue(self.listed("o/r"))
 
 
-class MergedRegistrationRealTest(ApproveCase):
+class MergedRealCase(ApproveCase):
+    evidence_plan = PID_B
+
     def setUp(self):
         super().setUp()
         self.before = real_home_state()
@@ -1061,6 +1071,11 @@ class MergedRegistrationRealTest(ApproveCase):
         self.repo = register_check.adopted_repository(
             self.parent / "merged", "fixture/console-merged", ROOT / register_check.CONTRACT_SOURCE)
         self.remote = self.parent / "merged" / "origin.git"
+        evidence = next((self.repo / ".agents/artifacts/evidence").glob("*.json"))
+        record = json.loads(evidence.read_text())
+        evidence.write_text(json.dumps({**record, "plan_id": self.evidence_plan}) + "\n")
+        git(self.repo, "add", str(evidence))
+        git(self.repo, "commit", "-q", "--amend", "--no-edit")
         self.tip = git(self.repo, "rev-parse", "HEAD").strip()
         git(self.repo, "push", "--quiet", "--force", "origin", "HEAD~1:refs/heads/main")
         planned = {
@@ -1085,6 +1100,8 @@ class MergedRegistrationRealTest(ApproveCase):
         self.forge.states[7] = "merged"
         self.start(register.Adopter(), slug_of=lambda root: "fixture/console-merged")
 
+
+class MergedRegistrationRealTest(MergedRealCase):
     def test_before_the_remote_carries_the_adoption_nothing_is_registered(self):
         results = [row["result"] for row in self.settled(1)]
         self.assertEqual(json.loads(self.registry.read_text())["projects"], [])
@@ -1110,3 +1127,16 @@ class MergedRegistrationRealTest(ApproveCase):
         self.assertIn("fixture/console-merged was registered.",
                       [m["sentence"] if isinstance(m, dict) else m for m in recent])
         self.assertEqual(git(self.repo, "rev-parse", "HEAD").strip(), self.tip)
+
+
+class MergedReadoptionRealTest(MergedRealCase):
+    evidence_plan = PID_A
+
+    def test_the_remote_carrying_an_earlier_adoption_does_not_register_the_new_plan(self):
+        self.settled(1)
+        git(self.repo, "push", "--quiet", "--force", "origin", f"{self.tip}:refs/heads/main")
+        self.svc.poll_adoptions()
+        self.assertEqual(json.loads(self.registry.read_text())["projects"], [])
+        self.assertEqual([row["result"] for row in self.registrations()], ["waiting"])
+        self.assertFalse(self.listed("fixture/console-merged"))
+        self.assertEqual(self.retry_items(), [])

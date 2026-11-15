@@ -46,6 +46,15 @@ pinned commit with no adoption evidence record refuses `not_integrated` with
 `adopt.registration.not_integrated`, and when the default contract did not
 resolve and no operand was given its message names `--integration-branch`.
 
+`--plan-id ID` (the adoption console's registration after a merge; accepted
+only with `--register`, at most once) names the plan whose adoption must be
+the one on the pinned commit: when no adoption evidence record there carries
+that `plan_id`, registration refuses `not_integrated` with
+`adopt.registration.not_integrated` before anything is written, so an earlier
+valid adoption of the same project is never taken for the new one. The
+operand is checked by `require_integrated` and is never part of the report or
+the registry entry.
+
 The resolver is not reached from this module. `adopt-project` owns the one
 seam it is consumed through — invoked as a child process through
 `agent_tools.system.siblings.sibling_argv`, never imported (D26) — and hands that
@@ -327,7 +336,8 @@ def unresolved_integration_branch(message: str) -> AdoptError:
         "", message)
 
 
-def require_integrated(verification: Verification) -> None:
+def require_integrated(verification: Verification,
+                       plan_id: str | None = None) -> None:
     """Refuse `not_integrated` when the pinned commit carries no adoption.
 
     Called only under `--register`, before `registration_allowed`: a remote
@@ -335,10 +345,17 @@ def require_integrated(verification: Verification) -> None:
     whatever else the report says (D7). When that revision is a default branch
     whose contract does not resolve and no operand replaced it, the message
     names `--integration-branch`, the one repair that reaches the adoption;
-    every other missing record keeps the plain message.
+    every other missing record keeps the plain message. With `plan_id`, a
+    revision whose evidence records all name other plans is no adoption of
+    that plan either, and refuses the same way.
     """
     if verification.evidence_candidates:
-        return
+        if plan_id is None or plan_id in verification.evidence_plan_ids:
+            return
+        raise refuse(
+            "not_integrated", "adopt.registration.not_integrated", "",
+            "the remote integration branch carries no adoption evidence "
+            "record of the named plan")
     source = verification.source
     if not source.default_contract_resolved and source.override_default is None:
         raise refuse(
@@ -446,15 +463,19 @@ class Verification:
     pinned revision the report was read at, which registration walks ancestry
     from, and `evidence_candidates` every adoption evidence record path found
     in it, which `require_integrated` reads: an empty list is no adoption.
+    `evidence_plan_ids` is the `plan_id` of every candidate that parses as an
+    adoption record, which `require_integrated` matches against `--plan-id`.
     """
 
     def __init__(self, report: dict, resolve_payload: object,
                  source: VerificationSource,
-                 evidence_candidates: list[str]) -> None:
+                 evidence_candidates: list[str],
+                 evidence_plan_ids: list[object] | None = None) -> None:
         self.report = report
         self.resolve_payload = resolve_payload
         self.source = source
         self.evidence_candidates = evidence_candidates
+        self.evidence_plan_ids = evidence_plan_ids or []
 
 
 def verify_repository(root: Path, source: VerificationSource,
@@ -499,9 +520,10 @@ def verify_repository(root: Path, source: VerificationSource,
     # file that parses as an adoption record is a record to count. When none
     # parses, every candidate stays in view so a lone malformed file still
     # reports "does not parse" and several still report the ambiguity.
-    parsed = [path for path in candidates if parses_as_evidence_record(
-        blob_at(root, source.commit, path)) is not None]
-    candidates = parsed or candidates
+    parsed = {path: found for path in candidates
+              if (found := parses_as_evidence_record(
+                  blob_at(root, source.commit, path))) is not None}
+    candidates = list(parsed) or candidates
     if not candidates:
         record("adoption-evidence-record", "failed",
                "no adoption evidence record is committed under "
@@ -578,7 +600,8 @@ def verify_repository(root: Path, source: VerificationSource,
     override = branch_override(source)
     if override is not None:
         report["branch_override"] = override
-    return Verification(report, payload, source, candidates)
+    return Verification(report, payload, source, candidates,
+                        [found["plan_id"] for found in parsed.values()])
 
 
 def register_project(root: Path, verification: Verification) -> None:

@@ -547,7 +547,8 @@ more. A failed read is one stderr line `console: adoption_poll_failed <plan_id> 
 merges: the owner does, on the forge.
 
 The same round ends with the merged registration (#1055, ADR-console-028 D10, ADR-project-contract-005):
-`register_merged()` runs `Adopter.register(root, cancel=...)`, the bounded child, for each `opened`
+`register_merged()` runs `Adopter.register(root, cancel=..., integration_branch=<the recorded pull
+request base>, plan_id=<the adoption's plan id>)`, the bounded child, for each `opened`
 adoption whose pull request reads `merged` and whose registration is absent or `waiting`
 (`approve.enrolling`), one after another on the poll thread, never inside the ingest lock and
 never for a closed, open or ready pull request; `_enrolling` keeps one run per plan id, and
@@ -4757,7 +4758,8 @@ class ConsoleService:
         root, plan_id = entry["root"], entry["plan_id"]
         where = {"stage": "register", "root": root, "plan_id": plan_id}
         try:
-            report = self._adopter.register(root, cancel=self._stop)
+            report = self._adopter.register(
+                root, cancel=self._stop, integration_branch=entry["base"], plan_id=plan_id)
         except register.RunFailed as failure:
             if self._stop.is_set():
                 return

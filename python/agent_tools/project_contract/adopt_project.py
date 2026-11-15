@@ -113,7 +113,10 @@ its conditions, and the report then carries a `branch_override` member. It
 refuses `not_integrated` when that commit carries no evidence record or the
 adoption commit derived from it is not its ancestor (D19). What it stores is
 `{project_id, root}` with the real root (#148 D18), plus the `branch_override`
-member when the operand selected the branch.
+member when the operand selected the branch. `--plan-id ID` (accepted once,
+and only with `--register`) refuses `not_integrated` before any write when no
+evidence record on the pinned commit carries that plan id, so the adoption of
+one plan is never mistaken for an earlier adoption of the same project.
 
 `migrate --migration ID` executes one manifest migration on the checkout
 in place (https://github.com/fagenorn/nix-config/issues/579): it rewrites
@@ -791,6 +794,14 @@ def command_verify(args: argparse.Namespace) -> int:
         raise adopt_inspection.refuse(
             "adopt_failure", "adopt.verify.integration_branch_without_register",
             "", "`--integration-branch` is accepted only with `--register`")
+    if len(args.plan_id) > 1:
+        raise adopt_inspection.refuse(
+            "adopt_failure", "adopt.verify.plan_id_repeated", "",
+            "`--plan-id` may be given at most once")
+    if args.plan_id and not args.register:
+        raise adopt_inspection.refuse(
+            "adopt_failure", "adopt.verify.plan_id_without_register", "",
+            "`--plan-id` is accepted only with `--register`")
     root = adopt_inspection.require_repository(args.repo_root)
     if not args.register:
         verification = adopt_verify.verify_repository(
@@ -802,7 +813,8 @@ def command_verify(args: argparse.Namespace) -> int:
                 root, run_resolver, operand) as source:
             verification = adopt_verify.verify_repository(
                 root, source, run_resolver)
-        adopt_verify.require_integrated(verification)
+        adopt_verify.require_integrated(
+            verification, args.plan_id[0] if args.plan_id else None)
         if adopt_verify.registration_allowed(verification.report["result"]):
             adopt_verify.register_project(root, verification)
     emit_json(verification.report)
@@ -865,6 +877,12 @@ def build_parser() -> argparse.ArgumentParser:
                              "branch's contract does not resolve; origin "
                              "must list it and its own contract must resolve "
                              "and name it")
+    verify.add_argument("--plan-id", action="append", default=[],
+                        metavar="ID",
+                        help="with --register, the plan whose adoption the "
+                             "integration branch on origin must carry: "
+                             "registration refuses not_integrated when no "
+                             "evidence record there names it")
     migrate = subparsers.add_parser(
         "migrate", help="execute one manifest migration on a checkout, "
                         "validated by the resolver")
