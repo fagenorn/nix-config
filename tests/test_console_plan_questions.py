@@ -68,8 +68,6 @@ def project_id(value):
     return {"id": "project-id", "subject": "", "value": value}
 
 
-ONLY_ANSWER = "This is the only thing the adoption can do with this file."
-
 
 class QuestionsTest(unittest.TestCase):
     def test_a_tracked_candidate_offers_the_archive(self):
@@ -79,8 +77,7 @@ class QuestionsTest(unittest.TestCase):
             [{
                 "id": "candidate-class",
                 "subject": ".claude/odd.md",
-                "ask": "What should happen to .claude/odd.md? No rule covers this agent file.\n"
-                       "This is the only thing the adoption can do with this file.",
+                "ask": "What should happen to .claude/odd.md? No rule covers this agent file.",
                 "options": [{
                     "value": "archive-history",
                     "label": "Archive it under .agents/knowledge/archive/adopted/",
@@ -187,25 +184,28 @@ class QuestionsTest(unittest.TestCase):
         self.assertEqual(len(questions), 2)
         self.assertEqual(
             questions[1]["ask"],
-            "s:1:1 names a path this plan moves. Should it follow the move?\n" + ONLY_ANSWER,
+            "s:1:1 names a path this plan moves. Should it follow the move?",
         )
 
-    def test_a_question_with_exactly_one_answer_says_so_and_one_with_two_does_not(self):
+    def test_a_question_with_exactly_one_answer_keeps_its_plain_ask(self):
         one = [
             candidate(".claude/odd.md", "retain-product"),
             {**REFERENCE, "answers": ["retain"]},
             policy(None, ["retain"]),
         ]
         two = [{**REFERENCE, "answers": ["rewrite", "retain"]}, policy("rewrite")]
-        for question in plan_questions.questions(document(one, [REFERENCE_ROW], [POLICY_ROW])):
+        asked = plan_questions.questions(document(one, [REFERENCE_ROW], [POLICY_ROW]))
+        asked += plan_questions.questions(document(two, [REFERENCE_ROW], [POLICY_ROW]))
+        asked += plan_questions.questions(document([candidate(".claude/secrets/key.md", None)]))
+        asked += plan_questions.questions(document([project_id(None)]))
+        for question in asked:
             with self.subTest(subject=question["subject"]):
-                self.assertEqual(len(question["options"]), 1)
-                self.assertTrue(question["ask"].endswith("\n" + ONLY_ANSWER), question["ask"])
-        for question in plan_questions.questions(document(two, [REFERENCE_ROW], [POLICY_ROW])):
-            with self.subTest(subject=question["subject"]):
-                self.assertNotIn(ONLY_ANSWER, question["ask"])
-        for entry in (candidate(".claude/secrets/key.md", None), project_id(None)):
-            self.assertNotIn(ONLY_ANSWER, plan_questions.questions(document([entry]))[0]["ask"])
+                self.assertNotIn("only thing", question["ask"])
+                self.assertNotIn("\n", question["ask"])
+        self.assertEqual(
+            plan_questions.questions(document(one[:1]))[0]["ask"],
+            "What should happen to .claude/odd.md? No rule covers this agent file.",
+        )
 
 
 class ParseTest(unittest.TestCase):

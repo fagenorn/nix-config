@@ -103,16 +103,19 @@ members are exactly `MEMBERS` (a legacy row), `MEMBERS | EXTRA` or `MEMBERS | EX
 of dicts with exactly the string keys `id`, `subject` and `value` (ADR-console-029 D1); for thirteen
 also unless `draft` is None or a list of dicts whose keys are exactly `FIELD_KEYS`. `ENDED` is
 `event_log.REGISTRATION_ENDED`, not in `KEPT_KINDS`. `latest(events, state=None)` is the last valid
-`ENDED` payload over `DEFAULTS` with `at` added, else `state`: the view's `registration` member,
-folded by the service. `view_entry(running, latest, *, again=False, refusal=None, adoption=None,
-approve=None)` is that member, always the same nineteen keys: the `running` entry (headline `Planning the adoption of <name>…`, or
+`ENDED` payload over `DEFAULTS` with `at` added (a saved draft is read back through
+`contract_draft.refresh`, and a `drafting` row's questions from it, so an earlier console's wording
+never shows, ADR-console-033 D2), else `state`: the view's `registration` member, folded by the service. `view_entry(running, latest, *, again=False, refusal=None, adoption=None,
+approve=None)` is that member, always the same twenty keys: the `running` entry (headline `Planning the adoption of <name>…`, or
 `again_headline(name)`, `Planning the adoption of <name> again with your answer…`, when `again`)
 while a run is under way, with `plan_id`, `state` and `refusal` None and `questions` `[]`; else the
 latest with status `done`, its `plan_id`, `state` and `questions`, and `refusal` the text of the
 given `{"plan_id", "text", "id", "subject"}` only when its `plan_id` is the latest's, and `refused`
 its `{"id", "subject"}` under the same match (the question the refused answer was for), and `draft`
 `contract_draft.shown(draft)` when the latest row holds a draft list (None for the running entry and
-for any other row); else None (D4). The keys `adoption` and `approve` are None in the `running` entry
+for any other row), and `draft_more` `contract_draft.more_line(draft)` under the same condition (the
+counted line for the shown settings outside the main ones; None otherwise, including when no such
+setting is shown); else None (D4). The keys `adoption` and `approve` are None in the `running` entry
 and carry the given values (the `approve.entry` object and the action the page offers, #1054) in the
 `done` entry. `line` is the entry's state in one line (D6, D7): the running headline while a run is
 under way; the given adoption's headline when there is one (the adoption is then the plan's latest
@@ -501,6 +504,10 @@ def latest(events: Iterable[event_log.Event], state: dict | None = None) -> dict
         except ValueError:
             continue
         found = {**DEFAULTS, **payload, "at": event.at}
+        if isinstance(found["draft"], list) and isinstance(found["root"], str):
+            found["draft"] = contract_draft.refresh(found["root"], found["draft"])
+            if found["result"] == "drafting":
+                found["questions"] = contract_draft.questions(found["draft"])
     return found
 
 
@@ -531,7 +538,7 @@ def view_entry(running: str | None, latest: Mapping | None, *, again: bool = Fal
                 "result": None, "outcome": None, "headline": headline,
                 "lines": [], "note": None, "at": None, "plan_id": None, "state": None,
                 "questions": [], "refusal": None, "line": headline, "refused": None,
-                "draft": None, "adoption": None, "approve": None}
+                "draft": None, "draft_more": None, "adoption": None, "approve": None}
     if latest is None:
         return None
     mine = refusal is not None and refusal["plan_id"] == latest["plan_id"]
@@ -545,6 +552,7 @@ def view_entry(running: str | None, latest: Mapping | None, *, again: bool = Fal
             "line": line_of(latest) if adoption is None else adoption["headline"],
             "refused": {"id": refusal["id"], "subject": refusal["subject"]} if mine else None,
             "draft": contract_draft.shown(draft) if isinstance(draft, list) else None,
+            "draft_more": contract_draft.more_line(draft) if isinstance(draft, list) else None,
             "adoption": adoption, "approve": approve}
 
 

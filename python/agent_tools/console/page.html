@@ -82,6 +82,8 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .card { padding: 0 0 18px; }
 .card.lead { background: var(--s0); border: 1px solid var(--hair); border-radius: 16px; padding: 22px 32px 20px; margin: 0 -32px; box-shadow: 0 28px 48px -30px rgba(8, 9, 16, .9), 0 3px 8px -3px rgba(8, 9, 16, .45); }
 .card .q { margin-top: 10px; font: 600 1.5rem/1.3 var(--display); letter-spacing: -.012em; text-wrap: balance; }
+.card .q.reg { font-size: 1.25rem; }
+.rest .q.reg { margin: 6px 0 0; font: 600 1rem/1.4 var(--display); letter-spacing: -.012em; text-wrap: balance; }
 .more { font-size: .8125rem; color: var(--ov2); }
 .card .more { display: block; margin-top: 4px; }
 .card .context { margin-top: 8px; font-size: .9375rem; line-height: 1.5; color: var(--sub0); overflow-wrap: anywhere; }
@@ -91,7 +93,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .card .opts .picked, .rest .opts .picked, .done .opts .picked { color: var(--lav); }
 .card .reason { display: block; margin-top: 8px; font-size: .8125rem; color: var(--ov2); }
 .card .meta { margin-top: 8px; font-size: .8125rem; color: var(--ov2); }
-.card .head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 0; font-size: .84375rem; color: var(--sub0); }
+.card .head, .rest .head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 0; font-size: .84375rem; color: var(--sub0); }
 .head .wait { margin-left: auto; }
 .head .sprint-title { color: var(--text); overflow-wrap: anywhere; }
 .kind { display: inline-flex; gap: 7px; font-weight: 600; }
@@ -119,6 +121,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .done-item { flex: 1 0 100%; min-width: 0; }
 .keys { margin-top: 18px; display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: .8125rem; color: var(--ov2); }
 .keys span { display: inline-flex; align-items: center; gap: 6px; }
+.row-head .keys { flex-basis: 100%; margin-top: 6px; }
 .done-item summary, .check-more summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; cursor: pointer; list-style: none; padding: 4px 12px; margin: 0 -12px; border-radius: 10px; font-size: .875rem; color: var(--ov2); transition: background-color .16s; }
 .done-item summary { flex-wrap: nowrap; }
 .done-item summary > b { flex: 0 1000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -303,8 +306,15 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .register-lines { padding-left: 1.2em; color: var(--sub0); }
 .apply-lines { padding-left: 1.2em; color: var(--sub0); }
 .register-draft { list-style: none; padding-left: 0; color: var(--sub0); }
-.register-draft li { margin-bottom: 6px; }
-.draft-line { margin-right: 8px; }
+.register-draft li { margin-bottom: 6px; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; }
+.draft-line { margin-right: 8px; overflow-wrap: anywhere; }
+.draft-change { white-space: nowrap; }
+.draft-edit-box, .draft-refusal { grid-column: 1 / -1; }
+.draft-more { margin: 0 0 6px; color: var(--sub0); }
+.draft-more > summary { cursor: pointer; }
+.draft-more-list { list-style: none; padding-left: 0; margin: 6px 0 0; }
+.draft-more-list li { margin-bottom: 4px; }
+.register .draft-pick { display: block; width: 100%; box-sizing: border-box; text-align: left; border: 0; background: none; padding: 2px 0; overflow-wrap: anywhere; }
 .draft-edit-box { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 4px; }
 .draft-options { display: flex; flex-wrap: wrap; flex-basis: 100%; gap: 4px 8px; }
 .register .draft-option { max-width: 100%; text-align: left; overflow-wrap: anywhere; }
@@ -316,7 +326,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .register-adoption { margin-top: 8px; }
 .register-adoption-lines { padding-left: 1.2em; color: var(--sub0); }
 .register-pr-link { color: var(--blue); }
-.card .q.reg, .row-head b.reg { white-space: pre-line; }
+.card .q.reg, .rest .q.reg { white-space: pre-line; }
 .s-working { color: var(--green); }
 .s-waiting_answer, .s-waiting_permission { color: var(--yellow); }
 .s-limit { color: var(--red); }
@@ -336,6 +346,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
   .statement .sub { font-size: 1rem; }
 }
 @media (max-width: 480px) {
+  .card .q.reg, .rest .q.reg { font-size: 1rem; }
   .desk-grid { padding: 24px 16px 48px; }
   .statement h1 { font-size: 2rem; }
   .top-in { flex-wrap: wrap; }
@@ -1935,6 +1946,8 @@ const drafts = new Map();
 let fields = new Map();
 let lastView = null;
 let currentId = null;
+let keyHint = null;
+let hintHost = null;
 function itemId(item) {
   return item.project_id + "#" + item.key;
 }
@@ -1974,7 +1987,12 @@ function recommendedIndex(q) {
   if (Number.isInteger(i) && i >= 0 && i < q.options.length) return i;
   return q.options.indexOf(q.recommended);
 }
+// An adoption question the plan answers one way (ADR-console-033): no list to choose from, so the option is the card's action and starts picked.
+function soleOption(item) {
+  return item.reason === "register" && !textCard(item) && item.questions.length === 1 && item.questions[0].options.length === 1;
+}
 function startPicks(item) {
+  if (soleOption(item)) return [0];
   return item.questions.map((q) => {
     const chosen = q.options.indexOf(q.chosen);
     if (chosen >= 0) return chosen;
@@ -2032,7 +2050,7 @@ function currentEntry(open) {
     if (choosable(state)) return { item, state };
   }
   for (const item of open) {
-    if (!decision(item)) continue;
+    if (!decision(item) && !textCard(item)) continue;
     const state = answerState(item);
     if (choosable(state)) return { item, state };
   }
@@ -2317,6 +2335,7 @@ function briefRecord(sprintId) {
     field.setAttribute("aria-label", "Or say what to change");
     const row = el("details", "row brief-row");
     row.dataset.key = "brief:" + sprintId;
+    row.addEventListener("toggle", () => { if (keyHint !== null && hintHost === rec) seatHint(keyHint, rec); });
     const rowHead = el("summary", "row-head");
     row.appendChild(rowHead);
     rec = {
@@ -2395,7 +2414,6 @@ function approveLine(item, state, lead) {
     nodes.push(el("span", "", "A newer brief replaced version " + old + "; nothing was approved."));
   }
   const approve = actionButton(lead ? "approve primary needs" : "approve", "Approve", () => { if (startApproval(item, state)) redraw(); });
-  if (itemId(item) === currentId) approve.appendChild(el("kbd", "", "Enter"));
   nodes.push(approve);
   return nodes;
 }
@@ -2466,8 +2484,8 @@ function statusLine(act, state, item) {
 function actionLine(item, state, lead) {
   const act = el("div", "act");
   if (!statusLine(act, state, item) && (item.questions.length > 0 || !textCard(item))) {
-    const send = actionButton(lead ? "send primary needs" : "send", "Send answer", () => { if (start(item, state)) redraw(); });
-    if (itemId(item) === currentId) send.appendChild(el("kbd", "", "Enter"));
+    const words = soleOption(item) ? item.questions[0].options[0] : "Send answer";
+    const send = actionButton(lead ? "send primary needs" : "send", words, () => { if (start(item, state)) redraw(); });
     if (!picksComplete(item, state) || planBusy(item, state)) send.setAttribute("disabled", "");
     act.appendChild(send);
   }
@@ -2495,14 +2513,15 @@ function draftField(field, key, onInput) {
   fields.set(key, field);
   return field;
 }
-function typedArea(cls, label) {
+function typedArea(cls, label, placeholder) {
   const area = document.createElement("textarea");
   area.className = cls;
   area.setAttribute("aria-label", label);
+  area.setAttribute("placeholder", placeholder);
   return area;
 }
 function noteBox(item, state, box) {
-  const area = typedArea("note-text", "Note");
+  const area = typedArea("note-text", "Note", "Write a note");
   const send = actionButton("ans-note", "Send note", () => {
     const text = area.value;
     if (text.trim() === "") return;
@@ -2513,7 +2532,7 @@ function noteBox(item, state, box) {
   return send;
 }
 function wordsBox(item, state, box) {
-  const area = typedArea("words-text", "Answer in your own words");
+  const area = typedArea("words-text", "Answer in your own words", "Answer in your own words");
   const send = actionButton("ans-words", "Send my words", () => {
     const text = area.value;
     if (text.trim() === "") return;
@@ -2526,16 +2545,17 @@ function wordsBox(item, state, box) {
   send.disabled = pending || area.value.trim() === "";
   box.appendChild(send);
 }
-function draftInput(cls) {
+function draftInput(cls, placeholder) {
   const input = el("input", cls);
   input.type = "text";
   input.autocomplete = "off";
   input.spellcheck = false;
   input.setAttribute("aria-label", "Your answer");
+  input.setAttribute("placeholder", placeholder);
   return input;
 }
 function draftBox(item, state, box) {
-  const input = draftInput("draft-text");
+  const input = draftInput("draft-text", typeof item.placeholder === "string" && item.placeholder !== "" ? item.placeholder : "Type your answer");
   const row = el("div", "draft-row");
   // The pending answer carries the text it was sent with, so the field is read-only until it is undone or settled.
   const pending = !choosable(state) || planBusy(item, state);
@@ -2622,6 +2642,7 @@ function answerBox(item, state, lead) {
     if (item.questions.length > 1) {
       box.appendChild(el("p", live && itemId(item) === currentId && qi === now ? "meta now" : "meta", q.question));
     }
+    if (soleOption(item)) return;
     const list = el("ul", "opts");
     q.options.forEach((option, oi) => {
       const button = el("button", state.picks[qi] === oi ? "opt picked" : "opt");
@@ -2680,19 +2701,25 @@ function leadItem(item) {
 }
 function itemLine(item) {
   const line = el("li", "row");
-  const head = el("p", "row-head");
-  head.appendChild(kindWords(item));
-  const label = checkLabel(item);
-  if (label !== null) head.appendChild(label);
-  head.appendChild(el("b", isRegister(item) ? "reg" : "", item.headline));
-  const lm = phrase("span", "lm", isRegister(item) ? item.title : item.project_id + " \u00b7 " + (isQuestion(item) ? item.title : holds(item)));
-  if (item.stale) {
-    lm.appendChild(el("span", "", " \u00b7 "));
-    lm.appendChild(phrase("span", "read-at", "read ", timeEl("ago", item.read_at, "")));
+  if (isRegister(item)) {
+    // A register row reads like its lead card: title, then the ask (ADR-console-030 D5).
+    line.appendChild(headLine(item));
+    line.appendChild(el("p", "q reg", item.headline));
+  } else {
+    const head = el("p", "row-head");
+    head.appendChild(kindWords(item));
+    const label = checkLabel(item);
+    if (label !== null) head.appendChild(label);
+    head.appendChild(el("b", "", item.headline));
+    const lm = phrase("span", "lm", item.project_id + " \u00b7 " + (isQuestion(item) ? item.title : holds(item)));
+    if (item.stale) {
+      lm.appendChild(el("span", "", " \u00b7 "));
+      lm.appendChild(phrase("span", "read-at", "read ", timeEl("ago", item.read_at, "")));
+    }
+    head.appendChild(lm);
+    head.appendChild(phrase("span", "lw", "waiting ", timeEl("since", item.waiting_since, "")));
+    line.appendChild(head);
   }
-  head.appendChild(lm);
-  head.appendChild(phrase("span", "lw", "waiting ", timeEl("since", item.waiting_since, "")));
-  line.appendChild(head);
   if (isQuestion(item) && typeof item.context === "string") line.appendChild(el("p", "context", item.context));
   const more = moreWords(item);
   if (more !== null) line.appendChild(more);
@@ -2749,9 +2776,17 @@ function keyStrip(current, open) {
     if (current.state.reply.phase !== "sending") entry([el("kbd", "", "Enter")], " approve");
   } else if (current !== null) {
     const questions = current.item.questions;
-    const n = Math.min(9, questions[Math.min(current.state.q, questions.length - 1)].options.length);
-    entry(n > 1 ? [el("kbd", "", "1"), el("span", "", "\u2013"), el("kbd", "", String(n))] : [el("kbd", "", "1")], " choose");
-    if (picksComplete(current.item, current.state)) entry([el("kbd", "", "Enter")], " send answer");
+    if (soleOption(current.item)) {
+      if (picksComplete(current.item, current.state)) entry([el("kbd", "", "Enter")], " sends this answer");
+    } else if (questions.length > 0) {
+      const n = Math.min(9, questions[Math.min(current.state.q, questions.length - 1)].options.length);
+      entry(n > 1 ? [el("kbd", "", "1"), el("span", "", "\u2013"), el("kbd", "", String(n))] : [el("kbd", "", "1")], " choose");
+    }
+    if (soleOption(current.item)) {
+      // Its one strip entry is above.
+    } else if (textCard(current.item)) {
+      entry([el("kbd", "", "Enter")], questions.length > 0 ? " sends your choice or what you typed" : " sends what you typed");
+    } else if (picksComplete(current.item, current.state)) entry([el("kbd", "", "Enter")], " send answer");
   }
   if (open.some((item) => { const s = answers.get(stateId(item)); return s !== undefined && s.phase === "waiting"; })) {
     entry([el("kbd", "", "Esc")], " undo");
@@ -2760,6 +2795,11 @@ function keyStrip(current, open) {
   const strip = el("p", "keys");
   for (const e of entries) strip.appendChild(e);
   return strip;
+}
+// A brief after the first sits in a row that can fold: its hint goes on the row's summary while the row is closed, else on its card.
+function seatHint(strip, host) {
+  const folded = host.card !== undefined && host.card.parentNode === host.row && !host.row.open;
+  (folded ? host.rowHead : host.card !== undefined ? host.card : host).appendChild(strip);
 }
 function renderInbox(view) {
   const fresh = view !== lastView;
@@ -2864,16 +2904,27 @@ function renderInbox(view) {
   }
   const current = currentEntry(open);
   currentId = current === null ? null : itemId(current.item);
+  // The element that holds each open item's card, so the key hint lands on the card it acts on.
+  const cardOf = new Map();
   placeBriefCards(section, briefs);
+  for (const item of briefs) cardOf.set(stateId(item), briefRecord(item.sprint_id));
   for (const item of stalls) section.appendChild(stallCard(item));
   for (const item of progress) section.appendChild(progressCard(item));
   for (const item of signins) section.appendChild(signinCard(item));
   for (const item of open.filter(isAdoption)) section.appendChild(adoptionCard(item));
-  if (briefs.length === 0 && tracked.length > 0) section.appendChild(leadItem(tracked[0]));
+  if (briefs.length === 0 && tracked.length > 0) {
+    const lead = leadItem(tracked[0]);
+    cardOf.set(stateId(tracked[0]), lead);
+    section.appendChild(lead);
+  }
   const rows = briefs.length === 0 ? tracked.slice(1) : tracked;
   if (rows.length > 0) {
     const rest = el("ul", "rest");
-    for (const item of rows) rest.appendChild(itemLine(item));
+    for (const item of rows) {
+      const line = itemLine(item);
+      cardOf.set(stateId(item), line);
+      rest.appendChild(line);
+    }
     section.appendChild(rest);
   }
   const answered = view.inbox.answered;
@@ -2882,10 +2933,22 @@ function renderInbox(view) {
     for (const item of answered) done.appendChild(answeredLine(item));
     section.appendChild(done);
   }
-  const strip = keyStrip(current, open);
-  if (strip !== null) section.appendChild(strip);
   for (const fold of document.querySelectorAll("#inbox details")) {
     if (wasOpen.has(fold.dataset.key)) fold.open = true;
+  }
+  // The one key hint sits on the current card (else on the first waiting one); a brief card outlives a render, so the last hint is removed first.
+  if (keyHint !== null) keyHint.remove();
+  keyHint = null;
+  hintHost = null;
+  const strip = keyStrip(current, open);
+  if (strip !== null) {
+    const owner = current !== null ? current.item : open.find((item) => { const s = answers.get(stateId(item)); return s !== undefined && s.phase === "waiting"; });
+    const host = owner === undefined ? undefined : cardOf.get(stateId(owner));
+    if (host !== undefined) {
+      seatHint(strip, host);
+      keyHint = strip;
+      hintHost = host;
+    }
   }
   const again = held === null ? undefined : fields.get(held.key);
   if (again !== undefined) {
@@ -3451,7 +3514,7 @@ async function postChange(registration, change, value) {
 function changeBox(registration, entry, change) {
   const box = el("div", "draft-edit-box");
   const key = draftKey(entry.field);
-  const input = entry.text === true ? draftInput("draft-text draft-edit") : null;
+  const input = entry.text === true ? draftInput("draft-text draft-edit", "Type the new value") : null;
   const submit = () => {
     const value = change.choice !== null ? change.choice : input.value.trim();
     if (!send.disabled) postChange(registration, change, value);
@@ -3474,6 +3537,7 @@ function changeBox(registration, entry, change) {
     box.appendChild(list);
   }
   if (input !== null) {
+    input.setAttribute("placeholder", typeof entry.placeholder === "string" && entry.placeholder !== "" ? entry.placeholder : "Type the new value");
     draftField(input, key, () => {
       // Typing replaces a chosen option as the answer.
       if (change.choice !== null) {
@@ -3503,26 +3567,59 @@ function changeBox(registration, entry, change) {
   if (change.failure !== "") box.appendChild(el("p", "fail", change.failure));
   return box;
 }
-function drawDraft(registration) {
-  const list = el("ul", "register-draft");
-  for (const entry of registration.draft) {
-    const row = el("li");
-    row.appendChild(el("span", "draft-line", entry.line));
-    // A Change the console accepted and the plan then refused: the refusal is on the entry it changed, and Change starts from what was sent.
-    const refused = registration.refused;
-    const refusedHere = typeof registration.refusal === "string" && refused !== null && typeof refused === "object"
-      && refused.id === "contract-draft" && refused.subject === entry.field;
-    if (registerChange !== null && registerChange.field === entry.field) {
-      row.appendChild(changeBox(registration, entry, registerChange));
+// One entry's row. A fold entry is a quiet pick button until its change opens; every other entry has its own Change control.
+function draftRow(registration, entry, folded) {
+  const row = el("li");
+  // A Change the console accepted and the plan then refused: the refusal is on the entry it changed, and Change starts from what was sent.
+  const refused = registration.refused;
+  const refusedHere = typeof registration.refusal === "string" && refused !== null && typeof refused === "object"
+    && refused.id === "contract-draft" && refused.subject === entry.field;
+  const here = registerChange !== null && registerChange.field === entry.field;
+  if (!folded || here) row.appendChild(el("span", "draft-line", entry.line));
+  if (here) {
+    row.appendChild(changeBox(registration, entry, registerChange));
+  } else {
+    const sent = registerSent.get(entry.field);
+    const retry = refusedHere && sent !== undefined && sent.plan_id === registration.plan_id ? sent.value : undefined;
+    if (folded) {
+      const pick = actionButton("draft-pick", entry.line, () => openChange(entry, retry));
+      pick.setAttribute("aria-label", "Change: " + entry.line);
+      row.appendChild(pick);
     } else {
-      const sent = registerSent.get(entry.field);
-      const retry = refusedHere && sent !== undefined && sent.plan_id === registration.plan_id ? sent.value : undefined;
       row.appendChild(actionButton("draft-change", "Change", () => openChange(entry, retry)));
-      if (refusedHere) row.appendChild(el("p", "fail draft-refusal", registration.refusal));
     }
-    list.appendChild(row);
+    if (refusedHere) row.appendChild(el("p", "fail draft-refusal", registration.refusal));
   }
-  return list;
+  return { row, forced: here || refusedHere };
+}
+// The fold's open state of the last draw: its repository and its element, so a redraw of the same repository keeps it.
+let registerMore = null;
+function drawDraft(registration) {
+  // The fold exists only when the view said its counted words; an older frame draws every entry like the rest.
+  const folded = typeof registration.draft_more === "string" && registration.draft.some((entry) => entry.more === true);
+  const carried = registerMore !== null && registerMore.root === registration.root && registerMore.fold.open;
+  registerMore = null;
+  const list = el("ul", "register-draft");
+  const inner = el("ul", "draft-more-list");
+  let forced = false;
+  for (const entry of registration.draft) {
+    const inFold = folded && entry.more === true;
+    const drawn = draftRow(registration, entry, inFold);
+    if (inFold && drawn.forced) forced = true;
+    (inFold ? inner : list).appendChild(drawn.row);
+  }
+  const parts = [];
+  if (list.children.length > 0) parts.push(list);
+  if (folded) {
+    const fold = el("details", "draft-more");
+    fold.dataset.key = draftMoreKey;
+    fold.open = forced || carried;
+    fold.appendChild(el("summary", "", registration.draft_more));
+    fold.appendChild(inner);
+    registerMore = { root: registration.root, fold };
+    parts.push(fold);
+  }
+  return parts;
 }
 // The registration's words are the view's: the page shows them verbatim and composes none.
 function drawRegisterResult(registration) {
@@ -3535,7 +3632,8 @@ function drawRegisterResult(registration) {
   const drafted = Array.isArray(registration.draft) ? registration.draft : [];
   if (registerChange !== null && !drafted.some((entry) => entry.field === registerChange.field)) closeChange();
   registerFields = new Map();
-  if (drafted.length > 0) parts.push(drawDraft({ ...registration, draft: drafted }));
+  if (drafted.length > 0) parts.push(...drawDraft({ ...registration, draft: drafted }));
+  else registerMore = null;
   if (registration.status === "done") {
     const adoption = registration.adoption;
     if (adoption !== null && typeof adoption === "object") {
@@ -3579,7 +3677,10 @@ function renderRegister(view) {
   }
   if (registerReason.textContent !== reason) registerReason.textContent = reason;
   const shown = registration !== null && !(registration.status === "done" && registration.at === registerDismissed);
-  if (!shown) closeChange();
+  if (!shown) {
+    closeChange();
+    registerMore = null;
+  }
   const key = shown ? JSON.stringify(registration) + "\n" + JSON.stringify(registerChange) : "";
   if (key !== registerResultKey) {
     registerResultKey = key;
@@ -3655,9 +3756,13 @@ function renderGoal() {
     goalUi = null;
   }
 }
+// The register's fold keeps its own state per repository (registerMore), so the key-wide restore below leaves it out.
+const draftMoreKey = "draft-more";
 function render(view) {
   const wasOpen = new Set();
-  for (const fold of document.querySelectorAll("details[open]")) wasOpen.add(fold.dataset.key);
+  for (const fold of document.querySelectorAll("details[open]")) {
+    if (fold.dataset.key !== draftMoreKey) wasOpen.add(fold.dataset.key);
+  }
   renderStatement(view);
   recentProjects = view.recent_projects || [];
   renderGoal();
@@ -3744,12 +3849,30 @@ document.addEventListener("keydown", (event) => {
   if (current === null) return;
   const { item, state } = current;
   if (event.key === "Enter") {
-    if (isBrief(item) ? startApproval(item, state) : start(item, state)) {
+    if (textCard(item)) {
+      const key = itemId(item) + "\ndraft";
+      const typed = draftOf(key).value.trim();
+      if (typed !== "") {
+        if (startDraft(item, state, typed)) {
+          event.preventDefault();
+          redraw();
+        }
+      } else if (item.questions.length > 0 && picksComplete(item, state)) {
+        if (start(item, state)) {
+          event.preventDefault();
+          redraw();
+        }
+      } else {
+        const field = fields.get(key);
+        if (field !== undefined) field.focus();
+        event.preventDefault();
+      }
+    } else if (isBrief(item) ? startApproval(item, state) : start(item, state)) {
       event.preventDefault();
       redraw();
     }
   } else if (/^[1-9]$/.test(event.key)) {
-    if (isBrief(item)) return;
+    if (isBrief(item) || item.questions.length === 0) return;
     const qi = Math.min(state.q, item.questions.length - 1);
     const oi = Number(event.key) - 1;
     if (oi >= item.questions[qi].options.length) return;

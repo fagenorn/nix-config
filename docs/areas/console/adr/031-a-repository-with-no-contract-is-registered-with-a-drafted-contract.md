@@ -1,6 +1,6 @@
 # ADR-console-031 — A repository with no contract is registered with a drafted contract
 
-- **Status:** accepted
+- **Status:** accepted; amended by ADR-console-033
 - **Decided in:** #1067
 
 ## Context
