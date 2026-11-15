@@ -1918,6 +1918,7 @@ with open(here / "argv.jsonl", "a") as log:
     log.write(json.dumps(sys.argv) + "\n")
 if %(die)r:
     sys.exit(1)
+import time
 measures = json.loads(%(measures)r)
 buffer = b""
 evaluations = 0
@@ -1929,6 +1930,8 @@ while True:
         buffer += chunk
     raw, buffer = buffer.split(b"\0", 1)
     message = json.loads(raw)
+    if %(silent)r:
+        time.sleep(600)
     method, session = message["method"], message.get("sessionId")
     with open(here / "calls.jsonl", "a") as log:
         log.write(json.dumps([method, session]) + "\n")
@@ -1962,9 +1965,9 @@ M_OK = {"viewport": {"width": 1440, "height": 900},
 M_EMPTY = {**M_OK, "lead": None}
 
 
-def fake_browser(tmp, measures, *, die=False):
+def fake_browser(tmp, measures, *, die=False, silent=False):
     path = Path(tmp) / "browser"
-    path.write_text(FAKE_BROWSER % {"python": sys.executable, "die": die, "measures": json.dumps(measures)})
+    path.write_text(FAKE_BROWSER % {"python": sys.executable, "die": die, "measures": json.dumps(measures), "silent": silent})
     path.chmod(0o755)
     return path
 
@@ -2016,6 +2019,15 @@ class ChromiumDriverTest(unittest.TestCase):
                 "http://127.0.0.1:1/", width=1440, height=900, screenshot=self.tmp / "s.png",
                 browser=[str(fake)], timeout=10)
         self.assertLess(time.monotonic() - started, 10)
+
+    def test_a_silent_browser_is_bounded_by_the_timeout_not_a_fixed_call_limit(self):
+        fake = fake_browser(self.tmp, [M_OK], silent=True)
+        started = time.monotonic()
+        with self.assertRaises(verify_checks.BrowserError):
+            verify_checks.chromium_first_screen(
+                "http://127.0.0.1:1/", width=1440, height=900, screenshot=self.tmp / "s.png",
+                browser=[str(fake)], timeout=2)
+        self.assertLess(time.monotonic() - started, 8)
 
     def test_the_browser_comes_from_path_else_nix_shell(self):
         with mock.patch("shutil.which", return_value=None):

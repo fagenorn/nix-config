@@ -1267,7 +1267,7 @@ MEASURE_JS = """(() => {
   };
 })()"""
 
-CALL_TIMEOUT = 60.0
+GRACE = 10.0
 
 
 class _Pipe:
@@ -1278,7 +1278,7 @@ class _Pipe:
         self.buffer = b""
         self.next_id = 0
 
-    def call(self, method: str, params: dict, session: str | None = None) -> dict:
+    def call(self, method: str, deadline: float, params: dict, session: str | None = None) -> dict:
         self.next_id += 1
         message: dict = {"id": self.next_id, "method": method, "params": params}
         if session is not None:
@@ -1287,7 +1287,6 @@ class _Pipe:
             os.write(self.write_fd, json.dumps(message).encode() + b"\0")
         except OSError as error:
             raise BrowserError(f"{method}: {type(error).__name__}: {error}") from error
-        deadline = time.monotonic() + CALL_TIMEOUT
         while True:
             reply = self._read(method, deadline)
             if reply.get("id") != self.next_id:
@@ -1329,7 +1328,9 @@ def chromium_first_screen(url: str, *, width: int, height: int, screenshot: Path
     """Issue 1031: load `url` headless at width x height, save a PNG and return `MEASURE_JS` once the lead card exists.
 
     The browser is driven over `--remote-debugging-pipe` and is sent no input event; its profile is
-    removed and the browser ended on every path. Raises `BrowserError` naming the method that failed.
+    removed and the browser ended on every path. One deadline, `timeout` seconds from the start, bounds
+    every reply read up to the end of the polling; the last evaluation, the screenshot and the close each get `GRACE` more.
+    Raises `BrowserError` naming the method that failed.
     """
     profile = tempfile.mkdtemp()
     to_browser_read, to_browser_write = (_high_fd(fd) for fd in os.pipe())
@@ -1350,15 +1351,15 @@ def chromium_first_screen(url: str, *, width: int, height: int, screenshot: Path
                 os.close(fd)
                 owned.remove(fd)
         pipe = _Pipe(to_browser_write, from_browser_read)
-        target = pipe.call("Target.createTarget", {"url": "about:blank"}).get("targetId")
-        session = pipe.call("Target.attachToTarget", {"targetId": target, "flatten": True}).get("sessionId")
-        pipe.call("Emulation.setDeviceMetricsOverride",
-                  {"width": width, "height": height, "deviceScaleFactor": 1, "mobile": False}, session)
-        pipe.call("Page.navigate", {"url": url}, session)
         deadline = time.monotonic() + timeout
+        target = pipe.call("Target.createTarget", deadline, {"url": "about:blank"}).get("targetId")
+        session = pipe.call("Target.attachToTarget", deadline, {"targetId": target, "flatten": True}).get("sessionId")
+        pipe.call("Emulation.setDeviceMetricsOverride", deadline,
+                  {"width": width, "height": height, "deviceScaleFactor": 1, "mobile": False}, session)
+        pipe.call("Page.navigate", deadline, {"url": url}, session)
         measure = None
         while True:
-            result = pipe.call("Runtime.evaluate", {"expression": MEASURE_JS, "returnByValue": True}, session)
+            result = pipe.call("Runtime.evaluate", max(deadline, time.monotonic() + GRACE), {"expression": MEASURE_JS, "returnByValue": True}, session)
             value = result.get("result", {}).get("value") if isinstance(result.get("result"), dict) else None
             if isinstance(value, dict):
                 measure = value
@@ -1369,12 +1370,12 @@ def chromium_first_screen(url: str, *, width: int, height: int, screenshot: Path
             time.sleep(0.25)
         if measure is None:
             raise BrowserError("Runtime.evaluate: no measurement")
-        data = pipe.call("Page.captureScreenshot", {"format": "png"}, session).get("data")
+        data = pipe.call("Page.captureScreenshot", max(deadline, time.monotonic()) + GRACE, {"format": "png"}, session).get("data")
         if not isinstance(data, str):
             raise BrowserError("Page.captureScreenshot: no image data")
         screenshot.write_bytes(base64.b64decode(data))
         try:
-            pipe.call("Browser.close", {})
+            pipe.call("Browser.close", time.monotonic() + GRACE, {})
         except BrowserError:
             pass
         return measure
