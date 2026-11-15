@@ -12,3 +12,8 @@ __pycache__/
 .resolve-project.*.tmp
 producer-report-*.json
 
+
+# A devenv ad-hoc shell (`devenv -O ... shell -- ...`, used where this repo has
+# no devenv.nix) writes its cache into the current directory.
+.devenv/
+devenv.lock

@@ -193,6 +193,7 @@ agent-workflow-tests *args:
     tests/test_cache_keepalive.py \
     tests/test_claude_account_routing.py \
     tests/test_branch_protection.py \
+    tests/test_devenv_cache_ignored.py \
     tests/test_suite_runner.py \
     tests/test_console_event_log.py \
     tests/test_console_view.py \
