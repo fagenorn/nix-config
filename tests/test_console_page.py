@@ -6687,12 +6687,13 @@ def registered(snap: dict, cls: str) -> list:
 
 REGISTERING = {"root": "/srv/r", "name": "r", "project_id": None, "status": "running",
                "result": None, "outcome": None, "at": None,
-               "headline": "Planning the adoption of r…", "lines": [], "note": None}
+               "headline": "Planning the adoption of r…", "lines": [], "note": None,
+               "line": "Planning the adoption of r…", "refused": None}
 REGISTERED = {**REGISTERING, "status": "done", "result": "planned", "outcome": "reconcile",
               "at": "2026-11-15T08:00:00+00:00",
               "headline": "What adopting r would change: it has agent files or a contract to bring up to date",
               "lines": ["moves 2 agent files under .agents/", "writes the project contract"],
-              "note": "The plan has 1 open question."}
+              "note": "The plan has 1 open question.", "line": "Register r: 1 question open"}
 Q_CANDIDATE = {
     "id": "candidate-class", "subject": ".claude/odd.md",
     "ask": "What should happen to .claude/odd.md? No rule covers this agent file.\n"
@@ -6714,10 +6715,35 @@ Q_SECRET = {
     "why": ".claude/secrets/key.md looks like a secret, so it cannot be answered here: remove it "
            "from the repository in its own commit, then register the repository again."}
 PLAN_A = "sha256:" + "a" * 64
-ASKING = {**REGISTERED, "plan_id": PLAN_A, "state": "draft", "refusal": None,
-          "note": "The plan has 3 open questions.",
+ASKING = {**REGISTERED, "plan_id": PLAN_A, "state": "draft", "refusal": None, "refused": None,
+          "note": "The plan has 3 open questions.", "line": "Register r: 3 questions open",
           "questions": [Q_CANDIDATE, Q_REFERENCE, Q_SECRET]}
-ASKED = [START, {"frame": {**frame([]), "registration": ASKING}}]
+R_PLAN = PLAN_A
+
+
+def register_item(n: int, q: dict, **fields) -> dict:
+    options = [o["label"] for o in q["options"]]
+    base = {"type": "inbox_item", "reason": "register", "key": f"register/{R_PLAN}/{n}",
+            "project_id": None, "root": "/srv/r", "name": "r", "title": "Register r",
+            "plan_id": R_PLAN, "id": q["id"], "subject": q["subject"], "headline": q["ask"],
+            "why": q["why"], "refusal": None, "more_questions": 0,
+            "questions": [{"question": q["ask"], "options": options, "chosen": None,
+                           "recommended": None, "recommended_index": None}] if options else [],
+            "values": [o["value"] for o in q["options"]], "items": [], "answers": [],
+            "answered": False, "waiting_since": "2026-11-15T08:00:00+00:00"}
+    base.update(fields)
+    return base
+
+
+R0 = register_item(1, Q_REFERENCE)
+R1 = register_item(2, Q_SECRET)
+R2 = register_item(0, Q_CANDIDATE)
+
+
+def cards(items: list, registration: dict = ASKING) -> dict:
+    return {**frame(items), "registration": registration}
+
+
 REGISTER_OPEN = [START, {"frame": {**frame([]), "registration": None}}, {"click": "register-open"}]
 REGISTER_TYPED = REGISTER_OPEN + [{"type": {"class": "register-path", "text": "/srv/r"}}]
 
@@ -6766,15 +6792,15 @@ class RegisterControlTest(unittest.TestCase):
         self.assertEqual(registered(snap, "register-path"), [])
         self.assertEqual(len(registered(snap, "register-open")), 1)
 
-    def test_a_running_registration_shows_its_headline_only(self) -> None:
+    def test_a_running_registration_shows_its_line_only(self) -> None:
         (snap,) = render([START, {"frame": {**frame([]), "registration": REGISTERING}},
                           {"snapshot": True}])
-        (headline,) = registered(snap, "register-headline")
-        self.assertEqual(full(headline), "Planning the adoption of r…")
+        (line,) = registered(snap, "register-line")
+        self.assertEqual(full(line), REGISTERING["line"])
         self.assertEqual(registered(snap, "register-close"), [])
         self.assertEqual([n for n in nodes(snap["register"]) if n["tag"] == "li"], [])
 
-    def test_a_done_registration_shows_headline_lines_and_note_and_close_hides_it(self) -> None:
+    def test_a_done_registration_shows_its_line_and_lines_and_close_hides_it(self) -> None:
         done = {**frame([]), "registration": REGISTERED}
         shown, closed, again, fresh = render([
             START, {"frame": done}, {"snapshot": True},
@@ -6785,7 +6811,7 @@ class RegisterControlTest(unittest.TestCase):
         (result,) = registered(shown, "register-result")
         self.assertEqual(
             [full(n) for n in nodes(result)[1:] if n["tag"] in ("p", "li", "button")],
-            [REGISTERED["headline"], *REGISTERED["lines"], REGISTERED["note"], "Close"])
+            [REGISTERED["line"], *REGISTERED["lines"], "Close"])
         self.assertEqual(full(registered(shown, "register-close")[0]), "Close")
         for snap in (closed, again):
             self.assertEqual(registered(snap, "register-result"), [])
@@ -6838,96 +6864,20 @@ class RegisterControlTest(unittest.TestCase):
         self.assertTrue(got["fits"], got)
         self.assertTrue(got["inside"], got)
 
-    def test_open_questions_show_as_asks_with_their_options_or_why(self) -> None:
-        (snap,) = render(ASKED + [{"snapshot": True}])
-        self.assertEqual([full(n) for n in registered(snap, "register-ask")],
-                         [q["ask"] for q in ASKING["questions"]])
-        self.assertEqual([full(n) for n in registered(snap, "register-option")],
-                         ["Archive it under .agents/knowledge/archive/adopted/",
-                          "Change it to .agents/artifacts/specs/a.md", "Leave it as it is"])
-        self.assertEqual([full(n) for n in registered(snap, "register-why")], [Q_SECRET["why"]])
-        self.assertEqual(len(registered(snap, "register-question")), 3)
-        self.assertEqual(registered(snap, "register-refusal"), [])
-        (result,) = registered(snap, "register-result")
-        self.assertEqual(
-            [full(n) for n in nodes(result)[1:] if n["tag"] in ("p", "li", "button")],
-            [ASKING["headline"], *ASKING["lines"], ASKING["note"],
-             Q_CANDIDATE["ask"], "Archive it under .agents/knowledge/archive/adopted/",
-             Q_REFERENCE["ask"], "Change it to .agents/artifacts/specs/a.md", "Leave it as it is",
-             Q_SECRET["ask"], Q_SECRET["why"], "Close"])
-
     def test_a_ready_plan_shows_only_that_it_is_ready(self) -> None:
         plan_id = "sha256:" + "3f9a" * 16
         ready = {**REGISTERED, "state": "ready", "plan_id": plan_id, "questions": [],
-                 "answered": [], "note": "The plan is ready."}
+                 "answered": [], "note": "The plan is ready.", "line": "Register r: ready to apply"}
         (snap,) = render([START, {"frame": {**frame([]), "registration": ready}}, {"snapshot": True}])
         (result,) = registered(snap, "register-result")
         shown = full(result)
-        self.assertIn("The plan is ready.", shown)
+        self.assertIn("Register r: ready to apply", shown)
         self.assertNotIn(plan_id, shown)
         self.assertNotIn("sha256", shown)
         self.assertNotIn("adopt-project", shown)
-        self.assertNotIn("apply", shown)
+        self.assertNotIn("adopt-project apply", shown)
 
-    def test_close_stands_outside_the_question_list_after_its_last_answer(self) -> None:
-        (snap,) = render(ASKED + [{"snapshot": True}])
-        (result,) = registered(snap, "register-result")
-        (close,) = registered(snap, "register-close")
-        (listing,) = registered(snap, "register-questions")
-        self.assertNotIn(close, nodes(listing))
-        self.assertEqual(len(listing["children"]), 3)
-        self.assertTrue(all(has_class(c, "register-question") for c in listing["children"]))
-        self.assertIn(listing, result["children"])
-        self.assertIn(close, result["children"])
-        self.assertEqual(result["children"][-2:], [listing, close])
-
-    def test_choosing_an_option_posts_the_answer_with_the_shown_plan_id(self) -> None:
-        (snap,) = render(ASKED + [{"respond": {"status": 204, "text": ""}},
-                                  {"click": "register-option"}, {"snapshot": True}])
-        (post,) = snap["posts"]
-        self.assertEqual(post["url"], "/api/plan-answer")
-        self.assertEqual(json.loads(post["body"]), {
-            "plan_id": PLAN_A, "id": "candidate-class", "subject": ".claude/odd.md",
-            "value": "archive-history"})
-        self.assertEqual(registered(snap, "register-refusal"), [])
-
-    def test_options_are_disabled_while_an_answer_posts(self) -> None:
-        held, released = render(ASKED + [
-            {"hold": True}, {"click": "register-option"}, {"snapshot": True},
-            {"click": "register-option"},
-            {"release": {"status": 204, "text": ""}}, {"snapshot": True}])
-        options = registered(held, "register-option")
-        self.assertEqual(len(options), 3)
-        self.assertTrue(all(n["disabled"] is True for n in options))
-        self.assertEqual(len(released["posts"]), 1)
-        self.assertTrue(all(n["disabled"] is False for n in registered(released, "register-option")))
-
-    def test_a_refused_write_shows_its_reason_under_the_note(self) -> None:
-        reason = "that plan is no longer the one shown; answer the plan shown now\n"
-        other = {**ASKING, "plan_id": "sha256:" + "b" * 64}
-        first, second = render(ASKED + [
-            {"respond": {"status": 409, "text": reason}}, {"click": "register-option"},
-            {"snapshot": True},
-            {"frame": {**frame([]), "registration": other}}, {"snapshot": True}])
-        (shown,) = registered(first, "register-refusal")
-        self.assertEqual(full(shown), reason.strip())
-        self.assertEqual(registered(second, "register-refusal"), [])
-
-    def test_the_views_refusal_is_shown(self) -> None:
-        text = ("The plan refused that answer: the answer is not the one this candidate's "
-                "open question offers")
-        (snap,) = render([START, {"frame": {**frame([]), "registration": {**ASKING, "refusal": text}}},
-                          {"snapshot": True}])
-        (shown,) = registered(snap, "register-refusal")
-        self.assertEqual(full(shown), text)
-
-    def test_a_running_or_older_registration_shows_no_question(self) -> None:
-        for registration in (REGISTERING, REGISTERED):
-            (snap,) = render([START, {"frame": {**frame([]), "registration": registration}},
-                              {"snapshot": True}])
-            self.assertEqual(registered(snap, "register-question"), [])
-
-    def test_at_480_the_questions_fit(self) -> None:
+    def test_at_480_the_plan_question_cards_fit(self) -> None:
         try:
             from playwright.sync_api import Error, sync_playwright
         except ImportError:
@@ -6937,13 +6887,11 @@ class RegisterControlTest(unittest.TestCase):
             " addEventListener(name, fn) { this.l[name] = fn; } close() {} };"
             "window.fetch = () => Promise.resolve(new Response(null, {status: 204}));")
         measure = """() => {
-          const box = document.getElementById('register');
+          const box = document.getElementById('inbox');
           const edge = document.documentElement.clientWidth;
           const kids = [...box.querySelectorAll('*')].map((e) => e.getBoundingClientRect());
-          const list = box.querySelector('.register-questions').getBoundingClientRect();
-          const close = box.querySelector('.register-close').getBoundingClientRect();
           return {fits: box.scrollWidth <= box.clientWidth, kids: kids.length,
-                  inside: kids.every((r) => r.right <= edge), gap: close.top - list.bottom};
+                  inside: kids.every((r) => r.right <= edge)};
         }"""
         deep = "a-long-directory-name/" * 3
         long_reference = {
@@ -6952,7 +6900,8 @@ class RegisterControlTest(unittest.TestCase):
                    "Should it follow the move?",
             "options": [{"value": "rewrite", "label": f"Change it to .agents/artifacts/{deep}a.md"},
                         {"value": "retain", "label": "Leave it as it is"}]}
-        asking = {**ASKING, "questions": [Q_CANDIDATE, long_reference, Q_SECRET]}
+        asking = {**view([]), "inbox": {"open": [register_item(1, long_reference), R1], "answered": []},
+                  "registration": ASKING}
         html = PAGE.read_text(encoding="utf-8").replace("__CONSOLE_TOKEN__", "t")
         with sync_playwright() as pw:
             try:
@@ -6965,12 +6914,140 @@ class RegisterControlTest(unittest.TestCase):
                 page.route("http://console.test/", lambda route: route.fulfill(
                     body=html, content_type="text/html"))
                 page.goto("http://console.test/")
-                page.evaluate("(f) => window.__src.l.view({data: JSON.stringify(f)})",
-                              {**view([]), "registration": asking})
+                page.evaluate("(f) => window.__src.l.view({data: JSON.stringify(f)})", asking)
                 got = page.evaluate(measure)
             finally:
                 browser.close()
         self.assertGreater(got["kids"], 10)
         self.assertTrue(got["fits"], got)
         self.assertTrue(got["inside"], got)
-        self.assertGreaterEqual(got["gap"], 8, got)
+
+
+class RegisterCardPageTest(unittest.TestCase):
+    def test_plan_questions_are_question_cards_with_numbered_options(self) -> None:
+        (snap,) = render([START, {"frame": cards([R0, R1])}, {"snapshot": True}])
+        (lead,) = [n for n in nodes(snap["inbox"]) if has_class(n, "lead")]
+        shown = full(lead)
+        self.assertIn("Question", shown)
+        self.assertIn("Register r", shown)
+        self.assertIn(R0["headline"], shown)
+        self.assertNotIn("null", shown)
+        self.assertEqual([n for n in nodes(lead) if has_class(n, "proj")], [])
+        self.assertEqual([full(n) for n in nodes(lead) if has_class(n, "opt")],
+                         ["1Change it to .agents/artifacts/specs/a.md", "2Leave it as it is"])
+        self.assertEqual(count(snap, "words-text"), 0)
+        self.assertNotIn("Answer on the tracker", full(snap["inbox"]))
+        self.assertEqual([n for n in nodes(snap["inbox"]) if n.get("href")], [])
+
+    def test_number_keys_and_enter_answer_a_plan_question(self) -> None:
+        first, second = render([
+            START, {"frame": cards([R0, R1])}, {"snapshot": True},
+            {"respond": {"status": 204, "text": ""}}, {"key": "2"}, {"key": "Enter"},
+            {"clock": 5000}, {"snapshot": True}])
+        (strip,) = [n for n in nodes(first["inbox"]) if has_class(n, "keys")]
+        self.assertIn("1\u20132 choose", full(strip))
+        self.assertNotIn("Enter", full(strip))
+        (post,) = second["posts"]
+        self.assertEqual(post["url"], "/api/plan-answer")
+        self.assertEqual(posted(post), {"plan_id": PLAN_A, "id": "path-reference",
+                                        "subject": "tools/show.sh:1:5", "value": "retain"})
+        self.assertIn("Answered, planning again", full(second["inbox"]))
+        self.assertNotIn(SENT_TEXT, full(second["inbox"]))
+
+    def test_a_plan_question_has_no_preselected_option(self) -> None:
+        first, second = render([START, {"frame": cards([R0])}, {"snapshot": True},
+                                {"key": "Enter"}, {"clock": 5000}, {"snapshot": True}])
+        self.assertEqual(count(first, "opt"), 2)
+        self.assertEqual(picked(first), [])
+        self.assertEqual(second["posts"], [])
+
+    def test_a_plan_question_with_no_offered_answer_shows_its_next_step(self) -> None:
+        (snap,) = render([START, {"frame": cards([R1])}, {"snapshot": True}])
+        self.assertIn(Q_SECRET["why"], full(snap["inbox"]))
+        self.assertIn("Register r", full(snap["inbox"]))
+        self.assertEqual(count(snap, "opt"), 0)
+        self.assertNotIn("Send answer", full(snap["inbox"]))
+        self.assertNotIn("Answer on the tracker", full(snap["inbox"]))
+        self.assertEqual([n for n in nodes(snap["inbox"]) if n.get("href")], [])
+
+    def test_a_refused_plan_answer_shows_its_reason_on_the_card(self) -> None:
+        text = "The plan refused that answer: no"
+        (snap,) = render([START, {"frame": cards([{**R0, "refusal": text}])}, {"snapshot": True}])
+        (lead,) = [n for n in nodes(snap["inbox"]) if has_class(n, "lead")]
+        self.assertIn(text, full(lead))
+        reason = "that plan is no longer the one shown; answer the plan shown now"
+        (snap,) = render([START, {"frame": cards([R0])},
+                          {"respond": {"status": 409, "text": reason + "\n"}},
+                          {"key": "1"}, {"key": "Enter"}, {"clock": 5000}, {"snapshot": True}])
+        self.assertIn("Could not send: " + reason, full(snap["inbox"]))
+
+    def test_the_work_column_holds_the_line_and_change_lines_and_no_answer_control(self) -> None:
+        (snap,) = render([START, {"frame": cards([R0, R1])}, {"snapshot": True}])
+        (result,) = registered(snap, "register-result")
+        self.assertEqual(
+            [full(n) for n in nodes(result)[1:] if n["tag"] in ("p", "li", "button")],
+            [ASKING["line"], *ASKING["lines"], "Close"])
+        self.assertEqual(
+            sorted(n["cls"] for n in nodes(snap["register"]) if n["tag"] == "button"),
+            ["register-close", "register-open"])
+        self.assertEqual([n for n in nodes(snap["register"]) if has_class(n, "opt")], [])
+
+    def test_a_second_plan_question_row_keeps_its_options_and_send(self) -> None:
+        (snap,) = render([START, {"frame": cards([R0, R2])}, {"snapshot": True}])
+        (row,) = rows_of(snap)
+        self.assertEqual([full(n) for n in nodes(row) if has_class(n, "opt")],
+                         ["1Archive it under .agents/knowledge/archive/adopted/"])
+        (send,) = [n for n in nodes(row) if has_class(n, "send")]
+        self.assertTrue(full(send).startswith("Send answer"))
+        self.assertIn("Register r", full(row))
+        self.assertIn(Q_CANDIDATE["ask"], full(row))
+        self.assertNotIn("null", full(row))
+        self.assertEqual([n for n in nodes(row) if n.get("href")], [])
+        (lead,) = [n for n in nodes(snap["inbox"]) if has_class(n, "lead")]
+        self.assertEqual(len([n for n in nodes(lead) if has_class(n, "opt")]), 2)
+
+    def test_a_plan_question_row_shows_its_next_step_or_refusal(self) -> None:
+        (snap,) = render([START, {"frame": cards([R0, R1])}, {"snapshot": True}])
+        (row,) = rows_of(snap)
+        self.assertIn(Q_SECRET["why"], full(row))
+        self.assertIn("Register r", full(row))
+        self.assertNotIn("null", full(row))
+        self.assertNotIn("Answer on the tracker", full(row))
+        self.assertEqual([n for n in nodes(row) if has_class(n, "opt") or has_class(n, "send")
+                          or n.get("href")], [])
+        text = "The plan refused that answer: no"
+        (snap,) = render([START, {"frame": cards([R1, {**R0, "refusal": text}])}, {"snapshot": True}])
+        (row,) = rows_of(snap)
+        self.assertEqual([full(n) for n in nodes(row) if has_class(n, "opt")],
+                         ["1Change it to .agents/artifacts/specs/a.md", "2Leave it as it is"])
+        self.assertIn(text, full(row))
+        self.assertNotIn("null", full(row))
+        self.assertEqual([n for n in nodes(row) if n.get("href")], [])
+
+
+class RegisterAnswerTransitionTest(unittest.TestCase):
+    def test_a_second_question_of_the_plan_cannot_be_answered_while_one_is_outstanding(self) -> None:
+        (snap,) = render([
+            START, {"frame": cards([R0, R2])}, {"key": "1"}, {"key": "Enter"},
+            {"key": "1"}, {"key": "Enter"}, {"clock": 20000}, {"snapshot": True}])
+        (post,) = snap["posts"]
+        self.assertEqual(posted(post)["id"], "path-reference")
+        (row,) = rows_of(snap)
+        (send,) = [n for n in nodes(row) if has_class(n, "send")]
+        self.assertTrue(send["disabled"])
+
+    def test_a_refusal_frame_supersedes_the_late_acknowledgment_of_a_held_answer(self) -> None:
+        text = "The plan refused that answer: no"
+        refused = {**ASKING, "refusal": text, "refused": {"id": Q_REFERENCE["id"], "subject": Q_REFERENCE["subject"]}}
+        running = {**REGISTERING, "plan_id": None}
+        (snap,) = render([
+            START, {"frame": cards([R0])}, {"hold": True}, {"key": "1"}, {"key": "Enter"},
+            {"clock": 5000}, {"frame": cards([], running)},
+            {"frame": cards([{**R0, "refusal": text}], refused)},
+            {"release": {"status": 204, "text": ""}}, {"snapshot": True}])
+        shown = full(snap["inbox"])
+        self.assertNotIn("Answered, planning again", shown)
+        self.assertIn(text, shown)
+        options = [n for n in nodes(snap["inbox"]) if has_class(n, "opt")]
+        self.assertEqual(len(options), 2)
+        self.assertFalse(any(n["disabled"] for n in options))

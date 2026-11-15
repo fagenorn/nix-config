@@ -51,6 +51,8 @@ from agent_tools.console.view import (
     INBOX_SEEN,
     NEEDS_SENTENCE,
     QUESTION_SENTENCE,
+    REGISTER_SENTENCE,
+    REGISTER_STEP_SENTENCE,
     REGISTERED,
     STALE_HEADLINE,
     STALE_SENTENCE,
@@ -1982,3 +1984,91 @@ class SigninViewTest(unittest.TestCase):
     def test_a_capacity_without_sign_in_raises_nothing(self):
         shown = derive_view([state("p00", 1)], capacity=out())
         self.assertEqual([e for e in shown["inbox"]["open"] if e["reason"] == "signin"], [])
+
+
+PID = "sha256:" + "a" * 64
+ASK_A = {"id": "candidate-class", "subject": ".claude/odd.md",
+         "ask": "What should happen to .claude/odd.md? No rule covers this agent file.",
+         "options": [{"value": "archive-history",
+                      "label": "Archive it under .agents/knowledge/archive/adopted/"}],
+         "recommended": None, "why": None}
+ASK_B = {"id": "path-reference", "subject": "tools/show.sh:1:5",
+         "ask": "tools/show.sh line 1 names .claude/specs/a.md, which this plan moves. "
+                "Should it follow the move?",
+         "options": [{"value": "rewrite", "label": "Change it to .agents/artifacts/specs/a.md"},
+                     {"value": "retain", "label": "Leave it as it is"}],
+         "recommended": None, "why": None}
+ASK_WHY = {"id": "candidate-class", "subject": ".claude/secrets/key.md",
+           "ask": "What should happen to .claude/secrets/key.md?", "options": [],
+           "recommended": None,
+           "why": ".claude/secrets/key.md looks like a secret, so it cannot be answered here: "
+                  "remove it from the repository in its own commit, then register the "
+                  "repository again."}
+
+
+def reg(questions, **over):
+    return {"root": "/srv/sample-app", "name": "sample-app", "status": "done", "plan_id": PID,
+            "at": "2026-11-15T08:00:00+00:00", "questions": questions, "refusal": None,
+            "refused": None, **over}
+
+
+def register_item(index, ask):
+    return {"type": "inbox_item", "reason": "register", "key": f"register/{PID}/{index}",
+            "project_id": None, "root": "/srv/sample-app", "name": "sample-app",
+            "title": "Register sample-app", "plan_id": PID, "id": ask["id"],
+            "subject": ask["subject"], "headline": ask["ask"], "why": ask["why"],
+            "refusal": None, "more_questions": 0,
+            "questions": [{"question": ask["ask"], "options": [o["label"] for o in ask["options"]],
+                           "chosen": None, "recommended": None, "recommended_index": None}],
+            "values": [o["value"] for o in ask["options"]],
+            "items": [], "answers": [], "answered": False,
+            "waiting_since": "2026-11-15T08:00:00+00:00"}
+
+
+class RegisterItemViewTest(unittest.TestCase):
+    def decision(self):
+        record = {**item("p", "k1"), "reason": "decision", "questions": [
+            {"question": "Which?", "options": ["a", "b"], "chosen": None, "recommended": None}]}
+        return {("p", "k1"): InboxRecord(record, "t1", "u1")}
+
+    def test_two_open_plan_questions_are_two_counted_items(self):
+        shown = derive_view([], registration=reg([ASK_A, ASK_B]))
+        self.assertEqual(shown["inbox"]["open"],
+                         [register_item(0, ASK_A), register_item(1, ASK_B)])
+        self.assertEqual(shown["statement"]["inbox_items"], 2)
+        self.assertEqual(shown["statement"]["headline"], "2 things need you")
+
+    def test_a_question_with_no_offered_answer_is_an_item_with_its_why_and_no_options(self):
+        shown = derive_view([], registration=reg([ASK_WHY]))
+        (entry,) = shown["inbox"]["open"]
+        self.assertEqual((entry["why"], entry["questions"], entry["values"], entry["headline"]),
+                         (ASK_WHY["why"], [], [], ASK_WHY["ask"]))
+        self.assertEqual(shown["statement"]["inbox_items"], 1)
+        self.assertEqual(shown["statement"]["sentence"], REGISTER_STEP_SENTENCE)
+
+    def test_a_running_or_questionless_registration_adds_no_item(self):
+        for registration in (reg([ASK_A], status="running"), reg([]), None):
+            with self.subTest(registration=registration):
+                shown = derive_view([], registration=registration)
+                self.assertEqual(shown["inbox"]["open"], [])
+                self.assertEqual(shown["statement"]["inbox_items"], 0)
+
+    def test_plan_questions_sit_before_tracker_items(self):
+        shown = derive_view([state("p", 1)], self.decision(), registration=reg([ASK_A]))
+        self.assertEqual([e["key"] for e in shown["inbox"]["open"]], [f"register/{PID}/0", "k1"])
+        self.assertEqual(shown["statement"]["inbox_items"], 2)
+
+    def test_the_refusal_shows_on_the_refused_question_only(self):
+        refused = {"id": "path-reference", "subject": "tools/show.sh:1:5"}
+        text = "The plan refused that answer: no"
+        shown = derive_view([], registration=reg([ASK_A, ASK_B], refusal=text, refused=refused))
+        self.assertEqual([e["refusal"] for e in shown["inbox"]["open"]], [None, text])
+
+    def test_the_sentence_says_how_to_answer_a_plan_question(self):
+        def sentence(registration, records=None):
+            return derive_view([state("p", 1)], records, registration=registration)[
+                "statement"]["sentence"]
+
+        self.assertEqual(sentence(reg([ASK_A])), REGISTER_SENTENCE)
+        self.assertEqual(sentence(reg([ASK_A]), self.decision()), REGISTER_SENTENCE)
+        self.assertEqual(sentence(reg([ASK_WHY]), self.decision()), CHOOSE_SENTENCE)

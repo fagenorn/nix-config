@@ -64,16 +64,18 @@ Wire format, one object:
 null when `derive_view` is given none.
 
 The headline is "1 thing needs you" or "<n> things need you" for open items (a waiting brief is one,
-see below), else
+and so is each open question of the registration's plan, see below), else
 `ALL_OUT_HEADLINE` when every profile is out of usage, else `STALE_HEADLINE` when a registered
 project's tracker cannot be read, else "Nothing needs you". The sentence is `ALL_OUT_SENTENCE`
 when every profile is out of usage, else `STALE_SENTENCE` naming those projects when any is
 stale, else `BRIEF_SENTENCE` when any brief is open, else `MANAGER_SENTENCE` when a sprint is
 stalled, else `PROGRESS_SENTENCE` when a manager stopped making progress, else `SIGNIN_SENTENCE`
-when a profile's sign-in asks, else `QUESTION_SENTENCE` when any manager question is open, else `CHOOSE_SENTENCE` when an open item is a
-decision with questions (the page can
-answer it), else `ANSWER_SENTENCE` when an open item has answers (a verification prompt the page
-can answer), else `NEEDS_SENTENCE` when something is open, else the registered-project count. The
+when a profile's sign-in asks, else `QUESTION_SENTENCE` when any manager question is open, else
+`REGISTER_SENTENCE` when a plan question offers an option (the page can answer it), else
+`CHOOSE_SENTENCE` when an open item is a decision with questions (the page can answer it), else
+`ANSWER_SENTENCE` when an open item has answers (a verification prompt the page can answer), else
+`REGISTER_STEP_SENTENCE` when only plan questions with no offered answer are open, else
+`NEEDS_SENTENCE` when something is open, else the registered-project count. The
 all-out promotion never changes `inbox_items`, and the statement keeps exactly its four keys.
 `capacity` is the `capacity_view` the caller passes (`capacity.py` defines its members), else the
 empty capacity, the same bytes as `capacity_view` over no profile. `stale` is true
@@ -155,9 +157,10 @@ the owner added from the page and the retained log still holds, from the `accoun
 The top-level `registration` member (#1052, ADR-console-028, #1053, ADR-console-029) is the entry
 `register.view_entry` gives, copied, from the `registration` argument, and null when none is given:
 `{"root", "name", "project_id", "status": "running" | "done", "result", "outcome", "headline",
-"lines", "note", "at", "plan_id", "state", "questions", "refusal"}`, the owner's latest
-registration of a repository from the page (fourteen keys), with the plan's plain open questions
-and, when the plan refused the last answer, the refusal's text.
+"lines", "note", "at", "plan_id", "state", "questions", "refusal", "line", "refused"}`, the
+owner's latest registration of a repository from the page (sixteen keys), with the plan's plain open
+questions and, when the plan refused the last answer, the refusal's text and the question it
+answered (`refused`, `{"id", "subject"}`).
 
 The top-level `pin` member (#1029) is the pin note `pin.note` gives, copied, from the `pin`
 argument, and null with no pin. The top-level `pin_launches` member is the sorted list of profiles
@@ -200,6 +203,30 @@ option index into the full logged options.
 
 `QUESTION_SENTENCE` ("Choose an option with its number and press Enter, or answer in your own
 words.") says what the page offers.
+
+Each open question of a done registration's plan (#1066, ADR-console-029 D10; `registration.status`
+is `done` and `registration.questions` is not empty) is one entry of `inbox.open` too, after the
+manager questions and before every tracker item, in the plan's order, and counts in `inbox_items`
+and the headline; a running registration, one with no question and none at all add nothing. Its
+entry is
+
+    {"type": "inbox_item", "reason": "register", "key": "register/<plan id>/<index>",
+     "project_id": null, "root", "name", "title": "Register <name>", "plan_id", "id", "subject",
+     "headline": "<ask>", "why": "<text>" | null, "refusal": "<text>" | null,
+     "more_questions": 0,
+     "questions": [] | [{"question": "<ask>", "options": ["<label>", ...], "chosen": null,
+                         "recommended": null, "recommended_index": null}],
+     "values": ["<value>", ...], "items": [], "answers": [], "answered": false,
+     "waiting_since": "<the registration's at>"}
+
+`key` is the plan id and the question's index, so an answer that makes a new plan replaces the
+items; `options` are the plan's labels and `values` the values they send, in order, and nothing is
+preselected. A question the plan offers no answer to has `questions` `[]`, `values` `[]` and its
+`why`, and still counts. `refusal` is the registration's refusal on the question
+`registration.refused` names and null on every other. The items are never cut and carry no `stale`
+or `read_at`. `REGISTER_SENTENCE` ("Choose an option with its number and press Enter.") says what
+the page offers; `REGISTER_STEP_SENTENCE` ("Each one says what to do next.") stands when no plan
+question offers an answer and nothing else is open.
 
 A project entry is `{"type": "project", "project_id", "root", "quiet",
 "open_work", "last_activity", "sprints": [<sprint entry>, ...],
@@ -450,6 +477,9 @@ PROGRESS_SENTENCE = "Tell the manager to continue, or withdraw the sprint."
 SIGNIN_HEADLINE = "Sign in to {profile} again"
 SIGNIN_FIRST_HEADLINE = "Sign in to {profile}"
 SIGNIN_SENTENCE = "Press Sign in, then finish signing in in your browser."
+REGISTER_TITLE = "Register {name}"
+REGISTER_SENTENCE = "Choose an option with its number and press Enter."
+REGISTER_STEP_SENTENCE = "Each one says what to do next."
 CHOOSE_SENTENCE = "Choose an option with its number and press Enter, or answer on the tracker."
 ANSWER_SENTENCE = "Answer it here, or on the tracker."
 STALE_SENTENCE = ("The tracker could not be read for {projects}; "
@@ -940,6 +970,30 @@ def _signin_entry(entry: Mapping, runs: Mapping[str, Mapping]) -> dict:
             "answered": False, "waiting_since": signin["since"]}
 
 
+def _register_entries(registration: Mapping | None) -> list[dict]:
+    if not isinstance(registration, Mapping) or registration.get("status") != "done":
+        return []
+    questions = registration.get("questions")
+    if not isinstance(questions, list) or not questions:
+        return []
+    name, plan_id = registration.get("name"), registration.get("plan_id")
+    refused = registration.get("refused")
+    return [{"type": "inbox_item", "reason": "register", "key": f"register/{plan_id}/{index}",
+             "project_id": None, "root": registration.get("root"), "name": name,
+             "title": REGISTER_TITLE.format(name=name), "plan_id": plan_id, "id": q["id"],
+             "subject": q["subject"], "headline": q["ask"], "why": q["why"],
+             "refusal": (registration.get("refusal")
+                         if refused == {"id": q["id"], "subject": q["subject"]} else None),
+             "more_questions": 0,
+             "questions": [] if not q["options"] else [{
+                 "question": q["ask"], "options": [o["label"] for o in q["options"]],
+                 "chosen": None, "recommended": None, "recommended_index": None}],
+             "values": [o["value"] for o in q["options"]],
+             "items": [], "answers": [], "answered": False,
+             "waiting_since": registration.get("at")}
+            for index, q in enumerate(questions)]
+
+
 def _headline(open_count: int, stale: bool, all_out: bool) -> str:
     if open_count == 1:
         return "1 thing needs you"
@@ -1010,8 +1064,9 @@ def derive_view(
     signins = sorted((e for e in capacity["profiles"]
                       if isinstance(e.get("signin"), Mapping) and e["signin"].get("ask")),
                      key=lambda e: e["profile"])
+    registering = _register_entries(registration)
     open_count = (len(briefs) + len(stalls) + len(unprogressed) + len(signins) + len(asked)
-                  + len(open_items))
+                  + len(registering) + len(open_items))
     all_out = bool(capacity["all_out"])
     if all_out:
         sentence = ALL_OUT_SENTENCE
@@ -1027,10 +1082,14 @@ def derive_view(
         sentence = SIGNIN_SENTENCE
     elif asked:
         sentence = QUESTION_SENTENCE
+    elif any(e["questions"] for e in registering):
+        sentence = REGISTER_SENTENCE
     elif any(r.item["reason"] == "decision" and r.item["questions"] for r in open_items):
         sentence = CHOOSE_SENTENCE
     elif any(r.item.get("answers") for r in open_items):
         sentence = ANSWER_SENTENCE
+    elif registering and not open_items:
+        sentence = REGISTER_STEP_SENTENCE
     elif open_count:
         sentence = NEEDS_SENTENCE
     else:
@@ -1094,6 +1153,7 @@ def derive_view(
                           + [_progress_entry(s) for s in unprogressed]
                           + [_signin_entry(e, signin_runs) for e in signins]
                           + [_question_entry(s, q) for s, q in asked]
+                          + registering
                           + [_inbox_entry(r, health) for r in open_items],
                   "answered": [_inbox_entry(r, health) for r in answered]},
         "signin_runs": signin_runs,

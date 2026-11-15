@@ -217,8 +217,8 @@ answer the shown row holds, then the new one, and never the register child (no r
 an answer run). The original of a planner error, a failed child or any other exception is one
 stderr line `console: plan_answer_error <json>` (with the traceback for an unexpected exception)
 before it is shortened for the page. A plan appends one `registration.ended` row, as the first
-run does; a refusal appends nothing and is kept in memory, shown by the view for the plan it
-answered until the next run starts. One line `console: plan_answer_ended <result>` (or `refused`)
+run does; a refusal appends nothing and is kept in memory, naming the answered question (its id and
+subject), shown by the view for the plan it answered until the next run starts. One line `console: plan_answer_ended <result>` (or `refused`)
 ends the run. Any other exception is `console: plan_answer_failed <Type>` and 500 `answering
 failed`. The console never reads or writes the plan store or the registry here.
 
@@ -2689,7 +2689,9 @@ class ConsoleService:
             if payload is not None and not self._closed:
                 self._fold(self.log.append([register.ended(payload)]))
             elif payload is None:
-                self._answer_refusal = {"plan_id": plan_id, "text": text}
+                self._answer_refusal = {
+                    "plan_id": plan_id, "text": text,
+                    "id": answers[-1]["id"], "subject": answers[-1]["subject"]}
             self._registering = None
             self._answering = False
             if not self._closed:
