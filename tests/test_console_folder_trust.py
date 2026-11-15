@@ -306,6 +306,29 @@ class RowTest(unittest.TestCase):
                       payload={"by": "owner", "profile": "work"})
         self.assertEqual(folder_trust.failures([other]), {})
 
+    def test_removing_the_account_drops_its_failed_pairs_only_when_it_is_gone(self):
+        def removal(seq, profile, outcome, kind=None):
+            return Event(seq=seq, at=f"t{seq}", kind=event_log.ACCOUNT_REMOVAL, project=None,
+                         payload={"by": "owner", "profile": profile, "outcome": outcome,
+                                  "kind": kind})
+
+        row = folder_trust.granted_row("apply", "p", "/r",
+                                       [("work", "failed"), ("solo", "failed")])
+        failed = Event(seq=1, at="t1", kind=row[0], project=None, payload=row[2])
+        for outcome, kind in (("removed", None), ("removed_signed_out_already", "timeout")):
+            with self.subTest(outcome=outcome):
+                kept = folder_trust.failures([failed, removal(2, "solo", outcome, kind)])
+                self.assertEqual(list(kept), [("/r", "work")])
+        for outcome in ("signout_failed", "remove_failed"):
+            with self.subTest(outcome=outcome):
+                kept = folder_trust.failures([failed, removal(2, "solo", outcome, "timeout")])
+                self.assertEqual(sorted(kept), [("/r", "solo"), ("/r", "work")])
+        again = folder_trust.failures(
+            [removal(2, "solo", "removed"), Event(seq=3, at="t3", kind=row[0], project=None,
+                                                   payload=row[2])],
+            folder_trust.failures([failed]))
+        self.assertEqual(sorted(again), [("/r", "solo"), ("/r", "work")])
+
 
 class ItemsTest(unittest.TestCase):
     @staticmethod

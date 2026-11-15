@@ -12,12 +12,13 @@ import io
 import json
 import os
 import re
+import shutil
 import threading
 import time
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import approve, folder_trust, register, register_check, service
+from agent_tools.console import approve, folder_trust, register, register_check, service, signin
 from agent_tools.console import event_log
 from agent_tools.project_contract import adopt_apply, adopt_inspection
 from agent_tools.system.forge_api import ForgeError
@@ -1059,6 +1060,30 @@ class TrustGrantTest(ApproveCase):
         self.assertEqual(rows[1]["profiles"], [{"profile": "solo", "result": "granted"}])
         self.assertEqual(self.trust_cards(), [])
         self.assertEqual(self.parsed("solo"), self.trusted())
+
+    def test_removing_the_account_clears_its_check_again_card(self):
+        self.trust["trust_granter"] = lambda path, key: (
+            folder_trust.FAILED if path.parent.name == "solo" else folder_trust.grant(path, key))
+        solo = self.files["solo"].parent
+
+        def remover(name):
+            shutil.rmtree(solo)
+            self.trust["profile_dirs"].remove(solo)
+
+        self.trust.update(
+            account_remover=remover, signer_out=lambda one: None,
+            signin_reader=lambda one: signin.Status("signed_in", None))
+        self.ready(apply_result=APPLIED)
+        self.run_approval("opened")
+        self.assertEqual(len(self.trust_cards()), 1)
+        counted = self.view()["statement"]["inbox_items"]
+        status, _, _ = support.post_page(
+            self.svc.address, "/api/account-remove",
+            self.own(**{"Content-Type": "application/json"}),
+            json.dumps({"profile": "solo", "typed": "solo"}).encode())
+        self.assertEqual(status, 204)
+        self.assertEqual(self.trust_cards(), [])
+        self.assertEqual(self.view()["statement"]["inbox_items"], counted - 1)
 
     def test_a_check_of_a_pair_never_named_is_refused(self):
         self.trust["trust_granter"] = lambda path, key: (

@@ -68,7 +68,9 @@ are non-empty strings, every result is in `RESULTS` and every profile is `defaul
 `account_add.refusal`. The kind is not in `KEPT_KINDS`. No file content is logged.
 `failures(events, state=None)` folds a copy of `state`: for each valid row (re-validated with
 `granted_row`; an invalid one is skipped) a `(root, profile)` with result `failed` is set to
-`{"root", "project", "profile", "at"}` and one with `granted` or `already` is removed.
+`{"root", "project", "profile", "at"}` and one with `granted` or `already` is removed. An
+`account.removal` row of outcome `removed` or `removed_signed_out_already` (`GONE_OUTCOMES`) drops
+every pair of that profile, since a profile that no longer exists has no file left to check.
 
 Card. `items(failures)` is the Check again card of every pair `failures` holds, ordered by `(at,
 root, profile)`: reason `trust_failed`, key `trust/<profile>/<root>/<at>`, `project_id` null, the
@@ -131,6 +133,7 @@ KEPT_PREFIX = ".claude.json.trust-kept-"
 TEMP_PREFIX = ".claude.json.trust-"
 CHECK_OPTION = "Check again"
 CHECK_VALUE = "check"
+GONE_OUTCOMES = ("removed", "removed_signed_out_already")
 NOT_FAILED = "that folder is not waiting for a trust check"
 TRUST_SENTENCE = "Registering lets agents run in this folder with the folder's own settings and hooks."
 
@@ -469,6 +472,11 @@ def failures(events: Iterable[event_log.Event],
              state: dict[tuple[str, str], dict] | None = None) -> dict[tuple[str, str], dict]:
     folded = dict(state or {})
     for event in events:
+        if event.kind == event_log.ACCOUNT_REMOVAL:
+            profile = event.payload.get("profile")
+            if event.payload.get("outcome") in GONE_OUTCOMES and isinstance(profile, str):
+                folded = {slot: one for slot, one in folded.items() if slot[1] != profile}
+            continue
         if event.kind != event_log.TRUST_GRANTED:
             continue
         payload = event.payload

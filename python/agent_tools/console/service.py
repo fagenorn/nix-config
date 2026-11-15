@@ -300,7 +300,8 @@ run. Any other exception is `console: plan_approve_failed <Type>` and 500 `appro
 
 A `trust.granted` row that leaves a profile `failed` is folded (`folder_trust.failures`, at start,
 on append and after retention) into a Check again card (`folder_trust.items`, `trust_items` of the
-view) that a later `granted` or `already` for the same root and profile removes.
+view) that a later `granted` or `already` for the same root and profile removes, as does the
+removal of that profile (an `account.removal` row of outcome `removed` or `removed_signed_out_already`).
 
 `POST /api/trust-check` (#1078, ADR-console-033) is that card's answer. It runs the same checks with
 `MAX_TRUST_CHECK_BYTES` (4096) and `folder_trust.parse_check_request`: 400 `bad trust check`. The
