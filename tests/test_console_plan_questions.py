@@ -229,13 +229,28 @@ class RefusalTest(unittest.TestCase):
                     "The plan refused that answer: the answer is not the one",
                 )
 
-    def test_any_other_error_is_not_made_again(self):
-        error = {"code": "adopt_failure", "repair_id": "adopt.internal", "violations": []}
+    def test_any_other_error_is_not_made_again_in_its_message_never_its_code(self):
+        error = {
+            "code": "adopt_failure",
+            "repair_id": "adopt.some.repair",
+            "violations": [{"pointer": "/x", "message": "the store\n is unreadable"}],
+        }
         self.assertEqual(
-            plan_questions.refusal_text(error), "The plan was not made again: adopt.internal"
+            plan_questions.refusal_text(error),
+            "The plan was not made again: the store is unreadable",
         )
+        for bare in (
+            {"code": "adopt_failure", "repair_id": "adopt.internal", "violations": []},
+            {"code": "adopt_failure"},
+            {},
+        ):
+            with self.subTest(error=bare):
+                self.assertEqual(plan_questions.refusal_text(bare), "The plan was not made again.")
+
+    def test_a_failed_run_is_not_made_again_in_the_words_it_is_given(self):
         self.assertEqual(
-            plan_questions.rerun_failed("timed_out"), "The plan was not made again: timed_out"
+            plan_questions.rerun_failed("it took too long and was stopped"),
+            "The plan was not made again: it took too long and was stopped",
         )
 
 

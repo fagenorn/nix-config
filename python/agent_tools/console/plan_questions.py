@@ -35,8 +35,10 @@ included (chained).
 Refusals. `refusal_text(error)` words an adoption tool's error object: for a repair id in
 `REFUSED_REPAIRS` it is `The plan refused that answer: <message>` (the whitespace-collapsed message
 of the first violation, or `The plan refused that answer.` without one); otherwise it is
-`rerun_failed` of the repair id, else the code, else `unreadable`. `rerun_failed(kind)` is `The plan
-was not made again: <kind>`. `UNAVAILABLE` and `STALE` are the texts of an answer the host cannot
+`The plan was not made again: <message>` with the same message (`The plan was not made again.`
+without one), never the repair id or the code (#1057). `rerun_failed(words)` is `The plan was not
+made again: <words>`, the words being those a failed run is given (the caller maps a failure kind
+through `register.RUN_WORDS`; this module cannot import it). `UNAVAILABLE` and `STALE` are the texts of an answer the host cannot
 take and of an answer to a plan no longer shown.
 """
 
@@ -209,8 +211,8 @@ def parse_answer_request(body: bytes) -> tuple[str, str, str, str]:
     return value["plan_id"], value["id"], value["subject"], value["value"]
 
 
-def rerun_failed(kind: str) -> str:
-    return f"The plan was not made again: {kind}"
+def rerun_failed(words: str) -> str:
+    return f"The plan was not made again: {words}"
 
 
 def refusal_text(error: Mapping) -> str:
@@ -222,4 +224,6 @@ def refusal_text(error: Mapping) -> str:
         if message:
             return f"The plan refused that answer: {message}"
         return "The plan refused that answer."
-    return rerun_failed(error.get("repair_id") or error.get("code") or "unreadable")
+    if message:
+        return rerun_failed(message)
+    return "The plan was not made again."

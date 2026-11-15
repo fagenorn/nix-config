@@ -645,10 +645,18 @@ class PlanAnswerRunTest(Case):
         _, errors = self.refused_run(
             Fake(plan=[DRAFT, READY], raises_on=[None, timed_out()]), repo)
         self.assertEqual(self.view()["registration"]["refusal"],
-                         "The plan was not made again: timed_out")
+                         "The plan was not made again: it took too long and was stopped")
         (record,) = self.records(errors)
         self.assertEqual((record["root"], record["failure"]), (str(repo), "timed_out"))
         self.assertIn("child ran 300 s", record["cause"])
+
+    def test_an_error_that_is_not_a_refused_answer_shows_its_message_not_its_code(self):
+        repo = git_repo(self.parent / "r")
+        other = {"code": "adopt_failure", "repair_id": "adopt.some.repair",
+                 "violations": [{"pointer": "/x", "message": "the store is unreadable"}]}
+        self.refused_run(Fake(plan=[DRAFT, {"error": other}]), repo)
+        self.assertEqual(self.view()["registration"]["refusal"],
+                         "The plan was not made again: the store is unreadable")
 
     def test_the_next_answer_clears_the_refusal(self):
         repo = git_repo(self.parent / "r")
@@ -665,7 +673,7 @@ class PlanAnswerRunTest(Case):
             Fake(plan=[DRAFT, READY],
                  raises_on=[None, RuntimeError("store unreadable at /x")]), repo)
         self.assertEqual(self.view()["registration"]["refusal"],
-                         "The plan was not made again: RuntimeError")
+                         "The plan was not made again: it stopped unexpectedly")
         self.assertEqual(self.records(errors), [
             {"root": str(repo), "exception": "RuntimeError", "detail": "store unreadable at /x"}])
         self.assertIn("Traceback (most recent call last)", errors)

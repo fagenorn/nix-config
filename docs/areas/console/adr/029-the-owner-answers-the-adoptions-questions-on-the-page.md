@@ -33,7 +33,7 @@ Success is an empty `204` once the run is dispatched.
 **D6. A refusal.**
 
 - A plan error whose repair id is `adopt.decisions.invalid_answer` or `adopt.decisions.unmatched_answer` reads `The plan refused that answer: <its first message>`.
-- Any other error, or a run that fails, reads `The plan was not made again: <repair id or failure kind>`.
+- Any other error reads `The plan was not made again: <its first message>` (`The plan was not made again.` without one). A run that fails reads `The plan was not made again: <words>`, the words of ADR-console-028 D5's `RUN_WORDS` for its failure kind (`it stopped unexpectedly` for an unknown kind or any other exception). Neither shows a repair id, an error code, a failure kind or an exception's type (#1057).
 
 Neither appends a row, so the shown plan, its questions and the stored plan documents stay as they were. While that plan is shown, the text is the view's `registration.refusal`. It is kept in memory only: a restart forgets it, and the next answer run clears it. Before either text is made, the console writes the original to its stderr log as one `console: plan_answer_error <json>` line (the plan's error object, or the failure kind and its cause, or the exception's type and message followed by its traceback), so the reason outlives a restart.
 

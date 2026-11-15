@@ -2676,12 +2676,13 @@ class ConsoleService:
         except register.RunFailed as error:
             self._log_answer_error(
                 {"root": root, "failure": error.kind, "cause": repr(error.__cause__)})
-            text = plan_questions.rerun_failed(error.kind)
+            text = plan_questions.rerun_failed(
+                register.RUN_WORDS.get(error.kind, register.UNEXPECTED))
         except Exception as error:
             self._log_answer_error(
                 {"root": root, "exception": type(error).__name__, "detail": str(error)})
             traceback.print_exception(error, file=sys.stderr)
-            text = plan_questions.rerun_failed(type(error).__name__)
+            text = plan_questions.rerun_failed(register.UNEXPECTED)
         with self._ingest:
             if payload is not None and not self._closed:
                 self._fold(self.log.append([register.ended(payload)]))
