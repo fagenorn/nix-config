@@ -64,7 +64,8 @@ Wire format, one object:
 null when `derive_view` is given none.
 
 The headline is "1 thing needs you" or "<n> things need you" for open items (a waiting brief is one,
-and so is each open question of the registration's plan, see below), else
+and so is each open question of the registration's plan, and each retry or apply card, see
+below), else
 `ALL_OUT_HEADLINE` when every profile is out of usage, else `STALE_HEADLINE` when a registered
 project's tracker cannot be read, else "Nothing needs you". The sentence is `ALL_OUT_SENTENCE`
 when every profile is out of usage, else `STALE_SENTENCE` naming those projects when any is
@@ -72,7 +73,8 @@ stale, else `BRIEF_SENTENCE` when any brief is open, else `MANAGER_SENTENCE` whe
 stalled, else `PROGRESS_SENTENCE` when a manager stopped making progress, else `SIGNIN_SENTENCE`
 when a profile's sign-in asks, else `ADOPTION_SENTENCE` when an adoption's pull request is ready to
 merge, else `QUESTION_SENTENCE` when any manager question is open, else
-`REGISTER_SENTENCE` when a plan question offers an option (the page can answer it), else
+`REGISTER_SENTENCE` when a plan question, a retry item or an apply item offers an option (the page
+can answer it), else
 `REGISTER_TYPE_SENTENCE` when a plan question takes a typed answer (`text`), else
 `CHOOSE_SENTENCE` when an open item is a decision with questions (the page can answer it), else
 `ANSWER_SENTENCE` when an open item has answers (a verification prompt the page can answer), else
@@ -267,6 +269,15 @@ given, and counts in `inbox_items` and the headline. Its entry is
 
 While one is open the sentence is `REGISTER_SENTENCE`, at the slot it already has (after
 `QUESTION_SENTENCE`, before `CHOOSE_SENTENCE`). Without `retry_items` the view is unchanged.
+
+Each apply item a caller passes (`apply_items`; #1073, ADR-console-030) is one entry of
+`inbox.open` too: the owner's approval to apply a ready adoption, as the question card
+`approve.apply_items` builds. It has reason `register_apply` and the shape of a retry item, with
+`lines` (what applying will do, from the plan), `text` false and `values` led by the apply (or
+retry) value, then `not_now`. It is copied as given and not filtered by the registered projects,
+sits right after the plan questions and before the tracker items, in the order given, and counts
+once in `inbox_items` and the headline; it is never cut. While one is open the sentence is
+`REGISTER_SENTENCE`, in the slot the retry items use. Without `apply_items` the view is unchanged.
 
 A project entry is `{"type": "project", "project_id", "root", "quiet",
 "open_work", "last_activity", "sprints": [<sprint entry>, ...],
@@ -1065,6 +1076,7 @@ def derive_view(
     registration: Mapping | None = None,
     adoption_items: Iterable[Mapping] = (),
     retry_items: Iterable[Mapping] = (),
+    apply_items: Iterable[Mapping] = (),
 ) -> dict:
     states = list(states)
     sessions = list(sessions)
@@ -1110,9 +1122,11 @@ def derive_view(
                      key=lambda e: e["profile"])
     adoptions = [dict(item) for item in adoption_items]
     retries = [dict(item) for item in retry_items]
+    applies = [dict(item) for item in apply_items]
     registering = _register_entries(registration)
     open_count = (len(briefs) + len(stalls) + len(unprogressed) + len(signins) + len(adoptions)
-                  + len(asked) + len(retries) + len(registering) + len(open_items))
+                  + len(asked) + len(retries) + len(registering) + len(applies)
+                  + len(open_items))
     all_out = bool(capacity["all_out"])
     if all_out:
         sentence = ALL_OUT_SENTENCE
@@ -1130,7 +1144,7 @@ def derive_view(
         sentence = ADOPTION_SENTENCE
     elif asked:
         sentence = QUESTION_SENTENCE
-    elif retries or any(e["questions"] for e in registering):
+    elif retries or applies or any(e["questions"] for e in registering):
         sentence = REGISTER_SENTENCE
     elif any(e["text"] for e in registering):
         sentence = REGISTER_TYPE_SENTENCE
@@ -1206,6 +1220,7 @@ def derive_view(
                           + [_question_entry(s, q) for s, q in asked]
                           + retries
                           + registering
+                          + applies
                           + [_inbox_entry(r, health) for r in open_items],
                   "answered": [_inbox_entry(r, health) for r in answered]},
         "signin_runs": signin_runs,

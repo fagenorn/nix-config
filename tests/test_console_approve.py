@@ -203,7 +203,7 @@ class FoldTest(unittest.TestCase):
 
 class WordsTest(unittest.TestCase):
     def test_each_forge_failure_reads_its_reason_and_next_step(self):
-        again = "then press Try again."
+        again = "then choose Try again."
         cases = [
             (KeyError("x"), (register.UNEXPECTED, approve.OPEN_NOTE)),
             (ForgeError("gh_missing", "x"),
@@ -211,7 +211,7 @@ class WordsTest(unittest.TestCase):
               "Install gh and sign it in with gh auth login, " + again)),
             (ForgeError("gh_timeout", "api"),
              ("the forge took too long to answer",
-              "Press Try again; the console first looks for a pull request the forge may have "
+              "Choose Try again; the console first looks for a pull request the forge may have "
               "opened already.")),
             (ForgeError("gh_failed", "error connecting to api.github.com", transient=True),
              ("the forge could not be reached",
@@ -260,20 +260,20 @@ class WordsTest(unittest.TestCase):
                     "reason.")
         self.assertEqual(words(error("plan_stale", "adopt.plan.inputs_changed")), (
             "the repository changed since this plan was made",
-            "Register the repository again to make a new plan, then approve that one."))
+            "Register the repository again to make a new plan, then apply that one."))
         self.assertEqual(words(error(repair_id="adopt.worktree.dirty")), (
             "an uncommitted change in the repository overlaps what the plan changes",
-            "Commit or set aside the uncommitted change in /srv/r, then press Approve again."))
+            "Commit or set aside the uncommitted change in /srv/r, then choose Apply it again."))
         self.assertEqual(words(error(repair_id="adopt.worktree.retained"), KEPT), (
             "an earlier attempt of this plan is still kept",
             f"Remove the kept worktree with git worktree remove {KEPT['worktree']} and delete "
-            f"the branch {BRANCH}, then press Approve again."))
+            f"the branch {BRANCH}, then choose Apply it again."))
         self.assertEqual(words(error(repair_id="adopt.worktree.retained")), (
             "an earlier attempt of this plan is still kept", terminal))
         self.assertEqual(words(error(repair_id="adopt.worktree.unavailable")), (
             "the adoption's branch or worktree could not be created",
             f"If the branch {BRANCH} is left from an earlier attempt, delete it with git -C "
-            f"/srv/r branch -D {BRANCH}, then press Approve again."))
+            f"/srv/r branch -D {BRANCH}, then choose Apply it again."))
         self.assertEqual(words(error(repair_id="adopt.gate.no-new-broken-link"), KEPT), (
             "the no-new-broken-link check did not pass",
             f"Fix what failed in the repository (the kept worktree at {KEPT['worktree']} shows "
@@ -283,7 +283,7 @@ class WordsTest(unittest.TestCase):
             "the no-new-broken-link check did not pass", terminal))
         self.assertEqual(words(error(repair_id="adopt.manifest.missing")), (
             "the agent platform's files are not installed on this host yet",
-            "Run just switch in a terminal to install them, then press Approve again."))
+            "Run just switch in a terminal to install them, then choose Apply it again."))
         self.assertEqual(words(error(message="a  pre-commit\ngate")),
                          ("a pre-commit gate", terminal))
         self.assertEqual(words(error()), ("it could not be applied", terminal))
@@ -295,11 +295,43 @@ class WordsTest(unittest.TestCase):
     def test_a_run_failure_reads_in_words(self):
         self.assertEqual(approve.run_failure(PID, "timed_out", False), (
             "it took too long and was stopped",
-            f"Press Approve again. If it keeps failing, run adopt-project apply --plan-id {PID} "
+            f"Choose Apply it again. If it keeps failing, run adopt-project apply --plan-id {PID} "
             "in a terminal to see the full reason."))
         self.assertEqual(approve.run_failure(PID, "failed", False), (
             "the adoption tool stopped with an error", approve.terminal_note(PID, False)))
         self.assertEqual(approve.run_failure(PID, "Boom", False)[0], "it stopped unexpectedly")
+
+    def test_each_note_names_the_option_of_its_card(self):
+        again = []
+        for error in (KeyError("x"), ForgeError("gh_missing", "x"), ForgeError("gh_timeout", "a"),
+                      ForgeError("gh_failed", "e", transient=True),
+                      ForgeError("gh_failed", "gh: Bad credentials (HTTP 401)"),
+                      ForgeError("gh_failed", "gh: Forbidden (HTTP 403)"),
+                      ForgeError("gh_failed", "gh: Validation Failed (HTTP 422)"),
+                      ForgeError("gh_failed", "gh: Not Found (HTTP 404)"),
+                      ForgeError("payload_invalid", "x"),
+                      ForgeError("gh_failed", "gh: odd (HTTP 418)")):
+            again.append(approve.forge_failure(error, BRANCH, "develop")[1])
+        again += [approve.PUSH_NOTE, approve.OPEN_NOTE, approve.APPLIED_NOTE]
+        for note in again:
+            with self.subTest(note=note):
+                self.assertIn("Try again", note)
+        apply_it = []
+        for repair, kept in (("adopt.worktree.dirty", None), ("adopt.worktree.retained", KEPT),
+                             ("adopt.worktree.unavailable", None),
+                             (register.MANIFEST_PREFIX + "missing", None)):
+            apply_it.append(approve.apply_failure(
+                "/srv/r", PID, {"code": "verification_failed", "repair_id": repair,
+                                "violations": []}, kept, False)[1])
+        apply_it += [approve.run_failure(PID, kind, False)[1] for kind in register.RETRY_KINDS]
+        apply_it.append(approve.closed_note("/srv/r", BRANCH))
+        for note in apply_it:
+            with self.subTest(note=note):
+                self.assertIn("Apply it again", note)
+        for note in again + apply_it:
+            with self.subTest(note=note):
+                self.assertNotIn("press", note.lower())
+                self.assertNotIn("Approve", note)
 
     def test_no_reason_or_note_shows_a_code_or_kind(self):
         texts = []
@@ -421,8 +453,7 @@ class EntryTest(unittest.TestCase):
         pushed = f"Pushed {BRANCH} to origin."
         opened = "Opened pull request #7 against develop."
         closed = (f"Delete the branch {BRANCH} with git -C /srv/r branch -D {BRANCH} and git -C "
-                  f"/srv/r push origin --delete {BRANCH}, then press Approve to apply the plan "
-                  "again.")
+                  f"/srv/r push origin --delete {BRANCH}, then choose Apply it again.")
         waits = ("The pull request of r was merged; waiting for develop on origin to carry it "
                  "before registering.")
         url = "https://example.test/pull/7"
@@ -505,6 +536,44 @@ class EntryTest(unittest.TestCase):
             "lines": [], "note": None, "branch": None, "commit": None, "url": None})
 
 
+    def test_a_note_stored_in_the_old_words_reads_in_the_card_words(self):
+        cases = [
+            ("push_failed",
+             "Check that the repository's origin can be reached from this host and accepts the "
+             "push, then press Try again.", approve.PUSH_NOTE),
+            ("open_failed",
+             "Press Try again; the console first looks for a pull request the forge may have "
+             "opened already.",
+             "Choose Try again; the console first looks for a pull request the forge may have "
+             "opened already."),
+            ("open_failed",
+             f"Check on the forge that {BRANCH} differs from develop and has no pull request "
+             "open already, then press Try again.",
+             f"Check on the forge that {BRANCH} differs from develop and has no pull request "
+             "open already, then choose Try again."),
+            ("apply_failed",
+             "Commit or set aside the uncommitted change in /srv/r, then press Approve again.",
+             "Commit or set aside the uncommitted change in /srv/r, then choose Apply it again."),
+            ("apply_failed",
+             "Press Approve again. If it keeps failing, run adopt-project apply --plan-id p1 in "
+             "a terminal to see the full reason.",
+             "Choose Apply it again. If it keeps failing, run adopt-project apply --plan-id p1 "
+             "in a terminal to see the full reason."),
+            ("apply_failed",
+             "Register the repository again to make a new plan, then approve that one.",
+             "Register the repository again to make a new plan, then apply that one."),
+        ]
+        self.assertEqual(approve.PUSH_NOTE, "Check that the repository's origin can be reached "
+                         "from this host and accepts the push, then choose Try again.")
+        for step, old, new in cases:
+            with self.subTest(old=old):
+                found = self.adoption(step, reason="r", note=old)
+                self.assertEqual(approve.entry(found, running=False, name="r")["note"], new)
+                self.assertEqual(found["note"], old)
+        self.assertIsNone(approve.current_note(None))
+        self.assertEqual(approve.current_note("Remove it first."), "Remove it first.")
+
+
 class RetryEntryTest(unittest.TestCase):
     def test_only_a_refused_registration_is_a_retry_item(self):
         note = "Add the repository's origin remote, then choose Retry."
@@ -535,6 +604,85 @@ class RetryEntryTest(unittest.TestCase):
             "waiting_since": "t5"})
         self.assertEqual([i["plan_id"] for i in approve.retry_entries(found, running={"p1"})],
                          ["p0"])
+
+
+class ApplyItemTest(unittest.TestCase):
+    LATEST = {"root": "/srv/sample-app", "plan_id": "p", "state": "ready",
+              "lines": ["moves 2 agent files under .agents/", "writes the project contract"],
+              "at": "t1"}
+
+    def adoption(self, step, pull_state=None, **over):
+        return {**step_payload(step), "at": "t2", "pull_state": pull_state, "pull_at": None,
+                **over}
+
+    def item(self, key, headline, why, lines, first, value, since):
+        return {"type": "inbox_item", "reason": "register_apply", "key": key,
+                "project_id": None, "root": "/srv/sample-app", "name": "sample-app",
+                "title": "Register sample-app", "plan_id": "p", "id": None, "subject": None,
+                "headline": headline, "why": why, "lines": lines, "refusal": None,
+                "more_questions": 0, "text": False,
+                "questions": [{"question": headline, "options": [first, "Not now"],
+                               "chosen": None, "recommended": None,
+                               "recommended_index": None}],
+                "values": [value, "not_now"], "items": [], "answers": [], "answered": False,
+                "waiting_since": since}
+
+    def test_a_ready_plan_with_no_adoption_is_one_apply_item(self):
+        got = approve.apply_items(self.LATEST, None, None, approve.action(
+            self.LATEST, None, available=True, running=False))
+        self.assertEqual(got, [self.item(
+            "register-apply/p/t1", "Apply this adoption?", None, list(self.LATEST["lines"]),
+            "Apply it", "apply", "t1")])
+
+    def test_a_resumable_step_is_one_try_again_item(self):
+        for step in approve.RESUMABLE:
+            with self.subTest(step=step):
+                found = self.adoption(step, reason="no route", note="N")
+                entry = approve.entry(found, running=False, name="sample-app")
+                got = approve.apply_items(self.LATEST, found, entry, "retry")
+                self.assertEqual(got, [self.item(
+                    "register-apply/p/t1/t2", entry["headline"], entry["note"], [],
+                    "Try again", "retry", "t2")])
+
+    def test_a_failed_apply_and_a_closed_pull_request_offer_apply_it_again(self):
+        failed = self.adoption("apply_failed", reason="it broke", note="Remove it first.",
+                               kept=KEPT, branch=None, commit=None)
+        closed = self.adoption("opened", "closed", root="/srv/sample-app", pull_at="t3")
+        self.assertEqual(closed["pull_at"], "t3")
+        for found, since in ((failed, "t2"), (closed, "t3")):
+            with self.subTest(step=found["step"]):
+                entry = approve.entry(found, running=False, name="sample-app")
+                got = approve.apply_items(self.LATEST, found, entry, "approve")
+                self.assertEqual(got, [self.item(
+                    "register-apply/p/t1/t2", entry["headline"], entry["note"], [],
+                    "Apply it again", "apply", since)])
+        self.assertEqual(
+            approve.entry(closed, running=False, name="sample-app")["note"],
+            approve.closed_note("/srv/sample-app", BRANCH))
+
+    def test_no_action_or_a_deferred_plan_is_no_item(self):
+        self.assertEqual(approve.apply_items(self.LATEST, None, None, None), [])
+        self.assertEqual(approve.apply_items(None, None, None, "approve"), [])
+        self.assertEqual(approve.apply_items(self.LATEST, None, None, "approve",
+                                             deferred=frozenset({"p"})), [])
+        self.assertEqual(len(approve.apply_items(self.LATEST, None, None, "approve",
+                                                 deferred=frozenset({"q"}))), 1)
+
+    def test_the_deferral_row_and_its_fold(self):
+        self.assertEqual(approve.deferral_row("p"),
+                         (event_log.ADOPTION_DEFERRED, None, {"plan_id": "p"}))
+        for bad in ("", None, 3):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                approve.deferral_row(bad)
+        self.assertEqual(approve.DEFERRED, "adoption.deferred")
+        self.assertEqual(event_log.ADOPTION_DEFERRED, "adoption.deferred")
+        self.assertNotIn(event_log.ADOPTION_DEFERRED, event_log.KEPT_KINDS)
+        events = [Event(1, "t", approve.DEFERRED, None, {"plan_id": "p"}),
+                  Event(2, "t", approve.DEFERRED, None, {"plan_id": ""}),
+                  Event(3, "t", approve.DEFERRED, None, {"plan_id": "q", "x": 1}),
+                  Event(4, "t", approve.STEP, None, {"plan_id": "r"})]
+        self.assertEqual(approve.deferrals(events), frozenset({"p"}))
+        self.assertEqual(approve.deferrals([], frozenset({"z"})), frozenset({"z"}))
 
 
 class ActionTest(unittest.TestCase):

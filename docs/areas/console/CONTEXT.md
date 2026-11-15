@@ -138,7 +138,7 @@ The project contract the console drafts for a repository that has none, from its
 _Avoid_: generated contract, default contract
 
 **Approved adoption**:
-A ready adoption plan the owner approved on the page: the console applies it in its own worktree, pushes its one branch, opens its pull request and raises one inbox item while the pull request is ready to merge; the owner merges it on the forge (ADR-console-030).
+A ready adoption plan the owner approved on the page by choosing `Apply it` on its question card: the console applies it in its own worktree, pushes its one branch, opens its pull request and raises one inbox item while the pull request is ready to merge; the owner merges it on the forge (ADR-console-030).
 _Avoid_: auto-adoption, auto-merge
 
 **Merged adoption**:
