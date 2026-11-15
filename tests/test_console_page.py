@@ -279,7 +279,7 @@ class PageTest(unittest.TestCase):
              "/api/exclusion", "/api/pin", "/api/signin", "/api/signin-code", "/api/signin-cancel",
              "/api/account-add", "/api/signin-link", "/api/account-remove",
              "/api/register-project", "/api/plan-answer", "/api/plan-approve",
-             "/api/adoption-register"},
+             "/api/adoption-register", "/api/plan-defer"},
         )
         self.assertEqual(
             len(re.findall(r"\b(?:fetch|EventSource)\(", self.text)), len(literals)
@@ -288,7 +288,7 @@ class PageTest(unittest.TestCase):
     def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
         # A separate snapshot request can answer after a newer streamed frame
         # and render over it; the stream's first frame is already the snapshot.
-        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 30)
+        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 31)
         self.assertIsNotNone(
             re.search(r'fetch\("/api/looked",\s*\{\s*method:\s*"POST"', self.text)
         )
@@ -6800,6 +6800,34 @@ REFUSED_SHOWN = {**READY_SHOWN, "approve": None, "line": RETRY_HEADLINE + " " + 
                  "adoption": {**OPENED_ADOPTION, "state": "merged",
                               "headline": RETRY_HEADLINE + " " + RETRY_WHY, "note": None}}
 
+APPLY_ITEM = {
+    "type": "inbox_item", "reason": "register_apply",
+    "key": f"register-apply/{PLAN_A}/2026-11-15T08:00:00+00:00",
+    "project_id": None, "root": "/srv/r", "name": "r", "title": "Register r",
+    "plan_id": PLAN_A, "id": None, "subject": None, "headline": "Apply this adoption?",
+    "why": None, "lines": READY_SHOWN["lines"], "refusal": None, "more_questions": 0,
+    "text": False,
+    "questions": [{"question": "Apply this adoption?", "options": ["Apply it", "Not now"],
+                   "chosen": None, "recommended": None, "recommended_index": None}],
+    "values": ["apply", "not_now"], "items": [], "answers": [], "answered": False,
+    "waiting_since": "2026-11-15T08:00:00+00:00"}
+PUSH_FAILED_ADOPTION = {
+    **OPENED_ADOPTION, "step": "push_failed", "state": None,
+    "headline": "The branch adopt-aaaaaaaaaaaa was not pushed: remote rejected the push.",
+    "lines": [OPENED_ADOPTION["lines"][0]],
+    "note": "Check that the repository's origin can be reached from this host and accepts the "
+            "push, then choose Try again.",
+    "url": None}
+FAILED_SHOWN = {**READY_SHOWN, "approve": "retry", "adoption": PUSH_FAILED_ADOPTION,
+                "line": PUSH_FAILED_ADOPTION["headline"]}
+TRY_ITEM = {
+    **APPLY_ITEM, "key": APPLY_ITEM["key"] + "/2026-11-15T08:05:00+00:00",
+    "headline": PUSH_FAILED_ADOPTION["headline"], "why": PUSH_FAILED_ADOPTION["note"],
+    "lines": [],
+    "questions": [{**APPLY_ITEM["questions"][0], "question": PUSH_FAILED_ADOPTION["headline"],
+                   "options": ["Try again", "Not now"]}],
+    "values": ["retry", "not_now"]}
+
 
 def cards(items: list, registration: dict = ASKING) -> dict:
     return {**frame(items), "registration": registration}
@@ -6944,35 +6972,6 @@ class RegisterControlTest(unittest.TestCase):
         self.assertNotIn("sha256", shown)
         self.assertNotIn("adopt-project", shown)
         self.assertNotIn("adopt-project apply", shown)
-
-    def test_approve_shows_only_when_the_view_offers_it(self) -> None:
-        def shown(registration: dict) -> list:
-            (snap,) = render([START, {"frame": {**frame([]), "registration": registration}},
-                              {"snapshot": True}])
-            return [full(n) for n in registered(snap, "register-approve")]
-        self.assertEqual(shown(READY_SHOWN), ["Approve"])
-        self.assertEqual(shown({**READY_SHOWN, "approve": "retry"}), ["Try again"])
-        self.assertEqual(shown({**READY_SHOWN, "approve": None}), [])
-        self.assertEqual(shown({**REGISTERING, "approve": "approve"}), [])
-
-    def test_approve_posts_the_shown_plan_id_once_and_disables_while_posting(self) -> None:
-        held, released = render(READY + [
-            {"hold": True}, {"click": "register-approve"}, {"click": "register-approve"},
-            {"snapshot": True},
-            {"release": {"status": 204, "text": ""}}, {"snapshot": True}])
-        (post,) = held["posts"]
-        self.assertEqual(post["url"], "/api/plan-approve")
-        self.assertEqual(json.loads(post["body"]), {"plan_id": PLAN_A})
-        self.assertIs(registered(held, "register-approve")[0]["disabled"], True)
-        self.assertEqual(len(released["posts"]), 1)
-        self.assertIs(registered(released, "register-approve")[0]["disabled"], False)
-
-    def test_a_refused_approval_shows_its_reason(self) -> None:
-        (snap,) = render(READY + [
-            {"respond": {"status": 409, "text": "only a ready plan can be approved\n"}},
-            {"click": "register-approve"}, {"snapshot": True}])
-        (shown,) = registered(snap, "register-refusal")
-        self.assertEqual(full(shown), "only a ready plan can be approved")
 
     def test_an_approved_adoption_shows_its_headline_as_the_one_line_then_its_lines_note_and_link(self) -> None:
         def drawn(adoption: dict) -> dict:
@@ -7390,6 +7389,71 @@ class RegisterRetryPageTest(unittest.TestCase):
                        {"clock": 5000}, {"snapshot": True}])[-1]
         (post,) = snap["posts"]
         self.assertEqual(post["url"], "/api/plan-answer")
+
+
+class RegisterApplyPageTest(unittest.TestCase):
+    ANSWER = [{"respond": {"status": 204, "text": ""}}, {"key": "1"}, {"key": "Enter"},
+              {"clock": 5000}, {"snapshot": True}]
+
+    def test_a_ready_plan_is_a_question_card_with_apply_it_and_not_now(self) -> None:
+        (snap,) = render([START, {"frame": cards([APPLY_ITEM], READY_SHOWN)}, {"snapshot": True}])
+        (lead,) = [n for n in nodes(snap["inbox"]) if has_class(n, "lead")]
+        shown = full(lead)
+        for word in ("Question", "Register r", "Apply this adoption?", *READY_SHOWN["lines"]):
+            self.assertIn(word, shown)
+        self.assertEqual([full(n) for n in nodes(lead) if has_class(n, "opt")],
+                         ["1Apply it", "2Not now"])
+        (box,) = [n for n in nodes(lead) if has_class(n, "apply-lines")]
+        self.assertEqual([full(n) for n in nodes(box) if n["tag"] == "li"], READY_SHOWN["lines"])
+        self.assertEqual([n for n in nodes(lead) if has_class(n, "proj")], [])
+        self.assertNotIn("null", shown)
+
+    def test_one_and_enter_apply_the_plan(self) -> None:
+        (snap,) = render([START, {"frame": cards([APPLY_ITEM], READY_SHOWN)}, *self.ANSWER])
+        (post,) = snap["posts"]
+        self.assertEqual(post["url"], "/api/plan-approve")
+        self.assertEqual(posted(post), {"plan_id": PLAN_A})
+        self.assertIn("Answered, applying", full(snap["inbox"]))
+
+    def test_two_and_enter_set_the_card_aside(self) -> None:
+        (snap,) = render([START, {"frame": cards([APPLY_ITEM], READY_SHOWN)},
+                          {"respond": {"status": 204, "text": ""}}, {"key": "2"},
+                          {"key": "Enter"}, {"clock": 5000}, {"snapshot": True}])
+        (post,) = snap["posts"]
+        self.assertEqual(post["url"], "/api/plan-defer")
+        self.assertEqual(posted(post), {"plan_id": PLAN_A})
+
+    def test_a_failed_step_card_offers_try_again(self) -> None:
+        (snap,) = render([START, {"frame": cards([TRY_ITEM], FAILED_SHOWN)}, {"snapshot": True}])
+        (lead,) = [n for n in nodes(snap["inbox"]) if has_class(n, "lead")]
+        self.assertEqual([full(n) for n in nodes(lead) if has_class(n, "opt")],
+                         ["1Try again", "2Not now"])
+        self.assertIn(PUSH_FAILED_ADOPTION["note"], full(lead))
+        (answered,) = render([START, {"frame": cards([TRY_ITEM], FAILED_SHOWN)}, *self.ANSWER])
+        (post,) = answered["posts"]
+        self.assertEqual(post["url"], "/api/plan-approve")
+        self.assertEqual(posted(post), {"plan_id": PLAN_A})
+        self.assertIn("Answered, trying again", full(answered["inbox"]))
+
+    def test_the_work_column_has_no_approve_or_try_again_control(self) -> None:
+        for shown in (READY_SHOWN, {**READY_SHOWN, "approve": "approve"}, FAILED_SHOWN):
+            (snap,) = render([START, {"frame": cards([], shown)}, {"snapshot": True}])
+            self.assertEqual(registered(snap, "register-approve"), [])
+            labels = {full(n) for n in nodes(snap["register"]) if n["tag"] == "button"}
+            self.assertEqual(labels & {"Approve", "Try again", "Apply it", "Apply it again"}, set())
+            if shown is FAILED_SHOWN:
+                (note,) = registered(snap, "register-note")
+                self.assertEqual(full(note), PUSH_FAILED_ADOPTION["note"])
+                (line,) = registered(snap, "register-line")
+                self.assertEqual(full(line), PUSH_FAILED_ADOPTION["headline"])
+
+    def test_a_refused_apply_shows_its_reason_on_the_card(self) -> None:
+        reason = "only a ready plan can be approved"
+        (snap,) = render([
+            START, {"frame": cards([APPLY_ITEM], READY_SHOWN)},
+            {"respond": {"status": 409, "text": reason + "\n"}}, {"key": "1"}, {"key": "Enter"},
+            {"clock": 5000}, {"snapshot": True}])
+        self.assertIn("Could not send: " + reason, full(snap["inbox"]))
 
 
 class RegisterAnswerTransitionTest(unittest.TestCase):

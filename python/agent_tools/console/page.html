@@ -301,6 +301,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .register-result p, .register-result ul { margin: 0 0 6px; }
 .register-line { font-size: .84375rem; color: var(--text); }
 .register-lines { padding-left: 1.2em; color: var(--sub0); }
+.apply-lines { padding-left: 1.2em; color: var(--sub0); }
 .register-draft { list-style: none; padding-left: 0; color: var(--sub0); }
 .register-draft li { margin-bottom: 6px; }
 .draft-line { margin-right: 8px; }
@@ -312,7 +313,6 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .abox .draft-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin-top: 6px; }
 .abox .draft-row input { flex: 1 1 14rem; width: auto; min-width: 0; margin-top: 0; box-sizing: border-box; }
 .register-note { color: var(--ov2); }
-.register-refusal { color: var(--sub0); }
 .register-adoption { margin-top: 8px; }
 .register-adoption-lines { padding-left: 1.2em; color: var(--sub0); }
 .register-pr-link { color: var(--blue); }
@@ -1945,9 +1945,13 @@ function isQuestion(item) {
 function isRetry(item) {
   return item.reason === "register_retry";
 }
-// An open question of an adoption plan (ADR-console-029 D10) or a refused registration's Retry (ADR-console-028 D10): a card like a manager question.
+// A ready or failed adoption waiting to be applied (ADR-console-030 D9): a question card whose first option applies it and whose second sets it aside.
+function isApply(item) {
+  return item.reason === "register_apply";
+}
+// An open question of an adoption plan (ADR-console-029 D10), a refused registration's Retry (ADR-console-028 D10) or the apply card (ADR-console-030 D9): a card like a manager question.
 function isRegister(item) {
-  return item.reason === "register" || isRetry(item);
+  return item.reason === "register" || isRetry(item) || isApply(item);
 }
 function wordsKey(item) {
   return itemId(item) + "\nwords";
@@ -2074,6 +2078,13 @@ function start(item, state) {
   if (!choosable(state) || !picksComplete(item, state) || planBusy(item, state)) return false;
   if (isQuestion(item)) return begin(item, state, { round: true, body: roundBody(item, { choice: state.picks[0] }) });
   if (isRetry(item)) return begin(item, state, { retry: true, body: { plan_id: item.plan_id } });
+  if (isApply(item)) {
+    const body = { plan_id: item.plan_id };
+    const value = item.values[state.picks[0]];
+    if (value === "apply") return begin(item, state, { adopt: true, body, words: "Answered, applying" });
+    if (value === "retry") return begin(item, state, { adopt: true, body, words: "Answered, trying again" });
+    return begin(item, state, { defer: true, body, words: "Set aside until the plan changes" });
+  }
   if (isRegister(item)) {
     const body = { plan_id: item.plan_id, id: item.id, subject: item.subject, value: item.values[state.picks[0]] };
     return begin(item, state, { plan: true, body });
@@ -2128,11 +2139,15 @@ async function sendAnswer(id, state, item) {
       ? await fetch("/api/round-answer", { method: "POST", headers, body })
       : state.pending.retry
         ? await fetch("/api/adoption-register", { method: "POST", headers, body })
-        : state.pending.plan
-          ? await postPlanAnswer(state.pending.body)
-          : state.pending.check
-            ? await fetch("/api/check-answer", { method: "POST", headers, body })
-            : await fetch("/api/answer", { method: "POST", headers, body });
+        : state.pending.adopt
+          ? await fetch("/api/plan-approve", { method: "POST", headers, body })
+          : state.pending.defer
+            ? await fetch("/api/plan-defer", { method: "POST", headers, body })
+            : state.pending.plan
+              ? await postPlanAnswer(state.pending.body)
+              : state.pending.check
+                ? await fetch("/api/check-answer", { method: "POST", headers, body })
+                : await fetch("/api/answer", { method: "POST", headers, body });
     if (response.status !== 204) {
       reason = (await response.text()).trim() || "HTTP " + response.status;
     }
@@ -2421,7 +2436,8 @@ function statusLine(act, state, item) {
   } else if (state.phase === "sending") {
     act.appendChild(el("span", "", "Sending\u2026"));
   } else if (state.phase === "sent") {
-    act.appendChild(el("span", "", isRetry(item) ? "Answered, registering again" : isRegister(item) ? "Answered, planning again" : "Answered, waiting for the agent to pick it up"));
+    const words = state.pending && state.pending.words;
+    act.appendChild(el("span", "", words ? words : isRetry(item) ? "Answered, registering again" : isRegister(item) ? "Answered, planning again" : "Answered, waiting for the agent to pick it up"));
   } else {
     if (state.phase === "failed") act.appendChild(el("span", "fail", "Could not send: " + state.reason));
     if (state.notice) act.appendChild(el("span", "", state.notice));
@@ -2579,6 +2595,11 @@ function answerBox(item, state, lead) {
   const live = choosable(state);
   const now = Math.min(state.q, item.questions.length - 1);
   const box = el("div", "abox");
+  if (isApply(item) && Array.isArray(item.lines) && item.lines.length > 0) {
+    const list = el("ul", "apply-lines");
+    for (const line of item.lines) list.appendChild(el("li", "", line));
+    box.appendChild(list);
+  }
   item.questions.forEach((q, qi) => {
     if (item.questions.length > 1) {
       box.appendChild(el("p", live && itemId(item) === currentId && qi === now ? "meta now" : "meta", q.question));
@@ -3318,7 +3339,7 @@ function renderAccountAdd(view) {
 }
 renderAccountAdd(null);
 // The register control is built once as well (ADR-console-028 D8): a frame never replaces the path field, only the parts around it.
-const registerState = { phase: "closed", posting: false, failure: "", shown: "", approving: false, approveFailure: null };
+const registerState = { phase: "closed", posting: false, failure: "", shown: "" };
 let registerDismissed;
 let registerResultKey = "";
 const registerBox = document.getElementById("register");
@@ -3485,26 +3506,6 @@ function drawDraft(registration) {
   }
   return list;
 }
-// A ready plan is approved with one write (ADR-console-030); the failure is kept with the plan id it was for.
-async function approvePost(registration) {
-  if (registerState.approving) return;
-  registerState.approving = true;
-  registerState.approveFailure = null;
-  renderRegister(lastView);
-  let reason = null;
-  try {
-    const response = await fetch("/api/plan-approve", {
-      method: "POST", headers: stallHeaders(), body: JSON.stringify({ plan_id: registration.plan_id }),
-    });
-    if (response.status !== 204) reason = (await response.text()).trim() || "HTTP " + response.status;
-  } catch (error) {
-    console.error(error);
-    reason = "the console did not answer";
-  }
-  registerState.approving = false;
-  registerState.approveFailure = reason === null ? null : { plan_id: registration.plan_id, text: reason };
-  renderRegister(lastView);
-}
 // The registration's words are the view's: the page shows them verbatim and composes none.
 function drawRegisterResult(registration) {
   const parts = [el("p", "register-line", registration.line)];
@@ -3518,8 +3519,6 @@ function drawRegisterResult(registration) {
   registerFields = new Map();
   if (drafted.length > 0) parts.push(drawDraft({ ...registration, draft: drafted }));
   if (registration.status === "done") {
-    const failure = registerState.approveFailure;
-    if (failure !== null && failure.plan_id === registration.plan_id) parts.push(el("p", "register-refusal", failure.text));
     const adoption = registration.adoption;
     if (adoption !== null && typeof adoption === "object") {
       const inner = [];
@@ -3540,12 +3539,6 @@ function drawRegisterResult(registration) {
         for (const part of inner) box.appendChild(part);
         parts.push(box);
       }
-    }
-    if (registration.approve === "approve" || registration.approve === "retry") {
-      const approve = actionButton("register-approve", registration.approve === "retry" ? "Try again" : "Approve",
-        () => approvePost(registration));
-      approve.disabled = registerState.approving;
-      parts.push(approve);
     }
     parts.push(actionButton("register-close", "Close", () => {
       registerDismissed = registration.at;
@@ -3569,7 +3562,7 @@ function renderRegister(view) {
   if (registerReason.textContent !== reason) registerReason.textContent = reason;
   const shown = registration !== null && !(registration.status === "done" && registration.at === registerDismissed);
   if (!shown) closeChange();
-  const key = shown ? JSON.stringify([registration, registerState.approving, registerState.approveFailure]) + "\n" + JSON.stringify(registerChange) : "";
+  const key = shown ? JSON.stringify(registration) + "\n" + JSON.stringify(registerChange) : "";
   if (key !== registerResultKey) {
     registerResultKey = key;
     if (shown) {
