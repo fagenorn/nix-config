@@ -299,18 +299,14 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .register-path { flex: 1 1 12rem; min-width: 0; max-width: 100%; padding: 4px 8px; font: inherit; color: var(--text); background: var(--mantle); border: 1px solid var(--s1); border-radius: 8px; }
 .register-result { margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--hair); overflow-wrap: anywhere; }
 .register-result p, .register-result ul { margin: 0 0 6px; }
-.register-headline { font-size: .84375rem; color: var(--text); }
+.register-line { font-size: .84375rem; color: var(--text); }
 .register-lines { padding-left: 1.2em; color: var(--sub0); }
 .register-note { color: var(--ov2); }
+.register-refusal { color: var(--sub0); }
 .register-adoption { margin-top: 8px; }
-.register-adoption-headline { font-size: .84375rem; color: var(--text); }
 .register-adoption-lines { padding-left: 1.2em; color: var(--sub0); }
 .register-pr-link { color: var(--blue); }
-.register-question { margin: 8px 0 0; }
-.register-ask { color: var(--text); }
-.register-why, .register-refusal { color: var(--sub0); }
-.register-options { display: flex; flex-wrap: wrap; gap: 4px 8px; }
-.register-option { white-space: normal; text-align: left; max-width: 100%; }
+.card .q.reg, .row-head b.reg { white-space: pre-line; }
 .s-working { color: var(--green); }
 .s-waiting_answer, .s-waiting_permission { color: var(--yellow); }
 .s-limit { color: var(--red); }
@@ -1836,7 +1832,7 @@ function metaLine(item, tag, cls) {
 function kindOf(item) {
   if (isBrief(item)) return ["Brief", "brief-icon"];
   if (item.reason === "decision") return ["Decision", "decision-icon"];
-  if (isQuestion(item)) return ["Question", "decision-icon"];
+  if (isQuestion(item) || isRegister(item)) return ["Question", "decision-icon"];
   if (item.reason === "conflict") return ["Conflict", "conflict-icon"];
   if (item.reason === "needs-label") return ["Label", "label-icon"];
   if (item.kind === "approval" || item.kind === "paid-approval") return ["Approval", "approval-icon"];
@@ -1857,12 +1853,16 @@ function headLine(item) {
   line.appendChild(kindWords(item));
   const label = checkLabel(item);
   if (label !== null) line.appendChild(label);
-  line.appendChild(el("span", "proj", item.project_id));
-  if (isQuestion(item)) line.appendChild(el("span", "sprint-title", item.title));
+  if (!isRegister(item)) line.appendChild(el("span", "proj", item.project_id));
+  if (isQuestion(item) || isRegister(item)) line.appendChild(el("span", "sprint-title", item.title));
   line.appendChild(phrase("span", "wait", "waiting ", timeEl("since", item.waiting_since, "")));
   return line;
 }
 function heldLine(item) {
+  if (isRegister(item)) {
+    if (typeof item.why === "string") return el("p", "held why", item.why);
+    return typeof item.refusal === "string" ? el("p", "held fail", item.refusal) : null;
+  }
   if (isQuestion(item)) return el("p", "held blocks", "Blocks: " + item.blocks + (item.blocker ? " \u00b7 stops all work" : ""));
   const line = phrase("p", "held", holds(item));
   if (item.stale) {
@@ -1931,11 +1931,15 @@ function itemId(item) {
 function isQuestion(item) {
   return item.reason === "question";
 }
+// An open question of an adoption plan (ADR-console-029 D10): a card like a manager question, answered on the plan.
+function isRegister(item) {
+  return item.reason === "register";
+}
 function wordsKey(item) {
   return itemId(item) + "\nwords";
 }
 function decision(item) {
-  return (item.reason === "decision" || isQuestion(item)) && item.questions.length > 0 && !item.answered;
+  return (item.reason === "decision" || isQuestion(item) || isRegister(item)) && item.questions.length > 0 && !item.answered;
 }
 function check(item) {
   return (item.answers || []).length > 0 && !item.answered;
@@ -2039,9 +2043,22 @@ function begin(item, state, pending) {
 function roundBody(item, answer) {
   return { project_id: item.project_id, sprint_id: item.sprint_id, round: item.round, question: item.index, ...answer };
 }
+// A plan's answer replans it and replaces every one of its questions, so one answer at a time stands for a plan until a frame shows its outcome.
+function planBusy(item, state) {
+  if (!isRegister(item)) return false;
+  for (const other of answers.values()) {
+    if (other === state || other.pending === null || other.pending === undefined || !other.pending.plan) continue;
+    if (other.pending.body.plan_id === item.plan_id && ["waiting", "sending", "sent"].includes(other.phase)) return true;
+  }
+  return false;
+}
 function start(item, state) {
-  if (!choosable(state) || !picksComplete(item, state)) return false;
+  if (!choosable(state) || !picksComplete(item, state) || planBusy(item, state)) return false;
   if (isQuestion(item)) return begin(item, state, { round: true, body: roundBody(item, { choice: state.picks[0] }) });
+  if (isRegister(item)) {
+    const body = { plan_id: item.plan_id, id: item.id, subject: item.subject, value: item.values[state.picks[0]] };
+    return begin(item, state, { plan: true, body });
+  }
   const body = { project_id: state.project_id, key: state.key, choices: item.questions.map((_, i) => state.picks[i]) };
   return begin(item, state, { check: false, body });
 }
@@ -2082,9 +2099,11 @@ async function sendAnswer(id, state, item) {
     const body = JSON.stringify(state.pending.body);
     const response = state.pending.round
       ? await fetch("/api/round-answer", { method: "POST", headers, body })
-      : state.pending.check
-        ? await fetch("/api/check-answer", { method: "POST", headers, body })
-        : await fetch("/api/answer", { method: "POST", headers, body });
+      : state.pending.plan
+        ? await fetch("/api/plan-answer", { method: "POST", headers, body })
+        : state.pending.check
+          ? await fetch("/api/check-answer", { method: "POST", headers, body })
+          : await fetch("/api/answer", { method: "POST", headers, body });
     if (response.status !== 204) {
       reason = (await response.text()).trim() || "HTTP " + response.status;
     }
@@ -2366,14 +2385,14 @@ function actionButton(cls, label, onClick) {
   button.addEventListener("click", onClick);
   return button;
 }
-function statusLine(act, state) {
+function statusLine(act, state, item) {
   if (state.phase === "waiting") {
     act.appendChild(el("span", "", "Sending in five seconds."));
     act.appendChild(actionButton("undo", "Undo", () => { undo(state); redraw(); }));
   } else if (state.phase === "sending") {
     act.appendChild(el("span", "", "Sending\u2026"));
   } else if (state.phase === "sent") {
-    act.appendChild(el("span", "", "Answered, waiting for the agent to pick it up"));
+    act.appendChild(el("span", "", isRegister(item) ? "Answered, planning again" : "Answered, waiting for the agent to pick it up"));
   } else {
     if (state.phase === "failed") act.appendChild(el("span", "fail", "Could not send: " + state.reason));
     if (state.notice) act.appendChild(el("span", "", state.notice));
@@ -2383,13 +2402,13 @@ function statusLine(act, state) {
 }
 function actionLine(item, state, lead) {
   const act = el("div", "act");
-  if (!statusLine(act, state)) {
+  if (!statusLine(act, state, item)) {
     const send = actionButton(lead ? "send primary needs" : "send", "Send answer", () => { if (start(item, state)) redraw(); });
     if (itemId(item) === currentId) send.appendChild(el("kbd", "", "Enter"));
-    if (!picksComplete(item, state)) send.setAttribute("disabled", "");
+    if (!picksComplete(item, state) || planBusy(item, state)) send.setAttribute("disabled", "");
     act.appendChild(send);
   }
-  if (lead && !isQuestion(item)) act.appendChild(detailFold(item));
+  if (lead && !isQuestion(item) && !isRegister(item)) act.appendChild(detailFold(item));
   return act;
 }
 const ANSWER_LABELS = {
@@ -2473,7 +2492,7 @@ function checkBox(item, state, lead) {
     box.appendChild(act);
     return box;
   };
-  if (statusLine(act, state)) return finish();
+  if (statusLine(act, state, item)) return finish();
   const labels = ANSWER_LABELS[item.kind] || {};
   const buttons = [];
   let marked = false;
@@ -2525,7 +2544,10 @@ function answerBox(item, state, lead) {
     });
     box.appendChild(list);
   });
-  if (lead || isQuestion(item)) box.appendChild(heldLine(item));
+  if (lead || isQuestion(item) || isRegister(item)) {
+    const held = heldLine(item);
+    if (held !== null) box.appendChild(held);
+  }
   if (isQuestion(item)) wordsBox(item, state, box);
   box.appendChild(actionLine(item, state, lead));
   return box;
@@ -2535,20 +2557,21 @@ function boxState(item) {
   const state = answerState(item);
   if (check(item)) return state;
   // A question has no tracker page to answer on, so every one keeps its box; the keys go to one item only.
-  return isQuestion(item) || itemId(item) === currentId || state.phase !== "choosing" ? state : null;
+  return isQuestion(item) || isRegister(item) || itemId(item) === currentId || state.phase !== "choosing" ? state : null;
 }
 function leadItem(item) {
   const card = el("article", "card lead");
   card.appendChild(headLine(item));
-  card.appendChild(el("h2", "q", item.headline));
+  card.appendChild(el("h2", isRegister(item) ? "q reg" : "q", item.headline));
   if (isQuestion(item) && typeof item.context === "string") card.appendChild(el("p", "context", item.context));
   const more = moreWords(item);
   if (more !== null) card.appendChild(more);
   const state = boxState(item);
   if (state === null) {
     appendDetail(card, item, true);
-    card.appendChild(heldLine(item));
-    if (!isQuestion(item)) {
+    const held = heldLine(item);
+    if (held !== null) card.appendChild(held);
+    if (!isQuestion(item) && !isRegister(item)) {
       const act = el("div", "act");
       act.appendChild(answerLink(item, "answer primary needs"));
       card.appendChild(act);
@@ -2562,8 +2585,8 @@ function itemLine(item) {
   head.appendChild(kindWords(item));
   const label = checkLabel(item);
   if (label !== null) head.appendChild(label);
-  head.appendChild(el("b", "", item.headline));
-  const lm = phrase("span", "lm", item.project_id + " \u00b7 " + (isQuestion(item) ? item.title : holds(item)));
+  head.appendChild(el("b", isRegister(item) ? "reg" : "", item.headline));
+  const lm = phrase("span", "lm", isRegister(item) ? item.title : item.project_id + " \u00b7 " + (isQuestion(item) ? item.title : holds(item)));
   if (item.stale) {
     lm.appendChild(el("span", "", " \u00b7 "));
     lm.appendChild(phrase("span", "read-at", "read ", timeEl("ago", item.read_at, "")));
@@ -2577,9 +2600,12 @@ function itemLine(item) {
   const state = boxState(item);
   if (state === null) {
     appendDetail(line, item, true);
-    if (isQuestion(item)) line.appendChild(heldLine(item));
+    if (isQuestion(item) || isRegister(item)) {
+      const held = heldLine(item);
+      if (held !== null) line.appendChild(held);
+    }
   } else line.appendChild(answerBox(item, state, false));
-  if (!isQuestion(item)) line.appendChild(answerLink(item));
+  if (!isQuestion(item) && !isRegister(item)) line.appendChild(answerLink(item));
   return line;
 }
 function answeredLine(item) {
@@ -2715,6 +2741,14 @@ function renderInbox(view) {
     if (state.kind === "brief") {
       if (!present.has(id)) dropBriefState(id, state, briefs);
       continue;
+    }
+    // A plan answer still in flight whose question left the view (the plan running again) and came back has its outcome in that frame, which supersedes the late acknowledgment.
+    if (state.pending && state.pending.plan && state.phase === "sending") {
+      if (!present.has(id)) state.vanished = true;
+      else if (state.vanished) {
+        answers.delete(id);
+        continue;
+      }
     }
     const gone = !present.has(id) && state.phase !== "waiting" && state.phase !== "sending";
     if (gone || (state.phase === "sent" && reopened.has(id))) answers.delete(id);
@@ -3223,7 +3257,7 @@ function renderAccountAdd(view) {
 }
 renderAccountAdd(null);
 // The register control is built once as well (ADR-console-028 D8): a frame never replaces the path field, only the parts around it.
-const registerState = { phase: "closed", posting: false, failure: "", shown: "", answering: false, answerFailure: null, approving: false, approveFailure: null };
+const registerState = { phase: "closed", posting: false, failure: "", shown: "", approving: false, approveFailure: null };
 let registerDismissed;
 let registerResultKey = "";
 const registerBox = document.getElementById("register");
@@ -3272,26 +3306,7 @@ async function registerPost() {
   registerState.failure = reason === null ? "" : reason;
   renderRegister(lastView);
 }
-// An open question is answered with one write (ADR-console-029 D8); the failure is kept with the plan id it was for.
-async function answerPost(registration, question, option) {
-  if (registerState.answering) return;
-  registerState.answering = true;
-  registerState.answerFailure = null;
-  renderRegister(lastView);
-  let reason = null;
-  try {
-    const body = JSON.stringify({ plan_id: registration.plan_id, id: question.id, subject: question.subject, value: option.value });
-    const response = await fetch("/api/plan-answer", { method: "POST", headers: stallHeaders(), body });
-    if (response.status !== 204) reason = (await response.text()).trim() || "HTTP " + response.status;
-  } catch (error) {
-    console.error(error);
-    reason = "the console did not answer";
-  }
-  registerState.answering = false;
-  registerState.answerFailure = reason === null ? null : { plan_id: registration.plan_id, text: reason };
-  renderRegister(lastView);
-}
-// A ready plan is approved with one write (ADR-console-029); the failure is kept with the plan id it was for.
+// A ready plan is approved with one write (ADR-console-030); the failure is kept with the plan id it was for.
 async function approvePost(registration) {
   if (registerState.approving) return;
   registerState.approving = true;
@@ -3313,56 +3328,40 @@ async function approvePost(registration) {
 }
 // The registration's words are the view's: the page shows them verbatim and composes none.
 function drawRegisterResult(registration) {
-  const parts = [el("p", "register-headline", registration.headline)];
+  const parts = [el("p", "register-line", registration.line)];
   if (registration.lines.length > 0) {
     const list = el("ul", "register-lines");
     for (const line of registration.lines) list.appendChild(el("li", "", line));
     parts.push(list);
   }
-  if (registration.note) parts.push(el("p", "register-note", registration.note));
   if (registration.status === "done") {
-    const failedFor = (failure) => failure !== null && failure.plan_id === registration.plan_id;
-    const refusal = failedFor(registerState.approveFailure) ? registerState.approveFailure.text
-      : failedFor(registerState.answerFailure) ? registerState.answerFailure.text : registration.refusal;
-    if (refusal) parts.push(el("p", "register-refusal", refusal));
-    for (const question of registration.questions || []) {
-      const box = el("div", "register-question");
-      box.appendChild(el("p", "register-ask", question.ask));
-      if (typeof question.why === "string" && question.why !== "") {
-        box.appendChild(el("p", "register-why", question.why));
-      } else {
-        const options = el("div", "register-options");
-        for (const option of question.options) {
-          const button = actionButton("register-option", option.label, () => answerPost(registration, question, option));
-          button.disabled = registerState.answering;
-          options.appendChild(button);
-        }
-        box.appendChild(options);
-      }
-      parts.push(box);
-    }
+    const failure = registerState.approveFailure;
+    if (failure !== null && failure.plan_id === registration.plan_id) parts.push(el("p", "register-refusal", failure.text));
     const adoption = registration.adoption;
     if (adoption !== null && typeof adoption === "object") {
-      const box = el("div", "register-adoption");
-      box.appendChild(el("p", "register-adoption-headline", adoption.headline));
+      const inner = [];
       if (adoption.lines.length > 0) {
         const list = el("ul", "register-adoption-lines");
         for (const line of adoption.lines) list.appendChild(el("li", "", line));
-        box.appendChild(list);
+        inner.push(list);
       }
-      if (adoption.note) box.appendChild(el("p", "register-note", adoption.note));
+      if (adoption.note) inner.push(el("p", "register-note", adoption.note));
       if (isHttps(adoption.url)) {
         const link = el("a", "register-pr-link", "Open the pull request");
         link.rel = "noreferrer";
         link.href = adoption.url;
-        box.appendChild(link);
+        inner.push(link);
       }
-      parts.push(box);
+      if (inner.length > 0) {
+        const box = el("div", "register-adoption");
+        for (const part of inner) box.appendChild(part);
+        parts.push(box);
+      }
     }
     if (registration.approve === "approve" || registration.approve === "retry") {
       const approve = actionButton("register-approve", registration.approve === "retry" ? "Try again" : "Approve",
         () => approvePost(registration));
-      approve.disabled = registerState.approving || registerState.answering;
+      approve.disabled = registerState.approving;
       parts.push(approve);
     }
     parts.push(actionButton("register-close", "Close", () => {
@@ -3386,8 +3385,7 @@ function renderRegister(view) {
   }
   if (registerReason.textContent !== reason) registerReason.textContent = reason;
   const shown = registration !== null && !(registration.status === "done" && registration.at === registerDismissed);
-  const key = shown ? JSON.stringify([registration, registerState.answering, registerState.answerFailure,
-    registerState.approving, registerState.approveFailure]) : "";
+  const key = shown ? JSON.stringify([registration, registerState.approving, registerState.approveFailure]) : "";
   if (key !== registerResultKey) {
     registerResultKey = key;
     if (shown) {

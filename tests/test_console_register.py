@@ -292,11 +292,12 @@ class SummaryTest(unittest.TestCase):
 
     def test_a_ready_plan_and_a_blocked_draft(self):
         ready = register.summary("/srv/r", plan_doc(state="ready"))
-        self.assertEqual(ready["note"], "The plan is ready: press Approve to apply it and open "
-                         "its pull request, or run adopt-project apply --plan-id sha256:"
-                         + "a" * 64 + " in a terminal.")
+        self.assertEqual(ready["note"], "The plan is ready.")
         self.assertEqual(register.summary("/srv/r", plan_doc(state="ready", plan_id=None))["note"],
-                         "The plan is ready: press Approve to apply it and open its pull request.")
+                         "The plan is ready.")
+        for text in (ready["headline"], ready["note"], *ready["lines"]):
+            self.assertNotIn("sha256", text)
+            self.assertNotIn("adopt-project", text)
         blocked = register.summary("/srv/r", plan_doc(
             blockers=[{"id": "g", "message": "the tree is\n dirty"}]))
         self.assertEqual(blocked["note"], "The plan is a draft: the tree is dirty")
@@ -404,9 +405,36 @@ class NextStepTest(unittest.TestCase):
             with self.subTest(repair_id=repair_id):
                 row = register.summary("/srv/r", adopt_error(
                     repair_id, "the installed platform manifest was not found"))
-                self.assertEqual(row["headline"], "The adoption plan for r failed: "
-                                 "the installed platform manifest was not found.")
+                self.assertEqual(row["headline"], "The adoption plan for r could not start: "
+                                 "the agent platform's files are not installed on this host.")
+                self.assertNotIn("manifest", row["headline"])
                 self.assertEqual(row["note"], MANIFEST_STEP)
+                reg = register.summary("/srv/r", NO_CHANGE, adopt_error(
+                    repair_id, "the installed platform manifest was not found"))
+                self.assertEqual(reg["headline"], "r was not registered: "
+                                 "the agent platform's files are not installed on this host.")
+                self.assertNotIn("manifest", reg["headline"])
+                self.assertEqual(reg["note"], MANIFEST_STEP)
+
+    def test_any_other_manifest_failure_keeps_its_own_reason(self):
+        cases = (
+            ("adopt.manifest.invalid", "the installed platform manifest is not valid JSON"),
+            ("adopt.manifest.invalid", "the installed platform manifest could not be read"),
+            ("adopt.manifest.invalid", "the manifest's platform version is not strict SemVer"),
+            ("adopt.manifest.forward_step_missing",
+             "no migration steps forward from the project's declared schema"),
+            ("adopt.manifest.forward_step_ambiguous",
+             "more than one migration steps forward from the project's declared schema"),
+        )
+        for repair_id, message in cases:
+            with self.subTest(repair_id=repair_id, message=message):
+                row = register.summary("/srv/r", adopt_error(repair_id, message))
+                self.assertEqual(row["headline"], f"The adoption plan for r failed: {message}.")
+                self.assertEqual(row["note"],
+                                 f"Run {PLAN_COMMAND} in a terminal to see the full reason.")
+                reg = register.summary("/srv/r", NO_CHANGE, adopt_error(repair_id, message))
+                self.assertEqual(reg["headline"], f"r was not registered: {message}.")
+                self.assertNotIn("just switch", row["note"] + reg["note"])
 
     def test_each_refused_registration_has_its_own_next_step(self):
         again = "then press Register again."
@@ -514,36 +542,75 @@ class RowTest(unittest.TestCase):
                          "Planning the adoption of r again with your answer\u2026")
         latest = {**register.summary("/srv/r", plan_doc(open_questions=1)), "at": "t"}
         self.assertEqual(register.view_entry(
-            None, latest, refusal={"plan_id": latest["plan_id"], "text": "T"})["refusal"], "T")
+            None, latest, refusal={"plan_id": latest["plan_id"], "text": "T", "id": "q0",
+                     "subject": ""})["refusal"], "T")
         self.assertIsNone(register.view_entry(
-            None, latest, refusal={"plan_id": "sha256:other", "text": "T"})["refusal"])
+            None, latest, refusal={"plan_id": "sha256:other", "text": "T", "id": "q0",
+                     "subject": ""})["refusal"])
         self.assertIsNone(register.view_entry(
-            "/srv/r", latest, refusal={"plan_id": latest["plan_id"], "text": "T"})["refusal"])
+            "/srv/r", latest, refusal={"plan_id": latest["plan_id"], "text": "T", "id": "q0",
+                                   "subject": ""})["refusal"])
+
+    def test_view_entry_names_the_refused_question(self):
+        latest = {**register.summary("/srv/r", plan_doc(open_questions=1)), "at": "t"}
+        given = {"plan_id": latest["plan_id"], "text": "T", "id": "q0", "subject": ""}
+        shown = register.view_entry(None, latest, refusal=given)
+        self.assertEqual((shown["refusal"], shown["refused"]), ("T", {"id": "q0", "subject": ""}))
+        other = register.view_entry(None, latest, refusal={**given, "plan_id": "sha256:other"})
+        self.assertEqual((other["refusal"], other["refused"]), (None, None))
+        running = register.view_entry("/srv/r", latest, refusal=given)
+        self.assertEqual((running["refusal"], running["refused"]), (None, None))
+
+    def test_view_entry_line_says_the_state_in_one_line(self):
+        def row(doc, extra=None):
+            return {**register.summary("/srv/r", doc, extra), "at": "t"}
+
+        def line(latest):
+            return register.view_entry(None, latest)["line"]
+
+        failed = {**register.failed("/srv/r", "timed_out"), "at": "t"}
+        blocker = row(plan_doc(blockers=[{"message": "a blocker"}]))
+        registered = row(plan_doc(outcome="no_change", state="ready"),
+                         {"registered": True, "project_id": "o/r"})
+        self.assertEqual(
+            [line(row(plan_doc(open_questions=2))), line(row(plan_doc(open_questions=1))),
+             line(row(plan_doc(state="ready"))), line(blocker), line(failed), line(registered)],
+            ["Register r: 2 questions open", "Register r: 1 question open",
+             "Register r: ready to apply", "The plan is a draft: a blocker",
+             f"{failed['headline']} {failed['note']}", "r is registered as o/r."])
+        self.assertEqual(register.view_entry("/srv/r", None)["line"],
+                         "Planning the adoption of r\u2026")
+        self.assertEqual(register.view_entry("/srv/r", None, again=True)["line"],
+                         "Planning the adoption of r again with your answer\u2026")
 
     def test_view_entry_running_done_none(self):
         self.assertEqual(register.view_entry("/srv/r", None), {
             "root": "/srv/r", "name": "r", "project_id": None, "status": "running",
             "result": None, "outcome": None, "headline": "Planning the adoption of r…",
             "lines": [], "note": None, "at": None, "plan_id": None, "state": None,
-            "questions": [], "refusal": None, "adoption": None, "approve": None})
+            "questions": [], "refusal": None, "line": "Planning the adoption of r\u2026",
+            "refused": None, "adoption": None, "approve": None})
         latest = {**register.summary("/srv/r", plan_doc(state="ready")), "at": "t"}
         self.assertEqual(register.view_entry(None, latest), {
             "root": "/srv/r", "name": "r", "project_id": "o/r", "status": "done",
             "result": "planned", "outcome": "reconcile",
             "headline": latest["headline"], "lines": [],
-            "note": "The plan is ready: press Approve to apply it and open its pull request, "
-                    "or run adopt-project apply --plan-id " + PLAN_ID + " in a terminal.",
+            "note": "The plan is ready.",
             "at": "t", "plan_id": PLAN_ID, "state": "ready", "questions": [], "refusal": None,
-            "adoption": None, "approve": None})
+            "line": "Register r: ready to apply", "refused": None, "adoption": None,
+            "approve": None})
         self.assertIsNone(register.view_entry(None, None))
 
     def test_view_entry_carries_the_adoption_and_its_action(self):
         latest = {**register.summary("/srv/r", plan_doc(state="ready")), "at": "t"}
-        shown = register.view_entry(None, latest, adoption={"status": "done"}, approve="retry")
-        self.assertEqual((shown["adoption"], shown["approve"]), ({"status": "done"}, "retry"))
-        running = register.view_entry("/srv/r", latest, adoption={"status": "done"},
-                                      approve="approve")
+        adoption = {"status": "done", "headline": "The adoption of r was applied."}
+        shown = register.view_entry(None, latest, adoption=adoption, approve="retry")
+        self.assertEqual((shown["adoption"], shown["approve"]), (adoption, "retry"))
+        self.assertEqual(shown["line"], "The adoption of r was applied.")
+        self.assertEqual(register.view_entry(None, latest)["line"], "Register r: ready to apply")
+        running = register.view_entry("/srv/r", latest, adoption=adoption, approve="approve")
         self.assertEqual((running["adoption"], running["approve"]), (None, None))
+        self.assertEqual(running["line"], "Planning the adoption of r\u2026")
 
 
 FAKE = """#!/bin/sh

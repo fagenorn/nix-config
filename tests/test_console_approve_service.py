@@ -318,6 +318,7 @@ class PlanApproveRunTest(ApproveCase):
                       "Opened pull request #7 against develop."],
             "note": None, "branch": BRANCH, "commit": COMMIT, "url": URL})
         self.assertIsNone(shown["approve"])
+        self.assertEqual(shown["line"], shown["adoption"]["headline"])
         self.assertTrue(errors.rstrip().endswith("console: plan_approve_ended opened"))
 
     def test_a_failed_gate_is_shown_with_its_reason_and_nothing_is_pushed(self):

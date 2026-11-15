@@ -601,12 +601,41 @@ class PlanAnswerRunTest(Case):
         self.assertEqual(fake.calls, [("plan", str(repo)), ("plan", str(repo))])
         shown = self.view()["registration"]
         self.assertEqual((shown["state"], shown["questions"]), ("ready", []))
-        self.assertEqual(
-            shown["note"], "The plan is ready: press Approve to apply it and open its pull "
-            f"request, or run adopt-project apply --plan-id {PID_B} in a terminal.")
+        self.assertEqual(shown["note"], "The plan is ready.")
         rows = self.rows("registration.ended")
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[-1][1]["answered"], [A1])
+
+    def test_answering_an_item_reruns_the_plan_and_removes_that_item(self):
+        first = {"id": "candidate-class", "subject": ".claude/odd.md",
+                 "value": "archive-history"}
+        second = {"id": "path-reference", "subject": "tools/show.sh:1:5",
+                  "answers": ["rewrite", "retain"]}
+        two = {**DRAFT, "decisions": {"open": [first, second], "recommended": [],
+                                      "answered": []}}
+        one = {**DRAFT, "plan": {**DRAFT["plan"], "plan_id": PID_B},
+               "decisions": {"open": [second], "recommended": [], "answered": [A1]}}
+        fake = Fake(plan=[two, one])
+        self.begin(fake)
+        self.registered(git_repo(self.parent / "r"))
+        shown = self.view()
+        self.assertEqual([i["key"] for i in shown["inbox"]["open"]],
+                         [f"register/{PID_A}/0", f"register/{PID_A}/1"])
+        self.assertEqual(shown["statement"]["inbox_items"], 2)
+        self.assertEqual(self.answer(answer_of(PID_A, A1))[0], 204)
+        self.wait_for(lambda r: r["status"] == "done" and r["plan_id"] == PID_B)
+        shown = self.view()
+        self.assertEqual([i["key"] for i in shown["inbox"]["open"]], [f"register/{PID_B}/0"])
+        self.assertEqual(shown["inbox"]["open"][0]["subject"], "tools/show.sh:1:5")
+        self.assertEqual(shown["statement"]["inbox_items"], 1)
+        self.assertEqual(fake.answers[-1], [A1])
+
+    def test_a_refused_answer_keeps_the_item_with_its_plain_reason(self):
+        self.refused_run(Fake(plan=[DRAFT, {"error": REFUSED}]), git_repo(self.parent / "r"))
+        shown = self.view()
+        (entry,) = shown["inbox"]["open"]
+        self.assertEqual((entry["key"], entry["refusal"]), (f"register/{PID_A}/0", REFUSED_TEXT))
+        self.assertEqual(shown["statement"]["inbox_items"], 1)
 
     def test_every_answer_given_so_far_is_sent_again(self):
         a2 = {"id": "path-reference", "subject": "tools/show.sh:1:5", "value": "rewrite"}
@@ -665,8 +694,17 @@ class PlanAnswerRunTest(Case):
     def test_a_refused_answer_appends_nothing_and_shows_why(self):
         repo = git_repo(self.parent / "r")
         before, errors = self.refused_run(Fake(plan=[DRAFT, {"error": REFUSED}]), repo)
-        self.assertEqual(self.view()["registration"], {**before, "refusal": REFUSED_TEXT})
+        self.assertEqual(self.view()["registration"], {
+            **before, "refusal": REFUSED_TEXT,
+            "refused": {"id": A1["id"], "subject": A1["subject"]}})
         self.assertEqual(self.records(errors), [{"root": str(repo), "error": REFUSED}])
+
+    def test_a_refused_answer_names_its_question(self):
+        repo = git_repo(self.parent / "r")
+        self.refused_run(Fake(plan=[DRAFT, {"error": REFUSED}]), repo)
+        shown = self.view()["registration"]
+        self.assertEqual(shown["refused"], {"id": A1["id"], "subject": A1["subject"]})
+        self.assertEqual(shown["refusal"], REFUSED_TEXT)
 
     def test_a_failed_rerun_keeps_the_plan(self):
         repo = git_repo(self.parent / "r")
@@ -762,7 +800,8 @@ class PlanAnswerRealTest(Case):
         reg = self.registered(self.repo)
         self.assertEqual(reg["questions"], [
             {"id": "candidate-class", "subject": ".claude/odd.md",
-             "ask": "What should happen to .claude/odd.md? No rule covers this agent file.",
+             "ask": "What should happen to .claude/odd.md? No rule covers this agent file.\n"
+                    "This is the only thing the adoption can do with this file.",
              "options": [{"value": "archive-history",
                           "label": "Archive it under .agents/knowledge/archive/adopted/"}],
              "recommended": None, "why": None},
@@ -775,6 +814,24 @@ class PlanAnswerRealTest(Case):
         self.assertEqual(reg["state"], "draft")
         self.assertTrue(reg["plan_id"].startswith("sha256:"))
 
+    def test_a_throwaway_repository_asks_two_counted_register_items(self):
+        self.registered(self.repo)
+        shown = self.view()
+        items = [i for i in shown["inbox"]["open"] if i["reason"] == "register"]
+        self.assertEqual(len(items), 2)
+        for entry in items:
+            self.assertEqual(entry["title"], f"Register {self.repo.name}")
+        self.assertEqual(
+            [i["headline"] for i in items],
+            ["What should happen to .claude/odd.md? No rule covers this agent file.\n"
+             "This is the only thing the adoption can do with this file.",
+             "tools/show.sh line 1 names .claude/specs/a.md, which this plan moves. "
+             "Should it follow the move?"])
+        self.assertEqual(items[1]["questions"][0]["options"],
+                         ["Change it to .agents/artifacts/specs/a.md", "Leave it as it is"])
+        self.assertEqual(shown["statement"]["inbox_items"], 2)
+        self.assertEqual(shown["statement"]["headline"], "2 things need you")
+
     def test_answering_both_questions_on_a_throwaway_repository_makes_the_plan_ready(self):
         first = self.registered(self.repo)
         second = self.answered(first["plan_id"], "candidate-class", ".claude/odd.md",
@@ -782,9 +839,7 @@ class PlanAnswerRealTest(Case):
         self.assertEqual([q["subject"] for q in second["questions"]], ["tools/show.sh:1:5"])
         reg = self.answered(second["plan_id"], "path-reference", "tools/show.sh:1:5", "rewrite")
         self.assertEqual((reg["state"], reg["questions"]), ("ready", []))
-        self.assertEqual(
-            reg["note"], "The plan is ready: press Approve to apply it and open its pull "
-            f"request, or run adopt-project apply --plan-id {reg['plan_id']} in a terminal.")
+        self.assertEqual(reg["note"], "The plan is ready.")
         stored = (self.home / ".agents/state/adopt/plans"
                   / (reg["plan_id"].partition(":")[2] + ".json"))
         document = json.loads(stored.read_text())
