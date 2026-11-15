@@ -1,5 +1,6 @@
 """forge_markers (issue 623): grammar, reads and writes against the fake gh, and the race table."""
 import json
+import subprocess
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
@@ -554,6 +555,28 @@ class TransportTest(unittest.TestCase):
                                side_effect=forge_api.subprocess.TimeoutExpired("gh", forge_api.TIMEOUT)):
             error = self.raised(lambda: fm.list_markers(SLUG, ISSUE))
         self.assertEqual((error.code, error.transient), ("gh_timeout", True))
+
+    def test_a_call_under_a_deadline_runs_with_the_time_left(self):
+        done = subprocess.CompletedProcess(["gh"], 0, "{}", "")
+        with mock.patch.object(forge_api.subprocess, "run", return_value=done) as run:
+            with forge_api.deadline(10.0, lambda: 4.0):
+                forge_api.run_gh(["api", "x"])
+                with forge_api.deadline(100.0, lambda: 0.0):
+                    forge_api.run_gh(["api", "x"])
+                forge_api.run_gh(["api", "x"])
+            forge_api.run_gh(["api", "x"])
+        self.assertEqual([call.kwargs["timeout"] for call in run.call_args_list],
+                         [6.0, forge_api.TIMEOUT, 6.0, forge_api.TIMEOUT])
+
+    def test_a_call_at_or_past_the_deadline_starts_no_gh(self):
+        for now in (10.0, 11.0):
+            with self.subTest(now=now):
+                with mock.patch.object(forge_api.subprocess, "run") as run:
+                    with forge_api.deadline(10.0, lambda: now):
+                        error = self.raised(lambda: forge_api.run_gh(["api", "x"]))
+                self.assertEqual((error.code, error.transient), ("gh_timeout", True))
+                self.assertTrue(error.detail.startswith("deadline passed"))
+                run.assert_not_called()
 
     def test_constructed_errors_default_by_code(self):
         self.assertTrue(forge_api.ForgeError("gh_timeout", "x").transient)

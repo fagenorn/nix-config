@@ -12,6 +12,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from agent_tools.console import answer as console_answer
 from agent_tools.console import capacity as console_capacity
 from agent_tools.console import digest as console_digest
 from agent_tools.console import signin as console_signin
@@ -1276,7 +1277,7 @@ class PageAnswerTest(unittest.TestCase):
                 self.assertNotIn(WAIT_TEXT, full(snap["inbox"]))
 
     def test_a_refused_tick_reads_could_not_send_and_keeps_the_choice(self) -> None:
-        refusal = "the tracker refused the tick: gh_failed: gh: Server Error (HTTP 502)"
+        refusal = console_answer.NETWORK_DOWN
         for name, reply, reason in (
             ("refused", [{"respond": {"status": 502, "text": refusal + "\n"}}], refusal),
             ("no answer", [{"fail_fetch": True}], "the console did not answer"),
@@ -1295,6 +1296,63 @@ class PageAnswerTest(unittest.TestCase):
                     lead = snap["inbox"]["children"][0]
                     self.assertEqual(lead["tag"], "article")
                     self.assertIn("Which host?", full(lead))
+
+    def test_a_failed_tick_offers_try_again_which_sends_the_same_answer_at_once(self) -> None:
+        failed, sending, sent = render([
+            START, {"frame": frame([ANSWERABLE])},
+            {"respond": {"status": 502, "text": console_answer.NETWORK_DOWN + "\n"}},
+            {"key": "Enter"}, {"clock": 5000}, {"snapshot": True},
+            {"hold": True}, {"click": "answer-again"}, {"snapshot": True},
+            {"release": {"status": 204}}, {"snapshot": True},
+        ])
+        (fail,) = [n for n in nodes(failed["inbox"]) if has_class(n, "fail")]
+        self.assertEqual(fail["text"], "Could not send: " + console_answer.NETWORK_DOWN)
+        (again,) = [n for n in nodes(failed["inbox"]) if has_class(n, "answer-again")]
+        self.assertEqual(again["text"], "Try again")
+        self.assertFalse(has_class(again, "primary"))
+        self.assertTrue(picked(failed)[0].endswith("two"))
+        posts = answers(sending)
+        self.assertEqual(len(posts), 2)
+        for post in posts:
+            self.assertEqual(posted(post),
+                             {"project_id": "owner/p00", "key": "A", "choices": [1]})
+        self.assertIn("Sending\u2026", full(sending["inbox"]))
+        self.assertEqual(count(sending, "fail"), 0)
+        self.assertEqual(count(sending, "answer-again"), 0)
+        self.assertIn(SENT_TEXT, full(sent["inbox"]))
+
+    def test_try_again_is_offered_only_when_a_repeat_may_succeed(self) -> None:
+        refused = "the prompt changed on the tracker"
+        for name, steps, expected in (
+            ("refused", [{"respond": {"status": 409, "text": refused + "\n"}},
+                         {"key": "Enter"}, {"clock": 5000}], 0),
+            ("console failed",
+             [{"respond": {"status": 500, "text": console_answer.UNEXPECTED_FAILURE + "\n"}},
+              {"key": "Enter"}, {"clock": 5000}], 1),
+            ("no answer", [{"fail_fetch": True}, {"key": "Enter"}, {"clock": 5000}], 1),
+            ("another choice",
+             [{"respond": {"status": 502, "text": console_answer.NETWORK_DOWN + "\n"}},
+              {"key": "Enter"}, {"clock": 5000}, {"key": "1"}], 0),
+        ):
+            with self.subTest(name):
+                (snap,) = render([START, {"frame": frame([ANSWERABLE])}, *steps,
+                                  {"snapshot": True}])
+                self.assertEqual(count(snap, "answer-again"), expected)
+                if name == "refused":
+                    self.assertIn("Could not send: " + refused, full(snap["inbox"]))
+
+    def test_a_failure_with_no_reason_reads_plainly(self) -> None:
+        for status, expected in ((502, 1), (409, 0)):
+            with self.subTest(status):
+                (snap,) = render([
+                    START, {"frame": frame([ANSWERABLE])},
+                    {"respond": {"status": status, "text": ""}},
+                    {"key": "Enter"}, {"clock": 5000}, {"snapshot": True},
+                ])
+                (fail,) = [n for n in nodes(snap["inbox"]) if has_class(n, "fail")]
+                self.assertEqual(fail["text"], "Could not send: the console did not say why.")
+                self.assertNotIn("HTTP", full(snap["inbox"]))
+                self.assertEqual(count(snap, "answer-again"), expected)
 
     def test_a_sent_answer_reads_answered_waiting_for_the_agent_to_pick_it_up(self) -> None:
         sent, moved = render([
@@ -1909,6 +1967,24 @@ class PageCheckAnswerTest(unittest.TestCase):
             {"click": "ans-note"}, {"clock": 10000}, {"snapshot": True},
         ])
         self.assertEqual([posted(p)["note"] for p in checks(snap)], ["Loads", "Loads"])
+
+    def test_a_failed_check_answer_offers_try_again_with_the_same_answer(self) -> None:
+        down = {"respond": {"status": 502, "text": console_answer.NETWORK_DOWN + "\n"}}
+        item = {"frame": frame([check_item("A", "manual-check")])}
+        with self.subTest("passed"):
+            (snap,) = render([START, item, down, {"click": "ans-passed"}, {"clock": 5000},
+                              {"click": "answer-again"}, {"snapshot": True}])
+            first, second = [posted(p) for p in checks(snap)]
+            self.assertEqual(first, second)
+            self.assertEqual(first["answer"], "passed")
+        with self.subTest("note"):
+            (snap,) = render([
+                START, item, down, {"type": {"class": "note-text", "text": "Loads"}},
+                {"click": "ans-note"}, {"clock": 5000},
+                {"type": {"class": "note-text", "text": "Changed"}},
+                {"click": "answer-again"}, {"snapshot": True},
+            ])
+            self.assertEqual([posted(p)["note"] for p in checks(snap)], ["Loads", "Loads"])
 
     def test_a_draft_is_dropped_when_its_item_is_gone(self) -> None:
         a = check_item("A", "manual-check")

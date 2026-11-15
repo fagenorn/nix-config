@@ -570,7 +570,7 @@ class DocsTreeTest(unittest.TestCase):
                 ("docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md",
                  both + ", ADR-console-029, ADR-console-030"),
                 ("docs/areas/console/adr/002-the-desk-page-design-rules.md",
-                 both + ", ADR-console-029, ADR-console-031"),
+                 both + ", ADR-console-029, ADR-console-031, ADR-console-032"),
                 ("docs/areas/console/adr/024-the-owner-signs-a-profile-in-from-the-page.md",
                  "- **Status:** accepted; amended by ADR-console-025")):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
@@ -601,7 +601,8 @@ class DocsTreeTest(unittest.TestCase):
         status = ("- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
                   "ADR-console-028")
         for older, expected in ((adr008, status + ", ADR-console-029, ADR-console-030"),
-                                (adr002, status + ", ADR-console-029, ADR-console-031")):
+                                (adr002, status + ", ADR-console-029, ADR-console-031, "
+                                          "ADR-console-032")):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
                         if row.startswith("- **Status:**"))
             self.assertEqual(line, expected)
@@ -673,7 +674,7 @@ class DocsTreeTest(unittest.TestCase):
                  "- **Status:** accepted; amended by ADR-console-030, ADR-console-031"),
                 ("docs/areas/console/adr/002-the-desk-page-design-rules.md",
                  "- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
-                 "ADR-console-028, ADR-console-029, ADR-console-031")):
+                 "ADR-console-028, ADR-console-029, ADR-console-031, ADR-console-032")):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
                         if row.startswith("- **Status:**"))
             self.assertEqual(line, expected)
@@ -782,6 +783,28 @@ class DocsTreeTest(unittest.TestCase):
         write = self.doc("docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md")
         for needle in ("/api/answer", "4096"):
             self.assertIn(needle, write)
+
+    def test_the_tracker_write_retry_decision_is_recorded(self):
+        path = ("docs/areas/console/adr/032-a-tracker-write-rides-out-a-short-network-drop-"
+                "and-fails-in-plain-words.md")
+        first = (REPO_ROOT / path).read_text().splitlines()[0]
+        self.assertEqual(
+            first, "# ADR-console-032 \u2014 A tracker write rides out a short network drop "
+                   "and fails in plain words")
+        adr = self.doc(path)
+        for needle in ("ADR-console-010", "ADR-console-012", "ADR-console-002", "#1075",
+                       "transient", "30 seconds", "1, 2, 4, 8 and 10 seconds", "5 seconds",
+                       "deadline", "Sending\u2026", "this computer could not reach GitHub",
+                       "the console did not say why", "answer_tick_failed",
+                       "answer_tick_retry", "Try again", "a note", "already carries"):
+            self.assertIn(needle, adr)
+        for older in ("docs/areas/console/adr/010-the-page-answers-a-decision-prompt-by-ticking-it-as-the-owner.md",
+                      "docs/areas/console/adr/012-the-page-answers-owner-prompts-through-the-runners-owner-path.md"):
+            line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
+                        if row.startswith("- **Status:**"))
+            self.assertEqual(line, "- **Status:** accepted; amended by ADR-console-032")
+        self.assertIn("ADR-console-032",
+                      self.doc("docs/areas/console/adr/002-the-desk-page-design-rules.md"))
 
     def test_the_console_owner_prompt_decision_is_recorded(self):
         path = "docs/areas/console/adr/012-the-page-answers-owner-prompts-through-the-runners-owner-path.md"

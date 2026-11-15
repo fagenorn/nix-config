@@ -7,13 +7,21 @@ gh_timeout or payload_invalid.
 Transport class (issue 740): `run_gh` marks a timeout, an HTTP 5xx and a connection failure
 transient on the `ForgeError`; a caller may retry a whole idempotent operation on it.
 
-The module reads no host clock: "now" is the server's `Date` header (D5).
+Deadline (issue 1075): `deadline(at, clock)` bounds the `run_gh` calls made in its block, in the
+current thread. Each call starts only while `clock() < at` and runs with `timeout=min(TIMEOUT,
+at - clock())`; a call at or past `at` raises the transient `ForgeError("gh_timeout", "deadline
+passed: ...")` without starting `gh`. The innermost block wins and leaving it restores the outer one.
+
+The module reads no host clock: "now" is the server's `Date` header (D5). The one exception is the
+`clock` a caller hands to `deadline`, which is the only clock the module ever reads.
 """
+import contextlib
+import contextvars
 import json
 import os
 import re
 import subprocess
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any
@@ -26,6 +34,18 @@ TRANSPORT = re.compile(
     re.IGNORECASE)
 TIMEOUT = 30
 DETAIL_LIMIT = 240
+_DEADLINE: contextvars.ContextVar[tuple[float, Callable[[], float]] | None] = contextvars.ContextVar(
+    "forge_api_deadline", default=None)
+
+
+@contextlib.contextmanager
+def deadline(at: float, clock: Callable[[], float]) -> Iterator[None]:
+    """Bound every `run_gh` call of this block, in this thread, to end by `at` on `clock`."""
+    token = _DEADLINE.set((at, clock))
+    try:
+        yield
+    finally:
+        _DEADLINE.reset(token)
 
 
 def is_transport(stderr: str) -> bool:
@@ -50,8 +70,15 @@ def run_gh(argv: list[str], allow: Iterable[int] = ()) -> tuple[int, str]:
     """Run `gh` without any token variable. Returns (0, stdout), or (status, stdout) when the
     call failed with an HTTP status in `allow`; every other failure is a ForgeError."""
     env = {k: v for k, v in os.environ.items() if k not in ("GITHUB_TOKEN", "GH_TOKEN")}
+    timeout = TIMEOUT
+    bound = _DEADLINE.get()
+    if bound is not None:
+        left = bound[0] - bound[1]()
+        if left <= 0:
+            raise ForgeError("gh_timeout", "deadline passed: " + " ".join(argv))
+        timeout = min(TIMEOUT, left)
     try:
-        done = subprocess.run(["gh", *argv], capture_output=True, text=True, timeout=TIMEOUT,
+        done = subprocess.run(["gh", *argv], capture_output=True, text=True, timeout=timeout,
                               stdin=subprocess.DEVNULL, env=env)
     except subprocess.TimeoutExpired:
         raise ForgeError("gh_timeout", " ".join(argv)) from None

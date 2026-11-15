@@ -86,11 +86,13 @@ a `Content-Length` that is not ASCII digits is 411 `length required`, one above 
 line before it is translated: `answer.Refused` is `console: answer_refused <project_id> <key>
 <reason>` and 409 with the reason; a `ForgeError` is `console: answer_tick_failed <project_id> <key>
 <code>: <detail>` (whitespace runs collapsed to one space; the detail is what `gh` wrote to stderr)
-and 502 `the tracker refused the tick: <error>`; any other exception is `console: answer_failed
-<Type>: <message>` and 500 `answer failed`. `POST /api/check-answer` (#863) runs the same body checks in the same order, with
+and 502 with `answer.tracker_words(error)`, plain words that carry no raw tracker text (#1075); any
+other exception is `console: answer_failed <Type>: <message>` and 500 `answer.UNEXPECTED_FAILURE`.
+Before that final line, every retried transport failure writes `console: answer_tick_retry
+<project_id> <key> <attempt> <code>: <detail>` (the detail's whitespace collapsed). `POST /api/check-answer` (#863) runs the same body checks in the same order, with
 `answer.parse_check_request` as the parser, and calls `answer_check(project_id, key, answer, version,
 note, confirm)`; an `answer.Refused` or a `verify_answer.Refused` is the same stderr line and 409, and a
-`ForgeError` and any other exception are mapped as above. Success is an empty `204`. No refusal
+`ForgeError` and any other exception are mapped and retried as above. Success is an empty `204`. No refusal
 appends to the event log. `POST /api/goal` and `POST /api/withdraw` carry one JSON body each and run the same
 checks, in the same order and with the same statuses and texts as the answer route (one helper
 serves the three), with the limits `MAX_GOAL_BYTES` (16384) and `MAX_WITHDRAW_BYTES` (4096). A body
@@ -603,8 +605,13 @@ question of a decision item on the tracker, through `tick` (default `answer.tick
 raises `answer.Refused` with `NOT_OPEN` when the project is not registered, no record
 `(project_id, key)` exists, or the item is answered, is not a decision, or has no questions; with
 `CHOOSE` unless `choices` is a list of one `int` (not `bool`) per question within its options; with
-`SENDING` while another answer to the same item runs. A `ForgeError` of the tick propagates. The
-tick runs outside the ingest lock, so a hook or a poll never waits for `gh`. On success, under the
+`SENDING` while another answer to the same item runs. The tick runs through `answer.with_retries`
+(#1075), with the service's `monotonic` clock (default `time.monotonic`, so a step of the system
+clock never lengthens or ends the retries) and `write_sleep` (default `self._stop.wait`, so closing the
+service ends the retries): a transport failure is tried again within the `answer.RETRY_BUDGET_SECONDS`
+deadline, each retry writing one `answer_tick_retry` stderr line, and the slot stays in `_sending`
+for the whole retry, so a second answer meanwhile is `SENDING`. A `ForgeError` of the tick propagates
+only after the retries, or at once when it is not a transport failure. The tick runs outside the ingest lock, so a hook or a poll never waits for `gh`. On success, under the
 lock, when the record still exists, is unanswered and holds the same `(question, options)`, one
 `inbox.changed` event with the item answered (its `chosen` set) is appended and published, so the
 count leaves the headline at once; otherwise, and once the service is stopping, nothing is appended.
@@ -625,8 +632,10 @@ item without one is never approved): every live or paid approval needs its typed
 `SENDING` while another answer to the same item runs. No request answers more than one item, and no
 multi-item route exists. A note posts the owner's text and leaves the item open; any other word marks
 the item answered at once, as `answer` does and with the same generation bookkeeping, when the record
-still exists, is unanswered and names the same comment. A failure of `owner_path` propagates and
-appends nothing.
+still exists, is unanswered and names the same comment. `owner_path` runs through the same
+`answer.with_retries` as the tick, with the same deadline, `monotonic` clock, `write_sleep` and `SENDING` slot, except
+that a note is tried once: posting it again would post the text twice. A failure of `owner_path`
+propagates, only after the retries when it is a transport failure, and appends nothing.
 
 Goals (#886, ADR-console-011): `state_goal(project_id, goal)`, under the ingest lock, raises
 `sprints.Refused` with `UNREGISTERED` when the project is not in the folded states, then applies
@@ -1310,11 +1319,11 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             detail = " ".join(error.detail.split())
             print(f"console: answer_tick_failed {project_id} {key} {error.code}: {detail}",
                   file=sys.stderr)
-            self._refuse(502, f"the tracker refused the tick: {' '.join(str(error).split())}")
+            self._refuse(502, answer.tracker_words(error))
             return False
         except Exception as error:
             print(f"console: answer_failed {type(error).__name__}: {error}", file=sys.stderr)
-            self._refuse(500, "answer failed")
+            self._refuse(500, answer.UNEXPECTED_FAILURE)
             return False
         return True
 
@@ -2135,6 +2144,13 @@ class _TakeoverReservation:
     """A launch reservation made by the bring-back: it runs only while the takeover is still decided."""
 
 
+def _retry_line(project_id: str, key: str) -> Callable[[int, ForgeError], None]:
+    def on_retry(attempt: int, error: ForgeError) -> None:
+        print(f"console: answer_tick_retry {project_id} {key} {attempt} {error.code}: "
+              f"{' '.join(error.detail.split())}", file=sys.stderr)
+    return on_retry
+
+
 class ConsoleService:
     def __init__(self, store: Path, registry: Path, *, port: int = DEFAULT_PORT,
                  poll_seconds: float = POLL_SECONDS,
@@ -2156,6 +2172,8 @@ class ConsoleService:
                  sprint_secrets: Path | None = None,
                  tick: Callable[[str, int, int, list[dict], list[int]], None] = answer.tick_on_tracker,
                  owner_path: Callable[..., None] = verify_answer.answer_prompt,
+                 write_sleep: Callable[[float], object] | None = None,
+                 monotonic: Callable[[], float] = time.monotonic,
                  launcher: Callable[[manager.Launch], None] | None = None,
                  dispatch: Callable[[Callable[[], None]], None] | None = None,
                  nudger: Callable[[nudge.Nudge], None] | None = None,
@@ -2280,6 +2298,8 @@ class ConsoleService:
         self._tracker_thread: threading.Thread | None = None
         self._closing = False
         self._stop = threading.Event()
+        self._write_sleep = self._stop.wait if write_sleep is None else write_sleep
+        self._monotonic = monotonic
         self._watcher: threading.Thread | None = None
         self._signature = None
         self.log: EventLog | None = None
@@ -2523,7 +2543,9 @@ class ConsoleService:
             self._sending.add(slot)
         sent = False
         try:
-            self._tick(item["repo"], item["issue"], item["comment_id"], questions, choices)
+            answer.with_retries(
+                lambda: self._tick(item["repo"], item["issue"], item["comment_id"], questions, choices),
+                clock=self._monotonic, sleep=self._write_sleep, on_retry=_retry_line(project_id, key))
             sent = True
         finally:
             with self._ingest:
@@ -2550,8 +2572,15 @@ class ConsoleService:
             self._sending.add(slot)
         sent = False
         try:
-            self._owner_path(item["repo"], item["issue"], item["comment_id"], answer_word,
-                             version=version, note=note, paid=bool(item.get("paid")))
+            def write():
+                self._owner_path(item["repo"], item["issue"], item["comment_id"], answer_word,
+                                 version=version, note=note, paid=bool(item.get("paid")))
+
+            if answer_word == "note":
+                write()
+            else:
+                answer.with_retries(write, clock=self._monotonic, sleep=self._write_sleep,
+                                    on_retry=_retry_line(project_id, key))
             sent = True
         finally:
             with self._ingest:

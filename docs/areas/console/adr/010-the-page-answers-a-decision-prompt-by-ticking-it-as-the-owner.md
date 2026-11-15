@@ -1,6 +1,6 @@
 # ADR-console-010 — The page answers a decision prompt by ticking its box as the owner
 
-- **Status:** accepted
+- **Status:** accepted; amended by ADR-console-032
 - **Decided in:** #836, #838, #862
 
 ## Context
@@ -21,5 +21,5 @@ The marker may name a recommended option in `rec=<n1>.<n2>...`, one index per qu
 
 - A page closed inside the undo sends nothing.
 - A prompt whose poster named no recommendation opens with nothing selected.
-- A refused tick is reported to the page and written as one stderr line with the tracker's reason, and the event log records nothing of it.
+- A refused tick is reported to the page and written as one stderr line with the tracker's reason, and the event log records nothing of it; a failed write is retried and worded as ADR-console-032 says.
 - The console may now write to the tracker, but only a tick of a box the owner chose, behind the token and origin guard.

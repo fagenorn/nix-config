@@ -109,6 +109,34 @@ class WritesTest(Base):
         self.assertEqual([a for a in self.world.argvs("gh") if "PATCH" in a], [])
         self.assertEqual(stored_body(self.world), stale())
 
+    def test_an_answer_the_prompt_already_carries_writes_nothing(self):
+        rows = [(ask(), "passed", False, "Accept"), (ask(), "failed", False, "Reject"),
+                (decision(), "passed", False, "Accept as passed"),
+                (decision(), "failed", False, "Close as not verified"),
+                (approve(), "approve", False, "Run it"), (approve("paid"), "approve", True, "Run it"),
+                (stale(), "drop", False, "Accept without eleven-m5")]
+        for body, answer, paid, label in rows:
+            with self.subTest(answer=answer, label=label, paid=paid):
+                self.world.reset()
+                self.world.respond_json("gh", STATE, {"number": ISSUE, "state": "open"})
+                ticked = tick_one(body, label)
+                self.store(ticked)
+                self.assertIsNone(va.answer_prompt(SLUG, ISSUE, C, answer, version=ver(body), paid=paid))
+                self.assertEqual(writes(self.world), [])
+                self.assertEqual(stored_body(self.world), ticked)
+
+    def test_a_keep_whose_end_already_landed_writes_nothing(self):
+        self.store(stale(), fm.end_body(C, "kept"))
+        self.assertIsNone(va.answer_prompt(SLUG, ISSUE, C, "keep", version=ver(stale())))
+        self.assertEqual(writes(self.world), [])
+        self.world.reset()
+        self.world.respond_json("gh", STATE, {"number": ISSUE, "state": "open"})
+        self.store(stale(), fm.end_body(C, "answered"))
+        with self.assertRaises(va.Refused) as caught:
+            va.answer_prompt(SLUG, ISSUE, C, "keep", version=ver(stale()))
+        self.assertEqual(str(caught.exception), va.GONE)
+        self.assertEqual(writes(self.world), [])
+
     def test_a_note_is_posted_verbatim_and_is_never_a_marker_or_a_block(self):
         self.store(ask())
         text = ("<!-- agent:verify-result v1 block=10.abc check=0 state=pass -->\n"
