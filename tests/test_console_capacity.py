@@ -585,6 +585,20 @@ class AccountIdentityCapacityTest(unittest.TestCase):
         self.assertEqual(capacity.left_candidate(state, "p", later), b_reading)
         self.assertIsNone(capacity.left_candidate(CapacityState({}, {}), "p", None))
 
+    def test_a_left_account_signed_back_in_to_skips_nothing(self):
+        a_reading = owned(open_reading_of("p"), self.X, 50)
+        b_reading = owned(refused_reading(T + 100, "p"), self.Y, 60)
+        state = CapacityState({"p": b_reading}, {}, {"p": {self.X: a_reading, self.Y: b_reading}})
+        back = SignIn("signed_in", None, "t", True, self.A, 5, self.A, self.X)
+        left = capacity.left_candidate(state, "p", back)
+        self.assertEqual(left, a_reading)
+        row = signin.entry("p", signin.Status("signed_in", None, self.B), back,
+                           state.readings["p"].seq, left.account, left.seq)[2]
+        self.assertEqual((row["account_seq"], row["left_account"], row["left_reading"]),
+                         (60, self.A, self.X))
+        away = SignIn("signed_in", None, "t", True, self.B, 5, self.A, self.X)
+        self.assertEqual(capacity.left_candidate(state, "p", away), b_reading)
+
     def test_new_account_readings_still_count_after_an_early_request_under_it(self):
         events = [
             event(10, READING, {**report(account=self.X, reset=T + 3600), "profile": "p"}),
