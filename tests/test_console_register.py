@@ -292,10 +292,12 @@ class SummaryTest(unittest.TestCase):
 
     def test_a_ready_plan_and_a_blocked_draft(self):
         ready = register.summary("/srv/r", plan_doc(state="ready"))
-        self.assertEqual(ready["note"], "The plan is ready to apply: run adopt-project apply "
-                         "--plan-id sha256:" + "a" * 64)
+        self.assertEqual(ready["note"], "The plan is ready.")
         self.assertEqual(register.summary("/srv/r", plan_doc(state="ready", plan_id=None))["note"],
-                         "The plan is ready to apply.")
+                         "The plan is ready.")
+        for text in (ready["headline"], ready["note"], *ready["lines"]):
+            self.assertNotIn("sha256", text)
+            self.assertNotIn("adopt-project", text)
         blocked = register.summary("/srv/r", plan_doc(
             blockers=[{"id": "g", "message": "the tree is\n dirty"}]))
         self.assertEqual(blocked["note"], "The plan is a draft: the tree is dirty")
@@ -403,9 +405,36 @@ class NextStepTest(unittest.TestCase):
             with self.subTest(repair_id=repair_id):
                 row = register.summary("/srv/r", adopt_error(
                     repair_id, "the installed platform manifest was not found"))
-                self.assertEqual(row["headline"], "The adoption plan for r failed: "
-                                 "the installed platform manifest was not found.")
+                self.assertEqual(row["headline"], "The adoption plan for r could not start: "
+                                 "the agent platform's files are not installed on this host.")
+                self.assertNotIn("manifest", row["headline"])
                 self.assertEqual(row["note"], MANIFEST_STEP)
+                reg = register.summary("/srv/r", NO_CHANGE, adopt_error(
+                    repair_id, "the installed platform manifest was not found"))
+                self.assertEqual(reg["headline"], "r was not registered: "
+                                 "the agent platform's files are not installed on this host.")
+                self.assertNotIn("manifest", reg["headline"])
+                self.assertEqual(reg["note"], MANIFEST_STEP)
+
+    def test_any_other_manifest_failure_keeps_its_own_reason(self):
+        cases = (
+            ("adopt.manifest.invalid", "the installed platform manifest is not valid JSON"),
+            ("adopt.manifest.invalid", "the installed platform manifest could not be read"),
+            ("adopt.manifest.invalid", "the manifest's platform version is not strict SemVer"),
+            ("adopt.manifest.forward_step_missing",
+             "no migration steps forward from the project's declared schema"),
+            ("adopt.manifest.forward_step_ambiguous",
+             "more than one migration steps forward from the project's declared schema"),
+        )
+        for repair_id, message in cases:
+            with self.subTest(repair_id=repair_id, message=message):
+                row = register.summary("/srv/r", adopt_error(repair_id, message))
+                self.assertEqual(row["headline"], f"The adoption plan for r failed: {message}.")
+                self.assertEqual(row["note"],
+                                 f"Run {PLAN_COMMAND} in a terminal to see the full reason.")
+                reg = register.summary("/srv/r", NO_CHANGE, adopt_error(repair_id, message))
+                self.assertEqual(reg["headline"], f"r was not registered: {message}.")
+                self.assertNotIn("just switch", row["note"] + reg["note"])
 
     def test_each_refused_registration_has_its_own_next_step(self):
         again = "then press Register again."
@@ -530,7 +559,7 @@ class RowTest(unittest.TestCase):
             "root": "/srv/r", "name": "r", "project_id": "o/r", "status": "done",
             "result": "planned", "outcome": "reconcile",
             "headline": latest["headline"], "lines": [],
-            "note": "The plan is ready to apply: run adopt-project apply --plan-id " + PLAN_ID,
+            "note": "The plan is ready.",
             "at": "t", "plan_id": PLAN_ID, "state": "ready", "questions": [], "refusal": None})
         self.assertIsNone(register.view_entry(None, None))
 

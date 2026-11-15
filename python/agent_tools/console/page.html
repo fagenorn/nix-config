@@ -303,8 +303,9 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .register-lines { padding-left: 1.2em; color: var(--sub0); }
 .register-note { color: var(--ov2); }
 .register-question { margin: 8px 0 0; }
-.register-ask { color: var(--text); }
+.register-ask { color: var(--text); white-space: pre-line; }
 .register-why, .register-refusal { color: var(--sub0); }
+.register-questions + .register-close { margin-top: 16px; }
 .register-options { display: flex; flex-wrap: wrap; gap: 4px 8px; }
 .register-option { white-space: normal; text-align: left; max-width: 100%; }
 .s-working { color: var(--green); }
@@ -3284,6 +3285,7 @@ function drawRegisterResult(registration) {
     const failure = registerState.answerFailure;
     const refusal = failure !== null && failure.plan_id === registration.plan_id ? failure.text : registration.refusal;
     if (refusal) parts.push(el("p", "register-refusal", refusal));
+    const asked = el("div", "register-questions");
     for (const question of registration.questions || []) {
       const box = el("div", "register-question");
       box.appendChild(el("p", "register-ask", question.ask));
@@ -3298,8 +3300,9 @@ function drawRegisterResult(registration) {
         }
         box.appendChild(options);
       }
-      parts.push(box);
+      asked.appendChild(box);
     }
+    if (asked.children.length > 0) parts.push(asked);
     parts.push(actionButton("register-close", "Close", () => {
       registerDismissed = registration.at;
       renderRegister(lastView);
