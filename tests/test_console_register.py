@@ -292,10 +292,11 @@ class SummaryTest(unittest.TestCase):
 
     def test_a_ready_plan_and_a_blocked_draft(self):
         ready = register.summary("/srv/r", plan_doc(state="ready"))
-        self.assertEqual(ready["note"], "The plan is ready to apply: run adopt-project apply "
-                         "--plan-id sha256:" + "a" * 64)
+        self.assertEqual(ready["note"], "The plan is ready: press Approve to apply it and open "
+                         "its pull request, or run adopt-project apply --plan-id sha256:"
+                         + "a" * 64 + " in a terminal.")
         self.assertEqual(register.summary("/srv/r", plan_doc(state="ready", plan_id=None))["note"],
-                         "The plan is ready to apply.")
+                         "The plan is ready: press Approve to apply it and open its pull request.")
         blocked = register.summary("/srv/r", plan_doc(
             blockers=[{"id": "g", "message": "the tree is\n dirty"}]))
         self.assertEqual(blocked["note"], "The plan is a draft: the tree is dirty")
@@ -524,15 +525,25 @@ class RowTest(unittest.TestCase):
             "root": "/srv/r", "name": "r", "project_id": None, "status": "running",
             "result": None, "outcome": None, "headline": "Planning the adoption of r…",
             "lines": [], "note": None, "at": None, "plan_id": None, "state": None,
-            "questions": [], "refusal": None})
+            "questions": [], "refusal": None, "adoption": None, "approve": None})
         latest = {**register.summary("/srv/r", plan_doc(state="ready")), "at": "t"}
         self.assertEqual(register.view_entry(None, latest), {
             "root": "/srv/r", "name": "r", "project_id": "o/r", "status": "done",
             "result": "planned", "outcome": "reconcile",
             "headline": latest["headline"], "lines": [],
-            "note": "The plan is ready to apply: run adopt-project apply --plan-id " + PLAN_ID,
-            "at": "t", "plan_id": PLAN_ID, "state": "ready", "questions": [], "refusal": None})
+            "note": "The plan is ready: press Approve to apply it and open its pull request, "
+                    "or run adopt-project apply --plan-id " + PLAN_ID + " in a terminal.",
+            "at": "t", "plan_id": PLAN_ID, "state": "ready", "questions": [], "refusal": None,
+            "adoption": None, "approve": None})
         self.assertIsNone(register.view_entry(None, None))
+
+    def test_view_entry_carries_the_adoption_and_its_action(self):
+        latest = {**register.summary("/srv/r", plan_doc(state="ready")), "at": "t"}
+        shown = register.view_entry(None, latest, adoption={"status": "done"}, approve="retry")
+        self.assertEqual((shown["adoption"], shown["approve"]), ({"status": "done"}, "retry"))
+        running = register.view_entry("/srv/r", latest, adoption={"status": "done"},
+                                      approve="approve")
+        self.assertEqual((running["adoption"], running["approve"]), (None, None))
 
 
 FAKE = """#!/bin/sh

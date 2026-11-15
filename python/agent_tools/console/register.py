@@ -54,8 +54,9 @@ pure function of the document. `summary(root, plan, report=None)` is the row pay
 `bootstrap` or `reconcile` plan carries its header's `plan_id` and `state`, its
 `plan_questions.questions`, and its answered decisions as `{id, subject, value}` (ADR-console-029
 D1); every other row carries `DEFAULTS` (None, None, `[]`, `[]`). A ready plan's note is `The plan
-is ready to apply: run adopt-project apply --plan-id <plan_id>` (`The plan is ready to apply.`
-without a `plan_id`: D5). A `no_change` plan with no report (only an answer run passes none) is
+is ready: press Approve to apply it and open its pull request, or run adopt-project apply --plan-id
+<plan_id> in a terminal.` (`The plan is ready: press Approve to apply it and open its pull request.`
+without a `plan_id`: D5, as amended by ADR-console-030). A `no_change` plan with no report (only an answer run passes none) is
 `not_registered` and says `<name> needs no adoption change and is not registered yet: run
 <command>`, the command being the plan's `handoff.next_command` or else `adopt-project verify
 --register --repo-root <root>` (D5). A failed plan's headline is `The adoption plan for <name> failed:
@@ -89,12 +90,14 @@ members are exactly `MEMBERS` (a legacy row) or exactly `MEMBERS | EXTRA`, `by` 
 of dicts with exactly the string keys `id`, `subject` and `value` (ADR-console-029 D1). `ENDED` is
 `event_log.REGISTRATION_ENDED`, not in `KEPT_KINDS`. `latest(events, state=None)` is the last valid
 `ENDED` payload over `DEFAULTS` with `at` added, else `state`: the view's `registration` member,
-folded by the service. `view_entry(running, latest, *, again=False, refusal=None)` is that member,
-always the same fourteen keys: the `running` entry (headline `Planning the adoption of <name>…`, or
+folded by the service. `view_entry(running, latest, *, again=False, refusal=None, adoption=None,
+approve=None)` is that member, always the same sixteen keys: the `running` entry (headline `Planning the adoption of <name>…`, or
 `again_headline(name)`, `Planning the adoption of <name> again with your answer…`, when `again`)
 while a run is under way, with `plan_id`, `state` and `refusal` None and `questions` `[]`; else the
 latest with status `done`, its `plan_id`, `state` and `questions`, and `refusal` the text of the
-given `{"plan_id", "text"}` only when its `plan_id` is the latest's; else None (D4).
+given `{"plan_id", "text"}` only when its `plan_id` is the latest's; else None (D4). The keys
+`adoption` and `approve` are None in the `running` entry and carry the given values (the
+`approve.entry` object and the action the page offers, #1054) in the `done` entry.
 """
 
 from __future__ import annotations
@@ -335,9 +338,9 @@ def _answered(document: Mapping) -> list[dict]:
 def _note(plan: Mapping, document: Mapping) -> str:
     if plan.get("state") == "ready":
         if plan.get("plan_id"):
-            return ("The plan is ready to apply: run adopt-project apply "
-                    f"--plan-id {plan['plan_id']}")
-        return "The plan is ready to apply."
+            return ("The plan is ready: press Approve to apply it and open its pull request, "
+                    f"or run adopt-project apply --plan-id {plan['plan_id']} in a terminal.")
+        return "The plan is ready: press Approve to apply it and open its pull request."
     questions = len(document.get("decisions", {}).get("open", []))
     if questions:
         return f"The plan has {_count(questions, 'open question')}."
@@ -448,14 +451,15 @@ def again_headline(name: str) -> str:
 
 
 def view_entry(running: str | None, latest: Mapping | None, *, again: bool = False,
-               refusal: Mapping | None = None) -> dict | None:
+               refusal: Mapping | None = None, adoption: Mapping | None = None,
+               approve: str | None = None) -> dict | None:
     if running is not None:
         name = name_of(running)
         return {"root": running, "name": name, "project_id": None, "status": "running",
                 "result": None, "outcome": None,
                 "headline": again_headline(name) if again else f"Planning the adoption of {name}…",
                 "lines": [], "note": None, "at": None, "plan_id": None, "state": None,
-                "questions": [], "refusal": None}
+                "questions": [], "refusal": None, "adoption": None, "approve": None}
     if latest is None:
         return None
     shown = (refusal["text"] if refusal is not None and refusal["plan_id"] == latest["plan_id"]
@@ -465,7 +469,8 @@ def view_entry(running: str | None, latest: Mapping | None, *, again: bool = Fal
             "outcome": latest["outcome"], "headline": latest["headline"],
             "lines": latest["lines"], "note": latest["note"], "at": latest["at"],
             "plan_id": latest["plan_id"], "state": latest["state"],
-            "questions": latest["questions"], "refusal": shown}
+            "questions": latest["questions"], "refusal": shown, "adoption": adoption,
+            "approve": approve}
 
 
 class RunFailed(Exception):

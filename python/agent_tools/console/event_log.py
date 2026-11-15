@@ -69,6 +69,9 @@ Two more rows record the owner's sign-in from the page (#1026): `SIGNIN_ACTED` (
 accepted owner action) and `SIGNIN_ENDED` (`signin.ended`, one per finished client). Neither is in
 `KEPT_KINDS`, and neither carries a link or a code.
 
+Two kinds record an adoption the owner approved on the page (#1054): `ADOPTION_STEP`
+(`adoption.step`) and `ADOPTION_PULL` (`adoption.pull_request`); neither is in `KEPT_KINDS`.
+
 `ACCOUNT_ADDED` (`account.added`, one per account the owner adds from the page, #1027) is not in
 `KEPT_KINDS`. `ACCOUNT_REMOVAL` (`account.removal`, one per removal the owner confirms on the page,
 #1030) is not in `KEPT_KINDS`.
@@ -137,6 +140,8 @@ SIGNIN_ENDED = "signin.ended"
 ACCOUNT_ADDED = "account.added"
 ACCOUNT_REMOVAL = "account.removal"
 REGISTRATION_ENDED = "registration.ended"
+ADOPTION_STEP = "adoption.step"
+ADOPTION_PULL = "adoption.pull_request"
 SESSION_HOOK = "session.hook"
 SESSION_SEEN = "session.seen"
 SESSION_PROFILE = "session.profile"

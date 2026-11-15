@@ -590,7 +590,8 @@ class PlanAnswerRunTest(Case):
         shown = self.view()["registration"]
         self.assertEqual((shown["state"], shown["questions"]), ("ready", []))
         self.assertEqual(
-            shown["note"], f"The plan is ready to apply: run adopt-project apply --plan-id {PID_B}")
+            shown["note"], "The plan is ready: press Approve to apply it and open its pull "
+            f"request, or run adopt-project apply --plan-id {PID_B} in a terminal.")
         rows = self.rows("registration.ended")
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[-1][1]["answered"], [A1])
@@ -770,7 +771,8 @@ class PlanAnswerRealTest(Case):
         reg = self.answered(second["plan_id"], "path-reference", "tools/show.sh:1:5", "rewrite")
         self.assertEqual((reg["state"], reg["questions"]), ("ready", []))
         self.assertEqual(
-            reg["note"], f"The plan is ready to apply: run adopt-project apply --plan-id {reg['plan_id']}")
+            reg["note"], "The plan is ready: press Approve to apply it and open its pull "
+            f"request, or run adopt-project apply --plan-id {reg['plan_id']} in a terminal.")
         stored = (self.home / ".agents/state/adopt/plans"
                   / (reg["plan_id"].partition(":")[2] + ".json"))
         document = json.loads(stored.read_text())
