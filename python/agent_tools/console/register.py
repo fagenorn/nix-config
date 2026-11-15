@@ -24,13 +24,15 @@ service. `registry_unreadable()` is the text of a registration refused because t
 exists but cannot be read (an absent registry is an empty fleet), also decided by the service.
 `UNAVAILABLE` is `registering a project is not available on this host`.
 
-Runner. `Adopter(command=None, environ=None, timeout=RUN_TIMEOUT)` runs
+Runner. `Adopter(command=None, environ=None, timeout=RUN_TIMEOUT, apply_timeout=APPLY_TIMEOUT)` runs
 `[*command, "plan", "--repo-root", root, "--format", "json"]` (`plan`, followed by `--answer <id>
 <subject> <value>` for each of its `answers`, in the given order: ADR-console-029 D4) or
-`[*command, "verify", "--repo-root", root, "--register"]` (`register`), the command defaulting to the
-`adopt_project` sibling module. Each runs with no shell, in its own process group
+`[*command, "verify", "--repo-root", root, "--register"]` (`register`) or `[*command, "apply",
+"--plan-id", plan_id]` with `--acknowledge-deletions` added when asked (`apply`, #1054), the command
+defaulting to the `adopt_project` sibling module. Each runs with no shell, in its own process group
 (`manager.run_in_own_group`), `stdin` and `stderr` to `DEVNULL`, `stdout` piped, `env=dict(environ)`
-when `environ` is given (else the console's own) and `timeout` (`RUN_TIMEOUT`, 300 seconds). Exit 0
+when `environ` is given (else the console's own) and `timeout` (`RUN_TIMEOUT`, 300 seconds; an apply
+runs its gates, so it has its own `apply_timeout`, `APPLY_TIMEOUT`, 1800 seconds). Exit 0
 or 2 returns the parsed stdout object. A failed run raises `RunFailed(kind)`, `str(error) == kind`,
 `kind` one of `RUN_KINDS`: `cancelled` (the `cancel` event is set), `failed` (any other exit),
 `unreadable` (stdout is not a JSON object), `timed_out` (`subprocess.TimeoutExpired`), `not_installed`
@@ -54,7 +56,7 @@ pure function of the document. `summary(root, plan, report=None)` is the row pay
 `bootstrap` or `reconcile` plan carries its header's `plan_id` and `state`, its
 `plan_questions.questions`, and its answered decisions as `{id, subject, value}` (ADR-console-029
 D1); every other row carries `DEFAULTS` (None, None, `[]`, `[]`). A ready plan's note is `The plan
-is ready.` with no command and no plan id (#1065). A `no_change` plan with no report (only an answer run passes none) is
+is ready.` with no command and no plan id (#1065; ADR-console-030 keeps it, the page offers Approve beside it). A `no_change` plan with no report (only an answer run passes none) is
 `not_registered` and says `<name> needs no adoption change and is not registered yet: run
 <command>`, the command being the plan's `handoff.next_command` or else `adopt-project verify
 --register --repo-root <root>` (D5). A failed plan's headline is `The adoption plan for <name> failed:
@@ -90,19 +92,22 @@ members are exactly `MEMBERS` (a legacy row) or exactly `MEMBERS | EXTRA`, `by` 
 of dicts with exactly the string keys `id`, `subject` and `value` (ADR-console-029 D1). `ENDED` is
 `event_log.REGISTRATION_ENDED`, not in `KEPT_KINDS`. `latest(events, state=None)` is the last valid
 `ENDED` payload over `DEFAULTS` with `at` added, else `state`: the view's `registration` member,
-folded by the service. `view_entry(running, latest, *, again=False, refusal=None)` is that member,
-always the same sixteen keys: the `running` entry (headline `Planning the adoption of <name>…`, or
+folded by the service. `view_entry(running, latest, *, again=False, refusal=None, adoption=None,
+approve=None)` is that member, always the same eighteen keys: the `running` entry (headline `Planning the adoption of <name>…`, or
 `again_headline(name)`, `Planning the adoption of <name> again with your answer…`, when `again`)
 while a run is under way, with `plan_id`, `state` and `refusal` None and `questions` `[]`; else the
 latest with status `done`, its `plan_id`, `state` and `questions`, and `refusal` the text of the
 given `{"plan_id", "text", "id", "subject"}` only when its `plan_id` is the latest's, and `refused`
 its `{"id", "subject"}` under the same match (the question the refused answer was for); else None
-(D4). `line` (`line_of(latest)` for a finished entry) is the entry's state in one line (D6, D7):
-the running headline while a run is under way; for a plan with open questions `Register <name>: 1
-question open` or `<N> questions open`, counting every question, answerable or not; for a ready
-plan `Register <name>: ready to apply`, whatever the note says; for any other plan the note, else
-the headline; for any other result the headline, then a space and the note when it is a non-empty
-string.
+(D4). The keys `adoption` and `approve` are None in the `running` entry and carry the given values
+(the `approve.entry` object and the action the page offers, #1054) in the `done` entry. `line` is
+the entry's state in one line (D6, D7): the running headline while a run is under way; the given
+adoption's headline when there is one (the adoption is then the plan's latest state, so a ready
+plan never says `ready to apply` beside an applied branch); else `line_of(latest)`: for a plan with
+open questions `Register <name>: 1 question open` or `<N> questions open`, counting every
+question, answerable or not; for a ready plan `Register <name>: ready to apply`, whatever the note
+says; for any other plan the note, else the headline; for any other result the headline, then a
+space and the note when it is a non-empty string.
 """
 
 from __future__ import annotations
@@ -119,6 +124,7 @@ from agent_tools.system import siblings
 
 ENDED = event_log.REGISTRATION_ENDED
 RUN_TIMEOUT = 300
+APPLY_TIMEOUT = 1800
 GIT_TIMEOUT = 10
 RESULTS = ("planned", "registered", "not_registered", "needs_migration", "needs_repair", "failed")
 RUN_KINDS = ("not_installed", "timed_out", "unavailable", "failed", "unreadable", "cancelled")
@@ -484,14 +490,16 @@ def line_of(latest: Mapping) -> str:
 
 
 def view_entry(running: str | None, latest: Mapping | None, *, again: bool = False,
-               refusal: Mapping | None = None) -> dict | None:
+               refusal: Mapping | None = None, adoption: Mapping | None = None,
+               approve: str | None = None) -> dict | None:
     if running is not None:
         name = name_of(running)
         headline = again_headline(name) if again else f"Planning the adoption of {name}\u2026"
         return {"root": running, "name": name, "project_id": None, "status": "running",
                 "result": None, "outcome": None, "headline": headline,
                 "lines": [], "note": None, "at": None, "plan_id": None, "state": None,
-                "questions": [], "refusal": None, "line": headline, "refused": None}
+                "questions": [], "refusal": None, "line": headline, "refused": None,
+                "adoption": None, "approve": None}
     if latest is None:
         return None
     mine = refusal is not None and refusal["plan_id"] == latest["plan_id"]
@@ -501,8 +509,9 @@ def view_entry(running: str | None, latest: Mapping | None, *, again: bool = Fal
             "lines": latest["lines"], "note": latest["note"], "at": latest["at"],
             "plan_id": latest["plan_id"], "state": latest["state"],
             "questions": latest["questions"], "refusal": refusal["text"] if mine else None,
-            "line": line_of(latest),
-            "refused": {"id": refusal["id"], "subject": refusal["subject"]} if mine else None}
+            "line": line_of(latest) if adoption is None else adoption["headline"],
+            "refused": {"id": refusal["id"], "subject": refusal["subject"]} if mine else None,
+            "adoption": adoption, "approve": approve}
 
 
 class RunFailed(Exception):
@@ -513,26 +522,34 @@ class RunFailed(Exception):
 
 class Adopter:
     def __init__(self, *, command: Sequence[str] | None = None,
-                 environ: Mapping[str, str] | None = None, timeout: float = RUN_TIMEOUT):
+                 environ: Mapping[str, str] | None = None, timeout: float = RUN_TIMEOUT,
+                 apply_timeout: float = APPLY_TIMEOUT):
         self._command = (tuple(command) if command is not None
                          else tuple(siblings.sibling_argv("project_contract.adopt_project")))
         self._environ = environ
         self._timeout = timeout
+        self._apply_timeout = apply_timeout
 
     def plan(self, root: str, cancel=None, answers: Sequence[Mapping[str, str]] = ()) -> dict:
         arguments = ["plan", "--repo-root", root, "--format", "json"]
         for answer in answers:
             arguments += ["--answer", answer["id"], answer["subject"], answer["value"]]
-        return self._run(arguments, cancel)
+        return self._run(arguments, cancel, self._timeout)
 
     def register(self, root: str, cancel=None) -> dict:
-        return self._run(["verify", "--repo-root", root, "--register"], cancel)
+        return self._run(["verify", "--repo-root", root, "--register"], cancel, self._timeout)
 
-    def _run(self, arguments: list[str], cancel) -> dict:
+    def apply(self, plan_id: str, cancel=None, acknowledge_deletions: bool = False) -> dict:
+        arguments = ["apply", "--plan-id", plan_id]
+        if acknowledge_deletions:
+            arguments.append("--acknowledge-deletions")
+        return self._run(arguments, cancel, self._apply_timeout)
+
+    def _run(self, arguments: list[str], cancel, timeout: float) -> dict:
         env = dict(self._environ) if self._environ is not None else None
         try:
             done = manager.run_in_own_group(
-                [*self._command, *arguments], timeout=self._timeout, cancel=cancel,
+                [*self._command, *arguments], timeout=timeout, cancel=cancel,
                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 env=env, start_new_session=True)
         except subprocess.TimeoutExpired as error:

@@ -301,6 +301,11 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .register-result p, .register-result ul { margin: 0 0 6px; }
 .register-line { font-size: .84375rem; color: var(--text); }
 .register-lines { padding-left: 1.2em; color: var(--sub0); }
+.register-note { color: var(--ov2); }
+.register-refusal { color: var(--sub0); }
+.register-adoption { margin-top: 8px; }
+.register-adoption-lines { padding-left: 1.2em; color: var(--sub0); }
+.register-pr-link { color: var(--blue); }
 .card .q.reg, .row-head b.reg { white-space: pre-line; }
 .s-working { color: var(--green); }
 .s-waiting_answer, .s-waiting_permission { color: var(--yellow); }
@@ -941,6 +946,21 @@ function stallCard(item) {
 }
 function isProgress(item) {
   return item.reason === "progress";
+}
+function isAdoption(item) {
+  return item.reason === "adoption";
+}
+function adoptionCard(item) {
+  const card = el("article", "card adoption");
+  card.appendChild(el("p", "q", item.headline));
+  card.appendChild(phrase("p", "meta", (item.project_id || item.name) + " \u00b7 waiting ", timeEl("since", item.waiting_since, "")));
+  if (isHttps(item.url)) {
+    const link = el("a", "pr-link", "Open the pull request");
+    link.href = item.url;
+    link.rel = "noreferrer";
+    card.appendChild(link);
+  }
+  return card;
 }
 function progressCard(item) {
   const card = el("article", "card progress");
@@ -2666,7 +2686,7 @@ function renderInbox(view) {
     signins.push({ type: "inbox_item", reason: "signin", key: "signin/" + profile, project_id: null, profile,
       headline: "Sign in to " + profile, action: "signin", run, signin: null, answered: false, waiting_since: null });
   }
-  const tracked = open.filter((item) => !isBrief(item) && !isStall(item) && !isProgress(item) && !isSignin(item));
+  const tracked = open.filter((item) => !isBrief(item) && !isStall(item) && !isProgress(item) && !isSignin(item) && !isAdoption(item));
   for (const [key, state] of [...stallPosts]) {
     const id = key.split("\n")[1];
     const shown = key.startsWith("continue\n") || key.startsWith("progress-withdraw\n") ? progress : stalls;
@@ -2748,6 +2768,7 @@ function renderInbox(view) {
   for (const item of stalls) section.appendChild(stallCard(item));
   for (const item of progress) section.appendChild(progressCard(item));
   for (const item of signins) section.appendChild(signinCard(item));
+  for (const item of open.filter(isAdoption)) section.appendChild(adoptionCard(item));
   if (briefs.length === 0 && tracked.length > 0) section.appendChild(leadItem(tracked[0]));
   const rows = briefs.length === 0 ? tracked.slice(1) : tracked;
   if (rows.length > 0) {
@@ -3236,7 +3257,7 @@ function renderAccountAdd(view) {
 }
 renderAccountAdd(null);
 // The register control is built once as well (ADR-console-028 D8): a frame never replaces the path field, only the parts around it.
-const registerState = { phase: "closed", posting: false, failure: "", shown: "" };
+const registerState = { phase: "closed", posting: false, failure: "", shown: "", approving: false, approveFailure: null };
 let registerDismissed;
 let registerResultKey = "";
 const registerBox = document.getElementById("register");
@@ -3285,6 +3306,26 @@ async function registerPost() {
   registerState.failure = reason === null ? "" : reason;
   renderRegister(lastView);
 }
+// A ready plan is approved with one write (ADR-console-030); the failure is kept with the plan id it was for.
+async function approvePost(registration) {
+  if (registerState.approving) return;
+  registerState.approving = true;
+  registerState.approveFailure = null;
+  renderRegister(lastView);
+  let reason = null;
+  try {
+    const response = await fetch("/api/plan-approve", {
+      method: "POST", headers: stallHeaders(), body: JSON.stringify({ plan_id: registration.plan_id }),
+    });
+    if (response.status !== 204) reason = (await response.text()).trim() || "HTTP " + response.status;
+  } catch (error) {
+    console.error(error);
+    reason = "the console did not answer";
+  }
+  registerState.approving = false;
+  registerState.approveFailure = reason === null ? null : { plan_id: registration.plan_id, text: reason };
+  renderRegister(lastView);
+}
 // The registration's words are the view's: the page shows them verbatim and composes none.
 function drawRegisterResult(registration) {
   const parts = [el("p", "register-line", registration.line)];
@@ -3294,6 +3335,35 @@ function drawRegisterResult(registration) {
     parts.push(list);
   }
   if (registration.status === "done") {
+    const failure = registerState.approveFailure;
+    if (failure !== null && failure.plan_id === registration.plan_id) parts.push(el("p", "register-refusal", failure.text));
+    const adoption = registration.adoption;
+    if (adoption !== null && typeof adoption === "object") {
+      const inner = [];
+      if (adoption.lines.length > 0) {
+        const list = el("ul", "register-adoption-lines");
+        for (const line of adoption.lines) list.appendChild(el("li", "", line));
+        inner.push(list);
+      }
+      if (adoption.note) inner.push(el("p", "register-note", adoption.note));
+      if (isHttps(adoption.url)) {
+        const link = el("a", "register-pr-link", "Open the pull request");
+        link.rel = "noreferrer";
+        link.href = adoption.url;
+        inner.push(link);
+      }
+      if (inner.length > 0) {
+        const box = el("div", "register-adoption");
+        for (const part of inner) box.appendChild(part);
+        parts.push(box);
+      }
+    }
+    if (registration.approve === "approve" || registration.approve === "retry") {
+      const approve = actionButton("register-approve", registration.approve === "retry" ? "Try again" : "Approve",
+        () => approvePost(registration));
+      approve.disabled = registerState.approving;
+      parts.push(approve);
+    }
     parts.push(actionButton("register-close", "Close", () => {
       registerDismissed = registration.at;
       renderRegister(lastView);
@@ -3315,7 +3385,7 @@ function renderRegister(view) {
   }
   if (registerReason.textContent !== reason) registerReason.textContent = reason;
   const shown = registration !== null && !(registration.status === "done" && registration.at === registerDismissed);
-  const key = shown ? JSON.stringify(registration) : "";
+  const key = shown ? JSON.stringify([registration, registerState.approving, registerState.approveFailure]) : "";
   if (key !== registerResultKey) {
     registerResultKey = key;
     if (shown) {
