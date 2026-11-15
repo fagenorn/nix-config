@@ -6951,6 +6951,23 @@ CONFIRM_ITEM = {
     "values": ["register", "not_now"], "items": [], "answers": [], "answered": False,
     "waiting_since": "2026-11-15T08:00:00+00:00"}
 
+FAILED_HEADLINE = ("The adoption plan for r could not start: the agent platform's files are not "
+                   "installed on this host.")
+FAILED_WHY = ("Switch this computer to its current configuration to install them, then choose "
+              "Try again.")
+FAILED_ITEM = {
+    "type": "inbox_item", "reason": "register_failed",
+    "key": "register-failed//srv/r/2026-11-15T08:00:00+00:00",
+    "project_id": None, "root": "/srv/r", "name": "r", "title": "Register r",
+    "plan_id": None, "id": None, "subject": None, "headline": FAILED_HEADLINE,
+    "why": FAILED_WHY, "lines": [], "refusal": None, "more_questions": 0, "text": False,
+    "questions": [{"question": FAILED_HEADLINE, "options": ["Try again", "Not now"],
+                   "chosen": None, "recommended": None, "recommended_index": None}],
+    "values": ["try_again", "not_now"], "items": [], "answers": [], "answered": False,
+    "waiting_since": "2026-11-15T08:00:00+00:00"}
+FAILED_REGISTRATION = {**WAITING_SHOWN, "result": "failed", "line": "Register r: needs you",
+                       "lines": [], "note": None, "adoption": None}
+
 
 def cards(items: list, registration: dict = ASKING) -> dict:
     return {**frame(items), "registration": registration}
@@ -7876,6 +7893,51 @@ class RegisterConfirmPageTest(unittest.TestCase):
         self.assertEqual(post["url"], "/api/register-confirm")
         self.assertEqual(posted(post), {"root": "/srv/r", "choice": "not_now"})
         self.assertIn("Answered, not now", full(snap["inbox"]))
+
+
+class RegisterFailurePageTest(unittest.TestCase):
+    ANSWER = [{"respond": {"status": 204, "text": ""}}, {"clock": 5000}, {"snapshot": True}]
+
+    def test_a_failed_plan_is_a_question_card_with_try_again_and_not_now(self) -> None:
+        (snap,) = render([START, {"frame": cards([FAILED_ITEM], FAILED_REGISTRATION)},
+                          {"snapshot": True}])
+        (lead,) = [n for n in nodes(snap["inbox"]) if has_class(n, "lead")]
+        self.assertEqual([full(n) for n in nodes(lead) if has_class(n, "opt")],
+                         ["1Try again", "2Not now"])
+        self.assertEqual(full(lead).count(FAILED_HEADLINE), 1)
+        self.assertEqual(full(lead).count(FAILED_WHY), 1)
+        self.assertEqual(full(registered(snap, "register-line")[0]), "Register r: needs you")
+
+    def test_try_again_posts_the_root_and_try_again(self) -> None:
+        (snap,) = render([START, {"frame": cards([FAILED_ITEM], FAILED_REGISTRATION)},
+                          {"key": "1"}, {"key": "Enter"}, *self.ANSWER])
+        (post,) = snap["posts"]
+        self.assertEqual(post["url"], "/api/register-confirm")
+        self.assertEqual(posted(post), {"root": "/srv/r", "choice": "try_again"})
+        self.assertIn("Answered, trying again", full(snap["inbox"]))
+
+    def test_not_now_posts_the_root_and_not_now(self) -> None:
+        (snap,) = render([START, {"frame": cards([FAILED_ITEM], FAILED_REGISTRATION)},
+                          {"key": "2"}, {"key": "Enter"}, *self.ANSWER])
+        (post,) = snap["posts"]
+        self.assertEqual(post["url"], "/api/register-confirm")
+        self.assertEqual(posted(post), {"root": "/srv/r", "choice": "not_now"})
+        self.assertIn("Answered, not now", full(snap["inbox"]))
+
+    def test_a_long_path_breaks_after_each_slash(self) -> None:
+        line = "writes docs/areas/console/adr/a-very-long-file-name.md"
+        item = {**APPLY_ITEM, "lines": [line],
+                "questions": [{**APPLY_ITEM["questions"][0], "options": ["docs/x/y", "Not now"]}]}
+        (snap,) = render([START, {"frame": cards([item], READY_SHOWN)}, {"snapshot": True}])
+        (lead,) = [n for n in nodes(snap["inbox"]) if has_class(n, "lead")]
+        (box,) = [n for n in nodes(lead) if has_class(n, "apply-lines")]
+        (li,) = [n for n in nodes(box) if n["tag"] == "li"]
+        self.assertEqual(len([n for n in nodes(li) if n["tag"] == "wbr"]), 4)
+        self.assertEqual(full(li), line)
+        (option,) = [n for n in nodes(lead) if has_class(n, "ot") and full(n) == "docs/x/y"]
+        self.assertEqual(len([n for n in nodes(option) if n["tag"] == "wbr"]), 2)
+        plain = [n for n in nodes(lead) if has_class(n, "ot") and full(n) == "Not now"]
+        self.assertEqual([n for n in nodes(plain[0]) if n["tag"] == "wbr"], [])
 
 
 TRUST_ITEM = {

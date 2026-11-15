@@ -1,6 +1,6 @@
 # ADR-console-034 — Registering a project grants it folder trust in every profile
 
-- **Status:** accepted
+- **Status:** accepted; amended by ADR-console-035
 - **Decided in:** #1078
 
 ## Context

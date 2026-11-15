@@ -21,7 +21,7 @@ import time
 import unittest
 from pathlib import Path
 
-from agent_tools.console import folder_trust, register, register_check
+from agent_tools.console import event_log, folder_trust, register, register_check
 from agent_tools.project_contract import agent_platform
 
 from . import accounts_sandbox
@@ -244,6 +244,24 @@ class Case(unittest.TestCase):
     def view(self):
         return json.loads(self.svc.view_bytes)
 
+    def confirm_cards(self):
+        return [i for i in self.view()["inbox"]["open"] if i["reason"] == "register_confirm"]
+
+    def settled_row(self, root, bound=120):
+        """The stored payload of the root's last ended registration, once the run has finished.
+
+        It observes completion through the log and the service's run mark, not through the view,
+        which a card or a registered project reduces or drops (ADR-console-035).
+        """
+        end = time.monotonic() + bound
+        while time.monotonic() < end:
+            found = [payload for _, payload in self.rows(event_log.REGISTRATION_ENDED)
+                     if payload.get("root") == str(root)]
+            if self.svc._registering is None and found:
+                return found[-1]
+            time.sleep(0.05)
+        self.fail("no registration result")
+
     def wait_done(self, root, bound=120):
         end = time.monotonic() + bound
         while time.monotonic() < end:
@@ -413,7 +431,7 @@ class RegisterRunTest(Case):
         self.assertEqual(row["result"], "failed")
         self.assertEqual(row["headline"],
                          f"The adoption plan for {repo.name} failed: it took too long and was stopped.")
-        self.assertIn("Press Register again", row["note"])
+        self.assertEqual(row["note"], register.unknown_step(repo.name, "plan"))
         self.assertEqual(self.view()["registration"]["status"], "done")
 
     def test_a_registration_that_raised_names_the_register_command(self):
@@ -421,12 +439,13 @@ class RegisterRunTest(Case):
         self.begin(fake)
         repo = git_repo(self.parent / "r")
         self.assertEqual(self.post({"path": str(repo)})[0], 204)
-        self.assertEqual(self.wait_done(repo)["note"], register.CONFIRM_NOTE)
+        self.assertEqual(self.settled_row(repo)["note"], register.CONFIRM_NOTE)
+        self.assertEqual(len(self.confirm_cards()), 1)
         self.assertEqual(self.confirm({"root": str(repo), "choice": "register"})[0], 204)
         (_, row), = self.rows("registration.ended")[-1:]
         self.assertEqual(row["result"], "failed")
-        self.assertIn("verify --register --repo-root", row["note"])
-        self.assertNotIn("adopt-project plan", row["note"])
+        self.assertEqual(row["note"], register.unknown_step(repo.name, "register"))
+        self.assertNotIn("plan the adoption", row["note"])
 
     def test_a_no_change_plan_runs_the_register_check(self):
         report = {"registered": True, "project_id": "o/r", "result": "adopted"}
@@ -488,11 +507,13 @@ class RegisterRunTest(Case):
         self.begin(register.Adopter(), dispatch=None, profile_dirs=[work], trust_home=self.home)
         status, _, body = self.post({"path": str(root)})
         self.assertEqual((status, body), (204, b""))
-        self.assertEqual(self.wait_done(root)["note"], register.CONFIRM_NOTE)
+        self.assertEqual(self.settled_row(root)["note"], register.CONFIRM_NOTE)
+        self.assertEqual(len(self.confirm_cards()), 1)
         self.assertEqual(json.loads(self.registry.read_text())["projects"], [])
         status, _, body = self.confirm({"root": str(root), "choice": "register"})
         self.assertEqual((status, body), (204, b""))
-        self.wait_for(lambda r: r["status"] == "done" and r["result"] == "registered")
+        self.assertEqual(self.settled_row(root)["result"], "registered")
+        self.assertIsNone(self.view()["registration"])
         (_, row), = self.rows("registration.ended")[-1:]
         self.assertEqual(row["result"], "registered")
         self.assertEqual(row["headline"], f"{root.name} is registered as fixture/console-register.")
@@ -554,9 +575,9 @@ class RegisterTrustTest(Case):
 
     def test_no_trust_is_written_before_the_register_card_is_answered(self):
         before = self.contents()
-        shown = self.waiting()
-        self.assertEqual((shown["result"], shown["note"]),
-                         ("not_registered", register.CONFIRM_NOTE))
+        self.waiting()
+        row = self.settled_row(self.repo)
+        self.assertEqual((row["result"], row["note"]), ("not_registered", register.CONFIRM_NOTE))
         self.assertEqual(self.fake.calls, [("plan", str(self.repo))])
         self.assertEqual(self.contents(), before)
         self.assertEqual(self.rows("trust.granted"), [])
@@ -591,8 +612,9 @@ class RegisterTrustTest(Case):
         self.assertEqual(self.post({"path": str(self.repo)})[0], 204)
         self.wait_done(self.repo)
         self.assertEqual(self.answer(answer_of(PID_A, A1))[0], 204)
-        shown = self.wait_for(lambda r: r["status"] == "done" and r["outcome"] == "no_change")
-        self.assertEqual(shown["note"], register.CONFIRM_NOTE)
+        self.wait_for(lambda r: r["status"] == "done" and r["outcome"] == "no_change")
+        self.assertEqual(self.settled_row(self.repo)["note"], register.CONFIRM_NOTE)
+        self.assertEqual(len(self.card()), 1)
         self.assertEqual(self.confirm({"root": str(self.repo), "choice": "register"})[0], 204)
         self.assertEqual(fake.answers, [[], [A1], [A1]])
         self.assertEqual([c for c in fake.calls if c[0] == "register"],
@@ -655,6 +677,76 @@ REFUSED = {"code": "adopt_failure", "repair_id": "adopt.decisions.invalid_answer
                                       "offers"}]}
 REFUSED_TEXT = ("The plan refused that answer: the answer is not the one this candidate's open "
                 "question offers")
+
+
+class RegisterFailureCardTest(Case):
+    """A failed registration is one Try again card the service answers (#1085, ADR-console-035)."""
+
+    FAILED = {"error": {"code": "x", "repair_id": "adopt.manifest.missing", "violations": [
+        {"pointer": "", "message": "the installed platform manifest was not found"}]}}
+
+    def failed(self):
+        self.fake = Fake(plan=self.FAILED)
+        self.begin(self.fake)
+        repo = git_repo(self.parent / "fail-app")
+        self.assertEqual(self.post({"path": str(repo)})[0], 204)
+        return repo, self.settled_row(repo)
+
+    def failure_cards(self):
+        return [i for i in self.view()["inbox"]["open"] if i["reason"] == "register_failed"]
+
+    def test_a_failed_plan_is_one_card_and_the_work_line_says_needs_you(self):
+        repo, row = self.failed()
+        self.assertEqual(row["result"], "failed")
+        view = self.view()
+        self.assertEqual(view["statement"]["inbox_items"], 1)
+        (card,) = self.failure_cards()
+        self.assertEqual([o["label"] if isinstance(o, dict) else o
+                          for o in card["questions"][0]["options"]], ["Try again", "Not now"])
+        self.assertEqual(view["registration"]["line"], "Register fail-app: needs you")
+
+    def test_a_failed_plan_keeps_its_original_error_in_the_log_and_off_the_page(self):
+        message = "the contract at /srv/secret/.agents/project.json hashes to sha256:" + "a" * 64
+        error = {"code": "x", "repair_id": "adopt.contract.invalid",
+                 "violations": [{"pointer": "", "message": message}]}
+        self.fake = Fake(plan={"error": error})
+        self.begin(self.fake)
+        repo = git_repo(self.parent / "log-app")
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            self.assertEqual(self.post({"path": str(repo)})[0], 204)
+            row = self.settled_row(repo)
+        prefix = "console: registration_error "
+        found = [json.loads(line[len(prefix):]) for line in errors.getvalue().splitlines()
+                 if line.startswith(prefix)]
+        self.assertEqual(found, [{"root": str(repo), "verb": "plan", "error": error}])
+        self.assertNotIn("/srv/secret", row["headline"])
+        self.assertNotIn("sha256:", row["headline"])
+
+    def test_try_again_plans_again_and_not_now_removes_the_card(self):
+        repo, _ = self.failed()
+        before = len(self.rows(event_log.REGISTRATION_ENDED))
+        self.assertEqual(self.confirm({"root": str(repo), "choice": "try_again"})[0], 204)
+        self.settled_row(repo)
+        self.assertEqual([c[0] for c in self.fake.calls], ["plan", "plan"])
+        self.assertEqual(len(self.rows(event_log.REGISTRATION_ENDED)), before + 1)
+        self.assertEqual(self.confirm({"root": str(repo), "choice": "not_now"})[0], 204)
+        self.assertEqual(self.failure_cards(), [])
+        self.assertEqual(self.view()["inbox"]["open"], [])
+        self.assertEqual(self.rows(event_log.REGISTRATION_ENDED)[-1][1]["note"],
+                         register.LATER_NOTE)
+        self.assertEqual([c[0] for c in self.fake.calls], ["plan", "plan"])
+
+    def test_a_try_again_for_a_row_that_did_not_fail_is_refused(self):
+        self.fake = Fake(plan=NO_CHANGE, report={"registered": True, "project_id": "o/r"})
+        self.begin(self.fake)
+        repo = git_repo(self.parent / "r")
+        self.assertEqual(self.post({"path": str(repo)})[0], 204)
+        self.assertEqual(self.settled_row(repo)["note"], register.CONFIRM_NOTE)
+        calls = list(self.fake.calls)
+        status, _, body = self.confirm({"root": str(repo), "choice": "try_again"})
+        self.assertEqual((status, body), (409, (register.NOT_WAITING + "\n").encode()))
+        self.assertEqual(self.fake.calls, calls)
 
 
 class PlanAnswerGuardTest(Case):
@@ -916,12 +1008,14 @@ class PlanAnswerRunTest(Case):
         self.registered(repo)
         state = home_state(self.home)
         self.assertEqual(self.answer(answer_of(PID_A, A1))[::2], (204, b""))
-        shown = self.wait_for(lambda r: r["status"] == "done" and r["outcome"] == "no_change")
+        self.wait_for(lambda r: r["status"] == "done" and r["outcome"] == "no_change")
+        shown = self.settled_row(repo)
         self.assertEqual((shown["result"], shown["plan_id"], shown["questions"]),
                          ("not_registered", None, []))
         self.assertEqual(shown["headline"],
                          f"{repo.name} is already adopted and is not registered yet.")
         self.assertEqual(shown["note"], "Choose Register it to register it.")
+        self.assertEqual(len(self.confirm_cards()), 1)
         self.assertEqual(fake.calls, [("plan", str(repo)), ("plan", str(repo))])
         self.assertEqual(len(self.rows("registration.ended")), 2)
         self.assertEqual(home_state(self.home), state)

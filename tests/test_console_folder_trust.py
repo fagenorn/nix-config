@@ -426,7 +426,8 @@ class ItemsTest(unittest.TestCase):
         granted = self.event(2, [("work", "granted")])
         (card,) = folder_trust.items(folder_trust.failures([failed]))
         self.assertEqual(card["key"], "trust/work//r/t1")
-        self.assertEqual(card["why"], folder_trust.failed_words("/r", "work"))
+        self.assertEqual(card["why"], folder_trust.failed_words("p", "work"))
+        self.assertEqual(card["command"], folder_trust.command("/r", "work"))
         self.assertEqual(folder_trust.items(folder_trust.failures([failed, granted])), [])
 
 
@@ -445,9 +446,9 @@ class RequestTest(unittest.TestCase):
 class WordsTest(unittest.TestCase):
     def test_the_words_and_the_targets(self):
         self.assertEqual(
-            folder_trust.failed_words("/home/o/repo", "work"),
-            "Run this in a terminal: cd /home/o/repo && CLAUDE_ACCOUNT=work claude, "
-            "then accept the prompt and type /exit.")
+            folder_trust.failed_words("repo", "work"),
+            ("Open Claude Code in the repo folder under the work profile, accept its trust "
+             "prompt and close it, then choose Check again."))
         self.assertEqual(folder_trust.command("/a b", "work"),
                          "cd '/a b' && CLAUDE_ACCOUNT=work claude")
         self.assertEqual(folder_trust.TRUST_SENTENCE,

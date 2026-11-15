@@ -228,19 +228,22 @@ class RestoreTest(Case):
         def fetch(url):
             if box[0] is None:
                 return view(None)
-            row = ({"result": "registered", "headline": "registered",
-                    "at": "2026-11-15T08:01:00+00:00"} if confirmed else
-                   {"result": "not_registered", "outcome": "no_change",
-                    "headline": "r is already adopted and is not registered yet.",
-                    "note": register.CONFIRM_NOTE, "at": "2026-11-15T08:00:00+00:00"})
+            registration = None if confirmed else {
+                "root": box[0], "status": "done", "result": "not_registered",
+                "outcome": "no_change",
+                "headline": "r is already adopted and is not registered yet.",
+                "line": "Register r: needs you", "lines": [], "note": None, "adoption": None,
+                "at": "2026-11-15T08:00:00+00:00"}
             key = os.path.realpath(box[0])
             open_cards = [{"reason": "trust_failed", "root": "/elsewhere", "profile": "other"}]
+            if not confirmed:
+                open_cards.append({"reason": "register_confirm", "root": box[0]})
             if stays or not checked:
                 open_cards += [{"reason": "trust_failed", "root": key, "profile": name}
                                for name in cards]
             return 200, json.dumps({
-                "registration": {"root": box[0], "status": "done", **row},
-                "entries": [{"project_id": self.PID}],
+                "registration": registration,
+                "entries": [{"project_id": self.PID}] if confirmed else [],
                 "inbox": {"open": open_cards}}).encode()
 
         return self.run_check(["--wait", "1", "--contract", CONTRACT], fetch=fetch, post=post,
@@ -275,6 +278,13 @@ class RestoreTest(Case):
         self.assertEqual([name for name, _ in self.posts],
                          ["register-project", "register-confirm"])
         self.assertEqual(self.posts[1][1], {"root": self.posts[0][1]["path"], "choice": "register"})
+
+    def test_the_check_answers_the_register_card_and_meets_on_the_listed_project(self):
+        code, out = self.registered_run()
+        self.assertEqual(code, 0)
+        self.assertEqual(out["status"], "met")
+        posted = self.posts[0][1]["path"]
+        self.assertIn(("register-confirm", {"root": posted, "choice": "register"}), self.posts)
 
     def test_a_trust_card_the_run_left_is_checked_again_before_the_restore(self):
         code, out = self.registered_run(cards=("solo",))

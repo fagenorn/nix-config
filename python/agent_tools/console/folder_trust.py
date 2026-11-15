@@ -76,8 +76,8 @@ Card. `items(failures)` is the Check again card of every pair `failures` holds, 
 root, profile)`: reason `trust_failed`, key `trust/<profile>/<root>/<at>`, `project_id` null, the
 `root`, `name` (the project), `profile`, title `Trust <project>`, headline `headline(project,
 profile)` ("Agents cannot start in <project> under <profile> yet"), `why` the `failed_words` of the
-pair, `command` the terminal command alone, the one option `CHECK_OPTION` ("Check again") with the
-value `CHECK_VALUE` ("check"), `text` false and `waiting_since` the failure's time; no code or
+project and profile, `command` the terminal command alone, the one option `CHECK_OPTION` ("Check
+again") with the value `CHECK_VALUE` ("check"), `text` false and `waiting_since` the failure's time; no code or
 exception word reaches it. `parse_check_request(body)` is the card's answer, exactly `{"root",
 "profile"}` of non-empty strings with no control character; `ValueError` otherwise. `NOT_FAILED`
 ("that folder is not waiting for a trust check") is the service's refusal of a pair no failed row
@@ -85,8 +85,9 @@ holds.
 
 Words. `TRUST_SENTENCE` is the sentence the page shows. `command(root, profile)` is
 `cd <root> && CLAUDE_ACCOUNT=<profile> claude` (the root through `shlex.quote`) and
-`failed_words(root, profile)` is `Run this in a terminal: <command>, then accept the prompt and
-type /exit.`
+`failed_words(project, profile)` is `Open Claude Code in the <project> folder under the <profile>
+profile, accept its trust prompt and close it, then choose Check again.` (a card's `why` names no
+command or path; its `command` member stays on the wire)
 
 Command. `folder-trust grant-registered --profile <name>` (module `main(argv=None) -> int`) grants
 every registered project's trust in the one profile `<name>`, for the launcher's `add` (the
@@ -98,7 +99,8 @@ profile directory under `CLAUDE_ACCOUNTS_DIR` (default `$HOME/.claude-accounts`)
 with no output; one that is not a valid registry prints `folder-trust: the project registry cannot be
 read` and exits 1. For each project in order the key is `trust_key(root)` (None is `failed` with no
 write), else `grant` runs; stdout gets one `<project_id>: <result>` line and, for `failed`, a second
-line `  <failed_words(key or root, name)>`. The exit status is 1 when any result is `failed`, else 0.
+line `  Run this in a terminal: <command(key or root, name)>, then accept the prompt and type
+/exit.` The exit status is 1 when any result is `failed`, else 0.
 """
 
 from __future__ import annotations
@@ -512,8 +514,9 @@ def command(root: str, profile: str) -> str:
     return f"cd {shlex.quote(root)} && CLAUDE_ACCOUNT={profile} claude"
 
 
-def failed_words(root: str, profile: str) -> str:
-    return f"Run this in a terminal: {command(root, profile)}, then accept the prompt and type /exit."
+def failed_words(project: str, profile: str) -> str:
+    return (f"Open Claude Code in the {project} folder under the {profile} profile, accept its "
+            "trust prompt and close it, then choose Check again.")
 
 
 def headline(project: str, profile: str) -> str:
@@ -530,7 +533,8 @@ def items(failed: dict[tuple[str, str], dict]) -> list[dict]:
             "type": "inbox_item", "reason": "trust_failed", "key": f"trust/{profile}/{root}/{at}",
             "project_id": None, "root": root, "name": project, "profile": profile,
             "title": f"Trust {project}", "plan_id": None, "id": None, "subject": None,
-            "headline": ask, "why": failed_words(root, profile), "command": command(root, profile),
+            "headline": ask, "why": failed_words(project, profile),
+            "command": command(root, profile),
             "lines": [], "refusal": None, "more_questions": 0, "text": False,
             "questions": [{"question": ask, "options": [CHECK_OPTION], "chosen": None,
                            "recommended": None, "recommended_index": None}],
@@ -580,7 +584,8 @@ def _grant_registered(name: str) -> int:
         result = FAILED if key is None else grant(profile / ".claude.json", key)
         print(f"{entry['project_id']}: {result}")
         if result == FAILED:
-            print(f"  {failed_words(key or entry['root'], name)}")
+            print(f"  Run this in a terminal: {command(key or entry['root'], name)}, then accept "
+                  "the prompt and type /exit.")
             status = 1
     return status
 

@@ -1,6 +1,6 @@
 # ADR-console-030 — The owner approves a ready adoption on the page and the console opens its pull request
 
-- **Status:** accepted; amended by ADR-console-028 D10, ADR-console-034
+- **Status:** accepted; amended by ADR-console-028 D10, ADR-console-034, ADR-console-035
 - **Decided in:** #1054, #1073
 
 ## Context

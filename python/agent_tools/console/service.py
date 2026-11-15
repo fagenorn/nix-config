@@ -219,14 +219,20 @@ the register child, never by the console. Any other exception is `console: regis
 <Type>` and 500 `registering failed`.
 
 `POST /api/register-confirm` (#1078, ADR-console-034) is the answer to the Register card
-(`register.confirm_items`) of a repository that is already adopted. It runs the same checks with
+(`register.confirm_items`) of a repository that is already adopted, and (#1085, ADR-console-035) to
+the failure card (`register.failure_items`) of a registration that failed. It runs the same checks with
 `MAX_REGISTER_CONFIRM_BYTES` (4096) and `register.parse_confirm_request`: 400 `bad registration
 approval`. The service refuses, each as 409 with the text, one stderr line `console:
 register_confirm_refused <reason>`, appending and running nothing, in this order: without an adopter,
 `register.UNAVAILABLE`; while a run is under way, `register.running`; when the shown registration is
-not the waiting row (`register.waiting`) or names another root, `register.NOT_WAITING`. `not_now`
-appends the waiting row again with the note `register.LATER_NOTE` (`register.dismissed`), which
-writes no trust and runs no child, and answers `204`. `register` also refuses an unreadable registry
+not the row the choice answers (`register` the waiting row, `try_again` the failing one,
+`register.failing`, `not_now` either) or names another root, `register.NOT_WAITING`. `not_now`
+appends that row again with the note `register.LATER_NOTE` (`register.dismissed`), which
+writes no trust and runs no child, and answers `204`. `try_again` takes the same path as
+`POST /api/register-project` (the fleet read, `register.refusal`, the running mark, the plan, and for a
+`no_change` plan the Register card as today), with the shown row re-checked by its `at` under the ingest
+lock before the mark is set; it grants no folder trust and never runs the register child directly.
+`register` also refuses an unreadable registry
 and a root the registry already holds, as the first write does, and otherwise answers `204` at once
 and dispatches the run: the folder's trust is granted in every profile (`_grant_trust`, cause
 `register`, ADR-console-034), then the plan runs again and, for a `no_change` plan, the register
@@ -2556,6 +2562,8 @@ class ConsoleService:
             trust_items=folder_trust.items(self._trust_failures),
             confirm_items=register.confirm_items(
                 self._registration, running=self._registering is not None),
+            failure_items=register.failure_items(
+                self._registration, running=self._registering is not None),
             pin=pin.note(self._pinned, cap, manager.session_profile(cap, self._use.last)),
             pin_launches=self._pin_launches.launched,
             managers=self._launcher is not None, pending=self._pending))
@@ -3034,11 +3042,11 @@ class ConsoleService:
             raise
 
     def confirm_registration(self, root: str, choice: str) -> None:
-        """Answer the Register card of an adopted repository; refusals are `sprints.Refused`."""
+        """Answer the Register card or the failure card of a repository; refusals are `sprints.Refused`."""
         if self._adopter is None:
             raise sprints.Refused(register.UNAVAILABLE)
         with self._ingest:
-            latest = self._check_waiting(root)
+            latest = self._check_answerable(root, choice)
             if choice == register.LATER_VALUE:
                 self._fold(self.log.append([register.ended(register.dismissed(latest))]))
                 self._publish()
@@ -3053,12 +3061,15 @@ class ConsoleService:
             raise sprints.Refused(reason)
         project = latest["project_id"] or register.name_of(root)
         with self._ingest:
-            if self._check_waiting(root)["at"] != latest["at"]:
+            if self._check_answerable(root, choice)["at"] != latest["at"]:
                 raise sprints.Refused(register.NOT_WAITING)
             self._registering = root
             self._publish()
 
         def run() -> None:
+            if choice == register.TRY_VALUE:
+                self._run_registration(root, entries)
+                return
             try:
                 self._grant_trust("register", root, project)
             except Exception as error:
@@ -3074,12 +3085,19 @@ class ConsoleService:
                 self._publish()
             raise
 
-    def _check_waiting(self, root: str) -> dict:
-        """The registration row waiting on its Register card for `root`, held under the ingest lock."""
+    def _check_answerable(self, root: str, choice: str) -> dict:
+        """The registration row `choice` answers for `root`, held under the ingest lock.
+
+        `register` answers the waiting row, `try_again` the failing one and `not_now` either.
+        """
         if self._registering is not None:
             raise sprints.Refused(register.running(register.name_of(self._registering)))
         latest = self._registration
-        if not register.waiting(latest) or latest["root"] != root:
+        if latest is None or latest["root"] != root:
+            raise sprints.Refused(register.NOT_WAITING)
+        asks = ((choice in (register.CONFIRM_VALUE, register.LATER_VALUE) and register.waiting(latest))
+                or (choice in (register.TRY_VALUE, register.LATER_VALUE) and register.failing(latest)))
+        if not asks:
             raise sprints.Refused(register.NOT_WAITING)
         return latest
 
@@ -3103,10 +3121,17 @@ class ConsoleService:
                 if confirmed and plan.get("plan", {}).get("outcome") == "no_change":
                     verb = "register"
                     report = self._adopter.register(root, cancel=self._stop)
+                self._log_registration_failure(root, plan, report)
                 payload = register.summary(root, plan, report)
         except register.RunFailed as error:
+            self._log_registration_error({"root": root, "verb": verb, "failure": error.kind,
+                                          "cause": repr(error.__cause__)})
             payload = register.failed(root, error.kind, verb)
         except Exception as error:
+            self._log_registration_error({"root": root, "verb": verb,
+                                          "exception": type(error).__name__,
+                                          "detail": str(error)})
+            traceback.print_exception(error, file=sys.stderr)
             payload = register.failed(root, type(error).__name__, verb)
         with self._ingest:
             if not self._closed:
@@ -3117,6 +3142,17 @@ class ConsoleService:
         if not self._closed:
             self.refresh()
         print(f"console: registration_ended {payload['result']}", file=sys.stderr)
+
+    @staticmethod
+    def _log_registration_error(record: dict) -> None:
+        print(f"console: registration_error {json.dumps(record, sort_keys=True)}", file=sys.stderr)
+
+    def _log_registration_failure(self, root: str, plan: Mapping, report: Mapping | None) -> None:
+        """The child's own words of a failed plan or registration, before the page shows plain ones."""
+        if "error" in plan:
+            self._log_registration_error({"root": root, "verb": "plan", "error": plan["error"]})
+        elif report is not None and report.get("registered") is not True:
+            self._log_registration_error({"root": root, "verb": "register", "report": report})
 
     def answer_plan(self, plan_id: str, question: str, subject: str, value: str) -> None:
         """Plan the shown registration again with one more answer; refusals are `sprints.Refused`."""
@@ -3207,6 +3243,7 @@ class ConsoleService:
                     root, contract_draft.mark_refused(fields, *refused), answers)
             if refusals:
                 return plan
+            self._log_registration_error({"root": root, "verb": "plan", "error": plan["error"]})
         return register.summary(root, plan, None, draft=fields)
 
     def _run_answer(self, root: str, plan_id: str, answers: list[dict], asked: dict,
@@ -3434,7 +3471,7 @@ class ConsoleService:
             except register.RunFailed as error:
                 self._log_approval_error({"stage": "apply", "root": root, "plan_id": plan_id,
                                           "failure": error.kind, "cause": repr(error.__cause__)})
-                reason, note = approve.run_failure(plan_id, error.kind, acknowledge)
+                reason, note = approve.run_failure(name, error.kind)
                 return self._step(shown, plan_id, root, "apply_failed",
                                          reason=approve.reason_of(reason), note=note)
             except Exception as error:
@@ -3442,15 +3479,14 @@ class ConsoleService:
                                           "exception": type(error).__name__,
                                           "detail": str(error)})
                 traceback.print_exception(error, file=sys.stderr)
-                reason, note = approve.run_failure(plan_id, type(error).__name__, acknowledge)
+                reason, note = approve.run_failure(name, type(error).__name__)
                 return self._step(shown, plan_id, root, "apply_failed",
                                          reason=approve.reason_of(reason), note=note)
             if "error" in result:
                 self._log_approval_error({"stage": "apply", "root": root, "plan_id": plan_id,
                                           "error": result["error"]})
                 kept = approve.retained(plan_id)
-                reason, note = approve.apply_failure(root, plan_id, result["error"], kept,
-                                                     acknowledge)
+                reason, note = approve.apply_failure(name, result["error"], kept)
                 return self._step(shown, plan_id, root, "apply_failed",
                                          reason=approve.reason_of(reason), note=note, kept=kept)
             branch, commit = result["branch"], result["commit"]
@@ -3477,19 +3513,17 @@ class ConsoleService:
         if slug is None:
             return self._step(
                 shown, plan_id, root, "open_failed", **pushed, reason=approve.NO_SLUG,
-                note=(f"Open a pull request for the branch {branch} yourself; the console opens "
-                      "them only on GitHub."))
+                note=approve.NO_SLUG_NOTE)
         if base is None:
             return self._step(
                 shown, plan_id, root, "open_failed", **pushed, reason=approve.NO_BASE,
-                note=(f"Open a pull request for the branch {branch} yourself against the "
-                      "repository's integration branch."))
+                note=approve.NO_BASE_NOTE)
         try:
             pull, error = self._pull_request(slug, branch, base, name, shown, stop, where)
         except approve.Cancelled:
             return None
         if pull is None:
-            reason, note = approve.forge_failure(error, branch, base)
+            reason, note = approve.forge_failure(error, base)
             return self._step(shown, plan_id, root, "open_failed", **pushed,
                                      reason=approve.reason_of(reason), note=note)
         return self._step(shown, plan_id, root, "opened", **pushed, pull_request=pull)
