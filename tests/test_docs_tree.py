@@ -570,7 +570,7 @@ class DocsTreeTest(unittest.TestCase):
                 ("docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md",
                  both + ", ADR-console-029, ADR-console-030"),
                 ("docs/areas/console/adr/002-the-desk-page-design-rules.md",
-                 both + ", ADR-console-029, ADR-console-031, ADR-console-032"),
+                 both + ", ADR-console-029, ADR-console-031, ADR-console-032, ADR-console-033"),
                 ("docs/areas/console/adr/024-the-owner-signs-a-profile-in-from-the-page.md",
                  "- **Status:** accepted; amended by ADR-console-025")):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
@@ -602,7 +602,7 @@ class DocsTreeTest(unittest.TestCase):
                   "ADR-console-028")
         for older, expected in ((adr008, status + ", ADR-console-029, ADR-console-030"),
                                 (adr002, status + ", ADR-console-029, ADR-console-031, "
-                                          "ADR-console-032")):
+                                          "ADR-console-032, ADR-console-033")):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
                         if row.startswith("- **Status:**"))
             self.assertEqual(line, expected)
@@ -676,10 +676,33 @@ class DocsTreeTest(unittest.TestCase):
                  "ADR-console-033"),
                 ("docs/areas/console/adr/002-the-desk-page-design-rules.md",
                  "- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
-                 "ADR-console-028, ADR-console-029, ADR-console-031, ADR-console-032")):
+                 "ADR-console-028, ADR-console-029, ADR-console-031, ADR-console-032, "
+                 "ADR-console-033"),
+                ("docs/areas/console/adr/"
+                 "031-a-repository-with-no-contract-is-registered-with-a-drafted-contract.md",
+                 "- **Status:** accepted; amended by ADR-console-033")):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
                         if row.startswith("- **Status:**"))
             self.assertEqual(line, expected)
+
+    def test_the_plain_draft_and_cards_decision_is_recorded(self):
+        path = ("docs/areas/console/adr/033-the-drafted-contract-and-the-question-cards-"
+                "read-plainly-and-fit-the-screen.md")
+        first = (REPO_ROOT / path).read_text().splitlines()[0]
+        self.assertEqual(first, "# ADR-console-033 \u2014 The drafted contract and the question "
+                                "cards read plainly and fit the screen")
+        adr = self.doc(path)
+        for needle in ("#1079", "and 20 more settings at their usual values",
+                       "of them set by you", "work branches are named after their issue",
+                       "It has no remote, so the console cannot tell", "owner/name",
+                       "the build command", "sends what you typed", "sends this answer",
+                       "This is the only thing the adoption can do with this file.", "1.25rem",
+                       "ADR-console-002", "ADR-console-029", "ADR-console-031", "#1073"):
+            self.assertIn(needle, adr)
+        self.assertIn("ADR-console-033", self.doc("docs/areas/console/CONTEXT.md"))
+        module = self.doc("python/agent_tools/console/contract_draft.py")
+        self.assertIn("Decided in ADR-console-031.", module)
+        self.assertIn("ADR-console-033", module)
 
     def test_the_contract_draft_seam_is_recorded(self):
         path = ("docs/areas/project-contract/adr/"

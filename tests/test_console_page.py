@@ -2185,12 +2185,12 @@ class PageInboxGlanceTest(unittest.TestCase):
 class PageCardTest(unittest.TestCase):
     def test_the_first_open_item_is_one_card_for_each_kind(self) -> None:
         cases = [
-            ([ANSWERABLE], "Decision", "owner/p00", "Which host?", "Send answer", True),
-            ([BRIEF], "Brief", "owner/p01", "owner/p01 brief, version 2", "Approve", True),
-            ([check_item("M", "manual-check")], "Check", "owner/p00", "Question M?", "Passed", False),
-            ([check_item("L", "approval")], "Approval", "owner/p00", "Question L?", "Approve", False),
+            ([ANSWERABLE], "Decision", "owner/p00", "Which host?", "Send answer"),
+            ([BRIEF], "Brief", "owner/p01", "owner/p01 brief, version 2", "Approve"),
+            ([check_item("M", "manual-check")], "Check", "owner/p00", "Question M?", "Passed"),
+            ([check_item("L", "approval")], "Approval", "owner/p00", "Question L?", "Approve"),
         ]
-        for open_items, word, project, heading, label, enter in cases:
+        for open_items, word, project, heading, label in cases:
             with self.subTest(kind=word):
                 (snap,) = render([START, {"frame": frame(open_items)}, {"snapshot": True}])
                 card = snap["inbox"]["children"][0]
@@ -2209,8 +2209,7 @@ class PageCardTest(unittest.TestCase):
                 self.assertEqual(len(primaries), 1)
                 self.assertEqual(primaries[0]["tag"], "button")
                 self.assertEqual(primaries[0]["text"], label)
-                self.assertEqual([full(c) for c in primaries[0]["children"] if c["tag"] == "kbd"],
-                                 ["Enter"] if enter else [])
+                self.assertEqual([c for c in primaries[0]["children"] if c["tag"] == "kbd"], [])
 
     def test_the_lead_card_holds_its_held_work_under_the_options_and_its_link_under_detail(self) -> None:
         lead = item("A", held_work=3, headline="Which host?", questions=ANSWERABLE["questions"])
@@ -2246,8 +2245,7 @@ class PageCardTest(unittest.TestCase):
         self.assertEqual([n for n in nodes(card) if n["key"] == "detail:owner/p00#K"], [])
         entered = [n for n in nodes(snap["inbox"]) if n["tag"] == "button"
                    and any(c["tag"] == "kbd" and full(c) == "Enter" for c in n["children"])]
-        self.assertEqual([n["text"] for n in entered], ["Send answer"])
-        self.assertFalse(has_class(entered[0], "primary"))
+        self.assertEqual(entered, [])
 
     def test_with_a_brief_waiting_the_brief_is_the_one_raised_card(self) -> None:
         (snap,) = render([START, {"frame": frame([BRIEF, ANSWERABLE])}, {"snapshot": True}])
@@ -4375,6 +4373,36 @@ class PageBriefRowTest(unittest.TestCase):
             if selector == ".brief-row > summary":
                 self.assertEqual(decls.get("display", "flex"), "flex", selector)
 
+    def test_the_hint_follows_a_brief_row_as_it_folds_and_unfolds(self) -> None:
+        # The hint sits on the summary while the row is closed and on the card while it is open;
+        # folding or unfolding the row by hand moves it with no redraw in between (DR-003).
+        def holder(snap: dict) -> str:
+            (strip,) = keys_of(snap)
+            (row,) = [n for n in nodes(snap["inbox"]) if n["tag"] == "details" and has_class(n, "brief-row")]
+            (found,) = [c for c in nodes(row) if any(k is strip for k in c["children"])]
+            return found["tag"]
+
+        opened, folded, again = render([
+            START, {"frame": frame([BRIEF, BRIEF_B])}, {"open": KEY_B}, {"key": "Enter"},
+            {"snapshot": True}, {"close": KEY_B}, {"snapshot": True},
+            {"open": KEY_B}, {"snapshot": True}])
+        self.assertEqual([holder(opened), holder(folded), holder(again)], ["article", "summary", "article"])
+
+    def test_a_register_row_head_keeps_the_flex_layout_of_a_card_head(self) -> None:
+        # The harness applies no CSS: a head inside li.row needs the card head's flex layout, gaps
+        # and right-aligned wait, or later registration rows run their spans together (DR-002).
+        style = re.findall(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"))[0]
+        merged: dict = {}
+        for selector in (".card .head", ".rest .head"):
+            found = {}
+            for name, decls in style_rules(style):
+                if name == selector:
+                    found.update(decls)
+            merged[selector] = found
+        self.assertEqual(merged[".rest .head"], merged[".card .head"])
+        self.assertEqual(merged[".rest .head"].get("display"), "flex")
+        self.assertTrue([d for s, d in style_rules(style) if s == ".head .wait" and d.get("margin-left") == "auto"])
+
     def test_a_collapsed_row_title_wraps_a_long_unbroken_goal(self) -> None:
         # A goal with a long unbroken token (a filename) sits in a flex item <b>; without
         # overflow-wrap the row grows past a 480px viewport, as .brief .goal-line already avoids.
@@ -4653,7 +4681,9 @@ class PageKeyStripTest(unittest.TestCase):
                     self.assertEqual(strips, [])
                     continue
                 (strip,) = strips
-                self.assertIs(snap["inbox"]["children"][-1], strip)
+                holders = [n for n in nodes(snap["inbox"]) if has_class(n, "card") or has_class(n, "row")]
+                self.assertTrue([h for h in holders if id(strip) in {id(n) for n in nodes(h)}])
+                self.assertIsNot(snap["inbox"]["children"][-1], strip)
                 self.assertEqual([n["text"] for n in nodes(strip) if n["tag"] == "kbd"], expected)
                 for word in words:
                     self.assertIn(word, full(strip))
@@ -6802,8 +6832,7 @@ REGISTERED = {**REGISTERING, "status": "done", "result": "planned", "outcome": "
               "note": "The plan has 1 open question.", "line": "Register r: 1 question open"}
 Q_CANDIDATE = {
     "id": "candidate-class", "subject": ".claude/odd.md",
-    "ask": "What should happen to .claude/odd.md? No rule covers this agent file.\n"
-           "This is the only thing the adoption can do with this file.",
+    "ask": "What should happen to .claude/odd.md? No rule covers this agent file.",
     "options": [{"value": "archive-history",
                  "label": "Archive it under .agents/knowledge/archive/adopted/"}],
     "recommended": None, "why": None}
@@ -7154,12 +7183,22 @@ Q_TEXT = {"id": "contract-draft", "subject": "project-id",
 T0 = register_item(0, Q_TEXT, text=True)
 DRAFTED = {**ASKING, "questions": [Q_TEXT],
            "draft": [{"field": "default-branch", "line": "default branch: trunk (read from its remote)",
-                      "value": "trunk", "options": [], "text": True},
+                      "value": "trunk", "options": [], "text": True, "more": False,
+                      "placeholder": "the default branch"},
                      {"field": "release",
                       "line": "release profile: unsupported (the console's starting value)",
                       "value": "unsupported",
                       "options": [{"value": "unsupported", "label": "It makes no releases"}],
-                      "text": True}]}
+                      "text": True, "more": True, "placeholder": "the release profile"}],
+           "draft_more": "and 1 more setting at its usual value"}
+MANY = [{"field": f"f{n}", "line": f"setting {n}: value {n}", "value": f"value {n}",
+         "options": [], "text": True, "more": n >= 7, "placeholder": "the value"}
+        for n in range(27)]
+DRAFTED_MANY = {**DRAFTED, "draft": MANY, "draft_more": "and 20 more settings at their usual values"}
+B_RUNNING = {**REGISTERING, "root": "/srv/b", "name": "b", "headline": "Planning the adoption of b…",
+             "line": "Planning the adoption of b…"}
+B_DRAFTED = {**DRAFTED_MANY, "root": "/srv/b", "name": "b", "at": "2026-11-15T10:00:00+00:00"}
+A_RUNNING = {**REGISTERING, "at": None}
 
 
 class DraftedContractPageTest(unittest.TestCase):
@@ -7170,7 +7209,8 @@ class DraftedContractPageTest(unittest.TestCase):
             {"respond": {"status": 204, "text": ""}}, {"click": "ans-draft"},
             {"clock": 5000}, {"snapshot": True}])
         (field,) = [n for n in nodes(empty["inbox"]) if has_class(n, "draft-text")]
-        self.assertEqual((field["tag"], field["label"]), ("input", "Your answer"))
+        self.assertEqual((field["tag"], field["label"], field["placeholder"]),
+                         ("input", "Your answer", "Type your answer"))
         (send,) = [n for n in nodes(empty["inbox"]) if has_class(n, "ans-draft")]
         self.assertEqual(full(send), "Send")
         self.assertTrue(send["disabled"])
@@ -7207,9 +7247,10 @@ class DraftedContractPageTest(unittest.TestCase):
         shown = full(snap["register"])
         for entry in DRAFTED["draft"]:
             self.assertIn(entry["line"], shown)
-        self.assertEqual([full(n) for n in registered(snap, "draft-change")], ["Change", "Change"])
+        self.assertEqual([full(n) for n in registered(snap, "draft-change")], ["Change"])
+        self.assertEqual([full(n) for n in registered(snap, "draft-pick")], [DRAFTED["draft"][1]["line"]])
         (drafted,) = registered(snap, "register-draft")
-        self.assertEqual(len([n for n in nodes(drafted) if n["tag"] == "li"]), 2)
+        self.assertEqual(len([n for n in nodes(drafted) if n["tag"] == "li"]), 1)
 
     def test_change_sends_the_typed_value_and_a_failure_keeps_it(self) -> None:
         opened, sent = render([
@@ -7221,7 +7262,7 @@ class DraftedContractPageTest(unittest.TestCase):
         self.assertEqual(field["value"], "trunk")
         self.assertEqual([full(n) for n in registered(opened, "draft-send")], ["Send"])
         self.assertEqual([full(n) for n in registered(opened, "draft-cancel")], ["Cancel"])
-        self.assertEqual(len(registered(opened, "draft-change")), 1)
+        self.assertEqual(len(registered(opened, "draft-change")), 0)
         (post,) = sent["posts"]
         self.assertEqual(post["url"], "/api/plan-answer")
         self.assertEqual(posted(post), {"plan_id": PLAN_A, "id": "contract-draft",
@@ -7237,7 +7278,7 @@ class DraftedContractPageTest(unittest.TestCase):
             {"respond": {"status": 204, "text": ""}}, {"click": "draft-send"}, {"snapshot": True}])
         self.assertEqual(len(snap["posts"]), 1)
         self.assertEqual(registered(snap, "draft-edit"), [])
-        self.assertEqual(len(registered(snap, "draft-change")), 2)
+        self.assertEqual(len(registered(snap, "draft-change")), 1)
 
     def test_a_change_the_plan_refuses_after_the_204_shows_why_and_keeps_the_value_for_retry(self) -> None:
         refused = {**DRAFTED, "questions": [], "refusal": "planning timed out, try again",
@@ -7251,24 +7292,25 @@ class DraftedContractPageTest(unittest.TestCase):
         self.assertEqual(registered(opened, "draft-refusal"), [])
         (line,) = registered(shown, "draft-refusal")
         self.assertEqual(full(line), "planning timed out, try again")
-        self.assertEqual(len(registered(shown, "draft-change")), 2)
+        self.assertEqual(len(registered(shown, "draft-change")), 1)
         (field,) = registered(retry, "draft-edit")
         self.assertEqual(field["value"], "main")
         self.assertEqual(registered(retry, "draft-refusal"), [])
 
     def test_change_on_an_option_entry_offers_the_option_and_the_current_value(self) -> None:
         (snap,) = render([
-            START, {"frame": cards([], DRAFTED)}, {"click": "draft-change"}, {"click": "draft-change"},
+            START, {"frame": cards([], DRAFTED)}, {"open": "draft-more"}, {"click": "draft-pick"},
             {"snapshot": True}])
         (field,) = registered(snap, "draft-edit")
         self.assertEqual(field["value"], "unsupported")
         self.assertEqual([full(n) for n in registered(snap, "draft-option")], ["It makes no releases"])
         self.assertEqual(len(registered(snap, "draft-change")), 1)
+        self.assertEqual(field["placeholder"], "the release profile")
 
     def test_an_option_is_sent_as_the_choice(self) -> None:
         other = {**DRAFTED, "draft": [DRAFTED["draft"][0], {**DRAFTED["draft"][1], "value": "tagged"}]}
         (snap,) = render([
-            START, {"frame": cards([], other)}, {"click": "draft-change"}, {"click": "draft-change"},
+            START, {"frame": cards([], other)}, {"open": "draft-more"}, {"click": "draft-pick"},
             {"click": "draft-option"}, {"respond": {"status": 204, "text": ""}},
             {"click": "draft-send"}, {"snapshot": True}])
         (post,) = snap["posts"]
@@ -7284,7 +7326,7 @@ class DraftedContractPageTest(unittest.TestCase):
         self.assertEqual(kept["field"], {"cls": "draft-text draft-edit", "value": "main",
                                          "start": 4, "end": 4})
         self.assertEqual(registered(closed, "draft-edit"), [])
-        self.assertEqual(len(registered(closed, "draft-change")), 2)
+        self.assertEqual(len(registered(closed, "draft-change")), 1)
 
     def test_at_480_a_draft_and_a_text_card_fit(self) -> None:
         try:
@@ -7330,6 +7372,154 @@ class DraftedContractPageTest(unittest.TestCase):
         self.assertTrue(got["fits"], got)
         self.assertTrue(got["inside"], got)
         self.assertTrue(got["page"], got)
+
+    def test_the_work_column_shows_the_read_values_and_one_counted_line(self) -> None:
+        closed, opened = render([
+            START, {"frame": cards([], DRAFTED_MANY)}, {"snapshot": True},
+            {"open": "draft-more"}, {"snapshot": True}])
+        controls = [n for n in visible(closed["register"])
+                    if has_class(n, "draft-change") or has_class(n, "draft-pick")]
+        self.assertLessEqual(len(controls), 8)
+        self.assertEqual(len([n for n in visible(closed["register"]) if has_class(n, "draft-change")]), 7)
+        (fold,) = [n for n in nodes(closed["register"]) if n["tag"] == "details" and n["key"] == "draft-more"]
+        (summary,) = [n for n in fold["children"] if n["tag"] == "summary"]
+        self.assertEqual(full(summary), "and 20 more settings at their usual values")
+        self.assertNotIn("setting 7: value 7", visible_text(closed["register"]))
+        for entry in MANY:
+            self.assertIn(entry["line"], visible_text(opened["register"]))
+        self.assertEqual(len([n for n in visible(opened["register"]) if has_class(n, "draft-change")]), 7)
+
+    def test_choosing_a_setting_in_the_fold_opens_its_change_and_the_fold_stays_open(self) -> None:
+        (snap,) = render([
+            START, {"frame": cards([], DRAFTED_MANY)}, {"open": "draft-more"}, {"click": "draft-pick"},
+            {"frame": cards([], {**DRAFTED_MANY, "at": "2026-11-15T09:00:00+00:00"})},
+            {"snapshot": True}])
+        (field,) = registered(snap, "draft-edit")
+        self.assertEqual(field["value"], "value 7")
+        self.assertEqual(field["placeholder"], "the value")
+        (fold,) = [n for n in nodes(snap["register"]) if n["tag"] == "details" and n["key"] == "draft-more"]
+        self.assertTrue(fold["open"])
+        self.assertIn(field, nodes(fold))
+
+    def test_a_refused_setting_in_the_fold_opens_the_fold(self) -> None:
+        refused = {**DRAFTED_MANY, "refusal": "planning timed out, try again",
+                   "refused": {"id": "contract-draft", "subject": "f7"}}
+        (snap,) = render([START, {"frame": cards([], refused)}, {"snapshot": True}])
+        (fold,) = [n for n in nodes(snap["register"]) if n["tag"] == "details" and n["key"] == "draft-more"]
+        self.assertTrue(fold["open"])
+        self.assertIn("planning timed out, try again", visible_text(snap["register"]))
+
+    def test_a_frame_without_the_counted_line_draws_every_entry_with_change(self) -> None:
+        (snap,) = render([
+            START, {"frame": cards([], {**DRAFTED_MANY, "draft_more": None})}, {"snapshot": True}])
+        self.assertEqual(len(registered(snap, "draft-change")), 27)
+        self.assertEqual(registered(snap, "draft-more"), [])
+
+    def test_change_controls_never_wrap_under_their_row(self) -> None:
+        text = PAGE.read_text(encoding="utf-8")
+        (body,) = re.findall(r"(?s)<style>(.*?)</style>", text)
+        top = re.sub(r"(?s)@media[^{]*\{.*?\}\s*\}", "", body)
+        rules = style_rules(top)
+
+        def decls(selector: str) -> dict:
+            merged: dict = {}
+            for sel, found in rules:
+                if sel == selector:
+                    merged.update(found)
+            return merged
+
+        row = decls(".register-draft li")
+        self.assertEqual(row.get("display"), "grid")
+        self.assertEqual(row.get("grid-template-columns"), "minmax(0, 1fr) auto")
+        self.assertEqual(decls(".draft-change").get("white-space"), "nowrap")
+
+    def test_at_480_and_1440_change_sits_beside_its_line(self) -> None:
+        try:
+            from playwright.sync_api import Error, sync_playwright
+        except ImportError:
+            self.skipTest("playwright is not installed")
+        fakes = (
+            "window.EventSource = class { constructor() { window.__src = this; this.l = {}; }"
+            " addEventListener(name, fn) { this.l[name] = fn; } close() {} };"
+            "window.fetch = () => Promise.resolve(new Response(null, {status: 204}));")
+        measure = """() => {
+          const rect = (e) => e.getBoundingClientRect();
+          const rows = [...document.querySelectorAll('#register .register-draft > li')]
+            .filter((li) => li.querySelector('.draft-change'))
+            .map((li) => {
+              const line = li.querySelector('.draft-line');
+              const change = li.querySelector('.draft-change');
+              return {line: rect(line).toJSON(), change: rect(change).toJSON(),
+                      height: parseFloat(getComputedStyle(line).lineHeight)};
+            });
+          const summary = document.querySelector('#register .draft-more > summary');
+          return {rows, summary: summary === null ? null : rect(summary).bottom};
+        }"""
+        deep = "a-long-directory-name/" * 3
+        entries = [{**entry, "line": f"setting {n}: {deep}"} if n < 7 else entry
+                   for n, entry in enumerate(MANY)]
+        drafted = {**DRAFTED_MANY, "draft": entries}
+        asking = {**view([]), "inbox": {"open": [], "answered": []}, "registration": drafted}
+        html = PAGE.read_text(encoding="utf-8").replace("__CONSOLE_TOKEN__", "t")
+        with sync_playwright() as pw:
+            try:
+                browser = pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+            except Error as err:
+                self.skipTest(f"no Chromium to launch: {err}")
+            try:
+                for width in (480, 1440):
+                    page = browser.new_page(viewport={"width": width, "height": 900})
+                    page.add_init_script(fakes)
+                    page.route("http://console.test/", lambda route: route.fulfill(
+                        body=html, content_type="text/html"))
+                    page.goto("http://console.test/")
+                    page.evaluate("(f) => window.__src.l.view({data: JSON.stringify(f)})", asking)
+                    got = page.evaluate(measure)
+                    self.assertEqual(len(got["rows"]), 7, width)
+                    for row in got["rows"]:
+                        self.assertGreaterEqual(row["change"]["left"], row["line"]["right"] - 1, (width, row))
+                        self.assertLess(row["change"]["top"], row["line"]["top"] + row["height"], (width, row))
+                    if width == 1440:
+                        self.assertIsNotNone(got["summary"])
+                        self.assertLessEqual(got["summary"], 900)
+                    page.close()
+            finally:
+                browser.close()
+
+    def test_the_fold_keeps_its_open_or_closed_state_across_redraws(self) -> None:
+        again = {**DRAFTED_MANY, "at": "2026-11-15T09:00:00+00:00"}
+        cases = {
+            "new frame": ([{"open": "draft-more"}, {"frame": cards([], again)}], True),
+            "cancel": ([{"open": "draft-more"}, {"click": "draft-pick"}, {"click": "draft-cancel"}], True),
+            "stays closed": ([{"frame": cards([], again)}], False),
+        }
+        for name, (steps, expected) in cases.items():
+            with self.subTest(name):
+                (snap,) = render([START, {"frame": cards([], DRAFTED_MANY)}, *steps, {"snapshot": True}])
+                (fold,) = [n for n in nodes(snap["register"])
+                           if n["tag"] == "details" and n["key"] == "draft-more"]
+                self.assertIs(fold["open"], expected)
+                self.assertEqual(registered(snap, "draft-edit"), [])
+
+    def test_another_registration_starts_with_the_fold_closed(self) -> None:
+        cases = {
+            "A then B running then B": [{"frame": cards([], B_RUNNING)}, {"frame": cards([], B_DRAFTED)}],
+            "A then B": [{"frame": cards([], B_DRAFTED)}],
+            "A registered again": [
+                {"frame": cards([], A_RUNNING)},
+                {"frame": cards([], {**DRAFTED_MANY, "at": "2026-11-15T10:00:00+00:00"})}],
+        }
+        for name, steps in cases.items():
+            with self.subTest(name):
+                (snap,) = render([
+                    START, {"frame": cards([], DRAFTED_MANY)}, {"open": "draft-more"}, *steps,
+                    {"snapshot": True}])
+                (fold,) = [n for n in nodes(snap["register"])
+                           if n["tag"] == "details" and n["key"] == "draft-more"]
+                self.assertIs(fold["open"], False)
+                shown = visible(snap["register"])
+                self.assertEqual(len([n for n in shown if has_class(n, "draft-change")]), 7)
+                self.assertEqual([n for n in shown if has_class(n, "draft-pick")], [])
 
 
 class RegisterCardPageTest(unittest.TestCase):
@@ -7401,13 +7591,28 @@ class RegisterCardPageTest(unittest.TestCase):
             ["register-close", "register-open"])
         self.assertEqual([n for n in nodes(snap["register"]) if has_class(n, "opt")], [])
 
-    def test_a_second_plan_question_row_keeps_its_options_and_send(self) -> None:
+    def test_a_single_option_card_offers_the_option_as_its_action(self) -> None:
+        first, second = render([START, {"frame": cards([R2])}, {"snapshot": True},
+                                {"respond": {"status": 204, "text": ""}},
+                                {"key": "Enter"}, {"clock": 5000}, {"snapshot": True}])
+        (lead,) = [n for n in nodes(first["inbox"]) if has_class(n, "lead")]
+        self.assertEqual(count(first, "opt"), 0)
+        (send,) = [n for n in nodes(lead) if has_class(n, "send")]
+        self.assertEqual(full(send), "Archive it under .agents/knowledge/archive/adopted/")
+        self.assertTrue(has_class(send, "primary"))
+        (strip,) = [n for n in nodes(first["inbox"]) if has_class(n, "keys")]
+        self.assertIn("sends this answer", full(strip))
+        self.assertEqual([full(n) for n in nodes(strip) if n["tag"] == "kbd"], ["Enter"])
+        self.assertNotIn("only thing", full(first["inbox"]))
+        (post,) = [p for p in second["posts"] if p["url"] == "/api/plan-answer"]
+        self.assertEqual(json.loads(post["body"])["value"], "archive-history")
+
+    def test_a_second_plan_question_row_offers_its_single_option_as_the_action(self) -> None:
         (snap,) = render([START, {"frame": cards([R0, R2])}, {"snapshot": True}])
         (row,) = rows_of(snap)
-        self.assertEqual([full(n) for n in nodes(row) if has_class(n, "opt")],
-                         ["1Archive it under .agents/knowledge/archive/adopted/"])
+        self.assertEqual([n for n in nodes(row) if has_class(n, "opt")], [])
         (send,) = [n for n in nodes(row) if has_class(n, "send")]
-        self.assertTrue(full(send).startswith("Send answer"))
+        self.assertEqual(full(send), "Archive it under .agents/knowledge/archive/adopted/")
         self.assertIn("Register r", full(row))
         self.assertIn(Q_CANDIDATE["ask"], full(row))
         self.assertNotIn("null", full(row))
@@ -7432,6 +7637,159 @@ class RegisterCardPageTest(unittest.TestCase):
         self.assertIn(text, full(row))
         self.assertNotIn("null", full(row))
         self.assertEqual([n for n in nodes(row) if n.get("href")], [])
+
+
+T0P = {**T0, "placeholder": "owner/name"}
+T_BRANCH = register_item(3, {
+    "id": "contract-draft", "subject": "default-branch",
+    "ask": "Which branch is the default branch of r?\nIt has no remote, so the console cannot tell: "
+           "choose a branch or type its name.",
+    "options": [{"value": "trunk", "label": "trunk"}], "recommended": None, "why": None},
+    text=True, placeholder="a branch name")
+
+
+def keys_of(snap: dict) -> list:
+    return [n for n in nodes(snap["inbox"]) if has_class(n, "keys")]
+
+
+class RegisterCardKeysPageTest(unittest.TestCase):
+    def test_every_card_text_field_has_a_placeholder(self) -> None:
+        items = [T0P, T_BRANCH]
+        self.assertEqual(len({i["key"] for i in items}), len(items))
+        registers, managers, checks = render([
+            START, {"frame": cards(items)}, {"snapshot": True},
+            {"frame": frame([Q0, Q1])}, {"snapshot": True},
+            {"frame": frame([check_item("M", "manual-check", answers=["passed", "failed", "note"])])},
+            {"snapshot": True}])
+        for snap in (registers, managers, checks):
+            fields = [n for n in nodes(snap["inbox"]) if n["tag"] in ("input", "textarea")]
+            self.assertTrue(fields)
+            for field in fields:
+                if not has_class(field, "confirm-text"):
+                    self.assertTrue(field["placeholder"], field["cls"])
+        self.assertEqual([n["placeholder"] for n in nodes(registers["inbox"]) if has_class(n, "draft-text")],
+                         ["owner/name", "a branch name"])
+        self.assertEqual([n["placeholder"] for n in nodes(managers["inbox"]) if has_class(n, "words-text")],
+                         ["Answer in your own words"] * 2)
+        self.assertEqual([n["placeholder"] for n in nodes(checks["inbox"]) if has_class(n, "note-text")],
+                         ["Write a note"])
+        (bare,) = [n for n in nodes(render([START, {"frame": cards([T0])}, {"snapshot": True}])[-1]["inbox"])
+                   if has_class(n, "draft-text")]
+        self.assertEqual(bare["placeholder"], "Type your answer")
+
+    def test_enter_on_a_text_card_sends_the_typed_value(self) -> None:
+        first, second = render([
+            START, {"frame": cards([T0P])}, {"key": "Enter"}, {"snapshot": True},
+            {"type": {"class": "draft-text", "text": "sample-owner/sample-app"}},
+            {"blur_on": "draft-text"}, {"respond": {"status": 204, "text": ""}}, {"key": "Enter"},
+            {"clock": 5000}, {"snapshot": True}])
+        self.assertEqual(first["posts"], [])
+        self.assertEqual(first["field"]["cls"], "draft-text")
+        (post,) = second["posts"]
+        self.assertEqual(post["url"], "/api/plan-answer")
+        self.assertEqual(posted(post), {"plan_id": PLAN_A, "id": "contract-draft",
+                                        "subject": "project-id", "value": "sample-owner/sample-app"})
+
+    def test_exactly_one_key_hint_sits_on_the_current_card(self) -> None:
+        items = [T0P, R0]
+        self.assertEqual(len({i["key"] for i in items}), len(items))
+        (snap,) = render([START, {"frame": cards(items)}, {"snapshot": True}])
+        (strip,) = keys_of(snap)
+        (lead,) = [n for n in nodes(snap["inbox"]) if has_class(n, "lead")]
+        self.assertIn(id(strip), {id(n) for n in nodes(lead)})
+        self.assertIn("sends what you typed", full(strip))
+        enters = [n for n in nodes(snap["inbox"]) if n["tag"] == "button"
+                  and any(c["tag"] == "kbd" and full(c) == "Enter" for c in n["children"])]
+        self.assertEqual(enters, [])
+        self.assertIsNot(snap["inbox"]["children"][-1], strip)
+
+    def test_digits_on_a_text_card_without_options_do_nothing(self) -> None:
+        (snap,) = render([START, {"frame": cards([T0P])}, {"key": "1"}, {"key": "Enter"},
+                          {"snapshot": True}])
+        self.assertEqual(snap["posts"], [])
+
+    def test_every_register_card_reads_title_ask_options_hint_in_order(self) -> None:
+        items = [R0, T_BRANCH]
+        self.assertEqual(len({i["key"] for i in items}), len(items))
+        (snap,) = render([START, {"frame": cards(items)}, {"snapshot": True}])
+        (lead,) = [n for n in nodes(snap["inbox"]) if has_class(n, "lead")]
+        (row,) = [n for n in nodes(snap["inbox"]) if n["tag"] == "li" and has_class(n, "row")]
+        for name, card, hint in (("lead", lead, True), ("row", row, False)):
+            with self.subTest(card=name):
+                order = nodes(card)
+
+                def at(test) -> int:
+                    return next(i for i, n in enumerate(order) if test(n))
+                title = at(lambda n: has_class(n, "sprint-title"))
+                ask = at(lambda n: has_class(n, "q") and has_class(n, "reg"))
+                field = at(lambda n: has_class(n, "opt") or has_class(n, "draft-text"))
+                found = [title, ask, field]
+                if hint:
+                    found.append(at(lambda n: has_class(n, "keys")))
+                self.assertEqual(found, sorted(set(found)))
+                self.assertEqual(full(order[title]), "Register r")
+
+    def test_register_asks_are_set_small_enough_to_read_at_480(self) -> None:
+        (style,) = re.findall(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"))
+        small = [d for s, d in style_rules(media_block(style, "(max-width: 480px)")) if s == ".card .q.reg"]
+        self.assertTrue(small)
+        self.assertLessEqual(float(small[-1]["font-size"].removesuffix("rem")), 1.0)
+        top = re.sub(r"(?s)@media[^{]*\{.*?\}\s*\}", "", style)
+        self.assertEqual([d["font-size"] for s, d in style_rules(top) if s == ".card .q.reg" and "font-size" in d],
+                         ["1.25rem"])
+        self.assertTrue([d for s, d in style_rules(top) if s == ".rest .q.reg" and d.get("font", "").startswith("600 1rem/1.4 ")])
+
+    def test_at_480_a_typical_ask_takes_at_most_three_lines(self) -> None:
+        try:
+            from playwright.sync_api import Error, sync_playwright
+        except ImportError:
+            self.skipTest("playwright is not installed")
+        fakes = (
+            "window.EventSource = class { constructor() { window.__src = this; this.l = {}; }"
+            " addEventListener(name, fn) { this.l[name] = fn; } close() {} };"
+            "window.fetch = () => Promise.resolve(new Response(null, {status: 204}));")
+        measure = """() => {
+          const el = document.querySelector('.card.lead .q.reg');
+          return el.getBoundingClientRect().height / parseFloat(getComputedStyle(el).lineHeight);
+        }"""
+        html = PAGE.read_text(encoding="utf-8").replace("__CONSOLE_TOKEN__", "t")
+        with sync_playwright() as pw:
+            try:
+                browser = pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+            except Error as err:
+                self.skipTest(f"no Chromium to launch: {err}")
+            try:
+                page = browser.new_page(viewport={"width": 480, "height": 900})
+                page.add_init_script(fakes)
+                page.route("http://console.test/", lambda route: route.fulfill(
+                    body=html, content_type="text/html"))
+                page.goto("http://console.test/")
+                page.evaluate("(f) => window.__src.l.view({data: JSON.stringify(f)})", cards([T_BRANCH]))
+                lines = page.evaluate(measure)
+            finally:
+                browser.close()
+        self.assertLessEqual(round(lines), 3)
+
+    def test_a_repeated_frame_leaves_one_key_hint(self) -> None:
+        (snap,) = render([START, {"frame": frame([BRIEF])}, {"frame": frame([BRIEF])},
+                          {"frame": frame([BRIEF])}, {"snapshot": True}])
+        (strip,) = keys_of(snap)
+        (card,) = [n for n in nodes(snap["inbox"]) if has_class(n, "brief") and has_class(n, "lead")]
+        self.assertIn(id(strip), {id(n) for n in nodes(card)})
+        self.assertEqual([n["text"] for n in nodes(strip) if n["tag"] == "kbd"], ["Enter"])
+
+    def test_when_the_first_brief_waits_the_hint_moves_to_the_next_brief(self) -> None:
+        (snap,) = render([START, {"frame": frame([BRIEF, BRIEF_B])}, {"key": "Enter"},
+                          {"snapshot": True}])
+        (strip,) = keys_of(snap)
+        self.assertIn(id(strip), {id(n) for n in visible(snap["inbox"])})
+        (row,) = [n for n in nodes(snap["inbox"]) if n["tag"] == "details" and n["key"] == KEY_B]
+        (summary,) = [c for c in row["children"] if c["tag"] == "summary"]
+        self.assertIn(id(strip), {id(n) for n in nodes(summary)})
+        self.assertEqual([n["text"] for n in nodes(strip) if n["tag"] == "kbd"][0], "Enter")
+        self.assertIn("approve", full(strip))
+        (lead,) = [n for n in nodes(snap["inbox"]) if has_class(n, "brief") and has_class(n, "lead")]
+        self.assertNotIn(id(strip), {id(n) for n in nodes(lead)})
 
 
 class RegisterRetryPageTest(unittest.TestCase):

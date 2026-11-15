@@ -1,6 +1,6 @@
 """The console's drafted project contract for a repository that has none (#1067).
 
-Decided in ADR-console-031. A repository with no `.agents/project.json` is registered with a contract
+Decided in ADR-console-031. The plain words and the main/more split are ADR-console-033. A repository with no `.agents/project.json` is registered with a contract
 the console drafts from what the repository says and what the owner answers. This module reads the
 repository, drafts the 29 fields of the contract, words the open ones as cards, takes the owner's
 answers, and renders the wire-format contract that `adopt-project plan --contract-draft` takes. It
@@ -26,7 +26,15 @@ build and test commands) or the console's starting value, and opens the project 
 `taken(<id>)` when the id it read is registered for another checkout. A field is open (`open_fields`)
 when it has no value and is one of `ASKED` (the project id, the default branch, the tracker, the build
 and test commands), or when it has a `reason`; `questions` words each open field as one card; `shown`
-gives every other field as one line `<label>: <display> (<source>)` that can be changed.
+gives every other field as one entry that can be changed. `refresh(root, fields)` gives a saved draft today's
+label, option labels and card question (ADR-console-033) without touching a value, a source or a reason. `MAIN` lists the seven fields read from the
+repository or asked; each of them is one line `<label>: <display> (<source>)`. Every other field has
+the flag `more` in `shown`, and while its value is its start value its line is its start sentence
+(`REST_WORDS`, plain words with no source), so it reads as a settled default; once it is another value
+it reads `<label>: <value> (<source>)`. `more_line` counts those shown `more` entries in one line,
+`and <n> more settings at their usual values`, or `and <n> more settings, <k> of them set by you`.
+`placeholder` gives a typed field the words its empty box shows (`PLACEHOLDERS`), None for a choice.
+Every label is plain words, never a contract term.
 
 Answers. `set_value(fields, field, value, entries=, root=)` returns `(new_fields, None)` or `(None,
 text)`, refusing in order with `UNKNOWN_FIELD`, `EMPTY_VALUE`, `NOT_OFFERED` (a choice field), `ID_RULE`
@@ -102,32 +110,32 @@ _TABLE = (
     ("project-id", "project id", ("/project/id", "/bindings/tracker/repo_slug"), [], True),
     ("project-name", "project name", ("/project/name",), [], True),
     ("default-branch", "default branch", ("/bindings/vcs/default_branch",), [], True),
-    ("integration-branch", "integration branch", ("/bindings/vcs/integration_branch",), [], True),
-    ("branch-pattern", "branch name pattern", ("/bindings/vcs/branch_pattern",), [], True),
-    ("worktree-root", "worktree folder",
+    ("integration-branch", "branch finished work merges into", ("/bindings/vcs/integration_branch",), [], True),
+    ("branch-pattern", "work branch names", ("/bindings/vcs/branch_pattern",), [], True),
+    ("worktree-root", "folder for work copies",
      ("/bindings/vcs/worktree/root", "/capabilities/worktrees"), [], True),
-    ("worktree-prefix", "worktree name prefix", ("/bindings/vcs/worktree/prefix",), [], True),
+    ("worktree-prefix", "start of each work copy's name", ("/bindings/vcs/worktree/prefix",), [], True),
     ("commit-signed", "signed commits", ("/bindings/vcs/commit/signed",), _yes_no(), False),
     ("co-authored-by", "co-author lines in commits", ("/bindings/vcs/commit/co_authored_by",),
      _yes_no(), False),
-    ("merge-strategy", "merge strategy", ("/bindings/vcs/merge/strategy",), [], True),
+    ("merge-strategy", "how pull requests are merged", ("/bindings/vcs/merge/strategy",), [], True),
     ("delete-branch", "branch deletion after merge", ("/bindings/vcs/merge/delete_branch",),
      _yes_no(), False),
     ("tracker", "issue tracker", ("/bindings/tracker", "/capabilities/tracker"),
      [{"value": "github", "label": "Track its issues on GitHub"},
       {"value": "none", "label": "Track no issues here"}], False),
-    ("specs-path", "specs folder", ("/bindings/paths/artifacts/specs",), [], True),
+    ("specs-path", "design specs folder", ("/bindings/paths/artifacts/specs",), [], True),
     ("plans-path", "plans folder", ("/bindings/paths/artifacts/plans",), [], True),
-    ("docs-paths", "documentation paths",
+    ("docs-paths", "documentation",
      ("/bindings/paths/architecture", "/capabilities/knowledge.architecture"), [], True),
-    ("context-paths", "context paths",
+    ("context-paths", "glossary files",
      ("/bindings/paths/context", "/capabilities/knowledge.context"), [], True),
-    ("standards-paths", "standards paths",
+    ("standards-paths", "coding standards files",
      ("/bindings/paths/standards", "/capabilities/knowledge.standards"), [], True),
-    ("hints-paths", "hint paths", ("/bindings/paths/hints", "/capabilities/knowledge.hints"),
+    ("hints-paths", "notes that guide agents", ("/bindings/paths/hints", "/capabilities/knowledge.hints"),
      [], True),
-    ("operations-paths", "operations paths", ("/bindings/paths/operations",), [], True),
-    ("rejections-paths", "rejection paths", ("/bindings/paths/rejections",), [], True),
+    ("operations-paths", "notes on how it is run", ("/bindings/paths/operations",), [], True),
+    ("rejections-paths", "records of ruled-out ideas", ("/bindings/paths/rejections",), [], True),
     ("build-command", "build command",
      ("/bindings/commands/build", "/bindings/workflow/verification", "/capabilities/verification"),
      _none("It has no build command"), True),
@@ -143,11 +151,11 @@ _TABLE = (
      ("/bindings/workflow/orchestration/max_parallel",), [], True),
     ("attempt-budget", "minutes per delivery attempt",
      ("/bindings/workflow/orchestration/attempt_budget_minutes",), [], True),
-    ("light-lane", "light lane", ("/bindings/workflow/light_lane",),
-     _none("It has no light lane"), True),
+    ("light-lane", "short route for light changes", ("/bindings/workflow/light_lane",),
+     _none("Every change takes the full delivery route"), True),
     ("projections", "generated agent files", ("/projections",),
-     _none("It generates no agent files"), True),
-    ("release", "release profile", ("/release",),
+     _none("It generates no agent instruction files"), True),
+    ("release", "how it is released", ("/release",),
      [{"value": "unsupported", "label": "It makes no releases"}], True),
 )
 FIELDS: tuple[str, ...] = tuple(row[0] for row in _TABLE)
@@ -183,6 +191,62 @@ STARTS = {
     "light-lane": "none",
     "projections": "none",
     "release": "unsupported",
+}
+# The more group's start sentences: what a field reads as while it still has its start value.
+REST_WORDS = {
+    "integration-branch": "finished work merges into the default branch",
+    "branch-pattern": "work branches are named after their issue",
+    "worktree-root": "each piece of work gets its own copy of the repository in the .worktrees folder",
+    "worktree-prefix": "each work copy's folder name starts with worktree-",
+    "commit-signed": "commits are not signed",
+    "co-authored-by": "commits carry no co-author lines",
+    "merge-strategy": "pull requests are merged with a merge commit",
+    "delete-branch": "a work branch is deleted once it is merged",
+    "specs-path": "design specs are kept in .agents/artifacts/specs",
+    "plans-path": "plans are kept in .agents/artifacts/plans",
+    "context-paths": "no glossary files are named",
+    "standards-paths": "no coding standards files are named",
+    "hints-paths": "no notes that guide agents are named",
+    "operations-paths": "no notes on how it is run are named",
+    "rejections-paths": "no records of ruled-out ideas are named",
+    "review-plan-command": "no command reviews its plans",
+    "review-code-command": "no command reviews its code",
+    "max-parallel": "one delivery runs at a time",
+    "attempt-budget": "a delivery attempt may take up to 240 minutes",
+    "light-lane": "every change takes the full delivery route",
+    "projections": "it generates no agent instruction files",
+    "release": "it makes no releases",
+}
+# The fields whose values are read from the repository or asked: they keep their own line.
+MAIN: tuple[str, ...] = ("project-id", "project-name", "default-branch", "tracker", "docs-paths",
+                         "build-command", "test-command")
+_JSON = "the value as JSON"
+PLACEHOLDERS = {
+    "project-id": "owner/name",
+    "project-name": "the project name",
+    "default-branch": "a branch name",
+    "integration-branch": "a branch name",
+    "branch-pattern": "a branch name pattern",
+    "worktree-root": "a folder in the repository",
+    "specs-path": "a folder in the repository",
+    "plans-path": "a folder in the repository",
+    "worktree-prefix": "the start of each folder name",
+    "merge-strategy": "the merge method",
+    "docs-paths": "paths, separated by commas",
+    "context-paths": "paths, separated by commas",
+    "standards-paths": "paths, separated by commas",
+    "hints-paths": "paths, separated by commas",
+    "operations-paths": "paths, separated by commas",
+    "rejections-paths": "paths, separated by commas",
+    "build-command": "the build command",
+    "test-command": "the test command",
+    "review-plan-command": "the review command",
+    "review-code-command": "the review command",
+    "max-parallel": "a number",
+    "attempt-budget": "a number of minutes",
+    "light-lane": _JSON,
+    "projections": _JSON,
+    "release": _JSON,
 }
 DOC_FILES = ("README.md", "README", "README.rst", "ARCHITECTURE.md", "CONTEXT.md")
 JUST_FILES = ("justfile", "Justfile", ".justfile")
@@ -339,8 +403,11 @@ def _ask(field: str, name: str, remotes: int) -> str:
                 if remotes > 1 else "Its remote does not name a project")
         return f"Which project is this repository?\n{tail}: type its id, as owner/name."
     if field == "default-branch":
+        tail = ("It has no remote, so the console cannot tell" if remotes == 0 else
+                f"It has {remotes} remotes, so the console cannot tell which one to ask"
+                if remotes > 1 else "Its remote did not say")
         return (f"Which branch is the default branch of {name}?\n"
-                "Its remote did not say: choose a branch or type its name.")
+                f"{tail}: choose a branch or type its name.")
     if field == "tracker":
         return f"Where are the issues of {name} tracked?"
     if field in ("build-command", "test-command"):
@@ -385,6 +452,31 @@ def draft(root: str, reading: Mapping, *, entries: Iterable[Mapping] = ()) -> li
     return fields
 
 
+def _remote_count(fields: list[Mapping]) -> int:
+    """The remotes the draft was made from, as the project id's card recorded them."""
+    ask = next((f["ask"] for f in fields if f["field"] == "project-id"), "")
+    if "has no remote" in ask:
+        return 0
+    found = re.search(r"It has (\d+) remotes", ask)
+    return int(found.group(1)) if found else 1
+
+
+def refresh(root: str, fields: Iterable[Mapping]) -> list[dict]:
+    """A saved draft with today's wording: label, option labels and card question, values untouched."""
+    fields = [dict(f) for f in fields]
+    remotes, name = _remote_count(fields), Path(root).name
+    for field in fields:
+        known = field["field"]
+        if known not in LABELS or not isinstance(field["options"], list):
+            continue
+        current = {o["value"]: o["label"] for o in OPTIONS[known]}
+        field["label"] = LABELS[known]
+        field["ask"] = _ask(known, name, remotes)
+        field["options"] = [{**o, "label": current.get(o.get("value"), o.get("label"))}
+                            if isinstance(o, dict) else o for o in field["options"]]
+    return fields
+
+
 def open_fields(fields: Iterable[Mapping]) -> list[dict]:
     return [dict(f) for f in fields
             if (f["value"] is None and f["field"] in ASKED) or f["reason"] is not None]
@@ -406,13 +498,46 @@ def _display(field: Mapping, fields: Iterable[Mapping]) -> str:
     return str(value)
 
 
+def placeholder(field: str) -> str | None:
+    """The words a typed card's empty box shows, None for a field that is not typed."""
+    return PLACEHOLDERS[field] if TEXT[field] else None
+
+
+def _more(fields: list[dict]) -> list[dict]:
+    still_open = {f["field"] for f in open_fields(fields)}
+    return [f for f in fields if f["field"] not in still_open and f["field"] not in MAIN]
+
+
+def _at_start(field: Mapping) -> bool:
+    return field["value"] == STARTS.get(field["field"])
+
+
+def _line(field: Mapping, fields: list[dict]) -> str:
+    if field["field"] not in MAIN and _at_start(field):
+        return REST_WORDS[field["field"]]
+    return f"{field['label']}: {_display(field, fields)} ({SOURCES.get(field['source'], '')})"
+
+
 def shown(fields: Iterable[Mapping]) -> list[dict]:
     fields = list(fields)
     still_open = {f["field"] for f in open_fields(fields)}
-    return [{"field": f["field"],
-             "line": f"{f['label']}: {_display(f, fields)} ({SOURCES.get(f['source'], '')})",
-             "value": f["value"], "options": copy.deepcopy(f["options"]), "text": f["text"]}
+    return [{"field": f["field"], "line": _line(f, fields), "value": f["value"],
+             "options": copy.deepcopy(f["options"]), "text": f["text"],
+             "more": f["field"] not in MAIN, "placeholder": placeholder(f["field"])}
             for f in fields if f["field"] not in still_open]
+
+
+def more_line(fields: Iterable[Mapping]) -> str | None:
+    """The counted line for the shown settings outside `MAIN`, None when there are none."""
+    more = _more(list(fields))
+    count, set_by_you = len(more), sum(1 for f in more if f["source"] != "start")
+    if not count:
+        return None
+    if set_by_you == 0:
+        return ("and 1 more setting at its usual value" if count == 1
+                else f"and {count} more settings at their usual values")
+    return ("and 1 more setting, set by you" if count == 1
+            else f"and {count} more settings, {set_by_you} of them set by you")
 
 
 # --------------------------------------------------------------------------

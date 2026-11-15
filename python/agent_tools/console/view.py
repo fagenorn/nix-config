@@ -177,11 +177,12 @@ The top-level `registration` member (#1052, ADR-console-028, #1053, ADR-console-
 `register.view_entry` gives, copied, from the `registration` argument, and null when none is given:
 `{"root", "name", "project_id", "status": "running" | "done", "result", "outcome", "headline",
 "lines", "note", "at", "plan_id", "state", "questions", "refusal", "line", "refused", "draft",
-"adoption", "approve"}`, the owner's latest registration of a repository from the page (nineteen
+"draft_more", "adoption", "approve"}`, the owner's latest registration of a repository from the page (twenty
 keys), with the plan's plain open questions and, when the plan refused the last answer, the
 refusal's text and the question it answered (`refused`, `{"id", "subject"}`); `draft` is the drafted
 contract's lines (`contract_draft.shown`, ADR-console-031) when the latest row holds a draft, else
-null. `adoption` is the approved adoption's `approve.entry` (#1054) and `approve` the action the
+null; `draft_more` is the counted line for the shown settings outside the main ones
+(`contract_draft.more_line`), null when there are none or no draft. `adoption` is the approved adoption's `approve.entry` (#1054) and `approve` the action the
 page offers (`approve`, `retry` or null); the `line` is the adoption's headline while there is one.
 
 The top-level `pin` member (#1029) is the pin note `pin.note` gives, copied, from the `pin`
@@ -235,7 +236,7 @@ entry is
     {"type": "inbox_item", "reason": "register", "key": "register/<plan id>/<index>",
      "project_id": null, "root", "name", "title": "Register <name>", "plan_id", "id", "subject",
      "headline": "<ask>", "why": "<text>" | null, "refusal": "<text>" | null,
-     "more_questions": 0, "text": <bool>,
+     "more_questions": 0, "text": <bool>, "placeholder": "<words>" | null,
      "questions": [] | [{"question": "<ask>", "options": ["<label>", ...], "chosen": null,
                          "recommended": null, "recommended_index": null}],
      "values": ["<value>", ...], "items": [], "answers": [], "answered": false,
@@ -245,7 +246,9 @@ entry is
 items; `options` are the plan's labels and `values` the values they send, in order, and nothing is
 preselected. A question the plan offers no answer to has `questions` `[]`, `values` `[]` and its
 `why`, and still counts; `text` is true for a drafted-contract question the owner answers by typing
-(a text question with no options is still an item, ADR-console-031). `refusal` is the registration's refusal on the question
+(a text question with no options is still an item, ADR-console-031) and `placeholder` is
+`contract_draft.placeholder(subject)`, the words that card's empty box shows, for a `contract-draft`
+text question and null on every other. `refusal` is the registration's refusal on the question
 `registration.refused` names and null on every other. The items are never cut and carry no `stale`
 or `read_at`. `REGISTER_SENTENCE` ("Choose an option with its number and press Enter.") says what
 the page offers; `REGISTER_TYPE_SENTENCE` ("Type the answer on its card and press Enter.") stands
@@ -436,6 +439,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
 
+from agent_tools.console import contract_draft
 from agent_tools.console.capacity import EMPTY
 from agent_tools.console.deliveries import (
     DONE as RUN_DONE,
@@ -1054,6 +1058,9 @@ def _register_entries(registration: Mapping | None) -> list[dict]:
              "refusal": (registration.get("refusal")
                          if refused == {"id": q["id"], "subject": q["subject"]} else None),
              "more_questions": 0, "text": q.get("text") is True,
+             "placeholder": (contract_draft.placeholder(q["subject"])
+                             if q["id"] == contract_draft.QUESTION_ID and q.get("text") is True
+                             else None),
              "questions": [] if not q["options"] else [{
                  "question": q["ask"], "options": [o["label"] for o in q["options"]],
                  "chosen": None, "recommended": None, "recommended_index": None}],

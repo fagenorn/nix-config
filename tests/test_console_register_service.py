@@ -961,8 +961,7 @@ class PlanAnswerRealTest(Case):
         reg = self.registered(self.repo)
         self.assertEqual(reg["questions"], [
             {"id": "candidate-class", "subject": ".claude/odd.md",
-             "ask": "What should happen to .claude/odd.md? No rule covers this agent file.\n"
-                    "This is the only thing the adoption can do with this file.",
+             "ask": "What should happen to .claude/odd.md? No rule covers this agent file.",
              "options": [{"value": "archive-history",
                           "label": "Archive it under .agents/knowledge/archive/adopted/"}],
              "recommended": None, "why": None},
@@ -984,8 +983,7 @@ class PlanAnswerRealTest(Case):
             self.assertEqual(entry["title"], f"Register {self.repo.name}")
         self.assertEqual(
             [i["headline"] for i in items],
-            ["What should happen to .claude/odd.md? No rule covers this agent file.\n"
-             "This is the only thing the adoption can do with this file.",
+            ["What should happen to .claude/odd.md? No rule covers this agent file.",
              "tools/show.sh line 1 names .claude/specs/a.md, which this plan moves. "
              "Should it follow the move?"])
         self.assertEqual(items[1]["questions"][0]["options"],
@@ -1154,7 +1152,7 @@ class DraftRealTest(DraftCase):
         self.assertEqual(question["subject"], "docs-paths")
         self.assertEqual(
             question["why"],
-            "The plan refused the documentation paths: must be a non-empty repository-relative "
+            "The plan refused the documentation: must be a non-empty repository-relative "
             "path with no '..' segment")
         self.assertIs(question["text"], True)
         text = json.dumps(self.view())

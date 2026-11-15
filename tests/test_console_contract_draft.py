@@ -66,7 +66,7 @@ def pair(fields, field):
     return record["value"], record["source"]
 
 
-class DraftTest(unittest.TestCase):
+class ContractDraftTest(unittest.TestCase):
     def setUp(self):
         self.parent = Path(tempfile.mkdtemp()).resolve()
         self.addCleanup(shutil.rmtree, self.parent, ignore_errors=True)
@@ -289,7 +289,7 @@ class DraftTest(unittest.TestCase):
         error = {"code": "adopt_failure", "repair_id": "adopt.draft.invalid",
                  "violations": [{"pointer": "/bindings/paths/architecture/0", "message": message}]}
         refused = cd.refused_field(error)
-        text = f"The plan refused the documentation paths: {message}"
+        text = f"The plan refused the documentation: {message}"
         self.assertEqual(refused, ("docs-paths", text))
         slug = {"repair_id": "adopt.draft.invalid",
                 "violations": [{"pointer": "/bindings/tracker/repo_slug", "message": "m  x"}]}
@@ -318,14 +318,74 @@ class DraftTest(unittest.TestCase):
         self.assertTrue(all(entry["field"] for entry in lines))
         order = [entry["field"] for entry in lines]
         self.assertEqual(order, [f for f in cd.FIELDS if f not in ("build-command", "test-command")])
+        self.assertEqual([e["field"] for e in lines if not e["more"]],
+                         ["project-id", "project-name", "default-branch", "tracker", "docs-paths"])
+        for entry in lines:
+            self.assertEqual(set(entry),
+                             {"field", "line", "value", "options", "text", "more", "placeholder"})
         texts = [entry["line"] for entry in lines]
         for line in (
             f"project id: {ID} (read from its remote)",
-            "integration branch: the same as the default branch (the console's starting value)",
             f"issue tracker: GitHub, as {ID} (read from its remote)",
-            "release profile: unsupported (the console's starting value)",
+            "finished work merges into the default branch",
+            "work branches are named after their issue",
+            "it makes no releases",
         ):
             self.assertIn(line, texts)
+
+    def test_no_shown_line_uses_an_internal_term(self):
+        root, fields = self.remote_fields()
+        shown = cd.shown(fields)
+        words = [entry["line"] for entry in shown]
+        words += [option["label"] for entry in shown for option in entry["options"]]
+        words.append(cd.more_line(fields))
+        words += list(cd.LABELS.values())
+        for text in words:
+            for term in ("<num>", "<slug>", "light lane", "hint", "operations path",
+                         "rejection path", "the console's starting value"):
+                self.assertNotIn(term, text.lower())
+        (light,) = [e for e in shown if e["field"] == "light-lane"]
+        self.assertEqual([o["label"] for o in light["options"]],
+                         ["Every change takes the full delivery route"])
+
+    def test_the_counted_line_says_how_many_and_whether_you_changed_any(self):
+        root, fields = self.remote_fields()
+        count = len([f for f in cd.FIELDS if f not in cd.MAIN])
+        self.assertEqual(count, 22)
+        self.assertEqual(cd.more_line(fields), f"and {count} more settings at their usual values")
+        new, _ = cd.set_value(fields, "max-parallel", "2", entries=[], root=root)
+        self.assertEqual(cd.more_line(new), f"and {count} more settings, 1 of them set by you")
+        (line,) = [e["line"] for e in cd.shown(new) if e["field"] == "max-parallel"]
+        self.assertEqual(line, "deliveries at once: 2 (set by you)")
+
+    def test_every_text_field_has_a_placeholder(self):
+        root, fields = self.remote_fields()
+        for field in cd.FIELDS:
+            if cd.TEXT[field]:
+                self.assertTrue(isinstance(cd.placeholder(field), str) and cd.placeholder(field))
+            else:
+                self.assertIsNone(cd.placeholder(field))
+        self.assertEqual([f for f in cd.FIELDS if cd.placeholder(f) is None],
+                         ["commit-signed", "co-authored-by", "delete-branch", "tracker"])
+        self.assertEqual(cd.placeholder("project-id"), "owner/name")
+        self.assertEqual(cd.placeholder("build-command"), "the build command")
+        self.assertEqual(cd.placeholder("test-command"), "the test command")
+        for entry in cd.shown(fields):
+            self.assertEqual(entry["placeholder"], cd.placeholder(entry["field"]))
+
+    def test_the_default_branch_ask_follows_the_remote_count(self):
+        def ask(remotes):
+            reading = {"remotes": remotes, "default_branch": None, "branches": ["trunk"],
+                       "files": [], "texts": {}}
+            return by_field(cd.draft("/x/sample-app", reading))["default-branch"]["ask"]
+        none = ask([])
+        self.assertTrue(none.endswith(
+            "It has no remote, so the console cannot tell: choose a branch or type its name."))
+        self.assertNotIn("Its remote", none)
+        two = ask([("a", "git@github.com:o/a.git"), ("b", "git@github.com:o/b.git")])
+        self.assertIn("It has 2 remotes, so the console cannot tell which one to ask", two)
+        one = ask([("origin", "git@github.com:sample-owner/sample-app.git")])
+        self.assertIn("Its remote did not say", one)
 
     def test_reading_never_raises_or_writes(self):
         plain = self.parent / "plain"

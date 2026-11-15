@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from agent_tools.claims import forge_markers as fm
 from agent_tools.claims import forge_owner_action as foa
 from agent_tools.console import digest
+from agent_tools.console import contract_draft
 from agent_tools.console import folder_trust, inbox, register
 from agent_tools.console import view
 from agent_tools.console.deliveries import (
@@ -2049,7 +2050,7 @@ def register_item(index, ask):
             "refusal": None, "more_questions": 0,
             "questions": [{"question": ask["ask"], "options": [o["label"] for o in ask["options"]],
                            "chosen": None, "recommended": None, "recommended_index": None}],
-            "text": False, "values": [o["value"] for o in ask["options"]],
+            "text": False, "placeholder": None, "values": [o["value"] for o in ask["options"]],
             "items": [], "answers": [], "answered": False,
             "waiting_since": "2026-11-15T08:00:00+00:00"}
 
@@ -2078,6 +2079,39 @@ class RegisterItemViewTest(unittest.TestCase):
         self.assertEqual(shown["statement"]["inbox_items"], 1)
         self.assertEqual(shown["statement"]["sentence"], "Type the answer on its card and press Enter.")
         self.assertEqual(shown["statement"]["sentence"], view.REGISTER_TYPE_SENTENCE)
+
+    def test_no_drafted_value_line_uses_an_internal_term(self):
+        reading = {"remotes": [("origin", "git@github.com:sample-owner/sample-app.git")],
+                   "default_branch": "trunk", "branches": ["trunk"],
+                   "files": ["README.md", "justfile"],
+                   "texts": {"justfile": "build:\n\ttrue\ntest:\n\ttrue\n"}}
+        fields = contract_draft.draft("/x/sample-app", reading)
+        row = register.drafting("/x/sample-app", fields)
+        shown = derive_view([], registration=register.view_entry(
+            None, {**row, "at": "2026-11-15T08:00:00+00:00"}))
+        entries = shown["registration"]["draft"]
+        texts = ([e["line"] for e in entries] + [o["label"] for e in entries for o in e["options"]]
+                 + [shown["registration"]["draft_more"]])
+        self.assertEqual(len(entries), 29)
+        for text in texts:
+            for term in ("<num>", "<slug>", "light lane", "hint", "operations path",
+                         "rejection path"):
+                self.assertNotIn(term, text.lower())
+        self.assertEqual(
+            shown["registration"]["draft_more"],
+            f"and {len(contract_draft.FIELDS) - len(contract_draft.MAIN)} more settings at "
+            "their usual values")
+        self.assertEqual(shown["registration"]["draft_more"],
+                         "and 22 more settings at their usual values")
+
+    def test_a_text_card_carries_the_placeholder_of_its_field(self):
+        ask = {"id": "contract-draft", "subject": "project-id",
+               "ask": "Which project is this repository?", "options": [],
+               "recommended": None, "why": None, "text": True}
+        shown = derive_view([], registration=reg([ask, ASK_A]))
+        first, second = shown["inbox"]["open"]
+        self.assertEqual(first["placeholder"], "owner/name")
+        self.assertIsNone(second["placeholder"])
 
     def test_the_registration_carries_its_draft_lines(self):
         lines = [{"field": "project-id", "line": "Project id: o/r (read from the remote)",
