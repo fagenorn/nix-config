@@ -24,7 +24,7 @@ git log origin/<default>..origin/<integration> --first-parent --merges \
 
 Split fields on `%x1f`, records on `%x1e`.
 
-Single-branch (`<integration> == <default>`): the range is `<prev-tag>..origin/<default>` and `--merges` is dropped, since direct commits are the release units. Write the tag that `git describe --tags --abbrev=0 origin/<default>` prints into the command; a shell variable does not survive to a later call. With no tag yet that command exits non-zero and prints nothing, and the range is `origin/<default>`.
+Single-branch (`<integration> == <default>`): the range is `<prev-tag>..origin/<default>` and `--merges` is dropped, since direct commits are the release units. `<prev-tag>` is Phase 0's; with no tag yet the range is `origin/<default>`.
 
 For each merge, resolve the PR only when `capabilities.tracker` permits it:
 
@@ -33,7 +33,7 @@ ${GH_PREFIX}gh pr list --search "<merge-sha>" --state merged \
   --json number,title,url,labels,body -q '.[0]'
 ```
 
-An empty result means no PR: note it, keep the merge and use a commit URL. Read the PR body: it carries the intent.
+An empty result means no PR: note it, keep the merge and use a commit URL.
 
 ## Step 2 — Categorise each merge
 
@@ -48,7 +48,6 @@ Walk the table in order; stop at the first match.
 | Does it fix a defect or restore expected behaviour? | **Fixes** |
 | Is it operator-invisible — pure refactor, test hardening, internal docs, dependency bump? | **Internal** |
 
-- Five highlights means you're padding; demote to Features/Improvements.
 - A merge appears in two buckets only when one of them is Deploy notes. Otherwise pick the primary operator impact.
 - "Decommission X" / "retire Y" / "remove Z" is usually Deploy notes, even when the user-visible message is just "fewer endpoints".
 - ADR commits and spec/plan docs are Internal, unless they encode a behaviour change operators need; then categorise by the behaviour.
@@ -61,7 +60,6 @@ Walk the table in order; stop at the first match.
 | Bad | Good |
 |---|---|
 | `c7d3002a merge: <slug> — <terse desc> (issue-N → <integration>)` | `<What changed, in the words an operator would search for> — <the consequence they'd notice> ([#N](https://github.com/<passed-repo-slug>/pull/N))` |
-| `Various fixes and improvements` | (delete; if you're tempted to write this, you haven't read enough merges yet) |
 
 - Lead with the change, not the issue number; no SHA — the PR link is enough.
 - Link the PR inline with the **full URL**, never a bare `#N`.

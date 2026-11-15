@@ -46,7 +46,11 @@ The transaction verbs each take `[--profile P] [--repo-root R]`; `preview` and `
 `[--commit C --version V --title T --notes-file F]`, and `run` takes `--confirm TOKEN` once per
 token. The four candidate flags are all absent (no candidate) or all present: some absent
 refuses `candidate_required` naming them, and a notes file that cannot be read as UTF-8 refuses
-`candidate_invalid`. The candidate is `{version, commit, title, notes}`. A driver refusal prints
+`candidate_invalid`. The candidate is `{version, commit, title, notes}`. `preview` and `run`
+also take `--dispose no_recovery_path --reference TEXT` with no candidate, which previews or
+runs the manual disposition of a release parked after an effect (issue 1050; the contract is
+`release_driver`'s Dispose paragraph); `--reference` without `--dispose`, or a candidate beside
+it, refuses `dispose_invalid`. A driver refusal prints
 `{"error": {"code", "repair_id", "detail"}}` (`repair_id` null where none is named) and exits 3;
 a resolver refusal is untouched with exit 2, and any other failure keeps the `release`
 command's `resolver_failure` envelope (D18).
@@ -289,6 +293,14 @@ def command_transaction(args: argparse.Namespace) -> int:
     if args.action == "abandon":
         return emit_json(driver.abandon())
     candidate = _candidate(args)
+    if args.dispose is not None or args.reference is not None:
+        if args.dispose is None or candidate is not None:
+            raise Refusal("dispose_invalid", "--reference belongs to --dispose, which takes no "
+                          "candidate")
+        reference = args.reference or ""
+        if args.action == "run":
+            return emit_json(driver.dispose(args.dispose, reference, args.confirm))
+        return emit_json(driver.preview_dispose(args.dispose, reference))
     if args.action == "run":
         return emit_json(driver.run(candidate, args.confirm))
     document = driver.preview(candidate)
@@ -311,6 +323,10 @@ def _transaction_parser(areas: Any) -> None:
             verb.add_argument("--version", help="the version, which is the tag")
             verb.add_argument("--title", help="the release title")
             verb.add_argument("--notes-file", help="a UTF-8 file holding the release notes")
+            verb.add_argument("--dispose", metavar="GROUND",
+                              help="close the release parked after an effect as failed; the "
+                                   "ground is no_recovery_path")
+            verb.add_argument("--reference", help="with --dispose: why it can never finish")
         if name == "run":
             verb.add_argument("--confirm", action="append", default=[], metavar="TOKEN",
                               help="a confirmation token from preview; repeat per token")

@@ -164,11 +164,39 @@ Abandon (D14). `abandon` acquires custody and advances the current nonterminal r
 With no nonterminal release it refuses `no_release`, and it refuses `abandon_refused` when the
 core does, which it does once any action had an effect. It releases custody on that refusal.
 
+Dispose (issue 1050, ADR-release-012). A release parked after an effect whose remaining
+actions can never be satisfied is closed by the core's manual disposition, ground
+`no_recovery_path`; `abandon` is refused there and a resume cannot finish. `preview_dispose`
+reads only, calls no adapter and prints `{schema_version, mode: "dispose", profile,
+transaction_id, ordinal, state, parked_from, reason, candidate, disposition: {ground,
+reference}, actions, confirmations, runnable, refusal}` with one confirmation, `{action:
+"dispose", ground, version, commit, token}`. The token is `dispose:<first 12 hex of
+telemetry_digest({dispose: transaction id, ground, reference, acquisition: next acquisition
+ordinal})>`, so it differs from every action token and a re-acquisition, another ground or
+another reference yields a new one. Both verbs refuse, before any write: `ground_unsupported`
+for any ground but `no_recovery_path` (`successor_succeeded` needs `roll_forward`, which the
+driver does not expose), `reference_required` for a blank reference, `no_release` with no
+nonterminal release, `not_parked` outside `attention_required`, `no_effect` when no action had
+an effect (abandon instead) and `profile_drift` as a resume does. `dispose` then refuses
+`confirmation_stale` for any token but the previewed one and `confirmation_required` for none,
+acquires custody, inspects every declared action again under the held fence, issues one grant
+named by the token (actor `operator`, kind `human`, authority class `release`, the
+transaction's) and calls `dispose_failed` with `{ground, reference, occurred_at: null,
+successor: null, units: []}`. A core refusal (an action `in_progress` or `unknown` after the
+inspection is `effect_uncertain`; a grant that is not a human's at the class is
+`human_required` or `authority_class_mismatch`) gives custody up and refuses `dispose_refused`
+with the core's reason first in the detail. The result is the `run` document with `next`
+`disposed`, state `failed` and the sealed `receipt_digest`, plus `disposition`; it makes no
+lock or sync call. The version stays reserved, and the next new release takes the next
+ordinal. A candidate refused `release_in_flight` by a release parked after an effect is told
+the dispose command form.
+
 Status (D3, D25). `status` reads only and prints `{schema_version, profile, shape, legacy,
 release}`; `release` is null with no transaction and otherwise `{transaction_id, ordinal,
-state, parked_from, reason, version, commit, actions, grants, evidence_ids, terminal, receipt,
-hazard_markers}`. `reason` is the latest transition's reason when the state is
-`attention_required`, an `actions` entry is `{name, phase, operation, effect, status, attempts,
+state, parked_from, reason, disposition, version, commit, actions, grants, evidence_ids,
+terminal, receipt, hazard_markers}`. `reason` is the latest transition's reason when the state is
+`attention_required`, `disposition` is `{ground, reference, qualifier, grant_id}` of a disposed
+release and else null, an `actions` entry is `{name, phase, operation, effect, status, attempts,
 reference}`, a grant is `{grant_id, authority_class, valid}`, and `terminal` and `receipt` are
 the core's views, null until terminal. Legacy state is classified by `release_cutover`.
 """
@@ -186,8 +214,10 @@ from agent_tools.release import (release_adapter, release_cutover, release_lock,
                                  release_profile, release_sync, release_verification)
 from agent_tools.canonical import telemetry_digest
 from agent_tools.release.transaction_core import (
-    CreationConflict, GrantInvalid, InvocationRefused, LeaseUnavailable, ProofRefused,
+    CreationConflict, DispositionRefused, GrantInvalid, InvocationRefused, LeaseUnavailable, ProofRefused,
     TransactionBusy, TransactionError, TransactionStore)
+from agent_tools.release.transaction_disposition import FAILURE_REASON
+from agent_tools.release.transaction_recovery import no_effect
 from agent_tools.release.transaction_history import TERMINALS, Custody, Transaction
 from agent_tools.release.transaction_storage import lstat_mode, parse_at
 
@@ -203,6 +233,9 @@ SCOPE_AUTHORITY = "release-scope"
 OPERATOR = "operator"
 ACTIVATION_NOT_APPLICABLE = "activation-not-applicable"
 ABANDON_REASON = "abandoned by operator"
+DISPOSE_ACTION = "dispose"
+DISPOSE_GROUND = "no_recovery_path"
+DISPOSE_ACTOR_KIND = "human"
 ABSENT_RECOVERY = {
     "deployment_absent": ("; nothing deployed the release commit: redeploy {name} from source at "
                           "that commit, then run the release again to resume it"),
@@ -242,6 +275,12 @@ def creation_key(project_id: str, profile_id: str, ordinal: int) -> str:
 def token(plan_digest: str, action: str, attempt: int, acquisition: int) -> str:
     digest = telemetry_digest([plan_digest, action, attempt, acquisition])
     return f"{action}:{digest.removeprefix('sha256:')[:12]}"
+
+
+def dispose_token(transaction_id: str, ground: str, reference: str, acquisition: int) -> str:
+    digest = telemetry_digest({"dispose": transaction_id, "ground": ground,
+                               "reference": reference, "acquisition": acquisition})
+    return f"{DISPOSE_ACTION}:{digest.removeprefix('sha256:')[:12]}"
 
 
 def main_checkout(repo_root: Path) -> Path:
@@ -307,6 +346,14 @@ def _view(transaction: Transaction | None, name: str) -> Mapping[str, Any] | Non
     if transaction is None:
         return None
     return next((view for view in transaction.actions if view["name"] == name), None)
+
+
+def _parked_reason(transaction: Transaction) -> str | None:
+    """The latest transition's reason of a parked release, else None."""
+    if transaction.state != "attention_required":
+        return None
+    return next(event["reason"] for event in reversed(transaction.events)
+                if event["type"] == "transitioned")
 
 
 @dataclass(frozen=True)
@@ -468,18 +515,27 @@ class Driver:
                      transaction: Transaction) -> "_Plan":
         stored = _candidate(transaction)
         if candidate is not None:
-            raise Refusal("release_in_flight", f"{stored['version']} is in flight as "
-                          f"{transaction.transaction_id}; resume it with no candidate")
-        if transaction.subject["profile_digest"] != self.compiled["digest"]:
-            raise Refusal("profile_drift", f"{transaction.transaction_id} was created under "
-                          f"profile digest {transaction.subject['profile_digest']}, not the "
-                          f"current {self.compiled['digest']}: restore that profile or "
-                          "abandon the release")
+            detail = (f"{stored['version']} is in flight as {transaction.transaction_id}; "
+                      "resume it with no candidate")
+            if transaction.state == "attention_required" and not no_effect(transaction.events):
+                detail += ("; it is parked after an effect, so if it can never finish, dispose "
+                           f"it: release transaction preview --repo-root {self.project.root} "
+                           f'--dispose {DISPOSE_GROUND} --reference "<why>", then release '
+                           "transaction run with the same arguments and --confirm <token>")
+            raise Refusal("release_in_flight", detail)
+        self._require_profile(transaction)
         plan_digest = telemetry_digest({
             "transaction_id": transaction.transaction_id,
             "proof_plan_digest": transaction.events[0]["proof_plan_digest"]})
         document = self._document("resume", plan_digest, stored, None, transaction, None)
         return _Plan("resume", document, None, plan_digest, stored, ordinal, transaction, None)
+
+    def _require_profile(self, transaction: Transaction) -> None:
+        if transaction.subject["profile_digest"] != self.compiled["digest"]:
+            raise Refusal("profile_drift", f"{transaction.transaction_id} was created under "
+                          f"profile digest {transaction.subject['profile_digest']}, not the "
+                          f"current {self.compiled['digest']}: restore that profile or "
+                          "abandon the release")
 
     def _observe(self, candidate: Mapping[str, Any]) -> dict[str, Any]:
         return release_verification.observe(
@@ -694,6 +750,79 @@ class Driver:
                                         abandoned.subject["candidate"]["commit"])
         return result
 
+    def preview_dispose(self, ground: str, reference: str) -> dict[str, Any]:
+        return self._dispose_plan(ground, reference)[1]
+
+    def _dispose_plan(self, ground: str, reference: str) -> tuple[Transaction, dict[str, Any]]:
+        """The parked release a disposition would close and its preview document, from stored
+        state alone (issue 1050); every refusal comes before any write or adapter call."""
+        if ground != DISPOSE_GROUND:
+            raise Refusal("ground_unsupported", f"the driver disposes only with ground "
+                          f"{DISPOSE_GROUND}, not {ground!r}")
+        if not reference.strip():
+            raise Refusal("reference_required", "a disposition needs --reference saying why "
+                          "the release can never finish")
+        current = self.current()
+        if current is None or current[1].state in TERMINALS:
+            raise Refusal("no_release", "no release is in flight")
+        ordinal, transaction = current
+        if transaction.state != "attention_required":
+            raise Refusal("not_parked", f"{transaction.transaction_id} is {transaction.state}, "
+                          "not attention_required: resume it with no candidate")
+        if no_effect(transaction.events):
+            raise Refusal("no_effect", f"no action of {transaction.transaction_id} had an "
+                          "effect: abandon it instead")
+        self._require_profile(transaction)
+        stored = _candidate(transaction)
+        document = {
+            "schema_version": SCHEMA_VERSION, "mode": "dispose",
+            "profile": {"id": self.profile_id, "digest": self.compiled["digest"]},
+            "transaction_id": transaction.transaction_id, "ordinal": ordinal,
+            "state": transaction.state, "parked_from": transaction.parked_from,
+            "reason": _parked_reason(transaction), "candidate": stored,
+            "disposition": {"ground": ground, "reference": reference},
+            "actions": self._actions(transaction),
+            "confirmations": [{
+                "action": DISPOSE_ACTION, "ground": ground, "version": stored["version"],
+                "commit": stored["commit"],
+                "token": dispose_token(transaction.transaction_id, ground, reference,
+                                       _next_acquisition(transaction))}],
+            "runnable": True, "refusal": None}
+        return transaction, document
+
+    def dispose(self, ground: str, reference: str,
+                confirmations: Sequence[str]) -> dict[str, Any]:
+        """Close the parked release as `failed` under the previewed token (issue 1050)."""
+        transaction, document = self._dispose_plan(ground, reference)
+        expected = document["confirmations"][0]["token"]
+        supplied = list(dict.fromkeys(confirmations))
+        stale = [given for given in supplied if given != expected]
+        if stale:
+            raise Refusal("confirmation_stale", "not the confirmation of this disposition: "
+                          + ", ".join(stale))
+        if not supplied:
+            raise Refusal("confirmation_required", "confirm: " + DISPOSE_ACTION)
+        store, router = self.store(), self._router()
+        custody, held = self._acquire(store, transaction)
+        try:
+            for unit in held.proof_plan["units"]:
+                if _view(held, unit["name"]) is not None:
+                    store.renew(custody)
+                    store.inspect_action(
+                        custody, name=unit["name"], effect=router,
+                        parameters=release_profile.thaw(unit["parameters"]))
+            store.issue_grant(custody, grant_id=expected, actor=OPERATOR,
+                              actor_kind=DISPOSE_ACTOR_KIND, authority_class=AUTHORITY_CLASS)
+            disposed = store.dispose_failed(custody, grant_id=expected, disposition={
+                "ground": ground, "reference": reference, "occurred_at": None,
+                "successor": None, "units": []})
+        except (DispositionRefused, InvocationRefused) as refused:
+            store.release(custody)
+            raise Refusal("dispose_refused", f"{refused.reason}: {refused}"[
+                :REFUSAL_DETAIL_LIMIT]) from refused
+        return {**self._result(disposed, "disposed"),
+                "disposition": {"ground": ground, "reference": reference}, "legacy": None}
+
     def status(self) -> dict[str, Any]:
         shape = self.shape_refusal()
         found = self.transactions()
@@ -707,15 +836,16 @@ class Driver:
         store = self.store()
         candidate = _candidate(transaction)
         events = transaction.events
-        reason = None
-        if transaction.state == "attention_required":
-            reason = next(event["reason"] for event in reversed(events)
-                          if event["type"] == "transitioned")
+        disposed = next((event for event in reversed(events)
+                         if event["type"] == FAILURE_REASON), None)
         terminal = transaction.terminal
         return {
             "transaction_id": transaction.transaction_id, "ordinal": ordinal,
             "state": transaction.state, "parked_from": transaction.parked_from,
-            "reason": reason, "version": candidate["version"], "commit": candidate["commit"],
+            "reason": _parked_reason(transaction),
+            "disposition": None if disposed is None else {
+                key: disposed[key] for key in ("ground", "reference", "qualifier", "grant_id")},
+            "version": candidate["version"], "commit": candidate["commit"],
             "actions": [self._action_status(events, transaction, action)
                         for action in self._actions(transaction)],
             "grants": [{"grant_id": grant["grant_id"],
