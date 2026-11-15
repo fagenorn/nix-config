@@ -28,6 +28,10 @@ Event kinds read:
   speaks when `ok` and `resumed` are exactly true, the event's project is a str and its `sprint_id`
   names a sprint of the fold before the row; the sentence's title is that sprint's (the row carries
   none). Any other `sprint.nudged` row says nothing.
+- `adoption.registration` (`event_log.ADOPTION_REGISTRATION`, `approve.py`, #1055): a merged
+  adoption's registration. It speaks only when the payload is a dict whose `result` is exactly
+  `registered` and whose `project_id` is a non-empty string; a `waiting` or `refused` row says
+  nothing.
 - `manager.no_progress`, `sprint.continued` (`event_log.MANAGER_NO_PROGRESS`, `SPRINT_CONTINUED`):
   say nothing; the inbox item speaks.
 - `sprint.reported` (`event_log.SPRINT_REPORTED`, `sprints.py`): a manager's report of its sprint.
@@ -88,6 +92,7 @@ withdrawal removes the sprint).
     manager_restarted The manager of <title> was restarted
     manager_takeover A new manager took over <title>
     quota_resumed    <title> resumed after the quota reset
+    project_registered <project_id> was registered.
 
 An inbox payload needs `project_id` (str), `issue` (int, not bool) and
 `question` (str). A withdrawal needs the event's project (str) and a payload `goal` (str); it
@@ -123,8 +128,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 from agent_tools.console.event_log import (
-    BRIEF_APPROVED, BRIEF_SENT, GOAL_WITHDRAWN, MANAGER_NUDGED, MANAGER_STARTED, MANAGER_WOKEN,
-    QUESTION_ANSWERED, SPRINT_CLOSED, SPRINT_NUDGED, SPRINT_REPORTED, Event)
+    ADOPTION_REGISTRATION, BRIEF_APPROVED, BRIEF_SENT, GOAL_WITHDRAWN, MANAGER_NUDGED,
+    MANAGER_STARTED, MANAGER_WOKEN, QUESTION_ANSWERED, SPRINT_CLOSED, SPRINT_NUDGED, SPRINT_REPORTED, Event)
 from agent_tools.console.sessions import (
     ENDED, GONE, HOOK, LIMIT, SEEN, WORKING, SessionState, session_states)
 from agent_tools.console.sprints import (
@@ -152,6 +157,7 @@ SPRINT_DONE_MOMENT = "sprint_done"
 MANAGER_RESTARTED = "manager_restarted"
 MANAGER_TAKEOVER = "manager_takeover"
 QUOTA_RESUMED = "quota_resumed"
+PROJECT_REGISTERED = "project_registered"
 
 
 @dataclass(frozen=True)
@@ -355,6 +361,11 @@ def moments(
             said = _manager_moment(event, folded)
         elif event.kind == SPRINT_NUDGED:
             said = _resumed_moment(event, previous)
+        elif event.kind == ADOPTION_REGISTRATION:
+            project_id = payload.get("project_id") if isinstance(payload, dict) else None
+            if (isinstance(payload, dict) and payload.get("result") == "registered"
+                    and isinstance(project_id, str) and project_id != ""):
+                said = (PROJECT_REGISTERED, f"{project_id} was registered.")
         elif event.kind == GOAL_WITHDRAWN:
             goal = payload.get("goal") if isinstance(payload, dict) else None
             if isinstance(event.project, str) and isinstance(goal, str):

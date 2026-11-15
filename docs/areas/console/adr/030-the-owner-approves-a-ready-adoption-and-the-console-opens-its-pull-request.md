@@ -1,6 +1,6 @@
 # ADR-console-030 — The owner approves a ready adoption on the page and the console opens its pull request
 
-- **Status:** accepted
+- **Status:** accepted; amended by ADR-console-028 D10
 - **Decided in:** #1054
 
 ## Context
@@ -15,7 +15,7 @@ ADR-console-029 takes a plan to `ready` on the page and then leaves applying it 
 2. `a registration is already running for <name>` (a registration, an answer or an approval run is under way);
 3. `that plan is no longer the one shown; approve the plan shown now` (the latest row has no plan id, or another one);
 4. `only a ready plan can be approved`;
-5. `the pull request of this plan is already open` (its pull request is open or ready), or `the pull request of this plan was already merged; register the repository again` (D7).
+5. `the pull request of this plan is already open` (its pull request is open or ready), or `the pull request of this plan was already merged` (D7).
 
 Success is an empty `204` once the run is dispatched. Each refusal is also one stderr line `console: plan_approve_refused <reason>`.
 
@@ -36,7 +36,7 @@ Success is an empty `204` once the run is dispatched. Each refusal is also one s
 
 **D6. The pull request's state and the inbox item.** A poll reads each opened adoption's pull request every 120 seconds (`ADOPTION_SECONDS`), whatever project activity, outside the ingest lock, and appends a row only when the state changes. A pull request is ready to merge when it is open, not merged, and its `mergeable_state` is `clean`, `unstable` or `has_hooks`. `unstable` counts as ready because GitHub answers it for a pull request that can be merged while a check that is not required is pending or failing: this repository requires only `Nix Eval`, `Agent Workflow Tests` and `Instruction Budget`, so the pull request reads `unstable` while `Flake Checker` runs. `blocked` (a required check or review is missing), `behind`, `dirty`, `unknown` and `draft` are not ready. A ready pull request is one inbox item of reason `adoption`, keyed `adoption/<plan id>`, headed `The adoption of <project> is ready to merge`, carrying its link and number. It counts in the inbox total and the headline, sits after the sign-in entries and before the questions, and the sentence is `Open the pull request to merge the adoption.` It is gone once the pull request is merged, closed or reads open again.
 
-**D7. A closed or merged adoption.** A plan id is fixed by the repository's inputs and its answers, so registering an unchanged checkout again gives back the same plan. Approve is refused only while the pull request is open or ready, or once it is merged. A closed one is approved again as a fresh apply, and its note names the branch to delete in the checkout and on origin first, because apply cannot create a branch that still exists. A merged one's note says to bring the checkout up to date with the integration branch before registering again.
+**D7. A closed or merged adoption.** A plan id is fixed by the repository's inputs and its answers, so registering an unchanged checkout again gives back the same plan. Approve is refused only while the pull request is open or ready, or once it is merged. A closed one is approved again as a fresh apply, and its note names the branch to delete in the checkout and on origin first, because apply cannot create a branch that still exists. A merged one is registered by the console (ADR-console-028 D10).
 
 **D8. Shutdown.** Every child and every `gh` call runs in its own process group with the console's stop event as `cancel`. The run checks the stop event between stages, a cancelled call ends the run with no row, and `close` joins the approval worker, so the next Try again resumes from the last row.
 

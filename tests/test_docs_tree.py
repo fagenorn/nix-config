@@ -433,6 +433,24 @@ class DocsTreeTest(unittest.TestCase):
                  "ADR-console-030")):
             self.assertIn(needle, self.doc(older))
         self.assertIn("**Approved adoption**", self.doc("docs/areas/console/CONTEXT.md"))
+
+    def test_the_merged_adoption_registration_decision_is_recorded(self):
+        adr = self.doc("docs/areas/console/adr/028-the-owner-registers-a-project-from-the-page.md")
+        approval = self.doc(
+            "docs/areas/console/adr/"
+            "030-the-owner-approves-a-ready-adoption-and-the-console-opens-its-pull-request.md")
+        writes = self.doc(
+            "docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md")
+        context = self.doc("docs/areas/console/CONTEXT.md")
+        for needle in ("**D10.", "**D11.", "#1055", "POST /api/adoption-register",
+                       "bad registration retry", "that registration is not waiting for a retry",
+                       "adoption.registration", "not_integrated", "ADR-project-contract-005",
+                       "Retry", "was registered.", "ADR-console-029", "ADR-console-030", "#1066"):
+            self.assertIn(needle, adr)
+        self.assertIn("ADR-console-028 D10", approval)
+        self.assertNotIn("already merged; register the repository again", approval)
+        self.assertIn("POST /api/adoption-register", writes)
+        self.assertIn("**Merged adoption**:", context)
         self.assertIn("| Approved adoption | Console |", self.doc("docs/CONTEXT-MAP.md"))
 
     def test_the_console_profile_choice_decision_is_recorded(self):
@@ -595,7 +613,7 @@ class DocsTreeTest(unittest.TestCase):
                 (adr008, "- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
                          "ADR-console-028, ADR-console-029, ADR-console-030"),
                 (adr028, "- **Status:** accepted; amended by ADR-console-029, "
-                         "ADR-console-030, ADR-console-031")):
+                         "ADR-console-030, ADR-console-031; extended by #1055 (D10, D11)")):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
                         if row.startswith("- **Status:**"))
             self.assertEqual(line, expected)
@@ -626,7 +644,7 @@ class DocsTreeTest(unittest.TestCase):
         for older, expected in (
                 ("docs/areas/console/adr/028-the-owner-registers-a-project-from-the-page.md",
                  "- **Status:** accepted; amended by ADR-console-029, ADR-console-030, "
-                 "ADR-console-031"),
+                 "ADR-console-031; extended by #1055 (D10, D11)"),
                 ("docs/areas/console/adr/"
                  "029-the-owner-answers-the-adoptions-questions-on-the-page.md",
                  "- **Status:** accepted; amended by ADR-console-030, ADR-console-031"),

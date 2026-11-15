@@ -2121,3 +2121,44 @@ class RegisterItemViewTest(unittest.TestCase):
         self.assertEqual(sentence(reg([ASK_A])), REGISTER_SENTENCE)
         self.assertEqual(sentence(reg([ASK_A]), self.decision()), REGISTER_SENTENCE)
         self.assertEqual(sentence(reg([ASK_WHY]), self.decision()), CHOOSE_SENTENCE)
+
+
+RETRY_AT = "2026-11-15T09:00:00+00:00"
+RETRY_ITEM = {
+    "type": "inbox_item", "reason": "register_retry", "key": f"register-retry/{PID}/{RETRY_AT}",
+    "project_id": None, "root": "/srv/sample-app", "name": "sample-app",
+    "title": "Register sample-app", "plan_id": PID, "id": None, "subject": None,
+    "headline": "sample-app was not registered: the repository has no origin remote.",
+    "why": "Add the repository's origin remote, then choose Retry.",
+    "refusal": None, "more_questions": 0,
+    "questions": [{"question": "sample-app was not registered: the repository has no origin "
+                               "remote.", "options": ["Retry"], "chosen": None,
+                   "recommended": None, "recommended_index": None}],
+    "values": ["retry"], "items": [], "answers": [], "answered": False,
+    "waiting_since": RETRY_AT}
+
+
+class RetryItemViewTest(unittest.TestCase):
+    def test_a_retry_item_is_one_counted_entry_before_plan_questions_and_tracker_items(self):
+        shown = derive_view([state("p", 1)], RegisterItemViewTest.decision(self),
+                            registration=reg([ASK_A]), retry_items=[RETRY_ITEM])
+        self.assertEqual([e["key"] for e in shown["inbox"]["open"]],
+                         [RETRY_ITEM["key"], f"register/{PID}/0", "k1"])
+        self.assertEqual(shown["statement"]["inbox_items"], 3)
+        self.assertEqual(shown["statement"]["headline"], "3 things need you")
+        first = shown["inbox"]["open"][0]
+        self.assertEqual(first, RETRY_ITEM)
+        self.assertIsNot(first, RETRY_ITEM)
+
+    def test_a_retry_item_sets_the_register_sentence(self):
+        records = RegisterItemViewTest.decision(self)
+        without = derive_view([state("p", 1)], records)
+        self.assertEqual(without["statement"]["sentence"], CHOOSE_SENTENCE)
+        shown = derive_view([state("p", 1)], records, retry_items=[RETRY_ITEM])
+        self.assertEqual(shown["statement"]["sentence"], REGISTER_SENTENCE)
+
+    def test_a_retry_item_needs_no_registered_project(self):
+        shown = derive_view([], retry_items=[RETRY_ITEM])
+        self.assertEqual(shown["inbox"]["open"], [RETRY_ITEM])
+        self.assertEqual(shown["statement"]["inbox_items"], 1)
+        self.assertEqual(shown["statement"]["headline"], "1 thing needs you")

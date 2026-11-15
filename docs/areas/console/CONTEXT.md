@@ -140,3 +140,7 @@ _Avoid_: generated contract, default contract
 **Approved adoption**:
 A ready adoption plan the owner approved on the page: the console applies it in its own worktree, pushes its one branch, opens its pull request and raises one inbox item while the pull request is ready to merge; the owner merges it on the forge (ADR-console-030).
 _Avoid_: auto-adoption, auto-merge
+
+**Merged adoption**:
+An approved adoption whose pull request the owner merged: the console registers its project once origin's integration branch carries the adoption, says so in the digest, and asks the owner to Retry on a question card when the registration is refused (ADR-console-028 D10).
+_Avoid_: auto-registration

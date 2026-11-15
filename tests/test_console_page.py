@@ -278,7 +278,8 @@ class PageTest(unittest.TestCase):
              "/api/message", "/api/stop", "/api/round-answer", "/api/continue",
              "/api/exclusion", "/api/pin", "/api/signin", "/api/signin-code", "/api/signin-cancel",
              "/api/account-add", "/api/signin-link", "/api/account-remove",
-             "/api/register-project", "/api/plan-answer", "/api/plan-approve"},
+             "/api/register-project", "/api/plan-answer", "/api/plan-approve",
+             "/api/adoption-register"},
         )
         self.assertEqual(
             len(re.findall(r"\b(?:fetch|EventSource)\(", self.text)), len(literals)
@@ -287,7 +288,7 @@ class PageTest(unittest.TestCase):
     def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
         # A separate snapshot request can answer after a newer streamed frame
         # and render over it; the stream's first frame is already the snapshot.
-        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 29)
+        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 30)
         self.assertIsNotNone(
             re.search(r'fetch\("/api/looked",\s*\{\s*method:\s*"POST"', self.text)
         )
@@ -6783,6 +6784,22 @@ R0 = register_item(1, Q_REFERENCE)
 R1 = register_item(2, Q_SECRET)
 R2 = register_item(0, Q_CANDIDATE)
 
+RETRY_HEADLINE = "r was not registered: the repository has no origin remote."
+RETRY_WHY = "Add the repository's origin remote, then choose Retry."
+RETRY_ITEM = {
+    "type": "inbox_item", "reason": "register_retry",
+    "key": f"register-retry/{PLAN_A}/2026-11-15T09:00:00+00:00",
+    "project_id": None, "root": "/srv/r", "name": "r", "title": "Register r",
+    "plan_id": PLAN_A, "id": None, "subject": None, "headline": RETRY_HEADLINE,
+    "why": RETRY_WHY, "refusal": None, "more_questions": 0,
+    "questions": [{"question": RETRY_HEADLINE, "options": ["Retry"], "chosen": None,
+                   "recommended": None, "recommended_index": None}],
+    "values": ["retry"], "items": [], "answers": [], "answered": False,
+    "waiting_since": "2026-11-15T09:00:00+00:00"}
+REFUSED_SHOWN = {**READY_SHOWN, "approve": None, "line": RETRY_HEADLINE + " " + RETRY_WHY,
+                 "adoption": {**OPENED_ADOPTION, "state": "merged",
+                              "headline": RETRY_HEADLINE + " " + RETRY_WHY, "note": None}}
+
 
 def cards(items: list, registration: dict = ASKING) -> dict:
     return {**frame(items), "registration": registration}
@@ -7314,6 +7331,65 @@ class RegisterCardPageTest(unittest.TestCase):
         self.assertIn(text, full(row))
         self.assertNotIn("null", full(row))
         self.assertEqual([n for n in nodes(row) if n.get("href")], [])
+
+
+class RegisterRetryPageTest(unittest.TestCase):
+    ANSWER = [{"respond": {"status": 204, "text": ""}}, {"key": "1"}, {"key": "Enter"},
+              {"clock": 5000}, {"snapshot": True}]
+
+    def test_a_refused_registration_is_a_question_card_with_retry_and_no_work_button(self) -> None:
+        (snap,) = render([START, {"frame": cards([RETRY_ITEM], REFUSED_SHOWN)}, {"snapshot": True}])
+        (lead,) = [n for n in nodes(snap["inbox"]) if has_class(n, "lead")]
+        shown = full(lead)
+        for word in ("Question", "Register r", RETRY_HEADLINE, RETRY_WHY):
+            self.assertIn(word, shown)
+        self.assertNotIn("null", shown)
+        self.assertEqual([full(n) for n in nodes(lead) if has_class(n, "opt")], ["1Retry"])
+        self.assertEqual([n for n in nodes(lead) if has_class(n, "proj")], [])
+        self.assertEqual(count(snap, "words-text"), 0)
+        (line,) = registered(snap, "register-line")
+        self.assertEqual(full(line), RETRY_HEADLINE + " " + RETRY_WHY)
+        self.assertEqual(registered(snap, "register-approve"), [])
+        self.assertNotIn("Retry", [full(n) for n in nodes(snap["register"])])
+
+    def test_one_and_enter_retry_the_registration(self) -> None:
+        (snap,) = render([START, {"frame": cards([RETRY_ITEM], REFUSED_SHOWN)}, *self.ANSWER])
+        (post,) = snap["posts"]
+        self.assertEqual(post["url"], "/api/adoption-register")
+        self.assertEqual(posted(post), {"plan_id": PLAN_A})
+        self.assertIn("Answered, registering again", full(snap["inbox"]))
+        self.assertNotIn("Answered, planning again", full(snap["inbox"]))
+
+    def test_a_refused_retry_shows_its_reason_on_the_card(self) -> None:
+        reason = "that registration is not waiting for a retry"
+        (snap,) = render([
+            START, {"frame": cards([RETRY_ITEM], REFUSED_SHOWN)},
+            {"respond": {"status": 409, "text": reason + "\n"}}, {"key": "1"}, {"key": "Enter"},
+            {"clock": 5000}, {"snapshot": True}])
+        self.assertIn(reason, full(snap["inbox"]))
+
+    def test_a_fresh_retry_card_stays_answerable_after_a_late_acknowledgment(self) -> None:
+        later = "2026-11-15T09:01:00+00:00"
+        retry_2 = {**RETRY_ITEM, "key": f"register-retry/{PLAN_A}/{later}", "waiting_since": later}
+        mid, late = render([
+            START, {"frame": cards([RETRY_ITEM], REFUSED_SHOWN)}, {"hold": True},
+            {"key": "1"}, {"key": "Enter"}, {"clock": 5000},
+            {"frame": cards([retry_2], REFUSED_SHOWN)},
+            {"release": {"status": 204, "text": ""}}, {"snapshot": True},
+            {"key": "1"}, {"key": "Enter"}, {"clock": 10000}, {"snapshot": True}])
+        (lead,) = [n for n in nodes(mid["inbox"]) if has_class(n, "lead")]
+        self.assertEqual([full(n) for n in nodes(lead) if has_class(n, "opt")], ["1Retry"])
+        self.assertNotIn("Answered, registering again", full(mid["inbox"]))
+        self.assertNotIn("Sending", full(mid["inbox"]))
+        self.assertEqual([p["url"] for p in late["posts"]], ["/api/adoption-register"] * 2)
+        self.assertEqual([posted(p) for p in late["posts"]], [{"plan_id": PLAN_A}] * 2)
+
+    def test_a_plan_question_still_posts_its_answer(self) -> None:
+        snap = render([START, {"frame": cards([R0, RETRY_ITEM])},
+                       {"respond": {"status": 204, "text": ""}}, {"key": "2"}, {"key": "Enter"},
+                       {"clock": 5000}, {"snapshot": True}])[-1]
+        (post,) = snap["posts"]
+        self.assertEqual(post["url"], "/api/plan-answer")
 
 
 class RegisterAnswerTransitionTest(unittest.TestCase):

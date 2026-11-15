@@ -134,6 +134,7 @@ class Fake:
         self.apply_block = apply_block
         self.apply_raises = apply_raises
         self.calls = []
+        self.register_operands = []
         self.answers = []
         self.contracts = []
         self.applied = []
@@ -159,7 +160,8 @@ class Fake:
             return self.document.pop(0)
         return self.document
 
-    def register(self, root, cancel=None):
+    def register(self, root, cancel=None, **operands):
+        self.register_operands.append(operands)
         self._run("register", root, cancel)
         if self.register_raises is not None:
             raise self.register_raises

@@ -719,6 +719,15 @@ class AdopterTest(unittest.TestCase):
         self.assertEqual(self.args.read_text().splitlines(),
                          ["plan --repo-root /r --format json", "verify --repo-root /r --register"])
 
+    def test_register_argv_carries_the_integration_branch_and_the_plan_id(self):
+        adopter = self.adopter()
+        adopter.register("/r", integration_branch="develop", plan_id="sha256:aa")
+        adopter.register("/r", plan_id="sha256:aa")
+        self.assertEqual(self.args.read_text().splitlines(),
+                         ["verify --repo-root /r --register --integration-branch develop "
+                          "--plan-id sha256:aa",
+                          "verify --repo-root /r --register --plan-id sha256:aa"])
+
     def test_apply_argv_with_and_without_the_deletion_acknowledgement(self):
         adopter = self.adopter()
         adopter.apply("sha256:aa")

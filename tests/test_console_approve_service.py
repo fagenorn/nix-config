@@ -16,7 +16,8 @@ import time
 from pathlib import Path
 
 from agent_tools.console import approve, register, register_check, service
-from agent_tools.project_contract import adopt_apply
+from agent_tools.console import event_log
+from agent_tools.project_contract import adopt_apply, adopt_inspection
 from agent_tools.system.forge_api import ForgeError
 
 from . import console_test_support as support
@@ -26,6 +27,7 @@ from .test_console_register_service import (
     reconcile_repository)
 
 PATH = "/api/plan-approve"
+RETRY_PATH = "/api/adoption-register"
 BRANCH = "adopt-bbbbbbbbbbbb"
 COMMIT = "c" * 40
 APPLIED = {"branch": BRANCH, "commit": COMMIT, "plan_id": PID_B, "migration_map": "m",
@@ -42,6 +44,15 @@ WITH_DELETION = {**READY, "changes": [
     *READY["changes"], {"op": "delete-file", "sources": ["old.md"], "targets": []}]}
 APPLIED_LINE = f"Applied on the branch {BRANCH} as one commit, cccccccccccc."
 URL = "https://github.com/fixture/r/pull/7"
+NOT_INTEGRATED = {"error": {
+    "code": "not_integrated", "repair_id": "adopt.registration.not_integrated",
+    "violations": [{"pointer": "",
+                    "message": "the remote integration branch carries no adoption evidence record"}]}}
+NO_REMOTE = {"error": {
+    "code": "not_integrated", "repair_id": "adopt.registration.no_remote",
+    "violations": [{"pointer": "", "message": "the repository has no origin remote"}]}}
+GREEN = {"registered": True, "project_id": "o/r", "result": "adopted"}
+REGISTER_ERROR = "console: adoption_register_error "
 ERROR_LINE = "console: plan_approve_error "
 PLAIN_WORDS = ("adopt.", "verification_failed", "HTTP", "422", "gh_failed", "Traceback")
 
@@ -115,6 +126,21 @@ class Pusher:
             (cancel or threading.Event()).wait(10)
 
 
+class RegistryFake(Fake):
+    def __init__(self, registry, **fake_arguments):
+        super().__init__(**fake_arguments)
+        self.registry = registry
+
+    def register(self, root, cancel=None, **operands):
+        self.register_operands.append(operands)
+        self._run("register", root, cancel)
+        if self.register_raises is not None:
+            raise self.register_raises
+        if self.report is GREEN:
+            support.write_registry(self.registry, [{"project_id": "o/r", "root": root}])
+        return self.report
+
+
 class ApproveCase(Case):
     def setUp(self):
         super().setUp()
@@ -134,8 +160,8 @@ class ApproveCase(Case):
         self.svc.close()
         return self.begin(self.fake if fake is None else fake, **self.kwargs)
 
-    def ready(self, plan=READY, **fake_arguments):
-        fake = Fake(plan=plan, **fake_arguments)
+    def ready(self, plan=READY, fake_class=Fake, **fake_arguments):
+        fake = fake_class(plan=plan, **fake_arguments)
         self.start(fake)
         self.repo = reconcile_repository(self.parent, contract=True)
         self.shown = self.registered(self.repo)
@@ -185,6 +211,56 @@ class ApproveCase(Case):
 
     def adoption(self):
         return self.view()["registration"]["adoption"]
+
+    def opened(self, fake_class=Fake, **fake_arguments):
+        fake = self.ready(apply_result=APPLIED, fake_class=fake_class, **fake_arguments)
+        self.run_approval("opened")
+        return fake
+
+    def items(self):
+        return [i for i in self.view()["inbox"]["open"] if i["reason"] == "adoption"]
+
+    def pulls(self):
+        return self.rows("adoption.pull_request")
+
+    def poll(self, state, number=7):
+        self.forge.states[number] = state
+        self.svc.poll_adoptions()
+
+    def registrations(self):
+        return [payload for _, payload in self.rows("adoption.registration")]
+
+    def register_calls(self):
+        return [call for call in self.fake.calls if call[0] == "register"]
+
+    def retry_items(self):
+        return [i for i in self.view()["inbox"]["open"] if i["reason"] == "register_retry"]
+
+    def listed(self, project_id):
+        for entry in self.view()["entries"]:
+            found = entry["projects"] if entry["type"] == "quiet_group" else [entry]
+            if any(one["project_id"] == project_id for one in found):
+                return True
+        return False
+
+    def retry(self, plan_id):
+        status, _, _ = support.post_page(
+            self.svc.address, RETRY_PATH, self.own(**{"Content-Type": "application/json"}),
+            json.dumps({"plan_id": plan_id}).encode())
+        for worker in self.approval_threads():
+            worker.join(30)
+        return status
+
+    def settled(self, count, bound=120):
+        end = time.monotonic() + bound
+        while time.monotonic() < end:
+            found = self.registrations()
+            with self.svc._ingest:
+                busy = PID_B in self.svc._enrolling
+            if len(found) >= count and not busy:
+                return found
+            time.sleep(0.05)
+        self.fail("the registration never settled")
 
 
 class PlanApproveGuardTest(ApproveCase):
@@ -464,21 +540,6 @@ class PlanApproveRunTest(ApproveCase):
 
 
 class AdoptionPollTest(ApproveCase):
-    def opened(self, **forge_arguments):
-        fake = self.ready(apply_result=APPLIED)
-        self.run_approval("opened")
-        return fake
-
-    def items(self):
-        return [i for i in self.view()["inbox"]["open"] if i["reason"] == "adoption"]
-
-    def pulls(self):
-        return self.rows("adoption.pull_request")
-
-    def poll(self, state, number=7):
-        self.forge.states[number] = state
-        self.svc.poll_adoptions()
-
     def test_a_ready_pull_request_raises_one_inbox_item_with_its_link(self):
         self.opened()
         self.poll("ready")
@@ -495,12 +556,15 @@ class AdoptionPollTest(ApproveCase):
         self.assertEqual(self.forge.calls[-1], ("state", "fixture/r", 7))
 
     def test_a_merged_pull_request_closes_the_item(self):
-        self.opened()
+        fake = self.opened()
+        fake.report = NOT_INTEGRATED
         self.poll("ready")
         self.poll("merged")
         self.assertEqual(self.items(), [])
-        self.assertEqual(self.adoption()["headline"], "The pull request of reconcile was merged.")
-        self.assertEqual(self.adoption()["note"], approve.merged_note(str(self.repo), "develop"))
+        self.assertEqual(self.adoption()["headline"],
+                         "The pull request of reconcile was merged; waiting for develop on "
+                         "origin to carry it before registering.")
+        self.assertIsNone(self.adoption()["note"])
 
     def test_a_closed_pull_request_closes_the_item(self):
         self.opened()
@@ -528,10 +592,11 @@ class AdoptionPollTest(ApproveCase):
 
     def test_a_merged_adoption_is_not_approved_again(self):
         fake = self.opened()
+        fake.report = NOT_INTEGRATED
         self.poll("ready")
         self.poll("merged")
         self.assertIsNone(self.view()["registration"]["approve"])
-        self.assertEqual(self.adoption()["note"], approve.merged_note(str(self.repo), "develop"))
+        self.assertIsNone(self.adoption()["note"])
         steps = self.steps()
         errors = io.StringIO()
         with contextlib.redirect_stderr(errors):
@@ -757,3 +822,321 @@ class PlanApproveRealTest(ApproveCase):
             "the repository changed since this plan was made."))
         self.assertEqual(self.refs(), [f"refs/heads/main {self.main0}"])
         self.assertEqual(self.forge.calls, [])
+
+
+class MergedRegistrationTest(ApproveCase):
+    def merged(self, report, **fake_arguments):
+        fake = self.opened(fake_class=RegistryFake, registry=self.registry, **fake_arguments)
+        fake.report = report
+        return fake
+
+    def captured(self, job):
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            job()
+        return errors.getvalue()
+
+    def results(self):
+        return [row["result"] for row in self.registrations()]
+
+    def test_a_merged_pull_request_registers_once_and_a_green_one_is_listed_at_once(self):
+        self.merged(GREEN)
+        self.poll("ready")
+        self.poll("merged")
+        self.assertTrue(self.listed("o/r"))
+        self.poll("merged")
+        self.assertEqual(len(self.register_calls()), 1)
+        self.assertEqual(self.registrations(), [{
+            "plan_id": PID_B, "number": 7, "result": "registered", "project_id": "o/r",
+            "reason": None, "note": None}])
+        self.assertEqual(self.adoption()["headline"], "reconcile is registered as o/r.")
+        view = self.view()
+        self.assertIn("o/r was registered.", [m["sentence"] if isinstance(m, dict) else m
+                                               for m in view["digest"]["recent"]])
+        self.assertEqual(view["statement"]["inbox_items"], 0)
+
+    def test_the_registration_names_the_recorded_integration_branch_and_the_plan(self):
+        fake = self.merged(GREEN)
+        self.poll("merged")
+        self.assertEqual(self.svc._adoptions[PID_B]["base"], APPLIED["integration_branch"])
+        self.assertEqual(fake.register_operands,
+                         [{"integration_branch": "develop", "plan_id": PID_B}])
+
+    def test_before_the_remote_carries_the_adoption_the_registration_waits_and_retries_on_the_next_look(self):
+        fake = self.merged(NOT_INTEGRATED)
+        self.poll("merged")
+        self.poll("merged")
+        self.assertEqual(len(self.register_calls()), 2)
+        self.assertEqual(self.results(), ["waiting"])
+        self.assertEqual(json.loads(self.registry.read_text())["projects"], [])
+        self.assertEqual(self.retry_items(), [])
+        self.assertEqual(self.view()["statement"]["inbox_items"], 0)
+        self.assertEqual(self.adoption()["headline"],
+                         "The pull request of reconcile was merged; waiting for develop on "
+                         "origin to carry it before registering.")
+        fake.report = GREEN
+        self.poll("merged")
+        self.assertEqual(self.results(), ["waiting", "registered"])
+        self.assertTrue(self.listed("o/r"))
+
+    def test_a_closed_pull_request_ends_with_no_registration(self):
+        self.merged(GREEN)
+        self.poll("ready")
+        self.poll("closed")
+        self.poll("closed")
+        self.assertEqual(self.register_calls(), [])
+        self.assertEqual(self.registrations(), [])
+        self.assertEqual(json.loads(self.registry.read_text())["projects"], [])
+        self.assertEqual(self.adoption()["headline"],
+                         "The pull request of reconcile was closed without merging.")
+        self.assertEqual(self.retry_items(), [])
+
+    def test_another_refusal_is_shown_with_its_reason_and_retry_runs_it_again(self):
+        fake = self.merged(NO_REMOTE)
+        self.poll("merged")
+        self.poll("merged")
+        self.assertEqual(len(self.register_calls()), 1)
+        reason = "the repository has no origin remote"
+        note = "Add the repository's origin remote, then choose Retry."
+        (row,) = self.registrations()
+        self.assertEqual((row["result"], row["reason"], row["note"]), ("refused", reason, note))
+        view = self.view()
+        self.assertEqual(view["registration"]["line"],
+                         f"reconcile was not registered: {reason}. {note}")
+        self.assertIsNone(view["registration"]["approve"])
+        (item,) = self.retry_items()
+        self.assertEqual(item["title"], "Register reconcile")
+        self.assertEqual(item["questions"][0]["options"], ["Retry"])
+        self.assertEqual(item["values"], ["retry"])
+        self.assertEqual(item["why"], note)
+        self.assertEqual(view["statement"]["inbox_items"], 1)
+        fake.report = GREEN
+        self.assertEqual(self.retry(PID_B), 204)
+        self.assertEqual(len(self.register_calls()), 2)
+        self.assertEqual(self.results(), ["refused", "registered"])
+        self.assertEqual(self.retry_items(), [])
+        self.assertTrue(self.listed("o/r"))
+
+    def test_a_retry_is_refused_in_order_and_runs_nothing(self):
+        fake = self.merged(NO_REMOTE)
+        self.poll("merged")
+        calls = len(self.register_calls())
+        rows = self.registrations()
+
+        def post(body=None, raw=None):
+            payload = json.dumps(body).encode() if raw is None else raw
+            return support.post_page(self.svc.address, RETRY_PATH,
+                                     self.own(**{"Content-Type": "application/json"}), payload)
+
+        for body, raw in (({"plan_id": ""}, None), ({"x": 1}, None), (None, b"[")):
+            with self.subTest(body=body, raw=raw):
+                status, _, answer = post(body, raw)
+                self.assertEqual((status, answer), (400, b"bad registration retry\n"))
+
+        def refused(plan_id, text):
+            errors = self.captured(lambda: self.assertEqual(
+                post({"plan_id": plan_id})[::2], (409, text.encode() + b"\n")))
+            self.assertIn(f"console: adoption_register_refused {text}", errors)
+
+        refused("sha256:" + "f" * 64, approve.NOT_REFUSED)
+        fake.report = NOT_INTEGRATED
+        self.assertEqual(self.retry(PID_B), 204)
+        self.assertEqual(self.results(), ["refused", "waiting"])
+        refused(PID_B, approve.NOT_REFUSED)
+        calls_now = len(self.register_calls())
+        rows_now = self.registrations()
+        with self.svc._ingest:
+            self.svc._enrolling.add(PID_B)
+        try:
+            refused(PID_B, register.running("reconcile"))
+        finally:
+            with self.svc._ingest:
+                self.svc._enrolling.discard(PID_B)
+        self.assertEqual(len(self.register_calls()), calls_now)
+        self.assertEqual(self.registrations(), rows_now)
+        self.assertEqual((calls, rows[0]["result"]), (1, "refused"))
+
+    def test_without_an_adopter_a_retry_is_unavailable(self):
+        self.start(None)
+        status, _, body = support.post_page(
+            self.svc.address, RETRY_PATH, self.own(**{"Content-Type": "application/json"}),
+            json.dumps({"plan_id": PID_B}).encode())
+        self.assertEqual((status, body), (409, register.UNAVAILABLE.encode() + b"\n"))
+
+    def test_a_waiting_registration_survives_a_restart_and_registers_on_the_first_look(self):
+        fake = self.merged(NOT_INTEGRATED)
+        self.poll("merged")
+        fake.report = GREEN
+        self.restart()
+        end = time.monotonic() + 10
+        while time.monotonic() < end and self.results()[-1:] != ["registered"]:
+            time.sleep(0.05)
+        self.assertEqual(self.results()[-1:], ["registered"])
+        self.assertTrue(self.listed("o/r"))
+
+    def test_a_failed_run_is_refused_in_words_and_logged_in_full(self):
+        self.merged(None, register_raises=register.RunFailed("timed_out"))
+        errors = self.captured(lambda: self.poll("merged"))
+        (row,) = self.registrations()
+        self.assertEqual((row["result"], row["reason"]),
+                         ("refused", "it took too long and was stopped"))
+        lines = [line for line in errors.splitlines() if line.startswith(REGISTER_ERROR)]
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(json.loads(lines[0][len(REGISTER_ERROR):])["failure"], "timed_out")
+        self.assertNotIn("timed_out", f"{row['reason']} {row['note']} "
+                         f"{self.view()['registration']['line']}")
+
+    def test_a_registration_stopped_by_the_console_closing_appends_nothing(self):
+        fake = self.merged(None)
+        service_ = self.svc
+
+        def stopping(root, cancel=None, **operands):
+            fake.calls.append(("register", root))
+            service_._stop.set()
+            raise register.RunFailed("cancelled")
+
+        fake.register = stopping
+        self.forge.states[7] = "merged"
+        self.svc.poll_adoptions()
+        self.assertEqual(len(self.register_calls()), 1)
+        self.assertEqual(self.registrations(), [])
+
+    def test_the_registration_runs_outside_the_lock_once_per_plan_and_says_registering(self):
+        fake = self.merged(GREEN)
+        fake.block = threading.Event()
+        self.addCleanup(fake.block.set)
+        self.forge.states[7] = "merged"
+        helper = threading.Thread(target=self.svc.poll_adoptions)
+        helper.start()
+        end = time.monotonic() + 10
+        while time.monotonic() < end and len(self.register_calls()) < 1:
+            time.sleep(0.02)
+        self.assertEqual(len(self.register_calls()), 1)
+        self.svc.record_look()
+        self.svc.register_merged()
+        headline = self.adoption()["headline"]
+        self.assertEqual(len(self.register_calls()), 1)
+        self.assertEqual(headline, "Registering reconcile\u2026")
+        self.assertIsNone(self.svc._registering)
+        self.assertEqual(self.retry_items(), [])
+        fake.block.set()
+        helper.join(30)
+        self.assertEqual(self.results(), ["registered"])
+
+    def test_a_report_that_failed_its_checks_is_refused_and_logged_in_full(self):
+        checks = [adopt_inspection.verify_check_entry(
+            "path-migration-map", "failed", "the evidence record names no path migration map")]
+        self.merged({"registered": False, "result": "not_conformant", "project_id": "o/r",
+                     "checks": checks, "blockers": []})
+        errors = self.captured(lambda: self.poll("merged"))
+        (row,) = self.registrations()
+        self.assertEqual((row["result"], row["reason"]), (
+            "refused", "the adoption on the remote did not pass the registration's checks"))
+        lines = [line for line in errors.splitlines() if line.startswith(REGISTER_ERROR)]
+        self.assertEqual(len(lines), 1)
+        record = json.loads(lines[0][len(REGISTER_ERROR):])
+        self.assertEqual((record["plan_id"], record["stage"]), (PID_B, "register"))
+        self.assertEqual(record["report"]["checks"], checks)
+        self.assertNotIn("the evidence record names no path migration map",
+                         f"{row['reason']} {row['note']}")
+
+    def test_a_retry_that_meets_the_same_refusal_appends_a_row_and_a_fresh_card(self):
+        fake = self.merged(NO_REMOTE)
+        self.poll("merged")
+        first = self.retry_items()[0]["key"]
+        self.assertEqual(self.retry(PID_B), 204)
+        rows = self.registrations()
+        self.assertEqual([row["result"] for row in rows], ["refused", "refused"])
+        self.assertEqual(rows[0]["reason"], rows[1]["reason"])
+        (item,) = self.retry_items()
+        second = item["key"]
+        self.assertNotEqual(second, first)
+        self.assertEqual(
+            second, f"register-retry/{PID_B}/{self.svc._adoptions[PID_B]['registration']['at']}")
+        fake.report = GREEN
+        self.assertEqual(self.retry(PID_B), 204)
+        self.assertEqual(self.results(), ["refused", "refused", "registered"])
+        self.assertEqual(len(self.register_calls()), 3)
+        self.assertEqual(self.retry_items(), [])
+        self.assertTrue(self.listed("o/r"))
+
+
+class MergedRealCase(ApproveCase):
+    evidence_plan = PID_B
+
+    def setUp(self):
+        super().setUp()
+        self.before = real_home_state()
+        self.addCleanup(lambda: self.assertEqual(real_home_state(), self.before))
+        self.repo = register_check.adopted_repository(
+            self.parent / "merged", "fixture/console-merged", ROOT / register_check.CONTRACT_SOURCE)
+        self.remote = self.parent / "merged" / "origin.git"
+        evidence = next((self.repo / ".agents/artifacts/evidence").glob("*.json"))
+        record = json.loads(evidence.read_text())
+        evidence.write_text(json.dumps({**record, "plan_id": self.evidence_plan}) + "\n")
+        git(self.repo, "add", str(evidence))
+        git(self.repo, "commit", "-q", "--amend", "--no-edit")
+        self.tip = git(self.repo, "rev-parse", "HEAD").strip()
+        git(self.repo, "push", "--quiet", "--force", "origin", "HEAD~1:refs/heads/main")
+        planned = {
+            "by": "owner", "root": str(self.repo), "project_id": "fixture/console-merged",
+            "result": "planned", "outcome": "reconcile", "headline": "The plan is ready.",
+            "lines": [], "note": None, "plan_id": PID_B, "state": "ready", "questions": [],
+            "answered": []}
+        opened = {key: None for key in approve.STEP_MEMBERS}
+        opened.update({
+            "by": "owner", "plan_id": PID_B, "root": str(self.repo),
+            "project_id": "fixture/console-merged", "step": "opened", "branch": BRANCH,
+            "commit": COMMIT, "base": "main",
+            "pull_request": {"number": 7,
+                             "url": "https://github.com/fixture/console-merged/pull/7"}})
+        log = event_log.EventLog(self.store)
+        try:
+            log.append([register.ended(planned), approve.step_row(opened)])
+        finally:
+            close = getattr(log, "close", None)
+            if close is not None:
+                close()
+        self.forge.states[7] = "merged"
+        self.start(register.Adopter(), slug_of=lambda root: "fixture/console-merged")
+
+
+class MergedRegistrationRealTest(MergedRealCase):
+    def test_before_the_remote_carries_the_adoption_nothing_is_registered(self):
+        results = [row["result"] for row in self.settled(1)]
+        self.assertEqual(json.loads(self.registry.read_text())["projects"], [])
+        self.assertEqual(results, ["waiting"])
+        self.assertEqual(self.adoption()["headline"],
+                         "The pull request of repo was merged; waiting for main on origin to "
+                         "carry it before registering.")
+        self.assertEqual(self.retry_items(), [])
+        self.assertEqual(git(self.repo, "rev-parse", "HEAD").strip(), self.tip)
+
+    def test_a_merged_adoption_on_the_remote_registers_and_is_listed_with_a_digest_line(self):
+        self.settled(1)
+        git(self.repo, "push", "--quiet", "--force", "origin", f"{self.tip}:refs/heads/main")
+        self.svc.poll_adoptions()
+        self.assertEqual(json.loads(self.registry.read_text())["projects"],
+                         [{"project_id": "fixture/console-merged", "root": str(self.repo)}])
+        self.assertTrue(self.listed("fixture/console-merged"))
+        self.assertEqual([row["result"] for row in self.registrations()],
+                         ["waiting", "registered"])
+        self.assertEqual(self.adoption()["headline"],
+                         "repo is registered as fixture/console-merged.")
+        recent = self.view()["digest"]["recent"]
+        self.assertIn("fixture/console-merged was registered.",
+                      [m["sentence"] if isinstance(m, dict) else m for m in recent])
+        self.assertEqual(git(self.repo, "rev-parse", "HEAD").strip(), self.tip)
+
+
+class MergedReadoptionRealTest(MergedRealCase):
+    evidence_plan = PID_A
+
+    def test_the_remote_carrying_an_earlier_adoption_does_not_register_the_new_plan(self):
+        self.settled(1)
+        git(self.repo, "push", "--quiet", "--force", "origin", f"{self.tip}:refs/heads/main")
+        self.svc.poll_adoptions()
+        self.assertEqual(json.loads(self.registry.read_text())["projects"], [])
+        self.assertEqual([row["result"] for row in self.registrations()], ["waiting"])
+        self.assertFalse(self.listed("fixture/console-merged"))
+        self.assertEqual(self.retry_items(), [])
