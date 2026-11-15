@@ -171,7 +171,7 @@ def stale():
 class VerifyPromptTableTest(unittest.TestCase):
     def test_each_owner_prompt_kind_becomes_an_inbox_item(self):
         rows = [  # issue, body, reason, then (kind, answers, paid, confirm, detail, answered)
-            (11, ask(), "verify-ask", ("manual-check", ["passed", "failed", "note"], False, "", ASK_TEXT, False)),
+            (11, ask(), "verify-ask", ("manual-check", ["passed", "failed", "note"], False, "", "", False)),
             (12, approve(), "verify-approve",
              ("approval", ["approve"], False, "octo/widgets#12", 'Command: ["just", "smoke"]', False)),
             (13, approve("paid"), "verify-approve",
@@ -186,11 +186,12 @@ class VerifyPromptTableTest(unittest.TestCase):
         for item, (n, body, reason, want) in zip(items, rows):
             with self.subTest(reason=reason, issue=n):
                 kind, answers, paid, confirm, detail, answered = want
+                question, check_id = (ASK_TEXT, "AC1") if reason == "verify-ask" else (SENTENCES[reason], "")
                 self.assertRegex(item["version"], r"^sha256:[0-9a-f]{64}$")
                 self.assertEqual({k: v for k, v in item.items() if k != "version"},
                                  expected(n, C1 + n, reason, kind=kind, answers=answers, paid=paid,
                                           confirm=confirm, detail=detail, answered=answered,
-                                          question=SENTENCES[reason], held_work=1))
+                                          question=question, check_id=check_id, held_work=1))
         self.assertEqual(json.loads(json.dumps(items)), items)
 
     def test_the_version_names_the_prompt_content_the_owner_saw(self):
@@ -222,21 +223,75 @@ class VerifyPromptTableTest(unittest.TestCase):
         both_decision = decision("- [x] Accept as passed\n- [x] Close as not verified")
         items = self.one(comment_node(C1, both_ask), comment_node(C1 + 1, both_decision))
         self.assertEqual([(i["kind"], i["answered"], i["detail"]) for i in items],
-                         [("manual-check", False, ASK_TEXT), ("verdict", False, "")])
+                         [("manual-check", False, ""), ("verdict", False, "")])
 
     def test_detail_keeps_checkbox_lines_that_are_not_the_runners_boxes(self):
         text = "Open the staging site.\n- [ ] Check the dock too"
         body = ask(f"{text}\n\n- [ ] Accept\n- [ ] Reject")
-        self.assertEqual(self.one(comment_node(C1, body))[0]["detail"], text)
+        self.assertEqual(self.one(comment_node(C1, body))[0]["detail"], "- [ ] Check the dock too")
         fenced = "```\n- [ ] Restart the service\nopen the dock\n```\n\nThen: probe deployed_includes"
         body = verify_body("verify-act", {"host": "mbp"}, SENTENCES["verify-act"], fenced)
         self.assertEqual(self.one(comment_node(C1, body))[0]["detail"], fenced)
         next_to = ask(f"\n{text}\n- [ ] Accept now\n- [ ] Accept\n- [ ] Reject")
-        self.assertEqual(self.one(comment_node(C1, next_to))[0]["detail"], f"{text}\n- [ ] Accept now")
+        self.assertEqual(self.one(comment_node(C1, next_to))[0]["detail"],
+                         "- [ ] Check the dock too\n- [ ] Accept now")
 
     def test_a_carriage_return_does_not_reach_the_detail(self):
         body = ask(f"{ASK_TEXT}\r\n\r\n- [ ] Accept\r\n- [ ] Reject\r\n")
-        self.assertEqual(self.one(comment_node(C1, body))[0]["detail"], ASK_TEXT)
+        item = self.one(comment_node(C1, body))[0]
+        self.assertEqual((item["question"], item["detail"]), (ASK_TEXT, ""))
+
+
+DEMO_ASK = ("Open the console at 1440 px and say whether the question is readable at a glance. "
+            "Note anything that hides it.")
+DEMO_QUESTION = "Open the console at 1440 px and say whether the question is readable at a glance."
+DEMO_REST = "Note anything that hides it."
+
+
+def asked(text, sentence=SENTENCES["verify-ask"]):
+    return verify_body("verify-ask", {"host": "mbp"}, sentence, f"{text}\n\n{ASK_BOXES}")
+
+
+def heading(body):
+    item = read(page([issue_node(7, [comment_node(C1, body)])]))[0]
+    return item["question"], item["check_id"], item["detail"]
+
+
+class AskHeadingTest(unittest.TestCase):
+    def test_the_demo_ask_heads_its_item(self):
+        body = asked(DEMO_ASK, "A3: the owner's answer is needed.")
+        self.assertEqual(heading(body), (DEMO_QUESTION, "A3", DEMO_REST))
+
+    def test_the_first_sentence_ends_at_its_terminator(self):
+        table = [
+            ("Is the dock bright? Say so.", "Is the dock bright?", "Say so."),
+            ("Open it! Then look.", "Open it!", "Then look."),
+            ('Type "yes." Then stop.', 'Type "yes."', "Then stop."),
+            ("Open the dock (then the bar.) Then look.", "Open the dock (then the bar.)", "Then look."),
+            ("Check that v1.2 runs and stop.", "Check that v1.2 runs and stop.", ""),
+            ("Open the dock", "Open the dock", ""),
+            ("Open   the\tsite.   Then look.", "Open the site.", "Then look."),
+            ("Open the dock\nthen look.", "Open the dock", "then look."),
+            ("Open the dock.\n\nThen look.", "Open the dock.", "Then look."),
+        ]
+        for text, question, detail in table:
+            with self.subTest(text=text):
+                self.assertEqual(heading(asked(text)), (question, "AC1", detail))
+
+    def test_an_ask_the_reader_cannot_split_keeps_its_sentence(self):
+        sentence = SENTENCES["verify-ask"]
+        table = {
+            "not the runner's shape": (verify_body("verify-ask", {"host": "mbp"}, "Recorded.",
+                                                   f"{ASK_TEXT}\n\n{ASK_BOXES}"), ("Recorded.", "", ASK_TEXT)),
+            "a fenced first line": (asked("```\nopen the dock\n```"), (sentence, "", "```\nopen the dock\n```")),
+            "a tilde fence": (asked("~~~\nopen the dock\n~~~"), (sentence, "", "~~~\nopen the dock\n~~~")),
+            "only boxes": (verify_body("verify-ask", {"host": "mbp"}, sentence, ASK_BOXES), (sentence, "", "")),
+            "another reason": (verify_body("verify-act", {"host": "mbp"}, sentence, "Open the dock. Then look."),
+                               (sentence, "", "Open the dock. Then look.")),
+        }
+        for name, (body, want) in table.items():
+            with self.subTest(name):
+                self.assertEqual(heading(body), want)
 
 
 class NoVerifyItemTest(unittest.TestCase):

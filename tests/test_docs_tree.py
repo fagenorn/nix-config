@@ -660,6 +660,12 @@ class DocsTreeTest(unittest.TestCase):
         for needle in ("fine, tight or out", "A session named for a sprint adds no line"):
             self.assertIn(needle, context)
 
+    def test_the_check_heading_is_recorded(self):
+        rules = self.doc("docs/areas/console/adr/002-the-desk-page-design-rules.md")
+        for needle in ("#1046", "a manual check's heading is the first sentence of its ask",
+                       "its check id a small label after the kind words"):
+            self.assertIn(needle, rules)
+
     def test_later_open_items_as_rows_are_recorded(self) -> None:
         rules = self.doc("docs/areas/console/adr/002-the-desk-page-design-rules.md")
         for needle in (

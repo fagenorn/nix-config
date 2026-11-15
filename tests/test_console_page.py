@@ -1640,6 +1640,14 @@ def check_item(key: str, kind: str, **fields) -> dict:
     return item(key, **base)
 
 
+DEMO_QUESTION = "Open the console at 1440 px and say whether the question is readable at a glance."
+DEMO_REST = "Note anything that hides it."
+
+
+def labels_of(tree: dict) -> list:
+    return [n for n in nodes(tree) if has_class(n, "check-id")]
+
+
 def checked(snap: dict) -> list:
     return [posted(p) for p in checks(snap)]
 
@@ -6428,6 +6436,63 @@ class PanelSigninPageTest(unittest.TestCase):
         self.assertEqual(urls, {"/api/exclusion", "/api/pin", "/api/signin", "/api/account-remove",
                                 "/api/account-add", "/api/signin-code", "/api/signin-cancel",
                                 "/api/signin-link"})
+
+
+class PageCheckHeadingTest(unittest.TestCase):
+    def test_the_card_is_headed_by_the_ask_with_the_check_id_as_a_label(self) -> None:
+        lead = check_item("A", "manual-check", headline=DEMO_QUESTION, check_id="A3",
+                          detail=DEMO_REST)
+        snap = render([START, {"frame": frame([lead])}, {"snapshot": True}])[-1]
+        card = snap["inbox"]["children"][0]
+        (heading,) = [n for n in nodes(card) if n["tag"] == "h2" and has_class(n, "q")]
+        self.assertEqual(full(heading), DEMO_QUESTION)
+        self.assertNotIn("A3", full(heading))
+        (label,) = labels_of(card)
+        self.assertEqual(full(label), "A3")
+        self.assertEqual(label["tag"], "span")
+        (head,) = [n for n in nodes(card) if n["tag"] == "p" and has_class(n, "head")]
+        classes = [c["cls"].split() for c in head["children"]]
+        at = next(i for i, c in enumerate(head["children"]) if c is label)
+        self.assertIn("kind", classes[at - 1])
+        self.assertIn(DEMO_REST, full(card))
+        self.assertEqual(full(card).count(DEMO_QUESTION), 1)
+
+    def test_a_row_puts_the_check_id_beside_its_headline(self) -> None:
+        snap = render([START, {"frame": frame([ANSWERABLE, check_item(
+            "B", "manual-check", headline=DEMO_QUESTION, check_id="A4")])},
+            {"snapshot": True}])[-1]
+        (head,) = [n for n in nodes(snap["inbox"]) if n["tag"] == "p" and has_class(n, "row-head")
+                   and any(c["tag"] == "b" and c["text"] == DEMO_QUESTION for c in n["children"])]
+        kids = head["children"]
+        self.assertTrue(has_class(kids[0], "kind"))
+        self.assertTrue(has_class(kids[1], "check-id"))
+        self.assertEqual(full(kids[1]), "A4")
+        self.assertEqual((kids[2]["tag"], kids[2]["text"]), ("b", DEMO_QUESTION))
+
+    def test_an_answered_check_line_starts_with_its_check_id(self) -> None:
+        done = check_item("Z", "manual-check", answered=True, headline=DEMO_QUESTION,
+                          check_id="A5", answered_at="2026-11-11T10:00:00+00:00")
+        snap = render([{"start": {"focused": False, "clock": NOW_MS}},
+                       {"frame": frame([], answered=[done])}, {"snapshot": True}])[-1]
+        (fold,) = [n for n in nodes(snap["inbox"]) if n["tag"] == "details" and has_class(n, "done-item")]
+        (summary,) = [c for c in fold["children"] if c["tag"] == "summary"]
+        self.assertEqual([(c["tag"], c["cls"]) for c in summary["children"]],
+                         [("span", "check-id"), ("b", ""), ("span", "when")])
+        self.assertEqual(summary["children"][0]["text"], "A5")
+
+    def test_an_item_without_a_check_id_has_no_label(self) -> None:
+        opened = [ANSWERABLE, check_item("M", "manual-check"),
+                  check_item("N", "manual-check", check_id=""),
+                  check_item("V", "verdict", check_id=""),
+                  item("C", reason="conflict", headline="Landing stopped on a merge conflict.",
+                       items=["x"])]
+        done = item("Z", answered=True, headline="Which database?",
+                    answered_at="2026-11-11T10:00:00+00:00")
+        snap = render([{"start": {"focused": False, "clock": NOW_MS}},
+                       {"frame": frame(opened, answered=[done])}, {"snapshot": True}])[-1]
+        self.assertEqual(labels_of(snap["inbox"]), [])
+        (heading,) = [n for n in nodes(snap["inbox"]) if n["tag"] == "h2" and has_class(n, "q")]
+        self.assertEqual(full(heading), "Which host?")
 
 
 class LapsedResetPageTest(unittest.TestCase):

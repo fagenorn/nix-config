@@ -838,6 +838,22 @@ class HeldVerificationViewTest(unittest.TestCase):
         self.assertEqual(result["statement"]["inbox_items"], 2)
 
 
+    def test_a_manual_check_is_headed_by_its_ask(self):
+        ask = ("Open the console at 1440 px and say whether the question is readable at a glance. "
+               "Note anything that hides it.")
+        node = held_node(24, [owner_comment(400, ask_prompt(f"{ask}\n\n- [ ] Accept\n- [ ] Reject")),
+                              owner_comment(401, decision_prompt(
+                                  "- [ ] Accept as passed\n- [ ] Close as not verified"))])
+        by_kind = {i["kind"]: i for i in inbox_view(node)["inbox"]["open"]}
+        check = by_kind["manual-check"]
+        self.assertEqual((check["headline"], check["check_id"], check["detail"]),
+                         ("Open the console at 1440 px and say whether the question is readable at a glance.",
+                          "AC1", "Note anything that hides it."))
+        self.assertNotIn("question", check)
+        verdict = by_kind["verdict"]
+        self.assertEqual((verdict["headline"], verdict["check_id"]), ("AC1 failed: the owner decides.", ""))
+
+
 class InboxHealthTest(unittest.TestCase):
     def test_health_is_folded_from_its_changes(self):
         table = [

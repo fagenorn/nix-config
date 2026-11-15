@@ -20,7 +20,12 @@ Its `kind` is `verify_answer.kind_of`, its `answers` are `verify_answer.ANSWERS[
 `verify_answer.is_paid`, and `confirm` is `<slug>#<issue>` for every approval, live or paid, else
 `""`. Its `detail` is the body after the sentence with the runner's own trailing answer boxes
 (`verify_answer.labels`) and the empty lines around them dropped; a checkbox-shaped line inside the
-ask text or the act fence stays. A held issue with no live runner prompt yields no item.
+ask text or the act fence stays. For a `verify-ask` prompt whose sentence names its check
+(`verify_answer.ask_check_id`) and whose detail has a first line that opens no fence, `question` is
+that line's first sentence (cut after the first `.`, `?` or `!`, with any closing quote or bracket,
+that whitespace or the line end follows, else the whole line, whitespace collapsed), `check_id` is
+the check id and `detail` is the rest; every other verification prompt keeps its sentence and whole
+detail with `check_id` `""` (#1046). A held issue with no live runner prompt yields no item.
 
 A comment's id is `fullDatabaseId` (GitHub's `BigInt`, a decimal string) converted with `int`: the
 32-bit `databaseId` is not read, because comment ids already exceed 2^31-1. A node's type is its
@@ -36,7 +41,7 @@ is sorted by `key` and holds only JSON-native values; every item is
     {"key": "<slug>#<issue>/<comment id>", "project_id", "repo", "issue", "comment_id", "url",
      "reason", "kind", "question", "detail", "questions": [{"question", "options", "chosen", "recommended"}]
      (decision only), "items": [str] (conflict and needs-label only), "answers": [str], "paid": bool,
-     "confirm", "answered", "held_work"} and, for a verification prompt only, "version"
+     "confirm", "answered", "held_work"} and, for a verification prompt only, "version" and "check_id"
 
 For `decision`, `conflict` and `needs-label` the kind is the reason, `detail` and `confirm` are `""`,
 `answers` is `[]`, `paid` is false and there is no `version`. A verification prompt's `version` is
@@ -175,15 +180,39 @@ def _detail(marker: fm.Marker) -> str:
     return "\n".join(lines)
 
 
+_SENTENCE_END = re.compile(r"[.?!][\"')\]]*(?=\s|$)")
+
+
+def _ask_heading(marker: fm.Marker) -> tuple[str, str, str]:
+    """The `(question, check_id, detail)` of a verification prompt: a manual check is headed by the
+    first sentence of its ask, anything the reader cannot split keeps its sentence and whole detail."""
+    sentence, detail = foa.marker_sentence(marker), _detail(marker)
+    whole = (sentence, "", detail)
+    if marker.fields.get("reason") != verify_answer.ASK or not detail:
+        return whole
+    check_id = verify_answer.ask_check_id(sentence)
+    first, newline, rest = detail.partition("\n")
+    if not check_id or first.strip().startswith(("```", "~~~")):
+        return whole
+    cut = _SENTENCE_END.search(first)
+    head, tail = (first[:cut.end()], first[cut.end():]) if cut else (first, "")
+    lines = [tail.strip(), *(rest.split("\n") if newline else [])]
+    while lines and not lines[0].strip():
+        lines.pop(0)
+    return " ".join(head.split()), check_id, "\n".join(lines)
+
+
 def _verify_item(project_id: str, slug: str, issue: int, held: int, marker: fm.Marker,
                  runner_markers: Sequence[fm.Marker]) -> dict:
     reason = marker.fields["reason"]
+    question, check_id, detail = _ask_heading(marker)
     return {
         "key": item_key(slug, issue, marker.comment_id), "project_id": project_id, "repo": slug,
         "issue": issue, "comment_id": marker.comment_id,
         "url": f"https://github.com/{slug}/issues/{issue}#issuecomment-{marker.comment_id}",
-        "reason": reason, "kind": verify_answer.kind_of(marker), "question": foa.marker_sentence(marker),
-        "detail": _detail(marker), "questions": [], "items": [], "answers": list(verify_answer.ANSWERS[reason]),
+        "reason": reason, "kind": verify_answer.kind_of(marker), "question": question,
+        "detail": detail, "check_id": check_id, "questions": [], "items": [],
+        "answers": list(verify_answer.ANSWERS[reason]),
         "paid": verify_answer.is_paid(marker), "confirm": f"{slug}#{issue}" if reason == "verify-approve" else "",
         "answered": verify_answer.answered(marker, runner_markers), "held_work": held,
         "version": verify_answer.content_version(marker),

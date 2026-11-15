@@ -215,6 +215,23 @@ class RefusalTest(Base):
                 self.assertEqual(writes(self.world), [])
 
 
+class AskCheckIdTest(unittest.TestCase):
+    def test_the_check_id_is_read_back_from_the_ask_sentence(self):
+        rows = [("AC1: the owner's answer is needed.", "AC1"),
+                ("A3: the owner's answer is needed.", "A3"),
+                (vo.ask_sentence("AC12"), "AC12"),
+                ("Recorded.", ""),
+                ("AC1 failed: the owner decides.", ""),
+                ("AC1 has live effects: tick the box to run it once on mbp.", ""),
+                (": the owner's answer is needed.", ""),
+                ("a b: the owner's answer is needed.", ""),
+                ("AC1: the owner's answer is needed. Extra.", ""),
+                ("", "")]
+        for sentence, expected in rows:
+            with self.subTest(sentence=sentence):
+                self.assertEqual(va.ask_check_id(sentence), expected)
+
+
 class ReadingTest(unittest.TestCase):
     def test_kinds_and_answered(self):
         paid = approve("paid")

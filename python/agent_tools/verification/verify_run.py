@@ -646,7 +646,7 @@ class _Pass:
                 if self.expire_waiting(index, check, ac, key, previous, waiting):  # an unanswered ask lapses like an approval
                     return
                 return self.line(index, ac, "pending", "owner_waiting")
-            won = self.prompt(verify_owner.ASK, index, {"host": self.host}, f"{ac}: the owner's answer is needed.",
+            won = self.prompt(verify_owner.ASK, index, {"host": self.host}, verify_owner.ask_sentence(ac),
                               f"{check['run']['ask']}\n\n{verify_owner.box(verify_owner.ACCEPT)}\n"
                               f"{verify_owner.box(verify_owner.REJECT)}")
             return self.line(index, ac, "pending", "owner_asked" if won else "owner_waiting")

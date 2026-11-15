@@ -105,6 +105,8 @@ class PromptOnceTest(OwnerBase):
         self.assertEqual(prompt.fields,
                          {"reason": "verify-ask", "block": bkey(ask_check()), "check": "0", "host": "mbp"})
         self.assertIn("Is the dock icon bright?", prompt.body)
+        self.assertEqual((foa.marker_sentence(prompt), vo.ask_sentence("AC1")),
+                         ("AC1: the owner's answer is needed.",) * 2)
         self.assertEqual(self.results(), ["pass"])
         self.assertEqual(self.markers("verify-result")[0].fields["owner"], str(prompt.comment_id))
         self.assertEqual(self.world.issue()["state"], "closed")
