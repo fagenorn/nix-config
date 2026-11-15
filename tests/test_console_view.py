@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from agent_tools.claims import forge_markers as fm
 from agent_tools.claims import forge_owner_action as foa
 from agent_tools.console import digest
-from agent_tools.console import inbox, register
+from agent_tools.console import folder_trust, inbox, register
 from agent_tools.console import view
 from agent_tools.console.deliveries import (
     DELIVERY_GONE,
@@ -2223,3 +2223,21 @@ class RegisterConfirmTest(unittest.TestCase):
         self.assertEqual(shown["statement"]["inbox_items"], 1)
         self.assertEqual(shown["statement"]["sentence"], REGISTER_SENTENCE)
         self.assertEqual(register.confirm_items(self.WAITING, running=True), [])
+
+
+class TrustItemTest(unittest.TestCase):
+    FAILED = {("/home/o/repo", "work"): {
+        "root": "/home/o/repo", "project": "repo", "profile": "work",
+        "at": "2026-11-15T10:00:00+00:00"}}
+
+    def test_a_failed_profile_is_a_card_with_its_terminal_command(self):
+        shown = derive_view([], trust_items=folder_trust.items(self.FAILED))
+        (card,) = shown["inbox"]["open"]
+        self.assertEqual(card["reason"], "trust_failed")
+        self.assertEqual(card["why"], "Run this in a terminal: cd /home/o/repo && "
+                                      "CLAUDE_ACCOUNT=work claude, then accept the prompt and "
+                                      "type /exit.")
+        self.assertEqual(card["questions"][0]["options"], ["Check again"])
+        self.assertEqual(card["values"], ["check"])
+        self.assertEqual(shown["statement"]["inbox_items"], 1)
+        self.assertEqual(shown["statement"]["sentence"], REGISTER_SENTENCE)

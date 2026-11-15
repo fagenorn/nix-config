@@ -70,6 +70,17 @@ are non-empty strings, every result is in `RESULTS` and every profile is `defaul
 `granted_row`; an invalid one is skipped) a `(root, profile)` with result `failed` is set to
 `{"root", "project", "profile", "at"}` and one with `granted` or `already` is removed.
 
+Card. `items(failures)` is the Check again card of every pair `failures` holds, ordered by `(at,
+root, profile)`: reason `trust_failed`, key `trust/<profile>/<root>/<at>`, `project_id` null, the
+`root`, `name` (the project), `profile`, title `Trust <project>`, headline `headline(project,
+profile)` ("Agents cannot start in <project> under <profile> yet"), `why` the `failed_words` of the
+pair, `command` the terminal command alone, the one option `CHECK_OPTION` ("Check again") with the
+value `CHECK_VALUE` ("check"), `text` false and `waiting_since` the failure's time; no code or
+exception word reaches it. `parse_check_request(body)` is the card's answer, exactly `{"root",
+"profile"}` of non-empty strings with no control character; `ValueError` otherwise. `NOT_FAILED`
+("that folder is not waiting for a trust check") is the service's refusal of a pair no failed row
+holds.
+
 Words. `TRUST_SENTENCE` is the sentence the page shows. `command(root, profile)` is
 `cd <root> && CLAUDE_ACCOUNT=<profile> claude` (the root through `shlex.quote`) and
 `failed_words(root, profile)` is `Run this in a terminal: <command>, then accept the prompt and
@@ -118,6 +129,9 @@ GIT_TIMEOUT = 10
 CAUSES = ("apply", "register", "account", "check")
 KEPT_PREFIX = ".claude.json.trust-kept-"
 TEMP_PREFIX = ".claude.json.trust-"
+CHECK_OPTION = "Check again"
+CHECK_VALUE = "check"
+NOT_FAILED = "that folder is not waiting for a trust check"
 TRUST_SENTENCE = "Registering lets agents run in this folder with the folder's own settings and hooks."
 
 _AT_FDCWD = -100
@@ -481,6 +495,45 @@ def command(root: str, profile: str) -> str:
 
 def failed_words(root: str, profile: str) -> str:
     return f"Run this in a terminal: {command(root, profile)}, then accept the prompt and type /exit."
+
+
+def headline(project: str, profile: str) -> str:
+    return f"Agents cannot start in {project} under {profile} yet"
+
+
+def items(failed: dict[tuple[str, str], dict]) -> list[dict]:
+    found = []
+    for (root, profile), one in sorted(failed.items(), key=lambda pair: (
+            pair[1]["at"], pair[0][0], pair[0][1])):
+        project, at = one["project"], one["at"]
+        ask = headline(project, profile)
+        found.append({
+            "type": "inbox_item", "reason": "trust_failed", "key": f"trust/{profile}/{root}/{at}",
+            "project_id": None, "root": root, "name": project, "profile": profile,
+            "title": f"Trust {project}", "plan_id": None, "id": None, "subject": None,
+            "headline": ask, "why": failed_words(root, profile), "command": command(root, profile),
+            "lines": [], "refusal": None, "more_questions": 0, "text": False,
+            "questions": [{"question": ask, "options": [CHECK_OPTION], "chosen": None,
+                           "recommended": None, "recommended_index": None}],
+            "values": [CHECK_VALUE], "items": [], "answers": [], "answered": False,
+            "waiting_since": at})
+    return found
+
+
+def parse_check_request(body: bytes) -> tuple[str, str]:
+    try:
+        value = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("not a JSON object") from error
+    if not isinstance(value, dict) or set(value) != {"root", "profile"}:
+        raise ValueError("wrong members")
+    root, profile = value["root"], value["profile"]
+    for text in (root, profile):
+        if not isinstance(text, str) or not text:
+            raise ValueError("wrong types")
+        if any(ord(char) < 0x20 or ord(char) == 0x7F for char in text):
+            raise ValueError("control character")
+    return root, profile
 
 
 def _accounts_dir() -> Path:

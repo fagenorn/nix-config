@@ -307,6 +307,33 @@ class RowTest(unittest.TestCase):
         self.assertEqual(folder_trust.failures([other]), {})
 
 
+class ItemsTest(unittest.TestCase):
+    @staticmethod
+    def event(seq, results):
+        row = folder_trust.granted_row("apply", "p", "/r", results)
+        return Event(seq=seq, at=f"t{seq}", kind=row[0], project=None, payload=row[2])
+
+    def test_items_follow_the_fold(self):
+        failed = self.event(1, [("work", "failed")])
+        granted = self.event(2, [("work", "granted")])
+        (card,) = folder_trust.items(folder_trust.failures([failed]))
+        self.assertEqual(card["key"], "trust/work//r/t1")
+        self.assertEqual(card["why"], folder_trust.failed_words("/r", "work"))
+        self.assertEqual(folder_trust.items(folder_trust.failures([failed, granted])), [])
+
+
+class RequestTest(unittest.TestCase):
+    def test_a_check_request_is_exactly_a_root_and_a_profile(self):
+        self.assertEqual(
+            folder_trust.parse_check_request(b'{"root": "/r", "profile": "work"}'),
+            ("/r", "work"))
+        for body in (b"[]", b"\xff", b'{"root": "/r"}', b'{"root": "", "profile": "w"}',
+                     b'{"root": "/r", "profile": 1}', b'{"root": "/r\\n", "profile": "w"}',
+                     b'{"root": "/r", "profile": "w", "x": 1}'):
+            with self.subTest(body=body), self.assertRaises(ValueError):
+                folder_trust.parse_check_request(body)
+
+
 class WordsTest(unittest.TestCase):
     def test_the_words_and_the_targets(self):
         self.assertEqual(

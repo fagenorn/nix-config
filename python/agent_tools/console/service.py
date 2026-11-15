@@ -298,6 +298,20 @@ The console never merges: it pushes the one branch and opens its pull request, a
 required checks keep merge safety. One line `console: plan_approve_ended <step or stopped>` ends the
 run. Any other exception is `console: plan_approve_failed <Type>` and 500 `approving failed`.
 
+A `trust.granted` row that leaves a profile `failed` is folded (`folder_trust.failures`, at start,
+on append and after retention) into a Check again card (`folder_trust.items`, `trust_items` of the
+view) that a later `granted` or `already` for the same root and profile removes.
+
+`POST /api/trust-check` (#1078, ADR-console-033) is that card's answer. It runs the same checks with
+`MAX_TRUST_CHECK_BYTES` (4096) and `folder_trust.parse_check_request`: 400 `bad trust check`. The
+service refuses with 409 `folder_trust.NOT_FAILED` and one stderr line `console:
+trust_check_refused <reason>`, writing nothing, unless the `(root, profile)` pair is a folded failure
+and the profile still has a target (`trust_home/.claude.json` for `default`, else the profile
+directory of that name). Otherwise it runs the grant for that one pair on the handler thread
+(`_grant_trust`, cause `check`, the root being the key already, so `close` waits for it), appends one
+`trust.granted` row for that pair and answers `204`. Any other exception is `console:
+trust_check_failed <Type>` and 500 `checking failed`.
+
 `POST /api/adoption-register` (#1055, ADR-console-028 D10) is the Retry of a refused registration
 of a merged adoption. It runs the same checks with `MAX_ADOPTION_REGISTER_BYTES` (4096) and
 `approve.parse_approve_request`: 400 `bad registration retry`. The service refuses, each as 409
@@ -1072,12 +1086,13 @@ PLAN_APPROVE_PATH = "/api/plan-approve"
 ADOPTION_REGISTER_PATH = "/api/adoption-register"
 PLAN_DEFER_PATH = "/api/plan-defer"
 REGISTER_CONFIRM_PATH = "/api/register-confirm"
+TRUST_CHECK_PATH = "/api/trust-check"
 PAGE_WRITES: frozenset[str] = frozenset({
     LOOKED_PATH, ANSWER_PATH, CHECK_PATH, GOAL_PATH, WITHDRAW_PATH, APPROVE_PATH, REPLY_PATH,
     RETRY_PATH, MESSAGE_PATH, STOP_PATH, ROUND_ANSWER_PATH, CONTINUE_PATH, EXCLUSION_PATH,
     PIN_PATH, SIGNIN_PATH, SIGNIN_CODE_PATH, SIGNIN_CANCEL_PATH, SIGNIN_LINK_PATH, ACCOUNT_ADD_PATH,
     ACCOUNT_REMOVE_PATH, REGISTER_PATH, PLAN_ANSWER_PATH, PLAN_APPROVE_PATH,
-    ADOPTION_REGISTER_PATH, PLAN_DEFER_PATH, REGISTER_CONFIRM_PATH})
+    ADOPTION_REGISTER_PATH, PLAN_DEFER_PATH, REGISTER_CONFIRM_PATH, TRUST_CHECK_PATH})
 MAX_SIGNIN_BYTES = 4096
 MAX_ACCOUNT_BYTES = 4096
 MAX_REMOVE_BYTES = 4096
@@ -1087,6 +1102,7 @@ MAX_PLAN_APPROVE_BYTES = 4096
 MAX_ADOPTION_REGISTER_BYTES = 4096
 MAX_PLAN_DEFER_BYTES = 4096
 MAX_REGISTER_CONFIRM_BYTES = 4096
+MAX_TRUST_CHECK_BYTES = 4096
 APPROVAL_THREAD = "console-adoption-approval"
 SIGNIN_THREAD = "console-signin-deadline"
 SIGNIN_TICK_SECONDS = 1.0
@@ -1647,6 +1663,28 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return False
         return True
 
+    def _trust_check_request(self, console: "ConsoleService") -> bool:
+        """Carry out the Check again answer; True when the shared 204 is to be sent."""
+        body = self._json_body(MAX_TRUST_CHECK_BYTES)
+        if body is None:
+            return False
+        try:
+            root, profile = folder_trust.parse_check_request(body)
+        except ValueError:
+            self._refuse(400, "bad trust check")
+            return False
+        try:
+            console.check_trust(root, profile)
+        except sprints.Refused as error:
+            print(f"console: trust_check_refused {error}", file=sys.stderr)
+            self._refuse(409, str(error))
+            return False
+        except Exception as error:
+            print(f"console: trust_check_failed {type(error).__name__}", file=sys.stderr)
+            self._refuse(500, "checking failed")
+            return False
+        return True
+
     def _brief_request(self):
         """The manager's route: a brief sent with the sprint's secret; no token, no page."""
         console = self.server.console
@@ -2102,6 +2140,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
             if not self._register_confirm_request(console):
                 return
+        elif route == TRUST_CHECK_PATH:
+            self.close_connection = True
+            if not self._trust_check_request(console):
+                return
         else:
             if (self.headers.get("Content-Length", "0") != "0"
                     or self.headers.get("Transfer-Encoding") is not None):
@@ -2319,6 +2361,7 @@ class ConsoleService:
         self._pinned: str | None = None
         self._signin_ends: dict[str, signin_run.Ended] = {}
         self._accounts_added: frozenset[str] = frozenset()
+        self._trust_failures: dict[tuple[str, str], dict] = {}
         self._pin_launches: pin.PinLaunches = pin.pin_launches([])
         self._signin_live: dict[str, int] = {}
         self._signin_by_run: dict[int, tuple[str, int]] = {}
@@ -2389,6 +2432,7 @@ class ConsoleService:
             self._pinned = pin.pinned_profile(events)
             self._signin_ends = signin_run.ended_state(events)
             self._accounts_added = account_add.added_state(events)
+            self._trust_failures = folder_trust.failures(events)
             self._registration = register.latest(events)
             self._adoptions = approve.adoptions(events)
             self._deferred = approve.deferrals(events)
@@ -2499,6 +2543,7 @@ class ConsoleService:
             adoption_items=approve.inbox_entries(self._adoptions),
             retry_items=approve.retry_entries(self._adoptions, self._enrolling),
             apply_items=apply_items,
+            trust_items=folder_trust.items(self._trust_failures),
             confirm_items=register.confirm_items(
                 self._registration, running=self._registering is not None),
             pin=pin.note(self._pinned, cap, manager.session_profile(cap, self._use.last)),
@@ -3239,8 +3284,12 @@ class ConsoleService:
         return payload
 
     def _grant_trust(self, cause: str, root: str, project: str,
-                     profiles: Sequence[tuple[str, Path]] | None = None) -> list[tuple[str, str]]:
+                     profiles: Sequence[tuple[str, Path]] | None = None,
+                     key: str | None = None) -> list[tuple[str, str]]:
         """Grant the folder's client trust in every target and log one `trust.granted` row.
+
+        `key` is the trust key when the caller already holds it (a failed row names the key as its
+        root); otherwise it is read from `root`.
 
         The row is kept even when `close` has begun, the files being written already; a grant that
         starts after `close` began writes nothing. `close` waits for every grant under way.
@@ -3255,7 +3304,7 @@ class ConsoleService:
                      if profiles is None else list(profiles))
             if not found:
                 return []
-            key = folder_trust.trust_key(root)
+            key = folder_trust.trust_key(root) if key is None else key
             results = []
             for name, path in found:
                 if key is None:
@@ -3282,6 +3331,20 @@ class ConsoleService:
             with self._ingest:
                 self._grants_running -= 1
                 self._grants_done.notify_all()
+
+    def check_trust(self, root: str, profile: str) -> None:
+        """Grant the trust again for one failed pair, as the Check again card asks (#1078).
+
+        Refused with `folder_trust.NOT_FAILED` unless a logged `trust.granted` row left
+        `(root, profile)` failed and the profile's file is still a target; nothing else is granted.
+        """
+        with self._ingest:
+            failed = self._trust_failures.get((root, profile))
+        found = [pair for pair in folder_trust.targets(self._trust_home, self._profile_dirs())
+                 if pair[0] == profile]
+        if failed is None or not found:
+            raise sprints.Refused(folder_trust.NOT_FAILED)
+        self._grant_trust("check", root, failed["project"], found, key=root)
 
     def _run_approval(self, root: str, shown: dict, adoption: dict | None) -> None:
         final = None
@@ -4921,6 +4984,7 @@ class ConsoleService:
         self._pinned = pin.pinned_profile(appended, self._pinned)
         self._signin_ends = signin_run.ended_state(appended, self._signin_ends)
         self._accounts_added = account_add.added_state(appended, self._accounts_added)
+        self._trust_failures = folder_trust.failures(appended, self._trust_failures)
         self._registration = register.latest(appended, self._registration)
         self._adoptions = approve.adoptions(appended, self._adoptions)
         self._deferred = approve.deferrals(appended, self._deferred)
@@ -4952,6 +5016,7 @@ class ConsoleService:
                 self._pinned = pin.pinned_profile(events)
                 self._signin_ends = signin_run.ended_state(events)
                 self._accounts_added = account_add.added_state(events)
+                self._trust_failures = folder_trust.failures(events)
                 self._registration = register.latest(events)
                 self._adoptions = approve.adoptions(events)
                 self._deferred = approve.deferrals(events)

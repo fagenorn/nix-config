@@ -1033,6 +1033,54 @@ class TrustGrantTest(ApproveCase):
         self.assertEqual([p["profile"] for p in row["profiles"]], ["default", "solo", "work"])
         self.assertEqual(self.parsed("work"), self.trusted())
 
+    CHECK = "/api/trust-check"
+
+    def check(self, body):
+        return support.post_page(
+            self.svc.address, self.CHECK,
+            self.own(**{"Content-Type": "application/json"}), json.dumps(body).encode())
+
+    def trust_cards(self):
+        return [card for card in self.view()["inbox"]["open"] if card["reason"] == "trust_failed"]
+
+    def test_a_failed_read_back_shows_its_card_and_check_again_clears_it(self):
+        self.trust["trust_granter"] = lambda path, key: (
+            folder_trust.FAILED if path.parent.name == "solo" else folder_trust.grant(path, key))
+        self.ready(apply_result=APPLIED)
+        self.run_approval("opened")
+        (card,) = self.trust_cards()
+        self.assertEqual(card["title"], "Trust o/r")
+        self.assertEqual(card["why"], folder_trust.failed_words(self.key, "solo"))
+        self.svc._trust_granter = folder_trust.grant
+        self.assertEqual(self.check({"root": self.key, "profile": "solo"})[::2], (204, b""))
+        rows = self.trust_rows()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[1]["cause"], "check")
+        self.assertEqual(rows[1]["profiles"], [{"profile": "solo", "result": "granted"}])
+        self.assertEqual(self.trust_cards(), [])
+        self.assertEqual(self.parsed("solo"), self.trusted())
+
+    def test_a_check_of_a_pair_never_named_is_refused(self):
+        self.trust["trust_granter"] = lambda path, key: (
+            folder_trust.FAILED if path.parent.name == "solo" else folder_trust.grant(path, key))
+        self.ready(apply_result=APPLIED)
+        self.run_approval("opened")
+        before = self.snapshot()
+        rows = len(self.trust_rows())
+        for body in ({"root": self.key, "profile": "work"},
+                     {"root": self.key, "profile": "default"},
+                     {"root": "/nowhere", "profile": "solo"}):
+            with self.subTest(body=body):
+                errors = io.StringIO()
+                with contextlib.redirect_stderr(errors):
+                    status, _, text = self.check(body)
+                self.assertEqual(
+                    (status, text), (409, b"that folder is not waiting for a trust check\n"))
+                self.assertIn("console: trust_check_refused", errors.getvalue())
+        self.assertEqual(self.check({"root": self.key})[0], 400)
+        self.assertEqual(len(self.trust_rows()), rows)
+        self.assertEqual(self.snapshot(), before)
+
     def test_a_grant_after_close_writes_nothing(self):
         self.ready(apply_result=APPLIED)
         self.svc.close()

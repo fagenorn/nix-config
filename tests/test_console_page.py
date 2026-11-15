@@ -280,7 +280,8 @@ class PageTest(unittest.TestCase):
              "/api/exclusion", "/api/pin", "/api/signin", "/api/signin-code", "/api/signin-cancel",
              "/api/account-add", "/api/signin-link", "/api/account-remove",
              "/api/register-project", "/api/plan-answer", "/api/plan-approve",
-             "/api/adoption-register", "/api/plan-defer", "/api/register-confirm"},
+             "/api/adoption-register", "/api/plan-defer", "/api/register-confirm",
+             "/api/trust-check"},
         )
         self.assertEqual(
             len(re.findall(r"\b(?:fetch|EventSource)\(", self.text)), len(literals)
@@ -289,7 +290,7 @@ class PageTest(unittest.TestCase):
     def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
         # A separate snapshot request can answer after a newer streamed frame
         # and render over it; the stream's first frame is already the snapshot.
-        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 32)
+        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 33)
         self.assertIsNotNone(
             re.search(r'fetch\("/api/looked",\s*\{\s*method:\s*"POST"', self.text)
         )
@@ -7517,6 +7518,37 @@ class RegisterConfirmPageTest(unittest.TestCase):
         self.assertEqual(post["url"], "/api/register-confirm")
         self.assertEqual(posted(post), {"root": "/srv/r", "choice": "not_now"})
         self.assertIn("Answered, not now", full(snap["inbox"]))
+
+
+TRUST_ITEM = {
+    "type": "inbox_item", "reason": "trust_failed",
+    "key": "trust/work//srv/r/2026-11-15T10:00:00+00:00",
+    "project_id": None, "root": "/srv/r", "name": "r", "profile": "work", "title": "Trust r",
+    "plan_id": None, "id": None, "subject": None,
+    "headline": "Agents cannot start in r under work yet",
+    "why": "Run this in a terminal: cd /srv/r && CLAUDE_ACCOUNT=work claude, then accept the prompt and type /exit.",
+    "command": "cd /srv/r && CLAUDE_ACCOUNT=work claude", "lines": [], "refusal": None,
+    "more_questions": 0, "text": False,
+    "questions": [{"question": "Agents cannot start in r under work yet",
+                   "options": ["Check again"], "chosen": None, "recommended": None,
+                   "recommended_index": None}],
+    "values": ["check"], "items": [], "answers": [], "answered": False,
+    "waiting_since": "2026-11-15T10:00:00+00:00"}
+
+
+class TrustCheckPageTest(unittest.TestCase):
+    def test_the_card_shows_the_command_and_check_again_posts_the_pair(self) -> None:
+        (snap,) = render([START, {"frame": cards([TRUST_ITEM])}, {"snapshot": True}])
+        (lead,) = [n for n in nodes(snap["inbox"]) if has_class(n, "lead")]
+        self.assertIn(TRUST_ITEM["why"], full(lead))
+        self.assertEqual([full(n) for n in nodes(lead) if has_class(n, "opt")], ["1Check again"])
+        (snap,) = render([START, {"frame": cards([TRUST_ITEM])},
+                          {"respond": {"status": 204, "text": ""}}, {"key": "1"},
+                          {"key": "Enter"}, {"clock": 5000}, {"snapshot": True}])
+        (post,) = snap["posts"]
+        self.assertEqual(post["url"], "/api/trust-check")
+        self.assertEqual(posted(post), {"root": "/srv/r", "profile": "work"})
+        self.assertIn("Answered, checking", full(snap["inbox"]))
 
 
 class RegisterApplyPageTest(unittest.TestCase):
