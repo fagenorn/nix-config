@@ -133,6 +133,48 @@ class GrantTest(FileCase):
         self.assertEqual(self.parsed(), {"n": 2})
         self.assertEqual(leftovers(self.dir, ".claude.json.trust-"), kept)
 
+    def test_a_displaced_document_the_next_attempt_refuses_is_put_back(self):
+        for index, text in enumerate(("[]", "not json", '{"projects": []}',
+                                      '{"projects": {"/r": 1}}')):
+            with self.subTest(text=text):
+                path = self.dir / f"refused-{index}.json"
+                path.write_text(json.dumps({"projects": {}}), encoding="utf-8")
+
+                def hook(attempt, path=path, text=text):
+                    if attempt == 0:
+                        atomic_write(path, text)
+
+                self.assertEqual(folder_trust.grant(path, "/r", before_swap=hook), "failed")
+                self.assertEqual(path.read_text(encoding="utf-8"), text)
+        self.assertEqual(leftovers(self.dir, ".claude.json.trust-"), [])
+
+    def test_a_displaced_document_is_put_back_when_the_next_attempt_cannot_write(self):
+        foreign = json.dumps({"projects": {}, "clientField": 1})
+        real_temp, real_swap = folder_trust._temp, folder_trust.swap
+        for name, patched in (("temp", "_temp"), ("swap", "swap")):
+            with self.subTest(step=name):
+                path = self.dir / f"cannot-{name}.json"
+                path.write_text(json.dumps({"projects": {}}), encoding="utf-8")
+                calls = []
+
+                def hook(attempt, path=path):
+                    if attempt == 0:
+                        atomic_write(path, foreign)
+
+                def fail_second(real):
+                    def wrapper(*args):
+                        calls.append(1)
+                        if len(calls) == 2:
+                            raise OSError(errno.ENOSPC, "full")
+                        return real(*args)
+                    return wrapper
+
+                real = real_temp if name == "temp" else real_swap
+                with mock.patch.object(folder_trust, patched, new=fail_second(real)):
+                    self.assertEqual(folder_trust.grant(path, "/r", before_swap=hook), "failed")
+                self.assertEqual(path.read_text(encoding="utf-8"), foreign)
+        self.assertEqual(leftovers(self.dir, ".claude.json.trust-"), [])
+
     def test_the_mode_is_kept_and_a_new_file_is_0600(self):
         self.arrange({"projects": {}}, mode=0o640)
         self.assertEqual(folder_trust.grant(self.path, "/r"), "granted")

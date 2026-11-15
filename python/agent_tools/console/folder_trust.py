@@ -39,8 +39,11 @@ attempt. `before_swap(attempt)` is a test seam called after the temporary is wri
 swap.
 
 After `attempts` displacements of a newer document the result is `FAILED` and the newest displaced
-document is put back at the path unchanged (one more swap). If that put-back displaces a document
-that is not the console's own merge, the document is kept as a sibling `KEPT_PREFIX<n>` file, one
+document is put back at the path unchanged (one more swap). A displaced foreign document stays in its
+own file, never copied, until the next swap has merged it, so every exit that leaves it unmerged puts
+it back the same way: a later attempt that refuses it (not JSON, not an object), an `OSError` from
+the temporary or a swap, or the exhaustion above. If that put-back displaces a document that is not
+the console's own merge, or cannot swap, the document is kept as a sibling `KEPT_PREFIX<n>` file, one
 stderr line `folder_trust: kept <file name>` names it, and the result is `FAILED`. Nothing is
 unlinked that a writer other than this module wrote, except a displaced document whose content has
 been merged into the next write.
@@ -288,20 +291,29 @@ def _keep(name: str, directory: Path) -> None:
     print(f"folder_trust: kept {kept.name}", file=sys.stderr)
 
 
-def _put_back(path: Path, doc: _Doc, ours: _Doc) -> None:
-    """Put the foreign `doc` back at `path`; keep whatever that displaces unless it is `ours`."""
-    name, _ = _temp(path.parent, doc.data, doc.mode)
+def _restore(path: Path, held: str, ours: _Doc | None) -> None:
+    """Put the foreign document held in the file `held` back at `path`; keep what it displaces.
+
+    The displaced document is unlinked only when it is `ours`. When the swap cannot run the held
+    file is kept as it is. Never raises an `OSError`.
+    """
+    directory = path.parent
     try:
-        swap(Path(name), path)
-        displaced = _read(Path(name))
-        if displaced is not None and not _same(displaced, ours):
-            kept, name = name, ""
-            _keep(kept, path.parent)
+        try:
+            swap(Path(held), path)
+        except OSError:
+            _keep(held, directory)
+            return
+        try:
+            displaced = _read(Path(held))
+        except (_Refused, OSError):
+            displaced = None
+        if displaced is not None and ours is not None and _same(displaced, ours):
+            _unlink(held)
         else:
-            _unlink(name)
-            name = ""
-    finally:
-        _unlink(name or None)
+            _keep(held, directory)
+    except OSError:
+        pass
 
 
 def _write(path: Path, key: str, edit: Callable[[dict, str], dict],
@@ -310,54 +322,69 @@ def _write(path: Path, key: str, edit: Callable[[dict, str], dict],
     """Merge by `edit` into the file at `path` until `done` reads true there.
 
     Returns `("unchanged", True)` when it already was, `("changed", True)` once the read-back
-    shows it, and `("failed", False)` otherwise.
+    shows it, and `("failed", False)` otherwise. The newest displaced foreign document stays in
+    the file `held` until the next swap has merged it; every exit that leaves it unmerged,
+    a raised `_Refused` or `OSError` included, puts it back through `_restore`.
     """
     path = Path(path)
     content = expect = _read(path)
-    for attempt in range(attempts):
-        document = _parse(content, key)
-        if content is expect and done(document, key):
-            return "unchanged", True
-        merged = edit(document, key)
-        text = (json.dumps(merged, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
-        mode = content.mode if content is not None else 0o600
-        name, ident = _temp(path.parent, text, mode)
-        try:
-            ours = _Doc(text, ident, mode)
-            if before_swap is not None:
-                before_swap(attempt)
-            if expect is None:
-                try:
-                    os.link(name, path)
-                except FileExistsError:
-                    content = expect = _read(path)
-                    continue
-                displaced = None
-            else:
-                try:
-                    swap(Path(name), path)
-                except FileNotFoundError:
-                    content = expect = _read(path)
-                    continue
-                try:
-                    displaced = _read(Path(name))
-                except _Refused:
-                    swap(Path(name), path)
-                    return "failed", False
-                _unlink(name)
-                name = ""
-        finally:
-            _unlink(name or None)
-        if expect is None or _same(displaced, expect):
-            back = _read(path)
-            if back is not None and _is_done(back, key, done):
-                return "changed", True
-            content = expect = back
-            continue
-        content, expect = displaced, ours
-    if content is not expect:
-        _put_back(path, content, expect)
-    return "failed", False
+    held: str | None = None
+    try:
+        for attempt in range(attempts):
+            document = _parse(content, key)
+            if content is expect and done(document, key):
+                return "unchanged", True
+            merged = edit(document, key)
+            text = (json.dumps(merged, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
+            mode = content.mode if content is not None else 0o600
+            name, ident = _temp(path.parent, text, mode)
+            try:
+                ours = _Doc(text, ident, mode)
+                if before_swap is not None:
+                    before_swap(attempt)
+                if expect is None:
+                    try:
+                        os.link(name, path)
+                    except FileExistsError:
+                        content = expect = _read(path)
+                        continue
+                    displaced = None
+                else:
+                    try:
+                        swap(Path(name), path)
+                    except FileNotFoundError:
+                        if held is not None:
+                            _keep(held, path.parent)
+                            held = None
+                        content = expect = _read(path)
+                        continue
+                    try:
+                        displaced = _read(Path(name))
+                    except (_Refused, OSError):
+                        swap(Path(name), path)
+                        raise
+                    if held is not None:
+                        _unlink(held)
+                        held = None
+                    if not _same(displaced, expect):
+                        held, name = name, ""
+            finally:
+                _unlink(name or None)
+            if expect is None or _same(displaced, expect):
+                back = _read(path)
+                if back is not None and _is_done(back, key, done):
+                    return "changed", True
+                content = expect = back
+                continue
+            content, expect = displaced, ours
+        if held is not None:
+            _restore(path, held, expect)
+            held = None
+        return "failed", False
+    except BaseException:
+        if held is not None:
+            _restore(path, held, expect)
+        raise
 
 
 def _is_done(doc: _Doc, key: str, done: Callable[[dict, str], bool]) -> bool:
