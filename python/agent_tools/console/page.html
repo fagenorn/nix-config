@@ -1931,9 +1931,13 @@ function itemId(item) {
 function isQuestion(item) {
   return item.reason === "question";
 }
-// An open question of an adoption plan (ADR-console-029 D10): a card like a manager question, answered on the plan.
+// A refused registration waiting for its Retry (ADR-console-028 D10): a question card whose one option runs the registration again.
+function isRetry(item) {
+  return item.reason === "register_retry";
+}
+// An open question of an adoption plan (ADR-console-029 D10) or a refused registration's Retry (ADR-console-028 D10): a card like a manager question.
 function isRegister(item) {
-  return item.reason === "register";
+  return item.reason === "register" || isRetry(item);
 }
 function wordsKey(item) {
   return itemId(item) + "\nwords";
@@ -2055,6 +2059,7 @@ function planBusy(item, state) {
 function start(item, state) {
   if (!choosable(state) || !picksComplete(item, state) || planBusy(item, state)) return false;
   if (isQuestion(item)) return begin(item, state, { round: true, body: roundBody(item, { choice: state.picks[0] }) });
+  if (isRetry(item)) return begin(item, state, { retry: true, body: { plan_id: item.plan_id } });
   if (isRegister(item)) {
     const body = { plan_id: item.plan_id, id: item.id, subject: item.subject, value: item.values[state.picks[0]] };
     return begin(item, state, { plan: true, body });
@@ -2099,11 +2104,13 @@ async function sendAnswer(id, state, item) {
     const body = JSON.stringify(state.pending.body);
     const response = state.pending.round
       ? await fetch("/api/round-answer", { method: "POST", headers, body })
-      : state.pending.plan
-        ? await fetch("/api/plan-answer", { method: "POST", headers, body })
-        : state.pending.check
-          ? await fetch("/api/check-answer", { method: "POST", headers, body })
-          : await fetch("/api/answer", { method: "POST", headers, body });
+      : state.pending.retry
+        ? await fetch("/api/adoption-register", { method: "POST", headers, body })
+        : state.pending.plan
+          ? await fetch("/api/plan-answer", { method: "POST", headers, body })
+          : state.pending.check
+            ? await fetch("/api/check-answer", { method: "POST", headers, body })
+            : await fetch("/api/answer", { method: "POST", headers, body });
     if (response.status !== 204) {
       reason = (await response.text()).trim() || "HTTP " + response.status;
     }
@@ -2392,7 +2399,7 @@ function statusLine(act, state, item) {
   } else if (state.phase === "sending") {
     act.appendChild(el("span", "", "Sending\u2026"));
   } else if (state.phase === "sent") {
-    act.appendChild(el("span", "", isRegister(item) ? "Answered, planning again" : "Answered, waiting for the agent to pick it up"));
+    act.appendChild(el("span", "", isRetry(item) ? "Answered, registering again" : isRegister(item) ? "Answered, planning again" : "Answered, waiting for the agent to pick it up"));
   } else {
     if (state.phase === "failed") act.appendChild(el("span", "fail", "Could not send: " + state.reason));
     if (state.notice) act.appendChild(el("span", "", state.notice));
