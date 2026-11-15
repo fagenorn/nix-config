@@ -16,13 +16,14 @@ from unittest import mock
 
 from agent_tools.console import console, digest, service, write_guard
 
-from agent_tools.console import answer, sprints
+from agent_tools.console import answer, sprints, view
 from agent_tools.system.forge_api import ForgeError
 from agent_tools.verification import verify_answer
 
 from . import console_test_support as support
-from .forge_world import ForgeWorld
-from .test_console_answer import ASK7 as CHECK_ITEM, C, ITEM, view_of
+from .forge_world import NETWORK_DOWN as DIAL_FAILURE, ForgeWorld
+from .test_console_answer import ASK7 as CHECK_ITEM, C, FakeClock, ITEM, dropped, view_of
+from .test_console_inbox import ask
 from .test_console_stream import open_stream, next_frame
 from .test_console_tracker import Scripted
 from .test_forge_owner_action import ISSUE, SLUG, box_body, comment
@@ -293,9 +294,9 @@ class AnswerRouteTest(Case):
             (answer.Refused(answer.CHANGED), 409, b"the prompt changed on the tracker\n",
              f"console: answer_refused owner/p00 {key} the prompt changed on the tracker"),
             (ForgeError("gh_failed", "gh: Server Error\n(HTTP 502)"), 502,
-             b"the tracker refused the tick: gh_failed: gh: Server Error (HTTP 502)\n",
+             (answer.FORGE_DOWN + "\n").encode(),
              f"console: answer_tick_failed owner/p00 {key} gh_failed: gh: Server Error (HTTP 502)"),
-            (RuntimeError("boom"), 500, b"answer failed\n",
+            (RuntimeError("boom"), 500, (answer.UNEXPECTED_FAILURE + "\n").encode(),
              "console: answer_failed RuntimeError: boom"),
         ]
         for error, status, text, line in table:
@@ -312,6 +313,153 @@ class AnswerRouteTest(Case):
                 self.assertIn(line, err.getvalue())
                 self.assertEqual(
                     [i["key"] for i in view_of(svc)["inbox"]["open"]], [key])
+                svc.close()
+
+    def ticking_world(self, **store):
+        world = ForgeWorld(self)
+        world.comment_store(SLUG, ISSUE, [comment(C, box_body())], **store)
+        world.respond_json("gh", ["api", f"repos/{SLUG}/issues/{ISSUE}"],
+                           {"number": ISSUE, "state": "open"})
+        return world
+
+    def changed_rows(self):
+        return [row for row in support.log_rows(self.store) if row[2] == view.INBOX_CHANGED]
+
+    def post_answer(self, svc, **over):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            got = support.post_page(svc.address, ANSWER, self.headers(svc), self.body(**over))
+        return got, err.getvalue()
+
+    def test_a_tick_that_meets_a_short_network_drop_is_sent_once(self):
+        world = self.ticking_world()
+        world.outage(2)
+        slept = []
+        svc = self.open(write_sleep=slept.append)
+        before = len(self.changed_rows())
+        (status, _, body), stderr = self.post_answer(svc)
+        self.assertEqual((status, body), (204, b""))
+        self.assertEqual(slept, [1.0, 2.0])
+        patches = [argv for argv in world.argvs("gh") if "-X" in argv]
+        self.assertEqual(len(patches), 1)
+        self.assertEqual(world.stored()[0]["body"], box_body(ticks={(0, 1), (1, 0)}))
+        self.assertEqual(len(self.changed_rows()), before + 1)
+        self.assertEqual(view_of(svc)["statement"]["inbox_items"], 0)
+        for attempt in (1, 2):
+            line = next(l for l in stderr.splitlines() if
+                        l.startswith(f"console: answer_tick_retry owner/p00 {ITEM['key']} {attempt} gh_failed: "))
+            self.assertIn("network is unreachable", line)
+
+    def test_a_tick_whose_reply_was_lost_is_not_ticked_twice(self):
+        world = self.ticking_world(lose_reply=["edit"])
+        slept = []
+        svc = self.open(write_sleep=slept.append)
+        (status, _, body), _ = self.post_answer(svc)
+        self.assertEqual((status, body), (204, b""))
+        self.assertEqual(slept, [1.0])
+        patches = [argv for argv in world.argvs("gh") if "-X" in argv]
+        self.assertEqual(len(patches), 1)
+        self.assertEqual(world.stored()[0]["body"], box_body(ticks={(0, 1), (1, 0)}))
+        self.assertEqual([i["key"] for i in view_of(svc)["inbox"]["open"]], [])
+
+    def test_a_check_answer_whose_reply_was_lost_is_not_ticked_twice(self):
+        world = ForgeWorld(self)
+        world.comment_store(SLUG, 7, [comment(C + 7, ask())], lose_reply=["edit"])
+        world.respond_json("gh", ["api", f"repos/{SLUG}/issues/7"], {"number": 7, "state": "open"})
+        slept = []
+        svc = self.open(tracker=Scripted([CHECK_ITEM]), write_sleep=slept.append)
+        word = {"project_id": "owner/p00", "key": CHECK_ITEM["key"], "answer": "passed",
+                "version": CHECK_ITEM["version"]}
+        status, _, body = support.post_page(svc.address, CHECK, self.headers(svc), json.dumps(word).encode())
+        self.assertEqual((status, body), (204, b""))
+        self.assertEqual(slept, [1.0])
+        patches = [argv for argv in world.argvs("gh") if "-X" in argv]
+        self.assertEqual(len(patches), 1)
+        self.assertIn("- [x] Accept", world.stored()[0]["body"])
+        self.assertEqual(view_of(svc)["inbox"]["open"], [])
+
+    def failing_tick(self, error, advance=0.0):
+        calls = []
+
+        def tick(*args):
+            calls.append(args)
+            self.clk.now += advance
+            raise error
+        return tick, calls
+
+    def test_a_lasting_network_drop_is_retried_within_thirty_seconds_then_told_in_plain_words(self):
+        self.clk = FakeClock()
+        tick, calls = self.failing_tick(dropped())
+        svc = self.open(tick=tick, clock=self.clk, write_sleep=self.clk.sleep)
+        out = []
+        got = self.assert_unchanged(svc, lambda: out.append(self.post_answer(svc)) or out[-1][0])
+        (status, _, body), stderr = out[-1]
+        self.assertEqual((status, body), (502, (answer.NETWORK_DOWN + "\n").encode()))
+        self.assertEqual(len(calls), 6)
+        self.assertEqual(self.clk.slept, [1.0, 2.0, 4.0, 8.0, 10.0])
+        self.assertLessEqual(self.clk.now - 1000.0, answer.RETRY_BUDGET_SECONDS)
+        for needle in (b"gh_failed", b"dial tcp", b"network is unreachable", b"20.250.119.72", b"HTTP"):
+            self.assertNotIn(needle, body)
+        self.assertIn(f"console: answer_tick_failed owner/p00 {ITEM['key']} gh_failed: {DIAL_FAILURE}", stderr)
+        self.assertEqual([i["key"] for i in view_of(svc)["inbox"]["open"]], [ITEM["key"]])
+
+    def test_the_retries_stop_at_the_thirty_second_budget(self):
+        self.clk = FakeClock()
+        tick, calls = self.failing_tick(dropped(), advance=10.0)
+        svc = self.open(tick=tick, clock=self.clk, write_sleep=self.clk.sleep)
+        (status, _, body), _ = self.post_answer(svc)
+        self.assertEqual((status, body), (502, (answer.NETWORK_DOWN + "\n").encode()))
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(self.clk.slept, [1.0, 2.0])
+
+    def test_a_refusal_that_is_not_a_network_error_is_not_retried_and_reads_plainly(self):
+        table = [
+            (ForgeError("gh_failed", "gh: Not Found (HTTP 404)"), 502, answer.NOT_FOUND,
+             "answer_tick_failed owner/p00 {key} gh_failed: gh: Not Found (HTTP 404)"),
+            (ForgeError("gh_failed", "gh: Forbidden (HTTP 403)"), 502, answer.NOT_SIGNED_IN,
+             "answer_tick_failed owner/p00 {key} gh_failed: gh: Forbidden (HTTP 403)"),
+            (ForgeError("gh_missing", "No such file"), 502, answer.GH_MISSING,
+             "answer_tick_failed owner/p00 {key} gh_missing: No such file"),
+            (ForgeError("payload_invalid", "issue 12 has no readable state"), 502, answer.NOT_TAKEN,
+             "answer_tick_failed owner/p00 {key} payload_invalid: issue 12 has no readable state"),
+            (RuntimeError("boom"), 500, answer.UNEXPECTED_FAILURE, "answer_failed RuntimeError: boom"),
+        ]
+        for error, status, words, line in table:
+            with self.subTest(error=str(error)):
+                slept = []
+                tick, calls = self.failing_tick(error)
+                self.clk = FakeClock()
+                svc = self.open(tick=tick, write_sleep=slept.append)
+                out = []
+                self.assert_unchanged(svc, lambda: out.append(self.post_answer(svc)) or out[-1][0])
+                (got_status, _, body), stderr = out[-1]
+                self.assertEqual((got_status, body), (status, (words + "\n").encode()))
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(slept, [])
+                self.assertIn("console: " + line.format(key=ITEM["key"]), stderr)
+                svc.close()
+
+    def test_a_check_answer_rides_out_a_network_drop_and_a_note_is_tried_once(self):
+        word = {"project_id": "owner/p00", "key": CHECK_ITEM["key"], "answer": "passed",
+                "version": CHECK_ITEM["version"]}
+        for name, body, drops, status, text, count, waits in [
+                ("passed", word, 2, 204, b"", 3, [1.0, 2.0]),
+                ("note", {**word, "answer": "note", "note": "Loads"}, None, 502,
+                 (answer.NETWORK_DOWN + "\n").encode(), 1, [])]:
+            with self.subTest(name):
+                calls, slept = [], []
+
+                def owner_path(*args, drops=drops, **kwargs):
+                    calls.append(args)
+                    if drops is None or len(calls) <= drops:
+                        raise dropped()
+
+                svc = self.open(tracker=Scripted([CHECK_ITEM]), owner_path=owner_path,
+                                write_sleep=slept.append)
+                got = support.post_page(svc.address, CHECK, self.headers(svc), json.dumps(body).encode())
+                self.assertEqual((got[0], got[2]), (status, text))
+                self.assertEqual(len(calls), count)
+                self.assertEqual(slept, waits)
                 svc.close()
 
     def test_other_methods_on_the_answer_route_are_refused(self):

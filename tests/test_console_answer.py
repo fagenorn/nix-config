@@ -325,12 +325,12 @@ class AnswerServiceTest(unittest.TestCase):
         if self.raise_ is not None:
             raise self.raise_
 
-    def open(self, tracker):
+    def open(self, tracker, **kwargs):
         support.write_registry(self.registry, support.entries(1))
         svc = service.ConsoleService(
             self.store, self.registry, port=0, tracker=tracker, tick=self.recorder,
             slug_of=lambda root: SLUG, activity=lambda root: time.time(), session_dirs=lambda: [],
-            repo_of=lambda cwd: cwd)
+            repo_of=lambda cwd: cwd, **kwargs)
         self.addCleanup(svc.close)
         return svc
 
@@ -409,6 +409,28 @@ class AnswerServiceTest(unittest.TestCase):
         svc.answer("owner/p00", ITEM["key"], [1, 0])
         self.assertEqual([str(e) for e in raised], [answer.SENDING])
         self.assertEqual(len(self.ticks), 1)
+        self.assertEqual(self.keys(svc, "answered"), [ITEM["key"]])
+
+    def test_a_second_answer_while_one_is_retrying_is_refused(self):
+        refused = []
+
+        def again(seconds):
+            try:
+                svc.answer("owner/p00", ITEM["key"], [1, 0])
+            except answer.Refused as error:
+                refused.append(str(error))
+
+        svc = self.open(Scripted([ITEM]), write_sleep=again)
+        svc.poll_tracker()
+
+        def drop_once():
+            self.inside = None
+            raise dropped()
+
+        self.inside = drop_once
+        svc.answer("owner/p00", ITEM["key"], [1, 0])
+        self.assertEqual(refused, [answer.SENDING])
+        self.assertEqual(len(self.ticks), 2)
         self.assertEqual(self.keys(svc, "answered"), [ITEM["key"]])
 
     def test_the_next_read_of_the_ticked_prompt_appends_nothing(self):
