@@ -30,6 +30,7 @@ Routes (every response carries `Cache-Control: no-store` and
     POST /api/plan-approve 204, a JSON body, the page approves a ready adoption plan (below)
     POST /api/plan-defer 204, a JSON body, the page answers Not now to an adoption's apply card (below)
     POST /api/register-confirm 204, a JSON body, the page answers the Register card of an adopted repository (below)
+    POST /api/trust-check 204, a JSON body, the page answers a Check again card of a failed folder trust (below)
     POST /api/brief 200 application/json, a manager sends a sprint's brief (below)
     POST /api/report 200 application/json, a manager sends a sprint's report (below)
     POST /api/close 200 application/json, a manager sends a sprint's closing report (below)
@@ -70,7 +71,7 @@ A page write (`PAGE_WRITES`, today `POST /api/looked`, `POST /api/answer`, `POST
 `POST /api/retry-manager`, `POST /api/message`, `POST /api/stop`, `POST /api/round-answer`, `POST /api/continue`, `POST /api/exclusion`, `POST /api/pin`, `POST /api/signin`,
 `POST /api/signin-code`, `POST /api/signin-cancel`, `POST /api/signin-link`, `POST /api/account-add`, `POST /api/account-remove` and
 `POST /api/register-project`, `POST /api/plan-answer`, `POST /api/plan-approve`,
-`POST /api/adoption-register`, `POST /api/plan-defer` and `POST /api/register-confirm`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
+`POST /api/adoption-register`, `POST /api/plan-defer`, `POST /api/register-confirm` and `POST /api/trust-check`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
 alone and goes through one guard, `_page_write`, whatever its route. After the loopback `Host`
 check and before any body is read, exactly one `Origin` header must equal `http://<Host>` (else
 403 `text/plain` `origin refused`) and exactly one `X-Console-Token` header must equal the
@@ -285,7 +286,9 @@ one `trust.granted` owner-action row (cause `apply`; one profile and its result 
 content) and one stderr line `console: trust_granted <cause> <project> <n granted> <n already> <n
 failed>`; a failed grant never stops the run, and a resumed approval (Try again, Apply it again)
 grants nothing. `close` waits for a grant under way, so its row is kept, and a grant that starts
-after `close` began writes nothing (`console: trust_grant_skipped closing`). The run applies the plan (`Adopter.apply`,
+after `close` began writes nothing (`console: trust_grant_skipped closing`). A result for a profile that no longer exists when the row is
+published (an account removal finished meanwhile) is dropped, and a grant left with no result appends
+nothing. The run applies the plan (`Adopter.apply`,
 acknowledging deletions only when the shown plan lists them) and appends `adoption.step` `applied`,
 pushes only the one adoption branch, at the commit apply recorded (`approve.push`), then looks for the branch's pull request
 before opening one and, when the open fails, looks once more (a pull request whose answer was lost
@@ -313,8 +316,10 @@ service refuses with 409 `folder_trust.NOT_FAILED` and one stderr line `console:
 trust_check_refused <reason>`, writing nothing, unless the `(root, profile)` pair is a folded failure
 and the profile still has a target (`trust_home/.claude.json` for `default`, else the profile
 directory of that name). Otherwise it runs the grant for that one pair on the handler thread
-(`_grant_trust`, cause `check`, the root being the key already, so `close` waits for it), appends one
-`trust.granted` row for that pair and answers `204`. Any other exception is `console:
+(`_grant_trust`, cause `check`, so `close` waits for it), appends one
+`trust.granted` row for that pair and answers `204`. The key is resolved again from the card's root,
+never taken from it: a failed row names the checkout path when its key never resolved, and the row
+keeps that root, so a granted retry clears the card it answers. Any other exception is `console:
 trust_check_failed <Type>` and 500 `checking failed`.
 
 `POST /api/adoption-register` (#1055, ADR-console-028 D10) is the Retry of a refused registration
@@ -3313,11 +3318,13 @@ class ConsoleService:
 
     def _grant_trust(self, cause: str, root: str, project: str,
                      profiles: Sequence[tuple[str, Path]] | None = None,
-                     key: str | None = None) -> list[tuple[str, str]]:
+                     slot: str | None = None) -> list[tuple[str, str]]:
         """Grant the folder's client trust in every target and log one `trust.granted` row.
 
-        `key` is the trust key when the caller already holds it (a failed row names the key as its
-        root); otherwise it is read from `root`.
+        The key is read from `root` every time. The row names the key, or `slot` when the caller
+        answers a failed row (a failure whose key never resolved names the checkout path, and the
+        retry must clear that very pair). A result for a profile that no longer exists when the row
+        is published is dropped, so an account removal that finished first leaves no card behind.
 
         The row is kept even when `close` has begun, the files being written already; a grant that
         starts after `close` began writes nothing. `close` waits for every grant under way.
@@ -3332,7 +3339,7 @@ class ConsoleService:
                      if profiles is None else list(profiles))
             if not found:
                 return []
-            key = folder_trust.trust_key(root) if key is None else key
+            key = folder_trust.trust_key(root)
             results = []
             for name, path in found:
                 if key is None:
@@ -3344,9 +3351,15 @@ class ConsoleService:
                     print(f"console: trust_grant_error {name} {type(error).__name__}",
                           file=sys.stderr)
                     results.append((name, folder_trust.FAILED))
-            row = folder_trust.granted_row(
-                cause, project, key if key is not None else os.path.realpath(root), results)
+            named = slot if slot is not None else (
+                key if key is not None else os.path.realpath(root))
             with self._ingest:
+                present = self._read_profiles()
+                results = [(name, result) for name, result in results
+                           if name == "default" or name in present]
+                if not results:
+                    return []
+                row = folder_trust.granted_row(cause, project, named, results)
                 self._fold(self.log.append([row]))
                 if not self._closed:
                     self._publish()
@@ -3372,7 +3385,7 @@ class ConsoleService:
                  if pair[0] == profile]
         if failed is None or not found:
             raise sprints.Refused(folder_trust.NOT_FAILED)
-        self._grant_trust("check", root, failed["project"], found, key=root)
+        self._grant_trust("check", root, failed["project"], found, slot=root)
 
     def _run_approval(self, root: str, shown: dict, adoption: dict | None) -> None:
         final = None

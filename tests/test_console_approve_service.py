@@ -1085,6 +1085,60 @@ class TrustGrantTest(ApproveCase):
         self.assertEqual(self.trust_cards(), [])
         self.assertEqual(self.view()["statement"]["inbox_items"], counted - 1)
 
+    def test_checking_again_a_worktree_whose_key_never_resolved_trusts_the_main_checkout(self):
+        self.ready(apply_result=APPLIED)
+        linked = self.parent / "linked"
+        git(self.repo, "worktree", "add", "-q", "-b", "wt", str(linked))
+        slot = os.path.realpath(linked)
+        with mock.patch.object(folder_trust, "trust_key", return_value=None), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.svc._grant_trust("apply", str(linked), "p")
+        self.assertEqual(len(self.trust_cards()), 3)
+        self.assertEqual(self.check({"root": slot, "profile": "solo"})[::2], (204, b""))
+        key = os.path.realpath(self.key)
+        self.assertEqual(self.parsed("solo")["projects"], {
+            key: {"allowedTools": ["Bash"], "hasTrustDialogAccepted": True}})
+        self.assertEqual(sorted(card["profile"] for card in self.trust_cards()),
+                         ["default", "work"])
+
+    def test_a_grant_that_an_account_removal_overtakes_publishes_nothing_for_that_account(self):
+        entered, gate = threading.Event(), threading.Event()
+        self.addCleanup(gate.set)
+
+        def granter(path, key):
+            if path.parent.name == "solo":
+                entered.set()
+                gate.wait(30)
+                return folder_trust.FAILED
+            return folder_trust.grant(path, key)
+
+        self.trust["trust_granter"] = granter
+        solo = self.files["solo"].parent
+
+        def remover(name):
+            shutil.rmtree(solo)
+            self.trust["profile_dirs"].remove(solo)
+
+        self.trust.update(
+            account_remover=remover, signer_out=lambda one: None,
+            signin_reader=lambda one: signin.Status("signed_in", None))
+        self.ready(apply_result=APPLIED)
+        granting = threading.Thread(
+            target=self.svc._grant_trust, args=("apply", str(self.repo), "p"))
+        granting.start()
+        self.assertTrue(entered.wait(30))
+        status, _, _ = support.post_page(
+            self.svc.address, "/api/account-remove",
+            self.own(**{"Content-Type": "application/json"}),
+            json.dumps({"profile": "solo", "typed": "solo"}).encode())
+        self.assertEqual(status, 204)
+        gate.set()
+        granting.join(30)
+        self.assertFalse(granting.is_alive())
+        self.assertEqual(self.trust_cards(), [])
+        for row in self.trust_rows():
+            self.assertNotIn("solo", [p["profile"] for p in row["profiles"]])
+
     def test_a_check_of_a_pair_never_named_is_refused(self):
         self.trust["trust_granter"] = lambda path, key: (
             folder_trust.FAILED if path.parent.name == "solo" else folder_trust.grant(path, key))

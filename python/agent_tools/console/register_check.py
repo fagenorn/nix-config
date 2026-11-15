@@ -58,7 +58,10 @@ remove it, because a cleanup before then could be undone by a late registry or p
 that dies with no `close` while a child runs leaves that child unbounded; the view then does not
 answer 200 and the gate reports `unsettled`.
 
-Restore runs after the gate: the registry entry is removed under `registry_transaction()`, the root's
+Restore runs after the gate: a Check again card the run left for the root (`inbox.open`, reason
+`trust_failed`) is answered through `POST /api/trust-check`, because the card lives in the console's log
+and only a granted retry clears it, and a card still open afterwards is a leftover named `trust card
+<profile>` (`trust cards unread` when the view does not answer); then the registry entry is removed under `registry_transaction()`, the root's
 trust entry is removed from `~/.claude.json` and every profile's `.claude.json` (`folder_trust.remove_entry`,
 the key being the root's real path), plans are deleted, the directory is removed, and the registry must
 equal `before` (by project id) with the directory gone and no matching plan left, else `{"status":
@@ -97,6 +100,7 @@ NOT_YET = 75
 LOOPBACK = ("127.0.0.1", "localhost")
 REGISTER_PATH = "/api/register-project"
 CONFIRM_PATH = "/api/register-confirm"
+TRUST_CHECK_PATH = "/api/trust-check"
 STATE_PATH = "/api/state"
 DIGEST = "a1" * 32
 GIT_ENV = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
@@ -285,7 +289,39 @@ def _poll(fetch: Callable[[str], Answer], url: str, poll: float, bound: float,
         time.sleep(poll)
 
 
-def _restore(tmp: Path, root: Path | None, project_id: str, before: list[dict]) -> list[str]:
+def _clear_trust_cards(fetch, post, base: str, token: str, root: Path) -> list[str]:
+    """Check again each Check again card the fixture's grant left; the cards still open, named.
+
+    The cards live in the console's event log, which the check cannot edit: a granted retry is what
+    clears one, so this runs before the trust entries are removed.
+    """
+    keys = {os.path.realpath(root), str(root)}
+
+    def open_cards() -> list[dict] | None:
+        document = _json_object(fetch(base + STATE_PATH))
+        if document is None:
+            return None
+        inbox = document.get("inbox")
+        found = inbox.get("open") if isinstance(inbox, dict) else None
+        return [card for card in found or ()
+                if isinstance(card, dict) and card.get("reason") == "trust_failed"
+                and card.get("root") in keys]
+
+    cards = open_cards()
+    if cards is None:
+        return ["trust cards unread"]
+    headers = {"Origin": base, write_guard.TOKEN_HEADER: token, "Content-Type": "application/json"}
+    for card in cards:
+        post(base + TRUST_CHECK_PATH, headers,
+             json.dumps({"root": card["root"], "profile": card.get("profile")}).encode("utf-8"))
+    cards = open_cards()
+    if cards is None:
+        return ["trust cards unread"]
+    return [f"trust card {card.get('profile')}" for card in cards]
+
+
+def _restore(tmp: Path, root: Path | None, project_id: str, before: list[dict],
+             clear: Callable[[Path], list[str]] = lambda root: []) -> list[str]:
     """Remove what the run left; the paths still left, the registry's included, else an empty list."""
     leftovers: list[str] = []
     try:
@@ -297,6 +333,11 @@ def _restore(tmp: Path, root: Path | None, project_id: str, before: list[dict]) 
     except Exception as error:  # noqa: BLE001 -- the comparison below decides
         print(f"register_check: {type(error).__name__}", file=sys.stderr)
     if root is not None:
+        try:
+            leftovers.extend(clear(root))
+        except Exception as error:  # noqa: BLE001 -- a card left is named, never raised
+            print(f"register_check: {type(error).__name__}", file=sys.stderr)
+            leftovers.append("trust cards")
         key = os.path.realpath(root)
         for _, path in folder_trust.targets(Path.home(), service.default_profile_dirs()):
             try:
@@ -432,7 +473,10 @@ def _decide(args, fetch, post, tmp_root, project_id, poll, settle) -> tuple[int,
         if reached:
             settled = _poll(fetch, state, poll, settle - (time.monotonic() - reached[-1]),
                             lambda d: not _is_running(d, str(root)))
-        leftovers = _restore(tmp, root, pid, before) if settled else []
+        leftovers = _restore(
+            tmp, root, pid, before,
+            lambda one: _clear_trust_cards(fetch, post, f"http://{urlsplit(args.url).netloc}",
+                                           token, one)) if settled else []
     if not settled:
         return 1, {"status": "unsettled", "project_id": pid, "root": str(root)}
     if leftovers:
