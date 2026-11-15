@@ -1482,9 +1482,25 @@ function outWords(p, cls) {
   if (p.out_until === null || p.out_until === undefined) return phrase("span", cls, "out, reset unknown");
   return phrase("span", cls, "out until ", timeEl("weekday", p.out_until, ""));
 }
+// A frame is drawn when it arrives, and a reset can pass after that (#1045): a profile whose next reset
+// has gone by reads as reset, with the figures and the time from before it dropped, until a frame says more.
+function lapsedReset(p) {
+  if (p.state === "out" || p.next_reset === null || p.next_reset === undefined) return false;
+  const at = Date.parse(p.next_reset);
+  return Number.isFinite(at) && at <= Date.now();
+}
+function settled(p) {
+  return lapsedReset(p) ? {...p, state: "reset", week_left: null, five_hour_left: null, next_reset: null} : p;
+}
+let lapsedDrawn = "";
+function lapsedNow(view) {
+  const profiles = view !== null && view.capacity && Array.isArray(view.capacity.profiles) ? view.capacity.profiles : [];
+  return profiles.filter(lapsedReset).map((p) => p.profile + "\n" + p.next_reset).join("\n");
+}
 function renderCapacity(view) {
   const box = document.getElementById("capacity");
-  const cap = view.capacity || {profiles: []};
+  const cap = {...(view.capacity || {profiles: []})};
+  cap.profiles = cap.profiles.map(settled);
   const known = (v) => v !== null && v !== undefined;
   const readings = cap.profiles.filter((p) => counted(p) && p.state !== "unknown" && !signedOut(p));
   const eligible = readings.filter((p) => !excludedProfile(p));
@@ -1563,7 +1579,8 @@ function renderCapacity(view) {
 // and remove controls. It draws only while open and holds nothing while closed.
 let accountsOpen = false;
 let accountsReturn = null;
-function accountRow(p, view) {
+function accountRow(shown, view) {
+  const p = settled(shown);
   const known = (v) => v !== null && v !== undefined;
   const name = p.profile;
   const row = el("li", "acct-row" + (excludedProfile(p) ? " acct-excluded" : "") + (pinnedProfile(p) ? " acct-pinned" : ""));
@@ -3180,6 +3197,11 @@ function render(view) {
 }
 function tick() {
   for (const t of document.querySelectorAll("time")) t.textContent = timeWords(t.dataset.form, t.dataset.stamp);
+  const lapsed = lapsedNow(lastView);
+  if (lapsed !== lapsedDrawn) {
+    lapsedDrawn = lapsed;
+    redrawAccounts();
+  }
   setTimeout(tick, TICK_MS);
 }
 setTimeout(tick, TICK_MS);

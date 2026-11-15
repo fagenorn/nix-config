@@ -275,6 +275,18 @@ class CapacityViewTest(unittest.TestCase):
         self.assertEqual(current["resumes_at"], iso(T + 100))
         self.assertIs(current["tight"], False)
 
+    def test_a_reset_that_has_passed_is_no_next_reset_whenever_the_view_is_built(self):
+        read = reading_of(report(
+            reset=T + 600, windows={"7d": window("allowed", 0.35, T + 600),
+                                    "5h": window("allowed", 0.6, T + 600)}), "p1")
+        state = CapacityState({"p1": read}, {})
+        before = capacity_view(["p1"], state, T + 599)["profiles"][0]
+        after = capacity_view(["p1"], state, T + 600)["profiles"][0]
+        self.assertEqual((before["state"], before["week_left"], before["next_reset"]),
+                         ("ok", 65, iso(T + 600)))
+        self.assertEqual((after["state"], after["week_left"], after["five_hour_left"],
+                          after["next_reset"]), ("reset", 100, 100, None))
+
     def test_tight_needs_every_other_profile_out(self):
         table = [(["ok"], False), (["ok", "out"], True), (["reset", "out", "out"], True),
                  (["ok", "unknown"], False), (["ok", "out", "unknown"], False),

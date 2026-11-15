@@ -6424,3 +6424,53 @@ class PanelSigninPageTest(unittest.TestCase):
         self.assertEqual(urls, {"/api/exclusion", "/api/pin", "/api/signin", "/api/account-remove",
                                 "/api/account-add", "/api/signin-code", "/api/signin-cancel",
                                 "/api/signin-link"})
+
+
+class LapsedResetPageTest(unittest.TestCase):
+    """#1045: a frame drawn before a reset passed does not keep naming that reset."""
+    at_now = {"start": {"focused": False, "clock": NOW_MS}}
+
+    def frame_read_before(self, reset_in_s: int) -> dict:
+        """The capacity the console built an hour before the page's clock, its week resetting `reset_in_s` after that."""
+        then = NOW_S - 3600
+        return {**view([]), "capacity": real_capacity(then, [
+            {"name": "p1", "week": .35, "five": .6, "week_reset": then + reset_in_s,
+             "five_reset": then + reset_in_s}])}
+
+    def test_a_reset_in_the_past_is_not_shown_on_the_strip_or_in_the_panel(self) -> None:
+        strip_snap, panel_snap = (
+            render([self.at_now, {"frame": self.frame_read_before(1800)}, {"snapshot": True}])[0],
+            opened_at(self.frame_read_before(1800)))
+        (acct,) = accounts(strip_snap)
+        self.assertEqual(full(part(strip_snap, "cap-acct")), "p1reset, not yet used")
+        self.assertEqual(bars(acct), [])
+        self.assertNotIn("65%", full(strip_snap["capacity"]))
+        (row,) = rows(panel_snap)
+        self.assertEqual(details(row), ["reset, not yet used", "sign-in unknown"])
+        self.assertEqual([n for n in nodes(row) if has_class(n, "acct-reset")], [])
+
+    def test_a_reset_still_ahead_is_shown(self) -> None:
+        panel_snap = opened_at(self.frame_read_before(2 * 3600))
+        (row,) = rows(panel_snap)
+        self.assertEqual(details(row)[0], "65% of the week left")
+        self.assertEqual([full(n) for n in nodes(row) if has_class(n, "acct-reset")],
+                         ["resets " + weekday(datetime.fromtimestamp(
+                             NOW_S + 3600, timezone.utc).isoformat())])
+
+    def test_a_reset_passing_between_frames_is_dropped_when_the_clock_moves(self) -> None:
+        frame = self.frame_read_before(2 * 3600)
+        before, after = render([
+            self.at_now, {"frame": frame}, {"click": "cap"}, {"snapshot": True},
+            {"clock": NOW_MS + 2 * 3600 * 1000}, {"snapshot": True},
+        ])
+        (row,) = rows(before)
+        self.assertIn("65% of the week left", details(row))
+        (late,) = rows(after)
+        self.assertEqual(details(late), ["reset, not yet used", "sign-in unknown"])
+        self.assertIn("reset, not yet used", full(after["capacity"]))
+        self.assertNotIn("65%", full(after["capacity"]))
+
+
+def opened_at(frame: dict) -> dict:
+    (snap,) = render([LapsedResetPageTest.at_now, {"frame": frame}, {"click": "cap"}, {"snapshot": True}])
+    return snap
