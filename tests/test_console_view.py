@@ -2298,6 +2298,18 @@ class RegisterFailureViewTest(unittest.TestCase):
         self.assertEqual(asked["registration"]["line"], "x")
         self.assertEqual(derive_view([], registration=entry)["registration"], entry)
 
+    def test_an_apply_card_clears_the_drafted_settings_beside_the_work_line(self):
+        lines = [{"field": "project-id", "line": "Project id: o/r (read from the remote)",
+                  "value": "o/r", "options": [], "text": True}]
+        entry = {**reg([]), "root": "/srv/r", "name": "r", "line": "x", "lines": ["writes a"],
+                 "note": "n", "adoption": None, "draft": lines, "draft_more": "and 1 more setting"}
+        card = {**APPLY_ITEM, "root": "/srv/r"}
+        shown = derive_view([], registration=entry, apply_items=[card])["registration"]
+        self.assertEqual((shown["line"], shown["draft"], shown["draft_more"]),
+                         ("Register r: needs you", None, None))
+        plain = derive_view([], registration=entry)["registration"]
+        self.assertEqual((plain["draft"], plain["draft_more"]), (lines, "and 1 more setting"))
+
     def test_a_registered_root_leaves_only_its_project_and_digest_line(self):
         opened = step_payload("opened", plan_id="p1", root="/srv/p00", project_id="p00")
         adoption = approve.entry({**opened, "pull_state": "merged", "pull_at": "t",

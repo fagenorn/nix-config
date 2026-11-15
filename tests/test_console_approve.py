@@ -403,8 +403,9 @@ class ApplyWordsTest(unittest.TestCase):
     def test_a_signing_failure_names_its_cause_and_next_step(self):
         reason = ("the project asks for signed commits and this computer could not sign the "
                   "adoption commit")
-        note = ("Set up a signing key on this computer, or turn signed commits off in the "
-                "project's settings, then choose Apply it again.")
+        note = ("Set up a signing key on this computer, then choose Apply it again. To turn "
+                "signed commits off in the project's settings instead, commit that change, then "
+                "register the repository again to make a new plan.")
         got_kept = approve.apply_failure("r", self.SIGNING, KEPT)
         got_none = approve.apply_failure("r", self.SIGNING, None)
         self.assertEqual(got_none, (reason, note))

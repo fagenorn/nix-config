@@ -705,6 +705,24 @@ class RegisterFailureCardTest(Case):
                           for o in card["questions"][0]["options"]], ["Try again", "Not now"])
         self.assertEqual(view["registration"]["line"], "Register fail-app: needs you")
 
+    def test_a_failed_plan_keeps_its_original_error_in_the_log_and_off_the_page(self):
+        message = "the contract at /srv/secret/.agents/project.json hashes to sha256:" + "a" * 64
+        error = {"code": "x", "repair_id": "adopt.contract.invalid",
+                 "violations": [{"pointer": "", "message": message}]}
+        self.fake = Fake(plan={"error": error})
+        self.begin(self.fake)
+        repo = git_repo(self.parent / "log-app")
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            self.assertEqual(self.post({"path": str(repo)})[0], 204)
+            row = self.settled_row(repo)
+        prefix = "console: registration_error "
+        found = [json.loads(line[len(prefix):]) for line in errors.getvalue().splitlines()
+                 if line.startswith(prefix)]
+        self.assertEqual(found, [{"root": str(repo), "verb": "plan", "error": error}])
+        self.assertNotIn("/srv/secret", row["headline"])
+        self.assertNotIn("sha256:", row["headline"])
+
     def test_try_again_plans_again_and_not_now_removes_the_card(self):
         repo, _ = self.failed()
         before = len(self.rows(event_log.REGISTRATION_ENDED))

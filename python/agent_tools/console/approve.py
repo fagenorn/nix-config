@@ -583,8 +583,9 @@ def apply_failure(name: str, error: Mapping, kept: Mapping | None) -> tuple[str,
     if repair == SIGNING_REPAIR:
         return ("the project asks for signed commits and this computer could not sign the "
                 "adoption commit",
-                "Set up a signing key on this computer, or turn signed commits off in the "
-                "project's settings, then choose Apply it again." + leftover)
+                "Set up a signing key on this computer, then choose Apply it again. To turn "
+                "signed commits off in the project's settings instead, commit that change, then "
+                "register the repository again to make a new plan." + leftover)
     if repair == COMMIT_REPAIR:
         return ("the adoption commit could not be made", commit_note + leftover)
     if repair.startswith(GATE_PREFIX):

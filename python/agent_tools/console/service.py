@@ -3121,10 +3121,17 @@ class ConsoleService:
                 if confirmed and plan.get("plan", {}).get("outcome") == "no_change":
                     verb = "register"
                     report = self._adopter.register(root, cancel=self._stop)
+                self._log_registration_failure(root, plan, report)
                 payload = register.summary(root, plan, report)
         except register.RunFailed as error:
+            self._log_registration_error({"root": root, "verb": verb, "failure": error.kind,
+                                          "cause": repr(error.__cause__)})
             payload = register.failed(root, error.kind, verb)
         except Exception as error:
+            self._log_registration_error({"root": root, "verb": verb,
+                                          "exception": type(error).__name__,
+                                          "detail": str(error)})
+            traceback.print_exception(error, file=sys.stderr)
             payload = register.failed(root, type(error).__name__, verb)
         with self._ingest:
             if not self._closed:
@@ -3135,6 +3142,17 @@ class ConsoleService:
         if not self._closed:
             self.refresh()
         print(f"console: registration_ended {payload['result']}", file=sys.stderr)
+
+    @staticmethod
+    def _log_registration_error(record: dict) -> None:
+        print(f"console: registration_error {json.dumps(record, sort_keys=True)}", file=sys.stderr)
+
+    def _log_registration_failure(self, root: str, plan: Mapping, report: Mapping | None) -> None:
+        """The child's own words of a failed plan or registration, before the page shows plain ones."""
+        if "error" in plan:
+            self._log_registration_error({"root": root, "verb": "plan", "error": plan["error"]})
+        elif report is not None and report.get("registered") is not True:
+            self._log_registration_error({"root": root, "verb": "register", "report": report})
 
     def answer_plan(self, plan_id: str, question: str, subject: str, value: str) -> None:
         """Plan the shown registration again with one more answer; refusals are `sprints.Refused`."""
@@ -3225,6 +3243,7 @@ class ConsoleService:
                     root, contract_draft.mark_refused(fields, *refused), answers)
             if refusals:
                 return plan
+            self._log_registration_error({"root": root, "verb": "plan", "error": plan["error"]})
         return register.summary(root, plan, None, draft=fields)
 
     def _run_answer(self, root: str, plan_id: str, answers: list[dict], asked: dict,

@@ -191,8 +191,8 @@ the given entry is null, or is `done` and its `root` is the root of a registered
 project's entry and the digest say so, and a finished result of a root now registered has nothing
 left to say. Else, when any retry, apply, confirm or failure item has a reason in `ASKING_REASONS`
 and the entry's `root`, a card already says what is asked, so the entry's `line` is
-`NEEDS_LINE` ("Register <name>: needs you"), its `lines` are `[]` and its `note` and `adoption`
-null. Otherwise it is a plain copy. A plan question (reason `register`) never reduces the line.
+`NEEDS_LINE` ("Register <name>: needs you"), its `lines` are `[]` and its `note`, `adoption`,
+`draft` and `draft_more` null. Otherwise it is a plain copy. A plan question (reason `register`) never reduces the line.
 
 The top-level `pin` member (#1029) is the pin note `pin.note` gives, copied, from the `pin`
 argument, and null with no pin. The top-level `pin_launches` member is the sorted list of profiles
@@ -1099,7 +1099,8 @@ def _shown_registration(registration: Mapping | None, states: list[ProjectState]
         return None
     if any(c.get("reason") in ASKING_REASONS and c.get("root") == root for c in cards):
         return {**registration, "line": NEEDS_LINE.format(name=registration["name"]),
-                "lines": [], "note": None, "adoption": None}
+                "lines": [], "note": None, "adoption": None, "draft": None,
+                "draft_more": None}
     return dict(registration)
 
 
