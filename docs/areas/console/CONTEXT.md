@@ -38,7 +38,7 @@ The sentence or two the owner states on the page for one registered project, kep
 _Avoid_: task, request
 
 **Brief**:
-The manager's answer to a goal: what done looks like, what is excluded, the slices, the risks and what it expects to ask. It waits in the inbox until the owner approves it, which starts the sprint, or answers it with a reply; a newer brief replaces it (ADR-console-013).
+The manager's answer to a goal: a title of at most 60 characters that names the sprint, what done looks like, what is excluded, the slices, the risks and what it expects to ask. It waits in the inbox until the owner approves it, which starts the sprint, or answers it with a reply; a newer brief replaces it (ADR-console-013, ADR-console-027).
 _Avoid_: plan, proposal
 
 **Manager**:
@@ -50,7 +50,7 @@ What the owner says to one sprint: an approval, a change request, free text or t
 _Avoid_: chat, comment
 
 **Question round**:
-The questions a manager sends at once with `sprint ask`: each says what it blocks and offers two to four options, one recommended. Each question is an inbox item kept only in the console's log; the owner answers it on the page with an option or their own words, and the answer reaches the manager as a message. A sprint has one open round at a time unless a round is a blocker, and reads waiting on you (n) while any question is open (ADR-console-019).
+The questions a manager sends at once with `sprint ask`: each leads with its ask (at most 140 characters), may add a context (at most 400), says what it blocks and offers two to four options of at most 80 characters, one recommended. Each question is an inbox item kept only in the console's log; the owner answers it on the page with an option or their own words, and the answer reaches the manager as a message. A sprint has one open round at a time unless a round is a blocker, and reads waiting on you (n) while any question is open (ADR-console-019, ADR-console-027).
 _Avoid_: poll, survey
 
 **Nudge**:
@@ -66,7 +66,7 @@ The manager's fixed-shape account after each batch and on any change of state: a
 _Avoid_: update, log
 
 **Sprint**:
-One goal, later its issues and its outcome, in one project (#834), shown under its project as one line with its state (drafting the brief, starting, on track, waiting on you, waiting on quota until <time>, quiet and may be stuck, closing, done, stopping or stopped by you), its progress and its manager's status; its manager session is listed inside it, and a manager that failed to start or is missing offers a retry. An ended sprint folds into its project's Finished sprints a day after it ends (ADR-console-011, ADR-console-013, ADR-console-014, ADR-console-015, ADR-console-018).
+One goal, later its issues and its outcome, in one project (#834), shown under its project as one line with its state (drafting the brief, starting, on track, waiting on you, waiting on quota until <time>, quiet and may be stuck, closing, done, stopping or stopped by you), its progress and its manager's status; its manager session is listed inside it, and a manager that failed to start or is missing offers a retry. An ended sprint folds into its project's Finished sprints a day after it ends. It is named by its brief's title (else its goal's first sentence), and only its own detail carries the goal (ADR-console-011, ADR-console-013, ADR-console-014, ADR-console-015, ADR-console-018, ADR-console-027).
 _Avoid_: job, run
 
 **Session**:

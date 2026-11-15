@@ -128,6 +128,18 @@ its output, a timeout or a shell that cannot be run). It never writes a file.
 `GET http://127.0.0.1:N/api/state` answers 200 within 5 seconds, not met on any other status or no
 answer; it reads only that endpoint.
 
+`console-first-screen --port N [--browser PATH]` (`verify_checks.console_first_screen`, issue 1031) reads
+`GET http://127.0.0.1:N/api/state` (no answer, a status other than 200 or a body that is not a JSON object is
+`unreachable`, exit 1), applies `first_screen_state` to it (any code other than 0 is returned as it is and no
+browser starts), then loads `http://127.0.0.1:N/` in headless Chromium at 1440x900 (the browser is `PATH`, else
+`chromium` on the PATH, else `nix shell n#chromium --command chromium`; none that runs is `no_browser`, exit 1),
+polls until the lead card exists, saves a PNG screenshot and measures it. It is met when the lead card is the
+long-goal sprint's open question (its ask equals the item's headline) and its whole ask and every option of its
+first question sit inside the 900 pixel fold, the ask not clipped, and no part of a long goal (characters 200 to
+300) is in the rendered text; exit 0. Not met (1) names the `fold_ask`, `fold_options` or `visible_goal` members.
+A page led by another item, or none, is not yet (75). The check sends no input to the page, keeps the screenshot
+(`first-screen-1440.png`, its path in every report from the browser) and removes the browser's profile.
+
 `issue-closed --repo R --issue N` (`verify_checks.issue_closed`, issue 1010) is met when issue N of R
 was closed as completed after the verify run verified its held block: a closed state with reason
 `completed` alone is not enough, since an owner can close an issue that way by hand. It reads
@@ -145,18 +157,22 @@ or `--issue` (a positive integer) is a usage error (2).
 from __future__ import annotations
 
 import argparse
+import base64
+import fcntl
 import http.client
 import io
 import json
 import os
 import pwd
 import re
+import select
 import shutil
 import subprocess
 import sys
 import tarfile
 import tempfile
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Iterator, Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
@@ -1115,6 +1131,346 @@ def console_state(port: int, *, timeout: float = 5.0) -> tuple[int, dict]:
     return (0 if status == 200 else 1), {"port": port, "status": status}
 
 
+LONG_GOAL_CHARS = 1000
+NEEDLE = slice(200, 300)
+
+
+def _sprint_entries(view: object) -> list[dict]:
+    """Issue 1031: every sprint entry of the live view, the same dict objects as in `view`."""
+    if not isinstance(view, dict) or not isinstance(view.get("entries"), list):
+        return []
+    projects: list[object] = []
+    for entry in view["entries"]:
+        if isinstance(entry, dict) and entry.get("type") == "quiet_group":
+            members = entry.get("projects")
+            projects.extend(members if isinstance(members, list) else [])
+        else:
+            projects.append(entry)
+    found: list[dict] = []
+    for project in projects:
+        if not isinstance(project, dict):
+            continue
+        finished = project.get("finished_sprints")
+        for group in (project.get("sprints"),
+                      finished.get("sprints") if isinstance(finished, dict) else None):
+            if isinstance(group, list):
+                found.extend(sprint for sprint in group if isinstance(sprint, dict))
+    return found
+
+
+def _walk_strings(value: object, path: str, exempt: set[int]) -> Iterator[tuple[str, str]]:
+    if isinstance(value, str):
+        yield path, value
+    elif isinstance(value, dict):
+        for key, member in value.items():
+            if key == "goal" and id(value) in exempt:
+                continue
+            yield from _walk_strings(member, f"{path}.{key}" if path else str(key), exempt)
+    elif isinstance(value, list):
+        for index, member in enumerate(value):
+            yield from _walk_strings(member, f"{path}[{index}]", exempt)
+
+
+def _strings(value: object, path: str = "") -> Iterator[tuple[str, str]]:
+    """Every decoded string in `value` with its dotted path, bar each sprint entry's own goal."""
+    return _walk_strings(value, path, {id(entry) for entry in _sprint_entries(value)})
+
+
+def _collapse(text: str) -> str:
+    """Issue 1031: `text` as rendered prose, every run of whitespace one space, the ends trimmed."""
+    return " ".join(text.split())
+
+
+def _short(value: object, low: int, high: int, *, stripped: bool = False) -> bool:
+    return isinstance(value, str) and low <= len((value.strip() if stripped else value)) <= high
+
+
+def _question_members(item: dict, sprint_title: object) -> list[str]:
+    members: list[str] = []
+    if "goal" in item:
+        members.append("goal")
+    if not _short(item.get("title"), 1, 60) or item["title"] != sprint_title:
+        members.append("title")
+    if not _short(item.get("headline"), 1, 140, stripped=True):
+        members.append("headline")
+    questions = item.get("questions")
+    if (not isinstance(questions, list) or not questions
+            or not all(isinstance(q, dict) and _short(q.get("question"), 1, 140, stripped=True)
+                       for q in questions)):
+        members.append("questions")
+    options_ok = all(
+        isinstance(q.get("options"), list) and 2 <= len(q["options"]) <= 4
+        and all(_short(o, 1, 80, stripped=True) for o in q["options"])
+        for q in (questions if isinstance(questions, list) else ()) if isinstance(q, dict))
+    if not options_ok:
+        members.append("options")
+    context = item.get("context")
+    if context is not None and not _short(context, 0, 400):
+        members.append("context")
+    return members
+
+
+def _long_goal_questions(view: object) -> tuple[list[dict], dict[object, dict], list[dict]]:
+    """Issue 1031: the sprint entries, the long-goal ones by id and their open question items."""
+    sprints = _sprint_entries(view)
+    long_sprints = {sprint.get("sprint_id"): sprint for sprint in sprints
+                    if isinstance(sprint.get("sprint_id"), str) and isinstance(sprint.get("goal"), str) and len(sprint["goal"]) > LONG_GOAL_CHARS}
+    inbox = view.get("inbox") if isinstance(view, dict) else None
+    opened = inbox.get("open") if isinstance(inbox, dict) else None
+    candidates = [item for item in opened if isinstance(item, dict) and item.get("reason") == "question"
+                  and isinstance(item.get("sprint_id"), str) and item["sprint_id"] in long_sprints] if isinstance(opened, list) else []
+    return sprints, long_sprints, candidates
+
+
+def first_screen_state(view: object) -> tuple[int, dict]:
+    """Issue 1031: a long-goal question reads by title with a short ask, 0 met, 1 not met, 75 not yet."""
+    sprints, long_sprints, candidates = _long_goal_questions(view)
+    if not candidates:
+        return 75, {"verdict": "not_yet", "questions": 0}
+    problems: list[dict] = []
+    for item in candidates:
+        sprint_id = item["sprint_id"]
+        for member in _question_members(item, long_sprints[sprint_id].get("title")):
+            problems.append({"sprint_id": sprint_id, "member": member})
+    for sprint in sprints:
+        goal = sprint.get("goal")
+        if not (isinstance(goal, str) and len(goal) > LONG_GOAL_CHARS):
+            continue
+        needle = goal[NEEDLE]
+        for path, text in _strings(view):
+            if needle in text:
+                problems.append({"sprint_id": sprint.get("sprint_id"), "member": "goal_text", "path": path})
+    if not problems:
+        return 0, {"verdict": "met", "questions": len(candidates)}
+    return 1, {"verdict": "not_met", "questions": len(candidates), "problems": problems}
+
+
+class BrowserError(Exception):
+    """Issue 1031: the headless browser failed, closed its pipe or did not answer in time."""
+
+
+def browser_command() -> list[str]:
+    """Issue 1031: `chromium` from the PATH, else Chromium through `nix shell`."""
+    found = shutil.which("chromium")
+    return [found] if found is not None else ["nix", "shell", "n#chromium", "--command", "chromium"]
+
+
+MEASURE_JS = """(() => {
+  const lead = document.querySelector(".lead");
+  const ask = lead && lead.querySelector("h2.q");
+  const title = lead && lead.querySelector(".head .sprint-title");
+  const box = (node) => { const r = node.getBoundingClientRect(); return {top: r.top, bottom: r.bottom}; };
+  return {
+    viewport: {width: window.innerWidth, height: window.innerHeight},
+    lead: ask ? {
+      title: title ? title.textContent : null,
+      ask: Object.assign({text: ask.textContent,
+                          clipped: ask.scrollHeight > ask.clientHeight + 1 || ask.scrollWidth > ask.clientWidth + 1},
+                         box(ask)),
+      options: Array.from(lead.querySelectorAll("button.opt")).map((b) =>
+        Object.assign({text: (b.querySelector(".ot") || b).textContent}, box(b))),
+    } : null,
+    text: document.body.innerText,
+  };
+})()"""
+
+GRACE = 10.0
+
+
+class _Pipe:
+    """The DevTools pipe transport: `\\0`-terminated JSON objects, written to fd 3 and read from fd 4 of the browser."""
+
+    def __init__(self, write_fd: int, read_fd: int) -> None:
+        self.write_fd, self.read_fd = write_fd, read_fd
+        self.buffer = b""
+        self.next_id = 0
+
+    def call(self, method: str, deadline: float, params: dict, session: str | None = None) -> dict:
+        self.next_id += 1
+        message: dict = {"id": self.next_id, "method": method, "params": params}
+        if session is not None:
+            message["sessionId"] = session
+        try:
+            os.write(self.write_fd, json.dumps(message).encode() + b"\0")
+        except OSError as error:
+            raise BrowserError(f"{method}: {type(error).__name__}: {error}") from error
+        while True:
+            reply = self._read(method, deadline)
+            if reply.get("id") != self.next_id:
+                continue
+            if "error" in reply:
+                raise BrowserError(f"{method}: {reply['error']}")
+            result = reply.get("result")
+            return result if isinstance(result, dict) else {}
+
+    def _read(self, method: str, deadline: float) -> dict:
+        while b"\0" not in self.buffer:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not select.select([self.read_fd], [], [], remaining)[0]:
+                raise BrowserError(f"{method}: no reply")
+            try:
+                chunk = os.read(self.read_fd, 65536)
+            except OSError as error:
+                raise BrowserError(f"{method}: {type(error).__name__}: {error}") from error
+            if not chunk:
+                raise BrowserError(f"{method}: the browser closed its pipe")
+            self.buffer += chunk
+        raw, self.buffer = self.buffer.split(b"\0", 1)
+        try:
+            reply = json.loads(raw)
+        except ValueError as error:
+            raise BrowserError(f"{method}: an unreadable reply: {error}") from error
+        return reply if isinstance(reply, dict) else {}
+
+
+EXEC_ON_PIPE_FDS = (
+    "import os, sys\n"
+    "os.dup2(int(sys.argv[1]), 3)\n"
+    "os.dup2(int(sys.argv[2]), 4)\n"
+    "os.execvp(sys.argv[3], sys.argv[3:])"
+)
+"""Issue 1031: run the browser with the pipes on descriptors 3 and 4. dash's `3<&10` is "Bad fd number", so no shell does it."""
+
+
+def _high_fd(fd: int) -> int:
+    """Move `fd` to a number of 10 or more, so the launcher's dup2 onto 3 and 4 cannot clash with it."""
+    moved = fcntl.fcntl(fd, fcntl.F_DUPFD_CLOEXEC, 10)
+    os.close(fd)
+    return moved
+
+
+def chromium_first_screen(url: str, *, width: int, height: int, screenshot: Path,
+                          browser: Sequence[str], timeout: float = 300.0) -> dict:
+    """Issue 1031: load `url` headless at width x height, save a PNG and return `MEASURE_JS` once the lead card exists.
+
+    The browser is driven over `--remote-debugging-pipe` and is sent no input event; its profile is
+    removed and the browser ended on every path. One deadline, `timeout` seconds from the start, bounds
+    every reply read up to the end of the polling; the last evaluation, the screenshot and the close each get `GRACE` more.
+    Raises `BrowserError` naming the method that failed.
+    """
+    profile = tempfile.mkdtemp()
+    to_browser_read, to_browser_write = (_high_fd(fd) for fd in os.pipe())
+    from_browser_read, from_browser_write = (_high_fd(fd) for fd in os.pipe())
+    process: subprocess.Popen | None = None
+    owned = [to_browser_read, to_browser_write, from_browser_read, from_browser_write]
+    try:
+        try:
+            process = subprocess.Popen(
+                [sys.executable, "-I", "-c", EXEC_ON_PIPE_FDS, str(to_browser_read), str(from_browser_write), *browser,
+                 "--headless=new", "--remote-debugging-pipe", "--no-first-run", "--no-default-browser-check",
+                 "--hide-scrollbars", f"--user-data-dir={profile}", f"--window-size={width},{height}",
+                 "about:blank"],
+                pass_fds=(to_browser_read, from_browser_write),
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        finally:
+            for fd in (to_browser_read, from_browser_write):
+                os.close(fd)
+                owned.remove(fd)
+        pipe = _Pipe(to_browser_write, from_browser_read)
+        deadline = time.monotonic() + timeout
+        target = pipe.call("Target.createTarget", deadline, {"url": "about:blank"}).get("targetId")
+        session = pipe.call("Target.attachToTarget", deadline, {"targetId": target, "flatten": True}).get("sessionId")
+        pipe.call("Emulation.setDeviceMetricsOverride", deadline,
+                  {"width": width, "height": height, "deviceScaleFactor": 1, "mobile": False}, session)
+        pipe.call("Page.navigate", deadline, {"url": url}, session)
+        measure = None
+        while True:
+            result = pipe.call("Runtime.evaluate", max(deadline, time.monotonic() + GRACE), {"expression": MEASURE_JS, "returnByValue": True}, session)
+            value = result.get("result", {}).get("value") if isinstance(result.get("result"), dict) else None
+            if isinstance(value, dict):
+                measure = value
+                if value.get("lead") is not None:
+                    break
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.25)
+        if measure is None:
+            raise BrowserError("Runtime.evaluate: no measurement")
+        data = pipe.call("Page.captureScreenshot", max(deadline, time.monotonic()) + GRACE, {"format": "png"}, session).get("data")
+        if not isinstance(data, str):
+            raise BrowserError("Page.captureScreenshot: no image data")
+        screenshot.write_bytes(base64.b64decode(data))
+        try:
+            pipe.call("Browser.close", time.monotonic() + GRACE, {})
+        except BrowserError:
+            pass
+        return measure
+    finally:
+        for fd in owned:
+            os.close(fd)
+        if process is not None:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(10)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait()
+            else:
+                process.wait()
+        shutil.rmtree(profile, ignore_errors=True)
+
+
+FOLD = 900
+
+
+def console_first_screen(port: int, *, browser: Sequence[str] | None = None, timeout: float = 300.0,
+                         out_dir: Path | None = None) -> tuple[int, dict]:
+    """Issue 1031: the live first screen at 1440x900 shows the long-goal question whole above the fold (0), else 1 or 75."""
+    connection = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+    status: int | None = None
+    try:
+        connection.request("GET", "/api/state")
+        response = connection.getresponse()
+        status = response.status
+        body = response.read()
+        view = json.loads(body) if status == 200 else None
+        error = None if isinstance(view, dict) else f"status {status}: not a JSON object"
+    except (OSError, http.client.HTTPException, ValueError) as caught:
+        view, error = None, f"{type(caught).__name__}: {caught}"
+    finally:
+        connection.close()
+    if not isinstance(view, dict):
+        return 1, {"verdict": "unreachable", "port": port, "status": status, "error": error or f"status {status}"}
+    code, report = first_screen_state(view)
+    if code != 0:
+        return code, {**report, "port": port}
+    out = out_dir if out_dir is not None else Path(tempfile.mkdtemp(prefix="console-first-screen-"))
+    screenshot = out / "first-screen-1440.png"
+    try:
+        out.mkdir(parents=True, exist_ok=True)
+        measure = chromium_first_screen(f"http://127.0.0.1:{port}/", width=1440, height=900, screenshot=screenshot,
+                                        browser=list(browser) if browser else browser_command(), timeout=timeout)
+    except (BrowserError, OSError) as caught:
+        return 1, {"verdict": "no_browser", "port": port, "error": f"{type(caught).__name__}: {caught}"}
+    _, long_sprints, candidates = _long_goal_questions(view)
+    lead = measure.get("lead")
+    ask = lead.get("ask") if isinstance(lead, dict) else None
+    ask_text = ask.get("text") if isinstance(ask, dict) and isinstance(ask.get("text"), str) else None
+    title_text = lead.get("title") if isinstance(lead, dict) and isinstance(lead.get("title"), str) else None
+    asked = [c for c in candidates if ask_text is not None and ask_text.strip() == str(c.get("headline")).strip()]
+    chosen = next((c for c in asked if title_text is not None and title_text.strip() == str(c.get("title")).strip()),
+                  asked[0] if asked else None)
+    if chosen is None:
+        return 75, {"verdict": "not_yet", "lead": "other", "screenshot": str(screenshot)}
+    problems: list[dict] = []
+    if title_text is None or title_text.strip() != str(chosen.get("title")).strip():
+        problems.append({"member": "lead_title"})
+    if ask["top"] < 0 or ask["bottom"] > FOLD or ask.get("clipped"):
+        problems.append({"member": "fold_ask"})
+    options = lead.get("options") if isinstance(lead.get("options"), list) else []
+    if ([str(option.get("text", "")).strip() for option in options] != chosen["questions"][0]["options"]
+            or any(option.get("bottom", FOLD + 1) > FOLD for option in options)):
+        problems.append({"member": "fold_options"})
+    text = _collapse(measure.get("text") if isinstance(measure.get("text"), str) else "")
+    needles = (_collapse(sprint["goal"][NEEDLE]) for sprint in long_sprints.values())
+    if any(needle and needle in text for needle in needles):
+        problems.append({"member": "visible_goal"})
+    if not problems:
+        return 0, {"verdict": "met", "port": port, "screenshot": str(screenshot), "viewport": measure.get("viewport")}
+    return 1, {"verdict": "not_met", "port": port, "screenshot": str(screenshot), "problems": problems}
+
+
 def _port(value: str) -> int:
     try:
         port = int(value)
@@ -1187,6 +1543,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         "console-state",
         help="issue 856: the console's state endpoint answers 200 on loopback")
     console.add_argument("--port", type=_port, required=True)
+    first = checks.add_parser(
+        "console-first-screen",
+        help="issue 1031: the live console's first screen shows a long-goal question whole above the fold")
+    first.add_argument("--port", type=_port, required=True)
+    first.add_argument("--browser", type=_nonempty)
     closed = checks.add_parser(
         "issue-closed",
         help="issue 1010: an issue was closed as completed, by its own verify run")
@@ -1195,6 +1556,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.check == "console-state":
         code, report = console_state(args.port)
+        print(json.dumps(report, sort_keys=True))
+        return code
+    if args.check == "console-first-screen":
+        code, report = console_first_screen(args.port, browser=[args.browser] if args.browser else None)
         print(json.dumps(report, sort_keys=True))
         return code
     if args.check == "darwin-shell-path":

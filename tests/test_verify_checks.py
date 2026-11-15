@@ -1768,3 +1768,429 @@ class ConsoleStateTest(unittest.TestCase):
     def test_the_docstring_documents_the_check(self):
         for needle in ("console-state --port N", "verify_checks.console_state"):
             self.assertIn(needle, verify_checks.__doc__)
+
+
+class FirstScreenStateTest(unittest.TestCase):
+    """`first_screen_state` (issue 1031): a long-goal question is named by title with a short ask."""
+
+    GOAL = "Make the importer resumable after a crash. " + "g" * 1357
+    SID = "a" * 16
+    TITLE = "Importer resumes after a crash"
+
+    def view(self):
+        return {
+            "entries": [{"type": "project", "project_id": "owner/importer",
+                         "sprints": [{"sprint_id": self.SID, "title": self.TITLE, "goal": self.GOAL}],
+                         "finished_sprints": {"sprints": []}}],
+            "inbox": {"open": [{"reason": "question", "sprint_id": self.SID, "title": self.TITLE,
+                                "headline": "Which store keeps the checkpoints?", "context": None,
+                                "questions": [{"question": "Which store keeps the checkpoints?",
+                                               "options": ["sqlite", "files"]}]}]},
+            "digest": {"moments": []},
+        }
+
+    def item(self, v):
+        return v["inbox"]["open"][0]
+
+    def members(self, report):
+        return [problem["member"] for problem in report["problems"]]
+
+    def test_a_long_goal_question_named_by_title_is_met(self):
+        self.assertEqual(verify_checks.first_screen_state(self.view()), (0, {"verdict": "met", "questions": 1}))
+
+    def test_no_open_question_of_a_long_goal_is_not_yet(self):
+        none_open = self.view()
+        none_open["inbox"]["open"] = []
+        short = self.view()
+        short["entries"][0]["sprints"][0]["goal"] = self.GOAL[:900]
+        for name, v in (("none open", none_open), ("short goal", short), ("not a dict", [])):
+            with self.subTest(name):
+                code, report = verify_checks.first_screen_state(v)
+                self.assertEqual(code, 75)
+                self.assertEqual(report["verdict"], "not_yet")
+
+    def test_a_question_carrying_the_goal_is_not_met(self):
+        v = self.view()
+        self.item(v)["goal"] = self.GOAL
+        code, report = verify_checks.first_screen_state(v)
+        self.assertEqual(code, 1)
+        self.assertIn({"sprint_id": self.SID, "member": "goal"}, report["problems"])
+
+    def test_an_empty_or_missing_ask_or_options_is_not_met(self):
+        def headline(value):
+            return lambda v: self.item(v).__setitem__("headline", value)
+
+        def question(key, value):
+            return lambda v: self.item(v)["questions"][0].__setitem__(key, value)
+
+        cases = (
+            ("empty headline", headline(""), "headline"),
+            ("blank headline", headline("   "), "headline"),
+            ("no questions", lambda v: self.item(v).pop("questions"), "questions"),
+            ("empty questions", lambda v: self.item(v).__setitem__("questions", []), "questions"),
+            ("empty question", question("question", ""), "questions"),
+            ("no options", question("options", []), "options"),
+            ("one option", question("options", ["sqlite"]), "options"),
+            ("empty option", question("options", ["sqlite", ""]), "options"),
+        )
+        for name, change, member in cases:
+            with self.subTest(name):
+                v = self.view()
+                change(v)
+                code, report = verify_checks.first_screen_state(v)
+                self.assertEqual(code, 1)
+                self.assertIn({"sprint_id": self.SID, "member": member}, report["problems"])
+
+    def test_an_ask_or_option_over_its_limit_is_not_met(self):
+        def headline(v):
+            self.item(v)["headline"] = "h" * 141
+
+        def option(v):
+            self.item(v)["questions"][0]["options"] = ["sqlite", "o" * 81]
+
+        def title(v):
+            self.item(v)["title"] = "t" * 61
+
+        def context(v):
+            self.item(v)["context"] = "c" * 401
+
+        for change, member in ((headline, "headline"), (option, "options"), (title, "title"),
+                               (context, "context")):
+            with self.subTest(member):
+                v = self.view()
+                change(v)
+                code, report = verify_checks.first_screen_state(v)
+                self.assertEqual(code, 1)
+                self.assertIn({"sprint_id": self.SID, "member": member}, report["problems"])
+
+    def test_goal_text_outside_the_sprint_entrys_goal_is_not_met(self):
+        def moment(v):
+            v["digest"]["moments"].append({"text": "A brief arrived: " + self.GOAL})
+
+        def status(v):
+            v["entries"][0]["sprints"][0]["status"] = self.GOAL[150:400]
+
+        def unstopped(v):
+            v["entries"][0]["unstopped"] = [{"title": self.TITLE, "note": self.GOAL[190:310]}]
+
+        def unstopped_goal(v):
+            v["entries"][0]["unstopped"] = [{"title": self.TITLE, "goal": self.GOAL}]
+
+        for change, path in ((moment, "digest.moments[0].text"),
+                             (status, "entries[0].sprints[0].status"),
+                             (unstopped, "entries[0].unstopped[0].note"),
+                             (unstopped_goal, "entries[0].unstopped[0].goal")):
+            with self.subTest(path):
+                v = self.view()
+                change(v)
+                code, report = verify_checks.first_screen_state(v)
+                self.assertEqual(code, 1)
+                self.assertIn({"sprint_id": self.SID, "member": "goal_text", "path": path},
+                              report["problems"])
+
+    def test_goal_text_with_escaped_characters_is_still_found(self):
+        g2 = "Make the importer resumable after a crash. " + ("é \"quoted\"\nline " * 100)[:1357]
+        v = self.view()
+        v["entries"][0]["sprints"][0]["goal"] = g2
+        v["digest"]["moments"].append({"text": "Seen: " + g2})
+        code, report = verify_checks.first_screen_state(v)
+        self.assertEqual(code, 1)
+        self.assertIn("goal_text", self.members(report))
+
+    def test_the_sprint_entrys_own_goal_is_exempt_wherever_the_entry_sits(self):
+        finished = self.view()
+        project = finished["entries"][0]
+        project["finished_sprints"]["sprints"] = project["sprints"]
+        project["sprints"] = []
+        quiet = self.view()
+        quiet["entries"] = [{"type": "quiet_group", "projects": quiet["entries"]}]
+        for name, v in (("finished", finished), ("quiet group", quiet)):
+            with self.subTest(name):
+                self.assertEqual(verify_checks.first_screen_state(v), (0, {"verdict": "met", "questions": 1}))
+
+
+FAKE_BROWSER = r'''#!%(python)s
+import base64, json, os, sys
+from pathlib import Path
+
+here = Path(__file__).resolve().parent
+with open(here / "argv.jsonl", "a") as log:
+    log.write(json.dumps(sys.argv) + "\n")
+if %(die)r:
+    sys.exit(1)
+import time
+measures = json.loads(%(measures)r)
+buffer = b""
+evaluations = 0
+while True:
+    while b"\0" not in buffer:
+        chunk = os.read(3, 65536)
+        if not chunk:
+            sys.exit(0)
+        buffer += chunk
+    raw, buffer = buffer.split(b"\0", 1)
+    message = json.loads(raw)
+    if %(silent)r:
+        time.sleep(600)
+    method, session = message["method"], message.get("sessionId")
+    with open(here / "calls.jsonl", "a") as log:
+        log.write(json.dumps([method, session]) + "\n")
+    result = {}
+    if method == "Target.createTarget":
+        result = {"targetId": "T"}
+    elif method == "Target.attachToTarget":
+        result = {"sessionId": "S"}
+    elif method == "Runtime.evaluate":
+        result = {"result": {"type": "object", "value": measures[min(evaluations, len(measures) - 1)]}}
+        evaluations += 1
+    elif method == "Page.captureScreenshot":
+        result = {"data": base64.b64encode(b"\x89PNG fake").decode()}
+    reply = {"id": message["id"], "result": result}
+    if session:
+        reply["sessionId"] = session
+    out = [reply]
+    if method == "Page.navigate":
+        out.append({"method": "Page.loadEventFired", "params": {}, "sessionId": "S"})
+    for member in out:
+        os.write(4, json.dumps(member).encode() + b"\0")
+    if method == "Browser.close":
+        sys.exit(0)
+'''
+
+M_OK = {"viewport": {"width": 1440, "height": 900},
+        "lead": {"title": "Importer resumes after a crash",
+                 "ask": {"text": "Which store keeps the checkpoints?", "top": 120, "bottom": 168, "clipped": False},
+                 "options": [{"text": "sqlite", "top": 300, "bottom": 340},
+                             {"text": "files", "top": 350, "bottom": 390}]},
+        "text": "Importer resumes after a crash\nWhich store keeps the checkpoints?"}
+M_EMPTY = {**M_OK, "lead": None}
+
+
+def fake_browser(tmp, measures, *, die=False, silent=False):
+    path = Path(tmp) / "browser"
+    path.write_text(FAKE_BROWSER % {"python": sys.executable, "die": die, "measures": json.dumps(measures), "silent": silent})
+    path.chmod(0o755)
+    return path
+
+
+def with_lead(measure, **changes):
+    lead = json.loads(json.dumps(measure["lead"]))
+    ask = {**lead["ask"], **changes.get("ask", {})}
+    options = changes.get("options", lead["options"])
+    return {**measure, "lead": {"title": changes.get("title", lead["title"]), "ask": ask, "options": options},
+            **({"text": changes["text"]} if "text" in changes else {})}
+
+
+class ChromiumDriverTest(unittest.TestCase):
+    """`chromium_first_screen` (issue 1031): DevTools over the browser's pipe, no input sent."""
+
+    def setUp(self):
+        handle = tempfile.TemporaryDirectory()
+        self.addCleanup(handle.cleanup)
+        self.tmp = Path(handle.name)
+
+    def jsonl(self, name):
+        return [json.loads(line) for line in (self.tmp / name).read_text().splitlines()]
+
+    def test_the_driver_speaks_the_pipe_and_waits_for_the_lead(self):
+        fake = fake_browser(self.tmp, [M_EMPTY, M_OK])
+        measure = verify_checks.chromium_first_screen(
+            "http://127.0.0.1:1/", width=1440, height=900, screenshot=self.tmp / "s.png",
+            browser=[str(fake)], timeout=10)
+        self.assertEqual(measure, M_OK)
+        self.assertEqual((self.tmp / "s.png").read_bytes(), b"\x89PNG fake")
+        argv = self.jsonl("argv.jsonl")[0]
+        for flag in ("--headless=new", "--remote-debugging-pipe", "--window-size=1440,900"):
+            self.assertIn(flag, argv)
+        profile = [a for a in argv if a.startswith("--user-data-dir=")]
+        self.assertEqual(len(profile), 1)
+        self.assertFalse(Path(profile[0].split("=", 1)[1]).exists())
+        calls = self.jsonl("calls.jsonl")
+        methods = [method for method, _ in calls]
+        self.assertEqual(methods[:2], ["Target.createTarget", "Target.attachToTarget"])
+        self.assertEqual(calls[2:4], [["Emulation.setDeviceMetricsOverride", "S"], ["Page.navigate", "S"]])
+        self.assertEqual(methods[-1], "Browser.close")
+        self.assertEqual(methods.count("Runtime.evaluate"), 2)
+        self.assertFalse([m for m in methods if m.startswith("Input.")])
+
+    def test_the_browser_is_launched_without_a_shell_that_only_takes_single_digit_descriptors(self):
+        # dash (the CI runner's /bin/sh) refuses `3<&10`: "Bad fd number". The pipes must reach
+        # descriptors 3 and 4 without a shell redirection naming a descriptor of 10 or more.
+        fake = fake_browser(self.tmp, [M_OK])
+        launched = []
+        real = subprocess.Popen
+
+        def spy(argv, *args, **kwargs):
+            launched.append(argv)
+            return real(argv, *args, **kwargs)
+
+        with mock.patch.object(verify_checks.subprocess, "Popen", spy):
+            verify_checks.chromium_first_screen(
+                "http://127.0.0.1:1/", width=1440, height=900, screenshot=self.tmp / "s.png",
+                browser=[str(fake)], timeout=10)
+        self.assertEqual(len(launched), 1)
+        self.assertNotIn(launched[0][0], ("/bin/sh", "sh"))
+        self.assertFalse([part for part in launched[0] if "<&" in part or ">&" in part])
+        self.assertEqual(self.jsonl("calls.jsonl")[0][0], "Target.createTarget")
+
+    def test_a_browser_that_dies_raises(self):
+        fake = fake_browser(self.tmp, [M_OK], die=True)
+        started = time.monotonic()
+        with self.assertRaises(verify_checks.BrowserError):
+            verify_checks.chromium_first_screen(
+                "http://127.0.0.1:1/", width=1440, height=900, screenshot=self.tmp / "s.png",
+                browser=[str(fake)], timeout=10)
+        self.assertLess(time.monotonic() - started, 10)
+
+    def test_a_silent_browser_is_bounded_by_the_timeout_not_a_fixed_call_limit(self):
+        fake = fake_browser(self.tmp, [M_OK], silent=True)
+        started = time.monotonic()
+        with self.assertRaises(verify_checks.BrowserError):
+            verify_checks.chromium_first_screen(
+                "http://127.0.0.1:1/", width=1440, height=900, screenshot=self.tmp / "s.png",
+                browser=[str(fake)], timeout=2)
+        self.assertLess(time.monotonic() - started, 8)
+
+    def test_the_browser_comes_from_path_else_nix_shell(self):
+        with mock.patch("shutil.which", return_value=None):
+            self.assertEqual(verify_checks.browser_command(), ["nix", "shell", "n#chromium", "--command", "chromium"])
+        with mock.patch("shutil.which", return_value="/run/current-system/sw/bin/chromium"):
+            self.assertEqual(verify_checks.browser_command(), ["/run/current-system/sw/bin/chromium"])
+
+
+class ConsoleFirstScreenTest(unittest.TestCase):
+    """`console-first-screen` (issue 1031): the live first screen at 1440x900 against the fold."""
+
+    GOAL = FirstScreenStateTest.GOAL
+    view = FirstScreenStateTest.view
+    SID = FirstScreenStateTest.SID
+    TITLE = FirstScreenStateTest.TITLE
+
+    def setUp(self):
+        handle = tempfile.TemporaryDirectory()
+        self.addCleanup(handle.cleanup)
+        self.tmp = Path(handle.name)
+
+    def serve(self, view):
+        body = json.dumps(view).encode()
+
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200 if self.path == "/api/state" else 404)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        return server.server_address[1]
+
+    def check(self, measures, view=None, *, timeout=10, die=False):
+        port = self.serve(view if view is not None else self.view())
+        fake = fake_browser(self.tmp, measures, die=die)
+        return verify_checks.console_first_screen(port, browser=[str(fake)], timeout=timeout, out_dir=self.tmp)
+
+    def test_a_whole_ask_and_options_above_the_fold_is_met(self):
+        code, report = self.check([M_OK])
+        self.assertEqual(code, 0, report)
+        self.assertEqual(report["verdict"], "met")
+        self.assertEqual(report["screenshot"], str(self.tmp / "first-screen-1440.png"))
+        self.assertTrue((self.tmp / "first-screen-1440.png").exists())
+        self.assertEqual(report["viewport"], {"width": 1440, "height": 900})
+
+    def test_an_ask_or_option_below_the_fold_is_not_met(self):
+        second_low = [{"text": "sqlite", "top": 300, "bottom": 340}, {"text": "files", "top": 350, "bottom": 920}]
+        one_option = [{"text": "sqlite", "top": 300, "bottom": 340}]
+        cases = (("ask below", with_lead(M_OK, ask={"bottom": 950}), "fold_ask"),
+                 ("ask clipped", with_lead(M_OK, ask={"clipped": True}), "fold_ask"),
+                 ("option below", with_lead(M_OK, options=second_low), "fold_options"),
+                 ("one option", with_lead(M_OK, options=one_option), "fold_options"))
+        for name, measure, member in cases:
+            with self.subTest(name):
+                code, report = self.check([measure])
+                self.assertEqual(code, 1, report)
+                self.assertEqual(report["verdict"], "not_met")
+                self.assertIn({"member": member}, report["problems"])
+
+    def test_goal_text_on_the_rendered_page_is_not_met(self):
+        code, report = self.check([{**M_OK, "text": "Seen: " + self.GOAL}])
+        self.assertEqual(code, 1)
+        self.assertIn({"member": "visible_goal"}, report["problems"])
+
+    def test_a_lead_without_or_with_another_sprint_title_is_not_met(self):
+        for name, title in (("no title", None), ("another title", "Exporter streams rows")):
+            with self.subTest(name):
+                code, report = self.check([with_lead(M_OK, title=title)])
+                self.assertEqual(code, 1, report)
+                self.assertIn({"member": "lead_title"}, report["problems"])
+
+    def test_the_lead_is_matched_to_the_candidate_with_its_own_title(self):
+        v = self.view()
+        twin = json.loads(json.dumps(v["inbox"]["open"][0]))
+        twin.update(sprint_id="b" * 16, title="Exporter streams rows")
+        v["entries"][0]["sprints"].append({"sprint_id": "b" * 16, "title": "Exporter streams rows", "goal": self.GOAL})
+        v["inbox"]["open"].insert(0, twin)
+        code, report = self.check([M_OK], v)
+        self.assertEqual(code, 0, report)
+
+    def test_a_rendered_goal_with_collapsed_whitespace_is_not_met(self):
+        goal = self.GOAL[:210] + "\n\n  " + "word  \n  and\tmore " * 6 + self.GOAL[260:]
+        v = self.view()
+        v["entries"][0]["sprints"][0]["goal"] = goal
+        rendered = " ".join(goal.split())
+        self.assertNotIn(goal[200:300], rendered)
+        code, report = self.check([{**M_OK, "text": "Seen: " + rendered}], v)
+        self.assertEqual(code, 1, report)
+        self.assertIn({"member": "visible_goal"}, report["problems"])
+
+    def test_a_page_led_by_another_item_is_not_yet(self):
+        other = with_lead(M_OK, ask={"text": "Approve the brief?"})
+        for name, measure, timeout in (("no lead", M_EMPTY, 2), ("another ask", other, 10)):
+            with self.subTest(name):
+                code, report = self.check([measure], timeout=timeout)
+                self.assertEqual(code, 75, report)
+                self.assertEqual(report["lead"], "other")
+
+    def test_no_long_goal_question_never_starts_the_browser(self):
+        v = self.view()
+        v["inbox"]["open"] = []
+        code, report = self.check([M_OK], v)
+        self.assertEqual(code, 75, report)
+        self.assertFalse((self.tmp / "argv.jsonl").exists())
+
+    def test_a_failing_state_never_starts_the_browser(self):
+        v = self.view()
+        v["inbox"]["open"][0]["goal"] = self.GOAL
+        code, report = self.check([M_OK], v)
+        self.assertEqual(code, 1)
+        self.assertEqual(report["verdict"], "not_met")
+        self.assertFalse((self.tmp / "argv.jsonl").exists())
+
+    def test_no_browser_is_reported(self):
+        code, report = self.check([M_OK], die=True)
+        self.assertEqual(code, 1)
+        self.assertEqual(report["verdict"], "no_browser")
+
+    def test_no_console_is_unreachable(self):
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        code, report = verify_checks.console_first_screen(port, browser=["/nonexistent"], out_dir=self.tmp)
+        self.assertEqual(code, 1)
+        self.assertEqual(report["verdict"], "unreachable")
+
+    def test_the_wrapper_is_committed_and_the_docstring_names_the_check(self):
+        port = self.serve(self.view())
+        fake = fake_browser(self.tmp, [M_OK])
+        result = run_from_root([str(ROOT / CHECKS / "console-first-screen"), "--port", str(port),
+                                "--browser", str(fake)])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["verdict"], "met")
+        self.assertEqual(committed_mode(f"{CHECKS}/console-first-screen"), "100755")
+        for needle in ("console-first-screen --port N", "verify_checks.console_first_screen"):
+            self.assertIn(needle, verify_checks.__doc__)

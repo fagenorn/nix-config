@@ -12,13 +12,14 @@ from unittest import mock
 from agent_tools.console import nudge, service, sprints
 
 from . import console_test_support as support
+from .test_console_messages import PARTS
 from .test_console_questions import ROUND
 from .test_console_reports import REPORT
 from .test_console_revive_service import GOAL, T0, ReviveCase
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 RESET = int(T0) + 3600
-RESUMED = GOAL + " resumed after the quota reset"
+RESUMED = PARTS["title"] + " resumed after the quota reset"
 JSON = {"Content-Type": "application/json"}
 
 
@@ -194,7 +195,8 @@ class IdleServiceTest(IdleCase):
         self.reach_no_progress(svc, sid)
         live = self.live(svc)
         (item,) = [i for i in live["inbox"]["open"] if i["reason"] == "progress"]
-        self.assertEqual(item["headline"], "the manager has stopped making progress on " + GOAL)
+        self.assertEqual(item["headline"],
+                         "the manager has stopped making progress on " + PARTS["title"])
         self.assertEqual(item["last_status"], REPORT["status"])
         self.assertEqual(live["statement"]["inbox_items"], 1)
         self.now[0] = T0 + 2190
@@ -450,4 +452,4 @@ class IdleQuotaTest(IdleCase):
             {"sprint_id": sid, "goal": GOAL, "session_id": "s-1", "ok": True, "resumed": True}])
         said = self.said(svc)
         self.assertEqual(said.count(RESUMED), 1)
-        self.assertEqual(said.count("The manager of " + GOAL + " was restarted"), 0)
+        self.assertEqual(said.count("The manager of " + PARTS["title"] + " was restarted"), 0)

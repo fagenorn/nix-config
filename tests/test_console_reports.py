@@ -142,7 +142,7 @@ class ReportRouteTest(Case):
         self.assertEqual(
             [m["sentence"] for m in digest["recent"] + digest["earlier"]
              if m["sentence"].startswith(prefix)],
-            [f"{prefix} closing: {GOAL_TEXT}", f"{prefix} on track: {GOAL_TEXT}"])
+            [f"{prefix} closing: {PARTS['title']}", f"{prefix} on track: {PARTS['title']}"])
 
     def test_a_report_survives_a_restart(self):
         svc = self.open()

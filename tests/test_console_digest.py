@@ -205,6 +205,35 @@ class DigestTest(unittest.TestCase):
             Moment(5, at(5), BRIEF_APPROVED_MOMENT,
                    "The brief for owner/p00 was approved, version 2: make the importer resumable")])
 
+    def test_a_brief_sentence_names_the_sprint_by_the_briefs_title(self):
+        sid = "a" * 16
+        goal = "Make the importer resumable after a crash. " + "g" * 1357
+        row = {"sprint_id": sid, "goal": goal}
+        brief = {"title": "Importer resumes after a crash", "done": "d", "excluded": ["x"],
+                 "slices": ["a"], "risks": ["r"], "asks": ["q"]}
+        found = moments([
+            Event(1, at(1), GOAL_STATED, "owner/p00", row),
+            Event(2, at(2), BRIEF_SENT, "owner/p00", {**row, "version": 1, "brief": brief}),
+            Event(3, at(3), BRIEF_APPROVED, "owner/p00", {**row, "version": 1})], {}, {})
+        self.assertEqual([m.sentence for m in found], [
+            "A brief for owner/p00 arrived, version 1: Importer resumes after a crash",
+            "The brief for owner/p00 was approved, version 1: Importer resumes after a crash"])
+        self.assertNotIn(goal, "".join(m.sentence for m in found))
+
+    def test_a_withdrawal_and_a_restart_name_the_sprint_by_title(self):
+        sid = "a" * 16
+        goal = "Make the importer resumable after a crash. " + "g" * 1357
+        title = "Make the importer resumable after a crash."
+        row = {"sprint_id": sid, "goal": goal}
+        found = moments([
+            Event(1, at(1), GOAL_STATED, "owner/p00", row),
+            Event(2, at(2), MANAGER_WOKEN, "owner/p00", {**row, "ok": True, "session_id": "s-1"}),
+            Event(3, at(3), GOAL_WITHDRAWN, "owner/p00", row)], {}, {})
+        self.assertEqual([m.sentence for m in found], [
+            f"The manager of {title} was restarted",
+            f"The goal for owner/p00 was withdrawn: {title}"])
+        self.assertNotIn("g" * 100, "".join(m.sentence for m in found))
+
     def test_a_wake_that_ran_and_a_takeover_that_started_each_say_one_sentence(self):
         sid = "a" * 16
         rows = [

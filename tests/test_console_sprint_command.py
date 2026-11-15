@@ -740,6 +740,21 @@ class ManagerContractTest(unittest.TestCase):
                 self.assertIn(needle, questions)
         self.assertIn("`answer`", text.partition("## Every turn")[2].partition("\n## ")[0])
 
+    def test_the_contract_states_the_title_ask_context_and_option_limits(self):
+        text = CONTRACT.read_text(encoding="utf-8")
+        drafting = " ".join(text.partition("## Drafting the brief")[2].partition("\n## ")[0].split())
+        questions = " ".join(text.partition("## Questions")[2].partition("\n## ")[0].split())
+        for needle in ("`title`", f"at most {sprints.MAX_TITLE_CHARS} characters",
+                       sprints.TITLE_TOO_LONG, "six parts"):
+            with self.subTest(section="drafting", needle=needle):
+                self.assertIn(needle, drafting)
+        for needle in ("`context`", f"at most {sprints.MAX_ASK_CHARS} characters",
+                       f"at most {sprints.MAX_CONTEXT_CHARS} characters",
+                       f"at most {sprints.MAX_OPTION_CHARS} characters", "Good:", "Bad:",
+                       sprints.ASK_TOO_LONG.format(n=1).split(":")[0]):
+            with self.subTest(section="questions", needle=needle):
+                self.assertIn(needle, questions)
+
     def test_the_contract_says_what_follows_an_approval(self):
         text = CONTRACT.read_text(encoding="utf-8")
         for needle in ("`sprint inbox`", "Start every turn",
@@ -803,7 +818,9 @@ class CommandContractTest(unittest.TestCase):
                      "--brief-file", "--port", "POST /api/brief", "GET /api/sprint-status",
                      "exit 0", "exit 1", "exit 2", "printed nowhere", "sprint report", "--report-file",
                      "POST /api/report", "sprint contract", "sprint ask", "--round-file",
-                     "POST /api/ask", "chosen", "round or reply file"):
+                     "POST /api/ask", "chosen", "round or reply file",
+                     '"context": "<optional, at most 400 characters>"',
+                     "six parts, `title` first"):
             self.assertIn(name, docstring)
         self.assertEqual(sprint.build_parser().prog, "sprint")
 

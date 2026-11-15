@@ -23,7 +23,8 @@ MESSAGE = "/api/message"
 INBOX = "/api/inbox"
 MESSAGE_REPLY = "/api/message-reply"
 GOAL_TEXT = "make the importer resumable"
-PARTS = {"done": "the importer resumes after a crash", "excluded": ["no new formats"],
+PARTS = {"title": "Importer resumes after a crash",
+         "done": "the importer resumes after a crash", "excluded": ["no new formats"],
          "slices": ["checkpoint", "resume"], "risks": ["partial writes"],
          "asks": ["which store?"]}
 JSON = {"Content-Type": "application/json"}
