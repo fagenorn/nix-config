@@ -1576,14 +1576,43 @@ class CommitGateTest(ApplyTestCase):
              if gate["id"] == "workflow-verification-commands"],
             ["failed"])
 
-    def test_a_signing_failure_is_verification_failed(self):
+    def test_a_signer_that_cannot_run_is_signing_unavailable(self):
         """`-S` is passed exactly when the contract asks for it, and a signer
-        that cannot run is surfaced rather than retried unsigned."""
+        that cannot run is named as such rather than retried unsigned."""
         root = apply_repo(self.home, signed=True)
         git(root, "config", "gpg.format", "openpgp")
         git(root, "config", "gpg.program",
             str(root / "no-such-signing-program"))
         git(root, "config", "user.signingkey", "DEADBEEF")
+        plan_id = self.ready_plan(root)["plan"]["plan_id"]
+        base = git(root, "rev-parse", "HEAD").strip()
+        payload = self.assert_retained(root, plan_id, base,
+                                       "adopt.commit.signing_unavailable")
+        self.assertEqual(
+            payload["error"]["violations"][0]["message"],
+            "the contract asks for a signed commit and this host could not "
+            "sign one")
+
+    def test_a_failing_hook_with_a_working_signer_stays_commit_failed(self):
+        root = apply_repo(self.home, signed=True)
+        tools = Path(tempfile.mkdtemp())
+        signer = tools / "signer"
+        signer.write_text(
+            "#!/bin/sh\n"
+            "cat >/dev/null\n"
+            "printf '\\n[GNUPG:] SIG_CREATED D 1 8 00 1700000000 X\\n' >&2\n"
+            "printf -- '-----BEGIN PGP SIGNATURE-----\\n\\nx\\n"
+            "-----END PGP SIGNATURE-----\\n'\n", "utf-8")
+        signer.chmod(0o755)
+        hooks = tools / "hooks"
+        hooks.mkdir()
+        hook = hooks / "pre-commit"
+        hook.write_text("#!/bin/sh\nexit 1\n", "utf-8")
+        hook.chmod(0o755)
+        git(root, "config", "gpg.format", "openpgp")
+        git(root, "config", "gpg.program", str(signer))
+        git(root, "config", "user.signingkey", "DEADBEEF")
+        git(root, "config", "core.hooksPath", str(hooks))
         plan_id = self.ready_plan(root)["plan"]["plan_id"]
         base = git(root, "rev-parse", "HEAD").strip()
         self.assert_retained(root, plan_id, base, "adopt.commit.failed")

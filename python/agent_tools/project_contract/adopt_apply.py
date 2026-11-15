@@ -825,6 +825,23 @@ def signing_requested(payload: object) -> bool | None:
     return signed if isinstance(signed, bool) else None
 
 
+SIGNING_UNAVAILABLE = "adopt.commit.signing_unavailable"
+
+
+def signing_works(worktree: Path) -> bool:
+    """Whether this host can sign a commit under the worktree's configuration.
+
+    Asked only after a failed commit whose contract asked for a signature: a
+    `git commit-tree -S` over `HEAD`'s tree signs with the same `gpg.*` and
+    `user.signingkey` settings as `git commit -S`, runs no hook and moves no
+    ref, so a failure here is the signer and a success there means the commit
+    failed for another reason (a hook, an empty identity).
+    """
+    code, _ = run_git(worktree, "commit-tree", "-S", "-m",
+                      "adopt signing probe", "HEAD^{tree}")
+    return code == 0
+
+
 def expected_commit_paths(operations: list[dict]) -> tuple[set[str], set[str]]:
     """`(required, optional)` paths a commit of these operations may change.
 

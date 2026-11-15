@@ -69,7 +69,12 @@ counted against its own tree, than its pre-move counterpart at `HEAD` (a file
 with no counterpart is compared with zero). Because the verification commands
 and a `pre-commit` hook run after it, the same count over the commit against
 its parent is proved again once the commit exists, and a failure there refuses
-`adopt.commit.new_broken_link` with the worktree and branch retained.
+`adopt.commit.new_broken_link` with the worktree and branch retained. A
+commit that fails is refused `adopt.commit.failed`, except that when the
+contract asked for a signature and a `git commit-tree -S` probe of the
+worktree's `HEAD` tree (no ref moved, no hook run) also fails, it is refused
+`adopt.commit.signing_unavailable`; either way the worktree is retained and
+the commit is never retried unsigned.
 
 `plan --contract-draft FILE` plans the adoption of a checkout that has no
 project contract by carrying one drafted outside it (#1067). The file holds one
@@ -816,11 +821,16 @@ def command_apply(args: argparse.Namespace) -> int:
     if code != 0:
         # Never retried unsigned: a contract that asks for a signature and a
         # machine that cannot produce one is a failure, not a downgrade.
+        unsigned = signed and not adopt_apply.signing_works(worktree)
+        cause = (adopt_apply.SIGNING_UNAVAILABLE if unsigned
+                 else "adopt.commit.failed")
         adopt_apply.retain_failure(digest, document, worktree, branch,
-                                   gates, "adopt.commit.failed")
+                                   gates, cause)
         raise adopt_inspection.refuse(
-            "verification_failed", "adopt.commit.failed", "",
-            "the adoption commit could not be created")
+            "verification_failed", cause, "",
+            "the contract asks for a signed commit and this host could not "
+            "sign one" if unsigned
+            else "the adoption commit could not be created")
 
     commit = adopt_inspection.git_or_fail(
         worktree, "rev-parse", "HEAD").decode("ascii", "strict").strip()
