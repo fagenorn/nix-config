@@ -93,7 +93,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .card .opts .picked, .rest .opts .picked, .done .opts .picked { color: var(--lav); }
 .card .reason { display: block; margin-top: 8px; font-size: .8125rem; color: var(--ov2); }
 .card .meta { margin-top: 8px; font-size: .8125rem; color: var(--ov2); }
-.card .head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 0; font-size: .84375rem; color: var(--sub0); }
+.card .head, .rest .head { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 10px; margin-top: 0; font-size: .84375rem; color: var(--sub0); }
 .head .wait { margin-left: auto; }
 .head .sprint-title { color: var(--text); overflow-wrap: anywhere; }
 .kind { display: inline-flex; gap: 7px; font-weight: 600; }
@@ -1947,6 +1947,7 @@ let fields = new Map();
 let lastView = null;
 let currentId = null;
 let keyHint = null;
+let hintHost = null;
 function itemId(item) {
   return item.project_id + "#" + item.key;
 }
@@ -2334,6 +2335,7 @@ function briefRecord(sprintId) {
     field.setAttribute("aria-label", "Or say what to change");
     const row = el("details", "row brief-row");
     row.dataset.key = "brief:" + sprintId;
+    row.addEventListener("toggle", () => { if (keyHint !== null && hintHost === rec) seatHint(keyHint, rec); });
     const rowHead = el("summary", "row-head");
     row.appendChild(rowHead);
     rec = {
@@ -2794,6 +2796,11 @@ function keyStrip(current, open) {
   for (const e of entries) strip.appendChild(e);
   return strip;
 }
+// A brief after the first sits in a row that can fold: its hint goes on the row's summary while the row is closed, else on its card.
+function seatHint(strip, host) {
+  const folded = host.card !== undefined && host.card.parentNode === host.row && !host.row.open;
+  (folded ? host.rowHead : host.card !== undefined ? host.card : host).appendChild(strip);
+}
 function renderInbox(view) {
   const fresh = view !== lastView;
   lastView = view;
@@ -2932,15 +2939,15 @@ function renderInbox(view) {
   // The one key hint sits on the current card (else on the first waiting one); a brief card outlives a render, so the last hint is removed first.
   if (keyHint !== null) keyHint.remove();
   keyHint = null;
+  hintHost = null;
   const strip = keyStrip(current, open);
   if (strip !== null) {
     const owner = current !== null ? current.item : open.find((item) => { const s = answers.get(stateId(item)); return s !== undefined && s.phase === "waiting"; });
     const host = owner === undefined ? undefined : cardOf.get(stateId(owner));
     if (host !== undefined) {
-      // A brief after the first sits in a closed row: its hint goes on the row's summary, which always shows.
-      const folded = host.card !== undefined && host.card.parentNode === host.row && !host.row.open;
-      (folded ? host.rowHead : host.card !== undefined ? host.card : host).appendChild(strip);
+      seatHint(strip, host);
       keyHint = strip;
+      hintHost = host;
     }
   }
   const again = held === null ? undefined : fields.get(held.key);

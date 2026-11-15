@@ -44,7 +44,7 @@
 // when unset; Elem.style is a plain object) and its aria-label attribute as
 // label (null when unset) and, on an A element, its href (null when unset or
 // empty). {close: "<details key>"} sets that fold's open to
-// false (none throws), the mirror of open. An optional "in": "<details key>" on
+// false (none throws), the mirror of open. Both fire the fold's toggle listeners. An optional "in": "<details key>" on
 // a click, type, append, input, select or focus_on step limits the lookup to the
 // first attached element with the class inside that fold's subtree (an unknown
 // key or no match throws); without it the lookup is unchanged. A key step may
@@ -436,10 +436,12 @@ async function run() {
       const fold = attached(root).find((n) => n.tagName === "DETAILS" && n.dataset.key === step.open);
       if (!fold) throw new Error("no details with key " + step.open);
       fold.open = true;
+      for (const fn of fold.listeners.toggle || []) fn({ type: "toggle", target: fold });
     } else if ("close" in step) {
       const fold = attached(root).find((n) => n.tagName === "DETAILS" && n.dataset.key === step.close);
       if (!fold) throw new Error("no details with key " + step.close);
       fold.open = false;
+      for (const fn of fold.listeners.toggle || []) fn({ type: "toggle", target: fold });
     } else if ("clock" in step) {
       state.clock = step.clock;
       runDueTimers();

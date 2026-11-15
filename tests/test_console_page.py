@@ -4372,6 +4372,36 @@ class PageBriefRowTest(unittest.TestCase):
             if selector == ".brief-row > summary":
                 self.assertEqual(decls.get("display", "flex"), "flex", selector)
 
+    def test_the_hint_follows_a_brief_row_as_it_folds_and_unfolds(self) -> None:
+        # The hint sits on the summary while the row is closed and on the card while it is open;
+        # folding or unfolding the row by hand moves it with no redraw in between (DR-003).
+        def holder(snap: dict) -> str:
+            (strip,) = keys_of(snap)
+            (row,) = [n for n in nodes(snap["inbox"]) if n["tag"] == "details" and has_class(n, "brief-row")]
+            (found,) = [c for c in nodes(row) if any(k is strip for k in c["children"])]
+            return found["tag"]
+
+        opened, folded, again = render([
+            START, {"frame": frame([BRIEF, BRIEF_B])}, {"open": KEY_B}, {"key": "Enter"},
+            {"snapshot": True}, {"close": KEY_B}, {"snapshot": True},
+            {"open": KEY_B}, {"snapshot": True}])
+        self.assertEqual([holder(opened), holder(folded), holder(again)], ["article", "summary", "article"])
+
+    def test_a_register_row_head_keeps_the_flex_layout_of_a_card_head(self) -> None:
+        # The harness applies no CSS: a head inside li.row needs the card head's flex layout, gaps
+        # and right-aligned wait, or later registration rows run their spans together (DR-002).
+        style = re.findall(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"))[0]
+        merged: dict = {}
+        for selector in (".card .head", ".rest .head"):
+            found = {}
+            for name, decls in style_rules(style):
+                if name == selector:
+                    found.update(decls)
+            merged[selector] = found
+        self.assertEqual(merged[".rest .head"], merged[".card .head"])
+        self.assertEqual(merged[".rest .head"].get("display"), "flex")
+        self.assertTrue([d for s, d in style_rules(style) if s == ".head .wait" and d.get("margin-left") == "auto"])
+
     def test_a_collapsed_row_title_wraps_a_long_unbroken_goal(self) -> None:
         # A goal with a long unbroken token (a filename) sits in a flex item <b>; without
         # overflow-wrap the row grows past a 480px viewport, as .brief .goal-line already avoids.

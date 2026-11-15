@@ -584,6 +584,41 @@ class RowTest(unittest.TestCase):
         self.assertIn("It has no remote, so the console cannot tell", ask)
         self.assertNotIn("Its remote", ask)
 
+    def test_a_row_saved_before_the_plain_words_is_read_back_in_them(self):
+        reading = {"remotes": [], "default_branch": None, "branches": ["trunk"], "files": [],
+                   "texts": {}}
+        now = contract_draft.draft("/x/sample-app", reading)
+        # The same draft as an earlier console saved it: internal labels, old option and card words.
+        old_label = {"light-lane": "light lane", "worktree-prefix": "worktree name prefix"}
+        saved = []
+        for f in now:
+            f = {**f, "label": old_label.get(f["field"], f["label"])}
+            if f["field"] == "light-lane":
+                f["options"] = [{"value": "none", "label": "It has no light lane"}]
+            if f["field"] == "default-branch":
+                f["ask"] = ("Which branch is the default branch of sample-app?\n"
+                            "Its remote did not say: choose a branch or type its name.")
+            if f["field"] == "worktree-prefix":
+                f.update(value="mine-", source="owner")
+            saved.append(f)
+        row = register.drafting("/x/sample-app", saved)
+        found = register.latest([Event(1, "t1", register.ENDED, None, row)])
+        draft = {f["field"]: f for f in found["draft"]}
+        self.assertEqual(draft["light-lane"]["label"], "short route for light changes")
+        self.assertEqual(draft["light-lane"]["options"],
+                         [{"value": "none", "label": "Every change takes the full delivery route"}])
+        self.assertEqual(draft["worktree-prefix"]["label"], "start of each work copy's name")
+        self.assertEqual((draft["worktree-prefix"]["value"], draft["worktree-prefix"]["source"]),
+                         ("mine-", "owner"))
+        self.assertIn("It has no remote, so the console cannot tell", draft["default-branch"]["ask"])
+        self.assertEqual(draft["default-branch"]["options"], [{"value": "trunk", "label": "trunk"}])
+        (branch,) = [q for q in found["questions"] if q["subject"] == "default-branch"]
+        self.assertEqual(branch["ask"], draft["default-branch"]["ask"])
+        self.assertNotIn("Its remote", "".join(q["ask"] for q in found["questions"]))
+        self.assertEqual(found["plan_id"], row["plan_id"])
+        shown = {e["field"]: e["line"] for e in register.view_entry(None, found)["draft"]}
+        self.assertNotIn("light lane", shown["light-lane"])
+
     def test_ended_takes_thirteen_members_and_checks_the_draft(self):
         row = register.drafting("/x/sample-app", draft_fields())
         self.assertEqual(len(row), 13)

@@ -26,7 +26,8 @@ build and test commands) or the console's starting value, and opens the project 
 `taken(<id>)` when the id it read is registered for another checkout. A field is open (`open_fields`)
 when it has no value and is one of `ASKED` (the project id, the default branch, the tracker, the build
 and test commands), or when it has a `reason`; `questions` words each open field as one card; `shown`
-gives every other field as one entry that can be changed. `MAIN` lists the seven fields read from the
+gives every other field as one entry that can be changed. `refresh(root, fields)` gives a saved draft today's
+label, option labels and card question (ADR-console-033) without touching a value, a source or a reason. `MAIN` lists the seven fields read from the
 repository or asked; each of them is one line `<label>: <display> (<source>)`. Every other field has
 the flag `more` in `shown`, and while its value is its start value its line is its start sentence
 (`REST_WORDS`, plain words with no source), so it reads as a settled default; once it is another value
@@ -448,6 +449,31 @@ def draft(root: str, reading: Mapping, *, entries: Iterable[Mapping] = ()) -> li
     held = taken_id(fields, entries, root)
     if held is not None:
         fields[0]["reason"] = held
+    return fields
+
+
+def _remote_count(fields: list[Mapping]) -> int:
+    """The remotes the draft was made from, as the project id's card recorded them."""
+    ask = next((f["ask"] for f in fields if f["field"] == "project-id"), "")
+    if "has no remote" in ask:
+        return 0
+    found = re.search(r"It has (\d+) remotes", ask)
+    return int(found.group(1)) if found else 1
+
+
+def refresh(root: str, fields: Iterable[Mapping]) -> list[dict]:
+    """A saved draft with today's wording: label, option labels and card question, values untouched."""
+    fields = [dict(f) for f in fields]
+    remotes, name = _remote_count(fields), Path(root).name
+    for field in fields:
+        known = field["field"]
+        if known not in LABELS or not isinstance(field["options"], list):
+            continue
+        current = {o["value"]: o["label"] for o in OPTIONS[known]}
+        field["label"] = LABELS[known]
+        field["ask"] = _ask(known, name, remotes)
+        field["options"] = [{**o, "label": current.get(o.get("value"), o.get("label"))}
+                            if isinstance(o, dict) else o for o in field["options"]]
     return fields
 
 

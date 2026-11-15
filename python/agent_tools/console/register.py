@@ -103,8 +103,9 @@ members are exactly `MEMBERS` (a legacy row), `MEMBERS | EXTRA` or `MEMBERS | EX
 of dicts with exactly the string keys `id`, `subject` and `value` (ADR-console-029 D1); for thirteen
 also unless `draft` is None or a list of dicts whose keys are exactly `FIELD_KEYS`. `ENDED` is
 `event_log.REGISTRATION_ENDED`, not in `KEPT_KINDS`. `latest(events, state=None)` is the last valid
-`ENDED` payload over `DEFAULTS` with `at` added, else `state`: the view's `registration` member,
-folded by the service. `view_entry(running, latest, *, again=False, refusal=None, adoption=None,
+`ENDED` payload over `DEFAULTS` with `at` added (a saved draft is read back through
+`contract_draft.refresh`, and a `drafting` row's questions from it, so an earlier console's wording
+never shows, ADR-console-033 D2), else `state`: the view's `registration` member, folded by the service. `view_entry(running, latest, *, again=False, refusal=None, adoption=None,
 approve=None)` is that member, always the same twenty keys: the `running` entry (headline `Planning the adoption of <name>…`, or
 `again_headline(name)`, `Planning the adoption of <name> again with your answer…`, when `again`)
 while a run is under way, with `plan_id`, `state` and `refusal` None and `questions` `[]`; else the
@@ -503,6 +504,10 @@ def latest(events: Iterable[event_log.Event], state: dict | None = None) -> dict
         except ValueError:
             continue
         found = {**DEFAULTS, **payload, "at": event.at}
+        if isinstance(found["draft"], list) and isinstance(found["root"], str):
+            found["draft"] = contract_draft.refresh(found["root"], found["draft"])
+            if found["result"] == "drafting":
+                found["questions"] = contract_draft.questions(found["draft"])
     return found
 
 

@@ -21,7 +21,7 @@ The owner's rules for this sprint: everything that needs the owner is a counted 
 
 **D1. The main group is a fixed field set.** `project-id`, `project-name`, `default-branch`, `tracker`, `docs-paths`, `build-command` and `test-command`, in field order, whatever their source. Every other settled field is in the more group. Each main entry keeps its own Change control, so at most seven are visible before the fold opens.
 
-**D2. Plain words.** `contract_draft.py` owns every drafted-value word, and the page shows them verbatim.
+**D2. Plain words.** `contract_draft.py` owns every drafted-value word, and the page shows them verbatim. A draft saved before this wording is read back through `contract_draft.refresh`, which gives it the current labels, option labels and card questions and leaves every value, source and reason as saved.
 
 - A more-group field at its start value reads as one plain sentence with no source suffix, for example `work branches are named after their issue`. At any other value it reads `<plain label>: <value> (<source words>)`.
 - Labels are plain everywhere: asks, refusals and lines.
@@ -40,6 +40,7 @@ The owner's rules for this sprint: everything that needs the owner is a counted 
 - The current card is the first open brief, decision or text card. It holds the strip as its last child. When nothing is current, the strip goes on the first waiting card.
 - There is one strip however many renders run: the page removes the strip it placed last before placing the next, because brief cards are kept between renders.
 - When the current card is a brief inside a closed row, the strip sits in that row's summary line, so it is always visible.
+- Folding or unfolding that row moves the strip at once, to the summary line while closed and to the card while open.
 - No button carries an Enter key hint any more. This amends ADR-console-002, where the primary named its key.
 - A text card's strip says Enter `sends what you typed`, or with options `sends your choice or what you typed`. A card whose one option is the action says Enter `sends this answer`.
 
