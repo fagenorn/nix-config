@@ -705,6 +705,15 @@ def require_manifest() -> dict:
 # --------------------------------------------------------------------------
 
 
+def command_discard(args: argparse.Namespace) -> int:
+    require_manifest()
+    digest = adopt_apply.plan_digest(args.plan_id)
+    document = adopt_apply.load_stored_plan(digest)
+    root = adopt_inspection.require_repository(document["handoff"]["repo_root"])
+    adopt_apply.discard_retained(root, digest)
+    return emit_json({"plan_id": args.plan_id, "discarded": True})
+
+
 def command_apply(args: argparse.Namespace) -> int:
     manifest = require_manifest()
     digest = adopt_apply.plan_digest(args.plan_id)
@@ -733,9 +742,12 @@ def command_apply(args: argparse.Namespace) -> int:
     # registered in the target and therefore *changes* what the inspection
     # sees: checked after the digest it could never be reached on the retry it
     # exists for, and the caller would be told to re-plan instead of being
-    # told that a failed attempt is still there. Never deleted here — #72
-    # allows that only under an acknowledged cleanup.
+    # told that a failed attempt is still there. Never deleted here unless the
+    # caller asked: #72 allows that only under an acknowledged cleanup, and
+    # `--discard-retained` (like the `discard` verb) is that acknowledgement.
     worktree = agent_platform.state_root() / "adopt" / "worktrees" / digest
+    if args.discard_retained:
+        adopt_apply.discard_retained(root, digest)
     if worktree.exists():
         raise adopt_inspection.refuse(
             "adopt_failure", "adopt.worktree.retained", "",
@@ -984,6 +996,15 @@ def build_parser() -> argparse.ArgumentParser:
                                  "plan")
     apply_plan.add_argument("--acknowledge-deletions", action="store_true",
                             help="acknowledge that the plan deletes a file")
+    apply_plan.add_argument("--discard-retained", action="store_true",
+                            help="remove this plan's retained worktree, its "
+                                 "branch and its failure record before "
+                                 "applying")
+    discard = subparsers.add_parser(
+        "discard", help="remove a stored plan's retained worktree, its "
+                        "branch and its failure record, and apply nothing")
+    discard.add_argument("--plan-id", required=True,
+                         help="the content-addressed id of a stored plan")
     verify = subparsers.add_parser(
         "verify", help="report a checkout's conformance, and optionally "
                        "register it in the fleet")
@@ -1027,6 +1048,8 @@ def dispatch(args: argparse.Namespace) -> int:
         return command_plan(args)
     if args.command == "apply":
         return command_apply(args)
+    if args.command == "discard":
+        return command_discard(args)
     if args.command == "verify":
         return command_verify(args)
     if args.command == "migrate":

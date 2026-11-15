@@ -63,7 +63,8 @@ the first rule that matches: not a `ForgeError` (`UNEXPECTED`), `gh_missing`, `g
 transient `gh_failed`, an HTTP 401 or 403, 422 or 404 read from gh's message, else the forge answered
 in a way the console does not understand. `apply_failure(name, error, kept)` is `(reason, note)`
 for an apply error object, by the first rule that matches: `plan_stale`; the dirty, retained and
-unavailable worktree repairs; `SIGNING_REPAIR` (`adopt.commit.signing_unavailable`); `COMMIT_REPAIR`
+unavailable worktree repairs; `DISCARD_REPAIR` (`adopt.discard.failed`, a copy that could not be
+removed, noted `RETAINED_NOTE`); `SIGNING_REPAIR` (`adopt.commit.signing_unavailable`); `COMMIT_REPAIR`
 (`adopt.commit.failed`); a failed `adopt.gate.*` gate; an uninstalled platform manifest; a repair id
 with a prefix of `APPLY_REASONS`; else `it could not be applied`. It reads no violation message, so a
 formatter's output, a worktree path or a plan id never reaches a card (the service logs them). A
@@ -191,6 +192,10 @@ CLOSED_NOTE = ("Ask an agent to delete the adoption's branch on this computer an
                "choose Apply it again.")
 KEPT_SENTENCE = ("A leftover copy of the adoption is kept on this computer; ask an agent to "
                  "remove it before you choose Apply it again.")
+DISCARD_REPAIR = "adopt.discard.failed"
+DISCARD_REASON = "the copy that the last attempt left on this computer could not be removed"
+RETAINED_NOTE = ("Choose Apply it again to remove the copy that attempt left on this computer and "
+                 "apply the plan again.")
 SIGNING_REPAIR = "adopt.commit.signing_unavailable"
 COMMIT_REPAIR = "adopt.commit.failed"
 APPLY_REASONS = (
@@ -577,6 +582,8 @@ def apply_failure(name: str, error: Mapping, kept: Mapping | None) -> tuple[str,
         return ("an earlier attempt of this plan is still kept",
                 "A leftover copy of the adoption is kept on this computer; ask an agent to "
                 "remove it, then choose Apply it again.")
+    if repair == DISCARD_REPAIR:
+        return (DISCARD_REASON, RETAINED_NOTE)
     if repair == "adopt.worktree.unavailable":
         return ("the adoption's branch or worktree could not be created",
                 "If a branch from an earlier attempt of this adoption is left, ask an agent to "

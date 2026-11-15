@@ -124,7 +124,8 @@ def real_home_state() -> tuple:
 
 class Fake:
     def __init__(self, plan=None, report=None, block=None, raises=None, raises_on=None,
-                 register_raises=None, apply_result=None, apply_block=None, apply_raises=None):
+                 register_raises=None, apply_result=None, apply_block=None, apply_raises=None,
+                 discard_result=None):
         self.document = plan
         self.report = report
         self.block = block
@@ -134,11 +135,14 @@ class Fake:
         self.apply_result = apply_result
         self.apply_block = apply_block
         self.apply_raises = apply_raises
+        self.discard_result = discard_result
         self.calls = []
         self.register_operands = []
         self.answers = []
         self.contracts = []
         self.applied = []
+        self.discards = []
+        self.order = []
 
     def _run(self, verb, root, cancel):
         self.calls.append((verb, root))
@@ -152,6 +156,7 @@ class Fake:
             contract, contract is not None and os.path.exists(contract),
             contract is None or not Path(contract).resolve().is_relative_to(Path(root).resolve())))
         self.answers.append(list(answers))
+        self.order.append(("plan", root))
         self._run("plan", root, cancel)
         if self.raises_on:
             error = self.raises_on.pop(0)
@@ -168,13 +173,20 @@ class Fake:
             raise self.register_raises
         return self.report
 
-    def apply(self, plan_id, cancel=None, acknowledge_deletions=False):
+    def apply(self, plan_id, cancel=None, acknowledge_deletions=False, discard_retained=False):
         self.applied.append((plan_id, acknowledge_deletions))
+        self.discards.append(discard_retained)
         if self.apply_block is not None:
             self.apply_block.wait(30)
         if self.apply_raises is not None:
             raise self.apply_raises
         return self.apply_result
+
+    def discard(self, plan_id, cancel=None):
+        self.order.append(("discard", plan_id))
+        if self.discard_result is not None:
+            return self.discard_result
+        return {"plan_id": plan_id, "discarded": True}
 
 
 class Case(unittest.TestCase):

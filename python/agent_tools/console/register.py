@@ -29,7 +29,8 @@ Runner. `Adopter(command=None, environ=None, timeout=RUN_TIMEOUT, apply_timeout=
 <subject> <value>` for each of its `answers`, in the given order: ADR-console-029 D4, then
 `--contract-draft <contract>` when `contract` is given: ADR-console-031) or
 `[*command, "verify", "--repo-root", root, "--register"]` (`register`) or `[*command, "apply",
-"--plan-id", plan_id]` with `--acknowledge-deletions` added when asked (`apply`, #1054), the command
+"--plan-id", plan_id]` with `--acknowledge-deletions` and then `--discard-retained` added when asked
+(`apply`, #1054, #1088) or `[*command, "discard", "--plan-id", plan_id]` (`discard`, #1088), the command
 defaulting to the `adopt_project` sibling module. Each runs with no shell, in its own process group
 (`manager.run_in_own_group`), `stdin` and `stderr` to `DEVNULL`, `stdout` piped, `env=dict(environ)`
 when `environ` is given (else the console's own) and `timeout` (`RUN_TIMEOUT`, 300 seconds; an apply
@@ -191,6 +192,8 @@ UNEXPECTED = "it stopped unexpectedly"
 AGAIN = "choose Try again."
 MANIFEST_STEP = ("Switch this computer to its current configuration to install them, then "
                  + AGAIN)
+DISCARD_STEP = ("Choose Try again to remove the copy the last attempt left on this computer and "
+                "plan again.")
 VERB_WORDS = {"plan": "plan the adoption of", "register": "register",
               "apply": "apply the adoption of"}
 FORBIDDEN = re.compile(r"--plan-id|sha256:|[0-9a-f]{12,}|(?:^|[\s(\"'])/\S")
@@ -398,6 +401,8 @@ def next_step(root: str, error: Mapping, verb: str) -> str:
     repair_id = str(error.get("repair_id") or "")
     if _is_manifest(error):
         return MANIFEST_STEP
+    if repair_id == "adopt.discard.failed":
+        return DISCARD_STEP
     return NEXT_STEPS.get(repair_id) or unknown_step(name_of(root), verb)
 
 
@@ -685,11 +690,17 @@ class Adopter:
             arguments += ["--plan-id", plan_id]
         return self._run(arguments, cancel, self._timeout)
 
-    def apply(self, plan_id: str, cancel=None, acknowledge_deletions: bool = False) -> dict:
+    def apply(self, plan_id: str, cancel=None, acknowledge_deletions: bool = False,
+              discard_retained: bool = False) -> dict:
         arguments = ["apply", "--plan-id", plan_id]
         if acknowledge_deletions:
             arguments.append("--acknowledge-deletions")
+        if discard_retained:
+            arguments.append("--discard-retained")
         return self._run(arguments, cancel, self._apply_timeout)
+
+    def discard(self, plan_id: str, cancel=None) -> dict:
+        return self._run(["discard", "--plan-id", plan_id], cancel, self._timeout)
 
     def _run(self, arguments: list[str], cancel, timeout: float) -> dict:
         env = dict(self._environ) if self._environ is not None else None

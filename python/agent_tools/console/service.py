@@ -295,7 +295,9 @@ grants nothing. `close` waits for a grant under way, so its row is kept, and a g
 after `close` began writes nothing (`console: trust_grant_skipped closing`). A result for a profile that no longer exists when the row is
 published (an account removal finished meanwhile) is dropped, and a grant left with no result appends
 nothing. The run applies the plan (`Adopter.apply`,
-acknowledging deletions only when the shown plan lists them) and appends `adoption.step` `applied`,
+acknowledging deletions only when the shown plan lists them; Apply it again passes
+`--discard-retained`, and a plan run first has `adopt-project discard` remove every copy kept by a
+failed apply of the same repository, so no copy is left behind unnamed) and appends `adoption.step` `applied`,
 pushes only the one adoption branch, at the commit apply recorded (`approve.push`), then looks for the branch's pull request
 before opening one and, when the open fails, looks once more (a pull request whose answer was lost
 is found, never opened twice) and appends `opened`. A failure appends `apply_failed`,
@@ -3110,7 +3112,12 @@ class ConsoleService:
         """
         verb = "plan"
         try:
-            if not os.path.lexists(os.path.join(root, ".agents/project.json")):
+            left = self._discard_left(root)
+            if left is not None:
+                self._log_registration_error({"root": root, "verb": "discard",
+                                              "error": left["error"]})
+                payload = register.summary(root, left)
+            elif not os.path.lexists(os.path.join(root, ".agents/project.json")):
                 reading = self._draft_reader(root)
                 fields = contract_draft.draft(root, reading, entries=entries)
                 payload = self._plan_draft(root, fields, [])
@@ -3196,6 +3203,28 @@ class ConsoleService:
                 self._publish()
             raise
 
+    def _discard_left(self, root: str) -> dict | None:
+        """Remove every copy a failed apply of `root` kept; the first failure's error document.
+
+        A plan run of the root leaves those copies behind, so each is discarded first (#1088).
+        With none kept, no child runs.
+        """
+        with self._ingest:
+            plan_ids = sorted(plan_id for plan_id, found in self._adoptions.items()
+                              if found["root"] == root and found["step"] == "apply_failed")
+        for plan_id in plan_ids:
+            if approve.retained(plan_id) is None:
+                continue
+            try:
+                result = self._adopter.discard(plan_id, cancel=self._stop)
+            except register.RunFailed:
+                result = {"error": {
+                    "code": "adopt_failure", "repair_id": approve.DISCARD_REPAIR,
+                    "violations": [{"pointer": "", "message": approve.DISCARD_REASON}]}}
+            if "error" in result:
+                return result
+        return None
+
     def _write_draft(self, fields: list[dict]) -> Path:
         directory = agent_platform.ensure_directory(agent_platform.state_root() / "console" / "drafts")
         handle, name = tempfile.mkstemp(dir=directory, suffix=".json")
@@ -3251,22 +3280,27 @@ class ConsoleService:
         payload = None
         text = None
         try:
-            if changed is not None:
-                result = self._plan_draft(root, changed, answers, refusals=True)
+            left = self._discard_left(root)
+            if left is not None:
+                self._log_answer_error({"root": root, "discard": left["error"]})
+                payload = register.summary(root, left)
             else:
-                result = self._plan_with(root, draft, answers)
-                refused = (contract_draft.refused_field(result["error"])
-                           if draft is not None and "error" in result else None)
-                if refused is not None:
-                    result = register.drafting(
-                        root, contract_draft.mark_refused(draft, *refused), answers)
-                elif "error" not in result:
-                    result = register.summary(root, result, draft=draft)
-            if "error" in result:
-                self._log_answer_error({"root": root, "error": result["error"]})
-                text = plan_questions.refusal_text(result["error"])
-            else:
-                payload = result
+                if changed is not None:
+                    result = self._plan_draft(root, changed, answers, refusals=True)
+                else:
+                    result = self._plan_with(root, draft, answers)
+                    refused = (contract_draft.refused_field(result["error"])
+                               if draft is not None and "error" in result else None)
+                    if refused is not None:
+                        result = register.drafting(
+                            root, contract_draft.mark_refused(draft, *refused), answers)
+                    elif "error" not in result:
+                        result = register.summary(root, result, draft=draft)
+                if "error" in result:
+                    self._log_answer_error({"root": root, "error": result["error"]})
+                    text = plan_questions.refusal_text(result["error"])
+                else:
+                    payload = result
         except register.RunFailed as error:
             self._log_answer_error(
                 {"root": root, "failure": error.kind, "cause": repr(error.__cause__)})
@@ -3463,11 +3497,13 @@ class ConsoleService:
         name = register.name_of(root)
         acknowledge = approve.acknowledges(shown)
         resume = adoption is not None and adoption["step"] in approve.RESUMABLE
+        again = adoption is not None and adoption["step"] == "apply_failed"
         if resume:
             branch, commit, base = adoption["branch"], adoption["commit"], adoption["base"]
         else:
             try:
-                result = self._adopter.apply(plan_id, cancel=stop, acknowledge_deletions=acknowledge)
+                result = self._adopter.apply(plan_id, cancel=stop, acknowledge_deletions=acknowledge,
+                                             discard_retained=again)
             except register.RunFailed as error:
                 self._log_approval_error({"stage": "apply", "root": root, "plan_id": plan_id,
                                           "failure": error.kind, "cause": repr(error.__cause__)})

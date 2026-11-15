@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import os
 import posixpath
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -556,6 +557,135 @@ class ApplyRefusalTest(ApplyTestCase):
         self.assertEqual((retained / "evidence.txt").read_text("utf-8"), "kept")
         self.assertEqual(git(root, "status", "--porcelain"), before_status)
         self.assertEqual(tree_snapshot(root), before_tree)
+
+
+class DiscardRetainedTest(ApplyTestCase):
+    """#72's acknowledged cleanup: `--discard-retained` and `discard` remove
+    one plan's copy, its branch and its failure record, and nothing else."""
+
+    def record(self, plan_id: str) -> Path:
+        return self.state("adopt", "worktrees",
+                          self.digest(plan_id) + ".failure.json")
+
+    def branch(self, plan_id: str) -> str:
+        return "adopt-" + self.digest(plan_id)[:12]
+
+    def registered_copy(self, root: Path, plan_id: str) -> None:
+        self.worktree(plan_id).parent.mkdir(parents=True, exist_ok=True)
+        git(root, "worktree", "add", "--no-checkout", "-b",
+            self.branch(plan_id), str(self.worktree(plan_id)), "HEAD")
+
+    def stale_other(self, root: Path) -> None:
+        git(root, "worktree", "add", "-b", "other",
+            str(self.home / "elsewhere"), "HEAD")
+        shutil.rmtree(self.home / "elsewhere")
+
+    def assert_other_untouched(self, root: Path) -> None:
+        self.assertIn(str(self.home / "elsewhere"),
+                      git(root, "worktree", "list", "--porcelain"))
+        self.assertTrue((root / ".git" / "worktrees" / "elsewhere").exists())
+        self.assertIn("other", git(root, "branch", "--list", "other"))
+
+    def test_discard_retained_removes_a_registered_copy_and_applies(self):
+        root = apply_repo(self.home)
+        # Registered before planning: the entries are part of the plan's
+        # inputs, so apply can only proceed if the discard left them alone.
+        self.stale_other(root)
+        plan_id = self.ready_plan(root)["plan"]["plan_id"]
+        self.registered_copy(root, plan_id)
+        self.record(plan_id).write_text("{}", encoding="utf-8")
+        code, payload, err = self.apply(plan_id, "--discard-retained")
+        self.assertEqual(code, 0, err or payload)
+        self.assertIn("branch", payload)
+        self.assertIn("commit", payload)
+        self.assertFalse(self.record(plan_id).exists())
+        self.assert_other_untouched(root)
+
+    def test_discard_removes_the_copy_its_branch_and_record_and_nothing_else(
+            self):
+        root = apply_repo(self.home)
+        plan_id = self.ready_plan(root)["plan"]["plan_id"]
+        self.registered_copy(root, plan_id)
+        self.record(plan_id).write_text("{}", encoding="utf-8")
+        self.stale_other(root)
+        git(root, "branch", "adopt-ffffffffffff")
+        before_tree = tree_snapshot(root)
+        before_status = git(root, "status", "--porcelain")
+        code, out, err = run("discard", "--plan-id", plan_id, home=self.home)
+        self.assertEqual(code, 0, err or out)
+        self.assertEqual(json.loads(out),
+                         {"plan_id": plan_id, "discarded": True})
+        self.assertFalse(self.worktree(plan_id).exists())
+        self.assertNotIn(str(self.worktree(plan_id)),
+                         git(root, "worktree", "list", "--porcelain"))
+        self.assertEqual(git(root, "branch", "--list", self.branch(plan_id)),
+                         "")
+        self.assertFalse(self.record(plan_id).exists())
+        self.assert_other_untouched(root)
+        self.assertIn("adopt-ffffffffffff",
+                      git(root, "branch", "--list", "adopt-ffffffffffff"))
+        self.assertEqual(tree_snapshot(root), before_tree)
+        self.assertEqual(git(root, "status", "--porcelain"), before_status)
+
+    def test_discard_removes_a_registered_copy_whose_directory_is_gone(self):
+        root = apply_repo(self.home)
+        plan_id = self.ready_plan(root)["plan"]["plan_id"]
+        self.registered_copy(root, plan_id)
+        shutil.rmtree(self.worktree(plan_id))
+        self.stale_other(root)
+        code, out, err = run("discard", "--plan-id", plan_id, home=self.home)
+        self.assertEqual(code, 0, err or out)
+        listing = git(root, "worktree", "list", "--porcelain")
+        self.assertNotIn(str(self.worktree(plan_id)), listing)
+        self.assertEqual(git(root, "branch", "--list", self.branch(plan_id)),
+                         "")
+        self.assert_other_untouched(root)
+
+    def test_discard_with_a_plain_left_directory_removes_only_it(self):
+        root = apply_repo(self.home)
+        self.stale_other(root)
+        plan_id = self.ready_plan(root)["plan"]["plan_id"]
+        self.worktree(plan_id).mkdir(parents=True)
+        (self.worktree(plan_id) / "evidence.txt").write_text(
+            "kept", encoding="utf-8")
+        code, payload, err = self.apply(plan_id, "--discard-retained")
+        self.assertEqual(code, 0, err or payload)
+        self.assertFalse((self.worktree(plan_id) / "evidence.txt").exists())
+        self.assert_other_untouched(root)
+
+    def test_discard_with_nothing_kept_is_a_no_op(self):
+        root = apply_repo(self.home)
+        plan_id = self.ready_plan(root)["plan"]["plan_id"]
+        before_tree = tree_snapshot(root)
+        before_status = git(root, "status", "--porcelain")
+        before_branches = git(root, "branch", "--list")
+        code, out, err = run("discard", "--plan-id", plan_id, home=self.home)
+        self.assertEqual(code, 0, err or out)
+        self.assertEqual(json.loads(out),
+                         {"plan_id": plan_id, "discarded": True})
+        self.assertEqual(tree_snapshot(root), before_tree)
+        self.assertEqual(git(root, "status", "--porcelain"), before_status)
+        self.assertEqual(git(root, "branch", "--list"), before_branches)
+
+    def test_a_discard_removal_that_fails_is_refused_and_applies_nothing(self):
+        root = apply_repo(self.home)
+        plan_id = self.ready_plan(root)["plan"]["plan_id"]
+        self.registered_copy(root, plan_id)
+        before_head = git(root, "rev-parse", "HEAD")
+        real = adopt_inspection.run_git
+
+        def failing(where, *args):
+            if args[:2] == ("worktree", "remove"):
+                return 1, b"refused"
+            return real(where, *args)
+
+        with mock.patch.object(adopt_apply, "run_git", failing), \
+                mock.patch.dict(os.environ, {"HOME": str(self.home)}):
+            with self.assertRaises(adopt_inspection.AdoptError) as caught:
+                adopt_apply.discard_retained(root, self.digest(plan_id))
+        self.assertEqual(caught.exception.code, "adopt_failure")
+        self.assertEqual(caught.exception.repair_id, "adopt.discard.failed")
+        self.assertEqual(git(root, "rev-parse", "HEAD"), before_head)
 
 
 # --------------------------------------------------------------------------

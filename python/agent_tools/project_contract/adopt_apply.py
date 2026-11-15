@@ -9,7 +9,12 @@ three proofs taken over the commit once it exists — that it changes exactly
 the planned paths, that no Markdown file in it has more non-resolving relative
 links than its pre-move counterpart, and that the branch carries it and
 nothing else — and the retention of a failed attempt beside its worktree
-(D17).
+(D17), and its removal: `discard_retained` is #72's acknowledged cleanup, the
+one thing that deletes a retained copy. It removes that plan's worktree with
+its own administrative entry, its branch and its failure record, and nothing
+else. It never runs `git worktree prune`, because prune also deletes the
+entry of every other worktree whose directory is missing, which no
+acknowledgement of this plan's copy covers.
 
 Every refusal here mutates nothing, and nothing here trusts a stored
 operation: the plan id authenticates the plan's *inputs*, and the entry point
@@ -35,6 +40,7 @@ import os
 from pathlib import Path
 import posixpath
 import re
+import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -789,6 +795,45 @@ def failure_record_path(digest: str) -> Path:
     """The one home of a retained attempt's failure record."""
     return (agent_platform.state_root() / "adopt" / "worktrees"
             / f"{digest}.failure.json")
+
+
+def discard_retained(root: Path, digest: str) -> None:
+    """Remove one plan's retained copy, its branch and its failure record.
+
+    The acknowledged cleanup #72 allows: the directory under the adoption
+    worktree home with its own administrative entry, the local branch
+    `adopt-<digest[:12]>` and the failure record, and nothing else. There is
+    no `git worktree prune` on purpose (see the module docstring). With
+    nothing retained it changes nothing. A step that fails is refused as
+    `adopt.discard.failed`.
+    """
+    home = agent_platform.state_root() / "adopt" / "worktrees"
+    worktree = home / digest
+    branch = f"adopt-{digest[:12]}"
+    failed = refuse("adopt_failure", "adopt.discard.failed", "",
+                    "the retained worktree of this plan could not be removed")
+    code, listing = run_git(root, "worktree", "list", "--porcelain")
+    registered = code == 0 and any(
+        line.startswith("worktree ")
+        and Path(line[len("worktree "):]).resolve() == worktree.resolve()
+        for line in listing.decode("utf-8", "replace").splitlines())
+    if registered:
+        code, _ = run_git(root, "worktree", "remove", "--force", str(worktree))
+        if code != 0:
+            raise failed
+    elif worktree.exists():
+        if worktree.parent != home:
+            raise failed
+        shutil.rmtree(worktree)
+    if worktree.exists():
+        raise failed
+    code, _ = run_git(root, "rev-parse", "--verify", "--quiet",
+                      f"refs/heads/{branch}")
+    if code == 0:
+        code, _ = run_git(root, "branch", "-D", branch)
+        if code != 0:
+            raise failed
+    failure_record_path(digest).unlink(missing_ok=True)
 
 
 def retain_failure(digest: str, document: dict, worktree: Path, branch: str,

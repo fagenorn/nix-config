@@ -413,6 +413,14 @@ CODE_WORDS = ("adopt.", "platform.", "adopt_failure", "not_integrated", "timed_o
 
 
 class NextStepTest(unittest.TestCase):
+    def test_a_failed_discard_before_a_plan_says_try_again(self):
+        error = adopt_error("adopt.discard.failed",
+                            "the retained worktree of this plan could not be removed")
+        self.assertEqual(register.summary("/x/r", error)["note"], register.DISCARD_STEP)
+        self.assertEqual(register.DISCARD_STEP,
+                         "Choose Try again to remove the copy the last attempt left on this "
+                         "computer and plan again.")
+
     def test_a_missing_manifest_says_the_cause_once_and_the_step_once(self):
         error = {"code": "x", "repair_id": "adopt.manifest.missing", "violations": [
             {"pointer": "", "message": "the installed platform manifest was not found"}]}
@@ -841,6 +849,18 @@ class AdopterTest(unittest.TestCase):
         self.assertEqual(self.args.read_text().splitlines(),
                          ["apply --plan-id sha256:aa",
                           "apply --plan-id sha256:aa --acknowledge-deletions"])
+
+    def test_apply_discards_the_retained_copy_when_asked(self):
+        adopter = self.adopter()
+        adopter.apply("sha256:aa", acknowledge_deletions=True, discard_retained=True)
+        adopter.apply("sha256:aa", acknowledge_deletions=True)
+        self.assertEqual(self.args.read_text().splitlines(),
+                         ["apply --plan-id sha256:aa --acknowledge-deletions --discard-retained",
+                          "apply --plan-id sha256:aa --acknowledge-deletions"])
+
+    def test_discard_runs_the_discard_subcommand(self):
+        self.adopter().discard("sha256:aa")
+        self.assertEqual(self.args.read_text().splitlines(), ["discard --plan-id sha256:aa"])
 
     def test_apply_has_its_own_timeout(self):
         self.assertEqual(register.APPLY_TIMEOUT, 1800)

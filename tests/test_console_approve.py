@@ -322,6 +322,19 @@ class WordsTest(unittest.TestCase):
                          ("it could not be applied", commit_note + " " + leftover))
         self.assertEqual(words(error()), ("it could not be applied", commit_note))
 
+    def test_a_failed_discard_on_apply_it_again_offers_it_again(self):
+        error = {"code": "adopt_failure", "repair_id": "adopt.discard.failed",
+                 "violations": [{"pointer": "", "message": "the retained worktree of this plan "
+                                                           "could not be removed"}]}
+        self.assertEqual(approve.DISCARD_REPAIR, "adopt.discard.failed")
+        self.assertEqual(approve.apply_failure("r", error, None),
+                         (approve.DISCARD_REASON, approve.RETAINED_NOTE))
+        self.assertEqual(approve.DISCARD_REASON, "the copy that the last attempt left on this "
+                                                 "computer could not be removed")
+        self.assertEqual(approve.RETAINED_NOTE,
+                         "Choose Apply it again to remove the copy that attempt left on this "
+                         "computer and apply the plan again.")
+
     def test_a_run_failure_reads_in_words(self):
         note = ("Choose Apply it again. If it keeps failing, ask an agent to apply the adoption "
                 "of r in a terminal, which shows the full reason.")

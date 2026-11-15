@@ -48,6 +48,14 @@ STALE_ERROR = {"error": {
                     "message": "the repository no longer hashes to the plan's input digest"}]}}
 WITH_DELETION = {**READY, "changes": [
     *READY["changes"], {"op": "delete-file", "sources": ["old.md"], "targets": []}]}
+SIGNING = {"error": {
+    "code": "verification_failed", "repair_id": "adopt.commit.signing_unavailable",
+    "violations": [{"pointer": "", "message": "the contract asks for a signed commit "
+                                              "and this host could not sign one"}]}}
+DISCARD_FAILED = {"error": {
+    "code": "adopt_failure", "repair_id": "adopt.discard.failed",
+    "violations": [{"pointer": "", "message": "the retained worktree of this plan could not "
+                                              "be removed"}]}}
 URL = "https://github.com/fixture/r/pull/7"
 NOT_INTEGRATED = {"error": {
     "code": "not_integrated", "repair_id": "adopt.registration.not_integrated",
@@ -429,6 +437,57 @@ class ApplyCardTest(ApproveCase):
         raw = re.compile(r"--plan-id|sha256:|[0-9a-f]{12,}|(?:^|[\s(\"'])/\S")
         for text in (card["headline"], card["why"], *card["lines"], shown["line"]):
             self.assertIsNone(raw.search(text), text)
+
+    def kept(self, plan_id):
+        """A copy a failed apply left: the directory and the record `approve.retained` reads."""
+        home = self.home / ".agents/state/adopt/worktrees"
+        digest = adopt_apply.plan_digest(plan_id)
+        (home / digest).mkdir(parents=True, exist_ok=True)
+        (home / f"{digest}.failure.json").write_text(json.dumps({
+            "branch": f"adopt-{digest[:12]}", "worktree": str(home / digest)}))
+
+    def answer_after_a_failed_apply(self, **fake_arguments):
+        self.ready(apply_result=SIGNING, **fake_arguments)
+        self.run_approval("apply_failed")
+        return self.fake
+
+    def answered(self):
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            status, _, _ = self.answer(answer_of(PID_B, {
+                "id": "candidate-class", "subject": ".claude/odd.md", "value": "keep"}))
+            self.assertEqual(status, 204)
+            return self.settled_row(self.repo)
+
+    def test_apply_it_again_after_a_kept_copy_asks_apply_to_discard_it(self):
+        fake = self.ready(apply_result=SIGNING)
+        self.run_approval("apply_failed")
+        self.run_approval("apply_failed")
+        self.assertEqual(fake.discards, [False, True])
+
+    def test_a_draft_change_after_a_failed_apply_discards_its_kept_copy_before_planning(self):
+        fake = self.answer_after_a_failed_apply()
+        self.kept(PID_B)
+        before = len(fake.order)
+        self.answered()
+        self.assertEqual(fake.order[before:], [("discard", PID_B), ("plan", str(self.repo))])
+
+    def test_a_failed_discard_plans_nothing_and_says_try_again(self):
+        fake = self.answer_after_a_failed_apply(discard_result=DISCARD_FAILED)
+        self.kept(PID_B)
+        before = len(fake.order)
+        row = self.answered()
+        self.assertEqual(fake.order[before:], [("discard", PID_B)])
+        self.assertEqual((row["result"], row["note"]), ("failed", register.DISCARD_STEP))
+        raw = re.compile(r"--plan-id|sha256:|[0-9a-f]{12,}|(?:^|[\s(\"'])/\S")
+        for text in (row["headline"], row["note"]):
+            self.assertIsNone(raw.search(text), text)
+
+    def test_no_kept_copy_runs_no_discard(self):
+        fake = self.answer_after_a_failed_apply()
+        before = len(fake.order)
+        self.answered()
+        self.assertEqual(fake.order[before:], [("plan", str(self.repo))])
 
     def test_not_now_on_a_failed_step_hides_it_and_keeps_the_work_line(self):
         self.pusher.raises = [approve.PushFailed("remote rejected the push", "d")]
