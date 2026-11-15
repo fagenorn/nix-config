@@ -395,6 +395,15 @@ function el(tag, cls, text) {
   if (text !== undefined) node.textContent = text;
   return node;
 }
+// Appends the text to the node as one span per segment, split after every slash, with a wbr between segments, so a long path breaks at a slash and the text read back is unchanged (ADR-console-035).
+function pathWords(node, text) {
+  const segments = String(text).match(/[^/]*\/|[^/]+/g) || [];
+  segments.forEach((segment, i) => {
+    if (i > 0) node.appendChild(el("wbr"));
+    node.appendChild(el("span", "", segment));
+  });
+  return node;
+}
 function icon(id) {
   return document.getElementById(id).content.firstElementChild.cloneNode(true);
 }
@@ -1970,9 +1979,13 @@ function isConfirm(item) {
 function isTrust(item) {
   return item.reason === "trust_failed";
 }
-// An open question of an adoption plan (ADR-console-029 D10), a refused registration's Retry (ADR-console-028 D10), the apply card (ADR-console-030 D9) or the Register card (ADR-console-034): a card like a manager question.
+// A registration that failed (ADR-console-035): a question card whose first option registers again and whose second sets it aside; the page shows its headline, why and options verbatim.
+function isFailure(item) {
+  return item.reason === "register_failed";
+}
+// An open question of an adoption plan (ADR-console-029 D10), a refused registration's Retry (ADR-console-028 D10), the apply card (ADR-console-030 D9), the Register card (ADR-console-034) or a failed registration's card (ADR-console-035): a card like a manager question.
 function isRegister(item) {
-  return item.reason === "register" || isRetry(item) || isApply(item) || isConfirm(item) || isTrust(item);
+  return item.reason === "register" || isRetry(item) || isApply(item) || isConfirm(item) || isFailure(item) || isTrust(item);
 }
 function wordsKey(item) {
   return itemId(item) + "\nwords";
@@ -2115,6 +2128,11 @@ function start(item, state) {
     const choice = item.values[state.picks[0]];
     const body = { root: item.root, choice };
     return begin(item, state, { confirm: true, body, words: choice === "register" ? "Answered, registering" : "Answered, not now" });
+  }
+  if (isFailure(item)) {
+    const choice = item.values[state.picks[0]];
+    const body = { root: item.root, choice };
+    return begin(item, state, { confirm: true, body, words: choice === "try_again" ? "Answered, trying again" : "Answered, not now" });
   }
   if (isTrust(item)) return begin(item, state, { trust: true, body: { root: item.root, profile: item.profile }, words: "Answered, checking" });
   if (isRegister(item)) {
@@ -2653,7 +2671,7 @@ function answerBox(item, state, lead) {
   const box = el("div", "abox");
   if (isApply(item) && Array.isArray(item.lines) && item.lines.length > 0) {
     const list = el("ul", "apply-lines");
-    for (const line of item.lines) list.appendChild(el("li", "", line));
+    for (const line of item.lines) list.appendChild(pathWords(el("li"), line));
     box.appendChild(list);
   }
   item.questions.forEach((q, qi) => {
@@ -2668,7 +2686,7 @@ function answerBox(item, state, lead) {
       if (!live) button.setAttribute("disabled", "");
       button.appendChild(el("kbd", "", String(oi + 1)));
       button.setAttribute("aria-pressed", String(state.picks[qi] === oi));
-      button.appendChild(el("span", "ot", option === q.chosen ? "chosen: " + option : option));
+      button.appendChild(pathWords(el("span", "ot"), option === q.chosen ? "chosen: " + option : option));
       if (oi === recommendedIndex(q)) button.appendChild(el("span", "rec", "Recommended"));
       button.addEventListener("click", () => {
         if (!choosable(state)) return;
@@ -3593,7 +3611,7 @@ function draftRow(registration, entry, folded) {
   const refusedHere = typeof registration.refusal === "string" && refused !== null && typeof refused === "object"
     && refused.id === "contract-draft" && refused.subject === entry.field;
   const here = registerChange !== null && registerChange.field === entry.field;
-  if (!folded || here) row.appendChild(el("span", "draft-line", entry.line));
+  if (!folded || here) row.appendChild(pathWords(el("span", "draft-line"), entry.line));
   if (here) {
     row.appendChild(changeBox(registration, entry, registerChange));
   } else {
@@ -3644,7 +3662,7 @@ function drawRegisterResult(registration) {
   const parts = [el("p", "register-line", registration.line)];
   if (registration.lines.length > 0) {
     const list = el("ul", "register-lines");
-    for (const line of registration.lines) list.appendChild(el("li", "", line));
+    for (const line of registration.lines) list.appendChild(pathWords(el("li"), line));
     parts.push(list);
   }
   const drafted = Array.isArray(registration.draft) ? registration.draft : [];

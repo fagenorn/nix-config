@@ -570,7 +570,8 @@ class DocsTreeTest(unittest.TestCase):
                 ("docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md",
                  both + ", ADR-console-029, ADR-console-030"),
                 ("docs/areas/console/adr/002-the-desk-page-design-rules.md",
-                 both + ", ADR-console-029, ADR-console-031, ADR-console-032, ADR-console-033"),
+                 both + ", ADR-console-029, ADR-console-031, ADR-console-032, ADR-console-033, "
+                 "ADR-console-035"),
                 ("docs/areas/console/adr/024-the-owner-signs-a-profile-in-from-the-page.md",
                  "- **Status:** accepted; amended by ADR-console-025")):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
@@ -602,7 +603,7 @@ class DocsTreeTest(unittest.TestCase):
                   "ADR-console-028")
         for older, expected in ((adr008, status + ", ADR-console-029, ADR-console-030"),
                                 (adr002, status + ", ADR-console-029, ADR-console-031, "
-                                          "ADR-console-032, ADR-console-033")):
+                                          "ADR-console-032, ADR-console-033, ADR-console-035")):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
                         if row.startswith("- **Status:**"))
             self.assertEqual(line, expected)
@@ -637,7 +638,7 @@ class DocsTreeTest(unittest.TestCase):
                 (adr008, "- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
                          "ADR-console-028, ADR-console-029, ADR-console-030"),
                 (adr028, "- **Status:** accepted; amended by ADR-console-029, "
-                         "ADR-console-030, ADR-console-031, ADR-console-034; "
+                         "ADR-console-030, ADR-console-031, ADR-console-034, ADR-console-035; "
                          "extended by #1055 (D10, D11)")):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
                         if row.startswith("- **Status:**"))
@@ -669,7 +670,7 @@ class DocsTreeTest(unittest.TestCase):
         for older, expected in (
                 ("docs/areas/console/adr/028-the-owner-registers-a-project-from-the-page.md",
                  "- **Status:** accepted; amended by ADR-console-029, ADR-console-030, "
-                 "ADR-console-031, ADR-console-034; extended by #1055 (D10, D11)"),
+                 "ADR-console-031, ADR-console-034, ADR-console-035; extended by #1055 (D10, D11)"),
                 ("docs/areas/console/adr/"
                  "029-the-owner-answers-the-adoptions-questions-on-the-page.md",
                  "- **Status:** accepted; amended by ADR-console-030, ADR-console-031, "
@@ -677,7 +678,7 @@ class DocsTreeTest(unittest.TestCase):
                 ("docs/areas/console/adr/002-the-desk-page-design-rules.md",
                  "- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
                  "ADR-console-028, ADR-console-029, ADR-console-031, ADR-console-032, "
-                 "ADR-console-033"),
+                 "ADR-console-033, ADR-console-035"),
                 ("docs/areas/console/adr/"
                  "031-a-repository-with-no-contract-is-registered-with-a-drafted-contract.md",
                  "- **Status:** accepted; amended by ADR-console-033")):
@@ -1103,7 +1104,7 @@ class DocsTreeTest(unittest.TestCase):
                                     ).read_text().splitlines()
                     if row.startswith("- **Status:**"))
         self.assertEqual(line, "- **Status:** accepted; amended by ADR-console-028 D10, "
-                               "ADR-console-034")
+                               "ADR-console-034, ADR-console-035")
 
     def test_the_release_result_adr_limits_one_mutation_to_the_forge_adapter(self):
         text = self.doc("docs/areas/release/adr/005-adapters-never-claim-success.md")
