@@ -367,8 +367,8 @@ class BriefRouteTest(Case):
         self.reply(svc, other, 1, "redo")
         moments = view_of(svc)["digest"]["recent"]
         said = [m["sentence"] for m in moments]
-        self.assertIn(f"A brief for owner/p01 arrived, version 1: {GOAL_TEXT}", said)
-        self.assertIn(f"The brief for owner/p01 was approved, version 1: {GOAL_TEXT}", said)
+        self.assertIn(f"A brief for owner/p01 arrived, version 1: {PARTS['title']}", said)
+        self.assertIn(f"The brief for owner/p01 was approved, version 1: {PARTS['title']}", said)
         self.assertEqual(sorted(m["kind"] for m in moments if m["kind"].startswith("brief_")),
                          ["brief_approved", "brief_sent", "brief_sent"])
 

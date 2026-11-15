@@ -674,5 +674,5 @@ class ReviveViewServiceTest(ReviveCase):
         self.tick(svc, 120)
         live = self.live(svc)
         said = [m["sentence"] for m in live["digest"]["recent"]]
-        self.assertEqual(said.count("The manager of " + GOAL + " was restarted"), 1)
+        self.assertEqual(said.count("The manager of " + PARTS["title"] + " was restarted"), 1)
         self.assertEqual([i for i in live["inbox"]["open"] if i["reason"] == "manager"], [])
