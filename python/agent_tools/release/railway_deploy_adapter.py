@@ -20,12 +20,28 @@ environment unchanged, it resolves the released commit, reads `railway status --
 the linked project and environment, then one `railway deployment list ... --json` per service
 and classifies each service by plan P5, in order. Only read-only `railway` verbs are ever run.
 
-A `SKIPPED` deployment is `satisfied` only with two kinds of affirmative evidence (plan P5.5):
-the released commit's GitHub check runs (every attempt, re-runs included) are all green with no
-check ever re-run, and the serving deployment is the skipped push's immediate predecessor at the released commit's first parent. Railway skips a push
-both when no watched path changed and after failed or timed-out CI, so a skip alone proves
-nothing. Anything short of both is `unknown`/`skip_unexplained`, a conservative answer the
-driver waits on and then parks, never a false success.
+A `SKIPPED` deployment is `satisfied` only with affirmative evidence that the service serves
+what the released commit would build. Railway skips a push both when no watched path changed
+and after failed or timed-out CI, so a skip alone proves nothing. Two routes explain one:
+
+- the CI route (plan P5.5): the released commit's GitHub check runs (every attempt, re-runs
+  included) are all green with no check ever re-run, and the serving deployment is the skipped
+  push's immediate predecessor at the released commit's first parent;
+- the watch-path route (ADR-release-013), tried when the CI route has a gap: Railway states
+  `meta.skippedReason` `No changes to watched files` on the skipped row; the first older row
+  that is not itself `SKIPPED` is serving, on the target branch, with a commit and the same
+  `meta.rootDirectory`; the skipped row's `meta.serviceManifest.build.watchPatterns` is absent
+  or exactly `["**"]`; and GitHub's compare of the serving commit with the released commit
+  shows the serving commit is an ancestor and fewer than `COMPARE_FILE_LIMIT` changed files,
+  none of them (nor a rename's previous name) under the root directory or equal to
+  `meta.configFile`. Which release deployed the serving row, and how that release was
+  disposed, is not read: a `SUCCESS` row is the service's own evidence.
+
+A failed check is `diverged`/`skipped_after_ci_failure` on either route. Anything short of one
+complete route is `unknown`/`skip_unexplained`, a conservative answer the driver waits on and
+then parks, never a false success; its references then end with one
+`railway-skip:<service>/<ci gap>/<watch gap>` entry per unexplained service, so the park reason
+names what was missing.
 
 It is registered as `railway-deploy` at contract version 1.0.0, a second watch-only adapter
 beside `github-actions-health`. Its target is a `github_repository` (`kind`, `repository`,
@@ -47,10 +63,8 @@ classified newest first by `createdAt`, then `id`, in this order:
 - `QUEUED`, `WAITING`, `INITIALIZING`, `BUILDING`, `DEPLOYING` or `NEEDS_APPROVAL` is
   `in_progress` (`deployment_in_progress`);
 - `SUCCESS` or `SLEEPING` is `satisfied` (`deployed`);
-- `SKIPPED` is `satisfied` (`skipped`) only when the commit's GitHub check runs are all green
-  and the serving deployment is the immediately older row at the released commit's first
-  parent, otherwise `unknown` (`skip_unexplained`) or, after a failed check, `diverged`
-  (`skipped_after_ci_failure`);
+- `SKIPPED` is `satisfied` (`skipped`) only by one of the two routes above, otherwise `unknown`
+  (`skip_unexplained`) or, after a failed check, `diverged` (`skipped_after_ci_failure`);
 - `FAILED` or `CRASHED` is `diverged` (`silent_rollback` with an older serving deployment,
   else `deployment_failed`);
 - `REMOVED` or `REMOVING` is `diverged` (`removed`);
@@ -80,6 +94,9 @@ COLLECTION_BUDGET_SECONDS = 30
 DETAIL_LIMIT = release_merge.DETAIL_LIMIT
 CHECK_RUN_LIMIT = 100
 BENIGN_CONCLUSIONS = ("success", "neutral", "skipped")
+SKIP_REASON_UNWATCHED = "No changes to watched files"
+COMPARE_FILE_LIMIT = 300
+WHOLE_ROOT_PATTERNS = (None, ["**"])
 STATUS_ARGV = ["status", "--json"]
 SLUG = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 BRANCH = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_./-]*")
@@ -119,6 +136,11 @@ def check_runs_argv(repository: str, commit: str) -> list[str]:
 def parent_argv(repository: str, commit: str) -> list[str]:
     """The git commit (its parents) as an explicit GET, run through `release_merge.gh`."""
     return ["api", "-X", "GET", f"repos/{repository}/git/commits/{commit}"]
+
+
+def compare_argv(repository: str, base: str, head: str) -> list[str]:
+    """The comparison of two commits (ancestry and changed files) as an explicit GET."""
+    return ["api", "-X", "GET", f"repos/{repository}/compare/{base}...{head}"]
 
 
 def describe() -> dict[str, Any]:
@@ -256,7 +278,9 @@ def _rows(payload: Any) -> list[dict[str, Any]]:
     """The deployment rows, newest first by `(createdAt, id)` (plan P4).
 
     A `null` or absent `meta` is unavailable identity, not a violation: its `commit` and
-    `branch` are `None`, so the row never matches.
+    `branch` are `None`, so the row never matches. The watch-path members (`skipped_reason`,
+    `root`, `patterns`, `config_file`) are read leniently: `root` and `patterns` are `False`
+    when present in another shape, which the watch-path route refuses.
     """
     if not isinstance(payload, list):
         raise _Invalid("deployment list is not a list")
@@ -277,6 +301,7 @@ def _rows(payload: Any) -> list[dict[str, Any]]:
         if meta is not None and not isinstance(meta, dict):
             raise _Invalid(f"deployment {index} meta is not an object or null")
         commit = branch = None
+        scope = _watch_scope(meta or {})
         if meta:
             commit, branch = meta.get("commitHash"), meta.get("branch")
             if commit is not None and not (isinstance(commit, str)
@@ -286,9 +311,27 @@ def _rows(payload: Any) -> list[dict[str, Any]]:
                 raise _Invalid(f"deployment {index} meta.branch is not a string")
             commit = commit.lower() if commit is not None else None
         rows.append({"key": (created, entry["id"]), "id": entry["id"],
-                     "status": entry["status"], "commit": commit, "branch": branch})
+                     "status": entry["status"], "commit": commit, "branch": branch, **scope})
     rows.sort(key=lambda row: row["key"], reverse=True)
     return rows
+
+
+def _watch_scope(meta: dict[str, Any]) -> dict[str, Any]:
+    """What a row says about its skip and its watched tree (ADR-release-013)."""
+    reason, root, config = (meta.get("skippedReason"), meta.get("rootDirectory"),
+                            meta.get("configFile"))
+    manifest = meta.get("serviceManifest")
+    build = manifest.get("build") if isinstance(manifest, dict) else None
+    patterns = build.get("watchPatterns") if isinstance(build, dict) else None
+    if root is None:
+        root = ""
+    if patterns is not None and not (isinstance(patterns, list)
+                                     and all(isinstance(item, str) for item in patterns)):
+        patterns = False
+    return {"skipped_reason": reason if isinstance(reason, str) else None,
+            "root": root.strip("/") if isinstance(root, str) else False,
+            "patterns": patterns,
+            "config_file": config.lstrip("/") if isinstance(config, str) else None}
 
 
 class _Service:
@@ -302,6 +345,7 @@ class _Service:
         self.serving: dict[str, Any] | None = None
         self.pending_skip = False
         self.skip_evidence: str | None = None
+        self.watch_evidence: str | None = None
         self.code_gap: str | None = None
 
     def set(self, outcome: str, reason: str, detail: str = "") -> None:
@@ -319,6 +363,8 @@ class _Service:
             "serving": self.serving}
         if self.skip_evidence is not None:
             entry["skip_evidence"] = self.skip_evidence
+        if self.watch_evidence is not None:
+            entry["watch_evidence"] = self.watch_evidence
         return entry
 
 
@@ -421,6 +467,76 @@ def _first_parent(repository: str, commit: str, deadline: float) -> str | None:
     return parents[0]["sha"]
 
 
+def _watch_serving(service: _Service, branch: str) -> dict[str, Any] | str:
+    """The row serving under the skip, or the gap that leaves it unproven (ADR-release-013).
+
+    Older `SKIPPED` rows are stepped over: a skipped push never served anything, and the
+    comparison spans every commit between the serving row and the released one. Any other row
+    that is not serving (failed, crashed, removed, in progress) stops the search, since the
+    service may then be serving nothing.
+    """
+    matched = service.rows[service.matched]  # type: ignore[index]
+    if matched["skipped_reason"] != SKIP_REASON_UNWATCHED:
+        return "skip_reason_unstated"
+    if matched["root"] is False or matched["patterns"] not in WHOLE_ROOT_PATTERNS:
+        return "watch_patterns_unsupported"
+    for row in service.rows[service.matched + 1:]:  # type: ignore[operator]
+        if row["status"] == "SKIPPED":
+            continue
+        if row["status"] not in SERVING:
+            return "intervening_deployment"
+        if row["commit"] is None or row["branch"] != branch:
+            return "serving_identity_unknown"
+        if row["root"] != matched["root"]:
+            return "root_directory_changed"
+        return row
+    return "no_serving_deployment"
+
+
+def _compare(repository: str, base: str, head: str, deadline: float) -> list[str] | str:
+    """Every path changed from `base` to `head`, or the gap: `base` must be an ancestor.
+
+    GitHub returns at most `COMPARE_FILE_LIMIT` files, so a full page is unproven, not clean.
+    """
+    status, payload, _ = release_merge.gh(compare_argv(repository, base, head), deadline)
+    files = payload.get("files") if isinstance(payload, dict) else None
+    merge_base = payload.get("merge_base_commit") if isinstance(payload, dict) else None
+    if (status != "ok" or not isinstance(files, list) or not isinstance(merge_base, dict)
+            or not isinstance(payload.get("status"), str)
+            or type(payload.get("behind_by")) is not int
+            or not all(isinstance(entry, dict) and _text(entry.get("filename"))
+                       and isinstance(entry.get("previous_filename", ""), str)
+                       for entry in files)):
+        return "diff_unread"
+    if (payload["status"] not in ("ahead", "identical") or payload["behind_by"] != 0
+            or merge_base.get("sha") != base):
+        return "serving_not_ancestor"
+    if len(files) >= COMPARE_FILE_LIMIT:
+        return "diff_over_limit"
+    return [path for entry in files
+            for path in (entry["filename"], entry.get("previous_filename")) if path]
+
+
+def _watch_gap(service: _Service, target: dict[str, Any], released: str, deadline: float,
+               reading: "_Reading") -> str | None:
+    """The first missing piece of the watch-path evidence, or None (ADR-release-013)."""
+    serving = _watch_serving(service, target["branch"])
+    if isinstance(serving, str):
+        return serving
+    repository, base = target["repository"], serving["commit"]
+    if base not in reading.comparisons:
+        reading.comparisons[base] = _compare(repository, base, released, deadline)
+        reading.references.append(f"github:{repository}/compare/{base}...{released}")
+    changed = reading.comparisons[base]
+    if isinstance(changed, str):
+        return changed
+    matched = service.rows[service.matched]  # type: ignore[index]
+    prefix = f"{matched['root']}/" if matched["root"] else ""
+    if any(path.startswith(prefix) or path == matched["config_file"] for path in changed):
+        return "watched_path_changed"
+    return None
+
+
 class _Reading:
     """What one inspect read: the released commit, the services, the evidence and references."""
 
@@ -432,6 +548,7 @@ class _Reading:
         self.services: list[_Service] = []
         self.check_runs: dict[str, Any] | None = None
         self.evidence_references: list[str] = []
+        self.comparisons: dict[str, list[str] | str] = {}
 
 
 def _read(parameters: dict[str, Any], deadline: float) -> _Reading:
@@ -487,7 +604,7 @@ def _read(parameters: dict[str, Any], deadline: float) -> _Reading:
 
 def _settle_skips(reading: _Reading, pending: list[_Service], target: dict[str, Any],
                   released: str, deadline: float) -> None:
-    """Plan P5.5: classify each pending skip by its CI evidence and its code evidence."""
+    """Classify each pending skip: the CI route (plan P5.5), else the watch-path route."""
     repository = target["repository"]
     verdict, reading.check_runs = _check_runs(repository, released, deadline)
     reading.references.append(f"github:{repository}/commits/{released}/check-runs")
@@ -513,9 +630,18 @@ def _settle_skips(reading: _Reading, pending: list[_Service], target: dict[str, 
         if gap is None:
             service.set("satisfied", "skipped")
             service.skip_evidence = "complete"
-        else:
-            service.set("unknown", "skip_unexplained", f"skip evidence: {gap}")
-            service.skip_evidence = gap
+            continue
+        watch = _watch_gap(service, target, released, deadline, reading)
+        if watch is None:
+            service.set("satisfied", "skipped")
+            service.skip_evidence = "watch_paths_unchanged"
+            continue
+        service.set("unknown", "skip_unexplained",
+                    f"skip evidence: {gap}; watch evidence: {watch}")
+        service.skip_evidence, service.watch_evidence = gap, watch
+    reading.references.extend(
+        f"railway-skip:{service.name}/{service.skip_evidence}/{service.watch_evidence}"
+        for service in pending if service.outcome == "unknown")
 
 
 def _aggregate(services: list[_Service]) -> _Service:
