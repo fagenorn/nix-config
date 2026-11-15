@@ -435,7 +435,7 @@ class PlanApproveRunTest(ApproveCase):
             "The adoption of reconcile was not applied: the repository changed since this plan "
             "was made.")
         self.assertEqual(adoption["note"],
-                         "Register the repository again to make a new plan, then approve that one.")
+                         "Register the repository again to make a new plan, then apply that one.")
         self.assertEqual(adoption["lines"], [])
         self.assertEqual((self.pusher.calls, self.forge.calls), ([], []))
 
@@ -444,7 +444,7 @@ class PlanApproveRunTest(ApproveCase):
         shown, _ = self.run_approval("apply_failed")
         adoption = shown["adoption"]
         self.assertTrue(adoption["headline"].endswith(": it took too long and was stopped."))
-        self.assertTrue(adoption["note"].startswith("Press Approve again."))
+        self.assertTrue(adoption["note"].startswith("Choose Apply it again."))
         fake.apply_raises = KeyError("x")
         shown, errors = self.run_approval("apply_failed")
         self.assertTrue(shown["adoption"]["headline"].endswith(": it stopped unexpectedly."))
@@ -484,7 +484,7 @@ class PlanApproveRunTest(ApproveCase):
         self.assertEqual(
             adoption["note"],
             f"Check on the forge that {BRANCH} differs from develop and has no pull request open "
-            "already, then press Try again.")
+            "already, then choose Try again.")
         for text in (adoption["headline"], *adoption["lines"], adoption["note"]):
             for word in ("HTTP", "422", "gh_failed"):
                 self.assertNotIn(word, text)

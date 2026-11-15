@@ -71,6 +71,8 @@ accepted owner action) and `SIGNIN_ENDED` (`signin.ended`, one per finished clie
 
 Two kinds record an adoption the owner approved on the page (#1054): `ADOPTION_STEP`
 (`adoption.step`) and `ADOPTION_PULL` (`adoption.pull_request`); neither is in `KEPT_KINDS`.
+`ADOPTION_DEFERRED` (`adoption.deferred`, #1073, `{"plan_id"}`, one per `Not now` the owner chooses
+on an apply card) is not in `KEPT_KINDS` either.
 
 `ACCOUNT_ADDED` (`account.added`, one per account the owner adds from the page, #1027) is not in
 `KEPT_KINDS`. `ACCOUNT_REMOVAL` (`account.removal`, one per removal the owner confirms on the page,
@@ -143,6 +145,7 @@ REGISTRATION_ENDED = "registration.ended"
 ADOPTION_STEP = "adoption.step"
 ADOPTION_PULL = "adoption.pull_request"
 ADOPTION_REGISTRATION = "adoption.registration"
+ADOPTION_DEFERRED = "adoption.deferred"
 SESSION_HOOK = "session.hook"
 SESSION_SEEN = "session.seen"
 SESSION_PROFILE = "session.profile"

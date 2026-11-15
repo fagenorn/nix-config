@@ -51,8 +51,13 @@ adoption of <project_id or name> is ready to merge`, with the pull request's `ur
 link is not a GitHub pull request link of that number): the poll reads the repository the pull
 request was opened in, never the checkout's origin of the day.
 
-Words. Every reason and note is plain: none holds an error code, a repair id, an HTTP status, a run
-kind or an exception name. `branch_of(plan_id)` is the branch apply creates for the plan.
+Words. The notes name the option of the card they sit on: `Try again` on a resumable step, `Apply it
+again` on a failed apply and on a closed pull request; none says `press` or `Approve`.
+`current_note(note)` is a stored note in the words of today: it applies each pair of `LEGACY_WORDS`
+(the words an earlier release stored for its buttons) with `str.replace`, None stays None, and the
+stored row is never rewritten. Every reason and note is plain: none holds an error code, a repair
+id, an HTTP status, a run kind or an exception name.
+`branch_of(plan_id)` is the branch apply creates for the plan.
 `forge_failure(error, branch, base)` is `(reason, note)` for a failed pull request lookup or open, by
 the first rule that matches: not a `ForgeError` (`UNEXPECTED`), `gh_missing`, `gh_timeout`, a
 transient `gh_failed`, an HTTP 401 or 403, 422 or 404 read from gh's message, else the forge answered
@@ -76,9 +81,20 @@ adoption, else exactly the keys `status`, `step`, `state`, `headline`, `lines`, 
 `commit` and `url` (`running` gives status `running`, the running headline and None elsewhere; a
 merged pull request's headline reads its registration: waiting, `registering`, registered or
 refused, and its `note` is None).
-`action(latest, adoption, *, available, running)` is `approve` for a ready plan with no adoption, a
-failed apply or a closed pull request, `retry` for a step in `RESUMABLE`, else None (and None unless
-`available`, not `running` and `latest` is a ready plan with an id). `acknowledges(latest)` is true
+`action(latest, adoption, *, available, running)` is the action the card offers: `approve` for a
+ready plan with no adoption, a failed apply or a closed pull request, `retry` for a step in
+`RESUMABLE`, else None (and None unless `available`, not `running` and `latest` is a ready plan
+with an id). `apply_items(latest, adoption, entry, action, *, deferred)` lists the one question
+card (an `inbox_item` of reason `register_apply`, `text` False, the options `[<first>, Not now]`
+and the values `[apply | retry, not_now]`) that action asks, else `[]`: none when `latest` or the
+action is None or when `latest["plan_id"]` is in `deferred`. A ready plan with no adoption asks
+`Apply this adoption?` with `Apply it` (key `register-apply/<plan_id>/<latest at>`, the plan's lines
+as `lines`); with an adoption the ask is the entry's headline and its note is `why` (key
+`.../<adoption at>`), the option `Apply it again` for `approve` (waiting since the pull request's
+`pull_at`, else the step's `at`) and `Try again` for `retry`. `deferral_row(plan_id)` is the
+`(DEFERRED, None, {"plan_id"})` row of a `Not now` (`adoption.deferred`, ValueError for a plan id
+that is not a non-empty string), and `deferrals(events, state)` folds `state` plus the plan id of
+every such row whose payload is exactly that, skipping any other. `acknowledges(latest)` is true
 when a plan line starts with `deletes `, the only case a deletion is acknowledged for the owner.
 `title(name)` and `body(latest)` word the pull request from the plan. `retained(plan_id)` reads the
 kept worktree of a failed apply from its failure record (a file of at most 65536 bytes holding a JSON
@@ -128,6 +144,7 @@ from agent_tools.system.forge_api import ForgeError
 STEP = event_log.ADOPTION_STEP
 PULL = event_log.ADOPTION_PULL
 REGISTRATION = event_log.ADOPTION_REGISTRATION
+DEFERRED = event_log.ADOPTION_DEFERRED
 STEPS = ("applied", "apply_failed", "push_failed", "open_failed", "opened")
 RESUMABLE = ("applied", "push_failed", "open_failed")
 PULL_STATES = ("open", "ready", "merged", "closed")
@@ -145,17 +162,34 @@ STALE = "that plan is no longer the one shown; approve the plan shown now"
 NOT_READY = "only a ready plan can be approved"
 OPENED = "the pull request of this plan is already open"
 PUSH_NOTE = ("Check that the repository's origin can be reached from this host and accepts the "
-             "push, then press Try again.")
+             "push, then choose Try again.")
 OPEN_NOTE = ("Check that gh is signed in on this host and can open pull requests on the "
-             "repository, then press Try again.")
+             "repository, then choose Try again.")
 NO_SLUG = "the repository's origin is not on GitHub"
 NO_BASE = "the project contract names no integration branch"
-APPLIED_NOTE = "Press Try again to push the branch and open its pull request."
+APPLIED_NOTE = "Choose Try again to push the branch and open its pull request."
 MERGED = "the pull request of this plan was already merged"
 NOT_REFUSED = "that registration is not waiting for a retry"
 RETRY_AGAIN = "choose Retry."
 RETRY_OPTION = "Retry"
 RETRY_VALUE = "retry"
+APPLY_ASK = "Apply this adoption?"
+APPLY_OPTION = "Apply it"
+APPLY_AGAIN_OPTION = "Apply it again"
+TRY_AGAIN_OPTION = "Try again"
+NOT_NOW_OPTION = "Not now"
+APPLY_VALUE = "apply"
+NOT_NOW_VALUE = "not_now"
+DEFER_STALE = "that plan is no longer the one shown"
+NOT_OFFERED = "that plan is not waiting for an answer"
+# Notes a console of an earlier release stored, by the words they used for the buttons then.
+LEGACY_WORDS = (
+    ("then press Try again.", "then choose Try again."),
+    ("Press Try again; ", "Choose Try again; "),
+    ("then press Approve again.", "then choose Apply it again."),
+    ("Press Approve again. If it keeps failing,", "Choose Apply it again. If it keeps failing,"),
+    ("then approve that one.", "then apply that one."),
+)
 NOT_INTEGRATED = "adopt.registration.not_integrated"
 UNCHECKED = "the adoption on the remote did not pass the registration's checks"
 GATE_PREFIX = "adopt.gate."
@@ -254,6 +288,34 @@ def registration_row(payload: Mapping) -> tuple[str, None, dict]:
     return (REGISTRATION, None, dict(payload))
 
 
+def deferral_row(plan_id: str) -> tuple[str, None, dict]:
+    if not isinstance(plan_id, str) or plan_id == "":
+        raise ValueError("not an adoption deferral row")
+    return (DEFERRED, None, {"plan_id": plan_id})
+
+
+def deferrals(events: Iterable[Event], state: Collection[str] = frozenset()) -> frozenset[str]:
+    result = set(state)
+    for event in events:
+        if event.kind != DEFERRED:
+            continue
+        try:
+            _, _, payload = deferral_row(event.payload["plan_id"])
+        except (ValueError, KeyError, TypeError):
+            continue
+        if event.payload == payload:
+            result.add(payload["plan_id"])
+    return frozenset(result)
+
+
+def current_note(note: str | None) -> str | None:
+    if note is None:
+        return None
+    for old, new in LEGACY_WORDS:
+        note = note.replace(old, new)
+    return note
+
+
 def adoptions(events: Iterable[Event], state: dict | None = None) -> dict[str, dict]:
     result = dict(state or {})
     for event in events:
@@ -324,6 +386,37 @@ def retry_entries(adoptions: Mapping[str, Mapping],
     return items
 
 
+def apply_items(latest: Mapping | None, adoption: Mapping | None, entry: Mapping | None,
+                action: str | None, *, deferred: Collection[str] = frozenset()) -> list[dict]:
+    if latest is None or action is None or latest["plan_id"] in deferred:
+        return []
+    plan_id = latest["plan_id"]
+    name = register.name_of(latest["root"])
+    if action == "approve" and adoption is None:
+        key, ask, why = f"register-apply/{plan_id}/{latest['at']}", APPLY_ASK, None
+        lines, first, value, since = list(latest["lines"]), APPLY_OPTION, APPLY_VALUE, latest["at"]
+    elif action in ("approve", "retry") and adoption is not None and entry is not None:
+        key = f"register-apply/{plan_id}/{latest['at']}/{adoption['at']}"
+        ask, why, lines = entry["headline"], entry["note"], []
+        if action == "approve":
+            first, value = APPLY_AGAIN_OPTION, APPLY_VALUE
+            since = adoption["pull_at"] or adoption["at"]
+        else:
+            first, value, since = TRY_AGAIN_OPTION, RETRY_VALUE, adoption["at"]
+    else:
+        return []
+    return [{
+        "type": "inbox_item", "reason": "register_apply", "key": key,
+        "project_id": None, "root": latest["root"], "name": name,
+        "title": f"Register {name}", "plan_id": plan_id, "id": None, "subject": None,
+        "headline": ask, "why": why, "lines": lines, "refusal": None,
+        "more_questions": 0, "text": False,
+        "questions": [{"question": ask, "options": [first, NOT_NOW_OPTION], "chosen": None,
+                       "recommended": None, "recommended_index": None}],
+        "values": [value, NOT_NOW_VALUE], "items": [], "answers": [], "answered": False,
+        "waiting_since": since}]
+
+
 def waiting(adoptions: Mapping[str, Mapping]) -> list[dict]:
     return [dict(adoptions[plan_id]) for plan_id in sorted(adoptions)
             if adoptions[plan_id]["step"] == "opened"
@@ -361,7 +454,7 @@ def branch_of(plan_id: str) -> str:
 
 def closed_note(root: str, branch: str) -> str:
     return (f"Delete the branch {branch} with git -C {root} branch -D {branch} and git -C {root} "
-            f"push origin --delete {branch}, then press Approve to apply the plan again.")
+            f"push origin --delete {branch}, then choose Apply it again.")
 
 
 def _retry_words(step: str) -> str:
@@ -413,29 +506,29 @@ def forge_failure(error: BaseException, branch: str, base: str) -> tuple[str, st
         return (register.UNEXPECTED, OPEN_NOTE)
     if error.code == "gh_missing":
         return ("gh is not installed on this host",
-                "Install gh and sign it in with gh auth login, then press Try again.")
+                "Install gh and sign it in with gh auth login, then choose Try again.")
     if error.code == "gh_timeout":
         return ("the forge took too long to answer",
-                "Press Try again; the console first looks for a pull request the forge may have "
+                "Choose Try again; the console first looks for a pull request the forge may have "
                 "opened already.")
     if error.code == "gh_failed":
         if error.transient:
             return ("the forge could not be reached",
-                    "Check this host's network connection, then press Try again.")
+                    "Check this host's network connection, then choose Try again.")
         found = forge_api.HTTP_STATUS.search(error.detail)
         status = int(found.group(1)) if found else None
         if status in (401, 403):
             return ("gh is not signed in, or may not open pull requests on this repository",
                     "Sign gh in with gh auth login on this host with access to the repository, "
-                    "then press Try again.")
+                    "then choose Try again.")
         if status == 422:
             return ("the forge refused the pull request",
                     f"Check on the forge that {branch} differs from {base} and has no pull "
-                    "request open already, then press Try again.")
+                    "request open already, then choose Try again.")
         if status == 404:
             return ("the forge does not know the repository or the branch",
                     f"Check that origin is the GitHub repository and that {branch} reached it, "
-                    "then press Try again.")
+                    "then choose Try again.")
     return ("the forge answered in a way the console does not understand", OPEN_NOTE)
 
 
@@ -450,21 +543,21 @@ def apply_failure(root: str, plan_id: str, error: Mapping, kept: Mapping | None,
     repair = error.get("repair_id") or ""
     if error.get("code") == "plan_stale":
         return ("the repository changed since this plan was made",
-                "Register the repository again to make a new plan, then approve that one.")
+                "Register the repository again to make a new plan, then apply that one.")
     if repair == "adopt.worktree.dirty":
         return ("an uncommitted change in the repository overlaps what the plan changes",
-                f"Commit or set aside the uncommitted change in {root}, then press Approve "
+                f"Commit or set aside the uncommitted change in {root}, then choose Apply it "
                 "again.")
     if repair == "adopt.worktree.retained":
         note = (f"Remove the kept worktree with git worktree remove {kept['worktree']} and "
-                f"delete the branch {kept['branch']}, then press Approve again." if kept
+                f"delete the branch {kept['branch']}, then choose Apply it again." if kept
                 else terminal_note(plan_id, acknowledge))
         return ("an earlier attempt of this plan is still kept", note)
     if repair == "adopt.worktree.unavailable":
         branch = branch_of(plan_id)
         return ("the adoption's branch or worktree could not be created",
                 f"If the branch {branch} is left from an earlier attempt, delete it with git -C "
-                f"{root} branch -D {branch}, then press Approve again.")
+                f"{root} branch -D {branch}, then choose Apply it again.")
     if repair.startswith(GATE_PREFIX):
         note = (f"Fix what failed in the repository (the kept worktree at {kept['worktree']} "
                 f"shows it), remove that worktree and the branch {kept['branch']}, then "
@@ -473,7 +566,7 @@ def apply_failure(root: str, plan_id: str, error: Mapping, kept: Mapping | None,
         return (f"the {repair[len(GATE_PREFIX):]} check did not pass", note)
     if repair.startswith(register.MANIFEST_PREFIX):
         return ("the agent platform's files are not installed on this host yet",
-                "Run just switch in a terminal to install them, then press Approve again.")
+                "Run just switch in a terminal to install them, then choose Apply it again.")
     violations = error.get("violations") or []
     message = ""
     if violations and isinstance(violations[0], Mapping):
@@ -484,7 +577,7 @@ def apply_failure(root: str, plan_id: str, error: Mapping, kept: Mapping | None,
 def run_failure(plan_id: str, kind: str, acknowledge: bool) -> tuple[str, str]:
     reason = register.RUN_WORDS.get(kind, register.UNEXPECTED)
     if kind in register.RETRY_KINDS:
-        return (reason, "Press Approve again. If it keeps failing, r"
+        return (reason, "Choose Apply it again. If it keeps failing, r"
                 + terminal_note(plan_id, acknowledge)[1:])
     return (reason, terminal_note(plan_id, acknowledge))
 
@@ -549,7 +642,7 @@ def entry(adoption: Mapping | None, *, running: bool, name: str,
     state = adoption["pull_state"]
     applied = applied_line(branch, commit) if branch and commit else None
     kept = adoption["kept"]
-    note = adoption["note"]
+    note = current_note(adoption["note"])
     lines: list[str]
     if step == "applied":
         headline = f"The adoption of {name} was applied, but its branch is not pushed yet."
