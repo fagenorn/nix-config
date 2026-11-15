@@ -81,8 +81,10 @@ console.log(JSON.stringify({
 """
 
 
-def render_page(view: dict) -> dict:
-    """The `#statement`, `#inbox`, `#capacity` and `#promoted` trees the page draws for `view`, run under node."""
+def render_page(view: dict, clock_ms: int | None = None) -> dict:
+    """The `#statement`, `#inbox`, `#capacity` and `#promoted` trees the page draws for `view`, run under node.
+
+    The page reads the real clock unless `clock_ms` freezes it, which a view with a reset time needs (#1045)."""
     node = shutil.which("node")
     if node is None:
         raise AssertionError("node is not on PATH; the page render tests need it")
@@ -91,7 +93,8 @@ def render_page(view: dict) -> dict:
     ids = re.findall(r'id="([^"]+)"', html)
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "render.js"
-        path.write_text(INBOX_HARNESS + script + TAIL, encoding="utf-8")
+        frozen = "" if clock_ms is None else f"Date.now = () => {int(clock_ms)};\n"
+        path.write_text(INBOX_HARNESS + frozen + script + TAIL, encoding="utf-8")
         done = subprocess.run(
             [node, str(path), "-", json.dumps(ids), json.dumps(view)],
             capture_output=True, text=True, timeout=30, check=False,
@@ -779,8 +782,9 @@ def bar(n: dict) -> str:
     return i["width"]
 
 
-def capacity_snap(cap: dict) -> dict:
-    (snap,) = render([START, {"frame": {**view([]), "capacity": cap}}, {"snapshot": True}])
+def capacity_snap(cap: dict, clock_ms: int = 0) -> dict:
+    (snap,) = render([{"start": {"focused": False, "clock": clock_ms}},
+                      {"frame": {**view([]), "capacity": cap}}, {"snapshot": True}])
     return snap
 
 
@@ -846,7 +850,7 @@ class CapacityPageTest(unittest.TestCase):
         snap = capacity_snap(capacity([
             profile("a", "out", week_left=0, out_until="2026-11-13T09:30:00+00:00"),
             profile("b", "out", out_until="2026-11-13T10:00:00+00:00"),
-        ], all_out=True, resumes_at="2026-11-13T09:30:00+00:00"))
+        ], all_out=True, resumes_at="2026-11-13T09:30:00+00:00"), NOW_MS)
         self.assertEqual(
             [n["cls"] for n in strip(snap)],
             ["cap-state cap-out", "cap-acct cap-out cap-tightest", "cap-acct cap-out cap-extra"])
@@ -862,7 +866,7 @@ class CapacityPageTest(unittest.TestCase):
         statement = render_page({**view([]), "capacity": capacity([
             profile("a", "out", week_left=0, out_until="2026-11-13T09:30:00+00:00"),
             profile("b", "out", out_until="2026-11-13T10:00:00+00:00"),
-        ], all_out=True, resumes_at="2026-11-13T09:30:00+00:00")})["statement"]
+        ], all_out=True, resumes_at="2026-11-13T09:30:00+00:00")}, NOW_MS)["statement"]
         self.assertIn("Resumes Fri 09:30", full(statement))
         for n in nodes(snap["capacity"]):
             self.assertNotIn("needs", n["cls"])
@@ -921,7 +925,7 @@ class CapacityPageTest(unittest.TestCase):
                profile("b", "out", out_until="2026-11-12T10:00:00+00:00")]
         full = {**view([]), "capacity": capacity(
             out, all_out=True, resumes_at="2026-11-12T09:00:00+00:00")}
-        result = render_page(full)
+        result = render_page(full, NOW_MS - 86400 * 1000)
         self.assertIn("Capacity", result["promoted"]["text"])
         self.assertEqual(result["promoted"]["text"].count("out until"), 2)
         self.assertIn("Resumes ", result["statement"]["text"])
@@ -929,7 +933,7 @@ class CapacityPageTest(unittest.TestCase):
         self.assertLess(html.index('id="promoted"'), html.index('id="inbox"'))
         partial = {**view([]), "capacity": capacity(
             out, all_out=False, resumes_at="2026-11-12T09:00:00+00:00")}
-        shown = render_page(partial)
+        shown = render_page(partial, NOW_MS - 86400 * 1000)
         self.assertEqual(shown["promoted"]["children"], [])
         self.assertNotIn("Resumes ", shown["statement"]["text"])
 
@@ -4954,7 +4958,7 @@ class AccountNamePageTest(unittest.TestCase):
             {"name": "p1", "week": 1.0, "week_reset": NOW_S + 86400, "signin": signed,
              "account": "a@example.invalid"}])
         self.assertIs(cap["all_out"], True)
-        result = render_page({**view([]), "capacity": cap})
+        result = render_page({**view([]), "capacity": cap}, NOW_MS)
         items = [full(n) for n in nodes(result["promoted"]) if n["tag"] == "li"]
         self.assertEqual(len(items), 1)
         self.assertTrue(items[0].startswith("p1 "), items)
@@ -5446,14 +5450,14 @@ class SigninPageTest(unittest.TestCase):
 
     def test_a_signed_out_profile_with_an_old_reading_never_makes_the_strip_fine(self) -> None:
         cap = signed_out_pair()
-        snap = capacity_snap(cap)
+        snap = capacity_snap(cap, NOW_MS)
         self.assertEqual(full(strip(snap)[0]), "out")
         self.assertEqual([n for n in nodes(snap["capacity"]) if has_class(n, "cap-when")], [])
-        statement = render_page({**view([]), "capacity": cap})["statement"]
+        statement = render_page({**view([]), "capacity": cap}, NOW_MS)["statement"]
         self.assertIn("Resumes " + weekday(cap["resumes_at"]), full(statement))
 
     def test_the_all_out_panel_names_a_signed_out_profile_as_signed_out(self) -> None:
-        result = render_page({**view([]), "capacity": signed_out_pair()})
+        result = render_page({**view([]), "capacity": signed_out_pair()}, NOW_MS)
         a, default = [n for n in nodes(result["promoted"]) if n["tag"] == "li"]
         self.assertEqual(a["cls"], "cap-out")
         self.assertTrue(full(a).startswith("a out until"))
@@ -6424,3 +6428,89 @@ class PanelSigninPageTest(unittest.TestCase):
         self.assertEqual(urls, {"/api/exclusion", "/api/pin", "/api/signin", "/api/account-remove",
                                 "/api/account-add", "/api/signin-code", "/api/signin-cancel",
                                 "/api/signin-link"})
+
+
+class LapsedResetPageTest(unittest.TestCase):
+    """#1045: a frame drawn before a reset passed does not keep naming that reset."""
+    at_now = {"start": {"focused": False, "clock": NOW_MS}}
+
+    def frame_read_before(self, reset_in_s: int) -> dict:
+        """The capacity the console built an hour before the page's clock, its week resetting `reset_in_s` after that."""
+        then = NOW_S - 3600
+        return {**view([]), "capacity": real_capacity(then, [
+            {"name": "p1", "week": .35, "five": .6, "week_reset": then + reset_in_s,
+             "five_reset": then + reset_in_s}])}
+
+    def test_a_reset_in_the_past_is_not_shown_on_the_strip_or_in_the_panel(self) -> None:
+        strip_snap, panel_snap = (
+            render([self.at_now, {"frame": self.frame_read_before(1800)}, {"snapshot": True}])[0],
+            opened_at(self.frame_read_before(1800)))
+        (acct,) = accounts(strip_snap)
+        self.assertEqual(full(part(strip_snap, "cap-acct")), "p1reset, not yet used")
+        self.assertEqual(bars(acct), [])
+        self.assertNotIn("65%", full(strip_snap["capacity"]))
+        (row,) = rows(panel_snap)
+        self.assertEqual(details(row), ["reset, not yet used", "sign-in unknown"])
+        self.assertEqual([n for n in nodes(row) if has_class(n, "acct-reset")], [])
+
+    def test_a_reset_still_ahead_is_shown(self) -> None:
+        panel_snap = opened_at(self.frame_read_before(2 * 3600))
+        (row,) = rows(panel_snap)
+        self.assertEqual(details(row)[0], "65% of the week left")
+        self.assertEqual([full(n) for n in nodes(row) if has_class(n, "acct-reset")],
+                         ["resets " + weekday(datetime.fromtimestamp(
+                             NOW_S + 3600, timezone.utc).isoformat())])
+
+    def test_a_reset_passing_between_frames_is_dropped_when_the_clock_moves(self) -> None:
+        frame = self.frame_read_before(2 * 3600)
+        before, after = render([
+            self.at_now, {"frame": frame}, {"click": "cap"}, {"snapshot": True},
+            {"clock": NOW_MS + 2 * 3600 * 1000}, {"snapshot": True},
+        ])
+        (row,) = rows(before)
+        self.assertIn("65% of the week left", details(row))
+        (late,) = rows(after)
+        self.assertEqual(details(late), ["reset, not yet used", "sign-in unknown"])
+        self.assertIn("reset, not yet used", full(after["capacity"]))
+        self.assertNotIn("65%", full(after["capacity"]))
+
+    def refused_frame(self, reset_in_s: int) -> dict:
+        """An hour before the page's clock, p1 refused until `reset_in_s` after that and p2 had room."""
+        then = NOW_S - 3600
+        return {**view([]), "capacity": real_capacity(then, [
+            {"name": "p1", "week": 1.0, "five": .6, "refused": True, "week_reset": then + reset_in_s,
+             "five_reset": then + reset_in_s}])}
+
+    def test_a_refused_reading_still_out_is_shown_out(self) -> None:
+        (row,) = rows(opened_at(self.refused_frame(2 * 3600)))
+        self.assertEqual(details(row)[0][:9], "out until")
+
+    def test_an_out_until_in_the_past_is_not_shown_on_the_strip_or_in_the_panel(self) -> None:
+        strip_snap, panel_snap = (
+            render([self.at_now, {"frame": self.refused_frame(1800)}, {"snapshot": True}])[0],
+            opened_at(self.refused_frame(1800)))
+        (acct,) = accounts(strip_snap)
+        self.assertEqual(full(part(strip_snap, "cap-acct")), "p1reset, not yet used")
+        self.assertNotIn("out until", full(strip_snap["capacity"]))
+        self.assertNotIn("out until", full(panel(panel_snap)))
+        self.assertNotIn("Resumes", full(strip_snap["statement"]))
+        self.assertEqual(text(strip_snap["promoted"]), "")
+        (row,) = rows(panel_snap)
+        self.assertEqual(details(row), ["reset, not yet used", "sign-in unknown"])
+
+    def test_an_out_until_passing_between_frames_is_dropped_when_the_clock_moves(self) -> None:
+        before, after = render([
+            self.at_now, {"frame": self.refused_frame(2 * 3600)}, {"click": "cap"}, {"snapshot": True},
+            {"clock": NOW_MS + 2 * 3600 * 1000}, {"snapshot": True},
+        ])
+        (row,) = rows(before)
+        self.assertEqual(details(row)[0][:9], "out until")
+        (late,) = rows(after)
+        self.assertEqual(details(late), ["reset, not yet used", "sign-in unknown"])
+        self.assertIn("reset, not yet used", full(after["capacity"]))
+        self.assertNotIn("out until", full(after["capacity"]))
+
+
+def opened_at(frame: dict) -> dict:
+    (snap,) = render([LapsedResetPageTest.at_now, {"frame": frame}, {"click": "cap"}, {"snapshot": True}])
+    return snap
