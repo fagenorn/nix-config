@@ -14,7 +14,7 @@ import time
 import unittest
 from pathlib import Path
 
-from agent_tools.console import plan_questions, register
+from agent_tools.console import contract_draft, plan_questions, register
 from agent_tools.console.event_log import Event
 from agent_tools.console.register import Adopter, RunFailed
 
@@ -227,7 +227,27 @@ def plan_doc(outcome="reconcile", state="draft", open_questions=0, blockers=(),
                handoff={"next_command": next_command}, **extra)
 
 
+def draft_fields() -> list[dict]:
+    return [
+        {"field": "project-id", "label": "Project id", "value": "sample-owner/sample-app",
+         "source": "remote", "options": [], "text": True, "reason": None,
+         "ask": "Which project is this repository?"},
+        {"field": "build-command", "label": "Build command", "value": None, "source": "none",
+         "options": [], "text": True, "reason": None,
+         "ask": "Which command builds sample-app?\nThe console found none in its files: type "
+                "the command, or say it has none."}]
+
+
 class SummaryTest(unittest.TestCase):
+    def test_a_drafted_plan_row_keeps_its_draft(self):
+        fields = draft_fields()
+        plan = plan_doc(outcome="bootstrap", open_questions=0, changes=[
+            {"op": "write-file", "sources": [], "targets": [".agents/project.json"]}])
+        row = register.summary("/srv/r", plan, draft=fields)
+        self.assertEqual(row["draft"], fields)
+        self.assertTrue(row["lines"][0].startswith("writes the project contract"))
+        self.assertIsNone(register.summary("/srv/r", plan)["draft"])
+
     def test_a_draft_with_questions(self):
         row = register.summary("/srv/r", plan_doc(open_questions=2))
         self.assertEqual(row["result"], "planned")
@@ -249,7 +269,8 @@ class SummaryTest(unittest.TestCase):
         self.assertEqual(row["questions"], plan_questions.questions(doc_))
         self.assertEqual(len(row["questions"]), 1)
         self.assertEqual(row["answered"], answered)
-        self.assertEqual(set(row), register.MEMBERS | register.EXTRA)
+        self.assertEqual(set(row), register.MEMBERS | register.EXTRA | {"draft"})
+        self.assertIsNone(row["draft"])
 
     def test_other_rows_carry_the_defaults(self):
         rows = [register.summary("/srv/r", plan_doc(outcome="no_change", state="ready"),
@@ -260,8 +281,8 @@ class SummaryTest(unittest.TestCase):
                 register.failed("/srv/r", "timed_out")]
         for row in rows:
             with self.subTest(result=row["result"]):
-                self.assertEqual((row["plan_id"], row["state"], row["questions"], row["answered"]),
-                                 (None, None, [], []))
+                self.assertEqual((row["plan_id"], row["state"], row["questions"], row["answered"],
+                                  row["draft"]), (None, None, [], [], None))
 
     def test_a_no_change_plan_without_a_report_names_its_terminal_handoff(self):
         nc = {"plan": {"state": "ready", "outcome": "no_change", "project_id": "o/r",
@@ -377,7 +398,7 @@ class SummaryTest(unittest.TestCase):
                                        "headline": f"The adoption plan for r failed: {text}.",
                                        "lines": [], "note": register.run_next_step("/srv/r", kind),
                                        "plan_id": None, "state": None, "questions": [],
-                                       "answered": []})
+                                       "answered": [], "draft": None})
 
     def test_a_headline_that_already_ends_in_a_full_stop_gets_no_second(self):
         row = register.summary("/srv/r", {"error": {"code": "adopt_failure", "repair_id": "x",
@@ -525,9 +546,13 @@ class RowTest(unittest.TestCase):
 
     def test_ended_takes_the_twelve_members_and_still_reads_a_legacy_row(self):
         p = register.summary("/srv/a", plan_doc(open_questions=1))
+        twelve = {k: v for k, v in p.items() if k != "draft"}
         legacy = {k: p[k] for k in register.MEMBERS}
         self.assertEqual(register.ended(p)[2], p)
+        self.assertEqual(register.ended(twelve)[2], twelve)
         self.assertEqual(register.ended(legacy)[2], legacy)
+        self.assertEqual(register.latest([Event(1, "t1", register.ENDED, None, twelve)]),
+                         {**twelve, "draft": None, "at": "t1"})
         self.assertEqual(register.latest([Event(1, "t1", register.ENDED, None, legacy)]),
                          {**legacy, **register.DEFAULTS, "at": "t1"})
         for bad in ({**p, "answered": [{"id": "x"}]},
@@ -536,6 +561,54 @@ class RowTest(unittest.TestCase):
                     {k: v for k, v in p.items() if k != "state"}):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 register.ended(bad)
+
+    def test_a_drafting_row_asks_the_open_fields(self):
+        fields = draft_fields()
+        row = register.drafting("/x/sample-app", fields)
+        self.assertEqual((row["result"], row["state"]), ("drafting", "drafting"))
+        self.assertTrue(row["plan_id"].startswith("draft:sha256:"))
+        self.assertEqual(row["headline"],
+                         "What the console read from sample-app: it has no project contract yet")
+        self.assertEqual(row["note"], "The draft has 1 open question.")
+        self.assertEqual([q["subject"] for q in row["questions"]], ["build-command"])
+        self.assertEqual(row["questions"][0]["ask"], fields[1]["ask"])
+        self.assertEqual(row["draft"], fields)
+        self.assertEqual(row["project_id"], "sample-owner/sample-app")
+        self.assertEqual(register.ended(row)[2], row)
+
+    def test_ended_takes_thirteen_members_and_checks_the_draft(self):
+        row = register.drafting("/x/sample-app", draft_fields())
+        self.assertEqual(len(row), 13)
+        self.assertEqual(register.ended(row)[2], row)
+        lacking = [{k: v for k, v in row["draft"][0].items() if k != "ask"}, *row["draft"][1:]]
+        extra = [{**row["draft"][0], "more": 1}, *row["draft"][1:]]
+        for bad in ({**row, "draft": lacking}, {**row, "draft": extra}, {**row, "draft": "x"},
+                    {**row, "draft": ["x"]}):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                register.ended(bad)
+        self.assertEqual(register.ended({**row, "draft": None})[2]["draft"], None)
+        legacy = {k: row[k] for k in register.MEMBERS}
+        self.assertEqual(register.latest([Event(1, "t1", register.ENDED, None, legacy)])["draft"],
+                         None)
+
+    def test_a_drafting_row_says_its_questions_in_one_line(self):
+        fields = draft_fields()
+        row = register.drafting("/x/sample-app", fields)
+        entry = register.view_entry(None, {**row, "at": "t"})
+        self.assertEqual(entry["line"], "Register sample-app: 1 question open")
+        self.assertEqual(entry["draft"], contract_draft.shown(fields))
+        running = register.view_entry("/x/sample-app", None)
+        self.assertIsNone(running["draft"])
+        self.assertEqual(len(running), 17)
+
+    def test_the_draft_id_follows_the_values(self):
+        one = draft_fields()
+        two = draft_fields()
+        two[0]["value"] = "sample-owner/other-app"
+        self.assertNotEqual(register.drafting("/x/a", one)["plan_id"],
+                            register.drafting("/x/a", two)["plan_id"])
+        self.assertEqual(register.drafting("/x/a", one)["plan_id"],
+                         register.drafting("/x/a", draft_fields())["plan_id"])
 
     def test_view_entry_again_and_refusal(self):
         self.assertEqual(register.view_entry("/srv/r", None, again=True)["headline"],
@@ -589,7 +662,7 @@ class RowTest(unittest.TestCase):
             "result": None, "outcome": None, "headline": "Planning the adoption of r…",
             "lines": [], "note": None, "at": None, "plan_id": None, "state": None,
             "questions": [], "refusal": None, "line": "Planning the adoption of r\u2026",
-            "refused": None})
+            "refused": None, "draft": None})
         latest = {**register.summary("/srv/r", plan_doc(state="ready")), "at": "t"}
         self.assertEqual(register.view_entry(None, latest), {
             "root": "/srv/r", "name": "r", "project_id": "o/r", "status": "done",
@@ -597,7 +670,7 @@ class RowTest(unittest.TestCase):
             "headline": latest["headline"], "lines": [],
             "note": "The plan is ready.",
             "at": "t", "plan_id": PLAN_ID, "state": "ready", "questions": [], "refusal": None,
-            "line": "Register r: ready to apply", "refused": None})
+            "line": "Register r: ready to apply", "refused": None, "draft": None})
         self.assertIsNone(register.view_entry(None, None))
 
 
@@ -639,6 +712,15 @@ class AdopterTest(unittest.TestCase):
                          "plan --repo-root /r --format json --answer candidate-class "
                          ".claude/odd.md archive-history --answer path-reference "
                          "tools/show.sh:1:5 rewrite")
+
+    def test_plan_sends_the_drafted_contract_after_the_answers(self):
+        answer = {"id": "contract-draft", "subject": "build-command", "value": "make"}
+        self.adopter().plan("/r", answers=[answer], contract="/s/d.json")
+        self.adopter().plan("/r", answers=[answer])
+        first, second = self.args.read_text().splitlines()[-2:]
+        self.assertEqual(first, "plan --repo-root /r --format json --answer contract-draft "
+                                "build-command make --contract-draft /s/d.json")
+        self.assertNotIn("--contract-draft", second)
 
     def test_exit_0_and_2_return_the_object(self):
         for code in (0, 2):
