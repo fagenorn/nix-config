@@ -371,7 +371,8 @@ class GoalRouteTest(Case):
         self.assertTrue(sprints.SPRINT_ID.fullmatch(payload["sprint_id"]))
         self.assertEqual(self.sprints_of(svc, "owner/p01"), [{
             "type": "sprint", "sprint_id": payload["sprint_id"],
-            "goal": "make the importer resumable", "state": "drafting",
+            "title": "make the importer resumable", "goal": "make the importer resumable",
+            "state": "drafting",
             "state_text": "drafting the brief", "stated_at": at,
             "age_text": "stated just now", "manager_text": "managers are not available on this host yet",
             "manager_state": "unavailable", "manager_until": None, "retry": False,
