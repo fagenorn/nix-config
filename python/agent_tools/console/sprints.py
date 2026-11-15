@@ -203,6 +203,8 @@ plus that. `progress_text(landed, total, in_delivery, queued, held)` is `<landed
 followed by `, <n> in delivery`, `, <n> queued` and `, <n> held` for each non-zero count, in that
 order. The view states and texts are the constants `ON_TRACK`, `WAITING`, `QUIET`, `CLOSING`,
 `DONE` and their `_TEXT`; `CLOSED_OUT` is the view's stage for a run's `done` (not a report stage).
+A running sprint's ball (#1086) is `BALL_MANAGER`, `BALL_OWNER` or `BALL_NOBODY`, worded by
+`BALL_TEXT`, and its now-sentence is one of the `NOW_*_TEXT` constants or the report's status line.
 
 Messages (#889) are what the owner says to a sprint, each one a `Message` kept in `message_id` order
 on `SprintState.messages`. Four rows carry them, the first three kept (`event_log.SPRINT_MESSAGED`,
@@ -479,6 +481,18 @@ STOPPING = "stopping"
 STOPPING_TEXT = "stopping"
 STOPPED = "stopped"
 STOPPED_TEXT = "stopped by you"
+BALL_MANAGER = "manager"
+BALL_OWNER = "owner"
+BALL_NOBODY = "nobody"
+BALL_TEXT = {BALL_MANAGER: "manager working", BALL_OWNER: "waiting on you",
+             BALL_NOBODY: "nothing running, may be stuck"}
+NOW_STOPPING_TEXT = "Finishing what is mid-merge, then stopping."
+NOW_ANSWER_TEXT = "The manager is waiting for an answer in its terminal."
+NOW_PERMISSION_TEXT = "The manager is waiting for a permission in its terminal."
+NOW_DRAFTING_TEXT = "Drafting the brief."
+NOW_BRIEF_TEXT = "The brief waits for your approval."
+NOW_QUOTA_TEXT = "Waiting for its account's usage to reset."
+NOW_STARTING_TEXT = "Starting the work."
 SECRETS_DIR = "sprint-secrets"
 SPRINT_ID = re.compile(r"[0-9a-f]{16}")
 

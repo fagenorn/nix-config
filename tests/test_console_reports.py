@@ -3,14 +3,23 @@
 Run: just agent-workflow-tests
 """
 import contextlib
+import dataclasses
 import io
 import json
+import unittest
 
 from agent_tools.console import service, sprints
+from agent_tools.console.deliveries import QUIET_AFTER_MS, IssueStage
+from agent_tools.console.sprints import (
+    BALL_TEXT, CHANGES, NOW_ANSWER_TEXT, NOW_BRIEF_TEXT, NOW_DRAFTING_TEXT, NOW_PERMISSION_TEXT,
+    NOW_QUOTA_TEXT, NOW_STARTING_TEXT, NOW_STOPPING_TEXT)
 
 from . import console_test_support as support
 from .test_console_answer import view_of
 from .test_console_briefs import GOAL_TEXT, JSON, PARTS
+from .test_console_view import (
+    A, MIN, NAME, T0_MS, briefed, closed, entry, iso, line, observed, open_item, out, reported,
+    session, sprint, started, with_manager)
 from .test_console_writes import Case
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
@@ -250,3 +259,97 @@ class CloseRouteTest(ReportRouteTest):
         svc = self.open()
         got = support.request(svc.address, "GET", CLOSE_PATH)
         self.assertEqual((got[0], got[1]["Allow"]), (405, "POST"))
+
+
+PAST = T0_MS + QUIET_AFTER_MS + MIN
+BUILDING = IssueStage(4, "building")
+
+
+def manager_session(state):
+    return session("s1", state, name=NAME)
+
+
+class SprintBallViewTest(unittest.TestCase):
+    def shown(self, state, now_ms, *sessions, **extra):
+        return entry(line(state, now_ms, sessions=list(sessions), **extra))
+
+    def test_an_on_track_report_with_an_idle_manager_and_nothing_moved_reads_nothing_running(self):
+        s = reported(with_manager(started(A)), T0_MS)
+        shown = self.shown(s, PAST, manager_session("idle"))
+        self.assertEqual((shown["ball"], shown["ball_text"]),
+                         ("nobody", "nothing running, may be stuck"))
+        self.assertNotEqual(shown["state_text"], "on track")
+        self.assertEqual(shown["now_text"], "two slices are building")
+
+    def test_a_working_manager_session_reads_manager_working_past_the_threshold(self):
+        s = reported(with_manager(started(A)), T0_MS)
+        shown = self.shown(s, PAST, manager_session("working"))
+        self.assertEqual((shown["ball"], shown["ball_text"]), ("manager", "manager working"))
+
+    def test_a_delivery_run_that_moved_recently_reads_manager_working(self):
+        for moved_ms, ball in ((PAST - MIN, "manager"), (T0_MS, "nobody")):
+            with self.subTest(moved_ms=moved_ms):
+                s = observed(reported(started(A), T0_MS), moved_ms, BUILDING)
+                self.assertEqual(self.shown(s, PAST, manager_session("idle"))["ball"], ball)
+
+    def test_movement_inside_the_threshold_reads_manager_working(self):
+        s = reported(started(A), T0_MS)
+        for now, ball in ((T0_MS + QUIET_AFTER_MS - 1, "manager"), (T0_MS + QUIET_AFTER_MS, "nobody")):
+            with self.subTest(now=now):
+                self.assertEqual(self.shown(s, now)["ball"], ball)
+
+    def test_waiting_on_the_owner_wins_over_a_working_manager(self):
+        working = manager_session("working")
+        stalled = dataclasses.replace(started(A), stalled="launch failed")
+        idle = dataclasses.replace(reported(started(A), T0_MS), no_progress_at=iso(T0_MS))
+        cases = (
+            (reported(started(A), T0_MS, inbox=(9,)), {("p00", "k9"): open_item("p00", "k9", 9)}),
+            (briefed(sprint(A)), None),
+            (stalled, None),
+            (idle, None),
+        )
+        for s, records in cases:
+            with self.subTest(sprint=s):
+                shown = self.shown(s, T0_MS + MIN, working, records=records)
+                self.assertEqual((shown["ball"], shown["ball_text"]), ("owner", "waiting on you"))
+        self.assertEqual(self.shown(briefed(sprint(A)), T0_MS + MIN)["now_text"], NOW_BRIEF_TEXT)
+
+    def test_a_manager_waiting_in_its_terminal_is_waiting_on_you(self):
+        s = reported(with_manager(started(A)), T0_MS)
+        answer = self.shown(s, T0_MS + MIN, manager_session("waiting_answer"))
+        self.assertEqual((answer["ball"], answer["ball_text"], answer["now_text"]),
+                         ("owner", "waiting on you", NOW_ANSWER_TEXT))
+        permission = self.shown(s, PAST, manager_session("waiting_permission"),
+                                session("s2", "working", name=NAME))
+        self.assertEqual((permission["ball"], permission["now_text"]),
+                         ("owner", NOW_PERMISSION_TEXT))
+        self.assertEqual(self.shown(s, PAST, manager_session("waiting_answer"))["ball"], "owner")
+
+    def test_each_now_sentence_rule(self):
+        now = T0_MS + MIN
+        stopping = dataclasses.replace(reported(started(A), T0_MS), stop_at=iso(T0_MS))
+        waiting = manager_session("waiting_answer")
+        table = (
+            (sprint(A), [], {}, NOW_DRAFTING_TEXT),
+            (briefed(sprint(A), decision=CHANGES), [], {}, NOW_DRAFTING_TEXT),
+            (briefed(sprint(A)), [], {}, NOW_BRIEF_TEXT),
+            (started(A), [], {}, NOW_STARTING_TEXT),
+            (with_manager(started(A)), [], {"capacity": out()}, NOW_QUOTA_TEXT),
+            (stopping, [], {}, NOW_STOPPING_TEXT),
+            (stopping, [waiting], {}, NOW_STOPPING_TEXT),
+            (reported(started(A), T0_MS), [], {}, "two slices are building"),
+        )
+        for s, sessions, extra, text in table:
+            with self.subTest(text=text, sessions=len(sessions)):
+                shown = self.shown(s, now, *sessions, **extra)
+                self.assertEqual(shown["now_text"], text)
+                self.assertIn(shown["ball"], BALL_TEXT)
+                self.assertEqual(shown["ball_text"], BALL_TEXT[shown["ball"]])
+
+    def test_an_ended_sprint_has_no_ball_and_no_now_sentence(self):
+        stopped = dataclasses.replace(started(A), stopped_at=iso(T0_MS))
+        for s in (stopped, closed(started(A), T0_MS, ((12, "landed"),))):
+            with self.subTest(sprint=s):
+                shown = self.shown(s, T0_MS + MIN)
+                self.assertEqual((shown["ball"], shown["ball_text"], shown["now_text"]),
+                                 (None, None, None))
