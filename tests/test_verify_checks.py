@@ -1768,3 +1768,142 @@ class ConsoleStateTest(unittest.TestCase):
     def test_the_docstring_documents_the_check(self):
         for needle in ("console-state --port N", "verify_checks.console_state"):
             self.assertIn(needle, verify_checks.__doc__)
+
+
+class FirstScreenStateTest(unittest.TestCase):
+    """`first_screen_state` (issue 1031): a long-goal question is named by title with a short ask."""
+
+    GOAL = "Make the importer resumable after a crash. " + "g" * 1357
+    SID = "a" * 16
+    TITLE = "Importer resumes after a crash"
+
+    def view(self):
+        return {
+            "entries": [{"type": "project", "project_id": "owner/importer",
+                         "sprints": [{"sprint_id": self.SID, "title": self.TITLE, "goal": self.GOAL}],
+                         "finished_sprints": {"sprints": []}}],
+            "inbox": {"open": [{"reason": "question", "sprint_id": self.SID, "title": self.TITLE,
+                                "headline": "Which store keeps the checkpoints?", "context": None,
+                                "questions": [{"question": "Which store keeps the checkpoints?",
+                                               "options": ["sqlite", "files"]}]}]},
+            "digest": {"moments": []},
+        }
+
+    def item(self, v):
+        return v["inbox"]["open"][0]
+
+    def members(self, report):
+        return [problem["member"] for problem in report["problems"]]
+
+    def test_a_long_goal_question_named_by_title_is_met(self):
+        self.assertEqual(verify_checks.first_screen_state(self.view()), (0, {"verdict": "met", "questions": 1}))
+
+    def test_no_open_question_of_a_long_goal_is_not_yet(self):
+        none_open = self.view()
+        none_open["inbox"]["open"] = []
+        short = self.view()
+        short["entries"][0]["sprints"][0]["goal"] = self.GOAL[:900]
+        for name, v in (("none open", none_open), ("short goal", short), ("not a dict", [])):
+            with self.subTest(name):
+                code, report = verify_checks.first_screen_state(v)
+                self.assertEqual(code, 75)
+                self.assertEqual(report["verdict"], "not_yet")
+
+    def test_a_question_carrying_the_goal_is_not_met(self):
+        v = self.view()
+        self.item(v)["goal"] = self.GOAL
+        code, report = verify_checks.first_screen_state(v)
+        self.assertEqual(code, 1)
+        self.assertIn({"sprint_id": self.SID, "member": "goal"}, report["problems"])
+
+    def test_an_empty_or_missing_ask_or_options_is_not_met(self):
+        def headline(value):
+            return lambda v: self.item(v).__setitem__("headline", value)
+
+        def question(key, value):
+            return lambda v: self.item(v)["questions"][0].__setitem__(key, value)
+
+        cases = (
+            ("empty headline", headline(""), "headline"),
+            ("blank headline", headline("   "), "headline"),
+            ("no questions", lambda v: self.item(v).pop("questions"), "questions"),
+            ("empty questions", lambda v: self.item(v).__setitem__("questions", []), "questions"),
+            ("empty question", question("question", ""), "questions"),
+            ("no options", question("options", []), "options"),
+            ("one option", question("options", ["sqlite"]), "options"),
+            ("empty option", question("options", ["sqlite", ""]), "options"),
+        )
+        for name, change, member in cases:
+            with self.subTest(name):
+                v = self.view()
+                change(v)
+                code, report = verify_checks.first_screen_state(v)
+                self.assertEqual(code, 1)
+                self.assertIn({"sprint_id": self.SID, "member": member}, report["problems"])
+
+    def test_an_ask_or_option_over_its_limit_is_not_met(self):
+        def headline(v):
+            self.item(v)["headline"] = "h" * 141
+
+        def option(v):
+            self.item(v)["questions"][0]["options"] = ["sqlite", "o" * 81]
+
+        def title(v):
+            self.item(v)["title"] = "t" * 61
+
+        def context(v):
+            self.item(v)["context"] = "c" * 401
+
+        for change, member in ((headline, "headline"), (option, "options"), (title, "title"),
+                               (context, "context")):
+            with self.subTest(member):
+                v = self.view()
+                change(v)
+                code, report = verify_checks.first_screen_state(v)
+                self.assertEqual(code, 1)
+                self.assertIn({"sprint_id": self.SID, "member": member}, report["problems"])
+
+    def test_goal_text_outside_the_sprint_entrys_goal_is_not_met(self):
+        def moment(v):
+            v["digest"]["moments"].append({"text": "A brief arrived: " + self.GOAL})
+
+        def status(v):
+            v["entries"][0]["sprints"][0]["status"] = self.GOAL[150:400]
+
+        def unstopped(v):
+            v["entries"][0]["unstopped"] = [{"title": self.TITLE, "note": self.GOAL[190:310]}]
+
+        def unstopped_goal(v):
+            v["entries"][0]["unstopped"] = [{"title": self.TITLE, "goal": self.GOAL}]
+
+        for change, path in ((moment, "digest.moments[0].text"),
+                             (status, "entries[0].sprints[0].status"),
+                             (unstopped, "entries[0].unstopped[0].note"),
+                             (unstopped_goal, "entries[0].unstopped[0].goal")):
+            with self.subTest(path):
+                v = self.view()
+                change(v)
+                code, report = verify_checks.first_screen_state(v)
+                self.assertEqual(code, 1)
+                self.assertIn({"sprint_id": self.SID, "member": "goal_text", "path": path},
+                              report["problems"])
+
+    def test_goal_text_with_escaped_characters_is_still_found(self):
+        g2 = "Make the importer resumable after a crash. " + ("é \"quoted\"\nline " * 100)[:1357]
+        v = self.view()
+        v["entries"][0]["sprints"][0]["goal"] = g2
+        v["digest"]["moments"].append({"text": "Seen: " + g2})
+        code, report = verify_checks.first_screen_state(v)
+        self.assertEqual(code, 1)
+        self.assertIn("goal_text", self.members(report))
+
+    def test_the_sprint_entrys_own_goal_is_exempt_wherever_the_entry_sits(self):
+        finished = self.view()
+        project = finished["entries"][0]
+        project["finished_sprints"]["sprints"] = project["sprints"]
+        project["sprints"] = []
+        quiet = self.view()
+        quiet["entries"] = [{"type": "quiet_group", "projects": quiet["entries"]}]
+        for name, v in (("finished", finished), ("quiet group", quiet)):
+            with self.subTest(name):
+                self.assertEqual(verify_checks.first_screen_state(v), (0, {"verdict": "met", "questions": 1}))

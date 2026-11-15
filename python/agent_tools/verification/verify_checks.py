@@ -156,7 +156,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
@@ -1113,6 +1113,109 @@ def console_state(port: int, *, timeout: float = 5.0) -> tuple[int, dict]:
     finally:
         connection.close()
     return (0 if status == 200 else 1), {"port": port, "status": status}
+
+
+LONG_GOAL_CHARS = 1000
+NEEDLE = slice(200, 300)
+
+
+def _sprint_entries(view: object) -> list[dict]:
+    """Issue 1031: every sprint entry of the live view, the same dict objects as in `view`."""
+    if not isinstance(view, dict) or not isinstance(view.get("entries"), list):
+        return []
+    projects: list[object] = []
+    for entry in view["entries"]:
+        if isinstance(entry, dict) and entry.get("type") == "quiet_group":
+            members = entry.get("projects")
+            projects.extend(members if isinstance(members, list) else [])
+        else:
+            projects.append(entry)
+    found: list[dict] = []
+    for project in projects:
+        if not isinstance(project, dict):
+            continue
+        finished = project.get("finished_sprints")
+        for group in (project.get("sprints"),
+                      finished.get("sprints") if isinstance(finished, dict) else None):
+            if isinstance(group, list):
+                found.extend(sprint for sprint in group if isinstance(sprint, dict))
+    return found
+
+
+def _walk_strings(value: object, path: str, exempt: set[int]) -> Iterator[tuple[str, str]]:
+    if isinstance(value, str):
+        yield path, value
+    elif isinstance(value, dict):
+        for key, member in value.items():
+            if key == "goal" and id(value) in exempt:
+                continue
+            yield from _walk_strings(member, f"{path}.{key}" if path else str(key), exempt)
+    elif isinstance(value, list):
+        for index, member in enumerate(value):
+            yield from _walk_strings(member, f"{path}[{index}]", exempt)
+
+
+def _strings(value: object, path: str = "") -> Iterator[tuple[str, str]]:
+    """Every decoded string in `value` with its dotted path, bar each sprint entry's own goal."""
+    return _walk_strings(value, path, {id(entry) for entry in _sprint_entries(value)})
+
+
+def _short(value: object, low: int, high: int, *, stripped: bool = False) -> bool:
+    return isinstance(value, str) and low <= len((value.strip() if stripped else value)) <= high
+
+
+def _question_members(item: dict, sprint_title: object) -> list[str]:
+    members: list[str] = []
+    if "goal" in item:
+        members.append("goal")
+    if not _short(item.get("title"), 1, 60) or item["title"] != sprint_title:
+        members.append("title")
+    if not _short(item.get("headline"), 1, 140, stripped=True):
+        members.append("headline")
+    questions = item.get("questions")
+    if (not isinstance(questions, list) or not questions
+            or not all(isinstance(q, dict) and _short(q.get("question"), 1, 140, stripped=True)
+                       for q in questions)):
+        members.append("questions")
+    options_ok = all(
+        isinstance(q.get("options"), list) and 2 <= len(q["options"]) <= 4
+        and all(_short(o, 1, 80, stripped=True) for o in q["options"])
+        for q in (questions if isinstance(questions, list) else ()) if isinstance(q, dict))
+    if not options_ok:
+        members.append("options")
+    context = item.get("context")
+    if context is not None and not _short(context, 0, 400):
+        members.append("context")
+    return members
+
+
+def first_screen_state(view: object) -> tuple[int, dict]:
+    """Issue 1031: a long-goal question reads by title with a short ask, 0 met, 1 not met, 75 not yet."""
+    sprints = _sprint_entries(view)
+    long_sprints = {sprint.get("sprint_id"): sprint for sprint in sprints
+                    if isinstance(sprint.get("sprint_id"), str) and isinstance(sprint.get("goal"), str) and len(sprint["goal"]) > LONG_GOAL_CHARS}
+    inbox = view.get("inbox") if isinstance(view, dict) else None
+    opened = inbox.get("open") if isinstance(inbox, dict) else None
+    candidates = [item for item in opened if isinstance(item, dict) and item.get("reason") == "question"
+                  and isinstance(item.get("sprint_id"), str) and item["sprint_id"] in long_sprints] if isinstance(opened, list) else []
+    if not candidates:
+        return 75, {"verdict": "not_yet", "questions": 0}
+    problems: list[dict] = []
+    for item in candidates:
+        sprint_id = item["sprint_id"]
+        for member in _question_members(item, long_sprints[sprint_id].get("title")):
+            problems.append({"sprint_id": sprint_id, "member": member})
+    for sprint in sprints:
+        goal = sprint.get("goal")
+        if not (isinstance(goal, str) and len(goal) > LONG_GOAL_CHARS):
+            continue
+        needle = goal[NEEDLE]
+        for path, text in _strings(view):
+            if needle in text:
+                problems.append({"sprint_id": sprint.get("sprint_id"), "member": "goal_text", "path": path})
+    if not problems:
+        return 0, {"verdict": "met", "questions": len(candidates)}
+    return 1, {"verdict": "not_met", "questions": len(candidates), "problems": problems}
 
 
 def _port(value: str) -> int:
