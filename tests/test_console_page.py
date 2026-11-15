@@ -6695,7 +6695,8 @@ REGISTERED = {**REGISTERING, "status": "done", "result": "planned", "outcome": "
               "note": "The plan has 1 open question."}
 Q_CANDIDATE = {
     "id": "candidate-class", "subject": ".claude/odd.md",
-    "ask": "What should happen to .claude/odd.md? No rule covers this agent file.",
+    "ask": "What should happen to .claude/odd.md? No rule covers this agent file.\n"
+           "This is the only thing the adoption can do with this file.",
     "options": [{"value": "archive-history",
                  "label": "Archive it under .agents/knowledge/archive/adopted/"}],
     "recommended": None, "why": None}
@@ -6855,6 +6856,18 @@ class RegisterControlTest(unittest.TestCase):
              Q_REFERENCE["ask"], "Change it to .agents/artifacts/specs/a.md", "Leave it as it is",
              Q_SECRET["ask"], Q_SECRET["why"], "Close"])
 
+    def test_close_stands_outside_the_question_list_after_its_last_answer(self) -> None:
+        (snap,) = render(ASKED + [{"snapshot": True}])
+        (result,) = registered(snap, "register-result")
+        (close,) = registered(snap, "register-close")
+        (listing,) = registered(snap, "register-questions")
+        self.assertNotIn(close, nodes(listing))
+        self.assertEqual(len(listing["children"]), 3)
+        self.assertTrue(all(has_class(c, "register-question") for c in listing["children"]))
+        self.assertIn(listing, result["children"])
+        self.assertIn(close, result["children"])
+        self.assertEqual(result["children"][-2:], [listing, close])
+
     def test_choosing_an_option_posts_the_answer_with_the_shown_plan_id(self) -> None:
         (snap,) = render(ASKED + [{"respond": {"status": 204, "text": ""}},
                                   {"click": "register-option"}, {"snapshot": True}])
@@ -6914,8 +6927,10 @@ class RegisterControlTest(unittest.TestCase):
           const box = document.getElementById('register');
           const edge = document.documentElement.clientWidth;
           const kids = [...box.querySelectorAll('*')].map((e) => e.getBoundingClientRect());
+          const list = box.querySelector('.register-questions').getBoundingClientRect();
+          const close = box.querySelector('.register-close').getBoundingClientRect();
           return {fits: box.scrollWidth <= box.clientWidth, kids: kids.length,
-                  inside: kids.every((r) => r.right <= edge)};
+                  inside: kids.every((r) => r.right <= edge), gap: close.top - list.bottom};
         }"""
         deep = "a-long-directory-name/" * 3
         long_reference = {
@@ -6945,3 +6960,4 @@ class RegisterControlTest(unittest.TestCase):
         self.assertGreater(got["kids"], 10)
         self.assertTrue(got["fits"], got)
         self.assertTrue(got["inside"], got)
+        self.assertGreaterEqual(got["gap"], 8, got)

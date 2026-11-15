@@ -589,8 +589,7 @@ class PlanAnswerRunTest(Case):
         self.assertEqual(fake.calls, [("plan", str(repo)), ("plan", str(repo))])
         shown = self.view()["registration"]
         self.assertEqual((shown["state"], shown["questions"]), ("ready", []))
-        self.assertEqual(
-            shown["note"], f"The plan is ready to apply: run adopt-project apply --plan-id {PID_B}")
+        self.assertEqual(shown["note"], "The plan is ready.")
         rows = self.rows("registration.ended")
         self.assertEqual(len(rows), 2)
         self.assertEqual(rows[-1][1]["answered"], [A1])
@@ -749,7 +748,8 @@ class PlanAnswerRealTest(Case):
         reg = self.registered(self.repo)
         self.assertEqual(reg["questions"], [
             {"id": "candidate-class", "subject": ".claude/odd.md",
-             "ask": "What should happen to .claude/odd.md? No rule covers this agent file.",
+             "ask": "What should happen to .claude/odd.md? No rule covers this agent file.\n"
+                    "This is the only thing the adoption can do with this file.",
              "options": [{"value": "archive-history",
                           "label": "Archive it under .agents/knowledge/archive/adopted/"}],
              "recommended": None, "why": None},
@@ -769,8 +769,7 @@ class PlanAnswerRealTest(Case):
         self.assertEqual([q["subject"] for q in second["questions"]], ["tools/show.sh:1:5"])
         reg = self.answered(second["plan_id"], "path-reference", "tools/show.sh:1:5", "rewrite")
         self.assertEqual((reg["state"], reg["questions"]), ("ready", []))
-        self.assertEqual(
-            reg["note"], f"The plan is ready to apply: run adopt-project apply --plan-id {reg['plan_id']}")
+        self.assertEqual(reg["note"], "The plan is ready.")
         stored = (self.home / ".agents/state/adopt/plans"
                   / (reg["plan_id"].partition(":")[2] + ".json"))
         document = json.loads(stored.read_text())

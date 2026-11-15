@@ -54,14 +54,15 @@ pure function of the document. `summary(root, plan, report=None)` is the row pay
 `bootstrap` or `reconcile` plan carries its header's `plan_id` and `state`, its
 `plan_questions.questions`, and its answered decisions as `{id, subject, value}` (ADR-console-029
 D1); every other row carries `DEFAULTS` (None, None, `[]`, `[]`). A ready plan's note is `The plan
-is ready to apply: run adopt-project apply --plan-id <plan_id>` (`The plan is ready to apply.`
-without a `plan_id`: D5). A `no_change` plan with no report (only an answer run passes none) is
+is ready.` with no command and no plan id (#1065). A `no_change` plan with no report (only an answer run passes none) is
 `not_registered` and says `<name> needs no adoption change and is not registered yet: run
 <command>`, the command being the plan's `handoff.next_command` or else `adopt-project verify
 --register --repo-root <root>` (D5). A failed plan's headline is `The adoption plan for <name> failed:
-<message>`, or `... could not be made.` when the error has no message; a refused registration's is
-`<name> was not registered: <message>`, or `... was not registered.`; neither shows the error code
-(#1057). `failed(root, kind, verb="plan")` is the same shape for a run that raised, its headline ending in the
+<message>`, or `... could not be made.` when the error has no message, or, when the error's
+`repair_id` is `adopt.manifest.*`, `The adoption plan for <name> could not start: the agent
+platform's files are not installed on this host.` (#1065); a refused registration's is
+`<name> was not registered: <message>`, or `... was not registered.`, and for that `repair_id` it is
+`<name> was not registered: ` and the same words; neither shows the error code (#1057). `failed(root, kind, verb="plan")` is the same shape for a run that raised, its headline ending in the
 words of `RUN_WORDS[kind]` (an unknown kind reads `it stopped unexpectedly`), never the kind word.
 
 Next step (#1062). Every failed headline ends with a full stop, and every failed row (a plan that
@@ -153,6 +154,7 @@ NEXT_STEPS = {
     "adopt.registration.not_integrated": INTEGRATED_STEP,
 }
 MANIFEST_PREFIX = "adopt.manifest."
+PLATFORM_MISSING = "the agent platform's files are not installed on this host."
 
 
 def not_directory(path: str) -> str:
@@ -310,9 +312,13 @@ def run_next_step(root: str, kind: str, verb: str = "plan") -> str:
     return _full_reason(root, verb)
 
 
+def _is_manifest(error: Mapping) -> bool:
+    return str(error.get("repair_id") or "").startswith(MANIFEST_PREFIX)
+
+
 def next_step(root: str, error: Mapping, verb: str) -> str:
     repair_id = str(error.get("repair_id") or "")
-    if repair_id.startswith(MANIFEST_PREFIX):
+    if _is_manifest(error):
         return MANIFEST_STEP
     return NEXT_STEPS.get(repair_id) or _full_reason(root, verb)
 
@@ -334,10 +340,7 @@ def _answered(document: Mapping) -> list[dict]:
 
 def _note(plan: Mapping, document: Mapping) -> str:
     if plan.get("state") == "ready":
-        if plan.get("plan_id"):
-            return ("The plan is ready to apply: run adopt-project apply "
-                    f"--plan-id {plan['plan_id']}")
-        return "The plan is ready to apply."
+        return "The plan is ready."
     questions = len(document.get("decisions", {}).get("open", []))
     if questions:
         return f"The plan has {_count(questions, 'open question')}."
@@ -355,8 +358,11 @@ def summary(root: str, plan: Mapping, report: Mapping | None = None) -> dict:
     name = name_of(root)
     if "error" in plan:
         message = _error_message(plan["error"])
-        text = (_sentence(f"The adoption plan for {name} failed: {message}") if message
-                else f"The adoption plan for {name} could not be made.")
+        if _is_manifest(plan["error"]):
+            text = f"The adoption plan for {name} could not start: {PLATFORM_MISSING}"
+        else:
+            text = (_sentence(f"The adoption plan for {name} failed: {message}") if message
+                    else f"The adoption plan for {name} could not be made.")
         return _row(root, None, "failed", None, text, [], next_step(root, plan["error"], "plan"))
     header = plan["plan"]
     outcome = header["outcome"]
@@ -370,8 +376,11 @@ def summary(root: str, plan: Mapping, report: Mapping | None = None) -> dict:
     if outcome == "no_change":
         if report is not None and "error" in report:
             message = _error_message(report["error"])
-            text = (_sentence(f"{name} was not registered: {message}") if message
-                    else f"{name} was not registered.")
+            if _is_manifest(report["error"]):
+                text = f"{name} was not registered: {PLATFORM_MISSING}"
+            else:
+                text = (_sentence(f"{name} was not registered: {message}") if message
+                        else f"{name} was not registered.")
             return _row(root, project_id, "not_registered", outcome, text, [],
                         next_step(root, report["error"], "register"))
         if report is not None and report.get("registered") is True:
