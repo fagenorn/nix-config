@@ -1962,15 +1962,15 @@ function isRetry(item) {
 function isApply(item) {
   return item.reason === "register_apply";
 }
-// An already-adopted repository waiting to be registered (ADR-console-033): a question card whose first option grants its folder trust and registers it and whose second sets it aside.
+// An already-adopted repository waiting to be registered (ADR-console-034): a question card whose first option grants its folder trust and registers it and whose second sets it aside.
 function isConfirm(item) {
   return item.reason === "register_confirm";
 }
-// A profile whose folder trust could not be read back (ADR-console-033): a question card that shows the terminal command and whose one option checks again.
+// A profile whose folder trust could not be read back (ADR-console-034): a question card that shows the terminal command and whose one option checks again.
 function isTrust(item) {
   return item.reason === "trust_failed";
 }
-// An open question of an adoption plan (ADR-console-029 D10), a refused registration's Retry (ADR-console-028 D10), the apply card (ADR-console-030 D9) or the Register card (ADR-console-033): a card like a manager question.
+// An open question of an adoption plan (ADR-console-029 D10), a refused registration's Retry (ADR-console-028 D10), the apply card (ADR-console-030 D9) or the Register card (ADR-console-034): a card like a manager question.
 function isRegister(item) {
   return item.reason === "register" || isRetry(item) || isApply(item) || isConfirm(item) || isTrust(item);
 }

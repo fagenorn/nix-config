@@ -138,7 +138,7 @@ The project contract the console drafts for a repository that has none, from its
 _Avoid_: generated contract, default contract
 
 **Folder trust**:
-The client's per-profile record, `projects[<git root>].hasTrustDialogAccepted` in the profile's `.claude.json`, that lets a background session run in a folder; the console writes it, for every profile, only when the owner approves a registration, and a profile added later gets every registered project (ADR-console-033).
+The client's per-profile record, `projects[<git root>].hasTrustDialogAccepted` in the profile's `.claude.json`, that lets a background session run in a folder; the console writes it, for every profile, only when the owner approves a registration, and a profile added later gets every registered project (ADR-console-034).
 _Avoid_: workspace trust, permission
 
 **Approved adoption**:

@@ -1,4 +1,4 @@
-# ADR-console-033 — Registering a project grants it folder trust in every profile
+# ADR-console-034 — Registering a project grants it folder trust in every profile
 
 - **Status:** accepted
 - **Decided in:** #1078

@@ -32,7 +32,7 @@ directory with a throwaway project id `console-check/register-<hex>`, and POSTs 
 - A 204, or no answer at all, may have dispatched a run. The check polls the view every second until
   `registration.root` is the posted root and its `status` is `done`, at most `--wait` seconds (else
   `not_met`, reason `no result`). The adopted fixture first ends in the waiting row, which
-  `register.waiting` accepts (ADR-console-033): the check answers the Register card as the owner's page
+  `register.waiting` accepts (ADR-console-034): the check answers the Register card as the owner's page
   does, with `POST /api/register-confirm {"root": <root>, "choice": "register"}` (same headers, same
   refusal rules as the first POST), and polls again, for a done row of this root whose `at` differs
   from the waiting row's. A `result` other than `registered` is `not_met` with the `headline` as the
@@ -42,7 +42,7 @@ directory with a throwaway project id `console-check/register-<hex>`, and POSTs 
 Two sprint rules govern what it leaves behind. S1: the check leaves no trace of itself, so it removes
 the throwaway directory, its registry entry, its folder-trust entries and every stored plan whose
 `handoff.repo_root` is its root. S2: it never writes the registry except to remove its own entry, never writes a `.claude.json`
-except to remove its own root's project entry (the approval grants the folder's client trust, ADR-console-033),
+except to remove its own root's project entry (the approval grants the folder's client trust, ADR-console-034),
 and writes nothing else.
 
 The settle gate. No restore happens while the console's run may still write. Every outcome after the

@@ -210,14 +210,14 @@ service refuses, each as 409 with the text, one stderr line `console: registrati
 registered); and, under the ingest lock, a second registration while one runs
 (`register.running`). Otherwise the answer is an empty `204` at once and the run is dispatched: the
 adopter's plan. A `no_change` plan runs no register check: its row is the waiting row, `register.summary`
-with no report (#1078, ADR-console-033), and the Register card waits for the owner (below). One
+with no report (#1078, ADR-console-034), and the Register card waits for the owner (below). One
 `registration.ended` row (also for a failed child) is appended, unless the
 service is closed, in the same ingest section that clears the running mark, so the view's
 `registration` stays `running` until no child of the run is left. The registry is written only by
 the register child, never by the console. Any other exception is `console: registration_failed
 <Type>` and 500 `registering failed`.
 
-`POST /api/register-confirm` (#1078, ADR-console-033) is the answer to the Register card
+`POST /api/register-confirm` (#1078, ADR-console-034) is the answer to the Register card
 (`register.confirm_items`) of a repository that is already adopted. It runs the same checks with
 `MAX_REGISTER_CONFIRM_BYTES` (4096) and `register.parse_confirm_request`: 400 `bad registration
 approval`. The service refuses, each as 409 with the text, one stderr line `console:
@@ -228,7 +228,7 @@ appends the waiting row again with the note `register.LATER_NOTE` (`register.dis
 writes no trust and runs no child, and answers `204`. `register` also refuses an unreadable registry
 and a root the registry already holds, as the first write does, and otherwise answers `204` at once
 and dispatches the run: the folder's trust is granted in every profile (`_grant_trust`, cause
-`register`, ADR-console-033), then the plan runs again and, for a `no_change` plan, the register
+`register`, ADR-console-034), then the plan runs again and, for a `no_change` plan, the register
 child. Nothing is granted or registered before this answer. Any other exception is `console:
 register_confirm_failed <Type>` and 500 `registering failed`.
 
@@ -279,7 +279,7 @@ the plan's adoption is an opened pull request that is still open or ready (`appr
 merged (`approve.MERGED`). A closed pull request, a failed apply or no adoption at all is approved
 again as a fresh apply. Otherwise the answer is an empty `204` at once and the run is dispatched on
 a tracked thread (`APPROVAL_THREAD`) that `close` joins. A fresh approval (no adoption yet) first
-grants the folder's client trust (#1078, ADR-console-033): `folder_trust.grant` for the main
+grants the folder's client trust (#1078, ADR-console-034): `folder_trust.grant` for the main
 checkout's key in `~/.claude.json` (when the service was given a `trust_home`) and in every profile,
 one `trust.granted` owner-action row (cause `apply`; one profile and its result per entry, no file
 content) and one stderr line `console: trust_granted <cause> <project> <n granted> <n already> <n
@@ -307,7 +307,7 @@ on append and after retention) into a Check again card (`folder_trust.items`, `t
 view) that a later `granted` or `already` for the same root and profile removes, as does the
 removal of that profile (an `account.removal` row of outcome `removed` or `removed_signed_out_already`).
 
-`POST /api/trust-check` (#1078, ADR-console-033) is that card's answer. It runs the same checks with
+`POST /api/trust-check` (#1078, ADR-console-034) is that card's answer. It runs the same checks with
 `MAX_TRUST_CHECK_BYTES` (4096) and `folder_trust.parse_check_request`: 400 `bad trust check`. The
 service refuses with 409 `folder_trust.NOT_FAILED` and one stderr line `console:
 trust_check_refused <reason>`, writing nothing, unless the `(root, profile)` pair is a folded failure

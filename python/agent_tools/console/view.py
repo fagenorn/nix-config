@@ -282,7 +282,7 @@ sits right after the plan questions and before the tracker items, in the order g
 once in `inbox_items` and the headline; it is never cut. While one is open the sentence is
 `REGISTER_SENTENCE`, in the slot the retry items use. Without `apply_items` the view is unchanged.
 
-Each confirm item a caller passes (`confirm_items`; #1078, ADR-console-033) is one entry of
+Each confirm item a caller passes (`confirm_items`; #1078, ADR-console-034) is one entry of
 `inbox.open` too: the Register card of an already-adopted repository, as `register.confirm_items`
 builds it. It has reason `register_confirm`, key `register-confirm/<root>/<at>`, `plan_id` null,
 the options `Register it` and `Not now` with the values `register` and `not_now`, and the
@@ -290,7 +290,7 @@ folder-trust sentence as its `why`. It is copied as given and not filtered by th
 projects, sits right after the apply items, and counts once in `inbox_items` and the headline.
 While one is open the sentence is `REGISTER_SENTENCE`. Without `confirm_items` the view is unchanged.
 
-Each trust item a caller passes (`trust_items`; #1078, ADR-console-033) is one entry of `inbox.open`
+Each trust item a caller passes (`trust_items`; #1078, ADR-console-034) is one entry of `inbox.open`
 too: a profile whose folder trust could not be read back, as `folder_trust.items` builds it. It has
 reason `trust_failed`, key `trust/<profile>/<root>/<at>`, `project_id` null, the `root`, `profile`
 and `command`, the terminal command as its `why`, and the one option `Check again` with the value

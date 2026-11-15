@@ -60,7 +60,7 @@ D1) and the `draft` it was given (the drafted contract's fields, ADR-console-031
 carries `DEFAULTS` (None, None, `[]`, `[]`, None). A ready plan's note is `The plan
 is ready.` with no command and no plan id (#1065; ADR-console-030 keeps it, the page offers Approve beside it). A `no_change` plan with no report is
 `not_registered` and says `waiting_headline(name)`, `<name> is already adopted and is not registered
-yet.`, with the note `CONFIRM_NOTE`, `Choose Register it to register it.` (#1078, ADR-console-033):
+yet.`, with the note `CONFIRM_NOTE`, `Choose Register it to register it.` (#1078, ADR-console-034):
 the row the Register card waits on. A failed plan's headline is `The adoption plan for <name> failed:
 <message>`, or `... could not be made.` when the error has no message, or, when the error's
 `repair_id` is `adopt.manifest.*` and its message says the manifest was not found, `The adoption plan for <name> could not start: the agent
@@ -87,7 +87,7 @@ name that verb's command; every other kind names it alone. `failed(root, kind, v
 `register` verb reads `<name> was not registered: <words>.`, so a registration that raised never
 sends the owner to rerun the plan that had succeeded.
 
-Register card (#1078, ADR-console-033). `waiting(latest)` is true for that row only (`not_registered`,
+Register card (#1078, ADR-console-034). `waiting(latest)` is true for that row only (`not_registered`,
 `no_change`, the note `CONFIRM_NOTE`); `confirm_items(latest, *, running)` is `[]` unless the latest row
 is waiting and no run is under way, else the one inbox item of reason `register_confirm` (key
 `register-confirm/<root>/<at>`, headline `CONFIRM_ASK`, `why` the folder-trust sentence, options

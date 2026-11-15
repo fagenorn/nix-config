@@ -5,7 +5,7 @@ records the answer as `projects["<key>"].hasTrustDialogAccepted` in `$CLAUDE_CON
 (`~/.claude.json` for the default account). Until it is `true`, the client withholds the folder's own
 settings and hooks, so an agent started there by the console has no lifecycle guard. Registering a
 project the owner approved grants that trust for every account, and nothing else does (no flag, env
-var or settings key marks a folder trusted; ADR-console-033).
+var or settings key marks a folder trusted; ADR-console-034).
 
 Key. `trust_key(root)` is the real path (`os.path.realpath`) of the main checkout's git root:
 `git -C <root> rev-parse --path-format=absolute --git-common-dir`, its parent when its last segment
@@ -55,7 +55,7 @@ return raises `OSError(errno)`. A host without it (`ENOSYS`, `EINVAL`, `ENOTSUP`
 `FAILED` with nothing written: there is no `os.replace` fallback.
 
 Residual. A client that reads the console's interim merge in the instant between two swaps and later
-writes from it is not detected (ADR-console-033).
+writes from it is not detected (ADR-console-034).
 
 Remove. `remove_entry(path, key, *, attempts=ATTEMPTS)` deletes the whole `projects[key]` entry
 through the same protocol and returns `REMOVED`, `ABSENT` (no file, or no entry: nothing written) or

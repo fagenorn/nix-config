@@ -1,6 +1,6 @@
 # ADR-console-029 — The owner answers the adoption's questions on the page
 
-- **Status:** accepted; amended by ADR-console-030, ADR-console-031, ADR-console-033
+- **Status:** accepted; amended by ADR-console-030, ADR-console-031, ADR-console-033, ADR-console-034
 - **Decided in:** #1053, #1066
 
 ## Context
