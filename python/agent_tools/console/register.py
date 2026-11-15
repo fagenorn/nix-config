@@ -39,11 +39,16 @@ or 2 returns the parsed stdout object. A failed run raises `RunFailed(kind)`, `s
 Plain lines. `plan_lines(document)` is the D4 list of ADR-console-028, each line only when its count
 is above zero, in this order: `moves N agent file(s)` (followed by ` under .agents/` when every move
 target starts with `.agents/`), `writes the project contract`, `generates N file(s) from the
-contract`, `writes N other file(s)`, `deletes N file(s)`, `rewrites N link(s)` and `rewrites N path
-reference(s)` (the references answered `rewrite` or `extend`). It is a pure function of the document
-and never includes a path of it. `summary(root, plan, report=None)` is the row payload (`by`, `root`,
+contract`, `writes <paths>` (the non-contract files), `deletes <paths>`, `rewrites N link(s)` and
+`rewrites N path reference(s)` (the references answered `rewrite` or `extend`). `<paths>` names up to
+three paths, as `a`, `a and b`, `a, b and c`, and from four on `a, b, c and N more` (#1057). It is a
+pure function of the document. `summary(root, plan, report=None)` is the row payload (`by`, `root`,
 `project_id`, `result`, `outcome`, `headline`, `lines`, `note`) with the D4 to D6 texts; message
-text is whitespace-collapsed. `failed(root, kind)` is the same shape for a run that raised.
+text is whitespace-collapsed. A failed plan's headline is `The adoption plan for <name> failed:
+<message>`, or `... could not be made.` when the error has no message; a refused registration's is
+`<name> was not registered: <message>`, or `... was not registered.`; neither shows the error code
+(#1057). `failed(root, kind)` is the same shape for a run that raised, its headline ending in the
+words of `RUN_WORDS[kind]` (an unknown kind reads `it stopped unexpectedly`), never the kind word.
 
 Row. `ended(payload)` is `("registration.ended", None, payload)` and raises `ValueError` unless the
 members are exactly the eight above, `by` is `owner`, `result` is one of `RESULTS` and `lines` is a
@@ -79,6 +84,16 @@ OUTCOME_TEXT = {
 }
 MEMBERS = {"by", "root", "project_id", "result", "outcome", "headline", "lines", "note"}
 CONTRACT = ".agents/project.json"
+NAMED = 3
+RUN_WORDS = {
+    "timed_out": "it took too long and was stopped",
+    "not_installed": "the adoption tool could not be started",
+    "unavailable": "the adoption tool could not be started",
+    "cancelled": "it was cancelled",
+    "failed": "the adoption tool stopped with an error",
+    "unreadable": "the adoption tool gave an answer that could not be read",
+}
+UNEXPECTED = "it stopped unexpectedly"
 
 
 def not_directory(path: str) -> str:
@@ -162,6 +177,14 @@ def _count(count: int, noun: str) -> str:
     return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
 
 
+def _named(paths: Sequence[str]) -> str:
+    if len(paths) > NAMED:
+        return f"{', '.join(paths[:NAMED])} and {len(paths) - NAMED} more"
+    if len(paths) > 1:
+        return f"{', '.join(paths[:-1])} and {paths[-1]}"
+    return paths[0]
+
+
 def plan_lines(document: Mapping) -> list[str]:
     changes = document["changes"]
     moves = [op for op in changes if op["op"] == "git-mv"]
@@ -169,8 +192,8 @@ def plan_lines(document: Mapping) -> list[str]:
     contract = any(CONTRACT in op["targets"] for op in writes)
     moved = sum(len(op["sources"]) for op in moves)
     generated = sum(len(op["targets"]) for op in changes if op["op"] == "regenerate-projection")
-    other = sum(1 for op in writes if CONTRACT not in op["targets"])
-    deleted = sum(len(op["sources"]) for op in changes if op["op"] == "delete-file")
+    other = [path for op in writes if CONTRACT not in op["targets"] for path in op["targets"]]
+    deleted = [path for op in changes if op["op"] == "delete-file" for path in op["sources"]]
     rewrites = document["link_rewrites"]
     links = rewrites["inbound"]["links"] + rewrites["outbound"]["links"]
     references = sum(1 for row in document["path_references"]
@@ -184,9 +207,9 @@ def plan_lines(document: Mapping) -> list[str]:
     if generated:
         lines.append(f"generates {_count(generated, 'file')} from the contract")
     if other:
-        lines.append(f"writes {_count(other, 'other file')}")
+        lines.append(f"writes {_named(other)}")
     if deleted:
-        lines.append(f"deletes {_count(deleted, 'file')}")
+        lines.append(f"deletes {_named(deleted)}")
     if links:
         lines.append(f"rewrites {_count(links, 'link')}")
     if references:
@@ -198,12 +221,11 @@ def _collapse(text: object) -> str:
     return " ".join(str(text).split())
 
 
-def _error_text(error: Mapping) -> str:
+def _error_message(error: Mapping) -> str:
     violations = error.get("violations") or []
-    code = _collapse(error.get("code"))
-    if violations and isinstance(violations[0], Mapping) and violations[0].get("message"):
-        return f"{code}: {_collapse(violations[0]['message'])}"
-    return code
+    if violations and isinstance(violations[0], Mapping):
+        return _collapse(violations[0].get("message") or "")
+    return ""
 
 
 def _row(root: str, project_id: str | None, result: str, outcome: str | None, headline: str,
@@ -231,8 +253,10 @@ def _after(command: object, verb: str) -> str:
 def summary(root: str, plan: Mapping, report: Mapping | None = None) -> dict:
     name = name_of(root)
     if "error" in plan:
-        return _row(root, None, "failed", None,
-                    f"The adoption plan for {name} failed: {_error_text(plan['error'])}", [], None)
+        message = _error_message(plan["error"])
+        text = (f"The adoption plan for {name} failed: {message}" if message
+                else f"The adoption plan for {name} could not be made.")
+        return _row(root, None, "failed", None, text, [], None)
     header = plan["plan"]
     outcome = header["outcome"]
     project_id = report.get("project_id") if report is not None else header.get("project_id")
@@ -242,7 +266,9 @@ def summary(root: str, plan: Mapping, report: Mapping | None = None) -> dict:
                     plan_lines(plan), _note(header, plan))
     if outcome == "no_change":
         if report is not None and "error" in report:
-            text = f"{name} was not registered: {_error_text(report['error'])}"
+            message = _error_message(report["error"])
+            text = (f"{name} was not registered: {message}" if message
+                    else f"{name} was not registered.")
             return _row(root, project_id, "not_registered", outcome, text, [], None)
         if report is not None and report.get("registered") is True:
             return _row(root, project_id, "registered", outcome,
@@ -266,7 +292,8 @@ def summary(root: str, plan: Mapping, report: Mapping | None = None) -> dict:
 
 def failed(root: str, kind: str) -> dict:
     return _row(root, None, "failed", None,
-                f"The adoption plan for {name_of(root)} failed: {kind}", [], None)
+                f"The adoption plan for {name_of(root)} failed: {RUN_WORDS.get(kind, UNEXPECTED)}",
+                [], None)
 
 
 def ended(payload: Mapping) -> tuple[str, None, dict]:
