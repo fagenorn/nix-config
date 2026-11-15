@@ -8,7 +8,11 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import stat
+import subprocess
 import tempfile
+import threading
+import time
 import unittest
 from pathlib import Path
 
@@ -432,6 +436,254 @@ class RetainedTest(unittest.TestCase):
         self.write(json.dumps({"branch": BRANCH, "worktree": str(self.worktree),
                                "pad": "x" * 70000}))
         self.assertIsNone(approve.retained(PID))
+
+
+ADOPTION = "adopt-0123456789ab"
+GIT_ENV = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
+
+
+def sandbox_dir() -> Path:
+    return Path(tempfile.mkdtemp(dir=accounts_sandbox.root()))
+
+
+def git(*args, cwd=None, env=None):
+    done = subprocess.run(["git", *args], cwd=cwd, env=env or GIT_ENV, text=True,
+                          capture_output=True, stdin=subprocess.DEVNULL)
+    assert done.returncode == 0, done.stderr
+    return done.stdout
+
+
+def fake_bin(directory: Path, name: str, script: str) -> Path:
+    path = directory / name
+    path.write_text("#!/bin/sh\n" + script)
+    path.chmod(path.stat().st_mode | stat.S_IXUSR)
+    return directory
+
+
+class PushTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = sandbox_dir()
+        self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
+        self.root = self.tmp / "repo"
+        self.remote = self.tmp / "origin.git"
+        git("init", "-q", "--bare", str(self.remote))
+        git("init", "-q", "-b", "main", str(self.root))
+        for key, value in (("user.name", "t"), ("user.email", "t@example.test"),
+                           ("commit.gpgsign", "false"), ("tag.gpgsign", "false")):
+            git("config", key, value, cwd=self.root)
+        git("commit", "-q", "--allow-empty", "-m", "one", cwd=self.root)
+        git("remote", "add", "origin", str(self.remote), cwd=self.root)
+        git("push", "-q", "origin", "main", cwd=self.root)
+        for branch in (ADOPTION, "other"):
+            git("checkout", "-q", "-b", branch, "main", cwd=self.root)
+            git("commit", "-q", "--allow-empty", "-m", branch, cwd=self.root)
+        git("checkout", "-q", "main", cwd=self.root)
+        self.main = self.sha("main")
+        self.fake = sandbox_dir()
+        self.addCleanup(shutil.rmtree, self.fake, ignore_errors=True)
+
+    def sha(self, ref):
+        return git("rev-parse", ref, cwd=self.root).strip()
+
+    def refs(self):
+        return git("for-each-ref", "--format=%(refname) %(objectname)",
+                   cwd=self.remote).splitlines()
+
+    def push(self, branch=ADOPTION, **kwargs):
+        return approve.push(str(self.root), branch, environ=GIT_ENV, **kwargs)
+
+    def test_the_push_sends_exactly_the_one_branch(self):
+        before = git("status", "--porcelain", cwd=self.root)
+        self.push()
+        self.assertEqual(sorted(self.refs()),
+                         [f"refs/heads/{ADOPTION} {self.sha(ADOPTION)}",
+                          f"refs/heads/main {self.main}"])
+        self.assertEqual(git("status", "--porcelain", cwd=self.root), before)
+
+    def test_tags_never_follow_the_branch(self):
+        git("config", "push.followTags", "true", cwd=self.root)
+        git("tag", "-a", "v1", "-m", "v1", ADOPTION, cwd=self.root)
+        self.push()
+        self.assertEqual(sorted(self.refs()),
+                         [f"refs/heads/{ADOPTION} {self.sha(ADOPTION)}",
+                          f"refs/heads/main {self.main}"])
+        self.assertEqual(git("tag", "--list", cwd=self.remote), "")
+
+    def test_a_branch_that_is_not_an_adoption_branch_is_never_pushed(self):
+        before = self.refs()
+        for branch in ("other", "adopt-xyz"):
+            with self.subTest(branch=branch), self.assertRaises(approve.PushFailed) as refused:
+                self.push(branch)
+            self.assertEqual(refused.exception.reason, "that branch is not an adoption branch")
+            self.assertEqual(str(refused.exception), refused.exception.reason)
+        self.assertEqual(self.refs(), before)
+
+    def test_a_refused_push_raises_its_last_stderr_line(self):
+        git("remote", "set-url", "origin", str(self.tmp / "missing.git"), cwd=self.root)
+        done = subprocess.run(
+            ["git", "-C", str(self.root), "push", "--quiet", "origin",
+             f"refs/heads/{ADOPTION}:refs/heads/{ADOPTION}"],
+            env=GIT_ENV, text=True, capture_output=True, stdin=subprocess.DEVNULL)
+        last = [line for line in done.stderr.splitlines() if line.strip()][-1].strip()
+        with self.assertRaises(approve.PushFailed) as refused:
+            self.push()
+        reason = refused.exception.reason
+        self.assertEqual(reason, last)
+        self.assertNotIn("\n", reason)
+        self.assertLessEqual(len(reason), 200)
+        self.assertIn(last, refused.exception.detail)
+
+    def test_the_push_runs_with_prompts_off(self):
+        seen = self.fake / "seen"
+        fake_bin(self.fake, "git",
+                 f'echo "$GIT_TERMINAL_PROMPT" > {seen}.prompt\necho "$@" > {seen}.args\n')
+        approve.push(str(self.root), ADOPTION,
+                     environ={**os.environ, "PATH": f"{self.fake}:{os.environ['PATH']}"})
+        self.assertEqual(Path(f"{seen}.prompt").read_text().strip(), "0")
+        self.assertEqual(
+            Path(f"{seen}.args").read_text().strip(),
+            f"-C {self.root} push --quiet --no-follow-tags origin "
+            f"refs/heads/{ADOPTION}:refs/heads/{ADOPTION}")
+
+    def test_a_push_that_takes_too_long_reads_in_words(self):
+        fake_bin(self.fake, "git", "sleep 5\n")
+        with self.assertRaises(approve.PushFailed) as slow:
+            approve.push(str(self.root), ADOPTION, timeout=0.5,
+                         environ={"PATH": f"{self.fake}:{os.environ['PATH']}"})
+        self.assertEqual(slow.exception.reason, "it took too long and was stopped")
+        empty = sandbox_dir()
+        self.addCleanup(shutil.rmtree, empty, ignore_errors=True)
+        with self.assertRaises(approve.PushFailed) as missing:
+            approve.push(str(self.root), ADOPTION, environ={"PATH": str(empty)})
+        self.assertEqual(missing.exception.reason, "git could not be started")
+
+
+class GhJsonTest(unittest.TestCase):
+    SCRIPT = """case "$FAKE_GH" in
+token) printf '{"token": "%s%s"}' "${GITHUB_TOKEN-unset}" "${GH_TOKEN-unset}" ;;
+fail) echo 'gh: Validation Failed (HTTP 422)' >&2; exit 1 ;;
+text) printf nope ;;
+sleep) echo $$ > "$FAKE_PID"; sleep 30 ;;
+esac
+"""
+
+    def setUp(self):
+        self.fake = sandbox_dir()
+        self.addCleanup(shutil.rmtree, self.fake, ignore_errors=True)
+        fake_bin(self.fake, "gh", self.SCRIPT)
+        self.pid = self.fake / "pid"
+
+    def environ(self, mode):
+        return {"PATH": f"{self.fake}:{os.environ['PATH']}", "GITHUB_TOKEN": "t",
+                "GH_TOKEN": "t", "FAKE_GH": mode, "FAKE_PID": str(self.pid)}
+
+    def test_the_child_sees_no_token(self):
+        self.assertEqual(approve.gh_json(["api", "x"], environ=self.environ("token")),
+                         {"token": "unsetunset"})
+
+    def test_a_failed_call_is_a_forge_error_with_its_stderr(self):
+        with self.assertRaises(ForgeError) as failed:
+            approve.gh_json(["api", "x"], environ=self.environ("fail"))
+        error = failed.exception
+        self.assertEqual((error.code, error.detail, error.transient),
+                         ("gh_failed", "gh: Validation Failed (HTTP 422)", False))
+        with self.assertRaises(ForgeError) as text:
+            approve.gh_json(["api", "x"], environ=self.environ("text"))
+        self.assertEqual(text.exception.code, "payload_invalid")
+        empty = sandbox_dir()
+        self.addCleanup(shutil.rmtree, empty, ignore_errors=True)
+        with self.assertRaises(ForgeError) as missing:
+            approve.gh_json(["api", "x"], environ={"PATH": str(empty)})
+        self.assertEqual(missing.exception.code, "gh_missing")
+        with self.assertRaises(ForgeError) as slow:
+            approve.gh_json(["api", "x"], timeout=0.5, environ=self.environ("sleep"))
+        self.assertEqual(slow.exception.code, "gh_timeout")
+
+    def test_a_set_cancel_ends_the_call_and_its_process(self):
+        cancel = threading.Event()
+        timer = threading.Timer(0.3, cancel.set)
+        timer.start()
+        self.addCleanup(timer.cancel)
+        started = time.monotonic()
+        with self.assertRaises(approve.Cancelled):
+            approve.gh_json(["api", "x"], cancel, environ=self.environ("sleep"))
+        self.assertLess(time.monotonic() - started, 5)
+        pid = int(self.pid.read_text())
+        with self.assertRaises(ProcessLookupError):
+            os.kill(pid, 0)
+
+
+class GitHubForgeTest(unittest.TestCase):
+    def forge(self, *answers):
+        self.calls = []
+        queue = list(answers)
+
+        def gh_json(argv, cancel=None):
+            self.calls.append((argv, cancel))
+            return queue.pop(0)
+        return approve.GitHubForge(gh_json=gh_json)
+
+    def test_open_posts_one_pull_request_and_builds_its_link_locally(self):
+        event = threading.Event()
+        forge = self.forge({"number": 7, "html_url": "https://evil.example/x"})
+        self.assertEqual(
+            forge.open_pull_request("o/r", ADOPTION, "main", "T", "B\n- x", cancel=event),
+            {"number": 7, "url": "https://github.com/o/r/pull/7"})
+        self.assertEqual(self.calls, [(["api", "-X", "POST", "repos/o/r/pulls", "-f", "title=T",
+                                        "-f", f"head={ADOPTION}", "-f", "base=main",
+                                        "-f", "body=B\n- x"], event)])
+
+    def test_open_refuses_an_answer_without_a_number(self):
+        for answer in ({}, {"number": True}, {"number": 0}, []):
+            with self.subTest(answer=answer), self.assertRaises(ForgeError) as bad:
+                self.forge(answer).open_pull_request("o/r", ADOPTION, "main", "T", "B")
+            self.assertEqual(bad.exception.code, "payload_invalid")
+
+    def test_find_returns_the_open_pull_request_of_the_head_and_base(self):
+        listing = [{"number": 3, "head": {"ref": "other"}, "base": {"ref": "main"}},
+                   {"number": 7, "head": {"ref": ADOPTION}, "base": {"ref": "main"}}]
+        forge = self.forge(listing)
+        self.assertEqual(forge.find_pull_request("o/r", ADOPTION, "main"),
+                         {"number": 7, "url": "https://github.com/o/r/pull/7"})
+        self.assertEqual(self.calls[0][0],
+                         ["api", "-X", "GET", "repos/o/r/pulls", "-f", f"head=o:{ADOPTION}",
+                          "-f", "base=main", "-f", "state=open"])
+        self.assertIsNone(self.forge([]).find_pull_request("o/r", ADOPTION, "main"))
+        only = [{"number": 7, "head": {"ref": ADOPTION}, "base": {"ref": "develop"}}]
+        self.assertIsNone(self.forge(only).find_pull_request("o/r", ADOPTION, "main"))
+        with self.assertRaises(ForgeError) as bad:
+            self.forge({}).find_pull_request("o/r", ADOPTION, "main")
+        self.assertEqual(bad.exception.code, "payload_invalid")
+
+    def test_the_state_table(self):
+        for mergeable in ("clean", "unstable", "has_hooks"):
+            with self.subTest(mergeable=mergeable):
+                forge = self.forge({"state": "open", "merged": False,
+                                    "mergeable_state": mergeable})
+                self.assertEqual(forge.pull_request_state("o/r", 7), "ready")
+        self.assertEqual(self.calls[0][0], ["api", "repos/o/r/pulls/7"])
+        for mergeable in ("blocked", "behind", "dirty", "unknown", "draft", None):
+            with self.subTest(mergeable=mergeable):
+                answer = {"state": "open", "merged": False}
+                if mergeable:
+                    answer["mergeable_state"] = mergeable
+                self.assertEqual(self.forge(answer).pull_request_state("o/r", 7), "open")
+        self.assertEqual(self.forge({"state": "closed", "merged": True})
+                         .pull_request_state("o/r", 7), "merged")
+        self.assertEqual(self.forge({"state": "closed", "merged": False})
+                         .pull_request_state("o/r", 7), "closed")
+        for answer in ({}, []):
+            with self.subTest(answer=answer), self.assertRaises(ForgeError) as bad:
+                self.forge(answer).pull_request_state("o/r", 7)
+            self.assertEqual(bad.exception.code, "payload_invalid")
+
+    def test_the_forge_offers_no_merge(self):
+        self.assertEqual({name for name in dir(approve.GitHubForge) if not name.startswith("_")},
+                         {"find_pull_request", "open_pull_request", "pull_request_state"})
+
+    def test_forge_for(self):
+        self.assertIsInstance(approve.forge_for("linux"), approve.GitHubForge)
+        self.assertIsNone(approve.forge_for("darwin"))
 
 
 if __name__ == "__main__":

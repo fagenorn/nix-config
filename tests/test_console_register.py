@@ -564,10 +564,13 @@ class AdopterTest(unittest.TestCase):
         self.script.chmod(self.script.stat().st_mode | stat.S_IXUSR)
         self.args = self.tmp / "args"
 
-    def adopter(self, *, out='{"a":1}', code=0, sleep=False, timeout=30, command=None):
+    def adopter(self, *, out='{"a":1}', code=0, sleep=False, timeout=30, command=None,
+                apply_timeout=None):
         environ = {"PATH": os.environ["PATH"], "FAKE_ARGS": str(self.args), "FAKE_OUT": out,
                    "FAKE_EXIT": str(code), "FAKE_SLEEP": "1" if sleep else "0"}
-        return Adopter(command=command or (str(self.script),), environ=environ, timeout=timeout)
+        extra = {} if apply_timeout is None else {"apply_timeout": apply_timeout}
+        return Adopter(command=command or (str(self.script),), environ=environ, timeout=timeout,
+                       **extra)
 
     def test_plan_and_register_argv(self):
         adopter = self.adopter()
@@ -575,6 +578,20 @@ class AdopterTest(unittest.TestCase):
         adopter.register("/r")
         self.assertEqual(self.args.read_text().splitlines(),
                          ["plan --repo-root /r --format json", "verify --repo-root /r --register"])
+
+    def test_apply_argv_with_and_without_the_deletion_acknowledgement(self):
+        adopter = self.adopter()
+        adopter.apply("sha256:aa")
+        adopter.apply("sha256:aa", acknowledge_deletions=True)
+        self.assertEqual(self.args.read_text().splitlines(),
+                         ["apply --plan-id sha256:aa",
+                          "apply --plan-id sha256:aa --acknowledge-deletions"])
+
+    def test_apply_has_its_own_timeout(self):
+        self.assertEqual(register.APPLY_TIMEOUT, 1800)
+        with self.assertRaises(RunFailed) as failed:
+            self.adopter(sleep=True, timeout=60, apply_timeout=1).apply("sha256:aa")
+        self.assertEqual(failed.exception.kind, "timed_out")
 
     def test_plan_sends_every_answer_in_order(self):
         self.adopter().plan("/r", answers=[

@@ -24,13 +24,15 @@ service. `registry_unreadable()` is the text of a registration refused because t
 exists but cannot be read (an absent registry is an empty fleet), also decided by the service.
 `UNAVAILABLE` is `registering a project is not available on this host`.
 
-Runner. `Adopter(command=None, environ=None, timeout=RUN_TIMEOUT)` runs
+Runner. `Adopter(command=None, environ=None, timeout=RUN_TIMEOUT, apply_timeout=APPLY_TIMEOUT)` runs
 `[*command, "plan", "--repo-root", root, "--format", "json"]` (`plan`, followed by `--answer <id>
 <subject> <value>` for each of its `answers`, in the given order: ADR-console-029 D4) or
-`[*command, "verify", "--repo-root", root, "--register"]` (`register`), the command defaulting to the
-`adopt_project` sibling module. Each runs with no shell, in its own process group
+`[*command, "verify", "--repo-root", root, "--register"]` (`register`) or `[*command, "apply",
+"--plan-id", plan_id]` with `--acknowledge-deletions` added when asked (`apply`, #1054), the command
+defaulting to the `adopt_project` sibling module. Each runs with no shell, in its own process group
 (`manager.run_in_own_group`), `stdin` and `stderr` to `DEVNULL`, `stdout` piped, `env=dict(environ)`
-when `environ` is given (else the console's own) and `timeout` (`RUN_TIMEOUT`, 300 seconds). Exit 0
+when `environ` is given (else the console's own) and `timeout` (`RUN_TIMEOUT`, 300 seconds; an apply
+runs its gates, so it has its own `apply_timeout`, `APPLY_TIMEOUT`, 1800 seconds). Exit 0
 or 2 returns the parsed stdout object. A failed run raises `RunFailed(kind)`, `str(error) == kind`,
 `kind` one of `RUN_KINDS`: `cancelled` (the `cancel` event is set), `failed` (any other exit),
 `unreadable` (stdout is not a JSON object), `timed_out` (`subprocess.TimeoutExpired`), `not_installed`
@@ -114,6 +116,7 @@ from agent_tools.system import siblings
 
 ENDED = event_log.REGISTRATION_ENDED
 RUN_TIMEOUT = 300
+APPLY_TIMEOUT = 1800
 GIT_TIMEOUT = 10
 RESULTS = ("planned", "registered", "not_registered", "needs_migration", "needs_repair", "failed")
 RUN_KINDS = ("not_installed", "timed_out", "unavailable", "failed", "unreadable", "cancelled")
@@ -481,26 +484,34 @@ class RunFailed(Exception):
 
 class Adopter:
     def __init__(self, *, command: Sequence[str] | None = None,
-                 environ: Mapping[str, str] | None = None, timeout: float = RUN_TIMEOUT):
+                 environ: Mapping[str, str] | None = None, timeout: float = RUN_TIMEOUT,
+                 apply_timeout: float = APPLY_TIMEOUT):
         self._command = (tuple(command) if command is not None
                          else tuple(siblings.sibling_argv("project_contract.adopt_project")))
         self._environ = environ
         self._timeout = timeout
+        self._apply_timeout = apply_timeout
 
     def plan(self, root: str, cancel=None, answers: Sequence[Mapping[str, str]] = ()) -> dict:
         arguments = ["plan", "--repo-root", root, "--format", "json"]
         for answer in answers:
             arguments += ["--answer", answer["id"], answer["subject"], answer["value"]]
-        return self._run(arguments, cancel)
+        return self._run(arguments, cancel, self._timeout)
 
     def register(self, root: str, cancel=None) -> dict:
-        return self._run(["verify", "--repo-root", root, "--register"], cancel)
+        return self._run(["verify", "--repo-root", root, "--register"], cancel, self._timeout)
 
-    def _run(self, arguments: list[str], cancel) -> dict:
+    def apply(self, plan_id: str, cancel=None, acknowledge_deletions: bool = False) -> dict:
+        arguments = ["apply", "--plan-id", plan_id]
+        if acknowledge_deletions:
+            arguments.append("--acknowledge-deletions")
+        return self._run(arguments, cancel, self._apply_timeout)
+
+    def _run(self, arguments: list[str], cancel, timeout: float) -> dict:
         env = dict(self._environ) if self._environ is not None else None
         try:
             done = manager.run_in_own_group(
-                [*self._command, *arguments], timeout=self._timeout, cancel=cancel,
+                [*self._command, *arguments], timeout=timeout, cancel=cancel,
                 stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                 env=env, start_new_session=True)
         except subprocess.TimeoutExpired as error:

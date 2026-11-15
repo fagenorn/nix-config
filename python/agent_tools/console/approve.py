@@ -59,19 +59,43 @@ when a plan line starts with `deletes `, the only case a deletion is acknowledge
 kept worktree of a failed apply from its failure record (a file of at most 65536 bytes holding a JSON
 object whose `branch` and `worktree` are strings and whose worktree is a directory), else None; it
 never raises.
+
+Runners. The console never merges: the forge's required checks keep merge safety, and `GitHubForge`
+has no method that merges. `push(root, branch, cancel=None, *, timeout=PUSH_TIMEOUT, environ=None)`
+pushes only the one adoption branch, by the one refspec `refs/heads/<branch>:refs/heads/<branch>`,
+never forced and with `--no-follow-tags`, so no tag rides along whatever the repository's config
+says; it refuses a branch that is not `adopt-<12 hex>` before any process, runs git in its own
+group with prompts off (`GIT_TERMINAL_PROMPT=0`), and raises `PushFailed` (`reason` the page's
+words, `detail` git's stderr for the log only, `str(error) == reason`) on a refusal, a timeout, a
+cancel or a git that could not be started. `gh_json(argv, cancel=None, *, timeout, environ=None)`
+is the console's cancellable `gh` runner: it runs `gh` in its own group with no `GITHUB_TOKEN` or
+`GH_TOKEN`, so a set `cancel` (the console is closing) ends the call and its process and raises
+`Cancelled`, and its failures are the `ForgeError`s of `forge_api` (`gh_timeout`, `gh_missing`,
+`gh_failed`, `payload_invalid`). `GitHubForge(gh_json=gh_json)` offers `find_pull_request(slug,
+head, base, cancel=None)` (the open pull request of that head and base as `{number, url}`, else
+None), `open_pull_request(slug, head, base, title, body, cancel=None)` and `pull_request_state(slug,
+number, cancel=None)` (`merged`, `closed`, `ready` for an open pull request whose `mergeable_state`
+is in `READY_MERGEABLE`, else `open`); the link of a pull request is built here from the slug and
+number, never read from the forge's answer. `forge_for(platform)` is `GitHubForge()` where
+`manager.supported(platform)`, else None.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
-from collections.abc import Iterable, Mapping
+import subprocess
+import threading
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
+from typing import Any
 
-from agent_tools.console import event_log, register
+from agent_tools.console import event_log, manager, register
 from agent_tools.console.event_log import Event
 from agent_tools.project_contract import adopt_apply
 from agent_tools.system import forge_api
+from agent_tools.system.forge_api import ForgeError
 
 STEP = event_log.ADOPTION_STEP
 PULL = event_log.ADOPTION_PULL
@@ -96,6 +120,9 @@ NO_BASE = "the project contract names no integration branch"
 APPLIED_NOTE = "Press Try again to push the branch and open its pull request."
 MERGED = "the pull request of this plan was already merged; register the repository again"
 GATE_PREFIX = "adopt.gate."
+PUSH_TIMEOUT = 120
+DETAIL_CHARS = 2000
+READY_MERGEABLE = ("clean", "unstable", "has_hooks")
 
 
 def _collapse(text: object) -> str:
@@ -422,3 +449,114 @@ def retained(plan_id: str) -> dict | None:
         return {"branch": record["branch"], "worktree": record["worktree"]}
     except (adopt_apply.AdoptError, OSError, ValueError):
         return None
+
+
+class PushFailed(Exception):
+    def __init__(self, reason: str, detail: str = ""):
+        super().__init__(reason)
+        self.reason = reason
+        self.detail = detail
+
+
+def push(root: str, branch: str, cancel: threading.Event | None = None, *,
+         timeout: float = PUSH_TIMEOUT, environ: Mapping[str, str] | None = None) -> None:
+    if BRANCH.fullmatch(branch) is None:
+        raise PushFailed("that branch is not an adoption branch")
+    env = {**(environ if environ is not None else os.environ), "GIT_TERMINAL_PROMPT": "0"}
+    try:
+        done = manager.run_in_own_group(
+            ["git", "-C", root, "push", "--quiet", "--no-follow-tags", "origin",
+             f"refs/heads/{branch}:refs/heads/{branch}"],
+            timeout=timeout, cancel=cancel, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE, env=env, start_new_session=True)
+    except subprocess.TimeoutExpired as error:
+        raise PushFailed(register.RUN_WORDS["timed_out"]) from error
+    except OSError as error:
+        raise PushFailed("git could not be started") from error
+    if cancel is not None and cancel.is_set():
+        raise PushFailed(register.RUN_WORDS["cancelled"])
+    if done.returncode == 0:
+        return
+    stderr = (done.stderr or b"").decode("utf-8", errors="replace")
+    lines = [line for line in stderr.splitlines() if line.strip()]
+    raise PushFailed(reason_of(lines[-1]) if lines else "git refused the push",
+                     stderr[:DETAIL_CHARS])
+
+
+class Cancelled(Exception):
+    """A forge call ended because its `cancel` event was set (the console is closing)."""
+
+
+def gh_json(argv: list[str], cancel: threading.Event | None = None, *,
+            timeout: float = forge_api.TIMEOUT, environ: Mapping[str, str] | None = None) -> Any:
+    source = environ if environ is not None else os.environ
+    env = {key: value for key, value in source.items() if key not in ("GITHUB_TOKEN", "GH_TOKEN")}
+    try:
+        done = manager.run_in_own_group(
+            ["gh", *argv], timeout=timeout, cancel=cancel, stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, start_new_session=True,
+            env=env)
+    except subprocess.TimeoutExpired:
+        raise ForgeError("gh_timeout", " ".join(argv)) from None
+    except OSError as error:
+        raise ForgeError("gh_missing", str(error)) from None
+    if cancel is not None and cancel.is_set():
+        raise Cancelled()
+    if done.returncode != 0:
+        raise ForgeError("gh_failed", done.stderr.strip(),
+                         transient=forge_api.is_transport(done.stderr))
+    try:
+        return json.loads(done.stdout)
+    except ValueError:
+        raise ForgeError("payload_invalid", "stdout is not JSON") from None
+
+
+def _pull_request(slug: str, number: object) -> dict | None:
+    if not _positive(number):
+        return None
+    return {"number": number, "url": f"https://github.com/{slug}/pull/{number}"}
+
+
+class GitHubForge:
+    def __init__(self, gh_json: Callable[..., Any] = gh_json):
+        self._gh_json = gh_json
+
+    def find_pull_request(self, slug: str, head: str, base: str, cancel=None) -> dict | None:
+        listing = self._gh_json(
+            ["api", "-X", "GET", f"repos/{slug}/pulls", "-f", f"head={slug.split('/')[0]}:{head}",
+             "-f", f"base={base}", "-f", "state=open"], cancel)
+        if not isinstance(listing, list):
+            raise ForgeError("payload_invalid", "the pull request listing is not a list")
+        for found in listing:
+            if (isinstance(found, dict) and isinstance(found.get("head"), dict)
+                    and isinstance(found.get("base"), dict)
+                    and found["head"].get("ref") == head and found["base"].get("ref") == base):
+                pull = _pull_request(slug, found.get("number"))
+                if pull is not None:
+                    return pull
+        return None
+
+    def open_pull_request(self, slug: str, head: str, base: str, title: str, body: str,
+                          cancel=None) -> dict:
+        answer = self._gh_json(
+            ["api", "-X", "POST", f"repos/{slug}/pulls", "-f", f"title={title}",
+             "-f", f"head={head}", "-f", f"base={base}", "-f", f"body={body}"], cancel)
+        pull = _pull_request(slug, answer.get("number")) if isinstance(answer, dict) else None
+        if pull is None:
+            raise ForgeError("payload_invalid", "the pull request answer has no number")
+        return pull
+
+    def pull_request_state(self, slug: str, number: int, cancel=None) -> str:
+        answer = self._gh_json(["api", f"repos/{slug}/pulls/{number}"], cancel)
+        if isinstance(answer, dict):
+            if answer.get("merged") is True:
+                return "merged"
+            if answer.get("state") == "closed":
+                return "closed"
+            if answer.get("state") == "open":
+                return "ready" if answer.get("mergeable_state") in READY_MERGEABLE else "open"
+        raise ForgeError("payload_invalid", "the pull request answer has no state")
+
+
+def forge_for(platform: str) -> GitHubForge | None:
+    return GitHubForge() if manager.supported(platform) else None
