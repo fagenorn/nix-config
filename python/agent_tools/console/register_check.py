@@ -31,13 +31,19 @@ directory with a throwaway project id `console-check/register-<hex>`, and POSTs 
   dispatched a run.
 - A 204, or no answer at all, may have dispatched a run. The check polls the view every second until
   `registration.root` is the posted root and its `status` is `done`, at most `--wait` seconds (else
-  `not_met`, reason `no result`). A `result` other than `registered` is `not_met` with the
-  `headline` as the reason. After `registered` it polls at most 30 s for the project id among the
-  view's project entries, quiet groups included (else `not_met`, reason `not listed`).
+  `not_met`, reason `no result`). The adopted fixture first ends in the waiting row, which
+  `register.waiting` accepts (ADR-console-034): the check answers the Register card as the owner's page
+  does, with `POST /api/register-confirm {"root": <root>, "choice": "register"}` (same headers, same
+  refusal rules as the first POST), and polls again, for a done row of this root whose `at` differs
+  from the waiting row's. A `result` other than `registered` is `not_met` with the `headline` as the
+  reason. After `registered` it polls at most 30 s for the project id among the view's project
+  entries, quiet groups included (else `not_met`, reason `not listed`).
 
 Two sprint rules govern what it leaves behind. S1: the check leaves no trace of itself, so it removes
-the throwaway directory, its registry entry and every stored plan whose `handoff.repo_root` is its
-root. S2: it never writes the registry except to remove its own entry, and it writes nothing else.
+the throwaway directory, its registry entry, its folder-trust entries and every stored plan whose
+`handoff.repo_root` is its root. S2: it never writes the registry except to remove its own entry, never writes a `.claude.json`
+except to remove its own root's project entry (the approval grants the folder's client trust, ADR-console-034),
+and writes nothing else.
 
 The settle gate. No restore happens while the console's run may still write. Every outcome after the
 POST, except a definite refusal and a fixture failure, polls the view until it answers 200 and its
@@ -52,11 +58,16 @@ remove it, because a cleanup before then could be undone by a late registry or p
 that dies with no `close` while a child runs leaves that child unbounded; the view then does not
 answer 200 and the gate reports `unsettled`.
 
-Restore runs after the gate: the registry entry is removed under `registry_transaction()`, plans are
-deleted, the directory is removed, and the registry must equal `before` (by project id) with the directory
-gone and no matching plan left, else `{"status": "not_restored", "leftovers": [<path>, ...]}`, 1
-replaces any answer; the leftovers name each plan or directory that could not be removed and the
-registry when it differs. Met is `{"status": "met", "project_id": <id>,
+Restore runs after the gate: a Check again card the run left for the root (`inbox.open`, reason
+`trust_failed`) is answered through `POST /api/trust-check`, because the card lives in the console's log
+and only a granted retry clears it, and a card still open afterwards is a leftover named `trust card
+<profile>` (`trust cards unread` when the view does not answer); then the registry entry is removed under `registry_transaction()`, the root's
+trust entry is removed from `~/.claude.json` and every profile's `.claude.json` (`folder_trust.remove_entry`,
+the key being the root's real path), plans are deleted, the directory is removed, and the registry must
+equal `before` (by project id) with the directory gone and no matching plan left, else `{"status":
+"not_restored", "leftovers": [<path>, ...]}`, 1 replaces any answer; the leftovers name each trust file
+whose entry could not be removed, each plan or directory that could not be removed and the registry when
+it differs. The settle bound counts from the last POST. Met is `{"status": "met", "project_id": <id>,
 "root": <root>, "restored": true}`, 0.
 """
 
@@ -76,7 +87,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from agent_tools.console import register, service, write_guard
+from agent_tools.console import folder_trust, register, service, write_guard
 from agent_tools.project_contract import agent_platform
 from agent_tools.system import siblings
 
@@ -88,6 +99,8 @@ FETCH_TIMEOUT = 5.0
 NOT_YET = 75
 LOOPBACK = ("127.0.0.1", "localhost")
 REGISTER_PATH = "/api/register-project"
+CONFIRM_PATH = "/api/register-confirm"
+TRUST_CHECK_PATH = "/api/trust-check"
 STATE_PATH = "/api/state"
 DIGEST = "a1" * 32
 GIT_ENV = {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull,
@@ -276,7 +289,39 @@ def _poll(fetch: Callable[[str], Answer], url: str, poll: float, bound: float,
         time.sleep(poll)
 
 
-def _restore(tmp: Path, root: Path | None, project_id: str, before: list[dict]) -> list[str]:
+def _clear_trust_cards(fetch, post, base: str, token: str, root: Path) -> list[str]:
+    """Check again each Check again card the fixture's grant left; the cards still open, named.
+
+    The cards live in the console's event log, which the check cannot edit: a granted retry is what
+    clears one, so this runs before the trust entries are removed.
+    """
+    keys = {os.path.realpath(root), str(root)}
+
+    def open_cards() -> list[dict] | None:
+        document = _json_object(fetch(base + STATE_PATH))
+        if document is None:
+            return None
+        inbox = document.get("inbox")
+        found = inbox.get("open") if isinstance(inbox, dict) else None
+        return [card for card in found or ()
+                if isinstance(card, dict) and card.get("reason") == "trust_failed"
+                and card.get("root") in keys]
+
+    cards = open_cards()
+    if cards is None:
+        return ["trust cards unread"]
+    headers = {"Origin": base, write_guard.TOKEN_HEADER: token, "Content-Type": "application/json"}
+    for card in cards:
+        post(base + TRUST_CHECK_PATH, headers,
+             json.dumps({"root": card["root"], "profile": card.get("profile")}).encode("utf-8"))
+    cards = open_cards()
+    if cards is None:
+        return ["trust cards unread"]
+    return [f"trust card {card.get('profile')}" for card in cards]
+
+
+def _restore(tmp: Path, root: Path | None, project_id: str, before: list[dict],
+             clear: Callable[[Path], list[str]] = lambda root: []) -> list[str]:
     """Remove what the run left; the paths still left, the registry's included, else an empty list."""
     leftovers: list[str] = []
     try:
@@ -288,6 +333,19 @@ def _restore(tmp: Path, root: Path | None, project_id: str, before: list[dict]) 
     except Exception as error:  # noqa: BLE001 -- the comparison below decides
         print(f"register_check: {type(error).__name__}", file=sys.stderr)
     if root is not None:
+        try:
+            leftovers.extend(clear(root))
+        except Exception as error:  # noqa: BLE001 -- a card left is named, never raised
+            print(f"register_check: {type(error).__name__}", file=sys.stderr)
+            leftovers.append("trust cards")
+        key = os.path.realpath(root)
+        for _, path in folder_trust.targets(Path.home(), service.default_profile_dirs()):
+            try:
+                if folder_trust.remove_entry(path, key) == folder_trust.FAILED:
+                    leftovers.append(str(path))
+            except Exception as error:  # noqa: BLE001 -- a file left is named, never raised
+                print(f"register_check: {type(error).__name__}", file=sys.stderr)
+                leftovers.append(str(path))
         for plan in (agent_platform.state_root() / "adopt" / "plans").glob("*.json"):
             try:
                 handoff = json.loads(plan.read_text("utf-8")).get("handoff")
@@ -341,6 +399,29 @@ def _exercise(args, token: str, fetch, post, root: Path, project_id: str, poll: 
 
     if not _poll(fetch, state, poll, args.wait, done):
         return 1, {"status": "not_met", "reason": "no result"}
+    if register.waiting(found):
+        waited = found.get("at")
+        headers = {"Origin": base, write_guard.TOKEN_HEADER: token,
+                   "Content-Type": "application/json"}
+        status, body = post(base + CONFIRM_PATH, headers, json.dumps(
+            {"root": str(root), "choice": register.CONFIRM_VALUE}).encode("utf-8"))
+        if status is not None and 400 <= status <= 499:
+            return 1, {"status": "not_met", "reason": f"refused {status} {_text(body)}"}
+        reached.append(time.monotonic())
+        if status is not None and status != 204:
+            return 1, {"status": "not_met", "reason": f"refused {status} {_text(body)}"}
+        found.clear()
+
+        def answered(document: dict) -> bool:
+            registration = document.get("registration")
+            if (isinstance(registration, dict) and registration.get("root") == str(root)
+                    and registration.get("status") == "done" and registration.get("at") != waited):
+                found.update(registration)
+                return True
+            return False
+
+        if not _poll(fetch, state, poll, args.wait, answered):
+            return 1, {"status": "not_met", "reason": "no result"}
     if found.get("result") != "registered":
         return 1, {"status": "not_met", "reason": str(found.get("headline"))}
     if not _poll(fetch, state, poll, LISTED_SECONDS, lambda d: _listed(d, project_id)):
@@ -390,9 +471,12 @@ def _decide(args, fetch, post, tmp_root, project_id, poll, settle) -> tuple[int,
         verdict = _exercise(args, token, fetch, post, root, pid, poll, reached)
     finally:
         if reached:
-            settled = _poll(fetch, state, poll, settle - (time.monotonic() - reached[0]),
+            settled = _poll(fetch, state, poll, settle - (time.monotonic() - reached[-1]),
                             lambda d: not _is_running(d, str(root)))
-        leftovers = _restore(tmp, root, pid, before) if settled else []
+        leftovers = _restore(
+            tmp, root, pid, before,
+            lambda one: _clear_trust_cards(fetch, post, f"http://{urlsplit(args.url).netloc}",
+                                           token, one)) if settled else []
     if not settled:
         return 1, {"status": "unsettled", "project_id": pid, "root": str(root)}
     if leftovers:

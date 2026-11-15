@@ -284,7 +284,7 @@ class SummaryTest(unittest.TestCase):
                 self.assertEqual((row["plan_id"], row["state"], row["questions"], row["answered"],
                                   row["draft"]), (None, None, [], [], None))
 
-    def test_a_no_change_plan_without_a_report_names_its_terminal_handoff(self):
+    def test_an_adopted_plan_with_no_report_waits_for_the_register_card(self):
         nc = {"plan": {"state": "ready", "outcome": "no_change", "project_id": "o/r",
                        "blockers": [], "plan_id": "sha256:" + "c" * 64},
               "decisions": {"open": [], "answered": []},
@@ -292,11 +292,19 @@ class SummaryTest(unittest.TestCase):
         for document in (register.summary("/srv/r", nc),
                          register.summary("/srv/r", {**nc, "handoff": {"next_command": None}})):
             self.assertEqual((document["result"], document["outcome"], document["lines"],
-                              document["note"], document["plan_id"]),
-                             ("not_registered", "no_change", [], None, None))
-            self.assertEqual(document["headline"],
-                             "r needs no adoption change and is not registered yet: run "
-                             "adopt-project verify --register --repo-root /srv/r")
+                              document["plan_id"]),
+                             ("not_registered", "no_change", [], None))
+            self.assertEqual(document["headline"], "r is already adopted and is not registered yet.")
+            self.assertEqual(document["note"], "Choose Register it to register it.")
+            at = {**document, "at": "2026-11-15T08:00:00+00:00"}
+            self.assertTrue(register.waiting(at))
+            self.assertFalse(register.waiting(register.dismissed(at)))
+            self.assertEqual(register.dismissed(at)["note"],
+                             "Not registered. Press Register again to register it.")
+        refused = register.summary("/srv/r", nc, {"error": {"repair_id": "adopt.registration.no_remote",
+                                                            "message": "no origin"}})
+        self.assertFalse(register.waiting({**refused, "at": "2026-11-15T08:00:00+00:00"}))
+        self.assertFalse(register.waiting(None))
 
     def test_one_open_question_is_singular(self):
         row = register.summary("/srv/r", plan_doc(open_questions=1))

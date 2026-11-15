@@ -21,7 +21,7 @@ import time
 import unittest
 from pathlib import Path
 
-from agent_tools.console import register, register_check
+from agent_tools.console import folder_trust, register, register_check
 from agent_tools.project_contract import agent_platform
 
 from . import accounts_sandbox
@@ -30,6 +30,7 @@ from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- modul
 
 PATH = "/api/register-project"
 ANSWER = "/api/plan-answer"
+CONFIRM = "/api/register-confirm"
 PID_A = "sha256:" + "a" * 64
 PID_B = "sha256:" + "b" * 64
 ROOT = Path(__file__).resolve().parent.parent
@@ -217,6 +218,11 @@ class Case(unittest.TestCase):
         payload = json.dumps(body).encode() if raw is None else raw
         sent = self.own(**{"Content-Type": "application/json"}) if headers is None else headers
         return support.post_page(self.svc.address, ANSWER, sent, payload)
+
+    def confirm(self, body=None, headers=None, raw=None):
+        payload = json.dumps(body).encode() if raw is None else raw
+        sent = self.own(**{"Content-Type": "application/json"}) if headers is None else headers
+        return support.post_page(self.svc.address, CONFIRM, sent, payload)
 
     def registered(self, root):
         self.assertEqual(self.post({"path": str(root)})[0], 204)
@@ -415,7 +421,9 @@ class RegisterRunTest(Case):
         self.begin(fake)
         repo = git_repo(self.parent / "r")
         self.assertEqual(self.post({"path": str(repo)})[0], 204)
-        (_, row), = self.rows("registration.ended")
+        self.assertEqual(self.wait_done(repo)["note"], register.CONFIRM_NOTE)
+        self.assertEqual(self.confirm({"root": str(repo), "choice": "register"})[0], 204)
+        (_, row), = self.rows("registration.ended")[-1:]
         self.assertEqual(row["result"], "failed")
         self.assertIn("verify --register --repo-root", row["note"])
         self.assertNotIn("adopt-project plan", row["note"])
@@ -426,8 +434,13 @@ class RegisterRunTest(Case):
         self.begin(fake)
         repo = git_repo(self.parent / "r")
         self.assertEqual(self.post({"path": str(repo)})[0], 204)
-        self.assertEqual(fake.calls, [("plan", str(repo)), ("register", str(repo))])
+        self.assertEqual(fake.calls, [("plan", str(repo))])
         (_, row), = self.rows("registration.ended")
+        self.assertEqual(row["note"], register.CONFIRM_NOTE)
+        self.assertEqual(self.confirm({"root": str(repo), "choice": "register"})[0], 204)
+        self.assertEqual(fake.calls, [("plan", str(repo)), ("plan", str(repo)),
+                                      ("register", str(repo))])
+        (_, row), = self.rows("registration.ended")[-1:]
         self.assertEqual(row["result"], "registered")
 
     def test_the_result_survives_a_restart(self):
@@ -469,10 +482,17 @@ class RegisterRunTest(Case):
         before = real_home_state()
         root = register_check.adopted_repository(
             self.parent, "fixture/console-register", ROOT / register_check.CONTRACT_SOURCE)
-        self.begin(register.Adopter(), dispatch=None)
+        work = self.parent / "accounts" / "profiles" / "work"
+        work.mkdir(parents=True)
+        (work / ".claude.json").write_text(json.dumps({"oauthAccount": {"a": 1}}), "utf-8")
+        self.begin(register.Adopter(), dispatch=None, profile_dirs=[work], trust_home=self.home)
         status, _, body = self.post({"path": str(root)})
         self.assertEqual((status, body), (204, b""))
-        self.wait_done(root)
+        self.assertEqual(self.wait_done(root)["note"], register.CONFIRM_NOTE)
+        self.assertEqual(json.loads(self.registry.read_text())["projects"], [])
+        status, _, body = self.confirm({"root": str(root), "choice": "register"})
+        self.assertEqual((status, body), (204, b""))
+        self.wait_for(lambda r: r["status"] == "done" and r["result"] == "registered")
         (_, row), = self.rows("registration.ended")[-1:]
         self.assertEqual(row["result"], "registered")
         self.assertEqual(row["headline"], f"{root.name} is registered as fixture/console-register.")
@@ -488,7 +508,134 @@ class RegisterRunTest(Case):
             if not listed:
                 time.sleep(0.1)
         self.assertTrue(listed)
+        (_, grant), = self.rows("trust.granted")
+        self.assertEqual((grant["cause"], [p["profile"] for p in grant["profiles"]]),
+                         ("register", ["default", "work"]))
+        for path in (self.home / ".claude.json", work / ".claude.json"):
+            document = json.loads(path.read_text("utf-8"))
+            self.assertIs(document["projects"][os.path.realpath(root)]["hasTrustDialogAccepted"],
+                          True)
+        self.assertEqual(json.loads((work / ".claude.json").read_text("utf-8"))["oauthAccount"],
+                         {"a": 1})
         self.assertEqual(real_home_state(), before)
+
+
+class RegisterTrustTest(Case):
+    """An adopted repository waits for its Register card; only its approval grants and registers (#1078)."""
+
+    def setUp(self):
+        super().setUp()
+        self.files = {"default": self.home / ".claude.json"}
+        profiles = []
+        for name in ("work", "solo"):
+            directory = self.parent / "accounts" / "profiles" / name
+            directory.mkdir(parents=True)
+            profiles.append(directory)
+            self.files[name] = directory / ".claude.json"
+        for path in self.files.values():
+            path.write_text(json.dumps({"oauthAccount": {"a": 1}}), "utf-8")
+        self.profiles = profiles
+        self.fake = Fake(plan=NO_CHANGE, report={"registered": True, "project_id": "o/r"})
+        self.repo = git_repo(self.parent / "r")
+        self.begin(self.fake)
+
+    def begin(self, adopter, **kwargs):
+        return super().begin(adopter, profile_dirs=self.profiles, trust_home=self.home, **kwargs)
+
+    def contents(self):
+        return {name: path.read_bytes() for name, path in self.files.items()}
+
+    def waiting(self):
+        self.assertEqual(self.post({"path": str(self.repo)})[0], 204)
+        return self.wait_done(self.repo)
+
+    def card(self):
+        return [i for i in self.view()["inbox"]["open"] if i["reason"] == "register_confirm"]
+
+    def test_no_trust_is_written_before_the_register_card_is_answered(self):
+        before = self.contents()
+        shown = self.waiting()
+        self.assertEqual((shown["result"], shown["note"]),
+                         ("not_registered", register.CONFIRM_NOTE))
+        self.assertEqual(self.fake.calls, [("plan", str(self.repo))])
+        self.assertEqual(self.contents(), before)
+        self.assertEqual(self.rows("trust.granted"), [])
+        self.assertEqual(len(self.card()), 1)
+
+    def test_register_it_grants_then_registers(self):
+        self.waiting()
+        self.assertEqual(self.confirm({"root": str(self.repo), "choice": "register"})[0], 204)
+        (_, grant), = self.rows("trust.granted")
+        self.assertEqual(grant["cause"], "register")
+        key = os.path.realpath(self.repo)
+        for name, path in self.files.items():
+            with self.subTest(file=name):
+                document = json.loads(path.read_text("utf-8"))
+                self.assertIs(document["projects"][key]["hasTrustDialogAccepted"], True)
+        self.assertEqual([c for c in self.fake.calls if c[0] == "register"],
+                         [("register", str(self.repo))])
+        (_, row), = self.rows("registration.ended")[-1:]
+        self.assertEqual(row["result"], "registered")
+
+    def test_register_it_after_an_answer_run_plans_with_the_answers_and_registers(self):
+        nothing = {**NO_CHANGE, "decisions": {"open": [], "recommended": [], "answered": [A1]}}
+
+        class Answered(Fake):
+            def plan(self, root, cancel=None, answers=(), contract=None):
+                super().plan(root, cancel, answers, contract)
+                return nothing if answers else DRAFT
+
+        self.svc.close()
+        fake = Answered(report={"registered": True, "project_id": "o/r"})
+        self.begin(fake)
+        self.assertEqual(self.post({"path": str(self.repo)})[0], 204)
+        self.wait_done(self.repo)
+        self.assertEqual(self.answer(answer_of(PID_A, A1))[0], 204)
+        shown = self.wait_for(lambda r: r["status"] == "done" and r["outcome"] == "no_change")
+        self.assertEqual(shown["note"], register.CONFIRM_NOTE)
+        self.assertEqual(self.confirm({"root": str(self.repo), "choice": "register"})[0], 204)
+        self.assertEqual(fake.answers, [[], [A1], [A1]])
+        self.assertEqual([c for c in fake.calls if c[0] == "register"],
+                         [("register", str(self.repo))])
+        (_, row), = self.rows("registration.ended")[-1:]
+        self.assertEqual(row["result"], "registered")
+
+    def test_not_now_writes_no_trust_and_removes_the_card(self):
+        self.waiting()
+        before = self.contents()
+        counted = self.view()["statement"]["inbox_items"]
+        self.assertEqual(len(self.card()), 1)
+        self.assertEqual(self.confirm({"root": str(self.repo), "choice": "not_now"})[0], 204)
+        self.assertEqual(self.card(), [])
+        self.assertEqual(self.view()["statement"]["inbox_items"], counted - 1)
+        (_, row), = self.rows("registration.ended")[-1:]
+        self.assertEqual(row["note"], "Not registered. Press Register again to register it.")
+        self.assertEqual([c for c in self.fake.calls if c[0] == "register"], [])
+        self.assertEqual(self.contents(), before)
+        self.assertEqual(self.rows("trust.granted"), [])
+        self.svc.close()
+        self.begin(Fake())
+        self.assertEqual(self.card(), [])
+
+    def test_a_confirm_for_another_root_or_a_row_not_waiting_is_refused(self):
+        self.waiting()
+        before, rows = self.contents(), len(support.log_rows(self.store))
+        status, _, body = self.confirm({"root": str(self.parent / "other"), "choice": "register"})
+        self.assertEqual((status, body), (409, b"that project is not waiting to be registered\n"))
+        self.assertEqual((self.contents(), len(support.log_rows(self.store))), (before, rows))
+        self.assertEqual(self.confirm({"root": str(self.repo), "choice": "not_now"})[0], 204)
+        rows = len(support.log_rows(self.store))
+        status, _, body = self.confirm({"root": str(self.repo), "choice": "register"})
+        self.assertEqual((status, body), (409, b"that project is not waiting to be registered\n"))
+        self.assertEqual((self.contents(), len(support.log_rows(self.store))), (before, rows))
+        self.assertEqual([c for c in self.fake.calls if c[0] == "register"], [])
+        for bad in ({"root": "/r"}, {"root": "/r", "choice": "maybe"}):
+            status, _, body = self.confirm(bad)
+            self.assertEqual((status, body), (400, b"bad registration approval\n"))
+        status, _, body = self.confirm(
+            {"root": str(self.repo), "choice": "register"},
+            headers={"Origin": self.own()["Origin"], "Content-Type": "application/json"})
+        self.assertEqual((status, body), (403, b"token refused\n"))
 
 
 def answer_of(plan_id, given):
@@ -772,10 +919,9 @@ class PlanAnswerRunTest(Case):
         shown = self.wait_for(lambda r: r["status"] == "done" and r["outcome"] == "no_change")
         self.assertEqual((shown["result"], shown["plan_id"], shown["questions"]),
                          ("not_registered", None, []))
-        self.assertEqual(
-            shown["headline"],
-            f"{repo.name} needs no adoption change and is not registered yet: run "
-            f"adopt-project verify --register --repo-root {repo}")
+        self.assertEqual(shown["headline"],
+                         f"{repo.name} is already adopted and is not registered yet.")
+        self.assertEqual(shown["note"], "Choose Register it to register it.")
         self.assertEqual(fake.calls, [("plan", str(repo)), ("plan", str(repo))])
         self.assertEqual(len(self.rows("registration.ended")), 2)
         self.assertEqual(home_state(self.home), state)

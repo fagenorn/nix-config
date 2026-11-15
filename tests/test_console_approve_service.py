@@ -10,13 +10,15 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import re
+import shutil
 import threading
 import time
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import approve, register, register_check, service
+from agent_tools.console import approve, folder_trust, register, register_check, service, signin
 from agent_tools.console import event_log
 from agent_tools.project_contract import adopt_apply, adopt_inspection
 from agent_tools.system.forge_api import ForgeError
@@ -899,6 +901,274 @@ class PlanApproveCloseTest(ApproveCase):
         self.assertEqual(shown["adoption"]["url"], URL)
         self.assertEqual(len(self.opens()), 1)
         self.assertEqual(len(fake.applied), 1)
+
+
+class TrustGrantTest(ApproveCase):
+    """The Apply approval grants the folder's trust in every profile and logs it (#1078)."""
+
+    def setUp(self):
+        super().setUp()
+        self.key = str(self.parent / "reconcile")
+        self.arranged = {"oauthAccount": {"emailAddress": "o@example.test"}, "keep": [1, 2],
+                         "projects": {self.key: {"allowedTools": ["Bash"]}}}
+        self.files = {"default": self.home / ".claude.json"}
+        for name in ("work", "solo"):
+            directory = self.parent / "accounts" / "profiles" / name
+            directory.mkdir(parents=True)
+            self.files[name] = directory / ".claude.json"
+        self.rearrange()
+        self.trust = {"profile_dirs": [self.files[n].parent for n in ("work", "solo")],
+                      "trust_home": self.home}
+        self.granted = []
+
+    def rearrange(self, names=("default", "work", "solo")):
+        for name in names:
+            self.files[name].write_text(json.dumps(self.arranged), "utf-8")
+
+    def snapshot(self):
+        return {name: (path.read_bytes(), path.stat().st_mtime_ns)
+                for name, path in self.files.items()}
+
+    def trusted(self):
+        return {**self.arranged, "projects": {self.key: {
+            "allowedTools": ["Bash"], "hasTrustDialogAccepted": True}}}
+
+    def start(self, fake, **kwargs):
+        return super().start(fake, **{**self.trust, **kwargs})
+
+    def trust_rows(self):
+        return [payload for _, payload in self.rows("trust.granted")]
+
+    def parsed(self, name):
+        return json.loads(self.files[name].read_text("utf-8"))
+
+    def test_apply_it_sets_the_key_in_both_profiles_and_the_home_file_and_nothing_else(self):
+        self.ready(apply_result=APPLIED)
+        self.run_approval("opened")
+        for name in ("default", "work", "solo"):
+            with self.subTest(file=name):
+                self.assertEqual(self.parsed(name), self.trusted())
+
+    def test_one_owner_action_row_names_each_profile_and_its_result(self):
+        def granter(path, key):
+            if path.parent.name == "solo":
+                raise RuntimeError("o@example.test")
+            return folder_trust.grant(path, key)
+
+        self.trust["trust_granter"] = granter
+        self.ready(apply_result=APPLIED)
+        _, errors = self.run_approval("opened")
+        self.assertEqual(self.trust_rows(), [{
+            "by": "owner", "cause": "apply", "project": "o/r", "root": self.key,
+            "profiles": [{"profile": "default", "result": "granted"},
+                         {"profile": "solo", "result": "failed"},
+                         {"profile": "work", "result": "granted"}]}])
+        self.assertIn("console: trust_grant_error solo RuntimeError", errors)
+        self.assertIn("console: trust_granted apply o/r 2 0 1", errors)
+        self.assertNotIn("o@example.test", errors)
+        for row in support.log_rows(self.store):
+            self.assertNotIn("o@example.test", row[4])
+
+    def test_a_failed_grant_still_applies(self):
+        self.trust["trust_granter"] = lambda path, key: folder_trust.FAILED
+        self.ready(apply_result=APPLIED)
+        self.run_approval("opened")
+        self.assertEqual(self.steps()[0], "applied")
+        self.assertEqual([p["result"] for p in self.trust_rows()[0]["profiles"]], ["failed"] * 3)
+
+    def test_not_now_try_again_and_the_merged_registration_write_no_trust(self):
+        self.pusher.raises = [approve.PushFailed("remote rejected the push", "d")]
+        fake = self.ready(apply_result=APPLIED, fake_class=RegistryFake, registry=self.registry)
+        fake.report = GREEN
+        self.assertEqual(self.defer()[0], 204)
+        self.assertEqual(self.trust_rows(), [])
+        self.run_approval("push_failed")
+        self.assertEqual(len(self.trust_rows()), 1)
+        self.rearrange()
+        before = self.snapshot()
+        self.run_approval("opened")
+        self.poll("merged")
+        self.assertEqual(len(self.register_calls()), 1)
+        self.assertEqual(self.snapshot(), before)
+        self.assertEqual(len(self.trust_rows()), 1)
+
+    def test_without_a_trust_home_the_home_file_is_not_a_target(self):
+        self.trust["trust_home"] = None
+        self.ready(apply_result=APPLIED)
+        self.run_approval("opened")
+        self.assertEqual([p["profile"] for p in self.trust_rows()[0]["profiles"]],
+                         ["solo", "work"])
+        self.assertEqual(self.parsed("default"), self.arranged)
+
+    def test_a_grant_that_close_overtakes_keeps_its_row(self):
+        entered, gate = threading.Event(), threading.Event()
+        self.addCleanup(gate.set)
+
+        def granter(path, key):
+            if path.parent.name == "work":
+                entered.set()
+                gate.wait(30)
+            return folder_trust.grant(path, key)
+
+        self.trust["trust_granter"] = granter
+        self.ready(apply_result=APPLIED)
+        granting = threading.Thread(
+            target=self.svc._grant_trust, args=("apply", str(self.repo), "p"))
+        granting.start()
+        self.assertTrue(entered.wait(30))
+        closing = threading.Thread(target=self.svc.close)
+        closing.start()
+        end = time.monotonic() + 30
+        while time.monotonic() < end and not self.svc._closed:
+            time.sleep(0.01)
+        self.assertTrue(self.svc._closed)
+        log_closed, close_log = threading.Event(), self.svc.log.close
+        self.svc.log.close = lambda: (log_closed.set(), close_log())
+        # A close that does not wait for the grant closes the log within this bound.
+        log_closed.wait(2)
+        gate.set()
+        for thread in (granting, closing):
+            thread.join(30)
+            self.assertFalse(thread.is_alive())
+        (row,) = self.trust_rows()
+        self.assertEqual([p["profile"] for p in row["profiles"]], ["default", "solo", "work"])
+        self.assertEqual(self.parsed("work"), self.trusted())
+
+    CHECK = "/api/trust-check"
+
+    def check(self, body):
+        return support.post_page(
+            self.svc.address, self.CHECK,
+            self.own(**{"Content-Type": "application/json"}), json.dumps(body).encode())
+
+    def trust_cards(self):
+        return [card for card in self.view()["inbox"]["open"] if card["reason"] == "trust_failed"]
+
+    def test_a_failed_read_back_shows_its_card_and_check_again_clears_it(self):
+        self.trust["trust_granter"] = lambda path, key: (
+            folder_trust.FAILED if path.parent.name == "solo" else folder_trust.grant(path, key))
+        self.ready(apply_result=APPLIED)
+        self.run_approval("opened")
+        (card,) = self.trust_cards()
+        self.assertEqual(card["title"], "Trust o/r")
+        self.assertEqual(card["why"], folder_trust.failed_words(self.key, "solo"))
+        self.svc._trust_granter = folder_trust.grant
+        self.assertEqual(self.check({"root": self.key, "profile": "solo"})[::2], (204, b""))
+        rows = self.trust_rows()
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[1]["cause"], "check")
+        self.assertEqual(rows[1]["profiles"], [{"profile": "solo", "result": "granted"}])
+        self.assertEqual(self.trust_cards(), [])
+        self.assertEqual(self.parsed("solo"), self.trusted())
+
+    def test_removing_the_account_clears_its_check_again_card(self):
+        self.trust["trust_granter"] = lambda path, key: (
+            folder_trust.FAILED if path.parent.name == "solo" else folder_trust.grant(path, key))
+        solo = self.files["solo"].parent
+
+        def remover(name):
+            shutil.rmtree(solo)
+            self.trust["profile_dirs"].remove(solo)
+
+        self.trust.update(
+            account_remover=remover, signer_out=lambda one: None,
+            signin_reader=lambda one: signin.Status("signed_in", None))
+        self.ready(apply_result=APPLIED)
+        self.run_approval("opened")
+        self.assertEqual(len(self.trust_cards()), 1)
+        counted = self.view()["statement"]["inbox_items"]
+        status, _, _ = support.post_page(
+            self.svc.address, "/api/account-remove",
+            self.own(**{"Content-Type": "application/json"}),
+            json.dumps({"profile": "solo", "typed": "solo"}).encode())
+        self.assertEqual(status, 204)
+        self.assertEqual(self.trust_cards(), [])
+        self.assertEqual(self.view()["statement"]["inbox_items"], counted - 1)
+
+    def test_checking_again_a_worktree_whose_key_never_resolved_trusts_the_main_checkout(self):
+        self.ready(apply_result=APPLIED)
+        linked = self.parent / "linked"
+        git(self.repo, "worktree", "add", "-q", "-b", "wt", str(linked))
+        slot = os.path.realpath(linked)
+        with mock.patch.object(folder_trust, "trust_key", return_value=None), \
+                contextlib.redirect_stderr(io.StringIO()):
+            self.svc._grant_trust("apply", str(linked), "p")
+        self.assertEqual(len(self.trust_cards()), 3)
+        self.assertEqual(self.check({"root": slot, "profile": "solo"})[::2], (204, b""))
+        key = os.path.realpath(self.key)
+        self.assertEqual(self.parsed("solo")["projects"], {
+            key: {"allowedTools": ["Bash"], "hasTrustDialogAccepted": True}})
+        self.assertEqual(sorted(card["profile"] for card in self.trust_cards()),
+                         ["default", "work"])
+
+    def test_a_grant_that_an_account_removal_overtakes_publishes_nothing_for_that_account(self):
+        entered, gate = threading.Event(), threading.Event()
+        self.addCleanup(gate.set)
+
+        def granter(path, key):
+            if path.parent.name == "solo":
+                entered.set()
+                gate.wait(30)
+                return folder_trust.FAILED
+            return folder_trust.grant(path, key)
+
+        self.trust["trust_granter"] = granter
+        solo = self.files["solo"].parent
+
+        def remover(name):
+            shutil.rmtree(solo)
+            self.trust["profile_dirs"].remove(solo)
+
+        self.trust.update(
+            account_remover=remover, signer_out=lambda one: None,
+            signin_reader=lambda one: signin.Status("signed_in", None))
+        self.ready(apply_result=APPLIED)
+        granting = threading.Thread(
+            target=self.svc._grant_trust, args=("apply", str(self.repo), "p"))
+        granting.start()
+        self.assertTrue(entered.wait(30))
+        status, _, _ = support.post_page(
+            self.svc.address, "/api/account-remove",
+            self.own(**{"Content-Type": "application/json"}),
+            json.dumps({"profile": "solo", "typed": "solo"}).encode())
+        self.assertEqual(status, 204)
+        gate.set()
+        granting.join(30)
+        self.assertFalse(granting.is_alive())
+        self.assertEqual(self.trust_cards(), [])
+        for row in self.trust_rows():
+            self.assertNotIn("solo", [p["profile"] for p in row["profiles"]])
+
+    def test_a_check_of_a_pair_never_named_is_refused(self):
+        self.trust["trust_granter"] = lambda path, key: (
+            folder_trust.FAILED if path.parent.name == "solo" else folder_trust.grant(path, key))
+        self.ready(apply_result=APPLIED)
+        self.run_approval("opened")
+        before = self.snapshot()
+        rows = len(self.trust_rows())
+        for body in ({"root": self.key, "profile": "work"},
+                     {"root": self.key, "profile": "default"},
+                     {"root": "/nowhere", "profile": "solo"}):
+            with self.subTest(body=body):
+                errors = io.StringIO()
+                with contextlib.redirect_stderr(errors):
+                    status, _, text = self.check(body)
+                self.assertEqual(
+                    (status, text), (409, b"that folder is not waiting for a trust check\n"))
+                self.assertIn("console: trust_check_refused", errors.getvalue())
+        self.assertEqual(self.check({"root": self.key})[0], 400)
+        self.assertEqual(len(self.trust_rows()), rows)
+        self.assertEqual(self.snapshot(), before)
+
+    def test_a_grant_after_close_writes_nothing(self):
+        self.ready(apply_result=APPLIED)
+        self.svc.close()
+        before = self.snapshot()
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            self.assertEqual(self.svc._grant_trust("apply", str(self.repo), "p"), [])
+        self.assertIn("console: trust_grant_skipped closing", errors.getvalue())
+        self.assertEqual(self.snapshot(), before)
 
 
 class PlanApproveRealTest(ApproveCase):

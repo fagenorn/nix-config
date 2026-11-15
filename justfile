@@ -207,6 +207,7 @@ agent-workflow-tests *args:
     tests/test_console_account_remove.py \
     tests/test_console_account_service.py \
     tests/test_console_account_remove_service.py \
+    tests/test_console_folder_trust.py \
     tests/test_console_plan_questions.py \
     tests/test_console_contract_draft.py \
     tests/test_console_register.py \

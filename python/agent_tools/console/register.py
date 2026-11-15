@@ -58,10 +58,10 @@ pure function of the document. `summary(root, plan, report=None, draft=None)` is
 `plan_questions.questions`, and its answered decisions as `{id, subject, value}` (ADR-console-029
 D1) and the `draft` it was given (the drafted contract's fields, ADR-console-031); every other row
 carries `DEFAULTS` (None, None, `[]`, `[]`, None). A ready plan's note is `The plan
-is ready.` with no command and no plan id (#1065; ADR-console-030 keeps it, the page offers Approve beside it). A `no_change` plan with no report (only an answer run passes none) is
-`not_registered` and says `<name> needs no adoption change and is not registered yet: run
-<command>`, the command being the plan's `handoff.next_command` or else `adopt-project verify
---register --repo-root <root>` (D5). A failed plan's headline is `The adoption plan for <name> failed:
+is ready.` with no command and no plan id (#1065; ADR-console-030 keeps it, the page offers Approve beside it). A `no_change` plan with no report is
+`not_registered` and says `waiting_headline(name)`, `<name> is already adopted and is not registered
+yet.`, with the note `CONFIRM_NOTE`, `Choose Register it to register it.` (#1078, ADR-console-034):
+the row the Register card waits on. A failed plan's headline is `The adoption plan for <name> failed:
 <message>`, or `... could not be made.` when the error has no message, or, when the error's
 `repair_id` is `adopt.manifest.*` and its message says the manifest was not found, `The adoption plan for <name> could not start: the agent
 platform's files are not installed on this host.` (#1065); a refused registration's is
@@ -86,6 +86,17 @@ a run that raised, `verb` being the operation that raised (`plan` or `register`)
 name that verb's command; every other kind names it alone. `failed(root, kind, verb="plan")` for the
 `register` verb reads `<name> was not registered: <words>.`, so a registration that raised never
 sends the owner to rerun the plan that had succeeded.
+
+Register card (#1078, ADR-console-034). `waiting(latest)` is true for that row only (`not_registered`,
+`no_change`, the note `CONFIRM_NOTE`); `confirm_items(latest, *, running)` is `[]` unless the latest row
+is waiting and no run is under way, else the one inbox item of reason `register_confirm` (key
+`register-confirm/<root>/<at>`, headline `CONFIRM_ASK`, `why` the folder-trust sentence, options
+`CONFIRM_OPTION` then `LATER_OPTION`, values `CONFIRM_VALUE` then `LATER_VALUE`). The page answers it
+with `parse_confirm_request(body)`, exactly `{"root", "choice"}`, `root` a string with no character
+below 0x20 and no 0x7F, `choice` one of `CONFIRM_VALUE` and `LATER_VALUE` (`ValueError` otherwise).
+`dismissed(latest)` is the waiting row with the note `LATER_NOTE`: `Not now` appends it, `waiting` is
+false for it, and the card is gone until the owner presses Register again. `NOT_WAITING` is the text of
+a confirmation for a root that is not the waiting one.
 
 Drafting row (ADR-console-031). `drafting(root, fields, answered=())` is the row of a repository with no
 project contract: `result` and `state` `drafting`, `project_id` the draft's project-id value (None
@@ -135,7 +146,7 @@ import subprocess
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
-from agent_tools.console import contract_draft, event_log, manager, plan_questions
+from agent_tools.console import contract_draft, event_log, folder_trust, manager, plan_questions
 from agent_tools.system import siblings
 
 ENDED = event_log.REGISTRATION_ENDED
@@ -187,6 +198,14 @@ NEXT_STEPS = {
 MANIFEST_PREFIX = "adopt.manifest."
 MANIFEST_ABSENT = "the installed platform manifest was not found"
 PLATFORM_MISSING = "the agent platform's files are not installed on this host."
+CONFIRM_NOTE = "Choose Register it to register it."
+CONFIRM_ASK = "Register this project?"
+CONFIRM_OPTION = "Register it"
+CONFIRM_VALUE = "register"
+LATER_OPTION = "Not now"
+LATER_VALUE = "not_now"
+LATER_NOTE = "Not registered. Press Register again to register it."
+NOT_WAITING = "that project is not waiting to be registered"
 
 
 def not_directory(path: str) -> str:
@@ -207,6 +226,10 @@ def registry_unreadable() -> str:
 
 def running(name: str) -> str:
     return f"a registration is already running for {name}"
+
+
+def waiting_headline(name: str) -> str:
+    return f"{name} is already adopted and is not registered yet."
 
 
 def parse_register_request(body: bytes) -> str:
@@ -437,12 +460,8 @@ def summary(root: str, plan: Mapping, report: Mapping | None = None,
             return _row(root, project_id, "registered", outcome,
                         f"{name} is registered as {report.get('project_id')}.", [], None)
         if report is None:
-            next_command = plan.get("handoff", {}).get("next_command")
-            run = (next_command if isinstance(next_command, str) and next_command
-                   else f"adopt-project verify --register --repo-root {root}")
-            return _row(root, project_id, "not_registered", outcome,
-                        f"{name} needs no adoption change and is not registered yet: run {run}",
-                        [], None)
+            return _row(root, project_id, "not_registered", outcome, waiting_headline(name), [],
+                        CONFIRM_NOTE, answered=_answered(plan))
         result = _collapse(report.get("result"))
         return _row(root, project_id, "not_registered", outcome,
                     _sentence(f"{name} was not registered: {result}"), [],
@@ -509,6 +528,50 @@ def latest(events: Iterable[event_log.Event], state: dict | None = None) -> dict
             if found["result"] == "drafting":
                 found["questions"] = contract_draft.questions(found["draft"])
     return found
+
+
+def waiting(latest: Mapping | None) -> bool:
+    return (latest is not None and latest.get("result") == "not_registered"
+            and latest.get("outcome") == "no_change" and latest.get("note") == CONFIRM_NOTE)
+
+
+def dismissed(latest: Mapping) -> dict:
+    return {**{key: latest[key] for key in MEMBERS | EXTRA | {"draft"} if key in latest},
+            "note": LATER_NOTE}
+
+
+def confirm_items(latest: Mapping | None, *, running: bool) -> list[dict]:
+    if running or not waiting(latest):
+        return []
+    root, at = latest["root"], latest["at"]
+    name = name_of(root)
+    return [{
+        "type": "inbox_item", "reason": "register_confirm", "key": f"register-confirm/{root}/{at}",
+        "project_id": None, "root": root, "name": name, "title": f"Register {name}",
+        "plan_id": None, "id": None, "subject": None, "headline": CONFIRM_ASK,
+        "why": folder_trust.TRUST_SENTENCE, "lines": [], "refusal": None, "more_questions": 0,
+        "text": False,
+        "questions": [{"question": CONFIRM_ASK, "options": [CONFIRM_OPTION, LATER_OPTION],
+                       "chosen": None, "recommended": None, "recommended_index": None}],
+        "values": [CONFIRM_VALUE, LATER_VALUE], "items": [], "answers": [], "answered": False,
+        "waiting_since": at}]
+
+
+def parse_confirm_request(body: bytes) -> tuple[str, str]:
+    try:
+        value = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("not a JSON object") from error
+    if not isinstance(value, dict) or set(value) != {"root", "choice"}:
+        raise ValueError("wrong members")
+    root, choice = value["root"], value["choice"]
+    if not isinstance(root, str) or not root or not isinstance(choice, str):
+        raise ValueError("wrong types")
+    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in root):
+        raise ValueError("control character")
+    if choice not in (CONFIRM_VALUE, LATER_VALUE):
+        raise ValueError("unknown choice")
+    return root, choice
 
 
 def again_headline(name: str) -> str:

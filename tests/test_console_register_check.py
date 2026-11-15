@@ -19,7 +19,7 @@ import unittest
 import unittest.mock
 from pathlib import Path
 
-from agent_tools.console import register, register_check
+from agent_tools.console import folder_trust, register, register_check
 from agent_tools.project_contract import agent_platform
 
 from . import accounts_sandbox
@@ -74,8 +74,17 @@ class RealConsoleTest(Case):
         self.addCleanup(shutil.rmtree, keep, True)
         seeded([{"project_id": "owner/keep", "root": str(keep)}])
         store = agent_platform.state_root() / "console" / "events.sqlite3"
+        accounts = self.home / "accounts"
+        work = accounts / "profiles" / "work"
+        work.mkdir(parents=True)
+        arranged = {"oauthAccount": {"a": 1}}
+        (work / ".claude.json").write_text(json.dumps(arranged), "utf-8")
+        patched = unittest.mock.patch.dict(os.environ, {"CLAUDE_ACCOUNTS_DIR": str(accounts)})
+        patched.start()
+        self.addCleanup(patched.stop)
         svc = support.service(self, store, agent_platform.registry_path(),
-                              adopter=register.Adopter(), dispatch=None)
+                              adopter=register.Adopter(), dispatch=None, profile_dirs=[work],
+                              trust_home=self.home)
         code, out = self.run_check(
             ["--url", f"http://127.0.0.1:{svc.address[1]}", "--contract", CONTRACT,
              "--wait", "120"])
@@ -90,6 +99,14 @@ class RealConsoleTest(Case):
         results = [json.loads(row[4])["result"] for row in support.log_rows(store)
                    if row[2] == "registration.ended"]
         self.assertIn("registered", results)
+        (grant,) = [json.loads(row[4]) for row in support.log_rows(store)
+                    if row[2] == "trust.granted"]
+        self.assertEqual(grant["cause"], "register")
+        key = os.path.realpath(out["root"])
+        for path, expected in ((work / ".claude.json", arranged), (self.home / ".claude.json", {})):
+            document = json.loads(path.read_text("utf-8"))
+            self.assertNotIn(key, document.pop("projects", {}))
+            self.assertEqual(document, expected)
 
 
 class SettleTest(Case):
@@ -178,15 +195,31 @@ class SettleTest(Case):
 class RestoreTest(Case):
     PID = "console-check/register-leftover"
 
-    def registered_run(self):
-        """A stubbed console that registers, leaving one stored plan behind; the output."""
+    def registered_run(self, cards=(), stays=False):
+        """A stubbed console that registers, leaving one stored plan behind; the output.
+
+        `cards` are the profiles whose Check again card the run left for the fixture's root, plus
+        one card of another root; a trust check clears the fixture's unless `stays`.
+        """
         seeded([])
         self.token()
         box = [None]
         plans = agent_platform.state_root() / "adopt/plans"
         self.plan = plans / "leftover.json"
 
+        self.posts = posts = []
+        confirmed = []
+
+        checked = []
+
         def post(url, headers, body):
+            posts.append((url.rsplit("/", 1)[-1], json.loads(body)))
+            if url.endswith("/api/trust-check"):
+                checked.append(json.loads(body)["profile"])
+                return 204, b""
+            if url.endswith("/api/register-confirm"):
+                confirmed.append(True)
+                return 204, b""
             box[0] = json.loads(body)["path"]
             plans.mkdir(parents=True, exist_ok=True)
             self.plan.write_text(json.dumps({"handoff": {"repo_root": box[0]}}))
@@ -195,10 +228,20 @@ class RestoreTest(Case):
         def fetch(url):
             if box[0] is None:
                 return view(None)
+            row = ({"result": "registered", "headline": "registered",
+                    "at": "2026-11-15T08:01:00+00:00"} if confirmed else
+                   {"result": "not_registered", "outcome": "no_change",
+                    "headline": "r is already adopted and is not registered yet.",
+                    "note": register.CONFIRM_NOTE, "at": "2026-11-15T08:00:00+00:00"})
+            key = os.path.realpath(box[0])
+            open_cards = [{"reason": "trust_failed", "root": "/elsewhere", "profile": "other"}]
+            if stays or not checked:
+                open_cards += [{"reason": "trust_failed", "root": key, "profile": name}
+                               for name in cards]
             return 200, json.dumps({
-                "registration": {"root": box[0], "status": "done", "result": "registered",
-                                 "headline": "registered"},
-                "entries": [{"project_id": self.PID}]}).encode()
+                "registration": {"root": box[0], "status": "done", **row},
+                "entries": [{"project_id": self.PID}],
+                "inbox": {"open": open_cards}}).encode()
 
         return self.run_check(["--wait", "1", "--contract", CONTRACT], fetch=fetch, post=post,
                               project_id=self.PID, poll=0.05, settle=5)
@@ -229,6 +272,29 @@ class RestoreTest(Case):
         code, out = self.registered_run()
         self.assertEqual((code, out["status"], out["restored"]), (0, "met", True))
         self.assertFalse(self.plan.exists())
+        self.assertEqual([name for name, _ in self.posts],
+                         ["register-project", "register-confirm"])
+        self.assertEqual(self.posts[1][1], {"root": self.posts[0][1]["path"], "choice": "register"})
+
+    def test_a_trust_card_the_run_left_is_checked_again_before_the_restore(self):
+        code, out = self.registered_run(cards=("solo",))
+        self.assertEqual((code, out["status"], out["restored"]), (0, "met", True))
+        checks = [body for name, body in self.posts if name == "trust-check"]
+        self.assertEqual(checks, [{"root": os.path.realpath(self.posts[0][1]["path"]),
+                                   "profile": "solo"}])
+
+    def test_a_trust_card_that_stays_is_not_restored_and_is_named(self):
+        code, out = self.registered_run(cards=("solo",), stays=True)
+        self.assertEqual((code, out), (1, {"status": "not_restored",
+                                           "leftovers": ["trust card solo"]}))
+
+    def test_a_trust_entry_that_cannot_be_removed_is_named(self):
+        with unittest.mock.patch.object(register_check.folder_trust, "remove_entry",
+                                        return_value="failed"):
+            code, out = self.registered_run()
+        expected = [str(path) for _, path in folder_trust.targets(
+            Path.home(), register_check.service.default_profile_dirs())]
+        self.assertEqual((code, out), (1, {"status": "not_restored", "leftovers": expected}))
 
 
 class StubTest(Case):

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Verify check for issue 1052: register a throwaway adopted repository from the page, then restore the registry.
+# Verify check for issue 1052: register a throwaway adopted repository from the page (answering its Register card), then restore the registry and the folder trust.
 # verify-pending runs it from the repository root at the commit the block names, so
 # `python` below is that commit's agent_tools source. Exit 0 met, 1 not met, 75 not yet.
 PYTHONPATH=python exec python3 -m agent_tools.console.register_check "$@"

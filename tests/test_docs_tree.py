@@ -637,7 +637,8 @@ class DocsTreeTest(unittest.TestCase):
                 (adr008, "- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
                          "ADR-console-028, ADR-console-029, ADR-console-030"),
                 (adr028, "- **Status:** accepted; amended by ADR-console-029, "
-                         "ADR-console-030, ADR-console-031; extended by #1055 (D10, D11)")):
+                         "ADR-console-030, ADR-console-031, ADR-console-034; "
+                         "extended by #1055 (D10, D11)")):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
                         if row.startswith("- **Status:**"))
             self.assertEqual(line, expected)
@@ -668,11 +669,11 @@ class DocsTreeTest(unittest.TestCase):
         for older, expected in (
                 ("docs/areas/console/adr/028-the-owner-registers-a-project-from-the-page.md",
                  "- **Status:** accepted; amended by ADR-console-029, ADR-console-030, "
-                 "ADR-console-031; extended by #1055 (D10, D11)"),
+                 "ADR-console-031, ADR-console-034; extended by #1055 (D10, D11)"),
                 ("docs/areas/console/adr/"
                  "029-the-owner-answers-the-adoptions-questions-on-the-page.md",
                  "- **Status:** accepted; amended by ADR-console-030, ADR-console-031, "
-                 "ADR-console-033"),
+                 "ADR-console-033, ADR-console-034"),
                 ("docs/areas/console/adr/002-the-desk-page-design-rules.md",
                  "- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
                  "ADR-console-028, ADR-console-029, ADR-console-031, ADR-console-032, "
@@ -1081,6 +1082,28 @@ class DocsTreeTest(unittest.TestCase):
         self.assertNotIn("changes nothing unless", text)
         self.assertIn("integration branch the default contract names", text)
         self.assertIn("conflicting `--integration-branch` operand refuses", text)
+
+    def test_the_trust_adr_records_the_owners_conditions(self):
+        adr = self.doc("docs/areas/console/adr/"
+                       "034-registering-a-project-grants-it-folder-trust-in-every-profile.md")
+        for needle in ("hasTrustDialogAccepted",
+                       "Registering lets agents run in this folder with the folder's own "
+                       "settings and hooks.",
+                       "CLAUDE_CODE_SANDBOXED", "trust.granted", "CLAUDE_ACCOUNT=<profile> claude",
+                       "RENAME_EXCHANGE", "CLAUDE_ACCOUNT_SKIP_FOLDER_TRUST"):
+            self.assertIn(needle, adr)
+        self.assertTrue(adr.startswith("# ADR-console-034 \u2014 Registering a project grants "
+                                       "it folder trust in every profile"))
+        self.assertIn("ADR-console-034",
+                      self.doc("docs/areas/hosts/adr/005-account-profiles-link-shared-config.md"))
+        context = self.doc("docs/areas/console/CONTEXT.md")
+        self.assertRegex(context, r"\*\*Folder trust\*\*:.*?\(ADR-console-034\)\. _Avoid_")
+        line = next(row for row in (REPO_ROOT / "docs/areas/console/adr/030-the-owner-approves-"
+                                    "a-ready-adoption-and-the-console-opens-its-pull-request.md"
+                                    ).read_text().splitlines()
+                    if row.startswith("- **Status:**"))
+        self.assertEqual(line, "- **Status:** accepted; amended by ADR-console-028 D10, "
+                               "ADR-console-034")
 
     def test_the_release_result_adr_limits_one_mutation_to_the_forge_adapter(self):
         text = self.doc("docs/areas/release/adr/005-adapters-never-claim-success.md")

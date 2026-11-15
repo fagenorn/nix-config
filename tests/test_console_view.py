@@ -10,8 +10,7 @@ from agent_tools.claims import forge_markers as fm
 from agent_tools.claims import forge_owner_action as foa
 from agent_tools.console import digest
 from agent_tools.console import contract_draft
-from agent_tools.console import inbox
-from agent_tools.console import register
+from agent_tools.console import folder_trust, inbox, register
 from agent_tools.console import view
 from agent_tools.console.deliveries import (
     DELIVERY_GONE,
@@ -2237,3 +2236,42 @@ class ApplyItemViewTest(unittest.TestCase):
         self.assertEqual(shown["inbox"]["open"], [APPLY_ITEM])
         self.assertEqual(shown["statement"]["inbox_items"], 1)
         self.assertEqual(shown["statement"]["headline"], "1 thing needs you")
+
+
+class RegisterConfirmTest(unittest.TestCase):
+    WAITING = {"by": "owner", "root": "/srv/sample-app", "project_id": None,
+               "result": "not_registered", "outcome": "no_change",
+               "headline": "sample-app is already adopted and is not registered yet.",
+               "lines": [], "note": "Choose Register it to register it.",
+               "at": "2026-11-15T08:00:00+00:00"}
+
+    def test_the_register_card_says_what_registering_allows(self):
+        items = register.confirm_items(self.WAITING, running=False)
+        shown = derive_view([], confirm_items=items)
+        (card,) = shown["inbox"]["open"]
+        self.assertEqual(card["reason"], "register_confirm")
+        self.assertEqual(card["why"], "Registering lets agents run in this folder with the "
+                                      "folder's own settings and hooks.")
+        self.assertEqual(card["questions"][0]["options"], ["Register it", "Not now"])
+        self.assertEqual(card["values"], ["register", "not_now"])
+        self.assertEqual(shown["statement"]["inbox_items"], 1)
+        self.assertEqual(shown["statement"]["sentence"], REGISTER_SENTENCE)
+        self.assertEqual(register.confirm_items(self.WAITING, running=True), [])
+
+
+class TrustItemTest(unittest.TestCase):
+    FAILED = {("/home/o/repo", "work"): {
+        "root": "/home/o/repo", "project": "repo", "profile": "work",
+        "at": "2026-11-15T10:00:00+00:00"}}
+
+    def test_a_failed_profile_is_a_card_with_its_terminal_command(self):
+        shown = derive_view([], trust_items=folder_trust.items(self.FAILED))
+        (card,) = shown["inbox"]["open"]
+        self.assertEqual(card["reason"], "trust_failed")
+        self.assertEqual(card["why"], "Run this in a terminal: cd /home/o/repo && "
+                                      "CLAUDE_ACCOUNT=work claude, then accept the prompt and "
+                                      "type /exit.")
+        self.assertEqual(card["questions"][0]["options"], ["Check again"])
+        self.assertEqual(card["values"], ["check"])
+        self.assertEqual(shown["statement"]["inbox_items"], 1)
+        self.assertEqual(shown["statement"]["sentence"], REGISTER_SENTENCE)

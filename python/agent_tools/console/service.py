@@ -29,6 +29,8 @@ Routes (every response carries `Cache-Control: no-store` and
     POST /api/plan-answer 204, a JSON body, the page answers one question of the adoption plan (below)
     POST /api/plan-approve 204, a JSON body, the page approves a ready adoption plan (below)
     POST /api/plan-defer 204, a JSON body, the page answers Not now to an adoption's apply card (below)
+    POST /api/register-confirm 204, a JSON body, the page answers the Register card of an adopted repository (below)
+    POST /api/trust-check 204, a JSON body, the page answers a Check again card of a failed folder trust (below)
     POST /api/brief 200 application/json, a manager sends a sprint's brief (below)
     POST /api/report 200 application/json, a manager sends a sprint's report (below)
     POST /api/close 200 application/json, a manager sends a sprint's closing report (below)
@@ -69,7 +71,7 @@ A page write (`PAGE_WRITES`, today `POST /api/looked`, `POST /api/answer`, `POST
 `POST /api/retry-manager`, `POST /api/message`, `POST /api/stop`, `POST /api/round-answer`, `POST /api/continue`, `POST /api/exclusion`, `POST /api/pin`, `POST /api/signin`,
 `POST /api/signin-code`, `POST /api/signin-cancel`, `POST /api/signin-link`, `POST /api/account-add`, `POST /api/account-remove` and
 `POST /api/register-project`, `POST /api/plan-answer`, `POST /api/plan-approve`,
-`POST /api/adoption-register` and `POST /api/plan-defer`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
+`POST /api/adoption-register`, `POST /api/plan-defer`, `POST /api/register-confirm` and `POST /api/trust-check`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
 alone and goes through one guard, `_page_write`, whatever its route. After the loopback `Host`
 check and before any body is read, exactly one `Origin` header must equal `http://<Host>` (else
 403 `text/plain` `origin refused`) and exactly one `X-Console-Token` header must equal the
@@ -155,7 +157,11 @@ failed add is one stderr line `console: account_add_failed <name> <kind>` and 50
 not be created: <kind>`, appending nothing. An added profile appends one `account.added` row
 `{"by": "owner", "profile": <name>}`, joins the service's profiles at once, and its sign-in status is
 read once (a failed read is one stderr line `console: signin_add_read_failed <profile> <kind or
-Type>` and records nothing) before the sign-in starts as the start route starts it. A sign-in that
+Type>` and records nothing) before the sign-in starts as the start route starts it. Before that the
+new profile is granted every registered project's folder trust (`_grant_trust`, cause `account`, one
+`trust.granted` row per project, no lock held), after the adder returned, so the adder's 30 second
+deadline bounds creation only; an unreadable registry grants nothing (`console:
+trust_account_registry_unreadable <name>`) and no grant fails the add. A sign-in that
 cannot start leaves the row and the profile, appends the start route's `failed` row and answers
 502 `the account was added; its sign-in could not start: <kind>`, with `console: signin_start_failed
 <name> <kind>`. Any other exception is `console: account_add_failed <Type>` (never its message) and
@@ -204,12 +210,28 @@ service refuses, each as 409 with the text, one stderr line `console: registrati
 `register.refusal` rejects (not a full path, not a directory, not the top of a checkout, already
 registered); and, under the ingest lock, a second registration while one runs
 (`register.running`). Otherwise the answer is an empty `204` at once and the run is dispatched: the
-adopter's plan, and for a `no_change` plan its register check, each a child that ends before the
-next starts. One `registration.ended` row (also for a failed child) is appended, unless the
+adopter's plan. A `no_change` plan runs no register check: its row is the waiting row, `register.summary`
+with no report (#1078, ADR-console-034), and the Register card waits for the owner (below). One
+`registration.ended` row (also for a failed child) is appended, unless the
 service is closed, in the same ingest section that clears the running mark, so the view's
 `registration` stays `running` until no child of the run is left. The registry is written only by
 the register child, never by the console. Any other exception is `console: registration_failed
 <Type>` and 500 `registering failed`.
+
+`POST /api/register-confirm` (#1078, ADR-console-034) is the answer to the Register card
+(`register.confirm_items`) of a repository that is already adopted. It runs the same checks with
+`MAX_REGISTER_CONFIRM_BYTES` (4096) and `register.parse_confirm_request`: 400 `bad registration
+approval`. The service refuses, each as 409 with the text, one stderr line `console:
+register_confirm_refused <reason>`, appending and running nothing, in this order: without an adopter,
+`register.UNAVAILABLE`; while a run is under way, `register.running`; when the shown registration is
+not the waiting row (`register.waiting`) or names another root, `register.NOT_WAITING`. `not_now`
+appends the waiting row again with the note `register.LATER_NOTE` (`register.dismissed`), which
+writes no trust and runs no child, and answers `204`. `register` also refuses an unreadable registry
+and a root the registry already holds, as the first write does, and otherwise answers `204` at once
+and dispatches the run: the folder's trust is granted in every profile (`_grant_trust`, cause
+`register`, ADR-console-034), then the plan runs again and, for a `no_change` plan, the register
+child. Nothing is granted or registered before this answer. Any other exception is `console:
+register_confirm_failed <Type>` and 500 `registering failed`.
 
 A checkout with no `.agents/project.json` (ADR-console-031) is drafted instead of planned: the run
 reads it (`draft_reader`, `contract_draft.read` by default), drafts the contract from the fleet
@@ -257,7 +279,16 @@ or another one than the body's, `approve.STALE`; when it is not ready, `approve.
 the plan's adoption is an opened pull request that is still open or ready (`approve.OPENED`) or was
 merged (`approve.MERGED`). A closed pull request, a failed apply or no adoption at all is approved
 again as a fresh apply. Otherwise the answer is an empty `204` at once and the run is dispatched on
-a tracked thread (`APPROVAL_THREAD`) that `close` joins. The run applies the plan (`Adopter.apply`,
+a tracked thread (`APPROVAL_THREAD`) that `close` joins. A fresh approval (no adoption yet) first
+grants the folder's client trust (#1078, ADR-console-034): `folder_trust.grant` for the main
+checkout's key in `~/.claude.json` (when the service was given a `trust_home`) and in every profile,
+one `trust.granted` owner-action row (cause `apply`; one profile and its result per entry, no file
+content) and one stderr line `console: trust_granted <cause> <project> <n granted> <n already> <n
+failed>`; a failed grant never stops the run, and a resumed approval (Try again, Apply it again)
+grants nothing. `close` waits for a grant under way, so its row is kept, and a grant that starts
+after `close` began writes nothing (`console: trust_grant_skipped closing`). A result for a profile that no longer exists when the row is
+published (an account removal finished meanwhile) is dropped, and a grant left with no result appends
+nothing. The run applies the plan (`Adopter.apply`,
 acknowledging deletions only when the shown plan lists them) and appends `adoption.step` `applied`,
 pushes only the one adoption branch, at the commit apply recorded (`approve.push`), then looks for the branch's pull request
 before opening one and, when the open fails, looks once more (a pull request whose answer was lost
@@ -273,6 +304,23 @@ apply has already made its branch and a restarted console must not offer a fresh
 The console never merges: it pushes the one branch and opens its pull request, and the forge's
 required checks keep merge safety. One line `console: plan_approve_ended <step or stopped>` ends the
 run. Any other exception is `console: plan_approve_failed <Type>` and 500 `approving failed`.
+
+A `trust.granted` row that leaves a profile `failed` is folded (`folder_trust.failures`, at start,
+on append and after retention) into a Check again card (`folder_trust.items`, `trust_items` of the
+view) that a later `granted` or `already` for the same root and profile removes, as does the
+removal of that profile (an `account.removal` row of outcome `removed` or `removed_signed_out_already`).
+
+`POST /api/trust-check` (#1078, ADR-console-034) is that card's answer. It runs the same checks with
+`MAX_TRUST_CHECK_BYTES` (4096) and `folder_trust.parse_check_request`: 400 `bad trust check`. The
+service refuses with 409 `folder_trust.NOT_FAILED` and one stderr line `console:
+trust_check_refused <reason>`, writing nothing, unless the `(root, profile)` pair is a folded failure
+and the profile still has a target (`trust_home/.claude.json` for `default`, else the profile
+directory of that name). Otherwise it runs the grant for that one pair on the handler thread
+(`_grant_trust`, cause `check`, so `close` waits for it), appends one
+`trust.granted` row for that pair and answers `204`. The key is resolved again from the card's root,
+never taken from it: a failed row names the checkout path when its key never resolved, and the row
+keeps that root, so a granted retry clears the card it answers. Any other exception is `console:
+trust_check_failed <Type>` and 500 `checking failed`.
 
 `POST /api/adoption-register` (#1055, ADR-console-028 D10) is the Retry of a refused registration
 of a merged adoption. It runs the same checks with `MAX_ADOPTION_REGISTER_BYTES` (4096) and
@@ -972,7 +1020,7 @@ import traceback
 import uuid
 import collections
 from collections import OrderedDict
-from collections.abc import Callable, Collection, Iterable, Mapping
+from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import parse_qsl
@@ -980,7 +1028,7 @@ from urllib.parse import parse_qsl
 from agent_tools.claims import owner_actions
 from agent_tools.console import (
     account_add, account_remove, answer, approve, capacity, contract_draft, deliveries, digest, exclusion, idle, inbox,
-    manager, nudge, pin, plan_questions, probe, register, revive, sessions, signin, signin_run, sprints, write_guard)
+    folder_trust, manager, nudge, pin, plan_questions, probe, register, revive, sessions, signin, signin_run, sprints, write_guard)
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
     MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_STOP_FAILED,
@@ -1047,12 +1095,14 @@ PLAN_ANSWER_PATH = "/api/plan-answer"
 PLAN_APPROVE_PATH = "/api/plan-approve"
 ADOPTION_REGISTER_PATH = "/api/adoption-register"
 PLAN_DEFER_PATH = "/api/plan-defer"
+REGISTER_CONFIRM_PATH = "/api/register-confirm"
+TRUST_CHECK_PATH = "/api/trust-check"
 PAGE_WRITES: frozenset[str] = frozenset({
     LOOKED_PATH, ANSWER_PATH, CHECK_PATH, GOAL_PATH, WITHDRAW_PATH, APPROVE_PATH, REPLY_PATH,
     RETRY_PATH, MESSAGE_PATH, STOP_PATH, ROUND_ANSWER_PATH, CONTINUE_PATH, EXCLUSION_PATH,
     PIN_PATH, SIGNIN_PATH, SIGNIN_CODE_PATH, SIGNIN_CANCEL_PATH, SIGNIN_LINK_PATH, ACCOUNT_ADD_PATH,
     ACCOUNT_REMOVE_PATH, REGISTER_PATH, PLAN_ANSWER_PATH, PLAN_APPROVE_PATH,
-    ADOPTION_REGISTER_PATH, PLAN_DEFER_PATH})
+    ADOPTION_REGISTER_PATH, PLAN_DEFER_PATH, REGISTER_CONFIRM_PATH, TRUST_CHECK_PATH})
 MAX_SIGNIN_BYTES = 4096
 MAX_ACCOUNT_BYTES = 4096
 MAX_REMOVE_BYTES = 4096
@@ -1061,6 +1111,8 @@ MAX_PLAN_ANSWER_BYTES = 4096
 MAX_PLAN_APPROVE_BYTES = 4096
 MAX_ADOPTION_REGISTER_BYTES = 4096
 MAX_PLAN_DEFER_BYTES = 4096
+MAX_REGISTER_CONFIRM_BYTES = 4096
+MAX_TRUST_CHECK_BYTES = 4096
 APPROVAL_THREAD = "console-adoption-approval"
 SIGNIN_THREAD = "console-signin-deadline"
 SIGNIN_TICK_SECONDS = 1.0
@@ -1599,6 +1651,50 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return False
         return True
 
+    def _register_confirm_request(self, console: "ConsoleService") -> bool:
+        """Carry out the Register card's answer; True when the shared 204 is to be sent."""
+        body = self._json_body(MAX_REGISTER_CONFIRM_BYTES)
+        if body is None:
+            return False
+        try:
+            root, choice = register.parse_confirm_request(body)
+        except ValueError:
+            self._refuse(400, "bad registration approval")
+            return False
+        try:
+            console.confirm_registration(root, choice)
+        except sprints.Refused as error:
+            print(f"console: register_confirm_refused {error}", file=sys.stderr)
+            self._refuse(409, str(error))
+            return False
+        except Exception as error:
+            print(f"console: register_confirm_failed {type(error).__name__}", file=sys.stderr)
+            self._refuse(500, "registering failed")
+            return False
+        return True
+
+    def _trust_check_request(self, console: "ConsoleService") -> bool:
+        """Carry out the Check again answer; True when the shared 204 is to be sent."""
+        body = self._json_body(MAX_TRUST_CHECK_BYTES)
+        if body is None:
+            return False
+        try:
+            root, profile = folder_trust.parse_check_request(body)
+        except ValueError:
+            self._refuse(400, "bad trust check")
+            return False
+        try:
+            console.check_trust(root, profile)
+        except sprints.Refused as error:
+            print(f"console: trust_check_refused {error}", file=sys.stderr)
+            self._refuse(409, str(error))
+            return False
+        except Exception as error:
+            print(f"console: trust_check_failed {type(error).__name__}", file=sys.stderr)
+            self._refuse(500, "checking failed")
+            return False
+        return True
+
     def _brief_request(self):
         """The manager's route: a brief sent with the sprint's secret; no token, no page."""
         console = self.server.console
@@ -2050,6 +2146,14 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
             if not self._plan_defer_request(console):
                 return
+        elif route == REGISTER_CONFIRM_PATH:
+            self.close_connection = True
+            if not self._register_confirm_request(console):
+                return
+        elif route == TRUST_CHECK_PATH:
+            self.close_connection = True
+            if not self._trust_check_request(console):
+                return
         else:
             if (self.headers.get("Content-Length", "0") != "0"
                     or self.headers.get("Transfer-Encoding") is not None):
@@ -2190,6 +2294,8 @@ class ConsoleService:
                  draft_reader: Callable[[str], dict] = contract_draft.read,
                  forge=None,
                  pusher: Callable[..., None] = approve.push,
+                 trust_home: Path | None = None,
+                 trust_granter: Callable[[Path, str], str] = folder_trust.grant,
                  approval_dispatch: Callable[[Callable[[], None]], None] | None = None,
                  probe_dispatch: Callable[[Callable[[], None]], None] | None = None,
                  probe_tick_seconds: float = PROBE_TICK_SECONDS,
@@ -2206,6 +2312,9 @@ class ConsoleService:
         self._draft_reader = draft_reader
         self._forge = forge
         self._pusher = pusher
+        self._trust_home = None if trust_home is None else Path(trust_home)
+        self._trust_granter = trust_granter
+        self._grants_running = 0
         self._approving = False
         self._enrolling: set[str] = set()
         self._approval_workers: list[threading.Thread] = []
@@ -2262,6 +2371,7 @@ class ConsoleService:
         self._pinned: str | None = None
         self._signin_ends: dict[str, signin_run.Ended] = {}
         self._accounts_added: frozenset[str] = frozenset()
+        self._trust_failures: dict[tuple[str, str], dict] = {}
         self._pin_launches: pin.PinLaunches = pin.pin_launches([])
         self._signin_live: dict[str, int] = {}
         self._signin_by_run: dict[int, tuple[str, int]] = {}
@@ -2305,6 +2415,7 @@ class ConsoleService:
         self.log: EventLog | None = None
         self._ingest = threading.Lock()
         self._idle = threading.Condition(self._ingest)
+        self._grants_done = threading.Condition(self._ingest)
         self._signin_runs = None if signin_runs is None else signin_runs(on_end=self._signin_ended)
         self._published = threading.Condition()
         self._view = b""
@@ -2331,6 +2442,7 @@ class ConsoleService:
             self._pinned = pin.pinned_profile(events)
             self._signin_ends = signin_run.ended_state(events)
             self._accounts_added = account_add.added_state(events)
+            self._trust_failures = folder_trust.failures(events)
             self._registration = register.latest(events)
             self._adoptions = approve.adoptions(events)
             self._deferred = approve.deferrals(events)
@@ -2441,6 +2553,9 @@ class ConsoleService:
             adoption_items=approve.inbox_entries(self._adoptions),
             retry_items=approve.retry_entries(self._adoptions, self._enrolling),
             apply_items=apply_items,
+            trust_items=folder_trust.items(self._trust_failures),
+            confirm_items=register.confirm_items(
+                self._registration, running=self._registering is not None),
             pin=pin.note(self._pinned, cap, manager.session_profile(cap, self._use.last)),
             pin_launches=self._pin_launches.launched,
             managers=self._launcher is not None, pending=self._pending))
@@ -2867,8 +2982,31 @@ class ConsoleService:
                 self._profiles = listed
                 self._fold(self.log.append([account_add.added(name)]))
                 self._publish()
+        self._grant_registered_projects(name)
         self._read_signin_now(name, "add")
         return self.start_signin(name)
+
+    def _grant_registered_projects(self, name: str) -> None:
+        """Grant a page-added profile every registered project's folder trust (#1078).
+
+        Runs after the adder returned, so the add deadline bounds creation only, and before the
+        sign-in starts. Nothing here fails the add: an unreadable registry grants nothing.
+        """
+        entries = read_fleet(self.registry)
+        if entries is None:
+            if os.path.lexists(self.registry):
+                print(f"console: trust_account_registry_unreadable {name}", file=sys.stderr)
+            return
+        found = [d for d in self._profile_dirs() if sessions.account_name(d) == name]
+        if not found:
+            return
+        for entry in entries:
+            try:
+                self._grant_trust("account", entry["root"], entry["project_id"],
+                                  profiles=[(name, found[0] / ".claude.json")])
+            except Exception as error:
+                print(f"console: trust_account_failed {name} {type(error).__name__}",
+                      file=sys.stderr)
 
     def register_project(self, path: str) -> None:
         """Dispatch the adoption plan of a repository; refusals are `sprints.Refused`."""
@@ -2895,7 +3033,63 @@ class ConsoleService:
                 self._publish()
             raise
 
-    def _run_registration(self, root: str, entries: list[dict]) -> None:
+    def confirm_registration(self, root: str, choice: str) -> None:
+        """Answer the Register card of an adopted repository; refusals are `sprints.Refused`."""
+        if self._adopter is None:
+            raise sprints.Refused(register.UNAVAILABLE)
+        with self._ingest:
+            latest = self._check_waiting(root)
+            if choice == register.LATER_VALUE:
+                self._fold(self.log.append([register.ended(register.dismissed(latest))]))
+                self._publish()
+                return
+        entries = read_fleet(self.registry)
+        if entries is None:
+            if os.path.lexists(self.registry):
+                raise sprints.Refused(register.registry_unreadable())
+            entries = []
+        reason, _ = register.refusal(root, entries, home=os.environ.get("HOME", ""))
+        if reason is not None:
+            raise sprints.Refused(reason)
+        project = latest["project_id"] or register.name_of(root)
+        with self._ingest:
+            if self._check_waiting(root)["at"] != latest["at"]:
+                raise sprints.Refused(register.NOT_WAITING)
+            self._registering = root
+            self._publish()
+
+        def run() -> None:
+            try:
+                self._grant_trust("register", root, project)
+            except Exception as error:
+                print(f"console: trust_grant_failed {type(error).__name__}", file=sys.stderr)
+            self._run_registration(root, entries, confirmed=True,
+                                   answers=latest["answered"], draft=latest["draft"])
+
+        try:
+            self._dispatch(run)
+        except BaseException:
+            with self._ingest:
+                self._registering = None
+                self._publish()
+            raise
+
+    def _check_waiting(self, root: str) -> dict:
+        """The registration row waiting on its Register card for `root`, held under the ingest lock."""
+        if self._registering is not None:
+            raise sprints.Refused(register.running(register.name_of(self._registering)))
+        latest = self._registration
+        if not register.waiting(latest) or latest["root"] != root:
+            raise sprints.Refused(register.NOT_WAITING)
+        return latest
+
+    def _run_registration(self, root: str, entries: list[dict], *, confirmed: bool = False,
+                          answers: list[dict] | None = None, draft: list[dict] | None = None) -> None:
+        """Plan and, when confirmed, register; a confirmed run plans with the waiting row's answers.
+
+        The Register card can follow an answer run, and a plan without those answers goes back to
+        `reconcile` (a `retain` answer adds no operation), so `register` would never run.
+        """
         verb = "plan"
         try:
             if not os.path.lexists(os.path.join(root, ".agents/project.json")):
@@ -2903,9 +3097,10 @@ class ConsoleService:
                 fields = contract_draft.draft(root, reading, entries=entries)
                 payload = self._plan_draft(root, fields, [])
             else:
-                plan = self._adopter.plan(root, cancel=self._stop)
+                plan = (self._plan_with(root, draft, answers) if answers or draft
+                        else self._adopter.plan(root, cancel=self._stop))
                 report = None
-                if plan.get("plan", {}).get("outcome") == "no_change":
+                if confirmed and plan.get("plan", {}).get("outcome") == "no_change":
                     verb = "register"
                     report = self._adopter.register(root, cancel=self._stop)
                 payload = register.summary(root, plan, report)
@@ -3121,9 +3316,82 @@ class ConsoleService:
         approve.step_row(payload)
         return payload
 
+    def _grant_trust(self, cause: str, root: str, project: str,
+                     profiles: Sequence[tuple[str, Path]] | None = None,
+                     slot: str | None = None) -> list[tuple[str, str]]:
+        """Grant the folder's client trust in every target and log one `trust.granted` row.
+
+        The key is read from `root` every time. The row names the key, or `slot` when the caller
+        answers a failed row (a failure whose key never resolved names the checkout path, and the
+        retry must clear that very pair). A result for a profile that no longer exists when the row
+        is published is dropped, so an account removal that finished first leaves no card behind.
+
+        The row is kept even when `close` has begun, the files being written already; a grant that
+        starts after `close` began writes nothing. `close` waits for every grant under way.
+        """
+        with self._ingest:
+            if self._closed:
+                print("console: trust_grant_skipped closing", file=sys.stderr)
+                return []
+            self._grants_running += 1
+        try:
+            found = (folder_trust.targets(self._trust_home, self._profile_dirs())
+                     if profiles is None else list(profiles))
+            if not found:
+                return []
+            key = folder_trust.trust_key(root)
+            results = []
+            for name, path in found:
+                if key is None:
+                    results.append((name, folder_trust.FAILED))
+                    continue
+                try:
+                    results.append((name, self._trust_granter(path, key)))
+                except Exception as error:
+                    print(f"console: trust_grant_error {name} {type(error).__name__}",
+                          file=sys.stderr)
+                    results.append((name, folder_trust.FAILED))
+            named = slot if slot is not None else (
+                key if key is not None else os.path.realpath(root))
+            with self._ingest:
+                present = self._read_profiles()
+                results = [(name, result) for name, result in results
+                           if name == "default" or name in present]
+                if not results:
+                    return []
+                row = folder_trust.granted_row(cause, project, named, results)
+                self._fold(self.log.append([row]))
+                if not self._closed:
+                    self._publish()
+            counts = [sum(1 for _, result in results if result == one)
+                      for one in folder_trust.RESULTS]
+            print(f"console: trust_granted {cause} {project} {counts[0]} {counts[1]} {counts[2]}",
+                  file=sys.stderr)
+            return results
+        finally:
+            with self._ingest:
+                self._grants_running -= 1
+                self._grants_done.notify_all()
+
+    def check_trust(self, root: str, profile: str) -> None:
+        """Grant the trust again for one failed pair, as the Check again card asks (#1078).
+
+        Refused with `folder_trust.NOT_FAILED` unless a logged `trust.granted` row left
+        `(root, profile)` failed and the profile's file is still a target; nothing else is granted.
+        """
+        with self._ingest:
+            failed = self._trust_failures.get((root, profile))
+        found = [pair for pair in folder_trust.targets(self._trust_home, self._profile_dirs())
+                 if pair[0] == profile]
+        if failed is None or not found:
+            raise sprints.Refused(folder_trust.NOT_FAILED)
+        self._grant_trust("check", root, failed["project"], found, slot=root)
+
     def _run_approval(self, root: str, shown: dict, adoption: dict | None) -> None:
         final = None
         try:
+            if adoption is None:
+                self._grant_trust("apply", root, shown["project_id"] or register.name_of(root))
             final = self._approval_steps(root, shown, adoption)
         except Exception as error:
             self._log_approval_error({"stage": "run", "root": root,
@@ -4757,6 +5025,7 @@ class ConsoleService:
         self._pinned = pin.pinned_profile(appended, self._pinned)
         self._signin_ends = signin_run.ended_state(appended, self._signin_ends)
         self._accounts_added = account_add.added_state(appended, self._accounts_added)
+        self._trust_failures = folder_trust.failures(appended, self._trust_failures)
         self._registration = register.latest(appended, self._registration)
         self._adoptions = approve.adoptions(appended, self._adoptions)
         self._deferred = approve.deferrals(appended, self._deferred)
@@ -4788,6 +5057,7 @@ class ConsoleService:
                 self._pinned = pin.pinned_profile(events)
                 self._signin_ends = signin_run.ended_state(events)
                 self._accounts_added = account_add.added_state(events)
+                self._trust_failures = folder_trust.failures(events)
                 self._registration = register.latest(events)
                 self._adoptions = approve.adoptions(events)
                 self._deferred = approve.deferrals(events)
@@ -5132,4 +5402,6 @@ class ConsoleService:
             self._server.shutdown()
         self._server.server_close()
         with self._ingest:
+            while self._grants_running:
+                self._grants_done.wait()
             self.log.close()

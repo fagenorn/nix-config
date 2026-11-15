@@ -151,6 +151,18 @@ class AdderTest(unittest.TestCase):
             time.sleep(3)
             self.assertFalse(marker.exists())
 
+    def test_the_adder_withholds_the_launchers_grant(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            seen = root / "seen"
+            script = root / "launcher"
+            script.write_text('#!/bin/sh\nprintf %s "$CLAUDE_ACCOUNT_SKIP_FOLDER_TRUST" > "$SEEN"\n')
+            script.chmod(0o755)
+            Adder(command=[str(script)], environ={"SEEN": str(seen), "PATH": os.environ["PATH"]})(
+                "solo")
+            self.assertEqual(seen.read_text(), "1")
+            self.assertEqual(account_add.SKIP_TRUST_ENV, "CLAUDE_ACCOUNT_SKIP_FOLDER_TRUST")
+
     def test_adder_for(self):
         self.assertIsInstance(adder_for("linux"), Adder)
         self.assertIsNone(adder_for("darwin"))

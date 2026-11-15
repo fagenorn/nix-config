@@ -8,6 +8,7 @@ import json
 import os
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import threading
@@ -335,6 +336,66 @@ class AccountSigninTest(Case):
         self.assertNotIn(LINK, self.svc.view_bytes.decode())
 
 
+class AccountTrustTest(Case):
+    def setUp(self):
+        super().setUp()
+        self.repos = []
+        for name in ("alpha", "beta"):
+            repo = self.root / name
+            repo.mkdir()
+            subprocess.run(["git", "init", "-q"], cwd=repo, check=True,
+                           stdin=subprocess.DEVNULL)
+            self.repos.append(repo)
+        support.write_registry(self.registry, [
+            {"project_id": repo.name, "root": str(repo)} for repo in self.repos])
+
+    def trusting_adder(self, name):
+        self.added.append(name)
+        directory = self.profiles / name
+        directory.mkdir(mode=0o700)
+        (directory / ".claude.json").write_text(json.dumps({"oauthAccount": {"a": 1}}))
+
+    def test_a_page_added_profile_carries_every_registered_project(self):
+        work = self.profiles / "work" / ".claude.json"
+        work.write_text(json.dumps({"projects": {}}))
+        before = work.read_bytes()
+        self.begin(adder=self.trusting_adder)
+        status, _, _ = self.post({"name": "twin"})
+        self.assertEqual(status, 200)
+        document = json.loads((self.profiles / "twin" / ".claude.json").read_text())
+        self.assertEqual(document["oauthAccount"], {"a": 1})
+        for repo in self.repos:
+            self.assertIs(document["projects"][os.path.realpath(repo)]["hasTrustDialogAccepted"], True)
+        self.assertEqual(work.read_bytes(), before)
+        rows = [payload for _, payload in self.rows("trust.granted")]
+        self.assertEqual([row["cause"] for row in rows], ["account", "account"])
+        self.assertEqual([row["project"] for row in rows], ["alpha", "beta"])
+        for row in rows:
+            self.assertEqual(row["profiles"], [{"profile": "twin", "result": "granted"}])
+
+    def test_a_profile_with_no_claude_json_gets_one_with_the_keys(self):
+        self.begin()
+        status, _, _ = self.post({"name": "twin"})
+        self.assertEqual(status, 200)
+        path = self.profiles / "twin" / ".claude.json"
+        self.assertEqual(stat.S_IMODE(os.stat(path).st_mode), 0o600)
+        document = json.loads(path.read_text())
+        self.assertEqual(list(document), ["projects"])
+        self.assertEqual(sorted(document["projects"]),
+                         sorted(os.path.realpath(repo) for repo in self.repos))
+        for entry in document["projects"].values():
+            self.assertEqual(entry, {"hasTrustDialogAccepted": True})
+
+    def test_an_empty_registry_grants_nothing(self):
+        support.write_registry(self.registry, [])
+        self.begin(adder=self.trusting_adder)
+        status, _, _ = self.post({"name": "twin"})
+        self.assertEqual(status, 200)
+        self.assertEqual(self.rows("trust.granted"), [])
+        self.assertEqual(json.loads((self.profiles / "twin" / ".claude.json").read_text()),
+                         {"oauthAccount": {"a": 1}})
+
+
 class AccountProfileTest(Case):
     def test_an_added_profile_is_the_one_the_launchers_add_makes(self):
         home = self.root / "home"
@@ -383,6 +444,94 @@ class AccountProfileTest(Case):
         self.assertNotIn("oauthAccount", copied)
         for one in (a, b):
             self.assertEqual(stat.S_IMODE(os.stat(one / ".claude.json").st_mode), 0o600)
+
+    def test_the_launchers_add_grants_every_registered_project(self):
+        import subprocess
+        home = self.root / "home"
+        (home / ".claude").mkdir(parents=True)
+        (home / ".claude.json").write_text(json.dumps(
+            {"oauthAccount": {"emailAddress": "o@example.test"}, "projects": {}}))
+        repo = self.root / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True, stdin=subprocess.DEVNULL)
+        key = os.path.realpath(repo)
+        support.write_registry(home / ".agents/state/fleet/registry.json",
+                               [{"project_id": "alpha", "root": str(repo)}])
+        jq = shutil.which("jq")
+        if jq is None:
+            self.fail("jq is not on PATH; the launcher's .claude.json copy needs it")
+        shim = self.root / "folder-trust"
+        python_dir = Path(__file__).resolve().parents[1] / "python"
+        shim.write_text(f'#!/bin/sh\nPYTHONPATH={python_dir} exec {sys.executable} '
+                        '-m agent_tools.console.folder_trust "$@"\n')
+        shim.chmod(0o755)
+        module = self.root / "mod"
+        shutil.copytree(ACCOUNTS_MODULE, module)
+        launcher = module / "bin/claude-account"
+        text = launcher.read_text()
+        self.assertEqual(text.count("\nJQ=jq\n"), 1)
+        self.assertEqual(text.count("\nFOLDER_TRUST=\n"), 1)
+        launcher.write_text(text.replace("\nJQ=jq\n", f"\nJQ={jq}\n")
+                            .replace("\nFOLDER_TRUST=\n", f"\nFOLDER_TRUST={shim}\n"))
+        env = {"HOME": str(home), "CLAUDE_ACCOUNTS_DIR": str(self.accounts),
+               "PATH": os.environ["PATH"]}
+        for name in ("solo", "-h"):
+            with self.subTest(name=name):
+                done = subprocess.run([shutil.which("bash"), str(launcher), "add", name],
+                                      env=env, capture_output=True, check=False)
+                self.assertEqual(done.returncode, 0, done.stderr)
+                document = json.loads((self.profiles / name / ".claude.json").read_text())
+                self.assertIs(document["projects"][key]["hasTrustDialogAccepted"], True)
+                self.assertNotIn("oauthAccount", document)
+        done = subprocess.run(
+            [shutil.which("bash"), str(launcher), "add", "skip"],
+            env={**env, "CLAUDE_ACCOUNT_SKIP_FOLDER_TRUST": "1"}, capture_output=True, check=False)
+        self.assertEqual(done.returncode, 0, done.stderr)
+        document = json.loads((self.profiles / "skip" / ".claude.json").read_text())
+        self.assertNotIn(key, document.get("projects", {}))
+
+    def test_a_page_add_through_the_real_adder_grants_before_the_sign_in(self):
+        home = self.root / "home"
+        (home / ".claude").mkdir(parents=True)
+        (home / ".claude.json").write_text(json.dumps(
+            {"oauthAccount": {"emailAddress": "o@example.test"}, "projects": {}}))
+        repo = self.root / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=repo, check=True, stdin=subprocess.DEVNULL)
+        key = os.path.realpath(repo)
+        entry = [{"project_id": "alpha", "root": str(repo)}]
+        support.write_registry(home / ".agents/state/fleet/registry.json", entry)
+        support.write_registry(self.registry, entry)
+        jq = shutil.which("jq")
+        if jq is None:
+            self.fail("jq is not on PATH; the launcher's .claude.json copy needs it")
+        shim = self.root / "folder-trust"
+        python_dir = Path(__file__).resolve().parents[1] / "python"
+        shim.write_text(f'#!/bin/sh\necho ran >> {repo}/shim-ran\n'
+                        f'PYTHONPATH={python_dir} exec {sys.executable} '
+                        '-m agent_tools.console.folder_trust "$@"\n')
+        shim.chmod(0o755)
+        module = self.root / "mod"
+        shutil.copytree(ACCOUNTS_MODULE, module)
+        launcher = module / "bin/claude-account"
+        text = launcher.read_text()
+        self.assertEqual(text.count("\nJQ=jq\n"), 1)
+        self.assertEqual(text.count("\nFOLDER_TRUST=\n"), 1)
+        launcher.write_text(text.replace("\nJQ=jq\n", f"\nJQ={jq}\n")
+                            .replace("\nFOLDER_TRUST=\n", f"\nFOLDER_TRUST={shim}\n"))
+        launch_env = {"HOME": str(home), "CLAUDE_ACCOUNTS_DIR": str(self.accounts),
+                      "PATH": os.environ["PATH"]}
+        self.begin(adder=account_add.Adder(command=[shutil.which("bash"), str(launcher)],
+                                           environ=launch_env))
+        status, _, _ = self.post({"name": "twin"})
+        self.assertEqual(status, 200)
+        self.assertFalse((repo / "shim-ran").exists())
+        document = json.loads((self.profiles / "twin" / ".claude.json").read_text())
+        self.assertIs(document["projects"][key]["hasTrustDialogAccepted"], True)
+        granted = [seq for seq, payload in self.rows("trust.granted")
+                   if payload["cause"] == "account"]
+        self.assertEqual(len(granted), 1)
+        self.assertLess(granted[0], self.start_attempt("twin"))
 
 
 if __name__ == "__main__":

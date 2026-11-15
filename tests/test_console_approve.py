@@ -16,7 +16,7 @@ import time
 import unittest
 from pathlib import Path
 
-from agent_tools.console import approve, event_log, register
+from agent_tools.console import approve, event_log, folder_trust, register
 from agent_tools.console.event_log import Event
 from agent_tools.project_contract import adopt_apply
 from agent_tools.system.forge_api import ForgeError
@@ -631,8 +631,15 @@ class ApplyItemTest(unittest.TestCase):
         got = approve.apply_items(self.LATEST, None, None, approve.action(
             self.LATEST, None, available=True, running=False))
         self.assertEqual(got, [self.item(
-            "register-apply/p/t1", "Apply this adoption?", None, list(self.LATEST["lines"]),
+            "register-apply/p/t1", "Apply this adoption?", folder_trust.TRUST_SENTENCE,
+            list(self.LATEST["lines"]),
             "Apply it", "apply", "t1")])
+
+    def test_the_apply_card_says_what_registering_allows(self):
+        got = approve.apply_items(self.LATEST, None, None, "approve")
+        self.assertEqual(
+            got[0]["why"],
+            "Registering lets agents run in this folder with the folder's own settings and hooks.")
 
     def test_a_resumable_step_is_one_try_again_item(self):
         for step in approve.RESUMABLE:
