@@ -7014,6 +7014,23 @@ class DraftedContractPageTest(unittest.TestCase):
         self.assertEqual(registered(snap, "draft-edit"), [])
         self.assertEqual(len(registered(snap, "draft-change")), 2)
 
+    def test_a_change_the_plan_refuses_after_the_204_shows_why_and_keeps_the_value_for_retry(self) -> None:
+        refused = {**DRAFTED, "questions": [], "refusal": "planning timed out, try again",
+                   "refused": {"id": "contract-draft", "subject": "default-branch"}}
+        opened, shown, retry = render([
+            START, {"frame": cards([], DRAFTED)}, {"click": "draft-change"},
+            {"type": {"class": "draft-edit", "text": "main"}},
+            {"respond": {"status": 204, "text": ""}}, {"click": "draft-send"}, {"snapshot": True},
+            {"frame": cards([], refused)}, {"snapshot": True},
+            {"click": "draft-change"}, {"snapshot": True}])
+        self.assertEqual(registered(opened, "draft-refusal"), [])
+        (line,) = registered(shown, "draft-refusal")
+        self.assertEqual(full(line), "planning timed out, try again")
+        self.assertEqual(len(registered(shown, "draft-change")), 2)
+        (field,) = registered(retry, "draft-edit")
+        self.assertEqual(field["value"], "main")
+        self.assertEqual(registered(retry, "draft-refusal"), [])
+
     def test_change_on_an_option_entry_offers_the_option_and_the_current_value(self) -> None:
         (snap,) = render([
             START, {"frame": cards([], DRAFTED)}, {"click": "draft-change"}, {"click": "draft-change"},

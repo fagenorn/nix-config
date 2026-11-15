@@ -3341,6 +3341,8 @@ async function registerPost() {
 }
 // The open Change entry of the registration's drafted contract: one at a time, its typed text in `drafts` under "draft:" + field.
 let registerChange = null;
+// What an accepted Change sent, by field and plan: a plan that later refuses it leaves this as the retry's starting value.
+const registerSent = new Map();
 let registerFields = new Map();
 function draftKey(field) {
   return "draft:" + field;
@@ -3349,10 +3351,11 @@ function closeChange() {
   if (registerChange !== null) drafts.delete(draftKey(registerChange.field));
   registerChange = null;
 }
-function openChange(entry) {
+function openChange(entry, retry) {
   closeChange();
-  const value = typeof entry.value === "string" ? entry.value : "";
-  registerChange = { field: entry.field, choice: null, posting: false, failure: "" };
+  const value = typeof retry === "string" ? retry : typeof entry.value === "string" ? entry.value : "";
+  const choice = typeof retry === "string" && entry.text !== true ? retry : null;
+  registerChange = { field: entry.field, choice, posting: false, failure: "" };
   drafts.set(draftKey(entry.field), { value, start: value.length, end: value.length });
   renderRegister(lastView);
   const input = registerFields.get(draftKey(entry.field));
@@ -3372,8 +3375,10 @@ async function postChange(registration, change, value) {
   }
   if (registerChange !== change) return;
   change.posting = false;
-  if (reason === null) closeChange();
-  else change.failure = reason;
+  if (reason === null) {
+    registerSent.set(change.field, { plan_id: registration.plan_id, value });
+    closeChange();
+  } else change.failure = reason;
   renderRegister(lastView);
 }
 function changeBox(registration, entry, change) {
@@ -3436,10 +3441,17 @@ function drawDraft(registration) {
   for (const entry of registration.draft) {
     const row = el("li");
     row.appendChild(el("span", "draft-line", entry.line));
+    // A Change the console accepted and the plan then refused: the refusal is on the entry it changed, and Change starts from what was sent.
+    const refused = registration.refused;
+    const refusedHere = typeof registration.refusal === "string" && refused !== null && typeof refused === "object"
+      && refused.id === "contract-draft" && refused.subject === entry.field;
     if (registerChange !== null && registerChange.field === entry.field) {
       row.appendChild(changeBox(registration, entry, registerChange));
     } else {
-      row.appendChild(actionButton("draft-change", "Change", () => openChange(entry)));
+      const sent = registerSent.get(entry.field);
+      const retry = refusedHere && sent !== undefined && sent.plan_id === registration.plan_id ? sent.value : undefined;
+      row.appendChild(actionButton("draft-change", "Change", () => openChange(entry, retry)));
+      if (refusedHere) row.appendChild(el("p", "fail draft-refusal", registration.refusal));
     }
     list.appendChild(row);
   }

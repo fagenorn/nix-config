@@ -133,6 +133,20 @@ class DraftTest(unittest.TestCase):
         self.assertEqual(pair(fields, "test-command"), ("npm test", "files"))
         self.assertEqual(pair(fields, "build-command"), (None, None))
 
+    def test_a_just_recipe_is_found_by_its_whole_name_and_runs_with_no_argument(self):
+        for index, (text, build, test) in enumerate((
+                ("build-release:\n\techo b\ntest-unit:\n\techo t\n", None, None),
+                ("build target:\n\techo b\ntest +files:\n\techo t\n", None, None),
+                ("build target='a:b' flag:\n\techo b\n", None, None),
+                ("build target='x' *rest:\n\techo b\ntest: build\n\techo t\n",
+                 "just build", "just test"),
+                ("build := 'x'\ntest $name=\"a b\":\n\techo t\n", None, "just test"))):
+            root = sample(self.parent / f"j{index}", remote=False)
+            commit(root, {"justfile": text})
+            fields = cd.draft(str(root), cd.read(str(root)))
+            self.assertEqual(pair(fields, "build-command")[0], build, text)
+            self.assertEqual(pair(fields, "test-command")[0], test, text)
+
     def expected_contract(self):
         return {
             "schema_version": 2,

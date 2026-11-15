@@ -266,11 +266,25 @@ def _host(url: str) -> str | None:
 # --------------------------------------------------------------------------
 
 
+_JUST_PARAMETER = r"""[+*$]?[A-Za-z_][\w-]*(?:=(?:'[^']*'|"[^"]*"|`[^`]*`|[^\s:]+))?"""
+_JUST_PARAMETERS = re.compile(_JUST_PARAMETER)
+
+
+def _just_recipe(which: str, text: str) -> bool:
+    """True when `text` defines the recipe `which` and `just <which>` runs it with no argument."""
+    header = re.compile(rf"^{which}((?:[ \t]+{_JUST_PARAMETER})*)[ \t]*:(?!=)", re.M)
+    for found in header.finditer(text):
+        if all(item.startswith("*") or "=" in item
+               for item in _JUST_PARAMETERS.findall(found.group(1))):
+            return True
+    return False
+
+
 def _command(reading: Mapping, which: str) -> str | None:
     files = set(reading.get("files") or ())
     texts = reading.get("texts") or {}
     for name in JUST_FILES:
-        if name in files and re.search(rf"^{which}\b[^:=]*:(?!=)", texts.get(name, ""), re.M):
+        if name in files and _just_recipe(which, texts.get(name, "")):
             return f"just {which}"
     for name in MAKE_FILES:
         if name in files and re.search(rf"^{which}:(?!=)", texts.get(name, ""), re.M):
