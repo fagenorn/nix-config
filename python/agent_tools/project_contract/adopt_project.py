@@ -109,7 +109,11 @@ green run produces exactly one commit on one new branch and removes the
 worktree only after proving that the commit changes exactly the paths the plan
 declared, that no Markdown file in it has more non-resolving relative links
 than its pre-move counterpart, and that the ref carries it. It never pushes,
-never merges and never writes the fleet registry.
+never merges and never writes the fleet registry. A green run prints
+`{branch, commit, plan_id, migration_map, evidence_record,
+integration_branch}`, the last read from the resolver's view of the worktree
+(null when it names none); a retained attempt's record is at
+`adopt_apply.failure_record_path(<digest>)`.
 
 `verify` answers the conformance question read-only against one pinned
 revision — the contract resolves, every projection is in sync, no agent path is
@@ -791,6 +795,7 @@ def command_apply(args: argparse.Namespace) -> int:
             [{"pointer": f"/verification/commit_gates/{gate['id']}",
               "message": "a pre-commit gate did not pass"} for gate in failed])
 
+    branch_name = adopt_verify.integration_branch(run.resolve_payload)
     records = {"migration_map": document["handoff"]["migration_map"],
                "evidence_record": document["handoff"]["evidence_record"]}
     signed = adopt_apply.signing_requested(run.resolve_payload)
@@ -837,7 +842,8 @@ def command_apply(args: argparse.Namespace) -> int:
     document["verification"]["commit_gates"] = gates
     adopt_planning.store_document(stored_plan["plan_id"], document)
     return emit_json({"branch": branch, "commit": commit,
-                      "plan_id": stored_plan["plan_id"], **records})
+                      "plan_id": stored_plan["plan_id"], **records,
+                      "integration_branch": branch_name})
 
 
 def find_repository_root() -> str:

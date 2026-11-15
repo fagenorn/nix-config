@@ -70,7 +70,8 @@ project's tracker cannot be read, else "Nothing needs you". The sentence is `ALL
 when every profile is out of usage, else `STALE_SENTENCE` naming those projects when any is
 stale, else `BRIEF_SENTENCE` when any brief is open, else `MANAGER_SENTENCE` when a sprint is
 stalled, else `PROGRESS_SENTENCE` when a manager stopped making progress, else `SIGNIN_SENTENCE`
-when a profile's sign-in asks, else `QUESTION_SENTENCE` when any manager question is open, else
+when a profile's sign-in asks, else `ADOPTION_SENTENCE` when an adoption's pull request is ready to
+merge, else `QUESTION_SENTENCE` when any manager question is open, else
 `REGISTER_SENTENCE` when a plan question offers an option (the page can answer it), else
 `REGISTER_TYPE_SENTENCE` when a plan question takes a typed answer (`text`), else
 `CHOOSE_SENTENCE` when an open item is a decision with questions (the page can answer it), else
@@ -151,6 +152,21 @@ is that mapping, `{profile: run}`, copied (an empty object when none is given). 
 link is never in the view: the page holds it from the start answer, the add answer and the
 link answer of `POST /api/signin-link` alone, each a guarded page request.
 
+An adoption whose pull request is ready to merge (#1054, `approve.inbox_entries`) arrives through the
+`adoption_items` argument, one mapping each, and is one entry of `inbox.open`, copied, after the
+sign-in entries and before the questions, in the order given. It counts in `inbox_items` and the
+headline and is not filtered by the registered projects: the adoption's project is not registered
+yet. Its entry is
+
+    {"type": "inbox_item", "reason": "adoption", "key": "adoption/<plan id>",
+     "project_id": "<the contract's project id>" | null, "name": "<the checkout's name>",
+     "headline": "The adoption of <project> is ready to merge", "url": "<pull request url>",
+     "number": <pull request number>, "answered": false, "waiting_since": "<time the pull request
+     was first read as ready>"}
+
+`ADOPTION_SENTENCE` says what the page offers: opening the pull request, where the owner merges it.
+It follows `SIGNIN_SENTENCE` and precedes `QUESTION_SENTENCE` in the precedence.
+
 The top-level `accounts_added` member (#1027) is the sorted, de-duplicated list of the profile names
 the owner added from the page and the retained log still holds, from the `accounts_added` argument
 (`account_add.added_state`; an empty list when none is given).
@@ -158,11 +174,13 @@ the owner added from the page and the retained log still holds, from the `accoun
 The top-level `registration` member (#1052, ADR-console-028, #1053, ADR-console-029) is the entry
 `register.view_entry` gives, copied, from the `registration` argument, and null when none is given:
 `{"root", "name", "project_id", "status": "running" | "done", "result", "outcome", "headline",
-"lines", "note", "at", "plan_id", "state", "questions", "refusal", "line", "refused", "draft"}`, the
-owner's latest registration of a repository from the page (seventeen keys), with the plan's plain
-open questions and, when the plan refused the last answer, the refusal's text and the question it
-answered (`refused`, `{"id", "subject"}`); `draft` is the drafted contract's lines
-(`contract_draft.shown`, ADR-console-030) when the latest row holds a draft, else null.
+"lines", "note", "at", "plan_id", "state", "questions", "refusal", "line", "refused", "draft",
+"adoption", "approve"}`, the owner's latest registration of a repository from the page (nineteen
+keys), with the plan's plain open questions and, when the plan refused the last answer, the
+refusal's text and the question it answered (`refused`, `{"id", "subject"}`); `draft` is the drafted
+contract's lines (`contract_draft.shown`, ADR-console-031) when the latest row holds a draft, else
+null. `adoption` is the approved adoption's `approve.entry` (#1054) and `approve` the action the
+page offers (`approve`, `retry` or null); the `line` is the adoption's headline while there is one.
 
 The top-level `pin` member (#1029) is the pin note `pin.note` gives, copied, from the `pin`
 argument, and null with no pin. The top-level `pin_launches` member is the sorted list of profiles
@@ -225,7 +243,7 @@ entry is
 items; `options` are the plan's labels and `values` the values they send, in order, and nothing is
 preselected. A question the plan offers no answer to has `questions` `[]`, `values` `[]` and its
 `why`, and still counts; `text` is true for a drafted-contract question the owner answers by typing
-(a text question with no options is still an item, ADR-console-030). `refusal` is the registration's refusal on the question
+(a text question with no options is still an item, ADR-console-031). `refusal` is the registration's refusal on the question
 `registration.refused` names and null on every other. The items are never cut and carry no `stale`
 or `read_at`. `REGISTER_SENTENCE` ("Choose an option with its number and press Enter.") says what
 the page offers; `REGISTER_TYPE_SENTENCE` ("Type the answer on its card and press Enter.") stands
@@ -481,6 +499,7 @@ PROGRESS_SENTENCE = "Tell the manager to continue, or withdraw the sprint."
 SIGNIN_HEADLINE = "Sign in to {profile} again"
 SIGNIN_FIRST_HEADLINE = "Sign in to {profile}"
 SIGNIN_SENTENCE = "Press Sign in, then finish signing in in your browser."
+ADOPTION_SENTENCE = "Open the pull request to merge the adoption."
 REGISTER_TITLE = "Register {name}"
 REGISTER_SENTENCE = "Choose an option with its number and press Enter."
 REGISTER_STEP_SENTENCE = "Each one says what to do next."
@@ -1026,6 +1045,7 @@ def derive_view(
     pin: Mapping | None = None,
     pin_launches: Iterable[str] = (),
     registration: Mapping | None = None,
+    adoption_items: Iterable[Mapping] = (),
 ) -> dict:
     states = list(states)
     sessions = list(sessions)
@@ -1069,9 +1089,10 @@ def derive_view(
     signins = sorted((e for e in capacity["profiles"]
                       if isinstance(e.get("signin"), Mapping) and e["signin"].get("ask")),
                      key=lambda e: e["profile"])
+    adoptions = [dict(item) for item in adoption_items]
     registering = _register_entries(registration)
-    open_count = (len(briefs) + len(stalls) + len(unprogressed) + len(signins) + len(asked)
-                  + len(registering) + len(open_items))
+    open_count = (len(briefs) + len(stalls) + len(unprogressed) + len(signins) + len(adoptions)
+                  + len(asked) + len(registering) + len(open_items))
     all_out = bool(capacity["all_out"])
     if all_out:
         sentence = ALL_OUT_SENTENCE
@@ -1085,6 +1106,8 @@ def derive_view(
         sentence = PROGRESS_SENTENCE
     elif signins:
         sentence = SIGNIN_SENTENCE
+    elif adoptions:
+        sentence = ADOPTION_SENTENCE
     elif asked:
         sentence = QUESTION_SENTENCE
     elif any(e["questions"] for e in registering):
@@ -1159,6 +1182,7 @@ def derive_view(
         "inbox": {"open": [_brief_entry(s) for s in briefs] + [_stall_entry(s) for s in stalls]
                           + [_progress_entry(s) for s in unprogressed]
                           + [_signin_entry(e, signin_runs) for e in signins]
+                          + adoptions
                           + [_question_entry(s, q) for s, q in asked]
                           + registering
                           + [_inbox_entry(r, health) for r in open_items],

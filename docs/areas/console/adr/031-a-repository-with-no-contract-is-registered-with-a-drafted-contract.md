@@ -1,4 +1,4 @@
-# ADR-console-030 — A repository with no contract is registered with a drafted contract
+# ADR-console-031 — A repository with no contract is registered with a drafted contract
 
 - **Status:** accepted
 - **Decided in:** #1067
@@ -27,7 +27,7 @@ ADR-console-028 plans a repository's adoption from the page, and ADR-console-029
 
 ## Consequences
 
-- The owner takes a repository with no contract from nothing to a `ready` plan with no terminal; applying stays a terminal command.
+- The owner takes a repository with no contract from nothing to a `ready` plan with no terminal; approving a ready plan is ADR-console-030.
 - Tests sandbox HOME, every repository and the remote: a throwaway bare remote reached through `insteadOf`, with `GIT_ALLOW_PROTOCOL=file` so a missed rewrite fails instead of reaching a network host.
 - The page's two new controls (a Change control and a text field on a card) belong to ADR-console-002's desk rules.
-- Related: ADR-console-002, ADR-console-008, ADR-console-028, ADR-console-029, ADR-project-contract-004, ADR-project-contract-005, ADR-project-contract-006.
+- Related: ADR-console-002, ADR-console-008, ADR-console-028, ADR-console-029, ADR-console-030, ADR-project-contract-004, ADR-project-contract-005, ADR-project-contract-006.

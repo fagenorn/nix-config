@@ -278,7 +278,7 @@ class PageTest(unittest.TestCase):
              "/api/message", "/api/stop", "/api/round-answer", "/api/continue",
              "/api/exclusion", "/api/pin", "/api/signin", "/api/signin-code", "/api/signin-cancel",
              "/api/account-add", "/api/signin-link", "/api/account-remove",
-             "/api/register-project", "/api/plan-answer"},
+             "/api/register-project", "/api/plan-answer", "/api/plan-approve"},
         )
         self.assertEqual(
             len(re.findall(r"\b(?:fetch|EventSource)\(", self.text)), len(literals)
@@ -287,7 +287,7 @@ class PageTest(unittest.TestCase):
     def test_the_page_takes_its_view_only_from_the_stream(self) -> None:
         # A separate snapshot request can answer after a newer streamed frame
         # and render over it; the stream's first frame is already the snapshot.
-        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 28)
+        self.assertEqual(len(re.findall(r"\bfetch\(", self.text)), 29)
         self.assertIsNotNone(
             re.search(r'fetch\("/api/looked",\s*\{\s*method:\s*"POST"', self.text)
         )
@@ -504,13 +504,17 @@ class PageTest(unittest.TestCase):
                 self.assertLess(size, 1.5, selector)
 
     def test_the_tracker_and_sign_in_links_are_the_only_hrefs(self) -> None:
-        self.assertEqual(len(re.findall(r"\.href\s*=", self.text)), 3)
+        self.assertEqual(len(re.findall(r"\.href\s*=", self.text)), 5)
         lines = self.text.splitlines()
         (at,) = [i for i, row in enumerate(lines) if "link.href = held.link;" in row]
         self.assertIn("isHttps(", lines[at - 1] + lines[at])
         self.assertIn(r"/^https:\/\//", self.text)
         self.assertEqual(self.text.count("a.href = item.url;"), 1)
         self.assertEqual(self.text.count("link.href = sprint.tracker_url;"), 1)
+        self.assertEqual(self.text.count("link.href = item.url;"), 1)
+        self.assertEqual(self.text.count("link.href = adoption.url;"), 1)
+        self.assertEqual(self.text.count("if (isHttps(item.url)) {"), 1)
+        self.assertEqual(self.text.count("if (isHttps(adoption.url)) {"), 1)
         self.assertIn('sprint.tracker_url.startsWith("https:")', self.text)
 
 
@@ -5773,6 +5777,29 @@ class SigninPageTest(unittest.TestCase):
                 order.append("tracker")
         self.assertEqual(order, ["progress", "signin", "question", "tracker"])
 
+    def test_an_adoption_card_sits_between_sign_ins_and_questions(self) -> None:
+        (snap,) = render([
+            START, {"frame": frame([SIGNIN, ADOPTION_ITEM, Q0, ANSWERABLE])}, {"snapshot": True}])
+        order = []
+        card = None
+        for child in snap["inbox"]["children"]:
+            text = full(child)
+            if has_class(child, "signin"):
+                order.append("signin")
+            elif has_class(child, "adoption"):
+                order.append("adoption")
+                card = child
+            elif Q0["headline"] in text:
+                order.append("question")
+            elif ANSWERABLE["headline"] in text:
+                order.append("tracker")
+        self.assertEqual(order, ["signin", "adoption", "question", "tracker"])
+        (headline,) = of_class(card, "p", "q")
+        self.assertEqual(full(headline), ADOPTION_ITEM["headline"])
+        (link,) = of_class(card, "a", "pr-link")
+        self.assertEqual(full(link), "Open the pull request")
+        self.assertEqual(link["href"], ADOPTION_ITEM["url"])
+
 
 LATER = [START, {"respond": {"status": 200, "text": ANSWER}},
          {"frame": frame([with_run(SIGNIN, "running", 7)])}]
@@ -6688,7 +6715,8 @@ def registered(snap: dict, cls: str) -> list:
 REGISTERING = {"root": "/srv/r", "name": "r", "project_id": None, "status": "running",
                "result": None, "outcome": None, "at": None,
                "headline": "Planning the adoption of r…", "lines": [], "note": None,
-               "line": "Planning the adoption of r…", "refused": None}
+               "line": "Planning the adoption of r…", "refused": None, "adoption": None,
+               "approve": None}
 REGISTERED = {**REGISTERING, "status": "done", "result": "planned", "outcome": "reconcile",
               "at": "2026-11-15T08:00:00+00:00",
               "headline": "What adopting r would change: it has agent files or a contract to bring up to date",
@@ -6718,6 +6746,22 @@ PLAN_A = "sha256:" + "a" * 64
 ASKING = {**REGISTERED, "plan_id": PLAN_A, "state": "draft", "refusal": None, "refused": None,
           "note": "The plan has 3 open questions.", "line": "Register r: 3 questions open",
           "questions": [Q_CANDIDATE, Q_REFERENCE, Q_SECRET]}
+READY_SHOWN = {**ASKING, "state": "ready", "questions": [],
+               "note": "The plan is ready.", "line": "Register r: ready to apply",
+               "approve": "approve", "adoption": None}
+OPENED_ADOPTION = {
+    "status": "done", "step": "opened", "state": "open",
+    "headline": "Waiting for the pull request of r to be ready to merge.",
+    "lines": ["Applied on the branch adopt-aaaaaaaaaaaa as one commit, cccccccccccc.",
+              "Pushed adopt-aaaaaaaaaaaa to origin.", "Opened pull request #7 against main."],
+    "note": None, "branch": "adopt-aaaaaaaaaaaa", "commit": "c" * 40,
+    "url": "https://github.com/o/r/pull/7"}
+ADOPTION_ITEM = {
+    "type": "inbox_item", "reason": "adoption", "key": "adoption/" + PLAN_A, "project_id": "o/r",
+    "name": "r", "headline": "The adoption of o/r is ready to merge",
+    "url": "https://github.com/o/r/pull/7", "number": 7, "answered": False,
+    "waiting_since": "2026-11-15T08:00:00+00:00"}
+READY = [START, {"frame": {**frame([]), "registration": READY_SHOWN}}]
 R_PLAN = PLAN_A
 
 
@@ -6858,11 +6902,18 @@ class RegisterControlTest(unittest.TestCase):
                 page.click(".register-open")
                 page.fill(".register-path", "/home/anis/Projects/" + "a-long-directory-name/" * 3)
                 got = page.evaluate(measure)
+                page.evaluate("(f) => window.__src.l.view({data: JSON.stringify(f)})",
+                              {**view([]), "registration": {
+                                  **READY_SHOWN, "approve": None, "adoption": OPENED_ADOPTION}})
+                adopted = page.evaluate(measure)
             finally:
                 browser.close()
         self.assertGreater(got["kids"], 5)
         self.assertTrue(got["fits"], got)
         self.assertTrue(got["inside"], got)
+        self.assertGreater(adopted["kids"], 5)
+        self.assertTrue(adopted["fits"], adopted)
+        self.assertTrue(adopted["inside"], adopted)
 
     def test_a_ready_plan_shows_only_that_it_is_ready(self) -> None:
         plan_id = "sha256:" + "3f9a" * 16
@@ -6876,6 +6927,62 @@ class RegisterControlTest(unittest.TestCase):
         self.assertNotIn("sha256", shown)
         self.assertNotIn("adopt-project", shown)
         self.assertNotIn("adopt-project apply", shown)
+
+    def test_approve_shows_only_when_the_view_offers_it(self) -> None:
+        def shown(registration: dict) -> list:
+            (snap,) = render([START, {"frame": {**frame([]), "registration": registration}},
+                              {"snapshot": True}])
+            return [full(n) for n in registered(snap, "register-approve")]
+        self.assertEqual(shown(READY_SHOWN), ["Approve"])
+        self.assertEqual(shown({**READY_SHOWN, "approve": "retry"}), ["Try again"])
+        self.assertEqual(shown({**READY_SHOWN, "approve": None}), [])
+        self.assertEqual(shown({**REGISTERING, "approve": "approve"}), [])
+
+    def test_approve_posts_the_shown_plan_id_once_and_disables_while_posting(self) -> None:
+        held, released = render(READY + [
+            {"hold": True}, {"click": "register-approve"}, {"click": "register-approve"},
+            {"snapshot": True},
+            {"release": {"status": 204, "text": ""}}, {"snapshot": True}])
+        (post,) = held["posts"]
+        self.assertEqual(post["url"], "/api/plan-approve")
+        self.assertEqual(json.loads(post["body"]), {"plan_id": PLAN_A})
+        self.assertIs(registered(held, "register-approve")[0]["disabled"], True)
+        self.assertEqual(len(released["posts"]), 1)
+        self.assertIs(registered(released, "register-approve")[0]["disabled"], False)
+
+    def test_a_refused_approval_shows_its_reason(self) -> None:
+        (snap,) = render(READY + [
+            {"respond": {"status": 409, "text": "only a ready plan can be approved\n"}},
+            {"click": "register-approve"}, {"snapshot": True}])
+        (shown,) = registered(snap, "register-refusal")
+        self.assertEqual(full(shown), "only a ready plan can be approved")
+
+    def test_an_approved_adoption_shows_its_headline_as_the_one_line_then_its_lines_note_and_link(self) -> None:
+        def drawn(adoption: dict) -> dict:
+            (snap,) = render([
+                START, {"frame": {**frame([]), "registration": {
+                    **READY_SHOWN, "approve": None, "adoption": adoption,
+                    "line": adoption["headline"]}}},
+                {"snapshot": True}])
+            return snap
+        snap = drawn(OPENED_ADOPTION)
+        (line,) = registered(snap, "register-line")
+        self.assertEqual(full(line), OPENED_ADOPTION["headline"])
+        self.assertEqual(registered(snap, "register-adoption-headline"), [])
+        (lines,) = registered(snap, "register-adoption-lines")
+        self.assertEqual([full(n) for n in lines["children"] if n["tag"] == "li"],
+                         OPENED_ADOPTION["lines"])
+        (link,) = [n for n in nodes(registered(snap, "register-adoption")[0]) if n["tag"] == "a"]
+        self.assertTrue(has_class(link, "register-pr-link"))
+        self.assertEqual(full(link), "Open the pull request")
+        self.assertEqual(link["href"], OPENED_ADOPTION["url"])
+        noted = drawn({**OPENED_ADOPTION, "note": "The branch is kept."})
+        self.assertIn("The branch is kept.",
+                      [full(n) for n in registered(noted, "register-note")])
+        for url in (None, "javascript:alert(1)"):
+            plain = drawn({**OPENED_ADOPTION, "url": url})
+            self.assertEqual([n for n in nodes(registered(plain, "register-adoption")[0])
+                              if n["tag"] == "a"], [])
 
     def test_at_480_the_plan_question_cards_fit(self) -> None:
         try:

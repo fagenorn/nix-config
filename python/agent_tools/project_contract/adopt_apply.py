@@ -785,13 +785,19 @@ def commit_message(project_id: str, digest: str, records: dict) -> str:
             f"adoption evidence record: {records['evidence_record']}\n")
 
 
+def failure_record_path(digest: str) -> Path:
+    """The one home of a retained attempt's failure record."""
+    return (agent_platform.state_root() / "adopt" / "worktrees"
+            / f"{digest}.failure.json")
+
+
 def retain_failure(digest: str, document: dict, worktree: Path, branch: str,
                    gates: list[dict], repair_id: str) -> None:
     """Record why the worktree is being kept, beside it and never in the
     target repository."""
     document["verification"]["commit_gates"] = gates
     store_document(document["plan"]["plan_id"], document)
-    evidence = worktree.parent / f"{digest}.failure.json"
+    evidence = failure_record_path(digest)
     agent_platform.ensure_directory(evidence.parent)
     agent_platform.write_atomically(evidence, canonical_json({
         "schema_version": ADOPT_SCHEMA_VERSION,

@@ -134,5 +134,9 @@ One open question of a repository's adoption plan, shown on the page as an inbox
 _Avoid_: adoption prompt, open decision
 
 **Drafted contract**:
-The project contract the console drafts for a repository that has none, from its remote and its tracked files; every value it set is shown with where it came from and can be changed before the plan is applied; it lives in the console's state and the stored plan until `adopt-project apply` writes it (ADR-console-030).
+The project contract the console drafts for a repository that has none, from its remote and its tracked files; every value it set is shown with where it came from and can be changed before the plan is applied; it lives in the console's state and the stored plan until `adopt-project apply` writes it (ADR-console-031).
 _Avoid_: generated contract, default contract
+
+**Approved adoption**:
+A ready adoption plan the owner approved on the page: the console applies it in its own worktree, pushes its one branch, opens its pull request and raises one inbox item while the pull request is ready to merge; the owner merges it on the forge (ADR-console-030).
+_Avoid_: auto-adoption, auto-merge

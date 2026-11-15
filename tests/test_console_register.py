@@ -599,7 +599,7 @@ class RowTest(unittest.TestCase):
         self.assertEqual(entry["draft"], contract_draft.shown(fields))
         running = register.view_entry("/x/sample-app", None)
         self.assertIsNone(running["draft"])
-        self.assertEqual(len(running), 17)
+        self.assertEqual(len(running), 19)
 
     def test_the_draft_id_follows_the_values(self):
         one = draft_fields()
@@ -662,7 +662,7 @@ class RowTest(unittest.TestCase):
             "result": None, "outcome": None, "headline": "Planning the adoption of r…",
             "lines": [], "note": None, "at": None, "plan_id": None, "state": None,
             "questions": [], "refusal": None, "line": "Planning the adoption of r\u2026",
-            "refused": None, "draft": None})
+            "refused": None, "draft": None, "adoption": None, "approve": None})
         latest = {**register.summary("/srv/r", plan_doc(state="ready")), "at": "t"}
         self.assertEqual(register.view_entry(None, latest), {
             "root": "/srv/r", "name": "r", "project_id": "o/r", "status": "done",
@@ -670,8 +670,20 @@ class RowTest(unittest.TestCase):
             "headline": latest["headline"], "lines": [],
             "note": "The plan is ready.",
             "at": "t", "plan_id": PLAN_ID, "state": "ready", "questions": [], "refusal": None,
-            "line": "Register r: ready to apply", "refused": None, "draft": None})
+            "line": "Register r: ready to apply", "refused": None, "draft": None,
+            "adoption": None, "approve": None})
         self.assertIsNone(register.view_entry(None, None))
+
+    def test_view_entry_carries_the_adoption_and_its_action(self):
+        latest = {**register.summary("/srv/r", plan_doc(state="ready")), "at": "t"}
+        adoption = {"status": "done", "headline": "The adoption of r was applied."}
+        shown = register.view_entry(None, latest, adoption=adoption, approve="retry")
+        self.assertEqual((shown["adoption"], shown["approve"]), (adoption, "retry"))
+        self.assertEqual(shown["line"], "The adoption of r was applied.")
+        self.assertEqual(register.view_entry(None, latest)["line"], "Register r: ready to apply")
+        running = register.view_entry("/srv/r", latest, adoption=adoption, approve="approve")
+        self.assertEqual((running["adoption"], running["approve"]), (None, None))
+        self.assertEqual(running["line"], "Planning the adoption of r\u2026")
 
 
 FAKE = """#!/bin/sh
@@ -692,10 +704,13 @@ class AdopterTest(unittest.TestCase):
         self.script.chmod(self.script.stat().st_mode | stat.S_IXUSR)
         self.args = self.tmp / "args"
 
-    def adopter(self, *, out='{"a":1}', code=0, sleep=False, timeout=30, command=None):
+    def adopter(self, *, out='{"a":1}', code=0, sleep=False, timeout=30, command=None,
+                apply_timeout=None):
         environ = {"PATH": os.environ["PATH"], "FAKE_ARGS": str(self.args), "FAKE_OUT": out,
                    "FAKE_EXIT": str(code), "FAKE_SLEEP": "1" if sleep else "0"}
-        return Adopter(command=command or (str(self.script),), environ=environ, timeout=timeout)
+        extra = {} if apply_timeout is None else {"apply_timeout": apply_timeout}
+        return Adopter(command=command or (str(self.script),), environ=environ, timeout=timeout,
+                       **extra)
 
     def test_plan_and_register_argv(self):
         adopter = self.adopter()
@@ -703,6 +718,20 @@ class AdopterTest(unittest.TestCase):
         adopter.register("/r")
         self.assertEqual(self.args.read_text().splitlines(),
                          ["plan --repo-root /r --format json", "verify --repo-root /r --register"])
+
+    def test_apply_argv_with_and_without_the_deletion_acknowledgement(self):
+        adopter = self.adopter()
+        adopter.apply("sha256:aa")
+        adopter.apply("sha256:aa", acknowledge_deletions=True)
+        self.assertEqual(self.args.read_text().splitlines(),
+                         ["apply --plan-id sha256:aa",
+                          "apply --plan-id sha256:aa --acknowledge-deletions"])
+
+    def test_apply_has_its_own_timeout(self):
+        self.assertEqual(register.APPLY_TIMEOUT, 1800)
+        with self.assertRaises(RunFailed) as failed:
+            self.adopter(sleep=True, timeout=60, apply_timeout=1).apply("sha256:aa")
+        self.assertEqual(failed.exception.kind, "timed_out")
 
     def test_plan_sends_every_answer_in_order(self):
         self.adopter().plan("/r", answers=[

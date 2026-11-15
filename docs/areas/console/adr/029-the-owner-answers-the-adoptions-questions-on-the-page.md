@@ -1,6 +1,6 @@
 # ADR-console-029 — The owner answers the adoption's questions on the page
 
-- **Status:** accepted; amended by ADR-console-030
+- **Status:** accepted; amended by ADR-console-030, ADR-console-031
 - **Decided in:** #1053, #1066
 
 ## Context
@@ -28,7 +28,7 @@ Success is an empty `204` once the run is dispatched.
 
 **D4. The run.** `adopt-project plan --repo-root <root> --format json` runs with one `--answer ID SUBJECT VALUE` per entry of the shown row's `answered`, then the new answer. It runs under ADR-console-028 D3's bounds (no shell, its own process group, `stdin` from the null device, 300 seconds, cancelled when the console closes), on a thread of its own. The console judges no answer: the plan accepts or refuses it. While it runs, the view's `registration` is `running` with the headline `Planning the adoption of <name> again with your answer…`.
 
-**D5. The result.** A plan appends one new `registration.ended` row (D1), and the page shows its change lines and what is still open. A ready plan's note is `The plan is ready.`, with no command and no plan id (#1065), which amends ADR-console-028 D4 for every ready row; the page needs no terminal. A question with exactly one offered answer ends its ask with `This is the only thing the adoption can do with this file.` on its own line, and the page sets Close apart from the questions (#1065). A missing agent platform headlines a plan `The adoption plan for <name> could not start: the agent platform's files are not installed on this host.` (#1065). An answer can leave nothing to adopt: a plan whose outcome is `no_change` appends a `not_registered` row whose headline is `<name> needs no adoption change and is not registered yet: run <the plan's handoff.next_command>`, and the answer run never registers the repository.
+**D5. The result.** A plan appends one new `registration.ended` row (D1), and the page shows its change lines and what is still open. A ready plan's note is `The plan is ready.`, with no command and no plan id (#1065), which amends ADR-console-028 D4 for every ready row; the page needs no terminal, and the Approve button of ADR-console-030 is the page's way to apply it. A question with exactly one offered answer ends its ask with `This is the only thing the adoption can do with this file.` on its own line, and the page sets Close apart from the questions (#1065). A missing agent platform headlines a plan `The adoption plan for <name> could not start: the agent platform's files are not installed on this host.` (#1065). An answer can leave nothing to adopt: a plan whose outcome is `no_change` appends a `not_registered` row whose headline is `<name> needs no adoption change and is not registered yet: run <the plan's handoff.next_command>`, and the answer run never registers the repository.
 
 **D6. A refusal.**
 

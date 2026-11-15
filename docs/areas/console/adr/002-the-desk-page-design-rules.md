@@ -1,6 +1,6 @@
 # ADR-console-002 — The desk page's design rules
 
-- **Status:** accepted; amended by ADR-console-024, ADR-console-025, ADR-console-028, ADR-console-029, ADR-console-030
+- **Status:** accepted; amended by ADR-console-024, ADR-console-025, ADR-console-028, ADR-console-029, ADR-console-031
 - **Decided in:** #833, #855, #887, #895, #911, #919, #920, #922, #944, #1026, #1027, #1039, #1036, #1046, #1066
 
 ## Context
