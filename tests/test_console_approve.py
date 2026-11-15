@@ -50,6 +50,13 @@ def pull_event(seq, at, plan_id, number, state):
                  approve.pull_row(plan_id, number, "u", state)[2])
 
 
+def registration_event(seq, at, plan_id="p1", number=7, result="registered", project_id="o/r",
+                       reason=None, note=None):
+    return Event(seq, at, approve.REGISTRATION, None,
+                 {"plan_id": plan_id, "number": number, "result": result,
+                  "project_id": project_id, "reason": reason, "note": note})
+
+
 class ParseTest(unittest.TestCase):
     def test_parse_approve_request_takes_exactly_a_plan_id(self):
         self.assertEqual(approve.parse_approve_request(b'{"plan_id": "sha256:aa"}'), "sha256:aa")
@@ -95,6 +102,31 @@ class RowTest(unittest.TestCase):
         self.assertNotIn(approve.PULL, event_log.KEPT_KINDS)
 
 
+class RegistrationRowTest(unittest.TestCase):
+    def test_registration_row_takes_exactly_its_members(self):
+        base = {"plan_id": "p1", "number": 7, "result": "waiting", "project_id": None,
+                "reason": None, "note": None}
+        valid = [base, {**base, "result": "registered", "project_id": "o/r"},
+                 {**base, "result": "refused", "reason": "r", "note": "n"}]
+        for payload in valid:
+            with self.subTest(payload=payload):
+                kind, project, row = approve.registration_row(payload)
+                self.assertEqual((kind, project, row), (approve.REGISTRATION, None, payload))
+                self.assertIsNot(row, payload)
+        refused = {**base, "result": "refused", "reason": "r", "note": "n"}
+        registered = {**base, "result": "registered", "project_id": "o/r"}
+        broken = [{**base, "extra": 1}, {k: v for k, v in base.items() if k != "note"},
+                  {**base, "result": "merged"}, {**base, "number": 0}, {**base, "number": True},
+                  {**base, "plan_id": ""}, {**registered, "project_id": None},
+                  {**refused, "reason": None}, {**refused, "note": None}]
+        for payload in broken:
+            with self.subTest(broken=payload), self.assertRaises(ValueError):
+                approve.registration_row(payload)
+        self.assertEqual(approve.REGISTRATION, event_log.ADOPTION_REGISTRATION)
+        self.assertEqual(approve.REGISTRATION, "adoption.registration")
+        self.assertNotIn(approve.REGISTRATION, event_log.KEPT_KINDS)
+
+
 class FoldTest(unittest.TestCase):
     def test_the_latest_step_and_pull_state_fold_per_plan(self):
         events = [step_event(1, "t1", step="applied"), step_event(2, "t2"),
@@ -127,6 +159,38 @@ class FoldTest(unittest.TestCase):
                        {k: v for k, v in step_payload("applied").items() if k != "note"})
         self.assertEqual(approve.adoptions([broken]), {})
         self.assertEqual(approve.adoptions([pull_event(4, "t4", "zz", 7, "ready")]), {})
+
+    def test_a_registration_row_folds_only_onto_its_merged_pull_request(self):
+        merged = [step_event(1, "t1"), pull_event(2, "t2", "p1", 7, "merged")]
+        found = approve.adoptions([*merged, registration_event(3, "t3")])
+        self.assertEqual(found["p1"]["registration"],
+                         {"result": "registered", "project_id": "o/r", "reason": None,
+                          "note": None, "at": "t3"})
+        other = approve.adoptions([*merged, registration_event(3, "t3", number=8)])
+        self.assertIsNone(other["p1"]["registration"])
+        unmerged = approve.adoptions([step_event(1, "t1", plan_id="p2"),
+                                      registration_event(2, "t2", plan_id="p2")])
+        self.assertIsNone(unmerged["p2"]["registration"])
+        reset = approve.adoptions([*merged, registration_event(3, "t3"),
+                                   step_event(4, "t4", step="open_failed")])
+        self.assertIsNone(reset["p1"]["registration"])
+        self.assertIsNone(approve.adoptions([step_event(1, "t1")])["p1"]["registration"])
+        kept = approve.adoptions([pull_event(5, "t5", "p1", 7, "merged")], found)
+        self.assertEqual(kept["p1"]["registration"]["at"], "t3")
+
+    def test_enrolling_lists_merged_adoptions_not_yet_registered_or_refused(self):
+        events = []
+        for number, (plan, state) in enumerate(
+                [("p1", "merged"), ("p2", "merged"), ("p3", "merged"), ("p4", "merged"),
+                 ("p5", "closed"), ("p6", "open")]):
+            events += [step_event(10 * number + 1, "a", plan_id=plan),
+                       pull_event(10 * number + 2, "b", plan, 7, state)]
+        events += [registration_event(100, "c", plan_id="p2", result="waiting", project_id=None),
+                   registration_event(101, "c", plan_id="p3"),
+                   registration_event(102, "c", plan_id="p4", result="refused", project_id=None,
+                                      reason="r", note="n")]
+        result = approve.enrolling(approve.adoptions(events))
+        self.assertEqual([e["plan_id"] for e in result], ["p1", "p2"])
 
     def test_waiting_lists_open_and_ready_by_plan_id(self):
         found = approve.adoptions([
@@ -273,6 +337,80 @@ class WordsTest(unittest.TestCase):
         self.assertEqual(approve.branch_of(PID), BRANCH)
 
 
+def report_error(repair, message):
+    return {"error": {"code": "not_integrated", "repair_id": repair,
+                      "violations": [{"pointer": "", "message": message}]}}
+
+
+FULL_REASON = ("Run adopt-project verify --register --repo-root /srv/r in a terminal to see the "
+               "full reason. Then choose Retry.")
+UNCHECKED = "the adoption on the remote did not pass the registration's checks"
+
+
+def refused(reason, note):
+    return {"result": "refused", "project_id": None, "reason": reason, "note": note}
+
+
+class OutcomeTest(unittest.TestCase):
+    def table(self):
+        return [
+            (report_error("adopt.registration.not_integrated",
+                          "the remote integration branch carries no adoption evidence record"),
+             {"result": "waiting", "project_id": None, "reason": None, "note": None}),
+            ({"registered": True, "project_id": "o/r", "result": "adopted"},
+             {"result": "registered", "project_id": "o/r", "reason": None, "note": None}),
+            (report_error("adopt.registration.no_remote", "the repository has no origin remote"),
+             refused("the repository has no origin remote",
+                     "Add the repository's origin remote, then choose Retry.")),
+            (report_error("adopt.manifest.missing", register.MANIFEST_ABSENT),
+             refused("the agent platform's files are not installed on this host",
+                     "The agent platform's files are not installed on this host yet. Run just "
+                     "switch in a terminal to install them, then choose Retry.")),
+            (report_error("adopt.registration.integration_branch_unresolved", "m"),
+             refused("m", "Run adopt-project verify --register --repo-root /srv/r in a terminal "
+                          "to see the full reason. Then choose Retry.")),
+            ({"registered": False, "result": "not_conformant"},
+             refused(UNCHECKED, FULL_REASON)),
+            ({"registered": True}, refused(UNCHECKED, FULL_REASON)),
+            (None, refused("the adoption tool gave an answer that could not be read",
+                           FULL_REASON)),
+        ]
+
+    def test_each_report_reads_as_waiting_registered_or_refused(self):
+        for report, expected in self.table():
+            with self.subTest(report=report):
+                self.assertEqual(approve.registration_outcome("/srv/r", report), expected)
+
+    def test_a_run_failure_reads_in_words_with_retry(self):
+        got = {kind: approve.run_outcome("/srv/r", kind)
+               for kind in ("timed_out", "failed", "KeyError")}
+        self.assertEqual(got["timed_out"], refused(
+            "it took too long and was stopped",
+            "Choose Retry. If it keeps failing, run adopt-project verify --register --repo-root "
+            "/srv/r in a terminal to see the full reason."))
+        self.assertEqual(got["failed"], refused(
+            "the adoption tool stopped with an error",
+            "Run adopt-project verify --register --repo-root /srv/r in a terminal to see the "
+            "full reason. Then choose Retry."))
+        self.assertEqual(got["KeyError"]["reason"], "it stopped unexpectedly")
+        for outcome in got.values():
+            self.assertEqual((outcome["result"], outcome["project_id"]),
+                             ("refused", None))
+
+    def test_no_reason_or_note_shows_a_code_or_sends_the_owner_to_register_again(self):
+        outcomes = [expected for _, expected in self.table() if expected["result"] == "refused"]
+        outcomes += [approve.run_outcome("/srv/r", kind) for kind in register.RUN_KINDS]
+        for outcome in outcomes:
+            with self.subTest(outcome=outcome):
+                for text in (outcome["reason"], outcome["note"]):
+                    for banned in ("adopt.", "_", "Register again", "press Register"):
+                        self.assertNotIn(banned, text)
+                self.assertIn("Retry", outcome["note"])
+        for report, expected in self.table():
+            if expected["result"] == "refused":
+                self.assertEqual(approve.registration_outcome("/srv/r", report), expected)
+
+
 class EntryTest(unittest.TestCase):
     def adoption(self, step, pull_state=None, **over):
         return {**step_payload(step, **over), "at": "t", "pull_state": pull_state,
@@ -285,8 +423,8 @@ class EntryTest(unittest.TestCase):
         closed = (f"Delete the branch {BRANCH} with git -C /srv/r branch -D {BRANCH} and git -C "
                   f"/srv/r push origin --delete {BRANCH}, then press Approve to apply the plan "
                   "again.")
-        merged = ("Bring /srv/r up to date with develop on origin, which now holds the "
-                  "adoption, then register the repository again to add it to the projects.")
+        waits = ("The pull request of r was merged; waiting for develop on origin to carry it "
+                 "before registering.")
         url = "https://example.test/pull/7"
         table = [
             (self.adoption("applied"),
@@ -314,8 +452,7 @@ class EntryTest(unittest.TestCase):
              ("opened", "ready", "The pull request of r is ready to merge.",
               [applied, pushed, opened], None, url)),
             (self.adoption("opened", "merged"),
-             ("opened", "merged", "The pull request of r was merged.",
-              [applied, pushed, opened], merged, url)),
+             ("opened", "merged", waits, [applied, pushed, opened], None, url)),
             (self.adoption("opened", "closed"),
              ("opened", "closed", "The pull request of r was closed without merging.",
               [applied, pushed, opened], closed, url)),
@@ -332,7 +469,33 @@ class EntryTest(unittest.TestCase):
                 self.assertEqual((got["branch"], got["commit"]),
                                  (adoption["branch"], adoption["commit"]))
         self.assertEqual(approve.closed_note("/srv/r", BRANCH), closed)
-        self.assertEqual(approve.merged_note("/srv/r", "develop"), merged)
+
+    def test_a_merged_adoption_reads_its_registration_state(self):
+        waits = ("The pull request of r was merged; waiting for develop on origin to carry it "
+                 "before registering.")
+        stamp = {"project_id": None, "reason": None, "note": None, "at": "t"}
+        table = [
+            ({}, False, waits),
+            ({"registration": None}, False, waits),
+            ({"registration": {**stamp, "result": "waiting"}}, False, waits),
+            ({"registration": {**stamp, "result": "registered", "project_id": "o/r"}}, False,
+             "r is registered as o/r."),
+            ({"registration": {**stamp, "result": "refused", "reason": "no origin",
+                               "note": "Add the origin, then choose Retry."}}, False,
+             "r was not registered: no origin. Add the origin, then choose Retry."),
+            ({}, True, "Registering r…"),
+        ]
+        for over, registering, headline in table:
+            with self.subTest(headline=headline):
+                adoption = {**self.adoption("opened", "merged", base="develop"), **over}
+                got = approve.entry(adoption, running=False, name="r", registering=registering)
+                self.assertEqual(got["headline"], headline)
+                self.assertIsNone(got["note"])
+                self.assertEqual(set(got), {"status", "step", "state", "headline", "lines",
+                                            "note", "branch", "commit", "url"})
+                self.assertEqual(got["lines"], [
+                    f"Applied on the branch {BRANCH} as one commit, {'c' * 12}.",
+                    f"Pushed {BRANCH} to origin.", "Opened pull request #7 against develop."])
 
     def test_none_and_running(self):
         self.assertIsNone(approve.entry(None, running=False, name="r"))
@@ -340,6 +503,38 @@ class EntryTest(unittest.TestCase):
             "status": "running", "step": None, "state": None,
             "headline": "Applying the adoption of r and opening its pull request…",
             "lines": [], "note": None, "branch": None, "commit": None, "url": None})
+
+
+class RetryEntryTest(unittest.TestCase):
+    def test_only_a_refused_registration_is_a_retry_item(self):
+        note = "Add the repository's origin remote, then choose Retry."
+        reason = "the repository has no origin remote"
+        events = []
+        for seq, (plan, root, at) in enumerate([("p1", "/srv/r", "t5"), ("p0", "/srv/zz", "t4")]):
+            events += [step_event(10 * seq + 1, "a", plan_id=plan, root=root, project_id=None),
+                       pull_event(10 * seq + 2, "b", plan, 7, "merged"),
+                       registration_event(10 * seq + 3, at, plan_id=plan, result="refused",
+                                          project_id=None, reason=reason, note=note)]
+        events += [step_event(40, "a", plan_id="p2"), pull_event(41, "b", "p2", 7, "merged"),
+                   registration_event(42, "c", plan_id="p2", result="waiting", project_id=None),
+                   step_event(43, "a", plan_id="p3"), pull_event(44, "b", "p3", 7, "merged"),
+                   registration_event(45, "c", plan_id="p3")]
+        found = approve.adoptions(events)
+        items = approve.retry_entries(found)
+        self.assertEqual([i["key"] for i in items],
+                         ["register-retry/p0/t4", "register-retry/p1/t5"])
+        headline = "r was not registered: the repository has no origin remote."
+        self.assertEqual(items[1], {
+            "type": "inbox_item", "reason": "register_retry", "key": "register-retry/p1/t5",
+            "project_id": None, "root": "/srv/r", "name": "r", "title": "Register r",
+            "plan_id": "p1", "id": None, "subject": None, "headline": headline, "why": note,
+            "refusal": None, "more_questions": 0,
+            "questions": [{"question": headline, "options": ["Retry"], "chosen": None,
+                           "recommended": None, "recommended_index": None}],
+            "values": ["retry"], "items": [], "answers": [], "answered": False,
+            "waiting_since": "t5"})
+        self.assertEqual([i["plan_id"] for i in approve.retry_entries(found, running={"p1"})],
+                         ["p0"])
 
 
 class ActionTest(unittest.TestCase):

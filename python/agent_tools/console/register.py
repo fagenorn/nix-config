@@ -536,8 +536,14 @@ class Adopter:
             arguments += ["--answer", answer["id"], answer["subject"], answer["value"]]
         return self._run(arguments, cancel, self._timeout)
 
-    def register(self, root: str, cancel=None) -> dict:
-        return self._run(["verify", "--repo-root", root, "--register"], cancel, self._timeout)
+    def register(self, root: str, cancel=None, *, integration_branch: str | None = None,
+                 plan_id: str | None = None) -> dict:
+        arguments = ["verify", "--repo-root", root, "--register"]
+        if integration_branch is not None:
+            arguments += ["--integration-branch", integration_branch]
+        if plan_id is not None:
+            arguments += ["--plan-id", plan_id]
+        return self._run(arguments, cancel, self._timeout)
 
     def apply(self, plan_id: str, cancel=None, acknowledge_deletions: bool = False) -> dict:
         arguments = ["apply", "--plan-id", plan_id]

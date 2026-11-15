@@ -1,7 +1,7 @@
 # ADR-console-028 — The owner registers a project from the page
 
-- **Status:** accepted; amended by ADR-console-029, ADR-console-030
-- **Decided in:** #1052
+- **Status:** accepted; amended by ADR-console-029, ADR-console-030; extended by #1055 (D10, D11)
+- **Decided in:** #1052, #1055
 
 ## Context
 
@@ -46,11 +46,27 @@ A project reaches the page only once it is in the fleet registry, and getting it
 
 **D9. Linux only.** The console registers only where it runs its other owner commands, which is Linux.
 
+**D10. A merged adoption registers its project (#1055).** Once the owner merges the pull request the console opened (ADR-console-030), the console registers the project itself, so the owner runs no terminal command and presses no Register again.
+
+- Trigger and child: each adoption poll round (ADR-console-030 D6, and once at start) ends by running `adopt-project verify --register` for every adoption whose pull request reads `merged` and whose registration is absent or `waiting`, one after another on the poll thread, through the same bounded child as D5 (no shell, its own process group, `stdin` from the null device, 300 seconds, cancelled when the console closes). Never for a closed, open or ready pull request, never on the request path and never inside the ingest lock. The child reads origin, not the checkout (ADR-project-contract-005), so a plan run of another repository may proceed: the run does not take the one-registration mark `_registering`, and a per-plan set keeps one run per adoption.
+- The child is told which adoption to look for: `--integration-branch` with the base the pull request was opened against, so an adoption merged into a non-default integration branch is found (ADR-project-contract-005), and `--plan-id` with the adoption's plan id, so the remote carrying an earlier adoption of the same project is `not_integrated` (`waiting`), never the new plan's registration; the registry is not written in that case.
+- One row kind records it, `adoption.registration`, with exactly `plan_id`, `number`, `result` (`waiting`, `registered`, `refused`), `project_id`, `reason` and `note`. It is not a kept kind (ADR-console-009) and folds only onto an opened adoption of the same pull request number whose state is `merged`.
+- Three outcomes. A `not_integrated` refusal, because origin's integration branch does not carry the adoption yet, is `waiting`: nothing is registered and the next round looks again. A green report is `registered`: the console lists the project at once, without waiting for the registry watcher, and the digest says `<project id> was registered.` Anything else, a failed run included, is `refused`: the reason is in plain words, never an error code, repair id or failure kind (D5, #1057, #1062), and the note ends `choose Retry.` The original failure, or the whole report of any run that is not a green registration with its failed checks, goes to stderr first as one `console: adoption_register_error <json>` line.
+- Dedupe. The poll appends a row only when its result or reason differs from the folded one, and does not run a refused registration again. A Retry always appends its outcome, an identical refusal included, so the card's key changes and the card is fresh. The console never writes the registry: the child does (D5).
+- The words. Merged and waiting: `The pull request of <name> was merged; waiting for <base> on origin to carry it before registering.` Running: `Registering <name>…`. Registered: `<name> is registered as <project id>.` Refused: `<name> was not registered: <reason>. <next step>` as one line. A closed pull request keeps `The pull request of <name> was closed without merging.` and registers nothing.
+- Retry. A refused registration is one ordinary question card in the inbox (ADR-console-029 D10, #1066), reason `register_retry`, with the one option `Retry`; it counts in `N things need you`, and the Work column shows only the registration's one line. Retry posts `POST /api/adoption-register`, a `PAGE_WRITES` member under ADR-console-008, with exactly `{"plan_id"}`, at most 4096 bytes: any other body is `400` `bad registration retry`. Refusals on the merits are `409` with the reason, append nothing and run nothing, in this order: `registering a project is not available on this host`; `a registration is already running for <name>`; `that registration is not waiting for a retry` (no merged adoption of that plan has a refused registration). Success is an empty `204` once the run is dispatched on the tracked worker that `close` joins.
+- The closed case. A merged adoption's Approve is refused as `the pull request of this plan was already merged` (ADR-console-030 D1), and the old advice to register the repository again is gone.
+- No host check is added, and no `_registering` mark is taken (above): a real check needs a merged pull request on the forge.
+
+**D11. The sprint's decisions.** The decisions of the sprint's four slices are kept in the ADR of the slice that made them: #1052 D1 to D9 here, #1053 and #1066 in ADR-console-029, #1054 in ADR-console-030, and #1055 in D10 above. The owner's rules for the sprint are O1 to O3: tests sandbox HOME, every repository, the remote and the forge, and host checks read the console log or set and restore their own state (O1); everything that needs the owner is an ordinary question card in the left column and counted, never a Work-column button (O2); a slice merges on green checks and the sprint manager takes the review screenshots after merge (O3).
+
 ## Consequences
 
 - The owner can see what adopting a repository would change, and register an adopted one, with no terminal.
 - Out of scope: migrating from the page, which stays a terminal command the page names. Answering the plan's questions is ADR-console-029, and applying a plan from the page is ADR-console-030.
-- Tests sandbox HOME (one per case) and every repository, so no case reads or writes the real fleet registry.
+- A project whose adoption was merged reaches the page with no terminal.
+- Tests sandbox HOME (one per case), every repository, the bare remote and the forge, so no case reads or writes the real fleet registry or a real remote.
+- There is no host check for D10, because a real one needs a merged pull request on the forge.
 - The host check restores what it registered.
 - The check restores only after the view shows the run is no longer running, and names what it leaves when it cannot see that.
 - Related: ADR-console-002, ADR-console-008, ADR-console-009, ADR-project-contract-004, ADR-project-contract-005.

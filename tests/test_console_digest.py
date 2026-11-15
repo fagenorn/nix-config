@@ -11,10 +11,10 @@ from agent_tools.claims import forge_owner_action as foa
 from agent_tools.console.digest import (
     ANSWER_DIFFERS, BRIEF_APPROVED_MOMENT, BRIEF_SENT_MOMENT, EARLIER_MAX, FIRST_VISIT, LOOKED, SHOWN,
     SPRINT_DONE_MOMENT, SPRINT_STATE_MOMENT, SPRINT_WITHDRAWN, Moment, digest, keep, last_looked,
-    moments)
+    PROJECT_REGISTERED, moments)
 from agent_tools.console.event_log import (
-    BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
-    MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_WOKEN,
+    ADOPTION_REGISTRATION, BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN,
+    MANAGER_FAILED, MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_WOKEN,
     QUESTION_ANSWERED, SPRINT_CLOSED, SPRINT_CONTINUED, SPRINT_NUDGED, SPRINT_REPORTED,
     SPRINT_STOP_REQUESTED, Event)
 from agent_tools.console.sessions import SessionState
@@ -51,6 +51,19 @@ class DigestTableTest(unittest.TestCase):
 
 
 class DigestTest(unittest.TestCase):
+    def test_a_registered_adoption_is_one_digest_moment(self):
+        def row(result, **over):
+            return {"plan_id": "p1", "number": 7, "result": result, "project_id": None,
+                    "reason": None, "note": None, **over}
+        events = [
+            Event(1, at(5), ADOPTION_REGISTRATION, None, row("registered", project_id="o/r")),
+            Event(2, at(6), ADOPTION_REGISTRATION, None, row("waiting", project_id="o/r")),
+            Event(3, at(7), ADOPTION_REGISTRATION, None,
+                  row("refused", project_id="o/r", reason="r", note="n"))]
+        self.assertEqual(moments(events, {}, {}),
+                         [Moment(1, at(5), "project_registered", "o/r was registered.")])
+        self.assertEqual(PROJECT_REGISTERED, "project_registered")
+
     def test_a_first_visit_covers_eight_hours(self):
         made = [Moment(1, "2026-11-11T03:59:59.999999+00:00", "k", "a"),
                 Moment(2, "2026-11-11T04:00:00.000000+00:00", "k", "b"),

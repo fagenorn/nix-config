@@ -66,6 +66,7 @@
 | Manager | Console |
 | Marker | Claims |
 | Message | Console |
+| Merged adoption | Console |
 | Migration | Project contract |
 | Not yet managed | Console |
 | Nudge | Console |
