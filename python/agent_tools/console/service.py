@@ -67,7 +67,8 @@ A page write (`PAGE_WRITES`, today `POST /api/looked`, `POST /api/answer`, `POST
 `POST /api/goal`, `POST /api/withdraw`, `POST /api/approve`, `POST /api/reply`,
 `POST /api/retry-manager`, `POST /api/message`, `POST /api/stop`, `POST /api/round-answer`, `POST /api/continue`, `POST /api/exclusion`, `POST /api/pin`, `POST /api/signin`,
 `POST /api/signin-code`, `POST /api/signin-cancel`, `POST /api/signin-link`, `POST /api/account-add`, `POST /api/account-remove` and
-`POST /api/register-project`, `POST /api/plan-answer` and `POST /api/plan-approve`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
+`POST /api/register-project`, `POST /api/plan-answer`, `POST /api/plan-approve` and
+`POST /api/adoption-register`; ADR-console-008, ADR-console-010, ADR-console-011, ADR-console-013) is made by the desk page
 alone and goes through one guard, `_page_write`, whatever its route. After the loopback `Host`
 check and before any body is read, exactly one `Origin` header must equal `http://<Host>` (else
 403 `text/plain` `origin refused`) and exactly one `X-Console-Token` header must equal the
@@ -247,6 +248,17 @@ apply has already made its branch and a restarted console must not offer a fresh
 The console never merges: it pushes the one branch and opens its pull request, and the forge's
 required checks keep merge safety. One line `console: plan_approve_ended <step or stopped>` ends the
 run. Any other exception is `console: plan_approve_failed <Type>` and 500 `approving failed`.
+
+`POST /api/adoption-register` (#1055, ADR-console-028 D10) is the Retry of a refused registration
+of a merged adoption. It runs the same checks with `MAX_ADOPTION_REGISTER_BYTES` (4096) and
+`approve.parse_approve_request`: 400 `bad registration retry`. The service refuses, each as 409
+with the text, one stderr line `console: adoption_register_refused <reason>`, appending and
+running nothing, in this order: without an adopter, `register.UNAVAILABLE`; while the plan's
+registration runs, `register.running(<name>)`; when no opened, merged adoption of that plan has a
+refused registration, `approve.NOT_REFUSED`. Otherwise the answer is an empty `204` once the run
+is dispatched on a tracked thread (`APPROVAL_THREAD`) that `close` joins, and the run appends its
+outcome whatever it is (an identical refusal included, so the card is fresh). Any other exception
+is `console: adoption_register_failed <Type>` and 500 `registering failed`.
 
 `POST /api/readings` runs the same checks in the same order (loopback `Host`, no `Origin`,
 `application/json`, a length, at most `MAX_READING_BYTES`), answers `204` and flushes, and only
@@ -533,6 +545,22 @@ more. A failed read is one stderr line `console: adoption_poll_failed <plan_id> 
 <message>` and the item stays as it was. An exception escaping a round is one stderr line
 `console: adoption_poll_loop_failed <Type>: <message>` and the loop goes on. The console never
 merges: the owner does, on the forge.
+
+The same round ends with the merged registration (#1055, ADR-console-028 D10, ADR-project-contract-005):
+`register_merged()` runs `Adopter.register(root, cancel=...)`, the bounded child, for each `opened`
+adoption whose pull request reads `merged` and whose registration is absent or `waiting`
+(`approve.enrolling`), one after another on the poll thread, never inside the ingest lock and
+never for a closed, open or ready pull request; `_enrolling` keeps one run per plan id, and
+the run does not take the one-registration mark. Its outcome (`approve.registration_outcome`) is
+one `adoption.registration` row, appended by the poll only when the result or reason differs from
+the folded one; `not_integrated` is `waiting` (the next look tries again), a registered project
+is listed at once (`refresh()` runs after the row, outside the lock) and anything else is
+`refused` in plain words with a Retry card. A run that ended because the console is closing
+appends nothing. Every run that is not a green registration first writes one stderr line
+`console: adoption_register_error <json>` holding the original (the failure kind, the exception
+with its traceback, or the whole returned report with its failed `checks`); one line
+`console: adoption_register_ended <plan_id> <result>` (` unchanged` when nothing was appended)
+ends the run. The console never writes the registry: the child does.
 
 Answers (#862, ADR-console-010): `answer(project_id, key, choices)` ticks one option under each
 question of a decision item on the tracker, through `tick` (default `answer.tick_on_tracker`;
@@ -972,17 +1000,20 @@ ACCOUNT_REMOVE_PATH = "/api/account-remove"
 REGISTER_PATH = "/api/register-project"
 PLAN_ANSWER_PATH = "/api/plan-answer"
 PLAN_APPROVE_PATH = "/api/plan-approve"
+ADOPTION_REGISTER_PATH = "/api/adoption-register"
 PAGE_WRITES: frozenset[str] = frozenset({
     LOOKED_PATH, ANSWER_PATH, CHECK_PATH, GOAL_PATH, WITHDRAW_PATH, APPROVE_PATH, REPLY_PATH,
     RETRY_PATH, MESSAGE_PATH, STOP_PATH, ROUND_ANSWER_PATH, CONTINUE_PATH, EXCLUSION_PATH,
     PIN_PATH, SIGNIN_PATH, SIGNIN_CODE_PATH, SIGNIN_CANCEL_PATH, SIGNIN_LINK_PATH, ACCOUNT_ADD_PATH,
-    ACCOUNT_REMOVE_PATH, REGISTER_PATH, PLAN_ANSWER_PATH, PLAN_APPROVE_PATH})
+    ACCOUNT_REMOVE_PATH, REGISTER_PATH, PLAN_ANSWER_PATH, PLAN_APPROVE_PATH,
+    ADOPTION_REGISTER_PATH})
 MAX_SIGNIN_BYTES = 4096
 MAX_ACCOUNT_BYTES = 4096
 MAX_REMOVE_BYTES = 4096
 MAX_REGISTER_BYTES = 4096
 MAX_PLAN_ANSWER_BYTES = 4096
 MAX_PLAN_APPROVE_BYTES = 4096
+MAX_ADOPTION_REGISTER_BYTES = 4096
 APPROVAL_THREAD = "console-adoption-approval"
 SIGNIN_THREAD = "console-signin-deadline"
 SIGNIN_TICK_SECONDS = 1.0
@@ -1476,6 +1507,28 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return False
         return True
 
+    def _adoption_register_request(self, console: "ConsoleService") -> bool:
+        """Carry out the registration retry write; True when the shared 204 is to be sent."""
+        body = self._json_body(MAX_ADOPTION_REGISTER_BYTES)
+        if body is None:
+            return False
+        try:
+            plan_id = approve.parse_approve_request(body)
+        except ValueError:
+            self._refuse(400, "bad registration retry")
+            return False
+        try:
+            console.retry_registration(plan_id)
+        except sprints.Refused as error:
+            print(f"console: adoption_register_refused {error}", file=sys.stderr)
+            self._refuse(409, str(error))
+            return False
+        except Exception as error:
+            print(f"console: adoption_register_failed {type(error).__name__}", file=sys.stderr)
+            self._refuse(500, "registering failed")
+            return False
+        return True
+
     def _brief_request(self):
         """The manager's route: a brief sent with the sprint's secret; no token, no page."""
         console = self.server.console
@@ -1919,6 +1972,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
             if not self._plan_approve_request(console):
                 return
+        elif route == ADOPTION_REGISTER_PATH:
+            self.close_connection = True
+            if not self._adoption_register_request(console):
+                return
         else:
             if (self.headers.get("Content-Length", "0") != "0"
                     or self.headers.get("Transfer-Encoding") is not None):
@@ -2065,6 +2122,7 @@ class ConsoleService:
         self._forge = forge
         self._pusher = pusher
         self._approving = False
+        self._enrolling: set[str] = set()
         self._approval_workers: list[threading.Thread] = []
         self._approval_dispatch = (
             self._on_approval_thread if approval_dispatch is None else approval_dispatch)
@@ -2267,7 +2325,8 @@ class ConsoleService:
             return None, None
         plan_id = latest["plan_id"]
         found = self._adoptions.get(plan_id) if plan_id else None
-        entry = approve.entry(found, running=self._approving, name=register.name_of(latest["root"]))
+        entry = approve.entry(found, running=self._approving, name=register.name_of(latest["root"]),
+                              registering=bool(plan_id) and plan_id in self._enrolling)
         action = approve.action(
             latest, found, available=self._adopter is not None and self._forge is not None,
             running=self._registering is not None)
@@ -2290,6 +2349,7 @@ class ConsoleService:
                 again=self._answering, refusal=self._answer_refusal, adoption=adoption,
                 approve=action),
             adoption_items=approve.inbox_entries(self._adoptions),
+            retry_items=approve.retry_entries(self._adoptions, self._enrolling),
             pin=pin.note(self._pinned, cap, manager.session_profile(cap, self._use.last)),
             pin_launches=self._pin_launches.launched,
             managers=self._launcher is not None, pending=self._pending))
@@ -4658,6 +4718,122 @@ class ConsoleService:
                                       state)])
                 self._fold(appended)
                 self._publish()
+        self.register_merged()
+
+    def register_merged(self) -> None:
+        """One round of merged registrations; see the module docstring."""
+        if self._adopter is None:
+            return
+        with self._ingest:
+            plans = [found["plan_id"] for found in approve.enrolling(self._adoptions)
+                     if found["plan_id"] not in self._enrolling]
+        for plan_id in plans:
+            if self._stop.is_set():
+                return
+            with self._ingest:
+                found = self._adoptions.get(plan_id)
+                if (self._closed or plan_id in self._enrolling or found is None
+                        or not any(one["plan_id"] == plan_id
+                                   for one in approve.enrolling(self._adoptions))):
+                    continue
+                entry = dict(found)
+                self._enrolling.add(plan_id)
+                self._publish()
+            try:
+                self._register_adoption(entry, retry=False)
+            finally:
+                with self._ingest:
+                    self._enrolling.discard(plan_id)
+                    if not self._closed:
+                        self._publish()
+
+    @staticmethod
+    def _log_register_error(record: dict) -> None:
+        print(f"console: adoption_register_error {json.dumps(record, sort_keys=True)}",
+              file=sys.stderr)
+
+    def _register_adoption(self, entry: dict, *, retry: bool) -> None:
+        """Run the registration of one merged adoption, append its outcome, list the project."""
+        root, plan_id = entry["root"], entry["plan_id"]
+        where = {"stage": "register", "root": root, "plan_id": plan_id}
+        try:
+            report = self._adopter.register(root, cancel=self._stop)
+        except register.RunFailed as failure:
+            if self._stop.is_set():
+                return
+            self._log_register_error({**where, "failure": failure.kind,
+                                      "cause": repr(failure.__cause__)})
+            outcome = approve.run_outcome(root, failure.kind)
+        except Exception as error:
+            self._log_register_error({**where, "exception": type(error).__name__,
+                                      "detail": str(error)})
+            traceback.print_exception(error, file=sys.stderr)
+            outcome = approve.run_outcome(root, type(error).__name__)
+        else:
+            project_id = report.get("project_id") if isinstance(report, Mapping) else None
+            if not (isinstance(report, Mapping) and report.get("registered") is True
+                    and isinstance(project_id, str) and project_id != ""):
+                try:
+                    json.dumps(report)
+                    whole = report
+                except (TypeError, ValueError):
+                    whole = repr(report)
+                self._log_register_error({**where, "report": whole})
+            outcome = approve.registration_outcome(root, report)
+        appended = False
+        with self._ingest:
+            if not self._closed:
+                folded = self._adoptions.get(plan_id)
+                current = folded.get("registration") if folded is not None else None
+                same = (current is not None
+                        and (current["result"], current["reason"])
+                        == (outcome["result"], outcome["reason"]))
+                if retry or not same:
+                    row = approve.registration_row({
+                        "plan_id": plan_id, "number": entry["pull_request"]["number"], **outcome})
+                    self._fold(self.log.append([row]))
+                    appended = True
+                self._publish()
+            listed = outcome["result"] == "registered" and not self._closed
+        if listed:
+            self.refresh()
+        print(f"console: adoption_register_ended {plan_id} {outcome['result']}"
+              f"{'' if appended else ' unchanged'}", file=sys.stderr)
+
+    def retry_registration(self, plan_id: str) -> None:
+        """Run a refused registration again on a tracked worker; refusals are `sprints.Refused`."""
+        if self._adopter is None:
+            raise sprints.Refused(register.UNAVAILABLE)
+        with self._ingest:
+            found = self._adoptions.get(plan_id)
+            if plan_id in self._enrolling:
+                name = register.name_of(found["root"]) if found is not None else plan_id
+                raise sprints.Refused(register.running(name))
+            if (found is None or found["step"] != "opened" or found["pull_state"] != "merged"
+                    or found.get("registration") is None
+                    or found["registration"]["result"] != "refused"):
+                raise sprints.Refused(approve.NOT_REFUSED)
+            entry = dict(found)
+            self._enrolling.add(plan_id)
+            self._publish()
+        try:
+            self._approval_dispatch(lambda: self._retry_job(entry))
+        except BaseException:
+            with self._ingest:
+                self._enrolling.discard(plan_id)
+                self._publish()
+            raise
+
+    def _retry_job(self, entry: dict) -> None:
+        try:
+            self._register_adoption(entry, retry=True)
+        except Exception as error:
+            print(f"console: adoption_register_failed {type(error).__name__}", file=sys.stderr)
+        finally:
+            with self._ingest:
+                self._enrolling.discard(entry["plan_id"])
+                if not self._closed:
+                    self._publish()
 
     def _adopt(self) -> None:
         while True:
