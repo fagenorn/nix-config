@@ -12,7 +12,9 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from agent_tools.console import capacity as console_capacity
 from agent_tools.console import digest as console_digest
+from agent_tools.console import signin as console_signin
 from agent_tools.console.event_log import Event
 from agent_tools.console.sprints import MAX_REPORT_ISSUES
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
@@ -249,7 +251,8 @@ class PageTest(unittest.TestCase):
             if selector.split()[0].startswith((".top", ".brand", ".conn", ".goal-", "#goal", ".cap", ".meter"))
             and decls.get("white-space") == "nowrap"
         }
-        self.assertEqual(unwrapped, {".brand", ".cap-acct", ".cap-acct b"})
+        self.assertEqual(unwrapped, {".brand", ".cap", ".cap-acct", ".cap-acct b",
+                                    ".goal-in .goal-text::placeholder"})
         (long_name,) = render([
             START,
             {"frame": {**view([]), "capacity": capacity([profile("a" * 60, "ok", week_left=50)])}},
@@ -799,7 +802,7 @@ class CapacityPageTest(unittest.TestCase):
         ], no_reading="1 with no reading yet"))
         self.assertEqual(
             [n["cls"] for n in strip(snap)],
-            ["cap-state cap-fine", "cap-acct", "cap-acct", "cap-when", "cap-none"])
+            ["cap-state cap-fine", "cap-acct cap-extra", "cap-acct cap-tightest", "cap-none cap-extra"])
         state = strip(snap)[0]
         self.assertEqual(full(state), "fine")
         self.assertIn("svg", [c["tag"] for c in state["children"]])
@@ -814,7 +817,8 @@ class CapacityPageTest(unittest.TestCase):
         self.assertEqual(full(pc), "65%")
         self.assertEqual(a["title"], "65% of the week left, 40% of 5 hours")
         self.assertEqual(c["title"], "30% of the week left")
-        self.assertEqual(full(part(snap, "cap-when")), "resets Mon 05:00")
+        self.assertEqual([n for n in nodes(snap["capacity"]) if has_class(n, "cap-when")], [])
+        self.assertNotIn("resets", full(snap["capacity"]))
         self.assertEqual(full(part(snap, "cap-none")), "1 with no reading yet")
 
     def test_tight_reads_tight_and_an_out_account_reads_out_until(self) -> None:
@@ -825,7 +829,7 @@ class CapacityPageTest(unittest.TestCase):
         ], tight=True))
         self.assertEqual(
             [n["cls"] for n in strip(snap)],
-            ["cap-state cap-tight", "cap-acct", "cap-acct cap-out", "cap-when"])
+            ["cap-state cap-tight", "cap-acct cap-extra", "cap-acct cap-out cap-tightest"])
         state = strip(snap)[0]
         self.assertEqual(full(state), "tight")
         self.assertIn("svg", [c["tag"] for c in state["children"]])
@@ -835,7 +839,8 @@ class CapacityPageTest(unittest.TestCase):
         self.assertEqual(b["title"], "55% of the week left, 0% of 5 hours")
         self.assertIn("out until Fri 09:30", full(b))
         self.assertEqual([n for n in nodes(b) if has_class(n, "cap-pc")], [])
-        self.assertEqual(full(part(snap, "cap-when")), "resets Mon 05:00")
+        self.assertEqual([n for n in nodes(snap["capacity"]) if has_class(n, "cap-when")], [])
+        self.assertNotIn("resets", full(snap["capacity"]))
 
     def test_every_account_out_reads_out_in_red_and_when_work_resumes(self) -> None:
         snap = capacity_snap(capacity([
@@ -844,15 +849,21 @@ class CapacityPageTest(unittest.TestCase):
         ], all_out=True, resumes_at="2026-11-13T09:30:00+00:00"))
         self.assertEqual(
             [n["cls"] for n in strip(snap)],
-            ["cap-state cap-out", "cap-acct cap-out", "cap-acct cap-out", "cap-when"])
+            ["cap-state cap-out", "cap-acct cap-out cap-tightest", "cap-acct cap-out cap-extra"])
         state = strip(snap)[0]
         self.assertEqual(full(state), "out")
         self.assertIn("svg", [c["tag"] for c in state["children"]])
         a, b = accounts(snap)
         self.assertEqual(bar(a), "0%")
         self.assertEqual(bars(b), [])
-        self.assertEqual(full(part(snap, "cap-when")), "resumes Fri 09:30")
+        self.assertEqual([n for n in nodes(snap["capacity"]) if has_class(n, "cap-when")], [])
+        self.assertNotIn("resumes", full(snap["capacity"]))
         self.assertNotIn("resets", full(snap["capacity"]))
+        statement = render_page({**view([]), "capacity": capacity([
+            profile("a", "out", week_left=0, out_until="2026-11-13T09:30:00+00:00"),
+            profile("b", "out", out_until="2026-11-13T10:00:00+00:00"),
+        ], all_out=True, resumes_at="2026-11-13T09:30:00+00:00")})["statement"]
+        self.assertIn("Resumes Fri 09:30", full(statement))
         for n in nodes(snap["capacity"]):
             self.assertNotIn("needs", n["cls"])
         text = PAGE.read_text(encoding="utf-8")
@@ -885,7 +896,8 @@ class CapacityPageTest(unittest.TestCase):
             profile("d", "reset", week_left=100, five_hour_left=100),
         ]))
         self.assertEqual(
-            [n["cls"] for n in strip(snap)], ["cap-state cap-fine", "cap-acct", "cap-acct"])
+            [n["cls"] for n in strip(snap)],
+            ["cap-state cap-fine", "cap-acct cap-extra", "cap-acct cap-tightest"])
         c, d = accounts(snap)
         self.assertIn("reset, not yet used", full(c))
         self.assertIn("reset, not yet used", full(d))
@@ -939,149 +951,6 @@ class CapacityPageTest(unittest.TestCase):
         self.assertEqual(full(both["promoted"]).count("out, reset unknown"), 2)
         self.assertNotIn("Resumes ", full(both["statement"]))
 
-    def test_each_account_offers_one_toggle_named_for_its_action(self) -> None:
-        snap = capacity_snap(capacity([
-            profile("a", "ok", week_left=65, excluded=True),
-            profile("b", "ok", week_left=30, excluded=False),
-            profile("c", "unknown", excluded=True),
-        ]))
-        a, b, c = accounts(snap)
-        self.assertTrue(has_class(a, "cap-excluded"))
-        self.assertTrue(has_class(c, "cap-excluded"))
-        self.assertFalse(has_class(b, "cap-excluded"))
-        toggles = []
-        for n in (a, b, c):
-            (toggle,) = [m for m in nodes(n) if has_class(m, "cap-toggle")]
-            toggles.append(full(toggle))
-        self.assertEqual(toggles, ["Include", "Exclude", "Include"])
-        for n in (a, c):
-            (mark,) = [m for m in nodes(n) if has_class(m, "cap-excl")]
-            self.assertEqual(full(mark), "excluded")
-        self.assertEqual([m for m in nodes(b) if has_class(m, "cap-excl")], [])
-        self.assertEqual(bar(a), "65%")
-
-    def test_the_toggle_posts_one_exclusion_with_the_token(self) -> None:
-        for first, body in (
-            (profile("a", "ok", week_left=65, excluded=True), {"profile": "a", "excluded": False}),
-            (profile("b", "ok", week_left=30, excluded=False), {"profile": "b", "excluded": True}),
-        ):
-            (snap,) = render([
-                START,
-                {"frame": {**view([]), "capacity": capacity([first])}},
-                {"click": "cap-toggle"},
-                {"snapshot": True},
-            ])
-            (post,) = [p for p in snap["posts"] if p["url"] == "/api/exclusion"]
-            self.assertEqual(post["method"], "POST")
-            self.assertEqual(post["headers"],
-                             {"X-Console-Token": TOKEN, "Content-Type": "application/json"})
-            self.assertEqual(json.loads(post["body"]), body)
-
-    def test_a_refused_toggle_says_why(self) -> None:
-        (snap,) = render([
-            START,
-            {"frame": {**view([]), "capacity": capacity([
-                profile("a", "ok", week_left=65, excluded=True)])}},
-            {"respond": {"status": 409, "text": "no such profile\n"}},
-            {"click": "cap-toggle"},
-            {"snapshot": True},
-        ])
-        (fail,) = [n for n in nodes(snap["capacity"]) if has_class(n, "fail")]
-        self.assertEqual(full(fail), "Could not include: no such profile")
-
-    def test_each_account_offers_pin_and_the_pinned_one_unpin(self) -> None:
-        snap = capacity_snap(capacity([
-            profile("a", "ok", week_left=65, pinned=True),
-            profile("b", "ok", week_left=30, pinned=False),
-        ]))
-        a, b = accounts(snap)
-        labels = []
-        for n in (a, b):
-            (pin,) = [m for m in nodes(n) if has_class(m, "cap-pin")]
-            labels.append(full(pin))
-        self.assertEqual(labels, ["Unpin", "Pin"])
-        self.assertTrue(has_class(a, "cap-pinned"))
-        self.assertFalse(has_class(b, "cap-pinned"))
-        (mark,) = [m for m in nodes(a) if has_class(m, "cap-pin-mark")]
-        self.assertEqual(full(mark), "pinned")
-        self.assertEqual([m for m in nodes(b) if has_class(m, "cap-pin-mark")], [])
-
-    def test_a_pinned_profile_with_no_reading_is_listed(self) -> None:
-        snap = capacity_snap(capacity([profile("c", "unknown", read_at=None, pinned=True)]))
-        (c,) = accounts(snap)
-        (pin,) = [m for m in nodes(c) if has_class(m, "cap-pin")]
-        self.assertEqual(full(pin), "Unpin")
-
-    def test_the_pin_button_posts_one_pin_with_the_token(self) -> None:
-        for first, body in (
-            (profile("a", "ok", week_left=65, pinned=True), {"profile": "a", "pinned": False}),
-            (profile("b", "ok", week_left=30, pinned=False), {"profile": "b", "pinned": True}),
-        ):
-            (snap,) = render([
-                START,
-                {"frame": {**view([]), "capacity": capacity([first])}},
-                {"click": "cap-pin"},
-                {"snapshot": True},
-            ])
-            (post,) = [p for p in snap["posts"] if p["url"] == "/api/pin"]
-            self.assertEqual(post["method"], "POST")
-            self.assertEqual(post["headers"],
-                             {"X-Console-Token": TOKEN, "Content-Type": "application/json"})
-            self.assertEqual(json.loads(post["body"]), body)
-
-    def test_a_refused_pin_says_why(self) -> None:
-        (snap,) = render([
-            START,
-            {"frame": {**view([]), "capacity": capacity([
-                profile("a", "ok", week_left=65, excluded=True, pinned=False)])}},
-            {"respond": {"status": 409, "text": "excluded; include it first\n"}},
-            {"click": "cap-pin"},
-            {"snapshot": True},
-        ])
-        (fail,) = [n for n in nodes(snap["capacity"]) if has_class(n, "fail")]
-        self.assertEqual(full(fail), "Could not pin: excluded; include it first")
-
-    def test_a_refused_unpin_says_why(self) -> None:
-        (snap,) = render([
-            START,
-            {"frame": {**view([]), "capacity": capacity([
-                profile("a", "ok", week_left=65, pinned=True)])}},
-            {"respond": {"status": 500, "text": "could not write\n"}},
-            {"click": "cap-pin"},
-            {"snapshot": True},
-        ])
-        (fail,) = [n for n in nodes(snap["capacity"]) if has_class(n, "fail")]
-        self.assertEqual(full(fail), "Could not unpin: could not write")
-
-    def test_the_strip_says_when_the_pin_is_not_in_effect(self) -> None:
-        cap = capacity([
-            profile("a", "out", out_until="2026-11-20T09:30:00+00:00", pinned=True),
-            profile("b", "ok", week_left=30, pinned=False),
-        ])
-
-        def last(pin: dict | None) -> dict:
-            frame = {**view([]), "capacity": cap}
-            if pin is not None:
-                frame["pin"] = pin
-            (snap,) = render([START, {"frame": frame}, {"snapshot": True}])
-            return strip(snap)[-1]
-
-        waiting = last({"profile": "a", "in_effect": False, "reason": "out of allowance",
-                        "until": "2026-11-20T09:30:00+00:00", "instead": "b"})
-        self.assertTrue(has_class(waiting, "cap-pin-note"))
-        self.assertEqual(full(waiting),
-                         "a is pinned but not in effect: out of allowance until Fri 09:30. "
-                         "New sessions use b.")
-        nowhere = last({"profile": "a", "in_effect": False, "reason": "signed out",
-                        "until": None, "instead": None})
-        self.assertTrue(has_class(nowhere, "cap-pin-note"))
-        self.assertEqual(full(nowhere),
-                         "a is pinned but not in effect: signed out. "
-                         "New sessions have no profile to use.")
-        for pin in ({"profile": "a", "in_effect": True, "reason": None,
-                     "until": None, "instead": None}, None):
-            self.assertFalse(has_class(last(pin), "cap-pin-note"))
-
     def test_all_out_lists_an_excluded_profile_as_excluded(self) -> None:
         result = render_page({**view([]), "capacity": capacity([
             profile("a", "ok", week_left=65, excluded=True),
@@ -1105,12 +974,13 @@ class CapacityPageTest(unittest.TestCase):
             profile("b", "ok", week_left=30, next_reset="2026-11-17T05:00:00+00:00", excluded=False),
         ]))
         self.assertEqual(classes(mixed)[0], "cap-state cap-fine")
-        self.assertEqual(full(part(mixed, "cap-when")), "resets Tue 05:00")
+        self.assertEqual([n for n in nodes(mixed["capacity"]) if has_class(n, "cap-when")], [])
         self.assertEqual([n for n in strip(mixed) if has_class(n, "cap-none")], [])
 
     def test_a_view_without_capacity_still_renders(self) -> None:
         result = render_page(view([]))
-        self.assertEqual(result["capacity"]["children"], [])
+        self.assertEqual([(n["cls"], full(n)) for n in result["capacity"]["children"]],
+                         [("cap-none", "no accounts")])
         self.assertEqual(result["promoted"]["children"], [])
 
 
@@ -1151,14 +1021,15 @@ class PageTimeTest(unittest.TestCase):
             profile("b", "out", out_until="2026-11-13T10:00:00+00:00"),
         ], all_out=True, resumes_at="2026-11-13T09:30:00+00:00")}
         one, two = render([
-            self.begin, {"frame": first}, {"snapshot": True},
+            self.begin, {"frame": first}, {"click": "cap"}, {"snapshot": True},
             {"frame": second}, {"snapshot": True},
         ])
         self.assertIn("waiting 3 h", full(one["inbox"]))
         self.assertIn("read yesterday", full(one["inbox"]))
         self.assertIn("Since you last looked, 1 h ago", full(one["digest"]))
         self.assertIn("5 min ago", full(one["digest"]))
-        self.assertIn("resets Mon 05:00", full(one["capacity"]))
+        self.assertIn("resets Mon 05:00", full(one["accounts_body"]))
+        self.assertNotIn("resets", full(one["capacity"]))
         self.assertIn("out until Fri 09:30", full(one["capacity"]))
         self.assertIn("stated 3 min ago", full(one["projects"]))
         self.assertIn("untouched for 3 days", full(one["projects"]))
@@ -4666,38 +4537,625 @@ def classes(snap: dict) -> list:
 
 
 def signed_out_pair() -> dict:
-    return capacity([
-        profile("a", "out", out_until="2026-11-14T09:00:00+00:00", signin=si("signed_in", 9)),
-        profile("default", "ok", week_left=80, next_reset="2026-11-13T05:00:00+00:00",
-                signin=si("signed_out", None)),
-    ], all_out=True, resumes_at="2026-11-14T09:00:00+00:00")
+    return real_capacity(NOW_S, [
+        {"name": "a", "week": .6, "week_reset": NOW_S + 86400, "refused": True,
+         "signin": ("signed_in", NOW_S + 9 * 86400)},
+        {"name": "default", "week": .2, "week_reset": NOW_S + 2 * 86400,
+         "signin": ("signed_out", None)},
+    ])
+
+
+NOW_S = 1794398400
+
+
+def real_capacity(now: float, rows: list, excluded=(), pinned=None) -> dict:
+    """The capacity view the console builds from readings and sign-ins, not a hand-built one."""
+    events, signins = [], {}
+    for row in rows:
+        name = row["name"]
+        if "week" in row or "five" in row:
+            refused = row.get("refused", False)
+            status = "rejected" if refused else "allowed"
+            week_reset = row.get("week_reset")
+            seq = len(events) + 1
+            events.append(Event(seq, f"t{seq}", console_capacity.READING, None, {
+                "profile": name, "http_status": 429 if refused else 200, "status": status,
+                "reset": week_reset if refused else None, "binding": "7d" if refused else None,
+                "claim": None, "account": None, "session_id": None,
+                "windows": {
+                    "7d": {"status": status, "utilization": row.get("week"), "reset": week_reset},
+                    "5h": {"status": "rejected" if row.get("five_out") else "allowed",
+                           "utilization": row.get("five"),
+                           "reset": row.get("five_reset")},
+                }}))
+        if row.get("signin") is not None:
+            state, end = row["signin"]
+            signins[name] = console_signin.SignIn(
+                state,
+                None if end is None else datetime.fromtimestamp(end, timezone.utc).isoformat(),
+                datetime.fromtimestamp(now, timezone.utc).isoformat(),
+                row.get("ever", state == "signed_in"))
+    return console_capacity.capacity_view(
+        [row["name"] for row in rows], console_capacity.capacity_state(events), now,
+        signins=signins, excluded=frozenset(excluded), pinned=pinned)
+
+
+def panel(snap: dict) -> dict:
+    return snap["accounts_body"]
+
+
+def rows(snap: dict) -> list:
+    return [n for n in nodes(panel(snap)) if has_class(n, "acct-row")]
+
+
+def opened(frame: dict, *steps) -> dict:
+    (snap,) = render([START, {"frame": frame}, {"click": "cap"}, *steps, {"snapshot": True}])
+    return snap
+
+
+def weekday(stamp: str) -> str:
+    return datetime.fromisoformat(stamp).astimezone(timezone.utc).strftime("%a %H:%M")
+
+
+F3 = {**view([]), "capacity": real_capacity(NOW_S, [
+    {"name": "a", "week": .35, "five": .6, "week_reset": NOW_S + 4 * 86400,
+     "five_reset": NOW_S + 3600, "signin": ("signed_in", NOW_S + 12 * 86400)},
+    {"name": "b", "week": .7, "week_reset": NOW_S + 5 * 86400, "refused": True},
+    {"name": "c"},
+], pinned="a"), "profile_sessions": {"a": 2, "b": 0, "c": 0}}
+
+
+def one_profile(row: dict, **extra) -> dict:
+    return {**view([]), "capacity": real_capacity(NOW_S, [row], **extra)}
+
+
+def names(snap: dict) -> list:
+    return [full(n) for n in nodes(panel(snap)) if has_class(n, "acct-name")]
+
+
+def details(row: dict) -> list:
+    (detail,) = [n for n in row["children"] if has_class(n, "acct-detail")]
+    return [full(c) for c in detail["children"]]
+
+
+class AccountsPanelPageTest(unittest.TestCase):
+    def test_the_strip_opens_the_accounts_panel_and_escape_closes_it_returning_focus(self) -> None:
+        closed, open_, after = render([
+            START, {"frame": F3}, {"snapshot": True}, {"focus_on": "cap"}, {"click": "cap"},
+            {"snapshot": True}, {"key": "Escape"}, {"snapshot": True},
+        ])
+        self.assertIs(closed["accounts"]["hidden"], True)
+        self.assertEqual(closed["capacity"]["expanded"], "false")
+        self.assertEqual(closed["accounts_body"]["children"], [])
+        self.assertIs(open_["accounts"]["hidden"], False)
+        self.assertEqual(open_["capacity"]["expanded"], "true")
+        self.assertEqual(open_["active"], "acct-panel")
+        self.assertEqual(names(open_), ["a", "b", "c"])
+        self.assertIs(after["accounts"]["hidden"], True)
+        self.assertEqual(after["capacity"]["expanded"], "false")
+        self.assertEqual(after["active"], "cap")
+        self.assertIs(after["key_prevented"], True)
+        self.assertEqual(after["accounts_body"]["children"], [])
+
+    def test_the_a_key_opens_the_panel_and_is_ignored_in_a_field_or_with_a_modifier(self) -> None:
+        opened_, closed, in_field, modified = render([
+            START, {"frame": F3}, {"key": "a"}, {"snapshot": True}, {"key": "Escape"},
+            {"snapshot": True}, {"key": "a", "target": "INPUT"}, {"snapshot": True},
+            {"key": "a", "ctrlKey": True}, {"snapshot": True},
+        ])
+        self.assertIs(opened_["accounts"]["hidden"], False)
+        self.assertIs(opened_["key_prevented"], True)
+        self.assertIs(closed["accounts"]["hidden"], True)
+        self.assertIs(in_field["accounts"]["hidden"], True)
+        self.assertIs(modified["accounts"]["hidden"], True)
+
+    def test_the_keyboard_flow_survives_a_panel_opened_with_nothing_focused(self) -> None:
+        # A browser's keydown targets the focused element, else the body: after Escape no strip button holds focus.
+        with_inbox = {**F3, **frame([ANSWERABLE])}
+        closed, reopened = render([
+            START, {"frame": with_inbox}, {"key": "a", "follow": True},
+            {"key": "Escape", "follow": True}, {"snapshot": True},
+            {"key": "a", "follow": True}, {"snapshot": True},
+        ])
+        self.assertNotIn("cap", (closed["active"] or "").split())
+        self.assertIs(reopened["accounts"]["hidden"], False)
+        (goal,) = render([
+            START, {"frame": with_inbox}, {"key": "a", "follow": True},
+            {"key": "Escape", "follow": True}, {"key": "g", "follow": True}, {"snapshot": True},
+        ])
+        self.assertIs(box_open(goal), True)
+
+    def test_a_streamed_frame_keeps_the_focused_panel_control(self) -> None:
+        def focused_in(snap: dict) -> list:
+            return [n for n in nodes(panel(snap)) if n["focused"]]
+
+        for cls in ("acct-close", "acct-pin"):
+            (snap,) = render([
+                START, {"frame": F3}, {"click": "cap"}, {"focus_on": cls},
+                {"frame": {**F3, "profile_sessions": {"a": 3, "b": 0, "c": 0}}}, {"snapshot": True},
+            ])
+            (kept,) = focused_in(snap)
+            self.assertIn(cls, kept["cls"].split())
+        # The control is found by its row, not by its class alone: the rows reorder under the focus.
+        cap = F3["capacity"]
+        flipped = {**F3, "capacity": {**cap, "profiles": list(reversed(cap["profiles"]))}}
+        (snap,) = render([
+            START, {"frame": F3}, {"click": "cap"}, {"focus_on": "acct-pin"},
+            {"frame": flipped}, {"snapshot": True},
+        ])
+        (kept,) = focused_in(snap)
+        self.assertIn("acct-pin", kept["cls"].split())
+        (owner,) = [r for r in rows(snap) if kept in nodes(r)]
+        self.assertEqual(full([n for n in nodes(owner) if has_class(n, "acct-name")][0]), "a")
+
+    def test_a_keyboard_pin_or_exclusion_keeps_the_focus_while_it_posts(self) -> None:
+        for cls, url in (("acct-pin", "/api/pin"), ("acct-toggle", "/api/exclusion")):
+            with self.subTest(cls=cls):
+                (snap,) = render([
+                    START, {"frame": F3}, {"click": "cap"}, {"focus_on": cls}, {"hold": True}, {"click": cls},
+                    {"snapshot": True},
+                ])
+                (kept,) = [n for n in nodes(panel(snap)) if n["focused"]]
+                self.assertIn(cls, kept["cls"].split())
+                self.assertEqual(len([p for p in snap["posts"] if p["url"] == url]), 1)
+                (again,) = render([
+                    START, {"frame": F3}, {"click": "cap"}, {"focus_on": cls}, {"hold": True}, {"click": cls},
+                    {"click": cls}, {"snapshot": True},
+                ])
+                self.assertEqual(len([p for p in again["posts"] if p["url"] == url]), 1)
+
+    def test_an_exhausted_account_keeps_its_weekly_figure_in_the_panel(self) -> None:
+        snap = opened(one_profile({
+            "name": "w", "week": .4, "five": 1.0, "five_out": True,
+            "week_reset": NOW_S + 4 * 86400, "five_reset": NOW_S + 3600}))
+        (row,) = rows(snap)
+        out = details(row)
+        self.assertTrue(out[0].startswith("out until "), out)
+        self.assertIn("60% of the week left", out)
+
+    def test_focus_returns_to_the_element_focused_at_opening(self) -> None:
+        with_inbox = {**F3, **frame([ANSWERABLE])}
+        (kept,) = render([
+            START, {"frame": with_inbox}, {"focus_on": "opt"}, {"click": "cap"},
+            {"key": "Escape"}, {"snapshot": True},
+        ])
+        self.assertIn("opt", kept["active"].split())
+        (lost,) = render([
+            START, {"frame": with_inbox}, {"focus_on": "opt"}, {"click": "cap"},
+            {"frame": with_inbox}, {"key": "Escape"}, {"snapshot": True},
+        ])
+        self.assertEqual(lost["active"], "cap")
+
+    def test_while_the_panel_is_open_only_escape_acts(self) -> None:
+        with_inbox = {**F3, **frame([ANSWERABLE])}
+        before, after = render([
+            START, {"frame": with_inbox}, {"snapshot": True}, {"click": "cap"},
+            {"key": "2"}, {"key": "g"}, {"snapshot": True},
+        ])
+        self.assertEqual(picked(after), picked(before))
+        self.assertIs(box_open(after), False)
+        self.assertIs(after["key_prevented"], False)
+
+    def test_escape_closes_the_panel_before_it_undoes_an_answer(self) -> None:
+        (snap,) = render([
+            START, {"frame": {**F3, **frame([ANSWERABLE])}}, {"key": "Enter"},
+            {"click": "cap"}, {"key": "Escape"}, {"snapshot": True},
+        ])
+        self.assertIs(snap["accounts"]["hidden"], True)
+        self.assertIn(WAIT_TEXT, text(snap["inbox"]))
+
+    def test_each_row_holds_the_details_of_its_profile(self) -> None:
+        snap = opened(F3)
+        a, b, c = rows(snap)
+        by_name = {p["profile"]: p for p in F3["capacity"]["profiles"]}
+        self.assertEqual(details(a), [
+            "65% of the week left", "40% of 5 hours",
+            "resets " + weekday(by_name["a"]["next_reset"]), "signed in, ends in 12 days"])
+        out = details(b)
+        self.assertTrue(out[0].startswith("out until " + weekday(by_name["b"]["out_until"])), out)
+        self.assertEqual([n for n in nodes(b) if has_class(n, "acct-reset")], [])
+        self.assertEqual(details(c), ["no reading yet", "sign-in unknown"])
+        for name in nodes(panel(snap)):
+            if has_class(name, "acct-name"):
+                self.assertEqual(name["title"], name["text"])
+        (mark,) = [n for n in nodes(a) if has_class(n, "acct-pin-mark")]
+        self.assertEqual(full(mark), "pinned")
+        self.assertEqual({n["tag"] for n in nodes(a) if has_class(n, "acct-pin")}, {"button"})
+
+    def test_the_strip_holds_no_control(self) -> None:
+        excluded = {**view([]), "capacity": real_capacity(NOW_S, [
+            {"name": "a", "week": .35}, {"name": "b", "week": .7}], excluded=("b",), pinned="a")}
+        for shown in (F3, excluded):
+            (snap,) = render([START, {"frame": shown}, {"snapshot": True}])
+            self.assertEqual(
+                [n for n in nodes(snap["capacity"])[1:] if n["tag"] in ("button", "input", "a")], [])
+
+    def test_the_panel_uses_only_the_page_tokens_and_hides_when_hidden(self) -> None:
+        (style,) = re.findall(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"))
+        rules = style_rules(style)
+
+        def ours(selector: str) -> bool:
+            return selector.startswith(".acct-") or selector.startswith("#accounts")
+
+        (hide,) = [d for s, d in rules if s == ".acct-panel[hidden]"]
+        self.assertEqual(hide.get("display"), "none")
+        declared = {k for s, d in rules if s == ":root" for k in d if k.startswith("--")}
+        ours_values = [v for s, d in rules if ours(s) for v in d.values()]
+        others = " ".join(v for s, d in rules if not ours(s) for v in d.values())
+        sizes = {d["font-size"] for s, d in rules if not ours(s) and "font-size" in d}
+        self.assertTrue(ours_values)
+        for value in ours_values:
+            for token in re.findall(r"var\((--[\w-]+)", value):
+                self.assertIn(token, declared)
+            for literal in re.findall(r"#[0-9a-fA-F]{3,8}\b|rgba?\([^)]*\)", value):
+                self.assertIn(literal, others)
+        for selector, decls in rules:
+            if ours(selector) and "font-size" in decls:
+                self.assertIn(decls["font-size"], sizes, selector)
+
+    def test_each_row_offers_one_exclusion_toggle_named_for_its_action(self) -> None:
+        shown = {**view([]), "capacity": real_capacity(NOW_S, [
+            {"name": "a", "week": .35}, {"name": "b", "week": .7}, {"name": "c"}],
+            excluded=("a", "c"))}
+        a, b, c = rows(opened(shown))
+        self.assertTrue(has_class(a, "acct-excluded"))
+        self.assertTrue(has_class(c, "acct-excluded"))
+        self.assertFalse(has_class(b, "acct-excluded"))
+        toggles = []
+        for n in (a, b, c):
+            (toggle,) = [m for m in nodes(n) if has_class(m, "acct-toggle")]
+            toggles.append(full(toggle))
+        self.assertEqual(toggles, ["Include", "Exclude", "Include"])
+        for n in (a, c):
+            (mark,) = [m for m in nodes(n) if has_class(m, "acct-excl")]
+            self.assertEqual(full(mark), "excluded")
+        self.assertEqual([m for m in nodes(b) if has_class(m, "acct-excl")], [])
+
+    def test_the_toggle_posts_one_exclusion_with_the_token(self) -> None:
+        for name, excluded, body in (
+            ("a", True, {"profile": "a", "excluded": False}),
+            ("b", False, {"profile": "b", "excluded": True}),
+        ):
+            snap = opened(one_profile({"name": name, "week": .35},
+                                      excluded=(name,) if excluded else ()),
+                          {"click": "acct-toggle"})
+            (post,) = [p for p in snap["posts"] if p["url"] == "/api/exclusion"]
+            self.assertEqual(post["method"], "POST")
+            self.assertEqual(post["headers"],
+                             {"X-Console-Token": TOKEN, "Content-Type": "application/json"})
+            self.assertEqual(json.loads(post["body"]), body)
+
+    def test_a_refused_toggle_says_why(self) -> None:
+        snap = opened(one_profile({"name": "a", "week": .35}, excluded=("a",)),
+                      {"respond": {"status": 409, "text": "no such profile\n"}},
+                      {"click": "acct-toggle"})
+        (fail,) = [n for n in nodes(panel(snap)) if has_class(n, "fail")]
+        self.assertEqual(full(fail), "Could not include: no such profile")
+
+    def test_each_row_offers_pin_and_the_pinned_one_unpin(self) -> None:
+        shown = {**view([]), "capacity": real_capacity(NOW_S, [
+            {"name": "a", "week": .35}, {"name": "b", "week": .7}], pinned="a")}
+        a, b = rows(opened(shown))
+        labels = []
+        for n in (a, b):
+            (pin,) = [m for m in nodes(n) if has_class(m, "acct-pin")]
+            labels.append(full(pin))
+        self.assertEqual(labels, ["Unpin", "Pin"])
+        self.assertTrue(has_class(a, "acct-pinned"))
+        self.assertFalse(has_class(b, "acct-pinned"))
+        (mark,) = [m for m in nodes(a) if has_class(m, "acct-pin-mark")]
+        self.assertEqual(full(mark), "pinned")
+        self.assertEqual([m for m in nodes(b) if has_class(m, "acct-pin-mark")], [])
+
+    def test_a_pinned_profile_with_no_reading_has_a_row(self) -> None:
+        (c,) = rows(opened(one_profile({"name": "c"}, pinned="c")))
+        (pin,) = [m for m in nodes(c) if has_class(m, "acct-pin")]
+        self.assertEqual(full(pin), "Unpin")
+
+    def test_the_pin_button_posts_one_pin_with_the_token(self) -> None:
+        for name, pinned, body in (
+            ("a", "a", {"profile": "a", "pinned": False}),
+            ("b", None, {"profile": "b", "pinned": True}),
+        ):
+            snap = opened(one_profile({"name": name, "week": .35}, pinned=pinned),
+                          {"click": "acct-pin"})
+            (post,) = [p for p in snap["posts"] if p["url"] == "/api/pin"]
+            self.assertEqual(post["method"], "POST")
+            self.assertEqual(post["headers"],
+                             {"X-Console-Token": TOKEN, "Content-Type": "application/json"})
+            self.assertEqual(json.loads(post["body"]), body)
+
+    def test_a_refused_pin_says_why(self) -> None:
+        snap = opened(one_profile({"name": "a", "week": .35}, excluded=("a",)),
+                      {"respond": {"status": 409, "text": "excluded; include it first\n"}},
+                      {"click": "acct-pin"})
+        (fail,) = [n for n in nodes(panel(snap)) if has_class(n, "fail")]
+        self.assertEqual(full(fail), "Could not pin: excluded; include it first")
+
+    def test_a_refused_unpin_says_why(self) -> None:
+        snap = opened(one_profile({"name": "a", "week": .35}, pinned="a"),
+                      {"respond": {"status": 500, "text": "could not write\n"}},
+                      {"click": "acct-pin"})
+        (fail,) = [n for n in nodes(panel(snap)) if has_class(n, "fail")]
+        self.assertEqual(full(fail), "Could not unpin: could not write")
+
+    def test_the_panel_says_when_the_pin_is_not_in_effect(self) -> None:
+        capacity_ = real_capacity(NOW_S, [
+            {"name": "a", "week": .35, "week_reset": NOW_S + 86400, "refused": True},
+            {"name": "b", "week": .7}], pinned="a")
+
+        def last(pin: dict | None) -> dict:
+            shown = {**view([]), "capacity": capacity_}
+            if pin is not None:
+                shown["pin"] = pin
+            return panel(opened(shown))["children"][-1]
+
+        waiting = last({"profile": "a", "in_effect": False, "reason": "out of allowance",
+                        "until": "2026-11-20T09:30:00+00:00", "instead": "b"})
+        self.assertTrue(has_class(waiting, "acct-pin-note"))
+        self.assertEqual(full(waiting),
+                         "a is pinned but not in effect: out of allowance until Fri 09:30. "
+                         "New sessions use b.")
+        nowhere = last({"profile": "a", "in_effect": False, "reason": "signed out",
+                        "until": None, "instead": None})
+        self.assertTrue(has_class(nowhere, "acct-pin-note"))
+        self.assertEqual(full(nowhere),
+                         "a is pinned but not in effect: signed out. "
+                         "New sessions have no profile to use.")
+        for pin in ({"profile": "a", "in_effect": True, "reason": None,
+                     "until": None, "instead": None}, None):
+            self.assertFalse(has_class(last(pin), "acct-pin-note"))
+
+
+class StripPageTest(unittest.TestCase):
+    @staticmethod
+    def base_rules() -> list:
+        (style,) = re.findall(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"))
+        base, at = "", 0
+        for found in re.finditer(r"@media [^{]+\{", style):
+            if found.start() < at:
+                continue
+            base += style[at:found.start()]
+            depth, at = 1, found.end()
+            while depth:
+                depth += {"{": 1, "}": -1}.get(style[at], 0)
+                at += 1
+        return style_rules(base + style[at:])
+
+    @staticmethod
+    def shown(cap: dict) -> dict:
+        (snap,) = render([START, {"frame": {**view([]), "capacity": cap}}, {"snapshot": True}])
+        return snap
+
+    def test_each_entry_is_its_name_bar_figure_and_quiet_word(self) -> None:
+        cap = real_capacity(NOW_S, [
+            {"name": "a", "week": .35, "five": .6, "week_reset": NOW_S + 4 * 86400,
+             "signin": ("signed_in", NOW_S + 12 * 86400)},
+            {"name": "b", "week": .7, "week_reset": NOW_S + 5 * 86400},
+            {"name": "c", "week": .5, "week_reset": NOW_S + 2 * 86400, "refused": True},
+        ], excluded=("b",), pinned="a")
+        snap = self.shown(cap)
+        a, b, c = [n for n in strip(snap) if has_class(n, "cap-acct")]
+        shape = lambda n: [(k["tag"], k["cls"]) for k in n["children"]]
+        self.assertEqual(shape(a), [("b", ""), ("span", "cap-pin-mark"), ("span", "meter"), ("span", "cap-pc")])
+        self.assertEqual(full(a["children"][-1]), "65%")
+        self.assertEqual(shape(b), [("b", ""), ("span", "cap-excl"), ("span", "meter"), ("span", "cap-pc")])
+        self.assertEqual(full(b["children"][-1]), "30%")
+        self.assertEqual([k["tag"] for k in c["children"]], ["b", "span", "span"])
+        (out_until,) = [p["out_until"] for p in cap["profiles"] if p["profile"] == "c"]
+        self.assertEqual(full(c["children"][-1]), "out until " + weekday(out_until))
+        self.assertEqual([n for n in nodes(snap["capacity"]) if has_class(n, "cap-when")], [])
+        self.assertEqual([n for n in nodes(snap["capacity"])
+                          if has_class(n, "acct-pin") or has_class(n, "cap-pin")], [])
+
+    def test_sign_in_words_show_only_when_the_sign_in_asks(self) -> None:
+        reading = {"week": .5, "week_reset": NOW_S + 86400}
+        frame_ = {**view([]), "capacity": real_capacity(NOW_S, [
+            {"name": "a", **reading, "signin": ("signed_in", NOW_S + 259200)},
+            {"name": "b", **reading, "signin": ("signed_in", NOW_S + 259201)},
+            {"name": "c", **reading, "signin": ("signed_out", None), "ever": True},
+            {"name": "d", **reading},
+        ])}
+        snap = opened(frame_)
+        self.assertEqual(
+            [full(n) for n in nodes(snap["capacity"]) if has_class(n, "cap-signin")],
+            ["signed in, ends in 3 days", "signed out"])
+        self.assertEqual(
+            [full(n) for n in nodes(panel(snap)) if has_class(n, "acct-signin-words")],
+            ["signed in, ends in 3 days", "signed in, ends in 3 days", "signed out", "sign-in unknown"])
+
+    def test_a_profile_with_no_reading_is_in_the_note_unless_it_asks_or_is_marked(self) -> None:
+        cap = real_capacity(NOW_S, [
+            {"name": "a", "week": .5, "week_reset": NOW_S + 86400},
+            {"name": "b"},
+            {"name": "c", "signin": ("signed_in", NOW_S + 2 * 86400)},
+            {"name": "d"},
+            {"name": "e", "signin": ("signed_in", NOW_S + 20 * 86400)},
+        ], pinned="d")
+        snap = self.shown(cap)
+        self.assertEqual([n["text"] for n in nodes(snap["capacity"]) if n["tag"] == "b"], ["a", "c", "d"])
+        self.assertTrue(cap["no_reading"])
+        self.assertEqual(full(part(snap, "cap-none")), cap["no_reading"])
+
+    def test_three_accounts_fit_one_line_at_1440(self) -> None:
+        rules = self.base_rules()
+        (cap,) = [d for s, d in rules if s == ".cap"]
+        for name, value in {
+            "flex-wrap": "nowrap", "white-space": "nowrap", "overflow": "hidden",
+            "min-width": "0", "max-width": "100%", "font": "inherit", "background": "none",
+            "border": "0", "padding": "0", "text-align": "left", "cursor": "pointer",
+            "font-size": ".8125rem", "color": "var(--sub0)",
+        }.items():
+            self.assertEqual(cap.get(name), value, name)
+        (kids,) = [d for s, d in rules if s == ".cap > *"]
+        self.assertEqual(kids.get("flex"), "none")
+        for selector in (".cap-excl", ".cap-pin-mark"):
+            (quiet,) = [d for s, d in rules if s == selector]
+            self.assertEqual(quiet.get("color"), "var(--ov2)", selector)
+
+        worst = real_capacity(NOW_S, [
+            {"name": "work-main", "week": .35, "week_reset": NOW_S + 4 * 86400,
+             "signin": ("signed_in", NOW_S + 2 * 86400)},
+            {"name": "personal", "week": .7, "week_reset": NOW_S + 5 * 86400},
+            {"name": "spare-one", "week": .88, "week_reset": NOW_S + 3 * 86400},
+        ], excluded=("personal",), pinned="work-main")
+        snap = self.shown(worst)
+
+        def width(n: dict) -> int:
+            if n["tag"] == "b":
+                return min(len(n["text"]) * 8, 144)
+            if n["tag"] == "svg":
+                return 16
+            if has_class(n, "meter"):
+                return 34
+            return len(full(n)) * 7
+
+        def group(n: dict) -> int:
+            if not n["children"]:
+                return width(n)
+            return sum(width(c) for c in n["children"]) + 7 * (len(n["children"]) - 1)
+
+        kids = strip(snap)
+        used = sum(group(n) for n in kids) + 16 * (len(kids) - 1)
+        budget = 1360 - 2 * 48 - 7 * 9 - 192 - len("Reconnecting…") * 7 - 3 * 28
+        self.assertLessEqual(used, budget)
+
+    def test_at_1440_the_rendered_strip_is_one_unclipped_line_beside_the_goal_bar(self) -> None:
+        # Real geometry in headless Chromium; skipped where Playwright or its browser is not installed.
+        try:
+            from playwright.sync_api import Error, sync_playwright
+        except ImportError:
+            self.skipTest("playwright is not installed")
+        worst = real_capacity(NOW_S, [
+            {"name": "work-main", "week": .35, "week_reset": NOW_S + 4 * 86400,
+             "signin": ("signed_in", NOW_S + 2 * 86400)},
+            {"name": "personal", "week": .7, "week_reset": NOW_S + 5 * 86400},
+            {"name": "spare-one", "week": .88, "week_reset": NOW_S + 3 * 86400},
+        ], excluded=("personal",), pinned="work-main")
+        fakes = (
+            "window.EventSource = class { constructor() { window.__src = this; this.l = {}; }"
+            " addEventListener(name, fn) { this.l[name] = fn; } close() {} };"
+            "window.fetch = () => Promise.resolve(new Response(null, {status: 204}));")
+        measure = """() => {
+          const cap = document.getElementById('capacity');
+          const bar = document.getElementById('goal').getBoundingClientRect();
+          const box = cap.getBoundingClientRect();
+          const kids = [...cap.children].map((e) => e.getBoundingClientRect());
+          return {
+            tops: [...new Set([...cap.children].map((e) => e.offsetTop))].length,
+            kids: kids.length,
+            inside: kids.every((r) => r.left >= box.left && r.right <= box.right),
+            fits: cap.scrollWidth <= cap.clientWidth,
+            beside: box.top < bar.bottom && bar.top < box.bottom,
+          };
+        }"""
+        html = PAGE.read_text(encoding="utf-8").replace("__CONSOLE_TOKEN__", "t")
+        with sync_playwright() as pw:
+            try:
+                browser = pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+            except Error as err:
+                self.skipTest(f"no Chromium to launch: {err}")
+            try:
+                page = browser.new_page(viewport={"width": 1440, "height": 900})
+                page.add_init_script(fakes)
+                page.route("http://console.test/", lambda route: route.fulfill(
+                    body=html, content_type="text/html"))
+                page.goto("http://console.test/")
+                page.evaluate("(f) => window.__src.l.view({data: JSON.stringify(f)})",
+                              {**view([]), "capacity": worst})
+                got = page.evaluate(measure)
+            finally:
+                browser.close()
+        self.assertGreater(got["kids"], 3)
+        self.assertEqual(got["tops"], 1, got)
+        self.assertTrue(got["inside"], got)
+        self.assertTrue(got["fits"], got)
+        self.assertTrue(got["beside"], got)
+
+    def test_at_1440_the_strip_never_shrinks_and_the_goal_placeholder_stays_one_line(self) -> None:
+        rules = self.base_rules()
+
+        def rule(selector: str) -> dict:
+            merged: dict = {}
+            for found, decls in rules:
+                if found == selector:
+                    merged.update(decls)
+            return merged
+
+        (style,) = re.findall(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"))
+        narrow = style_rules(media_block(style, "(max-width: 900px)"))
+        groups = {
+            "cap": (rule(".cap"), {
+                "flex": "0 0 auto", "overflow": "hidden", "min-width": "0", "max-width": "100%",
+                "white-space": "nowrap", "flex-wrap": "nowrap"}),
+            "goal-bar": (rule(".goal-bar"), {
+                "flex": "1 1 12rem", "min-width": "12rem", "max-width": "440px"}),
+            "top-in": (rule(".top-in"), {"flex-wrap": "wrap", "gap": "10px 28px"}),
+            "placeholder": (rule(".goal-in .goal-text::placeholder"), {
+                "white-space": "nowrap", "overflow": "hidden", "text-overflow": "ellipsis",
+                "color": "var(--ov2)"}),
+            "placeholder host": (rule(".goal-in .goal-text"), {"text-overflow": "ellipsis"}),
+            "narrow goal-bar": (
+                {k: v for s, d in narrow if s == ".goal-bar" for k, v in d.items()},
+                {"flex": "1 0 100%", "max-width": "none"}),
+        }
+        for name, (declared, wanted) in groups.items():
+            with self.subTest(rule=name):
+                for prop, value in wanted.items():
+                    self.assertEqual(declared.get(prop), value, prop)
+
+    def test_at_480_only_the_summary_word_and_the_tightest_account_show(self) -> None:
+        def rows_(*extra) -> list:
+            return [{"name": "a", "week": .35, "week_reset": NOW_S + 86400},
+                    {"name": "b", "week": .88, "week_reset": NOW_S + 86400},
+                    {"name": "c", "week": .5, "week_reset": NOW_S + 86400}, *extra]
+
+        def kept(snap: dict) -> list:
+            return [n for n in strip(snap) if not has_class(n, "cap-extra")]
+
+        snap = self.shown(real_capacity(NOW_S, rows_()))
+        self.assertEqual([n["cls"] for n in kept(snap)], ["cap-state cap-fine", "cap-acct cap-tightest"])
+        self.assertEqual(kept(snap)[1]["children"][0]["text"], "b")
+        out = self.shown(real_capacity(NOW_S, rows_(
+            {"name": "d", "week": .5, "week_reset": NOW_S + 86400, "refused": True})))
+        self.assertEqual(kept(out)[1]["children"][0]["text"], "d")
+        none = self.shown(real_capacity(NOW_S, [{"name": "a"}, {"name": "b"}]))
+        self.assertEqual(
+            [n for n in nodes(none["capacity"]) if has_class(n, "cap-extra") or has_class(n, "cap-tightest")], [])
+        text_ = PAGE.read_text(encoding="utf-8")
+        style = text_[text_.index("<style>"):text_.index("</style>")]
+        (extra,) = [d for s, d in style_rules(media_block(style, "(max-width: 480px)")) if s == ".cap-extra"]
+        self.assertEqual(extra.get("display"), "none")
+
+    def test_an_empty_strip_still_opens_the_panel(self) -> None:
+        snap = opened({**view([]), "capacity": console_capacity.EMPTY})
+        self.assertEqual([(n["cls"], full(n)) for n in strip(snap)], [("cap-none", "no accounts")])
+        self.assertIs(snap["accounts"]["hidden"], False)
 
 
 class RemovePageTest(unittest.TestCase):
     def removal_frame(self, sessions: dict | None = None, extra: dict | None = None) -> dict:
         return {**view([]), **(extra or {}),
-                "capacity": capacity([profile("a", "ok", week_left=65),
-                                      profile("b", "ok", week_left=30)]),
+                "capacity": real_capacity(NOW_S, [{"name": "a", "week": .35},
+                                                  {"name": "b", "week": .7}]),
                 "profile_sessions": sessions or {}}
 
     def opened(self, *steps) -> dict:
-        (snap,) = render([
-            START, {"frame": self.removal_frame({"a": 2})}, {"click": "cap-remove"}, *steps,
-            {"snapshot": True},
-        ])
-        return snap
+        return opened(self.removal_frame({"a": 2}), {"click": "acct-remove"}, *steps)
 
     def remove_node(self, snap: dict, cls: str) -> dict:
-        (found,) = [n for n in nodes(snap["capacity"]) if has_class(n, cls)]
+        (found,) = [n for n in nodes(panel(snap)) if has_class(n, cls)]
         return found
 
+    def render_steps(self, *steps) -> list:
+        return render([START, {"frame": self.removal_frame({"a": 2})}, {"click": "cap"},
+                       {"click": "acct-remove"}, *steps])
+
     def test_each_account_offers_remove(self) -> None:
-        snap = capacity_snap(capacity([
-            profile("a", "ok", week_left=65),
-            profile("b", "unknown", read_at=None, signin=si("signed_out", None)),
-        ]))
-        for acct in accounts(snap):
-            (remove,) = [m for m in nodes(acct) if has_class(m, "cap-remove")]
+        shown = {**view([]), "capacity": real_capacity(NOW_S, [
+            {"name": "a", "week": .35}, {"name": "b", "signin": ("signed_out", None)}])}
+        for row in rows(opened(shown)):
+            (remove,) = [m for m in nodes(row) if has_class(m, "acct-remove")]
             self.assertEqual(full(remove), "Remove")
 
     def test_remove_asks_for_the_typed_name_and_says_how_many_sessions_run(self) -> None:
@@ -4707,34 +5165,42 @@ class RemovePageTest(unittest.TestCase):
             (0, "No session is running under a."),
         ):
             with self.subTest(count=count):
-                (snap,) = render([
-                    START, {"frame": self.removal_frame({"a": count})},
-                    {"click": "cap-remove"}, {"snapshot": True},
-                ])
-                self.assertEqual(full(self.remove_node(snap, "cap-remove-sessions")), words)
-                self.assertEqual(full(self.remove_node(snap, "cap-remove-note")),
+                snap = opened(self.removal_frame({"a": count}), {"click": "acct-remove"})
+                self.assertEqual(full(self.remove_node(snap, "acct-remove-sessions")), words)
+                self.assertEqual(full(self.remove_node(snap, "acct-remove-note")),
                                  "Type a to remove it. It is signed out first.")
-                send = self.remove_node(snap, "cap-remove-send")
+                send = self.remove_node(snap, "acct-remove-send")
                 self.assertEqual(full(send), "Remove a")
                 self.assertTrue(send["disabled"])
-                name = self.remove_node(snap, "cap-remove-name")
+                name = self.remove_node(snap, "acct-remove-name")
                 self.assertEqual(name["label"], "Type a to remove it")
 
     def test_no_count_for_the_profile_says_no_sentence(self) -> None:
-        (snap,) = render([START, {"frame": self.removal_frame({})},
-                          {"click": "cap-remove"}, {"snapshot": True}])
-        self.assertEqual([n for n in nodes(snap["capacity"])
-                          if has_class(n, "cap-remove-sessions")], [])
+        snap = opened(self.removal_frame({}), {"click": "acct-remove"})
+        self.assertEqual([n for n in nodes(panel(snap))
+                          if has_class(n, "acct-remove-sessions")], [])
 
     def test_the_send_is_enabled_only_by_the_exact_name(self) -> None:
         for typed, disabled in (("A", True), ("a ", True), ("a", False)):
             with self.subTest(typed=typed):
-                snap = self.opened({"type": {"class": "cap-remove-name", "text": typed}})
-                self.assertEqual(self.remove_node(snap, "cap-remove-send")["disabled"], disabled)
+                snap = self.opened({"type": {"class": "acct-remove-name", "text": typed}})
+                self.assertEqual(self.remove_node(snap, "acct-remove-send")["disabled"], disabled)
+
+    def test_a_keyboard_removal_keeps_the_focus_on_its_buttons_while_it_posts(self) -> None:
+        named = {"type": {"class": "acct-remove-name", "text": "a"}}
+        for cls in ("acct-remove-send", "acct-remove-cancel"):
+            with self.subTest(cls=cls):
+                (snap,) = self.render_steps(
+                    named, {"focus_on": "acct-remove-send"}, {"hold": True}, {"click": "acct-remove-send"},
+                    {"focus_on": cls}, {"click": cls}, {"snapshot": True})
+                (kept,) = [n for n in nodes(panel(snap)) if n["focused"]]
+                self.assertIn(cls, kept["cls"].split())
+                self.assertEqual(len([p for p in snap["posts"] if p["url"] == "/api/account-remove"]), 1)
+                self.assertEqual(len([n for n in nodes(panel(snap)) if has_class(n, "acct-remove-send")]), 1)
 
     def test_remove_posts_the_profile_and_the_typed_name_with_the_token(self) -> None:
-        snap = self.opened({"type": {"class": "cap-remove-name", "text": "a"}},
-                           {"click": "cap-remove-send"})
+        snap = self.opened({"type": {"class": "acct-remove-name", "text": "a"}},
+                           {"click": "acct-remove-send"})
         (post,) = [p for p in snap["posts"] if p["url"] == "/api/account-remove"]
         self.assertEqual(post["method"], "POST")
         self.assertEqual(post["headers"],
@@ -4743,38 +5209,35 @@ class RemovePageTest(unittest.TestCase):
 
     def test_a_refused_removal_says_why(self) -> None:
         snap = self.opened(
-            {"type": {"class": "cap-remove-name", "text": "a"}},
+            {"type": {"class": "acct-remove-name", "text": "a"}},
             {"respond": {"status": 502,
                          "text": "the account was not removed: its sign-out failed: exited\n"}},
-            {"click": "cap-remove-send"})
-        (fail,) = [n for n in nodes(snap["capacity"]) if has_class(n, "fail")]
+            {"click": "acct-remove-send"})
+        (fail,) = [n for n in nodes(panel(snap)) if has_class(n, "fail")]
         self.assertEqual(full(fail), "Could not remove: the account was not removed: "
                                      "its sign-out failed: exited")
-        self.remove_node(snap, "cap-remove-box")
+        self.remove_node(snap, "acct-remove-box")
 
     def test_a_removal_closes_the_box(self) -> None:
-        snap = self.opened({"type": {"class": "cap-remove-name", "text": "a"}},
-                           {"click": "cap-remove-send"})
-        self.assertEqual([n for n in nodes(snap["capacity"])
-                          if has_class(n, "cap-remove-box")], [])
+        snap = self.opened({"type": {"class": "acct-remove-name", "text": "a"}},
+                           {"click": "acct-remove-send"})
+        self.assertEqual([n for n in nodes(panel(snap))
+                          if has_class(n, "acct-remove-box")], [])
 
     def typed_and_selected(self, *steps) -> dict:
-        frame = {**self.removal_frame({"a": 1}), "inbox": {"open": [ANSWERABLE], "answered": []}}
-        (snap,) = render([
-            START, {"frame": frame}, {"click": "cap-remove"},
-            {"type": {"class": "cap-remove-name", "text": "ab"}},
-            {"select": {"cls": "cap-remove-name", "start": 0, "end": 1}},
-            *steps,
-            {"snapshot": True},
-        ])
-        return snap
+        shown = {**self.removal_frame({"a": 1}), "inbox": {"open": [ANSWERABLE], "answered": []}}
+        return opened(
+            shown, {"click": "acct-remove"},
+            {"type": {"class": "acct-remove-name", "text": "ab"}},
+            {"select": {"cls": "acct-remove-name", "start": 0, "end": 1}},
+            *steps)
 
     def assert_kept(self, snap: dict) -> None:
-        name = self.remove_node(snap, "cap-remove-name")
+        name = self.remove_node(snap, "acct-remove-name")
         self.assertEqual(name["value"], "ab")
         self.assertTrue(name["focused"])
         self.assertEqual(name["selection"], [0, 1])
-        self.remove_node(snap, "cap-remove-box")
+        self.remove_node(snap, "acct-remove-box")
 
     def test_the_typed_name_its_selection_and_focus_survive_two_frames(self) -> None:
         first = {**self.removal_frame({"a": 1}), "inbox": {"open": [ANSWERABLE], "answered": []}}
@@ -4783,64 +5246,72 @@ class RemovePageTest(unittest.TestCase):
         self.assert_kept(snap)
 
     def test_the_typed_name_its_selection_and_focus_survive_a_local_redraw(self) -> None:
-        self.assert_kept(self.typed_and_selected({"click": "cap-toggle"}))
+        self.assert_kept(self.typed_and_selected({"click": "acct-toggle"}))
 
     def test_a_profile_that_leaves_the_listing_loses_its_open_box_and_name(self) -> None:
-        gone = {**self.removal_frame(), "capacity": capacity([profile("b", "ok", week_left=30)])}
+        gone = {**self.removal_frame(), "capacity": real_capacity(NOW_S, [
+            {"name": "b", "week": .7}])}
         snap, again = render([
-            START, {"frame": self.removal_frame({"a": 1})}, {"click": "cap-remove"},
-            {"type": {"class": "cap-remove-name", "text": "a"}},
+            START, {"frame": self.removal_frame({"a": 1})}, {"click": "cap"},
+            {"click": "acct-remove"},
+            {"type": {"class": "acct-remove-name", "text": "a"}},
             {"frame": gone}, {"frame": self.removal_frame({"a": 1})}, {"snapshot": True},
-            {"click": "cap-remove"}, {"snapshot": True},
+            {"click": "acct-remove"}, {"snapshot": True},
         ])
-        self.assertEqual([n for n in nodes(snap["capacity"])
-                          if has_class(n, "cap-remove-box")], [])
-        self.assertEqual(self.remove_node(again, "cap-remove-name")["value"], "")
+        self.assertEqual([n for n in nodes(panel(snap))
+                          if has_class(n, "acct-remove-box")], [])
+        self.assertEqual(self.remove_node(again, "acct-remove-name")["value"], "")
 
     def test_cancel_closes_the_box_and_forgets_the_name(self) -> None:
         snap = self.opened(
-            {"type": {"class": "cap-remove-name", "text": "a"}},
-            {"click": "cap-remove-cancel"}, {"click": "cap-remove"})
-        self.assertEqual(self.remove_node(snap, "cap-remove-name")["value"], "")
+            {"type": {"class": "acct-remove-name", "text": "a"}},
+            {"click": "acct-remove-cancel"}, {"click": "acct-remove"})
+        self.assertEqual(self.remove_node(snap, "acct-remove-name")["value"], "")
 
 
 class SigninPageTest(unittest.TestCase):
     def test_each_listed_profile_shows_its_sign_in_words(self) -> None:
-        snap = capacity_snap(capacity([
-            profile("a", "ok", week_left=60, signin=si("signed_in", 12)),
-            profile("b", "ok", week_left=50, signin=si("signed_in", 1)),
-            profile("c", "ok", week_left=40, signin=si("signed_in", 0)),
-            profile("d", "out", signin=si("signed_in", None)),
-            profile("e", "ok", week_left=30, signin=si("unknown", None)),
-        ]))
+        reading = {"week": .5, "week_reset": NOW_S + 86400}
+        frame_ = {**view([]), "capacity": real_capacity(NOW_S, [
+            {"name": "a", **reading, "signin": ("signed_in", NOW_S + 12 * 86400)},
+            {"name": "b", **reading, "signin": ("signed_in", NOW_S + 86400 + 3600)},
+            {"name": "c", **reading, "signin": ("signed_in", NOW_S + 3600)},
+            {"name": "d", **reading, "refused": True, "signin": ("signed_in", None)},
+            {"name": "e", **reading, "signin": ("unknown", None)},
+        ])}
+        snap = opened(frame_)
         self.assertEqual(
             [full(n) for n in nodes(snap["capacity"]) if has_class(n, "cap-signin")],
+            ["signed in, ends in 1 day", "signed in, ends today"])
+        self.assertEqual(
+            [full(n) for n in nodes(panel(snap)) if has_class(n, "acct-signin-words")],
             ["signed in, ends in 12 days", "signed in, ends in 1 day", "signed in, ends today",
              "signed in", "sign-in unknown"])
 
-    def test_a_profile_without_a_capacity_reading_shows_its_sign_in(self) -> None:
-        snap = capacity_snap(capacity([
-            profile("a", "ok", week_left=60, signin=si("signed_in", 20)),
-            profile("b", "unknown", signin=si("signed_in", 5)),
-            profile("c", "unknown", signin=si("unknown", None)),
-        ], no_reading="2 with no reading yet"))
+    def test_a_profile_without_a_capacity_reading_shows_its_sign_in_only_when_it_asks(self) -> None:
+        snap = capacity_snap(real_capacity(NOW_S, [
+            {"name": "a", "week": .4, "week_reset": NOW_S + 86400,
+             "signin": ("signed_in", NOW_S + 20 * 86400)},
+            {"name": "b", "signin": ("signed_in", NOW_S + 2 * 86400)},
+            {"name": "c", "signin": ("unknown", None)},
+        ]))
         self.assertEqual(classes(snap), [
-            "cap-state cap-fine", "cap-acct", "cap-acct cap-no-reading",
-            "cap-acct cap-no-reading", "cap-none"])
-        _, _, b, c, _ = strip(snap)
+            "cap-state cap-fine", "cap-acct cap-tightest", "cap-acct cap-no-reading cap-extra",
+            "cap-none cap-extra"])
+        b = strip(snap)[2]
         self.assertIn("b", full(b))
-        self.assertIn("signed in, ends in 5 days", full(b))
-        self.assertIn("c", full(c))
-        self.assertIn("sign-in unknown", full(c))
+        self.assertIn("signed in, ends in 2 days", full(b))
+        self.assertEqual([n["text"] for n in nodes(snap["capacity"]) if n["tag"] == "b"], ["a", "b"])
         self.assertEqual(bars(b), [])
-        self.assertEqual(bars(c), [])
 
     def test_a_signed_out_profile_is_listed_as_signed_out(self) -> None:
-        snap = capacity_snap(capacity([
-            profile("a", "ok", week_left=60, signin=si("signed_in", 20)),
-            profile("default", "unknown", signin=si("signed_out", None)),
-        ], no_reading=None))
-        self.assertEqual(classes(snap), ["cap-state cap-fine", "cap-acct", "cap-acct cap-signed-out"])
+        snap = capacity_snap(real_capacity(NOW_S, [
+            {"name": "a", "week": .4, "week_reset": NOW_S + 86400,
+             "signin": ("signed_in", NOW_S + 20 * 86400)},
+            {"name": "default", "signin": ("signed_out", None)},
+        ]))
+        self.assertEqual(classes(snap), [
+            "cap-state cap-fine", "cap-acct cap-tightest", "cap-acct cap-signed-out cap-extra"])
         out = strip(snap)[2]
         self.assertIn("default", full(out))
         self.assertIn("signed out", full(out))
@@ -4852,21 +5323,20 @@ class SigninPageTest(unittest.TestCase):
         self.assertEqual(classes(snap)[0], "cap-state cap-out")
         self.assertEqual(full(strip(snap)[0]), "out")
         (default,) = [n for n in accounts(snap) if "default" in full(n)]
-        self.assertEqual(default["cls"], "cap-acct cap-signed-out")
+        self.assertEqual(default["cls"], "cap-acct cap-signed-out cap-extra")
         self.assertEqual(bars(default), [])
         text = full(snap["capacity"])
         self.assertNotIn("80%", text)
-        self.assertNotIn("Fri 05:00", text)
+        self.assertNotIn(weekday(datetime.fromtimestamp(NOW_S + 2 * 86400, timezone.utc).isoformat()), text)
         self.assertNotIn("resets", text)
 
     def test_a_signed_out_profile_with_an_old_reading_never_makes_the_strip_fine(self) -> None:
-        snap = capacity_snap(capacity([
-            profile("a", "out", out_until="2026-11-14T09:00:00+00:00", signin=si("signed_in", 9)),
-            profile("default", "ok", week_left=80, next_reset="2026-11-13T05:00:00+00:00",
-                    signin=si("signed_out", None)),
-        ], all_out=True, resumes_at="2026-11-14T09:00:00+00:00"))
+        cap = signed_out_pair()
+        snap = capacity_snap(cap)
         self.assertEqual(full(strip(snap)[0]), "out")
-        self.assertEqual(full(part(snap, "cap-when")), "resumes Sat 09:00")
+        self.assertEqual([n for n in nodes(snap["capacity"]) if has_class(n, "cap-when")], [])
+        statement = render_page({**view([]), "capacity": cap})["statement"]
+        self.assertIn("Resumes " + weekday(cap["resumes_at"]), full(statement))
 
     def test_the_all_out_panel_names_a_signed_out_profile_as_signed_out(self) -> None:
         result = render_page({**view([]), "capacity": signed_out_pair()})
@@ -4893,7 +5363,7 @@ class SigninPageTest(unittest.TestCase):
             [profile("a", "ok", week_left=60), profile("b", "unknown")],
             no_reading="1 with no reading yet"))
         self.assertEqual([n for n in nodes(snap["capacity"]) if has_class(n, "cap-signin")], [])
-        self.assertEqual(classes(snap), ["cap-state cap-fine", "cap-acct", "cap-none"])
+        self.assertEqual(classes(snap), ["cap-state cap-fine", "cap-acct cap-tightest", "cap-none cap-extra"])
 
     def test_a_sign_in_ask_is_a_card_with_the_sign_in_action(self) -> None:
         f = frame([SIGNIN])
@@ -5235,7 +5705,7 @@ ADD_STEPS = [
     {"respond": {"status": 200, "text": ADDED}}, {"click": "account-add-send"},
 ]
 NO_ITEM = ADD_STEPS + [{"frame": {**V, "signin_runs": RUNNING}}]
-ELSE = "Finish this sign-in in Add account at the top of the page."
+ELSE = "Finish this sign-in in Add account in the accounts panel."
 
 
 def with_item(item: dict, runs: dict) -> dict:
@@ -5532,3 +6002,311 @@ class AddAccountKeepsCodePageTest(unittest.TestCase):
             {"frame": with_item(with_run(FRESH, "running", 9), RUNNING)}, {"snapshot": True}])
         self.assertEqual(snap["field"], {"cls": "account-code", "value": "ab", "start": 2, "end": 2})
         self.assertEqual(of_class(sign_in_card(snap), "input", "signin-code"), [])
+
+
+QUIET = {**frame([]), "capacity": real_capacity(NOW_S, [
+    {"name": "a", "week": .35, "signin": ("signed_in", NOW_S + 12 * 86400)},
+    {"name": "b", "week": .5, "signin": ("signed_in", NOW_S + 20 * 86400)},
+]), "profile_sessions": {"a": 0, "b": 0}}
+WORK_CAP = real_capacity(NOW_S, [{"name": "work", "week": .5, "signin": ("signed_in", NOW_S + 2 * 86400)}])
+GUARDED = {"X-Console-Token": TOKEN, "Content-Type": "application/json"}
+OPEN_A = [{"click": "cap"}, {"respond": {"status": 200, "text": ANSWER}}, {"click": "acct-signin"}]
+
+
+def row_of(snap: dict, name: str) -> dict:
+    (found,) = [r for r in rows(snap) if full(
+        next(n for n in nodes(r) if has_class(n, "acct-name"))) == name]
+    return found
+
+
+def in_row(row: dict, tag: str, cls: str) -> list:
+    return of_class(row, tag, cls)
+
+
+class PanelSigninPageTest(unittest.TestCase):
+    def test_each_row_offers_sign_in_named_for_its_history(self) -> None:
+        shown = {**view([]), "capacity": real_capacity(NOW_S, [
+            {"name": "a", "week": .35, "signin": ("signed_in", NOW_S + 12 * 86400)},
+            {"name": "b", "week": .5}])}
+        snap = opened(shown)
+        self.assertEqual([full(n) for n in nodes(panel(snap)) if has_class(n, "acct-signin")],
+                         ["Sign in again", "Sign in"])
+        snap = opened(shown, {"click": "acct-signin"})
+        post = snap["posts"][-1]
+        self.assertEqual((post["url"], post["method"], post["headers"]),
+                         ("/api/signin", "POST", GUARDED))
+        self.assertEqual(json.loads(post["body"]), {"profile": "a"})
+
+    def test_a_row_carries_its_sign_in_run_status(self) -> None:
+        notes = {"running": "A sign-in is running.", "failed": "The sign-in did not finish.",
+                 "timed_out": "The sign-in timed out.", "cancelled": "The sign-in was cancelled."}
+        for state, note in notes.items():
+            with self.subTest(state=state):
+                shown = {**view([]), "capacity": real_capacity(NOW_S, [
+                    {"name": "work", "week": .5, "signin": ("signed_out", None), "ever": True}]),
+                    "signin_runs": {"work": {"state": state, "at": None, "attempt": 3}}}
+                (work,) = rows(opened(shown))
+                self.assertEqual([full(n) for n in in_row(work, "p", "signin-run")], [note])
+        # A renewal outside the three-day window still shows how it ended: the outcome is not the ask.
+        for state, note in notes.items():
+            with self.subTest(signed_in=state):
+                shown = {**view([]), "capacity": real_capacity(
+                    NOW_S, [{"name": "work", "week": .5, "signin": ("signed_in", NOW_S + 12 * 86400)}]),
+                    "signin_runs": {"work": {"state": state, "at": None, "attempt": 3}}}
+                (work,) = rows(opened(shown))
+                self.assertEqual([full(n) for n in in_row(work, "p", "signin-run")], [note])
+        with self.subTest(signed_in="signed_in"):
+            shown = {**view([]), "capacity": real_capacity(
+                NOW_S, [{"name": "work", "week": .5, "signin": ("signed_in", NOW_S + 12 * 86400)}]),
+                "signin_runs": {"work": {"state": "signed_in", "at": None, "attempt": 3}}}
+            (work,) = rows(opened(shown))
+            self.assertEqual(in_row(work, "p", "signin-run"), [])
+
+    def _running_in_panel(self) -> list:
+        shown = {**frame([SIGNIN]), "capacity": WORK_CAP}
+        running = {**frame([with_run(SIGNIN, "running", 7)]), "capacity": WORK_CAP,
+                   "signin_runs": {"work": {"state": "running", "at": None, "attempt": 7}}}
+        return [START, {"frame": shown}, *OPEN_A, {"frame": running}], running
+
+    def test_with_the_panel_open_the_running_sign_in_shows_in_its_row_and_the_card_points_there(self) -> None:
+        steps, _ = self._running_in_panel()
+        open_, closed = render([*steps, {"snapshot": True}, {"key": "Escape"}, {"snapshot": True}])
+        (work,) = rows(open_)
+        (link,) = in_row(work, "a", "signin-link")
+        self.assertEqual(link["href"], "https://claude.example/a?s=1")
+        self.assertEqual(len(in_row(work, "input", "signin-code")), 1)
+        self.assertEqual(len(in_row(work, "button", "signin-send")), 1)
+        self.assertEqual(len(in_row(work, "button", "signin-cancel")), 1)
+        card = sign_in_card(open_)
+        self.assertEqual([full(n) for n in of_class(card, "p", "signin-elsewhere")],
+                         ["Finish this sign-in in the accounts panel."])
+        self.assertEqual(of_class(card, "input", "signin-code"), [])
+        card = sign_in_card(closed)
+        (link,) = of_class(card, "a", "signin-link")
+        self.assertEqual(link["href"], "https://claude.example/a?s=1")
+        self.assertEqual(len(of_class(card, "input", "signin-code")), 1)
+        self.assertEqual(closed["accounts_body"]["children"], [])
+
+    def test_opening_the_panel_moves_a_running_sign_in_from_the_card_to_its_row(self) -> None:
+        _, running = self._running_in_panel()
+        before, after = render([
+            START, {"respond": {"status": 200, "text": ANSWER}}, {"frame": running},
+            {"snapshot": True}, {"click": "cap"}, {"snapshot": True}])
+        self.assertEqual(len(of_class(sign_in_card(before), "input", "signin-code")), 1)
+        card = sign_in_card(after)
+        self.assertEqual([full(n) for n in of_class(card, "p", "signin-elsewhere")],
+                         ["Finish this sign-in in the accounts panel."])
+        self.assertEqual(of_class(card, "input", "signin-code"), [])
+        self.assertEqual(len(in_row(row_of(after, "work"), "input", "signin-code")), 1)
+
+    def test_a_typed_code_and_its_focus_survive_a_frame_in_the_panel(self) -> None:
+        steps, running = self._running_in_panel()
+        again = {**running, "statement": {**running["statement"], "headline": "again"}}
+        snap, after = render([
+            *steps, {"type": {"class": "signin-code", "text": "ab#C"}},
+            {"select": {"cls": "signin-code", "start": 1, "end": 3}}, {"frame": again},
+            {"snapshot": True}, {"key": "Escape"}, {"snapshot": True}])
+        (code,) = in_row(row_of(snap, "work"), "input", "signin-code")
+        self.assertEqual((code["value"], code["focused"], code["selection"]), ("ab#C", True, [1, 3]))
+        (code,) = of_class(sign_in_card(after), "input", "signin-code")
+        self.assertEqual(code["value"], "ab#C")
+
+    def test_a_keyboard_code_send_or_cancel_keeps_the_focus_while_it_posts(self) -> None:
+        steps, _ = self._running_in_panel()
+        for cls, url in (("signin-send", "/api/signin-code"), ("signin-cancel", "/api/signin-cancel")):
+            for extra in ([], [{"click": cls}]):
+                with self.subTest(cls=cls, second_click=bool(extra)):
+                    (snap,) = render([
+                        *steps, {"type": {"class": "signin-code", "text": "abc"}}, {"focus_on": cls},
+                        {"hold": True}, {"click": cls}, *extra, {"snapshot": True}])
+                    (kept,) = [n for n in nodes(panel(snap)) if n["focused"]]
+                    self.assertIn(cls, kept["cls"].split())
+                    self.assertEqual(len([p for p in snap["posts"] if p["url"] == url]), 1)
+
+    def test_escape_from_a_typed_code_leaves_no_field_focused(self) -> None:
+        steps, _ = self._running_in_panel()
+        typing, closed = render([
+            *steps, {"type": {"class": "signin-code", "text": "ab#C"}}, {"snapshot": True},
+            {"key": "Escape"}, {"snapshot": True}])
+        self.assertEqual(typing["active"], "signin-code")
+        self.assertIs(closed["accounts"]["hidden"], True)
+        self.assertIsNone(closed["active"])
+        self.assertIsNone(closed["field"])
+
+    def test_a_keyboard_sign_in_keeps_the_focus_while_it_posts(self) -> None:
+        shown = {**view([]), "capacity": real_capacity(NOW_S, [
+            {"name": "b", "week": .5, "signin": ("signed_out", None)}])}
+        for extra in ([], [{"click": "acct-signin"}]):
+            with self.subTest(second_click=bool(extra)):
+                (snap,) = render([
+                    START, {"frame": shown}, {"click": "cap"}, {"focus_on": "acct-signin"},
+                    {"hold": True}, {"click": "acct-signin"}, *extra, {"snapshot": True}])
+                (kept,) = [n for n in nodes(panel(snap)) if n["focused"]]
+                self.assertIn("acct-signin", kept["cls"].split())
+                self.assertEqual(len([p for p in snap["posts"] if p["url"] == "/api/signin"]), 1)
+
+    def test_a_sign_in_request_redraws_the_row_with_no_frame(self) -> None:
+        refused = {"respond": {"status": 409, "text": "a sign-in is already running"}}
+        failed = "Could not start the sign-in: a sign-in is already running"
+        base = [START, {"frame": QUIET}, {"click": "cap"}]
+        with self.subTest("refused_start"):
+            first, second = render([*base, refused, {"click": "acct-signin"}, {"snapshot": True},
+                                    {"frame": QUIET}, {"snapshot": True}])
+            for snap in (first, second):
+                a = row_of(snap, "a")
+                self.assertEqual([full(n) for n in in_row(a, "span", "signin-failed")], [failed])
+                (start,) = in_row(a, "button", "acct-signin")
+                self.assertIs(start["disabled"], False)
+        with self.subTest("refused_start_with_a_card"):
+            shown = {**frame([SIGNIN]), "capacity": WORK_CAP}
+            first, second = render([START, {"frame": shown}, {"click": "cap"}, refused,
+                                    {"click": "acct-signin"}, {"snapshot": True},
+                                    {"frame": shown}, {"snapshot": True}])
+            for snap in (first, second):
+                self.assertEqual(
+                    [full(n) for n in in_row(row_of(snap, "work"), "span", "signin-failed")], [failed])
+        with self.subTest("answer_before_the_stream"):
+            (snap,) = render([*base, *OPEN_A[1:], {"snapshot": True}])
+            a = row_of(snap, "a")
+            (link,) = in_row(a, "a", "signin-link")
+            self.assertEqual(link["href"], "https://claude.example/a?s=1")
+            self.assertEqual(len(in_row(a, "input", "signin-code")), 1)
+            self.assertEqual(len(in_row(a, "button", "signin-cancel")), 1)
+        with self.subTest("link_fetched_for_a_running_sign_in"):
+            running = {**QUIET, "signin_runs": {"a": {"state": "running", "at": None, "attempt": 7}}}
+            (snap,) = render([*base, {"respond": {"status": 200, "text": ANSWER}},
+                              {"frame": running}, {"snapshot": True}])
+            self.assertEqual([json.loads(p["body"]) for p in asks(snap)], [{"profile": "a"}])
+            (link,) = in_row(row_of(snap, "a"), "a", "signin-link")
+            self.assertEqual(link["href"], "https://claude.example/a?s=1")
+        typed = [*base, *OPEN_A[1:], {"type": {"class": "signin-code", "text": "ab#C-1"}}]
+        with self.subTest("code_sent"):
+            (snap,) = render([*typed, {"click": "signin-send"}, {"snapshot": True}])
+            (code,) = in_row(row_of(snap, "a"), "input", "signin-code")
+            self.assertEqual(code["value"], "")
+        with self.subTest("code_refused"):
+            (snap,) = render([*typed, {"respond": {"status": 400, "text": "the code was refused"}},
+                              {"click": "signin-send"}, {"snapshot": True}])
+            a = row_of(snap, "a")
+            self.assertEqual([full(n) for n in in_row(a, "span", "signin-failed")],
+                             ["Could not send the code: the code was refused"])
+            (code,) = in_row(a, "input", "signin-code")
+            self.assertEqual(code["value"], "ab#C-1")
+        with self.subTest("cancel_refused"):
+            (snap,) = render([*typed, {"respond": {"status": 409, "text": "no sign-in is running"}},
+                              {"click": "signin-cancel"}, {"snapshot": True}])
+            self.assertEqual([full(n) for n in in_row(row_of(snap, "a"), "span", "signin-failed")],
+                             ["Could not cancel: no sign-in is running"])
+
+    def test_the_panel_never_draws_peach(self) -> None:
+        nolink = {"respond": {"status": 200, "text": "{\"attempt\":7,\"link\":null}"}}
+        (snap,) = render([
+            START, {"frame": QUIET}, {"click": "cap"}, nolink, {"click": "acct-signin"}, nolink,
+            {"frame": {**QUIET, "signin_runs": {"a": {"state": "running", "at": None, "attempt": 7}}}},
+            {"snapshot": True}])
+        a = row_of(snap, "a")
+        (start,) = in_row(a, "button", "signin-start")
+        self.assertIn("acct-signin", start["cls"].split())
+        self.assertEqual(len(in_row(a, "button", "signin-cancel")), 1)
+        for n in nodes(panel(snap)):
+            self.assertFalse({"primary", "needs"} & set(n["cls"].split()), n["cls"])
+        (style,) = re.findall(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"))
+        for selector, decls in style_rules(style):
+            if ".acct-" in selector or "#accounts" in selector:
+                for value in decls.values():
+                    self.assertNotIn("var(--peach)", value, selector)
+
+    def test_add_account_sits_in_the_panel(self) -> None:
+        html = PAGE.read_text(encoding="utf-8")
+        section = html.index('id="accounts"')
+        self.assertLess(section, html.index('id="account-add"'))
+        self.assertLess(html.index('id="account-add"'), html.index("</section>", section))
+        top_in = html[html.index('<div class="top-in">'):html.index('<section class="acct-panel"')]
+        self.assertNotIn('id="account-add"', top_in)
+        before = {**frame([]), "capacity": real_capacity(NOW_S, [
+            {"name": "work", "week": .5, "signin": ("signed_in", NOW_S + 9 * 86400)}])}
+        after = {**frame([]), "capacity": real_capacity(NOW_S, [
+            {"name": "work", "week": .5, "signin": ("signed_in", NOW_S + 9 * 86400)},
+            {"name": "fresh", "signin": ("signed_out", None), "ever": False}]),
+            "signin_runs": RUNNING}
+        (snap,) = render([
+            START, {"frame": before}, {"click": "cap"}, {"click": "account-add-open"},
+            {"type": {"class": "account-name", "text": "fresh"}},
+            {"respond": {"status": 200, "text": ADDED}}, {"click": "account-add-send"},
+            {"frame": after}, {"snapshot": True}])
+        self.assertIs(snap["accounts"]["hidden"], False)
+        fresh = row_of(snap, "fresh")
+        self.assertEqual([full(n) for n in in_row(fresh, "p", "signin-elsewhere")],
+                         ["Finish this sign-in in Add account below."])
+        self.assertEqual(in_row(fresh, "input", "signin-code"), [])
+
+    def test_the_panel_holds_every_account_control_and_detail(self) -> None:
+        shown = {**view([]), "capacity": real_capacity(NOW_S, [
+            {"name": "a", "week": .35, "five": .6, "week_reset": NOW_S + 4 * 86400,
+             "five_reset": NOW_S + 3600, "signin": ("signed_in", NOW_S + 12 * 86400)},
+            {"name": "b", "signin": ("signed_out", None), "ever": True}],
+            excluded=("b",), pinned="a"), "profile_sessions": {"a": 1, "b": 0}}
+        snap = opened(shown)
+        a, b = rows(snap)
+        def labels(r: dict) -> list:
+            return [full(n) for n in in_row(r, "div", "acct-act")[0]["children"]
+                    if n["tag"] == "button"]
+
+        self.assertEqual(labels(a), ["Exclude", "Unpin", "Sign in again", "Remove"])
+        self.assertEqual(labels(b), ["Include", "Pin", "Sign in again", "Remove"])
+        shown_details = details(a)
+        for want in ("65% of the week left", "40% of 5 hours", "signed in, ends in 12 days"):
+            self.assertIn(want, shown_details)
+        self.assertTrue(any(d.startswith("resets ") for d in shown_details), shown_details)
+        (add,) = [n for n in nodes(snap["account_add"]) if has_class(n, "account-add-open")]
+        self.assertEqual(full(add), "Add account")
+        self.assertEqual(
+            [n for n in nodes(snap["capacity"])[1:] if n["tag"] in ("button", "input", "a")], [])
+        (live,) = render([START, {"frame": QUIET}, {"click": "cap"}, *OPEN_A[1:], {"snapshot": True}])
+        a = row_of(live, "a")
+        for tag, cls in (("a", "signin-link"), ("input", "signin-code"),
+                         ("button", "signin-send"), ("button", "signin-cancel")):
+            self.assertEqual(len(in_row(a, tag, cls)), 1, cls)
+
+    def test_every_panel_control_posts_a_guarded_page_write(self) -> None:
+        from agent_tools.console import service
+        two = {**view([]), "capacity": real_capacity(NOW_S, [
+            {"name": "a", "week": .35, "five": .6, "week_reset": NOW_S + 4 * 86400,
+             "five_reset": NOW_S + 3600, "signin": ("signed_in", NOW_S + 12 * 86400)},
+            {"name": "b", "signin": ("signed_out", None), "ever": True}],
+            excluded=("b",), pinned="a"), "profile_sessions": {"a": 1, "b": 0}}
+        (one,) = render([
+            START, {"frame": two}, {"click": "cap"}, {"click": "acct-toggle"}, {"click": "acct-pin"},
+            {"click": "acct-signin"}, {"click": "acct-remove"},
+            {"type": {"class": "acct-remove-name", "text": "a"}}, {"click": "acct-remove-send"},
+            {"click": "account-add-open"}, {"type": {"class": "account-name", "text": "fresh"}},
+            {"click": "account-add-send"}, {"snapshot": True}])
+        (second,) = render([
+            START, {"frame": QUIET}, {"click": "cap"}, {"respond": {"status": 200, "text": ANSWER}},
+            {"click": "acct-signin"}, {"type": {"class": "signin-code", "text": "ab#C-1"}},
+            {"click": "signin-send"}, {"click": "signin-cancel"},
+            {"respond": {"status": 200, "text": "{\"attempt\":4,\"link\":\"https://claude.example/b?s=2\"}"}},
+            {"frame": {**QUIET, "signin_runs": {
+                "a": {"state": "running", "at": None, "attempt": 7},
+                "b": {"state": "running", "at": None, "attempt": 4}}}},
+            {"snapshot": True}])
+        urls = set()
+        for snap in (one, second):
+            for post in snap["posts"]:
+                if post["url"] == "/api/looked":
+                    continue
+                urls.add(post["url"])
+                self.assertIn(post["url"], service.PAGE_WRITES)
+                self.assertEqual(post["method"], "POST")
+                self.assertEqual(post["headers"], GUARDED)
+        self.assertEqual([(p["url"], json.loads(p["body"])) for p in second["posts"]
+                          if p["url"] != "/api/looked"], [
+            ("/api/signin", {"profile": "a"}),
+            ("/api/signin-code", {"profile": "a", "code": "ab#C-1"}),
+            ("/api/signin-cancel", {"profile": "a"}),
+            ("/api/signin-link", {"profile": "b"})])
+        (link,) = in_row(row_of(second, "b"), "a", "signin-link")
+        self.assertEqual(link["href"], "https://claude.example/b?s=2")
+        self.assertEqual(urls, {"/api/exclusion", "/api/pin", "/api/signin", "/api/account-remove",
+                                "/api/account-add", "/api/signin-code", "/api/signin-cancel",
+                                "/api/signin-link"})

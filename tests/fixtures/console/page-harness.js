@@ -5,6 +5,7 @@
 // {focused, clock}, then clock, focus, blur, hide, pagehide. The owner's
 // answer adds {key, ctrlKey?, altKey?, metaKey?, target?} (a keydown on the
 // document; target is the tag name of the focused element, default none),
+// follow: true (the target is the focused element, else a BODY as a browser reports),
 // {click: "<class>"} (the click listeners of the first attached element with
 // that class; none throws), {respond: {status, text}} (queues the answer of
 // the next fetch but /api/looked, default 204 with no text) and
@@ -57,6 +58,11 @@
 // (remove, appendChild moving it, replaceChildren, textContent) the removed
 // active element's blur listeners then fire with relatedTarget null, as an
 // engine blurs a removed element.
+// The markup's tags with an id are parsed with their class attribute (className), every
+// other name="value" attribute (attributes) and a bare hidden (hidden); an Elem holds hidden
+// and an isConnected getter (true when its parentNode chain reaches the root). A snapshot
+// node carries hidden (bool) and expanded (its aria-expanded attribute, null when unset), and
+// the snapshot adds accounts and accounts_body (each a node or null) beside account_add.
 // Prints a JSON list of snapshots on stdout; any failure exits 1 with the
 // error on stderr. A selector the fake DOM does not support throws, so a
 // test cannot pass on a stub.
@@ -94,6 +100,7 @@ class Elem {
     this.open = false;
     this.value = "";
     this.disabled = false;
+    this.hidden = false;
     this.selectionStart = 0;
     this.selectionEnd = 0;
     this.children = [];
@@ -113,6 +120,7 @@ class Elem {
     if (name === "disabled") this.disabled = true;
   }
   focus() {
+    if (this.disabled === true) return; // a browser does not focus a disabled control
     const was = state.active === this;
     state.active = this;
     state.focusCount += 1;
@@ -124,6 +132,10 @@ class Elem {
   setSelectionRange(start, end) {
     this.selectionStart = start;
     this.selectionEnd = end;
+  }
+  get isConnected() {
+    for (let n = this; n; n = n.parentNode) if (n === root) return true;
+    return false;
   }
   get firstElementChild() {
     return this.children.find((c) => !c.isText) || null;
@@ -230,6 +242,12 @@ const templates = new Map();
 for (const m of markup.matchAll(/<([a-zA-Z][a-zA-Z0-9]*)\b([^>]*?\bid="([^"]+)"[^>]*)>/g)) {
   const node = new Elem(m[1]);
   node.id = m[3];
+  const given = /\bclass="([^"]*)"/.exec(m[2]);
+  if (given) node.className = given[1];
+  for (const a of m[2].matchAll(/([\w-]+)="([^"]*)"/g)) {
+    if (a[1] !== "class" && a[1] !== "id") node.attributes[a[1]] = a[2];
+  }
+  if (/(^|\s)hidden(\s|$)/.test(m[2].replace(/="[^"]*"/g, '=""'))) node.hidden = true;
   const withContent = /\bcontent="([^"]*)"/.exec(m[2]);
   if (withContent) node.content = withContent[1];
   if (m[1] === "template") {
@@ -366,6 +384,8 @@ function node(n) {
     label: n.attributes["aria-label"] === undefined ? null : n.attributes["aria-label"],
     width: n.style.width === undefined ? null : n.style.width,
     open: n.open,
+    hidden: n.hidden === true,
+    expanded: n.attributes["aria-expanded"] === undefined ? null : n.attributes["aria-expanded"],
     pressed: n.attributes["aria-pressed"] === undefined ? null : n.attributes["aria-pressed"],
     value: n.value === undefined ? null : n.value,
     disabled: n.disabled === true || "disabled" in n.attributes,
@@ -430,6 +450,7 @@ async function run() {
         key: step.key, ctrlKey: !!step.ctrlKey, altKey: !!step.altKey, metaKey: !!step.metaKey,
         shiftKey: false, repeat: false, preventDefault() { prevented = true; },
         target: own !== null ? own
+          : step.follow === true ? (document.activeElement || { tagName: "BODY", isContentEditable: false })
           : step.target === undefined ? null : { tagName: step.target, isContentEditable: step.editable === true },
       };
       if (own !== null) for (const fn of own.listeners.keydown || []) fn(Object.assign({ type: "keydown" }, event));
@@ -491,6 +512,8 @@ async function run() {
         goal: byId("goal") ? node(byId("goal")) : null,
         capacity: byId("capacity") ? node(byId("capacity")) : null,
         account_add: byId("account-add") ? node(byId("account-add")) : null,
+        accounts: byId("accounts") ? node(byId("accounts")) : null,
+        accounts_body: byId("accounts-body") ? node(byId("accounts-body")) : null,
         promoted: byId("promoted") ? node(byId("promoted")) : null,
         active: state.active && attached(root).includes(state.active) ? state.active.className : null,
         field: field === null || (field.tagName !== "INPUT" && field.tagName !== "TEXTAREA") ? null : {

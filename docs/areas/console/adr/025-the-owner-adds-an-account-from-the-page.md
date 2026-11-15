@@ -1,7 +1,7 @@
 # ADR-console-025 — The owner adds an account from the page
 
 - **Status:** accepted
-- **Decided in:** #842, #1027, #1035
+- **Decided in:** #842, #1027, #1035, #1039
 
 ## Context
 
@@ -9,7 +9,7 @@ ADR-console-024 let the owner sign a profile in from the page, but a profile has
 
 ## Decision
 
-**D1. The action and the write.** The page's header carries an Add account control. Its write is `POST /api/account-add`, a member of `PAGE_WRITES` under the guard of ADR-console-008. It carries one `application/json` body of at most 4096 bytes, `{"name": <string>}`; a body that is not that object is `400 bad account`. A refusal on its merits is `409` with the reason (D2, and `adding an account is not available on this host` when the console has no account adder, sign-in runs or sign-in reader). Success is `200` with `{"attempt": <int>, "link": <string> | null, "profile": <name>}`.
+**D1. The action and the write.** The accounts panel carries an Add account control. Its write is `POST /api/account-add`, a member of `PAGE_WRITES` under the guard of ADR-console-008. It carries one `application/json` body of at most 4096 bytes, `{"name": <string>}`; a body that is not that object is `400 bad account`. A refusal on its merits is `409` with the reason (D2, and `adding an account is not available on this host` when the console has no account adder, sign-in runs or sign-in reader). Success is `200` with `{"attempt": <int>, "link": <string> | null, "profile": <name>}`.
 
 **D2. The name.** The rule is the launcher's: `a-z`, `0-9`, `-` and `_`, at least one character. The name `default` is refused, and so is a name that already has a profile. The `409` reasons are `not an account name: use a-z, 0-9, - and _`, `default is not an account name`, `account <name> already exists` and `adding an account is not available on this host`. The page and the console give the same reason texts, and a name the console passes is a name the launcher creates.
 
@@ -19,7 +19,7 @@ ADR-console-024 let the owner sign a profile in from the page, but a profile has
 
 **D5. What is stored.** An added profile appends one `account.added` row with exactly `by` (`owner`) and `profile`; the kind is not kept past retention, and the view's `accounts_added` is folded from the retained rows. A refusal and a failed creation append none. No link is in any row, stderr line, view or stream frame.
 
-**D6. The page.** This amends ADR-console-002. The Add account control sits in the header. The account name is a fourth typed thing and its draft, selection and focus survive every frame. The add box carries the continuation until the view shows the add's attempt ended, whether or not the profile's sign-in card shows: a note that the sign-in started, the link or Get sign-in link (the start write again, which joins the live run, when the add answered with no link), the code field and Cancel. The link is kept in memory like the sign-in link of ADR-console-024 D3. On that page the card points to the add box instead of carrying a second code field, also when the card showed before the add answered. The outcome (signed in, did not finish, timed out, cancelled) stays in the add box until Add account is pressed again. A run that vanishes from the view, or that the view replaces with an older attempt's retained outcome (a restart), after the add's attempt was seen running, ends the continuation with no outcome. The typed code stays in the add box.
+**D6. The page.** This amends ADR-console-002. The Add account control sits at the bottom of the accounts panel. The account name is a fourth typed thing and its draft, selection and focus survive every frame. The add box carries the continuation until the view shows the add's attempt ended, whether or not the profile's sign-in card shows: a note that the sign-in started, the link or Get sign-in link (the start write again, which joins the live run, when the add answered with no link), the code field and Cancel. The link is kept in memory like the sign-in link of ADR-console-024 D3. On that page the card points to "Add account in the accounts panel" instead of carrying a second code field, also when the card showed before the add answered. The outcome (signed in, did not finish, timed out, cancelled) stays in the add box until Add account is pressed again. A run that vanishes from the view, or that the view replaces with an older attempt's retained outcome (a restart), after the add's attempt was seen running, ends the continuation with no outcome. The typed code stays in the add box.
 
 **D7. Linux only.** The console adds an account only where it starts a sign-in, which is Linux. The macOS half is held on #894.
 
