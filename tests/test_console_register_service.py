@@ -31,6 +31,7 @@ from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- modul
 PATH = "/api/register-project"
 ANSWER = "/api/plan-answer"
 CONFIRM = "/api/register-confirm"
+CANCEL = "/api/register-cancel"
 PID_A = "sha256:" + "a" * 64
 PID_B = "sha256:" + "b" * 64
 ROOT = Path(__file__).resolve().parent.parent
@@ -759,6 +760,172 @@ class RegisterFailureCardTest(Case):
         status, _, body = self.confirm({"root": str(repo), "choice": "try_again"})
         self.assertEqual((status, body), (409, (register.NOT_WAITING + "\n").encode()))
         self.assertEqual(self.fake.calls, calls)
+
+
+class CancelChecks:
+    """What every Cancel registration test checks (#1088); mixed into a `Case`."""
+
+    def arrange_profiles(self):
+        """Sandboxed profile files, as `TrustGrantTest` arranges them, and the service's trust kwargs."""
+        self.key = str(self.parent / "reconcile")
+        arranged = {"oauthAccount": {"emailAddress": "o@example.test"}, "keep": [1, 2],
+                    "projects": {self.key: {"allowedTools": ["Bash"]}}}
+        self.files = {"default": self.home / ".claude.json"}
+        for name in ("work", "solo"):
+            directory = self.parent / "accounts" / "profiles" / name
+            directory.mkdir(parents=True)
+            self.files[name] = directory / ".claude.json"
+        for path in self.files.values():
+            path.write_text(json.dumps(arranged), "utf-8")
+        self.trust = {"profile_dirs": [self.files[n].parent for n in ("work", "solo")],
+                      "trust_home": self.home}
+
+    def cancel(self, body=None, headers=None, raw=None):
+        payload = json.dumps(body).encode() if raw is None else raw
+        sent = self.own(**{"Content-Type": "application/json"}) if headers is None else headers
+        return support.post_page(self.svc.address, CANCEL, sent, payload)
+
+    def refused_cancel(self, body, text):
+        errors = io.StringIO()
+        with contextlib.redirect_stderr(errors):
+            status, _, answer = self.cancel(body)
+        self.assertEqual((status, answer), (409, text.encode() + b"\n"))
+        self.assertIn(f"console: register_cancel_refused {text}", errors.getvalue())
+
+    def inbox_of(self, root):
+        return [i for i in self.view()["inbox"]["open"] if i.get("root") == str(root)]
+
+    def captured(self, repo):
+        files = {str(path.relative_to(repo)): digest(path) for path in sorted(repo.rglob("*"))
+                 if path.is_file() and ".git" not in path.relative_to(repo).parts}
+        return {
+            "status": git(repo, "status", "--porcelain"), "files": files,
+            "refs": git(repo, "for-each-ref"), "worktrees": git(repo, "worktree", "list"),
+            "home": home_state(self.home), "real": real_home_state(),
+            "calls": list(self.fake.calls),
+            "order": [step for step in self.fake.order if step[0] != "discard"],
+            "trust_rows": len(self.rows("trust.granted")),
+            "profiles": {name: (path.read_bytes(), path.stat().st_mtime_ns)
+                         for name, path in self.files.items()}}
+
+    def assert_cancelled(self, repo):
+        plan_id = self.view()["registration"]["plan_id"]
+        before = self.captured(repo)
+        self.assertEqual(self.cancel({"root": str(repo)})[::2], (204, b""))
+        self.assertIsNone(self.view()["registration"])
+        self.assertEqual(self.inbox_of(repo), [])
+        (found,) = self.rows("registration.cancelled")
+        self.assertEqual(found[1], {"by": "owner", "root": str(repo), "plan_id": plan_id})
+        self.assertEqual(found[0], support.log_rows(self.store)[-1][0])
+        self.assertEqual(self.captured(repo), before)
+
+
+class RegisterCancelTest(CancelChecks, Case):
+    """Cancel registration of a plan or a failure that was never applied (#1088, ADR-console-036)."""
+
+    FAILED = RegisterFailureCardTest.FAILED
+
+    def setUp(self):
+        super().setUp()
+        self.arrange_profiles()
+        self.fake = None
+
+    def start(self, fake, **kwargs):
+        self.fake = fake
+        self.kwargs = {**self.trust, **kwargs}
+        return self.begin(fake, **self.kwargs)
+
+    def test_cancel_with_plan_questions_open(self):
+        self.start(Fake(plan=DRAFT))
+        repo = git_repo(self.parent / "r")
+        self.registered(repo)
+        self.assertEqual(len(self.inbox_of(repo)), 1)
+        self.assert_cancelled(repo)
+
+    def test_cancel_with_contract_questions_open(self):
+        self.start(Fake(plan=READY), draft_reader=lambda root: READ_NO_BUILD)
+        repo = git_repo(self.parent / "r", contract=False)
+        shown = self.registered(repo)
+        self.assertEqual(shown["result"], "drafting")
+        self.assertTrue(self.inbox_of(repo))
+        self.assert_cancelled(repo)
+
+    def test_cancel_a_failed_plan(self):
+        self.start(Fake(plan=self.FAILED))
+        repo = git_repo(self.parent / "fail-app")
+        self.assertEqual(self.post({"path": str(repo)})[0], 204)
+        self.assertEqual(self.settled_row(repo)["result"], "failed")
+        self.assertTrue(self.view()["registration"]["cancel"])
+        self.assert_cancelled(repo)
+
+    def test_cancel_after_not_now_on_a_failed_plan(self):
+        self.start(Fake(plan=self.FAILED))
+        repo = git_repo(self.parent / "fail-app")
+        self.assertEqual(self.post({"path": str(repo)})[0], 204)
+        self.settled_row(repo)
+        self.assertEqual(self.confirm({"root": str(repo), "choice": "not_now"})[0], 204)
+        self.assertEqual(self.inbox_of(repo), [])
+        self.assert_cancelled(repo)
+
+    def test_cancel_survives_a_restart(self):
+        self.start(Fake(plan=DRAFT))
+        repo = git_repo(self.parent / "r")
+        self.registered(repo)
+        self.assert_cancelled(repo)
+        self.svc.close()
+        self.begin(self.fake, **self.kwargs)
+        self.assertIsNone(self.view()["registration"])
+        self.assertEqual(self.inbox_of(repo), [])
+        self.assertEqual(len(self.rows("registration.cancelled")), 1)
+
+    def test_cancel_is_refused_while_a_run_is_under_way(self):
+        gate = threading.Event()
+        self.addCleanup(gate.set)
+        fake = Fake(plan=[DRAFT, READY])
+        self.start(fake, dispatch=None)
+        repo = git_repo(self.parent / "r")
+        self.registered(repo)
+        fake.block = gate
+        self.assertEqual(self.answer(answer_of(PID_A, A1))[0], 204)
+        before = support.log_rows(self.store)
+        self.refused_cancel({"root": str(repo)}, register.running(repo.name))
+        self.assertEqual(support.log_rows(self.store), before)
+        self.assertEqual(self.rows("registration.cancelled"), [])
+        gate.set()
+        self.wait_for(lambda r: r["status"] == "done" and r["plan_id"] == PID_B)
+
+    def test_cancel_for_another_root_is_refused(self):
+        self.start(Fake(plan=DRAFT))
+        repo = git_repo(self.parent / "r")
+        self.refused_cancel({"root": str(repo)}, register.NOT_WAITING)
+        self.registered(repo)
+        before = support.log_rows(self.store)
+        self.refused_cancel({"root": str(self.parent / "other")}, register.NOT_WAITING)
+        self.assertEqual(support.log_rows(self.store), before)
+        self.assertIsNotNone(self.view()["registration"])
+
+    def test_cancel_clears_the_refusal_of_the_last_answer(self):
+        fake = Fake(plan=[DRAFT, {"error": REFUSED}, DRAFT])
+        self.start(fake)
+        repo = git_repo(self.parent / "r")
+        self.registered(repo)
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(self.answer(answer_of(PID_A, A1))[0], 204)
+            self.wait_for(lambda r: r["refusal"] is not None)
+        self.assert_cancelled(repo)
+        self.assertIsNone(self.registered(repo)["refusal"])
+
+    def test_a_bad_cancel_body_is_400(self):
+        self.start(Fake(plan=DRAFT))
+        repo = git_repo(self.parent / "r")
+        self.registered(repo)
+        before = support.log_rows(self.store)
+        for raw in (b"[]", b"{}", b'{"root": ""}', b'{"root": 3}', b'{"root": "/x\\ny"}',
+                    json.dumps({"root": str(repo), "choice": "x"}).encode()):
+            with self.subTest(raw=raw):
+                status, _, body = self.cancel(raw=raw)
+                self.assertEqual((status, body), (400, b"bad registration cancel\n"))
+        self.assertEqual(support.log_rows(self.store), before)
 
 
 class PlanAnswerGuardTest(Case):

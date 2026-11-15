@@ -607,6 +607,59 @@ class LegacyNoteTest(unittest.TestCase):
         self.assertEqual(found["note"], register.MANIFEST_STEP)
 
 
+class CancelFoldTest(unittest.TestCase):
+    def ended_event(self, seq, root="/x/r", plan_id="P"):
+        row = {**register.summary(root, plan_doc(state="ready")), "plan_id": plan_id}
+        return Event(seq, f"t{seq}", register.ENDED, None, row)
+
+    def cancel_event(self, seq, root="/x/r", plan_id="P"):
+        row = register.cancelled_row(root, plan_id)
+        return Event(seq, f"t{seq}", row[0], None, row[2])
+
+    def test_a_cancel_row_folds_the_registration_away(self):
+        self.assertEqual(register.cancelled_row("/x/r", "P"),
+                         ("registration.cancelled", None,
+                          {"by": "owner", "root": "/x/r", "plan_id": "P"}))
+        self.assertEqual(register.CANCELLED, "registration.cancelled")
+        ended = self.ended_event(1)
+        self.assertIsNotNone(register.latest([ended]))
+        self.assertIsNone(register.latest([ended, self.cancel_event(2)]))
+        again = self.ended_event(3)
+        self.assertEqual(register.latest([ended, self.cancel_event(2), again])["at"], "t3")
+        for other in (self.cancel_event(2, root="/x/other"), self.cancel_event(2, plan_id="Q"),
+                      Event(2, "t2", register.CANCELLED, None, {"root": "/x/r", "plan_id": "P"})):
+            with self.subTest(other=other.payload):
+                self.assertEqual(register.latest([ended, other])["at"], "t1")
+        state = register.latest([ended])
+        self.assertIsNone(register.latest([self.cancel_event(2)], state))
+        self.assertIsNotNone(state)
+
+    def test_cancellable_before_apply_only(self):
+        planned = {"result": "planned"}
+        self.assertFalse(register.cancellable(None, None))
+        self.assertTrue(register.cancellable(planned, None))
+        self.assertTrue(register.cancellable({"result": "failed"}, None))
+        self.assertFalse(register.cancellable({"result": "registered"}, None))
+        self.assertTrue(register.cancellable(planned, {"step": "apply_failed"}))
+        for step in ("applied", "push_failed", "open_failed", "opened"):
+            with self.subTest(step=step):
+                self.assertFalse(register.cancellable(planned, {"step": step}))
+
+    def test_parse_cancel_request(self):
+        self.assertEqual(register.parse_cancel_request(b'{"root": "/x/r"}'), "/x/r")
+        for body in (b'{"root": "/x/r", "choice": "register"}', b'{}', b'{"root": ""}',
+                     b'{"root": 3}', b'{"root": "/x\nr"}', b'{"root": "/x\u007fr"}',
+                     b'not json', b'\xff', b'[]'):
+            with self.subTest(body=body), self.assertRaises(ValueError):
+                register.parse_cancel_request(body)
+        self.assertEqual(register.CANCEL_REFUSED,
+                         "only a registration that was not applied yet can be cancelled")
+        self.assertEqual(
+            register.CANCEL_DISCARD_FAILED,
+            "The copy that the failed attempt left on this computer could not be removed, so the "
+            "registration was not cancelled. Choose Cancel registration to try again.")
+
+
 class RowTest(unittest.TestCase):
     def test_ended_validates_and_latest_folds(self):
         p1 = register.summary("/srv/a", plan_doc(open_questions=1))
@@ -725,8 +778,8 @@ class RowTest(unittest.TestCase):
         running = register.view_entry("/x/sample-app", None)
         self.assertIsNone(running["draft"])
         self.assertIsNone(running["draft_more"])
-        self.assertEqual(len(running), 20)
-        self.assertEqual(len(entry), 20)
+        self.assertEqual(len(running), 21)
+        self.assertEqual(len(entry), 21)
         full = contract_draft.draft("/x/sample-app", {
             "remotes": [("origin", "git@github.com:sample-owner/sample-app.git")],
             "default_branch": "trunk", "branches": ["trunk"], "files": ["README.md"], "texts": {}})
@@ -795,7 +848,7 @@ class RowTest(unittest.TestCase):
             "lines": [], "note": None, "at": None, "plan_id": None, "state": None,
             "questions": [], "refusal": None, "line": "Planning the adoption of r\u2026",
             "refused": None, "draft": None, "draft_more": None, "adoption": None,
-            "approve": None})
+            "approve": None, "cancel": False})
         latest = {**register.summary("/srv/r", plan_doc(state="ready")), "at": "t"}
         self.assertEqual(register.view_entry(None, latest), {
             "root": "/srv/r", "name": "r", "project_id": "o/r", "status": "done",
@@ -804,7 +857,9 @@ class RowTest(unittest.TestCase):
             "note": "The plan is ready.",
             "at": "t", "plan_id": PLAN_ID, "state": "ready", "questions": [], "refusal": None,
             "line": "Register r: ready to apply", "refused": None, "draft": None,
-            "draft_more": None, "adoption": None, "approve": None})
+            "draft_more": None, "adoption": None, "approve": None, "cancel": False})
+        self.assertTrue(register.view_entry(None, latest, cancel=True)["cancel"])
+        self.assertFalse(register.view_entry("/srv/r", None, cancel=True)["cancel"])
         self.assertIsNone(register.view_entry(None, None))
 
     def test_view_entry_carries_the_adoption_and_its_action(self):

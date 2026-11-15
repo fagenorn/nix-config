@@ -189,6 +189,29 @@ SCHEMA_2 = (
 )
 
 
+class CancelledRegistrationTest(unittest.TestCase):
+    def test_cancelled_registration_reads_only_the_exact_row(self):
+        def event(kind=event_log.REGISTRATION_CANCELLED, **payload):
+            return event_log.Event(1, STAMP, kind, None, payload)
+
+        exact = {"by": "owner", "root": "/x/r", "plan_id": "P"}
+        self.assertEqual(event_log.REGISTRATION_CANCELLED, "registration.cancelled")
+        self.assertNotIn(event_log.REGISTRATION_CANCELLED, event_log.KEPT_KINDS)
+        self.assertEqual(event_log.cancelled_registration(event(**exact)), ("/x/r", "P"))
+        self.assertEqual(event_log.cancelled_registration(event(**{**exact, "plan_id": None})),
+                         ("/x/r", None))
+        for name, bad in (
+                ("no plan id", event(by="owner", root="/x/r")),
+                ("extra member", event(**exact, more=1)),
+                ("another by", event(**{**exact, "by": "page"})),
+                ("empty root", event(**{**exact, "root": ""})),
+                ("empty plan id", event(**{**exact, "plan_id": ""})),
+                ("a number", event(**{**exact, "plan_id": 3})),
+                ("another kind", event(event_log.REGISTRATION_ENDED, **exact))):
+            with self.subTest(name):
+                self.assertIsNone(event_log.cancelled_registration(bad))
+
+
 class FailingDelete:
     """A connection whose DELETE statements fail; everything else passes through."""
 

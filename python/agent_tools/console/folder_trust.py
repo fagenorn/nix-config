@@ -70,7 +70,9 @@ are non-empty strings, every result is in `RESULTS` and every profile is `defaul
 `granted_row`; an invalid one is skipped) a `(root, profile)` with result `failed` is set to
 `{"root", "project", "profile", "at"}` and one with `granted` or `already` is removed. An
 `account.removal` row of outcome `removed` or `removed_signed_out_already` (`GONE_OUTCOMES`) drops
-every pair of that profile, since a profile that no longer exists has no file left to check.
+every pair of that profile, since a profile that no longer exists has no file left to check. A
+`registration.cancelled` row (`event_log.cancelled_registration`, #1088) drops every pair of its root: the
+folder's Check again cards go, and no profile file is read or written.
 
 Card. `items(failures)` is the Check again card of every pair `failures` holds, ordered by `(at,
 root, profile)`: reason `trust_failed`, key `trust/<profile>/<root>/<at>`, `project_id` null, the
@@ -485,6 +487,10 @@ def failures(events: Iterable[event_log.Event],
              state: dict[tuple[str, str], dict] | None = None) -> dict[tuple[str, str], dict]:
     folded = dict(state or {})
     for event in events:
+        cancelled = event_log.cancelled_registration(event)
+        if cancelled is not None:
+            folded = {slot: one for slot, one in folded.items() if slot[0] != cancelled[0]}
+            continue
         if event.kind == event_log.ACCOUNT_REMOVAL:
             profile = event.payload.get("profile")
             if event.payload.get("outcome") in GONE_OUTCOMES and isinstance(profile, str):

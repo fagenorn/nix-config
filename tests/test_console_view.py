@@ -2298,6 +2298,14 @@ class RegisterFailureViewTest(unittest.TestCase):
         self.assertEqual(asked["registration"]["line"], "x")
         self.assertEqual(derive_view([], registration=entry)["registration"], entry)
 
+    def test_a_reduced_registration_keeps_its_cancel(self):
+        entry = {**reg([]), "root": "/srv/r", "name": "r", "line": "x", "lines": ["writes a"],
+                 "note": "n", "adoption": None, "cancel": True}
+        card = {**APPLY_ITEM, "root": "/srv/r"}
+        shown = derive_view([], registration=entry, apply_items=[card])["registration"]
+        self.assertEqual((shown["line"], shown["cancel"]), ("Register r: needs you", True))
+        self.assertTrue(derive_view([], registration=entry)["registration"]["cancel"])
+
     def test_an_apply_card_clears_the_drafted_settings_beside_the_work_line(self):
         lines = [{"field": "project-id", "line": "Project id: o/r (read from the remote)",
                   "value": "o/r", "options": [], "text": True}]

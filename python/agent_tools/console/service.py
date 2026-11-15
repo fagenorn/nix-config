@@ -31,6 +31,7 @@ Routes (every response carries `Cache-Control: no-store` and
     POST /api/plan-defer 204, a JSON body, the page answers Not now to an adoption's apply card (below)
     POST /api/register-confirm 204, a JSON body, the page answers the Register card of an adopted repository (below)
     POST /api/trust-check 204, a JSON body, the page answers a Check again card of a failed folder trust (below)
+    POST /api/register-cancel 204, a JSON body, the page cancels a registration that was not applied yet (below)
     POST /api/brief 200 application/json, a manager sends a sprint's brief (below)
     POST /api/report 200 application/json, a manager sends a sprint's report (below)
     POST /api/close 200 application/json, a manager sends a sprint's closing report (below)
@@ -238,6 +239,23 @@ and dispatches the run: the folder's trust is granted in every profile (`_grant_
 `register`, ADR-console-034), then the plan runs again and, for a `no_change` plan, the register
 child. Nothing is granted or registered before this answer. Any other exception is `console:
 register_confirm_failed <Type>` and 500 `registering failed`.
+
+`POST /api/register-cancel` (#1088, ADR-console-036) is the owner's Cancel registration of the shown
+registration, which was not applied yet or whose apply failed. It takes exactly `{"root"}` with
+`MAX_REGISTER_CANCEL_BYTES` (4096) and `register.parse_cancel_request`: 400 `bad registration cancel`.
+The service refuses, each as 409 with the text, one stderr line `console: register_cancel_refused
+<reason>`, appending nothing, in this order: while a run is under way, `register.running`; when the shown
+registration is none or names another root, `register.NOT_WAITING`; when `register.cancellable` is false
+for it and its adoption (an applied, pushed or opened one), `register.CANCEL_REFUSED`. When the plan's
+adoption is `apply_failed` and `approve.retained` finds the copy that attempt kept, the service first
+claims the run, has `Adopter.discard` remove that copy outside the lock and releases the claim; an `error`
+result, a `register.RunFailed` or no adopter refuses with `register.CANCEL_DISCARD_FAILED` and appends
+nothing. With no kept copy no child runs. Then it appends exactly one `registration.cancelled` row
+(`register.cancelled_row`), clears the answer's refusal and answers `204`: the registration, deferral,
+adoption and folder-trust folds each drop what the row names (so registering the same repository again
+offers a fresh Apply it, and its Check again cards are gone), after a restart too. It writes no file of
+its own, grants no trust and reads no registry. Any other exception is `console: register_cancel_failed
+<Type>` and 500 `cancelling failed`.
 
 A checkout with no `.agents/project.json` (ADR-console-031) is drafted instead of planned: the run
 reads it (`draft_reader`, `contract_draft.read` by default), drafts the contract from the fleet
@@ -1105,12 +1123,14 @@ ADOPTION_REGISTER_PATH = "/api/adoption-register"
 PLAN_DEFER_PATH = "/api/plan-defer"
 REGISTER_CONFIRM_PATH = "/api/register-confirm"
 TRUST_CHECK_PATH = "/api/trust-check"
+REGISTER_CANCEL_PATH = "/api/register-cancel"
 PAGE_WRITES: frozenset[str] = frozenset({
     LOOKED_PATH, ANSWER_PATH, CHECK_PATH, GOAL_PATH, WITHDRAW_PATH, APPROVE_PATH, REPLY_PATH,
     RETRY_PATH, MESSAGE_PATH, STOP_PATH, ROUND_ANSWER_PATH, CONTINUE_PATH, EXCLUSION_PATH,
     PIN_PATH, SIGNIN_PATH, SIGNIN_CODE_PATH, SIGNIN_CANCEL_PATH, SIGNIN_LINK_PATH, ACCOUNT_ADD_PATH,
     ACCOUNT_REMOVE_PATH, REGISTER_PATH, PLAN_ANSWER_PATH, PLAN_APPROVE_PATH,
-    ADOPTION_REGISTER_PATH, PLAN_DEFER_PATH, REGISTER_CONFIRM_PATH, TRUST_CHECK_PATH})
+    ADOPTION_REGISTER_PATH, PLAN_DEFER_PATH, REGISTER_CONFIRM_PATH, TRUST_CHECK_PATH,
+    REGISTER_CANCEL_PATH})
 MAX_SIGNIN_BYTES = 4096
 MAX_ACCOUNT_BYTES = 4096
 MAX_REMOVE_BYTES = 4096
@@ -1121,6 +1141,7 @@ MAX_ADOPTION_REGISTER_BYTES = 4096
 MAX_PLAN_DEFER_BYTES = 4096
 MAX_REGISTER_CONFIRM_BYTES = 4096
 MAX_TRUST_CHECK_BYTES = 4096
+MAX_REGISTER_CANCEL_BYTES = 4096
 APPROVAL_THREAD = "console-adoption-approval"
 SIGNIN_THREAD = "console-signin-deadline"
 SIGNIN_TICK_SECONDS = 1.0
@@ -1681,6 +1702,28 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return False
         return True
 
+    def _register_cancel_request(self, console: "ConsoleService") -> bool:
+        """Carry out Cancel registration; True when the shared 204 is to be sent."""
+        body = self._json_body(MAX_REGISTER_CANCEL_BYTES)
+        if body is None:
+            return False
+        try:
+            root = register.parse_cancel_request(body)
+        except ValueError:
+            self._refuse(400, "bad registration cancel")
+            return False
+        try:
+            console.cancel_registration(root)
+        except sprints.Refused as error:
+            print(f"console: register_cancel_refused {error}", file=sys.stderr)
+            self._refuse(409, str(error))
+            return False
+        except Exception as error:
+            print(f"console: register_cancel_failed {type(error).__name__}", file=sys.stderr)
+            self._refuse(500, "cancelling failed")
+            return False
+        return True
+
     def _trust_check_request(self, console: "ConsoleService") -> bool:
         """Carry out the Check again answer; True when the shared 204 is to be sent."""
         body = self._json_body(MAX_TRUST_CHECK_BYTES)
@@ -2162,6 +2205,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
             if not self._trust_check_request(console):
                 return
+        elif route == REGISTER_CANCEL_PATH:
+            self.close_connection = True
+            if not self._register_cancel_request(console):
+                return
         else:
             if (self.headers.get("Content-Length", "0") != "0"
                     or self.headers.get("Transfer-Encoding") is not None):
@@ -2544,6 +2591,9 @@ class ConsoleService:
 
     def _publish(self) -> None:
         adoption, action, apply_items = self._approval_view()
+        latest = self._registration
+        cancel = (self._registering is None and latest is not None
+                  and register.cancellable(latest, self._adoptions.get(latest["plan_id"])))
         cap = capacity.capacity_view(
             self._profiles, self._capacity, self._clock(), self._signins,
             excluded=self._excluded, pinned=self._pinned)
@@ -2557,7 +2607,7 @@ class ConsoleService:
             registration=register.view_entry(
                 None if self._approving else self._registering, self._registration,
                 again=self._answering, refusal=self._answer_refusal, adoption=adoption,
-                approve=action),
+                approve=action, cancel=cancel),
             adoption_items=approve.inbox_entries(self._adoptions),
             retry_items=approve.retry_entries(self._adoptions, self._enrolling),
             apply_items=apply_items,
@@ -3086,6 +3136,54 @@ class ConsoleService:
                 self._registering = None
                 self._publish()
             raise
+
+    def cancel_registration(self, root: str) -> None:
+        """Cancel the shown registration of `root` before apply; refusals are `sprints.Refused`."""
+        with self._ingest:
+            latest = self._cancellable(root)
+            plan_id = latest["plan_id"]
+            found = self._adoptions.get(plan_id)
+            discard = (found is not None and found["step"] == "apply_failed"
+                       and approve.retained(plan_id) is not None)
+            if discard:
+                self._registering = root
+                self._publish()
+        if discard:
+            try:
+                if self._adopter is None:
+                    failed = True
+                else:
+                    failed = "error" in self._adopter.discard(plan_id, cancel=self._stop)
+            except register.RunFailed:
+                failed = True
+            except BaseException:
+                with self._ingest:
+                    self._registering = None
+                    self._publish()
+                raise
+            with self._ingest:
+                self._registering = None
+                if failed:
+                    self._publish()
+            if failed:
+                raise sprints.Refused(register.CANCEL_DISCARD_FAILED)
+        with self._ingest:
+            if self._cancellable(root) is not latest:
+                raise sprints.Refused(register.NOT_WAITING)
+            self._fold(self.log.append([register.cancelled_row(root, plan_id)]))
+            self._answer_refusal = None
+            self._publish()
+
+    def _cancellable(self, root: str) -> dict:
+        """The shown registration of `root` when it may be cancelled, held under the ingest lock."""
+        if self._registering is not None:
+            raise sprints.Refused(register.running(register.name_of(self._registering)))
+        latest = self._registration
+        if latest is None or latest["root"] != root:
+            raise sprints.Refused(register.NOT_WAITING)
+        if not register.cancellable(latest, self._adoptions.get(latest["plan_id"])):
+            raise sprints.Refused(register.CANCEL_REFUSED)
+        return latest
 
     def _check_answerable(self, root: str, choice: str) -> dict:
         """The registration row `choice` answers for `root`, held under the ingest lock.

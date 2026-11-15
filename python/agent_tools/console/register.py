@@ -110,6 +110,16 @@ the row's headline, `why` its note, options `TRY_OPTION` then `LATER_OPTION`, va
 `parse_confirm_request` takes `TRY_VALUE` as a third choice. `NOT_WAITING` is the text of
 a confirmation for a root that is not the waiting one.
 
+Cancel (#1088, ADR-console-036). `CANCELLED` is `event_log.REGISTRATION_CANCELLED`; `cancelled_row(root,
+plan_id)` is `(CANCELLED, None, {"by": "owner", "root", "plan_id"})`. `latest` folds the registration to
+None when a valid cancel row names the folded row's root and plan id (a cancel naming another, or
+malformed, changes nothing; a later `registration.ended` row starts a new registration).
+`parse_cancel_request(body)` is exactly `{"root"}`, a non-empty string with no character below 0x20 and
+no 0x7F (`ValueError` otherwise). `cancellable(latest, adoption)` is true when `latest` is not None,
+its `result` is not `registered` and the plan's folded adoption is None or `apply_failed`.
+`CANCEL_REFUSED` and `CANCEL_DISCARD_FAILED` are the service's refusals. `view_entry` carries `cancel`
+(false for a running entry, the `cancel` argument for a done one).
+
 Drafting row (ADR-console-031). `drafting(root, fields, answered=())` is the row of a repository with no
 project contract: `result` and `state` `drafting`, `project_id` the draft's project-id value (None
 when it has none), `headline` `What the console read from <name>: it has no project contract yet`,
@@ -162,6 +172,7 @@ from agent_tools.console import contract_draft, event_log, folder_trust, manager
 from agent_tools.system import siblings
 
 ENDED = event_log.REGISTRATION_ENDED
+CANCELLED = event_log.REGISTRATION_CANCELLED
 RUN_TIMEOUT = 300
 APPLY_TIMEOUT = 1800
 GIT_TIMEOUT = 10
@@ -230,6 +241,9 @@ LATER_NOTE = "Not registered. Press Register again to register it."
 TRY_OPTION = "Try again"
 TRY_VALUE = "try_again"
 NOT_WAITING = "that project is not waiting to be registered"
+CANCEL_REFUSED = "only a registration that was not applied yet can be cancelled"
+CANCEL_DISCARD_FAILED = ("The copy that the failed attempt left on this computer could not be removed, "
+                         "so the registration was not cancelled. Choose Cancel registration to try again.")
 
 
 def not_directory(path: str) -> str:
@@ -536,6 +550,11 @@ def ended(payload: Mapping) -> tuple[str, None, dict]:
 def latest(events: Iterable[event_log.Event], state: dict | None = None) -> dict | None:
     found = state
     for event in events:
+        cancelled = event_log.cancelled_registration(event)
+        if cancelled is not None:
+            if found is not None and cancelled == (found["root"], found["plan_id"]):
+                found = None
+            continue
         if event.kind != ENDED:
             continue
         try:
@@ -618,6 +637,31 @@ def parse_confirm_request(body: bytes) -> tuple[str, str]:
     return root, choice
 
 
+def cancelled_row(root: str, plan_id: str | None) -> tuple[str, None, dict]:
+    return (CANCELLED, None, {"by": "owner", "root": root, "plan_id": plan_id})
+
+
+def parse_cancel_request(body: bytes) -> str:
+    try:
+        value = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("not a JSON object") from error
+    if not isinstance(value, dict) or set(value) != {"root"}:
+        raise ValueError("wrong members")
+    root = value["root"]
+    if not isinstance(root, str) or not root:
+        raise ValueError("wrong types")
+    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in root):
+        raise ValueError("control character")
+    return root
+
+
+def cancellable(latest: Mapping | None, adoption: Mapping | None) -> bool:
+    """True for a registration the owner may cancel: not registered and not applied yet."""
+    return (latest is not None and latest["result"] != "registered"
+            and (adoption is None or adoption["step"] == "apply_failed"))
+
+
 def again_headline(name: str) -> str:
     return f"Planning the adoption of {name} again with your answer…"
 
@@ -637,7 +681,7 @@ def line_of(latest: Mapping) -> str:
 
 def view_entry(running: str | None, latest: Mapping | None, *, again: bool = False,
                refusal: Mapping | None = None, adoption: Mapping | None = None,
-               approve: str | None = None) -> dict | None:
+               approve: str | None = None, cancel: bool = False) -> dict | None:
     if running is not None:
         name = name_of(running)
         headline = again_headline(name) if again else f"Planning the adoption of {name}\u2026"
@@ -645,7 +689,8 @@ def view_entry(running: str | None, latest: Mapping | None, *, again: bool = Fal
                 "result": None, "outcome": None, "headline": headline,
                 "lines": [], "note": None, "at": None, "plan_id": None, "state": None,
                 "questions": [], "refusal": None, "line": headline, "refused": None,
-                "draft": None, "draft_more": None, "adoption": None, "approve": None}
+                "draft": None, "draft_more": None, "adoption": None, "approve": None,
+                "cancel": False}
     if latest is None:
         return None
     mine = refusal is not None and refusal["plan_id"] == latest["plan_id"]
@@ -665,7 +710,7 @@ def view_entry(running: str | None, latest: Mapping | None, *, again: bool = Fal
             "refused": {"id": refusal["id"], "subject": refusal["subject"]} if mine else None,
             "draft": contract_draft.shown(draft) if isinstance(draft, list) else None,
             "draft_more": contract_draft.more_line(draft) if isinstance(draft, list) else None,
-            "adoption": adoption, "approve": approve}
+            "adoption": adoption, "approve": approve, "cancel": cancel}
 
 
 class RunFailed(Exception):

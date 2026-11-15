@@ -72,6 +72,26 @@ class ParseTest(unittest.TestCase):
                 approve.parse_approve_request(bad)
 
 
+class CancelFoldTest(unittest.TestCase):
+    def test_a_cancel_drops_the_plans_deferral_and_adoption(self):
+        cancel = register.cancelled_row("/srv/r", "P")
+        events = [Event(1, "t1", approve.DEFERRED, None, {"plan_id": "P"}),
+                  step_event(2, "t2", step="apply_failed", plan_id="P"),
+                  step_event(3, "t3", step="apply_failed", plan_id="R"),
+                  Event(4, "t4", cancel[0], None, cancel[2]),
+                  Event(5, "t5", approve.DEFERRED, None, {"plan_id": "Q"})]
+        self.assertEqual(approve.deferrals(events), frozenset({"Q"}))
+        found = approve.adoptions(events)
+        self.assertNotIn("P", found)
+        self.assertIn("R", found)
+        state = approve.adoptions(events[:3])
+        self.assertIn("P", approve.adoptions([], state))
+        self.assertNotIn("P", approve.adoptions(events[3:4], state))
+        self.assertEqual(approve.deferrals(events[3:4], frozenset({"P", "Z"})), frozenset({"Z"}))
+        malformed = Event(6, "t6", cancel[0], None, {"root": "/srv/r", "plan_id": "R"})
+        self.assertIn("R", approve.adoptions([malformed], found))
+
+
 class RowTest(unittest.TestCase):
     def test_step_row_takes_exactly_its_members(self):
         payload = step_payload()

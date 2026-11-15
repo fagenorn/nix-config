@@ -354,6 +354,10 @@ def deferral_row(plan_id: str) -> tuple[str, None, dict]:
 def deferrals(events: Iterable[Event], state: Collection[str] = frozenset()) -> frozenset[str]:
     result = set(state)
     for event in events:
+        cancelled = event_log.cancelled_registration(event)
+        if cancelled is not None:
+            result.discard(cancelled[1])
+            continue
         if event.kind != DEFERRED:
             continue
         try:
@@ -376,6 +380,10 @@ def current_note(note: str | None) -> str | None:
 def adoptions(events: Iterable[Event], state: dict | None = None) -> dict[str, dict]:
     result = dict(state or {})
     for event in events:
+        cancelled = event_log.cancelled_registration(event)
+        if cancelled is not None:
+            result.pop(cancelled[1], None)
+            continue
         try:
             if event.kind == STEP:
                 _, _, payload = step_row(event.payload)
