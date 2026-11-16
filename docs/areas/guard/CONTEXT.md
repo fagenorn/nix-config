@@ -20,6 +20,9 @@ _Avoid_: policy file
 A project's entry in the compiled policy, earned only when every derivation step holds. The guard uses it only after the row check confirms it.
 _Avoid_: generated row
 
+**Approved release path**:
+The one declared way to change production: a command id of the project contract. Planned: the guard admits it in every permission mode and refuses a command that reaches the same production by a route it covers; the contract field and the guard's reading of it do not exist yet, and a route it cannot see stays open. See ADR-guard-009.
+
 **Detaching word**:
 A word such as `nohup`, `setsid` or `disown` that the guard refuses in every repository, pointing at the Bash tool's background option instead.
 
@@ -30,8 +33,14 @@ _Avoid_: git command
 **Plan-gated floor**:
 The rule that relaxes the protection demand for one answer only: a repository whose plan cannot report branch protection at all. The guard accepts that answer and nothing looser.
 
+**Production rule**:
+A rule of the project contract that names a command id reaching production. Planned: the guard enforces it in every permission mode on the routes it covers; until the contract field and the guard's reading of it exist, nothing enforces it. It names the id, never the binary inside a script, alias or `just` recipe. A project that declares none declares no production. See ADR-guard-009.
+
 **Raise label**:
 The label that raises a repository's instruction budget for one change. Only the owner applies it, and the guard refuses an agent adding it.
+
+**Read-only route**:
+A declared way to reach production that only reads, such as a project's documented read-only check. Planned: the guard admits it in every permission mode once the contract can declare it. See ADR-guard-009.
 
 **Row check**:
 The live confirmation that a derived row still matches the repository it names, made once per invocation by reading the remote and the contract on its registered branch.
