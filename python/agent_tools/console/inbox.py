@@ -3,8 +3,9 @@ recently a project was touched locally. Pure of the console's log and clock; `re
 `gh` call and a cancellation test as arguments.
 
 Markers decide, labels filter. One GraphQL search per repository asks for open issues and pull
-requests carrying the `owner-action` or `owner-answered` label (`search_argv`, `QUERY`), at most
-`PAGE_SIZE` nodes a page and the last `COMMENTS` comments of each. An item exists only for a live
+requests carrying the `owner-action`, `owner-answered` or `needs-verification` (`HELD_LABEL`) label
+(`search_argv`, `QUERY`), at most `PAGE_SIZE` nodes a page and the last `COMMENTS` comments of each; an
+Issue node also reads its `authorAssociation`, `body` and `labels`. An item exists only for a live
 (`forge_markers.is_live`) comment of kind `forge_owner_action.KIND` whose `reason` is one of
 `forge_owner_action.REASONS`; a label alone raises nothing. Only comments whose `authorAssociation`
 is in `forge_owner_action.TRUSTED` are parsed, `end` markers included. The reader never parses
@@ -25,7 +26,21 @@ ask text or the act fence stays. For a `verify-ask` prompt whose sentence names 
 that line's first sentence (cut after the first `.`, `?` or `!`, with any closing quote or bracket,
 that whitespace or the line end follows, else the whole line, whitespace collapsed), `check_id` is
 the check id and `detail` is the rest; every other verification prompt keeps its sentence and whole
-detail with `check_id` `""` (#1046). A held issue with no live runner prompt yields no item.
+detail with `check_id` `""` (#1046).
+
+Held reviews (#1113, ADR-console-049). A held issue with no live runner prompt raises review items
+instead. An Issue node labelled `HELD_LABEL` whose `authorAssociation` is in `verify_answer.TRUSTED`
+and that has no live trusted runner prompt (the verification-item predicate above) is read through
+`acceptance_criteria` of its body: the checkbox lines of its first `Acceptance criteria` heading
+section, outside fences (a fence closes only on a line of its own delimiter character, at least as
+long as the one that opened it, with nothing after it but spaces; an unclosed fence runs to the end).
+A criterion is `Criterion(index, ticked, kind, text, line)`, `kind` being a leading `[code]`,
+`[evidence]`, `[human]` or `[note]` tag or None. `review_criteria` is the unticked `human` criteria
+when no unticked criterion has a kind other than `human` or `note`, else none; each raises one review
+item, keyed `<slug>#<issue>/ac<index>`, with `reason` `held-review`, `kind` `owner-review`, `question`
+the criterion's text, `answers` `["passed", "note"]`, `comment_id` None, `criterion` its index and
+`version` `criterion_version` (a digest of issue, index, kind and text, never the tick), plus the
+`check_id` `""`, `reading` `""` and `detail` `""` of an owner check, so it gets pictures like one.
 
 A `verify-ask` prompt's `reading` (#1112) is the instruction for reading the check's result, written in
 its ask as `Reading:` at the start of a detail line (after optional spaces) or right after whitespace
@@ -76,7 +91,8 @@ is sorted by `key` and holds only JSON-native values; every item is
     {"key": "<slug>#<issue>/<comment id>", "project_id", "repo", "issue", "comment_id", "url",
      "reason", "kind", "question", "detail", "questions": [{"question", "options", "chosen", "recommended"}]
      (decision only), "items": [str] (conflict and needs-label only), "answers": [str], "paid": bool,
-     "confirm", "answered", "held_work"} and, for a verification prompt only, "version", "check_id" and "reading"
+     "confirm", "answered", "held_work"} and, for a verification prompt or a review item, "version", "check_id"
+     and "reading" (and, for a review item only, "criterion"; its "comment_id" is None)
 (and, once `attach_pictures` has run, "pictures" and "missing_pictures")
 
 For `decision`, `conflict` and `needs-label` the kind is the reason, `detail` and `confirm` are `""`,
@@ -97,6 +113,7 @@ import os
 import re
 import stat
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -104,6 +121,7 @@ from typing import Any
 from agent_tools.claims import forge_markers as fm
 from agent_tools.claims import forge_owner_action as foa
 from agent_tools.claims import owner_actions
+from agent_tools.canonical import telemetry_digest
 from agent_tools.console import pictures
 from agent_tools.console.sprints import MAX_PICTURE_LINE_CHARS, MAX_PICTURES
 from agent_tools.system import forge_api
@@ -113,6 +131,10 @@ MAX_CALLS = 4
 PAGE_SIZE = 25
 COMMENTS = 100
 ACTIVE_WITHIN = 86400.0
+HELD_LABEL = "needs-verification"
+REVIEW_REASON = "held-review"
+REVIEW_KIND = "owner-review"
+REVIEW_ANSWERS = ("passed", "note")
 
 QUERY = """query($search: String!, $after: String) {
   search(query: $search, type: ISSUE, first: 25, after: $after) {
@@ -122,6 +144,9 @@ QUERY = """query($search: String!, $after: String) {
       __typename
       ... on Issue {
         number
+        authorAssociation
+        body
+        labels(first: 100) { nodes { name } }
         issueDependenciesSummary { blocking }
         comments(last: 100) { totalCount nodes { fullDatabaseId body authorAssociation updatedAt } }
       }
@@ -137,7 +162,7 @@ ACTIVITY_FILES = (("FETCH_HEAD",), ("logs", "HEAD"), ("index",))
 
 def search_argv(slug: str, after: str | None = None) -> list[str]:
     return ["api", "graphql", "-f", f"query={QUERY}",
-            "-f", f"search=repo:{slug} is:open label:{foa.LABEL[0]},{foa.ANSWERED_LABEL[0]}",
+            "-f", f"search=repo:{slug} is:open label:{foa.LABEL[0]},{foa.ANSWERED_LABEL[0]},{HELD_LABEL}",
             *(["-f", f"after={after}"] if after else [])]
 
 
@@ -185,6 +210,101 @@ def _comments(node: dict) -> list[dict]:
     if not all(isinstance(c, dict) for c in nodes):
         raise _invalid("a comment is not an object")
     return nodes
+
+
+_FENCE_OPEN = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
+_HEADING = re.compile(r"^\s{0,3}#{1,6}\s")
+_AC_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+Acceptance criteria\s*#*\s*$", re.IGNORECASE)
+_CRITERION = re.compile(r"^\s*[-*+] \[( |x|X)\]\s+(.*)$")
+_KIND = re.compile(r"\[(code|evidence|human|note)\]\s*(.*)$")
+
+
+@dataclass(frozen=True)
+class Criterion:
+    index: int
+    ticked: bool
+    kind: str | None
+    text: str
+    line: int
+
+
+def acceptance_criteria(body: str) -> list[Criterion]:
+    """The checkbox lines of the first `Acceptance criteria` section of an issue body, outside fences."""
+    criteria: list[Criterion] = []
+    inside = False
+    fence: re.Pattern | None = None
+    for number, raw in enumerate(body.split("\n")):
+        line = raw.removesuffix("\r")
+        if fence is not None:
+            if fence.match(line):
+                fence = None
+            continue
+        opened = _FENCE_OPEN.match(line)
+        if opened:
+            run = opened.group(1)
+            fence = re.compile(r"^\s{0,3}" + re.escape(run[0]) + "{" + str(len(run)) + r",}\s*$")
+            continue
+        if not inside:
+            inside = bool(_AC_HEADING.match(line))
+            continue
+        if _HEADING.match(line):
+            break
+        box = _CRITERION.match(line)
+        if not box:
+            continue
+        rest = box.group(2)
+        tagged = _KIND.match(rest)
+        kind, rest = (tagged.group(1), tagged.group(2)) if tagged else (None, rest)
+        criteria.append(Criterion(len(criteria) + 1, box.group(1) != " ", kind, " ".join(rest.split()), number))
+    return criteria
+
+
+def criterion_version(issue: int, criterion: Criterion) -> str:
+    return telemetry_digest({"issue": issue, "index": criterion.index, "kind": criterion.kind,
+                             "text": criterion.text})
+
+
+def review_criteria(criteria: Sequence[Criterion]) -> list[Criterion]:
+    """The unticked `human` criteria, when no other unticked criterion still waits on the runner."""
+    open_ = [c for c in criteria if not c.ticked]
+    if any(c.kind not in ("human", "note") for c in open_):
+        return []
+    return [c for c in open_ if c.kind == "human"]
+
+
+def review_key(slug: str, issue: int, index: int) -> str:
+    return f"{slug}#{issue}/ac{index}"
+
+
+def _review_item(project_id: str, slug: str, issue: int, held: int, criterion: Criterion) -> dict:
+    return {
+        "key": review_key(slug, issue, criterion.index), "project_id": project_id, "repo": slug,
+        "issue": issue, "comment_id": None, "url": f"https://github.com/{slug}/issues/{issue}",
+        "reason": REVIEW_REASON, "kind": REVIEW_KIND, "question": criterion.text, "detail": "",
+        "check_id": "", "reading": "", "questions": [], "items": [], "answers": list(REVIEW_ANSWERS),
+        "paid": False, "confirm": "", "answered": False, "held_work": held,
+        "version": criterion_version(issue, criterion), "criterion": criterion.index,
+    }
+
+
+def _labels(node: dict) -> list[str]:
+    connection = node.get("labels")
+    if connection is None:
+        return []
+    names = connection.get("nodes") if isinstance(connection, dict) else None
+    if not isinstance(names, list) or not all(isinstance(n, dict) and isinstance(n.get("name"), str)
+                                              for n in names):
+        raise _invalid("issue labels is not a connection of names")
+    return [n["name"] for n in names]
+
+
+def _body(node: dict) -> str:
+    body = node.get("body")
+    if body is None:
+        return ""
+    if not isinstance(body, str):
+        raise _invalid("issue body is not a string")
+    return body
 
 
 def _item(project_id: str, slug: str, issue: int, held: int, marker: fm.Marker) -> dict:
@@ -310,8 +430,13 @@ def items_from_node(project_id: str, slug: str, node: dict) -> list[dict]:
     runner_markers.sort(key=lambda m: m.comment_id)
     items = [_item(project_id, slug, number, held, m) for m in markers
              if m.kind == foa.KIND and m.fields.get("reason") in foa.REASONS and fm.is_live(m, markers)]
-    items += [_verify_item(project_id, slug, number, held, m, runner_markers) for m in runner_markers
-              if m.kind == foa.KIND and verify_answer.is_runner_prompt(m) and fm.is_live(m, runner_markers)]
+    prompts = [m for m in runner_markers
+               if m.kind == foa.KIND and verify_answer.is_runner_prompt(m) and fm.is_live(m, runner_markers)]
+    items += [_verify_item(project_id, slug, number, held, m, runner_markers) for m in prompts]
+    if (node.get("__typename") == "Issue" and HELD_LABEL in _labels(node)
+            and node.get("authorAssociation") in verify_answer.TRUSTED and not prompts):
+        items += [_review_item(project_id, slug, number, held, c)
+                  for c in review_criteria(acceptance_criteria(_body(node)))]
     return sorted(items, key=lambda item: item["key"])
 
 

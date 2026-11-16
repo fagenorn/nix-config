@@ -11,6 +11,7 @@ from pathlib import Path
 
 from agent_tools.claims import forge_markers as fm
 from agent_tools.claims import forge_owner_action as foa
+from agent_tools import canonical
 from agent_tools.console import inbox, pictures
 from agent_tools.system.forge_api import ForgeError
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
@@ -49,6 +50,19 @@ def comment_node(cid, body, assoc="OWNER"):
 def issue_node(number, comments, blocking=0):
     return {"__typename": "Issue", "number": number, "issueDependenciesSummary": {"blocking": blocking},
             "comments": {"totalCount": len(comments), "nodes": comments}}
+
+
+def held_issue(number, body, comments=(), labels=("needs-verification",), assoc="OWNER", blocking=0):
+    return {**issue_node(number, list(comments), blocking), "authorAssociation": assoc, "body": body,
+            "labels": {"nodes": [{"name": n} for n in labels]}}
+
+
+def ac_body(*lines):
+    return "## Problem\n\nx\n\n## Acceptance criteria\n\n" + "\n".join(lines) + "\n\n## Blocked by\n\n- #1112\n"
+
+
+HUMAN_TEXT = "The card looks right at 1440 and 480 px \u2014 measured: the owner judges before and after pictures"
+HUMAN = f"- [ ] [human] {HUMAN_TEXT}"
 
 
 def pr_node(number, comments):
@@ -514,6 +528,103 @@ class PromptPictureTest(unittest.TestCase):
         self.assertEqual([p["line"] for p in got["pictures"]], ["a.png", "b.png"])
 
 
+class HeldReviewTest(unittest.TestCase):
+    """A held issue whose only open criteria are owner reviews raises one review item each (#1113)."""
+
+    def review(self, issue, index, text, held_work=1):
+        return {"key": f"{SLUG}#{issue}/ac{index}", "project_id": PROJECT, "repo": SLUG, "issue": issue,
+                "comment_id": None, "url": f"https://github.com/{SLUG}/issues/{issue}",
+                "reason": "held-review", "kind": "owner-review", "question": text, "detail": "",
+                "check_id": "", "reading": "", "questions": [], "items": [], "answers": ["passed", "note"],
+                "paid": False, "confirm": "", "answered": False, "held_work": held_work,
+                "version": canonical.telemetry_digest({"issue": issue, "index": index, "kind": "human",
+                                                       "text": text}),
+                "criterion": index}
+
+    def test_a_held_issue_whose_only_open_criterion_is_human_yields_one_item(self):
+        node = held_issue(1091, ac_body("- [x] [code] A", "- [x] [code] B", HUMAN), blocking=1)
+        result = read(page([node]))
+        self.assertEqual(result, [self.review(1091, 3, HUMAN_TEXT, held_work=2)])
+        self.assertEqual(result[0]["key"], "octo/widgets#1091/ac3")
+        self.assertIsNone(result[0]["comment_id"])
+        self.assertEqual(json.loads(json.dumps(result)), result)
+
+    def test_an_open_code_evidence_or_untagged_criterion_raises_no_review_item(self):
+        control = inbox.items_from_node(PROJECT, SLUG, held_issue(7, ac_body("- [x] [code] A", HUMAN)))
+        self.assertEqual([i["reason"] for i in control], ["held-review"])
+        for extra in ("- [ ] [code] C", "- [ ] [evidence] E", "- [ ] U"):
+            with self.subTest(extra):
+                node = held_issue(7, ac_body("- [x] [code] A", extra, HUMAN))
+                self.assertEqual(inbox.items_from_node(PROJECT, SLUG, node), [])
+
+    def test_a_live_runner_prompt_suppresses_the_review_item(self):
+        node = held_issue(7, ac_body(HUMAN), comments=[comment_node(C1, ask())])
+        self.assertEqual([i["reason"] for i in inbox.items_from_node(PROJECT, SLUG, node)], ["verify-ask"])
+        control = inbox.items_from_node(PROJECT, SLUG, held_issue(7, ac_body(HUMAN)))
+        self.assertEqual([i["reason"] for i in control], ["held-review"])
+        ended = held_issue(7, ac_body(HUMAN),
+                           comments=[comment_node(C1, ask()), comment_node(C2, fm.end_body(C1, "done"))])
+        self.assertEqual([i["reason"] for i in inbox.items_from_node(PROJECT, SLUG, ended)], ["held-review"])
+
+    def test_only_a_trusted_held_issue_is_read(self):
+        body = ac_body(HUMAN)
+        self.assertEqual(inbox.items_from_node(PROJECT, SLUG, held_issue(7, body, labels=("owner-action",))), [])
+        for assoc in ("COLLABORATOR", "CONTRIBUTOR", "NONE"):
+            with self.subTest(assoc):
+                self.assertEqual(inbox.items_from_node(PROJECT, SLUG, held_issue(7, body, assoc=assoc)), [])
+        for assoc in ("OWNER", "MEMBER"):
+            with self.subTest(assoc):
+                items = inbox.items_from_node(PROJECT, SLUG, held_issue(7, body, assoc=assoc))
+                self.assertEqual(len(items), 1)
+
+    def test_two_open_human_criteria_yield_two_items(self):
+        node = held_issue(7, ac_body("- [ ] [human] One", "- [x] [code] A", "- [ ] [human] Two"))
+        items = inbox.items_from_node(PROJECT, SLUG, node)
+        self.assertEqual([i["key"] for i in items], [f"{SLUG}#7/ac1", f"{SLUG}#7/ac3"])
+        self.assertEqual([i["question"] for i in items], ["One", "Two"])
+
+    def test_an_open_note_criterion_blocks_nothing(self):
+        node = held_issue(7, ac_body("- [ ] [note] Cost read after deploy", HUMAN))
+        items = inbox.items_from_node(PROJECT, SLUG, node)
+        self.assertEqual([i["criterion"] for i in items], [2])
+
+    def test_criteria_are_read_only_from_the_acceptance_section_outside_fences(self):
+        body = ("## What to build\n\n- [ ] [human] Not a criterion\n\n### Acceptance criteria\n\n```\n"
+                "- [ ] [code] fenced\n```\n- [ ] [human] Real one\n\n## Blocked by\n\n- [ ] [code] after the section\n")
+        line = body.split("\n").index("- [ ] [human] Real one")
+        self.assertEqual(inbox.acceptance_criteria(body), [inbox.Criterion(1, False, "human", "Real one", line)])
+        items = inbox.items_from_node(PROJECT, SLUG, held_issue(7, body))
+        self.assertEqual([i["key"] for i in items], [f"{SLUG}#7/ac1"])
+        ticked = inbox.acceptance_criteria("## Acceptance criteria\n\n- [X] [human] Y\n")
+        self.assertTrue(ticked[0].ticked)
+        crlf = inbox.acceptance_criteria("## Acceptance criteria\r\n\r\n- [ ] [human] Y z\r\n- [x] [code] W\r\n")
+        self.assertEqual([c.text for c in crlf], ["Y z", "W"])
+        self.assertEqual(inbox.acceptance_criteria("## Problem\n\n- [ ] [human] Y\n"), [])
+
+    def test_the_version_names_the_criterion_it_was_read_from(self):
+        def version(*lines):
+            return inbox.criterion_version(7, inbox.acceptance_criteria(ac_body(*lines))[2])
+
+        base = version("- [ ] [code] A", "- [ ] [code] B", "- [ ] [human] C")
+        self.assertNotEqual(base, version("- [ ] [code] A", "- [ ] [code] B", "- [ ] [human] D"))
+        self.assertEqual(base, version("- [x] [code] A", "- [ ] [code] B", "- [ ] [human] C"))
+
+    def test_a_fence_closes_only_on_its_own_delimiter(self):
+        mixed = "## Acceptance criteria\n\n```text\n~~~\n- [ ] [human] Example only\n```\n- [ ] [code] Still unfinished\n"
+        want = [inbox.Criterion(1, False, "code", "Still unfinished", mixed.split("\n").index("- [ ] [code] Still unfinished"))]
+        self.assertEqual(inbox.acceptance_criteria(mixed), want)
+        self.assertEqual(inbox.items_from_node(PROJECT, SLUG, held_issue(7, mixed)), [])
+        longer = "## Acceptance criteria\n\n````\n```\n- [ ] [human] Inside\n````\n- [ ] [human] Real\n"
+        want = [inbox.Criterion(1, False, "human", "Real", longer.split("\n").index("- [ ] [human] Real"))]
+        self.assertEqual(inbox.acceptance_criteria(longer), want)
+        items = inbox.items_from_node(PROJECT, SLUG, held_issue(7, longer))
+        self.assertEqual([(i["key"], i["question"]) for i in items], [(f"{SLUG}#7/ac1", "Real")])
+        tilde = "## Acceptance criteria\n\n~~~\n- [ ] [human] In\n~~~~\n- [ ] [human] After\n"
+        self.assertEqual([c.text for c in inbox.acceptance_criteria(tilde)], ["After"])
+        texted = "## Acceptance criteria\n\n```\n``` x\n- [ ] [human] Still inside\n```\n- [ ] [human] Out\n"
+        self.assertEqual([c.text for c in inbox.acceptance_criteria(texted)], ["Out"])
+
+
 class ReadTest(unittest.TestCase):
     def endless(self, calls):
         def call(argv):
@@ -569,7 +680,7 @@ class ReadTest(unittest.TestCase):
             read(page([], more=True, cursor="c1", count=0), page([], more=True, cursor="c1", count=0))
         self.assertEqual(raised.exception.code, "payload_invalid")
 
-    def test_the_search_filters_by_both_labels(self):
+    def test_the_search_filters_by_its_three_labels(self):
         calls = []
         answers = [page([], more=True, cursor="c1", count=0), page([], count=0)]
 
@@ -579,9 +690,26 @@ class ReadTest(unittest.TestCase):
 
         inbox.read_items(PROJECT, SLUG, call=call)
         self.assertEqual([c[:2] for c in calls], [["api", "graphql"]] * 2)
-        self.assertIn("search=repo:octo/widgets is:open label:owner-action,owner-answered", calls[0])
+        self.assertIn("search=repo:octo/widgets is:open label:owner-action,owner-answered,needs-verification",
+                      calls[0])
         self.assertFalse([a for a in calls[0] if a.startswith("after=")])
         self.assertIn("after=c1", calls[1])
+        fragment = inbox.QUERY.split("... on Issue {")[1].split("... on PullRequest")[0]
+        for member in ("authorAssociation", "body", "labels(first: 100) { nodes { name } }"):
+            with self.subTest(member):
+                self.assertIn(member, fragment)
+
+    def test_the_held_label_is_the_runners(self):
+        from agent_tools.verification import verify_run
+        self.assertEqual(inbox.HELD_LABEL, verify_run.NEEDS)
+
+    def test_a_malformed_label_connection_fails_the_read(self):
+        for labels in ({"nodes": "x"}, {"nodes": [{"name": 3}]}):
+            with self.subTest(labels=labels):
+                node = {**held_issue(7, ac_body(HUMAN)), "labels": labels}
+                with self.assertRaises(ForgeError) as raised:
+                    read(page([node]))
+                self.assertEqual(raised.exception.code, "payload_invalid")
 
     def test_a_cancelled_read_stops_before_the_next_call(self):
         calls = []
