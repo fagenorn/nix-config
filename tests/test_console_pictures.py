@@ -35,11 +35,7 @@ from .test_console_sprint_command import run_sprint
 from .test_console_writes import Case
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
-PIXEL = bytes.fromhex(
-    "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000d4944415478da63f8cfc0f01f00050001ff56c72f0d0000000049454e44ae426082")
-WIDE = bytes.fromhex(
-    "89504e470d0a1a0a0000000d4948445200000002000000010806000000f4227f8a0000000e4944415478da636060f8ff1f84010dfb03fd9a369bf10000000049454e44ae426082")
-JPEG = b"\xff\xd8\xff\xe0\x00\x10JFIF\x00\x01\x01\x00\x00\x01\x00\x01\x00\x00" + b"\x00" * 64 + b"\xff\xd9"
+from .console_test_support import JPEG, PIXEL, WIDE  # noqa: F401 -- fixtures shared with the inbox suite (#1112)
 
 
 def chunk(kind: bytes, data: bytes) -> bytes:
@@ -182,6 +178,12 @@ class PictureStoreTest(unittest.TestCase):
             Event(3, "t", "other", None, {"pictures": a}),
         ]
         self.assertEqual(pictures.referenced(events), frozenset({a}))
+
+    def test_an_inbox_rows_picture_entries_reference_their_ids(self):
+        d = "d" * 64
+        event = Event(4, "t", "inbox.changed", "o/p", {"pictures": [
+            {"id": d, "line": "x.png", "pair": None}, {"id": "bad"}, {"line": "y"}]})
+        self.assertEqual(pictures.referenced([event]), frozenset({d}))
 
     def test_the_stored_kind_is_the_event_logs_and_is_not_kept(self):
         a = "a" * 64
