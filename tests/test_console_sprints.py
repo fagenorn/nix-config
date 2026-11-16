@@ -1640,10 +1640,13 @@ class RoundParseTest(unittest.TestCase):
             return json.dumps({"sprint_id": SID, "secret": "s3cret", "round": ROUND,
                                **changes}).encode()
 
-        self.assertEqual(sprints.parse_ask_request(ask()), (SID, "s3cret", ROUND))
+        self.assertEqual(sprints.parse_ask_request(ask()), (SID, "s3cret", ROUND, False))
+        self.assertEqual(sprints.parse_ask_request(ask(dry_run=True)),
+                         (SID, "s3cret", ROUND, True))
         withheld = json.dumps({"sprint_id": SID, "secret": "s3cret"}).encode()
         for body in (withheld, ask(round=[]), ask(round={**ROUND, "why": 1}), ask(sprint_id="ABC"),
                      ask(secret=5), ask(extra=1),
+                     ask(dry_run=False), ask(dry_run=1), ask(dry_run="true"), ask(dry_run=None),
                      b'{"sprint_id": "' + SID.encode() + b'", "secret": "a", "secret": "b", '
                      b'"round": {}}'):
             with self.subTest(body=body[:50]), self.assertRaises(ValueError):

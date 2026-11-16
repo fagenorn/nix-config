@@ -305,7 +305,8 @@ text stripped, a question carrying `"context"` only when the round gave one and 
 `round_pictures(checked)` is the unique picture ids of a checked round, in question then picture
 order.
 `parse_ask_request(body)` reads the manager's `{"sprint_id", "secret", "round"}` (exactly those
-keys) and returns `(sprint_id, secret, round)`, `round` an object whose keys are a subset of
+keys, plus an optional `"dry_run"` that must be `true`) and returns `(sprint_id, secret, round,
+dry_run)`, `round` an object whose keys are a subset of
 `questions, blocker`; `parse_round_answer(body)` reads the page's body, exactly one of `choice` and
 `text`, and returns `(project_id, sprint_id, round_id, index, choice, text)` with the absent one
 None. Both are `ValueError` on anything else, a repeated key, NaN or nesting too deep.
@@ -317,7 +318,9 @@ index)`. A `questions.asked` row changes a sprint only when it is open, its brie
 checked question is then added with `round_id` the row's `seq`, its `index` and `at`. Each checked
 question's pictures become `Question.pictures`, `QuestionPicture`s in order. A `picture.stored`
 row adds its `picture` to `SprintState.pictures` when its `sprint_id` is folded and `picture` fully
-matches `PICTURE_ID`; any other such row changes nothing. The fold does not enforce one open round;
+matches `PICTURE_ID`; any other such row changes nothing. A `questions.asked` row of a folded sprint
+adds the members of its top-level `pictures` list that fully match `PICTURE_ID`, so a sprint still
+owns a picture its kept round names after retention has removed the `picture.stored` row. The fold does not enforce one open round;
 the service does. A `question.answered` row applies only when its `round`
 and `index` (ints, not bools) name an unanswered question of the sprint, its `answer` is a string and
 its `chosen` is null or one of the question's options: the question then keeps `answer`, `chosen`,
@@ -816,15 +819,20 @@ def parse_report_request(body: bytes) -> tuple[str, str, dict]:
 ROUND_KEYS = ("questions", "blocker")
 
 
-def parse_ask_request(body: bytes) -> tuple[str, str, dict]:
-    value = _object(body, {"sprint_id", "secret", "round"}, project=False)
+def parse_ask_request(body: bytes) -> tuple[str, str, dict, bool]:
+    value = _decoded(body)
+    dry_run = isinstance(value, dict) and "dry_run" in value
+    if dry_run and value["dry_run"] is not True:
+        raise ValueError("dry_run must be true when given")
+    value = _object(body, {"sprint_id", "secret", "round"} | ({"dry_run"} if dry_run else set()),
+                    project=False)
     sprint_id = _sprint_id(value["sprint_id"])
     if not isinstance(value["secret"], str):
         raise ValueError("secret must be a string")
     round_ = value["round"]
     if not isinstance(round_, dict) or not set(round_) <= set(ROUND_KEYS):
         raise ValueError(f"round must be an object of {', '.join(ROUND_KEYS)}")
-    return sprint_id, value["secret"], round_
+    return sprint_id, value["secret"], round_, dry_run
 
 
 def _count(value: object, least: int) -> int:
@@ -1497,12 +1505,22 @@ def sprint_states(events: Iterable[Event],
             folded[sprint_id] = _folded_message(folded[sprint_id], event)
         elif event.kind in (QUESTIONS_ASKED, QUESTION_ANSWERED) and sprint_id in folded:
             folded[sprint_id] = _folded_question(folded[sprint_id], event)
+            if event.kind == QUESTIONS_ASKED:
+                folded[sprint_id] = _folded_round_pictures(folded[sprint_id], event)
         elif event.kind == PICTURE_STORED and sprint_id in folded:
             picture = event.payload.get("picture")
             if isinstance(picture, str) and PICTURE_ID.fullmatch(picture):
                 folded[sprint_id] = replace(folded[sprint_id],
                                             pictures=folded[sprint_id].pictures | {picture})
     return folded
+
+
+def _folded_round_pictures(state: SprintState, event: Event) -> SprintState:
+    """A kept `questions.asked` row's pictures stay the sprint's own after retention drops theirs."""
+    listed = event.payload.get("pictures")
+    named = {p for p in listed if isinstance(p, str) and PICTURE_ID.fullmatch(p)} \
+        if isinstance(listed, list) else set()
+    return replace(state, pictures=state.pictures | named) if named else state
 
 
 def ended_at(state: SprintState) -> str | None:

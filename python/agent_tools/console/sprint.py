@@ -52,7 +52,9 @@ sent as given. Before it reads or sends anything it checks the round's pictures 
 own rules (`agent_tools.console.sprints.checked_round`): a refusal is stderr `sprint: refused
 before sending: <reason>` and exit 1. It then reads every file before it uploads any: a file that
 cannot be read, or one over 2 MiB, is exit 2 and nothing is uploaded or sent. Whether a picture
-belongs to the sprint, and the sprint's state, stay the console's to decide.
+belongs to the sprint, and the sprint's state, stay the console's to decide: before it uploads
+anything it asks the console to check the round with its `file` members left out (`"dry_run":
+true`, which writes nothing), and a refusal there is exit 1 with nothing uploaded.
 
 On success it prints `sprint: round <id> sent, <n> questions` (`1 question` when n is 1) and exit
 0; a 200 answer without integer `round` and `questions` is `sprint: refused 200: unreadable
@@ -343,6 +345,15 @@ def with_ids(round_: dict, ids: dict[int, str]) -> dict:
         for question in round_["questions"]]}
 
 
+def without_files(round_: dict) -> dict:
+    """A copy of `round_` keeping only the picture members that already name a picture id."""
+    return {**round_, "questions": [
+        {**question, "pictures": [m for m in question["pictures"]
+                                  if not (isinstance(m, dict) and isinstance(m.get("file"), str))]}
+        if isinstance(question, dict) and isinstance(question.get("pictures"), list) else question
+        for question in round_["questions"]]}
+
+
 def send_round(args: argparse.Namespace, sprint: str) -> str:
     secret = resolve_secret(args)
     round_ = read_object(args.round_file, "round")
@@ -354,6 +365,11 @@ def send_round(args: argparse.Namespace, sprint: str) -> str:
             raise Refused(f"sprint: refused before sending: {error}") from error
         check_header_secret(secret)
         files = [read_picture(Path(m["file"])) for m in members]
+        # The console judges the named pictures and the sprint's state now, so a refusal leaves
+        # nothing uploaded; the uploads are the first write.
+        ask(args.port, "POST", service.ASK_PATH, json.dumps(
+            {"sprint_id": sprint, "secret": secret, "round": without_files(round_),
+             "dry_run": True}).encode())
         ids = {id(m): upload(args.port, sprint, secret, data) for m, data in zip(members, files)}
         round_ = with_ids(round_, ids)
     body = json.dumps({"sprint_id": sprint, "secret": secret, "round": round_}).encode()

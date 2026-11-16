@@ -534,12 +534,17 @@ logged), then for each question `n` and picture `m` (from 1) `Refused(PICTURE_FO
 picture is not among the sprint's own stored pictures but another sprint has stored it, else
 `Refused(PICTURE_UNKNOWN)` when no sprint has, then `Refused(PICTURE_UNKNOWN)` when
 `pictures.present` finds no regular file for it (the check writes nothing and runs under the lock
-every sweep holds), then
+every sweep holds; a sprint's own pictures also include those a kept `questions.asked` row names, so
+retention does not end the ownership), then
 `Refused(ROUND_OPEN)` when a question is open and the round is not a blocker; it appends exactly one
 `questions.asked` row `{"sprint_id", "goal", "blocker", "questions"}` (the checked round) plus a
 top-level `"pictures"`, the round's unique picture ids, only when the round names any (the sweep
 keeps those pictures), folds,
 publishes and returns the row's `seq` (the round's id) and the question count; it nudges nobody.
+A body that also carries `"dry_run": true` runs every one of those refusals through `check_round`
+(the same `_checked_ask` under the same lock) and appends and publishes nothing; the 200 answer is
+`{"questions":<n>}` without a round (`sprint ask` sends its round without its `file` members first,
+so a refusal comes before any upload).
 `answer_question(project_id, sprint_id, round_id, index, choice, text)`, under the lock, raises
 `Refused(NOT_OPEN)` unless the sprint is open and of that project, `ENDED` unless
 `sprints.takes_questions`, `UNKNOWN_QUESTION` unless
@@ -1960,11 +1965,14 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return
         self.close_connection = True
         try:
-            sprint_id, secret, round_ = sprints.parse_ask_request(self.rfile.read(length))
+            sprint_id, secret, round_, dry_run = sprints.parse_ask_request(self.rfile.read(length))
         except ValueError:
             return self._refuse(400, "bad round")
         try:
-            round_id, count = self.server.console.ask_questions(sprint_id, secret, round_)
+            if dry_run:
+                count = self.server.console.check_round(sprint_id, secret, round_)
+            else:
+                round_id, count = self.server.console.ask_questions(sprint_id, secret, round_)
         except sprints.SecretRefused:
             print(f"console: ask_refused {sprint_id} {sprints.SECRET_REFUSED}", file=sys.stderr)
             return self._refuse(403, sprints.SECRET_REFUSED)
@@ -1974,9 +1982,9 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         except Exception as error:
             print(f"console: ask_failed {type(error).__name__}: {error}", file=sys.stderr)
             return self._refuse(500, "ask failed")
+        answer = {"questions": count} if dry_run else {"questions": count, "round": round_id}
         self._send(200, "application/json", json.dumps(
-            {"questions": count, "round": round_id}, sort_keys=True,
-            separators=(",", ":")).encode())
+            answer, sort_keys=True, separators=(",", ":")).encode())
 
     def _picture_request(self):
         """The manager's route: one PNG picture sent with the sprint's secret in headers."""
@@ -5007,20 +5015,31 @@ class ConsoleService:
         if not pictures.present(self.pictures_dir, picture_id):
             raise sprints.Refused(sprints.PICTURE_UNKNOWN.format(n=n, m=m))
 
+    def _checked_ask(self, sprint_id: str, secret: str,
+                     round_: dict) -> tuple[sprints.SprintState, dict]:
+        """Every refusal of a round, in order, with nothing written (the caller holds the lock)."""
+        sprint = self._manager_sprint(sprint_id, secret)
+        if sprint.state != sprints.STARTING:
+            raise sprints.Refused(sprints.NOT_STARTED)
+        if not sprints.takes_questions(sprint):
+            raise sprints.Refused(sprints.ENDED)
+        checked = sprints.checked_round(round_)
+        for n, question in enumerate(checked["questions"], 1):
+            for m, member in enumerate(question.get("pictures", ()), 1):
+                self._own_picture(sprint, member["picture"], n, m)
+        if sprints.round_open(sprint) and not checked["blocker"]:
+            raise sprints.Refused(sprints.ROUND_OPEN)
+        return sprint, checked
+
+    def check_round(self, sprint_id: str, secret: str, round_: dict) -> int:
+        """The question count of a round `ask_questions` would take now; nothing is written."""
+        with self._ingest:
+            return len(self._checked_ask(sprint_id, secret, round_)[1]["questions"])
+
     def ask_questions(self, sprint_id: str, secret: str, round_: dict) -> tuple[int, int]:
         """Append one `questions.asked` event for an approved sprint; the round's id and size."""
         with self._ingest:
-            sprint = self._manager_sprint(sprint_id, secret)
-            if sprint.state != sprints.STARTING:
-                raise sprints.Refused(sprints.NOT_STARTED)
-            if not sprints.takes_questions(sprint):
-                raise sprints.Refused(sprints.ENDED)
-            checked = sprints.checked_round(round_)
-            for n, question in enumerate(checked["questions"], 1):
-                for m, member in enumerate(question.get("pictures", ()), 1):
-                    self._own_picture(sprint, member["picture"], n, m)
-            if sprints.round_open(sprint) and not checked["blocker"]:
-                raise sprints.Refused(sprints.ROUND_OPEN)
+            sprint, checked = self._checked_ask(sprint_id, secret, round_)
             payload = {"sprint_id": sprint_id, "goal": sprint.goal, "blocker": checked["blocker"],
                        "questions": checked["questions"]}
             if listed := sprints.round_pictures(checked):

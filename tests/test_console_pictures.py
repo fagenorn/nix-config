@@ -451,6 +451,24 @@ class PictureRoundTest(PictureCase):
             [{"id": a, "line": "the card before", "pair": "before"},
              {"id": b, "line": "the card after", "pair": "after"}])
 
+    def test_a_dry_run_checks_a_round_and_writes_nothing(self):
+        svc = self.open()
+        sid = self.approved(svc)
+        a = self.stored(svc, sid, PIXEL)
+        rows = support.log_rows(self.store)
+
+        def dry(round_, **changes):
+            body = json.dumps({"sprint_id": sid, "secret": self.secret(sid), "round": round_,
+                               "dry_run": True, **changes}).encode()
+            return support.post_page(svc.address, "/api/ask", JSON, body)
+        status, _, answer = dry(self.round_with({"picture": a, "line": "the header"}))
+        self.assertEqual((status, json.loads(answer)), (200, {"questions": 1}))
+        status, _, answer = dry(self.round_with({"picture": "f" * 64, "line": "the header"}))
+        self.assertEqual((status, answer.strip()),
+                         (409, sprints.PICTURE_UNKNOWN.format(n=1, m=1).encode()))
+        self.assertEqual(dry(self.round_with(), dry_run=False)[0], 400)
+        self.assertEqual(support.log_rows(self.store), rows)
+
     def test_each_bad_picture_list_is_refused_with_its_reason_and_appends_nothing(self):
         svc = self.open()
         sid = self.approved(svc)
@@ -564,6 +582,31 @@ class PictureRetentionTest(PictureCase):
         svc.retain()
         self.assertEqual(self.rows("test.reference"), [])
         self.assertEqual(self.entries(), [])
+
+    def test_a_round_picture_stays_the_sprints_after_retention_and_a_restart(self):
+        now = ["2026-01-01T00:00:00.000000+00:00"]
+        support.write_registry(self.registry, support.entries(2))
+        svc = self.start(log_clock=lambda: now[0])
+        sid = self.approved(svc)
+        picture_id = self.stored(svc, sid, PIXEL)
+        member = {"picture": picture_id, "line": "the header"}
+        round_ = {"questions": [{**PictureRoundTest.Q, "pictures": [member]}]}
+
+        def ask(blocker):
+            body = json.dumps({"sprint_id": sid, "secret": self.secret(sid),
+                               "round": {**round_, "blocker": blocker}}).encode()
+            return support.post_page(svc.address, "/api/ask", JSON, body)
+        self.assertEqual(ask(False)[0], 200)
+        now[0] = "2026-04-02T00:00:00.000000+00:00"
+        svc.retain()
+        self.assertEqual(self.rows(PICTURE_STORED), [])
+        self.assertEqual(len(self.rows("questions.asked")), 1)
+        svc.close()
+        svc = self.start(log_clock=lambda: now[0])
+        self.assertEqual(self.entries(), [picture_id])
+        status, _, answer = ask(True)
+        self.assertEqual(status, 200, answer)
+        self.assertEqual(len(self.rows("questions.asked")), 2)
 
     def test_the_start_pass_sweeps_too(self):
         support.write_registry(self.registry, support.entries(2))
@@ -903,6 +946,51 @@ class PictureAskTest(PictureCase):
         self.assertEqual((got.returncode, got.stdout, got.stderr),
                          (1, "", "sprint: refused 400: " + pictures.SIGNATURE_WRONG + "\n"))
         self.assertEqual(self.rows("questions.asked"), [])
+
+    def test_a_mixed_round_with_an_unknown_picture_uploads_nothing(self):
+        svc = self.open()
+        sid = self.approved(svc)
+        good = self.write("good.png", PIXEL)
+        other = self.approved(svc, "owner/p01")
+        foreign = self.stored(svc, other, WIDE)
+        for name, member in (("unknown", "f" * 64), ("another sprint's", foreign)):
+            round_ = {"questions": [{**self.Q, "pictures": [
+                {"file": str(good), "line": "the file"},
+                {"picture": member, "line": "the named one"}]}]}
+            with self.subTest(name):
+                before = self.entries()
+                rows = len(self.rows("picture.stored"))
+                got = self.assert_unchanged(svc, lambda: self.ask(svc, sid, round_))
+                self.assertEqual((got.returncode, got.stdout), (1, ""))
+                self.assertTrue(got.stderr.startswith("sprint: refused 409: "), got.stderr)
+                self.assertEqual(len(self.rows("picture.stored")), rows)
+                self.assertEqual(self.entries(), before)
+                self.assertEqual(self.rows("questions.asked"), [])
+
+    def test_a_mixed_round_with_an_open_round_uploads_nothing(self):
+        svc = self.open()
+        sid = self.approved(svc)
+        a = self.stored(svc, sid, PIXEL)
+        self.assertEqual(self.ask(svc, sid, {"questions": [self.Q]}).returncode, 0)
+        good = self.write("good.png", WIDE)
+        round_ = {"questions": [{**self.Q, "pictures": [
+            {"file": str(good), "line": "the file"}, {"picture": a, "line": "the named one"}]}]}
+        got = self.assert_unchanged(svc, lambda: self.ask(svc, sid, round_))
+        self.assertEqual((got.returncode, got.stdout, got.stderr),
+                         (1, "", f"sprint: refused 409: {sprints.ROUND_OPEN}\n"))
+        self.assertEqual(len(self.rows("picture.stored")), 1)
+
+    def test_a_mixed_round_with_a_known_picture_is_sent_whole(self):
+        svc = self.open()
+        sid = self.approved(svc)
+        a = self.stored(svc, sid, PIXEL)
+        good = self.write("good.png", WIDE)
+        b = hashlib.sha256(WIDE).hexdigest()
+        got = self.ask(svc, sid, {"questions": [{**self.Q, "pictures": [
+            {"file": str(good), "line": "the file"}, {"picture": a, "line": "the named one"}]}]})
+        self.assertEqual((got.returncode, got.stderr), (0, ""))
+        ((payload, _),) = self.rows("questions.asked")
+        self.assertEqual(payload["pictures"], [b, a])
 
     def test_ask_passes_an_already_sent_id_through(self):
         svc = self.open()
