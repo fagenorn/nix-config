@@ -796,10 +796,14 @@ Tracker (#859): when the service is given a `tracker`, a thread, `TRACKER_THREAD
 `start()`, calls `poll_tracker()` at once and then every `tracker_seconds` (`TRACKER_SECONDS`,
 two minutes). One poll reads the tracker, through `tracker(project_id, slug, cancelled=...)`, for
 each registered project that is active (`inbox.is_active`: a log event or a git write within a
-day) and has a GitHub checkout (`slug_of`), one project after another and never inside the ingest
+day, or a waiting line still shown, which only a read can replace by its card) and has a GitHub
+checkout (`slug_of`), one project after another and never inside the ingest
 lock; a project costs at most `inbox.MAX_CALLS` calls. The stop flag is checked between projects
 and, through `cancelled`, before every page, so `close()` waits for at most the one `gh` call
 already running and a read cancelled or finished after the stop appends and publishes nothing.
+The read also lists held issues (#1129): the due evaluation's forge reads are outside
+`inbox.MAX_CALLS`, and `cancelled` is asked before each of them too, so `close()` still waits for at
+most the one `gh` call already running.
 What a read finds is appended as the four inbox events (`inbox.seen`, `inbox.changed`,
 `inbox.gone`, `inbox.health`; see `view.py`) and the view is published. A failed read is one
 stderr line `console: tracker_failed <project_id> <Type>: <message>`; the project's items stay,
@@ -1291,7 +1295,7 @@ from agent_tools.console.event_log import (
     EventLog, utc_now)
 from agent_tools.console.view import (
     INBOX_CHANGED, ReadState, derive_view, encode_view, health_change, inbox_changes, inbox_records,
-    project_for, project_states, read_states, registry_changes, sprint_waiting)
+    is_waiting, project_for, project_states, read_states, registry_changes, sprint_waiting)
 from agent_tools.project_contract import agent_platform
 from agent_tools.system.forge_api import ForgeError
 from agent_tools.verification import verify_answer
@@ -4418,9 +4422,11 @@ class ConsoleService:
         return self._manager_session(sprint) is not None
 
     def _waiting(self, sprint: sprints.SprintState) -> int:
-        """Under the ingest lock: how many open records of the sprint's project wait on the owner."""
+        """Under the ingest lock: how many open records of the sprint's project wait on the owner. A record
+        that is a not-due wait is a line, never the owner's item (`view.is_waiting`)."""
         records = [r for r in self._inbox.values()
-                   if r.item.get("project_id") == sprint.project_id and not r.item["answered"]]
+                   if r.item.get("project_id") == sprint.project_id and not r.item["answered"]
+                   and not is_waiting(r.item)]
         return sprint_waiting(sprint, records)
 
     def _quota_wait(self, sprint: sprints.SprintState) -> manager.Wait | None:
@@ -6167,10 +6173,12 @@ class ConsoleService:
         if self._tracker is None:
             return
         now = self._clock()
+        with self._ingest:
+            waiting = {project_id for (project_id, _), record in self._inbox.items() if is_waiting(record.item)}
         for project_id, state in sorted(dict(self._states).items()):
             if self._stop.is_set():
                 return
-            if not inbox.is_active(state.last_at, self._activity(state.root), now):
+            if project_id not in waiting and not inbox.is_active(state.last_at, self._activity(state.root), now):
                 continue
             slug = self._slug_of(state.root)
             if slug is None:

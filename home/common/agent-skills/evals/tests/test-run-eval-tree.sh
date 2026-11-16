@@ -354,7 +354,7 @@ smoke_tmp_holds_only_its_sandbox() {
     esac
   done
 }
-for id in 1 2 3 4; do
+for id in 1 2 3 4 5; do
   scenario "setup-smoke-$id"
   mkdir -p "$S/skills/setup-smoke/evals"
   cp "$EVALS_SRC/tests/fixtures/setup-smoke-evals.json" "$S/skills/setup-smoke/evals/evals.json"
@@ -367,15 +367,18 @@ for id in 1 2 3 4; do
   check "setup smoke $id: deployed mode makes no temp root" smoke_tmp_holds_only_its_sandbox "$id"
   check "setup smoke $id: deployed mode passes no --setting-sources" test -z "$(grep -- '--setting-sources' "$STATE/record")"
 done
-# The tracked-issue kind puts the sandbox's read-only gh shim first on the claude run's PATH
-# (setup smoke 4 ran above); the other kinds leave PATH alone.
+# The tracked-issue and marked-pr kinds put the sandbox's read-only gh shim first on the claude
+# run's PATH (setup smokes 4 and 5 ran above); the other kinds leave PATH alone.
 gh_is_the_sandbox_shim() {
-  case "$(sed -n 's/^gh=//p' "$SCRATCH/setup-smoke-4/state/record" | head -n 1)" in
-    "$SCRATCH"/setup-smoke-4/tmp/eval-setup-smoke-4.*/bin/gh) true ;;
-    *) false ;;
-  esac
+  local id
+  for id in 4 5; do
+    case "$(sed -n 's/^gh=//p' "$SCRATCH/setup-smoke-$id/state/record" | head -n 1)" in
+      "$SCRATCH"/setup-smoke-$id/tmp/eval-setup-smoke-$id.*/bin/gh) ;;
+      *) return 1 ;;
+    esac
+  done
 }
-check "setup smoke 4: claude resolves gh to the sandbox's bin/gh" gh_is_the_sandbox_shim
+check "setup smoke 4-5: claude resolves gh to the sandbox's bin/gh" gh_is_the_sandbox_shim
 other_kinds_keep_gh_off_the_path() {
   local id value
   for id in 1 2 3; do

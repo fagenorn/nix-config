@@ -53,6 +53,19 @@
         {"name": "the resolver reports the github tracker", "shell": "resolve-project resolve --repo-root \"$REPO\" | jq -e '.bindings.tracker.kind == \"github\" and .capabilities.tracker.state == \"available\"' >/dev/null"},
         {"name": "the tracker commit reached origin", "shell": "[ \"$(git -C \"$ORIGIN\" rev-parse main)\" = \"$(git -C \"$REPO\" rev-parse main)\" ] && [ \"$(git -C \"$REPO\" log -1 --format=%s)\" = \"chore: track issues on github\" ] && [ -z \"$(git -C \"$REPO\" status --porcelain)\" ]"}
       ]
+    },
+    {
+      "id": 5, "name": "marked-pr-shape", "mode": "pipeline",
+      "setup": { "kind": "marked-pr" },
+      "prompt": "setup smoke", "expected_output": "setup state only",
+      "asserts": [
+        {"name": "PRE_WT is the issue-3 worktree and PRE_WT_HEAD its HEAD", "shell": "[ \"$PRE_WT\" = \"$WORK/issue-3-rename-flag\" ] && [ \"$PRE_WT_HEAD\" = \"$(git -C \"$PRE_WT\" rev-parse HEAD)\" ]"},
+        {"name": "origin carries the branch at PRE_WT_HEAD", "shell": "[ \"$(git -C \"$ORIGIN\" rev-parse refs/heads/issue-3-rename-flag)\" = \"$PRE_WT_HEAD\" ]"},
+        {"name": "shim serves pull request 7 at the branch tip", "shell": "\"$WORK/bin/gh\" pr view 7 --json headRefOid | grep -qF \"$PRE_WT_HEAD\""},
+        {"name": "shim serves the marked issue", "shell": "\"$WORK/bin/gh\" api repos/fixture/tinytask/issues/3 | grep -qF 'before merge:'"},
+        {"name": "the forge-claim stand-in is executable", "shell": "[ -x \"$WORK/bin/forge-claim\" ]"},
+        {"name": "local and origin main equal BASE_MAIN", "shell": "[ \"$(git -C \"$REPO\" rev-parse main)\" = \"$BASE_MAIN\" ] && [ \"$(git -C \"$ORIGIN\" rev-parse main)\" = \"$BASE_MAIN\" ]"}
+      ]
     }
   ]
 }

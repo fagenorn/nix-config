@@ -132,6 +132,25 @@ class DigestTest(unittest.TestCase):
                          ["owner/p00 needs you: Which database?",
                           "owner/p00 was answered: Which database?"])
 
+    def test_a_waiting_item_seen_says_nothing(self):
+        self.assertEqual(moments([Event(1, at(5), "inbox.seen", "owner/p00", self.waiting())], {}, {}), [])
+
+    def test_a_waiting_item_that_turns_due_says_it_needs_you(self):
+        waiting = self.waiting()
+        due = {key: value for key, value in waiting.items() if key != "wait"}
+        events = [Event(1, at(5), "inbox.seen", "owner/p00", waiting),
+                  Event(2, at(6), "inbox.changed", "owner/p00", due)]
+        found = moments(events, {}, {})
+        self.assertEqual([(m.kind, m.sentence) for m in found],
+                         [("inbox_appeared", "owner/p00 needs you: Read the hourly rows.")])
+
+    @staticmethod
+    def waiting():
+        return {"key": "k", "project_id": "owner/p00", "issue": 7, "reason": "verify-wait",
+                "question": "Read the hourly rows.", "questions": [], "answers": [], "answered": False,
+                "wait": {"reason": "not_before", "until": "2026-11-18T10:00:00+00:00",
+                         "what": "Read the hourly rows."}}
+
     def test_a_session_moment_names_no_session_and_no_path(self):
         def seen(seq, project, sid, repo, name):
             return Event(seq, at(seq), "session.seen", project,
@@ -477,6 +496,32 @@ class DigestTest(unittest.TestCase):
         for m in found:
             self.assertNotIn("on track", m.sentence)
             self.assertNotIn(" is now ", m.sentence)
+
+    def test_a_not_due_check_is_not_an_owner_item_in_a_sprint_sentence(self):
+        sid, goal = "a" * 16, "make the importer resumable"
+        row = {"sprint_id": sid, "goal": goal}
+        report = {"status": "one slice is building", "phase": "running",
+                  "milestone": "Importer resumes",
+                  "tracker_url": "https://github.com/owner/p00/milestone/3",
+                  "issues": [{"issue": 12, "stage": "building"}], "inbox": [],
+                  "next": "start the resume slice"}
+        rows = [
+            Event(1, at(1), GOAL_STATED, "owner/p00", row),
+            Event(2, at(2), BRIEF_SENT, "owner/p00", {
+                **row, "version": 1,
+                "brief": {"done": "d", "excluded": ["x"], "slices": ["a"], "risks": ["r"],
+                          "asks": ["q"]}}),
+            Event(3, at(3), BRIEF_APPROVED, "owner/p00", {**row, "version": 1}),
+            Event(4, at(4), SPRINT_REPORTED, "owner/p00", {
+                "sprint_id": sid, "goal": goal, "report": report})]
+        not_due = InboxRecord(
+            {"project_id": "owner/p00", "issue": 12, "key": "k", "answered": False,
+             "wait": {"reason": "not_before", "until": "2026-11-18T10:00:00+00:00",
+                      "what": "Read the rows."}},
+            at(0), at(0))
+        found = moments(rows, {}, {("owner/p00", "k"): not_due})
+        for m in found:
+            self.assertNotIn("waiting on you", m.sentence)
 
 
     def test_the_digest_never_names_a_sprint_quiet_or_nothing_running_while_it_moved(self):
