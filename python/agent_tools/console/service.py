@@ -39,6 +39,7 @@ stream `Content-Length`):
     POST /api/inbox 200 application/json, a manager reads a sprint's unread messages (below)
     POST /api/message-reply 200 application/json, a manager answers one message (below)
     POST /api/ask   200 application/json, a manager sends a round of questions (below)
+    POST /api/withdraw-question 200 application/json, a manager takes back one open question (below)
     POST /api/picture 200 application/json, a manager sends one PNG picture (below)
     POST /api/round-answer 204, a JSON body, the page answers one question (below)
     POST /api/recap 200 application/json, a manager reads what it needs to pick a sprint up (below)
@@ -50,7 +51,7 @@ stream `Content-Length`):
     other methods   405 with `Allow: GET` (`Allow: POST` on `/api/hooks`, `/api/readings`,
                     `/api/looked`, `/api/answer`, `/api/check-answer`, `/api/goal`, `/api/withdraw`,
                     `/api/approve`, `/api/reply`, `/api/retry-manager`, `/api/message`, `/api/stop`, `/api/exclusion`, `/api/pin`, `/api/brief`, `/api/report`,
-                    `/api/close`, `/api/inbox`, `/api/message-reply`, `/api/recap`, `/api/ask`, `/api/picture` and `/api/round-answer`;
+                    `/api/close`, `/api/inbox`, `/api/message-reply`, `/api/recap`, `/api/ask`, `/api/withdraw-question`, `/api/picture` and `/api/round-answer`;
                     `Allow: GET` on `/api/picture/<id>`)
 
 Two kinds of write exist. The hook and reading routes append what the proxies and hooks observe:
@@ -560,6 +561,30 @@ not being the recommendation. It appends exactly one `question.answered` row `{"
 publishes, nudges the manager as `send_message` does and returns the row's `seq`, the message's id.
 Every refusal appends and publishes nothing, and neither the secret nor the owner's text appears
 in a stderr line.
+
+Withdraw (#1099): `POST /api/withdraw-question` is a manager write dispatched like `/api/ask`, before
+`PAGE_WRITES`: `_checked_length(MAX_WITHDRAW_QUESTION_BYTES)` (4096: any `Origin` 403 `origin refused`,
+415, 411, 413), a body `sprints.parse_withdraw_question_request` does not accept (`sprint_id`, `secret`,
+`round`, `index`) is 400 `bad withdraw question`, a `sprints.SecretRefused` is `console:
+withdraw_question_refused <sprint_id> secret refused` and 403 `secret refused`, any other
+`sprints.Refused` is the same prefix with the reason and 409 with the reason, any other exception is
+`console: withdraw_question_failed <Type>: <message>` and 500 `withdraw question failed`; success is
+200 `application/json` `{"index":<i>,"round":<r>}` (sorted keys, compact). `withdraw_question(sprint_id,
+secret, round_id, index)`, under the ingest lock, is `_manager_sprint` (`NOT_OPEN`, then
+`SecretRefused`), `Refused(ENDED)` unless `sprints.takes_questions`, then `sprints.withdrawable`
+against every other folded sprint (`QUESTION_FOREIGN` or `UNKNOWN_QUESTION`, `ANSWERED_ALREADY`,
+`WITHDRAWN_ALREADY`); it appends exactly one `question.withdrawn` row `{"sprint_id", "goal", "round",
+"index", "question"}` (the ask), folds, publishes and returns the row's `seq`; it nudges nobody, and a
+refusal appends and publishes nothing. A round's question may carry `"replaces": {"round", "index"}`:
+`_checked_ask` (so `check_round`, the dry run, too) runs `sprints.withdrawable` for each mark, a refusal
+being `Refused(REPLACES_REFUSED)` naming the question's number, the pair and the reason, and raises
+`ROUND_OPEN` only when the round is not a blocker and some open question is not among
+`sprints.replaced(checked)`; `ask_questions` still appends the one `questions.asked` row, which carries
+the marks and withdraws what they name in the fold, and no other row. `answer_question` answers a
+question the manager took back (withdrawn or replaced) with `Refused(TAKEN_BACK)`, checked after
+`NOT_OPEN` and before `ENDED` (withdrawing a done sprint's last open question ends the sprint, and the
+owner is still told why), appending no row and storing no message; a question not taken back in an
+ended sprint is still `ENDED`.
 
 Pictures (#1089, ADR-console-036): `POST /api/picture` is a manager write dispatched like `/api/brief`,
 before `PAGE_WRITES`, whose body is one PNG and whose identity travels in headers. The checks run in
@@ -1118,7 +1143,7 @@ from agent_tools.console import (
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
     MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_STOP_FAILED,
-    MANAGER_STOPPED, MANAGER_WAITING, MANAGER_WOKEN, QUESTION_ANSWERED, QUESTIONS_ASKED,
+    MANAGER_STOPPED, MANAGER_WAITING, MANAGER_WOKEN, QUESTION_ANSWERED, QUESTION_WITHDRAWN, QUESTIONS_ASKED,
     SPRINT_ANSWERED, SPRINT_CONTINUED, SPRINT_MESSAGED, SPRINT_NUDGED, SPRINT_CLOSED, SPRINT_READ, SPRINT_REPORTED, SPRINT_STOP_REQUESTED, Event,
     EventLog, utc_now)
 from agent_tools.console.view import (
@@ -1168,6 +1193,7 @@ MESSAGE_PATH = "/api/message"
 INBOX_PATH = "/api/inbox"
 MESSAGE_REPLY_PATH = "/api/message-reply"
 ASK_PATH = "/api/ask"
+WITHDRAW_QUESTION_PATH = "/api/withdraw-question"
 ROUND_ANSWER_PATH = "/api/round-answer"
 CHECK_PATH = "/api/check-answer"
 SIGNIN_PATH = "/api/signin"
@@ -1219,9 +1245,11 @@ SPRINT_HEADER = "X-Console-Sprint"
 SECRET_HEADER = "X-Console-Secret"
 MAX_PICTURE_BYTES = pictures.MAX_BYTES
 MANAGER_WRITES: frozenset[str] = frozenset({BRIEF_PATH, REPORT_PATH, CLOSE_PATH, INBOX_PATH,
-                                            MESSAGE_REPLY_PATH, RECAP_PATH, ASK_PATH, PICTURE_PATH})
+                                            MESSAGE_REPLY_PATH, RECAP_PATH, ASK_PATH, WITHDRAW_QUESTION_PATH,
+                                            PICTURE_PATH})
 MAX_RECAP_BYTES = 4096
 MAX_ASK_BYTES = 65536
+MAX_WITHDRAW_QUESTION_BYTES = 4096
 MAX_ROUND_ANSWER_BYTES = 16384
 MAX_MESSAGE_BYTES = 16384
 MAX_INBOX_BYTES = 4096
@@ -1390,6 +1418,8 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return self._message_reply_request()
         if route == ASK_PATH:
             return self._ask_request()
+        if route == WITHDRAW_QUESTION_PATH:
+            return self._withdraw_question_request()
         if route == PICTURE_PATH:
             return self._picture_request()
         if route == RECAP_PATH:
@@ -1989,6 +2019,33 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         answer = {"questions": count} if dry_run else {"questions": count, "round": round_id}
         self._send(200, "application/json", json.dumps(
             answer, sort_keys=True, separators=(",", ":")).encode())
+
+    def _withdraw_question_request(self):
+        """The manager's route: one open question taken back, with the sprint's secret."""
+        length = self._checked_length(MAX_WITHDRAW_QUESTION_BYTES)
+        if length is None:
+            return
+        self.close_connection = True
+        try:
+            sprint_id, secret, round_id, index = sprints.parse_withdraw_question_request(
+                self.rfile.read(length))
+        except ValueError:
+            return self._refuse(400, "bad withdraw question")
+        try:
+            self.server.console.withdraw_question(sprint_id, secret, round_id, index)
+        except sprints.SecretRefused:
+            print(f"console: withdraw_question_refused {sprint_id} {sprints.SECRET_REFUSED}",
+                  file=sys.stderr)
+            return self._refuse(403, sprints.SECRET_REFUSED)
+        except sprints.Refused as error:
+            print(f"console: withdraw_question_refused {sprint_id} {error}", file=sys.stderr)
+            return self._refuse(409, str(error))
+        except Exception as error:
+            print(f"console: withdraw_question_failed {type(error).__name__}: {error}",
+                  file=sys.stderr)
+            return self._refuse(500, "withdraw question failed")
+        self._send(200, "application/json", json.dumps(
+            {"index": index, "round": round_id}, sort_keys=True, separators=(",", ":")).encode())
 
     def _picture_request(self):
         """The manager's route: one PNG picture sent with the sprint's secret in headers."""
@@ -5032,8 +5089,21 @@ class ConsoleService:
         for n, question in enumerate(checked["questions"], 1):
             for m, member in enumerate(question.get("pictures", ()), 1):
                 self._own_picture(sprint, member["picture"], n, m)
-        if sprints.round_open(sprint) and not checked["blocker"]:
-            raise sprints.Refused(sprints.ROUND_OPEN)
+        others = [other for key, other in self._sprints.items() if key != sprint_id]
+        for n, question in enumerate(checked["questions"], 1):
+            mark = question.get("replaces")
+            if mark is None:
+                continue
+            try:
+                sprints.withdrawable(sprint, mark["round"], mark["index"], others)
+            except sprints.Refused as error:
+                raise sprints.Refused(sprints.REPLACES_REFUSED.format(
+                    n=n, round=mark["round"], index=mark["index"], reason=str(error))) from None
+        if not checked["blocker"]:
+            replaced = set(sprints.replaced(checked))
+            if any((question.round_id, question.index) not in replaced
+                   for question in sprints.open_questions(sprint)):
+                raise sprints.Refused(sprints.ROUND_OPEN)
         return sprint, checked
 
     def check_round(self, sprint_id: str, secret: str, round_: dict) -> int:
@@ -5053,6 +5123,20 @@ class ConsoleService:
             self._apply(appended)
             return appended[-1].seq, len(checked["questions"])
 
+    def withdraw_question(self, sprint_id: str, secret: str, round_id: int, index: int) -> int:
+        """Append one `question.withdrawn` event for an open question of the sprint; its seq."""
+        with self._ingest:
+            sprint = self._manager_sprint(sprint_id, secret)
+            if not sprints.takes_questions(sprint):
+                raise sprints.Refused(sprints.ENDED)
+            others = [other for key, other in self._sprints.items() if key != sprint_id]
+            asked = sprints.withdrawable(sprint, round_id, index, others)
+            appended = self.log.append([(QUESTION_WITHDRAWN, sprint.project_id, {
+                "sprint_id": sprint_id, "goal": sprint.goal, "round": round_id, "index": index,
+                "question": asked.question})])
+            self._apply(appended)
+            return appended[-1].seq
+
     def answer_question(self, project_id: str, sprint_id: str, round_id: int, index: int,
                         choice: int | None, text: str | None) -> int:
         """Append one `question.answered` event, a message to the manager; its id."""
@@ -5060,10 +5144,12 @@ class ConsoleService:
             sprint = self._sprints.get(sprint_id)
             if sprint is None or sprint.project_id != project_id:
                 raise sprints.Refused(sprints.NOT_OPEN)
-            if not sprints.takes_questions(sprint):
-                raise sprints.Refused(sprints.ENDED)
             asked = next((question for question in sprint.questions
                           if (question.round_id, question.index) == (round_id, index)), None)
+            if asked is not None and asked.withdrawn_at is not None:
+                raise sprints.Refused(sprints.TAKEN_BACK)
+            if not sprints.takes_questions(sprint):
+                raise sprints.Refused(sprints.ENDED)
             if asked is None:
                 raise sprints.Refused(sprints.UNKNOWN_QUESTION)
             if asked.answer is not None:

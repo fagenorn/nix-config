@@ -1168,6 +1168,40 @@ class DocsTreeTest(unittest.TestCase):
                       "screenshots folder must carry a picture, or the round is refused with "
                       "the question named (ADR-console-039).", entry)
 
+    def test_adr_console_040_records_taking_back_and_replacing_a_question(self):
+        path = ("docs/areas/console/adr/"
+                "040-a-manager-takes-back-or-replaces-its-own-open-question.md")
+        first = (REPO_ROOT / path).read_text().splitlines()[0]
+        self.assertEqual(first, "# ADR-console-040 \u2014 A manager takes back or replaces its own "
+                                "open question")
+        adr = self.doc(path)
+        for needle in ("#1099", "question.withdrawn", "schema 9", "POST /api/withdraw-question",
+                       '"replaces"', "the manager took this question back",
+                       "this question belongs to another sprint", "counts from 0", "page.html",
+                       "ADR-console-015", "ADR-console-019", "ADR-console-009"):
+            with self.subTest(needle):
+                self.assertIn(needle, adr)
+        base = "docs/areas/console/adr/"
+
+        def status(name):
+            lines = (REPO_ROOT / base / name).read_text().splitlines()
+            return next(r for r in lines if r.startswith("- **Status:**"))
+        self.assertEqual(status("019-a-managers-questions-arrive-as-inbox-items.md"),
+                         "- **Status:** accepted; amended by ADR-console-038, ADR-console-040")
+        self.assertEqual(status("009-events-are-kept-for-90-days.md"),
+                         "- **Status:** accepted; amended by ADR-console-036, ADR-console-040")
+        retention = self.doc(base + "009-events-are-kept-for-90-days.md")
+        self.assertIn("schema 9", retention)
+        self.assertIn("question.withdrawn", retention)
+        self.assertIn("/api/withdraw-question", self.doc(
+            base + "008-only-the-page-writes-with-a-token-and-its-origin.md"))
+        context = self.doc("docs/areas/console/CONTEXT.md")
+        entry = context.split("**Question round**:", 1)[1].split("_Avoid_:", 1)[0]
+        self.assertIn("A manager takes back its own open question with `sprint withdraw-question`, "
+                      "or replaces it by naming it in a new round, and the owner then sees only "
+                      "the new card; an answer to a question taken back is refused "
+                      "(ADR-console-040).", entry)
+
     def test_the_release_result_adr_limits_one_mutation_to_the_forge_adapter(self):
         text = self.doc("docs/areas/release/adr/005-adapters-never-claim-success.md")
         self.assertNotIn("An adapter makes at most one mutation", text)

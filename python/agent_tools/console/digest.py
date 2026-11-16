@@ -41,7 +41,16 @@ Event kinds read:
   from the ones before the report; a refused, ignored or words-repeating report says nothing.
 - `question.answered` (`event_log.QUESTION_ANSWERED`, `sprints.py`): the owner answered a manager's
   question. It speaks only when its `differs` is `True`, so an answer that took the recommendation
-  says nothing, and nothing else about a round (asking it, answering the others) speaks.
+  says nothing, and nothing else about a round (asking it, answering the others) speaks, a round
+  that replaces a question (`questions.asked`) apart.
+- `question.withdrawn` (`event_log.QUESTION_WITHDRAWN`, #1099): a manager took back one of its open
+  questions. It speaks only when the event's project is a str, the payload `question` and `goal` are
+  str and that question of that sprint (by `sprint_id`, `round` and `index`) has no `withdrawn_at`
+  in the fold before the row and one in the fold after it, so a row the fold ignores (a question
+  answered, gone or already taken back, a sprint closed, stopped or ended) says nothing.
+- `questions.asked` (`event_log.QUESTIONS_ASKED`, #1099): a round that replaces questions. It speaks
+  only when the event's project is a str and the fold after the row has a question whose
+  `replaced_by` is the row's `seq`; a round that replaces nothing says nothing.
 - `sprint.closed` (`event_log.SPRINT_CLOSED`, `sprints.py`): a manager's closing report. It speaks
   only when the sprint was open with no closing before the row and has one after it, the sprint has
   no stop request, and the row's project is a string; a refused or repeated closing, and the closing
@@ -88,6 +97,9 @@ withdrawal removes the sprint).
     brief_sent       A brief for <project_id> arrived, version <n>: <title>
     brief_approved   The brief for <project_id> was approved, version <n>: <title>
     sprint_state     The sprint for <project_id> changed to <its ball words, or its state once ended>: <title>
+    question_withdrawn The manager of <title> took back a question: <question>
+    question_replaced  The manager of <title> replaced a question: <the replaced question's ask>
+                       (`The manager of <title> replaced <n> questions` when n > 1 were replaced)
     answer_differs   An answer for <project_id>: You chose '<answer>' over the recommended '<recommended>': <question>
     sprint_done      The sprint for <project_id> is done: <the closing report's first line>
     manager_restarted The manager of <title> was restarted
@@ -130,7 +142,8 @@ from datetime import datetime, timedelta, timezone
 
 from agent_tools.console.event_log import (
     ADOPTION_REGISTRATION, BRIEF_APPROVED, BRIEF_SENT, GOAL_WITHDRAWN, MANAGER_NUDGED,
-    MANAGER_STARTED, MANAGER_WOKEN, QUESTION_ANSWERED, SPRINT_CLOSED, SPRINT_NUDGED, SPRINT_REPORTED, Event)
+    MANAGER_STARTED, MANAGER_WOKEN, QUESTION_ANSWERED, QUESTION_WITHDRAWN, QUESTIONS_ASKED,
+    SPRINT_CLOSED, SPRINT_NUDGED, SPRINT_REPORTED, Event)
 from agent_tools.console.sessions import (
     ENDED, GONE, HOOK, LIMIT, SEEN, WORKING, SessionState, session_states)
 from agent_tools.console.sprints import (
@@ -159,6 +172,8 @@ MANAGER_RESTARTED = "manager_restarted"
 MANAGER_TAKEOVER = "manager_takeover"
 QUOTA_RESUMED = "quota_resumed"
 PROJECT_REGISTERED = "project_registered"
+QUESTION_WITHDRAWN_MOMENT = "question_withdrawn"
+QUESTION_REPLACED_MOMENT = "question_replaced"
 
 
 @dataclass(frozen=True)
@@ -269,6 +284,42 @@ def _answer_moment(event: Event) -> tuple[str, str] | None:
                             f"recommended '{recommended}': {question}")
 
 
+def _withdrawn_moment(event: Event, previous: Mapping[str, SprintState],
+                      folded: Mapping[str, SprintState]) -> tuple[str, str] | None:
+    payload = event.payload
+    sprint_id, goal, ask = payload.get("sprint_id"), payload.get("goal"), payload.get("question")
+    if not isinstance(event.project, str) or not isinstance(goal, str) or not isinstance(ask, str):
+        return None
+    before = previous.get(sprint_id) if isinstance(sprint_id, str) else None
+    after = folded.get(sprint_id) if isinstance(sprint_id, str) else None
+    if before is None or after is None:
+        return None
+    key = (payload.get("round"), payload.get("index"))
+    was_open = {(q.round_id, q.index) for q in before.questions if q.withdrawn_at is None}
+    if not any((q.round_id, q.index) == key and q.withdrawn_at is not None
+               and key in was_open for q in after.questions):
+        return None
+    return (QUESTION_WITHDRAWN_MOMENT,
+            f"The manager of {_title(sprint_id, goal, folded)} took back a question: {ask}")
+
+
+def _replaced_moment(event: Event, previous: Mapping[str, SprintState],
+                     folded: Mapping[str, SprintState]) -> tuple[str, str] | None:
+    sprint_id, goal = event.payload.get("sprint_id"), event.payload.get("goal")
+    after = folded.get(sprint_id) if isinstance(sprint_id, str) else None
+    if not isinstance(event.project, str) or after is None:
+        return None
+    replaced = sorted((q.round_id, q.index) for q in after.questions if q.replaced_by == event.seq)
+    if not replaced:
+        return None
+    title = _title(sprint_id, goal if isinstance(goal, str) else "", folded)
+    if len(replaced) > 1:
+        return (QUESTION_REPLACED_MOMENT, f"The manager of {title} replaced {len(replaced)} questions")
+    asked = {(q.round_id, q.index): q.question for q in previous[sprint_id].questions}
+    return (QUESTION_REPLACED_MOMENT,
+            f"The manager of {title} replaced a question: {asked[replaced[0]]}")
+
+
 def _resumed_sentence(title: str) -> str:
     return f"{title} resumed after the quota reset"
 
@@ -364,6 +415,10 @@ def moments(
             said = _brief_moment(event, folded)
         elif event.kind == QUESTION_ANSWERED:
             said = _answer_moment(event)
+        elif event.kind == QUESTION_WITHDRAWN:
+            said = _withdrawn_moment(event, previous, folded)
+        elif event.kind == QUESTIONS_ASKED:
+            said = _replaced_moment(event, previous, folded)
         elif event.kind in (MANAGER_NUDGED, MANAGER_WOKEN, MANAGER_STARTED):
             said = _manager_moment(event, folded)
         elif event.kind == SPRINT_NUDGED:

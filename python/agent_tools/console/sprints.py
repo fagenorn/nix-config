@@ -257,14 +257,17 @@ message_id, reply)`. All three are as strict as `parse_reply` (`ValueError` othe
 `inbox_entry(message)` is the wire entry `{"id", "kind", "version", "text", "at"}`, and for a
 `MESSAGE_ANSWER` message also `"question"`, `"round"` and `"chosen"` (see below).
 
-Rounds of questions (#891) are what an approved sprint's manager asks the owner. Two rows carry
-them, both kept (`event_log.QUESTIONS_ASKED`, `QUESTION_ANSWERED`; each with the project in its
-project column):
+Rounds of questions (#891) are what an approved sprint's manager asks the owner. Three rows carry
+them, all kept (`event_log.QUESTIONS_ASKED`, `QUESTION_ANSWERED`, `QUESTION_WITHDRAWN`; each with
+the project in its project column):
 
     questions.asked   {"sprint_id", "goal": <str>, "blocker": <bool>, "pictures"?: [<id>],
                        "questions": [{"question", "context"?, "blocks", "options": [<str>],
                                       "recommended", "pictures"?: [{"picture": <id>,
-                                      "line": <str>, "pair"?: "before" | "after"}]}]}
+                                      "line": <str>, "pair"?: "before" | "after"}],
+                                      "replaces"?: {"round": <int>, "index": <int>}}]}
+    question.withdrawn {"sprint_id", "goal": <str>, "round": <int>, "index": <int>,
+                        "question": <str>}
     question.answered {"sprint_id", "goal": <str>, "round": <int>, "index": <int>,
                        "question": <str>, "answer": <str>, "chosen": <str> | null,
                        "recommended": <str>, "differs": <bool>}
@@ -275,7 +278,8 @@ The round the manager sends (inside the ask request) and the owner's answer (the
                     "blocks": "<one line>", "options": ["<one line>", ...],
                     "recommended": "<exact text of one option>",
                     "pictures": [{"picture": "<id>", "line": "<one line>",
-                                  "pair": "before" | "after"}, ...]}, ...],
+                                  "pair": "before" | "after"}, ...],
+                    "replaces": {"round": <int >= 1>, "index": <int >= 0>}}, ...],
      "blocker": true | false}                   (blocker optional, default false)
     {"project_id", "sprint_id", "round": <int >= 1>, "question": <int >= 0>, "choice": <int >= 0>}
     {"project_id", "sprint_id", "round": <int >= 1>, "question": <int >= 0>, "text": "<words>"}
@@ -286,15 +290,17 @@ options. A question's `question` is its ask, at most `MAX_ASK_CHARS`; its option
 `checked_round(round, limits=True)` refuses with `Refused` the first failure, in this order:
 `NO_QUESTIONS` (`questions` not a list, or empty), `TOO_MANY_QUESTIONS`, `BAD_BLOCKER` (`blocker`
 present and not a bool); then, per question (`n` counts from 1): `QUESTION_SHAPE` (not an object, or
-a key outside `question, context, blocks, options, recommended, pictures`), `QUESTION_MEMBER` for
+a key outside `question, context, blocks, options, recommended, pictures, replaces`),
+`QUESTION_MEMBER` for
 `question`
 (not a string non-empty after stripping), `ASK_TOO_LONG`, `QUESTION_MEMBER` for `context` (present
 and not a string non-empty after stripping), `CONTEXT_TOO_LONG`, `QUESTION_MEMBER` for `blocks`
 (one line), `OPTION_COUNT`, `QUESTION_MEMBER` for `options` (an option not a string non-empty after
 stripping), `OPTION_TOO_LONG`, `QUESTION_MEMBER` for `options` again (an option with a line break or
 over `MAX_LINE_CHARS`), `OPTION_TWICE` (two options equal after stripping) and `NO_RECOMMENDATION`
-(`recommended` not a string whose strip equals one stripped option). The picture checks follow
-(#1090): `PICTURES_SHAPE` (`pictures` present and not a list), `TOO_MANY_PICTURES` (over
+(`recommended` not a string whose strip equals one stripped option), then `REPLACES_SHAPE`
+(`replaces` present and not an object of exactly `round`, an int that is not a bool and at least 1,
+and `index`, an int that is not a bool and at least 0). The picture checks follow (#1090): `PICTURES_SHAPE` (`pictures` present and not a list), `TOO_MANY_PICTURES` (over
 `MAX_PICTURES`), then per picture `m` (from 1) `PICTURE_SHAPE` (not an object, a key outside
 `picture, line, pair`, or `picture` or `line` missing), `PICTURE_MEMBER` for `picture` (not a string
 fully matching `pictures.PICTURE_ID`), `PICTURE_MEMBER` for `line` (not a string non-empty after
@@ -305,14 +311,18 @@ for a question that has no picture while its ask or context matches `LOOK_WORDS`
 screenshot or screenshots in any case, also written "screen shot", a `.png` file or a folder with a
 `screenshots` segment), naming the question's number and ask; a round read back from the log
 (`limits=False`) and a check with `files_withheld=True` (the service's dry run, whose round has its
-`file` members left out) skip it. `PICTURE_UNKNOWN` and `PICTURE_FOREIGN`
+`file` members left out) skip it. After the questions `REPLACES_TWICE` names the first question
+whose `replaces` equals an earlier question's (also with `limits=False`). `REPLACES_REFUSED` is the
+service's refusal of a mark that names no open question of the sprint. `PICTURE_UNKNOWN` and `PICTURE_FOREIGN`
 name the service's refusals of a picture it does not hold or another sprint sent. With
 `limits=False` the three limit steps are replaced by today's caps: a `QUESTION_MEMBER` for a
 `question` or `context` over `MAX_QUESTION_CHARS` (an option's cap is `MAX_LINE_CHARS`), and a
 picture's line over `MAX_LINE_CHARS`; the picture count cap stays. It returns a new
 `{"blocker": <bool>, "questions": [{"question", "blocks", "options", "recommended"}]}` with every
 text stripped, a question carrying `"context"` only when the round gave one and `"pictures"`
-(`{"picture", "line"}` plus `"pair"` when given) only when it gave a non-empty list.
+(`{"picture", "line"}` plus `"pair"` when given) only when it gave a non-empty list, and `"replaces"`
+(`{"round", "index"}`) only when it gave one. `replaced(checked)` is the `(round, index)` each
+question's `replaces` names in a checked round, in question order.
 `round_pictures(checked)` is the unique picture ids of a checked round, in question then picture
 order.
 `parse_ask_request(body)` reads the manager's `{"sprint_id", "secret", "round"}` (exactly those
@@ -338,8 +348,20 @@ its `chosen` is null or one of the question's options: the question then keeps `
 `answered_at` (the row's `at`) and `differs`, computed as `chosen != recommended` (the row's own
 `differs` is not trusted; the owner's own words, `chosen` null, always differ), and the sprint gains
 a `MESSAGE_ANSWER` message (`text` the answer, plus `question`, `round_id`, `chosen`). A second
-answer, or any other such row, changes nothing. `open_questions(state)` is the unanswered questions
-in `(round_id, index)` order, none once the sprint has `stopped_at` or a `closing`, and `round_open(state)` is true while there is one.
+answer, or any other such row, changes nothing, and so does an answer naming a withdrawn question:
+no answer and no message. A `question.withdrawn` row (#1099) changes a sprint only when
+`takes_questions(state)` holds and its `round` and `index` (ints, not bools) name an unanswered,
+unwithdrawn question of the sprint: that question's `withdrawn_at` becomes the row's `at`. A
+`questions.asked` row the fold accepts first withdraws each own open question its `replaces` marks
+name (`withdrawn_at` the row's `at`, `replaced_by` the row's `seq`), then adds its questions; a mark
+naming anything else is ignored and the round still folds. `withdrawable(state, round_id, index,
+others=())` returns the open question of `state` or raises `Refused`, in this order:
+`QUESTION_FOREIGN` when the pair is no question of `state` but one of a sprint in `others`, else
+`UNKNOWN_QUESTION`; `ANSWERED_ALREADY`; `WITHDRAWN_ALREADY`. (`TAKEN_BACK` is the answer's refusal
+for a withdrawn question.) `parse_withdraw_question_request(body)` reads the manager's
+`{"sprint_id", "secret", "round": <int >= 1>, "index": <int >= 0>}` and returns `(sprint_id,
+secret, round_id, index)`, as strict as `parse_ask_request`. `open_questions(state)` is the
+unanswered, unwithdrawn questions in `(round_id, index)` order, none once the sprint has `stopped_at` or a `closing`, and `round_open(state)` is true while there is one.
 `takes_questions(state)` is false once the sprint has `stopped_at`, a `closing` or has ended (`ended_at`); then
 a `questions.asked` or `question.answered` row changes nothing (the service refuses `ENDED`). An answer's inbox
 entry is `{"id", "kind": "answer", "version": null, "text": <the answer>, "at", "question":
@@ -438,10 +460,10 @@ from agent_tools.console.event_log import (BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_
                                            MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED,
                                            MANAGER_STOP_FAILED, MANAGER_STOPPED, MANAGER_WAITING,
                                            MANAGER_WOKEN, PICTURE_STORED, QUESTION_ANSWERED,
-                                           QUESTIONS_ASKED, SPRINT_ANSWERED, SPRINT_CLOSED,
-                                           SPRINT_CONTINUED, SPRINT_MESSAGED, SPRINT_NUDGED,
-                                           SPRINT_READ, SPRINT_REPORTED, SPRINT_STOP_REQUESTED,
-                                           Event)
+                                           QUESTION_WITHDRAWN, QUESTIONS_ASKED,
+                                           SPRINT_ANSWERED, SPRINT_CLOSED, SPRINT_CONTINUED,
+                                           SPRINT_MESSAGED, SPRINT_NUDGED, SPRINT_READ,
+                                           SPRINT_REPORTED, SPRINT_STOP_REQUESTED, Event)
 from agent_tools.console.manager import FAILED_TEXT, MISSING_TEXT, UNAVAILABLE_TEXT
 from agent_tools.console.manager import WAITING_TEXT as MANAGER_WAITING_TEXT
 from agent_tools.console.pictures import PICTURE_ID
@@ -571,7 +593,10 @@ NO_QUESTIONS = "the round has no questions"
 TOO_MANY_QUESTIONS = "a round has at most 10 questions"
 BAD_BLOCKER = "the round's blocker is not true or false"
 QUESTION_SHAPE = ("question {n} is not an object of question, context, blocks, options, "
-                  "recommended and pictures")
+                  "recommended, pictures and replaces")
+REPLACES_SHAPE = "question {n}'s replaces is not an object of round and index"
+REPLACES_TWICE = "question {n} replaces a question another question of the round replaces"
+REPLACES_REFUSED = "question {n} cannot replace round {round} question {index}: {reason}"
 PICTURES_SHAPE = "question {n}'s pictures are not a list"
 TOO_MANY_PICTURES = f"question {{n}} has more than {MAX_PICTURES} pictures"
 PICTURE_SHAPE = "question {n} picture {m} is not an object of picture, line and pair"
@@ -595,6 +620,9 @@ NO_RECOMMENDATION = "question {n} recommends none of its options"
 ROUND_OPEN = "a round of questions is already open"
 UNKNOWN_QUESTION = "this question is not known"
 ANSWERED_ALREADY = "this question is already answered"
+QUESTION_FOREIGN = "this question belongs to another sprint"
+WITHDRAWN_ALREADY = "this question is already withdrawn"
+TAKEN_BACK = "the manager took this question back"
 NOT_AN_OPTION = "choose one of the question's options"
 UNREACHABLE_TEXT = "manager not reachable"
 UNREACHABLE_AFTER = 2
@@ -745,6 +773,8 @@ class Question:
     answered_at: str | None = None
     context: str | None = None
     pictures: tuple[QuestionPicture, ...] = ()
+    withdrawn_at: str | None = None
+    replaced_by: int | None = None
 
 
 @dataclass(frozen=True)
@@ -902,6 +932,14 @@ def parse_round_answer(body: bytes) -> tuple[str, str, int, int, int | None, str
     choice = _count(value["choice"], 0) if "choice" in value else None
     return (project_id, _sprint_id(value["sprint_id"]), _count(value["round"], 1),
             _count(value["question"], 0), choice, text)
+
+
+def parse_withdraw_question_request(body: bytes) -> tuple[str, str, int, int]:
+    value = _object(body, {"sprint_id", "secret", "round", "index"}, project=False)
+    sprint_id = _sprint_id(value["sprint_id"])
+    if not isinstance(value["secret"], str):
+        raise ValueError("secret must be a string")
+    return sprint_id, value["secret"], _count(value["round"], 1), _count(value["index"], 0)
 
 
 def parse_close_request(body: bytes) -> tuple[str, str, dict]:
@@ -1070,7 +1108,7 @@ LOOK_WORDS = re.compile(r"\bscreen ?shots?\b|\.png\b|(?:^|[/\\])screenshots(?:[/
 def _checked_question(n: int, question: object, limits: bool, files_withheld: bool) -> dict:
     if not isinstance(question, dict) or not set(question) <= {"question", "context", "blocks",
                                                                 "options", "recommended",
-                                                                "pictures"}:
+                                                                "pictures", "replaces"}:
         raise Refused(QUESTION_SHAPE.format(n=n))
     text, blocks = question.get("question"), question.get("blocks")
     if not _text(text):
@@ -1104,6 +1142,9 @@ def _checked_question(n: int, question: object, limits: bool, files_withheld: bo
     recommended = question.get("recommended")
     if not isinstance(recommended, str) or recommended.strip() not in stripped:
         raise Refused(NO_RECOMMENDATION.format(n=n))
+    replaces = question.get("replaces")
+    if "replaces" in question and not _replaces_mark(replaces):
+        raise Refused(REPLACES_SHAPE.format(n=n))
     pictures = _checked_pictures(n, question["pictures"], limits) if "pictures" in question else []
     if (limits and not files_withheld and not pictures
             and any(LOOK_WORDS.search(part) for part in (text, context) if part)):
@@ -1114,7 +1155,15 @@ def _checked_question(n: int, question: object, limits: bool, files_withheld: bo
         checked["context"] = context.strip()
     if pictures:
         checked["pictures"] = pictures
+    if "replaces" in question:
+        checked["replaces"] = {"round": replaces["round"], "index": replaces["index"]}
     return checked
+
+
+def _replaces_mark(mark: object) -> bool:
+    return (isinstance(mark, dict) and set(mark) == {"round", "index"}
+            and _id(mark["round"]) and mark["round"] >= 1
+            and _id(mark["index"]) and mark["index"] >= 0)
 
 
 def _checked_pictures(n: int, pictures: object, limits: bool) -> list[dict]:
@@ -1168,9 +1217,20 @@ def checked_round(round_: dict, *, limits: bool = True, files_withheld: bool = F
     blocker = round_.get("blocker", False)
     if not isinstance(blocker, bool):
         raise Refused(BAD_BLOCKER)
-    return {"blocker": blocker,
-            "questions": [_checked_question(n, question, limits, files_withheld)
-                          for n, question in enumerate(questions, 1)]}
+    checked = [_checked_question(n, question, limits, files_withheld)
+               for n, question in enumerate(questions, 1)]
+    marks = [(row["replaces"]["round"], row["replaces"]["index"]) if "replaces" in row else None
+             for row in checked]
+    for n, mark in enumerate(marks, 1):
+        if mark is not None and mark in marks[:n - 1]:
+            raise Refused(REPLACES_TWICE.format(n=n))
+    return {"blocker": blocker, "questions": checked}
+
+
+def replaced(checked: dict) -> list[tuple[int, int]]:
+    """The `(round, index)` each question's `replaces` names in a checked round, in question order."""
+    return [(row["replaces"]["round"], row["replaces"]["index"])
+            for row in checked["questions"] if "replaces" in row]
 
 
 def first_line(summary: str) -> str:
@@ -1242,8 +1302,25 @@ def unreachable(state: SprintState) -> bool:
 def open_questions(state: SprintState) -> tuple[Question, ...]:
     if state.stopped_at is not None or state.closing is not None:
         return ()
-    return tuple(sorted((question for question in state.questions if question.answer is None),
+    return tuple(sorted((question for question in state.questions
+                         if question.answer is None and question.withdrawn_at is None),
                         key=lambda question: (question.round_id, question.index)))
+
+
+def withdrawable(state: SprintState, round_id: int, index: int,
+                 others: Iterable[SprintState] = ()) -> Question:
+    """The open question `(round_id, index)` of `state`, else `Refused` with why it cannot be taken back."""
+    for question in state.questions:
+        if (question.round_id, question.index) == (round_id, index):
+            if question.answer is not None:
+                raise Refused(ANSWERED_ALREADY)
+            if question.withdrawn_at is not None:
+                raise Refused(WITHDRAWN_ALREADY)
+            return question
+    if any((question.round_id, question.index) == (round_id, index)
+           for other in others for question in other.questions):
+        raise Refused(QUESTION_FOREIGN)
+    raise Refused(UNKNOWN_QUESTION)
 
 
 def round_open(state: SprintState) -> bool:
@@ -1345,6 +1422,11 @@ def _folded_question(state: SprintState, event: Event) -> SprintState:
                                      "blocker": payload.get("blocker", False)}, limits=False)
         except Refused:
             return state
+        marks = set(replaced(checked))
+        withdrawn = tuple(
+            replace(question, withdrawn_at=event.at, replaced_by=event.seq)
+            if (question.round_id, question.index) in marks and question.answer is None
+            and question.withdrawn_at is None else question for question in state.questions)
         added = tuple(Question(event.seq, index, event.at, checked["blocker"], row["question"],
                                row["blocks"], tuple(row["options"]), row["recommended"],
                                context=row.get("context"),
@@ -1352,15 +1434,24 @@ def _folded_question(state: SprintState, event: Event) -> SprintState:
                                                               p.get("pair"))
                                               for p in row.get("pictures", ())))
                       for index, row in enumerate(checked["questions"]))
-        return replace(state, questions=(*state.questions, *added))
+        return replace(state, questions=(*withdrawn, *added))
     round_id, index = payload.get("round"), payload.get("index")
+    if event.kind == QUESTION_WITHDRAWN:
+        if not _id(round_id) or not _id(index):
+            return state
+        return replace(state, questions=tuple(
+            replace(question, withdrawn_at=event.at)
+            if (question.round_id, question.index) == (round_id, index)
+            and question.answer is None and question.withdrawn_at is None else question
+            for question in state.questions))
     answer, chosen = payload.get("answer"), payload.get("chosen")
     if not _id(round_id) or not _id(index) or not isinstance(answer, str):
         return state
     for position, question in enumerate(state.questions):
         if (question.round_id, question.index) != (round_id, index):
             continue
-        if question.answer is not None or (chosen is not None and chosen not in question.options):
+        if (question.answer is not None or question.withdrawn_at is not None
+                or (chosen is not None and chosen not in question.options)):
             return state
         answered = replace(question, answer=answer, chosen=chosen, answered_at=event.at,
                            differs=chosen != question.recommended)
@@ -1562,7 +1653,8 @@ def sprint_states(events: Iterable[Event],
         elif event.kind in (SPRINT_MESSAGED, SPRINT_READ, SPRINT_ANSWERED, SPRINT_NUDGED) \
                 and sprint_id in folded:
             folded[sprint_id] = _folded_message(folded[sprint_id], event)
-        elif event.kind in (QUESTIONS_ASKED, QUESTION_ANSWERED) and sprint_id in folded:
+        elif event.kind in (QUESTIONS_ASKED, QUESTION_ANSWERED, QUESTION_WITHDRAWN) \
+                and sprint_id in folded:
             folded[sprint_id] = _folded_question(folded[sprint_id], event)
             if event.kind == QUESTIONS_ASKED:
                 folded[sprint_id] = _folded_round_pictures(folded[sprint_id], event)
