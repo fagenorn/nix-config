@@ -2332,6 +2332,48 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                                guard_args=guard_args)
         self.assertEqual(0, result.returncode, result.stderr)
 
+    def test_a_key_file_write_is_refused_when_git_fails_without_naming_no_repository(self):
+        """A nonzero `rev-parse` that is not git's "not a git repository" (dubious ownership,
+        a malformed config) is a failed lookup, never an outside-a-checkout answer."""
+        guard_args_base = self.tool_args(self.tool_rows())
+        prod = self.make_repo(f"git@github.com:{PROD}.git")
+        real = self.base_policy["git_bin"]
+        for label, stderr in (
+                ("dubious ownership", "fatal: detected dubious ownership in repository"),
+                ("malformed config", "fatal: bad config line 1 in file .git/config")):
+            with self.subTest(label=label):
+                failing = Path(tempfile.mkdtemp(dir=self.fixture_dir.name)) / "git"
+                failing.write_text(
+                    "#!/bin/sh\ncase \"$*\" in\n"
+                    f"  *rev-parse*) echo '{stderr}' >&2; exit 128;;\nesac\n"
+                    f"exec '{real}' \"$@\"\n", encoding="utf-8")
+                failing.chmod(0o755)
+                args = (*guard_args_base, "--git-bin", str(failing))
+                result = self.run_tool("Edit", {"file_path": str(prod / "deploy/prod.yaml")},
+                                       guard_args=args)
+                self.assertEqual(2, result.returncode, result.stderr)
+                self.assertIn("repository lookup failed (exit 128)", result.stderr)
+                result = self.run_tool("Edit", {"file_path": str(prod / "README.md")},
+                                       guard_args=args)
+                self.assertEqual(0, result.returncode, result.stderr)
+        with self.subTest(label="a directory in no checkout"):
+            bare = Path(tempfile.mkdtemp(dir=self.fixture_dir.name))
+            result = self.run_tool("Edit", {"file_path": str(bare / "deploy/prod.yaml")},
+                                   guard_args=guard_args_base)
+            self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_a_key_file_behind_a_directory_symlink_leaving_the_checkout_is_refused(self):
+        guard_args = self.tool_args(self.tool_rows())
+        prod = self.make_repo(f"git@github.com:{PROD}.git")
+        outside = Path(tempfile.mkdtemp(dir=self.fixture_dir.name))
+        (prod / "deploy").symlink_to(outside, target_is_directory=True)
+        for tool, field in EDIT_TOOLS:
+            with self.subTest(tool=tool):
+                result = self.run_tool(tool, {field: str(prod / "deploy/prod.yaml")},
+                                       guard_args=guard_args)
+                self.assertEqual(2, result.returncode, result.stderr)
+                self.assertIn(f"`deploy/prod.yaml` is a key file of {PROD}", result.stderr)
+
     def test_the_base_policy_is_read_only_for_a_key_file_candidate(self):
         broken = Path(tempfile.mkdtemp(dir=self.fixture_dir.name)) / "base.json"
         broken.write_text("{", encoding="utf-8")

@@ -4194,20 +4194,47 @@ def key_file_candidate(spellings, rows):
 
 
 def checkout_of(git_bin, directory, timeout):
-    """The realpath of the checkout `directory` is in, or None when it is in none."""
+    """The realpath of the checkout `directory` is in, or None when git confirms it is in
+    none. Any other failure of the lookup (a timeout, a git that cannot start, or a nonzero
+    exit that is not git's "not a git repository", as dubious ownership or a malformed
+    config is) raises `RepositoryLookupFailed`: it is no answer, so it is never "outside"."""
     try:
         child = subprocess.run(
             [git_bin, "-C", directory, "rev-parse", "--show-toplevel"],
             capture_output=True, text=True, timeout=timeout, check=False,
+            env={**os.environ, "LC_ALL": "C", "LANGUAGE": "C"},
         )
     except (subprocess.TimeoutExpired, OSError) as error:
         raise RepositoryLookupFailed(
             "timed out" if isinstance(error, subprocess.TimeoutExpired) else "could not start"
         ) from error
     top = child.stdout.strip()
-    if child.returncode != 0 or not top:
+    if child.returncode == 0 and top:
+        return os.path.realpath(top)
+    if child.returncode != 0 and "not a git repository" in child.stderr:
         return None
-    return os.path.realpath(top)
+    raise RepositoryLookupFailed(f"failed (exit {child.returncode})")
+
+
+def lookup_directories(spelling):
+    """The directories git is asked about for `spelling`: the nearest existing directory
+    (git follows a symlinked directory to its target), then each lexical ancestor holding a
+    `.git`, so a checkout reached through a symlinked directory inside it is still found."""
+    directory = os.path.dirname(spelling)
+    while not os.path.isdir(directory):
+        parent = os.path.dirname(directory)
+        if parent == directory:
+            break
+        directory = parent
+    found = [directory]
+    ancestor = os.path.dirname(spelling)
+    while True:
+        if os.path.isdir(ancestor) and os.path.lexists(os.path.join(ancestor, ".git")):
+            found.append(ancestor)
+        parent = os.path.dirname(ancestor)
+        if parent == ancestor:
+            return found
+        ancestor = parent
 
 
 def checkout_anchor(spelling, top):
@@ -4238,38 +4265,34 @@ def key_file_problem(spellings, rows, git_bin, deadline, child_timeout):
     checkouts = {}
     slugs = {}
     for spelling in spellings:
-        directory = os.path.dirname(spelling)
-        while not os.path.isdir(directory):
-            parent = os.path.dirname(directory)
-            if parent == directory:
-                break
-            directory = parent
-        try:
-            resolved = os.path.realpath(directory)
-            if resolved not in checkouts:
-                checkouts[resolved] = checkout_of(
-                    git_bin, directory, bounded_timeout(deadline, child_timeout))
-            top = checkouts[resolved]
-            if top is None:
+        for directory in lookup_directories(spelling):
+            try:
+                resolved = os.path.realpath(directory)
+                if resolved not in checkouts:
+                    checkouts[resolved] = checkout_of(
+                        git_bin, directory, bounded_timeout(deadline, child_timeout))
+                top = checkouts[resolved]
+                if top is None:
+                    continue
+                anchor = checkout_anchor(spelling, top)
+                if anchor is None:
+                    continue
+                if top not in slugs:
+                    slugs[top] = detect_repository(
+                        git_bin, top, bounded_timeout(deadline, child_timeout), strict=True)
+            except RepositoryLookupFailed as error:
+                return (f"the repository lookup {error} for a write to "
+                        f"`{shown_value(spelling)}`, which may be a key file of a declared "
+                        "project, so the guard cannot judge it")
+            slug = slugs[top]
+            production = (rows.get(slug) or {}).get("production")
+            if not production:
                 continue
-            anchor = checkout_anchor(spelling, top)
-            if anchor is None:
-                continue
-            if top not in slugs:
-                slugs[top] = detect_repository(
-                    git_bin, top, bounded_timeout(deadline, child_timeout), strict=True)
-        except RepositoryLookupFailed as error:
-            return (f"the repository lookup {error} for a write to `{shown_value(spelling)}`, "
-                    "which may be a key file of a declared project, so the guard cannot "
-                    "judge it")
-        slug = slugs[top]
-        production = (rows.get(slug) or {}).get("production")
-        if not production:
-            continue
-        relative = spelling[len(anchor):].lstrip("/")
-        for glob in production.get("key_files", []):
-            if fnmatch.fnmatchcase(relative, glob):
-                return key_file_refusal_text(relative, slug, glob, production["release_profile"])
+            relative = spelling[len(anchor):].lstrip("/")
+            for glob in production.get("key_files", []):
+                if fnmatch.fnmatchcase(relative, glob):
+                    return key_file_refusal_text(
+                        relative, slug, glob, production["release_profile"])
     return None
 
 
