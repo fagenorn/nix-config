@@ -446,6 +446,24 @@ class NudgeServiceTest(MessageRouteTest):
         self.assertEqual(self.notice_nudged(), [])
         self.assertEqual(svc._notice_due, {})
 
+    def test_a_notice_due_for_a_sprint_whose_project_was_unregistered_is_dropped_not_looped(self):
+        svc = self.begin()
+        sid = self.started(svc, "owner/p01", "s-1", "first goal")
+        svc.post_owner_notice("owner/p01", "routes are frozen until Friday")
+        support.write_registry(self.registry, support.entries(2)[:1])
+        svc.refresh()
+        self.assertNotIn("owner/p01", svc._states)
+        for _ in range(200):
+            if not self.queued.jobs:
+                break
+            self.queued.run_next()
+        self.assertEqual(self.queued.jobs, [])
+        self.assertEqual(svc._notice_due, {})
+        self.assertNotIn(sid, svc._nudging)
+        self.assertEqual(self.nudges, [])
+        svc.renudge()
+        self.assertEqual(self.queued.jobs, [])
+
     def test_a_message_to_a_running_manager_is_relayed_with_the_fixed_sentence_only(self):
         svc = self.begin()
         sid = self.running(svc)

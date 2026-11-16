@@ -4948,9 +4948,11 @@ class ConsoleService:
     def _notice_follow(self, sprint_id: str) -> bool:
         """Under the ingest lock: reserve the sprint for the nudge of a notice still due; whether it did.
 
-        A stopping service, no nudger or an unreachable sprint drops the due notice: no nudge can carry it.
+        A stopping service, no nudger, an unreachable sprint or one whose project left the registry drops the
+        due notice: no nudge can carry it.
         """
-        if self._stop.is_set() or self._nudger is None or self._reachable(sprint_id) is None:
+        sprint = None if self._stop.is_set() or self._nudger is None else self._reachable(sprint_id)
+        if sprint is None or sprint.project_id not in self._states:
             self._notice_due.pop(sprint_id, None)
             return False
         if sprint_id in self._notice_due and sprint_id not in self._nudging:
