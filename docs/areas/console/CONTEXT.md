@@ -53,6 +53,10 @@ _Avoid_: chat, comment
 The questions a manager sends at once with `sprint ask`: each leads with its ask (at most 140 characters), may add a context (at most 400), says what it blocks and offers two to four options of at most 80 characters, one recommended. Each question is an inbox item kept only in the console's log; the owner answers it on the page with an option or their own words, and the answer reaches the manager as a message. A sprint has one open round at a time unless a round is a blocker, and reads waiting on you (n) while any question is open (ADR-console-019, ADR-console-027). A question may carry up to eight pictures, each with a line and optionally marked before or after, shown on its card and full size in a viewer (ADR-console-038). A question whose ask or context names screenshots, a `.png` file or a screenshots folder must carry a picture, or the round is refused with the question named (ADR-console-039). A manager takes back its own open question with `sprint withdraw-question`, or replaces it by naming it in a new round, and the owner then sees only the new card; an answer to a question taken back is refused (ADR-console-040).
 _Avoid_: poll, survey
 
+**Notice**:
+A short bounded message a manager posts for its project with `sprint notice`, of kind claim, heads-up or hand-off, and the project's other managers read with `sprint notices`. It is kept only in the console's log, and it is information, never approval: nothing is refused because of one. It ends when it is withdrawn or when its sprint ends (ADR-console-042). A claim notice is not a **Claim** of the Claims area, which is an issue's delivery marker.
+_Avoid_: lock, reservation, announcement
+
 **Picture**:
 One PNG a manager sent to the console, kept by the console under its SHA-256 hash and shown only to the page; one nobody references is removed a day after it was last sent (ADR-console-036). A question's, a brief's and a report's pictures are shown as thumbnails on their card (a report's in its Detail fold) and full size in a modal viewer (ADR-console-038, ADR-console-041).
 _Avoid_: screenshot file, attachment

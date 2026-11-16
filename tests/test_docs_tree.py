@@ -373,7 +373,7 @@ class DocsTreeTest(unittest.TestCase):
         for term in ("Console", "Inbox item", "Quiet project", "Answered item",
                      "Held work", "Waiting since", "Session", "Outside sprints",
                      "Not yet managed", "Delivery run", "Goal", "Sprint", "Brief",
-                     "Message", "Nudge", "Question round"):
+                     "Message", "Nudge", "Question round", "Notice"):
             self.assertIn([term, "Console"], cells)
         self.assertIn("- **Console → Claims**:", text)
 
@@ -1210,6 +1210,29 @@ class DocsTreeTest(unittest.TestCase):
                       "or replaces it by naming it in a new round, and the owner then sees only "
                       "the new card; an answer to a question taken back is refused "
                       "(ADR-console-040).", entry)
+
+    def test_the_notice_decision_is_recorded(self):
+        path = ("docs/areas/console/adr/"
+                "042-a-manager-posts-lists-and-withdraws-short-notices-for-its-project.md")
+        first = (REPO_ROOT / path).read_text().splitlines()[0]
+        self.assertEqual(first, "# ADR-console-042 \u2014 A manager posts, lists and withdraws "
+                                "short notices for its project")
+        adr = self.doc(path)
+        for needle in ("notice.posted", "notice.withdrawn", "schema 10", "POST /api/notice",
+                       "POST /api/notices", "POST /api/withdraw-notice", "280", "200", "140",
+                       "never approval", "ADR-console-008", "ADR-console-009",
+                       "ADR-console-019", "#1117"):
+            with self.subTest(needle):
+                self.assertIn(needle, adr)
+        base = "docs/areas/console/adr/"
+        self.assertIn("POST /api/withdraw-notice", self.doc(
+            base + "008-only-the-page-writes-with-a-token-and-its-origin.md"))
+        self.assertIn("ADR-console-042", self.doc(
+            base + "008-only-the-page-writes-with-a-token-and-its-origin.md"))
+        self.assertIn("schema 10", self.doc(base + "009-events-are-kept-for-90-days.md"))
+        context = self.doc("docs/areas/console/CONTEXT.md")
+        self.assertIn("**Notice**:", context)
+        self.assertIn("ADR-console-042", context)
 
     def test_the_release_result_adr_limits_one_mutation_to_the_forge_adapter(self):
         text = self.doc("docs/areas/release/adr/005-adapters-never-claim-success.md")
