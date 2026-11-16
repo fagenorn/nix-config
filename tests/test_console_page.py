@@ -8424,6 +8424,15 @@ class PageReviewTest(unittest.TestCase):
         self.assertEqual([full(n) for n in with_class(lead_of(kept), "pic-line")],
                          ["Before, 1440 px", "After, 1440 px"])
 
+    def test_a_review_cards_detail_shows_the_measured_tail_only_when_its_fold_is_opened(self) -> None:
+        tail = "the owner judges the PNG screenshots"
+        card = {**review_item("A"), "detail": f"The card looks right - measured: {tail}"}
+        closed, opened = render([START, {"frame": frame([card])}, {"snapshot": True},
+                                 {"open": "check:owner/p00#A"}, {"snapshot": True}])
+        self.assertIn("Show the check", visible_text(closed["inbox"]))
+        self.assertNotIn(tail, visible_text(closed["inbox"]))
+        self.assertIn(tail, visible_text(opened["inbox"]))
+
     def test_a_manual_check_keeps_passed_failed_and_send_note(self) -> None:
         (snap,) = render([START, {"frame": frame([check_item("B", "manual-check")])},
                           {"snapshot": True}])

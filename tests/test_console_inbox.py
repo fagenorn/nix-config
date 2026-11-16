@@ -549,7 +549,7 @@ class HeldReviewTest(unittest.TestCase):
         return {"key": f"{SLUG}#{issue}/ac{index}", "project_id": PROJECT, "repo": SLUG, "issue": issue,
                 "comment_id": None, "url": f"https://github.com/{SLUG}/issues/{issue}",
                 "reason": "held-review", "kind": "owner-review", "question": heading or text, "criterion_text": text,
-                "detail": "",
+                "detail": text,
                 "check_id": "", "reading": "", "questions": [], "items": [], "answers": ["passed", "note"],
                 "paid": False, "confirm": "", "answered": False, "held_work": held_work,
                 "version": canonical.telemetry_digest({"issue": issue, "index": index, "kind": "human",
@@ -627,6 +627,13 @@ class HeldReviewTest(unittest.TestCase):
                 node = held_issue(7, ac_body(f"- [ ] [human] {text}"))
                 item, = inbox.items_from_node(PROJECT, SLUG, node)
                 self.assertEqual((item["question"], item["criterion_text"]), (heading, text))
+
+    def test_the_detail_keeps_the_whole_text_with_the_measured_tail(self):
+        for dash in ("\u2014", "-", "\u2013"):
+            text = f"The cards look right at 1440 px {dash} measured: the owner judges the PNG screenshots under /x"
+            with self.subTest(dash):
+                item, = inbox.items_from_node(PROJECT, SLUG, held_issue(7, ac_body(f"- [ ] [human] {text}")))
+                self.assertEqual((item["question"], item["detail"]), ("The cards look right at 1440 px", text))
 
     def test_a_word_with_a_slash_that_names_no_path_stays_in_the_heading(self):
         for text in ("The Approve/Not yet buttons both work", "Light/dark themes both look right",

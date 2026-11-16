@@ -52,7 +52,8 @@ equals, case-insensitively, the `ac` of a check of the newest block of a trusted
 Each remaining one raises one review item, keyed `<slug>#<issue>/ac<index>`,
 with `reason` `held-review`, `kind` `owner-review`, `answers` `["passed", "note"]`, `comment_id` None,
 `criterion` its index and `version` `criterion_version` (a digest of issue, index, kind and text, never the
-tick), plus the `check_id` `""`, `reading` `""` and `detail` `""` of an owner check. Its `question`, the card's
+tick), plus the `check_id` `""` and `reading` `""` of an owner check and a `detail` that is the criterion's whole text,
+measured tail included, which the card shows in its "Show the check" fold. Its `question`, the card's
 heading and the digest line, is the criterion's text cut before its first measured tail (a whitespace,
 any dash, whitespace, `measured:`, case-insensitive: ` \u2014 measured:` and ` - measured:`), without any word that names a PNG file or a folder (a
 `.png` name, or a word with a `/` that starts with `/`, `~/`, `./` or `../`, or ends with `/`, and has no `://`;
@@ -368,7 +369,7 @@ def _review_item(project_id: str, slug: str, issue: int, held: int, criterion: C
         "key": review_key(slug, issue, criterion.index), "project_id": project_id, "repo": slug,
         "issue": issue, "comment_id": None, "url": f"https://github.com/{slug}/issues/{issue}",
         "reason": REVIEW_REASON, "kind": REVIEW_KIND, "question": heading_text(criterion.text),
-        "criterion_text": criterion.text, "detail": "",
+        "criterion_text": criterion.text, "detail": criterion.text,
         "check_id": "", "reading": "", "questions": [], "items": [], "answers": list(REVIEW_ANSWERS),
         "paid": False, "confirm": "", "answered": False, "held_work": held,
         "version": criterion_version(issue, criterion), "criterion": criterion.index,
