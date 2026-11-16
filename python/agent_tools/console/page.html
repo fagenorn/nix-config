@@ -2028,7 +2028,7 @@ function itemId(item) {
 function isQuestion(item) {
   return item.reason === "question";
 }
-// The shared gallery for any card (ADR-console-038), also drawn by the brief card and the report (ADR-console-040): each picture is fetched once with the page token and shown from an object URL.
+// The shared gallery for any card (ADR-console-038), also drawn by the brief card and the report (ADR-console-041): each picture is fetched once with the page token and shown from an object URL.
 const pictureCache = new Map();
 function pictureSequence(pictures) {
   if (!Array.isArray(pictures)) return [];

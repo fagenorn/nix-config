@@ -38,7 +38,7 @@ The sentence or two the owner states on the page for one registered project, kep
 _Avoid_: task, request
 
 **Brief**:
-The manager's answer to a goal: a title of at most 60 characters that names the sprint, what done looks like, what is excluded, the slices, the risks and what it expects to ask. It waits in the inbox until the owner approves it, which starts the sprint, or answers it with a reply; a newer brief replaces it (ADR-console-013, ADR-console-027). It may carry up to eight pictures, each with a line, shown as thumbnails on its card and full size in the viewer (ADR-console-040).
+The manager's answer to a goal: a title of at most 60 characters that names the sprint, what done looks like, what is excluded, the slices, the risks and what it expects to ask. It waits in the inbox until the owner approves it, which starts the sprint, or answers it with a reply; a newer brief replaces it (ADR-console-013, ADR-console-027). It may carry up to eight pictures, each with a line, shown as thumbnails on its card and full size in the viewer (ADR-console-041).
 _Avoid_: plan, proposal
 
 **Manager**:
@@ -54,7 +54,7 @@ The questions a manager sends at once with `sprint ask`: each leads with its ask
 _Avoid_: poll, survey
 
 **Picture**:
-One PNG a manager sent to the console, kept by the console under its SHA-256 hash and shown only to the page; one nobody references is removed a day after it was last sent (ADR-console-036). A question's, a brief's and a report's pictures are shown as thumbnails on their card (a report's in its Detail fold) and full size in a modal viewer (ADR-console-038, ADR-console-040).
+One PNG a manager sent to the console, kept by the console under its SHA-256 hash and shown only to the page; one nobody references is removed a day after it was last sent (ADR-console-036). A question's, a brief's and a report's pictures are shown as thumbnails on their card (a report's in its Detail fold) and full size in a modal viewer (ADR-console-038, ADR-console-041).
 _Avoid_: screenshot file, attachment
 
 **Nudge**:
@@ -66,7 +66,7 @@ The console waking a gone manager in place, or starting a successor, while its s
 _Avoid_: restart loop, resurrection
 
 **Report**:
-The manager's fixed-shape account after each batch and on any change of state: a status line, each issue's stage or outcome, the inbox items it raised, the next step and the milestone; the closing report ends the sprint (ADR-console-014, ADR-console-018). It may carry up to eight pictures, each with a line, shown as thumbnails in its Detail fold and full size in the viewer (ADR-console-040).
+The manager's fixed-shape account after each batch and on any change of state: a status line, each issue's stage or outcome, the inbox items it raised, the next step and the milestone; the closing report ends the sprint (ADR-console-014, ADR-console-018). It may carry up to eight pictures, each with a line, shown as thumbnails in its Detail fold and full size in the viewer (ADR-console-041).
 _Avoid_: update, log
 
 **Sprint**:

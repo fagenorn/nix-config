@@ -1168,6 +1168,15 @@ class DocsTreeTest(unittest.TestCase):
                       "screenshots folder must carry a picture, or the round is refused with "
                       "the question named (ADR-console-039).", entry)
 
+    def test_an_adr_number_is_used_once_within_its_area(self):
+        for area in sorted((REPO_ROOT / "docs/areas").iterdir()):
+            seen: dict[str, str] = {}
+            for adr in sorted((area / "adr").glob("[0-9][0-9][0-9]-*.md")):
+                number = adr.name[:3]
+                with self.subTest(area=area.name, number=number):
+                    self.assertNotIn(number, seen, f"{seen.get(number)} and {adr.name}")
+                seen[number] = adr.name
+
     def test_adr_console_040_records_taking_back_and_replacing_a_question(self):
         path = ("docs/areas/console/adr/"
                 "040-a-manager-takes-back-or-replaces-its-own-open-question.md")

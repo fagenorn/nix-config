@@ -1659,12 +1659,12 @@ class PictureDocsTest(unittest.TestCase):
             entry = context[context.index(term):].split("\n\n")[0]
             self.assertIn("ADR-console-038", entry, term)
 
-    def test_adr_040_records_the_brief_and_report_pictures(self):
+    def test_adr_041_records_the_brief_and_report_pictures(self):
         adr = "docs/areas/console/adr/"
-        name = adr + "040-a-managers-brief-and-report-show-their-pictures-on-the-card.md"
+        name = adr + "041-a-managers-brief-and-report-show-their-pictures-on-the-card.md"
         self.assertEqual(
             (ROOT / name).read_text().splitlines()[0],
-            "# ADR-console-040 — A manager's brief and report show their pictures on the card")
+            "# ADR-console-041 — A manager's brief and report show their pictures on the card")
         text = self.doc(name)
         for needle in ("#1091", "`pictures`", "8", "140", "before", "after", "brief.sent",
                        "sprint.reported", "dry_run", "Detail", "recap", "ADR-console-013",
@@ -1677,8 +1677,8 @@ class PictureDocsTest(unittest.TestCase):
             with self.subTest(path):
                 lines = (ROOT / adr / path).read_text().splitlines()
                 self.assertEqual(next(r for r in lines if r.startswith("- **Status:**")),
-                                 "- **Status:** accepted; amended by ADR-console-040")
+                                 "- **Status:** accepted; amended by ADR-console-041")
         context = (ROOT / "docs/areas/console/CONTEXT.md").read_text()
         for term in ("**Brief**:", "**Report**:", "**Picture**:"):
             entry = context[context.index(term):].split("\n\n")[0]
-            self.assertIn("ADR-console-040", entry, term)
+            self.assertIn("ADR-console-041", entry, term)

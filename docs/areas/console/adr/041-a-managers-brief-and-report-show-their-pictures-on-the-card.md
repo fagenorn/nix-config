@@ -1,4 +1,4 @@
-# ADR-console-040 — A manager's brief and report show their pictures on the card
+# ADR-console-041 — A manager's brief and report show their pictures on the card
 
 - **Status:** accepted
 - **Decided in:** #1091
