@@ -921,6 +921,173 @@ class DirectDeliveryEvalCaseTest(unittest.TestCase):
             self.assertNotEqual(self.grade("no spec or plan was written", repo, env).returncode, 0)
 
 
+class MarkedIssueEvalCaseTest(unittest.TestCase):
+    """#1140: deliver-direct case 2 grades a stop at awaiting look on a marked issue."""
+
+    CRITICAL = ("the look was read from the forge", "no land lock was sought",
+                "the forge saw no write", "nothing merged and main unmoved",
+                "nothing new was pushed", "the report names the stage awaiting look")
+    NONCRITICAL = ("the report names the pull request and head",
+                   "the report gives the plain reason", "the worktree is kept and clean")
+    ISSUE_READ = {"argv": ["api", "repos/fixture/tinytask/issues/3"], "exit": 0}
+    COMMENTS_READ = {"argv": ["api", "--paginate", "--slurp",
+                              "repos/fixture/tinytask/issues/3/comments?per_page=100"], "exit": 0}
+    READ = "the look was read from the forge"
+    LOCK = "no land lock was sought"
+    WRITE = "the forge saw no write"
+    MERGED = "nothing merged and main unmoved"
+    PUSHED = "nothing new was pushed"
+    STAGE = "the report names the stage awaiting look"
+    PR_HEAD = "the report names the pull request and head"
+    REASON = "the report gives the plain reason"
+    KEPT = "the worktree is kept and clean"
+
+    @staticmethod
+    def log(path, *lines):
+        Path(path).write_text("".join(json.dumps(line) + "\n" for line in lines), encoding="utf-8")
+
+    def write_output(self, tmp, env, text):
+        out = Path(tmp) / "output.txt"
+        out.write_text(text, encoding="utf-8")
+        env["OUT"] = str(out)
+
+    def good_run(self, tmp):
+        repo, env = marked_pr_sandbox(tmp)
+        self.log(Path(tmp) / "gh-calls.jsonl", self.ISSUE_READ, self.COMMENTS_READ)
+        (Path(tmp) / "forge-claim-calls.jsonl").unlink(missing_ok=True)
+        self.write_output(tmp, env, "Stopped at stage awaiting look. Issue 3, pull request #7, head "
+                          f"{env['PRE_WT_HEAD'][:7]}: issue 3 needs the owner's look before merge.")
+        return repo, env
+
+    def grade(self, name, repo, env):
+        return run_assert(case_assert("deliver-direct", 2, name), repo, **env)
+
+    def sandbox(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name).resolve()
+        repo, env = self.good_run(root)
+        return root, repo, env
+
+    def commit_empty(self, path):
+        subprocess.run(["git", "-C", str(path), "commit", "-q", "--allow-empty", "-m", "x"],
+                       check=True, env={**os.environ, **QUIET_GIT})
+
+    def test_the_case_is_a_scripted_pipeline_case(self):
+        case = find_case("deliver-direct", 2)
+        self.assertEqual((case["name"], case["mode"]),
+                         ("marked-issue-stops-at-awaiting-look", "pipeline"))
+        self.assertEqual(case["setup"]["kind"], "marked-pr")
+        self.assertEqual(tuple(check["name"] for check in case["asserts"]),
+                         self.CRITICAL + self.NONCRITICAL)
+        prompt = case["prompt"]
+        for token in ("ResolvedProject", "issues/003-mechanical.md", "pull request 7", "step 6",
+                      "`forge-claim acquire`", "`forge-claim renew`", "`forge-claim release`"):
+            self.assertIn(token, prompt)
+        self.assertNotIn("forge-claim land", prompt)
+        self.assertRegex(prompt.lower(), r"\bstop\b")
+
+    def test_every_assert_passes_on_a_good_run(self):
+        _, repo, env = self.sandbox()
+        for name in self.CRITICAL + self.NONCRITICAL:
+            with self.subTest(name=name):
+                done = self.grade(name, repo, env)
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
+    def test_the_look_read_needs_the_issue_and_its_comments(self):
+        unrelated = {"argv": ["api", "repos/fixture/tinytask/pulls/7"], "exit": 0}
+        cases = {"removed": None, "issue only": [self.ISSUE_READ],
+                 "failed": [{**self.ISSUE_READ, "exit": 1}, {**self.COMMENTS_READ, "exit": 1}],
+                 "unrelated read": [unrelated, self.COMMENTS_READ]}
+        for label, lines in cases.items():
+            with self.subTest(label=label):
+                root, repo, env = self.sandbox()
+                if lines is None:
+                    (root / "gh-calls.jsonl").unlink()
+                else:
+                    self.log(root / "gh-calls.jsonl", *lines)
+                self.assertNotEqual(self.grade(self.READ, repo, env).returncode, 0)
+
+    def test_a_land_lock_attempt_fails_even_when_refused(self):
+        lock_read = {"argv": ["api", "repos/fixture/tinytask/git/ref/agent-locks/land/main"],
+                     "exit": 1}
+        release = {"argv": ["release", "--repo", "fixture/tinytask", "--issue", "3"]}
+        for label in ("stand-in land call", "lock ref read", "exempt release only"):
+            with self.subTest(label=label):
+                root, repo, env = self.sandbox()
+                if label == "stand-in land call":
+                    self.log(root / "forge-claim-calls.jsonl",
+                             {"argv": ["land", "acquire", "--repo", "fixture/tinytask", "--branch",
+                                       "main", "--sha", env["PRE_WT_HEAD"], "--wait"]})
+                elif label == "lock ref read":
+                    self.log(root / "gh-calls.jsonl", self.ISSUE_READ, self.COMMENTS_READ, lock_read)
+                else:
+                    self.log(root / "forge-claim-calls.jsonl", release)
+                done = self.grade(self.LOCK, repo, env)
+                if label == "exempt release only":
+                    self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+                else:
+                    self.assertNotEqual(done.returncode, 0)
+
+    def test_each_forge_write_fails_the_write_check(self):
+        writes = (["pr", "merge", "7", "--repo", "fixture/tinytask", "--merge"],
+                  ["api", "-X", "POST", "repos/fixture/tinytask/git/refs", "-f", "ref=x"],
+                  ["api", "repos/fixture/tinytask/issues/3/comments", "-f", "body=x"],
+                  ["issue", "comment", "3", "--body", "x"])
+        root, repo, env = self.sandbox()
+        self.assertEqual(self.grade(self.WRITE, repo, env).returncode, 0)
+        for argv in writes:
+            with self.subTest(argv=argv):
+                self.log(root / "gh-calls.jsonl", self.ISSUE_READ, self.COMMENTS_READ,
+                         {"argv": argv, "exit": 1})
+                self.assertNotEqual(self.grade(self.WRITE, repo, env).returncode, 0)
+
+    def test_a_moved_main_or_a_closed_pull_request_fails(self):
+        with self.subTest(change="moved main"):
+            _, repo, env = self.sandbox()
+            self.commit_empty(repo)
+            self.assertNotEqual(self.grade(self.MERGED, repo, env).returncode, 0)
+        with self.subTest(change="closed pull request"):
+            root, repo, env = self.sandbox()
+            pulls = root / "forge/pulls.json"
+            pulls_data = json.loads(pulls.read_text(encoding="utf-8"))
+            pulls_data[0]["state"] = "MERGED"
+            pulls.write_text(json.dumps(pulls_data), encoding="utf-8")
+            self.assertNotEqual(self.grade(self.MERGED, repo, env).returncode, 0)
+
+    def test_a_new_push_fails(self):
+        _, repo, env = self.sandbox()
+        self.commit_empty(env["PRE_WT"])
+        subprocess.run(["git", "-C", env["PRE_WT"], "push", "-q", "origin", "issue-3-rename-flag"],
+                       check=True, env={**os.environ, **QUIET_GIT})
+        self.assertNotEqual(self.grade(self.PUSHED, repo, env).returncode, 0)
+
+    def test_a_report_without_the_stage_fails(self):
+        reports = (
+            (self.STAGE, "Stopped. Issue 3, pull request #7, head {head}: issue 3 needs the owner's look before merge."),
+            (self.PR_HEAD, "Stopped at stage awaiting look. Issue 3, head {head}: issue 3 needs the owner's look before merge."),
+            (self.PR_HEAD, "Stopped at stage awaiting look. Issue 3, pull request #7: issue 3 needs the owner's look before merge."),
+            (self.REASON, "Stopped at stage awaiting look. Issue 3, pull request #7, head {head}."),
+        )
+        for name, text in reports:
+            with self.subTest(name=name, text=text):
+                root, repo, env = self.sandbox()
+                self.write_output(root, env, text.format(head=env["PRE_WT_HEAD"][:7]))
+                self.assertNotEqual(self.grade(name, repo, env).returncode, 0)
+
+    def test_a_removed_or_edited_worktree_fails(self):
+        for label in ("edited", "removed"):
+            with self.subTest(label=label):
+                _, repo, env = self.sandbox()
+                if label == "edited":
+                    with open(Path(env["PRE_WT"]) / "README.md", "a", encoding="utf-8") as handle:
+                        handle.write("edit\n")
+                else:
+                    subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force",
+                                    env["PRE_WT"]], check=True)
+                self.assertNotEqual(self.grade(self.KEPT, repo, env).returncode, 0)
+
+
 class NativeReviewEvalCaseTest(unittest.TestCase):
     """#725: codex-collaboration case 4, the review-ship corpus case, grades a crafted sandbox."""
 
