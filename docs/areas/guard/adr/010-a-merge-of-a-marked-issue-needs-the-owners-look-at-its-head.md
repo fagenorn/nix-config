@@ -1,4 +1,4 @@
-# ADR-guard-009 — A merge of a marked issue needs the owner's look at its head
+# ADR-guard-010 — A merge of a marked issue needs the owner's look at its head
 
 - **Status:** accepted
 - **Decided in:** issue 1138
