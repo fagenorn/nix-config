@@ -181,20 +181,22 @@ The top-level `registration` member (#1052, ADR-console-028, #1053, ADR-console-
 `register.view_entry` gives, copied, from the `registration` argument, and null when none is given:
 `{"root", "name", "project_id", "status": "running" | "done", "result", "outcome", "headline",
 "lines", "note", "at", "plan_id", "state", "questions", "refusal", "line", "refused", "draft",
-"draft_more", "adoption", "approve"}`, the owner's latest registration of a repository from the page (twenty
-keys), with the plan's plain open questions and, when the plan refused the last answer, the
+"draft_more", "adoption", "approve", "cancel"}`, the owner's latest registration of a repository from the page
+(twenty-one keys), with the plan's plain open questions and, when the plan refused the last answer, the
 refusal's text and the question it answered (`refused`, `{"id", "subject"}`); `draft` is the drafted
 contract's lines (`contract_draft.shown`, ADR-console-031) when the latest row holds a draft, else
 null; `draft_more` is the counted line for the shown settings outside the main ones
 (`contract_draft.more_line`), null when there are none or no draft. `adoption` is the approved adoption's `approve.entry` (#1054) and `approve` the action the
-page offers (`approve`, `retry` or null); the `line` is the adoption's headline while there is one.
+page offers (`approve`, `retry` or null); with an adoption the `lines` are `[]`, `draft` and `draft_more` are
+null, and the `line` is the adoption's headline, then its note (ADR-console-037).
 The member is the entry given, copied, under three rules (#1085, ADR-console-035). It is null when
 the given entry is null, or is `done` and its `root` is the root of a registered project: the
 project's entry and the digest say so, and a finished result of a root now registered has nothing
 left to say. Else, when any retry, apply, confirm or failure item has a reason in `ASKING_REASONS`
 and the entry's `root`, a card already says what is asked, so the entry's `line` is
 `NEEDS_LINE` ("Register <name>: needs you"), its `lines` are `[]` and its `note`, `adoption`,
-`draft` and `draft_more` null. Otherwise it is a plain copy. A plan question (reason `register`) never reduces the line.
+`draft` and `draft_more` null. Otherwise it is a plain copy. A plan question (reason `register`) never reduces the line. `cancel` (#1088) is
+true when the page may offer Cancel registration (`register.cancellable`, no run under way); the reduced entry keeps it.
 
 The top-level `pin` member (#1029) is the pin note `pin.note` gives, copied, from the `pin`
 argument, and null with no pin. The top-level `pin_launches` member is the sorted list of profiles

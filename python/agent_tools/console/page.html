@@ -81,9 +81,9 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 #inbox { margin-top: 40px; max-width: 44rem; }
 .card { padding: 0 0 18px; }
 .card.lead { background: var(--s0); border: 1px solid var(--hair); border-radius: 16px; padding: 22px 32px 20px; margin: 0 -32px; box-shadow: 0 28px 48px -30px rgba(8, 9, 16, .9), 0 3px 8px -3px rgba(8, 9, 16, .45); }
-.card .q { margin-top: 10px; font: 600 1.5rem/1.3 var(--display); letter-spacing: -.012em; text-wrap: balance; }
+.card .q { margin-top: 10px; font: 600 1.5rem/1.3 var(--display); letter-spacing: -.012em; text-wrap: pretty; }
 .card .q.reg { font-size: 1.25rem; }
-.rest .q.reg { margin: 6px 0 0; font: 600 1rem/1.4 var(--display); letter-spacing: -.012em; text-wrap: balance; }
+.rest .q.reg { margin: 6px 0 0; font: 600 1rem/1.4 var(--display); letter-spacing: -.012em; text-wrap: pretty; }
 .more { font-size: .8125rem; color: var(--ov2); }
 .card .more { display: block; margin-top: 4px; }
 .card .context { margin-top: 8px; font-size: .9375rem; line-height: 1.5; color: var(--sub0); overflow-wrap: anywhere; }
@@ -144,6 +144,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .abox textarea { min-height: 4.5rem; resize: vertical; }
 .opt { display: grid; grid-template-columns: 22px minmax(0, 1fr) auto; align-items: center; column-gap: 14px; width: 100%; padding: 9px 14px; border-radius: 10px; border: 1px solid transparent; }
 .opt .ot { font-size: 1.0625rem; line-height: 1.4; font-weight: 500; overflow-wrap: anywhere; }
+.seg { display: inline-block; max-width: 100%; overflow-wrap: anywhere; }
 .opt kbd { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; border: 1px solid var(--s2); border-radius: 6px; font: inherit; font-size: .75rem; font-weight: 600; color: var(--sub1); }
 .opt .rec { font-size: .75rem; font-weight: 600; color: var(--sub1); border: 1px solid var(--s2); border-radius: 999px; padding: 1px 8px; white-space: nowrap; }
 .opt.picked { border-color: var(--lav); background: rgba(183, 189, 248, .10); }
@@ -323,6 +324,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .register-result p, .register-result ul { margin: 0 0 6px; }
 .register-line { font-size: .84375rem; color: var(--text); }
 .register-lines { padding-left: 1.2em; color: var(--sub0); }
+.register-withdraw-reason { color: var(--red); margin-left: 8px; }
 .apply-lines { padding-left: 1.2em; color: var(--sub0); }
 .register-draft { list-style: none; padding-left: 0; color: var(--sub0); }
 .register-draft li { margin-bottom: 6px; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; }
@@ -341,10 +343,6 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .draft-edit { flex: 1 1 12rem; min-width: 0; max-width: 100%; box-sizing: border-box; padding: 4px 8px; font: inherit; color: var(--text); background: var(--mantle); border: 1px solid var(--s1); border-radius: 8px; }
 .abox .draft-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 8px; margin-top: 6px; }
 .abox .draft-row input { flex: 1 1 14rem; width: auto; min-width: 0; margin-top: 0; box-sizing: border-box; }
-.register-note { color: var(--ov2); }
-.register-adoption { margin-top: 8px; }
-.register-adoption-lines { padding-left: 1.2em; color: var(--sub0); }
-.register-pr-link { color: var(--blue); }
 .card .q.reg, .rest .q.reg { white-space: pre-line; }
 .s-working { color: var(--green); }
 .s-waiting_answer, .s-waiting_permission { color: var(--yellow); }
@@ -414,13 +412,30 @@ function el(tag, cls, text) {
   if (text !== undefined) node.textContent = text;
   return node;
 }
-// Appends the text to the node as one span per segment, split after every slash, with a wbr between segments, so a long path breaks at a slash and the text read back is unchanged (ADR-console-035).
+// Appends the text to the node so a path or project id breaks only at a slash and the text read back is unchanged (ADR-console-037). A text with no slash is one span. Otherwise a word holding a slash is one atomic span.seg per segment (split after each slash) with a wbr between the segments of that word, and the other words and spaces between such words are plain spans.
 function pathWords(node, text) {
-  const segments = String(text).match(/[^/]*\/|[^/]+/g) || [];
-  segments.forEach((segment, i) => {
-    if (i > 0) node.appendChild(el("wbr"));
-    node.appendChild(el("span", "", segment));
-  });
+  const value = String(text);
+  if (!value.includes("/")) {
+    node.appendChild(el("span", "", value));
+    return node;
+  }
+  let plain = "";
+  const flush = () => {
+    if (plain !== "") node.appendChild(el("span", "", plain));
+    plain = "";
+  };
+  for (const run of value.split(/(\s+)/)) {
+    if (!run.includes("/")) {
+      plain += run;
+      continue;
+    }
+    flush();
+    run.match(/[^/]*\/|[^/]+/g).forEach((segment, i) => {
+      if (i > 0) node.appendChild(el("wbr"));
+      node.appendChild(el("span", "seg", segment));
+    });
+  }
+  flush();
   return node;
 }
 function icon(id) {
@@ -1000,8 +1015,8 @@ function isAdoption(item) {
 }
 function adoptionCard(item) {
   const card = el("article", "card adoption");
-  card.appendChild(el("p", "q", item.headline));
-  card.appendChild(phrase("p", "meta", (item.project_id || item.name) + " \u00b7 waiting ", timeEl("since", item.waiting_since, "")));
+  card.appendChild(pathWords(el("p", "q"), item.headline));
+  card.appendChild(phrase("p", "meta", pathWords(el("span", "proj"), item.project_id || item.name), " \u00b7 waiting ", timeEl("since", item.waiting_since, "")));
   if (isHttps(item.url)) {
     const link = el("a", "pr-link", "Open the pull request");
     link.href = item.url;
@@ -1884,8 +1899,8 @@ function headLine(item) {
   line.appendChild(kindWords(item));
   const label = checkLabel(item);
   if (label !== null) line.appendChild(label);
-  if (!isRegister(item)) line.appendChild(el("span", "proj", item.project_id));
-  if (isQuestion(item) || isRegister(item)) line.appendChild(el("span", "sprint-title", item.title));
+  if (!isRegister(item)) line.appendChild(pathWords(el("span", "proj"), item.project_id));
+  if (isQuestion(item) || isRegister(item)) line.appendChild(pathWords(el("span", "sprint-title"), item.title));
   line.appendChild(phrase("span", "wait", "waiting ", timeEl("since", item.waiting_since, "")));
   return line;
 }
@@ -2123,6 +2138,10 @@ function start(item, state) {
     const value = item.values[state.picks[0]];
     if (value === "apply") return begin(item, state, { adopt: true, body, words: "Answered, applying" });
     if (value === "retry") return begin(item, state, { adopt: true, body, words: "Answered, trying again" });
+    if (value === "signing_off") {
+      const change = { plan_id: item.plan_id, id: "contract-draft", subject: "commit-signed", value: "no" };
+      return begin(item, state, { plan: true, body: change, words: "Answered, turning signed commits off" });
+    }
     return begin(item, state, { defer: true, body, words: "Set aside until the plan changes" });
   }
   if (isConfirm(item)) {
@@ -2400,14 +2419,14 @@ function drawBrief(rec, item, lead) {
   rec.card.className = lead ? "card brief lead" : "card brief";
   if (lead) {
     rec.top.replaceChildren(
-      kindWords(item), el("span", "proj", item.project_id),
+      kindWords(item), pathWords(el("span", "proj"), item.project_id),
       phrase("span", "wait", "waiting ", timeEl("since", item.waiting_since, "")),
     );
     rec.seen = null;
   } else {
     rec.top.replaceChildren();
     rec.rowHead.replaceChildren(
-      kindWords(item), el("b", "", item.title), el("span", "lm", item.project_id),
+      kindWords(item), el("b", "", item.title), pathWords(el("span", "lm"), item.project_id),
       phrase("span", "lw", "waiting ", timeEl("since", item.waiting_since, "")),
     );
     // A row opens itself once per change of its approval or reply phase; the owner's own open or close stands between.
@@ -2524,6 +2543,7 @@ function actionLine(item, state, lead) {
     const words = soleOption(item) ? item.questions[0].options[0] : "Send answer";
     const send = actionButton(lead ? "send primary needs" : "send", words, () => { if (start(item, state)) redraw(); });
     if (!picksComplete(item, state) || planBusy(item, state)) send.setAttribute("disabled", "");
+    send.replaceChildren(pathWords(el("span"), words));
     act.appendChild(send);
   }
   if (lead && !isQuestion(item) && !isRegister(item)) act.appendChild(detailFold(item));
@@ -2719,7 +2739,7 @@ function boxState(item) {
 function leadItem(item) {
   const card = el("article", "card lead");
   card.appendChild(headLine(item));
-  card.appendChild(el("h2", isRegister(item) ? "q reg" : "q", item.headline));
+  card.appendChild(pathWords(el("h2", isRegister(item) ? "q reg" : "q"), item.headline));
   if (isQuestion(item) && typeof item.context === "string") card.appendChild(el("p", "context", item.context));
   const more = moreWords(item);
   if (more !== null) card.appendChild(more);
@@ -2741,14 +2761,14 @@ function itemLine(item) {
   if (isRegister(item)) {
     // A register row reads like its lead card: title, then the ask (ADR-console-030 D5).
     line.appendChild(headLine(item));
-    line.appendChild(el("p", "q reg", item.headline));
+    line.appendChild(pathWords(el("p", "q reg"), item.headline));
   } else {
     const head = el("p", "row-head");
     head.appendChild(kindWords(item));
     const label = checkLabel(item);
     if (label !== null) head.appendChild(label);
     head.appendChild(el("b", "", item.headline));
-    const lm = phrase("span", "lm", item.project_id + " \u00b7 " + (isQuestion(item) ? item.title : holds(item)));
+    const lm = pathWords(el("span", "lm"), item.project_id + " \u00b7 " + (isQuestion(item) ? item.title : holds(item)));
     if (item.stale) {
       lm.appendChild(el("span", "", " \u00b7 "));
       lm.appendChild(phrase("span", "read-at", "read ", timeEl("ago", item.read_at, "")));
@@ -3532,7 +3552,6 @@ function renderAccountAdd(view) {
 renderAccountAdd(null);
 // The register control is built once as well (ADR-console-028 D8): a frame never replaces the path field, only the parts around it.
 const registerState = { phase: "closed", posting: false, failure: "", shown: "" };
-let registerDismissed;
 let registerResultKey = "";
 const registerBox = document.getElementById("register");
 const registerForm = el("div", "register-form");
@@ -3640,6 +3659,8 @@ function changeBox(registration, entry, change) {
         change.choice = option.value;
         renderRegister(lastView);
       });
+      button.replaceChildren();
+      pathWords(button, option.label);
       button.setAttribute("aria-pressed", String(change.choice === option.value));
       button.disabled = change.posting;
       picks.push(button);
@@ -3694,6 +3715,8 @@ function draftRow(registration, entry, folded) {
     const retry = refusedHere && sent !== undefined && sent.plan_id === registration.plan_id ? sent.value : undefined;
     if (folded) {
       const pick = actionButton("draft-pick", entry.line, () => openChange(entry, retry));
+      pick.replaceChildren();
+      pathWords(pick, entry.line);
       pick.setAttribute("aria-label", "Change: " + entry.line);
       row.appendChild(pick);
     } else {
@@ -3732,6 +3755,26 @@ function drawDraft(registration) {
   }
   return parts;
 }
+// Cancel registration: one post at a time; the refusal's text is the console's own and lasts as long as the registration it answered.
+const registerWithdraw = { key: null, posting: false, failure: "" };
+async function withdrawRegistration(registration) {
+  if (registerWithdraw.posting) return;
+  const key = registerWithdraw.key;
+  registerWithdraw.posting = true;
+  registerWithdraw.failure = "";
+  renderRegister(lastView);
+  let reason = "";
+  try {
+    const response = await fetch("/api/register-cancel", { method: "POST", headers: stallHeaders(), body: JSON.stringify({ root: registration.root }) });
+    if (response.status !== 204) reason = (await response.text()).trim() || NO_REASON;
+  } catch (error) {
+    console.error(error);
+    reason = "the console did not answer";
+  }
+  registerWithdraw.posting = false;
+  if (registerWithdraw.key === key) registerWithdraw.failure = reason;
+  renderRegister(lastView);
+}
 // The registration's words are the view's: the page shows them verbatim and composes none.
 function drawRegisterResult(registration) {
   const parts = [el("p", "register-line", registration.line)];
@@ -3745,32 +3788,11 @@ function drawRegisterResult(registration) {
   registerFields = new Map();
   if (drafted.length > 0) parts.push(...drawDraft({ ...registration, draft: drafted }));
   else registerMore = null;
-  if (registration.status === "done") {
-    const adoption = registration.adoption;
-    if (adoption !== null && typeof adoption === "object") {
-      const inner = [];
-      if (adoption.lines.length > 0) {
-        const list = el("ul", "register-adoption-lines");
-        for (const line of adoption.lines) list.appendChild(el("li", "", line));
-        inner.push(list);
-      }
-      if (adoption.note) inner.push(el("p", "register-note", adoption.note));
-      if (isHttps(adoption.url)) {
-        const link = el("a", "register-pr-link", "Open the pull request");
-        link.rel = "noreferrer";
-        link.href = adoption.url;
-        inner.push(link);
-      }
-      if (inner.length > 0) {
-        const box = el("div", "register-adoption");
-        for (const part of inner) box.appendChild(part);
-        parts.push(box);
-      }
-    }
-    parts.push(actionButton("register-close", "Close", () => {
-      registerDismissed = registration.at;
-      renderRegister(lastView);
-    }));
+  if (registration.status === "done" && registration.cancel === true) {
+    const withdraw = actionButton("register-withdraw", "Cancel registration", () => withdrawRegistration(registration));
+    withdraw.disabled = registerWithdraw.posting;
+    parts.push(withdraw);
+    if (registerWithdraw.failure !== "") parts.push(el("span", "register-withdraw-reason", registerWithdraw.failure));
   }
   registerResult.replaceChildren(...parts);
 }
@@ -3787,12 +3809,17 @@ function renderRegister(view) {
     registerForm.replaceChildren(...(naming ? [registerPath, registerSend, registerCancel, registerReason] : [registerOpen]));
   }
   if (registerReason.textContent !== reason) registerReason.textContent = reason;
-  const shown = registration !== null && !(registration.status === "done" && registration.at === registerDismissed);
+  const shown = registration !== null;
   if (!shown) {
     closeChange();
     registerMore = null;
   }
-  const key = shown ? JSON.stringify(registration) + "\n" + JSON.stringify(registerChange) : "";
+  const withdrawKey = shown ? registration.root + "\n" + registration.at : null;
+  if (registerWithdraw.key !== withdrawKey) {
+    registerWithdraw.key = withdrawKey;
+    registerWithdraw.failure = "";
+  }
+  const key = shown ? JSON.stringify(registration) + "\n" + JSON.stringify(registerChange) + "\n" + JSON.stringify(registerWithdraw) : "";
   if (key !== registerResultKey) {
     registerResultKey = key;
     if (shown) {

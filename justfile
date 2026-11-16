@@ -240,6 +240,7 @@ agent-workflow-tests *args:
     tests/test_console_reports.py \
     tests/test_console_screenshots.py \
     tests/test_console_sprint_command.py \
+    tests/test_console_pictures.py \
     tests/test_console_manager.py \
     tests/test_console_manager_service.py \
     tests/test_console_stops.py \

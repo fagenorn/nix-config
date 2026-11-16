@@ -74,10 +74,17 @@ Two kinds record an adoption the owner approved on the page (#1054): `ADOPTION_S
 `ADOPTION_DEFERRED` (`adoption.deferred`, #1073, `{"plan_id"}`, one per `Not now` the owner chooses
 on an apply card) is not in `KEPT_KINDS` either.
 
+`REGISTRATION_CANCELLED` (`registration.cancelled`, #1088, `{"by": "owner", "root", "plan_id"}`, one per
+Cancel registration the owner chooses, plus one per other failed apply of the same root) is not in `KEPT_KINDS`; the registration, deferral, adoption and
+folder-trust folds each drop what it names. `cancelled_registration(event)` reads it: `(root, plan_id)`
+for exactly that payload (`plan_id` null for a registration with none, a failed plan), else None.
+
 `ACCOUNT_ADDED` (`account.added`, one per account the owner adds from the page, #1027) is not in
 `KEPT_KINDS`. `ACCOUNT_REMOVAL` (`account.removal`, one per removal the owner confirms on the page,
 #1030) is not in `KEPT_KINDS`.
 `TRUST_GRANTED` (`trust.granted`, one per folder-trust grant the owner approved, #1078, `folder_trust.granted_row`)
+is not in `KEPT_KINDS`.
+`PICTURE_STORED` (`picture.stored`, one per picture a manager sent that the console accepted, #1089)
 is not in `KEPT_KINDS`.
 
 Another is kept in part (#1011): a session's profile is assigned by its `SESSION_SEEN` and
@@ -149,9 +156,11 @@ ADOPTION_STEP = "adoption.step"
 ADOPTION_PULL = "adoption.pull_request"
 ADOPTION_REGISTRATION = "adoption.registration"
 ADOPTION_DEFERRED = "adoption.deferred"
+REGISTRATION_CANCELLED = "registration.cancelled"
 SESSION_HOOK = "session.hook"
 SESSION_SEEN = "session.seen"
 SESSION_PROFILE = "session.profile"
+PICTURE_STORED = "picture.stored"
 # Rows of these kinds (the two goal kinds, the three brief kinds, the report
 # Rows of these kinds (the two goal kinds, the three brief kinds, the report
 # kind, the three message kinds, the two question kinds, the closing kind, the
@@ -233,6 +242,22 @@ class Event:
     kind: str
     project: str | None
     payload: dict
+
+
+def cancelled_registration(event: Event) -> tuple[str, str] | None:
+    """`(root, plan_id)` of a `REGISTRATION_CANCELLED` row with exactly the owner's payload, else None.
+
+    The plan id is a non-empty string, or JSON null for a registration that has none (a failed plan).
+    """
+    payload = event.payload
+    if event.kind != REGISTRATION_CANCELLED or not isinstance(payload, Mapping):
+        return None
+    root, plan_id = payload.get("root"), payload.get("plan_id")
+    if (payload != {"by": "owner", "root": root, "plan_id": plan_id}
+            or not isinstance(root, str) or not root
+            or not (plan_id is None or (isinstance(plan_id, str) and plan_id))):
+        return None
+    return (root, plan_id)
 
 
 def utc_now() -> str:

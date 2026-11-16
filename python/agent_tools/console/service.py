@@ -5,8 +5,9 @@ parameter names a host. `Host` must be `127.0.0.1:<port>` or `localhost:<port>`
 for the port actually bound, else the answer is `403` `text/plain`
 `loopback only`.
 
-Routes (every response carries `Cache-Control: no-store` and
-`X-Content-Type-Options: nosniff`, and every one but the stream `Content-Length`):
+Routes (every response carries `Cache-Control: no-store`, except a picture read's 200, which
+carries `Cache-Control: private`, and `X-Content-Type-Options: nosniff`, and every one but the
+stream `Content-Length`):
 
     GET /           200 text/html; charset=utf-8, the page, with `Content-Security-Policy: CSP`
     GET /api/state  200 application/json, the encoded view (see `view.py`)
@@ -31,22 +32,26 @@ Routes (every response carries `Cache-Control: no-store` and
     POST /api/plan-defer 204, a JSON body, the page answers Not now to an adoption's apply card (below)
     POST /api/register-confirm 204, a JSON body, the page answers the Register card of an adopted repository (below)
     POST /api/trust-check 204, a JSON body, the page answers a Check again card of a failed folder trust (below)
+    POST /api/register-cancel 204, a JSON body, the page cancels a registration that was not applied yet (below)
     POST /api/brief 200 application/json, a manager sends a sprint's brief (below)
     POST /api/report 200 application/json, a manager sends a sprint's report (below)
     POST /api/close 200 application/json, a manager sends a sprint's closing report (below)
     POST /api/inbox 200 application/json, a manager reads a sprint's unread messages (below)
     POST /api/message-reply 200 application/json, a manager answers one message (below)
     POST /api/ask   200 application/json, a manager sends a round of questions (below)
+    POST /api/picture 200 application/json, a manager sends one PNG picture (below)
     POST /api/round-answer 204, a JSON body, the page answers one question (below)
     POST /api/recap 200 application/json, a manager reads what it needs to pick a sprint up (below)
     GET /api/sprint-status?sprint_id=<id> 200 application/json, what became of a brief (below)
+    GET /api/picture/<id> 200 image/png, the page reads a stored picture (below)
     GET /api/profile 200 application/json, the profile a new session should use (below)
     GET /api/excluded 200 application/json, the profiles the owner excluded (below)
     anything else   404
     other methods   405 with `Allow: GET` (`Allow: POST` on `/api/hooks`, `/api/readings`,
                     `/api/looked`, `/api/answer`, `/api/check-answer`, `/api/goal`, `/api/withdraw`,
                     `/api/approve`, `/api/reply`, `/api/retry-manager`, `/api/message`, `/api/stop`, `/api/exclusion`, `/api/pin`, `/api/brief`, `/api/report`,
-                    `/api/close`, `/api/inbox`, `/api/message-reply`, `/api/recap`, `/api/ask` and `/api/round-answer`)
+                    `/api/close`, `/api/inbox`, `/api/message-reply`, `/api/recap`, `/api/ask`, `/api/picture` and `/api/round-answer`;
+                    `Allow: GET` on `/api/picture/<id>`)
 
 Two kinds of write exist. The hook and reading routes append what the proxies and hooks observe:
 `POST /api/hooks` appends session observations, `POST /api/readings` the capacity kinds
@@ -239,6 +244,27 @@ and dispatches the run: the folder's trust is granted in every profile (`_grant_
 child. Nothing is granted or registered before this answer. Any other exception is `console:
 register_confirm_failed <Type>` and 500 `registering failed`.
 
+`POST /api/register-cancel` (#1088, ADR-console-037) is the owner's Cancel registration of the shown
+registration, which was not applied yet or whose apply failed. It takes exactly `{"root"}` with
+`MAX_REGISTER_CANCEL_BYTES` (4096) and `register.parse_cancel_request`: 400 `bad registration cancel`.
+The service refuses, each as 409 with the text, one stderr line `console: register_cancel_refused
+<reason>`, appending nothing, in this order: while a run is under way, `register.running`; when the shown
+registration is none or names another root, `register.NOT_WAITING`; when `register.cancellable` is false
+for it and its adoption (an applied, pushed or opened one), `register.CANCEL_REFUSED`. When the plan's
+adoption is `apply_failed`, or the shown failure names no plan id, the service looks at every plan of the
+root whose apply failed: `approve.left_behind` finds any copy that attempt kept (its failure record, its
+directory or its branch, whichever remains), and the service claims the run, has `Adopter.discard` remove
+each outside the lock and releases the claim; an `error` result, a `register.RunFailed` or no adopter refuses
+with `register.CANCEL_DISCARD_FAILED` and appends nothing. With no kept copy no child runs. Then it appends
+one `registration.cancelled` row (`register.cancelled_row`) for the shown plan id, and one more for each
+other failed apply of the root, clears the answer's refusal and answers `204`: the registration, deferral,
+adoption and folder-trust folds each drop what the rows name (so registering the same repository again
+offers a fresh Apply it, and its Check again cards are gone), after a restart too. A Check again under way
+when the cancel lands writes nothing and logs no row (`console: trust_grant_skipped cancelled`), so it cannot
+bring the cancelled card back. It writes no file of
+its own, grants no trust and reads no registry. Any other exception is `console: register_cancel_failed
+<Type>` and 500 `cancelling failed`.
+
 A checkout with no `.agents/project.json` (ADR-console-031) is drafted instead of planned: the run
 reads it (`draft_reader`, `contract_draft.read` by default), drafts the contract from the fleet
 entries the request already read, and, while any field of the draft is open, appends one
@@ -295,7 +321,9 @@ grants nothing. `close` waits for a grant under way, so its row is kept, and a g
 after `close` began writes nothing (`console: trust_grant_skipped closing`). A result for a profile that no longer exists when the row is
 published (an account removal finished meanwhile) is dropped, and a grant left with no result appends
 nothing. The run applies the plan (`Adopter.apply`,
-acknowledging deletions only when the shown plan lists them) and appends `adoption.step` `applied`,
+acknowledging deletions only when the shown plan lists them; Apply it again passes
+`--discard-retained`, and a plan run first has `adopt-project discard` remove every copy kept by a
+failed apply of the same repository, so no copy is left behind unnamed) and appends `adoption.step` `applied`,
 pushes only the one adoption branch, at the commit apply recorded (`approve.push`), then looks for the branch's pull request
 before opening one and, when the open fails, looks once more (a pull request whose answer was lost
 is found, never opened twice) and appends `opened`. A failure appends `apply_failed`,
@@ -517,6 +545,38 @@ not being the recommendation. It appends exactly one `question.answered` row `{"
 publishes, nudges the manager as `send_message` does and returns the row's `seq`, the message's id.
 Every refusal appends and publishes nothing, and neither the secret nor the owner's text appears
 in a stderr line.
+
+Pictures (#1089, ADR-console-036): `POST /api/picture` is a manager write dispatched like `/api/brief`,
+before `PAGE_WRITES`, whose body is one PNG and whose identity travels in headers. The checks run in
+this order and each refusal appends nothing and writes no file: any `Origin` (the console's own
+included) is 403 `origin refused`; a media type that is not `image/png` is 415 `png only`; a length
+that is not ASCII digits is 411 `length required`; one over `MAX_PICTURE_BYTES` (2097152, 2 MiB) is
+413 `too large`, answered before any body byte is read, and exactly 2 MiB is taken; then exactly one
+`X-Console-Sprint` header matching `sprints.SPRINT_ID` and exactly one non-empty `X-Console-Secret`
+header, else 400 `bad picture`; the body is then read, and fewer bytes than the length are 400
+`bad picture` with nothing stored, else `store_picture(sprint_id, secret, data)`,
+under the ingest lock, is `_manager_sprint` (`NOT_OPEN` is 409 with the reason, then `SecretRefused`
+403 `secret refused`), then `pictures.checked_png` (`pictures.NotPng` is 400 with its reason), then
+`pictures.store` into `pictures/` beside the event log (the file `pictures/<sha256>`, 0600 in a 0700
+directory, written once; a resend keeps the file and renews its age), then one `picture.stored` row
+`{"picture", "sprint_id"}` of the sprint's project, per accepted send, resend included. Success is
+200 `application/json` `{"picture":"<id>"}` (sorted keys, compact). A refusal is a stderr line
+`console: picture_refused <sprint_id> <reason>`; any other exception is `console: picture_failed
+<Type>: <message>` and 500 `picture failed`. Neither the secret nor the bytes appear in a stderr line
+or an answer. The page is not changed by this route.
+
+`GET /api/picture/<id>` (ADR-console-036) is the page's read of a stored picture, and the only
+route that serves one. After the loopback `Host` check it runs `write_guard.read_refusal`: more
+than one `Origin`, or one that is not the console's own, is 403 `origin refused`; a `Sec-Fetch-Site`
+other than exactly one `same-origin` is 403 `origin refused`; the `X-Console-Token` header exactly
+once with the install's token, else 403 `token refused`. A read with no `Origin` is admitted,
+because a browser omits `Origin` on a same-origin GET. The guard runs before the id is looked at.
+The id is the route after `PICTURE_PREFIX` (`/api/picture/`): a query string, or an id that does
+not fully match `pictures.PICTURE_ID`, is 400 `bad picture id`. The file is read only as
+`pictures_dir / <id>` through `pictures.read`: an unknown id, a symlink, a non-regular file or an
+unreadable file is 404 `this picture is not known`. Success is 200 `image/png`, the stored bytes,
+`X-Content-Type-Options: nosniff` and `Cache-Control: private`; a refusal keeps
+`Cache-Control: no-store`. The token appears in no header or body. The page and `CSP` are unchanged.
 
 Reports (#890): `POST /api/report` is a manager write like the brief's: no token, the sprint's secret
 in its place. After the loopback `Host` check it runs `_checked_length(MAX_REPORT_BYTES)`, 65536
@@ -970,7 +1030,11 @@ opening the log and before reading its events, and `RETENTION_THREAD`, started b
 re-folds the sessions and the inbox records and re-derives the last look and the moments from the
 log under the ingest lock, with the construction code, and publishes, so the running digest equals
 the one a restart would publish, and a later change is judged against what the log still holds. A failing pass
-is one stderr line `console: retention_failed <Type>: <message>` and the loop goes on.
+is one stderr line `console: retention_failed <Type>: <message>` and the loop goes on. Each pass, the
+construction's included, also sweeps `pictures/` (ADR-console-036): it removes every picture that no
+row references (`pictures.referenced` of the log's events) once its age, by `self._clock()`, is more
+than one day, whether or not the pass removed rows. A failing sweep is one stderr line
+`console: picture_sweep_failed <Type>: <message>`; neither construction nor `retain()` raises for it.
 
 Digest: the view carries `digest.digest(moments, last look, now)` (see `digest.py`). The last look
 is the newest `page.looked` event of the log, the same for every client and across restarts; the
@@ -1034,7 +1098,7 @@ from urllib.parse import parse_qsl
 from agent_tools.claims import owner_actions
 from agent_tools.console import (
     account_add, account_remove, answer, approve, capacity, contract_draft, deliveries, digest, exclusion, idle, inbox,
-    folder_trust, manager, nudge, pin, plan_questions, probe, register, revive, sessions, signin, signin_run, sprints, write_guard)
+    folder_trust, manager, nudge, pin, plan_questions, probe, register, revive, pictures, sessions, signin, signin_run, sprints, write_guard)
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
     MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_STOP_FAILED,
@@ -1103,12 +1167,14 @@ ADOPTION_REGISTER_PATH = "/api/adoption-register"
 PLAN_DEFER_PATH = "/api/plan-defer"
 REGISTER_CONFIRM_PATH = "/api/register-confirm"
 TRUST_CHECK_PATH = "/api/trust-check"
+REGISTER_CANCEL_PATH = "/api/register-cancel"
 PAGE_WRITES: frozenset[str] = frozenset({
     LOOKED_PATH, ANSWER_PATH, CHECK_PATH, GOAL_PATH, WITHDRAW_PATH, APPROVE_PATH, REPLY_PATH,
     RETRY_PATH, MESSAGE_PATH, STOP_PATH, ROUND_ANSWER_PATH, CONTINUE_PATH, EXCLUSION_PATH,
     PIN_PATH, SIGNIN_PATH, SIGNIN_CODE_PATH, SIGNIN_CANCEL_PATH, SIGNIN_LINK_PATH, ACCOUNT_ADD_PATH,
     ACCOUNT_REMOVE_PATH, REGISTER_PATH, PLAN_ANSWER_PATH, PLAN_APPROVE_PATH,
-    ADOPTION_REGISTER_PATH, PLAN_DEFER_PATH, REGISTER_CONFIRM_PATH, TRUST_CHECK_PATH})
+    ADOPTION_REGISTER_PATH, PLAN_DEFER_PATH, REGISTER_CONFIRM_PATH, TRUST_CHECK_PATH,
+    REGISTER_CANCEL_PATH})
 MAX_SIGNIN_BYTES = 4096
 MAX_ACCOUNT_BYTES = 4096
 MAX_REMOVE_BYTES = 4096
@@ -1119,6 +1185,7 @@ MAX_ADOPTION_REGISTER_BYTES = 4096
 MAX_PLAN_DEFER_BYTES = 4096
 MAX_REGISTER_CONFIRM_BYTES = 4096
 MAX_TRUST_CHECK_BYTES = 4096
+MAX_REGISTER_CANCEL_BYTES = 4096
 APPROVAL_THREAD = "console-adoption-approval"
 SIGNIN_THREAD = "console-signin-deadline"
 SIGNIN_TICK_SECONDS = 1.0
@@ -1130,8 +1197,13 @@ MAX_REPORT_BYTES = 65536
 MAX_CLOSE_BYTES = 65536
 MAX_STOP_BYTES = 4096
 RECAP_PATH = "/api/recap"
+PICTURE_PATH = "/api/picture"
+PICTURE_PREFIX = PICTURE_PATH + "/"
+SPRINT_HEADER = "X-Console-Sprint"
+SECRET_HEADER = "X-Console-Secret"
+MAX_PICTURE_BYTES = pictures.MAX_BYTES
 MANAGER_WRITES: frozenset[str] = frozenset({BRIEF_PATH, REPORT_PATH, CLOSE_PATH, INBOX_PATH,
-                                            MESSAGE_REPLY_PATH, RECAP_PATH, ASK_PATH})
+                                            MESSAGE_REPLY_PATH, RECAP_PATH, ASK_PATH, PICTURE_PATH})
 MAX_RECAP_BYTES = 4096
 MAX_ASK_BYTES = 65536
 MAX_ROUND_ANSWER_BYTES = 16384
@@ -1243,11 +1315,12 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         """Silenced: the service writes no access log."""
 
-    def _send(self, status: int, content_type: str, body: bytes, *headers: tuple[str, str]):
+    def _send(self, status: int, content_type: str, body: bytes, *headers: tuple[str, str],
+              cache: str = "no-store"):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", cache)
         self.send_header("X-Content-Type-Options", "nosniff")
         for name, value in headers:
             self.send_header(name, value)
@@ -1266,14 +1339,15 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         self.close_connection = True
         self._send(status, "text/plain", text.encode() + b"\n", ("Connection", "close"))
 
-    def _checked_length(self, limit: int) -> int | None:
+    def _checked_length(self, limit: int, media: str = "application/json",
+                        wrong_media: str = "json only") -> int | None:
         """The body length of a write that passed the shared checks, else None (already refused)."""
         if self.headers.get("Origin") is not None:
             self._refuse(403, "origin refused")
             return None
-        media = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
-        if media != "application/json":
-            self._refuse(415, "json only")
+        sent = self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower()
+        if sent != media:
+            self._refuse(415, wrong_media)
             return None
         length = self.headers.get("Content-Length", "")
         if not (length.isascii() and length.isdigit()):
@@ -1300,6 +1374,8 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return self._message_reply_request()
         if route == ASK_PATH:
             return self._ask_request()
+        if route == PICTURE_PATH:
+            return self._picture_request()
         if route == RECAP_PATH:
             return self._recap_request()
         if route in PAGE_WRITES:
@@ -1679,6 +1755,28 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return False
         return True
 
+    def _register_cancel_request(self, console: "ConsoleService") -> bool:
+        """Carry out Cancel registration; True when the shared 204 is to be sent."""
+        body = self._json_body(MAX_REGISTER_CANCEL_BYTES)
+        if body is None:
+            return False
+        try:
+            root = register.parse_cancel_request(body)
+        except ValueError:
+            self._refuse(400, "bad registration cancel")
+            return False
+        try:
+            console.cancel_registration(root)
+        except sprints.Refused as error:
+            print(f"console: register_cancel_refused {error}", file=sys.stderr)
+            self._refuse(409, str(error))
+            return False
+        except Exception as error:
+            print(f"console: register_cancel_failed {type(error).__name__}", file=sys.stderr)
+            self._refuse(500, "cancelling failed")
+            return False
+        return True
+
     def _trust_check_request(self, console: "ConsoleService") -> bool:
         """Carry out the Check again answer; True when the shared 204 is to be sent."""
         body = self._json_body(MAX_TRUST_CHECK_BYTES)
@@ -1872,6 +1970,38 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         self._send(200, "application/json", json.dumps(
             {"questions": count, "round": round_id}, sort_keys=True,
             separators=(",", ":")).encode())
+
+    def _picture_request(self):
+        """The manager's route: one PNG picture sent with the sprint's secret in headers."""
+        length = self._checked_length(MAX_PICTURE_BYTES, media="image/png", wrong_media="png only")
+        if length is None:
+            return
+        sprint_ids = self.headers.get_all(SPRINT_HEADER) or []
+        secrets_sent = self.headers.get_all(SECRET_HEADER) or []
+        if not (len(sprint_ids) == 1 and sprints.SPRINT_ID.fullmatch(sprint_ids[0])
+                and len(secrets_sent) == 1 and secrets_sent[0]):
+            return self._refuse(400, "bad picture")
+        sprint_id, secret = sprint_ids[0], secrets_sent[0]
+        self.close_connection = True
+        data = self.rfile.read(length)
+        if len(data) != length:
+            return self._refuse(400, "bad picture")
+        try:
+            picture_id = self.server.console.store_picture(sprint_id, secret, data)
+        except sprints.SecretRefused:
+            print(f"console: picture_refused {sprint_id} {sprints.SECRET_REFUSED}", file=sys.stderr)
+            return self._refuse(403, sprints.SECRET_REFUSED)
+        except pictures.NotPng as error:
+            print(f"console: picture_refused {sprint_id} {error}", file=sys.stderr)
+            return self._refuse(400, str(error))
+        except sprints.Refused as error:
+            print(f"console: picture_refused {sprint_id} {error}", file=sys.stderr)
+            return self._refuse(409, str(error))
+        except Exception as error:
+            print(f"console: picture_failed {type(error).__name__}: {error}", file=sys.stderr)
+            return self._refuse(500, "picture failed")
+        self._send(200, "application/json", json.dumps(
+            {"picture": picture_id}, sort_keys=True, separators=(",", ":")).encode())
 
     def _round_answer_request(self, console: "ConsoleService") -> bool:
         """Read and carry out the owner's answer to one question; False when it was refused."""
@@ -2160,6 +2290,10 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             self.close_connection = True
             if not self._trust_check_request(console):
                 return
+        elif route == REGISTER_CANCEL_PATH:
+            self.close_connection = True
+            if not self._register_cancel_request(console):
+                return
         else:
             if (self.headers.get("Content-Length", "0") != "0"
                     or self.headers.get("Transfer-Encoding") is not None):
@@ -2201,10 +2335,31 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             body = json.dumps({"excluded": self.server.console.excluded_profiles()},
                               sort_keys=True, separators=(",", ":")).encode()
             self._send(200, "application/json", body)
+        elif route.startswith(PICTURE_PREFIX):
+            self._picture_read(route)
         elif route in POST_LIMITS or route in PAGE_WRITES or route in MANAGER_WRITES:
             self._refuse_method()
         else:
             self._send(404, "text/plain", b"not found\n")
+
+    def _picture_read(self, route: str):
+        console = self.server.console
+        refusal = write_guard.read_refusal(
+            self.headers["Host"], self.headers.get_all("Origin") or [],
+            self.headers.get_all(write_guard.FETCH_SITE_HEADER) or [],
+            self.headers.get_all(write_guard.TOKEN_HEADER) or [], console.page_token)
+        if refusal is not None:
+            return self._refuse(*refusal)
+        picture_id = route[len(PICTURE_PREFIX):]
+        if "?" in self.path or not pictures.PICTURE_ID.fullmatch(picture_id):
+            return self._refuse(400, "bad picture id")
+        try:
+            data = pictures.read(console.pictures_dir, picture_id)
+        except OSError:
+            data = None
+        if data is None:
+            return self._refuse(404, "this picture is not known")
+        self._send(200, "image/png", data, cache="private")
 
     def _stream(self):
         console = self.server.console
@@ -2321,6 +2476,7 @@ class ConsoleService:
         self._trust_home = None if trust_home is None else Path(trust_home)
         self._trust_granter = trust_granter
         self._grants_running = 0
+        self._cancelled: dict[str, int] = {}
         self._approving = False
         self._enrolling: set[str] = set()
         self._approval_workers: list[threading.Thread] = []
@@ -2361,6 +2517,7 @@ class ConsoleService:
         self._launching: dict[str, object] = {}
         self._last_listed: dict[str, int] = {}
         self._tick = tick
+        self._store = store
         self._owner_path = owner_path
         self._sprint_secrets = (Path(store).with_name(sprints.SECRETS_DIR)
                                 if sprint_secrets is None else Path(sprint_secrets))
@@ -2437,6 +2594,7 @@ class ConsoleService:
             self.log = EventLog(store, clock=log_clock)
             self.log.retain()
             events = self.log.events()
+            self._sweep_pictures(events)
             self._states = project_states(events)
             self._sessions = sessions.session_states(events)
             self._use = manager.profile_use(events)
@@ -2470,6 +2628,11 @@ class ConsoleService:
                 self.log.close()
             self._server.server_close()
             raise
+
+    @property
+    def pictures_dir(self) -> Path:
+        """The directory of the pictures managers sent, beside the event log."""
+        return Path(self._store).with_name(pictures.DIRECTORY)
 
     @property
     def address(self) -> tuple[str, int]:
@@ -2542,6 +2705,9 @@ class ConsoleService:
 
     def _publish(self) -> None:
         adoption, action, apply_items = self._approval_view()
+        latest = self._registration
+        cancel = (self._registering is None and latest is not None
+                  and register.cancellable(latest, self._adoptions.get(latest["plan_id"])))
         cap = capacity.capacity_view(
             self._profiles, self._capacity, self._clock(), self._signins,
             excluded=self._excluded, pinned=self._pinned)
@@ -2555,7 +2721,7 @@ class ConsoleService:
             registration=register.view_entry(
                 None if self._approving else self._registering, self._registration,
                 again=self._answering, refusal=self._answer_refusal, adoption=adoption,
-                approve=action),
+                approve=action, cancel=cancel),
             adoption_items=approve.inbox_entries(self._adoptions),
             retry_items=approve.retry_entries(self._adoptions, self._enrolling),
             apply_items=apply_items,
@@ -3086,6 +3252,67 @@ class ConsoleService:
                 self._publish()
             raise
 
+    def cancel_registration(self, root: str) -> None:
+        """Cancel the shown registration of `root` before apply; refusals are `sprints.Refused`.
+
+        Every failed apply of the root is cleaned and forgotten, not only the shown plan's: a shown
+        failure can carry no plan id while an earlier attempt still keeps its copy (#1088).
+        """
+        with self._ingest:
+            latest = self._cancellable(root)
+            failed = self._failed_applies(root)
+        pending = [plan_id for plan_id in failed if approve.left_behind(plan_id, root)]
+        if pending:
+            with self._ingest:
+                if self._cancellable(root) is not latest:
+                    raise sprints.Refused(register.NOT_WAITING)
+                self._registering = root
+                self._publish()
+            try:
+                if self._adopter is None:
+                    refused = True
+                else:
+                    refused = any("error" in self._adopter.discard(plan_id, cancel=self._stop)
+                                  for plan_id in pending)
+            except register.RunFailed:
+                refused = True
+            except BaseException:
+                with self._ingest:
+                    self._registering = None
+                    self._publish()
+                raise
+            with self._ingest:
+                self._registering = None
+                if refused:
+                    self._publish()
+            if refused:
+                raise sprints.Refused(register.CANCEL_DISCARD_FAILED)
+        with self._ingest:
+            if self._cancellable(root) is not latest:
+                raise sprints.Refused(register.NOT_WAITING)
+            plan_ids = [latest["plan_id"], *(one for one in self._failed_applies(root)
+                                             if one != latest["plan_id"])]
+            self._cancelled[root] = self._cancelled.get(root, 0) + 1
+            self._fold(self.log.append([register.cancelled_row(root, one) for one in plan_ids]))
+            self._answer_refusal = None
+            self._publish()
+
+    def _failed_applies(self, root: str) -> list[str]:
+        """The plan ids of `root` whose apply failed, held under the ingest lock."""
+        return sorted(plan_id for plan_id, found in self._adoptions.items()
+                      if found["root"] == root and found["step"] == "apply_failed")
+
+    def _cancellable(self, root: str) -> dict:
+        """The shown registration of `root` when it may be cancelled, held under the ingest lock."""
+        if self._registering is not None:
+            raise sprints.Refused(register.running(register.name_of(self._registering)))
+        latest = self._registration
+        if latest is None or latest["root"] != root:
+            raise sprints.Refused(register.NOT_WAITING)
+        if not register.cancellable(latest, self._adoptions.get(latest["plan_id"])):
+            raise sprints.Refused(register.CANCEL_REFUSED)
+        return latest
+
     def _check_answerable(self, root: str, choice: str) -> dict:
         """The registration row `choice` answers for `root`, held under the ingest lock.
 
@@ -3111,7 +3338,12 @@ class ConsoleService:
         """
         verb = "plan"
         try:
-            if not os.path.lexists(os.path.join(root, ".agents/project.json")):
+            left = self._discard_left(root)
+            if left is not None:
+                self._log_registration_error({"root": root, "verb": "discard",
+                                              "error": left["error"]})
+                payload = register.summary(root, left)
+            elif not os.path.lexists(os.path.join(root, ".agents/project.json")):
                 reading = self._draft_reader(root)
                 fields = contract_draft.draft(root, reading, entries=entries)
                 payload = self._plan_draft(root, fields, [])
@@ -3197,6 +3429,28 @@ class ConsoleService:
                 self._publish()
             raise
 
+    def _discard_left(self, root: str) -> dict | None:
+        """Remove every copy a failed apply of `root` kept; the first failure's error document.
+
+        A plan run of the root leaves those copies behind, so each is discarded first (#1088).
+        With none kept, no child runs.
+        """
+        with self._ingest:
+            plan_ids = sorted(plan_id for plan_id, found in self._adoptions.items()
+                              if found["root"] == root and found["step"] == "apply_failed")
+        for plan_id in plan_ids:
+            if not approve.left_behind(plan_id, root):
+                continue
+            try:
+                result = self._adopter.discard(plan_id, cancel=self._stop)
+            except register.RunFailed:
+                result = {"error": {
+                    "code": "adopt_failure", "repair_id": approve.DISCARD_REPAIR,
+                    "violations": [{"pointer": "", "message": approve.DISCARD_REASON}]}}
+            if "error" in result:
+                return result
+        return None
+
     def _write_draft(self, fields: list[dict]) -> Path:
         directory = agent_platform.ensure_directory(agent_platform.state_root() / "console" / "drafts")
         handle, name = tempfile.mkstemp(dir=directory, suffix=".json")
@@ -3252,22 +3506,27 @@ class ConsoleService:
         payload = None
         text = None
         try:
-            if changed is not None:
-                result = self._plan_draft(root, changed, answers, refusals=True)
+            left = self._discard_left(root)
+            if left is not None:
+                self._log_answer_error({"root": root, "discard": left["error"]})
+                payload = register.summary(root, left)
             else:
-                result = self._plan_with(root, draft, answers)
-                refused = (contract_draft.refused_field(result["error"])
-                           if draft is not None and "error" in result else None)
-                if refused is not None:
-                    result = register.drafting(
-                        root, contract_draft.mark_refused(draft, *refused), answers)
-                elif "error" not in result:
-                    result = register.summary(root, result, draft=draft)
-            if "error" in result:
-                self._log_answer_error({"root": root, "error": result["error"]})
-                text = plan_questions.refusal_text(result["error"])
-            else:
-                payload = result
+                if changed is not None:
+                    result = self._plan_draft(root, changed, answers, refusals=True)
+                else:
+                    result = self._plan_with(root, draft, answers)
+                    refused = (contract_draft.refused_field(result["error"])
+                               if draft is not None and "error" in result else None)
+                    if refused is not None:
+                        result = register.drafting(
+                            root, contract_draft.mark_refused(draft, *refused), answers)
+                    elif "error" not in result:
+                        result = register.summary(root, result, draft=draft)
+                if "error" in result:
+                    self._log_answer_error({"root": root, "error": result["error"]})
+                    text = plan_questions.refusal_text(result["error"])
+                else:
+                    payload = result
         except register.RunFailed as error:
             self._log_answer_error(
                 {"root": root, "failure": error.kind, "cause": repr(error.__cause__)})
@@ -3356,7 +3615,7 @@ class ConsoleService:
 
     def _grant_trust(self, cause: str, root: str, project: str,
                      profiles: Sequence[tuple[str, Path]] | None = None,
-                     slot: str | None = None) -> list[tuple[str, str]]:
+                     slot: str | None = None, epoch: int | None = None) -> list[tuple[str, str]]:
         """Grant the folder's client trust in every target and log one `trust.granted` row.
 
         The key is read from `root` every time. The row names the key, or `slot` when the caller
@@ -3366,10 +3625,17 @@ class ConsoleService:
 
         The row is kept even when `close` has begun, the files being written already; a grant that
         starts after `close` began writes nothing. `close` waits for every grant under way.
+
+        A retry passes the `epoch` it read of the root's cancellations (#1088): once the owner has
+        cancelled the root's registration, nothing is written and no row is logged, so a Check again
+        that was under way cannot bring the cancelled card back.
         """
         with self._ingest:
             if self._closed:
                 print("console: trust_grant_skipped closing", file=sys.stderr)
+                return []
+            if epoch is not None and self._cancelled.get(root, 0) != epoch:
+                print("console: trust_grant_skipped cancelled", file=sys.stderr)
                 return []
             self._grants_running += 1
         try:
@@ -3392,6 +3658,9 @@ class ConsoleService:
             named = slot if slot is not None else (
                 key if key is not None else os.path.realpath(root))
             with self._ingest:
+                if epoch is not None and self._cancelled.get(root, 0) != epoch:
+                    print("console: trust_grant_skipped cancelled", file=sys.stderr)
+                    return []
                 present = self._read_profiles()
                 results = [(name, result) for name, result in results
                            if name == "default" or name in present]
@@ -3419,11 +3688,12 @@ class ConsoleService:
         """
         with self._ingest:
             failed = self._trust_failures.get((root, profile))
+            epoch = self._cancelled.get(root, 0)
         found = [pair for pair in folder_trust.targets(self._trust_home, self._profile_dirs())
                  if pair[0] == profile]
         if failed is None or not found:
             raise sprints.Refused(folder_trust.NOT_FAILED)
-        self._grant_trust("check", root, failed["project"], found, slot=root)
+        self._grant_trust("check", root, failed["project"], found, slot=root, epoch=epoch)
 
     def _run_approval(self, root: str, shown: dict, adoption: dict | None) -> None:
         final = None
@@ -3464,11 +3734,13 @@ class ConsoleService:
         name = register.name_of(root)
         acknowledge = approve.acknowledges(shown)
         resume = adoption is not None and adoption["step"] in approve.RESUMABLE
+        again = adoption is not None and adoption["step"] == "apply_failed"
         if resume:
             branch, commit, base = adoption["branch"], adoption["commit"], adoption["base"]
         else:
             try:
-                result = self._adopter.apply(plan_id, cancel=stop, acknowledge_deletions=acknowledge)
+                result = self._adopter.apply(plan_id, cancel=stop, acknowledge_deletions=acknowledge,
+                                             discard_retained=again)
             except register.RunFailed as error:
                 self._log_approval_error({"stage": "apply", "root": root, "plan_id": plan_id,
                                           "failure": error.kind, "cause": repr(error.__cause__)})
@@ -3975,6 +4247,23 @@ class ConsoleService:
                 "brief": parts})])
             self._apply(appended)
             return version
+
+    def store_picture(self, sprint_id: str, secret: str, data: bytes) -> str:
+        """Keep one PNG of an open sprint whose secret is presented and log it; the picture's id."""
+        with self._ingest:
+            sprint = self._manager_sprint(sprint_id, secret)
+            pictures.checked_png(data)
+            picture_id, _ = pictures.store(self.pictures_dir, data)
+            self._apply(self.log.append(
+                [pictures.entry(sprint.project_id, sprint_id, picture_id)]))
+            return picture_id
+
+    def _sweep_pictures(self, events: Iterable[Event]) -> None:
+        try:
+            pictures.sweep(self.pictures_dir, pictures.referenced(events), self._clock())
+        except Exception as error:
+            print(f"console: picture_sweep_failed {type(error).__name__}: {error}",
+                  file=sys.stderr)
 
     def _manager_sprint(self, sprint_id: str, secret: str) -> sprints.SprintState:
         """The open sprint whose secret is presented (the caller holds the ingest lock)."""
@@ -5081,8 +5370,8 @@ class ConsoleService:
         """
         with self._ingest:
             removed = self.log.retain()
+            events = self.log.events()
             if removed:
-                events = self.log.events()
                 self._sessions = sessions.session_states(events)
                 self._use = manager.profile_use(events)
                 self._inbox = inbox_records(events)
@@ -5099,6 +5388,7 @@ class ConsoleService:
                 self._pin_launches = pin.pin_launches(events)
                 self._derive_digest(events)
                 self._publish()
+            self._sweep_pictures(events)
             return removed
 
     def expire_digest(self) -> None:
