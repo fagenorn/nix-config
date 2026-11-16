@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<link rel="icon" href="data:,">
+<title>Spend · Console</title>
+<style>
+:root {
+  --base: #24273a; --mantle: #1e2030;
+  --s0: #363a4f; --s1: #494d64; --s2: #5b6078;
+  --text: #cad3f5; --sub1: #b8c0e0; --sub0: #a5adcb; --ov2: #939ab7;
+  --crust: #181926; --lav: #b7bdf8;
+  --hair: rgba(202, 211, 245, .09);
+  --ui: "Segoe UI Variable Text", "Segoe UI", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter Variable", "Inter", system-ui, "Noto Sans", "Helvetica Neue", Arial, sans-serif;
+  --display: "Segoe UI Variable Display", "Segoe UI", -apple-system, BlinkMacSystemFont, "SF Pro Display", "Inter Display", "Inter Variable", "Inter", system-ui, "Noto Sans", "Helvetica Neue", Arial, sans-serif;
+  color-scheme: dark;
+}
+*, *::before, *::after { box-sizing: border-box; }
+html { background: var(--base); scrollbar-color: var(--s1) transparent; scrollbar-width: thin; -webkit-text-size-adjust: 100%; }
+body {
+  margin: 0; background: var(--base); color: var(--text);
+  font: 400 .9375rem/1.5 var(--ui); font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+}
+h1, h2, p, ul { margin: 0; padding: 0; }
+:focus-visible { outline: 2px solid var(--lav); outline-offset: 2px; border-radius: 6px; }
+.top { position: sticky; top: 0; z-index: 10; background: var(--base); border-bottom: 1px solid var(--hair); }
+.top-in { max-width: 1360px; margin: 0 auto; padding: 8px 48px; display: flex; flex-wrap: wrap; align-items: center; gap: 10px 28px; min-height: 56px; }
+.brand { font-weight: 600; color: var(--sub1); white-space: nowrap; letter-spacing: -.005em; }
+.conn { color: var(--ov2); font-size: .8125rem; }
+.nav { color: var(--sub0); font-size: .8125rem; text-decoration: none; white-space: nowrap; }
+.nav:hover { color: var(--text); }
+.spend { max-width: 1360px; margin: 0 auto; padding: 40px 48px 64px; }
+.empty { color: var(--sub0); }
+@media (max-width: 480px) {
+  .top-in { padding: 10px 16px; gap: 10px 16px; flex-wrap: wrap; }
+  .spend { padding: 24px 16px 48px; }
+}
+</style>
+</head>
+<body>
+<header class="top"><div class="top-in"><span class="brand">Console</span><a class="nav" href="/">Desk</a><span class="conn" id="conn" role="status">Reconnecting…</span></div></header>
+<main class="spend">
+<h1>Spend</h1>
+<div class="spans" id="spans" role="group" aria-label="Span"></div>
+<p class="estimate-note" id="note"></p>
+<section id="summary" aria-label="Total"></section>
+<section id="trend" aria-label="Per day"></section>
+<section id="breakdowns" aria-label="Breakdowns"></section>
+</main>
+<script>
+function render(view) {
+  const summary = document.getElementById("summary");
+  summary.textContent = "";
+  if (view.spend === null || view.spend === undefined) {
+    const empty = document.createElement("p");
+    empty.className = "empty";
+    empty.textContent = "Spend shows once the console has read the transcripts.";
+    summary.appendChild(empty);
+  }
+}
+const conn = document.getElementById("conn");
+const source = new EventSource("/api/stream");
+source.addEventListener("view", (event) => render(JSON.parse(event.data)));
+source.onopen = () => { conn.textContent = ""; };
+source.onerror = () => { conn.textContent = "Reconnecting…"; };
+</script>
+</body>
+</html>
