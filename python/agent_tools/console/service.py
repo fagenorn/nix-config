@@ -3440,12 +3440,12 @@ class ConsoleService:
         """Run a question's job on a tracked daemon thread; `close` joins every one it started."""
         worker = threading.Thread(target=job, name=PROJECT_QUESTION_THREAD, daemon=True)
         with self._ingest:
-            # Started inside the lock: the list never holds an unstarted thread that a concurrent
-            # prune drops or that `close` joins before it starts.
+            # Started inside the lock and listed only once started: the list never holds an
+            # unstarted thread, which `close` could not join (and a failed start lists nothing).
             self._project_question_workers = [
                 w for w in self._project_question_workers if w.is_alive()]
-            self._project_question_workers.append(worker)
             worker.start()
+            self._project_question_workers.append(worker)
 
     def ask_project_question(self, project_id: str, text: str) -> str:
         """Accept one question about a registered project and return its id (#1176, ADR-console-057).

@@ -19,8 +19,11 @@ this order:
 4. Any other tool but `Bash` (MCP tools, `Task`, `Agent` and `WebFetch` included): `TOOL_DENIED`.
 5. A `Bash` call whose `tool_input` is not an object or whose `command` is not a string: `MALFORMED`.
 6. A `Bash` command in which a lifecycle verb (`LIFECYCLE_VERBS`: `git push`, `gh pr create`,
-   `gh pr merge`, `git branch -d`, `gh release create`) is a contiguous run of the words of
-   `command.split()` (any whitespace): `LIFECYCLE_DENIED`, whatever `allowed` holds.
+   `gh pr merge`, `git branch -d`, `gh release create`) occurs in the words of `command.split()`
+   (any whitespace): `LIFECYCLE_DENIED`, whatever `allowed` holds. The executable matches by its
+   basename (`/usr/bin/git push`), and option words, each with one optional value, may sit between
+   the verb's words (`git -C . push`, `gh pr -R owner/repo create`); the words of `-d` itself stay
+   contiguous with `branch`.
 7. Otherwise the separators are checked before any split: the command is allowed only when
    `PLAIN_COMMAND` matches all of it (plain words separated by U+0020 only) and its words equal one
    member of `allowed`. Anything else is `NO_COMMANDS` when `allowed` is empty and
@@ -95,11 +98,30 @@ def parse_allowed(text: str) -> tuple[tuple[str, ...], ...]:
     return tuple(parsed)
 
 
+def _follows(words: list[str], position: int, verb: tuple[str, ...]) -> bool:
+    """Whether `verb[1:]` follows `words[position:]`, option words (and one value each) skipped.
+
+    An option word is any word starting with `-` that is not itself the next verb word, and it may
+    take the following word as its value, so both readings are tried: `git -C . push` and
+    `gh pr -R owner/repo create` match, and an unknown option is over-denied, never missed.
+    """
+    if not verb:
+        return True
+    if position >= len(words):
+        return False
+    if words[position] == verb[0]:
+        return _follows(words, position + 1, verb[1:])
+    if verb[0].startswith("-") or not words[position].startswith("-"):
+        return False
+    if _follows(words, position + 1, verb):
+        return True
+    return "=" not in words[position] and _follows(words, position + 2, verb)
+
+
 def _has_lifecycle_verb(words: list[str]) -> bool:
     for verb in LIFECYCLE_VERBS:
-        size = len(verb)
-        for start in range(len(words) - size + 1):
-            if tuple(words[start : start + size]) == verb:
+        for start, word in enumerate(words):
+            if word.rsplit("/", 1)[-1] == verb[0] and _follows(words, start + 1, verb[1:]):
                 return True
     return False
 

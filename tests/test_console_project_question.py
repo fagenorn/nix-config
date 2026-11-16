@@ -84,9 +84,22 @@ class HookTableTest(unittest.TestCase):
             "git branch -d topic",
             "gh release create v1.0.0",
             "just build && git push",
+            "git -C . push origin main",
+            "/usr/bin/git push origin main",
+            "git -c core.x=y push",
+            "git --git-dir=.git push",
+            "git --git-dir .git push",
+            "/usr/local/bin/gh pr create --title t",
+            "gh pr -R owner/repo merge 7",
+            "gh --repo owner/repo release create v1",
+            "git -C . branch -d topic",
         ):
             rows.append((bash(command), DECLARED, lifecycle))
         rows.append((bash("git push"), (("git", "push"),), lifecycle))
+        rows.append((bash("git -C . push origin main"), (("git", "-C", ".", "push", "origin", "main"),),
+                     lifecycle))
+        rows.append((bash("/usr/bin/git push origin main"),
+                     (("/usr/bin/git", "push", "origin", "main"),), lifecycle))
         for command in ("just switch", "just", "just build extra", "cat README.md", "FOO=1 just build"):
             rows.append((bash(command), DECLARED, undeclared))
         for command in (
@@ -531,6 +544,17 @@ class QuestionServiceTest(QuestionCase):
                                 "reason": "RuntimeError: no thread"})
         self.assertEqual(self.asked, [])
         self.assertEqual(svc._project_questions_open, 0)
+
+    def test_a_default_dispatch_that_cannot_start_a_thread_leaves_close_working(self):
+        svc = self.start(project_question_dispatch=None)
+        with mock.patch.object(threading.Thread, "start",
+                               side_effect=RuntimeError("can't start new thread")):
+            with self.assertRaises(RuntimeError):
+                svc.ask_project_question(WHY, "why?")
+        self.assertEqual(svc._project_question_workers, [])
+        self.assertEqual(svc._project_questions_open, 0)
+        svc.close()
+        self.assertEqual([row[0] for row in self.question_rows()][-1:], [ANSWERED_KIND])
 
     def test_an_unresolvable_contract_is_a_failed_answer_and_starts_no_session(self):
         error = resolve_project.ContractError(
