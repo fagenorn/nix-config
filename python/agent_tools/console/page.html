@@ -290,6 +290,12 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .run-sum { font-size: .8125rem; color: var(--sub0); }
 .line .root { display: block; margin-top: 4px; font-size: .8125rem; color: var(--ov2); overflow-wrap: anywhere; }
 .line .qw { display: inline-flex; align-items: baseline; gap: 6px; }
+.notice-list { margin-top: 4px; }
+.notice { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; color: var(--ov2); }
+.notice > * { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+.notice .notice-poster { color: var(--sub0); }
+.notices-project { min-width: 0; overflow-wrap: anywhere; }
+#list > li.line + li.line.after-line { margin-top: 0; padding-top: 0; border-top: 0; }
 .quietfold { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--hair); }
 .quietfold summary { display: flex; align-items: baseline; gap: 8px; cursor: pointer; list-style: none; padding: 4px 12px; margin: 0 -12px; border-radius: 10px; font-size: .875rem; color: var(--ov2); transition: background-color .16s; }
 .quietfold summary::-webkit-details-marker { display: none; }
@@ -1551,6 +1557,34 @@ function projectLine(entry) {
     line.appendChild(actionButton("give-goal", "Give it a goal", () => openGoalFor(entry.project_id)));
   }
   return line;
+}
+function noticeLine(notice) {
+  const item = el("li", "notice");
+  item.appendChild(el("span", "notice-poster", notice.poster));
+  item.appendChild(el("span", "notice-kind", notice.kind_text));
+  if (typeof notice.what === "string") item.appendChild(pathWords(el("span", "notice-what"), notice.what));
+  item.appendChild(el("span", "notice-text", notice.text));
+  if (typeof notice.until_text === "string") item.appendChild(el("span", "notice-until", notice.until_text));
+  if (typeof notice.to_text === "string") item.appendChild(el("span", "notice-for", notice.to_text));
+  item.appendChild(timeEl("ago", notice.at, "notice-age"));
+  return item;
+}
+// One closed fold of a project's open notices, in the view's order and words; null when it has none.
+function noticeFold(entry, afterLine) {
+  const notices = Array.isArray(entry.notices) ? entry.notices : [];
+  if (notices.length === 0) return null;
+  const item = el("li", afterLine ? "line notices after-line" : "line notices");
+  const fold = el("details");
+  fold.dataset.key = "notices:" + entry.project_id;
+  const summary = el("summary");
+  summary.appendChild(el("b", "", "Notices (" + notices.length + ")"));
+  if (!afterLine) summary.appendChild(el("span", "notices-project", entry.project_id));
+  fold.appendChild(summary);
+  const list = el("ul", "notice-list");
+  for (const notice of notices) list.appendChild(noticeLine(notice));
+  fold.appendChild(list);
+  item.appendChild(fold);
+  return item;
 }
 function renderStatement(view) {
   const box = document.getElementById("statement");
@@ -3513,13 +3547,20 @@ function drawProjects(view) {
       summary.appendChild(el("b", "", entry.label));
       fold.appendChild(summary);
       const inner = el("ul");
-      for (const project of entry.projects) inner.appendChild(projectLine(project));
+      for (const project of entry.projects) {
+        inner.appendChild(projectLine(project));
+        const notices = noticeFold(project, true);
+        if (notices !== null) inner.appendChild(notices);
+      }
       fold.appendChild(inner);
       const item = el("li");
       item.appendChild(fold);
       list.appendChild(item);
-    } else if (entry.quiet === true || entry.outside_sprints.sessions.length > 0) {
-      list.appendChild(projectLine(entry));
+    } else {
+      const drawn = entry.quiet === true || entry.outside_sprints.sessions.length > 0;
+      if (drawn) list.appendChild(projectLine(entry));
+      const notices = noticeFold(entry, drawn);
+      if (notices !== null) list.appendChild(notices);
     }
   }
   section.appendChild(list);

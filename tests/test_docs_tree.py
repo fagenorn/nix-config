@@ -1235,6 +1235,18 @@ class DocsTreeTest(unittest.TestCase):
         notice = context.split("**Notice**:", 1)[1].split("_Avoid_:", 1)[0]
         self.assertIn("ADR-console-044", notice)
 
+    def test_the_notices_fold_is_recorded(self):
+        adr = self.doc("docs/areas/console/adr/002-the-desk-page-design-rules.md")
+        self.assertIn('"Notices (n)"', adr)
+        self.assertIn("it never counts in the statement (#1119)", adr)
+        raw = (REPO_ROOT / "docs/areas/console/adr/002-the-desk-page-design-rules.md").read_text()
+        decided = next(line for line in raw.splitlines() if line.startswith("- **Decided in:**"))
+        self.assertTrue(decided.endswith(", #1119"))
+        context = self.doc("docs/areas/console/CONTEXT.md")
+        notice = context.split("**Notice**:", 1)[1].split("_Avoid_:", 1)[0]
+        self.assertIn('"Notices (n)" fold', notice)
+        self.assertIn("ADR-console-002", notice)
+
     def test_the_release_result_adr_limits_one_mutation_to_the_forge_adapter(self):
         text = self.doc("docs/areas/release/adr/005-adapters-never-claim-success.md")
         self.assertNotIn("An adapter makes at most one mutation", text)
