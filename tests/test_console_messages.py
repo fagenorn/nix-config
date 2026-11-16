@@ -516,7 +516,7 @@ class NudgeServiceTest(MessageRouteTest):
         secret = (svc._sprint_secrets / sid).read_text().removesuffix("\n")
         launch = manager.new_launch(
             sid, "owner/p01", "g", "/srv/p01", "work", secret, svc._sprint_secrets)
-        self.assertEqual(path.read_text(), json.dumps(manager.settings_document(launch.env)))
+        self.assertEqual(path.read_text(), json.dumps(manager.settings_document(launch.env, launch.permission)))
 
     def test_a_wake_of_a_session_the_full_listing_shows_writes_the_settings_file_again(self):
         svc, sid = self.stopped_with_full_listing(frozenset({"s-1"}))

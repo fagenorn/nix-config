@@ -1285,7 +1285,7 @@ from urllib.parse import parse_qsl
 from agent_tools.claims import owner_actions
 from agent_tools.console import (
     account_add, account_remove, activation, answer, approve, capacity, contract_draft, deliveries, digest, exclusion, idle, inbox,
-    folder_trust, manager, movement, nudge, pin, plan_questions, probe, register, revive, pictures, sessions, signin, signin_run, spend, sprints, write_guard)
+    folder_trust, manager, movement, nudge, permission, pin, plan_questions, probe, register, revive, pictures, sessions, signin, signin_run, spend, sprints, write_guard)
 from agent_tools.console.event_log import (
     BRIEF_APPROVED, BRIEF_REPLIED, BRIEF_SENT, GOAL_STATED, GOAL_WITHDRAWN, MANAGER_FAILED,
     MANAGER_NO_PROGRESS, MANAGER_NUDGED, MANAGER_STALLED, MANAGER_STARTED, MANAGER_STOP_FAILED,
@@ -4914,7 +4914,8 @@ class ConsoleService:
                 raise nudge.NudgeFailed("the sprint's secret is missing")
             try:
                 manager.write_settings(manager.settings_path(self._sprint_secrets, sprint_id),
-                                       {manager.ID_ENV: sprint_id, manager.SECRET_ENV: secret})
+                                       {manager.ID_ENV: sprint_id, manager.SECRET_ENV: secret},
+                                       permission.FALLBACK)
             except manager.LaunchFailed as error:
                 raise nudge.NudgeFailed(str(error)) from error
 

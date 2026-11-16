@@ -226,7 +226,7 @@ class ReviveServiceTest(ReviveCase):
         launch = manager.new_launch(
             sid, "owner/p01", GOAL, "/srv/p01", "work", self.secret(sid), svc._sprint_secrets)
         self.assertEqual(len(self.revives()), 1)
-        self.assertEqual(written, [json.dumps(manager.settings_document(launch.env))])
+        self.assertEqual(written, [json.dumps(manager.settings_document(launch.env, launch.permission))])
         self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
 
     def test_a_wake_of_a_session_the_full_listing_shows_writes_the_settings_file_again(self):

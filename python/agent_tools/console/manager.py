@@ -59,12 +59,15 @@ and a supervisor that is already running may start the session with its own envi
 launching client's. So `run_launch` writes the sprint's id and secret as `{"env": {...}}` to a
 per-sprint settings file (mode 0600, replaced on a retry) and passes `--settings <file>`; Claude
 Code applies a settings file's `env` to that session. Only the path is on argv. The file holds
-two more members (ADR-console-021, #973): `"worktree": {"bgIsolation": "none"}`, because a manager
+three more members (ADR-console-021, #973): `"worktree": {"bgIsolation": "none"}`, because a manager
 writes no code and every delivery makes its own worktree, and one `PermissionRequest` command hook
 that prints the client's deny decision with `REFUSAL`, one fixed sentence, because nobody watches
-a manager's session (a plain `printf`, no interpreter start). `settings_document(env)` is that
-content and `write_settings(path, env)` writes it (mode 0600, atomically); the console writes it
-again before every wake of a stopped or removed session (`service._refresh_settings`).
+a manager's session (a plain `printf`, no interpreter start). The third is `"permissions":
+{"defaultMode": <mode>}`, the mode the launch's `Permission` chose for the project (ADR-console-057,
+#1151), nothing else under `permissions`; a launch built without one carries `permission.FALLBACK`,
+so `auto`. `settings_document(env, permission)` is that content and `write_settings(path, env,
+permission)` writes it (mode 0600, atomically); the console writes it again before every wake of a
+stopped or removed session (`service._refresh_settings`).
 
 Runner. `run_launch` starts the command with no terminal (`stdin` and `stdout` to the null
 device, stderr to a temporary file, never a pipe, so a detached child that keeps the descriptors
@@ -132,6 +135,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 
+from agent_tools.console import permission as permissions
 from agent_tools.console.event_log import Event
 from agent_tools.console.sessions import DEFAULT_PROFILE, GONE, HOOK, PROFILE, SEEN
 
@@ -197,6 +201,7 @@ class Launch:
     env: Mapping[str, str] = field(repr=False)
     takeover: bool = False
     seen_after: int = 0
+    permission: permissions.Permission = permissions.FALLBACK
 
 
 @dataclass(frozen=True)
@@ -218,7 +223,8 @@ def remove_settings(directory: Path, sprint_id: str) -> None:
 
 def new_launch(sprint_id: str, project_id: str, goal: str, root: str, profile: str,
                secret: str, settings_dir: Path, takeover: bool = False,
-               seen_after: int = 0, notices: str = "") -> Launch:
+               seen_after: int = 0, notices: str = "",
+               permission: permissions.Permission = permissions.FALLBACK) -> Launch:
     lead = TAKEOVER_LEAD if takeover else PROMPT_LEAD
     if notices:
         lead = lead.removesuffix(GOAL_MARK).rstrip() + "\n\n" + notices + "\n\n" + GOAL_MARK
@@ -228,7 +234,7 @@ def new_launch(sprint_id: str, project_id: str, goal: str, root: str, profile: s
         prompt=lead + goal,
         settings=settings_path(settings_dir, sprint_id),
         env={ID_ENV: sprint_id, SECRET_ENV: secret}, takeover=takeover,
-        seen_after=seen_after)
+        seen_after=seen_after, permission=permission)
 
 
 def choose_profile(capacity: Mapping, last_use: Mapping[str, str]) -> str | Wait:
@@ -370,20 +376,21 @@ def launcher_for(platform: str) -> Callable[[Launch], None] | None:
     return run_launch if supported(platform) else None
 
 
-def settings_document(env: Mapping[str, str]) -> dict:
-    """The settings a manager's session runs under: its environment, no isolation guard, no prompts."""
+def settings_document(env: Mapping[str, str], permission: permissions.Permission) -> dict:
+    """The settings a manager's session runs under: its environment, no isolation guard, no prompts, the mode."""
     refusal = json.dumps({"hookSpecificOutput": {
         "hookEventName": "PermissionRequest",
         "decision": {"behavior": "deny", "message": REFUSAL}}})
     return {"env": dict(env),
             "worktree": {"bgIsolation": "none"},
             "hooks": {"PermissionRequest": [{"hooks": [{
-                "type": "command", "command": f"printf '%s\\n' {shlex.quote(refusal)}"}]}]}}
+                "type": "command", "command": f"printf '%s\\n' {shlex.quote(refusal)}"}]}]},
+            "permissions": {"defaultMode": permission.mode}}
 
 
-def write_settings(path: Path, env: Mapping[str, str]) -> None:
-    """Replace the file at `path` with `settings_document(env)`; `LaunchFailed` when it cannot be written."""
-    document = json.dumps(settings_document(env))
+def write_settings(path: Path, env: Mapping[str, str], permission: permissions.Permission) -> None:
+    """Replace the file at `path` with `settings_document(env, permission)`; `LaunchFailed` when it cannot be written."""
+    document = json.dumps(settings_document(env, permission))
     temporary = None
     try:
         path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -462,7 +469,7 @@ def run_launch(launch: Launch, *, platform: str = sys.platform, run=subprocess.r
     if not Path(launch.cwd).is_dir():
         raise fail(f"the project root {launch.cwd} is not a directory")
     try:
-        write_settings(launch.settings, launch.env)
+        write_settings(launch.settings, launch.env, launch.permission)
     except LaunchFailed as error:
         raise fail(str(error)) from error
     env = client_environment(launch.profile, environ)
