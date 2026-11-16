@@ -40,8 +40,9 @@ def all_sprints(view):
 
 
 class ScreenshotFixtureTest(unittest.TestCase):
-    def test_the_set_is_ten_states_at_two_widths(self) -> None:
-        self.assertEqual(len(shots.STATES), 10)
+    def test_the_set_is_eleven_states_at_two_widths(self) -> None:
+        self.assertEqual(len(shots.STATES), 11)
+        self.assertEqual(shots.STATES[-1], "spend-page")
         self.assertEqual(shots.STATES.index("tell-box-open"), shots.STATES.index("stuck") + 1)
         self.assertEqual(shots.WIDTHS, (1440, 480))
 
@@ -222,10 +223,22 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     self.assertTrue(any(s["closing"] for s in ended))
                 elif state == "nothing-running":
                     self.assertEqual(running, [])
+                days = (view["spend"] or {"days": []})["days"]
+                self.assertIsNotNone(view["spend"])
+                if state == "spend-page":
+                    self.assertGreater(days[-1]["total"]["dollars"], 0)
+                    self.assertGreaterEqual(
+                        sum(1 for d in days[-7:] if d["total"]["dollars"] > 0), 4)
+                    self.assertGreaterEqual(
+                        len(set().union(*(d["phase"] for d in days[-7:]))), 2)
+                    self.assertIn(running[0]["sprint_id"],
+                                  set().union(*(d["sprint"] for d in days[-7:])))
+                else:
+                    self.assertEqual(days[-1]["total"]["dollars"], 0)
 
 
 class ScreenshotCaptureTest(unittest.TestCase):
-    def test_the_command_writes_twenty_pngs_and_nothing_scrolls_sideways(self) -> None:
+    def test_the_command_writes_twenty_two_pngs_and_nothing_scrolls_sideways(self) -> None:
         try:
             from playwright.sync_api import Error, sync_playwright
         except ImportError:
@@ -251,7 +264,7 @@ class ScreenshotCaptureTest(unittest.TestCase):
             names = sorted(p.name for p in out.iterdir())
             self.assertEqual(
                 names, sorted(f"{s}-{w}.png" for s in shots.STATES for w in shots.WIDTHS))
-            self.assertEqual(len(names), 20)
+            self.assertEqual(len(names), 22)
             for path in out.iterdir():
                 self.assertEqual(path.read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
 

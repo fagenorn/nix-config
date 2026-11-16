@@ -3,10 +3,12 @@
 Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
 
 Contract:
-- `STATES` names the ten screens the sprint block, the finished list and the message life
-  must read well on (`tell-box-open` is the sprint block with its Tell box opened);
-  `WIDTHS` are the two viewport widths each is shot at. `capture` writes
-  `<state>-<width>.png` for every pair, so a full run writes 20 files.
+- `STATES` names the eleven screens the sprint block, the finished list, the message life and
+  the Spend page must read well on (`tell-box-open` is the sprint block with its Tell box opened;
+  `spend-page` is the `/spend` page over seeded transcripts: a running sprint's manager session,
+  an outside-sprint session and one workflow run, with spend on at least four of the last seven
+  days); `WIDTHS` are the two viewport widths each is shot at. `capture` writes
+  `<state>-<width>.png` for every pair, so a full run writes 22 files.
 - Each state is a fresh fixture console: a registry of three projects (`owner/web`,
   `owner/api`, `owner/docs`) and an event log seeded for that state with event times relative
   to one clock reading, served by the real `ConsoleService` on a loopback port. Nothing is
@@ -34,12 +36,13 @@ Contract:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import tempfile
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from agent_tools.console import manager
@@ -51,7 +54,7 @@ from .console_test_support import write_registry
 
 STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-sent",
           "message-picked-up", "message-replied", "message-not-picked-up", "finished-list",
-          "nothing-running")
+          "nothing-running", "spend-page")
 WIDTHS = (1440, 480)
 HEIGHT = 900
 MINUTE = 60.0
@@ -176,7 +179,7 @@ class _Seed:
                      {**base, "message": said.seq, "reply": REPLY_TEXT})
 
 
-def _seed_state(seed: _Seed, state: str) -> None:
+def _seed_state(seed: _Seed, state: str) -> str | None:
     web, api = PROJECTS[0], PROJECTS[1]
     if state == "live-several":
         seed.sprint(api, "Keep the importer fast", started=60 * MINUTE, report=45 * MINUTE)
@@ -209,8 +212,55 @@ def _seed_state(seed: _Seed, state: str) -> None:
                     report=3 * 60 * MINUTE, landed=True, close=2 * 60 * MINUTE)
         seed.sprint(web, "Try a new cache", started=4 * 60 * MINUTE, report=3.5 * 60 * MINUTE,
                     stop=3 * 60 * MINUTE)
+    elif state == "spend-page":
+        return seed.sprint(web, "Add resumable uploads", started=20 * MINUTE, report=2 * MINUTE)[0]
     elif state != "nothing-running":
         raise ValueError(f"unknown state {state!r}")
+    return None
+
+
+def _transcript(lines: Sequence[Mapping]) -> bytes:
+    return b"".join((json.dumps(line) + "\n").encode() for line in lines)
+
+
+def _write_spend(fixture: Fixture, now_s: float, sprint_id: str) -> None:
+    """Transcripts for the Spend page: a sprint's manager, an outside-sprint session, a run.
+
+    Every assistant line has its own message id, the registered root as its `cwd`, and a time
+    0 to 6 whole UTC days before `now_s`, so at least four of the last seven days have spend.
+    """
+    web, api = (str(path) for path in fixture.projects[:2])
+    counter = [0]
+
+    def assistant(sid: str, cwd: str, days_ago: int, input: int, output: int) -> dict:
+        counter[0] += 1
+        when = datetime.fromtimestamp(now_s, timezone.utc) - timedelta(days=days_ago)
+        return {"type": "assistant", "sessionId": sid, "cwd": cwd,
+                "timestamp": when.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+                "message": {"id": f"msg-{counter[0]:04d}", "model": "claude-sonnet-4-6",
+                            "usage": {"input_tokens": input, "cache_creation_input_tokens": 0,
+                                      "cache_read_input_tokens": input * 8,
+                                      "output_tokens": output}}}
+
+    msid, osid = "manager-1135", "outside-1135"
+    slug = fixture.config / "projects" / "-web"
+    run = slug / msid / "subagents" / "workflows" / "wf_1"
+    run.mkdir(parents=True, exist_ok=True)
+    title = {"type": "custom-title", "customTitle": manager.session_name("owner/web", sprint_id),
+             "sessionId": msid}
+    (slug / f"{msid}.jsonl").write_bytes(_transcript([title] + [
+        assistant(msid, web, ago, 40_000 + 9_000 * ago, 3_000 + 400 * ago) for ago in range(7)]))
+    other = fixture.config / "projects" / "-api"
+    other.mkdir(parents=True, exist_ok=True)
+    (other / f"{osid}.jsonl").write_bytes(_transcript([
+        assistant(osid, api, ago, 25_000 + 5_000 * ago, 2_000) for ago in (0, 2, 3, 5)]))
+    (run / "journal.jsonl").write_bytes(_transcript([
+        {"type": "started", "agentId": "a1", "label": "plan", "phase": "Plan"},
+        {"type": "started", "agentId": "a2", "label": "impl-1", "phase": "Tasks"}]))
+    (run / "agent-a1.jsonl").write_bytes(_transcript([
+        assistant(msid, web, ago, 60_000, 5_000) for ago in (1, 4)]))
+    (run / "agent-a2.jsonl").write_bytes(_transcript([
+        assistant(msid, web, ago, 90_000, 8_000) for ago in (0, 1, 2, 5)]))
 
 
 def build_fixture(root: Path, state: str, now_s: float) -> Fixture:
@@ -220,7 +270,7 @@ def build_fixture(root: Path, state: str, now_s: float) -> Fixture:
         Path(environ[name]) for name in ("HOME", "CLAUDE_ACCOUNTS_DIR", "CLAUDE_CONFIG_DIR",
                                          "XDG_STATE_HOME"))
     projects = tuple(root / "projects" / name.split("/")[1] for name in PROJECTS)
-    for directory in (home, accounts, config, state_dir, *projects):
+    for directory in (home, accounts, config, state_dir, config / "sessions", *projects):
         directory.mkdir(parents=True, exist_ok=True)
     console = state_dir / "console"
     fixture = Fixture(
@@ -232,9 +282,11 @@ def build_fixture(root: Path, state: str, now_s: float) -> Fixture:
     at = [_iso(now_s)]
     log = EventLog(fixture.store, clock=lambda: at[0])
     try:
-        _seed_state(_Seed(log, at, now_s), state)
+        sprint_id = _seed_state(_Seed(log, at, now_s), state)
     finally:
         log.close()
+    if state == "spend-page":
+        _write_spend(fixture, now_s, sprint_id)
     return fixture
 
 
@@ -244,12 +296,14 @@ def start_service(fixture: Fixture, now_s: float, launches: list | None = None) 
             launches.append(launch)
 
     service = ConsoleService(
-        fixture.store, fixture.registry, port=0, session_dirs=lambda: [],
+        fixture.store, fixture.registry, port=0, session_dirs=lambda: [fixture.config / "sessions"],
         profile_dirs=lambda: [], token_path=fixture.token, sprint_secrets=fixture.secrets,
         session_poll_seconds=3600, nudger=lambda nudge: None, launcher=launcher,
         activity=lambda root: None, slug_of=lambda root: None,
-        branch_pattern_of=lambda repo: None, dispatch=lambda job: job())
+        branch_pattern_of=lambda repo: None, dispatch=lambda job: job(),
+        repo_of=lambda cwd: cwd)
     service.start()
+    service.poll_spend()
     return service
 
 
@@ -275,7 +329,9 @@ def capture(out: Path, states: Sequence[str] = STATES,
                     try:
                         host, port = service.address
                         for width in widths:
-                            taken.append(_shoot(browser, f"http://{host}:{port}/", state, width, out))
+                            path = "spend" if state == "spend-page" else ""
+                            taken.append(
+                                _shoot(browser, f"http://{host}:{port}/{path}", state, width, out))
                     finally:
                         service.close()
         finally:
@@ -342,7 +398,7 @@ def _shoot(browser, url: str, state: str, width: int, out: Path) -> Shot:
     page = browser.new_page(viewport={"width": width, "height": HEIGHT})
     try:
         page.goto(url)
-        page.wait_for_selector("#projects h2")
+        page.wait_for_selector("#breakdowns h2" if state == "spend-page" else "#projects h2")
         if state == "finished-list":
             page.click('details[data-key="finished"] > summary')
             page.click('details[data-key^="ended:"] > summary')
