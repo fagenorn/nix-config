@@ -200,6 +200,8 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .st-dim { color: var(--ov2); }
 .sprint-ball.needs, .sic.needs { color: var(--peach); }
 .sic { display: flex; align-self: start; padding-top: 2px; }
+.sprint-checks { flex: 1 0 100%; list-style: none; margin: 0; padding: 0 0 0 28px; }
+.sprint-check { background: none; border: 0; padding: 2px 0; font: inherit; font-size: .8125rem; color: var(--ov2); text-align: left; cursor: pointer; overflow-wrap: anywhere; }
 .sprint-detail { flex: 1 0 100%; font-size: .8125rem; }
 .sprint-detail summary { cursor: pointer; color: var(--ov2); }
 .sprint-detail ul { margin-top: 2px; padding: 0 0 0 16px; }
@@ -222,6 +224,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .new-replies { margin-top: 8px; font-size: .9375rem; color: var(--sub0); max-width: 44rem; }
 .activation { margin-top: 8px; font-size: .84375rem; color: var(--text); max-width: 44rem; overflow-wrap: anywhere; }
 .activation code { font: 500 .8125rem/1.4 ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace; padding: 0 4px; background: var(--mantle); border-radius: 4px; white-space: nowrap; }
+.notice code { font: 500 .8125rem/1.4 ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace; padding: 0 4px; background: var(--mantle); border-radius: 4px; white-space: nowrap; }
 .tell-hint { color: var(--ov2); font-size: .8125rem; }
 .finished-messages { padding: 0 0 8px 16px; }
 .unreachable { color: var(--ov2); }
@@ -291,10 +294,19 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .line .root { display: block; margin-top: 4px; font-size: .8125rem; color: var(--ov2); overflow-wrap: anywhere; }
 .line .qw { display: inline-flex; align-items: baseline; gap: 6px; }
 .notice-list { margin-top: 4px; }
-.notice { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; color: var(--ov2); }
+.notice { color: var(--ov2); }
+.notice + .notice { margin-top: 12px; }
 .notice > * { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
-.notice .notice-poster { color: var(--sub0); }
-.notices-project { min-width: 0; overflow-wrap: anywhere; }
+.notice-head { display: flex; align-items: baseline; gap: 0 8px; color: var(--sub0); }
+.notice-head > *, .notice-claim > * { min-width: 0; }
+.notice-who { flex: 1 1 auto; min-width: 0; }
+.notice-head .notice-age { flex: none; margin-left: auto; color: var(--ov2); white-space: nowrap; }
+.notice-words { color: var(--text); }
+.notice-claim { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; }
+.notices-project { margin-left: 10px; min-width: 0; overflow-wrap: anywhere; }
+.line.notices summary { display: revert; list-style: revert; }
+.line.notices summary::-webkit-details-marker { display: revert; }
+.notice .notice-long, .notice code { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
 #list > li.line + li.line.after-line { margin-top: 0; padding-top: 0; border-top: 0; }
 .quietfold { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--hair); }
 .quietfold summary { display: flex; align-items: baseline; gap: 8px; cursor: pointer; list-style: none; padding: 4px 12px; margin: 0 -12px; border-radius: 10px; font-size: .875rem; color: var(--ov2); transition: background-color .16s; }
@@ -413,6 +425,7 @@ html:has(#viewer:not([hidden])) { overflow: hidden; }
   .top-in { flex-wrap: wrap; }
   .cap { margin-left: 0; }
   .cap-extra { display: none; }
+  .sprint-check { display: flex; align-items: flex-start; min-height: 44px; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .001ms !important; animation-delay: 0s !important; transition-duration: .001ms !important; }
@@ -479,6 +492,27 @@ function pathWords(node, text) {
       if (i > 0) node.appendChild(el("wbr"));
       node.appendChild(el("span", "seg", segment));
     });
+  }
+  flush();
+  return node;
+}
+// A run of LONG_WORD characters or more with no space is one cut span carrying its whole text in its title (#1133).
+const LONG_WORD = 24;
+function cutWords(node, text) {
+  let plain = "";
+  const flush = () => {
+    if (plain !== "") node.appendChild(el("span", "", plain));
+    plain = "";
+  };
+  for (const run of String(text).split(/(\s+)/)) {
+    if (/\s/.test(run) || run.length < LONG_WORD) {
+      plain += run;
+      continue;
+    }
+    flush();
+    const long = el("span", "notice-long", run);
+    long.setAttribute("title", run);
+    node.appendChild(long);
   }
   flush();
   return node;
@@ -746,6 +780,14 @@ function fillSprint(item, entry, sprint) {
     sprintRedraw -= 1;
   }
 }
+function focusCard(card) {
+  if (card === undefined || !card.isConnected) return;
+  if (card.tabIndex !== 0) card.tabIndex = -1;
+  card.focus();
+}
+function openCheckCard(check) {
+  focusCard(inboxCards.get(check.project_id + "#" + check.key));
+}
 function drawSprint(item, entry, sprint) {
   const state = withdrawals.get(sprint.sprint_id);
   latestSprints.set(sprint.sprint_id, { entry, sprint });
@@ -799,6 +841,16 @@ function drawSprint(item, entry, sprint) {
   words.appendChild(age);
   head.appendChild(words);
   item.appendChild(head);
+  const checks = sprint.checks || [];
+  if (checks.length > 0) {
+    const list = el("ul", "sprint-checks");
+    for (const check of checks) {
+      const line = el("li", "");
+      line.appendChild(actionButton("sprint-check", check.text, () => openCheckCard(check)));
+      list.appendChild(line);
+    }
+    item.appendChild(list);
+  }
   if (sprint.manager_text !== null && sprint.manager_text !== undefined) {
     item.appendChild(el("span", "manager", sprint.manager_text));
   }
@@ -1562,13 +1614,41 @@ function projectLine(entry) {
 }
 function noticeLine(notice) {
   const item = el("li", "notice");
-  item.appendChild(el("span", "notice-poster", notice.poster));
-  item.appendChild(el("span", "notice-kind", notice.kind_text));
-  if (typeof notice.what === "string") item.appendChild(pathWords(el("span", "notice-what"), notice.what));
-  item.appendChild(el("span", "notice-text", notice.text));
-  if (typeof notice.until_text === "string") item.appendChild(el("span", "notice-until", notice.until_text));
-  if (typeof notice.to_text === "string") item.appendChild(el("span", "notice-for", notice.to_text));
-  item.appendChild(timeEl("ago", notice.at, "notice-age"));
+  const head = el("p", "notice-head");
+  const who = el("span", "notice-who");
+  const label = typeof notice.to_text === "string" ? notice.kind_text + " " + notice.to_text : notice.kind_text;
+  who.appendChild(cutWords(el("b", "notice-label"), label));
+  who.appendChild(cutWords(el("span", "notice-from"), ", from " + notice.poster));
+  head.appendChild(who);
+  head.appendChild(timeEl("ago", notice.at, "notice-age"));
+  item.appendChild(head);
+  item.appendChild(cutWords(el("p", "notice-words"), notice.text));
+  if (typeof notice.what === "string") {
+    const claim = el("p", "notice-claim");
+    const paths = el("span", "notice-paths");
+    let plain = "";
+    const flush = () => {
+      if (plain !== "") cutWords(paths, plain);
+      plain = "";
+    };
+    // Only a path-shaped word (a slash, or a dot between word characters) takes the code chip; trailing punctuation and every other word of an area in words stay plain text.
+    for (const run of notice.what.trim().split(/(\s+)/)) {
+      const path = run.replace(/[,;:.]+$/, "");
+      if (!(path.includes("/") || /\w\.\w/.test(path))) {
+        plain += run;
+        continue;
+      }
+      flush();
+      const code = el("code", "notice-path", path);
+      code.setAttribute("title", path);
+      paths.appendChild(code);
+      plain += run.slice(path.length);
+    }
+    flush();
+    claim.appendChild(paths);
+    if (typeof notice.until_text === "string") claim.appendChild(cutWords(el("span", "notice-until"), notice.until_text));
+    item.appendChild(claim);
+  }
   return item;
 }
 // One closed fold of a project's open notices, in the view's order and words; null when it has none.
@@ -1986,13 +2066,19 @@ function isOwnerCheck(item) {
 }
 // An owner check's pictures (ADR-console-045) reuse the shared gallery and viewer of ADR-console-038.
 function checkPictures(node, item) {
-  const gallery = pictureGallery(itemId(item), item.pictures);
+  const gallery = pictureGallery(itemId(item), item.pictures, pictureCaption);
   if (gallery !== null) node.appendChild(gallery);
   if (!Array.isArray(item.missing_pictures)) return;
   for (const name of item.missing_pictures) node.appendChild(el("p", "pic-missing", name + " was not found on this host."));
 }
 function readingLine(item) {
   return typeof item.reading === "string" && item.reading !== "" ? el("p", "reading", "Reading: " + item.reading) : null;
+}
+// ADR-console-047: the reading is the first thing under the question, before the pictures that illustrate it and the answer box.
+function checkHead(node, item) {
+  const reading = readingLine(item);
+  if (reading !== null) node.appendChild(reading);
+  checkPictures(node, item);
 }
 function headLine(item) {
   const line = el("p", "head meta");
@@ -2071,6 +2157,7 @@ const drafts = new Map();
 let fields = new Map();
 let lastView = null;
 let currentId = null;
+let inboxCards = new Map();
 let keyHint = null;
 let hintHost = null;
 function itemId(item) {
@@ -2093,6 +2180,21 @@ function pictureSequence(pictures) {
     } else out.push(p);
   }
   return out;
+}
+// An owner check thumbnail reads a caption made from its file name, never the name itself (ADR-console-047): a before or after word leads, a trailing width reads in px, any other name is sentence case.
+function pictureCaption(name) {
+  const base = String(name).split(/[\\/]/).pop().replace(/\.png$/i, "");
+  const words = base.split(/[\s._-]+/).map((w) => w.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "")).filter((w) => w !== "");
+  let width = "";
+  if (words.length > 0 && /^\d{3,4}(px)?$/i.test(words[words.length - 1])) width = words.pop().replace(/px$/i, "");
+  const marker = words.find((w) => /^(before|after)$/i.test(w));
+  let lead = "Picture";
+  if (marker !== undefined) lead = marker.charAt(0).toUpperCase() + marker.slice(1).toLowerCase();
+  else if (words.length > 0) {
+    const text = words.map((w) => w.toLowerCase()).join(" ");
+    lead = text.charAt(0).toUpperCase() + text.slice(1);
+  }
+  return width === "" ? lead : lead + ", " + width + " px";
 }
 function pictureFailed(img) {
   if (img.hidden === true) return;
@@ -2168,7 +2270,8 @@ function viewerStillShown() {
   if (shown.length !== viewer.sequence.length) return false;
   return viewer.sequence.every((picture, i) => shown.some((n) => n.dataset.key === viewer.key + "/" + i && n.dataset.picture === picture.id));
 }
-function pictureFigure(key, index, picture, label, sequence) {
+function pictureFigure(key, index, picture, label, sequence, caption) {
+  const line = typeof caption === "function" ? caption(picture.line) : picture.line;
   const figure = el("figure", "pic");
   if (label !== null) figure.appendChild(el("span", "pic-label", label));
   const thumb = el("button", "pic-thumb");
@@ -2182,15 +2285,15 @@ function pictureFigure(key, index, picture, label, sequence) {
     openViewer(key, sequence, index);
   });
   const img = el("img", "pic-img");
-  img.setAttribute("alt", picture.line);
+  img.setAttribute("alt", line);
   img.dataset.picture = picture.id;
   thumb.appendChild(img);
   figure.appendChild(thumb);
-  figure.appendChild(el("figcaption", "pic-line", picture.line));
+  figure.appendChild(el("figcaption", "pic-line", line));
   pictureSrc(img, picture.id);
   return figure;
 }
-function pictureGallery(key, pictures) {
+function pictureGallery(key, pictures, caption) {
   const sequence = pictureSequence(pictures);
   if (sequence.length === 0) return null;
   const gallery = el("div", "pics");
@@ -2199,11 +2302,11 @@ function pictureGallery(key, pictures) {
     const next = sequence[i + 1];
     if (one.pair === "before" && next !== undefined && next.pair === "after") {
       const pair = el("div", "pic-pair");
-      pair.appendChild(pictureFigure(key, i, one, "Before", sequence));
-      pair.appendChild(pictureFigure(key, i + 1, next, "After", sequence));
+      pair.appendChild(pictureFigure(key, i, one, "Before", sequence, caption));
+      pair.appendChild(pictureFigure(key, i + 1, next, "After", sequence, caption));
       gallery.appendChild(pair);
       i += 1;
-    } else gallery.appendChild(pictureFigure(key, i, one, null, sequence));
+    } else gallery.appendChild(pictureFigure(key, i, one, null, sequence, caption));
   }
   return gallery;
 }
@@ -2997,8 +3100,6 @@ function checkBox(item, state, lead) {
       box.appendChild(heldLine(item));
       act.appendChild(detailFold(item));
     }
-    const reading = readingLine(item);
-    if (reading !== null) box.appendChild(reading);
     box.appendChild(act);
     return box;
   };
@@ -3080,7 +3181,7 @@ function leadItem(item) {
   const card = el("article", "card lead");
   card.appendChild(headLine(item));
   card.appendChild(pathWords(el("h2", isRegister(item) ? "q reg" : "q"), item.headline));
-  if (isOwnerCheck(item)) checkPictures(card, item);
+  if (isOwnerCheck(item)) checkHead(card, item);
   if (isQuestion(item) && typeof item.context === "string") card.appendChild(el("p", "context", item.context));
   if (isQuestion(item)) {
     const gallery = pictureGallery(itemId(item), item.pictures);
@@ -3122,7 +3223,7 @@ function itemLine(item) {
     head.appendChild(phrase("span", "lw", "waiting ", timeEl("since", item.waiting_since, "")));
     line.appendChild(head);
   }
-  if (isOwnerCheck(item)) checkPictures(line, item);
+  if (isOwnerCheck(item)) checkHead(line, item);
   if (isQuestion(item) && typeof item.context === "string") line.appendChild(el("p", "context", item.context));
   if (isQuestion(item)) {
     const gallery = pictureGallery(itemId(item), item.pictures);
@@ -3219,6 +3320,8 @@ function drawInbox(view) {
   const held = active && active.dataset && active.dataset.draft !== undefined
     ? { key: active.dataset.draft, start: active.selectionStart, end: active.selectionEnd }
     : null;
+  // A card the owner focused from a check line is rebuilt by every redraw, so its item key is kept and the replacement card is focused again.
+  const heldCard = [...inboxCards].find(([, card]) => card === active);
   fields = new Map();
   const wasOpen = new Set();
   for (const fold of document.querySelectorAll("#inbox details[open]")) wasOpen.add(fold.dataset.key);
@@ -3337,6 +3440,7 @@ function drawInbox(view) {
     }
     section.appendChild(rest);
   }
+  inboxCards = cardOf;
   const answered = view.inbox.answered;
   if (answered.length > 0) {
     const done = el("ul", "done");
@@ -3364,6 +3468,8 @@ function drawInbox(view) {
   if (again !== undefined) {
     again.focus();
     again.setSelectionRange(held.start, held.end);
+  } else if (heldCard !== undefined) {
+    focusCard(cardOf.get(heldCard[0]));
   }
 }
 function momentLine(moment) {
@@ -4350,7 +4456,8 @@ document.addEventListener("keydown", (event) => {
     return;
   }
   const focused = event.target && event.target.tagName;
-  if (["A", "BUTTON", "SUMMARY", "INPUT", "TEXTAREA", "SELECT"].includes(focused)) return;
+  // A card focused by its sprint's check line (openCheckCard) is ARTICLE or LI: the answer keys stay with it, not with the unrelated item currentEntry would pick.
+  if (["A", "BUTTON", "SUMMARY", "INPUT", "TEXTAREA", "SELECT", "ARTICLE", "LI"].includes(focused)) return;
   if (event.target && event.target.isContentEditable === true) return;
   if (event.key === "a") {
     openAccounts();
