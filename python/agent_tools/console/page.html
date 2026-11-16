@@ -220,6 +220,8 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .message-new { font-weight: 600; color: var(--text); }
 .finished-list > summary .message-new, .sprint-earlier summary .message-new { margin-left: 10px; }
 .new-replies { margin-top: 8px; font-size: .9375rem; color: var(--sub0); max-width: 44rem; }
+.activation { margin-top: 8px; font-size: .84375rem; color: var(--text); max-width: 44rem; overflow-wrap: anywhere; }
+.activation code { font: 500 .8125rem/1.4 ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace; padding: 0 4px; background: var(--mantle); border-radius: 4px; white-space: nowrap; }
 .tell-hint { color: var(--ov2); font-size: .8125rem; }
 .finished-messages { padding: 0 0 8px 16px; }
 .unreachable { color: var(--ov2); }
@@ -3455,6 +3457,20 @@ function renderProjects(view) {
     sprintRedraw -= 1;
   }
 }
+// The activation line (#1114, ADR-console-043): the one sentence at the head of the Work column when a merged console change is not active on this host. The command rides in a code span; the rest of the text is drawn with pathWords so the checkout's path breaks after a slash.
+function activationLine(view) {
+  const found = view.activation;
+  if (found === null || typeof found !== "object") return null;
+  const { text, command } = found;
+  if (typeof text !== "string" || typeof command !== "string") return null;
+  const at = text.indexOf(command);
+  if (at < 0) return null;
+  const line = el("p", "activation");
+  line.appendChild(el("span", "", text.slice(0, at)));
+  line.appendChild(el("code", "", command));
+  pathWords(line.appendChild(el("span")), text.slice(at + command.length));
+  return line;
+}
 function drawProjects(view) {
   const section = document.getElementById("projects");
   const heading = el("h2", "sec-h", "Work");
@@ -3466,6 +3482,8 @@ function drawProjects(view) {
     ? { id: active.dataset.tell, start: active.selectionStart, end: active.selectionEnd }
     : null;
   section.replaceChildren(heading);
+  const activation = activationLine(view);
+  if (activation !== null) section.appendChild(activation);
   if (view.project_count === 0) {
     section.appendChild(el("p", "empty", "No project is registered yet."));
     return;

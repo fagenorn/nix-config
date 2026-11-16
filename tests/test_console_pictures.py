@@ -1662,15 +1662,16 @@ class PictureDocsTest(unittest.TestCase):
         for path, amended in (
                 ("013-a-managers-brief-is-approved-or-redirected-on-the-page.md",
                  "- **Status:** accepted; amended by ADR-console-041"),
-                ("014-a-managers-report-becomes-the-sprints-line.md",
-                 "- **Status:** accepted; amended by ADR-console-041"),
                 ("038-a-managers-question-shows-its-pictures-on-the-card-and-full-size-in-a-viewer.md",
                  "- **Status:** accepted; amended by ADR-console-041 and ADR-console-044")):
             with self.subTest(path):
                 lines = (ROOT / adr / path).read_text().splitlines()
-                line = next(r for r in lines if r.startswith("- **Status:**"))
-                # Another area decision may be listed after this one (014 on main lists the sprint ADR).
-                self.assertTrue(line == amended or line.startswith(amended + ", "), line)
+                self.assertEqual(next(r for r in lines if r.startswith("- **Status:**")), amended)
+        with self.subTest("014"):
+            lines = (ROOT / adr / "014-a-managers-report-becomes-the-sprints-line.md"
+                     ).read_text().splitlines()
+            self.assertEqual(next(r for r in lines if r.startswith("- **Status:**")),
+                             "- **Status:** accepted; amended by ADR-console-041, ADR-console-042")
         context = (ROOT / "docs/areas/console/CONTEXT.md").read_text()
         for term in ("**Brief**:", "**Report**:", "**Picture**:"):
             entry = context[context.index(term):].split("\n\n")[0]

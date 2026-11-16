@@ -1,6 +1,6 @@
 # ADR-console-014 — A manager's report becomes the sprint's line
 
-- **Status:** accepted; amended by ADR-console-041
+- **Status:** accepted; amended by ADR-console-041, ADR-console-042
 - **Decided in:** #833, #835, #837, #838, #890
 
 ## Context

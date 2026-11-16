@@ -770,6 +770,51 @@ class PageRenderTest(unittest.TestCase):
         self.assertNotIn("untouched", by_project["owner/p02"])
 
 
+ACTIVATION = {
+    "text": "A console change merged and is not active on this host: run just switch in /home/owner/nix-config.",
+    "command": "just switch",
+    "root": "/home/owner/nix-config",
+}
+
+
+class ActivationPageTest(unittest.TestCase):
+    def test_the_activation_line_heads_the_work_column_with_the_command_in_a_code_span(self) -> None:
+        frame = dict(view([project(0, [], quiet=True)]), activation=ACTIVATION)
+        (snap,) = render([{"frame": frame}, {"snapshot": True}])
+        work = snap["projects"]
+        self.assertEqual(work["children"][0]["tag"], "h2")
+        line = work["children"][1]
+        self.assertEqual(line["tag"], "p")
+        self.assertIn("activation", line["cls"].split())
+        # a snapshot node carries its own text only, so the line reads back as its nodes in document order
+        self.assertEqual("".join(n["text"] for n in nodes(line)), ACTIVATION["text"])
+        codes = [n for n in nodes(line) if n["tag"] == "code"]
+        self.assertEqual(len(codes), 1)
+        self.assertEqual(codes[0]["text"], "just switch")
+
+    def test_no_activation_draws_no_line(self) -> None:
+        plain = view([project(0, [], quiet=True)])
+        for frame in (plain, dict(plain, activation=None)):
+            (snap,) = render([{"frame": frame}, {"snapshot": True}])
+            flat = nodes(snap["projects"])
+            self.assertFalse([n for n in flat if "activation" in n["cls"].split()])
+            self.assertFalse([n for n in flat if n["tag"] == "code"])
+
+    def test_the_line_shows_with_no_project_registered(self) -> None:
+        frame = dict(view([], count=0), activation=ACTIVATION)
+        (snap,) = render([{"frame": frame}, {"snapshot": True}])
+        work = snap["projects"]
+        self.assertIn("activation", work["children"][1]["cls"].split())
+        self.assertEqual(work["children"][2]["text"], "No project is registered yet.")
+
+    def test_the_activation_code_span_uses_no_web_font(self) -> None:
+        page = PAGE.read_text()
+        rule = re.search(r"\.activation code\s*\{([^}]*)\}", page)
+        self.assertIsNotNone(rule)
+        self.assertIn("monospace", rule.group(1))
+        self.assertNotIn("@font-face", page)
+
+
 def profile(name: str, state: str, **fields) -> dict:
     base = {"profile": name, "state": state, "week_left": None, "five_hour_left": None,
             "next_reset": None, "out_until": None, "read_at": "2026-11-10T08:30:00+00:00"}

@@ -1194,23 +1194,79 @@ class ObservedFoldTest(unittest.TestCase):
         observed, moved = fold(8)
         self.assertEqual(observed[0].stage, IssueStage(12, "done"))
         self.assertEqual((len(observed), moved), (1, ms(4) + 90_000))
-        self.assertEqual(fold(9), ((), None))
+        self.assertEqual(fold(9), ((), ms(4) + 90_000))
         tied = sprints.sprint_states(BASE + [seen(5, "wf_a", ms(4) + 60_000, ((12, "building"),)),
                                              seen(6, "wf_a", ms(4) + 60_000, ((12, "verifying"),))])
         self.assertEqual(tied[SID].observed[0].stage, IssueStage(12, "verifying"))
 
-    def test_only_runs_of_the_sprints_project_that_moved_after_the_report_count(self):
+    def test_only_runs_of_the_sprint_carrying_its_issues_move_it(self):
         late = {**seen(5, "wf_a", ms(4) + 60_000, ((12, "building"),)).payload}
         malformed = Event(5, at(5), DELIVERY_SEEN, "owner/p00", {**late, "moved_ms": "x"})
         for row in (seen(5, "wf_a", ms(4) + 60_000, ((12, "building"),), project="owner/p01"),
-                    seen(5, "wf_a", ms(4), ((12, "building"),)),
                     seen(5, "wf_a", ms(4) + 60_000, ((99, "building"),)), malformed):
             with self.subTest(row=row.payload):
                 state = sprints.sprint_states(BASE + [row])[SID]
                 self.assertEqual((state.observed, state.moved_ms), ((), None))
+        state = sprints.sprint_states(BASE + [seen(5, "wf_a", ms(4), ((12, "building"),))])[SID]
+        self.assertEqual((state.observed, state.moved_ms), ((), ms(4)))
         early = BASE[:3] + [seen(4, "wf_a", ms(3) + 1, ((12, "building"),)), reported(5, SID, REPORT)]
         state = sprints.sprint_states(early)[SID]
         self.assertEqual((state.observed, state.moved_ms), ((), None))
+
+
+def listing(seq):
+    return Event(seq, at(seq), "session.seen", "owner/p00",
+                 {"session_id": "s1", "cwd": "/srv/p00", "repo": "/srv/p00", "state": "working",
+                  "name": "owner/p00 sprint " + SID})
+
+
+class SprintMovementFoldTest(unittest.TestCase):
+    def test_a_run_that_moved_before_the_report_still_moves_the_sprint(self):
+        rows = BASE + [seen(5, "wf_a", ms(4) - 60_000, ((12, "building"),))]
+        state = sprints.sprint_states(rows)[SID]
+        self.assertEqual((state.observed, state.moved_ms), ((), ms(4) - 60_000))
+
+    def test_a_report_keeps_the_movement_folded_before_it(self):
+        rows = BASE + [seen(5, "wf_a", ms(4) + 60_000, ((12, "building"),)),
+                       reported(6, SID, REPORT)]
+        state = sprints.sprint_states(rows)[SID]
+        self.assertEqual((state.observed, state.moved_ms), ((), ms(4) + 60_000))
+
+    def test_a_run_of_the_sprints_manager_session_moves_it_whatever_issue_it_carries(self):
+        table = [
+            ("no report", BASE[:3] + [listing(4), seen(5, "wf_m", ms(5), ((99, "planning"),))],
+             ms(5)),
+            ("after the report",
+             BASE + [listing(5), seen(6, "wf_m", ms(4) + 60_000, ((99, "planning"),))],
+             ms(4) + 60_000),
+            ("another session",
+             BASE + [listing(5), seen(6, "wf_m", ms(4) + 60_000, ((99, "planning"),),
+                                      session_id="s2")],
+             None),
+        ]
+        for name, rows, expected in table:
+            with self.subTest(name):
+                state = sprints.sprint_states(rows)[SID]
+                self.assertEqual((state.observed, state.moved_ms), ((), expected))
+
+    def test_a_run_on_an_issue_of_the_reports_inbox_moves_the_sprint(self):
+        inboxed = {**REPORT, "inbox": [40]}
+        rows = BASE[:3] + [reported(4, SID, inboxed),
+                           seen(5, "wf_i", ms(4) + 60_000, ((40, "building"),))]
+        state = sprints.sprint_states(rows)[SID]
+        self.assertEqual((state.observed, state.moved_ms), ((), ms(4) + 60_000))
+
+    def test_movement_folding_in_two_parts_equals_folding_at_once(self):
+        rows = BASE[:3] + [listing(4), reported(5, SID, REPORT),
+                           seen(6, "wf_m", ms(5) - 30_000, ((99, "planning"),)),
+                           seen(7, "wf_a", ms(5) + 60_000, ((12, "building"),)),
+                           reported(8, SID, REPORT)]
+        whole = sprints.sprint_states(rows)
+        self.assertEqual((whole[SID].observed, whole[SID].moved_ms), ((), ms(5) + 60_000))
+        for cut in range(len(rows) + 1):
+            with self.subTest(cut=cut):
+                self.assertEqual(
+                    sprints.sprint_states(rows[cut:], sprints.sprint_states(rows[:cut])), whole)
 
 
 class WithdrawnTest(unittest.TestCase):
