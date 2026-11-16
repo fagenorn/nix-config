@@ -439,13 +439,18 @@ Each merge arm runs it right after the mergeability check, so before the
 feature arm's integration-base exemption and protection lookup and before the
 release arm's rollup predicate, with the matched PR number (the release arm
 receives it as `validate_release_merge`'s last parameter).
-1. The guard reads the PR body, `gh pr view <n> --repo <slug> --json body`.
-2. The PR's issues are the number in an `issue-<n>-` head branch plus every
-   closing keyword GitHub honours (`close`, `closes`, `closed`, `fix`, `fixes`,
-   `fixed`, `resolve`, `resolves`, `resolved`) or `Refs` (any case, an optional
-   colon) in the body followed by `#<n>`, `<slug>#<n>` or
+1. The guard reads the PR's body, commits and linked issues, `gh pr view <n>
+   --repo <slug> --json body,commits,closingIssuesReferences`.
+2. The PR's issues are the number in an `issue-<n>-` head branch, every issue
+   of this repository in `closingIssuesReferences` (the Development sidebar and
+   `gh issue develop` links), plus every closing keyword GitHub honours
+   (`close`, `closes`, `closed`, `fix`, `fixes`, `fixed`, `resolve`, `resolves`,
+   `resolved`) or `Refs` (any case, an optional colon) in the body or in a
+   commit message (headline and body) followed by `#<n>`, `<slug>#<n>` or
    `https://github.com/<slug>/issues/<n>` for this repository's slug; a
-   reference naming another repository is ignored. No issue: the merge is
+   reference naming another repository is ignored. A PR of
+   `LOOK_COMMIT_LIMIT` (100) commits or more is refused as unreadable, since
+   the lookup returns no more than that many. No issue: the merge is
    judged exactly as before, with no further child.
 3. For each issue it reads `gh api repos/<slug>/issues/<n>` and
    `gh api --paginate --slurp repos/<slug>/issues/<n>/comments?per_page=100`
@@ -473,8 +478,9 @@ timed-out lookup is `PR body lookup timed out`, `issue <n> lookup timed out` or
 `issue <n> lookup failed` or `issue <n> comment lookup failed` with the child's
 diagnostic, and output that is not the expected shape is refused as `unsafe
 merge: cannot read the PR body`, `cannot read issue <n>` or `cannot read the
-comments of issue <n>`; an issue or PR body object with no `body` key is
-unreadable, never an empty body. Which issues are marked, and which approvals count
+comments of issue <n>`; an issue or PR object with no `body` key, a PR object
+with no `commits` or `closingIssuesReferences` list, or an entry of either that
+is not readable, is unreadable, never an empty body or an empty list. Which issues are marked, and which approvals count
 (the owner's or a member's, naming this issue, this PR and this head, the
 latest answer deciding), is `look-approval`'s contract; `--admin` is in no merge
 form, so it is refused by the grammar before any lookup.
@@ -1148,6 +1154,13 @@ LOOK_REFERENCE = re.compile(
     r"(?:https?://(?:www\.)?github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/issues/"
     r"|([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#|#)([1-9][0-9]*)\b",
     re.IGNORECASE)
+# `gh pr view --json commits` returns at most this many commits; a PR with this
+# many or more may hold a closing keyword the lookup did not return, so the look
+# gate refuses it (issue 1138).
+LOOK_COMMIT_LIMIT = 100
+# A linked issue's URL as `closingIssuesReferences` gives it: `(slug, number)`.
+LOOK_ISSUE_URL = re.compile(
+    r"https://github\.com/([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)/issues/([1-9][0-9]*)")
 # GitHub's answer to a branch-protection read on a plan that cannot protect the
 # branch (issue 552 D2): `gh api` exits non-zero and writes this body to stdout.
 PLAN_GATED_STATUS = "403"
@@ -4985,16 +4998,17 @@ def mergeability_problem(pr_facts, base, head_commit):
     return None
 
 
-def look_issue_numbers(head_ref, body, repository):
+def look_issue_numbers(head_ref, body, repository, linked=()):
     """The issues a pull request settles, ascending (issue 1138).
 
-    The number in an `issue-<n>-` head branch, and every closing keyword of
+    The number in an `issue-<n>-` head branch, every number in `linked` (the
+    repository's issues the forge links to the PR), and every closing keyword of
     GitHub (`close`, `closes`, `closed`, `fix`, `fixes`, `fixed`, `resolve`,
-    `resolves`, `resolved`) or `Refs` (any case, an optional colon) in the body
+    `resolves`, `resolved`) or `Refs` (any case, an optional colon) in `body`
     followed by `#<n>`, `<repository>#<n>` or this repository's issue URL; a
     reference naming another repository is ignored.
     """
-    found = set()
+    found = set(linked)
     named = re.match(r"issue-([1-9][0-9]*)-", head_ref) if isinstance(head_ref, str) else None
     if named is not None:
         found.add(int(named.group(1)))
@@ -5003,6 +5017,44 @@ def look_issue_numbers(head_ref, body, repository):
         if not slug or slug.lower() == repository.lower():
             found.add(int(number))
     return sorted(found)
+
+
+def look_pr_texts(pr, repository):
+    """`(text, linked)` from the PR lookup's object, or `(None, None)` when unreadable.
+
+    `text` is the PR body and every commit message (headline and body) joined by
+    newlines; `linked` the numbers of `repository`'s issues in
+    `closingIssuesReferences`, other repositories' issues ignored. A missing or
+    mistyped field, an entry that is not readable, or `LOOK_COMMIT_LIMIT` commits
+    or more is unreadable.
+    """
+    if not isinstance(pr, dict) or "body" not in pr:
+        return None, None
+    body, commits, references = pr["body"], pr.get("commits"), pr.get("closingIssuesReferences")
+    if not (body is None or isinstance(body, str)):
+        return None, None
+    if not isinstance(commits, list) or len(commits) >= LOOK_COMMIT_LIMIT:
+        return None, None
+    if not isinstance(references, list):
+        return None, None
+    texts = [body or ""]
+    for commit in commits:
+        if not isinstance(commit, dict):
+            return None, None
+        for key in ("messageHeadline", "messageBody"):
+            text = commit.get(key)
+            if not isinstance(text, str):
+                return None, None
+            texts.append(text)
+    linked = []
+    for reference in references:
+        url = reference.get("url") if isinstance(reference, dict) else None
+        found = LOOK_ISSUE_URL.fullmatch(url) if isinstance(url, str) else None
+        if found is None:
+            return None, None
+        if found.group(1).lower() == repository.lower():
+            linked.append(int(found.group(2)))
+    return "\n".join(texts), linked
 
 
 def look_json(context, argv, timed_out, failed, unreadable):
@@ -5075,16 +5127,15 @@ def look_problem(context, number, pr_facts, head_commit):
     """
     repository = context.repository
     pr_body, status = look_json(
-        context, ["pr", "view", number, "--repo", repository, "--json", "body"],
+        context, ["pr", "view", number, "--repo", repository, "--json",
+         "body,commits,closingIssuesReferences"],
         "PR body lookup timed out", "PR body lookup failed", "cannot read the PR body")
     if status is not None:
         return status
-    if not isinstance(pr_body, dict) or "body" not in pr_body or not (
-        pr_body["body"] is None or isinstance(pr_body["body"], str)
-    ):
+    texts, linked = look_pr_texts(pr_body, repository)
+    if texts is None:
         return refuse("merge", "cannot read the PR body")
-    numbers = look_issue_numbers(
-        pr_facts.get("headRefName"), pr_body.get("body") or "", repository)
+    numbers = look_issue_numbers(pr_facts.get("headRefName"), texts, repository, linked)
     if not numbers:
         return None
     issues = []

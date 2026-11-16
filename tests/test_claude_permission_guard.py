@@ -89,7 +89,7 @@ elif (
     and argv[0:2] == ["pr", "view"]
     and argv[3] == "--repo"
     and argv[5] == "--json"
-    and argv[6] == "body"
+    and argv[6] == "body,commits,closingIssuesReferences"
 ):
     stage, number, slug = "body", argv[2], argv[4]
 elif len(argv) == 2 and argv[0] == "api":
@@ -157,7 +157,7 @@ if stage == "pr":
         '"status":"COMPLETED","conclusion":"SUCCESS"}]}'
     )
 elif stage == "body":
-    default = '{"body": ""}'
+    default = '{"body": "", "commits": [], "closingIssuesReferences": []}'
 elif stage == "issue":
     issue = json.loads(os.environ.get("FAKE_ISSUES", "{}")).get(number, {})
     default = json.dumps({"number": int(number), "body": issue.get("body", "")})
@@ -5002,8 +5002,20 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             "author_association": association,
         }
 
+    @staticmethod
+    def look_pr_json(body="", commits=(), linked=()):
+        """The PR body lookup's answer: body, commit messages and linked issue numbers."""
+        return json.dumps({
+            "body": body,
+            "commits": [{"messageHeadline": line, "messageBody": ""} for line in commits],
+            "closingIssuesReferences": [
+                {"url": n if isinstance(n, str)
+                 else f"https://github.com/fagenorn/nix-config/issues/{n}"}
+                for n in linked],
+        })
+
     def look_env(self, issues, body="", branch="issue-1200-page", head=LOOK_HEAD,
-                 base="main", slug="fagenorn/nix-config", number=1300):
+                 base="main", slug="fagenorn/nix-config", number=1300, commits=(), linked=()):
         pr = {
             "state": "OPEN",
             "baseRefName": base,
@@ -5017,7 +5029,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             pr["headRefOid"] = head
         return {
             "FAKE_PR_JSON": json.dumps(pr),
-            "FAKE_BODY_JSON": json.dumps({"body": body}),
+            "FAKE_BODY_JSON": self.look_pr_json(body, commits, linked),
             "FAKE_ISSUES": json.dumps(issues),
         }
 
@@ -5063,6 +5075,11 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             "upper-case Fixes": (repo, self.LOOK_MERGE, by_reference("FIXES #1200")),
             "a slug-qualified reference": (
                 repo, self.LOOK_MERGE, by_reference("resolves fagenorn/nix-config#1200")),
+            "a closing keyword in a commit message": (repo, self.LOOK_MERGE, self.look_env(
+                self.LOOK_MARKED, branch="topic", body="Page change",
+                commits=("Fix #1200 layout",))),
+            "a Development link": (repo, self.LOOK_MERGE, self.look_env(
+                self.LOOK_MARKED, branch="1200-page", body="Page change", linked=(1200,))),
             "an ended approval": (repo, self.LOOK_MERGE, self.marked_with(
                 self.look_comment(10), self.look_end_comment(11, 10))),
             "an integration base": (
@@ -5101,6 +5118,16 @@ class ClaudePermissionGuardTest(unittest.TestCase):
              "lifecycle guard: unsafe merge: cannot read issue 1200"),
             ({"FAKE_BODY_JSON": "{}"}, None,
              "lifecycle guard: unsafe merge: cannot read the PR body"),
+            ({"FAKE_BODY_JSON": '{"body": "", "closingIssuesReferences": []}'}, None,
+             "lifecycle guard: unsafe merge: cannot read the PR body"),
+            ({"FAKE_BODY_JSON": '{"body": "", "commits": []}'}, None,
+             "lifecycle guard: unsafe merge: cannot read the PR body"),
+            ({"FAKE_BODY_JSON": '{"body": "", "commits": [{}], "closingIssuesReferences": []}'},
+             None, "lifecycle guard: unsafe merge: cannot read the PR body"),
+            ({"FAKE_BODY_JSON": '{"body": "", "commits": [], "closingIssuesReferences": [{}]}'},
+             None, "lifecycle guard: unsafe merge: cannot read the PR body"),
+            ({"FAKE_BODY_JSON": self.look_pr_json(commits=["x"] * 100)}, None,
+             "lifecycle guard: unsafe merge: cannot read the PR body"),
             ({}, ("--gh-bin", str(self.fake_gh), "--look-bin", str(broken)),
              "lifecycle guard: look check failed:"),
         )
@@ -5130,6 +5157,11 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             "another repository's issue": self.look_env(
                 self.LOOK_MARKED, body="Closes other/repo#1200", branch="topic"),
             "no issue at all": self.look_env(self.LOOK_MARKED, branch="topic"),
+            "another repository's commit reference": self.look_env(
+                self.LOOK_MARKED, branch="topic", commits=("Fix other/repo#1200",)),
+            "another repository's link": self.look_env(
+                self.LOOK_MARKED, branch="topic",
+                linked=("https://github.com/other/repo/issues/1200",)),
         }
         for name, env in cases.items():
             with self.subTest(case=name):
@@ -5151,7 +5183,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
 
     def test_the_release_arm_meets_the_look_gate(self):
         repo = self.make_repo("git@github.com:elevenyellow/nodocom.git")
-        env = {**self.release_env(), "FAKE_BODY_JSON": json.dumps({"body": "Closes #1200"}),
+        env = {**self.release_env(), "FAKE_BODY_JSON": self.look_pr_json("Closes #1200"),
                "FAKE_ISSUES": json.dumps(self.LOOK_MARKED)}
         result = self.run_guard(self.RELEASE_MERGE, repo, env)
         self.assert_look_refusal(
@@ -5192,7 +5224,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         repo = self.make_repo("git@github.com:elevenyellow/nodocom.git")
         issues = {"1200": {"body": self.LOOK_BODY, "comments": [
             self.look_comment(10, issue=1200, pr=1484, head=self.HEAD_SHA)]}}
-        env = {**self.release_env(), "FAKE_BODY_JSON": json.dumps({"body": "Closes #1200"}),
+        env = {**self.release_env(), "FAKE_BODY_JSON": self.look_pr_json("Closes #1200"),
                "FAKE_ISSUES": json.dumps(issues)}
         result = self.run_guard(
             f"{self.RELEASE_MERGE} --match-head-commit {self.HEAD_SHA}", repo, env)
@@ -5211,7 +5243,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                     self.run_guard(command, repo, env), self.LOOK_UNPINNED_REFUSAL)
         release_issues = {"1200": {"body": self.LOOK_BODY, "comments": [
             self.look_comment(10, issue=1200, pr=1484, head=self.HEAD_SHA)]}}
-        release_env = {**self.release_env(), "FAKE_BODY_JSON": json.dumps({"body": "Closes #1200"}),
+        release_env = {**self.release_env(), "FAKE_BODY_JSON": self.look_pr_json("Closes #1200"),
                        "FAKE_ISSUES": json.dumps(release_issues)}
         result = self.run_guard(
             self.RELEASE_MERGE, self.make_repo("git@github.com:elevenyellow/nodocom.git"),
