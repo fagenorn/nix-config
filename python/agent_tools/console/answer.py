@@ -25,7 +25,8 @@ is still `Refused(ALREADY)`.
 
 A forge error propagates unchanged. `Refused` carries the one-line reason as `str(error)`.
 
-`with_retries(write, clock=, sleep=, on_retry=)` runs `write` again after a transport failure (#1075).
+`with_retries(write, clock=, sleep=, on_retry=)` runs `write` again after a transport failure (#1075) and
+returns what the attempt that succeeded returned (#1110).
 Only a `ForgeError` whose `transient` is true is retried; any other exception is raised on the attempt
 it came from, unchanged. `started = clock()` is read once and every attempt runs inside
 `forge_api.deadline(started + RETRY_BUDGET_SECONDS, clock)`, so no `gh` call of any attempt runs past
@@ -75,6 +76,7 @@ characters. Anything else, a repeated key included, raises `ValueError`.
 
 import json
 from collections.abc import Callable, Sequence
+from typing import TypeVar
 
 from agent_tools.canonical import reject_duplicate_keys, reject_nonfinite_literal
 from agent_tools.claims import forge_markers as fm
@@ -93,6 +95,7 @@ NOT_AN_ANSWER = "this item does not take that answer"
 CONFIRM = "type the issue reference exactly to approve this check"
 CHECK_ANSWERS = ("passed", "failed", "note", "approve", "keep", "drop")
 MAX_CONFIRM_CHARS = 200
+T = TypeVar("T")
 RETRY_DELAYS: tuple[float, ...] = (1.0, 2.0, 4.0, 8.0, 10.0)
 RETRY_BUDGET_SECONDS: float = 30.0
 LAST_TRY_SECONDS: float = 5.0
@@ -133,9 +136,9 @@ def tracker_words(error: BaseException) -> str:
     return NOT_TAKEN
 
 
-def with_retries(write: Callable[[], None], *, clock: Callable[[], float],
+def with_retries(write: Callable[[], T], *, clock: Callable[[], float],
                  sleep: Callable[[float], object],
-                 on_retry: Callable[[int, forge_api.ForgeError], None] = lambda attempt, error: None) -> None:
+                 on_retry: Callable[[int, forge_api.ForgeError], None] = lambda attempt, error: None) -> T:
     at = clock() + RETRY_BUDGET_SECONDS
     with forge_api.deadline(at, clock):
         attempt = 0

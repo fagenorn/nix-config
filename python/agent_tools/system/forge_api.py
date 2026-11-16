@@ -12,6 +12,11 @@ current thread. Each call starts only while `clock() < at` and runs with `timeou
 at - clock())`; a call at or past `at` raises the transient `ForgeError("gh_timeout", "deadline
 passed: ...")` without starting `gh`. The innermost block wins and leaving it restores the outer one.
 
+Cancellation (issue 1110): `run_gh` and `gh_json` take an optional `cancelled` test. With one, the
+call runs `gh` in its own process group and asks the test every `CANCEL_POLL_SECONDS`; once it is true
+the group is killed and the call raises `ForgeError("cancelled")`, so a caller closing does not wait
+out the transport timeout. Without one a call is a plain `subprocess.run`.
+
 The module reads no host clock: "now" is the server's `Date` header (D5). The one exception is the
 `clock` a caller hands to `deadline`, which is the only clock the module ever reads.
 """
@@ -20,7 +25,9 @@ import contextvars
 import json
 import os
 import re
+import signal
 import subprocess
+import time
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -33,6 +40,7 @@ TRANSPORT = re.compile(
     r"|connection reset|no such host|i/o timeout|TLS handshake timeout|unexpected EOF",
     re.IGNORECASE)
 TIMEOUT = 30
+CANCEL_POLL_SECONDS = 0.2
 DETAIL_LIMIT = 240
 _DEADLINE: contextvars.ContextVar[tuple[float, Callable[[], float]] | None] = contextvars.ContextVar(
     "forge_api_deadline", default=None)
@@ -66,9 +74,34 @@ class ForgeError(Exception):
         self.transient = code == "gh_timeout" if transient is None else bool(transient)
 
 
-def run_gh(argv: list[str], allow: Iterable[int] = ()) -> tuple[int, str]:
+def _run_cancellable(command: list[str], timeout: float, env: dict[str, str],
+                     cancelled: Callable[[], bool]) -> subprocess.CompletedProcess:
+    """`subprocess.run` for `command` in its own group, ended whole by `cancelled()` or `timeout`."""
+    with subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                          stderr=subprocess.PIPE, text=True, env=env,
+                          start_new_session=True) as process:
+        end = time.monotonic() + timeout
+        while True:
+            left = end - time.monotonic()
+            if cancelled() or left <= 0:
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+                process.communicate()
+                if cancelled():
+                    raise ForgeError("cancelled")
+                raise subprocess.TimeoutExpired(command, timeout)
+            try:
+                out, err = process.communicate(timeout=min(left, CANCEL_POLL_SECONDS))
+            except subprocess.TimeoutExpired:
+                continue
+            return subprocess.CompletedProcess(command, process.returncode, out, err)
+
+
+def run_gh(argv: list[str], allow: Iterable[int] = (),
+           cancelled: Callable[[], bool] | None = None) -> tuple[int, str]:
     """Run `gh` without any token variable. Returns (0, stdout), or (status, stdout) when the
-    call failed with an HTTP status in `allow`; every other failure is a ForgeError."""
+    call failed with an HTTP status in `allow`; every other failure is a ForgeError. A true
+    `cancelled()` ends the call at once with `ForgeError("cancelled")`."""
     env = {k: v for k, v in os.environ.items() if k not in ("GITHUB_TOKEN", "GH_TOKEN")}
     timeout = TIMEOUT
     bound = _DEADLINE.get()
@@ -78,8 +111,11 @@ def run_gh(argv: list[str], allow: Iterable[int] = ()) -> tuple[int, str]:
             raise ForgeError("gh_timeout", "deadline passed: " + " ".join(argv))
         timeout = min(TIMEOUT, left)
     try:
-        done = subprocess.run(["gh", *argv], capture_output=True, text=True, timeout=timeout,
-                              stdin=subprocess.DEVNULL, env=env)
+        if cancelled is None:
+            done = subprocess.run(["gh", *argv], capture_output=True, text=True, timeout=timeout,
+                                  stdin=subprocess.DEVNULL, env=env)
+        else:
+            done = _run_cancellable(["gh", *argv], timeout, env, cancelled)
     except subprocess.TimeoutExpired:
         raise ForgeError("gh_timeout", " ".join(argv)) from None
     except OSError as error:
@@ -102,9 +138,10 @@ def logged_in() -> bool:
     return True
 
 
-def gh_json(argv: list[str], allow: Iterable[int] = ()) -> Any:
+def gh_json(argv: list[str], allow: Iterable[int] = (),
+            cancelled: Callable[[], bool] | None = None) -> Any:
     """The parsed stdout of a `gh` call, or None when it failed with a status in `allow`."""
-    status, out = run_gh(argv, allow)
+    status, out = run_gh(argv, allow, cancelled)
     if status:
         return None
     try:
