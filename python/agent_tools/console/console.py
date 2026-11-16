@@ -58,6 +58,9 @@ It is also given `approve.forge_for(sys.platform)` (#1054), so on Linux the owne
 plan and the console pushes its branch and opens its pull request through `gh`; elsewhere the route
 refuses.
 
+It is also given `pull_reader=movement.read_pulls` (#1110), so a running sprint's pull requests are read
+from the forge to name what it waits on (`agent_tools.console.movement`).
+
 Every minute it compares the console's own files with the integration branch on origin as the
 console's checkout last fetched it (`agent_tools.console.activation`), on every platform; the page
 says when a `just switch` would change what the console runs.
@@ -81,7 +84,7 @@ from pathlib import Path
 
 import agent_tools
 from agent_tools.console import (
-    account_add, activation, account_remove, approve, inbox, manager, nudge, probe, register, service, signin,
+    account_add, activation, account_remove, approve, inbox, manager, movement, nudge, probe, register, service, signin,
     signin_run)
 from agent_tools.console.event_log import EventLogError
 from agent_tools.console.write_guard import TokenError
@@ -111,7 +114,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         console = service.ConsoleService(
             service.default_store(), service.default_registry(), port=args.port,
-            tracker=inbox.read_items, launcher=manager.launcher_for(sys.platform),
+            tracker=inbox.read_items, pull_reader=movement.read_pulls, launcher=manager.launcher_for(sys.platform),
             nudger=nudge.nudger_for(sys.platform), stopper=manager.stopper_for(sys.platform),
             full_listing=nudge.full_lister_for(sys.platform),
             prober=probe.prober_for(sys.platform), signin_reader=signin.reader_for(sys.platform),
