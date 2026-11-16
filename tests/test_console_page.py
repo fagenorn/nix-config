@@ -4568,17 +4568,19 @@ class PageSprintBlockTest(unittest.TestCase):
                 self.assertEqual(approvals(snap), [])
                 self.assertEqual(answers(snap), [])
 
-    def test_the_check_line_sits_the_same_at_every_width_and_reads_as_a_link(self) -> None:
+    def test_the_check_line_wears_the_sprint_openers_look_and_keeps_a_touch_target(self) -> None:
         (style, top) = page_css()
-        media = re.findall(r"(?s)@media[^{]*\{.*?\}\s*\}", style)
-        self.assertEqual([m for m in media if ".sprint-check" in m], [])
-        lists = css_declared(top, ".sprint-checks")
-        self.assertEqual(lists.get("padding"), "0 0 0 28px")
+        opener = css_declared(top, ".sprint-detail summary")
         line = css_declared(top, ".sprint-check")
-        self.assertEqual(line.get("color"), "var(--lav)")
-        self.assertEqual(line.get("text-decoration"), "underline")
-        self.assertEqual(line.get("text-underline-offset"), "3px")
+        self.assertEqual(line.get("color"), opener.get("color"))
+        self.assertEqual(line.get("cursor"), opener.get("cursor"))
+        self.assertEqual(line.get("font-size"), css_declared(top, ".sprint-detail").get("font-size"))
+        self.assertNotIn("text-decoration", line)
         self.assertNotIn("min-height", line)
+        self.assertEqual(css_declared(top, ".sprint-checks").get("padding"), "0 0 0 28px")
+        (narrow,) = [m for m in re.findall(r"(?s)@media[^{]*\{.*?\}\s*\}", style) if "max-width: 480px" in m]
+        self.assertEqual(css_declared(narrow, ".sprint-check").get("min-height"), "44px")
+        self.assertEqual(css_declared(narrow, ".sprint-checks"), {})
 
     def test_a_check_line_with_no_card_does_nothing(self) -> None:
         (before, after) = render([

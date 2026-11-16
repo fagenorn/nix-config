@@ -195,7 +195,7 @@ def _blocking(node: dict, slug: str) -> list[int]:
     for blocked in nodes:
         number = blocked.get("number") if isinstance(blocked, dict) else None
         repository = blocked.get("repository") if isinstance(blocked, dict) else None
-        if (isinstance(number, bool) or not isinstance(number, int) or not isinstance(blocked.get("state"), str)
+        if (isinstance(number, bool) or not isinstance(number, int) or blocked.get("state") not in ("OPEN", "CLOSED")
                 or not isinstance(repository, dict) or not isinstance(repository.get("nameWithOwner"), str)):
             raise _invalid("a blocked issue is malformed")
     return sorted({b["number"] for b in nodes if b["state"] == "OPEN"

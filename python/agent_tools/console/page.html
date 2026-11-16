@@ -201,7 +201,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .sprint-ball.needs, .sic.needs { color: var(--peach); }
 .sic { display: flex; align-self: start; padding-top: 2px; }
 .sprint-checks { flex: 1 0 100%; list-style: none; margin: 0; padding: 0 0 0 28px; }
-.sprint-check { background: none; border: 0; padding: 2px 0; font: inherit; color: var(--lav); text-decoration: underline; text-underline-offset: 3px; text-align: left; cursor: pointer; overflow-wrap: anywhere; }
+.sprint-check { background: none; border: 0; padding: 2px 0; font: inherit; font-size: .8125rem; color: var(--ov2); text-align: left; cursor: pointer; overflow-wrap: anywhere; }
 .sprint-detail { flex: 1 0 100%; font-size: .8125rem; }
 .sprint-detail summary { cursor: pointer; color: var(--ov2); }
 .sprint-detail ul { margin-top: 2px; padding: 0 0 0 16px; }
@@ -415,6 +415,7 @@ html:has(#viewer:not([hidden])) { overflow: hidden; }
   .top-in { flex-wrap: wrap; }
   .cap { margin-left: 0; }
   .cap-extra { display: none; }
+  .sprint-check { min-height: 44px; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .001ms !important; animation-delay: 0s !important; transition-duration: .001ms !important; }
