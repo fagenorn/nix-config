@@ -43,6 +43,7 @@ from agent_tools.console.sprints import (
     Brief,
     Closing,
     Manager,
+    Notice,
     Observed,
     PendingStop,
     Question,
@@ -2040,6 +2041,86 @@ def message_entry(rows):
     folded = sprint_states(rows)
     return derive_view([state("p00", 1)], sprints=folded,
                        now_ms=T0_MS)["entries"][0]["sprints"][0]
+
+
+B = "b" * 16
+C = "c" * 16
+
+
+def at_min(n):
+    return iso(T0_MS + n * MIN)
+
+
+def with_notices(state_, *notices):
+    return dataclasses.replace(state_, notices=tuple(notices))
+
+
+class NoticeViewTest(unittest.TestCase):
+    def test_a_projects_open_notices_are_listed_newest_first_with_their_words(self):
+        sa = with_notices(
+            sprint(A, goal="Fix the settings page"),
+            Notice(3, at_min(3), "claim", "the page fold",
+                   what="python/agent_tools/console/page.html", until="the board fold lands"),
+            Notice(7, at_min(7), "hand-off", "the importer needs a retry", to="owner"),
+            Notice(4, at_min(4), "heads-up", "taken back", withdrawn_at=at_min(5)))
+        sb = with_notices(
+            sprint(B, seq=6, goal="Keep the importer fast"),
+            Notice(5, at_min(5), "heads-up", "sprint ask gains a dry run"),
+            Notice(6, at_min(6), "heads-up", "ended with its sprint", ended_at=at_min(6)),
+            Notice(8, at_min(8), "hand-off", "take the reader", to=A))
+        sc = sprint(C, pid="p01", goal="Retire the old exporter")
+
+        view_ = derive_view([state("p00", 1), state("p01", 2)], sprints={A: sa, B: sb, C: sc},
+                            now_ms=T0_MS + 10 * MIN)
+        by_id = {e["project_id"]: e for e in view_["entries"]}
+
+        self.assertEqual(by_id["p00"]["notices"], [
+            {"id": 8, "sprint_id": B, "poster": "Keep the importer fast", "kind": "hand-off",
+             "kind_text": "hand-off", "text": "take the reader", "what": None,
+             "until_text": None, "to_text": "for Fix the settings page", "at": at_min(8)},
+            {"id": 7, "sprint_id": A, "poster": "Fix the settings page", "kind": "hand-off",
+             "kind_text": "hand-off", "text": "the importer needs a retry", "what": None,
+             "until_text": None, "to_text": "for you", "at": at_min(7)},
+            {"id": 5, "sprint_id": B, "poster": "Keep the importer fast", "kind": "heads-up",
+             "kind_text": "heads-up", "text": "sprint ask gains a dry run", "what": None,
+             "until_text": None, "to_text": None, "at": at_min(5)},
+            {"id": 3, "sprint_id": A, "poster": "Fix the settings page", "kind": "claim",
+             "kind_text": "claims", "text": "the page fold",
+             "what": "python/agent_tools/console/page.html",
+             "until_text": "until the board fold lands", "to_text": None, "at": at_min(3)}])
+        self.assertEqual(by_id["p01"]["notices"], [])
+
+    def test_a_hand_off_to_a_sprint_not_in_the_view_reads_for_another_sprint(self):
+        sa = with_notices(sprint(A), Notice(3, at_min(3), "hand-off", "the reader is yours",
+                                            to="d" * 16))
+
+        notices = derive_view([state("p00", 1)], sprints={A: sa})["entries"][0]["notices"]
+
+        self.assertEqual([n["to_text"] for n in notices], ["for another sprint"])
+
+    def test_notices_never_count_in_the_statement_or_the_inbox(self):
+        sa = with_notices(
+            sprint(A),
+            Notice(3, at_min(3), "hand-off", "the importer needs a retry", to="owner"),
+            Notice(4, at_min(4), "claim", "the page fold", what="page.html", until="Friday"))
+        bare = dataclasses.replace(sa, notices=())
+
+        with_ = derive_view([state("p00", 1)], sprints={A: sa}, now_ms=T0_MS)
+        without = derive_view([state("p00", 1)], sprints={A: bare}, now_ms=T0_MS)
+
+        self.assertEqual(len(with_["entries"][0]["notices"]), 2)
+        self.assertEqual(with_["statement"], without["statement"])
+        self.assertEqual(with_["inbox"], without["inbox"])
+        self.assertEqual(with_["statement"]["inbox_items"], 0)
+        self.assertEqual(with_["statement"]["headline"], "Nothing needs you")
+
+    def test_the_notice_wire_is_written(self):
+        doc = view.__doc__
+
+        self.assertIn('"notices": [<notice entry>, ...]', doc)
+        self.assertIn("<notice entry> = ", doc)
+        self.assertIn("NOTICE_OTHER_TEXT", doc)
+        self.assertIn("#1119", doc)
 
 
 class SprintMessageViewTest(unittest.TestCase):
