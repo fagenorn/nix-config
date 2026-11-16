@@ -43,7 +43,10 @@ line numbers; `look-lint` prints them, and a body with any is refused even besid
 
 The console reads a look-marker line with `marker_line`, the approved `(pr, head)` pairs of an issue
 with `approved_heads` (trust and latest-wins as `look_answer`), and the head commit of a merged REST
-pull request with `merged_head`.
+pull request with `merged_head`. `tick_markers` returns a body with the box of every unticked
+look-marker line outside fences changed from `- [ ]` to `- [x]` and the number it changed; every
+other byte of the body, the rest of a changed line (trailing spaces, `\\r`) included, is kept, and
+lines are split and joined on `\\n` alone.
 
 This module reads no network, runs no subprocess and reads no clock.
 """
@@ -221,6 +224,17 @@ def merged_head(pull: Any) -> str | None:
     head = pull.get("head")
     sha = head.get("sha") if isinstance(head, dict) else None
     return sha if isinstance(sha, str) and HEAD_PATTERN.fullmatch(sha) else None
+
+
+def tick_markers(body: str | None) -> tuple[str, int]:
+    """The body with every unticked look-marker line outside fences ticked, and how many changed."""
+    lines = (body or "").split("\n")
+    changed = 0
+    for n, line in body_lines(body):
+        if LINE.fullmatch(line) and line.startswith("- [ ] "):
+            lines[n - 1] = "- [x] " + lines[n - 1][6:]
+            changed += 1
+    return "\n".join(lines), changed
 
 
 def judge(pr: int, head: str | None, issues: Iterable[IssueFacts]) -> Verdict:

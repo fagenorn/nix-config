@@ -194,5 +194,15 @@ class LookAnsweredTest(unittest.TestCase):
                 self.assertIsNone(lm.merged_head(pull))
 
 
+class TickMarkersTest(unittest.TestCase):
+    def test_only_unticked_marker_lines_outside_fences_are_ticked(self):
+        body = ("## Acceptance criteria\r\n\r\n- [ ] [code] A — measured: a test  \r\n" + LINE
+                + "\r\n- [ ] [human] the footer\r\n```\r\n" + LINE + "\r\n```\r\n")
+        ticked = body.replace(LINE, "- [x]" + LINE[5:], 1)
+        self.assertEqual(lm.tick_markers(body), (ticked, 1))
+        self.assertEqual(lm.tick_markers(ticked), (ticked, 0))
+        self.assertEqual(lm.tick_markers(None), ("", 0))
+
+
 if __name__ == "__main__":
     unittest.main()
