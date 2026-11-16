@@ -1,6 +1,6 @@
 # ADR-console-045 — An owner check card shows the pictures and the reading its prompt names
 
-- **Status:** accepted
+- **Status:** accepted; amended by ADR-console-046
 - **Decided in:** #1112
 
 ## Context
@@ -28,4 +28,5 @@ A manual check asks the owner to look at something: a page, a layout, a screensh
 - The console reads project files and the configured screenshot locations on its own host; nothing outside those roots is read, and a symlink under one is never followed.
 - A host's screenshot locations are set in one place, `agentConsole.screenshotDirs`, and both platforms pass them to the same command.
 - A prompt that names no PNG, and one with no `Reading:`, show exactly what they showed before.
+- Each thumbnail's line and the reading's place on the card are amended by ADR-console-046.
 - Related: ADR-console-008, ADR-console-036, ADR-console-038.
