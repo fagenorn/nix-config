@@ -563,13 +563,18 @@ class HeldReviewTest(unittest.TestCase):
         self.assertIsNone(result[0]["comment_id"])
         self.assertEqual(json.loads(json.dumps(result)), result)
 
-    def test_an_open_code_evidence_or_untagged_criterion_raises_no_review_item(self):
+    def test_an_open_evidence_or_untagged_criterion_raises_no_review_item(self):
         control = inbox.items_from_node(PROJECT, SLUG, held_issue(7, ac_body("- [x] [code] A", HUMAN)))
         self.assertEqual([i["reason"] for i in control], ["held-review"])
-        for extra in ("- [ ] [code] C", "- [ ] [evidence] E", "- [ ] U"):
+        for extra in ("- [ ] [evidence] E", "- [ ] U"):
             with self.subTest(extra):
                 node = held_issue(7, ac_body("- [x] [code] A", extra, HUMAN))
                 self.assertEqual(inbox.items_from_node(PROJECT, SLUG, node), [])
+
+    def test_an_open_code_criterion_of_a_held_issue_counts_as_met(self):
+        node = held_issue(7, ac_body("- [ ] [code] Unmeasured", "- [ ] [code] Other", HUMAN))
+        items = inbox.items_from_node(PROJECT, SLUG, node)
+        self.assertEqual([i["key"] for i in items], [f"{SLUG}#7/ac3"])
 
     def test_any_list_marker_spacing_still_reads_the_criterion(self):
         for bullet in ("-  ", "-\t", "*   ", "+  "):
@@ -580,13 +585,27 @@ class HeldReviewTest(unittest.TestCase):
         spaced = ac_body(HUMAN, "-  [x] [evidence] Done")
         self.assertEqual([i["criterion"] for i in inbox.items_from_node(PROJECT, SLUG, held_issue(7, spaced))], [1])
 
-    def test_a_held_verify_block_naming_the_criterion_suppresses_nothing(self):
-        checks = [{"ac": "AC3", "kind": "human", "host": "any", "when": {"not_before": "2026-11-16T00:00:00Z"},
-                   "run": {"ask": "Does it look right?"}}]
-        text = json.dumps({"v": 1, "merge": "a" * 40, "checks": checks})
-        held = comment_node(C2, f"Held.\n\n```verify\n{text}\n```\n")
-        node = held_issue(7, ac_body("- [x] [code] A", HUMAN), comments=[held])
-        self.assertEqual([i["key"] for i in inbox.items_from_node(PROJECT, SLUG, node)], [f"{SLUG}#7/ac2"])
+    def test_a_verify_block_check_for_the_criterion_suppresses_its_item(self):
+        def block(*acs, assoc="OWNER", fenced=True):
+            checks = [{"ac": ac, "kind": "human", "host": "any", "when": {"not_before": "2026-11-16T00:00:00Z"},
+                       "run": {"ask": "Does it look right?"}} for ac in acs]
+            text = json.dumps({"v": 1, "merge": "a" * 40, "checks": checks})
+            return comment_node(C2, f"Held.\n\n```verify\n{text}\n```\n" if fenced else text, assoc)
+
+        body = ac_body("- [ ] [code] A", "- [ ] [human] One", "- [ ] [human] Two")
+
+        def keys(*comments):
+            return [i["key"] for i in inbox.items_from_node(PROJECT, SLUG, held_issue(7, body, comments=comments))]
+
+        self.assertEqual(keys(), [f"{SLUG}#7/ac2", f"{SLUG}#7/ac3"])
+        self.assertEqual(keys(block("AC2")), [f"{SLUG}#7/ac3"])
+        self.assertEqual(keys(block("AC2", "AC3")), [])
+        self.assertEqual(keys(block("ac3")), [f"{SLUG}#7/ac2"])
+        self.assertEqual(keys(block("AC1")), [f"{SLUG}#7/ac2", f"{SLUG}#7/ac3"])
+        self.assertEqual(keys(block("AC2", "AC3", assoc="CONTRIBUTOR")), [f"{SLUG}#7/ac2", f"{SLUG}#7/ac3"])
+        self.assertEqual(keys(block("AC2", "AC3", fenced=False)), [f"{SLUG}#7/ac2", f"{SLUG}#7/ac3"])
+        newer = comment_node(C3, f"Held again.\n\n```verify\n{json.dumps({'v': 1, 'merge': 'a' * 40, 'checks': []})}\n```\n")
+        self.assertEqual(keys(block("AC2", "AC3"), newer), [f"{SLUG}#7/ac2", f"{SLUG}#7/ac3"])
 
     def test_a_card_heading_names_no_file_or_folder_and_the_whole_text_stays_beside_it(self):
         table = {
@@ -620,9 +639,9 @@ class HeldReviewTest(unittest.TestCase):
                 self.assertEqual(inbox.items_from_node(PROJECT, SLUG, node)[0]["question"], heading)
 
     def test_a_fence_in_a_list_item_ends_with_the_item(self):
-        ended = ac_body("- [ ] [human] One", "  ```", "  example", "- [ ] [code] Two")
+        ended = ac_body("- [ ] [human] One", "  ```", "  example", "- [ ] [evidence] Two")
         self.assertEqual([(c.kind, c.text) for c in inbox.acceptance_criteria(ended)],
-                         [("human", "One"), ("code", "Two")])
+                         [("human", "One"), ("evidence", "Two")])
         self.assertEqual(inbox.items_from_node(PROJECT, SLUG, held_issue(7, ended)), [])
         reopened = ac_body("- [ ] [human] One", "  ```", "  x", "```", "- [ ] [human] Two")
         self.assertEqual([c.text for c in inbox.acceptance_criteria(reopened)], ["One"])
@@ -643,6 +662,19 @@ class HeldReviewTest(unittest.TestCase):
         self.assertEqual([c.text for c in inbox.acceptance_criteria(deep)], ["Inner"])
         open_fence = ac_body("- [ ] [human] One", "    ```", "    - [ ] [code] Example")
         self.assertEqual([c.text for c in inbox.acceptance_criteria(open_fence)], ["One"])
+
+    def test_a_fence_opened_after_a_list_marker_hides_its_example_boxes(self):
+        for fence in ("~~~", "```"):
+            with self.subTest(fence=fence):
+                body = ac_body("- [ ] [human] Real one", f"- {fence}", "  - [ ] [human] Example", f"  {fence}",
+                               "- [ ] [human] Second")
+                self.assertEqual([c.text for c in inbox.acceptance_criteria(body)], ["Real one", "Second"])
+        nested = ac_body("- - ~~~", "    - [ ] [code] Example", "    ~~~", "- [ ] [human] Real")
+        self.assertEqual([c.text for c in inbox.acceptance_criteria(nested)], ["Real"])
+        ordered = ac_body("1. ```", "   - [ ] [human] Example", "   ```", "- [ ] [human] Real")
+        self.assertEqual([c.text for c in inbox.acceptance_criteria(ordered)], ["Real"])
+        items = inbox.items_from_node(PROJECT, SLUG, held_issue(7, ac_body("- ~~~", "  - [ ] [human] Example", "  ~~~")))
+        self.assertEqual(items, [])
 
     def test_a_live_runner_prompt_suppresses_the_review_item(self):
         node = held_issue(7, ac_body(HUMAN), comments=[comment_node(C1, ask())])

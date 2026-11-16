@@ -28,20 +28,25 @@ that whitespace or the line end follows, else the whole line, whitespace collaps
 the check id and `detail` is the rest; every other verification prompt keeps its sentence and whole
 detail with `check_id` `""` (#1046).
 
-Held reviews (#1113, ADR-console-051). A held issue with no live runner prompt raises review items
+Held reviews (#1113, ADR-console-052). A held issue with no live runner prompt raises review items
 instead. An Issue node labelled `HELD_LABEL` whose `authorAssociation` is in `verify_answer.TRUSTED`
 and that has no live trusted runner prompt (the verification-item predicate above) is read through
 `acceptance_criteria` of its body: the checkbox lines of its first `Acceptance criteria` heading
 section, outside fences (a fence closes only on a line of its own delimiter character, at least as
 long as the one that opened it, with nothing after it but spaces; an unclosed fence runs to the end;
 a fence opens and closes with up to three spaces of indent beyond the content column of the list item
-enclosing it, so a fenced example nested under a checkbox is no criterion, and an open fence also ends at
-the first non-blank line indented less than that column, as its list item does).
+enclosing it, so a fenced example nested under a checkbox is no criterion, a fence may open right after a
+list marker (`- ~~~`) and then belongs to that item, and an open fence also ends at the first non-blank line
+indented less than that column, as its list item does).
 A criterion is `Criterion(index, ticked, kind, text, line)`, `kind` being a leading `[code]`,
 `[evidence]`, `[human]` or `[note]` tag or None, and a checkbox line's bullet (`-`, `*` or `+`) may be
 followed by any run of spaces or tabs. `review_criteria` is the unticked `human` criteria when no unticked
-criterion has a kind other than `human` or `note`, else none (an unticked `code`, `evidence` or untagged
-criterion keeps the issue with the runner). Each raises one review item, keyed `<slug>#<issue>/ac<index>`,
+criterion has a kind outside `MET_KINDS` (`code`, `human`, `note`: an unticked `[code]` box of a held issue
+counts as met, the hold step never ticks it; an unticked `evidence` or untagged criterion keeps the issue with
+the runner), less the criteria the held verify block already asks: a criterion whose `ac_id` (`AC<index>`)
+equals, case-insensitively, the `ac` of a check of the newest block of a trusted comment
+(`verify_answer.held_acs`) is left to the runner, which asks it when due, so the owner is never asked twice.
+Each remaining one raises one review item, keyed `<slug>#<issue>/ac<index>`,
 with `reason` `held-review`, `kind` `owner-review`, `answers` `["passed", "note"]`, `comment_id` None,
 `criterion` its index and `version` `criterion_version` (a digest of issue, index, kind and text, never the
 tick), plus the `check_id` `""`, `reading` `""` and `detail` `""` of an owner check. Its `question`, the card's
@@ -122,7 +127,7 @@ activity is at most `ACTIVE_WITHIN` seconds old; an unreadable or offset-less ti
 import os
 import re
 import stat
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -224,10 +229,29 @@ def _comments(node: dict) -> list[dict]:
 
 _FENCE_OPEN = re.compile(r"^([ \t]*)(`{3,}|~{3,})")
 _LIST_ITEM = re.compile(r"^([ \t]*)(?:[-*+]|\d{1,9}[.)])([ \t]+)")
+_FENCE_RUN = re.compile(r"(`{3,}|~{3,})")
 _HEADING = re.compile(r"^\s{0,3}#{1,6}\s")
 _AC_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+Acceptance criteria\s*#*\s*$", re.IGNORECASE)
 _CRITERION = re.compile(r"^\s*[-*+][ \t]+\[( |x|X)\][ \t]+(.*)$")
 _KIND = re.compile(r"\[(code|evidence|human|note)\]\s*(.*)$")
+
+
+def _list_prefixes(line: str) -> tuple[list[int], str]:
+    """The content column of each list marker that opens `line` (`- - x` has two), and the text after them."""
+    columns: list[int] = []
+    position = 0
+    while True:
+        item = _LIST_ITEM.match(line[position:])
+        if not item:
+            return columns, line[position:]
+        position += item.end()
+        columns.append(len(line[:position].expandtabs(4)))
+
+
+def _fence(run: str, column: int) -> tuple[re.Pattern, int, int]:
+    """A fence opened by `run` inside a container whose content column is `column`: its closer, the widest indent
+    that closer may have and the column below which a line ends the fence."""
+    return (re.compile(r"^([ \t]*)" + re.escape(run[0]) + "{" + str(len(run)) + r",}[ \t]*$"), column + 3, column)
 
 
 @dataclass(frozen=True)
@@ -264,11 +288,14 @@ def acceptance_criteria(body: str) -> list[Criterion]:
         opened = _FENCE_OPEN.match(line)
         if opened and indent - base <= 3:
             run = opened.group(2)
-            fence = (re.compile(r"^([ \t]*)" + re.escape(run[0]) + "{" + str(len(run)) + r",}[ \t]*$"), base + 3, base)
+            fence = _fence(run, base)
             continue
-        item = _LIST_ITEM.match(line)
-        if item:
-            containers.append(len(line[:item.end()].expandtabs(4)))
+        columns, rest = _list_prefixes(line)
+        containers.extend(columns)
+        sheltered = _FENCE_RUN.match(rest) if columns else None
+        if sheltered:
+            fence = _fence(sheltered.group(1), columns[-1])
+            continue
         if not inside:
             inside = bool(_AC_HEADING.match(line))
             continue
@@ -289,12 +316,24 @@ def criterion_version(issue: int, criterion: Criterion) -> str:
                              "text": criterion.text})
 
 
-def review_criteria(criteria: Sequence[Criterion]) -> list[Criterion]:
-    """The unticked `human` criteria, when no other unticked criterion still waits on the runner."""
+MET_KINDS = ("code", "human", "note")
+
+
+def ac_id(criterion: Criterion) -> str:
+    """The id a verify block's `ac` uses for the criterion: `AC` and its 1-based index."""
+    return f"AC{criterion.index}"
+
+
+def review_criteria(criteria: Sequence[Criterion], asked: Collection[str] = ()) -> list[Criterion]:
+    """The unticked `human` criteria the owner is asked about from the page.
+
+    None when an unticked criterion of another kind than `MET_KINDS` still waits on the runner (a `code` box of a
+    held issue counts as met). A criterion whose `ac_id` is in `asked`, the `ac` ids of the held verify block's
+    checks (upper-cased), is left to the runner, which asks it when due."""
     open_ = [c for c in criteria if not c.ticked]
-    if any(c.kind not in ("human", "note") for c in open_):
+    if any(c.kind not in MET_KINDS for c in open_):
         return []
-    return [c for c in open_ if c.kind == "human"]
+    return [c for c in open_ if c.kind == "human" and ac_id(c) not in asked]
 
 
 def live_prompts(markers: Sequence[fm.Marker]) -> list[fm.Marker]:
@@ -447,10 +486,13 @@ def items_from_node(project_id: str, slug: str, node: dict) -> list[dict]:
         raise _invalid("search node number is not an integer")
     markers = []
     runner_markers = []
+    runner_comments = []
     for comment in _comments(node):
         association = comment.get("authorAssociation")
         if association not in foa.TRUSTED:
             continue
+        if association in verify_answer.TRUSTED and isinstance(comment.get("body"), str):
+            runner_comments.append((_comment_id(comment.get("fullDatabaseId")), association, comment["body"]))
         marker = fm.parse({"id": _comment_id(comment.get("fullDatabaseId")), "body": comment.get("body"),
                            "updated_at": comment.get("updatedAt")})
         if marker is None:
@@ -467,7 +509,7 @@ def items_from_node(project_id: str, slug: str, node: dict) -> list[dict]:
     if (node.get("__typename") == "Issue" and HELD_LABEL in _labels(node)
             and node.get("authorAssociation") in verify_answer.TRUSTED and not prompts):
         items += [_review_item(project_id, slug, number, held, c)
-                  for c in review_criteria(acceptance_criteria(_body(node)))]
+                  for c in review_criteria(acceptance_criteria(_body(node)), verify_answer.held_acs(runner_comments))]
     return sorted(items, key=lambda item: item["key"])
 
 

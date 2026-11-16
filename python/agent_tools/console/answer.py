@@ -66,11 +66,11 @@ issue, as the owner (`forge_api.run_gh` drops the tokens). `answer` is `passed` 
 4. The criterion `index` of `inbox.acceptance_criteria` must exist and be `human`, else `REVIEW_GONE`.
 5. Its `inbox.criterion_version` must equal `version`, else `Refused(REVIEW_EDITED)`.
 6. A criterion already ticked: `passed` returns with no write, `note` is `Refused(REVIEW_ALREADY)`.
-7. Another unticked criterion whose kind is neither `human` nor `note` is `Refused(REVIEW_GONE)`.
+7. Another unticked criterion whose kind is outside `inbox.MET_KINDS` is `Refused(REVIEW_GONE)`.
 8. The comments of the issue are read again (`forge_markers.list_comments`), because the card was built at the
    inbox poll and a runner may have posted since: a live runner prompt (`inbox.live_prompts` of the trusted
-   markers) is `Refused(REVIEW_GONE)`, so the inbox's rule that a runner prompt keeps its own card holds at
-   the write too.
+   markers) or a verify block check for the criterion (`verify_answer.held_acs`) is `Refused(REVIEW_GONE)`,
+   so the inbox's rule that a runner prompt or a block check keeps its own card holds at the write too.
 9. `passed` writes one PATCH of the issue body in which only that line's first `[ ]` became `[x]` (the body
    is split and rejoined on `\n`, so every other byte, a `\r` included, is kept); `note` posts one comment.
 
@@ -308,7 +308,9 @@ def answer_criterion(slug: str, issue: int, index: int, answer: str, *, version:
         trusted = [c for c in fm.list_comments(slug, issue)
                    if c.get("author_association") in verify_answer.TRUSTED]
         markers = [m for m in (fm.parse(c) for c in trusted) if m is not None]
-        if inbox.live_prompts(markers):
+        asked = verify_answer.held_acs([(c["id"], c["author_association"], c["body"]) for c in trusted
+                                        if isinstance(c.get("id"), int) and isinstance(c.get("body"), str)])
+        if inbox.live_prompts(markers) or criterion not in inbox.review_criteria(criteria, asked):
             raise Refused(REVIEW_GONE)
         if answer == "passed":
             lines = body.split("\n")
