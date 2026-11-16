@@ -807,6 +807,10 @@ class ReviewWriteTest(unittest.TestCase):
         v_code = inbox.criterion_version(REVIEW_ISSUE, inbox.acceptance_criteria(with_code)[2])
         nested = review_body(HUMAN_LINE, "    ```", "    - [ ] [human] Example only", "    ```")
         v_nested = inbox.criterion_version(REVIEW_ISSUE, inbox.Criterion(2, False, "human", "Example only", 0))
+        ended = review_body("- [ ] [human] One", "  ```", "  example", "- [ ] [code] Two")
+        v_ended = inbox.criterion_version(REVIEW_ISSUE, inbox.Criterion(1, False, "human", "One", 0))
+        reopened = review_body("- [ ] [human] One", "  ```", "  x", "```", "- [ ] [human] Two")
+        v_reopened = inbox.criterion_version(REVIEW_ISSUE, inbox.Criterion(2, False, "human", "Two", 0))
         table = {
             "closed": ({"state": "closed"}, REVIEW_BODY, 3, V3, answer.CLOSED),
             "label gone": ({"labels": ("owner-action",)}, REVIEW_BODY, 3, V3, answer.REVIEW_GONE),
@@ -816,6 +820,8 @@ class ReviewWriteTest(unittest.TestCase):
             "another open kind": ({}, with_evidence, 3, v_evidence, answer.REVIEW_GONE),
             "another open code box": ({}, with_code, 3, v_code, answer.REVIEW_GONE),
             "a fenced example": ({}, nested, 2, v_nested, answer.REVIEW_GONE),
+            "a code box after an unclosed fence in an item": ({}, ended, 1, v_ended, answer.REVIEW_GONE),
+            "a box inside a fence a dedented line opens": ({}, reopened, 2, v_reopened, answer.REVIEW_GONE),
         }
         for name, (kwargs, body, index, version, reason) in table.items():
             with self.subTest(name):

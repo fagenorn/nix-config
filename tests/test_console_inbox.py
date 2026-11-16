@@ -527,6 +527,19 @@ class PromptPictureTest(unittest.TestCase):
         got = self.attach("shots/sub/ shots/")
         self.assertEqual([p["line"] for p in got["pictures"]], ["a.png", "b.png"])
 
+    def test_a_review_heading_loses_a_relative_folder_only_when_the_folder_exists(self):
+        (self.root / "shots" / "a.png").write_bytes(PIXEL)
+        text = "Judge the cards in shots/sub and light/dark here"
+        item = {**self.check(""), "question": text, "criterion_text": text, "check_id": ""}
+        got = inbox.attach_pictures(item, [self.root, self.screens], self.pictures_dir, home=self.root)
+        self.assertEqual(got["question"], text)
+        (self.root / "shots" / "sub").mkdir()
+        (self.root / "shots" / "sub" / "b.png").write_bytes(WIDE)
+        got = inbox.attach_pictures(item, [self.root, self.screens], self.pictures_dir, home=self.root)
+        self.assertEqual(got["question"], "Judge the cards and light/dark here")
+        self.assertEqual(got["criterion_text"], text)
+        self.assertEqual([p["line"] for p in got["pictures"]], ["b.png"])
+
 
 class HeldReviewTest(unittest.TestCase):
     """A held issue whose only open criteria are owner reviews raises one review item each (#1113)."""
@@ -591,6 +604,30 @@ class HeldReviewTest(unittest.TestCase):
                 node = held_issue(7, ac_body(f"- [ ] [human] {text}"))
                 item, = inbox.items_from_node(PROJECT, SLUG, node)
                 self.assertEqual((item["question"], item["criterion_text"]), (heading, text))
+
+    def test_a_word_with_a_slash_that_names_no_path_stays_in_the_heading(self):
+        for text in ("The Approve/Not yet buttons both work", "Light/dark themes both look right",
+                     "The card reads well at 1440/480 px", "The PR for octo/widgets#1113 shows the card",
+                     "Tests pass and/or are skipped", "Cost is N/A today"):
+            with self.subTest(text):
+                node = held_issue(7, ac_body(f"- [ ] [human] {text}"))
+                item, = inbox.items_from_node(PROJECT, SLUG, node)
+                self.assertEqual((item["question"], item["criterion_text"]), (text, text))
+        for text, heading in (("Judge ./shots/a.png and ../x/ and shots/ now", "Judge now"),
+                              ("Open ~/shots under /tmp/s please", "Open please")):
+            with self.subTest(text):
+                node = held_issue(7, ac_body(f"- [ ] [human] {text}"))
+                self.assertEqual(inbox.items_from_node(PROJECT, SLUG, node)[0]["question"], heading)
+
+    def test_a_fence_in_a_list_item_ends_with_the_item(self):
+        ended = ac_body("- [ ] [human] One", "  ```", "  example", "- [ ] [code] Two")
+        self.assertEqual([(c.kind, c.text) for c in inbox.acceptance_criteria(ended)],
+                         [("human", "One"), ("code", "Two")])
+        self.assertEqual(inbox.items_from_node(PROJECT, SLUG, held_issue(7, ended)), [])
+        reopened = ac_body("- [ ] [human] One", "  ```", "  x", "```", "- [ ] [human] Two")
+        self.assertEqual([c.text for c in inbox.acceptance_criteria(reopened)], ["One"])
+        kept = ac_body("- [ ] [human] One", "  ```", "", "  - [ ] [code] inner", "  ```", "- [ ] [human] Two")
+        self.assertEqual([c.text for c in inbox.acceptance_criteria(kept)], ["One", "Two"])
 
     def test_a_fenced_example_nested_under_a_checkbox_is_no_criterion(self):
         for indent in ("    ", "  ", "\t"):

@@ -35,7 +35,8 @@ and that has no live trusted runner prompt (the verification-item predicate abov
 section, outside fences (a fence closes only on a line of its own delimiter character, at least as
 long as the one that opened it, with nothing after it but spaces; an unclosed fence runs to the end;
 a fence opens and closes with up to three spaces of indent beyond the content column of the list item
-enclosing it, so a fenced example nested under a checkbox is no criterion).
+enclosing it, so a fenced example nested under a checkbox is no criterion, and an open fence also ends at
+the first non-blank line indented less than that column, as its list item does).
 A criterion is `Criterion(index, ticked, kind, text, line)`, `kind` being a leading `[code]`,
 `[evidence]`, `[human]` or `[note]` tag or None, and a checkbox line's bullet (`-`, `*` or `+`) may be
 followed by any run of spaces or tabs. `review_criteria` is the unticked `human` criteria when no unticked
@@ -45,7 +46,9 @@ with `reason` `held-review`, `kind` `owner-review`, `answers` `["passed", "note"
 `criterion` its index and `version` `criterion_version` (a digest of issue, index, kind and text, never the
 tick), plus the `check_id` `""`, `reading` `""` and `detail` `""` of an owner check. Its `question`, the card's
 heading and the digest line, is the criterion's text without any word that names a PNG file or a folder (a
-word with a `/` and no `://`, `heading_text`), and without a connecting word (`in`, `under`, `and`...) left
+`.png` name, or a word with a `/` that starts with `/`, `~/`, `./` or `../`, or ends with `/`, and has no `://`;
+`attach_pictures` also drops a relative word with a `/` that is a folder under its roots; `and/or`, `light/dark`
+and `1440/480` stay; `heading_text`), and without a connecting word (`in`, `under`, `and`...) left
 dangling before one; `criterion_text` is the whole text, which is what `attach_pictures` reads the pictures
 from, so the card shows the pictures and never a bare path. A text left with no word reads `REVIEW_HEADING`.
 
@@ -240,17 +243,20 @@ def acceptance_criteria(body: str) -> list[Criterion]:
     """The checkbox lines of the first `Acceptance criteria` section of an issue body, outside fences."""
     criteria: list[Criterion] = []
     inside = False
-    fence: tuple[re.Pattern, int] | None = None
+    fence: tuple[re.Pattern, int, int] | None = None
     containers: list[int] = []
     for number, raw in enumerate(body.split("\n")):
         line = raw.removesuffix("\r")
         indent = len(re.match(r"[ \t]*", line).group().expandtabs(4))
         if fence is not None:
-            closer, limit = fence
+            closer, limit, column = fence
             closing = closer.match(line)
-            if closing and len(closing.group(1).expandtabs(4)) <= limit:
+            if line.strip() and indent < column:
                 fence = None
-            continue
+            else:
+                if closing and len(closing.group(1).expandtabs(4)) <= limit:
+                    fence = None
+                continue
         if line.strip():
             while containers and indent < containers[-1]:
                 containers.pop()
@@ -258,7 +264,7 @@ def acceptance_criteria(body: str) -> list[Criterion]:
         opened = _FENCE_OPEN.match(line)
         if opened and indent - base <= 3:
             run = opened.group(2)
-            fence = (re.compile(r"^([ \t]*)" + re.escape(run[0]) + "{" + str(len(run)) + r",}[ \t]*$"), base + 3)
+            fence = (re.compile(r"^([ \t]*)" + re.escape(run[0]) + "{" + str(len(run)) + r",}[ \t]*$"), base + 3, base)
             continue
         item = _LIST_ITEM.match(line)
         if item:
@@ -520,21 +526,33 @@ def _core(raw: str) -> str:
         token = stripped
 
 
-def _names_a_path(token: str) -> bool:
-    return bool(token) and "://" not in token and ((token.lower().endswith(".png") and len(token) > 4)
-                                                    or "/" in token)
+_PATH_START = ("/", "~/", "./", "../")
+
+
+def _names_a_path(token: str, is_folder: Callable[[str], bool] | None = None) -> bool:
+    """Whether `token` is a PNG name, a path written as one (`/`, `~/`, `./`, `../` first or `/` last) or,
+    when `is_folder` says so, a relative word with a `/`; `and/or`, `light/dark` and `1440/480` are words."""
+    if not token or "://" in token:
+        return False
+    if token.lower().endswith(".png") and len(token) > 4:
+        return True
+    if "/" not in token:
+        return False
+    return token.startswith(_PATH_START) or token.endswith("/") or (is_folder is not None and is_folder(token))
 
 
 _CONNECTORS = frozenset(("in", "under", "at", "on", "from", "of", "into", "by", "to", "and", "or"))
 REVIEW_HEADING = "Review what this issue asks you to check."
 
 
-def heading_text(text: str) -> str:
-    """`text` without the words that name a PNG file or a folder and the connecting words left before them."""
+def heading_text(text: str, is_folder: Callable[[str], bool] | None = None) -> str:
+    """`text` without the words that name a PNG file or a folder and the connecting words left before them.
+
+    A word with a `/` is a folder only when written as a path or when `is_folder` says it is one."""
     kept: list[str] = []
     for raw in text.split():
         core = _core(raw)
-        if not _names_a_path(core):
+        if not _names_a_path(core, is_folder):
             kept.append(raw)
             continue
         while kept and _core(kept[-1]).lower() in _CONNECTORS and kept[-1] == _core(kept[-1]):
@@ -724,6 +742,18 @@ def attach_pictures(item: dict, roots: Sequence[Path], pictures_dir: Path, *,
             pass
         finally:
             os.close(folder_fd)
+    if "criterion_text" in item:
+        def is_folder(token: str) -> bool:
+            try:
+                fd = _open_inside(absolute(token), allowed, directory=True)
+            except OSError:
+                return False
+            if fd is None:
+                return False
+            os.close(fd)
+            return True
+
+        item = {**item, "question": heading_text(item["criterion_text"], is_folder)}
     return {**item, "pictures": found, "missing_pictures": missing}
 
 
