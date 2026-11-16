@@ -2076,6 +2076,98 @@ class MovementTest(Case):
                          ("quiet", "quiet for 16 min \u2014 may be stuck"))
         self.assertEqual(shown["ball"], "nobody")
 
+    def lock_step_run(self, svc):
+        """A live run whose issue 858 sits in a lock step: its journal ends in a `pr` step."""
+        body = support.hook_body("session start", cwd="/srv/p00")
+        svc.ingest_hook(body)
+        sid = json.loads(body)["session_id"]
+        journal = self.root / "projects/-srv-p00" / sid / "subagents/workflows/wf_l1/journal.jsonl"
+        journal.parent.mkdir(parents=True, exist_ok=True)
+        rows = [{"type": "started", "agentId": "a1", "label": "setup", "phase": "Setup"},
+                {"type": "result", "agentId": "a1", "result": {"branch": "issue-858-resume"}},
+                {"type": "started", "agentId": "a2", "label": "pr", "phase": "Ship"}]
+        journal.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        os.utime(journal, ns=(int(self.now * 1e9),) * 2)
+        svc.poll_deliveries()
+        return sid
+
+    def test_a_delivery_in_the_land_lock_step_for_twenty_minutes_reads_waiting_its_turn_to_merge(self):
+        self.now = 1_800_000_000.0
+        svc = self.open(Script((movement.PullRequest(41, frozenset({999}), False, None, True),)))
+        t = self.running_sprint(svc)
+        self.now = t + 60
+        self.lock_step_run(svc)
+        self.now = t + 20 * 60
+        self.poll(svc)
+        shown = sprint_entry(svc)
+        self.assertEqual((shown["state"], shown["ball"], shown["now_text"]),
+                         ("on_track", "manager", "waiting its turn to merge"))
+        self.assertNotIn("stuck", json.dumps(shown))
+
+    def test_a_lock_step_moves_nothing_once_its_session_ended_or_nobody_holds_the_lock(self):
+        self.now = 1_800_000_000.0
+        held = (movement.PullRequest(41, frozenset({999}), False, None, True),)
+        free = (movement.PullRequest(41, frozenset({999}), False, None, False),)
+        for name, step, ended in (("nobody holds the lock", free, False),
+                                  ("the session ended", held, True)):
+            with self.subTest(name):
+                self.store = self.root / f"{ended}/console/events.sqlite3"
+                svc = self.open(Script(step))
+                t = self.running_sprint(svc)
+                self.now = t + 60
+                sid = self.lock_step_run(svc)
+                if ended:
+                    svc.ingest_hook(support.hook_body("session end", session_id=sid, cwd="/srv/p00"))
+                self.now = t + 20 * 60
+                self.poll(svc)
+                self.assertEqual(sprint_entry(svc)["state"], "quiet")
+
+    def test_a_delivery_queued_behind_a_release_pull_request_reads_waiting_its_turn_to_merge(self):
+        self.now = 1_800_000_000.0
+        release = {"number": 77, "headRefName": "dev", "baseRefName": "main",
+                   "headRefOid": "77" * 20, "isCrossRepository": False, "body": "Release",
+                   "commits": {"nodes": []}}
+        lock = [{"ref": "refs/agent-locks/land/dev", "node_id": "REF_x",
+                 "url": "https://api.github.com/x",
+                 "object": {"sha": "77" * 20, "type": "commit", "url": "https://api.github.com/x"}}]
+
+        def call(argv):
+            if argv == movement.pulls_argv("owner/p00"):
+                return {"data": {"repository": {"pullRequests": {"nodes": [release]}}}}
+            if argv == movement.locks_argv("owner/p00"):
+                return lock
+            raise AssertionError(argv)
+
+        svc = self.open(lambda slug, pattern, *, cancelled: movement.read_pulls(
+            slug, pattern, call=call, cancelled=cancelled))
+        t = self.running_sprint(svc)
+        self.now = t + 60
+        self.lock_step_run(svc)
+        self.now = t + 20 * 60
+        self.poll(svc)
+        shown = sprint_entry(svc)
+        self.assertEqual((shown["state"], shown["ball"], shown["now_text"]),
+                         ("on_track", "manager", "waiting its turn to merge"))
+
+    def test_failed_forge_reads_let_a_lock_wait_age_out(self):
+        self.now = 1_800_000_000.0
+        reader = Script((movement.PullRequest(41, frozenset({999}), False, None, True),),
+                        ForgeError("payload_invalid", "x"))
+        svc = self.open(reader)
+        t = self.running_sprint(svc)
+        self.now = t + 60
+        self.lock_step_run(svc)
+        self.now = t + 17 * 60
+        self.poll(svc)
+        self.now = t + 20 * 60
+        self.poll(svc)
+        self.assertEqual(sprint_entry(svc)["now_text"], "waiting its turn to merge")
+        self.now = t + 33 * 60
+        self.poll(svc)
+        shown = sprint_entry(svc)
+        self.assertEqual((shown["state"], shown["ball"]), ("quiet", "nobody"))
+        self.assertEqual(shown["state_text"], "quiet for 16 min \u2014 may be stuck")
+
     def test_a_short_network_drop_inside_a_read_is_ridden_out(self):
         self.now = 1_800_000_000.0
         reader = Script(ForgeError("gh_failed", "HTTP 502", transient=True), RUNNING)

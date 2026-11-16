@@ -870,11 +870,15 @@ drops the reading of every project not in that set, so a project with no such sp
 call. For a project it reads the local half, `local_reader(root, pattern)` (default
 `movement.read_local`: the branch reflogs and the release store), where `pattern` is the project's
 branch pattern, and the forge half, `pull_reader(slug, pattern, cancelled=...)` (`movement.read_pulls`:
-one call for the open pull requests), through `answer.with_retries`, so a transient `ForgeError`
+two calls, the GraphQL pulls query and the REST lock listing), through `answer.with_retries`, so a transient `ForgeError`
 is retried on ADR-console-032's schedule within its 30-second deadline and a non-transient one is
 not. A forge read that cannot be made (no `pull_reader`, no slug) or that failed leaves `pulls`
 None, and `movement.merged` keeps the last good reading of the pull requests: the sprint reads
-its wait for the quiet window from the last time anything moved, then goes quiet. The merged reading
+its wait for the quiet window from the last time anything moved, then goes quiet. The fold also
+receives the issues whose run, in a session not ended, sits in a lock step (`IssueStage.locking`,
+#1184); a lock step counts only in a good read that saw a pull request hold a lock, and a failed
+read refreshes no lock time, a journal lock step's included, so a lock wait ages out with the rest
+of the kept reading. The merged reading
 is kept per project in memory only (a restart reads at once), published, and never appended to the
 log. The stop flag cancels the read in flight and a read finished after the stop changes nothing.
 Stderr lines: `console: movement_read_failed <project_id> <Type>: <message>` (a forge read that
@@ -882,7 +886,7 @@ failed), `console: movement_local_failed <project_id> <Type>: <message>` (the lo
 it reads as no movement), `console: movement_release_invalid <project_id> <transaction id>...` (the
 release store holds a transaction that is not readable; one line until a good read, and it moves
 nothing) and `console: movement_poll_failed <Type>: <message>` (an exception escaped a round; the
-loop goes on). The cost is one forge call per project with a running sprint per `MOVEMENT_SECONDS`.
+loop goes on). The cost is two forge calls per project with a running sprint per `MOVEMENT_SECONDS`.
 
 Answers (#862, ADR-console-010): `answer(project_id, key, choices)` ticks one option under each
 question of a decision item on the tracker, through `tick` (default `answer.tick_on_tracker`;
@@ -6470,8 +6474,17 @@ class ConsoleService:
                 if project_id not in self._states or self._closed:
                     continue
                 self._movement[project_id] = movement.merged(
-                    self._movement.get(project_id), pulls, int(self._clock() * 1000), local)
+                    self._movement.get(project_id), pulls, int(self._clock() * 1000), local,
+                    locking=self._locking_issues(project_id))
                 self._publish()
+
+    def _locking_issues(self, project_id: str) -> frozenset[int]:
+        """Under the ingest lock: the issues of live runs, in sessions not ended, sitting in a lock step."""
+        live = {sid for sid, session in self._sessions.items()
+                if session.state != sessions.ENDED and session.repo is not None
+                and project_for(session.repo, self._states) == project_id}
+        return frozenset(stage.issue for (sid, _), state in self._deliveries.items() if sid in live
+                         for stage in state.issues if stage.locking)
 
     def _move(self) -> None:
         while True:
