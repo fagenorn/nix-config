@@ -363,6 +363,15 @@ never taken from it: a failed row names the checkout path when its key never res
 keeps that root, so a granted retry clears the card it answers. Any other exception is `console:
 trust_check_failed <Type>` and 500 `checking failed`.
 
+Folder trust at start (#1183, ADR-console-034 D9): when the service is given `trust_at_start`,
+`start()` starts `TRUST_START_THREAD`, which reads the registry once with `read_fleet` and runs
+`_grant_trust` with cause `console-start` for every registered project in every target
+(`~/.claude.json` when given a `trust_home`, and every profile), one row per project, in registry
+order, off the ingest lock. A pair already trusted reads `already` and is not written; a `failed`
+result is a Check again card like any other. It stops between projects once `close` began and
+`close` joins it. An unreadable registry grants nothing (`console: trust_start_registry_unreadable`);
+a failing project is `console: trust_start_failed <project> <Type>` and the sweep goes on.
+
 `POST /api/adoption-register` (#1055, ADR-console-028 D10) is the Retry of a refused registration
 of a merged adoption. It runs the same checks with `MAX_ADOPTION_REGISTER_BYTES` (4096) and
 `approve.parse_approve_request`: 400 `bad registration retry`. The service refuses, each as 409
@@ -1259,7 +1268,7 @@ absent set starts empty, so a restart drops a session only after two polls miss
 it. On any failure after the bind, what was opened is closed and the exception
 re-raised. `start()` serves on a daemon thread named `console-http` and starts the spend thread; `close()`
 sets the stop flag, then `closing`, wakes every waiter, joins the watcher, the session poll, the probe loop, the
-tracker, movement, retention, digest and spend threads and tears the rest down; it is idempotent.
+tracker, movement, retention, digest and spend threads and the folder-trust start thread and tears the rest down; it is idempotent.
 """
 
 import contextlib
@@ -1445,6 +1454,7 @@ MANAGER_THREAD = "console-manager-launch"
 PROBE_TICK_SECONDS = 15.0
 PROBE_LOOP_THREAD = "console-probe-poll"
 PROBE_THREAD = "console-probe"
+TRUST_START_THREAD = "console-trust-start"
 
 
 def default_store() -> Path:
@@ -2854,6 +2864,7 @@ class ConsoleService:
                  pusher: Callable[..., None] = approve.push,
                  trust_home: Path | None = None,
                  trust_granter: Callable[[Path, str], str] = folder_trust.grant,
+                 trust_at_start: bool = False,
                  approval_dispatch: Callable[[Callable[[], None]], None] | None = None,
                  probe_dispatch: Callable[[Callable[[], None]], None] | None = None,
                  probe_tick_seconds: float = PROBE_TICK_SECONDS,
@@ -2874,6 +2885,8 @@ class ConsoleService:
         self._pusher = pusher
         self._trust_home = None if trust_home is None else Path(trust_home)
         self._trust_granter = trust_granter
+        self._trust_at_start = trust_at_start
+        self._trust_start_thread: threading.Thread | None = None
         self._grants_running = 0
         self._cancelled: dict[str, int] = {}
         self._approving = False
@@ -3607,6 +3620,27 @@ class ConsoleService:
                                   profiles=[(name, found[0] / ".claude.json")])
             except Exception as error:
                 print(f"console: trust_account_failed {name} {type(error).__name__}",
+                      file=sys.stderr)
+
+    def _grant_at_start(self) -> None:
+        """Grant every registered project's folder trust in every target, once (#1183).
+
+        Runs on `TRUST_START_THREAD` and holds no lock of its own: `_grant_trust` takes `_ingest`
+        only around its bookkeeping, and every write goes through the folder-trust writer lock.
+        Stops between projects once `close` began; one failing project does not stop the rest.
+        """
+        entries = read_fleet(self.registry)
+        if entries is None:
+            if os.path.lexists(self.registry):
+                print("console: trust_start_registry_unreadable", file=sys.stderr)
+            return
+        for entry in entries:
+            if self._stop.is_set():
+                return
+            try:
+                self._grant_trust(folder_trust.START_CAUSE, entry["root"], entry["project_id"])
+            except Exception as error:
+                print(f"console: trust_start_failed {entry['project_id']} {type(error).__name__}",
                       file=sys.stderr)
 
     def register_project(self, path: str) -> None:
@@ -6553,6 +6587,10 @@ class ConsoleService:
             self._signin_thread = threading.Thread(
                 target=self._signin_loop, name=SIGNIN_THREAD, daemon=True)
             self._signin_thread.start()
+        if self._trust_at_start:
+            self._trust_start_thread = threading.Thread(
+                target=self._grant_at_start, name=TRUST_START_THREAD, daemon=True)
+            self._trust_start_thread.start()
         self._thread = threading.Thread(
             target=self._server.serve_forever, name="console-http", daemon=True)
         self._thread.start()
@@ -6587,6 +6625,8 @@ class ConsoleService:
             self._probe_thread.join()
         if self._signin_thread is not None:
             self._signin_thread.join()
+        if self._trust_start_thread is not None:
+            self._trust_start_thread.join()
         if self._signin_runs is not None:
             self._signin_runs.close()
         with self._ingest:
