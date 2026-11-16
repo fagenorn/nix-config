@@ -1416,6 +1416,34 @@ class PictureReportCommandTest(ManagerPictureCase):
     send_command = PictureBriefCommandTest.send_command
     files = PictureBriefCommandTest.files
 
+    def test_a_non_ascii_secret_with_a_file_member_exits_2_for_a_brief_and_a_report(self):
+        svc = self.open()
+        good = self.write("good.png", PIXEL)
+        for command, parts, sid in (("brief", PARTS, self.sprint(svc)),
+                                    ("report", REPORT, self.approved(svc))):
+            path = self.write(f"{command}.json", json.dumps(
+                {**parts, "pictures": [{"file": str(good), "line": "x"}]}).encode())
+            with self.subTest(command):
+                got = self.assert_unchanged(svc, lambda: run_sprint(
+                    command, "--sprint", sid, "--secret-file",
+                    self.write("odd-secret", "s\u00e9cret".encode()), f"--{command}-file", path,
+                    "--port", svc.address[1]))
+                self.assertEqual((got.returncode, got.stdout, got.stderr),
+                                 (2, "", "sprint: the secret is not printable ASCII, so it cannot "
+                                         "go in a header: no request sent\n"))
+                self.assertEqual(self.entries(), [])
+
+    def test_the_docstring_states_the_secret_check_for_a_brief_and_a_report(self):
+        doc = " ".join(ast.get_docstring(ast.parse(
+            (ROOT / "python/agent_tools/console/sprint.py").read_text())).split())
+        for needle in ("it checks that the secret is printable ASCII",
+                       "a `picture` or `ask` secret, or a `brief` or `report` secret when the "
+                       "object names a `file` member",
+                       "a `sprint ask`, `sprint brief` or `sprint report` picture file is the "
+                       "same exit 2, before any upload"):
+            with self.subTest(needle):
+                self.assertIn(needle, doc)
+
     def test_report_uploads_each_file_and_the_report_names_the_ids(self):
         svc = self.open()
         sid = self.approved(svc)

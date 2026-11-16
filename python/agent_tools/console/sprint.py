@@ -45,8 +45,12 @@ size of the whole request with each picture's id in place (the console takes at 
 for a brief and 65536 for a report), and a refusal is stderr `sprint: refused before sending:
 <reason>` and exit 1, including
 `the brief is larger than <limit> bytes` and
-`the report is larger than <limit> bytes`; it reads every file before it uploads any, and a file
-that cannot be read, or one over 2 MiB, is exit 2 with nothing uploaded or sent; before it uploads anything it asks the
+`the report is larger than <limit> bytes`; it checks that the secret is printable ASCII, because
+the uploads carry it in a header (stderr `sprint: the secret is not printable ASCII, so it cannot
+go in a header: no request sent`, exit 2, nothing uploaded or sent; a brief or report with no
+`file` member carries the secret in its body and is not subject to this check); it reads every file
+before it uploads any, and a file that cannot be read, or one over 2 MiB, is exit 2 with nothing
+uploaded or sent; before it uploads anything it asks the
 console to check the brief or report with its `file` members left out (`"dry_run": true`, which
 writes nothing), and a refusal there is exit 1 with nothing uploaded; then it uploads each file in
 order. A picture refused while uploading (for example one that is not a PNG) is exit 1, and the
@@ -135,8 +139,9 @@ exit 1. A console that cannot be reached is stderr
 `sprint: console unreachable on 127.0.0.1:<port>: <error>` and exit 1. A secret, brief, report, closing report, round or reply file
 or a picture file that cannot be read, or a brief, report, closing report or round that is not a JSON object, is stderr `sprint: cannot read <path>:
 <reason>` and exit 2, with no request sent, as is a picture file larger than 2 MiB, stderr
-`sprint: cannot send <path>: it is larger than 2 MiB` (a `sprint ask` picture file is the same
-exit 2, before any upload); a `picture` or `ask` secret that is not printable
+`sprint: cannot send <path>: it is larger than 2 MiB` (a `sprint ask`, `sprint brief` or
+`sprint report` picture file is the same exit 2, before any upload); a `picture` or `ask` secret,
+or a `brief` or `report` secret when the object names a `file` member, that is not printable
 ASCII (it travels in a header) is stderr `sprint: the secret is not printable ASCII, so it cannot go
 in a header: no request sent` and exit 2, with no request sent; bad arguments are exit 2. The secret is printed nowhere.
 """
