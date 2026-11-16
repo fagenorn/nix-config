@@ -1051,7 +1051,8 @@ class ManagerContractTest(unittest.TestCase):
         for needle in ("sprint notice --notice-file -", "sprint notices",
                        "sprint withdraw-notice --notice <id>", "`claim`", "`heads-up`",
                        "`hand-off`", "280 characters", "200 characters", "140 characters",
-                       "at most 5 open notices", "never approval"):
+                       "at most 5 open notices", "never approval",
+                       "heads-up from the owner"):
             with self.subTest(needle):
                 self.assertIn(needle, section)
 
