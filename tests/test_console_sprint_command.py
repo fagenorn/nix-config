@@ -11,12 +11,12 @@ import subprocess
 import sys
 import tomllib
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import manager, sprint, sprints
+from agent_tools.console import manager, service, sprint, sprints
 
 from . import console_test_support as support
 from .test_console_answer import view_of
@@ -493,6 +493,116 @@ class SprintCommandTest(Case):
             ("hand-off", hand_off["text"])])
         for n in listed:
             self.assertEqual((n["sprint_id"], n["title"]), (a, "make the importer resumable"))
+
+    AGE = r"(just now|\d+ min ago)"
+    CLAIM_LINE = (r'- claim from "make the importer resumable", ' + AGE +
+                  r': the page fold \(what: python/agent_tools/console/page\.html; '
+                  r'until: the board fold lands\)')
+
+    def inbox(self, svc, sid):
+        return run_sprint("inbox", "--sprint", sid, "--secret-file", self.secret_file(sid),
+                          "--port", self.port(svc))
+
+    def status_with_secret(self, svc, sid):
+        return run_sprint("status", "--sprint", sid, "--secret-file", self.secret_file(sid),
+                          "--port", self.port(svc))
+
+    def test_inbox_and_status_print_another_sprints_open_claim(self):
+        svc = self.open()
+        a = self.goal(svc)
+        b = svc.state_goal("owner/p01", "make the exporter resumable")
+        self.assertEqual(self.notice(svc, a, CLAIM).returncode, 0)
+        env = {manager.ID_ENV: b, manager.SECRET_ENV: self.secret_file(b).read_text()}
+        runs = {"inbox": self.inbox(svc, b), "status": self.status_with_secret(svc, b),
+                "status env": run_sprint("status", "--port", self.port(svc), env=env)}
+        for name, got in runs.items():
+            with self.subTest(name):
+                self.assertEqual((got.returncode, got.stderr), (0, ""))
+                lines = got.stdout.splitlines()
+                self.assertEqual(len(lines), 3)
+                self.assertEqual(lines[1], sprints.NOTICE_BLOCK_HEAD)
+                self.assertRegex(lines[2], self.CLAIM_LINE)
+                if name == "inbox":
+                    self.assertEqual(json.loads(lines[0]), {"messages": []})
+                else:
+                    self.assertEqual(json.loads(lines[0])["decision"], "none")
+
+    def test_inbox_and_status_print_no_block_without_another_sprints_notice(self):
+        svc = self.open()
+        a = self.goal(svc)
+        b = svc.state_goal("owner/p01", "make the exporter resumable")
+        d = svc.state_goal("owner/p00", "make the importer resumable")
+        self.assertEqual(self.notice(svc, a, CLAIM).returncode, 0)
+        for sid in (a, d):
+            for got in (self.inbox(svc, sid), self.status_with_secret(svc, sid)):
+                self.assertEqual((got.returncode, len(got.stdout.splitlines())), (0, 1))
+        notice = self.notice_rows()[-1][0]
+        self.assertEqual(self.withdraw_notice(svc, a, "--notice", notice).returncode, 0)
+        for got in (self.inbox(svc, b), self.status_with_secret(svc, b)):
+            self.assertEqual((got.returncode, len(got.stdout.splitlines())), (0, 1))
+
+    def test_a_hand_off_is_for_you_in_its_addressees_block_and_plain_in_anothers(self):
+        svc = self.open()
+        a = self.goal(svc)
+        b = svc.state_goal("owner/p01", "make the exporter resumable")
+        c = svc.state_goal("owner/p01", "make the checker resumable")
+        notice = {"kind": "hand-off", "text": "the exporter needs the new flag", "to": b}
+        self.assertEqual(self.notice(svc, a, notice).returncode, 0)
+        for read in (self.inbox, self.status_with_secret):
+            with self.subTest(read.__name__):
+                got = read(svc, b)
+                self.assertRegex(
+                    got.stdout.splitlines()[2],
+                    r'- hand-off for you from "make the importer resumable", ' + self.AGE
+                    + ": the exporter needs the new flag")
+                got = read(svc, c)
+                self.assertRegex(
+                    got.stdout.splitlines()[2],
+                    r'- hand-off from "make the importer resumable", ' + self.AGE
+                    + ": the exporter needs the new flag")
+                self.assertNotIn("for you", got.stdout)
+
+    def test_status_shows_the_block_only_with_the_sprints_own_secret(self):
+        svc = self.open()
+        a = self.goal(svc)
+        b = svc.state_goal("owner/p01", "make the exporter resumable")
+        self.assertEqual(self.notice(svc, a, CLAIM).returncode, 0)
+        own = self.secret_file(b).read_text()
+        for env in (None, {manager.SECRET_ENV: own}, {manager.SECRET_ENV: "not the secret"}):
+            with self.subTest(env=env):
+                got = run_sprint("status", "--sprint", b, "--port", self.port(svc), env=env)
+                self.assertEqual((got.returncode, len(got.stdout.splitlines())), (0, 1))
+
+    def test_status_of_a_withdrawn_sprint_reads_no_secret_and_no_notices(self):
+        svc = self.open()
+        a = self.goal(svc)
+        b = svc.state_goal("owner/p01", "make the exporter resumable")
+        self.assertEqual(self.notice(svc, a, CLAIM).returncode, 0)
+        text = self.secret_file(b).read_text()
+        svc.withdraw_goal("owner/p01", b)
+        port = self.port(svc)
+        for got in (run_sprint("status", "--port", port,
+                               env={manager.ID_ENV: b, manager.SECRET_ENV: text}),
+                    run_sprint("status", "--sprint", b, "--secret-file", self.secret_file(b),
+                               "--port", port)):
+            self.assertEqual((got.returncode, got.stderr), (0, ""))
+            self.assertEqual(len(got.stdout.splitlines()), 1)
+            self.assertEqual(json.loads(got.stdout)["decision"], "withdrawn")
+
+    def test_inbox_reads_the_notices_before_the_messages(self):
+        paths = []
+
+        def fake(port, method, path, body=None, headers=None):
+            paths.append(path)
+            if path == service.NOTICES_PATH:
+                raise sprint.Refused("sprint: refused 403: secret refused")
+            return '{"messages":[]}'
+
+        with mock.patch.object(sprint, "ask", side_effect=fake), \
+                mock.patch.dict(os.environ, {manager.ID_ENV: "a" * 16, manager.SECRET_ENV: "s"}), \
+                redirect_stderr(StringIO()):
+            code = sprint.main(["inbox"])
+        self.assertEqual((code, paths), (1, [service.NOTICES_PATH]))
 
     def test_after_the_first_sprint_closes_notices_lists_nothing(self):
         svc = self.open()
@@ -1041,7 +1151,9 @@ class CommandContractTest(unittest.TestCase):
                      "POST /api/ask", "chosen", "round or reply file",
                      '"context": "<optional, at most 400 characters>"',
                      "six parts, `title` first", "sprint withdraw-question",
-                     "POST /api/withdraw-question", "--index", "replaces"):
+                     "POST /api/withdraw-question", "--index", "replaces",
+                     "sprints.notice_block",
+                     "sprint status [--sprint <id>] [--secret-file <path>] [--port N]"):
             self.assertIn(name, docstring)
         self.assertEqual(sprint.build_parser().prog, "sprint")
 
