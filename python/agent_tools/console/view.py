@@ -430,14 +430,21 @@ where a run's `done` reads `closed out` and any other run stage is that stage wi
 never from the `deliveries` mapping: a run leaves that mapping once its final record exists, while
 the fold keeps its last stage and movement, so they outlive the run. `waiting` is the number of
 open inbox items of registered projects whose project is the sprint's and whose issue is one of the
-report's issues or its `inbox` numbers, plus the sprint's open questions. Movement is the latest of the approval time (`decided_at`,
-else the brief's sent time), the report's time and the fold's `moved_ms`; `quiet_elapsed` is
-`now_ms` minus it, computed only for an approved brief and only when `now_ms` is not None (else 0).
+report's issues or its `inbox` numbers, plus the sprint's open questions.
+A running sprint's movement (#1109, `sprint_quiet_for`) is one reading. With no clock (`now_ms`
+None) or while one of the sprint's listed sessions works, it moves. Else it is the latest of the
+approved brief's time (`decided_at`, else the sent time), the report's time, the fold's `moved_ms`
+(the latest movement of any run of the sprint, before or after its report) and the goal's stated
+time; it is quiet once `now_ms` minus that reaches `QUIET_AFTER_MS`. A `failed` manager with no
+listed session drops only the stated time (a run, report or approval still moves the sprint whatever
+its order against the failure); with nothing else left it reads quiet at once. The state's `quiet`,
+the ball's `nobody` and the now-sentence's `last seen` prefix are all this one reading, and none
+decides movement itself.
 The state is the first that holds: `stopped_at` is set, `stopped` ("stopped by you"); `stop_at` is
 set, `stopping` ("stopping"); the sprint has a closing, `done`; the brief is not approved,
 `drafting` ("drafting the brief");
 the report's phase is `done` and no question is open, `done`; `waiting` is above 0, `waiting` ("waiting on you (<n>)");
-`quiet_elapsed` reaches `QUIET_AFTER_MS`, `quiet` ("quiet for <n> min \u2014 may be stuck"); the
+the movement reading is quiet, `quiet` ("quiet for <n> min \u2014 may be stuck"); the
 phase is `closing`, `closing`; no report, `starting`; else `on_track` ("on track").
 `status_at` is the report's own time, which the page words against its own clock.
 `ball`, `ball_text` and `now_text` (#1086) are null for an ended sprint (`ended_at` set); a running
@@ -445,10 +452,7 @@ sprint has exactly one ball and a non-empty now-sentence, and `state` and `state
 unchanged. `ball` (`sprint_ball`) is the first that holds: `owner` ("waiting on you") when `waiting`
 is above 0, the brief waits on the owner (decision none), the sprint is stalled, `no_progress_at` is
 set, or one of the sprint's listed sessions is waiting for an answer or a permission (the manager
-waits on the owner at its terminal); `manager` ("manager working") when a listed session is
-working, `now_ms` is None, or `now_ms` minus the latest movement (stated time, an approved brief's
-time, the report's time, the fold's `moved_ms`) is below `QUIET_AFTER_MS`, unless the sprint's
-manager row is `failed` and it has no listed session (a known launch failure, shown with its retry);
+waits on the owner at its terminal); `manager` ("manager working") while the movement reading moves;
 else `nobody` ("nothing running, may be stuck"). `ball_text` is `BALL_TEXT[ball]`. `now_text` (`sprint_now`) is the first
 that holds: a stop requested, `NOW_STOPPING_TEXT`; a listed session waiting for an answer, then for
 a permission, `NOW_ANSWER_TEXT`, `NOW_PERMISSION_TEXT`; no brief or one the owner asked to change,
@@ -936,11 +940,42 @@ def sprint_waiting(state: SprintState, records: Iterable[InboxRecord]) -> int:
     return sum(r.item.get("issue") in named for r in records) + len(open_questions(state))
 
 
+def sprint_quiet_for(state: SprintState, now_ms: int | None, listed: Collection[str]) -> int | None:
+    """The one movement reading of a running sprint (#1109): None while it moves, else the
+    milliseconds since it last moved, never negative. The state's quiet, the ball's nobody and the
+    now-sentence's `last seen` prefix all follow it, so they cannot disagree. It moves with no
+    clock and while one of the sprint's own listed sessions works. Else the signals are the
+    approved brief's time (`decided_at`, else the sent time), the report's time, the fold's
+    `moved_ms` (the latest movement of any run of the sprint, kept across reports) and the goal's
+    stated time. A `failed` manager with no listed session drops only the stated time (its launch
+    is known to have failed, so a fresh goal is no sign of life); a run, a report or an approval
+    inside the window still moves the sprint whatever its order against the failure. With no
+    signal left, the sprint reads quiet at once, for the time since the goal was stated."""
+    if now_ms is None or WORKING in listed:
+        return None
+    brief, report = state.brief, state.report
+    signals = []
+    if brief is not None and brief.decision == APPROVED:
+        signals.append(_millis(brief.decided_at or brief.sent_at))
+    if report is not None:
+        signals.append(_millis(report.at))
+    if state.moved_ms is not None:
+        signals.append(state.moved_ms)
+    failed = state.manager is not None and state.manager.state == FAILED and not listed
+    if not failed:
+        signals.append(_millis(state.stated_at))
+    elif not signals:
+        return max(0, now_ms - _millis(state.stated_at))
+    elapsed = max(0, now_ms - max(signals))
+    return elapsed if elapsed >= QUIET_AFTER_MS else None
+
+
 def sprint_state(state: SprintState, now_ms: int | None, waiting: int,
-                 quota: Wait | None = None) -> tuple[str, str]:
+                 quota: Wait | None = None, listed: Collection[str] = ()) -> tuple[str, str]:
     """The sprint's one shown state and its text; with `now_ms` None the sprint is never quiet.
     A `quota` (its manager's profile is out, #929) replaces every state but waiting on the owner,
-    closing and the ones before them."""
+    closing and the ones before them. `listed` is the `state` of each of the sprint's own listed
+    sessions, which `sprint_quiet_for` reads."""
     brief, report = state.brief, state.report
     if state.stopped_at is not None:
         return STOPPED, STOPPED_TEXT
@@ -956,16 +991,9 @@ def sprint_state(state: SprintState, now_ms: int | None, waiting: int,
         return WAITING, WAITING_TEXT.format(n=waiting)
     if quota is not None and (report is None or report.phase != CLOSING):
         return QUOTA, QUOTA_TEXT
-    quiet_elapsed = 0
-    if now_ms is not None:
-        moves = [_millis(brief.decided_at or brief.sent_at)]
-        if report is not None:
-            moves.append(_millis(report.at))
-        if state.moved_ms is not None:
-            moves.append(state.moved_ms)
-        quiet_elapsed = now_ms - max(moves)
-    if quiet_elapsed >= QUIET_AFTER_MS:
-        return QUIET, QUIET_TEXT.format(minutes=quiet_elapsed // 60_000)
+    quiet_for = sprint_quiet_for(state, now_ms, listed)
+    if quiet_for is not None:
+        return QUIET, QUIET_TEXT.format(minutes=quiet_for // 60_000)
     if report is not None and report.phase == CLOSING:
         return CLOSING, CLOSING_TEXT
     if report is None:
@@ -978,29 +1006,19 @@ def sprint_ball(state: SprintState, now_ms: int | None, waiting: int,
     """Who holds a running sprint's ball (#1086), or None once it has ended. `listed` is the
     `state` of each of the sprint's own listed sessions. The owner when anything waits on them: an
     open item (`waiting`), a brief awaiting a decision, a stall, no progress, or a manager session
-    waiting at its terminal. Else the manager when a session works, `now_ms` is None, or the sprint
-    moved less than `QUIET_AFTER_MS` ago (the latest of its stated time, an approved brief's time,
-    the report's time and the fold's movement); else nobody. A `failed` manager with no listed
-    session of its own is nobody whatever the clock says: its launch is known to have failed."""
+    waiting at its terminal. Else the manager while `sprint_quiet_for` reads the sprint moving, else
+    nobody; a `failed` manager with no listed session drops only the goal's stated time from the
+    signals, so the ball reads nobody at once only when no approval, report or run has moved, and a
+    run, report or approval inside the window keeps it manager whatever its order against the
+    failure."""
     if ended_at(state) is not None:
         return None
-    brief, report = state.brief, state.report
+    brief = state.brief
     if (waiting or (brief is not None and brief.decision == NONE) or state.stalled is not None
             or state.no_progress_at is not None
             or WAITING_ANSWER in listed or WAITING_PERMISSION in listed):
         return BALL_OWNER
-    if WORKING in listed or now_ms is None:
-        return BALL_MANAGER
-    if state.manager is not None and state.manager.state == FAILED and not listed:
-        return BALL_NOBODY
-    moves = [_millis(state.stated_at)]
-    if brief is not None and brief.decision == APPROVED:
-        moves.append(_millis(brief.decided_at or brief.sent_at))
-    if report is not None:
-        moves.append(_millis(report.at))
-    if state.moved_ms is not None:
-        moves.append(state.moved_ms)
-    return BALL_MANAGER if now_ms - max(moves) < QUIET_AFTER_MS else BALL_NOBODY
+    return BALL_MANAGER if sprint_quiet_for(state, now_ms, listed) is None else BALL_NOBODY
 
 
 def _stage_phrase(stages: Sequence[tuple[int, str, str]], milestone: str) -> str:
@@ -1141,9 +1159,9 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
     manager_state, manager_text, retry = manager_status(state, bool(sessions), now_ms, managers)
     quota = (quota_wait(capacity, state.manager.profile)
              if state.manager is not None and state.manager.state == STARTED else None)
-    name, text = sprint_state(state, now_ms, waiting, quota)
-    ended = ended_at(state)
     listed = [s.state for s in sessions]
+    name, text = sprint_state(state, now_ms, waiting, quota, listed=listed)
+    ended = ended_at(state)
     ball = sprint_ball(state, now_ms, waiting, listed)
     minute = nudges and state.manager is not None and state.manager.state == STARTED
     return {
