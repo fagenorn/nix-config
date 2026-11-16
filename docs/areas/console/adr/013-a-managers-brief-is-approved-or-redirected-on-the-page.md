@@ -1,6 +1,6 @@
 # ADR-console-013 — A manager's brief is approved or redirected on the page
 
-- **Status:** accepted
+- **Status:** accepted; amended by ADR-console-040
 - **Decided in:** #834, #835, #836, #887, #911
 
 ## Context
