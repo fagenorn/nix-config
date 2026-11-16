@@ -72,6 +72,7 @@
 | Merged adoption | Console |
 | Migration | Project contract |
 | Not yet managed | Console |
+| Notice | Console |
 | Nudge | Console |
 | Outside sprints | Console |
 | Owner prompt | Verification |
