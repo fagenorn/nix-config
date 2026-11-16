@@ -91,11 +91,13 @@ instruction paths: both skill roots, `home/common/claude-code/agents` and
   when its tracker capability is unsupported: a map, an unblocked ticket, a ticket blocked by it, and
   fog. The wayfind evals work it; every other eval must leave it untouched. Verify the fixture
   with `python3 -m unittest discover` from its root.
-- A pipeline case's `setup.kind` is one of five closed kinds: `dirty-worktree`,
-  `shippable-worktree`, `planned-worktree`, `release-ready` and `tracked-issue`. The
+- A pipeline case's `setup.kind` is one of six closed kinds: `dirty-worktree`,
+  `shippable-worktree`, `planned-worktree`, `release-ready`, `tracked-issue` and `marked-pr`. The
   middle three take no parameters and read their inputs (the issue-3 spec, plan package and
   `implementation.patch`) from the committed `setups/issue-3/`; `tracked-issue` takes none
-  either; `fixture-repo/` itself
+  either; `marked-pr` runs `tracked-issue`, marks issue 3 for a look, pushes branch
+  `issue-3-rename-flag` with the implementation and opens pull request 7 on the stand-in
+  forge (`$WORK/forge/pulls.json`), and `PRE_WT` is that worktree; `fixture-repo/` itself
   stays unchanged. Every pipeline assert also sees `BASE_MAIN`, local `main`'s SHA right
   after the setup, `PRE_WT_HEAD`, the pre-created worktree's HEAD right after the setup
   (empty when the setup makes none), and `ORIGIN_REFS`, the origin's full ref set right

@@ -36,6 +36,8 @@ OVERSIZED_BUDGET_FIXTURE = (
 WRITING_PLANS = REPO_ROOT / "home/common/agent-skills/skills/writing-plans/SKILL.md"
 ACCEPTANCE_RULES = REPO_ROOT / "home/common/agent-skills/standards/acceptance-planning.md"
 ACCEPTANCE_RULES_POINTER = "`~/.agents/standards/acceptance-planning.md`"
+LOOK_RULES = REPO_ROOT / "home/common/agent-skills/standards/look-before-merge.md"
+LOOK_RULES_POINTER = "`~/.agents/standards/look-before-merge.md`"
 
 
 SKILL_ROOTS = (
@@ -1863,7 +1865,7 @@ class DirectLaneRoutingTest(unittest.TestCase):
         """#635: step 1 claims through forge-claim and goes on only on its holding verdicts;
         the hot instruction bytes do not grow."""
         raw = self.DELIVER_DIRECT.read_bytes()
-        self.assertLessEqual(len(raw), 5038)
+        self.assertLessEqual(len(raw), 5120)
         text = normalized(raw.decode("utf-8"))
         step1 = text[text.index("**Claim.**"):text.index("**Worktree.**")]
         for token in ("`forge-claim acquire --repo <slug> --issue <n> --holder <host>/session-<id> --branch <branch>`",
@@ -1890,7 +1892,7 @@ class DirectLaneRoutingTest(unittest.TestCase):
         """#677: step 6 carries the consumed forms in ship order: waiting acquire, sync merge, push,
         required-check wait, the holding verdict before the merge, release; the hot bytes stay within their cap."""
         raw = self.DELIVER_DIRECT.read_bytes()
-        self.assertLessEqual(len(raw), 5038)
+        self.assertLessEqual(len(raw), 5120)
         text = normalized(raw.decode("utf-8"))
         land = text[text.index("**Land in order.**"):text.index("**Close out.**")]
         at = 0
@@ -1943,6 +1945,120 @@ class DirectLaneRoutingTest(unittest.TestCase):
             with self.subTest(token=token):
                 self.assertIn(token, step7)
         self.assertNotIn("comment what remains", text)
+
+
+class LookBeforeMergeContractsTest(unittest.TestCase):
+    """#1140: deliver-direct stops a marked issue before the land lock and resumes on the owner's answer."""
+
+    DELIVER_DIRECT = DirectLaneRoutingTest.DELIVER_DIRECT
+    STATUS = "`look-approval status --repo <slug> --issue <n> --pr <pr> --head <head>`"
+    POST = ("`look-approval post --repo <slug> --issue <n> --pr <pr> --head <head>"
+            " --answer approved --message session-<id>`")
+    PUSH = "`git -C <dir> push origin <branch>`"
+    HEAD_READ = "`gh pr view <pr> --repo <slug> --json headRefOid`"
+    MERGE = "`gh pr merge <pr> --repo <slug> --<vcs.merge.strategy> --match-head-commit <head>`"
+    LAND_RELEASE = "`forge-claim land release --repo <slug> --branch <int> --sha <lock sha>`"
+
+    @staticmethod
+    def section(prefix):
+        text = normalized(LOOK_RULES.read_text(encoding="utf-8"))
+        start = text.index("## " + prefix)
+        end = text.find(" ## ", start + 3)
+        return text[start:] if end < 0 else text[start:end]
+
+    @staticmethod
+    def bullet(section, answer):
+        start = section.index(f"- **{answer}**")
+        end = section.find(" - **", start + 3)
+        return section[start:] if end < 0 else section[start:end]
+
+    def test_the_skill_reads_the_look_before_the_land_lock(self):
+        text = normalized(self.DELIVER_DIRECT.read_text(encoding="utf-8"))
+        land = text[text.index("**Land in order.**"):text.index("**Close out.**")]
+        self.assertIn(self.STATUS, land)
+        acquire = "`forge-claim land acquire --repo <slug> --branch <int> --sha <head> --wait`"
+        self.assertLess(land.index(self.STATUS), land.index(acquire))
+        self.assertIn(LOOK_RULES_POINTER, land)
+
+    def test_a_new_session_reaches_the_resume_rules_from_the_skill(self):
+        """#1140: step 1 lets a session resuming at awaiting look past the open-PR refusal to
+        step 6, which points to the rules and stops on `needed` only."""
+        text = normalized(self.DELIVER_DIRECT.read_text(encoding="utf-8"))
+        step1 = text[text.index("**Claim.**"):text.index("**Worktree.**")]
+        refusal = step1.index("Refuse on an open PR")
+        exception = step1.index("unless resuming at awaiting look (acquire, then step 6)", refusal)
+        self.assertLess(exception, step1.index("`forge-claim acquire"))
+        land = text[text.index("**Land in order.**"):text.index("**Close out.**")]
+        status = land[land.index(self.STATUS):land.index("`forge-claim land acquire")]
+        self.assertIn("`unmarked`: go on; else follow " + LOOK_RULES_POINTER + "; `needed` stops.", status)
+        self.assertNotIn("`needed`: stop", status)
+
+    def test_a_session_resuming_after_an_approval_still_acquires_and_follows_the_standard(self):
+        """#1140: `approved` and `error` are routed to the standard, whose land rules need the
+        claim step 1 acquires, so step 1's exception acquires before step 6."""
+        text = normalized(self.DELIVER_DIRECT.read_text(encoding="utf-8"))
+        step1 = text[text.index("**Claim.**"):text.index("**Worktree.**")]
+        self.assertIn("unless resuming at awaiting look (acquire, then step 6)", step1)
+        land = text[text.index("**Land in order.**"):text.index("**Close out.**")]
+        status = land[land.index(self.STATUS):land.index("`forge-claim land acquire")]
+        self.assertNotIn("stop", status.replace("; `needed` stops.", ""))
+        rules = self.section("Land")
+        self.assertIn("On `error`, merge nothing: run `forge-claim release` and report it", rules)
+        self.assertIn("On `approved`, land as step 6 does", rules)
+
+    def test_the_look_rules_exist_once_and_are_in_no_hot_list(self):
+        found = sorted((REPO_ROOT / "home").rglob("look-before-merge.md"))
+        self.assertEqual(found, [LOOK_RULES])
+        model = json.loads((REPO_ROOT / "home/common/agent-skills/instruction-load.json")
+                           .read_text(encoding="utf-8"))
+        for profile in model["profiles"]:
+            with self.subTest(profile=profile["id"]):
+                self.assertFalse([m for m in profile["hot"] if "look-before-merge" in m])
+
+    def test_a_stop_takes_no_lock_and_merges_nothing(self):
+        stop = self.section("Stop")
+        for form in ("`forge-claim renew`", self.PUSH, self.STATUS, "`forge-claim release`"):
+            with self.subTest(form=form):
+                self.assertIn(form, stop)
+        for form in ("forge-claim land", "gh pr merge", "look-approval post"):
+            with self.subTest(form=form):
+                self.assertNotIn(form, stop)
+
+    def test_approve_posts_only_for_the_unchanged_head(self):
+        resume = self.section("Resume")
+        self.assertIn("`forge-claim acquire`", resume)
+        approve = self.bullet(resume, "approve")
+        self.assertIn(self.HEAD_READ, approve)
+        self.assertIn(self.POST, approve)
+        self.assertLess(approve.index(self.HEAD_READ), approve.index(self.POST))
+        self.assertIn("`posted`", approve)
+
+    def test_changes_pushes_the_open_branch_and_opens_nothing(self):
+        changes = self.bullet(self.section("Resume"), "changes")
+        for form in ("`forge-claim renew`", self.PUSH):
+            with self.subTest(form=form):
+                self.assertIn(form, changes)
+        for form in ("gh pr create", "gh pr merge", "forge-claim land", "look-approval post"):
+            with self.subTest(form=form):
+                self.assertNotIn(form, changes)
+
+    def test_a_marked_merge_carries_the_approved_head(self):
+        land = self.section("Land")
+        for form in (self.MERGE, self.STATUS, "`approved`", self.LAND_RELEASE):
+            with self.subTest(form=form):
+                self.assertIn(form, land)
+        self.assertGreater(land.index("`--delete-branch`"), land.index(self.MERGE))
+
+    def test_the_look_rules_name_no_project_literal(self):
+        text = LOOK_RULES.read_text(encoding="utf-8")
+        for literal in ("nix-config", "fagenorn", "lifecycle_guard", "home/common", "just ", "fixture/"):
+            with self.subTest(literal=literal):
+                self.assertNotIn(literal, text)
+
+    def test_the_standards_index_names_the_look_rules(self):
+        text = (REPO_ROOT / "home/common/agent-skills/standards/README.md").read_text(encoding="utf-8")
+        planning = text[text.index("## Planning rules"):]
+        self.assertIn("`look-before-merge.md`", planning)
 
 
 class ClaudeCompatibleWaitContractsTest(unittest.TestCase):
