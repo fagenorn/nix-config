@@ -12,7 +12,7 @@ Standard library only: it imports nothing from the repository's helper package,
 `agent_tools`.
 
 The decisions behind the rules below are the records in `docs/areas/guard/adr/`
-(ADR-guard-001 to ADR-guard-011), and the compiler that writes the compiled
+(ADR-guard-001 to ADR-guard-012), and the compiler that writes the compiled
 policy is documented in `python/agent_tools/guard/guard_policy.py`.
 
 Segments, tokens and verbs

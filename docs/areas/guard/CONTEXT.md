@@ -34,7 +34,7 @@ _Avoid_: git command
 The rule that relaxes the protection demand for one answer only: a repository whose plan cannot report branch protection at all. The guard accepts that answer and nothing looser.
 
 **Production rule**:
-A rule of the project contract that names a command id changing production. The guard refuses it in the project's checkout in every permission mode, read from the project's derived row, on the routes a shell-command guard covers; key files and MCP tools are not yet enforced. It names the id, never the binary inside a script, alias or `just` recipe. A project that declares none declares no production. See ADR-guard-009 and ADR-guard-011.
+A rule of the project contract that names a command id, key file glob or MCP tool that changes production. The guard refuses the command in the project's checkout, a write to the key file in that checkout and a call to the MCP tool anywhere, in every permission mode, read from the project's derived row. It names the id, never the binary inside a script, alias or `just` recipe. A project that declares none declares no production. See ADR-guard-009, ADR-guard-011 and ADR-guard-012.
 
 **Raise label**:
 The label that raises a repository's instruction budget for one change. Only the owner applies it, and the guard refuses an agent adding it.
