@@ -3,10 +3,11 @@
 Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
 
 Contract:
-- `STATES` names the ten screens the sprint block, the finished list and the message life
-  must read well on (`tell-box-open` is the sprint block with its Tell box opened);
+- `STATES` names the eleven screens the sprint block, the finished list and the message life
+  must read well on (`tell-box-open` is the sprint block with its Tell box opened;
+  `owner-check` is the sprint block with a held issue's owner check beside it);
   `WIDTHS` are the two viewport widths each is shot at. `capture` writes
-  `<state>-<width>.png` for every pair, so a full run writes 20 files.
+  `<state>-<width>.png` for every pair, so a full run writes 22 files.
 - Each state is a fresh fixture console: a registry of three projects (`owner/web`,
   `owner/api`, `owner/docs`) and an event log seeded for that state with event times relative
   to one clock reading, served by the real `ConsoleService` on a loopback port. Nothing is
@@ -51,7 +52,7 @@ from .console_test_support import write_registry
 
 STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-sent",
           "message-picked-up", "message-replied", "message-not-picked-up", "finished-list",
-          "nothing-running")
+          "nothing-running", "owner-check")
 WIDTHS = (1440, 480)
 HEIGHT = 900
 MINUTE = 60.0
@@ -125,7 +126,7 @@ class _Seed:
 
     def sprint(self, project: str, title: str, *, started: float, report: float | None = None,
                landed: bool = False, asks: bool = False, close: float | None = None,
-               stop: float | None = None) -> tuple[str, str]:
+               stop: float | None = None, held: bool = False) -> tuple[str, str]:
         """One approved sprint with a started manager; returns `(sprint_id, goal)`."""
         self.count += 1
         sid = f"{self.count:016x}"
@@ -142,6 +143,8 @@ class _Seed:
         approved = self.put(started - 60, "brief.approved", project, {**base, "version": 1})
         self.put(started - 70, "sprint.read", project, {"sprint_id": sid, "through": approved.seq})
         issues = ([{"issue": 12, "stage": "landed"}, {"issue": 13, "stage": "landed"}] if landed
+                  else [{"issue": 11, "stage": "held"}, {"issue": 12, "stage": "building"},
+                        {"issue": 13, "stage": "queued"}] if held
                   else [{"issue": 12, "stage": "building"}, {"issue": 13, "stage": "queued"}])
         if report is not None:
             self.put(report, "sprint.reported", project, {**base, "report": {
@@ -164,6 +167,18 @@ class _Seed:
             self.put(stop, "sprint.stop_requested", project, base)
             self.put(stop - 20, "manager.stopped", project, {"sprint_id": sid})
         return sid, goal
+
+    def check(self, project: str, issue: int, ago: float) -> None:
+        """One open `verify-ask` inbox item on `issue`, which blocks none of the manager's work."""
+        self.put(ago, "inbox.seen", project, {
+            "key": f"{project}#{issue}/9001", "project_id": project, "repo": project,
+            "issue": issue, "comment_id": 9001,
+            "url": f"https://github.com/{project}/issues/{issue}#issuecomment-9001",
+            "reason": "verify-ask", "kind": "manual-check",
+            "question": "Do the before and after pictures read well?", "detail": "",
+            "check_id": "", "questions": [], "items": [],
+            "answers": ["passed", "failed", "note"], "paid": False, "confirm": "",
+            "answered": False, "held_work": 1, "blocking": [], "version": "v1"})
 
     def message(self, project: str, sid: str, goal: str, *, sent: float, read: float | None = None,
                 replied: float | None = None) -> None:
@@ -209,6 +224,10 @@ def _seed_state(seed: _Seed, state: str) -> None:
                     report=3 * 60 * MINUTE, landed=True, close=2 * 60 * MINUTE)
         seed.sprint(web, "Try a new cache", started=4 * 60 * MINUTE, report=3.5 * 60 * MINUTE,
                     stop=3 * 60 * MINUTE)
+    elif state == "owner-check":
+        seed.sprint(web, "Add resumable uploads", started=20 * MINUTE, report=2 * MINUTE,
+                    held=True)
+        seed.check(web, 11, 3 * MINUTE)
     elif state != "nothing-running":
         raise ValueError(f"unknown state {state!r}")
 
