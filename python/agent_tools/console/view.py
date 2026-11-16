@@ -87,7 +87,8 @@ failure or trust card, see below), else
 project's tracker cannot be read, else "Nothing needs you". The sentence is `ALL_OUT_SENTENCE`
 when every profile is out of usage, else `STALE_SENTENCE` naming those projects when any is
 stale, else `BRIEF_SENTENCE` when any brief is open, else `MANAGER_SENTENCE` when a sprint is
-stalled, else `PROGRESS_SENTENCE` when a manager stopped making progress, else `SIGNIN_SENTENCE`
+stalled, else `FAILED_START_SENTENCE` when a manager failed to start, else `PROGRESS_SENTENCE`
+when a manager stopped making progress, else `SIGNIN_SENTENCE`
 when a profile's sign-in asks, else `ADOPTION_SENTENCE` when an adoption's pull request is ready to
 merge, else `QUESTION_SENTENCE` when any manager question is open, else
 `REGISTER_SENTENCE` when a plan question, a retry, apply, confirm, failure or trust item offers an option (the page
@@ -158,8 +159,23 @@ A stalled sprint (a shown sprint whose `stalled` is not None, `sprints.py`) is o
 `MANAGER_SENTENCE` says what the page offers. The sentence precedence is all out, stale, briefs, stalls,
 then the existing ones. A restart or a takeover adds no item, only a stall does.
 
+A shown, drafted sprint whose manager failed to start (#1182: `sprints.failed_start`, the one rule
+the block's Retry and the service's retry gate read too: a `failed` manager row that is not a
+takeover's, no brief, no listed session of its own, `managers` true, not stalled and not stopping)
+is one entry of `inbox.open`, after the stalls and before the progress entries, ordered by
+`(waiting_since, sprint_id)`, and counts in `inbox_items` and the headline. Its entry is
+
+    {"type": "inbox_item", "reason": "failed_start", "key": "failed-start/<sprint id>",
+     "project_id", "sprint_id", "title", "headline": "the manager of <title> failed to start",
+     "last_reason": <manager.plain_reason of the failure>, "answered": false,
+     "waiting_since": "<time the manager failed>"}
+
+`FAILED_START_SENTENCE` says what the page offers. The sentence precedence is all out, stale,
+briefs, stalls, failed starts, then the progress ones below. A later `manager.started`, a
+withdrawal, a brief, a listed own session or a takeover removes the card.
+
 A shown sprint whose `no_progress_at` is set (#929, a manager that stopped making progress) is
-one entry of `inbox.open`, after the stalls and before the questions, ordered by
+one entry of `inbox.open`, after the stalls and the failed starts and before the questions, ordered by
 `(no_progress_at, sprint_id)`, and counts in `inbox_items` and the headline. Its entry is
 
     {"type": "inbox_item", "reason": "progress", "key": "progress/<sprint id>", "project_id",
@@ -493,11 +509,12 @@ phase is `closing`, `closing`; no report, `starting`; else `on_track` ("on track
 sprint has exactly one ball and a non-empty now-sentence, and `state` and `state_text` are
 unchanged. `ball` (`sprint_ball`) is the first that holds: `owner` ("waiting on you") when `waiting`
 is above 0, the brief waits on the owner (decision none), the sprint is stalled, `no_progress_at` is
-set, or one of the sprint's listed sessions is waiting for an answer or a permission (the manager
+set, its manager failed to start with no brief (`sprints.failed_start`), or one of the sprint's listed sessions is waiting for an answer or a permission (the manager
 waits on the owner at its terminal); `manager` ("manager working") while the movement reading moves;
 else `nobody` ("nothing running, may be stuck"). `ball_text` is `BALL_TEXT[ball]`. `now_text` (`sprint_now`) is the first
 that holds: a stop requested, `NOW_STOPPING_TEXT`; a listed session waiting for an answer, then for
-a permission, `NOW_ANSWER_TEXT`, `NOW_PERMISSION_TEXT`; no brief or one the owner asked to change,
+a permission, `NOW_ANSWER_TEXT`, `NOW_PERMISSION_TEXT`; a manager that failed to start, `NOW_FAILED_START_TEXT` (`state` stays
+`drafting`); no brief or one the owner asked to change,
 `NOW_DRAFTING_TEXT`; a brief waiting on the owner, `NOW_BRIEF_TEXT`; an open question,
 `NOW_QUESTION_TEXT` with the first one's text; any other waiting item (`waiting` above 0),
 `NOW_DECISION_TEXT`; a stall, `NOW_STALLED_TEXT`; no progress, `NOW_NO_PROGRESS_TEXT`; a quota
@@ -605,7 +622,7 @@ from agent_tools.console.deliveries import (
 )
 from agent_tools.console.event_log import (
     Event, INBOX_CHANGED, INBOX_GONE, INBOX_SEEN, PROJECT_UNREGISTERED as UNREGISTERED)
-from agent_tools.console.manager import Wait, quota_wait, session_name
+from agent_tools.console.manager import Wait, plain_reason, quota_wait, session_name
 from agent_tools.console.movement import ProjectMovement
 from agent_tools.console.sessions import (
     ENDED,
@@ -653,6 +670,7 @@ from agent_tools.console.sprints import (
     NOW_COMMITTING_TEXT,
     NOW_DECISION_TEXT,
     NOW_DRAFTING_TEXT,
+    NOW_FAILED_START_TEXT,
     NOW_NO_PROGRESS_TEXT,
     NOW_PERMISSION_TEXT,
     NOW_QUESTION_TEXT,
@@ -706,6 +724,7 @@ from agent_tools.console.sprints import (
     closing_text,
     cut,
     ended_at,
+    failed_start,
     goal_title,
     manager_status,
     merge_refused,
@@ -756,6 +775,8 @@ BRIEF_SENTENCE = "Press Enter to approve the brief, or write a reply to ask for 
 QUESTION_SENTENCE = "Choose an option with its number and press Enter, or answer in your own words."
 MANAGER_SENTENCE = "Try again to start a new manager, or drop the sprint."
 PROGRESS_SENTENCE = "Tell the manager to continue, or drop the sprint."
+FAILED_START_HEADLINE = "the manager of {title} failed to start"
+FAILED_START_SENTENCE = "Retry to start the manager, or drop the sprint."
 SIGNIN_HEADLINE = "Sign in to {profile} again"
 SIGNIN_FIRST_HEADLINE = "Sign in to {profile}"
 SIGNIN_SENTENCE = "Press Sign in, then finish signing in in your browser."
@@ -1193,11 +1214,13 @@ def sprint_state(state: SprintState, now_ms: int | None, waiting: int,
 
 
 def sprint_ball(state: SprintState, now_ms: int | None, waiting: int,
-                listed: Collection[str], waits: WaitSignals = NO_WAITS) -> str | None:
+                listed: Collection[str], waits: WaitSignals = NO_WAITS,
+                failed_start: bool = False) -> str | None:
     """Who holds a running sprint's ball (#1086), or None once it has ended. `listed` is the
     `state` of each of the sprint's own listed sessions. The owner when anything waits on them: an
     open item (`waiting`), a brief awaiting a decision, a stall, no progress, or a manager session
-    waiting at its terminal. Else the manager while `sprint_quiet_for` reads the sprint moving, else
+    waiting at its terminal, or a manager that failed to start with no brief (`failed_start`, the
+    owner's retry card). Else the manager while `sprint_quiet_for` reads the sprint moving, else
     nobody; a `failed` manager with no listed session drops only the goal's stated time from the
     signals, so the ball reads nobody at once only when no approval, report or run has moved, and a
     run, report, approval or wait signal inside the window keeps it manager whatever its order
@@ -1206,7 +1229,7 @@ def sprint_ball(state: SprintState, now_ms: int | None, waiting: int,
         return None
     brief = state.brief
     if (waiting or (brief is not None and brief.decision == NONE) or state.stalled is not None
-            or state.no_progress_at is not None
+            or state.no_progress_at is not None or failed_start
             or WAITING_ANSWER in listed or WAITING_PERMISSION in listed):
         return BALL_OWNER
     quiet_for = sprint_quiet_for(state, now_ms, listed, waits)
@@ -1239,10 +1262,10 @@ def _stage_phrase(stages: Sequence[tuple[int, str, str]], milestone: str) -> str
 
 def sprint_now(state: SprintState, quota: Wait | None, listed: Collection[str], waiting: int,
                stages: Sequence[tuple[int, str, str]], ball: str | None,
-               wait: str | None = None) -> str | None:
+               wait: str | None = None, failed_start: bool = False) -> str | None:
     """What a running sprint is doing right now as one sentence (#1086), or None once it has
     ended; the first rule that holds, in the order the view docstring gives. `waiting`, `stages`,
-    `ball` and `wait` (`sprint_wait`) are the entry's own."""
+    `ball`, `wait` (`sprint_wait`) and `failed_start` are the entry's own."""
     if ended_at(state) is not None:
         return None
     brief, report = state.brief, state.report
@@ -1252,6 +1275,8 @@ def sprint_now(state: SprintState, quota: Wait | None, listed: Collection[str], 
         return NOW_ANSWER_TEXT
     if WAITING_PERMISSION in listed:
         return NOW_PERMISSION_TEXT
+    if failed_start:
+        return NOW_FAILED_START_TEXT
     if brief is None or brief.decision not in (APPROVED, NONE):
         return NOW_DRAFTING_TEXT
     if brief.decision == NONE:
@@ -1363,7 +1388,8 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
     waits = wait_signals(state, movement)
     name, text = sprint_state(state, now_ms, waiting, quota, listed=listed, waits=waits)
     ended = ended_at(state)
-    ball = sprint_ball(state, now_ms, waiting, listed, waits)
+    failed = failed_start(state, bool(sessions), managers)
+    ball = sprint_ball(state, now_ms, waiting, listed, waits, failed_start=failed)
     minute = nudges and state.manager is not None and state.manager.state == STARTED
     return {
         "type": "sprint",
@@ -1375,7 +1401,7 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
         "ball": ball,
         "ball_text": None if ball is None else BALL_TEXT[ball],
         "now_text": sprint_now(state, quota, listed, waiting, stages, ball,
-                               sprint_wait(state, now_ms, listed, waits)),
+                               sprint_wait(state, now_ms, listed, waits), failed_start=failed),
         "stated_at": state.stated_at,
         "age_text": age_text(elapsed),
         "manager_text": manager_text,
@@ -1569,6 +1595,15 @@ def _stall_entry(sprint: SprintState) -> dict:
             "answered": False, "waiting_since": sprint.stalled_at}
 
 
+def _failed_start_entry(sprint: SprintState) -> dict:
+    title = sprint_title(sprint)
+    return {"type": "inbox_item", "reason": "failed_start", "key": f"failed-start/{sprint.sprint_id}",
+            "project_id": sprint.project_id, "sprint_id": sprint.sprint_id,
+            "title": title, "headline": FAILED_START_HEADLINE.format(title=title),
+            "last_reason": plain_reason(sprint.manager.reason),
+            "answered": False, "waiting_since": sprint.manager.at}
+
+
 def _progress_entry(sprint: SprintState) -> dict:
     report = sprint.report
     title = sprint_title(sprint)
@@ -1726,7 +1761,31 @@ def derive_view(
     adopting = (shown_registration is not None
                 and (shown_registration.get("status") == "running"
                      or shown_registration.get("adoption") is not None))
-    open_count = (len(briefs) + len(stalls) + len(unprogressed) + len(signins) + len(adoptions)
+    by_id = {state.project_id: state for state in states}
+    owned: dict[str, list[SessionState]] = {}
+    unmanaged: dict[str, list[SessionState]] = {}
+    for session in sessions:
+        if session.state == ENDED or session.repo is None:
+            continue
+        project_id = project_for(session.repo, by_id)
+        if project_id is None:
+            unmanaged.setdefault(session.repo, []).append(session)
+        else:
+            owned.setdefault(project_id, []).append(session)
+
+    in_sprint: dict[str, list[SessionState]] = {}
+    for project_id in sorted({*drafted, *finished}):
+        for sprint in drafted.get(project_id, []) + finished.get(project_id, []):
+            name = session_name(project_id, sprint.sprint_id)
+            mine = [s for s in owned.get(project_id, ()) if s.name == name]
+            if mine:
+                in_sprint[sprint.sprint_id] = mine
+                owned[project_id] = [s for s in owned[project_id] if s.name != name]
+
+    starts = sorted((s for group in drafted.values() for s in group
+                     if failed_start(s, bool(in_sprint.get(s.sprint_id)), managers)),
+                    key=lambda s: (s.manager.at, s.sprint_id))
+    open_count = (len(briefs) + len(stalls) + len(starts) + len(unprogressed) + len(signins) + len(adoptions)
                   + len(asked) + len(retries) + len(registering) + len(applies) + len(confirms)
                   + len(failures) + len(trusts) + len(open_items))
     all_out = bool(capacity["all_out"])
@@ -1738,6 +1797,8 @@ def derive_view(
         sentence = BRIEF_SENTENCE
     elif stalls:
         sentence = MANAGER_SENTENCE
+    elif starts:
+        sentence = FAILED_START_SENTENCE
     elif unprogressed:
         sentence = PROGRESS_SENTENCE
     elif signins:
@@ -1760,30 +1821,9 @@ def derive_view(
         sentence = NEEDS_SENTENCE
     else:
         sentence = _sentence(len(states), adopting)
-    by_id = {state.project_id: state for state in states}
     runs: dict[str, list[DeliveryState]] = {}
     for delivery in (deliveries or {}).values():
         runs.setdefault(delivery.session_id, []).append(delivery)
-    owned: dict[str, list[SessionState]] = {}
-    unmanaged: dict[str, list[SessionState]] = {}
-    for session in sessions:
-        if session.state == ENDED or session.repo is None:
-            continue
-        project_id = project_for(session.repo, by_id)
-        if project_id is None:
-            unmanaged.setdefault(session.repo, []).append(session)
-        else:
-            owned.setdefault(project_id, []).append(session)
-
-    in_sprint: dict[str, list[SessionState]] = {}
-    for project_id in sorted({*drafted, *finished}):
-        for sprint in drafted.get(project_id, []) + finished.get(project_id, []):
-            name = session_name(project_id, sprint.sprint_id)
-            mine = [s for s in owned.get(project_id, ()) if s.name == name]
-            if mine:
-                in_sprint[sprint.sprint_id] = mine
-                owned[project_id] = [s for s in owned[project_id] if s.name != name]
-
     titles = {s.sprint_id: sprint_title(s) for s in (sprints or {}).values()}
     notices = {pid: _notice_entries(drafted.get(pid, []) + finished.get(pid, []), titles,
                                     open_owner_notices(owner_notices or {}, pid))
@@ -1851,6 +1891,7 @@ def derive_view(
                              else NEW_REPLIES_TEXT.format(n=len(new_replies))),
         "capacity": capacity,
         "inbox": {"open": [_brief_entry(s) for s in briefs] + [_stall_entry(s) for s in stalls]
+                          + [_failed_start_entry(s) for s in starts]
                           + [_progress_entry(s) for s in unprogressed]
                           + [_signin_entry(e, signin_runs) for e in signins]
                           + adoptions

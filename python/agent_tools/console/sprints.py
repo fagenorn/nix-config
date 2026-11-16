@@ -163,7 +163,9 @@ continue write, exactly `parse_withdraw`'s shape and refusals, and returns `(pro
 sprint_id)`. `idle` (which this module does not import) reads these fields.
 
 `manager_status(state, listed, now_ms, managers)` turns a sprint's manager into the view's
-`(manager_state, manager_text, retry)`; its docstring holds the rules.
+`(manager_state, manager_text, retry)`; its docstring holds the rules. `failed_start(state, listed,
+managers)` is true when that status is a `failed` one with retry on a first launch that has no brief
+(#1182): the owner's card, the line's `NOW_FAILED_START_TEXT` and the owner's ball read it.
 
 The view's `manager_state`, `manager_text` and `retry`, and the service's retry gate, are this
 function's three results.
@@ -678,6 +680,7 @@ NOW_BRIEF_TEXT = "waiting for your approval of the brief"
 NOW_QUESTION_TEXT = "waiting for your answer: {question}"
 NOW_DECISION_TEXT = "waiting for your decision on the tracker"
 NOW_STALLED_TEXT = "waiting for you: its managers keep failing"
+NOW_FAILED_START_TEXT = "waiting for you: the manager failed to start"
 NOW_NO_PROGRESS_TEXT = "waiting for you: the manager has stopped making progress"
 NOW_QUOTA_TEXT = "waiting for its account's usage to reset"
 NOW_STARTING_TEXT = "starting the work"
@@ -2356,6 +2359,19 @@ def manager_status(state: SprintState, listed: bool, now_ms: int | None,
     if manager.state == FAILED:
         return FAILED, f"{FAILED_TEXT}: {plain_reason(manager.reason)}", free
     return WAITING, MANAGER_WAITING_TEXT, free
+
+
+def failed_start(state: SprintState, listed: bool, managers: bool) -> bool:
+    """Whether a sprint's manager failed to start and the owner's retry is the way on (#1182).
+
+    True exactly when `manager_status(state, listed, None, managers)` is `failed` with retry, the
+    manager row is not a takeover's and the sprint has no brief: a first launch that never reached
+    a brief. A stalled sprint is not one (its stall card speaks) and neither is a stopping one.
+    The inbox card, the block's Retry and the service's retry gate read the same `manager_status`,
+    so the three never disagree."""
+    manager_state, _, retry = manager_status(state, listed, None, managers)
+    return (manager_state == FAILED and retry and state.manager is not None
+            and not state.manager.takeover and state.brief is None)
 
 
 def new_sprint_id() -> str:

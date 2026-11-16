@@ -3,14 +3,20 @@
 import dataclasses
 import unittest
 
-from agent_tools.console import manager, view
-from agent_tools.console.sprints import APPROVED, Manager
-from agent_tools.console.view import derive_view, encode_view
+from datetime import datetime
+
+from agent_tools.console import event_log, manager, view
+from agent_tools.console.event_log import Event
+from agent_tools.console.sprints import APPROVED, NOW_FAILED_START_TEXT, Manager, sprint_states
+from agent_tools.console.view import InboxRecord, MANAGER_SENTENCE, derive_view, encode_view
 
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
-from .test_console_view import T0, T0_MS, briefed, sprint, state
+from .test_console_view import T0, T0_MS, briefed, item, session, sprint, state
 
 SID = "a" * 16
+NAME = "p00 sprint " + SID
+PLAIN = "this account does not trust the project's folder"
+GOAL = "make the importer resumable"
 RAW = ("Workspace not trusted. Run `claude` in /home/anis/Projects/jarbird once and accept "
        "the trust prompt, then retry.")
 
@@ -79,6 +85,138 @@ class PlainReasonTest(unittest.TestCase):
                     (entry["manager_state"], entry["manager_text"], entry["retry"]), plain)
                 self.assertNotIn("/home/anis/Projects/jarbird", text)
                 self.assertNotIn("Workspace not trusted", text)
+
+
+def failed(s, reason=RAW, at=T0, takeover=False):
+    return dataclasses.replace(s, manager=Manager("failed", at, reason=reason, takeover=takeover))
+
+
+def row(seq, kind, **payload):
+    return Event(seq, f"2026-11-12T10:0{seq}:00.000000+00:00", kind, "p00", payload)
+
+
+def keys(shown):
+    return [e["key"] for e in shown["inbox"]["open"]]
+
+
+def card_keys(shown):
+    return [k for k in keys(shown) if k.startswith("failed-start/")]
+
+
+def sprint_entry(shown):
+    return shown["entries"][0]["sprints"][0]
+
+
+class FailedStartCardTest(unittest.TestCase):
+    def test_a_failed_first_launch_is_one_counted_card_with_plain_words(self):
+        shown = derive_view([state("p00", 1)], sprints={SID: failed(sprint(SID))},
+                            now_ms=T0_MS + 60_000)
+        self.assertEqual(shown["inbox"]["open"], [{
+            "type": "inbox_item", "reason": "failed_start", "key": "failed-start/" + SID,
+            "project_id": "p00", "sprint_id": SID, "title": GOAL,
+            "headline": "the manager of " + GOAL + " failed to start", "last_reason": PLAIN,
+            "answered": False, "waiting_since": T0}])
+        self.assertEqual(shown["statement"]["inbox_items"], 1)
+        self.assertEqual(shown["statement"]["headline"], "1 thing needs you")
+        self.assertEqual(shown["statement"]["sentence"], view.FAILED_START_SENTENCE)
+        self.assertEqual(view.FAILED_START_SENTENCE,
+                         "Retry to start the manager, or drop the sprint.")
+
+    def test_its_line_reads_failed_to_start_and_waits_on_the_owner(self):
+        shown = derive_view([state("p00", 1)], sprints={SID: failed(sprint(SID))},
+                            now_ms=T0_MS + 60_000)
+        line = sprint_entry(shown)
+        self.assertEqual(line["now_text"], "waiting for you: the manager failed to start")
+        self.assertEqual(line["now_text"], NOW_FAILED_START_TEXT)
+        self.assertEqual((line["ball"], line["ball_text"]), ("owner", "waiting on you"))
+        self.assertEqual((line["state"], line["state_text"]), ("drafting", "drafting the brief"))
+        self.assertEqual((line["manager_state"], line["retry"]), ("failed", True))
+
+    def test_a_later_start_a_withdrawal_or_a_brief_removes_the_card_and_restores_the_line(self):
+        base = [row(1, event_log.GOAL_STATED, sprint_id=SID, goal=GOAL),
+                row(2, event_log.MANAGER_FAILED, sprint_id=SID, reason=RAW)]
+        self.assertEqual(
+            card_keys(derive_view([state("p00", 1)], sprints=sprint_states(base),
+                                  now_ms=T0_MS + 5 * 60_000)), ["failed-start/" + SID])
+        with self.subTest("a later start"):
+            later = row(3, event_log.MANAGER_STARTED, sprint_id=SID, profile="work",
+                        session_name=NAME)
+            at = int(datetime.fromisoformat(later.at).timestamp() * 1000) + 60_000
+            shown = derive_view([state("p00", 1)], sprints=sprint_states([*base, later]),
+                                now_ms=at)
+            self.assertEqual(shown["inbox"]["open"], [])
+            self.assertEqual(shown["statement"]["inbox_items"], 0)
+            line = sprint_entry(shown)
+            self.assertEqual(line["now_text"], "drafting the brief")
+            self.assertEqual(line["manager_state"], "started")
+            self.assertEqual(line["ball"], "manager")
+        with self.subTest("a withdrawal"):
+            gone = row(3, event_log.GOAL_WITHDRAWN, sprint_id=SID, goal=GOAL)
+            shown = derive_view([state("p00", 1)], sprints=sprint_states([*base, gone]),
+                                now_ms=T0_MS + 5 * 60_000)
+            self.assertEqual(shown["inbox"]["open"], [])
+            self.assertEqual(shown["statement"]["inbox_items"], 0)
+            self.assertEqual(shown["entries"][0]["sprints"], [])
+        with self.subTest("a brief"):
+            shown = derive_view([state("p00", 1)],
+                                sprints={SID: briefed(failed(sprint(SID)))},
+                                now_ms=T0_MS + 60_000)
+            self.assertEqual(keys(shown), ["brief/" + SID])
+            line = sprint_entry(shown)
+            self.assertEqual(line["now_text"], "waiting for your approval of the brief")
+            self.assertFalse(line["retry"])
+
+    def test_no_card_while_a_retry_is_not_offered_or_is_not_the_owners(self):
+        now = T0_MS + 60_000
+        only = failed(sprint(SID))
+        self.assertEqual(
+            card_keys(derive_view([state("p00", 1)], sprints={SID: only}, now_ms=now)),
+            ["failed-start/" + SID])
+        cases = {
+            "an own listed session": dict(sprints={SID: only},
+                                          sessions=[session("m1", "idle", name=NAME)]),
+            "a takeover": dict(sprints={SID: failed(
+                briefed(sprint(SID), decision=APPROVED, at=T0), takeover=True)}),
+            "a takeover with no brief": dict(sprints={SID: failed(sprint(SID), takeover=True)}),
+            "no managers": dict(sprints={SID: only}, managers=False),
+            "a stop": dict(sprints={SID: dataclasses.replace(only, stop_at=T0)}),
+            "a stall": dict(sprints={SID: dataclasses.replace(only, stalled="r", stalled_at=T0)}),
+            "a quota wait": dict(sprints={SID: dataclasses.replace(
+                sprint(SID), manager=Manager("waiting", T0, until=None))}),
+            "an unregistered project": dict(sprints={SID: failed(sprint(SID, pid="p09"))}),
+        }
+        for name, extra in cases.items():
+            with self.subTest(name):
+                shown = derive_view([state("p00", 1)], now_ms=now, **extra)
+                self.assertEqual(card_keys(shown), [])
+                if name == "a stall":
+                    self.assertEqual(keys(shown), ["manager/" + SID])
+                if name == "an unregistered project":
+                    self.assertEqual(shown["statement"]["inbox_items"], 0)
+                    continue
+                line = sprint_entry(shown)
+                self.assertNotEqual(line["now_text"], NOW_FAILED_START_TEXT)
+                if name == "an own listed session":
+                    self.assertEqual(line["ball"], "manager")
+                if name == "no managers":
+                    self.assertEqual(line["now_text"], "drafting the brief")
+
+    def test_cards_follow_stalls_and_precede_progress_and_tracker_items(self):
+        a, b, c, d = "a" * 16, "b" * 16, "c" * 16, "d" * 16
+        records = {("p00", "k1"): InboxRecord(item("p00", "k1", held=9), "t1", "u1")}
+        sprints = {
+            a: dataclasses.replace(sprint(a), stalled="r", stalled_at="t5"),
+            b: failed(sprint(b)),
+            c: dataclasses.replace(sprint(c), no_progress_at="t1"),
+            d: failed(sprint(d), at="2026-11-12T09:00:00.000000+00:00")}
+        shown = derive_view([state("p00", 1)], records, sprints=sprints, now_ms=T0_MS + 60_000)
+        self.assertEqual(keys(shown), ["manager/" + a, "failed-start/" + d, "failed-start/" + b,
+                                       "progress/" + c, "k1"])
+        self.assertEqual(shown["statement"]["inbox_items"], 5)
+        self.assertEqual(shown["statement"]["sentence"], MANAGER_SENTENCE)
+        del sprints[a]
+        shown = derive_view([state("p00", 1)], records, sprints=sprints, now_ms=T0_MS + 60_000)
+        self.assertEqual(shown["statement"]["sentence"], view.FAILED_START_SENTENCE)
 
 
 if __name__ == "__main__":
