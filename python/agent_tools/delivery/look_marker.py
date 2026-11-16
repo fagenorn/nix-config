@@ -32,10 +32,19 @@ answer is not `approved`, or for which the head is unknown, yields `Verdict(Fals
 covers)`; otherwise `Verdict(True, marked=...)`, `marked` the numbers of the marked issues it
 admitted, ascending. An unmarked issue needs nothing.
 
+Near misses: a body line outside fences that is not a marker and, once its inline code spans
+(backtick runs) are removed, is criterion-shaped is a near miss, a marker its author meant and
+misspelt. Criterion-shaped is an optional list bullet (`-`, `*`, `+`) then one or more bracket
+groups (`[ ]`, `[human]`, `[code]`); the line is a near miss when it matches `before[\\s_-]*merg`
+(any case) and a bracket group is `[human]` (any case), or when the bracket groups are
+immediately followed by `before[\\s_-]*merg`. Prose, a bullet that only talks about the
+marker and text inside inline code are never near misses. `near_misses` returns them in body order with their 1-based
+line numbers; `look-lint` prints them, and a body with any is refused even beside a valid marker.
+
 This module reads no network, runs no subprocess and reads no clock.
 """
 import re
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -49,6 +58,9 @@ ANSWERS: tuple[str, ...] = ("approved", "changes")
 LINE = re.compile(r"- \[[ xX]\] \[human\] before merge: (?P<what>\S.*?) — measured: (?P<measured>\S.*)")
 FENCE_OPEN = re.compile(r"^ {0,3}(`{3,}|~{3,})")
 HEAD_PATTERN = re.compile(r"[0-9a-f]{40}")
+NEAR = re.compile(r"before[\s_-]*merg", re.IGNORECASE)
+CODE_SPAN = re.compile(r"(`+).*?\1")
+SHAPED = re.compile(r"\s*(?:[-*+]\s*)?(?P<groups>(?:\[[^\]]*\]\s*)+)")
 
 
 @dataclass(frozen=True)
@@ -85,11 +97,10 @@ class Verdict:
     marked: tuple[int, ...] = ()
 
 
-def read_look(body: str | None) -> Look:
-    """The look criteria an issue body carries outside code fences, in body order."""
-    found: list[LookCriterion] = []
+def body_lines(body: str | None) -> Iterator[tuple[int, str]]:
+    """Each `(n, line)` of a body outside code fences, `n` 1-based, `line` with its end stripped."""
     fence: tuple[str, int] | None = None
-    for raw in (body or "").split("\n"):
+    for n, raw in enumerate((body or "").split("\n"), 1):
         line = raw.rstrip()
         if fence is None:
             opened = FENCE_OPEN.match(line)
@@ -101,10 +112,38 @@ def read_look(body: str | None) -> Look:
             if re.fullmatch(rf" {{0,3}}{re.escape(char)}{{{size},}}[ \t]*", line):
                 fence = None
             continue
+        yield n, line
+
+
+def read_look(body: str | None) -> Look:
+    """The look criteria an issue body carries outside code fences, in body order."""
+    found: list[LookCriterion] = []
+    for _, line in body_lines(body):
         matched = LINE.fullmatch(line)
         if matched:
             found.append(LookCriterion(matched["what"], matched["measured"]))
     return Look(tuple(found))
+
+
+@dataclass(frozen=True)
+class NearMiss:
+    line: int
+    text: str
+
+
+def _near(line: str) -> bool:
+    text = CODE_SPAN.sub("", line)
+    shaped = SHAPED.match(text)
+    if shaped is None:
+        return False
+    return bool(NEAR.match(text, shaped.end())
+                or (NEAR.search(text) and "[human]" in shaped["groups"].lower()))
+
+
+def near_misses(body: str | None) -> tuple[NearMiss, ...]:
+    """The criterion-shaped lines outside fences that read like a look marker but are not one."""
+    return tuple(NearMiss(n, line) for n, line in body_lines(body)
+                 if not LINE.fullmatch(line) and _near(line))
 
 
 def _positive(name: str, value: Any) -> None:

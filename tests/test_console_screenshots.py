@@ -6,6 +6,7 @@ import dataclasses
 import json
 import os
 import pwd
+import sys
 import tempfile
 import time
 import unittest
@@ -40,9 +41,9 @@ def all_sprints(view):
 
 
 class ScreenshotFixtureTest(unittest.TestCase):
-    def test_the_set_is_eleven_states_at_two_widths(self) -> None:
-        self.assertEqual(len(shots.STATES), 11)
-        self.assertEqual(shots.STATES[-1], "owner-check")
+    def test_the_set_is_twelve_states_at_two_widths(self) -> None:
+        self.assertEqual(len(shots.STATES), 12)
+        self.assertEqual(shots.STATES[-2:], ("owner-check", "spend-page"))
         self.assertEqual(shots.STATES.index("tell-box-open"), shots.STATES.index("stuck") + 1)
         self.assertEqual(shots.WIDTHS, (1440, 480))
 
@@ -162,6 +163,27 @@ class ScreenshotFixtureTest(unittest.TestCase):
                 finally:
                     svc.close()
 
+    def test_the_fixture_service_never_reads_a_real_keepalive_log(self) -> None:
+        # On darwin the service's default ping log is under the real HOME; the fixture
+        # must not read it, or today's real pings price as keepalive spend (#1135).
+        with tempfile.TemporaryDirectory() as home, tempfile.TemporaryDirectory() as tmp:
+            log = Path(home) / "Library/Logs/claude-cache-proxy.log"
+            log.parent.mkdir(parents=True)
+            log.write_text(json.dumps({
+                "event": "ping", "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "conversation": "real", "model": "claude-sonnet-4-6",
+                "usage": {"input_tokens": 1000000}}) + "\n", encoding="utf-8")
+            now_s = time.time()
+            fixture = shots.build_fixture(Path(tmp), "finished-list", now_s)
+            with mock.patch.dict(os.environ, {"HOME": home}), \
+                    mock.patch.object(sys, "platform", "darwin"):
+                svc = shots.start_service(fixture, now_s)
+            try:
+                days = json.loads(svc.view_bytes)["spend"]["days"]
+            finally:
+                svc.close()
+            self.assertEqual([d["total"]["dollars"] for d in days if d["total"]["dollars"]], [])
+
     def test_each_fixture_view_shows_its_state(self) -> None:
         for state in shots.STATES:
             with self.subTest(state=state), tempfile.TemporaryDirectory() as tmp:
@@ -230,10 +252,22 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     self.assertEqual(view["statement"]["inbox_items"], 1)
                 elif state == "nothing-running":
                     self.assertEqual(running, [])
+                days = (view["spend"] or {"days": []})["days"]
+                self.assertIsNotNone(view["spend"])
+                if state == "spend-page":
+                    self.assertGreater(days[-1]["total"]["dollars"], 0)
+                    self.assertGreaterEqual(
+                        sum(1 for d in days[-7:] if d["total"]["dollars"] > 0), 4)
+                    self.assertGreaterEqual(
+                        len(set().union(*(d["phase"] for d in days[-7:]))), 2)
+                    self.assertIn(running[0]["sprint_id"],
+                                  set().union(*(d["sprint"] for d in days[-7:])))
+                else:
+                    self.assertEqual(days[-1]["total"]["dollars"], 0)
 
 
 class ScreenshotCaptureTest(unittest.TestCase):
-    def test_the_command_writes_twenty_two_pngs_and_nothing_scrolls_sideways(self) -> None:
+    def test_the_command_writes_twenty_four_pngs_and_nothing_scrolls_sideways(self) -> None:
         try:
             from playwright.sync_api import Error, sync_playwright
         except ImportError:
@@ -259,7 +293,7 @@ class ScreenshotCaptureTest(unittest.TestCase):
             names = sorted(p.name for p in out.iterdir())
             self.assertEqual(
                 names, sorted(f"{s}-{w}.png" for s in shots.STATES for w in shots.WIDTHS))
-            self.assertEqual(len(names), 22)
+            self.assertEqual(len(names), 24)
             for path in out.iterdir():
                 self.assertEqual(path.read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
 

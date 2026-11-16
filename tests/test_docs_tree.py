@@ -373,7 +373,7 @@ class DocsTreeTest(unittest.TestCase):
         for term in ("Console", "Inbox item", "Quiet project", "Answered item",
                      "Held work", "Waiting since", "Session", "Outside sprints",
                      "Not yet managed", "Delivery run", "Goal", "Sprint", "Brief",
-                     "Message", "Nudge", "Question round", "Notice"):
+                     "Message", "Nudge", "Question round", "Notice", "Spend page"):
             self.assertIn([term, "Console"], cells)
         self.assertIn("- **Console → Claims**:", text)
 
@@ -458,13 +458,38 @@ class DocsTreeTest(unittest.TestCase):
             first, "# ADR-console-049 — Spend is read from transcripts into memory and never logged")
         self.assertIn("ADR-console-049", self.doc("docs/areas/console/CONTEXT.md"))
 
+    def test_the_spend_page_decision_is_recorded(self):
+        path = "docs/areas/console/adr/052-the-spend-page-is-a-second-read-only-page-of-the-console.md"
+        first = (REPO_ROOT / path).read_text().splitlines()[0]
+        self.assertEqual(
+            first, "# ADR-console-052 — The Spend page is a second, read-only page of the console")
+        adr = self.doc(path)
+        for needle in ("#1135", "/spend", "/api/stream", "ADR-console-001",
+                       "ADR-console-002", "ADR-console-008", "ADR-console-049",
+                       "Estimated at API list prices", "unattributed", "1440",
+                       "480", "PAGE_WRITES"):
+            self.assertIn(needle, adr)
+        self.assertNotIn("no endpoint changes anything", adr)
+        self.assertNotIn("owner approved", adr)
+        context = self.doc("docs/areas/console/CONTEXT.md")
+        self.assertIn("**Spend page**:", context)
+        self.assertIn("ADR-console-052", context)
+        self.assertNotIn("its one page", context)
+        entry = context.split("**Console**:", 1)[1].split("_Avoid_", 1)[0]
+        self.assertIn("Spend page", entry)
+        for other in ("docs/areas/console/adr/001-the-console-truth-is-an-append-only-event-log.md",
+                      "docs/areas/console/adr/002-the-desk-page-design-rules.md"):
+            self.assertIn("ADR-console-052", self.doc(other))
+        self.assertIn('a quiet "Spend" link to the Spend page (ADR-console-052)',
+                      self.doc("docs/areas/console/adr/002-the-desk-page-design-rules.md"))
+
     def test_the_held_review_decision_is_recorded(self):
-        path = ("docs/areas/console/adr/052-a-held-issue-whose-only-open-criterion-is-an-owner-"
+        path = ("docs/areas/console/adr/053-a-held-issue-whose-only-open-criterion-is-an-owner-"
                 "review-gets-an-owner-check-card.md")
         first = (REPO_ROOT / path).read_text().splitlines()[0]
         self.assertEqual(
             first,
-            "# ADR-console-052 \u2014 A held issue whose only open criterion is an owner review "
+            "# ADR-console-053 \u2014 A held issue whose only open criterion is an owner review "
             "gets an owner check card")
         adr = self.doc(path)
         for needle in (
@@ -476,15 +501,15 @@ class DocsTreeTest(unittest.TestCase):
             self.assertIn(needle, adr)
         for older, status in (
             ("003-the-inbox-is-read-from-the-tracker.md",
-             "- **Status:** accepted; amended by ADR-console-052"),
+             "- **Status:** accepted; amended by ADR-console-053"),
             ("012-the-page-answers-owner-prompts-through-the-runners-owner-path.md",
-             "- **Status:** accepted; amended by ADR-console-032, ADR-console-052"),
+             "- **Status:** accepted; amended by ADR-console-032, ADR-console-053"),
         ):
             line = next(row for row in (REPO_ROOT / "docs/areas/console/adr" / older)
                         .read_text().splitlines() if row.startswith("- **Status:**"))
             self.assertEqual(line, status)
         entry = self.doc("docs/areas/console/CONTEXT.md").split("**Inbox item**:")[1].split("_Avoid_:")[0]
-        self.assertIn("ADR-console-052", entry)
+        self.assertIn("ADR-console-053", entry)
 
     def test_the_console_signin_decision_is_recorded(self):
         path = "docs/areas/console/adr/022-a-profiles-sign-in-is-read-from-the-clients-status-command.md"
@@ -685,7 +710,7 @@ class DocsTreeTest(unittest.TestCase):
                          "ADR-console-037"),
                 ("docs/areas/console/adr/002-the-desk-page-design-rules.md",
                  both + ", ADR-console-029, ADR-console-031, ADR-console-032, ADR-console-033, "
-                 "ADR-console-035, ADR-console-038"),
+                 "ADR-console-035, ADR-console-038, ADR-console-052"),
                 ("docs/areas/console/adr/024-the-owner-signs-a-profile-in-from-the-page.md",
                  "- **Status:** accepted; amended by ADR-console-025")):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
@@ -719,7 +744,7 @@ class DocsTreeTest(unittest.TestCase):
                                           "ADR-console-036, ADR-console-037"),
                                 (adr002, status + ", ADR-console-029, ADR-console-031, "
                                           "ADR-console-032, ADR-console-033, ADR-console-035, "
-                                          "ADR-console-038")):
+                                          "ADR-console-038, ADR-console-052")):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
                         if row.startswith("- **Status:**"))
             self.assertEqual(line, expected)
@@ -795,7 +820,7 @@ class DocsTreeTest(unittest.TestCase):
                 ("docs/areas/console/adr/002-the-desk-page-design-rules.md",
                  "- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
                  "ADR-console-028, ADR-console-029, ADR-console-031, ADR-console-032, "
-                 "ADR-console-033, ADR-console-035, ADR-console-038"),
+                 "ADR-console-033, ADR-console-035, ADR-console-038, ADR-console-052"),
                 ("docs/areas/console/adr/"
                  "031-a-repository-with-no-contract-is-registered-with-a-drafted-contract.md",
                  "- **Status:** accepted; amended by ADR-console-033")):
@@ -945,7 +970,7 @@ class DocsTreeTest(unittest.TestCase):
             ("docs/areas/console/adr/010-the-page-answers-a-decision-prompt-by-ticking-it-as-the-owner.md",
              "- **Status:** accepted; amended by ADR-console-032"),
             ("docs/areas/console/adr/012-the-page-answers-owner-prompts-through-the-runners-owner-path.md",
-             "- **Status:** accepted; amended by ADR-console-032, ADR-console-052"),
+             "- **Status:** accepted; amended by ADR-console-032, ADR-console-053"),
         ):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
                         if row.startswith("- **Status:**"))
@@ -1377,7 +1402,7 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("it never counts in the statement (#1119)", adr)
         raw = (REPO_ROOT / "docs/areas/console/adr/002-the-desk-page-design-rules.md").read_text()
         decided = next(line for line in raw.splitlines() if line.startswith("- **Decided in:**"))
-        self.assertTrue(decided.endswith(", #1133"))
+        self.assertTrue(decided.endswith(", #1133, #1135"))
         self.assertIn('the same disclosure arrow as "Show the report" and "Finished sprints"', adr)
         self.assertIn('"Hand-off for you, from <title>"', adr)
         self.assertIn("its paths in the code style", adr)

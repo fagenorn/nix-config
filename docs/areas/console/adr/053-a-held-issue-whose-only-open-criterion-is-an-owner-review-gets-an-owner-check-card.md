@@ -1,4 +1,4 @@
-# ADR-console-052 — A held issue whose only open criterion is an owner review gets an owner check card
+# ADR-console-053 — A held issue whose only open criterion is an owner review gets an owner check card
 
 - **Status:** accepted
 - **Decided in:** #1113

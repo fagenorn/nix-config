@@ -29,7 +29,7 @@ that whitespace or the line end follows, else the whole line, whitespace collaps
 the check id and `detail` is the rest; every other verification prompt keeps its sentence and whole
 detail with `check_id` `""` (#1046).
 
-Held reviews (#1113, ADR-console-052). A held issue with no live runner prompt raises review items
+Held reviews (#1113, ADR-console-053). A held issue with no live runner prompt raises review items
 instead. An Issue node labelled `HELD_LABEL` whose `authorAssociation` is in `verify_answer.TRUSTED`
 and that has no live trusted runner prompt (the verification-item predicate above) is read through
 `acceptance_criteria` of its body: the checkbox lines of its first `Acceptance criteria` heading
