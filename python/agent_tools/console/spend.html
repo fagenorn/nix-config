@@ -37,6 +37,7 @@ h1, h2, p, ul { margin: 0; padding: 0; }
 .field-area { display: block; width: 100%; min-height: 4.5rem; resize: vertical; }
 .field-code { font-family: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace; letter-spacing: .06em; }
 .field-bare { padding-left: 0; padding-right: 0; background: none; border-color: transparent; }
+.field-line::placeholder, .field-area::placeholder, .field-code::placeholder { color: var(--ov2); opacity: 1; }
 .btn-primary:disabled, .btn-primary[aria-disabled="true"], .btn-quiet:disabled, .btn-quiet[aria-disabled="true"], .btn-danger:disabled, .btn-danger[aria-disabled="true"], .btn-option:disabled, .btn-option[aria-disabled="true"], .field-line:disabled, .field-line[aria-disabled="true"], .field-area:disabled, .field-area[aria-disabled="true"], .field-code:disabled, .field-code[aria-disabled="true"] { border-width: 1px; border-style: dashed; border-color: var(--s1); cursor: not-allowed; opacity: .55; }
 .btn-primary[aria-busy="true"], .btn-quiet[aria-busy="true"], .btn-danger[aria-busy="true"], .btn-option[aria-busy="true"], .field-line[aria-busy="true"], .field-area[aria-busy="true"], .field-code[aria-busy="true"] { border-width: 1px; border-style: dotted; cursor: progress; }
 .btn-primary[aria-busy="true"]::after, .btn-quiet[aria-busy="true"]::after, .btn-danger[aria-busy="true"]::after { content: "\2026"; }

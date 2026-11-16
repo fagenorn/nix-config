@@ -861,3 +861,74 @@ class ControlStateTest(unittest.TestCase):
                         primaries = [n for n, _p in _walk(card, None)
                                      if "btn-primary" in n["cls"].split()]
                         self.assertLessEqual(len(primaries), 1)
+
+
+def contrast(fg_hex: str, bg_hex: str) -> float:
+    """The WCAG 2 contrast ratio of two `#rrggbb` colours."""
+    def luminance(hex_colour: str) -> float:
+        channels = [int(hex_colour[i:i + 2], 16) / 255 for i in (1, 3, 5)]
+        r, g, b = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in channels]
+        return .2126 * r + .7152 * g + .0722 * b
+    lighter, darker = sorted((luminance(fg_hex), luminance(bg_hex)), reverse=True)
+    return (lighter + .05) / (darker + .05)
+
+
+def _field_nodes(snapshot: dict):
+    for tree in TREES:
+        if snapshot.get(tree) is None:
+            continue
+        stack = [(snapshot[tree], [])]
+        while stack:
+            node, ancestors = stack.pop()
+            yield node, ancestors
+            stack.extend((child, ancestors + [node]) for child in node["children"])
+
+
+def _text_of(node: dict) -> str:
+    """The text of a node and of everything below it."""
+    return node["text"] + "".join(_text_of(child) for child in node["children"])
+
+
+class ControlLabelTest(unittest.TestCase):
+    def test_every_input_has_a_label(self) -> None:
+        unlabelled = []
+        for snap in snapshots_of(desk_scenarios()):
+            for node, ancestors in _field_nodes(snap):
+                if node["tag"] not in ("input", "textarea"):
+                    continue
+                if node.get("label"):
+                    continue
+                if any(a["tag"] == "label" and _text_of(a).strip() for a in ancestors):
+                    continue
+                unlabelled.append(role(node["cls"]))
+        self.assertEqual(sorted(set(unlabelled)), [])
+
+    def test_placeholders_meet_4_5_to_1_against_their_field(self) -> None:
+        style = page_style()
+        root_rule = re.search(r":root \{[^}]*\}", style).group(0)
+        root = dict(re.findall(r"(--[\w-]+):\s*(#[0-9a-fA-F]{6})", root_rule))
+
+        def colour(value: str) -> str:
+            return root[re.fullmatch(r"var\((--[\w-]+)\)", value).group(1)]
+
+        rules = [(s, d) for s, d in style_rules(controls_block(style)) if "::placeholder" in s]
+        self.assertEqual([s for s, _d in rules],
+                         [".field-line::placeholder", ".field-area::placeholder",
+                          ".field-code::placeholder"])
+        decls = rules[0][1]
+        self.assertTrue(all(d == decls for _s, d in rules))
+        self.assertEqual(decls["opacity"], "1")
+        placeholder = colour(decls["color"])
+        everything = style_rules(style)
+        backgrounds = {}
+        for kind in ("field-line", "field-area", "field-code"):
+            backgrounds[kind] = colour(decls_of(everything, "." + kind)["background"])
+        backgrounds["goal-in open"] = colour(
+            decls_of(everything, ".goal-bar.open .goal-in")["background"])
+        for name, background in backgrounds.items():
+            with self.subTest(field=name):
+                self.assertGreaterEqual(contrast(placeholder, background), 4.5)
+
+    def test_contrast_matches_the_wcag_formula(self) -> None:
+        self.assertEqual(round(contrast("#939ab7", "#1e2030"), 2), 5.79)
+        self.assertEqual(round(contrast("#181926", "#f5a97f"), 2), 9.01)
