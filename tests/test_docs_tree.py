@@ -416,9 +416,32 @@ class DocsTreeTest(unittest.TestCase):
         sprint_entry = next(
             line for line in (REPO_ROOT / "docs/areas/console/CONTEXT.md").read_text().splitlines()
             if line.startswith("One goal, later its issues"))
-        self.assertTrue(sprint_entry.endswith("ADR-console-042, ADR-console-050, ADR-console-051)."))
+        self.assertTrue(sprint_entry.endswith(
+            "ADR-console-042, ADR-console-050, ADR-console-051, ADR-console-057)."))
         self.assertNotIn("ADR-console-046", sprint_entry)
         self.assertEqual(len(list((REPO_ROOT / "docs/areas/console/adr").glob("050-*.md"))), 1)
+
+    def test_the_land_lock_wait_decision_is_recorded(self):
+        path = ("docs/areas/console/adr/057-a-sprint-queued-for-the-land-lock-reads-"
+                "waiting-its-turn-to-merge.md")
+        first = (REPO_ROOT / path).read_text().splitlines()[0]
+        self.assertEqual(first, "# ADR-console-057 — A sprint queued for the land lock reads "
+                                "waiting its turn to merge")
+        adr = self.doc(path)
+        for needle in ("#1184", "ADR-console-050", "ADR-console-048", "waiting its turn to merge",
+                       "refs/agent-locks/land/", "git/matching-refs", "land-lock-",
+                       "land-relock-", "land-pr-", "stuck", "release pull request",
+                       "refreshes no lock time"):
+            self.assertIn(needle, adr)
+        status = [line for line in (REPO_ROOT / (
+            "docs/areas/console/adr/050-a-sprint-waiting-on-ci-a-committing-delivery-or-a-"
+            "release-step-reads-what-it-waits-for.md")).read_text().splitlines()
+                  if line.startswith("- **Status:**")]
+        self.assertEqual(status, ["- **Status:** accepted; amended by ADR-console-057"])
+        context = self.doc("docs/areas/console/CONTEXT.md")
+        for needle in ("waiting its turn to merge", "ADR-console-057"):
+            self.assertIn(needle, context)
+        self.assertEqual(len(list((REPO_ROOT / "docs/areas/console/adr").glob("057-*.md"))), 1)
 
     def test_the_owner_check_pictures_decision_is_recorded(self):
         adr = self.doc(
