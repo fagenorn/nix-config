@@ -1,0 +1,5 @@
+#!/bin/sh
+# Verify check for issue 1186: the first marked issue held after landing under an approved look,
+# after this host activated the change, raises no owner-review card. verify-pending runs it from
+# the repository root at the commit the block names. Exit 0 met, 1 not met, 75 not yet, 2 usage or forge error.
+PYTHONPATH=python exec python3 -m agent_tools.console.look_check "$@"
