@@ -41,9 +41,10 @@ def all_sprints(view):
 
 
 class ScreenshotFixtureTest(unittest.TestCase):
-    def test_the_set_is_twelve_states_at_two_widths(self) -> None:
-        self.assertEqual(len(shots.STATES), 12)
-        self.assertEqual(shots.STATES[-2:], ("owner-check", "spend-page"))
+    def test_the_set_is_fourteen_states_at_two_widths(self) -> None:
+        self.assertEqual(len(shots.STATES), 14)
+        self.assertEqual(shots.STATES[-4:],
+                         ("owner-check", "spend-page", "notices-fold", "notice-post-open"))
         self.assertEqual(shots.STATES.index("tell-box-open"), shots.STATES.index("stuck") + 1)
         self.assertEqual(shots.WIDTHS, (1440, 480))
 
@@ -252,6 +253,17 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     self.assertEqual(view["statement"]["inbox_items"], 1)
                 elif state == "nothing-running":
                     self.assertEqual(running, [])
+                elif state in ("notices-fold", "notice-post-open"):
+                    self.assertEqual(
+                        sorted(s["title"] for s in running),
+                        ["Add resumable uploads", "Fix the settings page"])
+                    web = next(p for p in entries_of(view) if p["project_id"] == "owner/web")
+                    self.assertTrue(web["notice_post"])
+                    self.assertEqual(
+                        [(n["poster"], n["kind"], n["text"], n["owner"]) for n in web["notices"]],
+                        [("You", "heads-up", "routes are frozen until Friday", True),
+                         ("Fix the settings page", "claim", "reworking the settings form",
+                          False)])
                 days = (view["spend"] or {"days": []})["days"]
                 self.assertIsNotNone(view["spend"])
                 if state == "spend-page":
@@ -267,7 +279,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
 
 
 class ScreenshotCaptureTest(unittest.TestCase):
-    def test_the_command_writes_twenty_four_pngs_and_nothing_scrolls_sideways(self) -> None:
+    def test_the_command_writes_a_png_per_state_and_width_and_nothing_scrolls_sideways(self) -> None:
         try:
             from playwright.sync_api import Error, sync_playwright
         except ImportError:
@@ -293,7 +305,7 @@ class ScreenshotCaptureTest(unittest.TestCase):
             names = sorted(p.name for p in out.iterdir())
             self.assertEqual(
                 names, sorted(f"{s}-{w}.png" for s in shots.STATES for w in shots.WIDTHS))
-            self.assertEqual(len(names), 24)
+            self.assertEqual(len(names), 2 * len(shots.STATES))
             for path in out.iterdir():
                 self.assertEqual(path.read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
 
@@ -337,6 +349,12 @@ class ScreenshotReadingTest(unittest.TestCase):
         for name, count in zip(samples, counts):
             with self.subTest(name):
                 self.assertEqual(count, 1)
+
+    def test_the_jargon_count_skips_the_owners_withdraw(self) -> None:
+        owners = ('<body><div id="projects"><button class="notice-withdraw">Withdraw</button>'
+                  '</div></body>')
+        other = '<body><div id="projects"><button>Withdraw</button></div></body>'
+        self.assertEqual(self.read_pages([owners, other], shots.JARGON_COUNT), [0, 1])
 
     def test_the_jargon_count_skips_hidden_text_and_the_new_words(self) -> None:
         html = ('<body><div id="projects"><details><summary>End the sprint</summary>'

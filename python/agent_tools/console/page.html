@@ -305,6 +305,15 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .notice-head .notice-age { flex: none; margin-left: auto; color: var(--ov2); white-space: nowrap; }
 .notice-words { color: var(--text); }
 .notice-claim { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; }
+.notice-open, .notice-send, .notice-cancel, .notice-withdraw { font: inherit; color: inherit; background: none; border: 1px solid var(--hair); border-radius: 8px; padding: 2px 10px; cursor: pointer; transition: background-color .16s; }
+.notice-open:hover:enabled, .notice-send:hover:enabled, .notice-cancel:hover:enabled, .notice-withdraw:hover:enabled { background: rgba(202, 211, 245, .05); }
+.notice-send:disabled, .notice-withdraw:disabled { cursor: default; color: var(--ov2); }
+.notice-open { margin-top: 8px; font-size: .8125rem; color: var(--sub0); }
+.notice-withdraw { flex: none; padding: 0 8px; font-size: .8125rem; color: var(--ov2); }
+.notice-post { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 8px; font-size: .8125rem; color: var(--sub0); }
+.notice-text { flex: 1 1 12rem; min-width: 0; max-width: 100%; padding: 4px 8px; font: inherit; color: var(--text); background: var(--mantle); border: 1px solid var(--s1); border-radius: 8px; }
+.notice-post-reason, .notice-reason { color: var(--sub0); }
+.notice-reason { margin: 2px 0 0; font-size: .8125rem; }
 .notices-project { margin-left: 10px; min-width: 0; overflow-wrap: anywhere; }
 .line.notices summary { display: revert; list-style: revert; }
 .line.notices summary::-webkit-details-marker { display: revert; }
@@ -653,6 +662,10 @@ const latestSprints = new Map();
 const tellDrafts = new Map();
 const tells = new Map();
 const tellOpen = new Set();
+const noticeDrafts = new Map();
+const noticeOpen = new Set();
+const noticePosts = new Map();
+const noticeWithdrawals = new Map();
 let sprintRedraw = 0;
 function messageLabel(message) {
   if (message.kind === "approved") return "Approved version " + message.version;
@@ -1614,7 +1627,130 @@ function projectLine(entry) {
   }
   return line;
 }
-function noticeLine(notice) {
+function noticeKey(projectId, id) {
+  return projectId + "\n" + id;
+}
+function noticeField(projectId) {
+  return Array.from(document.querySelectorAll("input.notice-text")).find((input) => input.dataset.noticeDraft === projectId);
+}
+// A redraw of the Work column that keeps every open fold open, as `render` does around its own redraw.
+function redrawNotices() {
+  if (lastView === null) return;
+  holdPictures(() => {
+    const wasOpen = new Set();
+    for (const fold of document.querySelectorAll("details[open]")) wasOpen.add(fold.dataset.key);
+    renderProjects(lastView);
+    for (const fold of document.querySelectorAll("details")) {
+      if (wasOpen.has(fold.dataset.key)) fold.open = true;
+    }
+  });
+}
+function openNotice(projectId) {
+  noticeOpen.add(projectId);
+  redrawNotices();
+  const field = noticeField(projectId);
+  if (field !== undefined) field.focus();
+}
+function cancelNotice(projectId) {
+  noticeOpen.delete(projectId);
+  noticeDrafts.delete(projectId);
+  noticePosts.delete(projectId);
+  redrawNotices();
+}
+// The answer to an owner write: null for 204, else the trimmed body (or "HTTP <n>"), or "the console did not answer".
+async function ownerAnswer(response) {
+  if (response.status === 204) return null;
+  return (await response.text()).trim() || "HTTP " + response.status;
+}
+function ownerHeaders() {
+  return { "X-Console-Token": token, "Content-Type": "application/json" };
+}
+async function postNotice(projectId) {
+  const current = noticePosts.get(projectId);
+  if (current !== undefined && current.phase === "sending") return;
+  const draft = noticeDrafts.get(projectId);
+  const text = draft === undefined ? "" : draft.value;
+  if (text.trim() === "") return;
+  const state = { phase: "sending", reason: "" };
+  noticePosts.set(projectId, state);
+  redrawNotices();
+  let reason;
+  try {
+    reason = await ownerAnswer(await fetch("/api/owner-notice", {
+      method: "POST", headers: ownerHeaders(), body: JSON.stringify({ project_id: projectId, text }),
+    }));
+  } catch (error) {
+    console.error(error);
+    reason = "the console did not answer";
+  }
+  if (noticePosts.get(projectId) !== state) return;
+  if (reason === null) {
+    noticePosts.delete(projectId);
+    const typed = noticeDrafts.get(projectId);
+    if (typed !== undefined && typed.value === text) {
+      noticeDrafts.delete(projectId);
+      noticeOpen.delete(projectId);
+    }
+  } else {
+    state.phase = "failed";
+    state.reason = reason;
+  }
+  redrawNotices();
+}
+async function withdrawNotice(projectId, id) {
+  const key = noticeKey(projectId, id);
+  const current = noticeWithdrawals.get(key);
+  if (current !== undefined && current.phase === "sending") return;
+  const state = { phase: "sending", reason: "" };
+  noticeWithdrawals.set(key, state);
+  redrawNotices();
+  let reason;
+  try {
+    reason = await ownerAnswer(await fetch("/api/owner-notice-withdraw", {
+      method: "POST", headers: ownerHeaders(), body: JSON.stringify({ project_id: projectId, notice: id }),
+    }));
+  } catch (error) {
+    console.error(error);
+    reason = "the console did not answer";
+  }
+  if (noticeWithdrawals.get(key) !== state) return;
+  if (reason === null) {
+    noticeWithdrawals.delete(key);
+  } else {
+    state.phase = "failed";
+    state.reason = reason;
+  }
+  redrawNotices();
+}
+// The owner's post control at the foot of a project's notices fold: one quiet button, or the one-line field with Send and Cancel.
+function noticePostControl(projectId) {
+  if (!noticeOpen.has(projectId)) return actionButton("notice-open", "Post a notice", () => openNotice(projectId));
+  const state = noticePosts.get(projectId);
+  const sending = state !== undefined && state.phase === "sending";
+  const box = el("div", "notice-post");
+  const field = accountField("notice-text", "Notice", "One line for every manager of this project");
+  field.dataset.noticeDraft = projectId;
+  const draft = noticeDrafts.get(projectId);
+  if (draft !== undefined) field.value = draft.value;
+  const send = actionButton("notice-send", "Send", () => postNotice(projectId));
+  const reason = el("span", "notice-post-reason", sending ? "Sending\u2026" : state === undefined ? "" : state.reason);
+  send.disabled = sending || field.value.trim() === "";
+  field.addEventListener("input", () => {
+    noticeDrafts.set(projectId, { value: field.value, start: field.selectionStart, end: field.selectionEnd });
+    const shown = noticePosts.get(projectId);
+    if (shown !== undefined && shown.phase === "failed") {
+      noticePosts.delete(projectId);
+      reason.textContent = "";
+    }
+    send.disabled = field.value.trim() === "" || (shown !== undefined && shown.phase === "sending");
+  });
+  box.appendChild(field);
+  box.appendChild(send);
+  box.appendChild(actionButton("notice-cancel", "Cancel", () => cancelNotice(projectId)));
+  box.appendChild(reason);
+  return box;
+}
+function noticeLine(notice, projectId) {
   const item = el("li", "notice");
   const head = el("p", "notice-head");
   const who = el("span", "notice-who");
@@ -1622,6 +1758,13 @@ function noticeLine(notice) {
   who.appendChild(cutWords(el("b", "notice-label"), label));
   who.appendChild(cutWords(el("span", "notice-from"), ", from " + notice.poster));
   head.appendChild(who);
+  const owned = notice.owner === true;
+  const withdrawal = owned ? noticeWithdrawals.get(noticeKey(projectId, notice.id)) : undefined;
+  if (owned) {
+    const withdraw = actionButton("notice-withdraw", "Withdraw", () => withdrawNotice(projectId, notice.id));
+    withdraw.disabled = withdrawal !== undefined && withdrawal.phase === "sending";
+    head.appendChild(withdraw);
+  }
   head.appendChild(timeEl("ago", notice.at, "notice-age"));
   item.appendChild(head);
   item.appendChild(cutWords(el("p", "notice-words"), notice.text));
@@ -1651,22 +1794,29 @@ function noticeLine(notice) {
     if (typeof notice.until_text === "string") claim.appendChild(cutWords(el("span", "notice-until"), notice.until_text));
     item.appendChild(claim);
   }
+  if (withdrawal !== undefined && withdrawal.phase === "failed") item.appendChild(el("p", "notice-reason", withdrawal.reason));
   return item;
 }
-// One closed fold of a project's open notices, in the view's order and words; null when it has none.
+// One closed fold of a project's open notices, in the view's order and words, with the owner's post control at its foot while the project offers one; null when it has neither.
 function noticeFold(entry, afterLine) {
   const notices = Array.isArray(entry.notices) ? entry.notices : [];
-  if (notices.length === 0) return null;
+  const post = entry.notice_post === true;
+  if (notices.length === 0 && !post) return null;
   const item = el("li", afterLine ? "line notices after-line" : "line notices");
   const fold = el("details");
   fold.dataset.key = "notices:" + entry.project_id;
+  // A browser focuses a field only in an open fold, and `render` reopens its folds after this draw: draw it open while the control is.
+  if (post && noticeOpen.has(entry.project_id)) fold.open = true;
   const summary = el("summary");
   summary.appendChild(el("b", "", "Notices (" + notices.length + ")"));
   if (!afterLine) summary.appendChild(el("span", "notices-project", entry.project_id));
   fold.appendChild(summary);
-  const list = el("ul", "notice-list");
-  for (const notice of notices) list.appendChild(noticeLine(notice));
-  fold.appendChild(list);
+  if (notices.length > 0) {
+    const list = el("ul", "notice-list");
+    for (const notice of notices) list.appendChild(noticeLine(notice, entry.project_id));
+    fold.appendChild(list);
+  }
+  if (post) fold.appendChild(noticePostControl(entry.project_id));
   item.appendChild(fold);
   return item;
 }
@@ -3623,9 +3773,35 @@ function drawProjects(view) {
     && active.dataset.tell !== undefined
     ? { id: active.dataset.tell, start: active.selectionStart, end: active.selectionEnd }
     : null;
+  const heldNotice = active && active.tagName === "INPUT" && active.dataset
+    && active.dataset.noticeDraft !== undefined
+    ? { id: active.dataset.noticeDraft, start: active.selectionStart, end: active.selectionEnd }
+    : null;
   section.replaceChildren(heading);
   const activation = activationLine(view);
   if (activation !== null) section.appendChild(activation);
+  const offering = new Set();
+  const listed = new Set();
+  for (const entry of view.entries) {
+    for (const project of entry.type === "quiet_group" ? entry.projects : [entry]) {
+      if (project.notice_post === true) offering.add(project.project_id);
+      for (const notice of Array.isArray(project.notices) ? project.notices : []) {
+        listed.add(noticeKey(project.project_id, notice.id));
+      }
+    }
+  }
+  for (const id of [...noticeDrafts.keys()]) {
+    if (!offering.has(id)) noticeDrafts.delete(id);
+  }
+  for (const id of [...noticeOpen]) {
+    if (!offering.has(id)) noticeOpen.delete(id);
+  }
+  for (const id of [...noticePosts.keys()]) {
+    if (!offering.has(id)) noticePosts.delete(id);
+  }
+  for (const key of [...noticeWithdrawals.keys()]) {
+    if (!listed.has(key)) noticeWithdrawals.delete(key);
+  }
   if (view.project_count === 0) {
     section.appendChild(el("p", "empty", "No project is registered yet."));
     return;
@@ -3676,6 +3852,7 @@ function drawProjects(view) {
     if (entry.type === "quiet_group") {
       const fold = el("details", "quietfold");
       fold.dataset.key = "quiet";
+      if (entry.projects.some((project) => project.notice_post === true && noticeOpen.has(project.project_id))) fold.open = true;
       const summary = el("summary");
       summary.appendChild(quietIcon());
       summary.appendChild(el("b", "", entry.label));
@@ -3705,6 +3882,13 @@ function drawProjects(view) {
     if (again !== undefined) {
       again.focus();
       again.setSelectionRange(heldTell.start, heldTell.end);
+    }
+  }
+  if (heldNotice !== null) {
+    const again = noticeField(heldNotice.id);
+    if (again !== undefined) {
+      again.focus();
+      again.setSelectionRange(heldNotice.start, heldNotice.end);
     }
   }
 }
