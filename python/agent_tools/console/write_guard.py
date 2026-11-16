@@ -14,6 +14,14 @@ A page write is admitted only when, in this order:
 A caller meets this guard after the service's loopback `Host` check and before any body is
 read, so a refused write reads nothing, appends nothing and publishes nothing.
 
+A page read (`GET /api/picture/<id>`, ADR-console-036, #1089) meets `read_refusal` instead. A
+browser omits `Origin` on a same-origin GET and sends `Sec-Fetch-Site: same-origin`, so a read with
+no `Origin` is admitted where a write requires one. In this order: more than one `Origin`, or one
+that is not `http://<Host>`, is `403` `origin refused`; any `Sec-Fetch-Site` that is not exactly one
+`same-origin` value is `403` `origin refused`; exactly one `X-Console-Token` equal to the token
+(constant time) is required, else `403` `token refused`. The token is what proves the caller is
+the page; the origin checks only turn away a foreign page that has the token by no means.
+
 The token is `secrets.token_urlsafe(32)`: 43 characters of `[A-Za-z0-9_-]`. `load_token` creates
 it once, in `page-token` beside the event log (`~/.agents/state/console/page-token`), with
 `O_CREAT | O_EXCL`, mode 0600 and the parent directory 0700, and reads the same value back on
@@ -30,6 +38,7 @@ import secrets
 from pathlib import Path
 
 TOKEN_HEADER = "X-Console-Token"
+FETCH_SITE_HEADER = "Sec-Fetch-Site"
 TOKEN_SLOT = b"__CONSOLE_TOKEN__"
 TOKEN_FILE = "page-token"
 _TOKEN = re.compile(r"[A-Za-z0-9_-]{43}\n?")
@@ -62,6 +71,18 @@ def load_token(path: Path) -> str:
 def refusal(host: str, origins: list[str], tokens: list[str], token: str) -> tuple[int, str] | None:
     """The `(status, text)` that refuses a page write, or None when it is admitted."""
     if origins != [f"http://{host}"]:
+        return 403, "origin refused"
+    if len(tokens) != 1 or not hmac.compare_digest(tokens[0].encode(), token.encode()):
+        return 403, "token refused"
+    return None
+
+
+def read_refusal(host: str, origins: list[str], fetch_sites: list[str], tokens: list[str],
+                 token: str) -> tuple[int, str] | None:
+    """The `(status, text)` that refuses a page read, or None when it is admitted."""
+    if len(origins) > 1 or (origins and origins[0] != f"http://{host}"):
+        return 403, "origin refused"
+    if fetch_sites and fetch_sites != ["same-origin"]:
         return 403, "origin refused"
     if len(tokens) != 1 or not hmac.compare_digest(tokens[0].encode(), token.encode()):
         return 403, "token refused"

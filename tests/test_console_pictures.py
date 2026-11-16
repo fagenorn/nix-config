@@ -17,7 +17,7 @@ import unittest
 import zlib
 from pathlib import Path
 
-from agent_tools.console import event_log, pictures
+from agent_tools.console import event_log, pictures, write_guard
 from agent_tools.console.event_log import PICTURE_STORED, Event
 from agent_tools.console.pictures import SIGNATURE
 
@@ -401,6 +401,138 @@ class PictureRetentionTest(PictureCase):
         self.assertEqual(len(lines), 2)
 
 
+def get(address, path, headers=None):
+    connection = http.client.HTTPConnection(*address, timeout=5)
+    try:
+        connection.putrequest("GET", path, skip_host=True)
+        connection.putheader("Host", f"{address[0]}:{address[1]}")
+        for name, value in (headers or {}).items():
+            for member in (value if isinstance(value, list) else [value]):
+                connection.putheader(name, member)
+        connection.endheaders()
+        response = connection.getresponse()
+        return response.status, response.getheaders(), response.read()
+    finally:
+        connection.close()
+
+
+def values(headers, name):
+    return [value for key, value in headers if key.lower() == name.lower()]
+
+
+class ReadGuardTest(unittest.TestCase):
+    def test_the_read_guard_table(self):
+        host, token = "127.0.0.1:9", "t" * 43
+        own = "http://127.0.0.1:9"
+        refused_origin, refused_token = (403, "origin refused"), (403, "token refused")
+        rows = [
+            ("no-origin", [], [], [token], None),
+            ("own", [own], ["same-origin"], [token], None),
+            ("foreign", ["http://evil.example"], [], [token], refused_origin),
+            ("null", ["null"], [], [token], refused_origin),
+            ("two-origins", [own, own], [], [token], refused_origin),
+            ("cross-site", [], ["cross-site"], [token], refused_origin),
+            ("same-site", [], ["same-site"], [token], refused_origin),
+            ("none", [], ["none"], [token], refused_origin),
+            ("two-values", [], ["same-origin", "same-origin"], [token], refused_origin),
+            ("no-token", [], [], [], refused_token),
+            ("wrong-token", [], [], ["x" * 43], refused_token),
+            ("two-tokens", [], [], [token, token], refused_token),
+        ]
+        for name, origins, sites, tokens, expected in rows:
+            with self.subTest(name):
+                self.assertEqual(
+                    write_guard.read_refusal(host, origins, sites, tokens, token), expected)
+
+
+class PictureReadTest(PictureCase):
+    def stored(self, svc):
+        sid = self.sprint(svc)
+        status, _, answer = self.send(svc, sid, self.secret(sid), PIXEL)
+        self.assertEqual(status, 200)
+        return json.loads(answer)["picture"]
+
+    def token_only(self):
+        return {"X-Console-Token": self.token()}
+
+    def test_a_picture_is_read_with_the_token_and_no_origin_or_its_own(self):
+        svc = self.open()
+        picture_id = self.stored(svc)
+        own = f"http://127.0.0.1:{svc.address[1]}"
+        token = self.token()
+        for name, extra in (("token-only", {}), ("own-origin", {"Origin": own}),
+                            ("both", {"Origin": own, "Sec-Fetch-Site": "same-origin"}),
+                            ("site-only", {"Sec-Fetch-Site": "same-origin"})):
+            with self.subTest(name):
+                status, headers, body = get(svc.address, f"{PICTURE}/{picture_id}",
+                                            {**self.token_only(), **extra})
+                self.assertEqual(status, 200)
+                self.assertEqual(body, PIXEL)
+                self.assertEqual(values(headers, "Content-Type"), ["image/png"])
+                self.assertEqual(values(headers, "X-Content-Type-Options"), ["nosniff"])
+                self.assertEqual(values(headers, "Cache-Control"), ["private"])
+                self.assertEqual(values(headers, "Content-Length"), [str(len(PIXEL))])
+                self.assertFalse([v for _, v in headers if token in v])
+
+    def test_a_read_without_the_token_or_from_another_origin_is_403(self):
+        svc = self.open()
+        picture_id = self.stored(svc)
+        own = f"http://127.0.0.1:{svc.address[1]}"
+        token = self.token_only()
+        rows = [
+            ({}, "token refused"),
+            ({"Origin": own}, "token refused"),
+            ({"X-Console-Token": "A" * 43}, "token refused"),
+            ({**token, "Origin": "http://evil.example"}, "origin refused"),
+            ({**token, "Origin": "null"}, "origin refused"),
+            ({**token, "Sec-Fetch-Site": "cross-site"}, "origin refused"),
+            ({**token, "Sec-Fetch-Site": "same-site"}, "origin refused"),
+        ]
+        for headers, text in rows:
+            with self.subTest(headers=headers):
+                status, answer_headers, body = get(svc.address, f"{PICTURE}/{picture_id}", headers)
+                self.assertEqual(status, 403)
+                self.assertEqual(values(answer_headers, "Content-Type"), ["text/plain"])
+                self.assertEqual(values(answer_headers, "Cache-Control"), ["no-store"])
+                self.assertEqual(body, text.encode() + b"\n")
+                self.assertNotIn(PIXEL, body)
+
+    def test_a_malformed_id_is_400_with_the_token(self):
+        svc = self.open()
+        picture_id = self.stored(svc)
+        for path in ("/api/picture/..", "/api/picture/../events.sqlite3", "/api/picture/%2e%2e",
+                     f"{PICTURE}/{picture_id.upper()}", f"{PICTURE}/{picture_id[:-1]}",
+                     f"{PICTURE}/{picture_id}0", f"{PICTURE}/{picture_id}/x", "/api/picture/",
+                     f"{PICTURE}/{picture_id}?x=1"):
+            with self.subTest(path=path):
+                status, _, body = get(svc.address, path, self.token_only())
+                self.assertEqual((status, body), (400, b"bad picture id\n"))
+        status, _, body = get(svc.address, "/api/picture/..")
+        self.assertEqual((status, body), (403, b"token refused\n"))
+
+    def test_an_unknown_id_is_404(self):
+        svc = self.open()
+        status, _, body = get(svc.address, f"{PICTURE}/{'0' * 64}", self.token_only())
+        self.assertEqual((status, body), (404, b"this picture is not known\n"))
+
+    def test_a_symlink_in_the_store_is_not_served(self):
+        svc = self.open()
+        self.stored(svc)
+        os.symlink(self.token_file, self.pictures_dir / ("1" * 64))
+        status, _, body = get(svc.address, f"{PICTURE}/{'1' * 64}", self.token_only())
+        self.assertEqual(status, 404)
+        self.assertNotIn(self.token().encode(), body)
+
+    def test_other_methods_on_the_read_route_are_refused(self):
+        svc = self.open()
+        picture_id = self.stored(svc)
+        for method in ("POST", "PUT", "DELETE", "HEAD"):
+            with self.subTest(method):
+                status, headers, _ = support.request(
+                    svc.address, method, f"{PICTURE}/{picture_id}")
+                self.assertEqual((status, headers["Allow"]), (405, "GET"))
+
+
 class PictureDocsTest(unittest.TestCase):
     def doc(self, path):
         return " ".join((ROOT / path).read_text().split())
@@ -426,3 +558,24 @@ class PictureDocsTest(unittest.TestCase):
         self.assertIn("**Picture**:", context)
         self.assertIn("ADR-console-036", context)
         self.assertIn("| Picture | Console |", self.doc("docs/CONTEXT-MAP.md"))
+
+    def test_adr_008_lists_the_picture_read(self):
+        adr008 = "docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md"
+        adr036 = "docs/areas/console/adr/036-the-console-keeps-a-managers-pictures-and-serves-them-only-to-the-page.md"
+        lines = (ROOT / adr008).read_text().splitlines()
+        status = next(row for row in lines if row.startswith("- **Status:**"))
+        self.assertEqual(
+            status, "- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
+                    "ADR-console-028, ADR-console-029, ADR-console-030, ADR-console-036")
+        decided = next(row for row in lines if row.startswith("- **Decided in:**"))
+        self.assertTrue(decided.endswith("#1089"))
+        text = self.doc(adr008)
+        for needle in ("GET /api/picture/<id>", "Sec-Fetch-Site", "same-origin", "omit",
+                       "ADR-console-036"):
+            with self.subTest(needle):
+                self.assertIn(needle, text)
+        text = self.doc(adr036)
+        for needle in ("GET /api/picture/<id>", "Cache-Control: private", "nosniff",
+                       "bad picture id", "404", "Sec-Fetch-Site"):
+            with self.subTest(needle):
+                self.assertIn(needle, text)

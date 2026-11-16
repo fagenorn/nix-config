@@ -5,8 +5,9 @@ parameter names a host. `Host` must be `127.0.0.1:<port>` or `localhost:<port>`
 for the port actually bound, else the answer is `403` `text/plain`
 `loopback only`.
 
-Routes (every response carries `Cache-Control: no-store` and
-`X-Content-Type-Options: nosniff`, and every one but the stream `Content-Length`):
+Routes (every response carries `Cache-Control: no-store`, except a picture read's 200, which
+carries `Cache-Control: private`, and `X-Content-Type-Options: nosniff`, and every one but the
+stream `Content-Length`):
 
     GET /           200 text/html; charset=utf-8, the page, with `Content-Security-Policy: CSP`
     GET /api/state  200 application/json, the encoded view (see `view.py`)
@@ -41,13 +42,15 @@ Routes (every response carries `Cache-Control: no-store` and
     POST /api/round-answer 204, a JSON body, the page answers one question (below)
     POST /api/recap 200 application/json, a manager reads what it needs to pick a sprint up (below)
     GET /api/sprint-status?sprint_id=<id> 200 application/json, what became of a brief (below)
+    GET /api/picture/<id> 200 image/png, the page reads a stored picture (below)
     GET /api/profile 200 application/json, the profile a new session should use (below)
     GET /api/excluded 200 application/json, the profiles the owner excluded (below)
     anything else   404
     other methods   405 with `Allow: GET` (`Allow: POST` on `/api/hooks`, `/api/readings`,
                     `/api/looked`, `/api/answer`, `/api/check-answer`, `/api/goal`, `/api/withdraw`,
                     `/api/approve`, `/api/reply`, `/api/retry-manager`, `/api/message`, `/api/stop`, `/api/exclusion`, `/api/pin`, `/api/brief`, `/api/report`,
-                    `/api/close`, `/api/inbox`, `/api/message-reply`, `/api/recap`, `/api/ask`, `/api/picture` and `/api/round-answer`)
+                    `/api/close`, `/api/inbox`, `/api/message-reply`, `/api/recap`, `/api/ask`, `/api/picture` and `/api/round-answer`;
+                    `Allow: GET` on `/api/picture/<id>`)
 
 Two kinds of write exist. The hook and reading routes append what the proxies and hooks observe:
 `POST /api/hooks` appends session observations, `POST /api/readings` the capacity kinds
@@ -535,7 +538,20 @@ directory, written once; a resend keeps the file and renews its age), then one `
 200 `application/json` `{"picture":"<id>"}` (sorted keys, compact). A refusal is a stderr line
 `console: picture_refused <sprint_id> <reason>`; any other exception is `console: picture_failed
 <Type>: <message>` and 500 `picture failed`. Neither the secret nor the bytes appear in a stderr line
-or an answer. The page is not changed by this route and no route serves a picture.
+or an answer. The page is not changed by this route.
+
+`GET /api/picture/<id>` (ADR-console-036) is the page's read of a stored picture, and the only
+route that serves one. After the loopback `Host` check it runs `write_guard.read_refusal`: more
+than one `Origin`, or one that is not the console's own, is 403 `origin refused`; a `Sec-Fetch-Site`
+other than exactly one `same-origin` is 403 `origin refused`; the `X-Console-Token` header exactly
+once with the install's token, else 403 `token refused`. A read with no `Origin` is admitted,
+because a browser omits `Origin` on a same-origin GET. The guard runs before the id is looked at.
+The id is the route after `PICTURE_PREFIX` (`/api/picture/`): a query string, or an id that does
+not fully match `pictures.PICTURE_ID`, is 400 `bad picture id`. The file is read only as
+`pictures_dir / <id>` through `pictures.read`: an unknown id, a symlink, a non-regular file or an
+unreadable file is 404 `this picture is not known`. Success is 200 `image/png`, the stored bytes,
+`X-Content-Type-Options: nosniff` and `Cache-Control: private`; a refusal keeps
+`Cache-Control: no-store`. The token appears in no header or body. The page and `CSP` are unchanged.
 
 Reports (#890): `POST /api/report` is a manager write like the brief's: no token, the sprint's secret
 in its place. After the loopback `Host` check it runs `_checked_length(MAX_REPORT_BYTES)`, 65536
@@ -1154,6 +1170,7 @@ MAX_CLOSE_BYTES = 65536
 MAX_STOP_BYTES = 4096
 RECAP_PATH = "/api/recap"
 PICTURE_PATH = "/api/picture"
+PICTURE_PREFIX = PICTURE_PATH + "/"
 SPRINT_HEADER = "X-Console-Sprint"
 SECRET_HEADER = "X-Console-Secret"
 MAX_PICTURE_BYTES = pictures.MAX_BYTES
@@ -1270,11 +1287,12 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
     def log_message(self, format, *args):
         """Silenced: the service writes no access log."""
 
-    def _send(self, status: int, content_type: str, body: bytes, *headers: tuple[str, str]):
+    def _send(self, status: int, content_type: str, body: bytes, *headers: tuple[str, str],
+              cache: str = "no-store"):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
-        self.send_header("Cache-Control", "no-store")
+        self.send_header("Cache-Control", cache)
         self.send_header("X-Content-Type-Options", "nosniff")
         for name, value in headers:
             self.send_header(name, value)
@@ -2261,10 +2279,31 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             body = json.dumps({"excluded": self.server.console.excluded_profiles()},
                               sort_keys=True, separators=(",", ":")).encode()
             self._send(200, "application/json", body)
+        elif route.startswith(PICTURE_PREFIX):
+            self._picture_read(route)
         elif route in POST_LIMITS or route in PAGE_WRITES or route in MANAGER_WRITES:
             self._refuse_method()
         else:
             self._send(404, "text/plain", b"not found\n")
+
+    def _picture_read(self, route: str):
+        console = self.server.console
+        refusal = write_guard.read_refusal(
+            self.headers["Host"], self.headers.get_all("Origin") or [],
+            self.headers.get_all(write_guard.FETCH_SITE_HEADER) or [],
+            self.headers.get_all(write_guard.TOKEN_HEADER) or [], console.page_token)
+        if refusal is not None:
+            return self._refuse(*refusal)
+        picture_id = route[len(PICTURE_PREFIX):]
+        if "?" in self.path or not pictures.PICTURE_ID.fullmatch(picture_id):
+            return self._refuse(400, "bad picture id")
+        try:
+            data = pictures.read(console.pictures_dir, picture_id)
+        except OSError:
+            data = None
+        if data is None:
+            return self._refuse(404, "this picture is not known")
+        self._send(200, "image/png", data, cache="private")
 
     def _stream(self):
         console = self.server.console
