@@ -1575,6 +1575,97 @@ class RetentionServiceTest(Case):
         self.assertNotIn(service.DIGEST_THREAD, names)
 
 
+class WaitClockTest(Case):
+    def test_a_fast_host_clock_does_not_end_a_wait(self):
+        now = [datetime(2030, 1, 1, tzinfo=timezone.utc).timestamp()]
+        waiting = {"key": "octo/p00#7/wait/1/0", "project_id": "owner/p00", "repo": "octo/p00",
+                   "issue": 7, "comment_id": 1, "url": "https://example.test/7", "reason": "verify-wait",
+                   "kind": "waiting", "question": "Read the hourly rows.", "questions": [], "items": [],
+                   "answers": [], "answered": False, "held_work": 1,
+                   "wait": {"reason": "not_before", "until": "2026-11-18T10:00:00+00:00",
+                            "what": "Read the hourly rows."}}
+        current = [waiting]
+        svc = self.start(support.entries(1),
+                         tracker=lambda project_id, slug, *, cancelled: [current[0]],
+                         slug_of=lambda root: "octo/p00", activity=lambda root: now[0], **clocks(now))
+        svc.poll_tracker()
+        shown = json.loads(svc.view_bytes)
+        self.assertEqual(shown["statement"]["inbox_items"], 0)
+        self.assertEqual(shown["inbox"]["open"], [])
+        wait = shown["entries"][0]["waits"][0]
+        self.assertEqual((wait["until"], wait["text"]), ("2026-11-18T10:00:00+00:00", "Read the hourly rows."))
+        current[0] = {**waiting, "wait": {"reason": "due", "until": None, "what": "Read the hourly rows."}}
+        svc.poll_tracker()
+        shown = json.loads(svc.view_bytes)
+        self.assertEqual(shown["entries"][0]["waits"][0]["text"], "Due now: the next verification pass asks you here")
+        self.assertEqual(shown["statement"]["inbox_items"], 0)
+        svc.close()
+
+    def test_a_wait_survives_retention_and_its_project_is_still_polled_once_idle(self):
+        now = [T0]
+        last = [T0]
+        item = {"key": "octo/p00#7/wait/1/0", "project_id": "owner/p00", "repo": "octo/p00",
+                "issue": 7, "comment_id": 1, "url": "https://example.test/7", "reason": "verify-wait",
+                "kind": "waiting", "question": "Read the hourly rows.", "questions": [], "items": [],
+                "answers": [], "answered": False, "held_work": 1, "blocking": [],
+                "wait": {"reason": "not_before", "until": "2030-01-01T00:00:00+00:00",
+                         "what": "Read the hourly rows."}}
+        calls = []
+        current = [item]
+
+        def tracker(project_id, slug, *, cancelled):
+            calls.append(project_id)
+            return [current[0]]
+
+        svc = self.start(support.entries(1), retention_seconds=86400, tracker=tracker,
+                         slug_of=lambda root: "octo/p00", activity=lambda root: last[0], **clocks(now))
+        svc.poll_tracker()
+        now[0] = T0 + 91 * 86400
+        svc.retain()
+        before = len(calls)
+        svc.poll_tracker()
+        self.assertEqual(len(calls), before + 1)
+        self.assertEqual(json.loads(svc.view_bytes)["entries"][0]["waits"][0]["text"], "Read the hourly rows.")
+        current[0] = {k: v for k, v in item.items() if k != "wait"}
+        svc.poll_tracker()
+        now[0] = T0 + 183 * 86400
+        svc.retain()
+        before = len(calls)
+        svc.poll_tracker()
+        self.assertEqual(len(calls), before)
+        svc.close()
+
+    def test_a_not_due_check_does_not_park_its_sprint_as_waiting_on_the_owner(self):
+        now = [datetime(2026, 11, 16, tzinfo=timezone.utc).timestamp()]
+        item = {"key": "octo/p00#7/wait/1/0", "project_id": "owner/p00", "repo": "octo/p00",
+                "issue": 7, "comment_id": 1, "url": "https://example.test/7", "reason": "verify-wait",
+                "kind": "waiting", "question": "Read the hourly rows.", "questions": [], "items": [],
+                "answers": [], "answered": False, "held_work": 1,
+                "wait": {"reason": "not_before", "until": "2026-11-18T10:00:00+00:00",
+                         "what": "Read the hourly rows."}}
+        current = [item]
+        svc = self.start(support.entries(1),
+                         tracker=lambda project_id, slug, *, cancelled: [current[0]],
+                         slug_of=lambda root: "octo/p00", activity=lambda root: now[0], **clocks(now))
+        sid = svc.state_goal("owner/p00", "make the importer resumable")
+        secret = sprints.read_secret(self.store.with_name(sprints.SECRETS_DIR), sid)
+        svc.send_brief(sid, secret, PARTS)
+        svc.approve_brief("owner/p00", sid, 1)
+        svc.send_report(sid, secret, {
+            "status": "one slice is queued", "phase": "running", "milestone": "Importer resumes",
+            "tracker_url": "https://github.com/owner/p00/milestone/3",
+            "issues": [{"issue": 7, "stage": "queued"}], "inbox": [], "next": "start the slice"})
+        svc.poll_tracker()
+        with svc._ingest:
+            sprint = svc._sprints[sid]
+            self.assertEqual(svc._waiting(sprint), 0)
+        current[0] = {k: v for k, v in item.items() if k != "wait"}
+        svc.poll_tracker()
+        with svc._ingest:
+            self.assertEqual(svc._waiting(svc._sprints[sid]), 1)
+        svc.close()
+
+
 class BindTest(Case):
     def test_a_taken_port_raises_before_the_log_opens(self):
         with socket.socket() as held:
