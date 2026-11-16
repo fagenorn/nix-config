@@ -529,7 +529,8 @@ included) is 403 `origin refused`; a media type that is not `image/png` is 415 `
 that is not ASCII digits is 411 `length required`; one over `MAX_PICTURE_BYTES` (2097152, 2 MiB) is
 413 `too large`, answered before any body byte is read, and exactly 2 MiB is taken; then exactly one
 `X-Console-Sprint` header matching `sprints.SPRINT_ID` and exactly one non-empty `X-Console-Secret`
-header, else 400 `bad picture`; the body is then read, and `store_picture(sprint_id, secret, data)`,
+header, else 400 `bad picture`; the body is then read, and fewer bytes than the length are 400
+`bad picture` with nothing stored, else `store_picture(sprint_id, secret, data)`,
 under the ingest lock, is `_manager_sprint` (`NOT_OPEN` is 409 with the reason, then `SecretRefused`
 403 `secret refused`), then `pictures.checked_png` (`pictures.NotPng` is 400 with its reason), then
 `pictures.store` into `pictures/` beside the event log (the file `pictures/<sha256>`, 0600 in a 0700
@@ -1934,6 +1935,8 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         sprint_id, secret = sprint_ids[0], secrets_sent[0]
         self.close_connection = True
         data = self.rfile.read(length)
+        if len(data) != length:
+            return self._refuse(400, "bad picture")
         try:
             picture_id = self.server.console.store_picture(sprint_id, secret, data)
         except sprints.SecretRefused:

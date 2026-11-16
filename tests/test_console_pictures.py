@@ -10,9 +10,11 @@ import http.client
 import io
 import json
 import os
+import socket
 import stat
 import struct
 import tempfile
+import threading
 import time
 import unittest
 import zlib
@@ -137,6 +139,23 @@ class PictureStoreTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     pictures.read(self.dir, bad)
 
+    def test_read_refuses_a_named_pipe_without_blocking(self):
+        picture_id = "2" * 64
+        self.dir.mkdir(parents=True, exist_ok=True)
+        os.mkfifo(self.dir / picture_id)
+        done = []
+        reader = threading.Thread(
+            target=lambda: done.append(pictures.read(self.dir, picture_id)), daemon=True)
+        reader.start()
+        reader.join(5)
+        if reader.is_alive():
+            # unblock the stuck open so the thread ends, then fail
+            fd = os.open(self.dir / picture_id, os.O_WRONLY)
+            os.close(fd)
+            reader.join(5)
+            self.fail("read blocked on a named pipe")
+        self.assertEqual(done, [None])
+
     def test_references_come_from_pictures_lists_of_other_rows(self):
         a, b, c = "a" * 64, "b" * 64, "c" * 64
         events = [
@@ -215,6 +234,19 @@ class PictureCase(Case):
             return response.status, dict(response.getheaders()), response.read()
         finally:
             connection.close()
+
+    def send_short(self, svc, sid, secret, body, length):
+        """Send `body` under a larger Content-Length, then close the sending side."""
+        with socket.create_connection(svc.address, timeout=5) as sock:
+            sock.sendall((f"POST {PICTURE} HTTP/1.1\r\nHost: {svc.address[0]}:{svc.address[1]}\r\n"
+                          f"Content-Type: image/png\r\nX-Console-Sprint: {sid}\r\n"
+                          f"X-Console-Secret: {secret}\r\nContent-Length: {length}\r\n\r\n"
+                          ).encode() + body)
+            sock.shutdown(socket.SHUT_WR)
+            answer = b""
+            while chunk_ := sock.recv(4096):
+                answer += chunk_
+        return answer
 
     @property
     def pictures_dir(self):
@@ -309,6 +341,19 @@ class PictureWriteTest(PictureCase):
                 self.assertEqual(got[1]["Content-Type"], "text/plain")
                 self.assertEqual(got[2], text.encode() + b"\n")
                 self.assertEqual(self.entries(), [])
+
+    def test_an_incomplete_body_is_refused_and_leaves_no_file_and_no_row(self):
+        svc = self.open()
+        sid = self.sprint(svc)
+        header = png()[:33]
+        self.assertIsNone(pictures.checked_png(header))
+        with contextlib.redirect_stderr(io.StringIO()):
+            answer = self.assert_unchanged(
+                svc, lambda: self.send_short(svc, sid, self.secret(sid), header, len(header) + 50))
+        self.assertTrue(answer.startswith(b"HTTP/1.0 400") or answer.startswith(b"HTTP/1.1 400"),
+                        answer)
+        self.assertTrue(answer.endswith(b"bad picture\n"), answer)
+        self.assertEqual(self.entries(), [])
 
     def test_the_secret_appears_in_no_stderr_line_or_answer(self):
         svc = self.open()

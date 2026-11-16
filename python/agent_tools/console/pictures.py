@@ -115,7 +115,7 @@ def read(directory: Path, picture_id: str) -> bytes | None:
     if not PICTURE_ID.fullmatch(picture_id):
         raise ValueError("not a picture id")
     try:
-        fd = os.open(directory / picture_id, os.O_RDONLY | os.O_NOFOLLOW)
+        fd = os.open(directory / picture_id, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except OSError:
         return None
     with os.fdopen(fd, "rb") as handle:
