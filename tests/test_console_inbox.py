@@ -12,7 +12,9 @@ from pathlib import Path
 from agent_tools.claims import forge_markers as fm
 from agent_tools.claims import forge_owner_action as foa
 from agent_tools.console import inbox, pictures
+from agent_tools.system import forge_api
 from agent_tools.system.forge_api import ForgeError
+from agent_tools.verification import verify_answer, verify_issues
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 from .console_test_support import JPEG, PIXEL, WIDE
 
@@ -72,6 +74,33 @@ def expected(issue, comment_id, reason, **fields):
             "reason": reason, "kind": reason, "question": foa.SENTENCES.get(reason), "detail": "",
             "questions": [], "items": [], "answers": [], "paid": False, "confirm": "",
             "answered": False, **fields}
+
+
+MERGE = "a" * 40
+NOW = datetime(2026, 11, 16, 10, tzinfo=timezone.utc)
+
+
+def held_node(number, comments, branch="main"):
+    """An issue node that also names its repository's default branch."""
+    return {**issue_node(number, comments), "repository": {"defaultBranchRef": {"name": branch}}}
+
+
+def dated_comment(cid, body, created, assoc="OWNER"):
+    return {**comment_node(cid, body, assoc), "createdAt": created, "updatedAt": created}
+
+
+def hold_body(*checks):
+    block = {"v": 1, "merge": MERGE, "checks": list(checks)}
+    return "Held for verification.\n\n```verify\n" + json.dumps(block) + "\n```\n"
+
+
+def window_body(event):
+    return fm.render(verify_issues.WINDOW, {"event": event, "merge": MERGE, "host": "mbp"}, "The window opened.")
+
+
+def prompt_body(block_key, check):
+    return verify_body("verify-ask", {"host": "mbp", "block": block_key, "check": str(check)},
+                       SENTENCES["verify-ask"], f"{ASK_TEXT}\n\n{ASK_BOXES}")
 
 
 def three_nodes():
@@ -514,6 +543,156 @@ class PromptPictureTest(unittest.TestCase):
         self.assertEqual([p["line"] for p in got["pictures"]], ["a.png", "b.png"])
 
 
+CREATED = "2026-11-10T09:00:00Z"
+HOURLY = "Two days after the release, read the hourly rows on kestrel; there are no impossible_usage rows."
+
+
+def human(when, ask="Read the hourly rows. Count them.", ac="AC1"):
+    return {"ac": ac, "kind": "human", "when": when, "run": {"ask": ask}, "reason": "senses", "host": "mbp"}
+
+
+def block_of(*checks):
+    return {"v": 1, "merge": MERGE, "checks": list(checks)}
+
+
+def future(when_ask=None):
+    return human({"not_before": "2026-11-18T10:00:00+00:00"}, *([when_ask] if when_ask else []))
+
+
+class WaitingCheckTest(unittest.TestCase):
+    def read_held(self, *checks, extra=(), **kwargs):
+        comments = [dated_comment(10, hold_body(*checks), CREATED), *extra]
+        kwargs.setdefault("now", lambda: NOW)
+        return read(page([held_node(7, comments)]), **kwargs)
+
+    def test_a_future_not_before_is_a_waiting_item_not_a_card(self):
+        items = self.read_held(future("Read the hourly rows. Count them."))
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["reason"], "verify-wait")
+        self.assertEqual(items[0]["answers"], [])
+        self.assertEqual(items[0]["wait"], {"reason": "not_before", "until": "2026-11-18T10:00:00+00:00",
+                                            "what": "Read the hourly rows."})
+
+    def test_the_waiting_item_has_the_documented_shape(self):
+        item = self.read_held(future())[0]
+        self.assertEqual(item, {
+            "key": f"{SLUG}#7/wait/10/0", "project_id": PROJECT, "repo": SLUG, "issue": 7, "comment_id": 10,
+            "url": f"https://github.com/{SLUG}/issues/7#issuecomment-10", "reason": "verify-wait",
+            "kind": "waiting", "question": "Read the hourly rows.", "detail": "", "questions": [], "items": [],
+            "answers": [], "paid": False, "confirm": "", "answered": False, "held_work": 1,
+            "wait": {"reason": "not_before", "until": "2026-11-18T10:00:00+00:00", "what": "Read the hourly rows."}})
+
+    def test_a_live_command_with_no_text_waits_for_approval(self):
+        live = {"ac": "AC2", "kind": "evidence", "host": "mbp", "when": {"not_before": "2026-11-18T10:00:00+00:00"},
+                "run": {"command": "check-ok"}, "effects": "live"}
+        item = self.read_held(live)[0]
+        self.assertEqual(item["wait"]["what"], "AC2 waits for your approval to run")
+        self.assertEqual(item["question"], "AC2 waits for your approval to run")
+
+    def test_a_long_first_sentence_is_cut(self):
+        item = self.read_held(human({"not_before": "2026-11-18T10:00:00+00:00"}, "Read " + "rows " * 60 + "."))[0]
+        self.assertEqual(len(item["wait"]["what"]), 140)
+        self.assertTrue(item["wait"]["what"].endswith("…"))
+
+    def test_an_unseen_release_names_it_with_no_date(self):
+        paths = []
+
+        def api_get(path, allow=()):
+            paths.append(path)
+            return None
+
+        with mock.patch.object(forge_api, "api_get", side_effect=api_get):
+            items = self.read_held(human({"days_after": {"event": "released", "days": 2}}))
+        self.assertEqual(paths, [f"repos/{SLUG}/releases/latest"])
+        self.assertEqual(items[0]["wait"], {"reason": "not_released", "until": None, "what": "Read the hourly rows."})
+
+    def test_a_worded_wait_without_a_when_member_names_the_field(self):
+        check = human({"released_includes": MERGE}, HOURLY)
+        key = verify_issues.block_key(10, block_of(check))
+        prompt = dated_comment(11, prompt_body(key, 0), CREATED)
+        with mock.patch.object(forge_api, "api_get", side_effect=AssertionError("no forge read")):
+            items = self.read_held(check, extra=[prompt])
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["reason"], "verify-ask")
+        self.assertEqual(items[0]["answers"], list(verify_answer.ANSWERS["verify-ask"]))
+        self.assertEqual(items[0]["wait"], {"reason": "no_when", "until": None, "what": HOURLY})
+
+    def test_a_due_prompted_check_is_a_plain_card(self):
+        check = human({"not_before": "2026-11-15T10:00:00+00:00"}, "Read the hourly rows.")
+        key = verify_issues.block_key(10, block_of(check))
+        items = self.read_held(check, extra=[dated_comment(11, prompt_body(key, 0), CREATED)])
+        self.assertEqual(len(items), 1)
+        self.assertNotIn("wait", items[0])
+        self.assertEqual(items[0]["answers"], list(verify_answer.ANSWERS["verify-ask"]))
+
+    def test_a_runnable_evidence_check_raises_no_item(self):
+        probe = {"ac": "AC1", "kind": "evidence", "host": "mbp", "when": {"not_before": "2026-11-01T00:00:00+00:00"},
+                 "run": {"probe": "deployed_includes", "sha": MERGE}}
+        self.assertEqual(self.read_held(probe), [])
+
+    def test_one_clock_read_per_read(self):
+        calls = []
+
+        def now():
+            calls.append(1)
+            return NOW
+
+        nodes = [held_node(n, [dated_comment(10, hold_body(future()), CREATED)]) for n in (7, 8)]
+        items = read(page(nodes), now=now)
+        self.assertEqual(len(items), 2)
+        self.assertEqual(len(calls), 1)
+
+    def test_the_default_clock_is_the_forges(self):
+        check = human({"not_before": "2026-11-10T10:00:00+00:00"})
+        with mock.patch.object(forge_api, "server_now",
+                               return_value=datetime(2026, 11, 1, 10, tzinfo=timezone.utc)) as server:
+            items = self.read_held(check, now=None)
+        self.assertEqual(items[0]["wait"]["reason"], "not_before")
+        self.assertEqual(server.call_count, 1)
+
+    def test_a_stop_during_the_first_fact_read_reads_nothing_more(self):
+        stop, paths = [False], []
+
+        def api_get(path, allow=()):
+            paths.append(path)
+            stop[0] = True
+            return {"tag_name": "v1"}
+
+        with mock.patch.object(forge_api, "api_get", side_effect=api_get):
+            with self.assertRaises(ForgeError) as raised:
+                self.read_held(human({"released_includes": MERGE}), cancelled=lambda: stop[0])
+        self.assertEqual(raised.exception.code, "cancelled")
+        self.assertEqual(paths, [f"repos/{SLUG}/releases/latest"])
+
+    def test_a_stop_after_the_search_builds_no_node(self):
+        asked = []
+
+        def cancelled():
+            asked.append(1)
+            return len(asked) > 1
+
+        with self.assertRaises(ForgeError) as raised:
+            read(page(three_nodes()), cancelled=cancelled)
+        self.assertEqual(raised.exception.code, "cancelled")
+
+    def test_a_node_without_a_block_reads_no_clock(self):
+        def refuses():
+            raise AssertionError("no block, no clock")
+
+        self.assertEqual(read(page(three_nodes()), now=refuses), read(page(three_nodes())))
+
+    def test_a_block_needs_the_repository_and_creation_times(self):
+        comments = [dated_comment(10, hold_body(future()), CREATED)]
+        bad = {"no repository": issue_node(7, comments),
+               "no branch name": {**issue_node(7, comments), "repository": {"defaultBranchRef": None}},
+               "no createdAt": held_node(7, [comment_node(10, hold_body(future()))])}
+        for name, node in bad.items():
+            with self.subTest(name):
+                with self.assertRaises(ForgeError) as raised:
+                    read(page([node]), now=lambda: NOW)
+                self.assertEqual(raised.exception.code, "payload_invalid")
+
+
 class ReadTest(unittest.TestCase):
     def endless(self, calls):
         def call(argv):
@@ -569,7 +748,7 @@ class ReadTest(unittest.TestCase):
             read(page([], more=True, cursor="c1", count=0), page([], more=True, cursor="c1", count=0))
         self.assertEqual(raised.exception.code, "payload_invalid")
 
-    def test_the_search_filters_by_both_labels(self):
+    def test_the_search_filters_by_its_three_labels(self):
         calls = []
         answers = [page([], more=True, cursor="c1", count=0), page([], count=0)]
 
@@ -579,7 +758,8 @@ class ReadTest(unittest.TestCase):
 
         inbox.read_items(PROJECT, SLUG, call=call)
         self.assertEqual([c[:2] for c in calls], [["api", "graphql"]] * 2)
-        self.assertIn("search=repo:octo/widgets is:open label:owner-action,owner-answered", calls[0])
+        self.assertIn("search=repo:octo/widgets is:open label:owner-action,owner-answered,needs-verification",
+                      calls[0])
         self.assertFalse([a for a in calls[0] if a.startswith("after=")])
         self.assertIn("after=c1", calls[1])
 
