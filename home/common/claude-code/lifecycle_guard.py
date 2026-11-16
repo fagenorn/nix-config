@@ -3715,7 +3715,7 @@ def production_lifted(run, verb, read_only):
     )
 
 
-REDIRECTION = re.compile(r"[0-9]*(?:&>>?|>>|>\||>&|<&|<>|<<<|<<-?|>|<)(.*)", re.DOTALL)
+REDIRECTION = re.compile(r"[0-9]*(?:&>>?|>>|>&|<&|<>|<<<|<<-?|>|<)(.*)", re.DOTALL)
 ENV_PAYLOAD_PROGRAM = "env"
 
 
@@ -3768,18 +3768,81 @@ def production_runner_hides_shell(tokens, flags):
     return False
 
 
+ANSI_C_ESCAPES = {"'": "'", "\\": "\\", '"': '"', "n": "\n", "t": "\t"}
+
+
 def ansi_c_unquoted(text):
-    """`text` with the `$` of each `$'...'` and `$"..."` deleted, so the tokeniser reads
-    `$'just'` as `just` rather than `$just`. The quote characters stay, so the quoting
-    structure is unchanged."""
-    return text.replace("$'", "'").replace('$"', '"')
+    """`text` with each `$'...'` rewritten as the plain single-quoted word the shell reads
+    it as, and the `$` of each `$"..."` deleted, so `$'just'` reads as `just` rather than
+    `$just` and `$'it\\'s'` keeps its escaped quote inside the string. A backslash escape
+    inside `$'...'` is decoded when it is one of `\\'`, `\\\\`, `\\"`, `\\n` and `\\t` and kept
+    as written otherwise. Quotes, backslashes and comments outside a `$'...'` are tracked as
+    the segmenter does, so a `$'` inside another quote stays as it is; a `$'` with no closing
+    quote is left for the segmenter to refuse."""
+    out = []
+    quote = None
+    index = 0
+    length = len(text)
+    while index < length:
+        character = text[index]
+        if quote == "'":
+            out.append(character)
+            quote = None if character == "'" else quote
+            index += 1
+            continue
+        if character == "\\" and index + 1 < length:
+            out.append(text[index:index + 2])
+            index += 2
+            continue
+        if quote == '"':
+            out.append(character)
+            quote = None if character == '"' else quote
+            index += 1
+            continue
+        if character == "#" and (
+            not out or out[-1] in " \t\n" or out[-1] in SEGMENT_SEPARATORS
+        ):
+            while index < length and text[index] != "\n":
+                out.append(text[index])
+                index += 1
+            continue
+        if text.startswith("$'", index):
+            cursor = index + 2
+            body = []
+            while cursor < length and text[cursor] != "'":
+                if text[cursor] == "\\" and cursor + 1 < length:
+                    body.append(ANSI_C_ESCAPES.get(text[cursor + 1], text[cursor:cursor + 2]))
+                    cursor += 2
+                else:
+                    body.append(text[cursor])
+                    cursor += 1
+            if cursor >= length:
+                out.append(text[index:])
+                break
+            out.append("'" + "".join(body).replace("'", "'\\''") + "'")
+            index = cursor + 1
+            continue
+        if text.startswith('$"', index):
+            out.append('"')
+            quote = '"'
+            index += 2
+            continue
+        if character in "'\"":
+            quote = character
+        out.append(character)
+        index += 1
+    return "".join(out)
 
 
 def redirections_unglued(text):
     """`text` with the `&` of a redirection operator (`2>&1`, `&>file`, `<&3`) deleted, so
     the segmenter does not cut the command there and leave the redirection's target as a
-    command word. Only the `&` goes, and a quoted `&` was inert, so no word is hidden."""
-    return text.replace("&>>", ">>").replace("&>", ">").replace(">&", ">").replace("<&", "<")
+    command word. Only the `&` goes, and a quoted `&` was inert, so no word is hidden. The
+    `|` of a noclobber `>|` goes for the same reason, so the segmenter does not cut there."""
+    return (
+        text.replace("&>>", ">>").replace("&>", ">").replace(">&", ">").replace("<&", "<")
+        .replace(">|", ">")
+    )
 
 
 def joined_continuations(text):
@@ -3791,13 +3854,13 @@ def production_parse(command):
     """The tokens and command-position flags of each segment of `command`, with the raw
     text of the segments after it, or None when the guard reads the command as raw text:
     it cannot be parsed or tokenised, or a command word is an evaluator or `env -S`."""
-    split = split_segments_with_runs(redirections_unglued(command))
+    split = split_segments_with_runs(redirections_unglued(ansi_c_unquoted(command)))
     if split is None:
         return None
     segments = split[0]
     parsed = []
     for position, segment in enumerate(segments):
-        tokens = tokenize_segment(ansi_c_unquoted(segment))
+        tokens = tokenize_segment(segment)
         if tokens is None:
             return None
         flags, split_string = production_flags(tokens)

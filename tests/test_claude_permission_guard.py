@@ -1884,14 +1884,18 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                 "nice -n 5 /bin/zsh -c 'just switch'",
                 "find . -exec sh -c 'just switch' ';'", ">/dev/null sh -c 'just switch'",
                 "$'just' switch", "just $'switch'", "$\"just\" switch", "ju$'st' switch",
-                "env FOO=1 $'just' switch"),
+                "env FOO=1 $'just' switch",
+                "echo $'it\\'s ready'; just switch  # don't skip"),
             "(production rule kube-apply)": (
                 "nix develop -c bash -c 'kubectl apply -f x'",
-                "timeout 5 bash -c 'kubectl apply -f x'", "$'kubectl' apply -f x"),
+                "timeout 5 bash -c 'kubectl apply -f x'", "$'kubectl' apply -f x",
+                "printf $'can\\'t wait\\n' && kubectl apply -f x  # don't forget",
+                ">| /tmp/x kubectl apply"),
             "(production rule deploy-script)": (
                 ">/dev/null ./scripts/deploy.sh", "2>/dev/null ./scripts/deploy.sh",
                 "> /dev/null ./scripts/deploy.sh", ">>log.txt 2>&1 ./scripts/deploy.sh",
-                "</dev/null ./scripts/deploy.sh", "2>&1 env FOO=1 ./scripts/deploy.sh"),
+                "</dev/null ./scripts/deploy.sh", "2>&1 env FOO=1 ./scripts/deploy.sh",
+                ">|/dev/null ./scripts/deploy.sh", "2>|/dev/null ./scripts/deploy.sh"),
         }
         for needle, commands in rules.items():
             for command in commands:
