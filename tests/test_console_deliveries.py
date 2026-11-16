@@ -9,6 +9,7 @@ from pathlib import Path
 from unittest import mock
 
 from agent_tools.console import deliveries
+from agent_tools.console.event_log import Event
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
 L1 = b'{"type":"launched"}\n'
@@ -516,6 +517,77 @@ class RunFoldTest(unittest.TestCase):
             shown([S("t0", "facts-857", "Intake"), S("t1", "land-sync-review-857-1-again", "Land")]),
             {857: "landing"},
         )
+
+
+    def test_a_lock_step_marks_its_issue_locking_until_its_result(self):
+        records = [
+            S("a1", "setup", "Setup"), R("a1", {"branch": "issue-858-resume"}),
+            S("a2", "verify", "Verify"), S("a3", "pr", "Ship"),
+        ]
+        self.assertEqual(fold(records).issues(), (deliveries.IssueStage(858, "landing", None, None, True),))
+        steps = [
+            (R("a3", {"pr": 5, "head": "0" * 40}), False),
+            (S("a4", "land-lock-1", "Ship"), True),
+            (S("a5", "merge", "Ship"), False),
+            (S("a6", "land-relock-2", "Ship"), True),
+        ]
+        for record, locking in steps:
+            records.append(record)
+            with self.subTest(record=record):
+                (issue,) = fold(records).issues()
+                self.assertIs(issue.locking, locking)
+                self.assertEqual(issue.stage, "landing")
+
+    def test_a_batch_lock_step_marks_the_issue_its_label_names(self):
+        records = [S("t0", "facts-12", "Intake"), S("t0b", "facts-13", "Intake"), S("t1", "land-pr-12", "Land")]
+
+        def locking():
+            return {item.issue: item.locking for item in fold(records).issues()}
+
+        self.assertEqual(locking(), {12: True, 13: False})
+        for record, expected in [
+            (R("t1", {}), False),
+            (S("t2", "land-lock-12-1", "Land"), True),
+            (S("t3", "land-merge-12", "Land"), False),
+            (S("t4", "land-relock-12-2", "Land"), True),
+            (S("t5", "train-sweep-1", "Land"), True),
+        ]:
+            records.append(record)
+            with self.subTest(record=record):
+                self.assertEqual(locking(), {12: expected, 13: False})
+
+    def test_only_the_lock_steps_are_lock_steps(self):
+        for label in ("pr", "land-lock-3", "land-relock-2"):
+            self.assertIs(deliveries.classify(label, batch=False).lock, True, label)
+        for label in ("land-push-1", "checks-2", "merge", "land-unlock", "look-pr", "sync-1", "verify"):
+            self.assertIs(deliveries.classify(label, batch=False).lock, False, label)
+        for label in ("land-pr-12", "land-lock-12-1", "land-relock-12-2"):
+            self.assertIs(deliveries.classify(label, batch=True).lock, True, label)
+        for label in ("land-record-12-1", "land-checks-12-1", "land-unlock-12", "land-merge-12",
+                      "train-pr-12", "land-open-12", "close-out-12"):
+            self.assertIs(deliveries.classify(label, batch=True).lock, False, label)
+
+
+class SeenLockingTest(unittest.TestCase):
+    def test_the_seen_payload_carries_locking_and_an_old_row_reads_not_locking(self):
+        state = deliveries.DeliveryState("s1", "wf_1", 5, (deliveries.IssueStage(858, "landing", None, None, True),))
+        payload = deliveries.seen_payload(state)
+        self.assertEqual(
+            payload["issues"],
+            [{"issue": 858, "stage": "landing", "task": None, "tasks": None, "locking": True}],
+        )
+
+        def folded(body):
+            event = Event(1, "2027-01-15T08:00:00+00:00", deliveries.DELIVERY_SEEN, "p", body)
+            return deliveries.delivery_states([event])
+
+        self.assertEqual(folded(payload), {("s1", "wf_1"): state})
+        old = dict(payload, issues=[{k: v for k, v in payload["issues"][0].items() if k != "locking"}])
+        self.assertEqual(
+            folded(old),
+            {("s1", "wf_1"): deliveries.DeliveryState("s1", "wf_1", 5, (deliveries.IssueStage(858, "landing"),))},
+        )
+        self.assertEqual(folded(dict(payload, issues=[dict(payload["issues"][0], locking="yes")])), {})
 
 
 class ConfiguredBranchPatternTest(unittest.TestCase):

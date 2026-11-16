@@ -565,7 +565,7 @@ class DeliveryViewTest(unittest.TestCase):
              (DELIVERY_GONE, "owner/p00", {"session_id": "s2", "run_id": "wf_2"})])
         self.assertEqual(seen_payload(a), {
             "session_id": "s1", "run_id": "wf_1", "moved_ms": 10,
-            "issues": [{"issue": 858, "stage": "building", "task": 1, "tasks": 3}]})
+            "issues": [{"issue": 858, "stage": "building", "task": 1, "tasks": 3, "locking": False}]})
 
     def test_a_gone_run_leaves_the_session(self):
         folded = delivery_states([

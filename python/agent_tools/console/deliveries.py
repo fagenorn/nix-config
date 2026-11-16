@@ -62,6 +62,13 @@ chunking (folding a list in pieces equals folding it whole), and `RunFold.issues
   in a batch; either when held in a single run, whose hold step the console does not read, or when
   no plan graded the issue), with `notes_posted` true when the plan has notes and not false
   otherwise. Any other result leaves the issue as the label left it.
+- An issue is `locking` exactly when the latest staged step applied to it is a lock step (`classify`
+  gives `Step.lock`: the label fullmatches `OWNER_LOCK_LABELS`, `pr|land-lock-\\d+|land-relock-\\d+`, or
+  with a batch `BATCH_LOCK_LABELS`, `land-pr-\\d+|land-lock-\\d+-\\d+|land-relock-\\d+-\\d+`) and no
+  `result` of that step's agent has been read. Any later step with a stage sets `locking` to its
+  `lock`; a step with no stage changes nothing. An owner lock step's `result` clears its owner's
+  issue (waiting for the owner's issue like other effects); a batch lock step's `result` clears the
+  issue its label names, only when that issue is known.
 - `DONE` is final. A `QUEUED` step changes only an issue that is new or still `QUEUED`.
 
 `configured_branch_pattern(repo)` is the service's default source of that pattern: the project
@@ -69,11 +76,12 @@ contract's `vcs.branch_pattern` through `resolve_project.resolve`, or None when 
 
 Delivery events (the log's rows for the run journals): `delivery.seen` (`DELIVERY_SEEN`) carries
 `seen_payload(state)`, `{"session_id", "run_id", "moved_ms", "issues": [{"issue", "stage", "task",
-"tasks"}, ...]}` with `None` as null, and `delivery.gone` (`DELIVERY_GONE`) carries
+"tasks", "locking"}, ...]}` with `None` as null, and `delivery.gone` (`DELIVERY_GONE`) carries
 `{"session_id", "run_id"}`. `delivery_states(events, states=None)` folds them onto a `DeliveryState`
 per `(session_id, run_id)`: a `seen` whose `session_id` and `run_id` are str, `moved_ms` an int (not
 a bool) and `issues` a list of dicts each with an int (not bool) `issue`, a `stage` in `STAGES` and
-`task`/`tasks` an int or null replaces any earlier state; a `seen` of any other shape is ignored
+`task`/`tasks` an int or null and `locking` a bool when present (a row without it reads `False`;
+any other `locking` makes the `seen` invalid) replaces any earlier state; a `seen` of any other shape is ignored
 whole; a `gone` with str `session_id` and `run_id` removes the key; other kinds are ignored, and
 folding onto earlier states equals folding all events. `delivery_changes(states, readings, scanned,
 project_of)` lists what to append: a `seen` for each reading (in key order) that differs from the
@@ -249,12 +257,16 @@ CHILD_PHASE_PREFIX = "\u25b8 "
 
 @dataclass(frozen=True)
 class IssueStage:
-    """One issue's stage, with the task being built and the plan's task total when known."""
+    """One issue's stage, with the task being built and the plan's task total when known.
+
+    `locking`: its journal sits in a step that waits for the land lock and has not yet answered.
+    """
 
     issue: int
     stage: str
     task: int | None = None
     tasks: int | None = None
+    locking: bool = False
 
 
 def stage_text(stage: IssueStage) -> str:
@@ -272,6 +284,7 @@ class Step:
     stage: str | None
     task: int | None = None
     issue: int | None = None
+    lock: bool = False
 
 
 # One (stage, pattern) row per label template. Owner rows: group 1, where present, is the task.
@@ -316,6 +329,11 @@ BATCH_LABELS: tuple[tuple[str | None, str], ...] = (
 )
 
 
+# The labels that wait for the land lock, one pattern per table; an owner label stands for its own issue.
+OWNER_LOCK_LABELS = r"pr|land-lock-\d+|land-relock-\d+"
+BATCH_LOCK_LABELS = r"land-pr-\d+|land-lock-\d+-\d+|land-relock-\d+-\d+"
+
+
 # What both programs append to the label of a review step they run once more after an unusable reply.
 RERUN_SUFFIX = "-again"
 
@@ -328,14 +346,15 @@ def _group(match: re.Match) -> int | None:
 def classify(label: str, *, batch: bool) -> Step | None:
     """The step a label stands for in the owner table or, with `batch`, the batch table; None if unknown."""
     label = label.removesuffix(RERUN_SUFFIX)
+    lock = re.fullmatch(BATCH_LOCK_LABELS if batch else OWNER_LOCK_LABELS, label) is not None
     for stage, pattern in BATCH_LABELS if batch else OWNER_LABELS:
         match = re.fullmatch(pattern, label)
         if match is None:
             continue
         number = _group(match)
         if batch:
-            return Step(stage, issue=number)
-        return Step(stage, task=number)
+            return Step(stage, issue=number, lock=lock)
+        return Step(stage, task=number, lock=lock)
     return None
 
 
@@ -460,6 +479,9 @@ class RunFold:
 
     def _result(self, label: str, key: str | None, result: object) -> None:
         if key is None and self._batch:
+            step = classify(label, batch=True)
+            if step is not None and step.lock and step.issue in self._issues:
+                self._update(step.issue, locking=False)
             match = _BATCH_CLOSE_OUT.fullmatch(label)
             if match is not None:
                 issue = int(match.group(1))
@@ -482,6 +504,10 @@ class RunFold:
                     self._effect(owner, "grading", grading)
         elif label == "close-out":
             self._effect(owner, "close-out", result)
+        else:
+            step = classify(label, batch=False)
+            if step is not None and step.lock:
+                self._effect(owner, "unlocked", None)
 
     def _name(self, owner: _Owner, issue: int) -> None:
         owner.issue = issue
@@ -500,6 +526,8 @@ class RunFold:
             self._update(owner.issue, tasks=value)
         elif kind == "grading":
             self._gradings[owner.issue] = value
+        elif kind == "unlocked":
+            self._update(owner.issue, locking=False)
         elif closed_out(value, self._gradings.get(owner.issue)):
             self._done(owner.issue)
 
@@ -517,10 +545,10 @@ class RunFold:
         if step.stage == QUEUED and current is not None and current.stage != QUEUED:
             return
         if current is None:
-            self._issues[issue] = IssueStage(issue, step.stage, step.task)
+            self._issues[issue] = IssueStage(issue, step.stage, step.task, locking=step.lock)
         elif current.stage != DONE:
             task = step.task if step.task is not None else current.task
-            self._issues[issue] = replace(current, stage=step.stage, task=task)
+            self._issues[issue] = replace(current, stage=step.stage, task=task, locking=step.lock)
 
     def _done(self, issue: int) -> None:
         self._update(issue, stage=DONE)
@@ -572,7 +600,7 @@ def seen_payload(state: DeliveryState) -> dict:
         "run_id": state.run_id,
         "moved_ms": state.moved_ms,
         "issues": [
-            {"issue": i.issue, "stage": i.stage, "task": i.task, "tasks": i.tasks}
+            {"issue": i.issue, "stage": i.stage, "task": i.task, "tasks": i.tasks, "locking": i.locking}
             for i in state.issues
         ],
     }
@@ -592,7 +620,10 @@ def _issue_stage(row: object) -> IssueStage | None:
     issue, stage, task, tasks = (row.get(k) for k in ("issue", "stage", "task", "tasks"))
     if not _integer(issue) or stage not in STAGES or not _count(task) or not _count(tasks):
         return None
-    return IssueStage(issue, stage, task, tasks)
+    locking = row.get("locking", False)
+    if not isinstance(locking, bool):
+        return None
+    return IssueStage(issue, stage, task, tasks, locking)
 
 
 def _seen_state(payload: dict) -> DeliveryState | None:
