@@ -26,7 +26,8 @@ Contract:
   "stated" before an age, "withdraw", "nudge", "stop or", "would do differently"); or when a
   `tell-box-open` shot does not show the open Tell box (the textarea, the Send button and the
   pick-up hint, with the label, the field and the hint not overlapping and the field as wide as
-  the sprint block's content, `OPEN_TELL`). It returns 2 with a one-line
+  the sprint block's content, `OPEN_TELL`); or when any shot is not taken from the top of the
+  page (`window.scrollY` is not 0 right before its full-page capture). It returns 2 with a one-line
   reason when Playwright or Chromium is missing, else 0. Playwright is imported inside `capture` only,
   so the fixture half of this module needs nothing beyond the standard library.
 """
@@ -93,6 +94,7 @@ class Shot:
     squeezed: int = 0
     jargon: int = 0
     tell: tuple[bool, str | None, str | None, bool] | None = None
+    scroll_y: float = 0.0
 
 
 def sandbox_environ(root: Path) -> dict[str, str]:
@@ -332,6 +334,10 @@ JARGON_COUNT = r"""(() => {
 })()"""
 
 
+SCROLL_TOP = "window.scrollTo(0, 0)"
+SCROLL_Y = "window.scrollY"
+
+
 def _shoot(browser, url: str, state: str, width: int, out: Path) -> Shot:
     page = browser.new_page(viewport={"width": width, "height": HEIGHT})
     try:
@@ -345,14 +351,16 @@ def _shoot(browser, url: str, state: str, width: int, out: Path) -> Shot:
             page.click("button.tell-open")
             page.wait_for_selector(".tell-hint")
             tell = tuple(page.evaluate(TELL_READING))
+        page.evaluate(SCROLL_TOP)
         scroll_width = page.evaluate("document.documentElement.scrollWidth")
         squeezed = page.evaluate(SQUEEZED_COUNT)
         jargon = page.evaluate(JARGON_COUNT)
+        scroll_y = page.evaluate(SCROLL_Y)
         path = out / f"{state}-{width}.png"
         page.screenshot(path=str(path), full_page=True)
     finally:
         page.close()
-    return Shot(state, width, path, scroll_width, squeezed, jargon, tell)
+    return Shot(state, width, path, scroll_width, squeezed, jargon, tell, scroll_y=scroll_y)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -391,7 +399,11 @@ def main(argv: list[str] | None = None) -> int:
     closed = [shot for shot in taken if shot.state == "tell-box-open" and shot.tell != OPEN_TELL]
     for shot in closed:
         print(f"console-screenshots: {shot.path.name} does not show the open Tell box")
-    return 1 if wide or squeezed or jargon or closed else 0
+    scrolled = [shot for shot in taken if shot.scroll_y != 0]
+    for shot in scrolled:
+        print(f"console-screenshots: {shot.path.name} is not taken from the top of the page "
+              f"(scrolled {shot.scroll_y:g} px)")
+    return 1 if wide or squeezed or jargon or closed or scrolled else 0
 
 
 if __name__ == "__main__":

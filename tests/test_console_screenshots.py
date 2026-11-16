@@ -68,6 +68,74 @@ class ScreenshotFixtureTest(unittest.TestCase):
                                                  shots.OPEN_TELL))
         self.assertEqual(code, 0)
 
+    def test_a_shot_not_taken_from_the_top_fails_the_command(self) -> None:
+        def run(shot):
+            out = StringIO()
+            with tempfile.TemporaryDirectory() as tmp, \
+                    mock.patch.object(shots, "capture", return_value=[shot(Path(tmp) / "x.png")]), \
+                    redirect_stdout(out):
+                code = shots.main(["--out", tmp])
+            return code, out.getvalue()
+
+        code, text = run(lambda path: shots.Shot("finished-list", 480, path, 480, 0, 0, None,
+                                                 scroll_y=240.0))
+        self.assertEqual(code, 1)
+        self.assertIn("x.png is not taken from the top of the page", text)
+        code, text = run(lambda path: shots.Shot("finished-list", 480, path, 480, 0, 0, None,
+                                                 scroll_y=0.0))
+        self.assertEqual(code, 0)
+        self.assertNotIn("not taken from the top", text)
+
+    def test_a_shot_scrolls_back_to_the_top_before_its_capture(self) -> None:
+        def fake(reset_to):
+            class Page:
+                y = 0.0
+
+                def __init__(self):
+                    self.captured = []
+
+                def goto(self, url):
+                    pass
+
+                def wait_for_selector(self, selector):
+                    pass
+
+                def click(self, selector):
+                    self.y = 300.0
+
+                def evaluate(self, expression):
+                    if expression == shots.SCROLL_TOP:
+                        self.y = reset_to
+                        return None
+                    if expression == shots.SCROLL_Y:
+                        return self.y
+                    if expression == "document.documentElement.scrollWidth":
+                        return 480
+                    return 0
+
+                def screenshot(self, path, full_page):
+                    self.captured.append((self.y, full_page))
+
+                def close(self):
+                    pass
+
+            page = Page()
+
+            class Browser:
+                def new_page(self, viewport):
+                    return page
+
+            return Browser(), page
+
+        for reset_to in (0.0, 40.0):
+            with self.subTest(reset_to=reset_to), tempfile.TemporaryDirectory() as tmp:
+                browser, page = fake(reset_to)
+                shot = shots._shoot(browser, "http://console.test/", "finished-list", 480,
+                                    Path(tmp))
+                self.assertEqual(page.captured, [(reset_to, True)])
+                self.assertEqual(shot.scroll_y, reset_to)
+                self.assertEqual(shot.scroll_y, page.captured[0][0])
+
     def test_every_fixture_path_is_temporary_and_never_a_real_one(self) -> None:
         real_home = Path(pwd.getpwuid(os.getuid()).pw_dir)
         real_registry = real_home / ".agents" / "state" / "fleet" / "registry.json"
@@ -173,6 +241,7 @@ class ScreenshotCaptureTest(unittest.TestCase):
             self.assertEqual([s for s in taken if s.width == 480 and s.scroll_width > 480], [])
             self.assertEqual([s for s in taken if s.squeezed], [])
             self.assertEqual([s for s in taken if s.jargon], [])
+            self.assertEqual([(s.path.name, s.scroll_y) for s in taken if s.scroll_y != 0], [])
             self.assertEqual(
                 [s.width for s in taken if s.state == "tell-box-open" and s.tell == shots.OPEN_TELL],
                 list(shots.WIDTHS))
