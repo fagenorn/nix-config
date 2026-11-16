@@ -1,4 +1,4 @@
-# ADR-console-046 — An owner check card captions its pictures and reads its reading under the question
+# ADR-console-047 — An owner check card captions its pictures and reads its reading under the question
 
 - **Status:** accepted
 - **Decided in:** #1131

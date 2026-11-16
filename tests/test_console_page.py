@@ -8040,6 +8040,10 @@ class PageCheckCaptionTest(unittest.TestCase):
             ("beforehand-1440.png", "Beforehand, 1440 px"),
             ("480.png", "Picture, 480 px"),
             ("__.png", "Picture"),
+            ("card-(before)-1440.png", "Before, 1440 px"),
+            ("[After] card (480px).png", "After, 480 px"),
+            ("(owner) check,.png", "Owner check"),
+            ("(--).png", "Picture"),
         ]
         lines = [line for line, _ in table]
         captions = [caption for _, caption in table]

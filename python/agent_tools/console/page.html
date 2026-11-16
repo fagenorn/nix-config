@@ -1960,7 +1960,7 @@ function checkPictures(node, item) {
 function readingLine(item) {
   return typeof item.reading === "string" && item.reading !== "" ? el("p", "reading", "Reading: " + item.reading) : null;
 }
-// ADR-console-046: the reading is the first thing under the question, before the pictures that illustrate it and the answer box.
+// ADR-console-047: the reading is the first thing under the question, before the pictures that illustrate it and the answer box.
 function checkHead(node, item) {
   const reading = readingLine(item);
   if (reading !== null) node.appendChild(reading);
@@ -2066,10 +2066,10 @@ function pictureSequence(pictures) {
   }
   return out;
 }
-// An owner check thumbnail reads a caption made from its file name, never the name itself (ADR-console-046): a before or after word leads, a trailing width reads in px, any other name is sentence case.
+// An owner check thumbnail reads a caption made from its file name, never the name itself (ADR-console-047): a before or after word leads, a trailing width reads in px, any other name is sentence case.
 function pictureCaption(name) {
   const base = String(name).split(/[\\/]/).pop().replace(/\.png$/i, "");
-  const words = base.split(/[\s._-]+/).filter((w) => w !== "");
+  const words = base.split(/[\s._-]+/).map((w) => w.replace(/^[^\p{L}\p{N}]+|[^\p{L}\p{N}]+$/gu, "")).filter((w) => w !== "");
   let width = "";
   if (words.length > 0 && /^\d{3,4}(px)?$/i.test(words[words.length - 1])) width = words.pop().replace(/px$/i, "");
   const marker = words.find((w) => /^(before|after)$/i.test(w));

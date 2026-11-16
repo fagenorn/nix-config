@@ -412,7 +412,7 @@ class DocsTreeTest(unittest.TestCase):
 
     def test_the_owner_check_caption_decision_is_recorded(self):
         adr = self.doc(
-            "docs/areas/console/adr/046-an-owner-check-card-captions-its-pictures-and-reads-its-reading-under-the-question.md"
+            "docs/areas/console/adr/047-an-owner-check-card-captions-its-pictures-and-reads-its-reading-under-the-question.md"
         )
         for needle in (
             "#1131", "Before, 1440 px", "Owner check viewer, 480 px", "OWNER-CHECK-VIEWER-480.png",
@@ -421,7 +421,7 @@ class DocsTreeTest(unittest.TestCase):
         ):
             self.assertIn(needle, adr)
         self.assertIn(
-            "ADR-console-046",
+            "ADR-console-047",
             self.doc("docs/areas/console/adr/045-an-owner-check-card-shows-the-pictures-and-the-reading-its-prompt-names.md"),
         )
 
