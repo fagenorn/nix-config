@@ -1532,6 +1532,14 @@ class PageOwnerNoticeTest(unittest.TestCase):
             {"frame": view([offered])}, {"click": "notice-open"}, {"snapshot": True}])
         self.assertEqual(self.found(snap, "notice-text")[0]["value"], "")
 
+    def test_a_view_with_no_project_loses_every_notice_draft(self) -> None:
+        offered = postable(with_notices(project(0, [])))
+        (snap,) = render([
+            *self.typed("routes"), {"frame": view([])},
+            {"frame": view([offered])}, {"open": self.key}, {"snapshot": True}])
+        self.assertEqual(self.found(snap, "notice-text"), [])
+        self.assertEqual(len(self.found(snap, "notice-open")), 1)
+
     def test_the_harness_counts_a_focus_inside_a_closed_fold(self) -> None:
         shown, hidden = render([
             *self.opened(), {"click": "notice-open"}, {"snapshot": True},
