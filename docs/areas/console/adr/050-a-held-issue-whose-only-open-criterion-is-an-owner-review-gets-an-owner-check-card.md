@@ -1,4 +1,4 @@
-# ADR-console-049 — A held issue whose only open criterion is an owner review gets an owner check card
+# ADR-console-050 — A held issue whose only open criterion is an owner review gets an owner check card
 
 - **Status:** accepted
 - **Decided in:** #1113

@@ -5,6 +5,7 @@ Run: just agent-workflow-tests
 import json
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -817,6 +818,39 @@ class ReviewWriteTest(unittest.TestCase):
         self.world.respond("gh", R_PATCH(ticked), stdout="{}")
         answer.answer_criterion(SLUG, REVIEW_ISSUE, 3, "passed", version=V3)
         self.assertEqual(self.world.argvs("gh"), [R_STATE, R_PATCH(ticked)])
+
+    def test_overlapping_approvals_of_different_criteria_both_stay_ticked(self):
+        second = "- [ ] [human] The other card looks right"
+        body = review_body("- [x] [code] A", HUMAN_LINE, second)
+        versions = {c.index: inbox.criterion_version(REVIEW_ISSUE, c)
+                    for c in inbox.acceptance_criteria(body)}
+        current = [body]
+        first_read = threading.Event()
+        other_read = threading.Event()
+
+        def api_get(path):
+            snapshot = current[0]
+            if not first_read.is_set():
+                first_read.set()
+                other_read.wait(0.5)
+            else:
+                other_read.set()
+            return issue_reply(snapshot)
+
+        def run_gh(argv):
+            current[0] = argv[-1][len("body="):]
+
+        with mock.patch.object(answer.forge_api, "api_get", api_get), \
+                mock.patch.object(answer.forge_api, "run_gh", run_gh):
+            workers = [threading.Thread(target=answer.answer_criterion,
+                                        args=(SLUG, REVIEW_ISSUE, i, "passed"), kwargs={"version": versions[i]})
+                       for i in (2, 3)]
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join(5)
+        self.assertEqual(current[0], body.replace(HUMAN_LINE, "- [x] [human] The card looks right")
+                         .replace(second, "- [x] [human] The other card looks right"))
 
     def test_bad_arguments_are_refused_before_any_call(self):
         bad = [("failed", None), ("approve", None), ("passed", "a note"), ("note", None),

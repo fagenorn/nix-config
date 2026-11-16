@@ -59,7 +59,8 @@ Wire format, one object:
      "pin_launches": ["<profile>", ...],
      "profile_sessions": {"<profile>": <int>, ...},
      "unstopped": [{"project_id", "sprint_id", "title", "text", "failed_at"}, ...],
-     "activation": <activation line> | null}
+     "activation": <activation line> | null,
+     "spend": <spend view> | null}
 
 `activation` is the one line the page shows when a console change has merged and this host is not
 yet running it: `{"text": ACTIVATION_TEXT, "command": ACTIVATE_COMMAND, "root": "<root>"}`; the text is
@@ -69,6 +70,9 @@ member is on every view and is null when `derive_view` is given no `activation` 
 `activation.py` `Activation`) or one whose `changed` is empty. It is a line beside the statement,
 not an inbox item: it is not counted in `inbox_items` and never changes the headline, the sentence
 or `stale` (#1114, ADR-console-043).
+
+`spend` is the `spend.spend_view` the caller passes (members defined in `spend.py`), null when none;
+it is a reading beside the statement, never counted in `inbox_items` (#1134).
 
 `digest` is what changed since the owner last looked (see `digest.py`):
 `{"since": <last look> | null, "first_visit": <bool>, "recent": [<moment>, ...],
@@ -1465,6 +1469,7 @@ def derive_view(
     nudges: bool = True,
     looked: str | None = None,
     activation: Activation | None = None,
+    spend: Mapping | None = None,
 ) -> dict:
     states = list(states)
     sessions = list(sessions)
@@ -1671,6 +1676,7 @@ def derive_view(
             {"text": (ACTIVATION_BEHIND_TEXT if activation.local_behind else ACTIVATION_TEXT).format(
                 command=ACTIVATE_COMMAND, root=activation.root),
              "command": ACTIVATE_COMMAND, "root": activation.root}),
+        "spend": dict(spend) if spend is not None else None,
     }
 
 
