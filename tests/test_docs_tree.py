@@ -1641,12 +1641,25 @@ class DocsTreeTest(unittest.TestCase):
                     "mergedAt": merged[number],
                     "headRefName": head,
                     "headRefOid": "a" * 40 if number == 1041 else f"{number:040d}",
+                    "mergeCommit": {"oid": f"{number + 5000:040d}"},
                 }
             )
+        # An indirect merge: the forge marks it merged because its own head reached main
+        # inside another landing, so its merge commit is its head and it held no lock cycle.
+        pulls.append(
+            {
+                "number": 1500,
+                "createdAt": "2026-11-16T13:30:00Z",
+                "mergedAt": "2026-11-16T14:30:00Z",
+                "headRefName": "issue-1500-x",
+                "headRefOid": f"{1500:040d}",
+                "mergeCommit": {"oid": f"{1500:040d}"},
+            }
+        )
         fixture = {
             "pr list --repo fagenorn/nix-config --state merged --base main --search"
             " merged:2026-11-13..2026-11-16 --limit 300"
-            " --json number,createdAt,mergedAt,headRefName,headRefOid": pulls
+            " --json number,createdAt,mergedAt,headRefName,headRefOid,mergeCommit": pulls
         }
         for pull in pulls:
             if not 1002 <= pull["number"] <= 1040:
@@ -1743,16 +1756,23 @@ class DocsTreeTest(unittest.TestCase):
         for expected in (
             "| #1041 | 77 | 2026-11-16 21:20:00 | 60.0 | 40.0 | 20.0 | 2.0 | 1 | 1.0 | 8.0 | 0.5 | 7.5 | 0.1 | 8.0 | 9.0 |",
             "| #1041 | aaaaaaaaaaaa | 9003 | 9001 | 9004 | 501/1 |",
-            "| Hold (min) | 20.0 | 20.0 | 20.0 | 800.0 |",
+            "| Hold (min) | 20.0 | 20.0 | 20.0 | 780.0 |",
             "| CI runs | 0.0 | 0.0 | 1.0 | 1.0 |",
             "| Green to merge (min) | 9.0 | 9.0 | 9.0 | 9.0 |",
-            "Landings: 40, merged 2026-11-16 08:20:00 to 2026-11-16 21:20:00 (UTC).",
+            "Landings: 39, merged 2026-11-16 08:40:00 to 2026-11-16 21:20:00 (UTC).",
         ):
             self.assertIn(expected, out)
         self.assertTrue(any(line.startswith("| #1040 | - | 2026-11-16 21:00:00 |") for line in out))
-        for number in (1000, 1001, 1042):
+        self.assertTrue(
+            any(line.startswith("| #1021 | 1021 | 2026-11-16 14:40:00 | 60.0 | 40.0 | 20.0 |") for line in out),
+            "an indirect merge must not be the predecessor of the landing after it",
+        )
+        self.assertIn(
+            "Indirect merges (no lock cycle of their own): #1500 merged 2026-11-16 14:30:00 (UTC).", out
+        )
+        for number in (1000, 1001, 1002, 1042, 1500):
             self.assertFalse(any(line.startswith(f"| #{number} ") for line in out), number)
-        self.assertEqual(sum(1 for line in out if line.startswith("| #")), 80)
+        self.assertEqual(sum(1 for line in out if line.startswith("| #")), 78)
 
 
     def test_the_land_queue_proposal_keeps_every_required_check(self):
@@ -1772,7 +1792,8 @@ class DocsTreeTest(unittest.TestCase):
         proposal = land_queue_section(text, "Proposal")
         alternatives = land_queue_section(text, "Alternatives considered")
         m = re.search(
-            r"(?m)^\*\*Expected saving per queued pull request:\*\* at most (\d+\.\d) min per landing ahead of it \(the median of `([^`]+)`\)",
+            r"(?m)^\*\*Expected saving per queued pull request \(an assumed scenario, not a bound\):\*\*"
+            r" assume (\d+\.\d) min per landing ahead of it \(the median of `([^`]+)`\)",
             proposal,
         )
         self.assertEqual(len(contexts), 3)
@@ -1785,6 +1806,13 @@ class DocsTreeTest(unittest.TestCase):
         self.assertEqual(m[1], summary[m[2]])
         if m[2] == "Handoff (min)":
             self.assertIn("its own hold is unchanged", proposal)
+            saving = next(p for p in proposal.split("\n\n") if p.startswith("**Expected saving"))
+            self.assertNotIn("at most", saving)
+            self.assertNotIn("upper bound", saving)
+            self.assertIn("does not bound", saving)
+            self.assertIn("sync push", saving)
+            self.assertIn("removable polling delay is unknown", saving)
+            self.assertNotRegex(alternatives + proposal.split("**Expected saving")[0], r"[Ss]aving at most")
             self.assertIn("`python/agent_tools/claims/forge_land_lock.py`", proposal)
         else:
             self.assertIn(f"its own hold is at most {m[1]} min shorter", proposal)

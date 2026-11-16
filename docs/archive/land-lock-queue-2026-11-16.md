@@ -1,11 +1,12 @@
-# Land lock queue, the 40 landings up to #1190 (2026-11-16)
+# Land lock queue, the 39 landings up to #1190 (2026-11-16)
 
-This measures the 40 pull requests that merged into `main` from 2026-11-16 01:02:25 to 22:34:14 UTC, the last one being #1190, and how long each spent asking for, waiting for and holding the land lock, and how long the required checks on its merged head took. Every figure is derived from the forge alone (pull requests, workflow runs and check runs); the tables below are the output of the program under Reproduce, pasted verbatim.
+This measures the 39 landings on `main` from 2026-11-16 01:02:25 to 22:34:14 UTC, the last one being #1190 (a landing is a pull request that took the land lock itself; one indirect merge, #1080, is listed apart), and how long each spent asking for, waiting for and holding the land lock, and how long the required checks on its merged head took. Every figure is derived from the forge alone (pull requests, workflow runs and check runs); the tables below are the output of the program under Reproduce, pasted verbatim.
 
 ## Method
 
 The forge keeps no record of the lock `refs/agent-locks/land/main` or of its queue refs ([ADR-claims-004](../areas/claims/adr/004-the-land-lock-is-a-cas-ref.md), [ADR-claims-012](../areas/claims/adr/012-waiters-on-the-land-lock-queue-in-forge-clock-order.md)): a pull request's timeline holds no lock event. So the lock ask and the hold are derived from each pull request's `createdAt` and `mergedAt` and the serial order of the merges, which the lock enforces. For a landing, `prev` is the merge time of the landing before it.
 
+- A landing is a pull request whose merge commit is not its own head. When the forge marks a pull request merged because its head already reached `main` inside another landing, its merge commit is its head: it is an indirect merge, held no lock cycle of its own, and is neither a row nor a `prev`. #1080 is one: its head `f1a9d0f65a16` reached `main` through `a6aa3148`, merged into #1116 by `69ee02fa`, and the forge stamped it merged 2 seconds after #1116. Counting it as a landing would add a wait of 1185.4 minutes for a pull request that never took the lock. Its own lock history is unknown.
 - Ask to merge is `mergedAt` minus `createdAt`.
 - Wait is `max(0, prev - createdAt)`: the time the pull request existed while an earlier landing still held the lock.
 - Hold is `mergedAt - max(createdAt, prev)`: from the moment the lock could be the pull request's to its merge.
@@ -31,7 +32,6 @@ The estimator has known biases. A delivery marked for the owner's look (#1139), 
 | #1101 | 1099 | 2026-11-16 05:03:33 | 23.3 | 0.0 | 23.3 | - | 1 | 1.1 | 7.8 | 0.2 | 7.5 | 0.1 | 7.8 | 9.2 |
 | #1102 | 1091 | 2026-11-16 10:04:13 | 22.0 | 0.0 | 22.0 | - | 1 | 1.1 | 10.5 | 0.2 | 10.3 | 0.1 | 10.5 | 0.6 |
 | #1116 | 1103 | 2026-11-16 10:33:58 | 9.7 | 0.0 | 9.7 | - | 1 | 1.2 | 9.0 | 0.1 | 8.8 | 0.1 | 9.0 | 0.6 |
-| #1080 | - | 2026-11-16 10:34:00 | 1185.4 | 1185.4 | 0.0 | - | 1 | 1.4 | 9.6 | 0.2 | 9.3 | 0.2 | 9.6 | 1175.8 |
 | #1121 | 1109 | 2026-11-16 10:58:09 | 10.2 | 0.0 | 10.2 | - | 2 | 0.9 | 8.1 | 0.2 | 7.8 | 0.1 | 8.4 | 0.9 |
 | #1122 | 1114 | 2026-11-16 11:39:29 | 9.8 | 0.0 | 9.8 | - | 2 | 0.8 | 8.0 | 0.2 | 7.7 | 0.2 | 8.3 | 0.5 |
 | #1123 | 1117 | 2026-11-16 12:14:48 | 43.5 | 8.1 | 35.3 | 1.0 | 3 | 1.2 | 8.4 | 0.3 | 8.1 | 0.2 | 8.4 | 0.7 |
@@ -66,20 +66,21 @@ The estimator has known biases. A delivery marked for the owner's look (#1139), 
 
 | Figure | Median | p90 | Max | Sum |
 |---|---:|---:|---:|---:|
-| Ask to merge (min) | 32.8 | 140.4 | 1185.4 | 3088.9 |
-| Wait (min) | 8.5 | 95.4 | 1185.4 | 2323.5 |
-| Hold (min) | 14.0 | 31.9 | 92.3 | 765.5 |
+| Ask to merge (min) | 32.7 | 140.4 | 217.9 | 1903.5 |
+| Wait (min) | 8.1 | 95.4 | 173.5 | 1138.1 |
+| Hold (min) | 14.7 | 33.3 | 92.3 | 765.5 |
 | Handoff (min) | 1.4 | 5.8 | 83.0 | 143.9 |
-| CI runs | 2.0 | 3.0 | 7.0 | 90.0 |
-| Nix Eval (min) | 1.1 | 1.4 | 1.9 | 45.3 |
-| Agent Workflow Tests (min) | 8.7 | 10.6 | 15.3 | 370.3 |
-| AWT before test step (min) | 0.2 | 0.3 | 3.5 | 12.0 |
-| AWT test step (min) | 8.5 | 10.4 | 11.8 | 355.7 |
-| Instruction Budget (min) | 0.1 | 0.2 | 0.3 | 6.1 |
-| Final-head CI wall (min) | 8.8 | 10.6 | 15.3 | 373.4 |
-| Green to merge (min) | 0.7 | 1.3 | 1175.8 | 1214.8 |
+| CI runs | 2.0 | 3.0 | 7.0 | 89.0 |
+| Nix Eval (min) | 1.1 | 1.4 | 1.9 | 43.9 |
+| Agent Workflow Tests (min) | 8.7 | 10.7 | 15.3 | 360.7 |
+| AWT before test step (min) | 0.2 | 0.3 | 3.5 | 11.8 |
+| AWT test step (min) | 8.5 | 10.5 | 11.8 | 346.4 |
+| Instruction Budget (min) | 0.1 | 0.3 | 0.3 | 5.9 |
+| Final-head CI wall (min) | 8.7 | 10.7 | 15.3 | 363.8 |
+| Green to merge (min) | 0.7 | 1.3 | 9.2 | 39.0 |
 
-Landings: 40, merged 2026-11-16 01:02:25 to 2026-11-16 22:34:14 (UTC).
+Landings: 39, merged 2026-11-16 01:02:25 to 2026-11-16 22:34:14 (UTC).
+Indirect merges (no lock cycle of their own): #1080 merged 2026-11-16 10:34:00 (UTC).
 
 | PR | Head | Nix Eval check run | Agent Workflow Tests check run | Instruction Budget check run | CI run attempts |
 |---:|---|---:|---:|---:|---|
@@ -91,7 +92,6 @@ Landings: 40, merged 2026-11-16 01:02:25 to 2026-11-16 22:34:14 (UTC).
 | #1101 | 3cadd78ddd62 | 133097104155 | 133097103846 | 133097103893 | 43806096096/1 |
 | #1102 | 1dfd9890369d | 133218721991 | 133218722120 | 133218721786 | 43843778726/1 |
 | #1116 | d21c3d985b4e | 133234773703 | 133234773256 | 133234773390 | 43848522728/1 |
-| #1080 | f1a9d0f65a16 | 132849079823 | 132849079600 | 132849079670 | 43726373860/1 |
 | #1121 | d2d39a8b0c3d | 133247368153 | 133247368338 | 133247241775 | 43852057656/1 43852177680/1 |
 | #1122 | cb8728ce3ec2 | 133268645803 | 133268645701 | 133268503682 | 43858246449/1 43858398074/1 |
 | #1123 | 643833b345e7 | 133285887930 | 133285888395 | 133285888220 | 43858501535/1 43859821309/1 43863453140/1 |
@@ -124,7 +124,7 @@ Landings: 40, merged 2026-11-16 01:02:25 to 2026-11-16 22:34:14 (UTC).
 | #1189 | 0fc1462a454d | 133650803946 | 133650803606 | 133650636829 | 43966121931/1 43967488767/1 |
 | #1190 | df472460fafe | 133657353008 | 133657353091 | 133657194586 | 43969267720/1 43969381103/1 |
 
-Reading the summary: `Agent Workflow Tests` is the critical path of every hold, at a median of 8.7 minutes against 1.1 for `Nix Eval` and 0.1 for `Instruction Budget`, and its test step (median 8.5 minutes) is almost all of it; the job's own set-up before that step is a median 0.2 minutes. The median hold is 14.0 minutes (p90 31.9, maximum 92.3), so a hold is the final-head CI wall plus about five minutes of handoff, sync push and the waiter's own pre-lock work; the median handoff from one merge to the next waiter's first CI run is 1.4 minutes (p90 5.8), with one outlier of 83.0 minutes (#1159). The merge follows the last required check by a median 0.7 minutes; the 1175.8-minute maximum is #1080, merged 1185.4 minutes after it was opened from a branch that names no issue, and it dominates that column's sum, not its median. The issue's figure of about 25 minutes per re-run on 16 Nov is not confirmed: the final-head CI wall has a median of 8.8 minutes, p90 10.6 and maximum 15.3.
+Reading the summary: `Agent Workflow Tests` is the critical path of every hold, at a median of 8.7 minutes against 1.1 for `Nix Eval` and 0.1 for `Instruction Budget`, and its test step (median 8.5 minutes) is almost all of it; the job's own set-up before that step is a median 0.2 minutes. The median hold is 14.7 minutes (p90 33.3, maximum 92.3), so a hold is the final-head CI wall plus about six minutes of handoff, sync push and the waiter's own pre-lock work; the median handoff from one merge to the next waiter's first CI run is 1.4 minutes (p90 5.8), with one outlier of 83.0 minutes (#1159). The merge follows the last required check by a median 0.7 minutes (p90 1.3, maximum 9.2, #1101). The issue's figure of about 25 minutes per re-run on 16 Nov is not confirmed: the final-head CI wall has a median of 8.7 minutes, p90 10.7 and maximum 15.3.
 
 ## Reproduce
 
@@ -146,7 +146,7 @@ APP = 15368
 CHECKS = ("Nix Eval", "Agent Workflow Tests", "Instruction Budget")
 STEP = "Run agent workflow tests"
 CUTOFF = "2026-11-16T22:34:14Z"
-ROWS = 40
+ROWS = 39
 HEADERS = [
     "PR", "Issue", "Merged (UTC)", "Ask to merge (min)", "Wait (min)", "Hold (min)",
     "Handoff (min)", "CI runs", "Nix Eval (min)", "Agent Workflow Tests (min)",
@@ -183,16 +183,22 @@ def cell(value, spec="{:.1f}"):
 pulls = gh(
     "pr", "list", "--repo", REPO, "--state", "merged", "--base", "main",
     "--search", "merged:2026-11-13..2026-11-16", "--limit", "300",
-    "--json", "number,createdAt,mergedAt,headRefName,headRefOid",
+    "--json", "number,createdAt,mergedAt,headRefName,headRefOid,mergeCommit",
 )
 pulls = sorted(
     (p for p in pulls if p["mergedAt"] <= CUTOFF),
     key=lambda p: (p["mergedAt"], p["number"]),
 )
+# The forge marks a pull request merged when its head reaches main inside another
+# landing; its merge commit is then its own head. It held no lock cycle, so it is
+# neither a row nor a predecessor.
+indirect = [p for p in pulls if p["mergeCommit"] and p["mergeCommit"]["oid"] == p["headRefOid"]]
+pulls = [p for p in pulls if p not in indirect]
 if len(pulls) < ROWS + 1:
     print(len(pulls), file=sys.stderr)
     sys.exit(1)
 pulls = pulls[-(ROWS + 1):]
+indirect = [p for p in indirect if pulls[0]["mergedAt"] <= p["mergedAt"] <= pulls[-1]["mergedAt"]]
 
 table, provenance = [], []
 for before, pull in zip(pulls, pulls[1:]):
@@ -273,6 +279,10 @@ for index in range(3, 15):
     print(f"| {HEADERS[index]} | {text} |")
 print()
 print(f"Landings: {len(table)}, merged {table[0][2]} to {table[-1][2]} (UTC).")
+if indirect:
+    print("Indirect merges (no lock cycle of their own): " + "; ".join(
+        f"#{p['number']} merged {when(p['mergedAt']).strftime('%Y-%m-%d %H:%M:%S')}" for p in indirect
+    ) + " (UTC).")
 print()
 print("| PR | Head | Nix Eval check run | Agent Workflow Tests check run | Instruction Budget check run | CI run attempts |")
 print("|---:|---|---:|---:|---:|---|")
@@ -283,18 +293,18 @@ PY
 
 ## Proposal
 
-Three speed-ups have a saving per landing that the summary table gives as the median of one row, and each keeps the three required checks and the head they run on. A shortens the `Agent Workflow Tests` job's steps before its test step (median 0.2 minutes, `.github/workflows/ci.yaml` only). B shortens the holder's wait for green and merge (median 0.7 minutes, the delivery programs). C shortens the gap between one merge and the next waiter's start (median 1.4 minutes, one lock file). A quarter of the median Hold of 14.0 minutes is 3.5 minutes, and none of the three reaches it, so the one with the largest saving is proposed: C.
+Three speed-ups have a saving per landing that the summary table gives as the median of one row, and each keeps the three required checks and the head they run on. A shortens the `Agent Workflow Tests` job's steps before its test step (median 0.2 minutes, `.github/workflows/ci.yaml` only). B shortens the holder's wait for green and merge (median 0.7 minutes, the delivery programs). C shortens the gap between one merge and the next waiter's start (median 1.4 minutes, one lock file). A quarter of the median Hold of 14.7 minutes is 3.7 minutes, and none of the three medians reaches it, so the one with the largest median is proposed: C. These are medians of the measured rows, not bounds on what a change would save; a median bounds no single landing and no sum.
 
 **What changes.** The first waiter finds a closed lock only at a whole 120 second poll, because a merge leaves the lock's oid unchanged and the 20 second ref reads do not see it (ADR-claims-012, "The grace." and "Poll rate." bullets). A follow-up makes that waiter notice the merge sooner, so its start is not up to a poll late. The file that follow-up changes is `python/agent_tools/claims/forge_land_lock.py`. The forge-clock order of ADR-claims-012 and the CAS lock of ADR-claims-004 are kept: only how soon the first waiter looks again changes, never who is first or how the lock is taken. `.github/branch-protection.json` does not change, and neither does the sync-under-the-lock step. This document only proposes it; adopting it is a later issue.
 
-**Expected saving per queued pull request:** at most 1.4 min per landing ahead of it (the median of `Handoff (min)`). A pull request with k landings ahead of it waits at most k x 1.4 minutes less, and its own hold is unchanged: the lock hold of each holder is the same length, and the saving is the gap between one landing and the next waiter's start, which the estimated Hold (it starts at the previous merge) shows and the lock hold does not. For the 16 Nov case of five queued pull requests, the last one waits at most 5 x 1.4 = 7.0 minutes less. The figure is an upper bound, since a handoff cannot fall to zero, and it is the median: the p90 handoff is 5.8 minutes and one landing (#1159) took 83.0.
+**Expected saving per queued pull request (an assumed scenario, not a bound):** assume 1.4 min per landing ahead of it (the median of `Handoff (min)`) is the polling delay that C removes. Under that assumption a pull request with k landings ahead of it waits about k x 1.4 minutes less, and its own hold is unchanged: the lock hold of each holder is the same length, and the saving is the gap between one landing and the next waiter's start, which the estimated Hold (it starts at the previous merge) shows and the lock hold does not. For the 16 Nov case of five queued pull requests, that is 5 x 1.4 = 7.0 minutes. The assumption is not a measurement. The median does not bound any one handoff or the sum of k of them (the p90 handoff is 5.8 minutes and one landing, #1159, took 83.0), and a handoff also holds the waiter's sync push and the CI run's creation, which faster polling does not remove, so the removable polling delay is unknown here; the only bound the table gives is that a landing's saving cannot exceed its own handoff. Measuring that delay needs the lock's poll times, which the forge does not keep.
 
 **Why every required check still runs on a head up to date with `main`.** `Nix Eval`, `Agent Workflow Tests` and `Instruction Budget` stay required by `.github/branch-protection.json` with `strict` true. The holder still syncs under the lock and merges with `--match-head-commit` at the synced head. C changes only when the next holder starts, not which head the checks run on, so no merge is gated differently; merge safety keeps coming from the required status checks on the pull request (`.agents/knowledge/rejections/ungated-agent-merges.md`).
 
 ## Alternatives considered
 
-- **A, a shorter set-up before the test step.** Saving at most 0.2 minutes per landing (the median of `AWT before test step (min)`), and it shortens each holder's own hold. It changes `.github/workflows/ci.yaml` only, but it is the smallest saving of the three: the one large value (3.5 minutes, #1175) is not typical.
-- **B, a shorter wait between green and merge.** Saving at most 0.7 minutes per landing (the median of `Green to merge (min)`; the 1175.8 minute maximum is one outlier). It changes the delivery programs rather than one file, and its saving is smaller than C's.
+- **A, a shorter set-up before the test step.** The median of `AWT before test step (min)` is 0.2 minutes per landing, and it shortens each holder's own hold. It changes `.github/workflows/ci.yaml` only, but it is the smallest saving of the three: the one large value (3.5 minutes, #1175) is not typical.
+- **B, a shorter wait between green and merge.** The median of `Green to merge (min)` is 0.7 minutes per landing (p90 1.3, maximum 9.2). It changes the delivery programs rather than one file, and its median is smaller than C's.
 - **A faster suite, `SUITE_RUNNER_JOBS`, a larger runner, or the `nix shell` realization inside the test step.** The test step is almost all of the check (median 8.5 minutes), but no column splits it further, so saving not measured here; each needs its own measurement before it can be proposed.
 - **GitHub's merge queue (`merge_group`).** It replaces the lock and the up-to-date rule with the forge's queue, and changes branch protection, the CI triggers and the delivery programs. Saving not measured here, and a much larger change than one lock file.
 - **Landing several queued pull requests as one batch with one CI cycle.** A merged head would no longer be tested alone and a red batch needs bisecting; less safe, and saving not measured here.
