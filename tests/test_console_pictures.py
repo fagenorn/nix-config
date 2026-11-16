@@ -1672,12 +1672,16 @@ class PictureDocsTest(unittest.TestCase):
             with self.subTest(needle):
                 self.assertIn(needle, text)
         for path in ("013-a-managers-brief-is-approved-or-redirected-on-the-page.md",
-                     "014-a-managers-report-becomes-the-sprints-line.md",
                      "038-a-managers-question-shows-its-pictures-on-the-card-and-full-size-in-a-viewer.md"):
             with self.subTest(path):
                 lines = (ROOT / adr / path).read_text().splitlines()
                 self.assertEqual(next(r for r in lines if r.startswith("- **Status:**")),
                                  "- **Status:** accepted; amended by ADR-console-041")
+        with self.subTest("014"):
+            lines = (ROOT / adr / "014-a-managers-report-becomes-the-sprints-line.md"
+                     ).read_text().splitlines()
+            self.assertEqual(next(r for r in lines if r.startswith("- **Status:**")),
+                             "- **Status:** accepted; amended by ADR-console-041, ADR-console-042")
         context = (ROOT / "docs/areas/console/CONTEXT.md").read_text()
         for term in ("**Brief**:", "**Report**:", "**Picture**:"):
             entry = context[context.index(term):].split("\n\n")[0]
