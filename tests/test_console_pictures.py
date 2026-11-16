@@ -451,6 +451,45 @@ class PictureRoundTest(PictureCase):
             [{"id": a, "line": "the card before", "pair": "before"},
              {"id": b, "line": "the card after", "pair": "after"}])
 
+    def test_a_question_naming_screenshots_with_no_picture_is_refused_and_appends_nothing(self):
+        svc = self.open()
+        sid = self.approved(svc)
+        a = self.stored(svc, sid, PIXEL)
+        rows = support.log_rows(self.store)
+        ask = "Judge the screenshots in /tmp/shots"
+        status, _, answer = self.ask(svc, sid, {"questions": [{**self.Q, "question": ask}]})
+        self.assertEqual((status, answer.strip()), (
+            409, sprints.LOOK_WITHOUT_PICTURE.format(n=1, ask=ask).encode()))
+        self.assertIn(b"pictures", answer)
+        for member in ("question", "context"):
+            for text in ("Is card.png right?", "Look in /x/screenshots/y"):
+                with self.subTest(member=member, text=text):
+                    got = self.ask(svc, sid, {"questions": [{**self.Q, member: text}]})
+                    self.assertEqual(got[0], 409)
+        self.assertEqual(support.log_rows(self.store), rows)
+        status, _, answer = self.ask(svc, sid, self.round_with_question(
+            ask, {"picture": a, "line": "the shots folder"}))
+        self.assertEqual(status, 200, answer)
+        self.assertEqual(len(self.rows("questions.asked")), 1)
+
+    def test_a_question_naming_nothing_to_look_at_is_accepted_without_pictures(self):
+        svc = self.open()
+        sid = self.approved(svc)
+        status, _, answer = self.ask(svc, sid, {"questions": [self.Q]})
+        self.assertEqual(status, 200, answer)
+
+    def round_with_question(self, ask, *members):
+        return {"questions": [{**self.Q, "question": ask, "pictures": list(members)}]}
+
+    def test_a_dry_run_with_withheld_files_does_not_refuse_the_look_rule(self):
+        svc = self.open()
+        sid = self.approved(svc)
+        body = json.dumps({"sprint_id": sid, "secret": self.secret(sid), "dry_run": True,
+                           "round": {"questions": [{**self.Q, "question": "Judge the screenshots"}]}}
+                          ).encode()
+        status, _, answer = support.post_page(svc.address, "/api/ask", JSON, body)
+        self.assertEqual((status, json.loads(answer)), (200, {"questions": 1}))
+
     def test_a_dry_run_checks_a_round_and_writes_nothing(self):
         svc = self.open()
         sid = self.approved(svc)
@@ -1006,6 +1045,21 @@ class PictureAskTest(PictureCase):
         self.assertEqual((got.returncode, got.stderr), (0, ""))
         ((payload, _),) = self.rows("questions.asked")
         self.assertEqual(payload["pictures"], [b, a])
+
+    def test_ask_refuses_a_look_question_without_a_picture_and_takes_it_with_a_file(self):
+        svc = self.open()
+        sid = self.approved(svc)
+        ask = "Judge the screenshots in /tmp/shots"
+        got = self.assert_unchanged(svc, lambda: self.ask(svc, sid, {"questions": [
+            {**self.Q, "question": ask}]}))
+        self.assertEqual((got.returncode, got.stdout, got.stderr), (
+            1, "", "sprint: refused 409: " + sprints.LOOK_WITHOUT_PICTURE.format(n=1, ask=ask)
+            + "\n"))
+        shot = self.write("shot.png", PIXEL)
+        got = self.ask(svc, sid, {"questions": [{**self.Q, "question": ask, "pictures": [
+            {"file": str(shot), "line": "the shots"}]}]})
+        self.assertEqual((got.returncode, got.stderr), (0, ""))
+        self.assertEqual(len(self.rows("questions.asked")), 1)
 
     def test_ask_passes_an_already_sent_id_through(self):
         svc = self.open()

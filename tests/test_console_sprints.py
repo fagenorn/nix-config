@@ -1481,6 +1481,51 @@ class RoundPictureTest(unittest.TestCase):
             with self.subTest(reason=reason):
                 self.assertEqual(refusal(self.with_pictures(pictures)), reason)
 
+    LOOKS = ("Judge the screenshots in /tmp/shots", "Is the screenshot right?",
+             "Compare the SCREEN SHOT with the old one", "Read /tmp/out/card.PNG first",
+             "See card.png, then pick", "Look in /work/screenshots/after please",
+             "Which looks better, the Screenshots folder one?")
+
+    def test_a_question_naming_screenshots_without_a_picture_is_refused(self):
+        for text in self.LOOKS:
+            for member in ("question", "context"):
+                round_ = {"questions": [{**QUESTION, member: text}]}
+                with self.subTest(text=text, member=member):
+                    self.assertEqual(refusal(round_), sprints.LOOK_WITHOUT_PICTURE.format(
+                        n=1, ask=round_["questions"][0]["question"]))
+        for pictures in ([], None):
+            question = {**QUESTION, "question": self.LOOKS[0]}
+            if pictures is not None:
+                question["pictures"] = pictures
+            with self.subTest(pictures=pictures):
+                self.assertIn("attach the pictures with pictures",
+                              refusal({"questions": [question]}))
+
+    def test_the_refusal_names_the_first_such_question(self):
+        round_ = {"questions": [QUESTION, {**QUESTION, "question": "Is card.png fine?"},
+                                {**QUESTION, "question": "The screenshot?"}]}
+        self.assertEqual(refusal(round_), sprints.LOOK_WITHOUT_PICTURE.format(
+            n=2, ask="Is card.png fine?"))
+        self.assertTrue(refusal(round_).startswith('question 2 "Is card.png fine?"'))
+
+    def test_a_picture_or_a_question_naming_none_is_taken(self):
+        shot = [{"picture": A, "line": "the card"}]
+        for text in self.LOOKS:
+            with self.subTest(text=text):
+                got = sprints.checked_round(
+                    {"questions": [{**QUESTION, "question": text, "pictures": shot}]})
+                self.assertEqual(got["questions"][0]["pictures"], shot)
+        for text in ("Is the layout right?", "Use the png format?", "Ship the screen now?"):
+            with self.subTest(text=text):
+                sprints.checked_round({"questions": [{**QUESTION, "question": text}]})
+
+    def test_a_logged_round_and_withheld_files_skip_the_picture_rule(self):
+        round_ = {"questions": [{**QUESTION, "question": self.LOOKS[0]}]}
+        self.assertEqual(sprints.checked_round(round_, limits=False)["questions"][0]["question"],
+                         self.LOOKS[0])
+        self.assertEqual(sprints.checked_round(round_, files_withheld=True)
+                         ["questions"][0]["question"], self.LOOKS[0])
+
     def test_eight_pictures_and_a_140_character_line_are_taken(self):
         pictures = [{"picture": A, "line": "l" * 140}] + [{"picture": B, "line": "l"}] * 7
         checked = sprints.checked_round(self.with_pictures(pictures))

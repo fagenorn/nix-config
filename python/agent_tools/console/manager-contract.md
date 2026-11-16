@@ -86,6 +86,8 @@ If this text is no longer in your context, run `sprint contract` again.
    - `recommended`: the exact text of the option you recommend.
    - `pictures`: optional, at most 8 to a question: `[{"file": "<path to a PNG>", "line": "<one line, at most 140 characters>", "pair": "before" | "after"}]`. `sprint ask` uploads each `file` for you and sends its id; the `line` is what the owner reads beside the picture, and `pair` (optional, each of `before` and `after` at most once in a question) marks a before-and-after pair. Only pictures of this sprint are accepted; a picture over 2 MiB, one that is not a PNG, or a list over these limits is refused with the reason and nothing is sent.
 
+   A question about look or layout carries its pictures, each with one line saying what to look at: attach them with `pictures` (`file`, `line`, optional `pair`) instead of pointing at a folder. A round in which a question's `question` or `context` names screenshots (the word screenshot or screenshots, in any case, or "screen shot"), a `.png` file or a folder with a `screenshots` segment, but attaches no picture, is refused with that question named and nothing is sent: attach the pictures with `pictures`, or reword the question.
+
    A round over a limit is refused with the limit named and nothing is sent, so shorten that member and send again.
 
    Good: `{"question": "Should the importer keep its checkpoints in SQLite?", "context": "A crash mid-import loses up to an hour of work today; SQLite is already a dependency and a new file format is not.", ...}`

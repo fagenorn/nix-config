@@ -560,6 +560,13 @@ class SprintCommandTest(Case):
         self.assertIn("- Never enter or create a worktree yourself, because a delivery makes its "
                       "own.", section)
 
+    def test_the_contract_says_a_look_or_layout_question_carries_its_pictures(self):
+        section = run_sprint("contract").stdout.split("## Questions\n", 1)[1].split("\n## ", 1)[0]
+        for needle in ("A question about look or layout carries its pictures", "pictures",
+                       '[{"file": "<path to a PNG>", "line": "<one line, at most 140 characters>"',
+                       "screenshot", ".png", "refused"):
+            self.assertIn(needle, section)
+
     def test_the_contract_says_what_follows_a_restart_or_a_takeover(self):
         text = CONTRACT.read_text(encoding="utf-8")
         _, found, rest = text.partition("## After a restart or a takeover")
