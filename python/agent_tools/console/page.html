@@ -360,6 +360,8 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .pic-thumb img[hidden] { display: none; }
 .pic-failed { display: block; padding: 10px; font-size: .8125rem; color: var(--ov2); cursor: default; }
 .pic-line { margin-top: 4px; font-size: .84375rem; color: var(--sub0); overflow-wrap: anywhere; }
+.pic-missing { margin: 8px 0 0; font-size: .84375rem; color: var(--sub0); overflow-wrap: anywhere; }
+.reading { margin: 10px 0 0; font-weight: 600; color: var(--text); overflow-wrap: anywhere; }
 .pic-label { display: block; margin-bottom: 4px; font-size: .8125rem; color: var(--ov2); }
 html:has(#viewer:not([hidden])) { overflow: hidden; }
 .viewer { position: fixed; inset: 0; z-index: 30; display: flex; flex-direction: column; background: var(--crust); }
@@ -1943,6 +1945,19 @@ function kindWords(item) {
 function checkLabel(item) {
   return typeof item.check_id === "string" && item.check_id !== "" ? el("span", "check-id", item.check_id) : null;
 }
+function isOwnerCheck(item) {
+  return typeof item.check_id === "string";
+}
+// An owner check's pictures (ADR-console-042) reuse the shared gallery and viewer of ADR-console-038.
+function checkPictures(node, item) {
+  const gallery = pictureGallery(itemId(item), item.pictures);
+  if (gallery !== null) node.appendChild(gallery);
+  if (!Array.isArray(item.missing_pictures)) return;
+  for (const name of item.missing_pictures) node.appendChild(el("p", "pic-missing", name + " was not found on this host."));
+}
+function readingLine(item) {
+  return typeof item.reading === "string" && item.reading !== "" ? el("p", "reading", "Reading: " + item.reading) : null;
+}
 function headLine(item) {
   const line = el("p", "head meta");
   line.appendChild(kindWords(item));
@@ -2939,6 +2954,8 @@ function checkBox(item, state, lead) {
       box.appendChild(heldLine(item));
       act.appendChild(detailFold(item));
     }
+    const reading = readingLine(item);
+    if (reading !== null) box.appendChild(reading);
     box.appendChild(act);
     return box;
   };
@@ -3020,6 +3037,7 @@ function leadItem(item) {
   const card = el("article", "card lead");
   card.appendChild(headLine(item));
   card.appendChild(pathWords(el("h2", isRegister(item) ? "q reg" : "q"), item.headline));
+  if (isOwnerCheck(item)) checkPictures(card, item);
   if (isQuestion(item) && typeof item.context === "string") card.appendChild(el("p", "context", item.context));
   if (isQuestion(item)) {
     const gallery = pictureGallery(itemId(item), item.pictures);
@@ -3061,6 +3079,7 @@ function itemLine(item) {
     head.appendChild(phrase("span", "lw", "waiting ", timeEl("since", item.waiting_since, "")));
     line.appendChild(head);
   }
+  if (isOwnerCheck(item)) checkPictures(line, item);
   if (isQuestion(item) && typeof item.context === "string") line.appendChild(el("p", "context", item.context));
   if (isQuestion(item)) {
     const gallery = pictureGallery(itemId(item), item.pictures);
