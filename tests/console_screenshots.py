@@ -3,9 +3,10 @@
 Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
 
 Contract:
-- `STATES` names the nine screens the sprint block, the finished list and the message life
-  must read well on; `WIDTHS` are the two viewport widths each is shot at. `capture` writes
-  `<state>-<width>.png` for every pair, so a full run writes 18 files.
+- `STATES` names the ten screens the sprint block, the finished list and the message life
+  must read well on (`tell-box-open` is the sprint block with its Tell box opened);
+  `WIDTHS` are the two viewport widths each is shot at. `capture` writes
+  `<state>-<width>.png` for every pair, so a full run writes 20 files.
 - Each state is a fresh fixture console: a registry of three projects (`owner/web`,
   `owner/api`, `owner/docs`) and an event log seeded for that state with event times relative
   to one clock reading, served by the real `ConsoleService` on a loopback port. Nothing is
@@ -17,10 +18,13 @@ Contract:
   `XDG_CONFIG_HOME` under another for the run, so the owner's real accounts directory and real
   registry are never read or written. The temporary roots are removed after each state.
 - `main(["--out", dir])` prints each written path. It returns 1 (and says so) when any shot's
-  `document.documentElement.scrollWidth` exceeds its width or any sprint's "what it is doing
-  now" sentence is drawn narrower than half its head (it was once squeezed into the icon
-  column, which the sideways check misses), 2 with a one-line reason when
-  Playwright or Chromium is missing, else 0. Playwright is imported inside `capture` only,
+  `document.documentElement.scrollWidth` exceeds its width; when any sprint's "what it is
+  doing now" sentence is squeezed (it starts above its title's bottom, is narrower than the
+  head's line or than the title, is taller than two lines, or is clipped); when a shot shows a
+  jargon label (a "Detail" or "More" fold, or an "Approved version" message row that is not
+  sent or not picked up); or when a `tell-box-open` shot does not show the open Tell box (the
+  textarea, the Send button and the pick-up hint, `OPEN_TELL`). It returns 2 with a one-line
+  reason when Playwright or Chromium is missing, else 0. Playwright is imported inside `capture` only,
   so the fixture half of this module needs nothing beyond the standard library.
 """
 from __future__ import annotations
@@ -37,11 +41,13 @@ from pathlib import Path
 from agent_tools.console import manager
 from agent_tools.console.event_log import EventLog
 from agent_tools.console.service import ConsoleService
+from agent_tools.console.sprints import TELL_MINUTE_TEXT
 
 from .console_test_support import write_registry
 
-STATES = ("live-several", "waiting-on-you", "stuck", "message-sent", "message-picked-up",
-          "message-replied", "message-not-picked-up", "finished-list", "nothing-running")
+STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-sent",
+          "message-picked-up", "message-replied", "message-not-picked-up", "finished-list",
+          "nothing-running")
 WIDTHS = (1440, 480)
 HEIGHT = 900
 MINUTE = 60.0
@@ -49,6 +55,12 @@ PROJECTS = ("owner/web", "owner/api", "owner/docs")
 TRACKER_URL = "https://github.com/owner/web/issues"
 TELL_TEXT = "leave the importer's schema alone"
 REPLY_TEXT = "kept the schema; moved the change to the reader"
+MILESTONES = {"Add resumable uploads": "the upload form",
+              "Fix the settings page": "the settings form",
+              "Keep the importer fast": "the batch reader",
+              "Retire the old exporter": "the last export path",
+              "Try a new cache": "the cache layer"}
+OPEN_TELL = (True, "Send", TELL_MINUTE_TEXT)
 
 
 class Unavailable(Exception):
@@ -76,6 +88,8 @@ class Shot:
     path: Path
     scroll_width: int
     squeezed: int = 0
+    jargon: int = 0
+    tell: tuple[bool, str | None, str | None] | None = None
 
 
 def sandbox_environ(root: Path) -> dict[str, str]:
@@ -122,12 +136,12 @@ class _Seed:
             "risks": ["a partial write"], "asks": []}})
         approved = self.put(started - 60, "brief.approved", project, {**base, "version": 1})
         self.put(started - 70, "sprint.read", project, {"sprint_id": sid, "through": approved.seq})
-        stage = "landed" if landed else "building"
+        issues = ([{"issue": 12, "stage": "landed"}, {"issue": 13, "stage": "landed"}] if landed
+                  else [{"issue": 12, "stage": "building"}, {"issue": 13, "stage": "queued"}])
         if report is not None:
             self.put(report, "sprint.reported", project, {**base, "report": {
-                "status": f"Working on {title.lower()}", "phase": "running",
-                "milestone": "the first slice is in review", "tracker_url": TRACKER_URL,
-                "issues": [{"issue": 12, "stage": stage}, {"issue": 13, "stage": stage}],
+                "status": "the first slice is in review", "phase": "running",
+                "milestone": MILESTONES[title], "tracker_url": TRACKER_URL, "issues": issues,
                 "inbox": [], "next": "merge the first slice"}})
         if asks:
             self.put(MINUTE * 4, "questions.asked", project, {**base, "blocker": False, "questions": [{
@@ -171,6 +185,8 @@ def _seed_state(seed: _Seed, state: str) -> None:
                     asks=True)
     elif state == "stuck":
         seed.sprint(web, "Add resumable uploads", started=60 * MINUTE, report=45 * MINUTE)
+    elif state == "tell-box-open":
+        seed.sprint(web, "Add resumable uploads", started=20 * MINUTE, report=2 * MINUTE)
     elif state.startswith("message-"):
         sid, goal = seed.sprint(web, "Add resumable uploads", started=20 * MINUTE,
                                 report=2 * MINUTE)
@@ -262,6 +278,43 @@ def capture(out: Path, states: Sequence[str] = STATES,
     return taken
 
 
+TELL_READING = """(() => {
+  const box = document.querySelector('textarea.tell');
+  const rect = box ? box.getBoundingClientRect() : null;
+  const text = (selector) => {
+    const node = document.querySelector(selector);
+    return node ? node.textContent.trim() : null;
+  };
+  return [Boolean(rect && rect.width > 0 && rect.height > 0),
+          text('button.tell-send'), text('p.tell-hint')];
+})()"""
+
+SQUEEZED_COUNT = """Array.from(document.querySelectorAll('li.sprint')).filter((sprint) => {
+  const now = sprint.querySelector('.sp-now');
+  if (!now) return false;
+  const n = now.getBoundingClientRect();
+  const title = sprint.querySelector('.title-line').getBoundingClientRect();
+  const head = sprint.querySelector('.sp-head').getBoundingClientRect();
+  const lineHeight = parseFloat(getComputedStyle(now).lineHeight);
+  return n.top < title.bottom - 1 || n.width < head.right - title.left - 1
+    || n.width < title.width - 1 || n.height > 2 * lineHeight + 1
+    || now.scrollHeight > now.clientHeight + 1;
+}).length"""
+
+JARGON_COUNT = """(() => {
+  const folds = Array.from(document.querySelectorAll('#projects summary')).filter(
+    (summary) => ['Detail', 'More'].includes(summary.textContent.trim())).length;
+  const rows = Array.from(document.querySelectorAll('#projects li.message')).filter((row) => {
+    const text = row.querySelector('.message-text');
+    const state = row.querySelector('.message-state');
+    const said = state ? state.textContent.trim() : '';
+    return text && text.textContent.trim().startsWith('Approved version')
+      && !said.startsWith('sent') && !said.startsWith('not picked up');
+  }).length;
+  return folds + rows;
+})()"""
+
+
 def _shoot(browser, url: str, state: str, width: int, out: Path) -> Shot:
     page = browser.new_page(viewport={"width": width, "height": HEIGHT})
     try:
@@ -270,15 +323,19 @@ def _shoot(browser, url: str, state: str, width: int, out: Path) -> Shot:
         if state == "finished-list":
             page.click('details[data-key="finished"] > summary')
             page.click('details[data-key^="ended:"] > summary')
+        tell = None
+        if state == "tell-box-open":
+            page.click("button.tell-open")
+            page.wait_for_selector(".tell-hint")
+            tell = tuple(page.evaluate(TELL_READING))
         scroll_width = page.evaluate("document.documentElement.scrollWidth")
-        squeezed = page.evaluate(
-            "Array.from(document.querySelectorAll('.sp-now')).filter("
-            "(n) => n.clientWidth < n.parentElement.clientWidth / 2).length")
+        squeezed = page.evaluate(SQUEEZED_COUNT)
+        jargon = page.evaluate(JARGON_COUNT)
         path = out / f"{state}-{width}.png"
         page.screenshot(path=str(path), full_page=True)
     finally:
         page.close()
-    return Shot(state, width, path, scroll_width, squeezed)
+    return Shot(state, width, path, scroll_width, squeezed, jargon, tell)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -310,8 +367,14 @@ def main(argv: list[str] | None = None) -> int:
     squeezed = [shot for shot in taken if shot.squeezed > 0]
     for shot in squeezed:
         print(f"console-screenshots: {shot.path.name} squeezes the now sentence "
-              f"({shot.squeezed} narrower than half its head)")
-    return 1 if wide or squeezed else 0
+              f"({shot.squeezed} above, narrower than its line, over two lines or clipped)")
+    jargon = [shot for shot in taken if shot.jargon > 0]
+    for shot in jargon:
+        print(f"console-screenshots: {shot.path.name} shows a jargon label ({shot.jargon})")
+    closed = [shot for shot in taken if shot.state == "tell-box-open" and shot.tell != OPEN_TELL]
+    for shot in closed:
+        print(f"console-screenshots: {shot.path.name} does not show the open Tell box")
+    return 1 if wide or squeezed or jargon or closed else 0
 
 
 if __name__ == "__main__":
