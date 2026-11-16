@@ -1330,6 +1330,21 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn('"Notices (n)" fold', notice)
         self.assertIn("ADR-console-002", notice)
 
+    def test_the_guard_coverage_decision_is_recorded(self):
+        path = "docs/areas/guard/adr/009-the-guard-covers-bash-only-and-production-rules-live-in-the-contract.md"
+        adr = self.doc(path)
+        self.assertTrue(adr.startswith(
+            "# ADR-guard-009 \u2014 The guard covers the Bash tool only, and production rules live in the project contract"))
+        for needle in ("bypassPermissions", "2.1.322", "mcp__", "Edit", "Write", "just", "residual gap",
+                       "ADR-guard-005", "ADR-guard-006", "ADR-console-021", "detaching word",
+                       "raise label", "production rule", "read-only route", "approved release path"):
+            self.assertIn(needle, adr)
+        context = self.doc("docs/areas/guard/CONTEXT.md")
+        for term in ("Production rule", "Read-only route", "Approved release path"):
+            self.assertIn("**" + term + "**:", context)
+            self.assertIn("| " + term + " | Guard |", self.doc("docs/CONTEXT-MAP.md"))
+        self.assertIn("ADR-guard-009", context)
+
     def test_the_release_result_adr_limits_one_mutation_to_the_forge_adapter(self):
         text = self.doc("docs/areas/release/adr/005-adapters-never-claim-success.md")
         self.assertNotIn("An adapter makes at most one mutation", text)
