@@ -110,10 +110,12 @@ project is trusted everywhere. The targets are `targets(Path($HOME), <each direc
 CLAUDE_ACCOUNTS_DIR/profiles>)`: `default` first, then each account profile. A pair is missing when
 the project's `trust_key` is None, or its file is absent, unreadable, not a JSON object, or has
 `projects[key].hasTrustDialogAccepted` other than exactly `true`. Stdout is one JSON line,
-`{"status": "met" | "not_met" | "registry_unreadable", "projects": <n>, "missing": [{"project": <id>,
+`{"status": "met" | "not_met" | "registry_unreadable" | "profiles_unreadable", "projects": <n>, "missing": [{"project": <id>,
 "profile": <name>}, ...]}` (keys sorted), `missing` in registry then target order. The exit status is
-0 only for `met`; `not_met` and `registry_unreadable` (a registry that is absent or invalid: a
-vacuous pass would hide a broken host) are 1. No file is written, created or renamed, and no file
+0 only for `met`; `not_met`, `registry_unreadable` (a registry that is absent or invalid: a
+vacuous pass would hide a broken host) and `profiles_unreadable` (the profiles directory exists but
+cannot be listed, so some profile files went unexamined; `missing` is empty and `projects` the registry
+count) are 1. An absent profiles directory is no profiles, not a failure. No file is written, created or renamed, and no file
 content reaches stdout or stderr.
 """
 
@@ -622,6 +624,20 @@ def _trusted_in(path: Path, key: str) -> bool:
     return isinstance(entry, dict) and entry.get("hasTrustDialogAccepted") is True
 
 
+def _profile_dirs() -> list[Path]:
+    """Each directory under the profiles directory, sorted; an absent profiles directory is none.
+
+    Any other failure to list it raises OSError: a listing that cannot be read is not an empty one.
+    """
+    root = _accounts_dir() / "profiles"
+    try:
+        with os.scandir(root) as entries:
+            found = [Path(entry.path) for entry in entries if entry.is_dir()]
+    except FileNotFoundError:
+        return []
+    return sorted(found)
+
+
 def _check_registered() -> int:
     def report(status: str, count: int, missing: list[dict]) -> int:
         print(json.dumps({"status": status, "projects": count, "missing": missing},
@@ -634,8 +650,10 @@ def _check_registered() -> int:
         projects = agent_platform.read_registry()
     except (agent_platform.PlatformManifestError, OSError, RuntimeError, KeyError):
         return report("registry_unreadable", 0, [])
-    profiles = sorted(
-        directory for directory in (_accounts_dir() / "profiles").glob("*") if directory.is_dir())
+    try:
+        profiles = _profile_dirs()
+    except OSError:
+        return report("profiles_unreadable", len(projects), [])
     where = targets(Path(os.environ["HOME"]), profiles)
     missing = []
     for entry in projects:

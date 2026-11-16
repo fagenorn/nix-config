@@ -12,6 +12,7 @@ import errno
 import io
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -649,6 +650,26 @@ class CheckRegisteredTest(CommandTest):
                 self.assertEqual(done.returncode, 1, done.stderr)
                 self.assertEqual(report, {"status": "registry_unreadable", "projects": 0,
                                           "missing": []})
+
+    def test_check_registered_fails_when_the_profiles_directory_cannot_be_listed(self):
+        files = self.all_trusted()
+        profiles = self.accounts / "profiles"
+        profiles.chmod(0)
+        self.addCleanup(profiles.chmod, 0o755)
+        if os.access(profiles, os.R_OK):
+            self.skipTest("directory permissions are not enforced for this user")
+        before = self.snapshot(files[0])
+        done, report = self.check()
+        self.assertEqual(done.returncode, 1, done.stderr)
+        self.assertEqual(report, {"status": "profiles_unreadable", "projects": 2, "missing": []})
+        self.assertEqual(self.snapshot(files[0]), before)
+
+    def test_check_registered_treats_an_absent_profiles_directory_as_no_profiles(self):
+        self.all_trusted()
+        shutil.rmtree(self.accounts / "profiles")
+        done, report = self.check()
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(report, {"status": "met", "projects": 2, "missing": []})
 
     def test_the_wrapper_is_committed_executable_and_runs_the_check(self):
         self.all_trusted()
