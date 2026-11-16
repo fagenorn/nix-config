@@ -12,7 +12,7 @@ Standard library only: it imports nothing from the repository's helper package,
 `agent_tools`.
 
 The decisions behind the rules below are the records in `docs/areas/guard/adr/`
-(ADR-guard-001 to ADR-guard-008), and the compiler that writes the compiled
+(ADR-guard-001 to ADR-guard-011), and the compiler that writes the compiled
 policy is documented in `python/agent_tools/guard/guard_policy.py`.
 
 Segments, tokens and verbs
@@ -695,6 +695,67 @@ command, `eval`/`sh -c` source or a quoted `$(…)`/backtick substitution that
 mentions the label blocks too, while other labels, `--remove-label` and quoted
 mentions pass.
 
+Production rules
+----------------
+
+A project's declared production commands are refused outside its release path
+(issue 1149, ADR-guard-011). The rules are a derived row's optional `production`
+member, which the compiler copies from the project's contract: `changes`, the
+commands that change its production, `read_only`, the routes that only read it,
+and `release_profile`. A command `{id, argv}` is matched as the verb
+`[basename(argv[0]), *argv[1:]]`, so `/usr/local/bin/kubectl` is the word
+`kubectl`. The rules are read from the compiled policy unconfirmed: they only
+refuse, so the row check never confirms them (and never compares them), and a
+compiled policy that does not load, a row without `production` and a row with
+an empty `changes` refuse nothing.
+
+The check runs on every call after the detaching check and the base policy
+load, before any lifecycle verb is judged. It reuses the segment and token
+readings of the lifecycle verbs. The guard reads the command as raw text when
+it cannot be parsed, a segment cannot be tokenised, or a command word is an
+evaluator (`sh`, `bash`, `eval`, ...) or an `env -S`; there a verb counts when
+its words occur in order in either raw reading, or its words joined by one
+space are a substring of the command or of the command with its quotes and
+backslashes deleted, and nothing is lifted. Otherwise a verb of two or more
+words counts at any word whose basename is its first word, when its remaining
+words occur in order in that word's run (up to the next operator), or, when an
+operator cut the run, in the rest of the segment and both raw readings of the
+later segments. A one-word verb has no later words to tell a run of it from a
+mention of it (`git add scripts/deploy.sh`, `--title kubectl`), so it counts
+only at a command position, or at a later word of a run whose command-position
+program is in `PRODUCTION_RUNNERS` (`xargs`, `timeout`, `nice`, `find`, `devenv`
+and the other programs that run a later word as a command). A quoted token that
+holds `$(` or a backtick is also read as raw text alone, with no lift, since a
+substitution runs its text. A parsed match is lifted when its run begins with a
+read-only verb that properly extends the production verb (`kubectl get pods`
+against `kubectl`, not `just build switch` against `just switch`); raw text
+lifts nothing. The release path, `release transaction preview` and
+`release transaction run`, needs no special case: its arguments are inert for a
+one-word verb because they are not at a command position, and a chained or
+substituted production command in them still counts.
+
+Which project's rules refuse depends on the checkout: the payload cwd's
+repository (its `origin` slug). A command with a word, in either raw reading,
+whose basename is `cd`, `pushd`, `popd` or `chdir` may run elsewhere, so every
+declaring row judges it, the cwd repository first and then by sorted slug. That
+reading is by raw words, not command positions, because a leading redirection
+(`>/dev/null cd dir`) is read as the command word and a double-quoted
+substitution is one token. Inside a row the first rule in `changes` order that
+hits names the refusal, which is one line:
+
+    lifecycle guard: `<argv>` changes the production of <slug> (production rule
+    <id>), so it runs only through the release profile <release_profile> with
+    release transaction preview and release transaction run.
+
+Known limits: a production command reached by another name (a bare `just` that
+runs the default recipe, a script or alias), words fed on stdin, a program's own
+directory option (`env -C`, `make -C`) and a one-word command handed to a program
+outside `PRODUCTION_RUNNERS` (`ssh host kubectl apply`) are not seen. Where the
+text is read raw or behind a runner, a one-word command's name anywhere refuses,
+file arguments included. A command that mentions a directory-changing word
+anywhere is judged against every declaring project. Rewriting the compiled policy
+can remove a project's production refusals, though it still gains no authorization.
+
 Guard policy
 ------------
 
@@ -730,15 +791,18 @@ other, and each member has one trust rule:
     derived_repositories       compiled policy  A candidate row per slug, used
                                                 only after the row check
                                                 confirms it in this invocation.
+    production                 compiled policy  A row's declared production rules,
+                                                read unconfirmed: they only
+                                                refuse (issue 1149).
     derivation                 compiled policy  Recorded for the reader; null or
                                                 an object; the guard does not
                                                 interpret it.
 
 The guard loads the base policy on every call, after the detaching-word check.
-It opens the compiled policy only when it judges a repository-bound verb (push,
-PR creation, merge or release creation), at the point it builds the repository
-context, so a command with none of those, branch deletion included, never reads
-it. The compiled policy supplies no value the guard executes, and the guard
+It reads the compiled policy on every call that passes the detaching check and
+the base-policy load, for the production rules (issue 1149 D4), and runs the row
+check only for a repository-bound verb (push, PR creation, merge or release
+creation), when it builds the repository context. The compiled policy supplies no value the guard executes, and the guard
 runs only the base policy's three tools, the row check and the look check,
 which it finds by the absolute paths `--derive-bin` and `--look-bin` name. The compiled policy is a user-writable
 state file, because compiling at activation cannot write the store. Since issue
@@ -3573,6 +3637,194 @@ def bounded_timeout(deadline, child_timeout):
     return child_timeout
 
 
+DIRECTORY_CHANGING_WORDS = frozenset({"cd", "pushd", "popd", "chdir"})
+# Programs that run a later word of their own run as a command (issue 1149 D5),
+# matched by basename. Only a one-word production verb uses it.
+PRODUCTION_RUNNERS = frozenset({
+    "xargs", "timeout", "nice", "ionice", "stdbuf", "watch", "chrt", "taskset", "flock",
+    "doas", "caffeinate", "find", "parallel", "strace", "unbuffer", "nix", "nix-shell",
+    "devenv", "direnv",
+})
+PRODUCTION_ROUTE = "release transaction preview and release transaction run"
+
+
+def production_verb(argv):
+    """The words a production command is matched by: the program by basename, then the
+    arguments exactly."""
+    return [program_name(argv[0]), *argv[1:]]
+
+
+def words_in_order(words, needed):
+    """True when the exact `needed` words occur in `words` in order, not necessarily
+    adjacent; True for no needed word."""
+    position = 0
+    if not needed:
+        return True
+    for word in words:
+        if word == needed[position]:
+            position += 1
+            if position == len(needed):
+                return True
+    return False
+
+
+def production_raw_hit(text, verb):
+    """The raw-text reading of a production verb in `text`: its words in order in either
+    reading of the quotes and backslashes, or its words joined by one space a substring of
+    the text or of the text with its quotes and backslashes deleted."""
+    readings = (raw_words(text), raw_words(text, glued=True))
+    texts = (text, "".join(c for c in text if c not in RAW_GLUE_CHARS))
+    return (
+        any(verb_occurs_in_order(words, verb) for words in readings)
+        or any(" ".join(verb) in each for each in texts)
+    )
+
+
+def production_lifted(run, verb, read_only):
+    """True when `run`, the words from a match onward, begins with a read-only verb that
+    properly extends the production verb `verb`."""
+    return any(
+        len(each) > len(verb)
+        and each[:len(verb)] == verb
+        and len(run) >= len(each)
+        and program_name(run[0]) == each[0]
+        and run[1:len(each)] == each[1:]
+        for each in read_only
+    )
+
+
+def production_parse(command):
+    """The tokens and command-position flags of each segment of `command`, with the raw
+    text of the segments after it, or None when the guard reads the command as raw text:
+    it cannot be parsed or tokenised, or a command word is an evaluator or `env -S`."""
+    split = split_segments_with_runs(command)
+    if split is None:
+        return None
+    segments = split[0]
+    parsed = []
+    for position, segment in enumerate(segments):
+        tokens = tokenize_segment(segment)
+        if tokens is None:
+            return None
+        flags, split_string = command_position_flags(tokens)
+        if split_string or any(
+            flag and program_name(value) in SHELL_EVALUATORS
+            for flag, (value, _) in zip(flags, tokens)
+        ):
+            return None
+        parsed.append((tokens, flags, "\n".join(segments[position + 1:])))
+    return parsed
+
+
+def production_hits(command, rules):
+    """(hits, certain) for `command` against `rules`, a map of slug to its `production`
+    member: the `(slug, index into changes)` pairs the shell would run, and False for
+    `certain` when any word of either raw reading is a directory change (issue 1149 D5 to
+    D7). A mention as another program's argument never hits a one-word verb."""
+    verbs = {
+        slug: (
+            [production_verb(change["argv"]) for change in rule["changes"]],
+            [production_verb(change["argv"]) for change in rule["read_only"]],
+        )
+        for slug, rule in rules.items()
+    }
+    certain = not any(
+        program_name(word) in DIRECTORY_CHANGING_WORDS
+        for words in (raw_words(command), raw_words(command, glued=True))
+        for word in words
+    )
+    hits = set()
+    parsed = production_parse(command)
+    if parsed is None:
+        for slug, (changes, _) in verbs.items():
+            for index, verb in enumerate(changes):
+                if production_raw_hit(command, verb):
+                    hits.add((slug, index))
+        return hits, certain
+    for tokens, flags, later in parsed:
+        later_words = (raw_words(later), raw_words(later, glued=True))
+        for value, operator in tokens:
+            if not operator and ("$(" in value or "`" in value):
+                for slug, (changes, _) in verbs.items():
+                    for index, verb in enumerate(changes):
+                        if production_raw_hit(value, verb):
+                            hits.add((slug, index))
+        start = 0
+        while start < len(tokens):
+            if tokens[start][1]:
+                start += 1
+                continue
+            end = start
+            while end < len(tokens) and not tokens[end][1]:
+                end += 1
+            flagged = next((k for k in range(start, end) if flags[k]), None)
+            runner = program_name(tokens[flagged][0]) if flagged is not None else None
+            cut = end < len(tokens)
+            for i in range(start, end):
+                name = program_name(tokens[i][0])
+                run = [token[0] for token in tokens[i:end]]
+                after = [token[0] for token in tokens[i + 1:] if not token[1]]
+                for slug, (changes, read_only) in verbs.items():
+                    for index, verb in enumerate(changes):
+                        if (slug, index) in hits or name != verb[0]:
+                            continue
+                        if len(verb) == 1:
+                            matched = flags[i] or (
+                                flagged is not None and i > flagged
+                                and runner in PRODUCTION_RUNNERS
+                            )
+                        else:
+                            matched = words_in_order(run[1:], verb[1:]) or (
+                                cut and any(
+                                    words_in_order(after + words, verb[1:])
+                                    for words in later_words
+                                )
+                            )
+                        if matched and not production_lifted(run, verb, read_only):
+                            hits.add((slug, index))
+            start = end
+    return hits, certain
+
+
+def production_refusal_text(slug, rule, release_profile):
+    """The one sentence that refuses a production command (issue 1149 D8)."""
+    return (
+        f"`{shown_value(shlex.join(rule['argv']))}` changes the production of {slug} "
+        f"(production rule {shown_value(rule['id'])}), so it runs only through the "
+        f"release profile {shown_value(release_profile)} with {PRODUCTION_ROUTE}."
+    )
+
+
+def production_problem_for(command, rows, cwd, git_bin, timeout):
+    """The reason to refuse `command` as a production command, or None.
+
+    Only a row whose `production` has a `changes` entry takes part. With no hit nothing
+    runs; with one, `detect_repository` names the payload cwd's repository. A command that
+    may change directory is judged against every declaring row, that repository first,
+    then by sorted slug; otherwise only that repository's rules refuse. Inside a row the
+    first rule in `changes` order that hits names the refusal.
+    """
+    rules = {
+        slug: row["production"] for slug, row in rows.items()
+        if row.get("production") and row["production"]["changes"]
+    }
+    if not rules:
+        return None
+    hits, certain = production_hits(command, rules)
+    if not hits:
+        return None
+    here = detect_repository(git_bin, cwd, timeout)
+    order = [here] if here in rules else []
+    if not certain:
+        order += sorted(slug for slug in rules if slug != here)
+    for slug in order:
+        for index, change in enumerate(rules[slug]["changes"]):
+            if (slug, index) in hits:
+                return production_refusal_text(slug, change, rules[slug]["release_profile"])
+    return None
+
+
+
 class Context:
     """Injected dependencies plus one repository's facts, resolved once per
     directory or per named repository (issue 400 D8, issue 418 D4).
@@ -3582,10 +3834,9 @@ class Context:
     context (issue 418 D5): the repository is the slug a PR creation or merge
     names with `--repo`, no checkout is read for it (`cwd` is None, no `git`
     child runs), and the base branch is its row's `default_branch` once the row
-    check confirms the row. Building a context is the one place the compiled
-    policy is opened and the one place the row check runs, so a command with no
-    push, PR creation, merge or release creation never reads the first or
-    starts the second.
+    check confirms the row. Building a context is the one place the row check
+    runs, so a command with no push, PR creation, merge or release creation never starts the row check; the
+    compiled policy is also read once before it, for the production rules.
     """
 
     def __init__(self, args, base, cwd, deadline, repository=None):
@@ -5478,6 +5729,19 @@ def main():
         args.gh_bin = base.gh_bin
     if args.jq_bin is None:
         args.jq_bin = base.jq_bin
+
+    # Issue 1149 D4, D10: the compiled policy is read on every call that passes the
+    # detaching check and the base policy, for the production rules.
+    rows, _reason = load_compiled_policy(args.policy)
+    try:
+        refusal = production_problem_for(
+            command, rows, payload.get("cwd"), args.git_bin,
+            bounded_timeout(started + INVOCATION_DEADLINE_SECONDS,
+                            args.child_timeout_seconds))
+    except DeadlineExhausted:
+        return block(DEADLINE_REFUSAL)
+    if refusal is not None:
+        return block(refusal)
 
     operations = guarded_operations(command)
     for operation, _segment, problem, _directory in operations:
