@@ -553,7 +553,11 @@ publishes and returns the row's `seq` (the round's id) and the question count; i
 A body that also carries `"dry_run": true` runs every one of those refusals through `check_round`
 (the same `_checked_ask` under the same lock) and appends and publishes nothing; the 200 answer is
 `{"questions":<n>}` without a round (`sprint ask` sends its round without its `file` members first,
-so a refusal comes before any upload).
+so a refusal comes before any upload). The round's picture rule (#1092), `Refused(LOOK_WITHOUT_PICTURE)`
+for the first question whose ask or context names screenshots, a `.png` file or a screenshots folder
+and carries no picture, is `sprints.checked_round`'s; a dry run passes `files_withheld` and skips it,
+because the round it checks has its `file` members left out and `sprint ask` has already applied the rule
+to the whole round.
 `answer_question(project_id, sprint_id, round_id, index, choice, text)`, under the lock, raises
 `Refused(NOT_OPEN)` unless the sprint is open and of that project, `ENDED` unless
 `sprints.takes_questions`, `UNKNOWN_QUESTION` unless
@@ -2771,7 +2775,8 @@ class ConsoleService:
                 self._registration, running=self._registering is not None),
             pin=pin.note(self._pinned, cap, manager.session_profile(cap, self._use.last)),
             pin_launches=self._pin_launches.launched,
-            managers=self._launcher is not None, pending=self._pending))
+            managers=self._launcher is not None, pending=self._pending,
+            nudges=self._nudger is not None, looked=self._looked))
         with self._published:
             if view != self._view:
                 self._view = view
@@ -5074,15 +5079,15 @@ class ConsoleService:
         if not pictures.present(self.pictures_dir, picture_id):
             raise sprints.Refused(unknown)
 
-    def _checked_ask(self, sprint_id: str, secret: str,
-                     round_: dict) -> tuple[sprints.SprintState, dict]:
+    def _checked_ask(self, sprint_id: str, secret: str, round_: dict,
+                     files_withheld: bool = False) -> tuple[sprints.SprintState, dict]:
         """Every refusal of a round, in order, with nothing written (the caller holds the lock)."""
         sprint = self._manager_sprint(sprint_id, secret)
         if sprint.state != sprints.STARTING:
             raise sprints.Refused(sprints.NOT_STARTED)
         if not sprints.takes_questions(sprint):
             raise sprints.Refused(sprints.ENDED)
-        checked = sprints.checked_round(round_)
+        checked = sprints.checked_round(round_, files_withheld=files_withheld)
         for n, question in enumerate(checked["questions"], 1):
             for m, member in enumerate(question.get("pictures", ()), 1):
                 self._own_picture(sprint, member["picture"],
@@ -5095,7 +5100,7 @@ class ConsoleService:
     def check_round(self, sprint_id: str, secret: str, round_: dict) -> int:
         """The question count of a round `ask_questions` would take now; nothing is written."""
         with self._ingest:
-            return len(self._checked_ask(sprint_id, secret, round_)[1]["questions"])
+            return len(self._checked_ask(sprint_id, secret, round_, True)[1]["questions"])
 
     def ask_questions(self, sprint_id: str, secret: str, round_: dict) -> tuple[int, int]:
         """Append one `questions.asked` event for an approved sprint; the round's id and size."""

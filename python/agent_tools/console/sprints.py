@@ -216,11 +216,15 @@ last stage and movement outlive the run. `SprintState.observed` is ordered by is
 equals folding `b` onto the fold of `a`.
 
 `ago_text(elapsed_ms)` is `just now` under a minute, `<m> min ago` under an hour, `<h> h ago` under
-a day, else `1 day ago` or `<d> days ago`; a negative count is 0. `age_text(elapsed_ms)` is `stated `
+a day, else `1 day ago` or `<d> days ago`; a negative count is 0. `age_text(elapsed_ms)` is `goal set `
 plus that. `progress_text(landed, total, in_delivery, queued, held)` is `<landed> of <total> landed`
 followed by `, <n> in delivery`, `, <n> queued` and `, <n> held` for each non-zero count, in that
 order. The view states and texts are the constants `ON_TRACK`, `WAITING`, `QUIET`, `CLOSING`,
 `DONE` and their `_TEXT`; `CLOSED_OUT` is the view's stage for a run's `done` (not a report stage).
+A running sprint's ball (#1086) is `BALL_MANAGER`, `BALL_OWNER` or `BALL_NOBODY`, worded by
+`BALL_TEXT`, and its now-sentence is one of the `NOW_*_TEXT` constants or the stage phrase
+(`NOW_STAGE_TEXT`, prefixed by `NOW_QUIET_TEXT` when nobody has the ball), never the report's status
+line and never shortened.
 
 Messages (#889) are what the owner says to a sprint, each one a `Message` kept in `message_id` order
 on `SprintState.messages`. Four rows carry them, the first three kept (`event_log.SPRINT_MESSAGED`,
@@ -257,8 +261,10 @@ manager that row replaces, unless the row's int `seen_after` (the `manager_seen_
 when the launch began) is below the seq of the latest seen row: that row was written while the
 launcher was still returning, so it names the new manager and is kept.
 
-`message_state(message)` is `READ` when `read_at` is set, else `DELIVERED` when `delivered_at` is,
-else `SENT`; `unread(state)` is the messages without `read_at`, in id order; `unreachable(state)` is
+`message_state(message, now_ms)` is the first that holds of: `REPLIED` when `reply` is set,
+`PICKED_UP` when `read_at` is set, `NOT_PICKED_UP` when `now_ms` is not None and at least
+`NOT_PICKED_UP_AFTER_MS` have passed since the message's `at`, else `SENT`; `delivered_at` never
+changes the shown state, it only feeds the service's re-nudge. `unread(state)` is the messages without `read_at`, in id order; `unreachable(state)` is
 true once `failed_nudges` reaches `UNREACHABLE_AFTER`. `checked_message(text)` refuses
 `EMPTY_MESSAGE` for a blank text and `MESSAGE_TOO_LONG` above `MAX_MESSAGE_CHARS`, and returns the
 text unchanged. `parse_message(body)` reads the owner's write and returns `(project_id, sprint_id,
@@ -312,7 +318,12 @@ over `MAX_LINE_CHARS`), `OPTION_TWICE` (two options equal after stripping) and `
 fully matching `pictures.PICTURE_ID`), `PICTURE_MEMBER` for `line` (not a string non-empty after
 stripping), `LINE_TOO_LONG` (over `MAX_PICTURE_LINE_CHARS`), `PICTURE_MEMBER` for `line` again (a
 line break, or over `MAX_LINE_CHARS`) and `PICTURE_MEMBER` for `pair` (present and not in `PAIRS`);
-after the loop `PAIR_TWICE` for the first `pair` given twice. `PICTURE_UNKNOWN` and `PICTURE_FOREIGN`
+after the loop `PAIR_TWICE` for the first `pair` given twice, then (#1092) `LOOK_WITHOUT_PICTURE`
+for a question that has no picture while its ask or context matches `LOOK_WORDS` (the word
+screenshot or screenshots in any case, also written "screen shot", a `.png` file or a folder with a
+`screenshots` segment), naming the question's number and ask; a round read back from the log
+(`limits=False`) and a check with `files_withheld=True` (the service's dry run, whose round has its
+`file` members left out) skip it. `PICTURE_UNKNOWN` and `PICTURE_FOREIGN`
 name the service's refusals of a picture it does not hold or another sprint sent. A brief and a
 report check their picture list with the same loop (#1091): `checked_pictures(owner, pictures, *,
 limits=True)` with `owner` `"brief"` or `"report"` takes the same steps in the same order and
@@ -537,6 +548,24 @@ STOPPING = "stopping"
 STOPPING_TEXT = "stopping"
 STOPPED = "stopped"
 STOPPED_TEXT = "stopped by you"
+BALL_MANAGER = "manager"
+BALL_OWNER = "owner"
+BALL_NOBODY = "nobody"
+BALL_TEXT = {BALL_MANAGER: "manager working", BALL_OWNER: "waiting on you",
+             BALL_NOBODY: "nothing running, may be stuck"}
+NOW_STOPPING_TEXT = "finishing what is mid-merge, then stopping"
+NOW_ANSWER_TEXT = "waiting for your answer in the manager's terminal"
+NOW_PERMISSION_TEXT = "waiting for your permission in the manager's terminal"
+NOW_DRAFTING_TEXT = "drafting the brief"
+NOW_BRIEF_TEXT = "waiting for your approval of the brief"
+NOW_QUESTION_TEXT = "waiting for your answer: {question}"
+NOW_DECISION_TEXT = "waiting for your decision on the tracker"
+NOW_STALLED_TEXT = "waiting for you: its managers keep failing"
+NOW_NO_PROGRESS_TEXT = "waiting for you: the manager has stopped making progress"
+NOW_QUOTA_TEXT = "waiting for its account's usage to reset"
+NOW_STARTING_TEXT = "starting the work"
+NOW_STAGE_TEXT = "{stage} {count} of {total}: {milestone}"
+NOW_QUIET_TEXT = "last seen {phrase}"
 SECRETS_DIR = "sprint-secrets"
 SPRINT_ID = re.compile(r"[0-9a-f]{16}")
 
@@ -554,7 +583,7 @@ NOT_ENDED = "an issue of this sprint is neither landed nor dropped"
 ENDED = "this sprint has ended"
 ALREADY_STOPPING = "this sprint is already stopping"
 STOP_FAILED_TEXT = "could not stop the manager: {reason}; trying again"
-UNSTOPPED_TEXT = "The manager of a withdrawn goal could not be stopped: {reason}; trying again"
+UNSTOPPED_TEXT = "The manager of a dropped sprint could not be stopped: {reason}; trying again"
 STOP_TEXT = ("The owner stopped this sprint: finish what is mid-merge, start nothing new, and send "
              "your closing report with sprint close.")
 NOT_STARTED = "this sprint's brief is not approved"
@@ -580,6 +609,9 @@ PICTURE_SHAPE = "question {n} picture {m} is not an object of picture, line and 
 PICTURE_MEMBER = "question {n} picture {m} has no valid {member}"
 LINE_TOO_LONG = f"question {{n}} picture {{m}}'s line is over {MAX_PICTURE_LINE_CHARS} characters"
 PAIR_TWICE = "question {n} marks two pictures {pair}"
+LOOK_WITHOUT_PICTURE = ('question {n} "{ask}" names screenshots, a PNG file or a screenshots '
+                        "folder but attaches no picture: attach the pictures with pictures, or "
+                        "reword it")
 PICTURE_UNKNOWN = "question {n} picture {m} is not known"
 PICTURE_FOREIGN = "question {n} picture {m} was sent by another sprint"
 PART_PICTURES_SHAPE = "the {owner}'s pictures are not a list"
@@ -612,8 +644,22 @@ MESSAGE_TEXT = "text"
 MESSAGE_ANSWER = "answer"
 MESSAGE_STOP = "stop"
 SENT = "sent"
-DELIVERED = "delivered"
-READ = "read"
+PICKED_UP = "picked_up"
+REPLIED = "replied"
+NOT_PICKED_UP = "not_picked_up"
+NOT_PICKED_UP_AFTER_MS = 300_000
+PICKUP_MINUTE_TEXT = "the manager picks it up within a minute"
+PICKUP_TURN_TEXT = "the manager picks it up at its next turn"
+TELL_MINUTE_TEXT = "The manager picks it up within a minute."
+TELL_TURN_TEXT = "The manager picks it up at its next turn."
+PICKED_UP_TEXT = "picked up"
+SENT_ENDED_TEXT = "sent"
+REPLIED_TEXT = "replied"
+NOT_PICKED_UP_TEXT = "not picked up after 5 min"
+RETRY_ACTION_TEXT = "Press Retry to start a new manager."
+NUDGE_ACTION_TEXT = "Tell the manager again, or drop the sprint."
+TURN_ACTION_TEXT = ("It waits for the manager's next turn; "
+                    "drop the sprint if none comes.")
 MANAGER_SESSION_NAME = re.compile(r"(?P<project>.+) sprint (?P<sprint>[0-9a-f]{16})")
 
 _MINUTE_MS = 60_000
@@ -1066,7 +1112,13 @@ def checked_report(report: dict) -> dict:
     return checked
 
 
-def _checked_question(n: int, question: object, limits: bool) -> dict:
+# A question about look or layout (#1092): the word screenshot or screenshots (also "screen shot"),
+# a `.png` file, or a folder with a `screenshots` segment, which the word's boundary also matches.
+LOOK_WORDS = re.compile(r"\bscreen ?shots?\b|\.png\b|(?:^|[/\\])screenshots(?:[/\\]|$)",
+                        re.IGNORECASE)
+
+
+def _checked_question(n: int, question: object, limits: bool, files_withheld: bool) -> dict:
     if not isinstance(question, dict) or not set(question) <= {"question", "context", "blocks",
                                                                 "options", "recommended",
                                                                 "pictures"}:
@@ -1104,6 +1156,9 @@ def _checked_question(n: int, question: object, limits: bool) -> dict:
     if not isinstance(recommended, str) or recommended.strip() not in stripped:
         raise Refused(NO_RECOMMENDATION.format(n=n))
     pictures = _checked_pictures(n, question["pictures"], limits) if "pictures" in question else []
+    if (limits and not files_withheld and not pictures
+            and any(LOOK_WORDS.search(part) for part in (text, context) if part)):
+        raise Refused(LOOK_WITHOUT_PICTURE.format(n=n, ask=text.strip()))
     checked = {"question": text.strip(), "blocks": blocks.strip(), "options": stripped,
                "recommended": recommended.strip()}
     if "context" in question:
@@ -1182,7 +1237,7 @@ def round_pictures(checked: dict) -> list[str]:
                        for member in question.get("pictures", ()))
 
 
-def checked_round(round_: dict, *, limits: bool = True) -> dict:
+def checked_round(round_: dict, *, limits: bool = True, files_withheld: bool = False) -> dict:
     questions = round_.get("questions")
     if not isinstance(questions, list) or not questions:
         raise Refused(NO_QUESTIONS)
@@ -1192,7 +1247,7 @@ def checked_round(round_: dict, *, limits: bool = True) -> dict:
     if not isinstance(blocker, bool):
         raise Refused(BAD_BLOCKER)
     return {"blocker": blocker,
-            "questions": [_checked_question(n, question, limits)
+            "questions": [_checked_question(n, question, limits, files_withheld)
                           for n, question in enumerate(questions, 1)]}
 
 
@@ -1244,10 +1299,14 @@ def checked_message(text: str) -> str:
     return text
 
 
-def message_state(message: Message) -> str:
+def message_state(message: Message, now_ms: int | None) -> str:
+    if message.reply is not None:
+        return REPLIED
     if message.read_at is not None:
-        return READ
-    return DELIVERED if message.delivered_at is not None else SENT
+        return PICKED_UP
+    if now_ms is not None and now_ms - _ms(message.at) >= NOT_PICKED_UP_AFTER_MS:
+        return NOT_PICKED_UP
+    return SENT
 
 
 def unread(state: SprintState) -> tuple[Message, ...]:
@@ -1704,7 +1763,7 @@ def ago_text(elapsed_ms: int) -> str:
 
 
 def age_text(elapsed_ms: int) -> str:
-    return "stated " + ago_text(elapsed_ms)
+    return "goal set " + ago_text(elapsed_ms)
 
 
 def progress_text(landed: int, total: int, in_delivery: int, queued: int, held: int) -> str:

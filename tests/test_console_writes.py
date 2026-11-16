@@ -553,12 +553,15 @@ class GoalRouteTest(Case):
             "type": "sprint", "sprint_id": payload["sprint_id"],
             "title": "make the importer resumable", "goal": "make the importer resumable",
             "state": "drafting",
-            "state_text": "drafting the brief", "stated_at": at,
-            "age_text": "stated just now", "manager_text": "managers are not available on this host yet",
+            "state_text": "drafting the brief",
+            "ball": "manager", "ball_text": "manager working", "now_text": "drafting the brief",
+            "stated_at": at,
+            "age_text": "goal set just now", "manager_text": "managers are not available on this host yet",
             "manager_state": "unavailable", "manager_until": None, "retry": False,
             "progress": None, "progress_text": None, "status": None, "status_at": None,
             "next": None, "milestone": None, "tracker_url": None, "issues": [], "waiting": 0,
-            "sessions": [], "messages": [], "reach_text": None,
+            "sessions": [], "messages": [], "approval": None,
+            "tell_text": "The manager picks it up at its next turn.", "reach_text": None,
             "stoppable": True, "ended_at": None, "stop_text": None, "closing": None,
             "state_until": None, "pictures": []}])
         self.assertEqual(view_of(svc)["recent_projects"][0], "owner/p01")
@@ -675,7 +678,7 @@ class GoalRouteTest(Case):
         self.assertEqual(self.sprints_of(svc, "owner/p01"), [])
         self.assertFalse((self.secrets_dir / sid).exists())
         sentences = [m["sentence"] for m in view_of(svc)["digest"]["recent"]]
-        self.assertIn("The goal for owner/p01 was withdrawn: make the importer resumable",
+        self.assertIn("The sprint for owner/p01 was dropped: make the importer resumable",
                       sentences)
         self.refused(svc, WITHDRAW, self.withdraw_body(sid), 409, b"this sprint is not open")
 

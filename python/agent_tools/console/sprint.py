@@ -70,7 +70,10 @@ round is
                                   "pair": "before" | "after"}, ...]}, ...],
      "blocker": true | false}                   (blocker optional, default false)
 
-`pictures` is optional, at most 8 to a question, and `pair` is optional. The command uploads each
+`pictures` is optional, at most 8 to a question, and `pair` is optional; a question whose ask or context
+names screenshots, a `.png` file or a screenshots folder must carry one, else the console refuses the
+round with the question named (`sprint: refused 409: ...`), and a round with `file` members is
+refused before sending. The command uploads each
 `file` as `sprint picture` does (a relative path is read from the current directory) and sends the
 member with `"picture": "<id>"` in place of `"file"`; a member with `"picture"` and no `"file"` is
 sent as given. Before it reads or sends anything it checks the round's pictures with the console's

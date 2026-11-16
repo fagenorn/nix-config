@@ -755,7 +755,7 @@ class WithdrawStopTest(StopServiceTest):
         self.assertIn(f"console: manager_stop_failed {sid} No job matching\n", stderr.getvalue())
         self.assertEqual(self.unstopped(svc), [{
             "project_id": "owner/p01", "sprint_id": sid, "title": GOAL_TEXT,
-            "text": "The manager of a withdrawn goal could not be stopped: No job matching; "
+            "text": "The manager of a dropped sprint could not be stopped: No job matching; "
                     "trying again",
             "failed_at": row[1]}])
         self.now[0] = T0 + 59
