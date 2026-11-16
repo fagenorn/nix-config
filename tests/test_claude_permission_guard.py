@@ -446,6 +446,40 @@ class ClaudePermissionGuardTest(unittest.TestCase):
     def test_generated_allow_surface_is_exact_and_ordered(self):
         self.assertEqual(EXPECTED_ALLOW, self.settings["permissions"]["allow"])
 
+    def test_the_guard_is_registered_for_bash_file_edits_and_mcp_tools(self):
+        def matches(matcher, name):
+            # Claude Code's documented matcher rule (hooks.md, "Matcher patterns").
+            if re.fullmatch(r"[A-Za-z0-9_\- ,|]*", matcher):
+                return name in {part.strip() for part in re.split(r"[|,]", matcher)}
+            return re.search(matcher, name) is not None
+
+        entries = self.settings["hooks"]["PreToolUse"]
+        self.assertEqual(
+            ["Bash", "Edit|Write|MultiEdit|NotebookEdit", "^mcp__"],
+            [entry["matcher"] for entry in entries],
+        )
+        for entry in entries:
+            self.assertEqual(
+                [{"type": "command", "command": str(self.guard), "timeout": 30}],
+                entry["hooks"],
+            )
+        edits = entries[1]["matcher"]
+        self.assertEqual(
+            {"Edit", "Write", "MultiEdit", "NotebookEdit"},
+            {
+                name
+                for name in (
+                    "Edit", "Write", "MultiEdit", "NotebookEdit", "Read", "Bash", "Edits",
+                )
+                if matches(edits, name)
+            },
+        )
+        mcp = entries[2]["matcher"]
+        for name in ("mcp__deployer__apply", "mcp__plugin_x_y__z"):
+            self.assertTrue(matches(mcp, name), name)
+        for name in ("Read", "Bash", "xmcp__a__b"):
+            self.assertFalse(matches(mcp, name), name)
+
     def test_bash_timeout_ceiling_is_raised_and_the_default_left_alone(self):
         # #261 D2: an explicit foreground timeout must be able to cover the
         # longest verification command; the 120 s default stays the host's.
