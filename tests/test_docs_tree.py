@@ -568,7 +568,7 @@ class DocsTreeTest(unittest.TestCase):
                 "ADR-console-028")
         for older, status in (
                 ("docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md",
-                 both + ", ADR-console-029, ADR-console-030"),
+                 both + ", ADR-console-029, ADR-console-030, ADR-console-036"),
                 ("docs/areas/console/adr/002-the-desk-page-design-rules.md",
                  both + ", ADR-console-029, ADR-console-031, ADR-console-032, ADR-console-033, "
                  "ADR-console-035"),
@@ -601,7 +601,7 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("POST /api/register-project", self.doc(adr008))
         status = ("- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
                   "ADR-console-028")
-        for older, expected in ((adr008, status + ", ADR-console-029, ADR-console-030"),
+        for older, expected in ((adr008, status + ", ADR-console-029, ADR-console-030, ADR-console-036"),
                                 (adr002, status + ", ADR-console-029, ADR-console-031, "
                                           "ADR-console-032, ADR-console-033, ADR-console-035")):
             line = next(row for row in (REPO_ROOT / older).read_text().splitlines()
@@ -636,7 +636,7 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("| Plan question | Console |", self.doc("docs/CONTEXT-MAP.md"))
         for older, expected in (
                 (adr008, "- **Status:** accepted; amended by ADR-console-024, ADR-console-025, "
-                         "ADR-console-028, ADR-console-029, ADR-console-030"),
+                         "ADR-console-028, ADR-console-029, ADR-console-030, ADR-console-036"),
                 (adr028, "- **Status:** accepted; amended by ADR-console-029, "
                          "ADR-console-030, ADR-console-031, ADR-console-034, ADR-console-035; "
                          "extended by #1055 (D10, D11)")):

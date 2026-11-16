@@ -7,6 +7,7 @@
     sprint inbox [--sprint <id>] [--secret-file <path>] [--port N]
     sprint recap [--sprint <id>] [--secret-file <path>] [--port N]
     sprint reply [--sprint <id>] [--secret-file <path>] --message <id> --reply-file <path | -> [--port N]
+    sprint picture [--sprint <id>] [--secret-file <path>] --file <path> [--port N]
     sprint status [--sprint <id>] [--port N]
     sprint contract
 
@@ -16,7 +17,7 @@ the manager session it starts; without `--secret-file` the secret is `$CONSOLE_S
 (one trailing newline is removed, as from the file). A flag always wins over the environment. No id is stderr
 `sprint: no sprint id: pass --sprint or set CONSOLE_SPRINT_ID`, an id from the environment that
 is not a sprint id is stderr `sprint: CONSOLE_SPRINT_ID is not a sprint id (16 lowercase hex
-characters)`, and, for `brief`, `report`, `ask`, `close`, `inbox`, `recap` and `reply`, no secret is stderr `sprint: no secret: pass --secret-file or set
+characters)`, and, for `brief`, `report`, `ask`, `close`, `inbox`, `recap`, `reply` and `picture`, no secret is stderr `sprint: no secret: pass --secret-file or set
 CONSOLE_SPRINT_SECRET`; each is exit 2 with no request sent. `--port` is the console's loopback
 port (0-65535; default 27184); the command only ever talks to 127.0.0.1.
 
@@ -77,6 +78,14 @@ UTF-8 text with one trailing newline removed, and sends `POST /api/message-reply
 `sprint: reply to message <id> sent` and exit 0. The command validates nothing about a message or a
 reply beyond reading it: the console decides, in one place.
 
+`sprint picture` reads the secret the same way and the picture's bytes from `--file`, refuses a file
+larger than 2 MiB (2097152 bytes) before sending (the console closes such a connection unread), and
+sends `POST /api/picture` with the bytes as `Content-Type: image/png`, the sprint id in
+`X-Console-Sprint` and the secret in `X-Console-Secret`, no `Origin`. On success it prints the
+picture's id (64 lowercase hex characters) alone and exit 0; a 200 answer whose `picture` is not
+64 lowercase hex characters is `sprint: refused 200: unreadable answer: <error>` and exit 1. The
+command checks nothing about the PNG: the console decides, in one place.
+
 `sprint status` sends `GET /api/sprint-status?sprint_id=<id>` and prints the console's answer as one
 line of JSON, `{"decision", "reply", "sprint_id", "version"}`, and exit 0. `decision` is `none`
 (no answer yet), `approved`, `changes` (the owner's exact words are `reply`) or `withdrawn`.
@@ -89,8 +98,11 @@ run it first (ADR-console-015).
 Any other HTTP status is stderr `sprint: refused <status>: <text>` (the console's reason) and
 exit 1. A console that cannot be reached is stderr
 `sprint: console unreachable on 127.0.0.1:<port>: <error>` and exit 1. A secret, brief, report, closing report, round or reply file
-that cannot be read, or a brief, report, closing report or round that is not a JSON object, is stderr `sprint: cannot read <path>:
-<reason>` and exit 2, with no request sent; bad arguments are exit 2. The secret is printed nowhere.
+or a picture file that cannot be read, or a brief, report, closing report or round that is not a JSON object, is stderr `sprint: cannot read <path>:
+<reason>` and exit 2, with no request sent, as is a picture file larger than 2 MiB, stderr
+`sprint: cannot send <path>: it is larger than 2 MiB`; a `picture` secret that is not printable
+ASCII (it travels in a header) is stderr `sprint: the secret is not printable ASCII, so it cannot go
+in a header: no request sent` and exit 2, with no request sent; bad arguments are exit 2. The secret is printed nowhere.
 """
 
 from __future__ import annotations
@@ -99,6 +111,7 @@ import argparse
 import http.client
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -107,6 +120,7 @@ from agent_tools.console import manager, service, sprints
 from agent_tools.console.console import port_number
 
 TIMEOUT_SECONDS = 10
+PICTURE_ID = re.compile(r"[0-9a-f]{64}")
 REPORT_HELP = """the report's members, all required:
   status:      one line, at most 500 characters; it names no issue number (no # and a digit)
   phase:       one of running, closing, done
@@ -176,6 +190,7 @@ def build_parser() -> argparse.ArgumentParser:
                        ("inbox", "print the owner's unread messages to the sprint"),
                        ("recap", "print what a manager needs to pick the sprint up"),
                        ("reply", "answer one of the owner's messages"),
+                       ("picture", "send one PNG picture to the console"),
                        ("status", "print the owner's answer to the sprint's brief")):
         epilog = {"report": REPORT_HELP, "close": CLOSING_HELP}.get(name)
         each = commands.add_parser(
@@ -198,6 +213,8 @@ def build_parser() -> argparse.ArgumentParser:
             if name == "close":
                 each.add_argument("--closing-file", required=True,
                                   help="the closing report as a JSON object; - reads stdin")
+        if name == "picture":
+            each.add_argument("--file", type=Path, required=True, help="the PNG file to send")
         if name == "reply":
             each.add_argument("--message", type=message_id, required=True,
                               help="the id of the message being answered")
@@ -235,9 +252,13 @@ def read_object(name: str, what: str) -> dict:
     return value
 
 
-def ask(port: int, method: str, path: str, body: bytes | None = None) -> str:
-    """The console's answer text to one request, or `Refused` carrying the stderr line."""
-    headers = {"Content-Type": "application/json"} if body is not None else {}
+def ask(port: int, method: str, path: str, body: bytes | None = None,
+        headers: dict[str, str] | None = None) -> str:
+    """The console's answer text to one request, or `Refused` carrying the stderr line.
+
+    Given `headers`, exactly those are sent; otherwise a body is sent as JSON."""
+    if headers is None:
+        headers = {"Content-Type": "application/json"} if body is not None else {}
     connection = http.client.HTTPConnection(service.HOST, port, timeout=TIMEOUT_SECONDS)
     try:
         connection.request(method, path, body=body, headers=headers)
@@ -339,6 +360,30 @@ def send_reply(args: argparse.Namespace, sprint: str) -> str:
     return f"sprint: reply to message {args.message} sent"
 
 
+def send_picture(args: argparse.Namespace, sprint: str) -> str:
+    secret = resolve_secret(args)
+    if not (secret.isascii() and secret.isprintable()):
+        # A header cannot carry a newline or a non-ASCII character; naming the value would print it.
+        raise Unreadable("sprint: the secret is not printable ASCII, so it cannot go in a header: "
+                         "no request sent")
+    try:
+        data = args.file.read_bytes()
+    except OSError as error:
+        raise Unreadable(f"sprint: cannot read {args.file}: {error}") from error
+    if len(data) > service.MAX_PICTURE_BYTES:
+        raise Unreadable(f"sprint: cannot send {args.file}: it is larger than 2 MiB")
+    text = ask(args.port, "POST", service.PICTURE_PATH, data,
+               {"Content-Type": "image/png", service.SPRINT_HEADER: sprint,
+                service.SECRET_HEADER: secret})
+    try:
+        picture = json.loads(text)["picture"]
+        if not isinstance(picture, str) or PICTURE_ID.fullmatch(picture) is None:
+            raise ValueError(f"{picture!r} is not a picture id (64 lowercase hex characters)")
+    except (ValueError, KeyError, TypeError) as error:
+        raise Refused(f"sprint: refused 200: unreadable answer: {error}") from error
+    return picture
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "contract":
@@ -360,6 +405,8 @@ def main(argv: list[str] | None = None) -> int:
             line = read_recap(args, sprint)
         elif args.command == "reply":
             line = send_reply(args, sprint)
+        elif args.command == "picture":
+            line = send_picture(args, sprint)
         else:
             line = ask(args.port, "GET", f"{service.STATUS_PATH}?sprint_id={sprint}")
     except Unreadable as error:

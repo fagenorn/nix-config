@@ -75,6 +75,7 @@
 | Outside sprints | Console |
 | Owner prompt | Verification |
 | Owner-action marker | Claims |
+| Picture | Console |
 | Pinned profile | Console |
 | Plan question | Console |
 | Plan-gated floor | Guard |
