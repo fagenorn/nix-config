@@ -65,13 +65,14 @@ def deployment(id: str, commit: str | None, status: str = "SUCCESS",
 def watched(id: str, commit: str, status: str = "SUCCESS",
             created: str = "2026-11-08T10:00:00Z", *, branch: str = "main",
             root: object = "admin", patterns: object = ("**",),
-            skipped: object = _UNSET) -> dict:
+            skipped: object = _UNSET, config: object = "/admin/railway.toml") -> dict:
     """A row with the watch members Railway writes, as nodo-prod's admin service has them.
 
-    `skipped` defaults to Railway's own reason on a `SKIPPED` row and to no member otherwise.
+    `skipped` defaults to Railway's own reason on a `SKIPPED` row and to no member otherwise;
+    `config` is the `configFile` member, written with Railway's leading `/`.
     """
     meta: dict = {"commitHash": commit, "branch": branch, "reason": "deploy",
-                  "rootDirectory": root, "configFile": "/admin/railway.toml",
+                  "rootDirectory": root, "configFile": config,
                   "serviceManifest": {"build": {
                       "builder": "DOCKERFILE", "dockerfilePath": "Dockerfile",
                       "watchPatterns": list(patterns) if isinstance(patterns, tuple)

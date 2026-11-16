@@ -493,6 +493,45 @@ class WatchPathSkipTest(unittest.TestCase):
         self.admin(files=tuple(f"docs/{n}.md" for n in range(adapter.COMPARE_FILE_LIMIT)))
         self.refused("diff_over_limit")
 
+    def test_absent_watch_patterns_cover_the_whole_root(self):
+        bare = deployment("86ee94aa", MERGE, "SKIPPED", "2026-11-08T14:02:33Z",
+                          meta={"commitHash": MERGE, "branch": "main", "rootDirectory": "admin",
+                                "skippedReason": UNWATCHED})
+        for name, skipped in (("null patterns",
+                               watched("86ee94aa", MERGE, "SKIPPED", "2026-11-08T14:02:33Z",
+                                       patterns=None)),
+                              ("no manifest", bare)):
+            with self.subTest(name):
+                self.assertEqual(self.admin(skipped=skipped), ("satisfied", "skipped"))
+                self.assertEqual(self.evidence(), ("watch_paths_unchanged", None))
+
+    def test_a_config_file_outside_the_root_directory_is_watched(self):
+        skipped = watched("86ee94aa", MERGE, "SKIPPED", "2026-11-08T14:02:33Z",
+                          config="/deploy/admin.railway.toml")
+        self.admin(skipped=skipped, files=(*NODO_DELTA, "deploy/admin.railway.toml"))
+        self.refused("watched_path_changed")
+        self.admin(skipped=skipped, files=NODO_DELTA)
+        self.assertEqual(self.last["outcome"], "satisfied")
+
+    def test_a_root_directory_written_with_slashes_is_the_same_root(self):
+        skipped = watched("86ee94aa", MERGE, "SKIPPED", "2026-11-08T14:02:33Z", root="/admin/")
+        serving = watched("10043c13", BASE_TIP, created="2026-11-08T04:05:53Z", root="admin")
+        self.admin(serving, skipped=skipped, files=(*NODO_DELTA, "admin/src/App.tsx"))
+        self.refused("watched_path_changed")
+        self.assertEqual(self.admin(serving, skipped=skipped), ("satisfied", "skipped"))
+
+    def test_a_comparison_status_other_than_ahead_or_identical_is_not_an_ancestor(self):
+        for status in ("diverged", "behind"):
+            with self.subTest(status=status):
+                self.admin(status=status)
+                self.refused("serving_not_ancestor")
+
+    def test_the_comparison_file_limit_is_three_hundred(self):
+        self.assertEqual(self.admin(files=tuple(f"docs/{n}.md" for n in range(299))),
+                         ("satisfied", "skipped"))
+        self.admin(files=tuple(f"docs/{n}.md" for n in range(300)))
+        self.refused("diff_over_limit")
+
     def test_older_skipped_pushes_are_stepped_over(self):
         """Two releases in a row that leave the service alone: the comparison spans both."""
         self.assertEqual(self.admin(watched("skip1", HOTFIX, "SKIPPED", "2026-11-08T09:00:00Z"),
