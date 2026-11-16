@@ -335,22 +335,27 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .pic-pair { display: flex; gap: 12px; flex: 1 1 412px; min-width: 0; max-width: 100%; }
 .pic-pair .pic { flex: 1 1 0; }
 .pic-thumb { display: block; width: 100%; padding: 0; overflow: hidden; cursor: zoom-in; background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; }
-.pic-thumb img { display: block; width: 100%; height: 120px; object-fit: cover; }
+.pic-thumb img { display: block; width: 100%; height: 120px; object-fit: contain; background: var(--crust); }
 .pic-thumb img[hidden] { display: none; }
 .pic-failed { display: block; padding: 10px; font-size: .8125rem; color: var(--ov2); cursor: default; }
 .pic-line { margin-top: 4px; font-size: .84375rem; color: var(--sub0); overflow-wrap: anywhere; }
 .pic-label { display: block; margin-bottom: 4px; font-size: .8125rem; color: var(--ov2); }
-.viewer { position: fixed; inset: 0; z-index: 30; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 24px 16px; background: rgba(24, 25, 38, .92); overflow-y: auto; }
+html:has(#viewer:not([hidden])) { overflow: hidden; }
+.viewer { position: fixed; inset: 0; z-index: 30; display: flex; flex-direction: column; background: var(--crust); }
 .viewer[hidden] { display: none; }
-.viewer-count { margin: 0; font-size: .8125rem; color: var(--sub0); }
-.viewer-stage { max-width: 100%; }
+.viewer:focus-visible { outline: none; }
+.viewer-bar { flex: none; display: flex; align-items: center; gap: 8px; padding: 10px 16px; background: var(--mantle); border-bottom: 1px solid var(--hair); }
+.viewer-count { margin: 0; min-width: 4.5em; font-size: .8125rem; color: var(--sub0); text-align: center; white-space: nowrap; }
+.viewer-stage { flex: 1 1 auto; min-height: 0; display: flex; padding: 20px 16px; overflow: auto; overscroll-behavior: contain; }
+.viewer-stage > * { margin: auto; max-width: 100%; }
 .viewer-pair { display: flex; gap: 16px; max-width: 100%; }
 .viewer-pic { margin: 0; min-width: 0; }
 .viewer-pic.current { outline: 2px solid var(--lav); outline-offset: 4px; border-radius: 4px; }
-.viewer img { display: block; max-width: 100%; max-height: calc(100vh - 12rem); object-fit: contain; }
+.viewer img { display: block; max-width: 100%; max-height: calc(100vh - 10rem); object-fit: contain; }
 .viewer img[hidden] { display: none; }
-.viewer-close, .viewer-prev, .viewer-next { padding: 6px 14px; font: inherit; color: var(--text); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; cursor: pointer; }
-.viewer-close:disabled, .viewer-prev:disabled, .viewer-next:disabled { color: var(--ov2); cursor: default; }
+.viewer-bar button { min-height: 36px; padding: 6px 14px; font: inherit; color: var(--text); background: var(--base); border: 1px solid var(--s1); border-radius: 8px; cursor: pointer; white-space: nowrap; }
+.viewer-bar .viewer-close { margin-left: auto; }
+.viewer-bar button:disabled { color: var(--ov2); border-color: var(--hair); cursor: default; }
 
 @media (max-width: 1180px) {
   .desk-grid { grid-template-columns: minmax(0, 1fr) 400px; column-gap: 56px; }
@@ -367,6 +372,8 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 @media (max-width: 480px) {
   .pic-pair { flex-direction: column; }
   .viewer-pair { flex-direction: column; }
+  .viewer-bar { padding: 8px 12px; }
+  .viewer-bar button { min-height: 44px; padding: 6px 12px; }
   .pic { flex-basis: 100%; }
   .card .q.reg, .rest .q.reg { font-size: 1rem; }
   .desk-grid { padding: 24px 16px 48px; }
@@ -395,7 +402,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 <section class="register" id="register" aria-label="Register project"></section>
 </aside>
 </div>
-<div class="viewer" id="viewer" role="dialog" aria-modal="true" aria-label="Picture" hidden></div>
+<div class="viewer" id="viewer" role="dialog" aria-modal="true" aria-label="Picture" tabindex="-1" hidden></div>
 <template id="quiet-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M12.5 9.5A5 5 0 0 1 6.5 3.5a5 5 0 1 0 6 6z"/></svg></template>
 <template id="decision-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 13.5V9.5M8 9.5c0-3-3.6-2.6-3.6-6M8 9.5c0-3 3.6-2.6 3.6-6"/></svg></template>
 <template id="brief-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5h5.2L12 5.3v8.2H4zM9 2.5v3h3M6.2 8.5h3.6M6.2 11h3.6"/></svg></template>
@@ -2121,6 +2128,10 @@ function viewerButton(cls, text, disabled) {
   if (disabled) button.disabled = true;
   return button;
 }
+function viewerBar() {
+  const host = document.getElementById("viewer");
+  return [...host.children].find((n) => n.className === "viewer-bar") || null;
+}
 function drawViewer() {
   const host = document.getElementById("viewer");
   const { sequence, index } = viewer;
@@ -2137,24 +2148,34 @@ function drawViewer() {
     pair.appendChild(viewerFigure(sequence[first + 1], "After", first + 1 === index));
     stage.appendChild(pair);
   }
-  const close = viewerButton("viewer-close", "Close", false);
-  close.addEventListener("click", closeViewer);
-  const prev = viewerButton("viewer-prev", "Previous", index === 0);
-  prev.addEventListener("click", () => stepViewer(-1));
-  const forward = viewerButton("viewer-next", "Next", index === sequence.length - 1);
-  forward.addEventListener("click", () => stepViewer(1));
-  host.replaceChildren(close, el("p", "viewer-count", (index + 1) + " of " + sequence.length), stage, prev, forward);
+  // The bar is built once per opening and stays in place while only the stage is swapped, so a step never moves focus off the control that holds it.
+  let bar = viewerBar();
+  if (bar !== null) {
+    for (const n of [...host.children]) if (n !== bar) n.remove();
+    host.appendChild(stage);
+  } else {
+    const prev = viewerButton("viewer-prev", "Previous", false);
+    prev.addEventListener("click", () => stepViewer(-1));
+    const forward = viewerButton("viewer-next", "Next", false);
+    forward.addEventListener("click", () => stepViewer(1));
+    const close = viewerButton("viewer-close", "Close", false);
+    close.addEventListener("click", closeViewer);
+    bar = el("div", "viewer-bar");
+    for (const n of [prev, el("p", "viewer-count", ""), forward, close]) bar.appendChild(n);
+    host.replaceChildren(bar, stage);
+  }
+  const [prev, count, forward] = bar.children;
+  prev.disabled = index === 0;
+  forward.disabled = index === sequence.length - 1;
+  count.textContent = (index + 1) + " of " + sequence.length;
 }
 function stepViewer(by) {
   const to = viewer.index + by;
   if (to < 0 || to >= viewer.sequence.length) return;
-  const held = document.activeElement;
-  const cls = held !== null && held.parentNode === document.getElementById("viewer") ? held.className : "viewer-close";
   viewer.index = to;
   drawViewer();
-  const children = [...document.getElementById("viewer").children];
-  const again = children.find((n) => n.className === cls && n.disabled !== true) || children[0];
-  again.focus();
+  const held = document.activeElement;
+  if (held === null || held.disabled === true) document.getElementById("viewer").focus();
 }
 function openViewer(key, sequence, index) {
   if (viewer !== null) return;
@@ -2164,7 +2185,7 @@ function openViewer(key, sequence, index) {
   drawViewer();
   for (const n of shaded) n.inert = true;
   host.hidden = false;
-  host.children[0].focus();
+  host.focus();
 }
 function closeViewer() {
   if (viewer === null) return;
@@ -2187,9 +2208,9 @@ function viewerKey(event) {
     closeViewer();
   } else if (event.key === "Tab") {
     event.preventDefault();
-    const buttons = [...document.getElementById("viewer").children].filter((n) => n.tagName === "BUTTON" && n.disabled !== true);
+    const buttons = [...viewerBar().children].filter((n) => n.tagName === "BUTTON" && n.disabled !== true);
     const at = buttons.indexOf(document.activeElement);
-    const to = at < 0 ? 0 : (at + (event.shiftKey ? buttons.length - 1 : 1)) % buttons.length;
+    const to = at < 0 ? (event.shiftKey ? buttons.length - 1 : 0) : (at + (event.shiftKey ? buttons.length - 1 : 1)) % buttons.length;
     buttons[to].focus();
   }
   return true;

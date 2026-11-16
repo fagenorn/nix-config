@@ -1755,6 +1755,20 @@ def picture_posts(snap: dict) -> list:
     return [p for p in snap["posts"] if p["url"].startswith("/api/picture/")]
 
 
+def page_css() -> tuple:
+    """The page's whole style block and its top level with every @media block removed."""
+    (style,) = re.findall(r"(?s)<style>(.*?)</style>", PAGE.read_text(encoding="utf-8"))
+    return style, re.sub(r"(?s)@media[^{]*\{.*?\}\s*\}", "", style)
+
+
+def css_declared(block: str, selector: str) -> dict:
+    merged: dict = {}
+    for name, decls in style_rules(block):
+        if name == selector:
+            merged.update(decls)
+    return merged
+
+
 class PagePictureTest(unittest.TestCase):
     def test_a_question_card_draws_one_thumbnail_per_picture_with_its_line(self) -> None:
         (snap,) = render([START, {"frame": frame([PICTURED])}, {"snapshot": True}])
@@ -1867,6 +1881,14 @@ class PagePictureTest(unittest.TestCase):
         narrow = media_block(style, "(max-width: 480px)")
         self.assertEqual(declared(narrow, ".pic-pair").get("flex-direction"), "column")
 
+    def test_a_thumbnail_shows_the_whole_picture_in_a_box_of_one_size(self) -> None:
+        _, top = page_css()
+        image = css_declared(top, ".pic-thumb img")
+        self.assertEqual(image.get("object-fit"), "contain")
+        self.assertEqual(image.get("width"), "100%")
+        self.assertRegex(image.get("height", ""), r"^\d+px$")
+        self.assertRegex(image.get("background", ""), r"^var\(--[a-z0-9]+\)$")
+
     def test_the_pair_sits_in_one_row_on_a_desktop(self) -> None:
         text = PAGE.read_text(encoding="utf-8")
         (style,) = re.findall(r"(?s)<style>(.*?)</style>", text)
@@ -1905,7 +1927,7 @@ class PageViewerTest(unittest.TestCase):
         self.assertEqual(img["src"], made[C])
         (line,) = with_class(snap["viewer"], "pic-line")
         self.assertEqual(full(line), "the header at 1440")
-        self.assertEqual(snap["active"], "viewer-close")
+        self.assertEqual(snap["active"], "viewer")
 
     def test_enter_on_a_thumbnail_opens_it(self) -> None:
         (snap,) = render(self.opened + [
@@ -2018,12 +2040,64 @@ class PageViewerTest(unittest.TestCase):
             {"click": "pic-thumb"}, {"snapshot": True}, tab, {"snapshot": True}, tab,
             {"snapshot": True}, {"key": "Tab", "shiftKey": True, "follow": True}, {"snapshot": True}])
         self.assertEqual([s["active"] for s in (start, one, two, back)],
-                         ["viewer-close", "viewer-next", "viewer-close", "viewer-next"])
+                         ["viewer", "viewer-next", "viewer-close", "viewer-next"])
         for snap in (one, two, back):
             self.assertTrue(snap["key_prevented"])
         first, second = render(self.opened + [
             {"click": "pic-thumb", "nth": 1}, tab, {"snapshot": True}, tab, {"snapshot": True}])
         self.assertEqual([first["active"], second["active"]], ["viewer-prev", "viewer-next"])
+        (last,) = render(self.opened + [
+            {"click": "pic-thumb"}, {"key": "Tab", "shiftKey": True, "follow": True}, {"snapshot": True}])
+        self.assertEqual(last["active"], "viewer-close")
+
+    def test_arrows_move_the_picture_and_leave_focus_where_it_is(self) -> None:
+        right = {"key": "ArrowRight", "follow": True}
+        opened, moved = render(self.opened + [
+            {"click": "pic-thumb"}, {"snapshot": True}, right, {"snapshot": True}])
+        self.assertEqual([opened["active"], moved["active"]], ["viewer", "viewer"])
+        self.assertEqual(moved["focus_count"], opened["focus_count"])
+        self.assertEqual(self.count(moved), "2 of 3")
+        held, kept, ended = render(self.opened + [
+            {"click": "pic-thumb", "nth": 1}, {"focus_on": "viewer-next"}, {"snapshot": True},
+            {"key": "ArrowLeft", "follow": True}, {"snapshot": True}, right, right, {"snapshot": True}])
+        self.assertEqual([held["active"], kept["active"]], ["viewer-next", "viewer-next"])
+        self.assertEqual(kept["focus_count"], held["focus_count"])
+        self.assertEqual(self.count(kept), "1 of 3")
+        self.assertEqual(self.count(ended), "3 of 3")
+        self.assertEqual(ended["active"], "viewer")
+        _, top = page_css()
+        self.assertEqual(css_declared(top, ".viewer:focus-visible").get("outline"), "none")
+
+    def test_the_viewer_controls_share_one_bar_that_stays_in_view(self) -> None:
+        (snap,) = render(self.opened + [{"click": "pic-thumb", "nth": 1}, {"snapshot": True}])
+        (bar,) = with_class(snap["viewer"], "viewer-bar")
+        self.assertEqual([c["cls"] for c in bar["children"]],
+                         ["viewer-prev", "viewer-count", "viewer-next", "viewer-close"])
+        self.assertEqual([full(c) for c in bar["children"]], ["Previous", "2 of 3", "Next", "Close"])
+        self.assertEqual(len(with_class(snap["viewer"], "viewer-stage")), 1)
+        style, top = page_css()
+        row = css_declared(top, ".viewer-bar")
+        self.assertEqual(row.get("display"), "flex")
+        self.assertIn(row.get("flex-direction"), (None, "row"))
+        self.assertIn(row.get("flex-wrap"), (None, "nowrap"))
+        self.assertEqual(row.get("flex"), "none")
+        host = css_declared(top, ".viewer")
+        self.assertEqual((host.get("display"), host.get("flex-direction")), ("flex", "column"))
+        self.assertNotIn(host.get("overflow-y", host.get("overflow")), ("auto", "scroll"))
+        self.assertEqual(css_declared(top, ".viewer-stage").get("overflow"), "auto")
+        narrow = media_block(style, "(max-width: 480px)")
+        tall = css_declared(narrow, ".viewer-bar button").get("min-height", "0px")
+        self.assertGreaterEqual(int(tall.removesuffix("px")), 44)
+
+    def test_the_viewer_is_opaque_and_the_page_behind_it_does_not_scroll(self) -> None:
+        _, top = page_css()
+        tokens = css_declared(top, ":root")
+        for selector in (".viewer", ".viewer-bar"):
+            fill = css_declared(top, selector).get("background", "")
+            token = re.fullmatch(r"var\((--[a-z0-9]+)\)", fill)
+            self.assertIsNotNone(token, selector + " " + fill)
+            self.assertRegex(tokens.get(token.group(1), ""), r"^#[0-9a-f]{6}$", selector)
+        self.assertEqual(css_declared(top, "html:has(#viewer:not([hidden]))").get("overflow"), "hidden")
 
     def test_the_page_behind_the_viewer_is_inert(self) -> None:
         shown, closed = render(self.opened + [
