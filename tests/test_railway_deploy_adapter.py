@@ -520,6 +520,48 @@ class WatchPathSkipTest(unittest.TestCase):
         self.refused("watched_path_changed")
         self.assertEqual(self.admin(serving, skipped=skipped), ("satisfied", "skipped"))
 
+    def test_a_root_directory_written_with_dot_segments_is_the_same_root(self):
+        for root in ("./admin", "admin/.", ".//admin/", "./"):
+            with self.subTest(root=root):
+                skipped = watched("86ee94aa", MERGE, "SKIPPED", "2026-11-08T14:02:33Z", root=root)
+                serving = watched("10043c13", BASE_TIP, created="2026-11-08T04:05:53Z", root=root)
+                changed = "src/App.tsx" if root == "./" else "admin/src/App.tsx"
+                self.admin(serving, skipped=skipped, files=(*NODO_DELTA, changed))
+                self.refused("watched_path_changed")
+        skipped = watched("86ee94aa", MERGE, "SKIPPED", "2026-11-08T14:02:33Z", root=".")
+        serving = watched("10043c13", BASE_TIP, created="2026-11-08T04:05:53Z", root=".")
+        self.admin(serving, skipped=skipped, files=("admin/src/App.tsx",))
+        self.refused("watched_path_changed")
+        skipped = watched("86ee94aa", MERGE, "SKIPPED", "2026-11-08T14:02:33Z", root="../admin")
+        self.admin(skipped=skipped)
+        self.refused("watch_patterns_unsupported")
+
+    def test_a_malformed_manifest_or_build_is_not_absent_watch_patterns(self):
+        for manifest in ("invalid", ["build"], {"build": "invalid"}, {"build": ["x"]},
+                         {"build": {"watchPatterns": "**"}}):
+            with self.subTest(manifest=manifest):
+                skipped = watched("86ee94aa", MERGE, "SKIPPED", "2026-11-08T14:02:33Z")
+                skipped["meta"]["serviceManifest"] = manifest
+                self.admin(skipped=skipped)
+                self.refused("watch_patterns_unsupported")
+        for manifest in (None, {}, {"build": None}, {"build": {}}):
+            with self.subTest(manifest=manifest):
+                skipped = watched("86ee94aa", MERGE, "SKIPPED", "2026-11-08T14:02:33Z")
+                skipped["meta"]["serviceManifest"] = manifest
+                self.assertEqual(self.admin(skipped=skipped), ("satisfied", "skipped"))
+
+    def test_a_rename_without_its_previous_name_is_an_unread_comparison(self):
+        def payload(entry):
+            return json.dumps({"status": "ahead", "behind_by": 0,
+                               "merge_base_commit": {"sha": BASE_TIP}, "files": [entry]})
+        for entry in ({"filename": "docs/moved.md", "status": "renamed"},
+                      {"filename": "docs/moved.md", "status": "renamed", "previous_filename": ""}):
+            with self.subTest(entry=entry):
+                self.admin(stdout=payload(entry))
+                self.refused("diff_unread")
+        self.admin(stdout=payload({"filename": "docs/new.md", "status": "added"}))
+        self.assertEqual(self.last["outcome"], "satisfied")
+
     def test_a_comparison_status_other_than_ahead_or_identical_is_not_an_ancestor(self):
         for status in ("diverged", "behind"):
             with self.subTest(status=status):

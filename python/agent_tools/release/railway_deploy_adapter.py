@@ -316,20 +316,39 @@ def _rows(payload: Any) -> list[dict[str, Any]]:
     return rows
 
 
+def _watch_patterns(manifest: Any) -> Any:
+    """The skipped row's `build.watchPatterns`: `None` when a member is absent or null, `False`
+    when a container or the list itself is present in another shape (never read as absent)."""
+    if manifest is None:
+        return None
+    if not isinstance(manifest, dict):
+        return False
+    build = manifest.get("build")
+    if build is None:
+        return None
+    if not isinstance(build, dict):
+        return False
+    patterns = build.get("watchPatterns")
+    if patterns is not None and not (isinstance(patterns, list)
+                                     and all(isinstance(item, str) for item in patterns)):
+        return False
+    return patterns
+
+
 def _watch_scope(meta: dict[str, Any]) -> dict[str, Any]:
     """What a row says about its skip and its watched tree (ADR-release-013)."""
     reason, root, config = (meta.get("skippedReason"), meta.get("rootDirectory"),
                             meta.get("configFile"))
-    manifest = meta.get("serviceManifest")
-    build = manifest.get("build") if isinstance(manifest, dict) else None
-    patterns = build.get("watchPatterns") if isinstance(build, dict) else None
+    patterns = _watch_patterns(meta.get("serviceManifest"))
     if root is None:
         root = ""
-    if patterns is not None and not (isinstance(patterns, list)
-                                     and all(isinstance(item, str) for item in patterns)):
-        patterns = False
+    if isinstance(root, str):
+        segments = [part for part in root.split("/") if part not in ("", ".")]
+        root = False if ".." in segments else "/".join(segments)
+    else:
+        root = False
     return {"skipped_reason": reason if isinstance(reason, str) else None,
-            "root": root.strip("/") if isinstance(root, str) else False,
+            "root": root,
             "patterns": patterns,
             "config_file": config.lstrip("/") if isinstance(config, str) else None}
 
@@ -515,6 +534,8 @@ def _compare(repository: str, base: str, head: str, deadline: float) -> list[str
             or type(payload.get("behind_by")) is not int
             or not all(isinstance(entry, dict) and _text(entry.get("filename"))
                        and isinstance(entry.get("previous_filename", ""), str)
+                       and (entry.get("status") != "renamed"
+                            or _text(entry.get("previous_filename")))
                        for entry in files)):
         return "diff_unread"
     if (payload["status"] not in ("ahead", "identical") or payload["behind_by"] != 0
