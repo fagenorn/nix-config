@@ -154,6 +154,24 @@ class ReportRouteTest(Case):
              if m["sentence"].startswith(prefix)],
             [f"{prefix} done: {PARTS['title']}"])
 
+    def test_a_refused_merge_reads_in_the_sprints_line_and_once_in_the_digest(self):
+        svc = self.open()
+        sid = self.started(svc)
+        refused = {**REPORT, "status": "merge refused: required checks are not green",
+                   "inbox": []}
+        for _ in range(2):
+            self.assertEqual(self.report(svc, sid, self.secret(sid), refused)[0], 200)
+        view = view_of(svc)
+        shown = next(s for e in view["entries"] for s in e["sprints"] if s["sprint_id"] == sid)
+        self.assertEqual(shown["now_text"], "merge refused: required checks are not green")
+        self.assertNotEqual(shown["ball"], "owner")
+        digest = view["digest"]
+        self.assertEqual(
+            [m["sentence"] for m in digest["recent"] + digest["earlier"]
+             if m["sentence"] == f"A merge in {PARTS['title']} was refused: "
+                                 "required checks are not green"],
+            [f"A merge in {PARTS['title']} was refused: required checks are not green"])
+
     def test_a_report_survives_a_restart(self):
         svc = self.open()
         sid = self.started(svc)
