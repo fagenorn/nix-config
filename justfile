@@ -145,6 +145,8 @@ agent-workflow-tests *args:
     tests/test_look_marker.py \
     tests/test_look_approval.py \
     tests/test_look_lint.py \
+    tests/test_program_bridge.py \
+    tests/test_look_gate_end_to_end.py \
     tests/test_forge_claim.py \
     tests/test_forge_issue.py \
     tests/test_forge_owner_action.py \
@@ -212,6 +214,7 @@ agent-workflow-tests *args:
     tests/test_console_account_service.py \
     tests/test_console_account_remove_service.py \
     tests/test_console_folder_trust.py \
+    tests/test_console_trust_start.py \
     tests/test_console_plan_questions.py \
     tests/test_console_contract_draft.py \
     tests/test_console_register.py \
