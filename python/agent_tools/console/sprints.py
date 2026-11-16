@@ -5,10 +5,15 @@ Six event kinds carry a sprint (`event_log.GOAL_STATED`, `GOAL_WITHDRAWN`, `BRIE
 column. A goal row carries `{"sprint_id": <id>, "goal": <text>}` (a withdrawal repeats the stated
 text); the brief and report rows carry
 
-    brief.sent      {"sprint_id", "version": <int>, "goal": <str>, "brief": {<the six parts>}}
+    brief.sent      {"sprint_id", "version": <int>, "goal": <str>,
+                     "brief": {<the six parts>, "pictures"?: [{"picture": <id>, "line": <str>,
+                                                               "pair"?: "before" | "after"}]},
+                     "pictures"?: [<id>]}
     brief.approved  {"sprint_id", "version": <int>, "goal": <str>}
     brief.replied   {"sprint_id", "version": <int>, "goal": <str>, "reply": <str>}
-    sprint.reported {"sprint_id", "goal": <str>, "report": {<the seven REPORT_MEMBERS>}}
+    sprint.reported {"sprint_id", "goal": <str>,
+                     "report": {<the seven REPORT_MEMBERS>, "pictures"?: [<same members>]},
+                     "pictures"?: [<id>]}
 
 The log keeps all six indefinitely (`event_log.KEPT_KINDS`).
 
@@ -70,8 +75,11 @@ of texts that may be empty (`MAY_BE_EMPTY`). `checked_brief(brief)` checks them 
 (so `title` first) and refuses with `Refused("the brief has no <part>")` the first that is
 missing, of the wrong type, empty when it must not be, or holding a text empty after stripping
 (a `title` holding a line break is also "no title"), and a title over the limit with
-`TITLE_TOO_LONG`; it returns a new dict of the six parts with every text stripped.
-`sprint_title(state)` is the latest brief's title (whitespace collapsed, cut by `cut` to
+`TITLE_TOO_LONG`; it returns a new dict of the six parts with every text stripped, plus `"pictures"` (the checked
+members) only when `brief` has a non-empty `pictures` list. After the six parts it checks that list
+as `checked_pictures("brief", brief["pictures"])`: the picture checks of a question's round (see
+below), under the `PART_*` reasons, which read "the brief's picture 1 has no valid line" for the
+question's "question 1 picture 1 has no valid line". `sprint_title(state)` is the latest brief's title (whitespace collapsed, cut by `cut` to
 `MAX_TITLE_CHARS`) when it is a non-empty string, else `goal_title(goal)`: the goal's first line up
 to the first `.`, `!` or `?` followed by whitespace or the end (else the whole line), cut the same
 way, so a logged brief without a title still has a name. `cut(text, limit)` is the text when it fits,
@@ -80,9 +88,14 @@ keeps the text exactly and refuses `EMPTY_REPLY` when its strip is empty, then `
 `MAX_REPLY_CHARS` code points. `SecretRefused` (a `Refused`) is the service's refusal of a wrong
 secret; it maps to 403.
 
-`parse_brief_request(body)` reads the manager's body and returns `(sprint_id, secret, brief)`:
+`parse_brief_request(body)` reads the manager's body and returns `(sprint_id, secret, brief,
+dry_run)`:
 
-    {"sprint_id": "<16 lowercase hex>", "secret": "<string>", "brief": {<any subset of PARTS>}}
+    {"sprint_id": "<16 lowercase hex>", "secret": "<string>",
+     "brief": {<any subset of PARTS, and "pictures">}}
+
+plus an optional `"dry_run": true` (the same flag as `parse_ask_request`'s: `false` or any other
+value is `ValueError`); `dry_run` is `True` only when it was given.
 
 `parse_approve(body)` returns `(project_id, sprint_id, version)` and `parse_reply(body)` returns
 `(project_id, sprint_id, version, reply)` from the page's bodies:
@@ -93,7 +106,8 @@ secret; it maps to 403.
 All three readers are as strict as the goal ones; an unknown brief key is a `ValueError`, a missing
 one is not (the service answers it with the part).
 
-The fold also keeps each open sprint's `Brief(version, parts, sent_at, decision, reply)`.
+The fold also keeps each open sprint's `Brief(version, parts, sent_at, decision, reply, decided_at,
+pictures)`; `parts` is the logged `brief` dict without its `pictures` key.
 `brief.sent` changes an open sprint only when `version` is an int (not a bool) greater than the
 folded brief's version (0 with none) and `brief` is a dict: the brief is then that version with
 decision `NONE` and no reply, and a folded report of phase `done` is dropped (the replaced run's
@@ -157,16 +171,17 @@ function's three results.
 `withdrawn_ids(events, ids)` adds the `sprint_id` of every `goal.withdrawn` row with a string one.
 
 A report is what the approved sprint's manager says about the sprint. `parse_report_request(body)`
-reads the manager's body and returns `(sprint_id, secret, report)`:
+reads the manager's body and returns `(sprint_id, secret, report, dry_run)`:
 
     {"sprint_id": "<16 lowercase hex>", "secret": "<string>",
      "report": {"status": "<one line>", "phase": "running", "milestone": "<one line>",
                 "tracker_url": "https://<host>/<path>",
                 "issues": [{"issue": 12, "stage": "building"}, {"issue": 13, "stage": "landed"}],
-                "inbox": [12], "next": "<one line>"}}
+                "inbox": [12], "next": "<one line>", "pictures": [...]}}
 
-It accepts only a UTF-8 JSON object of exactly `sprint_id`, `secret` and `report`, a valid sprint
-id, a string secret and a `report` object whose keys are a subset of `REPORT_MEMBERS`; anything
+It accepts only a UTF-8 JSON object of exactly `sprint_id`, `secret` and `report` (plus an optional
+`"dry_run": true`, as a brief's), a valid sprint id, a string secret and a `report` object whose
+keys are a subset of `REPORT_MEMBERS` and `pictures`; anything
 else, a repeated key, a NaN literal or nesting too deep is `ValueError`. A missing member is not (the
 service answers it with the member). `checked_report(report)` checks the members in `REPORT_MEMBERS`
 order and refuses with `Refused("the report has no valid <member>")` the first that is missing or
@@ -179,13 +194,16 @@ no line break, at most `MAX_LINE_CHARS` code points after stripping); `phase` is
 `REPORT_STAGES`), no issue twice, possibly empty; `inbox` is a list of at most `MAX_REPORT_ISSUES`
 ints (not bools) of at least 1, possibly empty. It returns a new dict of the seven members: texts
 stripped, `issues` sorted by issue, `inbox` sorted without duplicates, `tracker_url` and `phase` as
-given.
+given, plus `"pictures"` on the same rule as a brief's: after the seven members and `STATUS_NUMBER`,
+`checked_pictures("report", report["pictures"])` checks a `pictures` list, and the checked members
+are returned only when it is non-empty. `pictures` is not one of `REPORT_MEMBERS`.
 
 The fold keeps each open sprint's `Report(at, status, phase, milestone, tracker_url, issues, inbox,
-next_step)`. `sprint.reported` changes an open sprint only when its brief is approved (`STARTING`)
-and `checked_report` accepts a dict `report`; the report is then replaced (`at` is the event's `at`,
-`issues` a tuple of `(issue, stage)`, `inbox` a tuple, `next_step` the `next` member) and the
-sprint's observations are cleared. Every other report row changes nothing.
+next_step, pictures)`. `sprint.reported` changes an open sprint only when its brief is approved
+(`STARTING`) and `checked_report` accepts the dict `report` without its `pictures` key; the report
+is then replaced (`at` is the event's `at`, `issues` a tuple of `(issue, stage)`, `inbox` a tuple,
+`next_step` the `next` member, `pictures` the read-back below) and the sprint's observations are
+cleared. Every other report row changes nothing.
 
 Observations: a `delivery.seen` row carries no sprint id and is read as the delivery fold reads it
 (`deliveries.delivery_states` on that one row; a row that parses to nothing changes nothing). For
@@ -314,7 +332,14 @@ screenshot or screenshots in any case, also written "screen shot", a `.png` file
 `file` members left out) skip it. After the questions `REPLACES_TWICE` names the first question
 whose `replaces` equals an earlier question's (also with `limits=False`). `REPLACES_REFUSED` is the
 service's refusal of a mark that names no open question of the sprint. `PICTURE_UNKNOWN` and `PICTURE_FOREIGN`
-name the service's refusals of a picture it does not hold or another sprint sent. With
+name the service's refusals of a picture it does not hold or another sprint sent. A brief and a
+report check their picture list with the same loop (#1091): `checked_pictures(owner, pictures, *,
+limits=True)` with `owner` `"brief"` or `"report"` takes the same steps in the same order and
+refuses under `PART_PICTURES_SHAPE`, `PART_TOO_MANY_PICTURES`, `PART_PICTURE_SHAPE`,
+`PART_PICTURE_MEMBER`, `PART_LINE_TOO_LONG` and `PART_PAIR_TWICE` (each formatted with `owner`, and
+`m` or `pair` as above), and `PART_PICTURE_UNKNOWN` and `PART_PICTURE_FOREIGN` name the service's
+refusals. `picture_ids(members)` is the unique `picture` values of checked members in first-seen
+order. With
 `limits=False` the three limit steps are replaced by today's caps: a `QUESTION_MEMBER` for a
 `question` or `context` over `MAX_QUESTION_CHARS` (an option's cap is `MAX_LINE_CHARS`), and a
 picture's line over `MAX_LINE_CHARS`; the picture count cap stays. It returns a new
@@ -339,9 +364,15 @@ index)`. A `questions.asked` row changes a sprint only when it is open, its brie
 checked question is then added with `round_id` the row's `seq`, its `index` and `at`. Each checked
 question's pictures become `Question.pictures`, `QuestionPicture`s in order. A `picture.stored`
 row adds its `picture` to `SprintState.pictures` when its `sprint_id` is folded and `picture` fully
-matches `PICTURE_ID`; any other such row changes nothing. A `questions.asked` row of a folded sprint
-adds the members of its top-level `pictures` list that fully match `PICTURE_ID`, so a sprint still
-owns a picture its kept round names after retention has removed the `picture.stored` row. The fold does not enforce one open round;
+matches `PICTURE_ID`; any other such row changes nothing. A `questions.asked`, `brief.sent` or
+`sprint.reported` row of a folded sprint adds the members of its top-level `pictures` list that
+fully match `PICTURE_ID`, whether or not the row itself applied, so a sprint still owns a picture
+its kept row names after retention has removed the `picture.stored` row. A `brief.sent` or
+`sprint.reported` row that applies also reads its pictures back: `Brief.pictures` and
+`Report.pictures` are the `QuestionPicture`s of `checked_pictures(owner, <the logged pictures>,
+limits=False)`, so a logged line over `MAX_PICTURE_LINE_CHARS` folds whole and renders cut, and are
+`()` when the key is absent or that check refuses; a refusal there never drops the brief or the
+report. The fold does not enforce one open round;
 the service does. A `question.answered` row applies only when its `round`
 and `index` (ints, not bools) name an unanswered question of the sprint, its `answer` is a string and
 its `chosen` is null or one of the question's options: the question then keeps `answer`, `chosen`,
@@ -447,7 +478,7 @@ import json
 import os
 import re
 import secrets
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
 from pathlib import Path
@@ -608,6 +639,14 @@ LOOK_WITHOUT_PICTURE = ('question {n} "{ask}" names screenshots, a PNG file or a
                         "reword it")
 PICTURE_UNKNOWN = "question {n} picture {m} is not known"
 PICTURE_FOREIGN = "question {n} picture {m} was sent by another sprint"
+PART_PICTURES_SHAPE = "the {owner}'s pictures are not a list"
+PART_TOO_MANY_PICTURES = f"the {{owner}} has more than {MAX_PICTURES} pictures"
+PART_PICTURE_SHAPE = "the {owner}'s picture {m} is not an object of picture, line and pair"
+PART_PICTURE_MEMBER = "the {owner}'s picture {m} has no valid {member}"
+PART_LINE_TOO_LONG = f"the {{owner}}'s picture {{m}}'s line is over {MAX_PICTURE_LINE_CHARS} characters"
+PART_PAIR_TWICE = "the {owner} marks two pictures {pair}"
+PART_PICTURE_UNKNOWN = "the {owner}'s picture {m} is not known"
+PART_PICTURE_FOREIGN = "the {owner}'s picture {m} was sent by another sprint"
 TITLE_TOO_LONG = f"the brief's title is at most {MAX_TITLE_CHARS} characters"
 ASK_TOO_LONG = (f"question {{n}}'s ask is over {MAX_ASK_CHARS} characters: keep it to the question "
                 "the owner answers and move the rest into context")
@@ -672,6 +711,7 @@ class Brief:
     decision: str
     reply: str | None
     decided_at: str | None = None
+    pictures: tuple["QuestionPicture", ...] = ()
 
 
 @dataclass(frozen=True)
@@ -684,6 +724,7 @@ class Report:
     issues: tuple[tuple[int, str], ...]
     inbox: tuple[int, ...]
     next_step: str
+    pictures: tuple["QuestionPicture", ...] = ()
 
 
 @dataclass(frozen=True)
@@ -870,26 +911,29 @@ def parse_continue(body: bytes) -> tuple[str, str]:
     return value["project_id"], _sprint_id(value["sprint_id"])
 
 
-def parse_brief_request(body: bytes) -> tuple[str, str, dict]:
-    value = _object(body, {"sprint_id", "secret", "brief"}, project=False)
+def _manager_request(body: bytes, key: str, members: tuple[str, ...]) -> tuple[str, str, dict, bool]:
+    """A manager's sprint, secret and `key` object with an optional `"dry_run": true`."""
+    value = _decoded(body)
+    dry_run = isinstance(value, dict) and "dry_run" in value
+    if dry_run and value["dry_run"] is not True:
+        raise ValueError("dry_run must be true when given")
+    value = _object(body, {"sprint_id", "secret", key} | ({"dry_run"} if dry_run else set()),
+                    project=False)
     sprint_id = _sprint_id(value["sprint_id"])
     if not isinstance(value["secret"], str):
         raise ValueError("secret must be a string")
-    brief = value["brief"]
-    if not isinstance(brief, dict) or not set(brief) <= set(PARTS):
-        raise ValueError(f"brief must be an object of {', '.join(PARTS)}")
-    return sprint_id, value["secret"], brief
+    given = value[key]
+    if not isinstance(given, dict) or not set(given) <= {*members, "pictures"}:
+        raise ValueError(f"{key} must be an object of {', '.join((*members, 'pictures'))}")
+    return sprint_id, value["secret"], given, dry_run
 
 
-def parse_report_request(body: bytes) -> tuple[str, str, dict]:
-    value = _object(body, {"sprint_id", "secret", "report"}, project=False)
-    sprint_id = _sprint_id(value["sprint_id"])
-    if not isinstance(value["secret"], str):
-        raise ValueError("secret must be a string")
-    report = value["report"]
-    if not isinstance(report, dict) or not set(report) <= set(REPORT_MEMBERS):
-        raise ValueError(f"report must be an object of {', '.join(REPORT_MEMBERS)}")
-    return sprint_id, value["secret"], report
+def parse_brief_request(body: bytes) -> tuple[str, str, dict, bool]:
+    return _manager_request(body, "brief", PARTS)
+
+
+def parse_report_request(body: bytes) -> tuple[str, str, dict, bool]:
+    return _manager_request(body, "report", REPORT_MEMBERS)
 
 
 ROUND_KEYS = ("questions", "blocker")
@@ -1052,6 +1096,9 @@ def checked_brief(brief: dict) -> dict:
                     or (not value and part not in MAY_BE_EMPTY)):
                 raise Refused(MISSING_PART.format(part=part))
             checked[part] = [item.strip() for item in value]
+    pictures = checked_pictures("brief", brief["pictures"]) if "pictures" in brief else []
+    if pictures:
+        checked["pictures"] = pictures
     return checked
 
 
@@ -1092,11 +1139,15 @@ def checked_report(report: dict) -> dict:
             raise Refused(REPORT_MEMBER.format(member=member))
         if member == "status" and re.search(r"#\d", report["status"].strip()):
             raise Refused(STATUS_NUMBER)
-    return {"status": report["status"].strip(), "phase": report["phase"],
-            "milestone": report["milestone"].strip(), "tracker_url": report["tracker_url"],
-            "issues": sorted(({"issue": row["issue"], "stage": row["stage"]}
-                              for row in report["issues"]), key=lambda row: row["issue"]),
-            "inbox": sorted(set(report["inbox"])), "next": report["next"].strip()}
+    pictures = checked_pictures("report", report["pictures"]) if "pictures" in report else []
+    checked = {"status": report["status"].strip(), "phase": report["phase"],
+               "milestone": report["milestone"].strip(), "tracker_url": report["tracker_url"],
+               "issues": sorted(({"issue": row["issue"], "stage": row["stage"]}
+                                 for row in report["issues"]), key=lambda row: row["issue"]),
+               "inbox": sorted(set(report["inbox"])), "next": report["next"].strip()}
+    if pictures:
+        checked["pictures"] = pictures
+    return checked
 
 
 # A question about look or layout (#1092): the word screenshot or screenshots (also "screen shot"),
@@ -1167,26 +1218,48 @@ def _replaces_mark(mark: object) -> bool:
 
 
 def _checked_pictures(n: int, pictures: object, limits: bool) -> list[dict]:
+    return _checked_picture_list(
+        pictures, limits, PICTURES_SHAPE.format(n=n), TOO_MANY_PICTURES.format(n=n),
+        lambda m: PICTURE_SHAPE.format(n=n, m=m),
+        lambda m, member: PICTURE_MEMBER.format(n=n, m=m, member=member),
+        lambda m: LINE_TOO_LONG.format(n=n, m=m), lambda pair: PAIR_TWICE.format(n=n, pair=pair))
+
+
+def checked_pictures(owner: str, pictures: object, *, limits: bool = True) -> list[dict]:
+    """A brief's or report's picture list, checked as a question's is, under the `PART_*` reasons."""
+    return _checked_picture_list(
+        pictures, limits, PART_PICTURES_SHAPE.format(owner=owner),
+        PART_TOO_MANY_PICTURES.format(owner=owner),
+        lambda m: PART_PICTURE_SHAPE.format(owner=owner, m=m),
+        lambda m, member: PART_PICTURE_MEMBER.format(owner=owner, m=m, member=member),
+        lambda m: PART_LINE_TOO_LONG.format(owner=owner, m=m),
+        lambda pair: PART_PAIR_TWICE.format(owner=owner, pair=pair))
+
+
+def _checked_picture_list(pictures: object, limits: bool, not_a_list: str, too_many: str,
+                          shape: Callable[[int], str], member_reason: Callable[[int, str], str],
+                          too_long: Callable[[int], str],
+                          twice: Callable[[str], str]) -> list[dict]:
     if not isinstance(pictures, list):
-        raise Refused(PICTURES_SHAPE.format(n=n))
+        raise Refused(not_a_list)
     if len(pictures) > MAX_PICTURES:
-        raise Refused(TOO_MANY_PICTURES.format(n=n))
+        raise Refused(too_many)
     checked = []
     for m, row in enumerate(pictures, 1):
         if (not isinstance(row, dict) or not set(row) <= {"picture", "line", "pair"}
                 or "picture" not in row or "line" not in row):
-            raise Refused(PICTURE_SHAPE.format(n=n, m=m))
+            raise Refused(shape(m))
         picture, line = row["picture"], row["line"]
         if not isinstance(picture, str) or not PICTURE_ID.fullmatch(picture):
-            raise Refused(PICTURE_MEMBER.format(n=n, m=m, member="picture"))
+            raise Refused(member_reason(m, "picture"))
         if not _text(line):
-            raise Refused(PICTURE_MEMBER.format(n=n, m=m, member="line"))
+            raise Refused(member_reason(m, "line"))
         if limits and len(line.strip()) > MAX_PICTURE_LINE_CHARS:
-            raise Refused(LINE_TOO_LONG.format(n=n, m=m))
+            raise Refused(too_long(m))
         if not _line(line):
-            raise Refused(PICTURE_MEMBER.format(n=n, m=m, member="line"))
+            raise Refused(member_reason(m, "line"))
         if "pair" in row and row["pair"] not in PAIRS:
-            raise Refused(PICTURE_MEMBER.format(n=n, m=m, member="pair"))
+            raise Refused(member_reason(m, "pair"))
         member = {"picture": picture, "line": line.strip()}
         if "pair" in row:
             member["pair"] = row["pair"]
@@ -1194,18 +1267,23 @@ def _checked_pictures(n: int, pictures: object, limits: bool) -> list[dict]:
     pairs = [member["pair"] for member in checked if "pair" in member]
     for pair in pairs:
         if pairs.count(pair) > 1:
-            raise Refused(PAIR_TWICE.format(n=n, pair=pair))
+            raise Refused(twice(pair))
     return checked
+
+
+def picture_ids(members: Iterable[dict]) -> list[str]:
+    """The unique `picture` values of checked members, in first-seen order."""
+    ids: list[str] = []
+    for member in members:
+        if member["picture"] not in ids:
+            ids.append(member["picture"])
+    return ids
 
 
 def round_pictures(checked: dict) -> list[str]:
     """The unique picture ids of a checked round, in question then picture order."""
-    ids: list[str] = []
-    for question in checked["questions"]:
-        for member in question.get("pictures", ()):
-            if member["picture"] not in ids:
-                ids.append(member["picture"])
-    return ids
+    return picture_ids(member for question in checked["questions"]
+                       for member in question.get("pictures", ()))
 
 
 def checked_round(round_: dict, *, limits: bool = True, files_withheld: bool = False) -> dict:
@@ -1345,6 +1423,17 @@ def _with_message(state: SprintState, message: Message) -> SprintState:
     return replace(state, messages=tuple(messages))
 
 
+def _read_back_pictures(owner: str, logged: dict) -> tuple["QuestionPicture", ...]:
+    """The pictures a logged brief or report carries; none when absent or when they fail the check."""
+    if "pictures" not in logged:
+        return ()
+    try:
+        checked = checked_pictures(owner, logged["pictures"], limits=False)
+    except Refused:
+        return ()
+    return tuple(QuestionPicture(p["picture"], p["line"], p.get("pair")) for p in checked)
+
+
 def _folded_brief(state: SprintState, event: Event) -> SprintState:
     payload = event.payload
     version = payload.get("version")
@@ -1352,10 +1441,13 @@ def _folded_brief(state: SprintState, event: Event) -> SprintState:
         return state
     brief = state.brief
     if event.kind == BRIEF_SENT:
-        parts = payload.get("brief")
-        if isinstance(parts, dict) and version > (brief.version if brief else 0):
+        logged = payload.get("brief")
+        if isinstance(logged, dict) and version > (brief.version if brief else 0):
+            parts = {key: value for key, value in logged.items() if key != "pictures"}
             superseded = state.report is not None and state.report.phase == DONE
-            return replace(state, brief=Brief(version, parts, event.at, NONE, None, None),
+            return replace(state,
+                           brief=Brief(version, parts, event.at, NONE, None, None,
+                                       _read_back_pictures("brief", logged)),
                            report=None if superseded else state.report)
         return state
     if brief is None or version != brief.version or brief.decision != NONE:
@@ -1538,15 +1630,17 @@ def _folded_report(state: SprintState, event: Event) -> SprintState:
     report = event.payload.get("report")
     if state.state != STARTING or not isinstance(report, dict):
         return state
+    members = {key: value for key, value in report.items() if key != "pictures"}
     try:
-        checked = checked_report(report)
+        checked = checked_report(members)
     except Refused:
         return state
     return replace(state, observed=(), moved_ms=None, idle_nudges=0, no_progress_at=None,
                    report=Report(event.at, checked["status"], checked["phase"],
                                  checked["milestone"], checked["tracker_url"],
                                  tuple((row["issue"], row["stage"]) for row in checked["issues"]),
-                                 tuple(checked["inbox"]), checked["next"]))
+                                 tuple(checked["inbox"]), checked["next"],
+                                 _read_back_pictures("report", report)))
 
 
 def _folded_stop_request(state: SprintState, event: Event) -> SprintState:
@@ -1636,6 +1730,8 @@ def sprint_states(events: Iterable[Event],
             folded.pop(sprint_id, None)
         elif event.kind in (BRIEF_SENT, BRIEF_APPROVED, BRIEF_REPLIED) and sprint_id in folded:
             folded[sprint_id] = _folded_brief(folded[sprint_id], event)
+            if event.kind == BRIEF_SENT:
+                folded[sprint_id] = _folded_row_pictures(folded[sprint_id], event)
         elif event.kind == SPRINT_STOP_REQUESTED and sprint_id in folded:
             folded[sprint_id] = _folded_stop_request(folded[sprint_id], event)
         elif event.kind == SPRINT_CLOSED and sprint_id in folded:
@@ -1650,6 +1746,7 @@ def sprint_states(events: Iterable[Event],
             folded[sprint_id] = _folded_idle(folded[sprint_id], event)
         elif event.kind == SPRINT_REPORTED and sprint_id in folded:
             folded[sprint_id] = _folded_report(folded[sprint_id], event)
+            folded[sprint_id] = _folded_row_pictures(folded[sprint_id], event)
         elif event.kind in (SPRINT_MESSAGED, SPRINT_READ, SPRINT_ANSWERED, SPRINT_NUDGED) \
                 and sprint_id in folded:
             folded[sprint_id] = _folded_message(folded[sprint_id], event)
@@ -1657,7 +1754,7 @@ def sprint_states(events: Iterable[Event],
                 and sprint_id in folded:
             folded[sprint_id] = _folded_question(folded[sprint_id], event)
             if event.kind == QUESTIONS_ASKED:
-                folded[sprint_id] = _folded_round_pictures(folded[sprint_id], event)
+                folded[sprint_id] = _folded_row_pictures(folded[sprint_id], event)
         elif event.kind == PICTURE_STORED and sprint_id in folded:
             picture = event.payload.get("picture")
             if isinstance(picture, str) and PICTURE_ID.fullmatch(picture):
@@ -1666,8 +1763,8 @@ def sprint_states(events: Iterable[Event],
     return folded
 
 
-def _folded_round_pictures(state: SprintState, event: Event) -> SprintState:
-    """A kept `questions.asked` row's pictures stay the sprint's own after retention drops theirs."""
+def _folded_row_pictures(state: SprintState, event: Event) -> SprintState:
+    """A kept row's top-level pictures stay the sprint's own after retention drops their rows."""
     listed = event.payload.get("pictures")
     named = {p for p in listed if isinstance(p, str) and PICTURE_ID.fullmatch(p)} \
         if isinstance(listed, list) else set()

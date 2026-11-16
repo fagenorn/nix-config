@@ -774,6 +774,18 @@ class ManagerContractTest(unittest.TestCase):
             with self.subTest(needle):
                 self.assertIn(needle, text)
 
+    def test_the_contract_says_how_a_brief_and_a_report_carry_pictures(self):
+        text = CONTRACT.read_text(encoding="utf-8")
+        for heading in ("## Drafting the brief", "## Reporting"):
+            section = text.partition(heading)[2].partition("\n## ")[0]
+            for needle in ("`pictures`", "file", "line", "8", "140", "before", "after",
+                           "named by nothing"):
+                with self.subTest(heading=heading, needle=needle):
+                    self.assertIn(needle, section)
+
+    def test_the_report_help_names_its_optional_pictures(self):
+        self.assertIn("pictures:", run_sprint("report", "--help").stdout)
+
     def test_contract_sends_no_request(self):
         out = StringIO()
         refused = AssertionError("sprint contract opened a connection")

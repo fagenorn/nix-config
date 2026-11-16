@@ -17,13 +17,14 @@ If this text is no longer in your context, run `sprint contract` again.
 
 1. Read the goal: it is the text after `The goal:` in your first prompt.
 2. Ground yourself in the project's documents with the `doc-grounded-questions` skill: its language, decisions and standards, and the code the goal touches. Read only.
-3. Write the brief as one JSON object of six parts, each required and none empty:
+3. Write the brief as one JSON object of six parts, each required and none empty, and optionally `pictures`:
    - `title`: one line of at most 60 characters that names the sprint everywhere on the owner's page; the tracker milestone name you will use is such a title.
    - `done`: one text, what done looks like.
    - `excluded`: a list of texts, what the sprint leaves out.
    - `slices`: a list of texts, the vertical slices in delivery order.
    - `risks`: a list of texts.
    - `asks`: a list of texts, what you expect to ask the owner.
+   - `pictures`: optional, at most 8: `[{"file": "<path to a PNG>", "line": "<one line, at most 140 characters>", "pair": "before" | "after"}]`, for example a mock-up. `sprint brief` uploads each `file` for you and sends its id; the `line` is what the owner reads beside the picture, and `pair` (optional, each of `before` and `after` at most once) marks a before-and-after pair. Only pictures of this sprint are accepted; a picture over 2 MiB, one that is not a PNG, or a list over these limits is refused with the reason and the brief is not sent. A list refused before the first upload leaves nothing uploaded, while a picture refused while uploading leaves the ones uploaded before it stored, named by nothing, until the console's sweep removes them: fix the file and send again.
 4. Send it with `sprint brief --brief-file -`, the JSON on standard input. It prints `sprint: brief version <n> sent`.
 5. Refused with `the brief has no <part>` or `the brief's title is at most 60 characters`: fix that part and send again. Refused with `secret refused` or `this sprint is not open`, or the console unreachable: say so in one line and stop.
 6. End your turn. The owner's answer arrives as a message: read it with `sprint inbox` at the start of your next turn.
@@ -64,6 +65,8 @@ If this text is no longer in your context, run `sprint contract` again.
 - `issues`: a list of every issue of the sprint, each `{"issue": <number>, "stage": <stage>}`, no issue twice; empty before any is cut. A stage is one of `queued`, `planning`, `plan review`, `building`, `final review`, `verifying`, `landing`, `working`, `landed` or `held`.
 - `inbox`: a list of the numbers of the issues waiting on the owner; empty when none is.
 - `next`: one line, what you do next.
+
+Optionally `pictures`, at most 8: `[{"file": "<path to a PNG>", "line": "<one line, at most 140 characters>", "pair": "before" | "after"}]`, for example the look of a landed change. `sprint report` uploads each `file` for you and sends its id; the `line` is what the owner reads beside the picture, and `pair` (optional, each of `before` and `after` at most once) marks a before-and-after pair. Only pictures of this sprint are accepted; a picture over 2 MiB, one that is not a PNG, or a list over these limits is refused with the reason and the report is not sent. A list refused before the first upload leaves nothing uploaded, while a picture refused while uploading leaves the ones uploaded before it stored, named by nothing, until the console's sweep removes them: fix the file and send again.
 
 ```json
 {"status": "two slices are building and one has landed",
