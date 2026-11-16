@@ -25,6 +25,7 @@ from agent_tools.verification import verify_pending
 from agent_tools.verification import verify_run as vr
 from agent_tools.project_contract.resolve_project import resolve
 from agent_tools.verification.verify_block import lint_block
+from agent_tools.system.forge_api import ForgeError
 
 from .forge_world import ForgeWorld, host_clock
 
@@ -395,6 +396,97 @@ class WhenTest(unittest.TestCase):
                                MERGE, context(world))
         self.assertEqual(due.reason, "not_before")
         self.assertNotIn("darwin-version", [call["tool"] for call in world.calls()])
+
+    def test_a_future_not_before_names_its_time(self):
+        world = world_with(self)
+        with host_clock(WRONG, vf, fm):
+            due = vf.evaluate_when({"not_before": "2026-11-06T11:00:00+00:00"}, MERGE, context(world))
+        self.assertEqual((due.due, due.reason, due.until),
+                         (False, "not_before", datetime(2026, 11, 6, 11, tzinfo=timezone.utc)))
+
+    def test_an_open_window_names_its_end(self):
+        _, due = self.window("2026-11-03T10:00:00Z", 7)
+        self.assertEqual(due.reason, "window_not_open")
+        self.assertEqual(due.until, datetime(2026, 11, 10, 10, tzinfo=timezone.utc))
+
+    def test_an_unseen_event_has_no_time(self):
+        world = world_with(self, "darwin-version")
+        world.respond_json("darwin-version", ["--json"], {"configurationRevision": REV})
+        pushed(world, REV)
+        ancestry(world, MERGE, REV, 1)
+        due = vf.evaluate_when({"days_after": {"event": "deployed", "days": 7}}, MERGE, context(world))
+        self.assertEqual(due.reason, "window_not_open")
+        self.assertIsNone(due.until)
+
+    def test_a_given_clock_replaces_the_forge_clock(self):
+        world = world_with(self)
+        fixed = datetime(2026, 11, 16, 9, tzinfo=timezone.utc)
+        ctx = vf.Context(slug=SLUG, root=world.checkout, default_branch="main", tracker=TRACKER,
+                         markers=[], clock=lambda: fixed)
+        self.assertEqual((ctx.now(), ctx.now()), (fixed, fixed))
+        self.assertEqual([a for a in world.argvs("gh") if "rate_limit" in a], [])
+
+    def test_a_context_that_reads_no_host_runs_no_version_tool(self):
+        world = world_with(self, "darwin-version")
+        world.respond_json("darwin-version", ["--json"], {"configurationRevision": REV})
+        ctx = vf.Context(slug=SLUG, root=world.checkout, default_branch="main", tracker=TRACKER,
+                         markers=[], reads_host=False)
+        reading = vf.deployed_includes(ctx, MERGE)
+        self.assertEqual(reading.reason, "revision_unknown")
+        self.assertNotIn("darwin-version", [c["tool"] for c in world.calls()])
+
+    def test_a_wait_on_two_dates_names_the_later(self):
+        world = world_with(self)
+        nodes = [gnode(10, hold(block())),
+                 gnode(11, marker(vi.WINDOW, {"event": "deployed", "merge": MERGE, "host": "eleven-m5"}),
+                       at="2026-11-16T09:00:00Z")]
+        held = vi.select(vi.comments_from_graphql(nodes))
+        when = {"not_before": "2026-11-18T10:00:00+00:00", "days_after": {"event": "deployed", "days": 7}}
+
+        def ctx_at(at):
+            return vf.Context(slug=SLUG, root=world.checkout, default_branch="main", tracker=TRACKER,
+                              markers=held.markers, clock=lambda: at)
+
+        def utc(day, hour):
+            return datetime(2026, 11, day, hour, tzinfo=timezone.utc)
+
+        waited = vf.evaluate_wait(when, MERGE, ctx_at(utc(16, 10)))
+        self.assertEqual((waited.due, waited.until), (False, utc(23, 9)))
+        first = vf.evaluate_when(when, MERGE, ctx_at(utc(16, 10)))
+        self.assertEqual((first.due, first.reason, first.until), (False, "not_before", utc(18, 10)))
+        waited = vf.evaluate_wait(when, MERGE, ctx_at(utc(19, 10)))
+        self.assertEqual((waited.due, waited.reason, waited.until), (False, "window_not_open", utc(23, 9)))
+        self.assertTrue(vf.evaluate_wait(when, MERGE, ctx_at(utc(23, 9))).due)
+        self.assertEqual(world.argvs("gh"), [])
+
+    def test_a_date_beside_an_unseen_release_gives_no_date(self):
+        world = world_with(self)
+        world.not_found("gh", ["api", f"repos/{SLUG}/releases/latest"])
+        when = {"not_before": "2026-11-18T10:00:00+00:00", "released_includes": MERGE}
+        clock = lambda: datetime(2026, 11, 16, 10, tzinfo=timezone.utc)
+
+        def ctx():
+            return vf.Context(slug=SLUG, root=world.checkout, default_branch="main", tracker=TRACKER,
+                              markers=[], clock=clock)
+
+        waited = vf.evaluate_wait(when, MERGE, ctx())
+        self.assertEqual((waited.due, waited.reason, waited.until), (False, "not_released", None))
+        before = len([a for a in world.argvs("gh") if f"repos/{SLUG}/releases/latest" in a])
+        first = vf.evaluate_when(when, MERGE, ctx())
+        self.assertEqual((first.due, first.reason), (False, "not_before"))
+        after = len([a for a in world.argvs("gh") if f"repos/{SLUG}/releases/latest" in a])
+        self.assertEqual(after, before)
+
+    def test_a_stop_during_the_first_forge_read_reads_nothing_more(self):
+        world = world_with(self)
+        world.respond_json("gh", ["api", f"repos/{SLUG}/releases/latest"], {"tag_name": "v1"})
+        asked = []
+        ctx = vf.Context(slug=SLUG, root=world.checkout, default_branch="main", tracker=TRACKER, markers=[],
+                         cancelled=lambda: (asked.append(1), len(asked) > 1)[1])
+        with self.assertRaises(ForgeError) as raised:
+            vf.evaluate_when({"released_includes": MERGE}, MERGE, ctx)
+        self.assertEqual(raised.exception.code, "cancelled")
+        self.assertEqual(world.argvs("gh"), [["api", f"repos/{SLUG}/releases/latest"]])
 
 
 RELEASES = ["api", "--paginate", "--slurp", f"repos/{SLUG}/releases?per_page=100"]
