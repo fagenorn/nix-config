@@ -4479,8 +4479,7 @@ function changeBox(registration, entry, change) {
         change.choice = option.value;
         renderRegister(lastView);
       });
-      button.replaceChildren();
-      pathWords(button, option.label);
+      button.replaceChildren(pathWords(el("span"), option.label));
       button.setAttribute("aria-pressed", String(change.choice === option.value));
       button.disabled = change.posting;
       markBusy(button, change.posting);
@@ -4537,8 +4536,7 @@ function draftRow(registration, entry, folded) {
     const retry = refusedHere && sent !== undefined && sent.plan_id === registration.plan_id ? sent.value : undefined;
     if (folded) {
       const pick = actionButton("draft-pick btn-quiet btn-bare", entry.line, () => openChange(entry, retry));
-      pick.replaceChildren();
-      pathWords(pick, entry.line);
+      pick.replaceChildren(pathWords(el("span"), entry.line));
       pick.setAttribute("aria-label", "Change: " + entry.line);
       row.appendChild(pick);
     } else {

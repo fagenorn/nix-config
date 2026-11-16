@@ -166,6 +166,7 @@ def desk_scenarios() -> list:
     begin = {"start": {"focused": False, "clock": NOW_MS}}
     posting = {"respond": {"status": 204, "text": ""}}
     brief_open = {"frame": frame([BRIEF, DECISION_ITEM])}
+    panel_open = {"click": "cap"}  # the Add account form sits in the accounts panel, shut at first
     manual = check_item("A", "manual-check")
     approval = check_item("B", "approval")
     words = {"type": {"class": "words-text", "text": "use the reader"}}
@@ -227,9 +228,9 @@ def desk_scenarios() -> list:
          {"frame": frame([with_run(SIGNIN, "running", 7)])}, snapshot],
         [START, {"frame": frame([SIGNIN])}, snapshot],
         # Add account: naming, then the code phase
-        [START, {"frame": V}, {"click": "account-add-open"}, snapshot],
-        [*ADD_STEPS, snapshot],
-        [*NO_LINK_RUNNING, snapshot],
+        [START, {"frame": V}, panel_open, {"click": "account-add-open"}, snapshot],
+        [*ADD_STEPS[:2], panel_open, *ADD_STEPS[2:], snapshot],
+        [*NO_LINK_RUNNING[:2], panel_open, *NO_LINK_RUNNING[2:], snapshot],
         # Register project with a result
         [*REGISTER_TYPED, snapshot],
         # the notices fold with post opened and an own notice
@@ -388,14 +389,14 @@ def last_compound(selector: str) -> str:
     return re.split(r"\s*[>+~]\s*|\s+", selector.strip())[-1]
 
 
-def targets_control(selector: str) -> str | None:
+def targets_control(selector: str, roles: dict = DESK_CONTROLS) -> str | None:
     """The control role, kind or tag a selector's last compound targets, else None."""
     compound = last_compound(selector)
     if ':not([class*="btn-"])' in compound:
         return None
     classes = set(re.findall(r"\.([\w-]+)", compound))
     for name in sorted(classes):
-        if name in DESK_CONTROLS or name in KINDS or (
+        if name in roles or name in KINDS or (
                 name.startswith("ans-") and name not in ANS_PLAIN) or name in ANS_PLAIN:
             return name
     if 'class^="ans-"' in compound:
@@ -421,6 +422,18 @@ def kind_owned(name: str, prop: str) -> bool:
     if LOOK.match(prop):
         return True
     return (name == "opt" or name == "btn-option") and bool(LOOK_OPTION.match(prop))
+
+
+def short_rules(style: str, roles: dict) -> list:
+    """Every rule of the style aimed at a control of `roles` that sets a height below 32 px."""
+    small = []
+    for selector, decls in rules_of(style):
+        if targets_control(selector, roles) is None:
+            continue
+        for prop in ("height", "min-height", "max-height"):
+            if prop in decls and css_px(decls[prop]) < 32:
+                small.append(f"{selector} {{ {prop}: {decls[prop]} }}")
+    return small
 
 
 class ControlStyleTest(unittest.TestCase):
@@ -510,20 +523,21 @@ class ControlStyleTest(unittest.TestCase):
         self.assertEqual(offenders, [])
 
     def test_no_rule_shrinks_a_control_below_32_px(self) -> None:
-        small = []
-        for selector, decls in rules_of(self.style):
-            if targets_control(selector) is None:
-                continue
-            for prop in ("height", "min-height", "max-height"):
-                if prop in decls and css_px(decls[prop]) < 32:
-                    small.append(f"{selector} {{ {prop}: {decls[prop]} }}")
-        self.assertEqual(small, [])
+        for page, style, roles in (("desk", self.style, DESK_CONTROLS),
+                                   ("spend", spend_style(), SPEND_CONTROLS)):
+            with self.subTest(page=page):
+                self.assertEqual(short_rules(style, roles), [])
         block = style_rules(controls_block(self.style))
         for kind in KINDS:
             with self.subTest(kind=kind):
                 heights = [d["min-height"] for s, d in block if s == "." + kind and "min-height" in d]
                 self.assertTrue(heights, kind)
                 self.assertGreaterEqual(css_px(heights[-1]), 32)
+
+    def test_the_height_floor_gate_sees_a_later_spend_rule(self) -> None:
+        shrunk = spend_style() + "\n.span { min-height: 20px; }\n"
+        self.assertEqual(short_rules(shrunk, SPEND_CONTROLS), [".span { min-height: 20px }"])
+        self.assertEqual(short_rules(shrunk, DESK_CONTROLS), [])
 
 
 def css_px(value: str) -> float:
@@ -938,7 +952,6 @@ class ControlLabelTest(unittest.TestCase):
 
 
 VOID_TAGS = frozenset({"input", "br", "hr", "img"})
-SPEND_TREES = ("spans", "note", "item", "summary", "trend", "breakdowns")
 CONTROL_HEIGHTS = f"""Array.from(document.querySelectorAll({json.dumps(CONTROL_SELECTOR)})).filter(
   (n) => n.getClientRects().length > 0 && getComputedStyle(n).visibility !== "hidden").map(
   (n) => [(n.getAttribute("class") || "").split(/\\s+/)[0], n.getBoundingClientRect().height,
@@ -970,41 +983,9 @@ def tree_html(node: dict) -> str:
     return f"<{node['tag']}{open_tag}>{inner}</{node['tag']}>"
 
 
-def spend_tree_html(node: dict) -> str:
-    """A Spend snapshot node written back as markup: its attributes but `data-*`, then its text."""
-    attrs = {"class": node["cls"] or None,
-             **{k: v for k, v in node["attrs"].items()
-                if not k.startswith("data-") and k != "class"}}
-    open_tag = "".join(f' {name}="{html.escape(str(value), quote=True)}"'
-                       for name, value in attrs.items() if value is not None)
-    tag = node["tag"].lower()
-    if tag in VOID_TAGS:
-        return f"<{tag}{open_tag}>"
-    inner = (html.escape(node["text"] or "") if not node["children"]
-             else "".join(spend_tree_html(child) for child in node["children"]))
-    return f"<{tag}{open_tag}>{inner}</{tag}>"
-
-
 def specimen(style: str, body: str) -> str:
     return (f'<!doctype html><html lang="en"><head><meta charset="utf-8"><style>{style}</style>'
             f"</head><body>{body}</body></html>")
-
-
-def desk_specimens() -> list:
-    """One page per `desk_scenarios()` snapshot: its trees under ids, under the desk `<style>`."""
-    style = page_style()
-    pages = []
-    for snap in snapshots_of(desk_scenarios()):
-        body = "".join(f'<div id="{tree.replace("_", "-")}">{tree_html(snap[tree])}</div>'
-                       for tree in TREES if snap.get(tree) is not None)
-        pages.append(specimen(style, body))
-    return pages
-
-
-def spend_specimens() -> list:
-    (snap,) = render_spend([{"frame": spend_view_fixture()}, {"snapshot": True}])["snapshots"]
-    body = "".join(f'<div id="{tree}">{spend_tree_html(snap[tree])}</div>' for tree in SPEND_TREES)
-    return [specimen(spend_style(), body)]
 
 
 def held_specimens() -> list:
@@ -1043,49 +1024,179 @@ def state_specimen() -> str:
     return specimen(page_style(), "<div>" + "".join(cells) + "</div>")
 
 
+PATH_OPTION = "owner/repo/release/main"
+PATH_DRAFT = {**DRAFTED, "draft": [DRAFTED["draft"][0], {
+    **DRAFTED["draft"][1], "value": "tagged", "line": "release branch: owner/repo/main (tagged)",
+    "options": [{"value": "path", "label": PATH_OPTION}]}]}
+
+
+class OptionWrapTest(unittest.TestCase):
+    def test_a_registration_option_label_is_one_flex_item(self) -> None:
+        """`.btn-quiet` is a flex box: a label's path segments must share one child (#1137)."""
+        (snap,) = render([START, {"frame": cards([], PATH_DRAFT)}, {"open": "draft-more"},
+                          {"click": "draft-pick"}, {"snapshot": True}])
+        (button,) = [n for n in nodes(snap["register"]) if "draft-option" in n["cls"].split()]
+        self.assertEqual(button["text"], "")
+        (label,) = button["children"]
+        self.assertEqual(label["tag"], "span")
+        self.assertEqual("".join(n["text"] for n in nodes(label)), PATH_OPTION)
+
+    def test_a_registration_setting_line_is_one_flex_item(self) -> None:
+        (snap,) = render([START, {"frame": cards([], PATH_DRAFT)}, {"open": "draft-more"},
+                          {"snapshot": True}])
+        (button,) = [n for n in nodes(snap["register"]) if "draft-pick" in n["cls"].split()]
+        self.assertEqual(button["text"], "")
+        (label,) = button["children"]
+        self.assertEqual(label["tag"], "span")
+
+
+CONSOLE_URL = "http://console.test"
+PAGE_STUBS = """
+window.__sources = [];
+window.__replies = [];
+window.EventSource = class {
+  constructor() { this.listeners = {}; window.__sources.push(this); }
+  addEventListener(name, fn) { this.listeners[name] = fn; }
+};
+window.fetch = (url) => {
+  if (String(url).startsWith("/api/picture/")) {
+    return Promise.resolve({ status: 200, ok: true, text: () => Promise.resolve(""),
+                             blob: () => Promise.resolve(new Blob([""])) });
+  }
+  const reply = window.__replies.shift() || { status: 204, text: "" };
+  return Promise.resolve({ status: reply.status, ok: reply.status >= 200 && reply.status < 300,
+                           text: () => Promise.resolve(reply.text) });
+};
+window.__step = (step) => {
+  const fold = (key) => key === undefined ? document
+    : Array.from(document.querySelectorAll("details")).find((d) => d.dataset.key === key);
+  const find = (cls, key, nth) => {
+    const scope = fold(key);
+    const found = scope && Array.from(scope.querySelectorAll("." + cls))[nth || 0];
+    if (!found) throw new Error("no element with class " + cls);
+    if (found.getClientRects().length === 0) throw new Error("the owner cannot see " + cls);
+    return found;
+  };
+  const fill = (spec, key, append) => {
+    const target = find(spec.class, key, 0);
+    target.focus();
+    target.value = append ? target.value + spec.text : spec.text;
+    target.dispatchEvent(new Event("input", { bubbles: true }));
+  };
+  if ("frame" in step) window.__sources[0].listeners.view({ data: JSON.stringify(step.frame) });
+  else if ("open" in step) fold(step.open).open = true;
+  else if ("click" in step) { const t = find(step.click, step.in, step.nth); if (!t.disabled) t.click(); }
+  else if ("type" in step) fill(step.type, step.in, false);
+  else if ("append" in step) fill(step.append, step.in, true);
+  else if ("input" in step) {
+    const target = find(step.input.cls, step.in, 0);
+    target.value = step.input.value;
+    target.dispatchEvent(new Event("input", { bubbles: true }));
+  } else if ("key" in step) document.body.dispatchEvent(new KeyboardEvent("keydown", { key: step.key, bubbles: true }));
+  else if ("respond" in step) window.__replies.push(step.respond);
+  else throw new Error("unsupported step " + Object.keys(step));
+};
+"""
+SETTLE = "new Promise((done) => setTimeout(done, 25))"
+
+
+def served(route) -> None:
+    """Serve the real desk page at `/` and the real Spend page at `/spend`; nothing else."""
+    path = route.request.url.removeprefix(CONSOLE_URL) or "/"
+    pages = {"/": (PAGE, "__CONSOLE_TOKEN__"), "/spend": (SPEND, None)}
+    if path not in pages:
+        route.fulfill(status=204, body="")
+        return
+    file, slot = pages[path]
+    body = file.read_text(encoding="utf-8")
+    route.fulfill(status=200, content_type="text/html",
+                  body=body.replace(slot, "test-token") if slot else body)
+
+
+def real_readings(browser, width: int, expression: str) -> dict:
+    """The control readings of the real pages at one width: `desk` (one list per scenario
+    snapshot, the real page.html replaying the scenario steps) and `spend` (the real
+    spend.html over its fixture view)."""
+    page = browser.new_page(viewport={"width": width, "height": 900})
+    errors = []
+    page.on("pageerror", lambda err: errors.append(str(err)))
+    page.route(f"{CONSOLE_URL}/**", served)
+    page.add_init_script(PAGE_STUBS)
+    found = {"desk": [], "spend": []}
+
+    def load(path: str, clock: int) -> None:
+        page.clock.set_fixed_time(clock)
+        page.goto(CONSOLE_URL + path)
+        page.evaluate(SETTLE)
+
+    for steps in desk_scenarios():
+        first = next(step["start"] for step in steps if "start" in step)
+        load("/", first["clock"])
+        for step in steps:
+            if "start" in step:
+                continue
+            if "snapshot" in step:
+                found["desk"].append(page.evaluate(expression))
+                continue
+            page.evaluate("(step) => window.__step(step)", step)
+            page.evaluate(SETTLE)
+    load("/spend", NOW_MS)
+    page.evaluate("(view) => window.__step({ frame: view })", spend_view_fixture())
+    page.evaluate(SETTLE)
+    found["spend"].append(page.evaluate(expression))
+    page.close()
+    if errors:
+        raise AssertionError(f"the real page threw at {width}: {errors}")
+    return found
+
+
 class ControlTargetTest(unittest.TestCase):
-    def read_widths(self, pages: list, widths: tuple, expression: str) -> dict:
-        """Load each markup at each width in Chromium: width -> one reading list per page."""
+    def chromium(self):
+        """A launched Chromium; the test is skipped when playwright or Chromium is missing."""
         try:
             from playwright.sync_api import Error, sync_playwright
         except ImportError:
             self.skipTest("playwright is not installed")
-        with sync_playwright() as pw:
-            try:
-                browser = pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
-            except Error as err:
-                self.skipTest(f"no Chromium to launch: {err}")
-            try:
-                found = {}
-                for width in widths:
-                    page = browser.new_page(viewport={"width": width, "height": 900})
-                    found[width] = []
-                    for markup in pages:
-                        page.set_content(markup)
-                        found[width].append(page.evaluate(expression))
-                    page.close()
-                return found
-            finally:
-                browser.close()
+        pw = sync_playwright().start()
+        self.addCleanup(pw.stop)
+        try:
+            browser = pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
+        except Error as err:
+            self.skipTest(f"no Chromium to launch: {err}")
+        self.addCleanup(browser.close)
+        return browser
+
+    def read_widths(self, pages: list, widths: tuple, expression: str) -> dict:
+        """Load each markup at each width in Chromium: width -> one reading list per page."""
+        browser = self.chromium()
+        found = {}
+        for width in widths:
+            page = browser.new_page(viewport={"width": width, "height": 900})
+            found[width] = []
+            for markup in pages:
+                page.set_content(markup)
+                found[width].append(page.evaluate(expression))
+            page.close()
+        return found
 
     def test_every_listed_control_is_at_least_32_px_tall_in_chromium(self) -> None:
-        desk, spend = desk_specimens(), spend_specimens()
-        pages = [(name, markup) for name, group in (("desk", desk), ("spend", spend))
-                 for markup in group]
-        by_width = self.read_widths([m for _n, m in pages], (1440, 480), CONTROL_HEIGHTS)
-        for width, readings in by_width.items():
-            measured = {"desk": set(), "spend": set()}
-            for (name, _markup), rows in zip(pages, readings):
-                for cls, height, display in rows:
-                    key = role_key(cls)
-                    measured[name].add(key)
-                    with self.subTest(page=name, width=width, role=key):
-                        self.assertGreaterEqual(height, 32, f"{name} {key} {height}")
-                        if key == "opt":
-                            self.assertEqual(display, "grid", f"{name} {key} {display}")
-            with self.subTest(width=width, completeness=True):
-                self.assertEqual(sorted(set(DESK_CONTROLS) - measured["desk"]), [])
-                self.assertEqual(sorted(set(SPEND_CONTROLS) - measured["spend"]), [])
+        """The real pages, whole: the layout containers of production stay around every control."""
+        browser = self.chromium()
+        for width in (1440, 480):
+            read = real_readings(browser, width, CONTROL_HEIGHTS)
+            for name, rows_by_snapshot in read.items():
+                measured = set()
+                for rows in rows_by_snapshot:
+                    for cls, height, display in rows:
+                        key = role_key(cls)
+                        measured.add(key)
+                        with self.subTest(page=name, width=width, role=key):
+                            self.assertGreaterEqual(height, 32, f"{name} {key} {height}")
+                            if key == "opt":
+                                self.assertEqual(display, "grid", f"{name} {key} {display}")
+                with self.subTest(page=name, width=width, completeness=True):
+                    roles = DESK_CONTROLS if name == "desk" else SPEND_CONTROLS
+                    self.assertEqual(sorted(set(roles) - measured), [])
 
     def test_a_disabled_or_busy_control_shows_its_border_in_chromium(self) -> None:
         pages = [*held_specimens(), state_specimen()]
