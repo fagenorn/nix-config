@@ -3,13 +3,16 @@
 Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
 
 Contract:
-- `STATES` names the twelve screens the sprint block, the finished list, the message life and
+- `STATES` names the thirteen screens the sprint block, the finished list, the message life and
   the Spend page must read well on (`tell-box-open` is the sprint block with its Tell box opened;
   `owner-check` is the sprint block with a held issue's owner check beside it; `spend-page` is
   the `/spend` page over seeded transcripts: a running sprint's manager session, an
   outside-sprint session and one workflow run, with spend on at least four of the last seven
-  days); `WIDTHS` are the two viewport widths each is shot at. `capture` writes
-  `<state>-<width>.png` for every pair, so a full run writes 24 files.
+  days; `desk-spend` is the desk page over seeded transcripts: a running sprint and a finished,
+  landed one, each with a manager session on two or more days, and an outside-sprint session
+  with one batch delivery run, with the sprint block, the finished line and the run line open
+  so the spend figures show); `WIDTHS` are the two viewport widths each is shot at. `capture`
+  writes `<state>-<width>.png` for every pair, so a full run writes 26 files.
 - Each state is a fresh fixture console: a registry of three projects (`owner/web`,
   `owner/api`, `owner/docs`) and an event log seeded for that state with event times relative
   to one clock reading, served by the real `ConsoleService` on a loopback port. Nothing is
@@ -46,7 +49,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from agent_tools.console import manager
+from agent_tools.console import manager, sessions
 from agent_tools.console.event_log import EventLog
 from agent_tools.console.service import ConsoleService
 from agent_tools.console.sprints import TELL_MINUTE_TEXT
@@ -55,7 +58,7 @@ from .console_test_support import write_registry
 
 STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-sent",
           "message-picked-up", "message-replied", "message-not-picked-up", "finished-list",
-          "nothing-running", "owner-check", "spend-page")
+          "nothing-running", "owner-check", "spend-page", "desk-spend")
 WIDTHS = (1440, 480)
 HEIGHT = 900
 MINUTE = 60.0
@@ -69,6 +72,7 @@ MILESTONES = {"Add resumable uploads": "the upload form",
               "Retire the old exporter": "the last export path",
               "Try a new cache": "the cache layer"}
 OPEN_TELL = (True, "Send", TELL_MINUTE_TEXT, True)
+DESK_OUTSIDE = "outside-1136"
 
 
 class Unavailable(Exception):
@@ -194,7 +198,8 @@ class _Seed:
                      {**base, "message": said.seq, "reply": REPLY_TEXT})
 
 
-def _seed_state(seed: _Seed, state: str) -> str | None:
+def _seed_state(seed: _Seed, state: str, web_root: str = "") -> tuple[str, ...]:
+    """Seed the events of `state`; returns the sprint ids whose transcripts the state writes."""
     web, api = PROJECTS[0], PROJECTS[1]
     if state == "live-several":
         seed.sprint(api, "Keep the importer fast", started=60 * MINUTE, report=45 * MINUTE)
@@ -232,14 +237,42 @@ def _seed_state(seed: _Seed, state: str) -> str | None:
                     held=True)
         seed.check(web, 11, 3 * MINUTE)
     elif state == "spend-page":
-        return seed.sprint(web, "Add resumable uploads", started=20 * MINUTE, report=2 * MINUTE)[0]
+        return (seed.sprint(web, "Add resumable uploads", started=20 * MINUTE,
+                            report=2 * MINUTE)[0],)
+    elif state == "desk-spend":
+        running = seed.sprint(web, "Add resumable uploads", started=20 * MINUTE,
+                              report=2 * MINUTE)[0]
+        ended = seed.sprint(api, "Retire the old exporter", started=5 * 60 * MINUTE,
+                            report=3 * 60 * MINUTE, landed=True, close=2 * 60 * MINUTE)[0]
+        seed.put(MINUTE, sessions.SEEN, web, {
+            "session_id": DESK_OUTSIDE, "cwd": web_root, "repo": web_root,
+            "state": "working", "name": "importer run"})
+        return running, ended
     elif state != "nothing-running":
         raise ValueError(f"unknown state {state!r}")
-    return None
+    return ()
 
 
 def _transcript(lines: Sequence[Mapping]) -> bytes:
     return b"".join((json.dumps(line) + "\n").encode() for line in lines)
+
+
+class _Assistant:
+    """Assistant transcript lines, each with its own message id, `days_ago` whole days before now."""
+
+    def __init__(self, now_s: float):
+        self.now_s = now_s
+        self.count = 0
+
+    def __call__(self, sid: str, cwd: str, days_ago: int, input: int, output: int) -> dict:
+        self.count += 1
+        when = datetime.fromtimestamp(self.now_s, timezone.utc) - timedelta(days=days_ago)
+        return {"type": "assistant", "sessionId": sid, "cwd": cwd,
+                "timestamp": when.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+                "message": {"id": f"msg-{self.count:04d}", "model": "claude-sonnet-4-6",
+                            "usage": {"input_tokens": input, "cache_creation_input_tokens": 0,
+                                      "cache_read_input_tokens": input * 8,
+                                      "output_tokens": output}}}
 
 
 def _write_spend(fixture: Fixture, now_s: float, sprint_id: str) -> None:
@@ -249,17 +282,7 @@ def _write_spend(fixture: Fixture, now_s: float, sprint_id: str) -> None:
     0 to 6 whole UTC days before `now_s`, so at least four of the last seven days have spend.
     """
     web, api = (str(path) for path in fixture.projects[:2])
-    counter = [0]
-
-    def assistant(sid: str, cwd: str, days_ago: int, input: int, output: int) -> dict:
-        counter[0] += 1
-        when = datetime.fromtimestamp(now_s, timezone.utc) - timedelta(days=days_ago)
-        return {"type": "assistant", "sessionId": sid, "cwd": cwd,
-                "timestamp": when.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
-                "message": {"id": f"msg-{counter[0]:04d}", "model": "claude-sonnet-4-6",
-                            "usage": {"input_tokens": input, "cache_creation_input_tokens": 0,
-                                      "cache_read_input_tokens": input * 8,
-                                      "output_tokens": output}}}
+    assistant = _Assistant(now_s)
 
     msid, osid = "manager-1135", "outside-1135"
     slug = fixture.config / "projects" / "-web"
@@ -282,6 +305,35 @@ def _write_spend(fixture: Fixture, now_s: float, sprint_id: str) -> None:
         assistant(msid, web, ago, 90_000, 8_000) for ago in (0, 1, 2, 5)]))
 
 
+def _write_desk_spend(fixture: Fixture, now_s: float, running: str, ended: str) -> None:
+    """Transcripts for the desk page: both sprints' managers and an outside session's batch run.
+
+    The run `wf_9` sits under the outside-sprint session `outside-1136`; its journal opens a
+    `facts-901` agent and an `acquire-901` agent, so the delivery reads as issue 901 planning.
+    """
+    web, api = (str(path) for path in fixture.projects[:2])
+    assistant = _Assistant(now_s)
+    projects = fixture.config / "projects"
+    for slug, root, project, sprint_id, msid, days in (
+            ("-web", web, "owner/web", running, "manager-1136-web", range(5)),
+            ("-api", api, "owner/api", ended, "manager-1136-api", (1, 2, 4))):
+        (projects / slug).mkdir(parents=True, exist_ok=True)
+        title = {"type": "custom-title", "sessionId": msid,
+                 "customTitle": manager.session_name(project, sprint_id)}
+        (projects / slug / f"{msid}.jsonl").write_bytes(_transcript([title] + [
+            assistant(msid, root, ago, 30_000 + 7_000 * ago, 2_500 + 300 * ago)
+            for ago in days]))
+    run = projects / "-web" / DESK_OUTSIDE / "subagents" / "workflows" / "wf_9"
+    run.mkdir(parents=True, exist_ok=True)
+    (run / "journal.jsonl").write_bytes(_transcript([
+        {"type": "started", "agentId": "f1", "label": "facts-901", "phase": "Intake"},
+        {"type": "started", "agentId": "q1", "label": "acquire-901", "phase": "Deliver"}]))
+    (run / "agent-f1.jsonl").write_bytes(_transcript([
+        assistant(DESK_OUTSIDE, web, ago, 50_000, 4_000) for ago in (0, 2)]))
+    (run / "agent-q1.jsonl").write_bytes(_transcript([
+        assistant(DESK_OUTSIDE, web, ago, 80_000, 6_000) for ago in (0, 1, 3)]))
+
+
 def build_fixture(root: Path, state: str, now_s: float) -> Fixture:
     root = Path(root)
     environ = sandbox_environ(root)
@@ -301,11 +353,13 @@ def build_fixture(root: Path, state: str, now_s: float) -> Fixture:
     at = [_iso(now_s)]
     log = EventLog(fixture.store, clock=lambda: at[0])
     try:
-        sprint_id = _seed_state(_Seed(log, at, now_s), state)
+        sprint_ids = _seed_state(_Seed(log, at, now_s), state, str(projects[0]))
     finally:
         log.close()
     if state == "spend-page":
-        _write_spend(fixture, now_s, sprint_id)
+        _write_spend(fixture, now_s, sprint_ids[0])
+    elif state == "desk-spend":
+        _write_desk_spend(fixture, now_s, *sprint_ids)
     return fixture
 
 
@@ -418,7 +472,9 @@ def _shoot(browser, url: str, state: str, width: int, out: Path) -> Shot:
     try:
         page.goto(url)
         page.wait_for_selector("#breakdowns h2" if state == "spend-page" else "#projects h2")
-        if state == "finished-list":
+        if state in ("finished-list", "desk-spend"):
+            if state == "desk-spend":
+                page.click('details[data-key="line:owner/web"] > summary')
             page.click('details[data-key="finished"] > summary')
             page.click('details[data-key^="ended:"] > summary')
         tell = None

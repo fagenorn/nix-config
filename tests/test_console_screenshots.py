@@ -41,9 +41,9 @@ def all_sprints(view):
 
 
 class ScreenshotFixtureTest(unittest.TestCase):
-    def test_the_set_is_twelve_states_at_two_widths(self) -> None:
-        self.assertEqual(len(shots.STATES), 12)
-        self.assertEqual(shots.STATES[-2:], ("owner-check", "spend-page"))
+    def test_the_set_is_thirteen_states_at_two_widths(self) -> None:
+        self.assertEqual(len(shots.STATES), 13)
+        self.assertEqual(shots.STATES[-3:], ("owner-check", "spend-page", "desk-spend"))
         self.assertEqual(shots.STATES.index("tell-box-open"), shots.STATES.index("stuck") + 1)
         self.assertEqual(shots.WIDTHS, (1440, 480))
 
@@ -254,7 +254,20 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     self.assertEqual(running, [])
                 days = (view["spend"] or {"days": []})["days"]
                 self.assertIsNotNone(view["spend"])
-                if state == "spend-page":
+                if state == "desk-spend":
+                    self.assertEqual(len(running), 1)
+                    self.assertGreaterEqual(len(ended), 1)
+                    self.assertLessEqual(
+                        {running[0]["sprint_id"], ended[0]["sprint_id"]},
+                        set().union(*(d["sprint"] for d in days[-7:])))
+                    line = next(p for p in entries_of(view)
+                                if p.get("project_id") == "owner/web")["outside_sprints"]
+                    outside = {s["session_id"]: s for s in line["sessions"]}
+                    self.assertEqual(
+                        [d["run_id"] for d in outside["outside-1136"]["deliveries"]], ["wf_9"])
+                    self.assertIn("wf_9", set().union(*(d["run"] for d in days[-7:])))
+                    self.assertGreater(days[-1]["total"]["dollars"], 0)
+                elif state == "spend-page":
                     self.assertGreater(days[-1]["total"]["dollars"], 0)
                     self.assertGreaterEqual(
                         sum(1 for d in days[-7:] if d["total"]["dollars"] > 0), 4)
@@ -267,7 +280,7 @@ class ScreenshotFixtureTest(unittest.TestCase):
 
 
 class ScreenshotCaptureTest(unittest.TestCase):
-    def test_the_command_writes_twenty_four_pngs_and_nothing_scrolls_sideways(self) -> None:
+    def test_the_command_writes_twenty_six_pngs_and_nothing_scrolls_sideways(self) -> None:
         try:
             from playwright.sync_api import Error, sync_playwright
         except ImportError:
@@ -293,7 +306,7 @@ class ScreenshotCaptureTest(unittest.TestCase):
             names = sorted(p.name for p in out.iterdir())
             self.assertEqual(
                 names, sorted(f"{s}-{w}.png" for s in shots.STATES for w in shots.WIDTHS))
-            self.assertEqual(len(names), 24)
+            self.assertEqual(len(names), 26)
             for path in out.iterdir():
                 self.assertEqual(path.read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
 
