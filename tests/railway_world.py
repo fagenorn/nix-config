@@ -22,13 +22,15 @@ from .actions_world import (BASE_TIP, HEAD, HOTFIX, MERGE, OLDER, PR, PR_VIEW, S
                             commit_argv)
 
 __all__ = ["BASE_TIP", "CONFIG", "GREEN", "HEAD", "HOTFIX", "MERGE", "OLDER", "PR", "PR_VIEW",
-           "RED", "RUNNING", "SLUG", "TIMED_OUT", "RailwayWorld", "commit_argv", "deployment"]
+           "RED", "RUNNING", "SLUG", "TIMED_OUT", "UNWATCHED", "RailwayWorld", "commit_argv",
+           "deployment", "watched"]
 
 CONFIG = {"project": "nodo-prod", "environment": "production", "services": ["api", "admin"]}
 GREEN = ("completed", "success")
 RED = ("completed", "failure")
 TIMED_OUT = ("completed", "timed_out")
 RUNNING = ("in_progress", None)
+UNWATCHED = "No changes to watched files"
 _UNSET = object()
 
 SCRIPT = """#!{python}
@@ -58,6 +60,27 @@ def deployment(id: str, commit: str | None, status: str = "SUCCESS",
     if meta is _UNSET:
         meta = {"commitHash": commit, "branch": branch}
     return {"id": id, "status": status, "createdAt": created, "meta": meta}
+
+
+def watched(id: str, commit: str, status: str = "SUCCESS",
+            created: str = "2026-11-08T10:00:00Z", *, branch: str = "main",
+            root: object = "admin", patterns: object = ("**",),
+            skipped: object = _UNSET) -> dict:
+    """A row with the watch members Railway writes, as nodo-prod's admin service has them.
+
+    `skipped` defaults to Railway's own reason on a `SKIPPED` row and to no member otherwise.
+    """
+    meta: dict = {"commitHash": commit, "branch": branch, "reason": "deploy",
+                  "rootDirectory": root, "configFile": "/admin/railway.toml",
+                  "serviceManifest": {"build": {
+                      "builder": "DOCKERFILE", "dockerfilePath": "Dockerfile",
+                      "watchPatterns": list(patterns) if isinstance(patterns, tuple)
+                      else patterns}}}
+    if skipped is _UNSET:
+        skipped = UNWATCHED if status == "SKIPPED" else _UNSET
+    if skipped is not _UNSET:
+        meta["skippedReason"] = skipped
+    return deployment(id, commit, status, created, branch, meta)
 
 
 class RailwayWorld:
@@ -120,14 +143,16 @@ class RailwayWorld:
                    exit: int = 0, stdout: str | None = None) -> None:
         """Every check run of the commit, history included, oldest first.
 
-        A run is `(status, conclusion)` or `(status, conclusion, name)`; its id is its position,
-        so a later run of the same name is a re-run that supersedes the earlier one.
+        A run is `(status, conclusion)`, `(status, conclusion, name)` or `(status, conclusion,
+        name, suite)`; its id is its position, so a later run of the same name in the same
+        check suite (or with no suite at all) is a re-run that supersedes the earlier one.
         """
         argv = ["api", "-X", "GET", f"repos/{SLUG}/commits/{commit}/check-runs", "-f",
                 "per_page=100", "-f", "filter=all"]
         payload = {"total_count": len(runs) if total is None else total,
                    "check_runs": [{"id": index + 1, "name": run[2] if len(run) > 2 else f"job-{index}",
-                                   "status": run[0], "conclusion": run[1]}
+                                   "status": run[0], "conclusion": run[1],
+                                   **({"check_suite": {"id": run[3]}} if len(run) > 3 else {})}
                                   for index, run in enumerate(runs)]}
         self._answer("gh", argv, json.dumps(payload) if stdout is None else stdout, exit, "", 0)
 
@@ -135,6 +160,19 @@ class RailwayWorld:
                        stdout: str | None = None) -> None:
         argv = ["api", "-X", "GET", f"repos/{SLUG}/git/commits/{commit}"]
         payload = {"sha": commit, "parents": [{"sha": p} for p in parents]}
+        self._answer("gh", argv, json.dumps(payload) if stdout is None else stdout, exit, "", 0)
+
+    def compare(self, base: str, head: str, *files: object, status: str = "ahead",
+                ahead: int = 1, behind: int = 0, merge_base: str | None = None, exit: int = 0,
+                stdout: str | None = None) -> None:
+        """GitHub's comparison of two commits; a file is a name or `(name, previous name)`."""
+        argv = ["api", "-X", "GET", f"repos/{SLUG}/compare/{base}...{head}"]
+        entries = [{"filename": f, "status": "modified"} if isinstance(f, str)
+                   else {"filename": f[0], "status": "renamed", "previous_filename": f[1]}
+                   for f in files]
+        payload = {"status": status, "ahead_by": ahead, "behind_by": behind,
+                   "merge_base_commit": {"sha": base if merge_base is None else merge_base},
+                   "files": entries}
         self._answer("gh", argv, json.dumps(payload) if stdout is None else stdout, exit, "", 0)
 
     def calls(self, program: str | None = None) -> list[dict]:

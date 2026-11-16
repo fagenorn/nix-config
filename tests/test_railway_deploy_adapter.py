@@ -9,7 +9,8 @@ from agent_tools.release import railway_deploy_adapter as adapter
 from agent_tools.release import release_adapter, release_profile, transaction_plan
 from . import release_test_support as support
 from .railway_world import (BASE_TIP, CONFIG, GREEN, HEAD, HOTFIX, MERGE, OLDER, PR, PR_VIEW, RED,
-                            RUNNING, SLUG, TIMED_OUT, RailwayWorld, commit_argv, deployment)
+                            RUNNING, SLUG, TIMED_OUT, UNWATCHED, RailwayWorld, commit_argv,
+                            deployment, watched)
 
 REFUSED = {"result": "rejected", "error_class": "unsupported_operation",
            "reference": "deploy: watch_only"}
@@ -251,6 +252,41 @@ class SkipTest(unittest.TestCase):
                                           ("completed", "failure", "ci")),
                          ("diverged", "skipped_after_ci_failure"))
 
+    def test_one_job_name_in_two_check_suites_is_two_checks_not_a_re_run(self):
+        """Regression (nodo-prod v0.51.1): two workflows each publish a job named `lint`, each
+        in its own check suite; nothing was re-run, so the CI route is complete."""
+        self.assertEqual(self.skipped_api(GREEN + ("lint", 118372805136), GREEN + ("build", 5),
+                                          GREEN + ("lint", 118373146276)),
+                         ("satisfied", "skipped"))
+        self.assertEqual(self.detail(), "complete")
+
+    def test_a_second_run_of_a_name_within_one_check_suite_is_a_re_run(self):
+        self.assertEqual(self.skipped_api(("completed", "failure", "lint", 7),
+                                          GREEN + ("lint", 7), GREEN + ("lint", 8)),
+                         ("unknown", "skip_unexplained"))
+        self.assertEqual(self.detail(), "checks_rerun")
+        self.setUp()
+        self.assertEqual(self.skipped_api(GREEN + ("lint", 7), GREEN + ("lint", 7)),
+                         ("unknown", "skip_unexplained"))
+        self.assertEqual(self.detail(), "checks_rerun")
+
+    def test_a_failure_in_one_suite_is_not_hidden_by_a_green_namesake_in_another(self):
+        """A new workflow run of the commit is a new suite: the failed one stays its own
+        check's latest run."""
+        self.assertEqual(self.skipped_api(("completed", "failure", "lint", 7),
+                                          GREEN + ("lint", 8)),
+                         ("diverged", "skipped_after_ci_failure"))
+
+    def test_a_malformed_check_suite_is_read_as_no_suite(self):
+        payload = {"total_count": 2, "check_runs": [
+            {"id": 1, "name": "lint", "status": "completed", "conclusion": "success",
+             "check_suite": {"id": "7"}},
+            {"id": 2, "name": "lint", "status": "completed", "conclusion": "success",
+             "check_suite": None}]}
+        self.assertEqual(self.skipped_api(stdout=json.dumps(payload)),
+                         ("unknown", "skip_unexplained"))
+        self.assertEqual(self.detail(), "checks_rerun")
+
     def test_a_full_page_of_green_checks_is_still_over_the_limit(self):
         self.assertEqual(self.skipped_api(*[GREEN] * 101), ("unknown", "skip_unexplained"))
         self.assertEqual(self.detail(), "checks_over_limit")
@@ -313,6 +349,171 @@ class SkipTest(unittest.TestCase):
         self.assertEqual(self.reads("check-runs"), [adapter.check_runs_argv(SLUG, MERGE)])
         self.assertEqual(self.reads("git/commits"), [adapter.parent_argv(SLUG, MERGE)])
         self.assertIn("-X", self.reads("check-runs")[0])
+
+
+NODO_DELTA = ("docs/operations/deploy.md", "docs/areas/data/adr/001-pooler.md",
+              "src/Infrastructure/Data/Retry.cs", "src/Infrastructure/DependencyInjection.cs",
+              "tests/Infrastructure.Tests/Data/RetryTests.cs")
+
+
+class WatchPathSkipTest(unittest.TestCase):
+    """ADR-release-013: a skip the CI route cannot explain is benign only when Railway says no
+    watched file changed and the serving row's commit is an ancestor of the released commit
+    with no change under the service's root directory. The shape is nodo-prod's v0.51.1: api
+    deployed the merge commit, admin skipped it and still serves the previous main tip, which
+    a release later disposed as failed had deployed."""
+
+    def setUp(self):
+        self.world = RailwayWorld(self)
+        self.world.status()
+        self.world.deployments("api", deployment("4fa7e1d2", MERGE, created="2026-11-08T14:02:33Z"))
+        self.world.check_runs(MERGE, total=0)
+        self.world.commit_parents(MERGE, BASE_TIP, HEAD)
+
+    def admin(self, *older, skipped=None, files=NODO_DELTA, **compare):
+        skipped = skipped or watched("86ee94aa", MERGE, "SKIPPED", "2026-11-08T14:02:33Z")
+        older = older or (watched("10043c13", BASE_TIP, created="2026-11-08T04:05:53Z"),
+                          watched("a10190b2", OLDER, "REMOVED", "2026-11-07T23:12:57Z"))
+        self.world.deployments("admin", skipped, *older)
+        self.world.compare(BASE_TIP, MERGE, *files, **compare)
+        observation = adapter.inspect(request())
+        self.assertEqual(release_adapter.effect_observation_problems(observation), [])
+        self.last = observation
+        entry = observation["facts"]["services"][1]
+        return entry["outcome"], entry["reason"]
+
+    def evidence(self):
+        entry = self.last["facts"]["services"][1]
+        return entry["skip_evidence"], entry.get("watch_evidence")
+
+    def compares(self):
+        return [c["argv"] for c in self.world.calls("gh") if "/compare/" in c["argv"][-1]]
+
+    def refused(self, watch, ci="checks_none"):
+        self.assertEqual((self.last["outcome"], self.last["reason"]),
+                         ("unknown", "skip_unexplained"))
+        self.assertEqual(self.evidence(), (ci, watch))
+        self.assertEqual(self.last["references"][-1], f"railway-skip:admin/{ci}/{watch}")
+
+    def test_the_nodo_shape_is_benign_whatever_ci_evidence_is_missing(self):
+        for runs, options in (((), {"total": 0}), ((GREEN, GREEN + ("ci",), GREEN + ("ci",)), {}),
+                              ((GREEN,), {"total": 150}), ((), {"exit": 1, "stdout": ""})):
+            with self.subTest(runs=runs, options=options):
+                self.world.check_runs(MERGE, *runs, **options)
+                self.assertEqual(self.admin(ahead=7), ("satisfied", "skipped"))
+                self.assertEqual(self.evidence(), ("watch_paths_unchanged", None))
+        self.assertEqual(self.compares()[0], adapter.compare_argv(SLUG, BASE_TIP, MERGE))
+        self.assertIn(f"github:{SLUG}/compare/{BASE_TIP}...{MERGE}", self.last["references"])
+        self.assertEqual(self.last["observed_subject"]["deployments"],
+                         {"api": "4fa7e1d2", "admin": "86ee94aa"})
+        self.assertEqual(adapter.inspect(predicate())["reason"], "running")
+
+    def test_a_failed_check_is_still_diverged_and_reads_no_comparison(self):
+        self.world.check_runs(MERGE, RED)
+        self.assertEqual(self.admin(), ("diverged", "skipped_after_ci_failure"))
+        self.assertEqual(self.compares(), [])
+
+    def test_the_ci_route_alone_reads_no_comparison(self):
+        self.world.check_runs(MERGE, GREEN)
+        self.assertEqual(self.admin(), ("satisfied", "skipped"))
+        self.assertEqual(self.evidence(), ("complete", None))
+        self.assertEqual(self.compares(), [])
+
+    def test_a_serving_row_that_failed_crashed_or_was_removed_stays_unexplained(self):
+        for status in ("FAILED", "CRASHED", "REMOVED", "REMOVING", "BUILDING"):
+            with self.subTest(status=status):
+                self.admin(watched("10043c13", BASE_TIP, status, "2026-11-08T04:05:53Z"),
+                           watched("a10190b2", OLDER, created="2026-11-07T23:12:57Z"))
+                self.refused("intervening_deployment", "intervening_deployment")
+        self.assertEqual(self.compares(), [])
+
+    def test_no_serving_row_stays_unexplained(self):
+        self.admin(watched("0ld", BASE_TIP, "SKIPPED", "2026-11-08T04:05:53Z"))
+        self.refused("no_serving_deployment", "intervening_deployment")
+        self.world.deployments("admin", watched("86ee94aa", MERGE, "SKIPPED", "2026-11-08T14:02:33Z"))
+        self.last = adapter.inspect(request())
+        self.refused("no_serving_deployment", "no_serving_deployment")
+
+    def test_a_serving_commit_that_is_not_an_ancestor_stays_unexplained(self):
+        for compare in ({"status": "diverged", "behind": 2, "merge_base": OLDER},
+                        {"status": "behind", "behind": 1, "merge_base": MERGE},
+                        {"status": "ahead", "behind": 0, "merge_base": OLDER},
+                        {"status": "ahead", "behind": 1}):
+            with self.subTest(compare=compare):
+                self.admin(**compare)
+                self.refused("serving_not_ancestor")
+
+    def test_a_serving_row_of_an_unrelated_branch_stays_unexplained(self):
+        self.admin(watched("10043c13", BASE_TIP, created="2026-11-08T04:05:53Z", branch="dev"))
+        self.refused("serving_identity_unknown", "serving_identity_unknown")
+        self.assertEqual(self.compares(), [])
+
+    def test_a_watched_path_changed_in_between_stays_unexplained(self):
+        for files in ((*NODO_DELTA, "admin/src/App.tsx"), ("admin/railway.toml",),
+                      (("docs/moved.md", "admin/README.md"),), (("admin/new.ts", "web/old.ts"),)):
+            with self.subTest(files=files):
+                self.admin(files=files)
+                self.refused("watched_path_changed")
+        self.admin(files=("administration/readme.md", "src/admin/page.cs"))
+        self.assertEqual(self.last["outcome"], "satisfied")
+
+    def test_a_service_at_the_repository_root_watches_every_path(self):
+        rows = (watched("86ee94aa", MERGE, "SKIPPED", "2026-11-08T14:02:33Z", root=None),
+                watched("10043c13", BASE_TIP, created="2026-11-08T04:05:53Z", root=None))
+        self.admin(rows[1], skipped=rows[0])
+        self.refused("watched_path_changed")
+        self.admin(rows[1], skipped=rows[0], files=(), status="identical")
+        self.assertEqual(self.last["outcome"], "satisfied")
+
+    def test_a_skip_railway_does_not_attribute_to_watch_paths_stays_unexplained(self):
+        for skipped in (None, "", "CI check suite failed", 7):
+            with self.subTest(skipped=skipped):
+                self.admin(skipped=watched("86ee94aa", MERGE, "SKIPPED", "2026-11-08T14:02:33Z",
+                                           skipped=skipped))
+                self.refused("skip_reason_unstated")
+        self.assertEqual(self.compares(), [])
+        self.assertEqual(UNWATCHED, adapter.SKIP_REASON_UNWATCHED)
+
+    def test_watch_patterns_the_adapter_cannot_evaluate_stay_unexplained(self):
+        for patterns, root in ((("/shared/**",), "admin"), (("**", "../api/**"), "admin"),
+                               ("**", "admin"), (("**",), 7)):
+            with self.subTest(patterns=patterns, root=root):
+                self.admin(skipped=watched("86ee94aa", MERGE, "SKIPPED", "2026-11-08T14:02:33Z",
+                                           patterns=patterns, root=root))
+                self.refused("watch_patterns_unsupported")
+        self.admin(watched("10043c13", BASE_TIP, created="2026-11-08T04:05:53Z", root="web"))
+        self.refused("root_directory_changed")
+
+    def test_an_unread_or_truncated_comparison_stays_unexplained(self):
+        self.admin(exit=1, stdout="")
+        self.refused("diff_unread")
+        self.admin(stdout=json.dumps({"status": "ahead", "behind_by": 0,
+                                      "merge_base_commit": {"sha": BASE_TIP}}))
+        self.refused("diff_unread")
+        self.admin(files=tuple(f"docs/{n}.md" for n in range(adapter.COMPARE_FILE_LIMIT)))
+        self.refused("diff_over_limit")
+
+    def test_older_skipped_pushes_are_stepped_over(self):
+        """Two releases in a row that leave the service alone: the comparison spans both."""
+        self.assertEqual(self.admin(watched("skip1", HOTFIX, "SKIPPED", "2026-11-08T09:00:00Z"),
+                                    watched("10043c13", BASE_TIP, created="2026-11-08T04:05:53Z")),
+                         ("satisfied", "skipped"))
+
+    def test_supersession_and_silent_rollback_are_judged_before_any_skip_evidence(self):
+        self.world.deployments("admin", watched("new", OLDER, created="2026-11-08T15:00:00Z"),
+                               watched("86ee94aa", MERGE, "SKIPPED", "2026-11-08T14:02:33Z"))
+        self.assertEqual(adapter.inspect(request())["reason"], "superseded")
+        self.world.deployments("admin", watched("86ee94aa", MERGE, "FAILED", "2026-11-08T14:02:33Z"),
+                               watched("10043c13", BASE_TIP, created="2026-11-08T04:05:53Z"))
+        self.assertEqual(adapter.inspect(request())["reason"], "silent_rollback")
+        self.assertEqual(self.compares(), [])
+
+    def test_one_comparison_serves_every_skipped_service(self):
+        rows = (watched("s2", MERGE, "SKIPPED", "2026-11-08T14:02:33Z", root="api"),
+                watched("s1", BASE_TIP, created="2026-11-08T04:05:53Z", root="api"))
+        self.world.deployments("api", *rows)
+        self.assertEqual(self.admin(), ("satisfied", "skipped"))
+        self.assertEqual(len(self.compares()), 1)
 
 
 class MergeTest(unittest.TestCase):
