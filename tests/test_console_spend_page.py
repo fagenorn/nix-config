@@ -10,6 +10,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 SPEND = REPO_ROOT / "python/agent_tools/console/spend.html"
 DESK = REPO_ROOT / "python/agent_tools/console/page.html"
 PYPROJECT = REPO_ROOT / "python/pyproject.toml"
+SERVICE = REPO_ROOT / "python/agent_tools/console/service.py"
+ADR_DIR = REPO_ROOT / "docs/areas/console/adr"
 
 
 class SpendStaticTest(unittest.TestCase):
@@ -61,6 +63,20 @@ class SpendStaticTest(unittest.TestCase):
 
     def test_the_spend_page_is_small(self) -> None:
         self.assertLess(len(gzip.compress(self.data, 9)), 20480)
+
+
+class SpendDecisionCitationTest(unittest.TestCase):
+    def test_the_service_cites_the_spend_page_decision_under_the_number_main_left_free(
+            self) -> None:
+        # origin/main took 050 for the wait-signals decision (#1110); the Spend page
+        # decision is the next free number, and a file under the cited number, once it
+        # exists, must be the decision made in #1135.
+        cited = re.findall(
+            r"GET /spend. serves the Spend page.*?\(#1135, ADR-console-(\d+)\)",
+            SERVICE.read_text(encoding="utf-8"), re.S)
+        self.assertEqual(cited, ["051"])
+        for path in ADR_DIR.glob("%s-*.md" % cited[0]):
+            self.assertIn("- **Decided in:** #1135", path.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

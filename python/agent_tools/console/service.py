@@ -707,7 +707,7 @@ subprocess. The view is rebuilt only by `refresh()`, which reads the fleet
 registry, appends the difference to the event log and publishes the new view;
 the page itself is read once, at import and given its token at construction.
 `GET /spend` serves the Spend page (`spend.html`) from memory with the page's CSP and no token;
-it writes nothing and reads its data from `/api/stream` (#1135, ADR-console-050).
+it writes nothing and reads its data from `/api/stream` (#1135, ADR-console-051).
 
 The stream carries `Connection: close` and no `Content-Length`. Its first frame is
 the current view (the page takes its view from the stream alone, never from a
