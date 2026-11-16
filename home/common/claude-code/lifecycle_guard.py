@@ -714,10 +714,16 @@ load, before any lifecycle verb is judged. It reuses the segment and token
 readings of the lifecycle verbs, and reads a leading redirection out of the way
 (`>/dev/null ./scripts/deploy.sh` runs the script) and an ANSI-C quoted word as
 its text (`$'just' switch`). The guard reads the command as raw text when
-it cannot be parsed, a segment cannot be tokenised, a command word is an
-evaluator (`sh`, `bash`, `eval`, ...) or an `env -S`, or the program at a command
-position is in `PRODUCTION_RUNNERS` and a later word of its run is an evaluator or
-`env -S` (`timeout 600 sh -c 'just switch'`, `devenv shell -- bash -c ...`); there a verb counts when
+it cannot be parsed or a segment cannot be tokenised, and reads the text of a
+segment as raw text when a command word is an evaluator (`sh`, `bash`, `eval`,
+...) or an `env -S`, or the program at a command position is in
+`PRODUCTION_RUNNERS` and a later word of its run is an evaluator or `env -S`
+(`timeout 600 sh -c 'just switch'`, `devenv shell -- bash -c ...`); every segment
+of a pipeline that reaches such a segment is read as raw text with it
+(`echo 'just switch' | sh`), and a command with a heredoc and such a segment is
+read as raw text whole. Any other segment is read as a command (issue 1192,
+ADR-guard-011 D10), so words in one quoted argument, a comment or an exactly-read
+heredoc body beside an evaluator are a mention and pass. In raw text a verb counts when
 its words occur in order in either raw reading, or its words joined by one
 space are a substring of the command or of the command with its quotes and
 backslashes deleted, and nothing is lifted. Otherwise a verb of two or more
@@ -729,10 +735,12 @@ mention of it (`git add scripts/deploy.sh`, `--title kubectl`), so it counts
 only at a command position, or at a later word of a run whose command-position
 program is in `PRODUCTION_RUNNERS` (`xargs`, `timeout`, `nice`, `find`, `devenv`
 and the other programs that run a later word as a command). A quoted token that
-holds `$(` or a backtick, or whitespace behind a runner (`watch 'just switch'`,
-`nix-shell --run '...'`, `flock f -c '...'`), is also read as raw text alone, with no
-lift, since a
-substitution runs its text. A parsed match is lifted when its run begins with a
+holds `$(` or a backtick, or whitespace behind a runner that runs it as shell text
+(`PRODUCTION_SHELL_RUNNERS`: `watch 'just switch'`, `nix-shell --run '...'`,
+`flock f -c '...'`, `parallel`), is also read as raw text alone, with no
+lift, since a substitution runs its text. A quoted word behind any other runner
+(`timeout 5 echo 'just switch'`, `devenv shell -- git commit -m '...'`) is its
+argument, a mention. A parsed match is lifted when its run begins with a
 read-only verb that properly extends the production verb (`kubectl get pods`
 against `kubectl`, not `just build switch` against `just switch`); raw text
 lifts nothing. The release path, `release transaction preview` and
@@ -3735,6 +3743,8 @@ PRODUCTION_RUNNERS = frozenset({
     "doas", "caffeinate", "find", "parallel", "strace", "unbuffer", "nix", "nix-shell",
     "devenv", "direnv",
 })
+# The runners that run a quoted word of their own run as shell text (issue 1192 D10).
+PRODUCTION_SHELL_RUNNERS = frozenset({"watch", "nix-shell", "flock", "parallel"})
 PRODUCTION_ROUTE = "release transaction preview and release transaction run"
 
 
@@ -3984,27 +3994,52 @@ def joined_continuations(text):
     return text.replace("\\\n", "")
 
 
+HEREDOC_OPERATOR = re.compile(r"<<(?!<)")
+PIPE_RUNS = frozenset({"|", "|&"})
+
+
 def production_parse(command):
-    """The tokens and command-position flags of each segment of `command`, with the raw
-    text of the segments after it, or None when the guard reads the command as raw text:
-    it cannot be parsed or tokenised, or a command word is an evaluator or `env -S`."""
+    """`(commands, code)` for `command`, or None when the guard reads the whole command as
+    raw text: it cannot be parsed or tokenised, or a segment that hands text to a shell shares
+    the command with a heredoc (issue 1192 D10).
+
+    `commands` is the tokens and command-position flags of each segment read as commands, with
+    the raw text of the segments after it. `code` is the text of the segments that hand text
+    to a shell, which counts as raw text: a command word that is an evaluator or `env -S`, a
+    runner holding one, and every segment of a pipeline that reaches one, since a segment
+    feeding the shell is its source."""
     split = split_segments_with_runs(production_text(command))
     if split is None:
         return None
-    segments = split[0]
-    parsed = []
-    for position, segment in enumerate(segments):
+    segments, runs = split
+    read = []
+    for segment in segments:
         tokens = tokenize_segment(segment)
         if tokens is None:
             return None
         flags, split_string = production_flags(tokens)
-        if split_string or any(
+        shell = split_string or any(
             flag and program_name(value) in SHELL_EVALUATORS
             for flag, (value, _) in zip(flags, tokens)
-        ) or production_runner_hides_shell(tokens, flags):
-            return None
-        parsed.append((tokens, flags, "\n".join(segments[position + 1:])))
-    return parsed
+        ) or production_runner_hides_shell(tokens, flags)
+        read.append((tokens, flags, shell))
+    code = [False] * len(read)
+    start = 0
+    while start < len(read):
+        end = start
+        while end + 1 < len(read) and runs[end] in PIPE_RUNS:
+            end += 1
+        if any(shell for _, _, shell in read[start:end + 1]):
+            code[start:end + 1] = [True] * (end + 1 - start)
+        start = end + 1
+    if any(code) and HEREDOC_OPERATOR.search(command):
+        return None
+    commands = [
+        (tokens, flags, "\n".join(segments[position + 1:]))
+        for position, (tokens, flags, _) in enumerate(read)
+        if not code[position]
+    ]
+    return commands, "\n".join(s for s, is_code in zip(segments, code) if is_code)
 
 
 def production_hits(command, rules):
@@ -4028,12 +4063,17 @@ def production_hits(command, rules):
     hits = set()
     parsed = production_parse(command)
     if parsed is None:
+        raw_texts = [raw]
+        commands = []
+    else:
+        commands, code = parsed
+        raw_texts = [joined_continuations(code)] if code else []
+    for text in raw_texts:
         for slug, (changes, _) in verbs.items():
             for index, verb in enumerate(changes):
-                if production_raw_hit(raw, verb):
+                if production_raw_hit(text, verb):
                     hits.add((slug, index))
-        return hits, certain
-    for tokens, flags, later in parsed:
+    for tokens, flags, later in commands:
         later = joined_continuations(later)
         later_words = (raw_words(later), raw_words(later, glued=True))
         for value, operator in tokens:
@@ -4053,9 +4093,10 @@ def production_hits(command, rules):
             flagged = next((k for k in range(start, end) if flags[k]), None)
             runner = program_name(tokens[flagged][0]) if flagged is not None else None
             cut = end < len(tokens)
-            if flagged is not None and runner in PRODUCTION_RUNNERS:
+            if flagged is not None and runner in PRODUCTION_SHELL_RUNNERS:
                 # Shell text a runner takes as one word (`watch 'just switch'`,
-                # `nix-shell --run '...'`, `flock f -c '...'`) is read as raw text.
+                # `nix-shell --run '...'`, `flock f -c '...'`) is read as raw text; a word
+                # an argv runner passes on (`timeout 5 echo 'just switch'`) is a mention.
                 for value, _ in tokens[flagged + 1:end]:
                     if any(character.isspace() for character in value):
                         for slug, (changes, _) in verbs.items():
