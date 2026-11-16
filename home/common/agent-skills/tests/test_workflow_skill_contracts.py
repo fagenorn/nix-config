@@ -1852,7 +1852,7 @@ class DirectLaneRoutingTest(unittest.TestCase):
         """#635: step 1 claims through forge-claim and goes on only on its holding verdicts;
         the hot instruction bytes do not grow."""
         raw = self.DELIVER_DIRECT.read_bytes()
-        self.assertLessEqual(len(raw), 5070)
+        self.assertLessEqual(len(raw), 5080)
         text = normalized(raw.decode("utf-8"))
         step1 = text[text.index("**Claim.**"):text.index("**Worktree.**")]
         for token in ("`forge-claim acquire --repo <slug> --issue <n> --holder <host>/session-<id> --branch <branch>`",
@@ -1879,7 +1879,7 @@ class DirectLaneRoutingTest(unittest.TestCase):
         """#677: step 6 carries the consumed forms in ship order: waiting acquire, sync merge, push,
         required-check wait, the holding verdict before the merge, release; the hot bytes stay within their cap."""
         raw = self.DELIVER_DIRECT.read_bytes()
-        self.assertLessEqual(len(raw), 5070)
+        self.assertLessEqual(len(raw), 5080)
         text = normalized(raw.decode("utf-8"))
         land = text[text.index("**Land in order.**"):text.index("**Close out.**")]
         at = 0
@@ -1965,8 +1965,21 @@ class LookBeforeMergeContractsTest(unittest.TestCase):
         self.assertIn(self.STATUS, land)
         acquire = "`forge-claim land acquire --repo <slug> --branch <int> --sha <head> --wait`"
         self.assertLess(land.index(self.STATUS), land.index(acquire))
-        self.assertIn("`unmarked`", land)
         self.assertIn(LOOK_RULES_POINTER, land)
+
+    def test_a_new_session_reaches_the_resume_rules_from_the_skill(self):
+        """#1140: step 1 lets a session resuming at awaiting look past the open-PR refusal to
+        step 6, which points to the rules and stops on `needed` only."""
+        text = normalized(self.DELIVER_DIRECT.read_text(encoding="utf-8"))
+        step1 = text[text.index("**Claim.**"):text.index("**Worktree.**")]
+        refusal = step1.index("Refuse on an open PR")
+        exception = step1.index("unless resuming at awaiting look: go to step 6", refusal)
+        self.assertLess(exception, step1.index("`forge-claim acquire"))
+        land = text[text.index("**Land in order.**"):text.index("**Close out.**")]
+        status = land[land.index(self.STATUS):land.index("`forge-claim land acquire")]
+        self.assertIn("`needed`: stop at awaiting look", status)
+        self.assertIn(LOOK_RULES_POINTER, status)
+        self.assertNotIn("not `unmarked`", land)
 
     def test_the_look_rules_exist_once_and_are_in_no_hot_list(self):
         found = sorted((REPO_ROOT / "home").rglob("look-before-merge.md"))

@@ -1033,6 +1033,10 @@ class MarkedIssueEvalCaseTest(unittest.TestCase):
         writes = (["pr", "merge", "7", "--repo", "fixture/tinytask", "--merge"],
                   ["api", "-X", "POST", "repos/fixture/tinytask/git/refs", "-f", "ref=x"],
                   ["api", "repos/fixture/tinytask/issues/3/comments", "-f", "body=x"],
+                  ["api", "--method=POST", "repos/fixture/tinytask/git/refs", "--raw-field=ref=x"],
+                  ["api", "repos/fixture/tinytask/issues/3/comments", "--field=body=x"],
+                  ["api", "repos/fixture/tinytask/issues/3/comments", "--input=body.json"],
+                  ["api", "-XPOST", "repos/fixture/tinytask/git/refs", "-fref=x"],
                   ["issue", "comment", "3", "--body", "x"])
         root, repo, env = self.sandbox()
         self.assertEqual(self.grade(self.WRITE, repo, env).returncode, 0)
@@ -1086,6 +1090,71 @@ class MarkedIssueEvalCaseTest(unittest.TestCase):
                     subprocess.run(["git", "-C", str(repo), "worktree", "remove", "--force",
                                     env["PRE_WT"]], check=True)
                 self.assertNotEqual(self.grade(self.KEPT, repo, env).returncode, 0)
+
+
+class MarkedIssueResumeEvalCaseTest(unittest.TestCase):
+    """#1140: deliver-direct case 3 grades a new session resuming at awaiting look on a stale approval."""
+
+    NAMES = ("the resume read the pull request head from the forge", "no land lock was sought",
+             "the forge saw no write", "nothing merged and main unmoved",
+             "nothing new was pushed", "the report names the stage awaiting look",
+             "the report names the pull request and head", "the report gives the plain reason",
+             "the worktree is kept and clean")
+    HEAD_READ = "the resume read the pull request head from the forge"
+    WRITE = "the forge saw no write"
+    VIEW = {"argv": ["pr", "view", "7", "--repo", "fixture/tinytask", "--json", "headRefOid"],
+            "exit": 0}
+
+    def sandbox(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name).resolve()
+        repo, env = marked_pr_sandbox(root)
+        MarkedIssueEvalCaseTest.log(root / "gh-calls.jsonl", self.VIEW)
+        MarkedIssueEvalCaseTest().write_output(
+            root, env, "Stopped at stage awaiting look. Issue 3, pull request #7, head "
+            f"{env['PRE_WT_HEAD'][:7]}: issue 3 needs the owner's look before merge.")
+        return root, repo, env
+
+    def grade(self, name, repo, env):
+        return run_assert(case_assert("deliver-direct", 3, name), repo, **env)
+
+    def test_the_case_is_a_scripted_pipeline_case_on_the_marked_sandbox(self):
+        case = find_case("deliver-direct", 3)
+        self.assertEqual(case["setup"]["kind"], "marked-pr")
+        self.assertEqual(tuple(check["name"] for check in case["asserts"]), self.NAMES)
+        prompt = case["prompt"]
+        for token in ("ResolvedProject", "pull request 7", "awaiting look", "approved, for head",
+                      "`forge-claim acquire`"):
+            self.assertIn(token, prompt)
+        self.assertNotIn("step 6", prompt)
+        self.assertNotIn("forge-claim land", prompt)
+        self.assertRegex(prompt.lower(), r"\bstop\b")
+
+    def test_every_assert_passes_on_a_good_run(self):
+        _, repo, env = self.sandbox()
+        for name in self.NAMES:
+            with self.subTest(name=name):
+                done = self.grade(name, repo, env)
+                self.assertEqual(done.returncode, 0, done.stdout + done.stderr)
+
+    def test_a_session_refused_by_the_open_pull_request_fails_the_head_read(self):
+        for label, lines in (("no call", None),
+                             ("a pr list only", [{"argv": ["pr", "list", "--search", "3"], "exit": 0}]),
+                             ("a failed view", [{**self.VIEW, "exit": 1}])):
+            with self.subTest(label=label):
+                root, repo, env = self.sandbox()
+                if lines is None:
+                    (root / "gh-calls.jsonl").unlink()
+                else:
+                    MarkedIssueEvalCaseTest.log(root / "gh-calls.jsonl", *lines)
+                self.assertNotEqual(self.grade(self.HEAD_READ, repo, env).returncode, 0)
+
+    def test_a_post_in_joined_forms_fails_the_write_check(self):
+        post = ["api", "--method=POST", "repos/fixture/tinytask/issues/3/comments", "--raw-field=body=x"]
+        root, repo, env = self.sandbox()
+        MarkedIssueEvalCaseTest.log(root / "gh-calls.jsonl", self.VIEW, {"argv": post, "exit": 1})
+        self.assertNotEqual(self.grade(self.WRITE, repo, env).returncode, 0)
 
 
 class NativeReviewEvalCaseTest(unittest.TestCase):

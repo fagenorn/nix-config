@@ -1,6 +1,6 @@
 {
   "skill_name": "deliver-direct",
-  "notes": "A cheap pipeline case against the shared tinytask fixture, used as the routine-issue case of a paired trial corpus; it stops after test-first, so review, push and ship are never exercised. Case 2 starts at step 6 on a marked-pr sandbox whose setup pushed the branch and opened pull request 7, because the guard lets no sandbox session push or open one; it exempts only the issue claim, and the forge-claim stand-in records any land-lock attempt; it needs the activated home's look-before-merge.md standard, which tree mode does not cover.",
+  "notes": "A cheap pipeline case against the shared tinytask fixture, used as the routine-issue case of a paired trial corpus; it stops after test-first, so review, push and ship are never exercised. Case 2 starts at step 6 on a marked-pr sandbox whose setup pushed the branch and opened pull request 7, because the guard lets no sandbox session push or open one; it exempts only the issue claim, and the forge-claim stand-in records any land-lock attempt; it needs the activated home's look-before-merge.md standard, which tree mode does not cover. Case 3 starts a new session on the same sandbox, told the owner's approval names a head that is not the pull request's: the open pull request must not refuse it, the head read finds the head moved, and it stops at awaiting look again.",
   "evals": [
     {
       "id": 1,
@@ -71,7 +71,55 @@
         },
         {
           "name": "the forge saw no write",
-          "shell": "[ ! -f \"$WORK/gh-calls.jsonl\" ] || jq -e -s 'all(.[]; (.argv[0:2] | IN([\"pr\",\"merge\"], [\"pr\",\"create\"], [\"issue\",\"comment\"], [\"issue\",\"edit\"], [\"issue\",\"close\"]) | not) and ([.argv[] | select(IN(\"-X\", \"--method\", \"-f\", \"-F\", \"--field\", \"--raw-field\", \"--input\"))] | length == 0))' \"$WORK/gh-calls.jsonl\" >/dev/null || fail \"the stand-in forge saw a write: a merge, a pull request, a comment or a lock\""
+          "shell": "[ ! -f \"$WORK/gh-calls.jsonl\" ] || jq -e -s 'all(.[]; (.argv[0:2] | IN([\"pr\",\"merge\"], [\"pr\",\"create\"], [\"issue\",\"comment\"], [\"issue\",\"edit\"], [\"issue\",\"close\"]) | not) and ([.argv[] | select(test(\"^(-[XfF].*|--(method|field|raw-field|input)(=.*)?)$\"))] | length == 0))' \"$WORK/gh-calls.jsonl\" >/dev/null || fail \"the stand-in forge saw a write: a merge, a pull request, a comment or a lock\""
+        },
+        {
+          "name": "nothing merged and main unmoved",
+          "shell": "{ [ \"$(git -C \"$REPO\" rev-parse main)\" = \"$BASE_MAIN\" ] && [ \"$(git -C \"$ORIGIN\" rev-parse main)\" = \"$BASE_MAIN\" ] && jq -e '.[0].state == \"OPEN\"' \"$WORK/forge/pulls.json\" >/dev/null; } || fail \"main moved or pull request 7 is no longer open\""
+        },
+        {
+          "name": "nothing new was pushed",
+          "shell": "[ \"$(git -C \"$ORIGIN\" for-each-ref --format='%(refname) %(objectname)')\" = \"$ORIGIN_REFS\" ] || fail \"the origin's refs changed: something was pushed\""
+        },
+        {
+          "name": "the report names the stage awaiting look",
+          "shell": "out_matches 'awaiting[ _-]look'"
+        },
+        {
+          "name": "the report names the pull request and head",
+          "shell": "[ -n \"$PRE_WT_HEAD\" ] || { fail \"no PRE_WT_HEAD\"; exit 1; }; out_matches '(#|pull request |PR )7([^0-9]|$)' && out_matches \"${PRE_WT_HEAD:0:7}\""
+        },
+        {
+          "name": "the report gives the plain reason",
+          "shell": "out_matches 'issue 3 needs the owner.s look before merge'"
+        },
+        {
+          "name": "the worktree is kept and clean",
+          "shell": "git -C \"$REPO\" worktree list --porcelain | grep -qxF \"worktree $PRE_WT\" || { fail \"the worktree $PRE_WT is no longer registered\"; exit 1; }; st=$(git -C \"$PRE_WT\" status --porcelain) || { fail \"git status failed in $PRE_WT\"; exit 1; }; [ -z \"$st\" ] || fail \"uncommitted changes left in $PRE_WT\""
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "name": "approved-for-a-moved-head-resumes-and-stops",
+      "mode": "pipeline",
+      "setup": {
+        "kind": "marked-pr"
+      },
+      "prompt": "Use the `deliver-direct` skill to deliver issue 3 of `fixture/tinytask` (`issues/003-mechanical.md`).\n\nResolve once into a retained ResolvedProject. A resolver refusal is fatal and values are never defaulted or inferred. This sandbox holds no issue claim: skip the issue claim, that is `forge-claim acquire`, `forge-claim renew` and `forge-claim release`; every other step and command applies as the skill says. An earlier session implemented the issue on branch `issue-3-rename-flag` in its worktree (`git worktree list`), pushed it, opened pull request 7 and stopped at awaiting look. You are the new session. The owner's answer: approved, for head 1111111111111111111111111111111111111111.\n\n**Stop where the skill tells you to stop, and report.** Never close the issue.",
+      "expected_output": "The session is not refused by open pull request 7: it resumes, reads the pull request head with `gh pr view`, finds it is not the head the owner approved, posts nothing, runs no `forge-claim land` command and merges nothing, and reports the stage awaiting look with issue 3, pull request 7, the current head and `issue 3 needs the owner's look before merge`. Nothing is pushed, main is unmoved locally and at origin, the stand-in forge sees no write, and the worktree is kept and clean.",
+      "asserts": [
+        {
+          "name": "the resume read the pull request head from the forge",
+          "shell": "[ -f \"$WORK/gh-calls.jsonl\" ] || { fail \"the stand-in forge was never called\"; exit 1; }; jq -e -s 'any(.[]; .argv[0:2] == [\"pr\",\"view\"] and .exit == 0 and any(.argv[]; test(\"headRefOid\")))' \"$WORK/gh-calls.jsonl\" >/dev/null || fail \"pull request 7's head was never read: the session refused the open pull request instead of resuming\""
+        },
+        {
+          "name": "no land lock was sought",
+          "shell": "{ [ ! -f \"$WORK/forge-claim-calls.jsonl\" ] || jq -e -s 'all(.[]; .argv[0] != \"land\")' \"$WORK/forge-claim-calls.jsonl\" >/dev/null; } && { [ ! -f \"$WORK/gh-calls.jsonl\" ] || jq -e -s 'all(.[]; all(.argv[]; test(\"agent-locks/land\") | not))' \"$WORK/gh-calls.jsonl\" >/dev/null; } || fail \"the session sought the land lock: a forge-claim land call or a land lock ref read\""
+        },
+        {
+          "name": "the forge saw no write",
+          "shell": "[ ! -f \"$WORK/gh-calls.jsonl\" ] || jq -e -s 'all(.[]; (.argv[0:2] | IN([\"pr\",\"merge\"], [\"pr\",\"create\"], [\"issue\",\"comment\"], [\"issue\",\"edit\"], [\"issue\",\"close\"]) | not) and ([.argv[] | select(test(\"^(-[XfF].*|--(method|field|raw-field|input)(=.*)?)$\"))] | length == 0))' \"$WORK/gh-calls.jsonl\" >/dev/null || fail \"the stand-in forge saw a write: a merge, a pull request, a comment or a lock\""
         },
         {
           "name": "nothing merged and main unmoved",
