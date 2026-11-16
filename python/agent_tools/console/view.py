@@ -441,8 +441,9 @@ never from the `deliveries` mapping: a run leaves that mapping once its final re
 the fold keeps its last stage and movement, so they outlive the run. `waiting` is the number of
 open inbox items of registered projects whose project is the sprint's and whose issue is one of the
 report's issues or its `inbox` numbers, plus the sprint's open questions. An open owner check (a
-verification prompt, ADR-console-051) whose `blocking` list meets none of the sprint's open issues
-(report issues not landed, held, dropped or closed out) is not counted and is listed in `checks`
+verification prompt or a held-issue review card, ADR-console-051, ADR-console-054) whose `blocking`
+list meets none of the sprint's open issues (report issues not landed, held, dropped or closed
+out) is not counted and is listed in `checks`
 instead; a missing or malformed `blocking` counts as blocking. `checks` is ordered by
 `waiting_since` then `key`, and each check stays an inbox item.
 A running sprint's movement (#1109, `sprint_quiet_for`) is one reading. With no clock (`now_ms`
@@ -570,7 +571,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
 
-from agent_tools.console import contract_draft
+from agent_tools.console import contract_draft, inbox
 from agent_tools.console.activation import Activation
 from agent_tools.console.capacity import EMPTY
 from agent_tools.console.deliveries import (
@@ -995,8 +996,9 @@ def _effective_stages(state: SprintState) -> list[tuple[int, str, str]]:
 
 
 def owner_check(item: Mapping) -> bool:
-    """Whether a tracker item is a verification owner prompt (ADR-console-051)."""
-    return item.get("reason") in verify_owner.REASONS
+    """Whether a tracker item is a verification owner prompt or a held-issue review card
+    (ADR-console-051 D1, ADR-console-054)."""
+    return item.get("reason") in verify_owner.REASONS or item.get("reason") == inbox.REVIEW_REASON
 
 
 def sprint_open_issues(state: SprintState) -> frozenset[int]:

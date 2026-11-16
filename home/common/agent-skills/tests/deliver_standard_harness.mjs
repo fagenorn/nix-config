@@ -5,6 +5,7 @@
 // is merged over that default; a reply "throw" throws, and a program throw prints { result: null, error, calls }. A folded label (NESTED) given an explicit object reply with no own key for a nested step
 // gets that step's default; a key present with null stays null. The fresh setup prompt (it names `--holder <host>/<id> `)
 // A scenario's "after": { "<label>": "<other label>" } holds the reply of <label> until <other label> has been called (a run where it never is does not end).
+// #1139: every setup reply carries the look marker read (SETUP.look, unmarked): an explicit ok setup reply with no own look key gets it too, fresh and resume alike.
 // also gets the folded claim: holder (built from the merged host, unless the patch sets it), acquire, claim, answer (the owner's answer) and renew (the already_held claim renew); a resume setup gets none. Prints { result, calls: [{label, agentType, model, effort, schema, prompt}], logs: [each log() line], events: ["call <label>" and "reply <label>" in order] }.
 import { readFileSync } from 'node:fs'
 
@@ -20,6 +21,7 @@ const SETUP = {
   review: { code: 'cr', plan: 'pr' }, review_state: { code: 'available', plan: 'available' },
   knowledge: { standards: ['/r/docs/standards'], hints: ['/r/.hints'], rejections: ['/r/.rej'] },
   verification: [{ id: 'build', argv: ['make', 'build'], cwd: '.' }],
+  look: { verdict: 'unmarked', covers: [] },
 }
 // The folded claim of a fresh setup prompt: the id its acquire command names, or null for a resume prompt.
 const HOLDER_ID = prompt => { const m = /--holder <host>\/([A-Za-z0-9._-]+) /.exec(prompt); return m ? m[1] : null }
@@ -43,6 +45,13 @@ const openChecks = prompt => {
 // Ordered: the first matching pattern wins.
 const DEFAULTS = [
   [/^land-push-/, prompt => ({ head: (/at the head ([0-9a-f]+)/.exec(prompt) || [])[1] || SHA, renew: { verdict: 'renewed' } })],
+  // #1139: a marked delivery's pull request step (no lock) and its push; the push answers the head the prompt names.
+  [/^look-pr$/, { pr: 42, head: SHA, probe: { conflicted: false }, behind: false, renew: { verdict: 'renewed' } }],
+  [/^look-push$/, prompt => ({ head: (/at the head ([0-9a-f]+)/.exec(prompt) || [])[1] || SHA, renew: { verdict: 'renewed' } })],
+  // #1139: the owner's look answers: the pull request head read, the approval post, and the fix round of a changes answer (look-fix-review falls to the review default).
+  [/^look-head$/, { head: SHA, state: 'OPEN', renew: { verdict: 'renewed' } }],
+  [/^look-post$/, { verdict: 'posted', comment_id: 101 }],
+  [/^look-fix$/, { ...DONE, start_head: SHA, commit: 'f1c0de' }],
   [/^land-unlock$/, { verdict: 'released' }],
   [/^land-(re)?lock-/, { renew: { verdict: 'renewed' }, lock: { verdict: 'acquired', lock_sha: SHA } }],
   [/^renew-/, { verdict: 'renewed', comment_id: 7 }],
@@ -81,7 +90,7 @@ const DEFAULTS = [
   [/^close-out$/, { issue_state: 'CLOSED', branch_deleted: true, released: true, decision_ended: true, notes: 'ok' }],
 ]
 // Folded labels: the nested steps their reply carries, each defaulted when an explicit reply leaves it out.
-const NESTED = [[/^(owner-answer|verify)$/, ['renew']], [/^setup$/, ['holder', 'acquire', 'claim', 'answer', 'renew']], [/^pr$/, ['renew', 'lock', 'checks']], [/^merge$/, ['renew', 'lock']], [/^land-push-/, ['renew']], [/^land-(re)?lock-/, ['renew', 'lock']], [/^checks-/, ['renew', 'lock']], [/^(impl-\d+|direct-impl)$/, ['renew']], [/^hold$/, ['release']]]
+const NESTED = [[/^(owner-answer|verify)$/, ['renew']], [/^setup$/, ['holder', 'acquire', 'claim', 'answer', 'renew']], [/^pr$/, ['renew', 'lock', 'checks']], [/^merge$/, ['renew', 'lock']], [/^land-push-/, ['renew']], [/^look-(pr|push|head)$/, ['renew']], [/^land-(re)?lock-/, ['renew', 'lock']], [/^checks-/, ['renew', 'lock']], [/^(impl-\d+|direct-impl)$/, ['renew']], [/^hold$/, ['release']]]
 const defaultOf = (label, prompt, over = {}) => {
   const hit = DEFAULTS.find(([re]) => re.test(label))
   if (!hit) throw new Error(`no stub reply for agent label ${label}`)
@@ -129,6 +138,7 @@ function replyOf(prompt, opts) {
       const base = defaultOf(label, prompt, out)
       for (const k of row[1]) if (!Object.prototype.hasOwnProperty.call(out, k)) out[k] = structuredClone(base[k])
     }
+    if (label === 'setup' && out && typeof out === 'object' && !Array.isArray(out) && out.ok === true && !Object.prototype.hasOwnProperty.call(out, 'look')) out.look = structuredClone(SETUP.look)
     return released(label, prompt, out)
   }
   const base = defaultOf(label, prompt)

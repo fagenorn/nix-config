@@ -5,6 +5,7 @@ Run: just agent-workflow-tests
 import json
 import subprocess
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -18,7 +19,7 @@ from agent_tools.verification import verify_answer
 
 from . import console_test_support as support
 from .forge_world import NETWORK_DOWN as DIAL_FAILURE, ForgeWorld
-from .test_console_inbox import act, approve, ask
+from .test_console_inbox import ac_body, act, approve, ask, held_issue
 from .test_console_tracker import Scripted
 from .test_forge_owner_action import ISSUE, QUESTIONS, SLUG, box_body, comment
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
@@ -502,6 +503,35 @@ ASK7, ASK8, ASK9, PAID10, ACT11, LIVE12 = (CHECKS[n] for n in (7, 8, 9, 10, 11, 
 ALL_CHECKS = list(CHECKS.values())
 
 
+REVIEW_ISSUE = 1091
+R_STATE = ["api", f"repos/{SLUG}/issues/{REVIEW_ISSUE}"]
+R_COMMENTS = ["api", "--paginate", "--slurp", f"repos/{SLUG}/issues/{REVIEW_ISSUE}/comments?per_page=100"]
+HUMAN_LINE = "- [ ] [human] The card looks right"
+
+
+def review_body(*lines):
+    return ac_body(*lines)
+
+
+REVIEW_BODY = review_body("- [x] [code] A", "- [x] [code] B", HUMAN_LINE).replace(
+    "## Problem\n\nx\n", "## Problem\n\nx\n- [ ] unrelated\n", 1)
+REVIEW_TICKED = REVIEW_BODY.replace(HUMAN_LINE, "- [x] [human] The card looks right")
+V3 = inbox.criterion_version(REVIEW_ISSUE, inbox.acceptance_criteria(REVIEW_BODY)[2])
+
+
+def issue_reply(body, state="open", labels=("needs-verification",), assoc="OWNER"):
+    return {"number": REVIEW_ISSUE, "state": state, "body": body,
+            "labels": [{"name": n} for n in labels], "author_association": assoc}
+
+
+def R_PATCH(body):
+    return ["api", "-X", "PATCH", f"repos/{SLUG}/issues/{REVIEW_ISSUE}", "-f", "body=" + body]
+
+
+def review_item():
+    return inbox.items_from_node("owner/p00", SLUG, held_issue(REVIEW_ISSUE, REVIEW_BODY))[0]
+
+
 class CheckAnswerServiceTest(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -509,6 +539,7 @@ class CheckAnswerServiceTest(unittest.TestCase):
         self.store = Path(tmp.name) / "state/console/events.sqlite3"
         self.registry = Path(tmp.name) / "fleet" / "registry.json"
         self.calls = []
+        self.criterion_calls = []
         self.raise_ = None
         self.inside = None
 
@@ -705,6 +736,251 @@ class CheckAnswerServiceTest(unittest.TestCase):
         self.assertEqual([str(e) for e in raised], [answer.SENDING])
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(self.keys(svc, "answered"), [ASK7["key"]])
+
+    def test_a_review_answer_reaches_the_criterion_path_not_the_owner_path(self):
+        item = review_item()
+        svc = self.make(Scripted([item]),
+                        criterion_path=lambda *a, **k: self.criterion_calls.append((a, k)))
+        svc.poll_tracker()
+        svc.answer_check(P, item["key"], "note", item["version"], note=NOTE)
+        svc.answer_check(P, item["key"], "passed", item["version"])
+        self.assertEqual(self.criterion_calls, [
+            ((SLUG, REVIEW_ISSUE, 3, "note"), {"version": item["version"], "note": NOTE}),
+            ((SLUG, REVIEW_ISSUE, 3, "passed"), {"version": item["version"], "note": None})])
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.keys(svc, "answered"), [item["key"]])
+
+
+class ReviewWriteTest(unittest.TestCase):
+    def setUp(self):
+        self.world = ForgeWorld(self)
+
+    def reply(self, body, **kwargs):
+        self.world.respond_json("gh", R_STATE, issue_reply(body, **kwargs))
+
+    def assert_owner(self):
+        self.assertTrue(all(call["token_visible"] is False for call in self.world.calls()))
+
+    def test_approve_ticks_exactly_that_criterion_as_the_owner(self):
+        self.world.comment_store(SLUG, REVIEW_ISSUE, [])
+        self.reply(REVIEW_BODY)
+        self.world.respond("gh", R_PATCH(REVIEW_TICKED), stdout="{}")
+        answer.answer_criterion(SLUG, REVIEW_ISSUE, 3, "passed", version=V3)
+        self.assertEqual(self.world.argvs("gh"), [R_STATE, R_COMMENTS, R_PATCH(REVIEW_TICKED)])
+        self.assert_owner()
+
+    def test_an_open_code_criterion_of_a_held_issue_does_not_stop_the_approval(self):
+        body = review_body("- [ ] [code] A", "- [x] [code] B", HUMAN_LINE)
+        ticked = body.replace(HUMAN_LINE, "- [x] [human] The card looks right")
+        version = inbox.criterion_version(REVIEW_ISSUE, inbox.acceptance_criteria(body)[2])
+        self.world.comment_store(SLUG, REVIEW_ISSUE, [])
+        self.reply(body)
+        self.world.respond("gh", R_PATCH(ticked), stdout="{}")
+        answer.answer_criterion(SLUG, REVIEW_ISSUE, 3, "passed", version=version)
+        self.assertEqual(self.world.argvs("gh"), [R_STATE, R_COMMENTS, R_PATCH(ticked)])
+
+    def test_a_prompt_or_a_verify_check_that_arrived_after_the_card_stops_both_writes(self):
+        block = json.dumps({"v": 1, "merge": "a" * 40, "checks": [{"ac": "AC3", "kind": "human"}]})
+        table = {
+            "a live runner prompt": [comment(C + 1, ask())],
+            "a verify block check for the criterion": [comment(C + 1, f"Held.\n\n```verify\n{block}\n```\n")],
+        }
+        for name, comments in table.items():
+            for word, note in (("passed", None), ("note", NOTE)):
+                with self.subTest(name, word=word):
+                    self.world.reset()
+                    self.world.comment_store(SLUG, REVIEW_ISSUE, comments)
+                    self.reply(REVIEW_BODY)
+                    with self.assertRaises(answer.Refused) as caught:
+                        answer.answer_criterion(SLUG, REVIEW_ISSUE, 3, word, version=V3, note=note)
+                    self.assertEqual(str(caught.exception), answer.REVIEW_GONE)
+                    self.assertEqual(self.world.argvs("gh"), [R_STATE, R_COMMENTS])
+                    self.assertEqual(self.world.stored(), comments)
+
+    def test_a_stranger_comment_or_another_checks_block_does_not_stop_the_approval(self):
+        other = json.dumps({"v": 1, "merge": "a" * 40, "checks": [{"ac": "AC9", "kind": "human"}]})
+        comments = [comment(C + 1, ask(), association="CONTRIBUTOR"),
+                    comment(C + 2, f"```verify\n{other}\n```\n")]
+        self.world.comment_store(SLUG, REVIEW_ISSUE, comments)
+        self.reply(REVIEW_BODY)
+        self.world.respond("gh", R_PATCH(REVIEW_TICKED), stdout="{}")
+        answer.answer_criterion(SLUG, REVIEW_ISSUE, 3, "passed", version=V3)
+        self.assertEqual(self.world.argvs("gh"), [R_STATE, R_COMMENTS, R_PATCH(REVIEW_TICKED)])
+
+    def test_not_yet_posts_the_note_and_ticks_nothing(self):
+        self.world.comment_store(SLUG, REVIEW_ISSUE, [])
+        self.reply(REVIEW_BODY)
+        answer.answer_criterion(SLUG, REVIEW_ISSUE, 3, "note", version=V3, note=NOTE)
+        self.assertEqual([c["body"] for c in self.world.stored()],
+                         [answer.review_note_body(SLUG, REVIEW_ISSUE, 3, NOTE)])
+        self.assertFalse(any("PATCH" in argv for argv in self.world.argvs("gh")))
+        self.assert_owner()
+
+    def test_a_closed_issue_or_a_gone_criterion_is_refused_and_never_written(self):
+        code2 = inbox.criterion_version(REVIEW_ISSUE, inbox.acceptance_criteria(REVIEW_BODY)[1])
+        with_evidence = review_body("- [x] [code] A", "- [x] [code] B", HUMAN_LINE, "- [ ] [evidence] E")
+        v_evidence = inbox.criterion_version(REVIEW_ISSUE, inbox.acceptance_criteria(with_evidence)[2])
+        nested = review_body(HUMAN_LINE, "    ```", "    - [ ] [human] Example only", "    ```")
+        v_nested = inbox.criterion_version(REVIEW_ISSUE, inbox.Criterion(2, False, "human", "Example only", 0))
+        ended = review_body("- [ ] [human] One", "  ```", "  example", "- [ ] [evidence] Two")
+        v_ended = inbox.criterion_version(REVIEW_ISSUE, inbox.Criterion(1, False, "human", "One", 0))
+        reopened = review_body("- [ ] [human] One", "  ```", "  x", "```", "- [ ] [human] Two")
+        v_reopened = inbox.criterion_version(REVIEW_ISSUE, inbox.Criterion(2, False, "human", "Two", 0))
+        headed = review_body("- [ ] [human] One", "  ### Details", "- [ ] [evidence] Two")
+        v_headed = inbox.criterion_version(REVIEW_ISSUE, inbox.Criterion(1, False, "human", "One", 0))
+        table = {
+            "an evidence box after a heading inside an item": ({}, headed, 1, v_headed, answer.REVIEW_GONE),
+            "closed": ({"state": "closed"}, REVIEW_BODY, 3, V3, answer.CLOSED),
+            "label gone": ({"labels": ("owner-action",)}, REVIEW_BODY, 3, V3, answer.REVIEW_GONE),
+            "untrusted author": ({"assoc": "CONTRIBUTOR"}, REVIEW_BODY, 3, V3, answer.REVIEW_GONE),
+            "not human": ({}, REVIEW_BODY, 2, code2, answer.REVIEW_GONE),
+            "missing index": ({}, REVIEW_BODY, 9, V3, answer.REVIEW_GONE),
+            "another open kind": ({}, with_evidence, 3, v_evidence, answer.REVIEW_GONE),
+            "a fenced example": ({}, nested, 2, v_nested, answer.REVIEW_GONE),
+            "an evidence box after an unclosed fence in an item": ({}, ended, 1, v_ended, answer.REVIEW_GONE),
+            "a box inside a fence a dedented line opens": ({}, reopened, 2, v_reopened, answer.REVIEW_GONE),
+        }
+        for name, (kwargs, body, index, version, reason) in table.items():
+            with self.subTest(name):
+                self.world.reset()
+                self.reply(body, **kwargs)
+                with self.assertRaises(answer.Refused) as caught:
+                    answer.answer_criterion(SLUG, REVIEW_ISSUE, index, "passed", version=version)
+                self.assertEqual(str(caught.exception), reason)
+                self.assertEqual(self.world.argvs("gh"), [R_STATE])
+
+    def test_an_edited_criterion_is_refused(self):
+        self.reply(REVIEW_BODY.replace("The card looks right", "The card looks right now"))
+        with self.assertRaises(answer.Refused) as caught:
+            answer.answer_criterion(SLUG, REVIEW_ISSUE, 3, "passed", version=V3)
+        self.assertEqual(str(caught.exception), answer.REVIEW_EDITED)
+        self.assertEqual(self.world.argvs("gh"), [R_STATE])
+
+    def test_an_already_ticked_criterion_is_left_alone_and_a_note_is_refused(self):
+        self.reply(REVIEW_TICKED)
+        self.assertIsNone(answer.answer_criterion(SLUG, REVIEW_ISSUE, 3, "passed", version=V3))
+        self.assertEqual(self.world.argvs("gh"), [R_STATE])
+        with self.assertRaises(answer.Refused) as caught:
+            answer.answer_criterion(SLUG, REVIEW_ISSUE, 3, "note", version=V3, note=NOTE)
+        self.assertEqual(str(caught.exception), answer.REVIEW_ALREADY)
+        self.assertEqual(self.world.argvs("gh"), [R_STATE, R_STATE])
+
+    def test_a_carriage_return_body_keeps_every_other_byte(self):
+        crlf = REVIEW_BODY.replace("\n", "\r\n")
+        ticked = REVIEW_TICKED.replace("\n", "\r\n")
+        self.world.comment_store(SLUG, REVIEW_ISSUE, [])
+        self.reply(crlf)
+        self.world.respond("gh", R_PATCH(ticked), stdout="{}")
+        answer.answer_criterion(SLUG, REVIEW_ISSUE, 3, "passed", version=V3)
+        self.assertEqual(self.world.argvs("gh"), [R_STATE, R_COMMENTS, R_PATCH(ticked)])
+
+    def test_overlapping_approvals_of_different_criteria_both_stay_ticked(self):
+        second = "- [ ] [human] The other card looks right"
+        body = review_body("- [x] [code] A", HUMAN_LINE, second)
+        versions = {c.index: inbox.criterion_version(REVIEW_ISSUE, c)
+                    for c in inbox.acceptance_criteria(body)}
+        current = [body]
+        first_read = threading.Event()
+        other_read = threading.Event()
+
+        def api_get(path):
+            snapshot = current[0]
+            if not first_read.is_set():
+                first_read.set()
+                other_read.wait(0.5)
+            else:
+                other_read.set()
+            return issue_reply(snapshot)
+
+        def run_gh(argv):
+            current[0] = argv[-1][len("body="):]
+
+        with mock.patch.object(answer.forge_api, "api_get", api_get), \
+                mock.patch.object(answer.forge_api, "run_gh", run_gh), \
+                mock.patch.object(answer.fm, "list_comments", lambda slug, issue: []):
+            workers = [threading.Thread(target=answer.answer_criterion,
+                                        args=(SLUG, REVIEW_ISSUE, i, "passed"), kwargs={"version": versions[i]})
+                       for i in (2, 3)]
+            for worker in workers:
+                worker.start()
+            for worker in workers:
+                worker.join(5)
+        self.assertEqual(current[0], body.replace(HUMAN_LINE, "- [x] [human] The card looks right")
+                         .replace(second, "- [x] [human] The other card looks right"))
+
+    def test_bad_arguments_are_refused_before_any_call(self):
+        bad = [("failed", None), ("approve", None), ("passed", "a note"), ("note", None),
+               ("note", "  "), ("note", "n" * (verify_answer.MAX_NOTE_CHARS + 1))]
+        for word, note in bad:
+            with self.subTest(word=word, note=note):
+                with self.assertRaises(ValueError):
+                    answer.answer_criterion(SLUG, REVIEW_ISSUE, 3, word, version=V3, note=note)
+        with self.assertRaises(answer.Refused) as caught:
+            answer.answer_criterion(SLUG, REVIEW_ISSUE, 3, "note", version=V3,
+                                    note="see\n```verify\n{}\n```")
+        self.assertEqual(str(caught.exception), verify_answer.NOTE_BLOCK)
+        self.assertEqual(self.world.argvs("gh"), [])
+
+
+class ReviewAnswerRouteTest(unittest.TestCase):
+    def setUp(self):
+        self.world = ForgeWorld(self)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.store = Path(tmp.name) / "state/console/events.sqlite3"
+        registry = Path(tmp.name) / "fleet" / "registry.json"
+        support.write_registry(registry, support.entries(1))
+        self.item = review_item()
+        self.svc = service.ConsoleService(
+            self.store, registry, port=0, tracker=Scripted([self.item]), tracker_seconds=3600,
+            slug_of=lambda root: SLUG, activity=lambda root: time.time(), session_dirs=lambda: [],
+            profile_dirs=lambda: [], repo_of=lambda cwd: cwd,
+            branch_pattern_of=lambda repo: "issue-<num>-<slug>")
+        self.addCleanup(self.svc.close)
+        self.svc.poll_tracker()
+        self.svc.start()
+        self.headers = {"Origin": f"http://127.0.0.1:{self.svc.address[1]}",
+                        "X-Console-Token": (self.store.parent / "page-token").read_text().strip(),
+                        "Content-Type": "application/json"}
+
+    def post(self, **extra):
+        body = {"project_id": P, "key": self.item["key"], "version": self.item["version"], **extra}
+        got = support.post_page(self.svc.address, "/api/check-answer", self.headers,
+                                json.dumps(body).encode())
+        return got[0], got[2]
+
+    def keys(self, section):
+        return [i["key"] for i in view_of(self.svc)["inbox"][section]]
+
+    def test_approve_ticks_exactly_that_criterion_as_the_owner(self):
+        self.world.comment_store(SLUG, REVIEW_ISSUE, [])
+        self.world.respond_json("gh", R_STATE, issue_reply(REVIEW_BODY))
+        self.world.respond("gh", R_PATCH(REVIEW_TICKED), stdout="{}")
+        self.assertEqual(self.post(answer="passed"), (204, b""))
+        self.assertEqual(self.world.argvs("gh"), [R_STATE, R_COMMENTS, R_PATCH(REVIEW_TICKED)])
+        self.assertTrue(all(call["token_visible"] is False for call in self.world.calls()))
+        self.assertIn(self.item["key"], self.keys("answered"))
+        self.assertEqual(view_of(self.svc)["statement"]["inbox_items"], 0)
+
+    def test_a_card_read_before_a_runner_prompt_arrived_writes_nothing(self):
+        self.world.comment_store(SLUG, REVIEW_ISSUE, [comment(C + 1, ask())])
+        self.world.respond_json("gh", R_STATE, issue_reply(REVIEW_BODY))
+        for extra in ({"answer": "passed"}, {"answer": "note", "note": NOTE}):
+            status, body = self.post(**extra)
+            self.assertEqual(status, 409)
+            self.assertIn(answer.REVIEW_GONE.encode(), body)
+        self.assertFalse(any("PATCH" in argv or "POST" in argv for argv in self.world.argvs("gh")))
+        self.assertEqual([c["id"] for c in self.world.stored()], [C + 1])
+        self.assertEqual(self.keys("open"), [self.item["key"]])
+
+    def test_not_yet_posts_the_note_and_ticks_nothing(self):
+        self.world.comment_store(SLUG, REVIEW_ISSUE, [])
+        self.world.respond_json("gh", R_STATE, issue_reply(REVIEW_BODY))
+        self.assertEqual(self.post(answer="note", note=NOTE), (204, b""))
+        self.assertEqual([c["body"] for c in self.world.stored()],
+                         [answer.review_note_body(SLUG, REVIEW_ISSUE, 3, NOTE)])
+        self.assertFalse(any("PATCH" in argv for argv in self.world.argvs("gh")))
+        self.assertEqual(self.keys("open"), [self.item["key"]])
 
 
 class ParseCheckRequestTest(unittest.TestCase):
