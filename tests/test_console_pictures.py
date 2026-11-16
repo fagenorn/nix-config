@@ -1285,6 +1285,220 @@ class PictureAskTest(PictureCase):
                 self.assertIn(needle, doc)
 
 
+class PictureBriefCommandTest(ManagerPictureCase):
+    def send_command(self, svc, sid, value, command):
+        path = self.write(f"{command}.json", json.dumps(value).encode())
+        return run_sprint(command, "--sprint", sid, "--secret-file", self.secret_file(sid),
+                          f"--{command}-file", path, "--port", svc.address[1])
+
+    def files(self):
+        before, after = self.write("before.png", PIXEL), self.write("after.png", WIDE)
+        return before, after, hashlib.sha256(PIXEL).hexdigest(), hashlib.sha256(WIDE).hexdigest()
+
+    def test_brief_uploads_each_file_and_the_brief_names_the_ids(self):
+        svc = self.open()
+        sid = self.sprint(svc)
+        before, after, a, b = self.files()
+        got = self.send_command(svc, sid, {**PARTS, "pictures": [
+            {"file": str(before), "line": "the mock-up before", "pair": "before"},
+            {"file": str(after), "line": "the mock-up after", "pair": "after"}]}, "brief")
+        self.assertEqual((got.returncode, got.stdout, got.stderr),
+                         (0, "sprint: brief version 1 sent\n", ""))
+        ((payload, _),) = self.rows("brief.sent")
+        self.assertEqual(payload["brief"]["pictures"],
+                         [{"picture": a, "line": "the mock-up before", "pair": "before"},
+                          {"picture": b, "line": "the mock-up after", "pair": "after"}])
+        self.assertEqual(payload["pictures"], [a, b])
+        self.assertEqual(len(self.rows("picture.stored")), 2)
+        self.assertEqual(self.entries(), sorted([a, b]))
+
+    def test_a_bad_brief_picture_list_exits_1_and_uploads_nothing(self):
+        svc = self.open()
+        sid = self.sprint(svc)
+        good = self.write("good.png", PIXEL)
+        member = {"file": str(good), "line": "the mock-up"}
+        cases = (
+            ("nine", PARTS, [member] * 9, "the brief has more than 8 pictures"),
+            ("no line", PARTS, [{"file": str(good)}],
+             "the brief's picture 1 is not an object of picture, line and pair"),
+            ("long line", PARTS, [{**member, "line": "l" * 141}],
+             "the brief's picture 1's line is over 140 characters"),
+            ("empty part", {**PARTS, "done": ""}, [member], "the brief has no done"),
+        )
+        for name, parts, listed, reason in cases:
+            with self.subTest(name):
+                got = self.assert_unchanged(svc, lambda: self.send_command(
+                    svc, sid, {**parts, "pictures": listed}, "brief"))
+                self.assertEqual((got.returncode, got.stdout, got.stderr),
+                                 (1, "", f"sprint: refused before sending: {reason}\n"))
+                self.assertEqual(self.rows("picture.stored"), [])
+                self.assertEqual(self.entries(), [])
+
+    def test_a_brief_with_an_unreadable_or_oversize_file_exits_2_and_sends_nothing(self):
+        svc = self.open()
+        sid = self.sprint(svc)
+        good = self.write("good.png", PIXEL)
+        big = self.write("big.png", padded(2 * 1024 * 1024 + 1))
+        missing = self.store.parent / "none.png"
+        for name, files in (("missing", (missing,)), ("oversize second", (good, big))):
+            with self.subTest(name):
+                got = self.assert_unchanged(svc, lambda: self.send_command(
+                    svc, sid, {**PARTS, "pictures": [
+                        {"file": str(f), "line": "a mock-up"} for f in files]}, "brief"))
+                self.assertEqual((got.returncode, got.stdout), (2, ""))
+                if name == "missing":
+                    self.assertTrue(got.stderr.startswith("sprint: cannot read"), got.stderr)
+                else:
+                    self.assertEqual(
+                        got.stderr, f"sprint: cannot send {big}: it is larger than 2 MiB\n")
+                self.assertEqual(self.rows("picture.stored"), [])
+                self.assertEqual(self.rows("brief.sent"), [])
+
+    def test_a_brief_too_large_once_ids_are_named_uploads_nothing(self):
+        svc = self.open()
+        sid = self.sprint(svc)
+        good = self.write("good.png", PIXEL)
+        got = self.assert_unchanged(svc, lambda: self.send_command(svc, sid, {
+            **PARTS, "done": "d" * 31000,
+            "pictures": [{"file": str(good), "line": "\u00e9" * 140}] * 8}, "brief"))
+        self.assertEqual((got.returncode, got.stdout, got.stderr), (
+            1, "", f"sprint: refused before sending: the brief is larger than "
+            f"{service.MAX_BRIEF_BYTES} bytes\n"))
+        self.assertEqual(self.rows("picture.stored"), [])
+        self.assertEqual(self.entries(), [])
+
+    def test_a_mixed_brief_with_an_unknown_or_foreign_picture_uploads_nothing(self):
+        svc = self.open()
+        sid = self.sprint(svc)
+        good = self.write("good.png", PIXEL)
+        other = self.approved(svc, "owner/p01")
+        foreign = self.stored(svc, other, padded(3072))
+        for name, member, reason in (
+                ("unknown", "f" * 64, "the brief's picture 1 is not known"),
+                ("another sprint's", foreign, "the brief's picture 1 was sent by another sprint")):
+            with self.subTest(name):
+                before, rows = self.entries(), len(self.rows("picture.stored"))
+                briefs = self.rows("brief.sent")
+                got = self.assert_unchanged(svc, lambda: self.send_command(svc, sid, {
+                    **PARTS, "pictures": [{"picture": member, "line": "the named one"},
+                                          {"file": str(good), "line": "the file"}]}, "brief"))
+                self.assertEqual((got.returncode, got.stdout, got.stderr),
+                                 (1, "", f"sprint: refused 409: {reason}\n"))
+                self.assertEqual(len(self.rows("picture.stored")), rows)
+                self.assertEqual(self.entries(), before)
+                self.assertEqual(self.rows("brief.sent"), briefs)
+
+    def test_a_picture_refused_while_uploading_sends_no_brief(self):
+        svc = self.open()
+        sid = self.sprint(svc)
+        good, renamed = self.write("good.png", PIXEL), self.write("renamed.png", JPEG)
+        got = self.send_command(svc, sid, {**PARTS, "pictures": [
+            {"file": str(good), "line": "the first"},
+            {"file": str(renamed), "line": "the second"}]}, "brief")
+        self.assertEqual((got.returncode, got.stdout, got.stderr),
+                         (1, "", "sprint: refused 400: " + pictures.SIGNATURE_WRONG + "\n"))
+        self.assertEqual(self.rows("brief.sent"), [])
+        self.assertEqual(len(self.rows("picture.stored")), 1)
+        self.assertEqual(self.entries(), [hashlib.sha256(PIXEL).hexdigest()])
+
+    def test_a_brief_passes_an_already_sent_id_through(self):
+        svc = self.open()
+        sid = self.sprint(svc)
+        a = self.stored(svc, sid, PIXEL)
+        got = self.send_command(svc, sid, {**PARTS, "pictures": [
+            {"picture": a, "line": "the header"}]}, "brief")
+        self.assertEqual((got.returncode, got.stderr), (0, ""))
+        ((payload, _),) = self.rows("brief.sent")
+        self.assertEqual(payload["brief"]["pictures"], [{"picture": a, "line": "the header"}])
+
+
+class PictureReportCommandTest(ManagerPictureCase):
+    send_command = PictureBriefCommandTest.send_command
+    files = PictureBriefCommandTest.files
+
+    def test_report_uploads_each_file_and_the_report_names_the_ids(self):
+        svc = self.open()
+        sid = self.approved(svc)
+        before, after, a, b = self.files()
+        got = self.send_command(svc, sid, {**REPORT, "pictures": [
+            {"file": str(before), "line": "the mock-up before", "pair": "before"},
+            {"file": str(after), "line": "the mock-up after", "pair": "after"}]}, "report")
+        self.assertEqual((got.returncode, got.stdout, got.stderr),
+                         (0, "sprint: report sent\n", ""))
+        ((payload, _),) = self.rows("sprint.reported")
+        self.assertEqual(payload["report"]["pictures"],
+                         [{"picture": a, "line": "the mock-up before", "pair": "before"},
+                          {"picture": b, "line": "the mock-up after", "pair": "after"}])
+        self.assertEqual(payload["pictures"], [a, b])
+
+    def test_a_picture_refused_while_uploading_sends_no_report(self):
+        svc = self.open()
+        sid = self.approved(svc)
+        good, renamed = self.write("good.png", PIXEL), self.write("renamed.png", JPEG)
+        got = self.send_command(svc, sid, {**REPORT, "pictures": [
+            {"file": str(good), "line": "the first"},
+            {"file": str(renamed), "line": "the second"}]}, "report")
+        self.assertEqual((got.returncode, got.stdout, got.stderr),
+                         (1, "", "sprint: refused 400: " + pictures.SIGNATURE_WRONG + "\n"))
+        self.assertEqual(self.rows("sprint.reported"), [])
+        self.assertEqual(len(self.rows("picture.stored")), 1)
+        self.assertEqual(self.entries(), [hashlib.sha256(PIXEL).hexdigest()])
+
+    def test_a_report_before_approval_with_a_file_uploads_nothing(self):
+        svc = self.open()
+        sid = self.sprint(svc)
+        good = self.write("good.png", PIXEL)
+        got = self.assert_unchanged(svc, lambda: self.send_command(svc, sid, {
+            **REPORT, "pictures": [{"file": str(good), "line": "the look"}]}, "report"))
+        self.assertEqual((got.returncode, got.stdout, got.stderr),
+                         (1, "", f"sprint: refused 409: {sprints.NOT_STARTED}\n"))
+        self.assertEqual(self.rows("picture.stored"), [])
+        self.assertEqual(self.entries(), [])
+
+    def test_a_bad_report_picture_list_exits_1_and_uploads_nothing(self):
+        svc = self.open()
+        sid = self.approved(svc)
+        good = self.write("good.png", PIXEL)
+        member = {"file": str(good), "line": "the look"}
+        for name, value, reason in (
+                ("nine", {**REPORT, "pictures": [member] * 9},
+                 "the report has more than 8 pictures"),
+                ("empty status", {**REPORT, "status": "", "pictures": [member]},
+                 "the report has no valid status")):
+            with self.subTest(name):
+                got = self.assert_unchanged(svc, lambda: self.send_command(
+                    svc, sid, value, "report"))
+                self.assertEqual((got.returncode, got.stdout, got.stderr),
+                                 (1, "", f"sprint: refused before sending: {reason}\n"))
+                self.assertEqual(self.rows("picture.stored"), [])
+                self.assertEqual(self.entries(), [])
+
+    def test_a_report_too_large_once_ids_are_named_uploads_nothing(self):
+        svc = self.open()
+        sid = self.approved(svc)
+        good = self.write("good.png", PIXEL)
+        path = self.write("report.json", json.dumps({**REPORT, "pictures": [
+            {"file": str(good), "line": "l" * 140}] * 8}).encode())
+        out, err = io.StringIO(), io.StringIO()
+        with mock.patch.object(service, "MAX_REPORT_BYTES", 1024), \
+                contextlib.redirect_stderr(err), contextlib.redirect_stdout(out):
+            code = sprint.main(["report", "--sprint", sid, "--secret-file",
+                                str(self.secret_file(sid)), "--report-file", str(path),
+                                "--port", str(svc.address[1])])
+        self.assertEqual((code, out.getvalue()), (1, ""))
+        self.assertEqual(
+            err.getvalue(), "sprint: refused before sending: the report is larger than 1024 bytes\n")
+        self.assertEqual(self.rows("picture.stored"), [])
+
+
+class PictureCommandDocsTest(unittest.TestCase):
+    def test_the_brief_and_report_docstring_states_the_picture_upload(self):
+        doc = ast.get_docstring(ast.parse((ROOT / "python/agent_tools/console/sprint.py").read_text()))
+        for needle in ("the brief is larger than", "the report is larger than", "named by nothing"):
+            with self.subTest(needle):
+                self.assertIn(needle, doc)
+
+
 class PictureDocsTest(unittest.TestCase):
     def doc(self, path):
         return " ".join((ROOT / path).read_text().split())

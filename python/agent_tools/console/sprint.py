@@ -24,14 +24,35 @@ port (0-65535; default 27184); the command only ever talks to 127.0.0.1.
 `sprint brief` reads the sprint's secret from `--secret-file` (the file the console made for the
 sprint; one trailing newline is removed) or the environment, and the brief from `--brief-file` (`-` reads stdin), a JSON
 object of six parts, `title` first (one line of at most 60 characters), then `done`, `excluded`,
-`slices`, `risks` and `asks`, and sends `POST /api/brief` with `{"sprint_id", "secret", "brief"}`, no `Origin`. On success
-it prints `sprint: brief version <n> sent` and exit 0. The command validates no part of the brief:
-the console decides, in one place.
+`slices`, `risks` and `asks`, and optionally `pictures`, and sends `POST /api/brief` with
+`{"sprint_id", "secret", "brief"}`, no `Origin`. On success it prints `sprint: brief version <n>
+sent` and exit 0. The command validates no part beyond the pictures' own rules: the console
+decides, in one place.
 
 `sprint report` reads the secret the same way and the report from `--report-file` (`-` reads stdin),
 a JSON object, and sends `POST /api/report` with `{"sprint_id", "secret", "report"}`, no `Origin`.
-On success it prints `sprint: report sent` and exit 0. The command validates no member of the
-report: the console decides, in one place.
+On success it prints `sprint: report sent` and exit 0. The command validates no member beyond the
+pictures' own rules: the console decides, in one place.
+
+`pictures` is optional on a brief and on a report, at most 8, each member
+`{"file": "<path>", "line": "<one line, at most 140 characters>", "pair": "before" | "after"}`
+with `pair` optional. As `sprint ask` does for a round, the command uploads each `file` and sends
+the member with `"picture": "<id>"` in place of `"file"`; a member with `"picture"` and no `"file"`
+is sent as given, and a brief or report with no `file` member goes as given with no local check. With
+a `file` member, in this order and stopping at the first refusal: it checks the brief or report with
+the console's own rules (`agent_tools.console.sprints.checked_brief` or `checked_report`) and the
+size of the whole request with each picture's id in place (the console takes at most 32768 bytes
+for a brief and 65536 for a report), and a refusal is stderr `sprint: refused before sending:
+<reason>` and exit 1, including
+`the brief is larger than <limit> bytes` and
+`the report is larger than <limit> bytes`; it reads every file before it uploads any, and a file
+that cannot be read, or one over 2 MiB, is exit 2 with nothing uploaded or sent; before it uploads anything it asks the
+console to check the brief or report with its `file` members left out (`"dry_run": true`, which
+writes nothing), and a refusal there is exit 1 with nothing uploaded; then it uploads each file in
+order. A picture refused while uploading (for example one that is not a PNG) is exit 1, and the
+brief or report is not sent: a picture refused while uploading stops the command before the brief
+or report is sent; the pictures uploaded before it stay stored, named by nothing, until the console's
+sweep removes them.
 
 `sprint ask` reads the secret the same way and the round from `--round-file` (`-` reads stdin), a
 JSON object, and sends `POST /api/ask` with `{"sprint_id", "secret", "round"}`, no `Origin`. The
@@ -146,6 +167,11 @@ REPORT_HELP = """the report's members, all required:
                verifying, landing, working, landed, held
   inbox:       the numbers of the issues waiting on the owner, [12], empty when none
   next:        one line, what the manager does next
+
+optional:
+  pictures:    at most 8, [{"file": "<path to a PNG>", "line": "<one line, at most 140
+               characters>", "pair": "before" | "after"}, ...]; the command uploads each file
+               and sends its id
 
 example:
   {"status": "two slices are building and one has landed", "phase": "running",
@@ -311,11 +337,64 @@ def resolve_secret(args: argparse.Namespace) -> str:
     return secret.removesuffix("\n")
 
 
+def part_pictures(value: dict) -> list[dict]:
+    """The members of a brief's or report's `pictures` list that name a `file`, in order."""
+    listed = value.get("pictures")
+    return [m for m in listed if isinstance(m, dict) and isinstance(m.get("file"), str)
+            ] if isinstance(listed, list) else []
+
+
+def with_part_ids(value: dict, ids: dict[int, str]) -> dict:
+    """A copy of `value` in which each picture member (by `id()`) names its picture id, not its file."""
+    def named(member):
+        if id(member) not in ids:
+            return member
+        return {**{k: v for k, v in member.items() if k != "file"}, "picture": ids[id(member)]}
+    if not isinstance(value.get("pictures"), list):
+        return dict(value)
+    return {**value, "pictures": [named(m) for m in value["pictures"]]}
+
+
+def without_part_files(value: dict) -> dict:
+    """A copy of `value` keeping only the picture members that already name a picture id."""
+    if not isinstance(value.get("pictures"), list):
+        return dict(value)
+    return {**value, "pictures": [m for m in value["pictures"]
+                                  if not (isinstance(m, dict) and isinstance(m.get("file"), str))]}
+
+
+def send_part(args: argparse.Namespace, sprint: str, secret: str, what: str, value: dict) -> str:
+    """Send a brief or a report (`what`), uploading each picture `file` first; the 200 answer text."""
+    path = service.BRIEF_PATH if what == "brief" else service.REPORT_PATH
+    members = part_pictures(value)
+    if members:
+        check = sprints.checked_brief if what == "brief" else sprints.checked_report
+        named = with_part_ids(value, {id(m): "0" * 64 for m in members})
+        try:
+            check(named)
+        except sprints.Refused as error:
+            raise Refused(f"sprint: refused before sending: {error}") from error
+        limit = service.MAX_BRIEF_BYTES if what == "brief" else service.MAX_REPORT_BYTES
+        # An id is as long as its placeholder, so the whole request's size is known before an upload.
+        if len(json.dumps({"sprint_id": sprint, "secret": secret, what: named}).encode()) > limit:
+            raise Refused(f"sprint: refused before sending: the {what} is larger than {limit} bytes")
+        check_header_secret(secret)
+        files = [read_picture(Path(m["file"])) for m in members]
+        # The console judges the named pictures and the sprint's state now, so a refusal leaves
+        # nothing uploaded; the uploads are the first write.
+        ask(args.port, "POST", path, json.dumps(
+            {"sprint_id": sprint, "secret": secret, what: without_part_files(value),
+             "dry_run": True}).encode())
+        ids = {id(m): upload(args.port, sprint, secret, data) for m, data in zip(members, files)}
+        value = with_part_ids(value, ids)
+    body = json.dumps({"sprint_id": sprint, "secret": secret, what: value}).encode()
+    return ask(args.port, "POST", path, body)
+
+
 def send_brief(args: argparse.Namespace, sprint: str) -> str:
     secret = resolve_secret(args)
     brief = read_object(args.brief_file, "brief")
-    body = json.dumps({"sprint_id": sprint, "secret": secret, "brief": brief}).encode()
-    text = ask(args.port, "POST", service.BRIEF_PATH, body)
+    text = send_part(args, sprint, secret, "brief", brief)
     try:
         return f"sprint: brief version {json.loads(text)['version']} sent"
     except (ValueError, KeyError, TypeError) as error:
@@ -395,8 +474,7 @@ def send_round(args: argparse.Namespace, sprint: str) -> str:
 def send_report(args: argparse.Namespace, sprint: str) -> str:
     secret = resolve_secret(args)
     report = read_object(args.report_file, "report")
-    body = json.dumps({"sprint_id": sprint, "secret": secret, "report": report}).encode()
-    ask(args.port, "POST", service.REPORT_PATH, body)
+    send_part(args, sprint, secret, "report", report)
     return "sprint: report sent"
 
 
