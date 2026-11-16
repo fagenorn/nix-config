@@ -27,3 +27,5 @@ A repo's `docs/standards/` is a directory of shards plus a **README index of at 
 ## Planning rules
 
 `acceptance-planning.md` is not a layer: it holds the rules for acceptance criteria and verification holds, read on demand by the planning and delivery skills and never pasted into briefs.
+
+`look-before-merge.md` is not a layer either: it holds the stop and resume of an issue that needs the owner's look before merge, read on demand by `deliver-direct` and never pasted into briefs.

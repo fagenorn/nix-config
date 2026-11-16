@@ -76,7 +76,9 @@ moments. Transitions:
 - `session_ended`: the state after is `ended` and the session was known and not
   ended, or a `session.gone` of a known session that was not ended (an ended
   session that then goes says it once);
-- `inbox_appeared`: `inbox.seen` with `answered` false;
+- `inbox_appeared`: `inbox.seen` with `answered` false and no mapping `wait`, or `inbox.changed` to an
+  unanswered item with no mapping `wait` from a known record whose item had a mapping `wait` (a check
+  that was waiting turned due; #1129). An `inbox.seen` of an item with a mapping `wait` says nothing;
 - `inbox_answered`: `inbox.seen` with `answered` true, or `inbox.changed` from a
   known unanswered record to `answered` true. Anything else about the inbox says
   nothing.
@@ -158,7 +160,7 @@ from agent_tools.console.sprints import (
     BALL_TEXT, MANAGER_SESSION_NAME, SprintState, goal_title, merge_refused, sprint_states,
     sprint_title)
 from agent_tools.console.view import (
-    INBOX_CHANGED, INBOX_SEEN, InboxRecord, inbox_records, item_headline, repo_name,
+    INBOX_CHANGED, INBOX_SEEN, InboxRecord, inbox_records, is_waiting, item_headline, repo_name,
     sprint_ball, sprint_state, sprint_waiting)
 
 LOOKED = "page.looked"
@@ -253,6 +255,12 @@ def _inbox_moment(event: Event, before: InboxRecord | None) -> tuple[str, str] |
     project_id = fields[0]
     headline = item_headline(event.payload)[0]
     answered = event.payload.get("answered")
+    if event.kind == INBOX_SEEN and isinstance(event.payload.get("wait"), Mapping):
+        return None
+    if (event.kind == INBOX_CHANGED and answered is False and before is not None
+            and isinstance(before.item.get("wait"), Mapping)
+            and not isinstance(event.payload.get("wait"), Mapping)):
+        return INBOX_APPEARED, f"{project_id} needs you: {headline}"
     if event.kind == INBOX_SEEN and answered is False:
         return INBOX_APPEARED, f"{project_id} needs you: {headline}"
     if event.kind == INBOX_SEEN and answered is True:
@@ -368,7 +376,8 @@ def _report_moment(event: Event, before: Mapping[str, SprintState],
     if new.report is None:
         return None
     open_items = [r for r in records.values()
-                  if r.item.get("project_id") == new.project_id and not r.item.get("answered")]
+                  if r.item.get("project_id") == new.project_id and not r.item.get("answered")
+                  and not is_waiting(r.item)]
     waiting = sprint_waiting(new, open_items)
     was = _shown_words(old, sprint_waiting(old, open_items))
     now = _shown_words(new, waiting)

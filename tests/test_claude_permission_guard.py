@@ -1914,6 +1914,20 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                     self.assertEqual(2, result.returncode, (command, result.stderr))
                     self.assertIn(needle, result.stderr)
 
+    @staticmethod
+    def redirection_heredocs():
+        """Issue 1173: a heredoc whose quoted delimiter holds a redirection operator. The
+        body's first line is the delimiter as the operator rewrite would leave it, so a
+        reader that rewrites the delimiter closes the body there, and its apostrophe then
+        pairs with the quote in the trailing comment."""
+        return tuple(
+            f"cat <<'{delimiter}' >/dev/null\n{early}\ndon't\n{delimiter}\njust switch # '"
+            for delimiter, early in (("X>", "X&>"), ("X>&", "X>"), ("X<&", "X<"),
+                                     ("X>|", "X>"))) + (
+            # A later expanding body the scan cannot read leaves the earlier bodies
+            # unrewritten too: the whole remainder goes to the raw-text reading.
+            "cat <<'X>' <<EOF >/dev/null\nX&>\nEOF\ndon't\nX>\n$?\nEOF\njust switch # '",)
+
     def test_a_production_command_hidden_by_a_runner_a_redirection_or_a_quoting_is_refused(self):
         """AC1 review findings: shell text behind a runner, a leading redirection, an ANSI-C
         quoted word and a continued directory name never hide a declared command."""
@@ -1932,7 +1946,8 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                 "env FOO=1 $'just' switch",
                 "echo $'it\\'s ready'; just switch  # don't skip",
                 "cat <<EOF >/dev/null\ndon't\nEOF\necho $'it\\'s'; just switch # don't",
-                "echo \\ #; just switch", "ls My\\ #2; just switch", "echo \\\t#; just switch"),
+                "echo \\ #; just switch", "ls My\\ #2; just switch", "echo \\\t#; just switch",
+                *self.redirection_heredocs()),
             "(production rule kube-apply)": (
                 "nix develop -c bash -c 'kubectl apply -f x'",
                 "timeout 5 bash -c 'kubectl apply -f x'", "$'kubectl' apply -f x",
@@ -2018,6 +2033,8 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                 "release transaction run --repo-root . --confirm tok",
                 'echo "just switch"', "git commit -m 'run just switch later'",
                 "cat > notes.md <<'EOF'\njust switch\nEOF\n", "true # just switch",
+                "cat <<'EOF' >/dev/null\nbody\nEOF\njust build",
+                "cat <<'X>' >/dev/null\nX&>\nX>\njust build # '",
                 "just switcher", "just build switchboard",
                 "git add scripts/deploy.sh", "cat scripts/deploy.sh",
                 "git diff -- scripts/deploy.sh", "git add kubectl",

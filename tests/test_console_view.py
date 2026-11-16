@@ -8,6 +8,8 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
+from unittest import mock
+
 from agent_tools.claims import forge_markers as fm
 from agent_tools.claims import forge_owner_action as foa
 from agent_tools.console import digest
@@ -70,6 +72,7 @@ from .test_console_sprints import (
 from agent_tools.console.view import (
     ADOPTING_SENTENCE,
     ALL_OUT_SENTENCE,
+    ANSWER_SENTENCE,
     BRIEF_SENTENCE,
     CHOOSE_SENTENCE,
     INBOX_CHANGED,
@@ -84,6 +87,7 @@ from agent_tools.console.view import (
     STALE_HEADLINE,
     STALE_SENTENCE,
     UNREGISTERED,
+    WAIT_TEXT,
     InboxRecord,
     ProjectState,
     ReadState,
@@ -97,8 +101,13 @@ from agent_tools.console.view import (
     read_states,
     registry_changes,
 )
+from agent_tools.system import forge_api
+from agent_tools.verification import verify_issues
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 from .test_console_approve import step_payload
+from .test_console_inbox import (
+    PROJECT as WAIT_PROJECT, SLUG as WAIT_SLUG, MERGE as WAIT_MERGE, block_of, dated_comment, held_node as held_issue,
+    hold_body, human, page as tracker_page, prompt_body, window_body)
 from .test_console_register import plan_doc
 
 
@@ -408,7 +417,7 @@ class SpendViewWireTest(unittest.TestCase):
         self.assertEqual(len(shown["spend"]["days"]), 30)
         for day in shown["spend"]["days"]:
             self.assertEqual(set(day), {"day", "total", "session", "project", "sprint", "run",
-                                        "phase", "account", "aspect"})
+                                        "phase", "account", "aspect", "sprint_phase", "run_phase"})
         self.assertEqual(shown["spend"]["days"][-1]["project"]["p00"]["input"], 1330)
 
     def test_view_without_spend_is_null(self):
@@ -846,7 +855,7 @@ HOLD = 'Held for verification.\n\n```verify\n{"checks": []}\n```'
 
 def owner_comment(cid, body):
     return {"fullDatabaseId": str(cid), "body": body, "authorAssociation": "OWNER",
-            "updatedAt": "2026-11-10T09:00:00Z"}
+            "createdAt": "2026-11-10T09:00:00Z", "updatedAt": "2026-11-10T09:00:00Z"}
 
 
 def ask_prompt(extra="Open the staging site.\n\n- [ ] Accept\n- [ ] Reject"):
@@ -861,6 +870,7 @@ def decision_prompt(extra):
 
 def held_node(number, comments):
     return {"__typename": "Issue", "number": number, "issueDependenciesSummary": {"blocking": 0},
+            "repository": {"defaultBranchRef": {"name": "main"}},
             "blocking": {"totalCount": 0, "nodes": []},
             "comments": {"totalCount": len(comments), "nodes": comments}}
 
@@ -2099,7 +2109,7 @@ class SprintViewTest(unittest.TestCase):
             "manager_state": "none", "manager_until": None, "retry": True,
             "progress": None, "progress_text": None, "status": None, "status_at": None,
             "next": None, "milestone": None, "tracker_url": None, "issues": [], "waiting": 0,
-            "checks": [],
+            "checks": [], "waits": [],
             "sessions": [], "messages": [], "approval": None, "reach_text": None,
             "tell_text": "The manager picks it up at its next turn.",
             "stoppable": True, "ended_at": None, "stop_text": None, "closing": None,
@@ -2957,3 +2967,133 @@ class TrustItemTest(unittest.TestCase):
         self.assertEqual(card["values"], ["check"])
         self.assertEqual(shown["statement"]["inbox_items"], 1)
         self.assertEqual(shown["statement"]["sentence"], REGISTER_SENTENCE)
+
+
+class WaitingLineTest(unittest.TestCase):
+    UNTIL = iso(T0_MS + 2 * DAY)
+    NAMING = reported(started(A), T0_MS + MIN, issues=((619, "held"),))
+
+    def waiting(self, issue=619, key="k-wait", reason="not_before", until=UNTIL, what="Read the hourly rows.",
+                project="p00"):
+        return InboxRecord(
+            {**item(project, key), "issue": issue, "reason": "verify-wait", "answers": [],
+             "url": f"https://example.test/{key}", "wait": {"reason": reason, "until": until, "what": what}},
+            "t1", "t1")
+
+    def view_of(self, *records, sprints=True, now_ms=T0_MS, projects=None):
+        owned = {(r.item["project_id"], r.item["key"]): r for r in records}
+        return derive_view(projects or [state("p00", 1)], owned, now_ms=now_ms,
+                           sprints={A: self.NAMING} if sprints else None)
+
+    def test_a_waiting_check_is_a_line_under_its_sprint_and_not_counted(self):
+        shown = self.view_of(self.waiting())
+        self.assertEqual(shown["statement"]["inbox_items"], 0)
+        self.assertEqual(shown["statement"]["headline"], "Nothing needs you")
+        self.assertEqual(shown["inbox"]["open"], [])
+        self.assertEqual(entry(shown)["waits"], [{
+            "key": "k-wait", "issue": 619, "url": "https://example.test/k-wait", "until": self.UNTIL,
+            "text": "Read the hourly rows."}])
+        self.assertEqual(entry(shown)["waiting"], 0)
+        self.assertEqual(shown["entries"][0]["waits"], [])
+
+    def test_a_prompted_waiting_check_becomes_a_card_once_its_time_passes(self):
+        check = human({"days_after": {"event": "released", "days": 2}}, "Two days of rows after the release. Count them.")
+        key = verify_issues.block_key(10, block_of(check))
+        hold = dated_comment(10, hold_body(check), "2026-11-16T08:00:00Z")
+        window = dated_comment(11, window_body("released"), "2026-11-16T09:00:00Z")
+        prompt = dated_comment(12, prompt_body(key, 0), "2026-11-18T09:15:00Z")
+        project = WAIT_PROJECT
+        sprint = dataclasses.replace(reported(started(A), T0_MS + MIN, issues=((619, "held"),)), project_id=project)
+        records, seq = {}, [0]
+
+        def read(nodes, clock):
+            with mock.patch.object(forge_api, "api_get", side_effect=AssertionError("the marker dates the window")):
+                items = inbox.read_items(
+                    project, WAIT_SLUG, call=lambda argv: tracker_page([held_issue(619, nodes)]), now=lambda: clock)
+            events = []
+            for kind, owner, payload in inbox_changes(records, project, items):
+                seq[0] += 1
+                events.append(Event(seq[0], f"t{seq[0]}", kind, owner, payload))
+            records.update(inbox_records(events, records))
+            for gone in [k for k in records if k[1] not in {i["key"] for i in items}]:
+                del records[gone]  # the items of this read are the whole inbox
+            return derive_view([state(project, 1)], records, now_ms=T0_MS, sprints={A: sprint})
+
+        first = read([hold, window], datetime(2026, 11, 16, 10, tzinfo=timezone.utc))
+        self.assertEqual(first["statement"]["inbox_items"], 0)
+        self.assertEqual([(w["until"], w["text"]) for w in entry(first)["waits"]],
+                         [("2026-11-18T09:00:00+00:00", "Two days of rows after the release.")])
+        second = read([hold, window], datetime(2026, 11, 18, 9, 1, tzinfo=timezone.utc))
+        self.assertEqual(second["statement"]["inbox_items"], 0)
+        self.assertEqual([(w["until"], w["text"]) for w in entry(second)["waits"]],
+                         [(None, "Due now: the next verification pass asks you here")])
+        third = read([hold, window, prompt], datetime(2026, 11, 18, 9, 16, tzinfo=timezone.utc))
+        self.assertEqual(third["statement"]["inbox_items"], 1)
+        self.assertEqual(third["inbox"]["open"][0]["key"], f"{WAIT_SLUG}#619/12")
+        self.assertEqual(entry(third)["waits"], [])
+        self.assertEqual(third["entries"][0]["waits"], [])
+
+    def test_a_host_clock_past_the_date_keeps_the_line(self):
+        shown = self.view_of(self.waiting(), now_ms=T0_MS + 30 * DAY)
+        self.assertEqual(shown["statement"]["inbox_items"], 0)
+        (wait,) = entry(shown)["waits"]
+        self.assertEqual(wait["until"], self.UNTIL)
+        self.assertEqual(wait["text"], "Read the hourly rows.")
+
+    def test_an_undated_wait_reads_its_reason(self):
+        texts = {
+            "not_released": "Waiting for the release to be seen: no release yet includes its merge",
+            "no_when": "Waiting with no date: its wording states a wait, but its verify block has no when field "
+                       "for that wait",
+            "due": "Due now: the next verification pass asks you here",
+            "due_command": "Due now: the next verification pass asks you here, "
+                           "unless it refuses the command as not a verification command"}
+        shown = self.view_of(*(self.waiting(key=f"k-{reason}", reason=reason, until=None) for reason in texts))
+        self.assertEqual({w["key"]: (w["until"], w["text"]) for w in entry(shown)["waits"]},
+                         {f"k-{reason}": (None, text) for reason, text in texts.items()})
+        self.assertEqual([w["key"] for w in entry(shown)["waits"]], sorted(f"k-{r}" for r in texts))
+        self.assertEqual(set(WAIT_TEXT), {"window_opening", "not_released", "not_deployed", "ci_not_passed",
+                                          "unknown", "no_when", "due", "due_command"})
+        self.assertEqual(WAIT_TEXT["window_opening"],
+                         "Waiting for the next verification pass to start its wait: what it waits for has been seen")
+        self.assertEqual(WAIT_TEXT["not_deployed"], "Waiting for the deploy to be seen: no deploy is known to include its merge")
+        self.assertEqual(WAIT_TEXT["ci_not_passed"], "Waiting for a CI run to pass at its commit")
+        self.assertEqual(WAIT_TEXT["unknown"], "Waiting: the tracker could not say whether it is due yet")
+
+    def test_a_wait_no_sprint_owns_is_under_its_project(self):
+        shown = self.view_of(self.waiting(), sprints=False)
+        (project,) = shown["entries"]
+        self.assertEqual(project["type"], "project")
+        self.assertEqual([w["key"] for w in project["waits"]], ["k-wait"])
+        self.assertIs(project["quiet"], False)
+        self.assertEqual(shown["statement"]["inbox_items"], 0)
+
+    def test_a_wait_is_under_its_project_once_the_sprint_naming_it_has_ended(self):
+        ended = {"stopped": stopped(self.NAMING, T0_MS + 2 * MIN, T0_MS + 2 * MIN),
+                 "closing": closed(self.NAMING, T0_MS + 2 * MIN, ((619, "held"),))}
+        for how, sprint in ended.items():
+            with self.subTest(how):
+                shown = derive_view([state("p00", 1)], {("p00", "k-wait"): self.waiting()},
+                                    now_ms=T0_MS + 3 * MIN, sprints={A: sprint})
+                self.assertEqual(entry(shown)["waits"], [])
+                self.assertEqual([w["key"] for w in shown["entries"][0]["waits"]], ["k-wait"])
+
+    def test_a_wait_under_a_sprint_that_does_not_name_its_issue_is_under_its_project(self):
+        shown = self.view_of(self.waiting(issue=7))
+        self.assertEqual(entry(shown)["waits"], [])
+        self.assertEqual([w["key"] for w in shown["entries"][0]["waits"]], ["k-wait"])
+
+    def test_a_project_with_only_a_wait_is_not_folded_into_the_quiet_group(self):
+        projects = [state(f"p{n:02d}", n) for n in range(view.FOLD_AFTER + 2)]
+        shown = self.view_of(self.waiting(project="p00"), sprints=False, projects=projects)
+        self.assertEqual([e["type"] for e in shown["entries"]].count("quiet_group"), 1)
+        self.assertEqual(shown["entries"][0]["project_id"], "p00")
+        self.assertEqual(shown["entries"][0]["type"], "project")
+
+    def test_a_due_check_is_a_counted_card(self):
+        card = InboxRecord({**item("p00", "k-ask"), "issue": 619, "reason": "verify-ask",
+                            "answers": ["passed", "failed", "note"]}, "t1", "t1")
+        shown = self.view_of(card)
+        self.assertEqual(shown["statement"]["inbox_items"], 1)
+        self.assertEqual(shown["statement"]["sentence"], ANSWER_SENTENCE)
+        self.assertEqual(entry(shown)["waits"], [])

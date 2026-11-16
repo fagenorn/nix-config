@@ -94,6 +94,15 @@ is not in `KEPT_KINDS`.
 `PICTURE_STORED` (`picture.stored`, one per picture a manager sent that the console accepted, #1089)
 is not in `KEPT_KINDS`.
 
+Three kinds are kept in part (#1129): `INBOX_SEEN` (`inbox.seen`), `INBOX_CHANGED` (`inbox.changed`)
+and `INBOX_GONE` (`inbox.gone`) are not in `KEPT_KINDS`, but the retention pass leaves, whatever its
+age, the newest row of each inbox item (the project and the payload's `key`) when that row is a
+`seen` or `changed` row whose payload carries a `wait` object (an owner check that is not due) and no
+`project.unregistered` row of its project is newer. An idle project is polled only while it holds
+such a wait, and an unchanged wait appends no row, so removing the row would end the polling and the
+waiting line with it, and the check would never become a card once its time came. A gone row, a
+superseded row and every other inbox row go like any other.
+
 Another is kept in part (#1011): a session's profile is assigned by its `SESSION_SEEN` and
 `SESSION_PROFILE` rows, and a profile's last use is read from the session's later `SESSION_HOOK` rows
 (`manager.profile_use`). The pass therefore leaves, for a session with a `SESSION_HOOK` row inside the
@@ -168,6 +177,10 @@ ADOPTION_PULL = "adoption.pull_request"
 ADOPTION_REGISTRATION = "adoption.registration"
 ADOPTION_DEFERRED = "adoption.deferred"
 REGISTRATION_CANCELLED = "registration.cancelled"
+INBOX_SEEN = "inbox.seen"
+INBOX_CHANGED = "inbox.changed"
+INBOX_GONE = "inbox.gone"
+PROJECT_UNREGISTERED = "project.unregistered"
 SESSION_HOOK = "session.hook"
 SESSION_SEEN = "session.seen"
 SESSION_PROFILE = "session.profile"
@@ -402,6 +415,12 @@ class EventLog:
                     "AND json_type(later.payload, '$.pinned') = 'false' "
                     "AND json_extract(later.payload, '$.profile') = "
                     "json_extract(events.payload, '$.profile'))) "
+                    "AND NOT (kind IN (?, ?) AND json_type(events.payload, '$.wait') IS 'object' "
+                    "AND seq = (SELECT MAX(newer.seq) FROM events AS newer "
+                    "WHERE newer.kind IN (?, ?, ?) AND newer.project IS events.project "
+                    "AND json_extract(newer.payload, '$.key') IS json_extract(events.payload, '$.key')) "
+                    "AND NOT EXISTS (SELECT 1 FROM events AS ended WHERE ended.kind = ? "
+                    "AND ended.project IS events.project AND ended.seq > events.seq)) "
                     "AND NOT (kind IN (?, ?) AND seq = (SELECT MAX(owner.seq) FROM events AS owner "
                     "WHERE owner.kind IN (?, ?) AND owner.at < ? AND "
                     "json_extract(owner.payload, '$.session_id') "
@@ -412,6 +431,7 @@ class EventLog:
                     "IS json_extract(events.payload, '$.session_id')))",
                     (cutoff, *sorted(KEPT_KINDS), SIGNIN_READING, SIGNIN_READING, PROFILE_EXCLUSION,
                      PROFILE_PIN,
+                     INBOX_SEEN, INBOX_CHANGED, INBOX_SEEN, INBOX_CHANGED, INBOX_GONE, PROJECT_UNREGISTERED,
                      SESSION_SEEN, SESSION_PROFILE, SESSION_SEEN, SESSION_PROFILE, cutoff,
                      SESSION_HOOK, cutoff)).rowcount
 

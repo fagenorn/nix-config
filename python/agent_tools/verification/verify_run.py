@@ -122,10 +122,10 @@ def list_held(slug: str) -> list[dict]:
         raise ForgeError("payload_invalid", "no issues listing") from None
     if not isinstance(nodes, list) or not all(isinstance(node, dict) for node in nodes):
         raise ForgeError("payload_invalid", "issues are not an array of objects")
-    return [_with_every_comment(slug, node) for node in nodes]
+    return [with_every_comment(slug, node) for node in nodes]
 
 
-def _with_every_comment(slug: str, node: dict) -> dict:
+def with_every_comment(slug: str, node: dict) -> dict:
     """`node`, its comment listing replaced by every comment when the `last: 100` window cut it short.
 
     A block or a ticked prompt older than the window would otherwise be invisible to a pass. The
