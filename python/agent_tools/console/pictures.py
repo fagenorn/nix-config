@@ -25,7 +25,8 @@ raises `ValueError` for an id that is not 64 lowercase hex digits and answers Tr
 entry are False). It writes nothing, not even the file's age; the caller holds the ingest lock
 that every sweep also holds, so the answer cannot go stale before the row is appended.
 
-Reference. A picture is referenced by a row whose payload `pictures` is a list holding its id:
+Reference. A picture is referenced by a row whose payload `pictures` is a list holding its id, as a
+member that is the id itself or an object whose `id` is the picture's id (#1112):
 `referenced(events)` collects the members that are well-formed ids from every row but those of kind
 `PICTURE_STORED`, whose own payload is `entry(project, sprint_id, id)`.
 
@@ -145,8 +146,11 @@ def referenced(events: Iterable[Event]) -> frozenset[str]:
         listed = event.payload.get("pictures")
         if event.kind == PICTURE_STORED or not isinstance(listed, list):
             continue
-        found.update(item for item in listed
-                     if isinstance(item, str) and PICTURE_ID.fullmatch(item))
+        for item in listed:
+            if isinstance(item, dict):
+                item = item.get("id")
+            if isinstance(item, str) and PICTURE_ID.fullmatch(item):
+                found.add(item)
     return frozenset(found)
 
 
