@@ -610,6 +610,25 @@ class PictureCommandTest(PictureCase):
                          (2, "", "sprint: no secret: pass --secret-file or set CONSOLE_SPRINT_SECRET\n"))
         self.assertEqual(self.entries(), [])
 
+    def test_a_secret_a_header_cannot_carry_exits_2_without_printing_it(self):
+        svc = self.open()
+        sid = self.sprint(svc)
+        shot = self.write("shot.png", PIXEL)
+        real = self.secret(sid)
+        files = [self.secret_file(sid, real + "\n\n"),
+                 self.write("odd-secret", "s\u00e9cret\u20ac".encode())]
+
+        def attempts():
+            return [self.run_picture(svc, sid, shot, each) for each in files] + [
+                run_sprint("picture", "--sprint", sid, "--file", shot, "--port", svc.address[1],
+                           env={"CONSOLE_SPRINT_SECRET": "s\u00e9cret\u20ac"})]
+        for result in self.assert_unchanged(svc, attempts):
+            with self.subTest(stderr=result.stderr):
+                self.assertEqual((result.returncode, result.stdout, result.stderr),
+                                 (2, "", "sprint: the secret is not printable ASCII, so it cannot "
+                                         "go in a header: no request sent\n"))
+        self.assertEqual(self.entries(), [])
+
     def test_an_unreadable_answer_exits_1(self):
         shot = self.write("shot.png", PIXEL)
         secret = self.write("secret", b"s" * 43)

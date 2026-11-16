@@ -100,7 +100,9 @@ exit 1. A console that cannot be reached is stderr
 `sprint: console unreachable on 127.0.0.1:<port>: <error>` and exit 1. A secret, brief, report, closing report, round or reply file
 or a picture file that cannot be read, or a brief, report, closing report or round that is not a JSON object, is stderr `sprint: cannot read <path>:
 <reason>` and exit 2, with no request sent, as is a picture file larger than 2 MiB, stderr
-`sprint: cannot send <path>: it is larger than 2 MiB`; bad arguments are exit 2. The secret is printed nowhere.
+`sprint: cannot send <path>: it is larger than 2 MiB`; a `picture` secret that is not printable
+ASCII (it travels in a header) is stderr `sprint: the secret is not printable ASCII, so it cannot go
+in a header: no request sent` and exit 2, with no request sent; bad arguments are exit 2. The secret is printed nowhere.
 """
 
 from __future__ import annotations
@@ -360,6 +362,10 @@ def send_reply(args: argparse.Namespace, sprint: str) -> str:
 
 def send_picture(args: argparse.Namespace, sprint: str) -> str:
     secret = resolve_secret(args)
+    if not (secret.isascii() and secret.isprintable()):
+        # A header cannot carry a newline or a non-ASCII character; naming the value would print it.
+        raise Unreadable("sprint: the secret is not printable ASCII, so it cannot go in a header: "
+                         "no request sent")
     try:
         data = args.file.read_bytes()
     except OSError as error:
