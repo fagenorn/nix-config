@@ -59,7 +59,8 @@ Wire format, one object:
      "pin_launches": ["<profile>", ...],
      "profile_sessions": {"<profile>": <int>, ...},
      "unstopped": [{"project_id", "sprint_id", "title", "text", "failed_at"}, ...],
-     "activation": <activation line> | null}
+     "activation": <activation line> | null,
+     "spend": <spend view> | null}
 
 `activation` is the one line the page shows when a console change has merged and this host is not
 yet running it: `{"text": ACTIVATION_TEXT, "command": ACTIVATE_COMMAND, "root": "<root>"}`; the text is
@@ -69,6 +70,9 @@ member is on every view and is null when `derive_view` is given no `activation` 
 `activation.py` `Activation`) or one whose `changed` is empty. It is a line beside the statement,
 not an inbox item: it is not counted in `inbox_items` and never changes the headline, the sentence
 or `stale` (#1114, ADR-console-043).
+
+`spend` is the `spend.spend_view` the caller passes (members defined in `spend.py`), null when none;
+it is a reading beside the statement, never counted in `inbox_items` (#1134).
 
 `digest` is what changed since the owner last looked (see `digest.py`):
 `{"since": <last look> | null, "first_visit": <bool>, "recent": [<moment>, ...],
@@ -440,9 +444,16 @@ A running sprint's movement (#1109, `sprint_quiet_for`) is one reading. With no 
 None) or while one of the sprint's listed sessions works, it moves. Else it is the latest of the
 approved brief's time (`decided_at`, else the sent time), the report's time, the fold's `moved_ms`
 (the latest movement of any run of the sprint, before or after its report) and the goal's stated
-time; it is quiet once `now_ms` minus that reaches `QUIET_AFTER_MS`. A `failed` manager with no
-listed session drops only the stated time (a run, report or approval still moves the sprint whatever
-its order against the failure); with nothing else left it reads quiet at once. The state's `quiet`,
+time, plus the wait signals of #1110 (`wait_signals`); it is quiet once `now_ms` minus that reaches
+`QUIET_AFTER_MS`. A `failed` manager with no listed session drops only the stated time (a run,
+report, approval or wait signal still moves the sprint whatever its order against the failure); with
+nothing else left it reads quiet at once. The wait signals are the last time CI ran on a pull
+request (`ci_ms`), the last time a commit landed on a pull request or a delivery's branch
+(`commit_ms`) and the last time a release was in progress (`release_ms`), each read from the
+project's `ProjectMovement`, which keeps the last time a signal was seen after it disappears. A
+pull request belongs to the sprint when its issues meet the issues of the report and its `inbox`
+numbers; a branch belongs when its issue is one of them; a release belongs whatever the issues. Each
+signal moves the sprint for `QUIET_AFTER_MS` after its time. The state's `quiet`,
 the ball's `nobody` and the now-sentence's `last seen` prefix are all this one reading, and none
 decides movement itself.
 The state is the first that holds: `stopped_at` is set, `stopped` ("stopped by you"); `stop_at` is
@@ -464,7 +475,9 @@ a permission, `NOW_ANSWER_TEXT`, `NOW_PERMISSION_TEXT`; no brief or one the owne
 `NOW_DRAFTING_TEXT`; a brief waiting on the owner, `NOW_BRIEF_TEXT`; an open question,
 `NOW_QUESTION_TEXT` with the first one's text; any other waiting item (`waiting` above 0),
 `NOW_DECISION_TEXT`; a stall, `NOW_STALLED_TEXT`; no progress, `NOW_NO_PROGRESS_TEXT`; a quota
-wait, `NOW_QUOTA_TEXT`; no report, `NOW_STARTING_TEXT`; else a shown merge refusal
+wait, `NOW_QUOTA_TEXT`; with no merge refusal shown, a wait signal that alone moves the sprint
+(`sprint_wait`), the first of `NOW_CI_TEXT`, `NOW_COMMITTING_TEXT` and `NOW_RELEASE_TEXT` whose
+signal is inside the window; no report, `NOW_STARTING_TEXT`; else a shown merge refusal
 (`sprints.merge_refused`), `NOW_REFUSED_TEXT` with its reason; else the stage phrase,
 `NOW_STAGE_TEXT`: the leading stage, its issue count, the total and the report's whole milestone
 (just the milestone when the report names no issue); either prefixed by `NOW_QUIET_TEXT` when the
@@ -566,6 +579,7 @@ from agent_tools.console.deliveries import (
 )
 from agent_tools.console.event_log import Event
 from agent_tools.console.manager import Wait, quota_wait, session_name
+from agent_tools.console.movement import ProjectMovement
 from agent_tools.console.sessions import (
     ENDED,
     IDLE,
@@ -607,6 +621,8 @@ from agent_tools.console.sprints import (
     NOT_PICKED_UP_TEXT,
     NOW_ANSWER_TEXT,
     NOW_BRIEF_TEXT,
+    NOW_CI_TEXT,
+    NOW_COMMITTING_TEXT,
     NOW_DECISION_TEXT,
     NOW_DRAFTING_TEXT,
     NOW_NO_PROGRESS_TEXT,
@@ -615,6 +631,7 @@ from agent_tools.console.sprints import (
     NOW_QUIET_TEXT,
     NOW_QUOTA_TEXT,
     NOW_REFUSED_TEXT,
+    NOW_RELEASE_TEXT,
     NOW_STAGE_TEXT,
     NOW_STALLED_TEXT,
     NOW_STARTING_TEXT,
@@ -978,17 +995,48 @@ def sprint_waiting(state: SprintState, records: Iterable[InboxRecord]) -> int:
     return sum(r.item.get("issue") in named for r in records) + len(open_questions(state))
 
 
-def sprint_quiet_for(state: SprintState, now_ms: int | None, listed: Collection[str]) -> int | None:
+@dataclass(frozen=True)
+class WaitSignals:
+    """The last time each wait of #1110 was seen for one sprint, None when never."""
+    ci_ms: int | None = None
+    commit_ms: int | None = None
+    release_ms: int | None = None
+
+
+NO_WAITS = WaitSignals()
+
+
+def wait_signals(state: SprintState, movement: ProjectMovement | None) -> WaitSignals:
+    """The sprint's wait signals out of its project's movement. The sprint's issues are the
+    report's issue numbers united with its `inbox` numbers (none without a report); a pull request
+    belongs when its issues meet them, a branch when its issue is one of them, and the release
+    whatever the issues."""
+    if movement is None:
+        return NO_WAITS
+    report = state.report
+    issues = (set() if report is None
+              else {issue for issue, _ in report.issues} | set(report.inbox))
+    pulls = [pull for pull in movement.pulls if issues & pull.issues]
+    running = [pull.running_ms for pull in pulls if pull.running_ms is not None]
+    commits = [pull.committed_ms for pull in pulls if pull.committed_ms is not None]
+    commits += [moved for issue, moved in movement.branches if issue in issues]
+    return WaitSignals(max(running, default=None), max(commits, default=None),
+                       movement.release_ms)
+
+
+def sprint_quiet_for(state: SprintState, now_ms: int | None, listed: Collection[str],
+                     waits: WaitSignals = NO_WAITS) -> int | None:
     """The one movement reading of a running sprint (#1109): None while it moves, else the
     milliseconds since it last moved, never negative. The state's quiet, the ball's nobody and the
     now-sentence's `last seen` prefix all follow it, so they cannot disagree. It moves with no
     clock and while one of the sprint's own listed sessions works. Else the signals are the
     approved brief's time (`decided_at`, else the sent time), the report's time, the fold's
     `moved_ms` (the latest movement of any run of the sprint, kept across reports) and the goal's
-    stated time. A `failed` manager with no listed session drops only the stated time (its launch
-    is known to have failed, so a fresh goal is no sign of life); a run, a report or an approval
-    inside the window still moves the sprint whatever its order against the failure. With no
-    signal left, the sprint reads quiet at once, for the time since the goal was stated."""
+    stated time, and each wait signal of `waits` (#1110) that is set. A `failed` manager with no
+    listed session drops only the stated time (its launch is known to have failed, so a fresh goal
+    is no sign of life); a run, a report, an approval or a wait signal inside the window still
+    moves the sprint whatever its order against the failure. With no signal left, the sprint reads
+    quiet at once, for the time since the goal was stated."""
     if now_ms is None or WORKING in listed:
         return None
     brief, report = state.brief, state.report
@@ -999,6 +1047,7 @@ def sprint_quiet_for(state: SprintState, now_ms: int | None, listed: Collection[
         signals.append(_millis(report.at))
     if state.moved_ms is not None:
         signals.append(state.moved_ms)
+    signals += [ms for ms in (waits.ci_ms, waits.commit_ms, waits.release_ms) if ms is not None]
     failed = state.manager is not None and state.manager.state == FAILED and not listed
     if not failed:
         signals.append(_millis(state.stated_at))
@@ -1008,12 +1057,29 @@ def sprint_quiet_for(state: SprintState, now_ms: int | None, listed: Collection[
     return elapsed if elapsed >= QUIET_AFTER_MS else None
 
 
+def sprint_wait(state: SprintState, now_ms: int | None, listed: Collection[str],
+                waits: WaitSignals) -> str | None:
+    """The wait sentence of #1110, or None. It names the wait only when the wait signals alone
+    move the sprint: with no clock, or when something else moves it, or when it is quiet whatever
+    the waits say, it is None. Else the first of CI, a committing delivery and a release step whose
+    signal is inside `QUIET_AFTER_MS`."""
+    if (now_ms is None or sprint_quiet_for(state, now_ms, listed) is None
+            or sprint_quiet_for(state, now_ms, listed, waits) is not None):
+        return None
+    for ms, text in ((waits.ci_ms, NOW_CI_TEXT), (waits.commit_ms, NOW_COMMITTING_TEXT),
+                     (waits.release_ms, NOW_RELEASE_TEXT)):
+        if ms is not None and now_ms - ms < QUIET_AFTER_MS:
+            return text
+    return None
+
+
 def sprint_state(state: SprintState, now_ms: int | None, waiting: int,
-                 quota: Wait | None = None, listed: Collection[str] = ()) -> tuple[str, str]:
+                 quota: Wait | None = None, listed: Collection[str] = (),
+                 waits: WaitSignals = NO_WAITS) -> tuple[str, str]:
     """The sprint's one shown state and its text; with `now_ms` None the sprint is never quiet.
     A `quota` (its manager's profile is out, #929) replaces every state but waiting on the owner,
     closing and the ones before them. `listed` is the `state` of each of the sprint's own listed
-    sessions, which `sprint_quiet_for` reads."""
+    sessions and `waits` the sprint's wait signals, which `sprint_quiet_for` reads."""
     brief, report = state.brief, state.report
     if state.stopped_at is not None:
         return STOPPED, STOPPED_TEXT
@@ -1029,7 +1095,7 @@ def sprint_state(state: SprintState, now_ms: int | None, waiting: int,
         return WAITING, WAITING_TEXT.format(n=waiting)
     if quota is not None and (report is None or report.phase != CLOSING):
         return QUOTA, QUOTA_TEXT
-    quiet_for = sprint_quiet_for(state, now_ms, listed)
+    quiet_for = sprint_quiet_for(state, now_ms, listed, waits)
     if quiet_for is not None:
         return QUIET, QUIET_TEXT.format(minutes=quiet_for // 60_000)
     if report is not None and report.phase == CLOSING:
@@ -1040,15 +1106,15 @@ def sprint_state(state: SprintState, now_ms: int | None, waiting: int,
 
 
 def sprint_ball(state: SprintState, now_ms: int | None, waiting: int,
-                listed: Collection[str]) -> str | None:
+                listed: Collection[str], waits: WaitSignals = NO_WAITS) -> str | None:
     """Who holds a running sprint's ball (#1086), or None once it has ended. `listed` is the
     `state` of each of the sprint's own listed sessions. The owner when anything waits on them: an
     open item (`waiting`), a brief awaiting a decision, a stall, no progress, or a manager session
     waiting at its terminal. Else the manager while `sprint_quiet_for` reads the sprint moving, else
     nobody; a `failed` manager with no listed session drops only the goal's stated time from the
     signals, so the ball reads nobody at once only when no approval, report or run has moved, and a
-    run, report or approval inside the window keeps it manager whatever its order against the
-    failure."""
+    run, report, approval or wait signal inside the window keeps it manager whatever its order
+    against the failure. `waits` are the sprint's wait signals."""
     if ended_at(state) is not None:
         return None
     brief = state.brief
@@ -1056,7 +1122,8 @@ def sprint_ball(state: SprintState, now_ms: int | None, waiting: int,
             or state.no_progress_at is not None
             or WAITING_ANSWER in listed or WAITING_PERMISSION in listed):
         return BALL_OWNER
-    return BALL_MANAGER if sprint_quiet_for(state, now_ms, listed) is None else BALL_NOBODY
+    quiet_for = sprint_quiet_for(state, now_ms, listed, waits)
+    return BALL_MANAGER if quiet_for is None else BALL_NOBODY
 
 
 def _stage_phrase(stages: Sequence[tuple[int, str, str]], milestone: str) -> str:
@@ -1084,10 +1151,11 @@ def _stage_phrase(stages: Sequence[tuple[int, str, str]], milestone: str) -> str
 
 
 def sprint_now(state: SprintState, quota: Wait | None, listed: Collection[str], waiting: int,
-               stages: Sequence[tuple[int, str, str]], ball: str | None) -> str | None:
+               stages: Sequence[tuple[int, str, str]], ball: str | None,
+               wait: str | None = None) -> str | None:
     """What a running sprint is doing right now as one sentence (#1086), or None once it has
-    ended; the first rule that holds, in the order the view docstring gives. `waiting`, `stages`
-    and `ball` are the entry's own."""
+    ended; the first rule that holds, in the order the view docstring gives. `waiting`, `stages`,
+    `ball` and `wait` (`sprint_wait`) are the entry's own."""
     if ended_at(state) is not None:
         return None
     brief, report = state.brief, state.report
@@ -1111,9 +1179,11 @@ def sprint_now(state: SprintState, quota: Wait | None, listed: Collection[str], 
         return NOW_NO_PROGRESS_TEXT
     if quota is not None:
         return NOW_QUOTA_TEXT
+    reason = merge_refused(state)
+    if wait is not None and reason is None:
+        return wait
     if report is None:
         return NOW_STARTING_TEXT
-    reason = merge_refused(state)
     phrase = (NOW_REFUSED_TEXT.format(reason=reason) if reason is not None
               else _stage_phrase(stages, report.milestone))
     return NOW_QUIET_TEXT.format(phrase=phrase) if ball == BALL_NOBODY else phrase
@@ -1179,7 +1249,8 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
                   sessions: Sequence[SessionState],
                   deliveries: Mapping[str, Sequence[DeliveryState]],
                   records: Sequence[InboxRecord] = (), capacity: Mapping = EMPTY,
-                  nudges: bool = True, looked: str | None = None) -> dict:
+                  nudges: bool = True, looked: str | None = None,
+                  movement: ProjectMovement | None = None) -> dict:
     stated_ms = _millis(state.stated_at)
     elapsed = 0 if now_ms is None else now_ms - stated_ms
     report = state.report
@@ -1200,9 +1271,10 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
     quota = (quota_wait(capacity, state.manager.profile)
              if state.manager is not None and state.manager.state == STARTED else None)
     listed = [s.state for s in sessions]
-    name, text = sprint_state(state, now_ms, waiting, quota, listed=listed)
+    waits = wait_signals(state, movement)
+    name, text = sprint_state(state, now_ms, waiting, quota, listed=listed, waits=waits)
     ended = ended_at(state)
-    ball = sprint_ball(state, now_ms, waiting, listed)
+    ball = sprint_ball(state, now_ms, waiting, listed, waits)
     minute = nudges and state.manager is not None and state.manager.state == STARTED
     return {
         "type": "sprint",
@@ -1213,7 +1285,8 @@ def _sprint_entry(state: SprintState, now_ms: int | None, managers: bool,
         "state_text": text,
         "ball": ball,
         "ball_text": None if ball is None else BALL_TEXT[ball],
-        "now_text": sprint_now(state, quota, listed, waiting, stages, ball),
+        "now_text": sprint_now(state, quota, listed, waiting, stages, ball,
+                               sprint_wait(state, now_ms, listed, waits)),
         "stated_at": state.stated_at,
         "age_text": age_text(elapsed),
         "manager_text": manager_text,
@@ -1261,10 +1334,12 @@ def _project_entry(state: ProjectState, sessions: Sequence[SessionState],
                    finished: Sequence[SprintState] = (),
                    capacity: Mapping = EMPTY,
                    nudges: bool = True, looked: str | None = None,
+                   movement: ProjectMovement | None = None,
                    notices: Sequence[Mapping] = (), notice_post: bool = False) -> dict:
     def entries(group: Sequence[SprintState]) -> list[dict]:
         return [_sprint_entry(s, now_ms, managers, (sprint_sessions or {}).get(s.sprint_id, ()),
-                              deliveries, records, capacity, nudges, looked) for s in group]
+                              deliveries, records, capacity, nudges, looked, movement)
+                for s in group]
 
     return {
         "type": "project",
@@ -1493,8 +1568,10 @@ def derive_view(
     failure_items: Iterable[Mapping] = (),
     nudges: bool = True,
     looked: str | None = None,
+    movement: Mapping[str, ProjectMovement] | None = None,
     activation: Activation | None = None,
     owner_notices: Mapping[str, tuple[Notice, ...]] | None = None,
+    spend: Mapping | None = None,
 ) -> dict:
     states = list(states)
     sessions = list(sessions)
@@ -1627,6 +1704,7 @@ def derive_view(
                               drafted.get(s.project_id, ()), managers, in_sprint,
                               open_by_project.get(s.project_id, ()),
                               finished.get(s.project_id, ()), capacity, nudges, looked,
+                              (movement or {}).get(s.project_id),
                               notices=notices[s.project_id],
                               notice_post=notice_post[s.project_id])
                for s in active]
@@ -1705,6 +1783,7 @@ def derive_view(
             {"text": (ACTIVATION_BEHIND_TEXT if activation.local_behind else ACTIVATION_TEXT).format(
                 command=ACTIVATE_COMMAND, root=activation.root),
              "command": ACTIVATE_COMMAND, "root": activation.root}),
+        "spend": dict(spend) if spend is not None else None,
     }
 
 

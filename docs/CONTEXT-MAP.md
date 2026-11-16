@@ -25,6 +25,7 @@
 | Activation unit | Release |
 | Adapter | Release |
 | Adoption | Project contract |
+| Approved release path | Guard |
 | Answered item | Console |
 | Approved adoption | Console |
 | Base policy | Guard |
@@ -83,6 +84,7 @@
 | Plan-gated floor | Guard |
 | Platform manifest | Project contract |
 | Prefix reorder | Hosts |
+| Production rule | Guard |
 | Probe | Verification |
 | Project contract | Project contract |
 | Projection | Project contract |
@@ -90,6 +92,7 @@
 | Question round | Console |
 | Quiet project | Console |
 | Raise label | Guard |
+| Read-only route | Guard |
 | Receipt | Release |
 | Registration | Console |
 | Release profile | Release |
@@ -99,6 +102,7 @@
 | Row check | Guard |
 | Session | Console |
 | Sign-in state | Console |
+| Spend | Console |
 | Sprint | Console |
 | Stale claim | Claims |
 | Suite member | Delivery |
