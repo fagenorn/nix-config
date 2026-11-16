@@ -759,6 +759,9 @@ day) and has a GitHub checkout (`slug_of`), one project after another and never 
 lock; a project costs at most `inbox.MAX_CALLS` calls. The stop flag is checked between projects
 and, through `cancelled`, before every page, so `close()` waits for at most the one `gh` call
 already running and a read cancelled or finished after the stop appends and publishes nothing.
+The read also lists held issues (#1129): the due evaluation's forge reads are outside
+`inbox.MAX_CALLS`, and `cancelled` is asked before each of them too, so `close()` still waits for at
+most the one `gh` call already running.
 What a read finds is appended as the four inbox events (`inbox.seen`, `inbox.changed`,
 `inbox.gone`, `inbox.health`; see `view.py`) and the view is published. A failed read is one
 stderr line `console: tracker_failed <project_id> <Type>: <message>`; the project's items stay,

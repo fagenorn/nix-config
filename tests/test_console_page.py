@@ -514,7 +514,7 @@ class PageTest(unittest.TestCase):
                 self.assertLess(size, 1.5, selector)
 
     def test_the_tracker_and_sign_in_links_are_the_only_hrefs(self) -> None:
-        self.assertEqual(len(re.findall(r"\.href\s*=", self.text)), 4)
+        self.assertEqual(len(re.findall(r"\.href\s*=", self.text)), 5)
         lines = self.text.splitlines()
         (at,) = [i for i, row in enumerate(lines) if "link.href = held.link;" in row]
         self.assertIn("isHttps(", lines[at - 1] + lines[at])
@@ -522,6 +522,8 @@ class PageTest(unittest.TestCase):
         self.assertEqual(self.text.count("a.href = item.url;"), 1)
         self.assertEqual(self.text.count("link.href = sprint.tracker_url;"), 1)
         self.assertEqual(self.text.count("link.href = item.url;"), 1)
+        self.assertEqual(self.text.count("link.href = wait.url;"), 1)
+        self.assertEqual(self.text.count("if (isHttps(wait.url)) {"), 1)
         self.assertNotIn("adoption.url", self.text)
         self.assertEqual(self.text.count("if (isHttps(item.url)) {"), 1)
         self.assertIn('sprint.tracker_url.startsWith("https:")', self.text)
@@ -10033,3 +10035,43 @@ class PageReportPictureTest(unittest.TestCase):
         (focused,) = [n for n in nodes(snap["projects"]) if n["focused"] and has_class(n, "pic-thumb")]
         self.assertEqual(focused["key"], REPORT_KEY + "/1")
         self.assertEqual(len([p for p in snap["posts"] if p["url"] == "/api/message"]), 1)
+
+
+DATED_WAIT = {
+    "key": "o/r#619/wait/1/0", "issue": 619, "until": "2026-11-18T12:00:00+00:00",
+    "url": "https://github.com/o/r/issues/619#issuecomment-1", "text": "Read the hourly rows.",
+}
+UNDATED_WAIT = {
+    "key": "o/r#620/wait/2/0", "issue": 620, "until": None,
+    "url": "https://github.com/o/r/issues/620#issuecomment-2",
+    "text": "Waiting for the release to be seen: no release yet includes its merge",
+}
+
+
+class WaitingLinePageTest(unittest.TestCase):
+    def test_a_dated_wait_reads_its_day_and_an_undated_one_its_reason(self) -> None:
+        frame = view([{**project(0, []), "waits": [UNDATED_WAIT],
+                       "sprints": [running_sprint("a", waits=[DATED_WAIT])]}])
+        (snap,) = render([START, {"frame": frame}, {"snapshot": True}])
+        lines = [n for n in nodes(snap["projects"]) if has_class(n, "wait")]
+        self.assertEqual([full(n) for n in lines], [
+            "Waiting until Wed 18 Nov: Read the hourly rows. #619",
+            "Waiting for the release to be seen: no release yet includes its merge #620",
+        ])
+        self.assertEqual([n["tag"] for n in lines], ["p", "li"])
+        self.assertEqual([[a["href"] for a in nodes(n) if a["tag"] == "a"] for n in lines],
+                         [[DATED_WAIT["url"]], [UNDATED_WAIT["url"]]])
+        self.assertEqual([n for n in nodes(snap["inbox"]) if has_class(n, "card")], [])
+
+    def test_a_project_with_only_waits_draws_its_name_and_its_line(self) -> None:
+        frame = view([{**project(1, []), "waits": [UNDATED_WAIT]}])
+        (snap,) = render([START, {"frame": frame}, {"snapshot": True}])
+        projects = snap["projects"]
+        self.assertEqual([full(n) for n in nodes(projects) if has_class(n, "pname")], ["owner/p01"])
+        (parent,) = [n for n in nodes(projects)
+                     if any(has_class(c, "wait") for c in n["children"])]
+        kinds = [c["cls"] for c in parent["children"]]
+        at = next(i for i, c in enumerate(parent["children"]) if has_class(c, "wait"))
+        self.assertTrue(has_class(parent["children"][at - 1], "line"), kinds)
+        self.assertEqual(full(parent["children"][at]),
+                         "Waiting for the release to be seen: no release yet includes its merge #620")
