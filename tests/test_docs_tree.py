@@ -408,6 +408,27 @@ class DocsTreeTest(unittest.TestCase):
         self.assertIn("ADR-console-022", self.doc(
             "docs/areas/console/adr/006-capacity-readings-arrive-from-the-proxy.md"))
 
+    def test_the_console_merge_refusal_decision_is_recorded(self):
+        path = "docs/areas/console/adr/043-a-merge-refused-by-the-guard-shows-once-in-the-sprints-line.md"
+        first = (REPO_ROOT / path).read_text().splitlines()[0]
+        self.assertEqual(
+            first,
+            "# ADR-console-043 — A merge refused by the guard shows once in the sprint's line, "
+            "never as a question")
+        adr = self.doc(path)
+        for needle in ("#1115", "merge refused: <reason>", "status line", "`sprint ask`", "inbox",
+                       "last seen", "digest", "A merge in <title> was refused: <reason>",
+                       "closed out", "ADR-console-014", "ADR-console-019", "ADR-console-042",
+                       "docs/areas/guard/adr/"):
+            with self.subTest(needle):
+                self.assertIn(needle, adr)
+        self.assertNotIn("stalled", adr)
+        raw = (REPO_ROOT / "docs/areas/console/CONTEXT.md").read_text()
+        entry = raw[raw.index("**Report**:"):].split("\n\n")[0]
+        for needle in ("ADR-console-043", "merge refused"):
+            with self.subTest(needle):
+                self.assertIn(needle, entry)
+
     def test_the_console_approval_decision_is_recorded(self):
         path = ("docs/areas/console/adr/"
                 "030-the-owner-approves-a-ready-adoption-and-the-console-opens-its-pull-request.md")

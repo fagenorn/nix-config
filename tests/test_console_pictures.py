@@ -1681,7 +1681,7 @@ class PictureDocsTest(unittest.TestCase):
             lines = (ROOT / adr / "014-a-managers-report-becomes-the-sprints-line.md"
                      ).read_text().splitlines()
             self.assertEqual(next(r for r in lines if r.startswith("- **Status:**")),
-                             "- **Status:** accepted; amended by ADR-console-041, ADR-console-042")
+                             "- **Status:** accepted; amended by ADR-console-041, ADR-console-042, ADR-console-043")
         context = (ROOT / "docs/areas/console/CONTEXT.md").read_text()
         for term in ("**Brief**:", "**Report**:", "**Picture**:"):
             entry = context[context.index(term):].split("\n\n")[0]
