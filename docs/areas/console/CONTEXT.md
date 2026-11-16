@@ -54,7 +54,7 @@ The questions a manager sends at once with `sprint ask`: each leads with its ask
 _Avoid_: poll, survey
 
 **Picture**:
-One PNG a manager sent to the console, kept by the console under its SHA-256 hash and shown only to the page; one nobody references is removed a day after it was last sent (ADR-console-036). A question's, a brief's and a report's pictures are shown as thumbnails on their card (a report's in its Detail fold) and full size in a modal viewer (ADR-console-038, ADR-console-041).
+One PNG a manager sent to the console, kept by the console under its SHA-256 hash and shown only to the page; one nobody references is removed a day after it was last sent (ADR-console-036). A question's, a brief's and a report's pictures are shown as thumbnails on their card (a report's in its Detail fold) and full size in a modal viewer (ADR-console-038, ADR-console-041); an owner check card shows the PNGs its prompt names under the project's root or a configured screenshot location the same way (ADR-console-042).
 _Avoid_: screenshot file, attachment
 
 **Nudge**:

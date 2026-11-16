@@ -394,6 +394,22 @@ class DocsTreeTest(unittest.TestCase):
         ):
             self.assertIn(needle, context)
 
+    def test_the_owner_check_pictures_decision_is_recorded(self):
+        adr = self.doc(
+            "docs/areas/console/adr/042-an-owner-check-card-shows-the-pictures-and-the-reading-its-prompt-names.md"
+        )
+        for needle in (
+            "#1112", "--screenshots", "agentConsole.screenshotDirs", "Reading:",
+            "was not found on this host.", "1440", "480", "ADR-console-036", "ADR-console-038",
+        ):
+            self.assertIn(needle, adr)
+        for path in (
+            "docs/areas/console/adr/036-the-console-keeps-a-managers-pictures-and-serves-them-only-to-the-page.md",
+            "docs/areas/console/adr/038-a-managers-question-shows-its-pictures-on-the-card-and-full-size-in-a-viewer.md",
+            "docs/areas/console/CONTEXT.md",
+        ):
+            self.assertIn("ADR-console-042", self.doc(path))
+
     def test_the_console_signin_decision_is_recorded(self):
         path = "docs/areas/console/adr/022-a-profiles-sign-in-is-read-from-the-clients-status-command.md"
         first = (REPO_ROOT / path).read_text().splitlines()[0]
