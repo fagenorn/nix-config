@@ -145,14 +145,14 @@ class ReportRouteTest(Case):
         svc = self.open()
         sid = self.started(svc)
         secret = self.secret(sid)
-        for report in (REPORT, REPORT, {**REPORT, "phase": "closing"}):
+        for report in (REPORT, REPORT, {**REPORT, "phase": "done"}):
             self.assertEqual(self.report(svc, sid, secret, report)[0], 200)
         digest = view_of(svc)["digest"]
-        prefix = "The sprint for owner/p01 is now"
+        prefix = "The sprint for owner/p01 changed to"
         self.assertEqual(
             [m["sentence"] for m in digest["recent"] + digest["earlier"]
              if m["sentence"].startswith(prefix)],
-            [f"{prefix} closing: {PARTS['title']}", f"{prefix} on track: {PARTS['title']}"])
+            [f"{prefix} done: {PARTS['title']}"])
 
     def test_a_report_survives_a_restart(self):
         svc = self.open()
