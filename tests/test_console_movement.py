@@ -340,6 +340,19 @@ class MergeTest(unittest.TestCase):
         self.assertEqual(later.locks, ((4, 1000), (7, 1000)))
         self.assertIs(later.lock_held, False)
 
+    def test_a_holding_pull_counts_only_for_an_issue_whose_run_is_live(self):
+        held = (PullRequest(42, frozenset({4}), False, None, True),)
+        reading = None
+        for k in range(90):
+            reading = movement.merged(reading, held, 1000 + k * 120_000, LocalReading((), False),
+                                      live=frozenset({9}))
+        self.assertEqual(reading.locks, ())
+        self.assertIs(reading.lock_held, True)
+        alive = movement.merged(None, held, 1000, LocalReading((), False), live=frozenset({4}))
+        self.assertEqual(alive.locks, ((4, 1000),))
+        ungated = movement.merged(None, held, 1000, LocalReading((), False))
+        self.assertEqual(ungated.locks, ((4, 1000),))
+
     def test_a_journal_lock_step_counts_only_while_a_pull_holds_a_lock(self):
         holding = movement.merged(
             None, (PullRequest(41, frozenset({5}), False, None, True),), 1000,

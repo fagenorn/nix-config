@@ -5,14 +5,15 @@ reads the land lock's queue on the forge and the running sprints on this host's 
 reports whether every sprint of the queue reads moving, none "quiet" or with the ball on nobody.
 
 The queue counts only confirmed open pull requests, every one of them among those `read_pulls`
-returned: the holders (read with `holding` true), united with the long waiters, the pull requests of
+returned: the holders (read with `holding` true), united with the live waiters, the pull requests of
 the waiter registrations (`refs/agent-locks/land-wait/<branch>/<since>-<pr>-<beat>`, forge_land_lock
-D12) that are live (`-QUEUE_SKEW <= forge_now() - beat <= QUEUE_LIVE`), have waited the quiet window
-(`forge_now() - since >= QUIET_AFTER_MS // 1000`: before that a waiting sprint would not read quiet
-even at the base, so its reading proves nothing), and whose `<pr>` is one of the read open pull
-requests. A registration whose pull request is not among them (closed, merged, or not read) is
-unresolved and counts nothing (D12 skips a closed one too). Met or not met is judged only with two
-or more queued and at least one long waiter among them; otherwise it prints
+D12) that are live (`-QUEUE_SKEW <= forge_now() - beat <= QUEUE_LIVE`) and whose `<pr>` is one of the
+read open pull requests. A registration whose pull request is not among them (closed, merged, or not
+read) is unresolved and counts nothing (D12 skips a closed one too). A live waiter is long when it has
+waited the quiet window (`forge_now() - since >= QUIET_AFTER_MS // 1000`: before that a waiting sprint
+would not read quiet even at the base, so its reading proves nothing): the age gates only which waiter
+can be the evidence, never who is in the queue, so a newer waiter's sprint is judged too. Met or not met
+is judged only with two or more queued and at least one long waiter among them; otherwise it prints
 `{"queued": [...], "status": "no_queue"}` and exits 75.
 
 The running sprints are those (`ended_at` null) of the project entry whose `project_id` is
@@ -25,8 +26,8 @@ another host, since `poll_deliveries` scans only this host's sessions, or its is
 running sprint), it prints `{"queued", "status": "no_sprint"}` and exits 75, even when a holder's
 sprint is here and moving.
 
-The judged sprints are the waiters' sprints united with the running sprints whose issues meet the
-holders' issues. Not met (exit 1, `{"queued", "status": "not_met", "stuck": [sprint ids]}`) when any
+The judged sprints are the long waiters' sprints united with the running sprints whose issues meet the
+issues of the holders or of the newer live waiters (the whole queue). Not met (exit 1, `{"queued", "status": "not_met", "stuck": [sprint ids]}`) when any
 judged sprint has `state == "quiet"` or `ball == "nobody"`.
 
 Met (exit 0, `{"queued", "sprints": [{"sprint_id", "state", "now_text"}], "status": "met"}`) only
@@ -78,17 +79,16 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _long_waiters(refs, open_numbers: set[int], now: int) -> set[int]:
-    """The open pull requests of the live registrations that have waited the quiet window."""
-    waiting: set[int] = set()
+def _live_waiters(refs, open_numbers: set[int], now: int) -> dict[int, bool]:
+    """The open pull requests of the live registrations, each true when it has waited the quiet window."""
+    waiting: dict[int, bool] = {}
     for ref in refs:
         found = forge_land_lock.WAITER.fullmatch(ref.rsplit("/", 1)[-1])
         if found is None:
             continue
         since, pr, beat = (int(part) for part in found.groups())
-        if (-forge_land_lock.QUEUE_SKEW <= now - beat <= forge_land_lock.QUEUE_LIVE
-                and now - since >= deliveries.QUIET_AFTER_MS // 1000 and pr in open_numbers):
-            waiting.add(pr)
+        if -forge_land_lock.QUEUE_SKEW <= now - beat <= forge_land_lock.QUEUE_LIVE and pr in open_numbers:
+            waiting[pr] = waiting.get(pr, False) or now - since >= deliveries.QUIET_AFTER_MS // 1000
     return waiting
 
 
@@ -127,8 +127,9 @@ def main(argv=None, *, read_pulls=movement.read_pulls, read_waiters=default_read
         manager_check._print({"reason": str(error), "status": "forge_unreadable"})
         return NOT_YET
     holders = {number for number, pull in pulls.items() if pull.holding}
-    long_waiters = _long_waiters(registrations, set(pulls), now)
-    queued = sorted(holders | long_waiters)
+    live_waiters = _live_waiters(registrations, set(pulls), now)
+    long_waiters = {number for number, long in live_waiters.items() if long}
+    queued = sorted(holders | set(live_waiters))
     if len(queued) < 2 or not long_waiters:
         manager_check._print({"queued": queued, "status": "no_queue"})
         return NOT_YET
@@ -139,13 +140,14 @@ def main(argv=None, *, read_pulls=movement.read_pulls, read_waiters=default_read
         return NOT_YET
     running = _running_sprints(state, args.project)
     waiter_issues = set().union(*(pulls[n].issues for n in long_waiters))
-    holder_issues = set().union(*(pulls[n].issues for n in holders))
+    others = set(queued) - long_waiters
+    other_issues = set().union(*(pulls[n].issues for n in others))
     waiter_sprints = [s for s in running if _issues(s) & waiter_issues]
     if not waiter_sprints:
         manager_check._print({"queued": queued, "status": "no_sprint"})
         return NOT_YET
     judged = waiter_sprints + [s for s in running
-                               if s not in waiter_sprints and _issues(s) & holder_issues]
+                               if s not in waiter_sprints and _issues(s) & other_issues]
     stuck = sorted(str(s.get("sprint_id")) for s in judged
                    if s.get("state") == "quiet" or s.get("ball") == "nobody")
     if stuck:

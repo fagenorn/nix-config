@@ -557,15 +557,31 @@ class RunFoldTest(unittest.TestCase):
                 self.assertEqual(locking(), {12: expected, 13: False})
 
     def test_only_the_lock_steps_are_lock_steps(self):
-        for label in ("pr", "land-lock-3", "land-relock-2"):
+        for label in ("pr", "land-lock-3", "land-relock-2", "checks-2"):
             self.assertIs(deliveries.classify(label, batch=False).lock, True, label)
-        for label in ("land-push-1", "checks-2", "merge", "land-unlock", "look-pr", "sync-1", "verify"):
+        for label in ("land-push-1", "merge", "land-unlock", "look-pr", "sync-1", "verify"):
             self.assertIs(deliveries.classify(label, batch=False).lock, False, label)
-        for label in ("land-pr-12", "land-lock-12-1", "land-relock-12-2"):
+        for label in ("land-pr-12", "land-lock-12-1", "land-relock-12-2", "land-record-12-1"):
             self.assertIs(deliveries.classify(label, batch=True).lock, True, label)
-        for label in ("land-record-12-1", "land-checks-12-1", "land-unlock-12", "land-merge-12",
+        for label in ("land-checks-12-1", "land-unlock-12", "land-merge-12",
                       "train-pr-12", "land-open-12", "close-out-12"):
             self.assertIs(deliveries.classify(label, batch=True).lock, False, label)
+
+    def test_a_lock_retaken_after_a_conflict_or_a_ci_fix_inside_a_checks_or_record_step_is_a_lock_wait(self):
+        owner = [
+            S("a1", "setup", "Setup"), R("a1", {"branch": "issue-858-resume"}),
+            S("a3", "pr", "Ship"), R("a3", {"pr": 5, "head": "0" * 40}),
+            S("a4", "fix-ci", "Ship"), R("a4", {}),
+            S("a5", "checks-2", "Ship"),
+        ]
+        (issue,) = fold(owner).issues()
+        self.assertIs(issue.locking, True)
+        (issue,) = fold(owner + [R("a5", {})]).issues()
+        self.assertIs(issue.locking, False)
+        batch = [S("t0", "facts-12", "Intake"), S("t1", "land-record-12-2", "Land")]
+        self.assertEqual({i.issue: i.locking for i in fold(batch).issues()}, {12: True})
+        batch.append(R("t1", {}))
+        self.assertEqual({i.issue: i.locking for i in fold(batch).issues()}, {12: False})
 
 
 class SeenLockingTest(unittest.TestCase):

@@ -63,8 +63,9 @@ chunking (folding a list in pieces equals folding it whole), and `RunFold.issues
   no plan graded the issue), with `notes_posted` true when the plan has notes and not false
   otherwise. Any other result leaves the issue as the label left it.
 - An issue is `locking` exactly when the latest staged step applied to it is a lock step (`classify`
-  gives `Step.lock`: the label fullmatches `OWNER_LOCK_LABELS`, `pr|land-lock-\\d+|land-relock-\\d+`, or
-  with a batch `BATCH_LOCK_LABELS`, `land-pr-\\d+|land-lock-\\d+-\\d+|land-relock-\\d+-\\d+`) and no
+  gives `Step.lock`: the label fullmatches `OWNER_LOCK_LABELS`, `pr|land-lock-\\d+|land-relock-\\d+|checks-\\d+`, or
+  with a batch `BATCH_LOCK_LABELS`, `land-pr-\\d+|land-lock-\\d+-\\d+|land-relock-\\d+-\\d+|land-record-\\d+-\\d+`; the
+  `checks-<n>` and `land-record-<n>-<m>` steps are lock steps because a conflict or CI fix retakes the lock inside them) and no
   `result` of that step's agent has been read. Any later step with a stage sets `locking` to its
   `lock`; a step with no stage changes nothing. An owner lock step's `result` clears its owner's
   issue (waiting for the owner's issue like other effects); a batch lock step's `result` clears the
@@ -330,8 +331,8 @@ BATCH_LABELS: tuple[tuple[str | None, str], ...] = (
 
 
 # The labels that wait for the land lock, one pattern per table; an owner label stands for its own issue.
-OWNER_LOCK_LABELS = r"pr|land-lock-\d+|land-relock-\d+"
-BATCH_LOCK_LABELS = r"land-pr-\d+|land-lock-\d+-\d+|land-relock-\d+-\d+"
+OWNER_LOCK_LABELS = r"pr|land-lock-\d+|land-relock-\d+|checks-\d+"
+BATCH_LOCK_LABELS = r"land-pr-\d+|land-lock-\d+-\d+|land-relock-\d+-\d+|land-record-\d+-\d+"
 
 
 # What both programs append to the label of a review step they run once more after an unusable reply.

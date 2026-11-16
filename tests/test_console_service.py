@@ -2076,7 +2076,7 @@ class MovementTest(Case):
                          ("quiet", "quiet for 16 min \u2014 may be stuck"))
         self.assertEqual(shown["ball"], "nobody")
 
-    def lock_step_run(self, svc):
+    def lock_step_run(self, svc, last="pr"):
         """A live run whose issue 858 sits in a lock step: its journal ends in a `pr` step."""
         body = support.hook_body("session start", cwd="/srv/p00")
         svc.ingest_hook(body)
@@ -2085,7 +2085,7 @@ class MovementTest(Case):
         journal.parent.mkdir(parents=True, exist_ok=True)
         rows = [{"type": "started", "agentId": "a1", "label": "setup", "phase": "Setup"},
                 {"type": "result", "agentId": "a1", "result": {"branch": "issue-858-resume"}},
-                {"type": "started", "agentId": "a2", "label": "pr", "phase": "Ship"}]
+                {"type": "started", "agentId": "a2", "label": last, "phase": "Ship"}]
         journal.write_text("".join(json.dumps(row) + "\n" for row in rows))
         os.utime(journal, ns=(int(self.now * 1e9),) * 2)
         svc.poll_deliveries()
@@ -2121,6 +2121,28 @@ class MovementTest(Case):
                 self.now = t + 20 * 60
                 self.poll(svc)
                 self.assertEqual(sprint_entry(svc)["state"], "quiet")
+
+    def test_a_run_that_died_holding_the_lock_ages_out_to_may_be_stuck(self):
+        self.now = 1_800_000_000.0
+        held = (movement.PullRequest(41, frozenset({858}), False, None, True),)
+        for name, ended in (("a live run holds it", False), ("its session ended", True)):
+            with self.subTest(name):
+                self.store = self.root / f"{ended}/console/events.sqlite3"
+                svc = self.open(Script(held))
+                t = self.running_sprint(svc)
+                self.now = t + 60
+                sid = self.lock_step_run(svc, last="merge")
+                if ended:
+                    svc.ingest_hook(support.hook_body("session end", session_id=sid, cwd="/srv/p00"))
+                for minutes in range(20, 181, 2):
+                    self.now = t + minutes * 60
+                    self.poll(svc)
+                shown = sprint_entry(svc)
+                if ended:
+                    self.assertEqual((shown["state"], shown["ball"]), ("quiet", "nobody"))
+                    self.assertNotEqual(shown["now_text"], "waiting its turn to merge")
+                else:
+                    self.assertEqual(shown["now_text"], "waiting its turn to merge")
 
     def test_a_delivery_queued_behind_a_release_pull_request_reads_waiting_its_turn_to_merge(self):
         self.now = 1_800_000_000.0

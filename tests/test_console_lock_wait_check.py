@@ -84,6 +84,23 @@ class LockWaitCheckTest(unittest.TestCase):
                 code, printed = self.run_check(**kwargs)
                 self.assertEqual((75, "no_queue"), (code, printed["status"]))
 
+    def test_a_newer_live_waiter_whose_sprint_reads_quiet_is_not_met(self):
+        newer = PullRequest(42, frozenset({6}), False, None, False)
+        waiters = {**WAITER_41,
+                   "refs/agent-locks/land-wait/main/%d-42-%d" % (NOW - 840, NOW - 17): "42" * 20}
+        older = sprint()
+        young = sprint("b" * 16, issue=6, state="quiet", ball="nobody")
+        code, printed = self.run_check(pulls=(P40, P41, newer), waiters=waiters,
+                                       state=state_of(older, young))
+        self.assertEqual((1, "not_met", ["b" * 16]), (code, printed["status"], printed["stuck"]))
+        self.assertEqual([40, 41, 42], printed["queued"])
+        with self.subTest("a newer waiter that reads moving leaves it met"):
+            moving = sprint("b" * 16, issue=6, now_text="waiting for CI on its pull request")
+            code, printed = self.run_check(pulls=(P40, P41, newer), waiters=waiters,
+                                           state=state_of(older, moving))
+            self.assertEqual((0, "met"), (code, printed["status"]))
+            self.assertEqual(["a" * 16], [row["sprint_id"] for row in printed["sprints"]])
+
     def test_no_sprint_of_the_queue_is_not_yet(self):
         for name, state in {
                 "another issue": state_of(sprint(issue=99)),
