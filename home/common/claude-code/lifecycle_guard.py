@@ -1461,8 +1461,9 @@ def split_segments_with_runs(command):
             index += 1
             continue
         if character == "\\" and index + 1 < length:
-            current.append(character)
-            current.append(command[index + 1])
+            # One element for the escaped pair, so an escaped blank is not the
+            # blank that opens a comment: `echo \ #; just switch` runs `just switch`.
+            current.append(command[index:index + 2])
             index += 2
             continue
         if quote == '"':
@@ -3780,6 +3781,7 @@ def ansi_c_unquoted(text):
     the segmenter does, so a `$'` inside another quote stays as it is; a `$'` with no closing
     quote is left for the segmenter to refuse."""
     out = []
+    pending = []
     quote = None
     index = 0
     length = len(text)
@@ -3805,6 +3807,37 @@ def ansi_c_unquoted(text):
             while index < length and text[index] != "\n":
                 out.append(text[index])
                 index += 1
+            continue
+        if character == "<" and text.startswith("<<", index):
+            # A heredoc body is skipped as the segmenter skips it, so an apostrophe in
+            # it never opens a quote here that the segmenter does not see.
+            if text.startswith("<<<", index):
+                out.append("<<<")
+                index += 3
+                continue
+            cursor, delimiter, strip_tabs, expands = read_heredoc_delimiter(text, index)
+            if delimiter is None:
+                out.append(text[index:])
+                break
+            out.append(text[index:cursor])
+            pending.append((delimiter, strip_tabs, expands))
+            index = cursor
+            continue
+        if character == "\n" and pending:
+            out.append(character)
+            index += 1
+            end = skip_heredoc_bodies(text, index, pending)
+            pending = []
+            if end is None:
+                out.append(text[index:])
+                break
+            body = text[index:end]
+            if body.endswith("\n"):
+                out.append(body[:-1])
+                out.append("\n")
+            else:
+                out.append(body)
+            index = end
             continue
         if text.startswith("$'", index):
             cursor = index + 2

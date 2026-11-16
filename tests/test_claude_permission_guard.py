@@ -1885,12 +1885,14 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                 "find . -exec sh -c 'just switch' ';'", ">/dev/null sh -c 'just switch'",
                 "$'just' switch", "just $'switch'", "$\"just\" switch", "ju$'st' switch",
                 "env FOO=1 $'just' switch",
-                "echo $'it\\'s ready'; just switch  # don't skip"),
+                "echo $'it\\'s ready'; just switch  # don't skip",
+                "cat <<EOF >/dev/null\ndon't\nEOF\necho $'it\\'s'; just switch # don't",
+                "echo \\ #; just switch", "ls My\\ #2; just switch", "echo \\\t#; just switch"),
             "(production rule kube-apply)": (
                 "nix develop -c bash -c 'kubectl apply -f x'",
                 "timeout 5 bash -c 'kubectl apply -f x'", "$'kubectl' apply -f x",
                 "printf $'can\\'t wait\\n' && kubectl apply -f x  # don't forget",
-                ">| /tmp/x kubectl apply"),
+                ">| /tmp/x kubectl apply", "echo \\ #; kubectl apply"),
             "(production rule deploy-script)": (
                 ">/dev/null ./scripts/deploy.sh", "2>/dev/null ./scripts/deploy.sh",
                 "> /dev/null ./scripts/deploy.sh", ">>log.txt 2>&1 ./scripts/deploy.sh",
@@ -1910,7 +1912,7 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                 self.assertIn(self.DEPLOY, result.stderr)
         for command in ("timeout 600 sh -c 'just build'", "2>&1 just build",
                         ">/dev/null git add scripts/deploy.sh", "timeout 5 echo hello world",
-                        "echo $'x' just"):
+                        "echo $'x' just", "echo \\\\ #; just switch"):
             with self.subTest(command=command):
                 result = self.run_guard(command, cwd=prod, guard_args=guard_args)
                 self.assertEqual(0, result.returncode, (command, result.stderr))
