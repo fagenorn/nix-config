@@ -3,7 +3,11 @@
 Run: just agent-workflow-tests
 """
 
+import contextlib
 import hashlib
+import http.client
+import io
+import json
 import os
 import stat
 import struct
@@ -18,7 +22,7 @@ from agent_tools.console.event_log import PICTURE_STORED, Event
 from agent_tools.console.pictures import SIGNATURE
 
 from . import accounts_sandbox
-from . import console_test_support as support  # noqa: F401 -- shared fixtures for later tasks
+from . import console_test_support as support
 from .test_console_writes import Case
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
@@ -172,3 +176,253 @@ class SandboxTest(Case):
         temporary = Path(tempfile.gettempdir()).resolve()
         self.assertTrue(self.store.resolve().is_relative_to(temporary))
         self.assertTrue(self.registry.resolve().is_relative_to(temporary))
+
+
+PICTURE = "/api/picture"
+ROOT = Path(__file__).resolve().parent.parent
+
+
+class PictureCase(Case):
+    def open(self):
+        support.write_registry(self.registry, support.entries(2))
+        return self.start()
+
+    def sprint(self, svc):
+        return svc.state_goal("owner/p01", "make the importer resumable")
+
+    def secret(self, sid):
+        return (self.store.parent / "sprint-secrets" / sid).read_text().removesuffix("\n")
+
+    def send(self, svc, sid, secret, body, **extra):
+        headers = {"Content-Type": "image/png", "X-Console-Sprint": sid,
+                   "X-Console-Secret": secret, **extra}
+        headers = {name: value for name, value in headers.items() if value is not None}
+        return support.post_page(svc.address, PICTURE, headers, body)
+
+    def send_headers_only(self, svc, headers, length):
+        connection = http.client.HTTPConnection(*svc.address, timeout=5)
+        try:
+            connection.putrequest("POST", PICTURE, skip_host=True)
+            connection.putheader("Host", f"{svc.address[0]}:{svc.address[1]}")
+            for name, value in headers.items():
+                connection.putheader(name, value)
+            connection.putheader("Content-Length", str(length))
+            connection.endheaders()
+            response = connection.getresponse()
+            return response.status, dict(response.getheaders()), response.read()
+        finally:
+            connection.close()
+
+    @property
+    def pictures_dir(self):
+        return self.store.parent / "pictures"
+
+    def entries(self):
+        return sorted(os.listdir(self.pictures_dir)) if self.pictures_dir.exists() else []
+
+    def rows(self, kind):
+        return [(json.loads(row[4]), row[3]) for row in support.log_rows(self.store)
+                if row[2] == kind]
+
+
+class PictureWriteTest(PictureCase):
+    def test_a_png_with_the_secret_is_stored_once_by_its_hash(self):
+        svc = self.open()
+        sid = self.sprint(svc)
+        status, headers, body = self.send(svc, sid, self.secret(sid), PIXEL)
+        picture_id = hashlib.sha256(PIXEL).hexdigest()
+        self.assertEqual(status, 200)
+        self.assertEqual(headers["Content-Type"], "application/json")
+        self.assertEqual(body, json.dumps({"picture": picture_id}, separators=(",", ":")).encode())
+        self.assertEqual(self.entries(), [picture_id])
+        self.assertEqual((self.pictures_dir / picture_id).read_bytes(), PIXEL)
+        self.assertEqual(stat.S_IMODE(os.stat(self.pictures_dir / picture_id).st_mode), 0o600)
+        self.assertEqual(stat.S_IMODE(os.stat(self.pictures_dir).st_mode), 0o700)
+        self.assertEqual(self.rows(PICTURE_STORED),
+                         [({"picture": picture_id, "sprint_id": sid}, "owner/p01")])
+
+    def test_sending_it_again_returns_the_same_id_and_writes_no_second_file(self):
+        svc = self.open()
+        sid = self.sprint(svc)
+        first = self.send(svc, sid, self.secret(sid), PIXEL)
+        picture_id = hashlib.sha256(PIXEL).hexdigest()
+        fd = os.open(self.pictures_dir / picture_id, os.O_RDONLY)
+        self.addCleanup(os.close, fd)
+        inode = os.fstat(fd).st_ino
+        second = self.send(svc, sid, self.secret(sid), PIXEL)
+        self.assertEqual((second[0], second[2]), (200, first[2]))
+        self.assertEqual(self.entries(), [picture_id])
+        self.assertEqual(len(self.rows(PICTURE_STORED)), 2)
+        self.assertEqual(os.stat(self.pictures_dir / picture_id).st_ino, inode)
+        self.assertEqual(os.fstat(fd).st_nlink, 1)
+
+    def test_a_picture_of_exactly_two_mib_is_taken(self):
+        svc = self.open()
+        sid = self.sprint(svc)
+        self.assertEqual(self.send(svc, sid, self.secret(sid), padded(2097152))[0], 200)
+
+    def test_each_refused_send_leaves_no_file_and_no_row(self):
+        svc = self.open()
+        sid = self.sprint(svc)
+        secret = self.secret(sid)
+        own = f"http://127.0.0.1:{svc.address[1]}"
+        rows = [
+            ("own-origin", lambda: self.send(svc, sid, secret, PIXEL, Origin=own),
+             403, "origin refused"),
+            ("foreign-origin", lambda: self.send(svc, sid, secret, PIXEL, Origin="http://evil.example"),
+             403, "origin refused"),
+            ("json", lambda: self.send(svc, sid, secret, PIXEL, **{"Content-Type": "application/json"}),
+             415, "png only"),
+            ("too-large", lambda: self.send_headers_only(
+                svc, {"Content-Type": "image/png", "X-Console-Sprint": sid,
+                      "X-Console-Secret": secret}, 2097153),
+             413, "too large"),
+            ("no-sprint", lambda: self.send(svc, sid, secret, PIXEL, **{"X-Console-Sprint": None}),
+             400, "bad picture"),
+            ("bad-sprint", lambda: self.send(svc, sid, secret, PIXEL, **{"X-Console-Sprint": "ABC"}),
+             400, "bad picture"),
+            ("two-secrets", lambda: self.send(svc, sid, secret, PIXEL,
+                                              **{"X-Console-Secret": [secret, secret]}),
+             400, "bad picture"),
+            ("no-secret", lambda: self.send(svc, sid, secret, PIXEL, **{"X-Console-Secret": None}),
+             400, "bad picture"),
+            ("unknown-sprint", lambda: self.send(svc, "e" * 16, secret, PIXEL),
+             409, "this sprint is not open"),
+            ("wrong-secret", lambda: self.send(svc, sid, "A" * 43, PIXEL),
+             403, "secret refused"),
+            ("signature", lambda: self.send(svc, sid, secret, b"GIF89a" + b"\0" * 40),
+             400, pictures.SIGNATURE_WRONG),
+            ("renamed-jpeg", lambda: self.send(svc, sid, secret, JPEG),
+             400, pictures.SIGNATURE_WRONG),
+            ("truncated", lambda: self.send(svc, sid, secret, png()[:20]),
+             400, pictures.HEADER_SHORT),
+            ("empty", lambda: self.send(svc, sid, secret, b""),
+             400, pictures.SIGNATURE_WRONG),
+        ]
+        for name, act, status, text in rows:
+            with self.subTest(name), contextlib.redirect_stderr(io.StringIO()):
+                got = self.assert_unchanged(svc, act)
+                self.assertEqual(got[0], status)
+                self.assertEqual(got[1]["Content-Type"], "text/plain")
+                self.assertEqual(got[2], text.encode() + b"\n")
+                self.assertEqual(self.entries(), [])
+
+    def test_the_secret_appears_in_no_stderr_line_or_answer(self):
+        svc = self.open()
+        sid = self.sprint(svc)
+        secret = self.secret(sid)
+        wrong = "A" * 43
+        captured = io.StringIO()
+        with contextlib.redirect_stderr(captured):
+            first = self.send(svc, sid, wrong, PIXEL)
+            second = self.send(svc, sid, secret, JPEG)
+        text = captured.getvalue()
+        self.assertIn(f"console: picture_refused {sid} secret refused", text)
+        self.assertIn(f"console: picture_refused {sid} not a PNG:", text)
+        for secret_value in (secret, wrong):
+            self.assertNotIn(secret_value, text)
+            self.assertNotIn(secret_value.encode(), first[2] + second[2])
+
+    def test_other_methods_on_the_write_route_are_refused(self):
+        svc = self.open()
+        for method in ("GET", "PUT", "DELETE"):
+            with self.subTest(method):
+                status, headers, _ = support.request(svc.address, method, PICTURE)
+                self.assertEqual((status, headers["Allow"]), (405, "POST"))
+
+
+class PictureRetentionTest(PictureCase):
+    def stored(self, svc, sid, body):
+        status, _, answer = self.send(svc, sid, self.secret(sid), body)
+        self.assertEqual(status, 200)
+        return json.loads(answer)["picture"]
+
+    def test_a_picture_no_row_references_is_removed_after_one_day(self):
+        svc = self.open()
+        sid = self.sprint(svc)
+        first = self.stored(svc, sid, PIXEL)
+        second = self.stored(svc, sid, WIDE)
+        age(self.pictures_dir / first, 86400 + 60)
+        age(self.pictures_dir / second, 86400 - 60)
+        svc.retain()
+        self.assertEqual(self.entries(), [second])
+        self.assertEqual(len(self.rows(PICTURE_STORED)), 2)
+
+    def test_a_referenced_picture_is_kept_whatever_its_age(self):
+        svc = self.open()
+        sid = self.sprint(svc)
+        picture_id = self.stored(svc, sid, PIXEL)
+        svc.log.append([("test.reference", None, {"pictures": [picture_id]})])
+        age(self.pictures_dir / picture_id, 3 * 86400)
+        svc.retain()
+        self.assertEqual(self.entries(), [picture_id])
+
+    def test_a_resend_renews_an_old_picture(self):
+        svc = self.open()
+        sid = self.sprint(svc)
+        picture_id = self.stored(svc, sid, PIXEL)
+        age(self.pictures_dir / picture_id, 2 * 86400)
+        self.stored(svc, sid, PIXEL)
+        svc.retain()
+        self.assertEqual(self.entries(), [picture_id])
+
+    def test_a_picture_is_kept_as_long_as_its_reference_row(self):
+        now = ["2026-01-01T00:00:00.000000+00:00"]
+        support.write_registry(self.registry, support.entries(2))
+        svc = self.start(log_clock=lambda: now[0])
+        sid = self.sprint(svc)
+        picture_id = self.stored(svc, sid, PIXEL)
+        svc.log.append([("test.reference", None, {"pictures": [picture_id]})])
+        age(self.pictures_dir / picture_id, 2 * 86400)
+        svc.retain()
+        self.assertEqual(self.entries(), [picture_id])
+        now[0] = "2026-04-02T00:00:00.000000+00:00"
+        svc.retain()
+        self.assertEqual(self.rows("test.reference"), [])
+        self.assertEqual(self.entries(), [])
+
+    def test_the_start_pass_sweeps_too(self):
+        support.write_registry(self.registry, support.entries(2))
+        picture_id, _ = pictures.store(self.pictures_dir, PIXEL)
+        age(self.pictures_dir / picture_id, 2 * 86400)
+        self.start()
+        self.assertEqual(self.entries(), [])
+
+    def test_a_failing_sweep_is_one_stderr_line_and_the_console_goes_on(self):
+        support.write_registry(self.registry, support.entries(2))
+        self.pictures_dir.parent.mkdir(parents=True, exist_ok=True)
+        self.pictures_dir.write_bytes(b"not a directory")
+        captured = io.StringIO()
+        with contextlib.redirect_stderr(captured):
+            svc = self.start()
+            svc.retain()
+        lines = [line for line in captured.getvalue().splitlines()
+                 if line.startswith("console: picture_sweep_failed NotADirectoryError:")]
+        self.assertEqual(len(lines), 2)
+
+
+class PictureDocsTest(unittest.TestCase):
+    def doc(self, path):
+        return " ".join((ROOT / path).read_text().split())
+
+    def test_adr_036_records_the_picture_store(self):
+        name = "docs/areas/console/adr/036-the-console-keeps-a-managers-pictures-and-serves-them-only-to-the-page.md"
+        self.assertTrue((ROOT / name).is_file())
+        text = self.doc(name)
+        self.assertEqual(
+            (ROOT / name).read_text().splitlines()[0],
+            "# ADR-console-036 — The console keeps a manager's pictures and serves them only to the page")
+        for needle in ("#1089", "POST /api/picture", "X-Console-Sprint", "X-Console-Secret",
+                       "image/png", "2 MiB", "413", "SHA-256", "0600", "0700", "picture.stored",
+                       "`pictures`", "one day", "ADR-console-009", "ADR-console-013",
+                       "ADR-console-019"):
+            with self.subTest(needle):
+                self.assertIn(needle, text)
+        self.assertIn("POST /api/picture", self.doc(
+            "docs/areas/console/adr/008-only-the-page-writes-with-a-token-and-its-origin.md"))
+        self.assertIn("ADR-console-036", self.doc(
+            "docs/areas/console/adr/009-events-are-kept-for-90-days.md"))
+        context = self.doc("docs/areas/console/CONTEXT.md")
+        self.assertIn("**Picture**:", context)
+        self.assertIn("ADR-console-036", context)
+        self.assertIn("| Picture | Console |", self.doc("docs/CONTEXT-MAP.md"))
