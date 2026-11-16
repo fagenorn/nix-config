@@ -1605,12 +1605,25 @@ function noticeLine(notice) {
   if (typeof notice.what === "string") {
     const claim = el("p", "notice-claim");
     const paths = el("span", "notice-paths");
-    notice.what.trim().split(/\s+/).forEach((path, at) => {
-      if (at > 0) paths.appendChild(el("span", "", " "));
+    let plain = "";
+    const flush = () => {
+      if (plain !== "") cutWords(paths, plain);
+      plain = "";
+    };
+    // Only a path-shaped word (a slash, or a dot between word characters) takes the code chip; trailing punctuation and every other word of an area in words stay plain text.
+    for (const run of notice.what.trim().split(/(\s+)/)) {
+      const path = run.replace(/[,;:.]+$/, "");
+      if (!(path.includes("/") || /\w\.\w/.test(path))) {
+        plain += run;
+        continue;
+      }
+      flush();
       const code = el("code", "notice-path", path);
       code.setAttribute("title", path);
       paths.appendChild(code);
-    });
+      plain += run.slice(path.length);
+    }
+    flush();
     claim.appendChild(paths);
     if (typeof notice.until_text === "string") claim.appendChild(cutWords(el("span", "notice-until"), notice.until_text));
     item.appendChild(claim);

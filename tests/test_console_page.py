@@ -1238,6 +1238,16 @@ class PageNoticeTest(unittest.TestCase):
             self.assertEqual(len(other["children"]), 2)
             self.assertEqual([n for n in nodes(other) if n["tag"] == "code"], [])
 
+    def test_a_claim_area_in_words_is_plain_text_and_only_paths_take_the_code_chip(self) -> None:
+        area = "the console page's notices fold"
+        mixed = "page.html, view.py and python/agent_tools/"
+        for what, chips in ((area, []), (mixed, ["page.html", "view.py", "python/agent_tools/"])):
+            (block,) = self.notice_blocks({**CLAIM_W, "what": what})
+            paths = next(n for n in nodes(block) if has_class(n, "notice-paths"))
+            codes = [n for n in nodes(paths) if n["tag"] == "code"]
+            self.assertEqual([(full(n), n["title"]) for n in codes], [(c, c) for c in chips])
+            self.assertEqual(full(paths), what)
+
     def test_only_its_words_set_a_hand_off_for_you_apart(self) -> None:
         for_sprint, for_you, heads_up = self.notice_blocks(HANDOFF_SPRINT_W, HANDOFF_W, HEADSUP_W)
 
