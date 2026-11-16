@@ -1657,6 +1657,36 @@ class DeliveryTest(Case):
         self.assertEqual((shown["state"], shown["state_text"]),
                          ("quiet", "quiet for 16 min \u2014 may be stuck"))
 
+    def test_a_working_manager_with_an_old_report_never_reads_stuck(self):
+        sid = self.svc.state_goal("owner/p00", "make the importer resumable")
+        secret = sprints.read_secret(self.store.with_name(sprints.SECRETS_DIR), sid)
+        self.svc.send_brief(sid, secret, PARTS)
+        self.svc.approve_brief("owner/p00", sid, 1)
+        self.svc.send_report(sid, secret, {
+            "status": "one slice is queued", "phase": "running", "milestone": "Importer resumes",
+            "tracker_url": "https://github.com/owner/p00/milestone/3",
+            "issues": [{"issue": 858, "stage": "queued"}], "inbox": [],
+            "next": "start the resume slice"})
+        report_ms = datetime.fromisoformat(support.log_rows(self.store)[-1][1]).timestamp() * 1000
+        name = f"owner/p00 sprint {sid}"
+        support.write_session(self.sessions, pid=os.getpid(), session_id="mgr-1", cwd="/srv/p00",
+                              status="busy", name=name)
+        self.svc.poll_sessions()
+        self.now = report_ms / 1000 + 20 * 60
+        self.svc.poll_deliveries()
+        shown = self.sprint_of(self.svc)
+        self.assertEqual(shown["state"], "on_track")
+        self.assertEqual((shown["ball"], shown["ball_text"]), ("manager", "manager working"))
+        self.assertNotIn("may be stuck", json.dumps(shown))
+        support.write_session(self.sessions, pid=os.getpid(), session_id="mgr-1", cwd="/srv/p00",
+                              status="idle", name=name)
+        self.svc.poll_sessions()
+        self.svc.poll_deliveries()
+        shown = self.sprint_of(self.svc)
+        self.assertEqual((shown["state"], shown["state_text"]),
+                         ("quiet", "quiet for 20 min \u2014 may be stuck"))
+        self.assertEqual(shown["ball"], "nobody")
+
     def test_a_run_that_completes_between_polls_leaves_its_close_out_on_the_sprint(self):
         sid = self.svc.state_goal("owner/p00", "make the importer resumable")
         secret = sprints.read_secret(self.store.with_name(sprints.SECRETS_DIR), sid)

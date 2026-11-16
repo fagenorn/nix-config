@@ -1,6 +1,7 @@
 """The console's view (#855): projection, registry diff, ordering and folding, encoding."""
 
 import dataclasses
+import itertools
 import json
 import re
 import unittest
@@ -43,6 +44,17 @@ from agent_tools.console.sprints import (
     first_line,
     sprint_states,
     sprint_title,
+)
+from .test_console_sprints import (
+    PARTS as PARTS_ROW,
+    REPORT as REPORT_ROW,
+    approved as approved_row,
+    at as at_row,
+    ms as ms_row,
+    reported as reported_row,
+    seen as seen_row,
+    sent as sent_row,
+    stated as stated_row,
 )
 from agent_tools.console.view import (
     ADOPTING_SENTENCE,
@@ -1537,6 +1549,118 @@ def stopped(state, stop_ms, stopped_ms=None):
     return dataclasses.replace(
         state, stop_at=iso(stop_ms),
         stopped_at=None if stopped_ms is None else iso(stopped_ms))
+
+
+working_session = session("s1", "working", name=NAME)
+idle_session = session("s1", "idle", name=NAME)
+
+
+def failed_at(s, at_ms):
+    return dataclasses.replace(s, manager=Manager("failed", iso(at_ms), "work", NAME))
+
+
+class SprintMovementViewTest(unittest.TestCase):
+    """One movement reading (#1109) behind the state, the ball and the now-sentence prefix."""
+
+    base = reported(with_manager(started(A)), R)
+
+    def test_a_working_manager_session_keeps_the_sprint_off_quiet_and_nobody(self):
+        now = R + 20 * MIN
+        shown = entry(line(self.base, now, sessions=[working_session]))
+        self.assertEqual((shown["state"], shown["state_text"]), ("on_track", "on track"))
+        self.assertEqual((shown["ball"], shown["ball_text"]), ("manager", "manager working"))
+        self.assertEqual(shown["now_text"], "building 1 of 7: Importer resumes")
+
+    def test_a_folded_run_on_an_unreported_issue_keeps_the_sprint_moving(self):
+        rows = [
+            stated_row(1, "p00", A, "make the importer resumable"),
+            sent_row(2, A, 1, PARTS_ROW), approved_row(3, A, 1),
+            reported_row(4, A, REPORT_ROW),
+            Event(5, at_row(5), "session.seen", "p00", {
+                "session_id": "s1", "cwd": "/srv/p00", "repo": "/srv/p00", "state": "idle",
+                "name": NAME}),
+            seen_row(6, "wf_m", ms_row(4) + 18 * MIN, ((99, "planning"),), project="p00",
+                     session_id="s1")]
+        now = ms_row(4) + 20 * MIN
+        for label, extra in (("run only", []), ("failed after the run", [Event(
+                7, iso(ms_row(4) + 19 * MIN), event_log.MANAGER_FAILED, "p00",
+                {"sprint_id": A, "reason": "launch failed"})])):
+            with self.subTest(label):
+                folded = sprint_states(rows + extra)[A]
+                shown = entry(line(folded, now))
+                self.assertEqual(shown["state"], "on_track")
+                self.assertEqual(shown["ball"], "manager")
+                self.assertEqual(shown["now_text"], "building 1 of 2: Importer resumes")
+
+    def test_the_state_the_ball_and_the_last_seen_prefix_agree_over_every_movement_signal(self):
+        now, recent = R + 20 * MIN, R + 18 * MIN
+        for flags in itertools.product((False, True), repeat=4):
+            has_working_session, has_run, has_report, has_approval = flags
+            s = self.base
+            if has_approval:
+                s = dataclasses.replace(
+                    s, brief=dataclasses.replace(s.brief, decided_at=iso(recent)))
+            if has_report:
+                s = dataclasses.replace(s, report=dataclasses.replace(s.report, at=iso(recent)))
+            if has_run:
+                s = dataclasses.replace(s, moved_ms=recent)
+            sessions = [working_session if has_working_session else idle_session]
+            with self.subTest(working=has_working_session, run=has_run, report=has_report,
+                              approval=has_approval):
+                shown = entry(line(s, now, sessions=sessions))
+                quiet = shown["state"] == "quiet"
+                nobody = shown["ball"] == "nobody"
+                prefixed = shown["now_text"].startswith("last seen ")
+                self.assertEqual(quiet, nobody)
+                self.assertEqual(nobody, prefixed)
+                self.assertEqual(quiet, not any(flags))
+                if not any(flags):
+                    self.assertEqual(shown["state_text"], "quiet for 20 min \u2014 may be stuck")
+        clockless = entry(line(self.base, None, sessions=[idle_session]))
+        self.assertEqual((clockless["state"], clockless["ball"]), ("on_track", "manager"))
+
+    def test_a_sprint_with_nothing_moving_for_twenty_minutes_reads_quiet_and_nothing_running(self):
+        shown = entry(line(self.base, R + 20 * MIN, sessions=[idle_session]))
+        self.assertEqual((shown["state"], shown["state_text"]),
+                         ("quiet", "quiet for 20 min \u2014 may be stuck"))
+        self.assertEqual((shown["ball"], shown["ball_text"]),
+                         ("nobody", "nothing running, may be stuck"))
+        self.assertEqual(shown["now_text"], "last seen building 1 of 7: Importer resumes")
+
+    def test_a_failed_launch_drops_only_the_goals_freshness(self):
+        now = R + 20 * MIN
+        run_before = failed_at(dataclasses.replace(
+            reported(started(A), R), moved_ms=R + 18 * MIN), R + 19 * MIN)
+        run_after = failed_at(dataclasses.replace(
+            reported(started(A), R), moved_ms=R + 19 * MIN), R + 18 * MIN)
+        report_before = failed_at(reported(started(A), R + 10 * MIN), R + 11 * MIN)
+        for label, s in (("a run before the failure", run_before),
+                         ("a run after the failure", run_after),
+                         ("a report before the failure", report_before)):
+            with self.subTest(label):
+                shown = entry(line(s, now))
+                self.assertEqual((shown["state"], shown["ball"]), ("on_track", "manager"))
+                self.assertEqual(shown["now_text"], "building 1 of 7: Importer resumes")
+        with self.subTest("nothing moved for twenty minutes"):
+            shown = entry(line(failed_at(reported(started(A), R), R + 5 * MIN), now))
+            self.assertEqual((shown["state"], shown["state_text"]),
+                             ("quiet", "quiet for 20 min \u2014 may be stuck"))
+            self.assertEqual(shown["ball"], "nobody")
+            self.assertEqual(shown["now_text"], "last seen building 1 of 7: Importer resumes")
+        with self.subTest("drafting, nothing but the goal"):
+            fresh = failed_at(sprint(A), T0_MS)
+            at = T0_MS + MIN
+            self.assertEqual(entry(line(fresh, at))["ball"], "nobody")
+            self.assertEqual(entry(line(fresh, at, sessions=[idle_session]))["ball"], "manager")
+            self.assertEqual(entry(line(fresh, at, sessions=[working_session]))["ball"],
+                             "manager")
+
+    def test_a_freshly_stated_goal_moves_until_its_launch_fails(self):
+        fresh = with_manager(sprint(A))
+        self.assertEqual(entry(line(fresh, T0_MS + MIN))["ball"], "manager")
+        self.assertEqual(entry(line(fresh, T0_MS + 15 * MIN))["ball"], "nobody")
+        failed = with_manager(sprint(A), state="failed")
+        self.assertEqual(entry(line(failed, T0_MS + MIN))["ball"], "nobody")
 
 
 class SprintEndViewTest(unittest.TestCase):
