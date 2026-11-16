@@ -1952,7 +1952,7 @@ function isOwnerCheck(item) {
 }
 // An owner check's pictures (ADR-console-045) reuse the shared gallery and viewer of ADR-console-038.
 function checkPictures(node, item) {
-  const gallery = pictureGallery(itemId(item), item.pictures);
+  const gallery = pictureGallery(itemId(item), item.pictures, pictureCaption);
   if (gallery !== null) node.appendChild(gallery);
   if (!Array.isArray(item.missing_pictures)) return;
   for (const name of item.missing_pictures) node.appendChild(el("p", "pic-missing", name + " was not found on this host."));
@@ -2060,6 +2060,21 @@ function pictureSequence(pictures) {
   }
   return out;
 }
+// An owner check thumbnail reads a caption made from its file name, never the name itself (ADR-console-046): a before or after word leads, a trailing width reads in px, any other name is sentence case.
+function pictureCaption(name) {
+  const base = String(name).split(/[\\/]/).pop().replace(/\.png$/i, "");
+  const words = base.split(/[\s._-]+/).filter((w) => w !== "");
+  let width = "";
+  if (words.length > 0 && /^\d{3,4}(px)?$/i.test(words[words.length - 1])) width = words.pop().replace(/px$/i, "");
+  const marker = words.find((w) => /^(before|after)$/i.test(w));
+  let lead = "Picture";
+  if (marker !== undefined) lead = marker.charAt(0).toUpperCase() + marker.slice(1).toLowerCase();
+  else if (words.length > 0) {
+    const text = words.map((w) => w.toLowerCase()).join(" ");
+    lead = text.charAt(0).toUpperCase() + text.slice(1);
+  }
+  return width === "" ? lead : lead + ", " + width + " px";
+}
 function pictureFailed(img) {
   if (img.hidden === true) return;
   img.hidden = true;
@@ -2134,7 +2149,8 @@ function viewerStillShown() {
   if (shown.length !== viewer.sequence.length) return false;
   return viewer.sequence.every((picture, i) => shown.some((n) => n.dataset.key === viewer.key + "/" + i && n.dataset.picture === picture.id));
 }
-function pictureFigure(key, index, picture, label, sequence) {
+function pictureFigure(key, index, picture, label, sequence, caption) {
+  const line = typeof caption === "function" ? caption(picture.line) : picture.line;
   const figure = el("figure", "pic");
   if (label !== null) figure.appendChild(el("span", "pic-label", label));
   const thumb = el("button", "pic-thumb");
@@ -2148,15 +2164,15 @@ function pictureFigure(key, index, picture, label, sequence) {
     openViewer(key, sequence, index);
   });
   const img = el("img", "pic-img");
-  img.setAttribute("alt", picture.line);
+  img.setAttribute("alt", line);
   img.dataset.picture = picture.id;
   thumb.appendChild(img);
   figure.appendChild(thumb);
-  figure.appendChild(el("figcaption", "pic-line", picture.line));
+  figure.appendChild(el("figcaption", "pic-line", line));
   pictureSrc(img, picture.id);
   return figure;
 }
-function pictureGallery(key, pictures) {
+function pictureGallery(key, pictures, caption) {
   const sequence = pictureSequence(pictures);
   if (sequence.length === 0) return null;
   const gallery = el("div", "pics");
@@ -2165,11 +2181,11 @@ function pictureGallery(key, pictures) {
     const next = sequence[i + 1];
     if (one.pair === "before" && next !== undefined && next.pair === "after") {
       const pair = el("div", "pic-pair");
-      pair.appendChild(pictureFigure(key, i, one, "Before", sequence));
-      pair.appendChild(pictureFigure(key, i + 1, next, "After", sequence));
+      pair.appendChild(pictureFigure(key, i, one, "Before", sequence, caption));
+      pair.appendChild(pictureFigure(key, i + 1, next, "After", sequence, caption));
       gallery.appendChild(pair);
       i += 1;
-    } else gallery.appendChild(pictureFigure(key, i, one, null, sequence));
+    } else gallery.appendChild(pictureFigure(key, i, one, null, sequence, caption));
   }
   return gallery;
 }

@@ -7961,13 +7961,13 @@ PIC_CHECK = check_item("P", "manual-check", headline=DEMO_QUESTION, check_id="A3
 
 
 class PageCheckPictureTest(unittest.TestCase):
-    def test_a_check_card_draws_one_thumbnail_per_picture_with_its_file_name(self) -> None:
+    def test_a_check_card_draws_one_thumbnail_per_picture_with_its_caption(self) -> None:
         (snap,) = render([START, {"frame": frame([PIC_CHECK])}, {"snapshot": True}])
         lead = lead_of(snap)
         self.assertEqual(len(with_class(lead, "pics")), 1)
         self.assertEqual(len(with_class(lead, "pic-thumb")), 2)
         self.assertEqual([full(n) for n in with_class(lead, "pic-line")],
-                         ["before-1440.png", "after-1440.png"])
+                         ["Before, 1440 px", "After, 1440 px"])
         keys = [n["key"] for n in with_class(lead, "pic-thumb")]
         self.assertEqual(keys, [f"owner/p00#{PIC_CHECK['key']}/{i}" for i in range(2)])
 
@@ -8023,6 +8023,70 @@ class PageCheckPictureTest(unittest.TestCase):
         for name in ("pics", "pic-missing", "reading"):
             self.assertEqual(with_class(snap["inbox"], name), [], name)
 
+
+
+def captioned(lines: list) -> dict:
+    return {**PIC_CHECK, "pictures": [{"id": f"{n + 1:064x}", "line": line, "pair": None}
+                                      for n, line in enumerate(lines)]}
+
+
+class PageCheckCaptionTest(unittest.TestCase):
+    def test_each_file_name_reads_as_its_caption(self) -> None:
+        table = [
+            ("before-1440.png", "Before, 1440 px"),
+            ("after-1440.png", "After, 1440 px"),
+            ("owner-check-viewer-480.png", "Owner check viewer, 480 px"),
+            ("OWNER-CHECK-VIEWER-480.png", "Owner check viewer, 480 px"),
+            ("Owner_Check-Viewer-480.png", "Owner check viewer, 480 px"),
+            ("Settings-PAGE.Wide.PNG", "Settings page wide"),
+            ("AFTER_480PX.PNG", "After, 480 px"),
+            ("card-before.png", "Before"),
+            ("before-after-1440.png", "Before, 1440 px"),
+            ("shots/after-480.png", "After, 480 px"),
+            ("C:\\shots\\Card-1440.png", "Card, 1440 px"),
+            ("settings__page--wide.png", "Settings page wide"),
+            ("release.notes.v2.png", "Release notes v2"),
+            ("2026-11-16-card.png", "2026 11 16 card"),
+            ("beforehand-1440.png", "Beforehand, 1440 px"),
+            ("480.png", "Picture, 480 px"),
+            ("__.png", "Picture"),
+        ]
+        lines = [line for line, _ in table]
+        captions = [caption for _, caption in table]
+        (snap,) = render([START, {"frame": frame([captioned(lines)])}, {"snapshot": True}])
+        self.assertEqual([full(n) for n in with_class(lead_of(snap), "pic-line")], captions)
+        self.assertEqual([n["alt"] for n in with_class(lead_of(snap), "pic-img")], captions)
+        for c in captions:
+            self.assertTrue("/" not in c and "\\" not in c and not c.lower().endswith(".png"), c)
+
+    def test_a_check_row_captions_its_pictures_too(self) -> None:
+        (snap,) = render([START, {"frame": frame([ANSWERABLE, PIC_CHECK])}, {"snapshot": True}])
+        (row,) = [r for r in rows_of(snap) if with_class(r, "pic-thumb")]
+        self.assertEqual([full(n) for n in with_class(row, "pic-line")],
+                         ["Before, 1440 px", "After, 1440 px"])
+
+    def test_the_viewer_shows_the_full_file_name(self) -> None:
+        (snap,) = render([START, {"frame": frame([PIC_CHECK])}, {"click": "pic-thumb"},
+                          {"snapshot": True}])
+        (current,) = with_class(snap["viewer"], "viewer-pic")
+        (line,) = with_class(current, "pic-line")
+        self.assertEqual(full(line), "before-1440.png")
+        (img,) = with_class(current, "viewer-img")
+        self.assertEqual(img["alt"], "before-1440.png")
+
+    def test_a_question_picture_keeps_a_file_name_line(self) -> None:
+        asked = question(0, "Which layout reads better?", ["the old", "the new"], "the new",
+                         pictures=[{"id": A, "line": "before-1440.png", "pair": None}])
+        (snap,) = render([START, {"frame": frame([asked])}, {"snapshot": True}])
+        self.assertEqual([full(n) for n in with_class(lead_of(snap), "pic-line")],
+                         ["before-1440.png"])
+        (img,) = with_class(lead_of(snap), "pic-img")
+        self.assertEqual(img["alt"], "before-1440.png")
+
+    def test_owner_check_pictures_named_before_and_after_are_not_a_pair(self) -> None:
+        (snap,) = render([START, {"frame": frame([PIC_CHECK])}, {"snapshot": True}])
+        self.assertEqual(with_class(lead_of(snap), "pic-pair"), [])
+        self.assertEqual(with_class(lead_of(snap), "pic-label"), [])
 
 
 class LapsedResetPageTest(unittest.TestCase):
