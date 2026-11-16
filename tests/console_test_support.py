@@ -147,6 +147,16 @@ class Launches:
             raise console_manager.LaunchFailed(reason)
 
 
+def goal_of(prompt: str) -> str:
+    """The goal of a launch prompt: the text after the first `The goal: ` not on a `- ` line."""
+    offset = 0
+    for line in prompt.splitlines(keepends=True):
+        if not line.startswith("- ") and "The goal: " in line:
+            return prompt[offset + line.index("The goal: ") + len("The goal: "):]
+        offset += len(line)
+    raise AssertionError("no goal in the prompt")
+
+
 class Queued:
     """A `dispatch` stand-in: holds each job until `run_next` runs the oldest."""
 

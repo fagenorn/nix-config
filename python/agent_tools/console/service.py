@@ -894,7 +894,10 @@ no row appended, and otherwise, unless the service is stopping, `manager.started
 or `manager.failed {sprint_id, reason}` is appended (the reason of a `LaunchFailed`, else `<Type>:
 <message>`, the secret shown as `<secret>`), a failure is one stderr line `console: manager_failed
 <sprint_id> <reason>`, and the view is published. `withdraw_goal` also removes the manager's
-settings file. The sprint's secret appears in no row, view or stderr line.
+settings file. The sprint's secret appears in no row, view or stderr line. `_prepared_launch`
+passes `manager.new_launch` `sprints.notice_block` of the project's open notices for the sprint
+(every other sprint's, never its own, #1118), so a first launch, an owner retry and a takeover
+all carry the block before the goal; a wake does not (the manager reads it with `sprint inbox`).
 
 Profile choice (#1011, ADR-console-023): `GET /api/profile` answers the profile a new session should
 use, `manager.session_profile` over `capacity.capacity_view` of the profile directories read at that
@@ -4389,9 +4392,12 @@ class ConsoleService:
             self._append_manager(MANAGER_WAITING, project_id, {
                 "sprint_id": sprint_id, "until": choice.until, **marks}, token)
             return None
+        notices = sprints.notice_block(
+            sprints.project_notices(self._sprints.values(), project_id), sprint_id,
+            int(self._clock() * 1000))
         return manager.new_launch(sprint_id, project_id, sprint.goal, project.root, choice,
                                   secret, self._sprint_secrets, takeover=takeover,
-                                  seen_after=sprint.manager_seen_seq or 0)
+                                  seen_after=sprint.manager_seen_seq or 0, notices=notices)
 
     def _unexcluded_launch(self, launch: manager.Launch, token: object,
                            prepared_pin: str | None) -> manager.Launch | None:
