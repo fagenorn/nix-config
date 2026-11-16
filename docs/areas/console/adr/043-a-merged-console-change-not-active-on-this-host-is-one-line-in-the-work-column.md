@@ -1,4 +1,4 @@
-# ADR-console-042 — A merged console change not active on this host is one line in the Work column
+# ADR-console-043 — A merged console change not active on this host is one line in the Work column
 
 - **Status:** accepted
 - **Decided in:** #1114

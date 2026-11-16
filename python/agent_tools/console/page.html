@@ -3431,7 +3431,7 @@ function renderProjects(view) {
     sprintRedraw -= 1;
   }
 }
-// The activation line (#1114, ADR-console-042): the one sentence at the head of the Work column when a merged console change is not active on this host. The command rides in a code span; the rest of the text is drawn with pathWords so the checkout's path breaks after a slash.
+// The activation line (#1114, ADR-console-043): the one sentence at the head of the Work column when a merged console change is not active on this host. The command rides in a code span; the rest of the text is drawn with pathWords so the checkout's path breaks after a slash.
 function activationLine(view) {
   const found = view.activation;
   if (found === null || typeof found !== "object") return null;

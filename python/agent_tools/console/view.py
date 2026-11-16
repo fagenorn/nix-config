@@ -66,7 +66,7 @@ yet running it: `{"text": ACTIVATION_TEXT, "command": ACTIVATE_COMMAND, "root": 
 member is on every view and is null when `derive_view` is given no `activation` reading (the
 `activation.py` `Activation`) or one whose `changed` is empty. It is a line beside the statement,
 not an inbox item: it is not counted in `inbox_items` and never changes the headline, the sentence
-or `stale` (#1114, ADR-console-042).
+or `stale` (#1114, ADR-console-043).
 
 `digest` is what changed since the owner last looked (see `digest.py`):
 `{"since": <last look> | null, "first_visit": <bool>, "recent": [<moment>, ...],
