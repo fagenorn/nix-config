@@ -28,11 +28,15 @@ ALLOWED_IMPORTS: dict[str, frozenset[str]] = {
         "agent_tools.project_contract.adopt_apply",  # approve
         "agent_tools.claims.forge_markers",  # answer, inbox
         "agent_tools.claims.forge_owner_action",  # answer, inbox
-        "agent_tools.claims.owner_actions",  # inbox, service
+        "agent_tools.claims.owner_actions",  # inbox, movement, service
+        "agent_tools.release.transaction_history",  # movement
+        "agent_tools.release.transaction_storage",  # movement
         "agent_tools.verification.verify_answer",  # answer, inbox, service
+        "agent_tools.verification.verify_owner",  # view
         "agent_tools.hosts.model_pricing",  # spend
     }),
     "delivery": frozenset({
+        "agent_tools.claims.forge_markers",  # look_marker, look_approval
         "agent_tools.project_contract.resolve_project",  # lane_triage, issue_branch
     }),
     "guard": frozenset({

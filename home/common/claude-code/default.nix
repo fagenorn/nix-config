@@ -193,6 +193,23 @@ let
     '';
   };
 
+  # The look check the guard runs before a merge of a pull request whose issues carry
+  # a look marker (issue 1138): `look-approval judge`, which reads one JSON document
+  # on stdin and starts no network call, so it exports no PATH. The hook wrapper names
+  # it by store path, as it names the row check, and it is not installed on PATH.
+  lifecycleGuardLookCheck = pkgs.writeTextFile {
+    name = "claude-guard-look-check";
+    executable = true;
+    text = ''
+      #!${pkgs.runtimeShell} -p
+      unset BASH_ENV ENV
+      exec ${agentTools.launchers.look-approval} judge "$@"
+    '';
+    checkPhase = ''
+      ${pkgs.stdenv.shellDryRun} "$target"
+    '';
+  };
+
   # The registered hook: one argument-free store path. Bash's `-p` ignores
   # BASH_ENV and inherited functions, `-I` and the unset keep PYTHONPATH, user
   # site and NIX_PYTHON* `.pth` hooks out, and `exec` hands the hook's timeout
@@ -209,7 +226,7 @@ let
     text = ''
       #!${pkgs.runtimeShell} -p
       unset NIX_PYTHONPATH NIX_PYTHONPREFIX NIX_PYTHONEXECUTABLE
-      exec ${pkgs.python3}/bin/python3 -I ${./lifecycle_guard.py} --base-policy ${lifecycleGuardBasePolicy} --policy ${lifecycleGuardPolicyPath} --derive-bin ${lifecycleGuardRowCheck} "$@"
+      exec ${pkgs.python3}/bin/python3 -I ${./lifecycle_guard.py} --look-bin ${lifecycleGuardLookCheck} --base-policy ${lifecycleGuardBasePolicy} --policy ${lifecycleGuardPolicyPath} --derive-bin ${lifecycleGuardRowCheck} "$@"
     '';
     checkPhase = ''
       if ! printf '%s' '{"tool_name":"Bash","tool_input":{"command":"true"}}' \
@@ -260,7 +277,7 @@ let
     cat > $out/pre-push <<'EOF'
     #!${pkgs.runtimeShell} -p
     unset NIX_PYTHONPATH NIX_PYTHONPREFIX NIX_PYTHONEXECUTABLE
-    exec ${pkgs.python3}/bin/python3 -I ${./lifecycle_guard.py} --base-policy ${lifecycleGuardBasePolicy} --policy ${lifecycleGuardPolicyPath} --derive-bin ${lifecycleGuardRowCheck} --mode pre-push${lib.optionalString (gitLfsBin != "") " --git-lfs-bin ${gitLfsBin}"} -- "$@"
+    exec ${pkgs.python3}/bin/python3 -I ${./lifecycle_guard.py} --look-bin ${lifecycleGuardLookCheck} --base-policy ${lifecycleGuardBasePolicy} --policy ${lifecycleGuardPolicyPath} --derive-bin ${lifecycleGuardRowCheck} --mode pre-push${lib.optionalString (gitLfsBin != "") " --git-lfs-bin ${gitLfsBin}"} -- "$@"
     EOF
     chmod 0555 $out/pre-push
     for name in ${lib.concatStringsSep " " agentGitHookNames}; do
