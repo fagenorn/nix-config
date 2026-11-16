@@ -160,7 +160,7 @@ from agent_tools.console.sprints import (
     BALL_TEXT, MANAGER_SESSION_NAME, SprintState, goal_title, merge_refused, sprint_states,
     sprint_title)
 from agent_tools.console.view import (
-    INBOX_CHANGED, INBOX_SEEN, InboxRecord, inbox_records, item_headline, repo_name,
+    INBOX_CHANGED, INBOX_SEEN, InboxRecord, inbox_records, is_waiting, item_headline, repo_name,
     sprint_ball, sprint_state, sprint_waiting)
 
 LOOKED = "page.looked"
@@ -376,7 +376,8 @@ def _report_moment(event: Event, before: Mapping[str, SprintState],
     if new.report is None:
         return None
     open_items = [r for r in records.values()
-                  if r.item.get("project_id") == new.project_id and not r.item.get("answered")]
+                  if r.item.get("project_id") == new.project_id and not r.item.get("answered")
+                  and not is_waiting(r.item)]
     waiting = sprint_waiting(new, open_items)
     was = _shown_words(old, sprint_waiting(old, open_items))
     now = _shown_words(new, waiting)

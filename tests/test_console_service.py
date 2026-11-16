@@ -1568,6 +1568,36 @@ class WaitClockTest(Case):
         self.assertEqual(shown["statement"]["inbox_items"], 0)
         svc.close()
 
+    def test_a_not_due_check_does_not_park_its_sprint_as_waiting_on_the_owner(self):
+        now = [datetime(2026, 11, 16, tzinfo=timezone.utc).timestamp()]
+        item = {"key": "octo/p00#7/wait/1/0", "project_id": "owner/p00", "repo": "octo/p00",
+                "issue": 7, "comment_id": 1, "url": "https://example.test/7", "reason": "verify-wait",
+                "kind": "waiting", "question": "Read the hourly rows.", "questions": [], "items": [],
+                "answers": [], "answered": False, "held_work": 1,
+                "wait": {"reason": "not_before", "until": "2026-11-18T10:00:00+00:00",
+                         "what": "Read the hourly rows."}}
+        current = [item]
+        svc = self.start(support.entries(1),
+                         tracker=lambda project_id, slug, *, cancelled: [current[0]],
+                         slug_of=lambda root: "octo/p00", activity=lambda root: now[0], **clocks(now))
+        sid = svc.state_goal("owner/p00", "make the importer resumable")
+        secret = sprints.read_secret(self.store.with_name(sprints.SECRETS_DIR), sid)
+        svc.send_brief(sid, secret, PARTS)
+        svc.approve_brief("owner/p00", sid, 1)
+        svc.send_report(sid, secret, {
+            "status": "one slice is queued", "phase": "running", "milestone": "Importer resumes",
+            "tracker_url": "https://github.com/owner/p00/milestone/3",
+            "issues": [{"issue": 7, "stage": "queued"}], "inbox": [], "next": "start the slice"})
+        svc.poll_tracker()
+        with svc._ingest:
+            sprint = svc._sprints[sid]
+            self.assertEqual(svc._waiting(sprint), 0)
+        current[0] = {k: v for k, v in item.items() if k != "wait"}
+        svc.poll_tracker()
+        with svc._ingest:
+            self.assertEqual(svc._waiting(svc._sprints[sid]), 1)
+        svc.close()
+
 
 class BindTest(Case):
     def test_a_taken_port_raises_before_the_log_opens(self):

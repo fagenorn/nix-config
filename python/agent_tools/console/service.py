@@ -1214,7 +1214,7 @@ from agent_tools.console.event_log import (
     EventLog, utc_now)
 from agent_tools.console.view import (
     INBOX_CHANGED, ReadState, derive_view, encode_view, health_change, inbox_changes, inbox_records,
-    project_for, project_states, read_states, registry_changes, sprint_waiting)
+    is_waiting, project_for, project_states, read_states, registry_changes, sprint_waiting)
 from agent_tools.project_contract import agent_platform
 from agent_tools.system.forge_api import ForgeError
 from agent_tools.verification import verify_answer
@@ -4246,9 +4246,11 @@ class ConsoleService:
         return self._manager_session(sprint) is not None
 
     def _waiting(self, sprint: sprints.SprintState) -> int:
-        """Under the ingest lock: how many open records of the sprint's project wait on the owner."""
+        """Under the ingest lock: how many open records of the sprint's project wait on the owner. A record
+        that is a not-due wait is a line, never the owner's item (`view.is_waiting`)."""
         records = [r for r in self._inbox.values()
-                   if r.item.get("project_id") == sprint.project_id and not r.item["answered"]]
+                   if r.item.get("project_id") == sprint.project_id and not r.item["answered"]
+                   and not is_waiting(r.item)]
         return sprint_waiting(sprint, records)
 
     def _quota_wait(self, sprint: sprints.SprintState) -> manager.Wait | None:
