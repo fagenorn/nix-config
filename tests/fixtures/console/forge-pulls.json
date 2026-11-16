@@ -1,0 +1,15 @@
+{"data": {"repository": {"pullRequests": {"nodes": [
+  {"number": 40, "headRefName": "issue-4-resume-the-importer", "body": "Delivers the resume slice.",
+   "commits": {"nodes": [{"commit": {"committedDate": "2026-11-12T09:00:00Z",
+     "statusCheckRollup": {"contexts": {"nodes": [
+       {"__typename": "CheckRun", "status": "IN_PROGRESS"},
+       {"__typename": "CheckRun", "status": "COMPLETED"},
+       {"__typename": "StatusContext", "state": "SUCCESS"}]}}}}]}},
+  {"number": 41, "headRefName": "docs-tidy", "body": "Closes #5 and relates to owner/other#6.",
+   "commits": {"nodes": [{"commit": {"committedDate": "2026-11-12T08:30:00Z",
+     "statusCheckRollup": null}}]}},
+  {"number": 42, "headRefName": "issue-99-unrelated", "body": "",
+   "commits": {"nodes": [{"commit": {"committedDate": "2026-11-12T08:00:00Z",
+     "statusCheckRollup": {"contexts": {"nodes": [
+       {"__typename": "StatusContext", "state": "PENDING"}]}}}}]}}
+]}}}}
