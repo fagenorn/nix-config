@@ -1145,9 +1145,11 @@ class PictureDocsTest(unittest.TestCase):
             with self.subTest(needle):
                 self.assertIn(needle, text)
         adr = "docs/areas/console/adr/"
-        amended = "- **Status:** accepted; amended by ADR-console-038"
-        for path in ("019-a-managers-questions-arrive-as-inbox-items.md",
-                     "036-the-console-keeps-a-managers-pictures-and-serves-them-only-to-the-page.md"):
+        for path, amended in (
+                ("019-a-managers-questions-arrive-as-inbox-items.md",
+                 "- **Status:** accepted; amended by ADR-console-038, ADR-console-040"),
+                ("036-the-console-keeps-a-managers-pictures-and-serves-them-only-to-the-page.md",
+                 "- **Status:** accepted; amended by ADR-console-038")):
             with self.subTest(path):
                 lines = (ROOT / adr / path).read_text().splitlines()
                 self.assertEqual(next(r for r in lines if r.startswith("- **Status:**")), amended)
