@@ -1483,6 +1483,24 @@ class SprintReportViewTest(unittest.TestCase):
                 self.assertEqual(shown["waiting"], 1)
                 self.assertEqual(shown["checks"], [])
 
+    def test_a_held_review_card_blocking_nothing_is_a_check_line(self):
+        review = InboxRecord({
+            **check_item("p00", "k1", 30, []).item, "reason": inbox.REVIEW_REASON,
+            "kind": inbox.REVIEW_KIND, "answers": ["passed", "note"]}, "t1", "u1")
+        shown = entry(line(HELD_SPRINT, R + 4 * MIN, {("p00", "k1"): review}))
+        self.assertNotEqual(shown["ball"], "owner")
+        self.assertEqual(shown["waiting"], 0)
+        self.assertEqual([c["key"] for c in shown["checks"]], ["k1"])
+
+    def test_a_held_review_card_blocking_an_open_issue_keeps_the_ball_with_the_owner(self):
+        review = InboxRecord({
+            **check_item("p00", "k1", 30, [12]).item, "reason": inbox.REVIEW_REASON,
+            "kind": inbox.REVIEW_KIND, "answers": ["passed", "note"]}, "t1", "u1")
+        shown = entry(line(HELD_SPRINT, R + 4 * MIN, {("p00", "k1"): review}))
+        self.assertEqual(shown["ball"], "owner")
+        self.assertEqual(shown["waiting"], 1)
+        self.assertEqual(shown["checks"], [])
+
     def test_only_an_owner_check_becomes_a_check_line(self):
         record = InboxRecord(
             {**item("p00", "k1"), "issue": 30, "reason": "decision", "blocking": []}, "t1", "u1")
