@@ -19,8 +19,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
-from agent_tools.console import (capacity, console, exclusion, manager, nudge, pin, probe, service,
-                                 sessions, signin, sprints)
+from agent_tools.console import (capacity, console, exclusion, manager, nudge, permission, pin, probe,
+                                 service, sessions, signin, sprints)
 from agent_tools.console.event_log import GOAL_STATED, EventLog
 
 from . import console_test_support as support
@@ -40,6 +40,63 @@ NOW = 1_800_000_000
 
 def iso(seconds):
     return datetime.fromtimestamp(seconds, timezone.utc).isoformat(timespec="microseconds")
+
+
+class ManagerPermissionTest(Case):
+    """The service reads the project's mode off the lock and launches the manager in it (#1151)."""
+
+    def launch(self, reader):
+        support.write_registry(self.registry, support.entries(2))
+        support.sign_in(self.store, "work")
+        launches = support.Launches()
+        svc = self.svc = self.start(
+            launcher=launches, permission_reader=reader, session_poll_seconds=3600,
+            profile_dirs=[support.profile_dir(self.store, "work")])
+        svc.state_goal("owner/p01", "make the importer resumable")
+        return svc, launches
+
+    def test_a_launch_runs_in_the_mode_its_project_reads(self):
+        calls, free = [], []
+        chosen = permission.Permission(permission.BYPASS, permission.RULES_IN_PLACE)
+
+        def reader(project_id, root):
+            calls.append((project_id, root))
+
+            def probe_lock():
+                if self.svc._ingest.acquire(timeout=1):
+                    self.svc._ingest.release()
+                    free.append(True)
+                else:
+                    free.append(False)
+
+            thread = threading.Thread(target=probe_lock)
+            thread.start()
+            thread.join()
+            return chosen
+
+        svc, launches = self.launch(reader)
+        self.assertEqual(free, [True])
+        self.assertEqual(calls, [("owner/p01", "/srv/p01")])
+        self.assertEqual(launches.calls[0].permission, chosen)
+        _, _, kind, _, payload = support.log_rows(self.store)[-1]
+        self.assertEqual(kind, "manager.started")
+        self.assertEqual(json.loads(payload)["permission"], {
+            "mode": "bypassPermissions", "reason": "production rules in place"})
+
+    def test_a_reader_that_fails_launches_in_auto(self):
+        def reader(project_id, root):
+            raise RuntimeError("boom")
+
+        stderr = io.StringIO()
+        with contextlib.redirect_stderr(stderr):
+            svc, launches = self.launch(reader)
+        self.assertEqual(launches.calls[0].permission, permission.FALLBACK)
+        _, _, kind, _, payload = support.log_rows(self.store)[-1]
+        self.assertEqual(kind, "manager.started")
+        self.assertEqual(json.loads(payload)["permission"], {
+            "mode": "auto", "reason": "the production rules could not be read"})
+        self.assertIn("console: permission_unreadable owner/p01 RuntimeError: boom",
+                      stderr.getvalue())
 
 
 class ManagerServiceTest(Case):
@@ -130,7 +187,8 @@ class ManagerServiceTest(Case):
         _, _, kind, project, payload = support.log_rows(self.store)[-1]
         self.assertEqual((kind, project, json.loads(payload)), (
             "manager.started", "owner/p01",
-            {"profile": "work", "session_name": name, "sprint_id": sid, "seen_after": 0}))
+            {"profile": "work", "session_name": name, "sprint_id": sid, "seen_after": 0,
+             "permission": {"mode": "auto", "reason": permission.UNRESOLVED}}))
         self.assertEqual(self.sprint(svc, sid)["manager_state"], "started")
 
     def test_a_new_manager_is_shown_the_other_sprints_open_notices_before_its_goal(self):
