@@ -1,6 +1,6 @@
 # ADR-guard-006 — The guard reads a trusted store base policy and an untrusted compiled policy
 
-- **Status:** accepted
+- **Status:** accepted; amended by ADR-guard-011
 - **Decided in:** issue 377 D1, D2, D4, D5
 
 ## Context
@@ -11,13 +11,13 @@ The guard needs two kinds of fact. Some it must trust absolutely: which owners a
 
 The guard reads two files with disjoint closed schemas, and a loader refuses a file with any other key set. The base policy is a store file that holds every trusted member: the authorized owners, the literal integration bases and the store paths of `git`, `gh` and `jq`. The compiled policy is a user state file that holds only derived rows and a record of their derivation. No member exists in both, so neither file is a valid instance of the other.
 
-The guard takes no trusted member from the compiled policy and treats each derived row as a claim to be confirmed before it is relied on (ADR-guard-007). A compiled policy that is missing, unreadable, not a regular file, over 1 MiB, not JSON or outside its schema contributes no row and blocks nothing the base policy allows. A base policy that is bad blocks every Bash call, because it is a store file the build check loaded and a bad one is an installation defect. The compiler leaves out a project whose slug or branch it finds unsupported, so that project alone has no row. The loader is stricter: a stored row whose slug or branch it cannot accept empties the whole compiled policy, so one malformed row removes every derived authorization.
+The guard takes no trusted member from the compiled policy and treats each derived row as a claim to be confirmed before it is relied on (ADR-guard-007); a row's production rules, which only refuse, are the exception and are read unconfirmed (ADR-guard-011). A compiled policy that is missing, unreadable, not a regular file, over 1 MiB, not JSON or outside its schema contributes no row and blocks nothing the base policy allows. A base policy that is bad blocks every Bash call, because it is a store file the build check loaded and a bad one is an installation defect. The compiler leaves out a project whose slug or branch it finds unsupported, so that project alone has no row. The loader is stricter: a stored row whose slug or branch it cannot accept empties the whole compiled policy, so one malformed row removes every derived authorization.
 
 The guard is not a sandbox.
 
 ## Consequences
 
-- The guard catches the mistakes of a cooperating session. Rewriting the compiled policy alone gains nothing: it cannot add an owner, an integration base or a program, and a forged row is refused at use. What stays user-writable:
+- The guard catches the mistakes of a cooperating session. Rewriting the compiled policy alone gains no authorization: it cannot add an owner, an integration base or a program, and a forged row is refused at use. It can remove refusals: a session that rewrites the compiled policy can remove a project's production refusals (ADR-guard-011). What stays user-writable:
   - The fleet registry. A session can add an entry, but the row check still demands that the repository's own branch on `origin` publishes a resolving contract that names that project id, that repository as tracker and as release target, and that the provider confirms the name. A registry edit therefore authorizes only a repository that already declares itself adopted and that the session could register with the registration command anyway.
   - Transport and tool configuration: `~/.ssh/config`, git configuration and the `gh` credential decide what `origin` and the provider answer. A session that rewrites them and the registry can forge a derivation, which takes several deliberate edits to stores unrelated to the guard.
   - The checkout's object store. A session that plants an object under the id `origin` lists forges that read, as it already could before a fetch that finds the object present (issue 385).

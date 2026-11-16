@@ -121,7 +121,7 @@ class GuardPolicyWorld:
         """This repository's own contract, renamed to `slug` (so it stays grammar-valid)."""
         text = (REPO_ROOT / ".agents/project.json").read_text("utf-8")
         contract = json.loads(text.replace(OWN_SLUG, slug))
-        # No row reads production rules yet (#1149), and the `release` mutations below would strand them.
+        # A test declares production rules through `mutate` (#1149): the `release` mutations below would strand a copied `release_profile`.
         contract.pop("production", None)
         contract["project"] = {"id": project_id, "name": project_id.split("/")[-1]}
         contract["bindings"]["vcs"]["integration_branch"] = integration_branch
