@@ -432,7 +432,7 @@ never from the `deliveries` mapping: a run leaves that mapping once its final re
 the fold keeps its last stage and movement, so they outlive the run. `waiting` is the number of
 open inbox items of registered projects whose project is the sprint's and whose issue is one of the
 report's issues or its `inbox` numbers, plus the sprint's open questions. An open owner check (a
-verification prompt, ADR-console-043) whose `blocking` list meets none of the sprint's open issues
+verification prompt, ADR-console-044) whose `blocking` list meets none of the sprint's open issues
 (report issues not landed, held, dropped or closed out) is not counted and is listed in `checks`
 instead; a missing or malformed `blocking` counts as blocking. `checks` is ordered by
 `waiting_since` then `key`, and each check stays an inbox item.
@@ -940,7 +940,7 @@ def _effective_stages(state: SprintState) -> list[tuple[int, str, str]]:
 
 
 def owner_check(item: Mapping) -> bool:
-    """Whether a tracker item is a verification owner prompt (ADR-console-043)."""
+    """Whether a tracker item is a verification owner prompt (ADR-console-044)."""
     return item.get("reason") in verify_owner.REASONS
 
 
@@ -960,7 +960,7 @@ def _sprint_named(state: SprintState, records: Iterable[InboxRecord]) -> list[In
 
 
 def sprint_checks(state: SprintState, records: Iterable[InboxRecord]) -> list[InboxRecord]:
-    """The sprint's open owner checks that block none of its open issues (ADR-console-043), ordered
+    """The sprint's open owner checks that block none of its open issues (ADR-console-044), ordered
     by `waiting_since` then `key`. A `blocking` that is missing or not a list counts as blocking."""
     open_issues = sprint_open_issues(state)
     checks = [r for r in _sprint_named(state, records)

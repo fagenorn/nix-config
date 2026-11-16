@@ -4337,6 +4337,19 @@ class PageSprintBlockTest(unittest.TestCase):
                 self.assertEqual(after["active"], active)
                 self.assertEqual(after["focus_count"], before["focus_count"] + 1)
 
+    def test_a_focused_check_card_keeps_enter_and_digits_from_answering_another_item(self) -> None:
+        for name, items in (("lead", [BRIEF, CHECK_ITEM]),
+                            ("row", [BRIEF, DECISION_ITEM, CHECK_ITEM])):
+            with self.subTest(name):
+                (_, focused, snap) = render([
+                    START, {"frame": with_check(items)}, {"snapshot": True}, {"click": "sprint-check"},
+                    {"snapshot": True}, {"key": "Enter", "follow": True}, {"key": "1", "follow": True},
+                    {"clock": 5000}, {"snapshot": True},
+                ])
+                self.assertIn(focused["active"], ("card lead", "row"))
+                self.assertEqual(approvals(snap), [])
+                self.assertEqual(answers(snap), [])
+
     def test_a_check_line_with_no_card_does_nothing(self) -> None:
         (before, after) = render([
             START, {"frame": with_check([])}, {"snapshot": True},

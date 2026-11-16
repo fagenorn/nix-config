@@ -4306,7 +4306,8 @@ document.addEventListener("keydown", (event) => {
     return;
   }
   const focused = event.target && event.target.tagName;
-  if (["A", "BUTTON", "SUMMARY", "INPUT", "TEXTAREA", "SELECT"].includes(focused)) return;
+  // A card focused by its sprint's check line (openCheckCard) is ARTICLE or LI: the answer keys stay with it, not with the unrelated item currentEntry would pick.
+  if (["A", "BUTTON", "SUMMARY", "INPUT", "TEXTAREA", "SELECT", "ARTICLE", "LI"].includes(focused)) return;
   if (event.target && event.target.isContentEditable === true) return;
   if (event.key === "a") {
     openAccounts();
