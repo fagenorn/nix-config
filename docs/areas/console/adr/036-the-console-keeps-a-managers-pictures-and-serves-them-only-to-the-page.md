@@ -1,6 +1,6 @@
 # ADR-console-036 — The console keeps a manager's pictures and serves them only to the page
 
-- **Status:** accepted
+- **Status:** accepted; amended by ADR-console-038
 - **Decided in:** #1089
 
 ## Context

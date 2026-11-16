@@ -340,6 +340,17 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .pic-failed { display: block; padding: 10px; font-size: .8125rem; color: var(--ov2); cursor: default; }
 .pic-line { margin-top: 4px; font-size: .84375rem; color: var(--sub0); overflow-wrap: anywhere; }
 .pic-label { display: block; margin-bottom: 4px; font-size: .8125rem; color: var(--ov2); }
+.viewer { position: fixed; inset: 0; z-index: 30; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; padding: 24px 16px; background: rgba(24, 25, 38, .92); overflow-y: auto; }
+.viewer[hidden] { display: none; }
+.viewer-count { margin: 0; font-size: .8125rem; color: var(--sub0); }
+.viewer-stage { max-width: 100%; }
+.viewer-pair { display: flex; gap: 16px; max-width: 100%; }
+.viewer-pic { margin: 0; min-width: 0; }
+.viewer-pic.current { outline: 2px solid var(--lav); outline-offset: 4px; border-radius: 4px; }
+.viewer img { display: block; max-width: 100%; max-height: calc(100vh - 12rem); object-fit: contain; }
+.viewer img[hidden] { display: none; }
+.viewer-close, .viewer-prev, .viewer-next { padding: 6px 14px; font: inherit; color: var(--text); background: var(--mantle); border: 1px solid var(--hair); border-radius: 8px; cursor: pointer; }
+.viewer-close:disabled, .viewer-prev:disabled, .viewer-next:disabled { color: var(--ov2); cursor: default; }
 
 @media (max-width: 1180px) {
   .desk-grid { grid-template-columns: minmax(0, 1fr) 400px; column-gap: 56px; }
@@ -355,6 +366,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 }
 @media (max-width: 480px) {
   .pic-pair { flex-direction: column; }
+  .viewer-pair { flex-direction: column; }
   .pic { flex-basis: 100%; }
   .card .q.reg, .rest .q.reg { font-size: 1rem; }
   .desk-grid { padding: 24px 16px 48px; }
@@ -383,6 +395,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 <section class="register" id="register" aria-label="Register project"></section>
 </aside>
 </div>
+<div class="viewer" id="viewer" role="dialog" aria-modal="true" aria-label="Picture" hidden></div>
 <template id="quiet-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M12.5 9.5A5 5 0 0 1 6.5 3.5a5 5 0 1 0 6 6z"/></svg></template>
 <template id="decision-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 13.5V9.5M8 9.5c0-3-3.6-2.6-3.6-6M8 9.5c0-3 3.6-2.6 3.6-6"/></svg></template>
 <template id="brief-icon"><svg class="ic" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.5h5.2L12 5.3v8.2H4zM9 2.5v3h3M6.2 8.5h3.6M6.2 11h3.6"/></svg></template>
@@ -2010,7 +2023,7 @@ function pictureFailed(img) {
   img.hidden = true;
   const thumb = img.parentNode;
   thumb.appendChild(el("span", "pic-failed", "The picture could not be loaded."));
-  thumb.parentNode.className += " failed";
+  if (thumb.tagName === "BUTTON") thumb.parentNode.className += " failed";
 }
 async function pictureFetch(id, entry) {
   let url = null;
@@ -2050,12 +2063,18 @@ function prunePictures() {
     if (entry.url !== null) URL.revokeObjectURL(entry.url);
   }
 }
-function pictureFigure(key, index, picture, label) {
+function pictureFigure(key, index, picture, label, sequence) {
   const figure = el("figure", "pic");
   if (label !== null) figure.appendChild(el("span", "pic-label", label));
   const thumb = el("button", "pic-thumb");
   thumb.setAttribute("type", "button");
   thumb.dataset.key = key + "/" + index;
+  thumb.addEventListener("click", () => openViewer(key, sequence, index));
+  thumb.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    openViewer(key, sequence, index);
+  });
   const img = el("img", "pic-img");
   img.setAttribute("alt", picture.line);
   img.dataset.picture = picture.id;
@@ -2074,13 +2093,106 @@ function pictureGallery(key, pictures) {
     const next = sequence[i + 1];
     if (one.pair === "before" && next !== undefined && next.pair === "after") {
       const pair = el("div", "pic-pair");
-      pair.appendChild(pictureFigure(key, i, one, "Before"));
-      pair.appendChild(pictureFigure(key, i + 1, next, "After"));
+      pair.appendChild(pictureFigure(key, i, one, "Before", sequence));
+      pair.appendChild(pictureFigure(key, i + 1, next, "After", sequence));
       gallery.appendChild(pair);
       i += 1;
-    } else gallery.appendChild(pictureFigure(key, i, one, null));
+    } else gallery.appendChild(pictureFigure(key, i, one, null, sequence));
   }
   return gallery;
+}
+// The shared modal viewer (ADR-console-038): one picture at a time in the card's order, a pair side by side. While it is open the rest of the body is inert and its own keys are the only ones that act.
+let viewer = null;
+function viewerFigure(picture, label, current) {
+  const figure = el("figure", current ? "viewer-pic current" : "viewer-pic");
+  if (current) figure.setAttribute("aria-current", "true");
+  if (label !== null) figure.appendChild(el("span", "pic-label", label));
+  const img = el("img", "pic-img viewer-img");
+  img.setAttribute("alt", picture.line);
+  img.dataset.picture = picture.id;
+  figure.appendChild(img);
+  figure.appendChild(el("figcaption", "pic-line", picture.line));
+  pictureSrc(img, picture.id);
+  return figure;
+}
+function viewerButton(cls, text, disabled) {
+  const button = el("button", cls, text);
+  button.setAttribute("type", "button");
+  if (disabled) button.disabled = true;
+  return button;
+}
+function drawViewer() {
+  const host = document.getElementById("viewer");
+  const { sequence, index } = viewer;
+  const one = sequence[index];
+  const before = sequence[index - 1];
+  const next = sequence[index + 1];
+  const first = one.pair === "before" && next !== undefined && next.pair === "after" ? index
+    : one.pair === "after" && before !== undefined && before.pair === "before" ? index - 1 : -1;
+  const stage = el("div", "viewer-stage");
+  if (first < 0) stage.appendChild(viewerFigure(one, null, false));
+  else {
+    const pair = el("div", "viewer-pair");
+    pair.appendChild(viewerFigure(sequence[first], "Before", first === index));
+    pair.appendChild(viewerFigure(sequence[first + 1], "After", first + 1 === index));
+    stage.appendChild(pair);
+  }
+  const close = viewerButton("viewer-close", "Close", false);
+  close.addEventListener("click", closeViewer);
+  const prev = viewerButton("viewer-prev", "Previous", index === 0);
+  prev.addEventListener("click", () => stepViewer(-1));
+  const forward = viewerButton("viewer-next", "Next", index === sequence.length - 1);
+  forward.addEventListener("click", () => stepViewer(1));
+  host.replaceChildren(close, el("p", "viewer-count", (index + 1) + " of " + sequence.length), stage, prev, forward);
+}
+function stepViewer(by) {
+  const to = viewer.index + by;
+  if (to < 0 || to >= viewer.sequence.length) return;
+  const held = document.activeElement;
+  const cls = held !== null && held.parentNode === document.getElementById("viewer") ? held.className : "viewer-close";
+  viewer.index = to;
+  drawViewer();
+  const children = [...document.getElementById("viewer").children];
+  const again = children.find((n) => n.className === cls && n.disabled !== true) || children[0];
+  again.focus();
+}
+function openViewer(key, sequence, index) {
+  if (viewer !== null) return;
+  const host = document.getElementById("viewer");
+  const shaded = [...document.body.children].filter((n) => n !== host && n.inert !== true);
+  viewer = { key, sequence, index, shaded };
+  drawViewer();
+  for (const n of shaded) n.inert = true;
+  host.hidden = false;
+  host.children[0].focus();
+}
+function closeViewer() {
+  if (viewer === null) return;
+  const { key, index, shaded } = viewer;
+  viewer = null;
+  for (const n of shaded) n.inert = false;
+  const host = document.getElementById("viewer");
+  host.hidden = true;
+  host.replaceChildren();
+  const thumb = [...document.querySelectorAll("button.pic-thumb")].find((n) => n.dataset.key === key + "/" + index);
+  if (thumb !== undefined) thumb.focus();
+}
+function viewerKey(event) {
+  if (viewer === null) return false;
+  if (event.key === "ArrowRight" || event.key === "ArrowLeft") {
+    event.preventDefault();
+    stepViewer(event.key === "ArrowRight" ? 1 : -1);
+  } else if (event.key === "Escape") {
+    event.preventDefault();
+    closeViewer();
+  } else if (event.key === "Tab") {
+    event.preventDefault();
+    const buttons = [...document.getElementById("viewer").children].filter((n) => n.tagName === "BUTTON" && n.disabled !== true);
+    const at = buttons.indexOf(document.activeElement);
+    const to = at < 0 ? 0 : (at + (event.shiftKey ? buttons.length - 1 : 1)) % buttons.length;
+    buttons[to].focus();
+  }
+  return true;
 }
 // A refused registration waiting for its Retry (ADR-console-028 D10): a question card whose one option runs the registration again.
 function isRetry(item) {
@@ -3123,6 +3235,7 @@ function renderInbox(view) {
     again.focus();
     again.setSelectionRange(held.start, held.end);
   }
+  if (viewer !== null && ![...document.querySelectorAll("button.pic-thumb")].some((n) => n.dataset.key.startsWith(viewer.key + "/"))) closeViewer();
   prunePictures();
 }
 function momentLine(moment) {
@@ -3984,6 +4097,7 @@ window.addEventListener("pagehide", endHold);
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "hidden") endHold(); });
 document.addEventListener("keydown", (event) => {
   if (event.ctrlKey || event.altKey || event.metaKey || event.repeat || lastView === null) return;
+  if (viewerKey(event)) return;
   if (accountsOpen) {
     if (event.key === "Escape") {
       event.preventDefault();

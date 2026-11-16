@@ -973,3 +973,31 @@ class PictureDocsTest(unittest.TestCase):
                        "bad picture id", "404", "Sec-Fetch-Site"):
             with self.subTest(needle):
                 self.assertIn(needle, text)
+
+    def test_adr_038_records_the_question_pictures(self):
+        name = ("docs/areas/console/adr/038-a-managers-question-shows-its-pictures-on-the-card-"
+                "and-full-size-in-a-viewer.md")
+        self.assertEqual(
+            (ROOT / name).read_text().splitlines()[0],
+            "# ADR-console-038 — A manager's question shows its pictures on the card and full "
+            "size in a viewer")
+        text = self.doc(name)
+        for needle in ("#1090", "8", "140", "before", "after", "X-Console-Token", "object URL",
+                       "blob:", "Escape", "inert", "480", "ADR-console-002", "ADR-console-019",
+                       "ADR-console-033", "ADR-console-036", "#1091"):
+            with self.subTest(needle):
+                self.assertIn(needle, text)
+        adr = "docs/areas/console/adr/"
+        amended = "- **Status:** accepted; amended by ADR-console-038"
+        for path in ("019-a-managers-questions-arrive-as-inbox-items.md",
+                     "036-the-console-keeps-a-managers-pictures-and-serves-them-only-to-the-page.md"):
+            with self.subTest(path):
+                lines = (ROOT / adr / path).read_text().splitlines()
+                self.assertEqual(next(r for r in lines if r.startswith("- **Status:**")), amended)
+        lines = (ROOT / adr / "002-the-desk-page-design-rules.md").read_text().splitlines()
+        status = next(r for r in lines if r.startswith("- **Status:**"))
+        self.assertTrue(status.endswith("ADR-console-035, ADR-console-038"), status)
+        context = (ROOT / "docs/areas/console/CONTEXT.md").read_text()
+        for term in ("**Question round**:", "**Picture**:"):
+            entry = context[context.index(term):].split("\n\n")[0]
+            self.assertIn("ADR-console-038", entry, term)

@@ -74,6 +74,13 @@
 // object_urls: {made, revoked}. A click, focus_on or key step's "on" takes an optional
 // nth (0-based, default 0) choosing among the matches in document order; fewer matches
 // throw.
+// A key step also takes shiftKey (default false) and passes it on the event. document.body is
+// root, whose direct children are the page's id'd elements (#viewer among them). A snapshot
+// node adds inert (true only when the element's inert property is true), and Elem.focus() does
+// nothing when the element or any ancestor through parentNode has inert true, as a browser
+// refuses focus inside an inert subtree. The harness still performs no native activation and no
+// native focus move: a key never clicks the focused button and Tab never moves focus by itself;
+// both are checked in a browser.
 // Prints a JSON list of snapshots on stdout; any failure exits 1 with the
 // error on stderr. A selector the fake DOM does not support throws, so a
 // test cannot pass on a stub.
@@ -132,6 +139,7 @@ class Elem {
   }
   focus() {
     if (this.disabled === true) return; // a browser does not focus a disabled control
+    for (let n = this; n; n = n.parentNode) if (n.inert === true) return; // nor inside an inert subtree
     const was = state.active === this;
     state.active = this;
     state.focusCount += 1;
@@ -367,6 +375,7 @@ const settle = async () => {
 const document = {
   addEventListener: listen("document"),
   hasFocus: () => state.focused,
+  body: root,
   get activeElement() {
     return state.active && attached(root).includes(state.active) ? state.active : null;
   },
@@ -418,6 +427,7 @@ function node(n) {
     width: n.style.width === undefined ? null : n.style.width,
     open: n.open,
     hidden: n.hidden === true,
+    inert: n.inert === true,
     expanded: n.attributes["aria-expanded"] === undefined ? null : n.attributes["aria-expanded"],
     pressed: n.attributes["aria-pressed"] === undefined ? null : n.attributes["aria-pressed"],
     value: n.value === undefined ? null : n.value,
@@ -483,7 +493,7 @@ async function run() {
       const own = step.on === undefined ? null : byClass(step.on, root, step.nth);
       const event = {
         key: step.key, ctrlKey: !!step.ctrlKey, altKey: !!step.altKey, metaKey: !!step.metaKey,
-        shiftKey: false, repeat: false, preventDefault() { prevented = true; },
+        shiftKey: step.shiftKey === true, repeat: false, preventDefault() { prevented = true; },
         target: own !== null ? own
           : step.follow === true ? (document.activeElement || { tagName: "BODY", isContentEditable: false })
           : step.target === undefined ? null : { tagName: step.target, isContentEditable: step.editable === true },
