@@ -3308,11 +3308,11 @@ class RefusalTest(AdoptTestCase):
         self.assertEqual(code, 2)
         self.assertEqual(out, "")
 
-    def test_the_parser_exposes_the_four_verbs_and_nothing_else(self):
+    def test_the_parser_exposes_the_five_verbs_and_nothing_else(self):
         code, out, err = run("--help", home=self.home)
         self.assertEqual(code, 0, err)
         choices = re.search(r"usage: adopt-project \[-h\] \{([^}]*)\}", out)
-        self.assertEqual(choices.group(1), "plan,apply,verify,migrate")
+        self.assertEqual(choices.group(1), "plan,apply,discard,verify,migrate")
 
 
 class ProcessWiringTest(AdoptTestCase):
