@@ -97,6 +97,8 @@ class ProfileInspectTest(ReleaseCommandCase):
         self.assertEqual((code, payload["error"]["code"]), (2, "profile_unknown"))
         contract = self.contract()
         contract["release"] = "unsupported"
+        # The replaced release no longer holds the profile that production.release_profile names.
+        contract.pop("production", None)
         self.write_contract(contract)
         code, payload, _ = self.run_release("profile", "inspect", "github-release")
         self.assertEqual((code, payload["error"]["code"]), (2, "release_unsupported"))
@@ -113,6 +115,7 @@ class PublicationFreeInspectTest(ReleaseCommandCase):
         profile = json.loads((REPO / "tests/fixtures/release/publication-free-profile.json")
                              .read_text("utf-8"))
         contract["release"] = {"profiles": {"forge-target": profile}}
+        contract.pop("production", None)
         self.write_contract(contract)
         code, report, err = self.run_release("profile", "inspect", "forge-target")
         self.assertEqual(code, 0, err)
@@ -358,6 +361,7 @@ class HostLocalInspectTest(ReleaseCommandCase):
             "argus": json.loads((fixtures / "argus-shaped-profile.json").read_text("utf-8")),
             "forge-target": json.loads((fixtures / "publication-free-profile.json")
                                        .read_text("utf-8"))}}
+        contract.pop("production", None)
         self.write_contract(contract)
         code, report, err = self.run_release("profile", "inspect", "argus")
         self.assertEqual(code, 0, err)
