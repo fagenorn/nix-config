@@ -301,7 +301,9 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .notice-head .notice-age { flex: none; margin-left: auto; color: var(--ov2); white-space: nowrap; }
 .notice-words { color: var(--text); }
 .notice-claim { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; }
-.notices-project { min-width: 0; overflow-wrap: anywhere; }
+.notices-project { margin-left: 10px; min-width: 0; overflow-wrap: anywhere; }
+.line.notices summary { display: revert; list-style: revert; }
+.line.notices summary::-webkit-details-marker { display: revert; }
 .notice .notice-long, .notice code { display: inline-block; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; vertical-align: bottom; }
 #list > li.line + li.line.after-line { margin-top: 0; padding-top: 0; border-top: 0; }
 .quietfold { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--hair); }

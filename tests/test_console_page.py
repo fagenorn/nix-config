@@ -1374,6 +1374,32 @@ class PageNoticeTest(unittest.TestCase):
                     len(fold_colour_faults("<style>" + rule + "</style>", {"notice", "notice-long"})), 1)
         self.assertEqual(fold_colour_faults(clean, {"notice", "line"}), [])
 
+    def test_the_closed_notices_fold_shows_the_reports_disclosure_arrow(self) -> None:
+        p0 = with_notices(project(0, []), HANDOFF_W, CLAIM_W)
+        snap = render([self.begin, {"frame": view([p0])}, {"snapshot": True}])[-1]
+        (fold,) = folds(snap["projects"])
+        self.assertFalse(fold["open"])
+        summary = fold["children"][0]
+        self.assertEqual(summary["tag"], "summary")
+        self.assertEqual([n for n in nodes(summary) if n["tag"] == "svg"], [])
+        for sel in (".sprint-detail summary", ".finished-list > summary"):
+            with self.subTest(selector=sel):
+                found = css_decls(sel)
+                self.assertTrue(found)
+                for d in found:
+                    for prop in ("display", "list-style", "list-style-type"):
+                        self.assertNotIn(prop, d)
+        selectors = [x.strip() for s, _ in css_rules(PAGE_TEXT) for x in s.split(",")]
+        for sel in (".sprint-detail summary::-webkit-details-marker",
+                    ".finished-list > summary::-webkit-details-marker"):
+            self.assertFalse([x for x in selectors if sel in x])
+        self.assertTrue([d for d in css_decls(".line.notices summary")
+                         if d.get("display") == "revert" and d.get("list-style") == "revert"])
+        self.assertTrue([d for d in css_decls(".line.notices summary::-webkit-details-marker")
+                         if d.get("display") == "revert"])
+        self.assertTrue([d for d in css_decls(".notices-project")
+                         if d.get("margin-left") == "10px"])
+
     def test_notice_words_wrap_within_the_column(self) -> None:
         rules = css_rules(PAGE_TEXT)
 
