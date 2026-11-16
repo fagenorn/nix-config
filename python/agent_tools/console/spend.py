@@ -70,14 +70,29 @@ counted is, per day in `total` and for the view. The keys, per message key:
 - `aspect`: `KEEPALIVE` for a ping; `DELIVERIES` for a workflow agent; for a session's own and
   subagent transcripts `MANAGERS` when the session is a sprint's, `OUTSIDE` otherwise, and
   `UNATTRIBUTED` when the session is unknown.
+
+The check (`python -m agent_tools.console.spend check-shares`): reads the transcripts under each
+`--projects` directory (default `~/.claude/projects`) from `--from` (default `2026-11-09`, the
+reader's `since`) and sums, over the `AGENT` keys of runs whose program is `--program` (default
+`deliver-batch`; nested deliver-standard children are inside the run) dated from `--from` to `--to`
+(default `2026-11-16`) inclusive, input + cache_write + cache_read + output tokens per phase
+(`phase_shares`; `UNATTRIBUTED` for an agent without a journal label). It prints one JSON line
+`{"program", "from", "to", "tokens", "shares", "reference", "off", "tolerance"}` (`shares` in
+percent rounded to 2 decimals, `reference` is `REFERENCE_BATCH_SHARES`, the delivery cost
+measurement's deliver-batch table grouped into `PHASES`, `off` the phases of the reference, in
+`PHASES` order, whose share is more than `--tolerance` points (default 3.0) from it). Exit 0 when
+there are tokens and `off` is empty, 1 when a phase is off, 75 when the window holds no tokens (its
+transcripts are gone or not yet read), 2 on a usage error or a `--from` after `--to`.
 """
 
 from __future__ import annotations
 
+import argparse
+import json
 import os
 import re
 import sys
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
@@ -116,6 +131,11 @@ DIMENSIONS = ("session", "project", "sprint", "run", "phase", "account", "aspect
 
 BATCH = "deliver-batch"
 STANDARD = "deliver-standard"
+
+REFERENCE_BATCH_SHARES: dict[str, float] = {
+    "setup": 2.6, "plan": 17.1, "plan review": 9.7, "plan revise": 7.9, "implement": 28.0,
+    "task review": 7.9, "final review": 11.0, "fix wave": 8.3, "verify": 0.7, "land": 5.8,
+    "close-out": 1.0}
 
 PHASE_LABELS: tuple[tuple[str, str], ...] = (
     ("setup", r"setup|acquire|acquire-\d+|worktree|facts-\d+|settle-\d+|readopt-\d+"
@@ -511,3 +531,57 @@ def session_profiles(events: Iterable[Event],
         if isinstance(session_id, str) and isinstance(profile, str):
             found[session_id] = profile
     return found
+
+
+def phase_shares(snapshot: Snapshot, program: str, start: str, end: str
+                 ) -> tuple[int, dict[str, float]]:
+    """(summed tokens, percent share per phase) of `program`'s workflow agents from day `start` to `end`."""
+    sums: dict[str, int] = {phase: 0 for phase in (*PHASES, OTHER, UNATTRIBUTED)}
+    for key, tokens in snapshot.totals.items():
+        if (key.source != AGENT or key.run is None or snapshot.programs.get(key.run) != program
+                or not start <= key.day <= end):
+            continue
+        label = snapshot.journals.get(key.run, {}).get(key.agent)
+        phase = phase_of(label) if label is not None else UNATTRIBUTED
+        sums[phase] += tokens.input + tokens.cache_write + tokens.cache_read + tokens.output
+    total = sum(sums.values())
+    return total, {phase: 100 * count / total if total else 0.0 for phase, count in sums.items()}
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="spend", description=__doc__.splitlines()[0])
+    commands = parser.add_subparsers(dest="command", required=True)
+    check = commands.add_parser("check-shares", help="compare the phase shares with the measurement")
+    check.add_argument("--projects", type=Path, action="append", metavar="DIR")
+    check.add_argument("--from", dest="start", default="2026-11-09")
+    check.add_argument("--to", dest="end", default="2026-11-16")
+    check.add_argument("--tolerance", type=float, default=3.0)
+    check.add_argument("--program", default=BATCH)
+    try:
+        args = parser.parse_args(argv)
+        for value in (args.start, args.end):
+            date.fromisoformat(value)
+        if args.start > args.end:
+            parser.error("--from is after --to")
+    except SystemExit as stop:
+        return stop.code if isinstance(stop.code, int) else 2
+    except ValueError as error:
+        print(f"spend: {error}", file=sys.stderr)
+        return 2
+    reader = SpendReader()
+    reader.read(args.projects or [Path.home() / ".claude/projects"], args.start)
+    tokens, shares = phase_shares(reader.snapshot(), args.program, args.start, args.end)
+    off = [phase for phase in PHASES
+           if abs(shares[phase] - REFERENCE_BATCH_SHARES[phase]) > args.tolerance]
+    print(json.dumps({"program": args.program, "from": args.start, "to": args.end,
+                      "tokens": tokens,
+                      "shares": {phase: round(share, 2) for phase, share in shares.items()},
+                      "reference": REFERENCE_BATCH_SHARES, "off": off,
+                      "tolerance": args.tolerance}, sort_keys=True))
+    if tokens == 0:
+        return 75
+    return 1 if off else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,7 +1,11 @@
 """The console's spend reader (#1134): pricing, phases, incremental transcript reading."""
 
+import contextlib
+import io
 import json
 import os
+import subprocess
+import sys
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -13,6 +17,7 @@ from agent_tools.console.spend import AGENT, BATCH, OTHER, PING, SESSION, STANDA
 from agent_tools.hosts import model_pricing
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 
+ROOT = Path(__file__).resolve().parents[1]
 DAY = "2026-11-16"
 SINCE = "2026-10-18"
 
@@ -496,6 +501,108 @@ class SessionProfilesTest(unittest.TestCase):
                    self.event(3, sessions.SEEN, session_id=7, profile="p3"),
                    self.event(4, sessions.HOOK, session_id="s1", profile="p4")]
         self.assertEqual(spend.session_profiles(ignored, known), {"s1": "p1"})
+
+
+SHARE_LABELS = {"setup": "setup", "plan": "plan", "plan review": "plan-review",
+                "plan revise": "plan-revise", "implement": "impl-1", "task review": "review-1",
+                "final review": "final-1", "fix wave": "fix-wave", "verify": "verify",
+                "land": "land-pr-5", "close-out": "close-out-5"}
+
+
+class CheckSharesTest(unittest.TestCase):
+    """`check-shares` over a tree whose batch run holds the reference shares, in thousandths."""
+
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.tmp = Path(tmp.name)
+        self.projects = self.tmp / "projects"
+        slug = self.projects / "-srv-p00" / "s1" / "subagents" / "workflows"
+        batch, standard = slug / "wf_b", slug / "wf_s"
+        batch.mkdir(parents=True)
+        standard.mkdir()
+        started = []
+        self.agents = {}
+        for index, (phase, share) in enumerate(spend.REFERENCE_BATCH_SHARES.items()):
+            agent, label = f"a{index}", SHARE_LABELS[phase]
+            started.append({"type": "started", "agentId": agent, "label": label, "phase": "Setup"})
+            self.agents[phase] = batch / f"agent-{agent}.jsonl"
+            self.agents[phase].write_bytes(
+                assistant(f"M{index}", "2026-11-12", input=round(share * 1000)))
+        started.append({"type": "started", "agentId": "ax", "label": "setup", "phase": "Intake"})
+        (batch / "journal.jsonl").write_text("".join(json.dumps(r) + "\n" for r in started))
+        (standard / "journal.jsonl").write_text(
+            '{"type":"started","agentId":"b1","label":"impl-1","phase":"Plan"}\n'
+            '{"type":"started","agentId":"b2","label":"impl-1","phase":"Tasks"}\n')
+        (standard / "agent-b1.jsonl").write_bytes(
+            assistant("S1", "2026-11-12", input=1_000_000))
+
+    def move(self, source, target, tokens):
+        for phase, delta in ((source, -tokens), (target, tokens)):
+            path = self.agents[phase]
+            line = json.loads(path.read_text())
+            line["message"]["usage"]["input_tokens"] += delta
+            path.write_text(json.dumps(line) + "\n")
+
+    def check(self, *extra):
+        argv = ["check-shares", "--projects", str(self.projects), "--from", "2026-11-09",
+                "--to", "2026-11-16", *extra]
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            code = spend.main(argv)
+        lines = out.getvalue().splitlines()
+        return code, json.loads(lines[0]) if lines else None
+
+    def test_reference_table(self):
+        self.assertEqual(set(spend.REFERENCE_BATCH_SHARES), set(spend.PHASES))
+        self.assertLessEqual(abs(sum(spend.REFERENCE_BATCH_SHARES.values()) - 100.0), 0.05)
+
+    def test_shares_within_tolerance_exit_0(self):
+        code, line = self.check()
+        self.assertEqual(code, 0)
+        self.assertEqual(line["off"], [])
+        self.assertEqual(line["tokens"], 100_000)
+        self.assertAlmostEqual(line["shares"]["implement"], 28.0)
+        self.assertEqual(line["program"], "deliver-batch")
+        self.assertEqual(line["reference"], spend.REFERENCE_BATCH_SHARES)
+        self.assertEqual(line["tolerance"], 3.0)
+
+    def test_a_phase_off_by_more_than_the_tolerance_exits_1(self):
+        self.move("implement", "plan", 4_000)
+        code, line = self.check()
+        self.assertEqual(code, 1)
+        self.assertEqual(line["off"], ["plan", "implement"])
+
+    def test_within_tolerance_boundary(self):
+        self.move("implement", "plan", 2_900)
+        code, line = self.check()
+        self.assertEqual(code, 0)
+        self.assertEqual(line["off"], [])
+
+    def test_no_batch_tokens_exit_75(self):
+        argv = ["check-shares", "--projects", str(self.projects), "--from", "2026-11-13",
+                "--to", "2026-11-16"]
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(spend.main(argv), 75)
+
+    def test_from_after_to_is_a_usage_error(self):
+        argv = ["check-shares", "--projects", str(self.projects), "--from", "2026-11-16",
+                "--to", "2026-11-09"]
+        with contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(spend.main(argv), 2)
+
+    def test_runs_as_a_module_from_the_root(self):
+        empty = self.tmp / "empty"
+        empty.mkdir()
+        done = subprocess.run(
+            [sys.executable, "-m", "agent_tools.console.spend", "check-shares",
+             "--projects", str(empty)],
+            cwd=ROOT, env={**os.environ, "PYTHONPATH": "python"}, capture_output=True, text=True,
+            timeout=60)
+        self.assertEqual(done.returncode, 75)
+        lines = done.stdout.splitlines()
+        self.assertEqual(len(lines), 1)
+        self.assertEqual(json.loads(lines[0])["tokens"], 0)
 
 
 if __name__ == "__main__":
