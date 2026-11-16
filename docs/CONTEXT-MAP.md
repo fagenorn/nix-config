@@ -100,6 +100,7 @@
 | Session | Console |
 | Sign-in state | Console |
 | Spend | Console |
+| Spend page | Console |
 | Sprint | Console |
 | Stale claim | Claims |
 | Suite member | Delivery |

@@ -5,12 +5,12 @@ budget: 200 lines
 
 # Console
 
-Console covers the local page that tells the owner whether they are needed and shows the fleet's projects, and the service behind it: its event log, its derived view and its update stream.
+Console covers the local pages, the desk page that tells the owner whether they are needed and shows the fleet's projects and the Spend page, and the service behind them: its event log, its derived view and its update stream.
 
 ## Language
 
 **Console**:
-The per-host loopback service and its one page that say whether the owner is needed and show the projects of the fleet registry. Its truth is its own append-only event log; the page shows a view derived from that log (ADR-console-001).
+The per-host loopback service and its two pages: the desk page, which says whether the owner is needed and shows the projects of the fleet registry, and the Spend page (ADR-console-051). Its truth is its own append-only event log; the page shows a view derived from that log (ADR-console-001).
 _Avoid_: dashboard, lead console
 
 **Inbox item**:
@@ -104,6 +104,10 @@ _Avoid_: sprint, job
 **Spend**:
 The tokens (input, cache writes, cache reads, output) and estimated list-price dollars the host's sessions and delivery runs used, read from their transcripts and shown per day for 30 days by session, project, sprint, run, phase, account and aspect (ADR-console-049).
 _Avoid_: cost, usage
+
+**Spend page**:
+The console's second page, at `/spend`, opened from the "Spend" link in the desk page's top bar: today's, the last 7 days' or the last 30 days' spend in tokens and estimated dollars, a per-day trend and the breakdowns by project, sprint, phase, account and aspect. It only reads (ADR-console-051).
+_Avoid_: metrics page, dashboard
 
 **Limit reading**:
 The last unified rate-limit state the cache proxy saw for one account profile: status, weekly and 5-hour use, and resets. An idle or exhausted profile is read too: on Linux the console sends one small request under every listed profile every 10 minutes (ADR-console-006).
