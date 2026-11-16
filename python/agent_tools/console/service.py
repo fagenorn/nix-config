@@ -450,7 +450,9 @@ secret takes the token's place. After the loopback `Host` check it runs the hook
 (`_checked_length(MAX_BRIEF_BYTES)`, 32768: any `Origin` is 403 `origin refused`, a media type that
 is not `application/json` 415 `json only`, a length that is not ASCII digits 411 `length required`,
 one over the limit 413 `too large`, the body unread), reads the body and runs
-`sprints.parse_brief_request` (a body it does not accept is 400 `bad brief`), then `send_brief`. A
+`sprints.parse_brief_request` (a body it does not accept is 400 `bad brief`), then `send_brief`, or
+`check_brief` when the body carries `"dry_run": true` (the answer is then 200 `application/json`
+`{"checked":true}` and nothing is appended, published or written). A
 `sprints.SecretRefused` is one stderr line `console: brief_refused <sprint_id> secret refused` and
 403 `secret refused`; any other `sprints.Refused` is `console: brief_refused <sprint_id> <reason>` and
 409 with the reason; any other exception is `console: brief_failed <Type>: <message>` and 500 `brief
@@ -464,9 +466,16 @@ open nor withdrawn is 404 `this sprint is not known`; else 200 `application/json
 Briefs (#887): `send_brief(sprint_id, secret, brief)`, under the ingest lock, raises
 `Refused(NOT_OPEN)` unless the sprint is open, `SecretRefused` unless `sprints.read_secret` holds a
 secret equal (`hmac.compare_digest`) to the presented one, then applies `sprints.checked_brief`
-(the six parts, `title` first; the secret is checked before the parts); it appends exactly one
-`brief.sent` row `{"sprint_id", "version", "goal", "brief"}` with the version one above the folded
-brief's (1 for none), folds and publishes, and returns the version. A brief after an approval or a reply replaces
+(the six parts, `title` first, then a `pictures` list; the secret is checked before the parts), then
+refuses each picture, from 1, that the sprint did not store (`sprints.PART_PICTURE_UNKNOWN`, or
+`PART_PICTURE_FOREIGN` when another sprint did) or whose file is gone, with `owner` "brief". A brief
+may carry up to eight `pictures` members as a question's round does (`picture`, `line`, `pair`).
+The checks and the append all run under the ingest lock every sweep holds, and a refusal leaves
+every picture file's age as it was. It appends exactly one `brief.sent` row `{"sprint_id",
+"version", "goal", "brief"}` with the version one above the folded brief's (1 for none), plus the
+top-level `"pictures"`, the unique ids in first-seen order, only when the brief names any (that
+list keeps the files from the sweep); a brief with none logs exactly the six parts. It folds and
+publishes, and returns the version. `recap` shows only the six parts. A brief after an approval or a reply replaces
 the decision: the sprint waits again. `approve_brief(project_id, sprint_id, version)` and
 `reply_brief(project_id, sprint_id, version, reply)`, under the lock, raise `Refused(NOT_OPEN)`
 unless the sprint is open and belongs to that project, `NOT_WAITING` when it has no brief, `REPLACED`
@@ -574,7 +583,8 @@ directory, written once; a resend keeps the file and renews its age), then one `
 200 `application/json` `{"picture":"<id>"}` (sorted keys, compact). A refusal is a stderr line
 `console: picture_refused <sprint_id> <reason>`; any other exception is `console: picture_failed
 <Type>: <message>` and 500 `picture failed`. Neither the secret nor the bytes appear in a stderr line
-or an answer. The page is not changed by this route.
+or an answer. The page is not changed by this route. A brief or a report row references pictures
+too: the ids its `pictures` members name are the row's top-level `pictures`, which keeps the files.
 
 `GET /api/picture/<id>` (ADR-console-036) is the page's read of a stored picture, and the only
 route that serves one. After the loopback `Host` check it runs `write_guard.read_refusal`: more
@@ -595,12 +605,18 @@ in its place. After the loopback `Host` check it runs `_checked_length(MAX_REPOR
 (any `Origin` is 403 `origin refused`, a media type that is not `application/json` 415 `json only`,
 a length that is not ASCII digits 411 `length required`, one over the limit 413 `too large`, the
 body unread), then `sprints.parse_report_request` (a body it does not accept is 400 `bad report`),
-then `send_report(sprint_id, secret, report)`, which under the ingest lock raises
+then `send_report(sprint_id, secret, report)`, or `check_report` when the body carries
+`"dry_run": true` (the answer is then 200 `application/json` `{"checked":true}` and nothing is
+appended, published or written). `send_report` under the ingest lock raises
 `Refused(NOT_OPEN)` unless the sprint is open, `SecretRefused` unless `sprints.read_secret` holds a
 secret equal (`hmac.compare_digest`) to the presented one, `Refused(NOT_STARTED)` unless the
 sprint's brief is approved, then whatever `sprints.checked_report` refuses (the secret is checked
-before the members). It appends exactly one `sprint.reported` row `{"sprint_id", "goal", "report"}`
-with the checked report, folds and publishes, and returns the row's `at`. A `sprints.SecretRefused`
+before the members; the members, then a `pictures` list), then each picture, from 1, the sprint did
+not store (`PART_PICTURE_UNKNOWN`, or `PART_PICTURE_FOREIGN` when another sprint did) or whose file
+is gone, with `owner` "report". It appends exactly one `sprint.reported` row `{"sprint_id", "goal",
+"report"}` with the checked report, plus the top-level `"pictures"` (the unique ids, first-seen
+order) only when the report names any, folds and publishes, and returns the row's `at`. A report
+with none logs exactly today's row. A `sprints.SecretRefused`
 is one stderr line `console: report_refused <sprint_id> secret refused` and 403 `secret refused`;
 any other `sprints.Refused` is `console: report_refused <sprint_id> <reason>` and 409 with the
 reason; any other exception is `console: report_failed <Type>: <message>` and 500 `report failed`.
@@ -1819,11 +1835,14 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return
         self.close_connection = True
         try:
-            sprint_id, secret, brief = sprints.parse_brief_request(self.rfile.read(length))
+            sprint_id, secret, brief, dry_run = sprints.parse_brief_request(self.rfile.read(length))
         except ValueError:
             return self._refuse(400, "bad brief")
         try:
-            version = console.send_brief(sprint_id, secret, brief)
+            if dry_run:
+                console.check_brief(sprint_id, secret, brief)
+            else:
+                version = console.send_brief(sprint_id, secret, brief)
         except sprints.SecretRefused:
             print(f"console: brief_refused {sprint_id} {sprints.SECRET_REFUSED}", file=sys.stderr)
             return self._refuse(403, sprints.SECRET_REFUSED)
@@ -1833,8 +1852,8 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         except Exception as error:
             print(f"console: brief_failed {type(error).__name__}: {error}", file=sys.stderr)
             return self._refuse(500, "brief failed")
-        self._send(200, "application/json",
-                   json.dumps({"version": version}, separators=(",", ":")).encode())
+        answer = {"checked": True} if dry_run else {"version": version}
+        self._send(200, "application/json", json.dumps(answer, separators=(",", ":")).encode())
 
     def _report_request(self):
         """The manager's route: a report sent with the sprint's secret; no token, no page."""
@@ -1844,11 +1863,15 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
             return
         self.close_connection = True
         try:
-            sprint_id, secret, report = sprints.parse_report_request(self.rfile.read(length))
+            sprint_id, secret, report, dry_run = sprints.parse_report_request(
+                self.rfile.read(length))
         except ValueError:
             return self._refuse(400, "bad report")
         try:
-            at = console.send_report(sprint_id, secret, report)
+            if dry_run:
+                console.check_report(sprint_id, secret, report)
+            else:
+                at = console.send_report(sprint_id, secret, report)
         except sprints.SecretRefused:
             print(f"console: report_refused {sprint_id} {sprints.SECRET_REFUSED}", file=sys.stderr)
             return self._refuse(403, sprints.SECRET_REFUSED)
@@ -1858,7 +1881,8 @@ class ConsoleHandler(http.server.BaseHTTPRequestHandler):
         except Exception as error:
             print(f"console: report_failed {type(error).__name__}: {error}", file=sys.stderr)
             return self._refuse(500, "report failed")
-        self._send(200, "application/json", json.dumps({"at": at}, separators=(",", ":")).encode())
+        answer = {"checked": True} if dry_run else {"at": at}
+        self._send(200, "application/json", json.dumps(answer, separators=(",", ":")).encode())
 
     def _close_request(self):
         """The manager's route: a closing report sent with the sprint's secret; no token, no page."""
@@ -4253,14 +4277,31 @@ class ConsoleService:
     def send_brief(self, sprint_id: str, secret: str, brief: dict) -> int:
         """Append one `brief.sent` event for an open sprint whose secret is presented; its version."""
         with self._ingest:
-            sprint = self._manager_sprint(sprint_id, secret)
-            parts = sprints.checked_brief(brief)
+            sprint, checked = self._checked_brief(sprint_id, secret, brief)
             version = (sprint.brief.version if sprint.brief else 0) + 1
-            appended = self.log.append([(BRIEF_SENT, sprint.project_id, {
-                "sprint_id": sprint_id, "version": version, "goal": sprint.goal,
-                "brief": parts})])
+            payload = {"sprint_id": sprint_id, "version": version, "goal": sprint.goal,
+                       "brief": checked}
+            if "pictures" in checked:
+                payload["pictures"] = sprints.picture_ids(checked["pictures"])
+            appended = self.log.append([(BRIEF_SENT, sprint.project_id, payload)])
             self._apply(appended)
             return version
+
+    def _checked_brief(self, sprint_id: str, secret: str,
+                       brief: dict) -> tuple[sprints.SprintState, dict]:
+        """Every refusal of a brief, in order, with nothing written (the caller holds the lock)."""
+        sprint = self._manager_sprint(sprint_id, secret)
+        checked = sprints.checked_brief(brief)
+        for m, member in enumerate(checked.get("pictures", ()), 1):
+            self._own_picture(sprint, member["picture"],
+                              sprints.PART_PICTURE_UNKNOWN.format(owner="brief", m=m),
+                              sprints.PART_PICTURE_FOREIGN.format(owner="brief", m=m))
+        return sprint, checked
+
+    def check_brief(self, sprint_id: str, secret: str, brief: dict) -> None:
+        """Refuse a brief `send_brief` would refuse now; nothing is written."""
+        with self._ingest:
+            self._checked_brief(sprint_id, secret, brief)
 
     def store_picture(self, sprint_id: str, secret: str, data: bytes) -> str:
         """Keep one PNG of an open sprint whose secret is presented and log it; the picture's id."""
@@ -4292,14 +4333,31 @@ class ConsoleService:
     def send_report(self, sprint_id: str, secret: str, report: dict) -> str:
         """Append one `sprint.reported` event for an approved sprint whose secret is presented; its at."""
         with self._ingest:
-            sprint = self._manager_sprint(sprint_id, secret)
-            if sprint.state != sprints.STARTING:
-                raise sprints.Refused(sprints.NOT_STARTED)
-            checked = sprints.checked_report(report)
-            appended = self.log.append([(SPRINT_REPORTED, sprint.project_id, {
-                "sprint_id": sprint_id, "goal": sprint.goal, "report": checked})])
+            sprint, checked = self._checked_report(sprint_id, secret, report)
+            payload = {"sprint_id": sprint_id, "goal": sprint.goal, "report": checked}
+            if "pictures" in checked:
+                payload["pictures"] = sprints.picture_ids(checked["pictures"])
+            appended = self.log.append([(SPRINT_REPORTED, sprint.project_id, payload)])
             self._apply(appended)
             return appended[-1].at
+
+    def _checked_report(self, sprint_id: str, secret: str,
+                        report: dict) -> tuple[sprints.SprintState, dict]:
+        """Every refusal of a report, in order, with nothing written (the caller holds the lock)."""
+        sprint = self._manager_sprint(sprint_id, secret)
+        if sprint.state != sprints.STARTING:
+            raise sprints.Refused(sprints.NOT_STARTED)
+        checked = sprints.checked_report(report)
+        for m, member in enumerate(checked.get("pictures", ()), 1):
+            self._own_picture(sprint, member["picture"],
+                              sprints.PART_PICTURE_UNKNOWN.format(owner="report", m=m),
+                              sprints.PART_PICTURE_FOREIGN.format(owner="report", m=m))
+        return sprint, checked
+
+    def check_report(self, sprint_id: str, secret: str, report: dict) -> None:
+        """Refuse a report `send_report` would refuse now; nothing is written."""
+        with self._ingest:
+            self._checked_report(sprint_id, secret, report)
 
     def send_closing(self, sprint_id: str, secret: str, closing: dict) -> str:
         """Append one `sprint.closed` event for a sprint that may close; its at."""
@@ -5006,14 +5064,15 @@ class ConsoleService:
             self._apply(appended)
             return appended[-1].at
 
-    def _own_picture(self, sprint: sprints.SprintState, picture_id: str, n: int, m: int) -> None:
+    def _own_picture(self, sprint: sprints.SprintState, picture_id: str, unknown: str,
+                     foreign: str) -> None:
         """Refuse a picture the sprint did not store or that is no longer a regular file."""
         if picture_id not in sprint.pictures:
             if any(picture_id in other.pictures for other in self._sprints.values()):
-                raise sprints.Refused(sprints.PICTURE_FOREIGN.format(n=n, m=m))
-            raise sprints.Refused(sprints.PICTURE_UNKNOWN.format(n=n, m=m))
+                raise sprints.Refused(foreign)
+            raise sprints.Refused(unknown)
         if not pictures.present(self.pictures_dir, picture_id):
-            raise sprints.Refused(sprints.PICTURE_UNKNOWN.format(n=n, m=m))
+            raise sprints.Refused(unknown)
 
     def _checked_ask(self, sprint_id: str, secret: str,
                      round_: dict) -> tuple[sprints.SprintState, dict]:
@@ -5026,7 +5085,9 @@ class ConsoleService:
         checked = sprints.checked_round(round_)
         for n, question in enumerate(checked["questions"], 1):
             for m, member in enumerate(question.get("pictures", ()), 1):
-                self._own_picture(sprint, member["picture"], n, m)
+                self._own_picture(sprint, member["picture"],
+                                  sprints.PICTURE_UNKNOWN.format(n=n, m=m),
+                                  sprints.PICTURE_FOREIGN.format(n=n, m=m))
         if sprints.round_open(sprint) and not checked["blocker"]:
             raise sprints.Refused(sprints.ROUND_OPEN)
         return sprint, checked

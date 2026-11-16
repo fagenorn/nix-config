@@ -67,9 +67,10 @@ class ParseBriefTest(unittest.TestCase):
         body = json.dumps({"sprint_id": SID, "secret": "s3cret",
                            "brief": {"done": "x", "slices": ["a"]}}).encode()
         self.assertEqual(sprints.parse_brief_request(body),
-                         (SID, "s3cret", {"done": "x", "slices": ["a"]}))
+                         (SID, "s3cret", {"done": "x", "slices": ["a"]}, False))
         good = {"sprint_id": SID, "secret": "s", "brief": {}}
-        self.assertEqual(sprints.parse_brief_request(json.dumps(good).encode()), (SID, "s", {}))
+        self.assertEqual(sprints.parse_brief_request(json.dumps(good).encode()),
+                         (SID, "s", {}, False))
         bad = [b"not json", b"[1]",
                json.dumps({**good, "extra": 1}).encode(),
                json.dumps({"sprint_id": SID, "brief": {}}).encode(),
@@ -88,7 +89,30 @@ class ParseBriefTest(unittest.TestCase):
     def test_a_title_key_is_accepted(self):
         brief = {"title": "x", "done": "x", "slices": ["a"]}
         body = json.dumps({"sprint_id": SID, "secret": "s", "brief": brief}).encode()
-        self.assertEqual(sprints.parse_brief_request(body), (SID, "s", brief))
+        self.assertEqual(sprints.parse_brief_request(body), (SID, "s", brief, False))
+
+    def test_a_brief_or_report_request_may_carry_pictures_and_a_dry_run(self):
+        brief = {"done": "x", "pictures": []}
+        body = {"sprint_id": SID, "secret": "s", "brief": brief}
+        self.assertEqual(sprints.parse_brief_request(json.dumps(body).encode()),
+                         (SID, "s", brief, False))
+        self.assertEqual(
+            sprints.parse_brief_request(json.dumps({**body, "dry_run": True}).encode()),
+            (SID, "s", brief, True))
+        report = {**REPORT, "pictures": []}
+        body = {"sprint_id": SID, "secret": "s", "report": report}
+        self.assertEqual(sprints.parse_report_request(json.dumps(body).encode()),
+                         (SID, "s", report, False))
+        self.assertEqual(
+            sprints.parse_report_request(json.dumps({**body, "dry_run": True}).encode()),
+            (SID, "s", report, True))
+        for parse, request in ((sprints.parse_brief_request,
+                                {"sprint_id": SID, "secret": "s", "brief": brief}),
+                               (sprints.parse_report_request, body)):
+            for dry_run in (False, "yes"):
+                with self.subTest(parse=parse.__name__, dry_run=dry_run):
+                    with self.assertRaises(ValueError):
+                        parse(json.dumps({**request, "dry_run": dry_run}).encode())
 
     def test_approve_and_reply_bodies(self):
         self.assertEqual(
@@ -684,7 +708,7 @@ def reported(seq, sprint_id, report):
 class ReportParseTest(unittest.TestCase):
     def test_a_report_request_is_a_sprint_a_secret_and_a_report(self):
         body = json.dumps({"sprint_id": SID, "secret": "s", "report": REPORT}).encode()
-        self.assertEqual(sprints.parse_report_request(body), (SID, "s", REPORT))
+        self.assertEqual(sprints.parse_report_request(body), (SID, "s", REPORT, False))
 
         def bodies(**changes):
             return json.dumps({"sprint_id": SID, "secret": "s", "report": REPORT,

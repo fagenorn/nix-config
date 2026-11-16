@@ -88,9 +88,14 @@ keeps the text exactly and refuses `EMPTY_REPLY` when its strip is empty, then `
 `MAX_REPLY_CHARS` code points. `SecretRefused` (a `Refused`) is the service's refusal of a wrong
 secret; it maps to 403.
 
-`parse_brief_request(body)` reads the manager's body and returns `(sprint_id, secret, brief)`:
+`parse_brief_request(body)` reads the manager's body and returns `(sprint_id, secret, brief,
+dry_run)`:
 
-    {"sprint_id": "<16 lowercase hex>", "secret": "<string>", "brief": {<any subset of PARTS>}}
+    {"sprint_id": "<16 lowercase hex>", "secret": "<string>",
+     "brief": {<any subset of PARTS, and "pictures">}}
+
+plus an optional `"dry_run": true` (the same flag as `parse_ask_request`'s: `false` or any other
+value is `ValueError`); `dry_run` is `True` only when it was given.
 
 `parse_approve(body)` returns `(project_id, sprint_id, version)` and `parse_reply(body)` returns
 `(project_id, sprint_id, version, reply)` from the page's bodies:
@@ -166,16 +171,17 @@ function's three results.
 `withdrawn_ids(events, ids)` adds the `sprint_id` of every `goal.withdrawn` row with a string one.
 
 A report is what the approved sprint's manager says about the sprint. `parse_report_request(body)`
-reads the manager's body and returns `(sprint_id, secret, report)`:
+reads the manager's body and returns `(sprint_id, secret, report, dry_run)`:
 
     {"sprint_id": "<16 lowercase hex>", "secret": "<string>",
      "report": {"status": "<one line>", "phase": "running", "milestone": "<one line>",
                 "tracker_url": "https://<host>/<path>",
                 "issues": [{"issue": 12, "stage": "building"}, {"issue": 13, "stage": "landed"}],
-                "inbox": [12], "next": "<one line>"}}
+                "inbox": [12], "next": "<one line>", "pictures": [...]}}
 
-It accepts only a UTF-8 JSON object of exactly `sprint_id`, `secret` and `report`, a valid sprint
-id, a string secret and a `report` object whose keys are a subset of `REPORT_MEMBERS`; anything
+It accepts only a UTF-8 JSON object of exactly `sprint_id`, `secret` and `report` (plus an optional
+`"dry_run": true`, as a brief's), a valid sprint id, a string secret and a `report` object whose
+keys are a subset of `REPORT_MEMBERS` and `pictures`; anything
 else, a repeated key, a NaN literal or nesting too deep is `ValueError`. A missing member is not (the
 service answers it with the member). `checked_report(report)` checks the members in `REPORT_MEMBERS`
 order and refuses with `Refused("the report has no valid <member>")` the first that is missing or
@@ -829,26 +835,29 @@ def parse_continue(body: bytes) -> tuple[str, str]:
     return value["project_id"], _sprint_id(value["sprint_id"])
 
 
-def parse_brief_request(body: bytes) -> tuple[str, str, dict]:
-    value = _object(body, {"sprint_id", "secret", "brief"}, project=False)
+def _manager_request(body: bytes, key: str, members: tuple[str, ...]) -> tuple[str, str, dict, bool]:
+    """A manager's sprint, secret and `key` object with an optional `"dry_run": true`."""
+    value = _decoded(body)
+    dry_run = isinstance(value, dict) and "dry_run" in value
+    if dry_run and value["dry_run"] is not True:
+        raise ValueError("dry_run must be true when given")
+    value = _object(body, {"sprint_id", "secret", key} | ({"dry_run"} if dry_run else set()),
+                    project=False)
     sprint_id = _sprint_id(value["sprint_id"])
     if not isinstance(value["secret"], str):
         raise ValueError("secret must be a string")
-    brief = value["brief"]
-    if not isinstance(brief, dict) or not set(brief) <= set(PARTS):
-        raise ValueError(f"brief must be an object of {', '.join(PARTS)}")
-    return sprint_id, value["secret"], brief
+    given = value[key]
+    if not isinstance(given, dict) or not set(given) <= {*members, "pictures"}:
+        raise ValueError(f"{key} must be an object of {', '.join((*members, 'pictures'))}")
+    return sprint_id, value["secret"], given, dry_run
 
 
-def parse_report_request(body: bytes) -> tuple[str, str, dict]:
-    value = _object(body, {"sprint_id", "secret", "report"}, project=False)
-    sprint_id = _sprint_id(value["sprint_id"])
-    if not isinstance(value["secret"], str):
-        raise ValueError("secret must be a string")
-    report = value["report"]
-    if not isinstance(report, dict) or not set(report) <= set(REPORT_MEMBERS):
-        raise ValueError(f"report must be an object of {', '.join(REPORT_MEMBERS)}")
-    return sprint_id, value["secret"], report
+def parse_brief_request(body: bytes) -> tuple[str, str, dict, bool]:
+    return _manager_request(body, "brief", PARTS)
+
+
+def parse_report_request(body: bytes) -> tuple[str, str, dict, bool]:
+    return _manager_request(body, "report", REPORT_MEMBERS)
 
 
 ROUND_KEYS = ("questions", "blocker")
