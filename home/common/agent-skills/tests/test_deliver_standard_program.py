@@ -7801,12 +7801,16 @@ class DeclaredBranchTest(unittest.TestCase):
         self.assertEqual(again["cont"]["final_reviewed"], {"head": TIP, "branches": {"constructor": "e" * 40}})
 
 
+# #1139: a marked issue stops at awaiting look; MARKED is the setup's look read, D a head a sync or a push moves the branch to.
+MARKED = {"verdict": "marked", "covers": ["the settings page"]}
+D = "d" * 40
+AWAIT_REASON = "issue 9 needs the owner's look before merge"
 CLERK, PLANNER, IMPL, REV, LITE = "clerk", "planner", "implementer", "reviewer", "reviewer-lite"
 EITHER = frozenset({REV, LITE})
 EXPECTED = {stem: frozenset({kind}) if isinstance(kind, str) else kind for kind, stems in (
     (CLERK, ("setup", "acquire", "worktree", "renew-", "owner-answer", "plan-codex", "direct-codex", "final-codex", "diff-size", "amend",
              "verify", "verify-", "verify-rerun-", "ws-check-", "land-unlock", "land-push-", "land-lock-", "land-relock-", "pr", "checks-", "merge",
-             "hold", "close-out")),
+             "hold", "close-out", "look-pr", "look-push")),
     (PLANNER, ("plan", "plan-revise", "plan-rules-revise", "plan-branch-revise", "plan-task-revise")),
     (IMPL, ("direct-impl", "direct-fix", "impl-", "fix-", "fix-wave", "fix-wave-", "verify-fix-", "fix-ci", "sync-", "sync-resolve-",
             "fix-sync-")),
@@ -7854,6 +7858,8 @@ SCENARIOS = (
                "land-relock-1": {"lock": {"verdict": "acquired", "lock_sha": MERGE}}}},
     {"args": DIRECT, "replies": {"direct-review": BAD}},
     {"args": DIRECT, "replies": {"direct-review": {"verdict": "pass", "findings": [], "escalate": True}}},
+    # #1139: a marked issue stops at awaiting look; a head behind its base is synced and pushed first.
+    {"patch": {"setup": {"look": MARKED}, "look-pr": {"behind": True}, "sync-1": {"merge_commit": D, "head": D}}},
     WS_SCENARIO,
 )
 
@@ -7902,7 +7908,8 @@ class AgentTypeTest(unittest.TestCase):
 class ClerkModelTest(unittest.TestCase):
     """#803, #813: clerk_model (sonnet, the default, or haiku) is checked before any agent and sets the model of every clerk call except the lifecycle and setup steps, which stay on the default."""
 
-    ON_DEFAULT = {"setup", "worktree", "land-unlock", "land-push-", "land-lock-", "land-relock-", "pr", "merge", "hold", "close-out"}
+    ON_DEFAULT = {"setup", "worktree", "land-unlock", "land-push-", "land-lock-", "land-relock-", "pr", "merge", "hold", "close-out",
+                  "look-pr", "look-push"}
 
     def test_clerk_model_must_be_sonnet_or_haiku(self):
         for bad in ("opus", "Haiku", "", 1, None, True):
@@ -7943,6 +7950,12 @@ class ClerkModelTest(unittest.TestCase):
                         self.assertEqual(t["model"], b["model"], b["label"])
         self.assertEqual(pinned, self.ON_DEFAULT)
         self.assertEqual(seen, clerk_stems - self.ON_DEFAULT)
+
+    def test_the_look_steps_stay_on_the_default_model(self):
+        _, calls = run(args=dict(ARGS, clerk_model="haiku"),
+                       patch={"setup": {"look": MARKED}, "look-pr": {"behind": True}, "sync-1": {"merge_commit": D, "head": D}})
+        for label in ("look-pr", "look-push"):
+            self.assertEqual([c["model"] for c in calls if c["label"] == label], ["sonnet"], label)
 
     def test_clerk_model_is_never_kept_in_cont(self):
         result, calls = run(args=dict(ARGS, mode="plan", clerk_model="haiku"))
@@ -10217,6 +10230,101 @@ class RulesReviseSecondRoundTest(unittest.TestCase):
         self.assertEqual(self.counts(calls), (1, 1))
         self.assertEqual(result["stage"], "plan-review")
         self.assertIsNone(result["cont"]["plan"])
+
+
+class LookStopTest(unittest.TestCase):
+    """#1139: a delivery of an issue marked for the owner's look stops at awaiting look, after verify, push and the pull request."""
+
+    PICS = [{"kind": "before", "path": "/tmp/b.png"}, {"kind": "after", "path": "/tmp/a.png"}]
+
+    def test_a_marked_issue_stops_at_awaiting_look_after_verify_push_and_pr(self):
+        result, calls = run(patch={"setup": {"look": MARKED}})
+        got = labels(calls)
+        self.assertEqual(result["stage"], "awaiting-look")
+        self.assertEqual((result["issue"], result["pr"], result["head"], result["reason"], result["covers"]),
+                         (9, 42, SHA, AWAIT_REASON, ["the settings page"]))
+        self.assertEqual(result["cont"]["look"], {"pr": 42, "head": SHA})
+        self.assertEqual(result["cont"]["verified"]["head"], SHA)
+        self.assertEqual(got[-1], "look-pr")
+        self.assertLess(got.index("verify"), got.index("look-pr"))
+        for label in ("pr", "merge", "hold", "close-out", "land-unlock"):
+            self.assertNotIn(label, got)
+        self.assertEqual([l for l in got if l.startswith(("land-", "checks-"))], [])
+        text = prompt(calls, "look-pr")
+        self.assertIn("git -C /r/.wt/w-issue-9-x push origin issue-9-x", text)
+        self.assertIn("If an open PR with head issue-9-x already exists", text)
+        for call in calls:
+            self.assertNotIn("forge-claim land", call["prompt"], call["label"])
+
+    def test_the_direct_lane_stops_at_awaiting_look_too(self):
+        result, calls = run(args=DIRECT, patch={"setup": {"look": MARKED}})
+        got = labels(calls)
+        self.assertEqual(result["stage"], "awaiting-look")
+        self.assertLess(got.index("direct-review"), got.index("look-pr"))
+        self.assertNotIn("merge", got)
+        self.assertEqual([l for l in got if l.startswith("land-")], [])
+
+    def test_a_marked_branch_behind_its_base_is_synced_and_pushed_before_the_stop(self):
+        result, calls = run(patch={"setup": {"look": MARKED}, "look-pr": {"behind": True}, "sync-1": {"merge_commit": D, "head": D}})
+        got = labels(calls)
+        self.assertEqual(got[got.index("look-pr") + 1:], ["sync-1", "look-push"])
+        self.assertIn("at the head " + D, prompt(calls, "look-push"))
+        self.assertEqual(result["stage"], "awaiting-look")
+        self.assertEqual(result["head"], D)
+        self.assertEqual(result["cont"]["look"]["head"], D)
+
+    def test_a_probe_conflict_is_resolved_and_reviewed_before_the_stop(self):
+        result, calls = run(patch={"setup": {"look": MARKED},
+                                   "look-pr": {"probe": {"conflicted": True, "tree": "e" * 40, "files": ["a.py"]}},
+                                   "sync-resolve-1": {"merge_commit": D, "head": D}})
+        got = labels(calls)
+        self.assertEqual([l for l in got if l in ("sync-resolve-1", "sync-review-1", "look-push")],
+                         ["sync-resolve-1", "sync-review-1", "look-push"])
+        self.assertNotIn("sync-1", got)
+        self.assertEqual([l for l in got if l.startswith("land-")], [])
+        self.assertEqual(result["stage"], "awaiting-look")
+        self.assertEqual(result["head"], D)
+
+    def test_a_look_marker_that_was_not_read_stops_after_verify(self):
+        for args in (ARGS, dict(ARGS, mode="ready")):
+            with self.subTest(mode=args.get("mode", "ship")):
+                result, calls = run(args=args, patch={"setup": {"look": {"verdict": "error", "detail": "x"}}})
+                got = labels(calls)
+                self.assertEqual(result["stage"], "look")
+                self.assertIn("cont", result)
+                self.assertNotIn("look-pr", got)
+                self.assertNotIn("pr", got)
+                self.assertIn("verify", got)
+
+    def test_both_setup_prompts_read_the_look_marker(self):
+        _, fresh = run()
+        _, resumed = run(args=dict(ARGS, cont=ship_cont()))
+        for calls in (fresh, resumed):
+            self.assertIn("look-approval marked --repo <slug> --issue 9", prompt(calls, "setup"))
+
+    def test_ready_mode_reports_the_look_verdict(self):
+        ready, _ = run(args=dict(ARGS, mode="ready"), patch={"setup": {"look": MARKED}})
+        self.assertEqual(ready["look"], {"verdict": "marked", "covers": ["the settings page"]})
+        plain, _ = run(args=dict(ARGS, mode="ready"))
+        self.assertEqual(plain["look"], {"verdict": "unmarked", "covers": []})
+
+    def test_the_pictures_verify_wrote_ride_on_the_stop(self):
+        result, _ = run(patch={"setup": {"look": MARKED}, "verify": {"pictures": self.PICS}})
+        self.assertEqual(result["pictures"], self.PICS)
+        self.assertEqual(result["cont"]["verified"]["pictures"], self.PICS)
+        bare, _ = run(patch={"setup": {"look": MARKED}})
+        self.assertNotIn("pictures", bare)
+        self.assertNotIn("pictures", bare["cont"]["verified"])
+
+    def test_an_unmarked_issue_ships_with_no_look_step(self):
+        result, calls = run()
+        got = labels(calls)
+        self.assertEqual(result["stage"], "done")
+        self.assertEqual([l for l in got if l.startswith("look-")], [])
+        self.assertEqual(got[got.index("pr"):], ["pr", "merge", "hold", "close-out"])
+        direct, direct_calls = run(args=DIRECT)
+        self.assertEqual(direct["stage"], "done")
+        self.assertEqual([l for l in labels(direct_calls) if l.startswith("look-")], [])
 
 
 if __name__ == "__main__":
