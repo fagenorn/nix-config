@@ -1,6 +1,6 @@
 # ADR-console-042 — A sprint reads stuck only when nothing it reads has moved
 
-- **Status:** accepted; amended by ADR-console-045
+- **Status:** accepted; amended by ADR-console-046
 - **Decided in:** #1109
 
 ## Context

@@ -21,6 +21,7 @@
 | Account binding | Hosts |
 | Account profile | Hosts |
 | Accounts panel | Console |
+| Activation line | Console |
 | Activation unit | Release |
 | Adapter | Release |
 | Adoption | Project contract |
@@ -71,6 +72,7 @@
 | Merged adoption | Console |
 | Migration | Project contract |
 | Not yet managed | Console |
+| Notice | Console |
 | Nudge | Console |
 | Outside sprints | Console |
 | Owner prompt | Verification |

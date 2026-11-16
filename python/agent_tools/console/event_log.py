@@ -29,6 +29,10 @@ Two kinds record a manager's questions and the owner's answers (#891): `QUESTION
 `QUESTION_WITHDRAWN` (`question.withdrawn`, #1099, kept) records a manager taking back an
 open question.
 
+Two kinds record a manager's notices (#1117): `NOTICE_POSTED` (`notice.posted`) and
+`NOTICE_WITHDRAWN` (`notice.withdrawn`), both in `KEPT_KINDS`, so the retention pass never drops
+an open notice and a withdrawal is never lost (ADR-console-044).
+
 Three more kinds are kept (#892): `SPRINT_CLOSED` (`sprint.closed`), `SPRINT_STOP_REQUESTED`
 (`sprint.stop_requested`) and `MANAGER_STOPPED` (`manager.stopped`). `manager.stopped` is kept
 because it alone ends a stop and a withdrawal's pending stop, and retention runs before the fold at
@@ -103,8 +107,8 @@ and writes nothing. A payload is stored as canonical JSON (sorted keys, compact
 separators, non-ASCII kept, NaN refused), serialised before the transaction
 begins.
 
-`PRAGMA user_version` is `SCHEMA_VERSION` (9) once opened: version 0 is created
-as schema 9, versions 1, 2, 3, 4, 5, 6, 7 and 8 are migrated to 9 in one transaction each and
+`PRAGMA user_version` is `SCHEMA_VERSION` (10) once opened: version 0 is created
+as schema 10, versions 1, 2, 3, 4, 5, 6, 7, 8 and 9 are migrated to 10 in one transaction each and
 keep every row, and a file at any other version raises `EventLogError` and is not
 modified. The parent directory is created with mode 0700. The connection
 is shared across threads and every use of it holds one lock.
@@ -118,7 +122,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 RETENTION = timedelta(days=90)
 
 GOAL_STATED = "goal.stated"
@@ -142,6 +146,8 @@ SPRINT_NUDGED = "sprint.nudged"
 QUESTIONS_ASKED = "questions.asked"
 QUESTION_ANSWERED = "question.answered"
 QUESTION_WITHDRAWN = "question.withdrawn"
+NOTICE_POSTED = "notice.posted"
+NOTICE_WITHDRAWN = "notice.withdrawn"
 SPRINT_CLOSED = "sprint.closed"
 SPRINT_STOP_REQUESTED = "sprint.stop_requested"
 MANAGER_STOPPED = "manager.stopped"
@@ -166,9 +172,10 @@ SESSION_PROFILE = "session.profile"
 PICTURE_STORED = "picture.stored"
 # Rows of these kinds (the two goal kinds, the three brief kinds, the report
 # Rows of these kinds (the two goal kinds, the three brief kinds, the report
-# kind, the three message kinds, the three question kinds, the closing kind, the
-# stop request and the stop's completion) are never removed: not by the retention
-# pass, not by a raw connection (the delete trigger of schema 3, 4, 5, 6, 7, 8 and 9).
+# kind, the three message kinds, the three question kinds, the two notice kinds, the
+# closing kind, the stop request and the stop's completion) are never removed: not by the
+# retention pass, not by a raw connection (the delete trigger of schema 3, 4, 5, 6, 7, 8, 9
+# and 10).
 # `SPRINT_NUDGED` and `MANAGER_STOP_FAILED` are not among them, nor is any manager kind other
 # than `MANAGER_STOPPED` (`MANAGER_STARTED`, `MANAGER_FAILED`, `MANAGER_WAITING`,
 # `MANAGER_WOKEN`, `MANAGER_STALLED`, `MANAGER_NUDGED`, `MANAGER_NO_PROGRESS`), nor is
@@ -178,6 +185,7 @@ KEPT_KINDS = frozenset({GOAL_STATED, GOAL_WITHDRAWN,
                         SPRINT_REPORTED,
                         SPRINT_MESSAGED, SPRINT_READ, SPRINT_ANSWERED,
                         QUESTIONS_ASKED, QUESTION_ANSWERED, QUESTION_WITHDRAWN,
+                        NOTICE_POSTED, NOTICE_WITHDRAWN,
                         SPRINT_CLOSED, SPRINT_STOP_REQUESTED, MANAGER_STOPPED})
 
 _APPEND_ONLY = "the console event log is append-only"
@@ -218,11 +226,12 @@ _RETENTION = (
         BEGIN SELECT RAISE(ABORT, '{_RETENTION_ONLY_FORWARD}'); END""",
 )
 
-# What schemas 3, 4, 5, 6, 7, 8 and 9 add to schema 2: the delete trigger also refuses every row
-# of a kept kind, whatever its age. Built from KEPT_KINDS so a later kept kind
+# What schemas 3, 4, 5, 6, 7, 8, 9 and 10 add to schema 2: the delete trigger also refuses
+# every row of a kept kind, whatever its age. Built from KEPT_KINDS so a later kept kind
 # needs no hand-edited SQL, only a re-run on an existing store (schema 4 added the
 # brief kinds, schema 5 the report kind, schema 6 the message kinds, schema 7 the closing kinds
-# and the stop's completion, schema 8 the question kinds, schema 9 the question withdrawal).
+# and the stop's completion, schema 8 the question kinds, schema 9 the question withdrawal,
+# schema 10 the notice kinds).
 _KEPT_LITERALS = ", ".join("'" + kind.replace("'", "''") + "'"
                            for kind in sorted(KEPT_KINDS))
 _KEPT = (
@@ -292,7 +301,7 @@ class EventLog:
             return
         if version == 1:
             self._transaction(self._migrate_from_1)
-        elif version in (2, 3, 4, 5, 6, 7, 8):
+        elif version in (2, 3, 4, 5, 6, 7, 8, 9):
             self._transaction(self._migrate_from_2)
         elif version == 0:
             self._transaction(self._create_schema)

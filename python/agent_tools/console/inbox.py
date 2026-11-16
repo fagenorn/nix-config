@@ -27,6 +27,41 @@ that whitespace or the line end follows, else the whole line, whitespace collaps
 the check id and `detail` is the rest; every other verification prompt keeps its sentence and whole
 detail with `check_id` `""` (#1046). A held issue with no live runner prompt yields no item.
 
+A `verify-ask` prompt's `reading` (#1112) is the instruction for reading the check's result, written in
+its ask as `Reading:` at the start of a detail line (after optional spaces) or right after whitespace
+(case-sensitive). It is the rest of that line, stripped and whitespace-collapsed, and it leaves the
+`detail`, which keeps every other character (text before `Reading:` on the line stays, a line left
+blank is dropped, blank lines at either end are dropped). A line inside a fenced block (opened and
+closed by a line starting with three backticks or `~~~`) is never read, an empty rest is no reading,
+and only the first reading is taken: a later `Reading:` stays in the detail. Every other prompt has
+`reading` `""` and its detail unchanged.
+
+Pictures (#1112, ADR-console-045). `attach_pictures(item, roots, pictures_dir, home=None)` returns a
+copy of a verification item with two more members, `pictures` (`[{"id", "line", "pair": None}]`, the
+stored pictures the prompt names) and `missing_pictures` (the PNG names it gives that exist nowhere
+under the roots). It reads the text `question`, `detail` and `reading` joined by a newline and never
+changes the item; the same files give an equal result on every call. `named_pictures(text)` splits
+the text on whitespace and strips each token of leading ``"`'([<{`` and trailing ``"`'.,;:!?)]}>``
+until stable: a token holding `://` is ignored, one whose lowercase ends `.png` (and is longer than
+four characters) is a PNG name, any other token holding `/` is a folder, each in first-seen order
+without repeats. A path starting `/` is absolute, one starting `~/` is under `home`, any other is
+under the first root (the project root). A root is a configured directory that exists; it is spelled
+as written and as its realpath, and a candidate is inside it when its normalised path equals or
+starts below either spelling. A relative PNG name is tried under each named folder in order, then
+under the first root; the first candidate that opens is chosen. A candidate is never resolved by
+its realpath: the root is opened, then each component is opened with `O_NOFOLLOW` relative to its
+parent descriptor, so no symlink under a root is followed, even one swapped in after a check. A
+candidate outside every root is dropped and records nothing; a name whose every candidate inside a
+root does not exist (a plain file standing where a folder is named counts as not existing) goes to
+`missing_pictures` as written; any other error skips the name. A named folder that opens as a
+directory and into which no named PNG resolved directly (a PNG that a folder listing chose does not
+count) contributes its direct entries ending `.png` (any case), sorted by name, each opened relative to the folder. A chosen file
+is read only through the descriptor that opened it and is stored only when it is a regular file of
+at most `pictures.MAX_BYTES` bytes that `pictures.checked_png` accepts; otherwise it is skipped, as
+is a file whose store fails. At most `sprints.MAX_PICTURES` pictures and as many missing names are
+kept, named PNGs first, then folder listings; each `line` is the file's base name cut to
+`sprints.MAX_PICTURE_LINE_CHARS` characters; a path is listed once.
+
 A comment's id is `fullDatabaseId` (GitHub's `BigInt`, a decimal string) converted with `int`: the
 32-bit `databaseId` is not read, because comment ids already exceed 2^31-1. A node's type is its
 `__typename`: an `Issue` must carry `issueDependenciesSummary.blocking` (a non-negative integer) and
@@ -41,7 +76,8 @@ is sorted by `key` and holds only JSON-native values; every item is
     {"key": "<slug>#<issue>/<comment id>", "project_id", "repo", "issue", "comment_id", "url",
      "reason", "kind", "question", "detail", "questions": [{"question", "options", "chosen", "recommended"}]
      (decision only), "items": [str] (conflict and needs-label only), "answers": [str], "paid": bool,
-     "confirm", "answered", "held_work"} and, for a verification prompt only, "version" and "check_id"
+     "confirm", "answered", "held_work"} and, for a verification prompt only, "version", "check_id" and "reading"
+(and, once `attach_pictures` has run, "pictures" and "missing_pictures")
 
 For `decision`, `conflict` and `needs-label` the kind is the reason, `detail` and `confirm` are `""`,
 `answers` is `[]`, `paid` is false and there is no `version`. A verification prompt's `version` is
@@ -59,6 +95,7 @@ activity is at most `ACTIVE_WITHIN` seconds old; an unreadable or offset-less ti
 
 import os
 import re
+import stat
 from collections.abc import Callable, Sequence
 from datetime import datetime
 from pathlib import Path
@@ -67,6 +104,8 @@ from typing import Any
 from agent_tools.claims import forge_markers as fm
 from agent_tools.claims import forge_owner_action as foa
 from agent_tools.claims import owner_actions
+from agent_tools.console import pictures
+from agent_tools.console.sprints import MAX_PICTURE_LINE_CHARS, MAX_PICTURES
 from agent_tools.system import forge_api
 from agent_tools.verification import verify_answer
 
@@ -202,16 +241,43 @@ def _ask_heading(marker: fm.Marker) -> tuple[str, str, str]:
     return " ".join(head.split()), check_id, "\n".join(lines)
 
 
+_READING = re.compile(r"(?<!\S)Reading:(.*)$")
+
+
+def _reading(detail: str) -> tuple[str, str]:
+    """The `(reading, detail_without_it)` of a manual check's detail: the rest of the first line holding
+    `Reading:` outside a fence, whitespace collapsed; an empty rest is no reading."""
+    lines = detail.split("\n")
+    fenced = False
+    for index, line in enumerate(lines):
+        if line.strip().startswith(("```", "~~~")):
+            fenced = not fenced
+            continue
+        found = None if fenced else _READING.search(line)
+        reading = " ".join(found.group(1).split()) if found else ""
+        if not reading:
+            continue
+        before = line[:found.start()].rstrip()
+        kept = [*lines[:index], *([before] if before else []), *lines[index + 1:]]
+        while kept and not kept[-1].strip():
+            kept.pop()
+        while kept and not kept[0].strip():
+            kept.pop(0)
+        return reading, "\n".join(kept)
+    return "", detail
+
+
 def _verify_item(project_id: str, slug: str, issue: int, held: int, marker: fm.Marker,
                  runner_markers: Sequence[fm.Marker]) -> dict:
     reason = marker.fields["reason"]
     question, check_id, detail = _ask_heading(marker)
+    reading, detail = _reading(detail) if reason == verify_answer.ASK else ("", detail)
     return {
         "key": item_key(slug, issue, marker.comment_id), "project_id": project_id, "repo": slug,
         "issue": issue, "comment_id": marker.comment_id,
         "url": f"https://github.com/{slug}/issues/{issue}#issuecomment-{marker.comment_id}",
         "reason": reason, "kind": verify_answer.kind_of(marker), "question": question,
-        "detail": detail, "check_id": check_id, "questions": [], "items": [],
+        "detail": detail, "check_id": check_id, "reading": reading, "questions": [], "items": [],
         "answers": list(verify_answer.ANSWERS[reason]),
         "paid": verify_answer.is_paid(marker), "confirm": f"{slug}#{issue}" if reason == "verify-approve" else "",
         "answered": verify_answer.answered(marker, runner_markers), "held_work": held,
@@ -287,6 +353,197 @@ def read_items(project_id: str, slug: str, *,
         raise forge_api.ForgeError("payload_incomplete", f"{len(nodes)} of {total} search results")
     return sorted((i for node in nodes for i in items_from_node(project_id, slug, node)),
                   key=lambda item: item["key"])
+
+
+_OPEN_LEADING = "\"`'([<{"
+_CLOSE_TRAILING = "\"`'.,;:!?)]}>"
+_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+
+
+def named_pictures(text: str) -> tuple[list[str], list[str]]:
+    """The PNG names and the folders a prompt's text mentions, first-seen order, no repeats."""
+    names: list[str] = []
+    folders: list[str] = []
+    for raw in text.split():
+        token = raw
+        while True:
+            stripped = token.lstrip(_OPEN_LEADING).rstrip(_CLOSE_TRAILING)
+            if stripped == token:
+                break
+            token = stripped
+        if not token or "://" in token:
+            continue
+        if token.lower().endswith(".png") and len(token) > 4:
+            if token not in names:
+                names.append(token)
+        elif "/" in token and token not in folders:
+            folders.append(token)
+    return names, folders
+
+
+def _spellings(roots: Sequence[Path]) -> list[tuple[str, ...]]:
+    found: list[tuple[str, ...]] = []
+    for root in roots:
+        written = os.path.normpath(os.path.abspath(root))
+        if os.path.isdir(written):
+            found.append((written, os.path.realpath(root)))
+    return found
+
+
+def _open_inside(path: str, roots: Sequence[tuple[str, ...]], *, directory: bool = False) -> int | None:
+    """An open descriptor of `path` found by walking down from a root, or None when no root holds it.
+
+    No component below the root is followed through a symlink; raises OSError."""
+    match = None
+    for spellings in roots:
+        for spelling in spellings:
+            if path == spelling or path.startswith(spelling.rstrip(os.sep) + os.sep):
+                match = (spellings[1], [part for part in path[len(spelling):].split(os.sep) if part])
+                break
+        if match:
+            break
+    if match is None:
+        return None
+    real, parts = match
+    current = os.open(real, os.O_RDONLY | _DIRECTORY)
+    try:
+        if not parts:
+            if not directory:
+                raise IsADirectoryError(path)
+            handed, current = current, -1
+            return handed
+        for index, part in enumerate(parts):
+            last = index == len(parts) - 1
+            if last and not directory:
+                flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+            else:
+                flags = os.O_RDONLY | os.O_NOFOLLOW | _DIRECTORY
+            try:
+                child = os.open(part, flags, dir_fd=current)
+            except NotADirectoryError:
+                # A plain file standing where a folder is named holds nothing; a symlink does not.
+                if not stat.S_ISLNK(os.stat(part, dir_fd=current, follow_symlinks=False).st_mode):
+                    raise FileNotFoundError(part) from None
+                raise
+            os.close(current)
+            current = child
+            if not last and not stat.S_ISDIR(os.fstat(current).st_mode):
+                raise FileNotFoundError(part)
+        if directory and not stat.S_ISDIR(os.fstat(current).st_mode):
+            raise NotADirectoryError(path)
+        handed, current = current, -1
+        return handed
+    finally:
+        if current >= 0:
+            os.close(current)
+
+
+def _serve(fd: int, pictures_dir: Path) -> str | None:
+    """The stored id of the PNG behind `fd`, or None when it is no regular, small, readable PNG."""
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > pictures.MAX_BYTES:
+            return None
+        data = b""
+        while len(data) <= pictures.MAX_BYTES:
+            piece = os.read(fd, pictures.MAX_BYTES + 1 - len(data))
+            if not piece:
+                break
+            data += piece
+        if len(data) > pictures.MAX_BYTES:
+            return None
+        pictures.checked_png(data)
+        return pictures.store(pictures_dir, data)[0]
+    except (OSError, pictures.NotPng):
+        return None
+
+
+def attach_pictures(item: dict, roots: Sequence[Path], pictures_dir: Path, *,
+                    home: Path | None = None) -> dict:
+    """`item` with the pictures its text names stored and listed (module docstring, Pictures)."""
+    names, folders = named_pictures("\n".join((item["question"], item["detail"], item.get("reading", ""))))
+    allowed = _spellings(roots)
+    home_dir = str(home if home is not None else Path.home())
+    project = os.path.abspath(roots[0]) if roots else os.getcwd()
+
+    def absolute(token: str, folder: str | None = None) -> str:
+        if token.startswith("/"):
+            return os.path.normpath(token)
+        if token.startswith("~/"):
+            return os.path.normpath(os.path.join(home_dir, token[2:]))
+        return os.path.normpath(os.path.join(folder if folder is not None else project, token))
+
+    found: list[dict] = []
+    missing: list[str] = []
+    listed: set[str] = set()
+    chosen: list[str] = []
+    named_pass = True
+
+    def add(path: str, fd: int) -> None:
+        try:
+            if path in listed or len(found) >= MAX_PICTURES:
+                return
+            picture_id = _serve(fd, pictures_dir)
+            if picture_id is None:
+                return
+            listed.add(path)
+            if named_pass:
+                chosen.append(path)
+            found.append({"id": picture_id, "line": os.path.basename(path)[:MAX_PICTURE_LINE_CHARS],
+                          "pair": None})
+        finally:
+            os.close(fd)
+
+    folder_paths = [absolute(folder) for folder in folders]
+    for name in names:
+        if name.startswith(("/", "~/")):
+            candidates = [absolute(name)]
+        else:
+            candidates = [absolute(name, folder) for folder in folder_paths] + [absolute(name)]
+        inside, absent, skipped = 0, 0, False
+        for path in candidates:
+            try:
+                fd = _open_inside(path, allowed)
+            except FileNotFoundError:
+                inside += 1
+                absent += 1
+                continue
+            except OSError:
+                skipped = True
+                break
+            if fd is None:
+                continue
+            add(path, fd)
+            skipped = True
+            break
+        if not skipped and inside and inside == absent and len(missing) < MAX_PICTURES:
+            missing.append(name)
+
+    named_pass = False
+    for folder in folder_paths:
+        if len(found) >= MAX_PICTURES:
+            break
+        if any(os.path.dirname(path) == folder.rstrip(os.sep) for path in chosen):
+            continue
+        try:
+            folder_fd = _open_inside(folder, allowed, directory=True)
+        except OSError:
+            continue
+        if folder_fd is None:
+            continue
+        try:
+            for entry in sorted(name for name in os.listdir(folder_fd) if name.lower().endswith(".png")):
+                path = os.path.join(folder, entry)
+                try:
+                    fd = os.open(entry, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=folder_fd)
+                except OSError:
+                    continue
+                add(path, fd)
+        except OSError:
+            pass
+        finally:
+            os.close(folder_fd)
+    return {**item, "pictures": found, "missing_pictures": missing}
 
 
 def local_activity(root: str) -> float | None:

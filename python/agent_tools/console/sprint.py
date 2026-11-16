@@ -7,6 +7,9 @@
     sprint inbox [--sprint <id>] [--secret-file <path>] [--port N]
     sprint recap [--sprint <id>] [--secret-file <path>] [--port N]
     sprint withdraw-question [--sprint <id>] [--secret-file <path>] --round <id> --index <n> [--port N]
+    sprint notice [--sprint <id>] [--secret-file <path>] --notice-file <path | -> [--port N]
+    sprint notices [--sprint <id>] [--secret-file <path>] [--port N]
+    sprint withdraw-notice [--sprint <id>] [--secret-file <path>] --notice <id> [--port N]
     sprint reply [--sprint <id>] [--secret-file <path>] --message <id> --reply-file <path | -> [--port N]
     sprint picture [--sprint <id>] [--secret-file <path>] --file <path> [--port N]
     sprint status [--sprint <id>] [--port N]
@@ -18,7 +21,7 @@ the manager session it starts; without `--secret-file` the secret is `$CONSOLE_S
 (one trailing newline is removed, as from the file). A flag always wins over the environment. No id is stderr
 `sprint: no sprint id: pass --sprint or set CONSOLE_SPRINT_ID`, an id from the environment that
 is not a sprint id is stderr `sprint: CONSOLE_SPRINT_ID is not a sprint id (16 lowercase hex
-characters)`, and, for `brief`, `report`, `ask`, `withdraw-question`, `close`, `inbox`, `recap`, `reply` and `picture`, no secret is stderr `sprint: no secret: pass --secret-file or set
+characters)`, and, for `brief`, `report`, `ask`, `withdraw-question`, `notice`, `notices`, `withdraw-notice`, `close`, `inbox`, `recap`, `reply` and `picture`, no secret is stderr `sprint: no secret: pass --secret-file or set
 CONSOLE_SPRINT_SECRET`; each is exit 2 with no request sent. `--port` is the console's loopback
 port (0-65535; default 27184); the command only ever talks to 127.0.0.1.
 
@@ -103,6 +106,25 @@ least 1); anything else is exit 2 with no request sent. On success it prints `sp
 question <i> withdrawn` and exit 0; a refusal (an answered question, one already withdrawn, another
 sprint's question, a wrong secret) is `sprint: refused <status>: <text>` and exit 1, and a 200 answer
 without integer `round` and `index` is `sprint: refused 200: unreadable answer: <error>` and exit 1.
+
+`sprint notice` reads the secret the same way and the notice from `--notice-file` (`-` reads stdin),
+a JSON object (`kind` and the members of that kind), and sends `POST /api/notice` with
+`{"sprint_id", "secret", "notice"}`, no `Origin`. On success it prints `sprint: notice <id> posted`
+and exit 0. The command validates no member of the notice: the console decides, in one place, and a
+refusal is `sprint: refused <status>: <text>` and exit 1. A file that cannot be read or is not a JSON
+object is exit 2 with no request sent; a 200 answer without an integer `notice` is `sprint: refused
+200: unreadable answer: <error>` and exit 1.
+
+`sprint notices` reads the secret the same way and sends `POST /api/notices` with `{"sprint_id",
+"secret"}`, no `Origin`. It prints the console's answer as returned, one JSON line `{"notices":
+[...]}` of the open notices of the sprint's project, oldest first, and exit 0.
+
+`sprint withdraw-notice` reads the secret the same way and sends `POST /api/withdraw-notice` with
+`{"sprint_id", "secret", "notice"}`, no `Origin`, for the notice `--notice` (an integer of at least
+1, the id `sprint notice` printed); anything else is exit 2 with no request sent. On success it prints
+`sprint: notice <id> withdrawn` and exit 0; a refusal (a notice already ended, another sprint's
+notice, a wrong secret) is `sprint: refused <status>: <text>` and exit 1, and a 200 answer without an
+integer `notice` is `sprint: refused 200: unreadable answer: <error>` and exit 1.
 
 `sprint report --help` and `sprint close --help` list the members of the report and of the closing
 report, each with one line and an example, the same lists `sprint contract` prints.
@@ -253,6 +275,16 @@ def round_id(text: str) -> int:
     return value
 
 
+def notice_id(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        value = 0
+    if value < 1:
+        raise argparse.ArgumentTypeError(f"{text!r} is not a notice id (an integer of at least 1)")
+    return value
+
+
 def question_index(text: str) -> int:
     try:
         value = int(text)
@@ -271,6 +303,9 @@ def build_parser() -> argparse.ArgumentParser:
                        ("report", "send the sprint's report to the console"),
                        ("ask", "send one round of questions to the owner"),
                        ("withdraw-question", "take back one of the sprint's open questions"),
+                       ("notice", "post one notice for the sprint's project"),
+                       ("notices", "print the project's open notices"),
+                       ("withdraw-notice", "take back one of the sprint's notices"),
                        ("close", "send the sprint's closing report"),
                        ("inbox", "print the owner's unread messages to the sprint"),
                        ("recap", "print what a manager needs to pick the sprint up"),
@@ -295,6 +330,9 @@ def build_parser() -> argparse.ArgumentParser:
                               else (f"--{name}-file", name))
                 each.add_argument(flag, required=True,
                                   help=f"the {what} as a JSON object; - reads stdin")
+            if name == "notice":
+                each.add_argument("--notice-file", required=True,
+                                  help="the notice as a JSON object; - reads stdin")
             if name == "close":
                 each.add_argument("--closing-file", required=True,
                                   help="the closing report as a JSON object; - reads stdin")
@@ -305,6 +343,9 @@ def build_parser() -> argparse.ArgumentParser:
                               help="the id of the round holding the question")
             each.add_argument("--index", type=question_index, required=True,
                               help="the question's index in its round, counting from 0")
+        if name == "withdraw-notice":
+            each.add_argument("--notice", type=notice_id, required=True,
+                              help="the id of the notice being taken back")
         if name == "reply":
             each.add_argument("--message", type=message_id, required=True,
                               help="the id of the message being answered")
@@ -535,6 +576,37 @@ def send_withdrawal(args: argparse.Namespace, sprint: str) -> str:
     return f"sprint: round {round_} question {index} withdrawn"
 
 
+def send_notice(args: argparse.Namespace, sprint: str) -> str:
+    secret = resolve_secret(args)
+    notice = read_object(args.notice_file, "notice")
+    body = json.dumps({"sprint_id": sprint, "secret": secret, "notice": notice}).encode()
+    text = ask(args.port, "POST", service.NOTICE_PATH, body)
+    return f"sprint: notice {answered_notice(text)} posted"
+
+
+def answered_notice(text: str) -> int:
+    try:
+        notice = json.loads(text)["notice"]
+        if type(notice) is not int:
+            raise TypeError("notice is not an integer")
+    except (ValueError, KeyError, TypeError) as error:
+        raise Refused(f"sprint: refused 200: unreadable answer: {error}") from error
+    return notice
+
+
+def read_notices(args: argparse.Namespace, sprint: str) -> str:
+    secret = resolve_secret(args)
+    body = json.dumps({"sprint_id": sprint, "secret": secret}).encode()
+    return ask(args.port, "POST", service.NOTICES_PATH, body)
+
+
+def send_notice_withdrawal(args: argparse.Namespace, sprint: str) -> str:
+    secret = resolve_secret(args)
+    body = json.dumps({"sprint_id": sprint, "secret": secret, "notice": args.notice}).encode()
+    text = ask(args.port, "POST", service.WITHDRAW_NOTICE_PATH, body)
+    return f"sprint: notice {answered_notice(text)} withdrawn"
+
+
 def send_report(args: argparse.Namespace, sprint: str) -> str:
     secret = resolve_secret(args)
     report = read_object(args.report_file, "report")
@@ -624,6 +696,12 @@ def main(argv: list[str] | None = None) -> int:
             line = send_round(args, sprint)
         elif args.command == "withdraw-question":
             line = send_withdrawal(args, sprint)
+        elif args.command == "notice":
+            line = send_notice(args, sprint)
+        elif args.command == "notices":
+            line = read_notices(args, sprint)
+        elif args.command == "withdraw-notice":
+            line = send_notice_withdrawal(args, sprint)
         elif args.command == "close":
             line = send_closing(args, sprint)
         elif args.command == "inbox":

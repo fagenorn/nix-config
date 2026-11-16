@@ -197,6 +197,7 @@ agent-workflow-tests *args:
     tests/test_suite_runner.py \
     tests/test_console_event_log.py \
     tests/test_console_view.py \
+    tests/test_console_activation.py \
     tests/test_console_capacity.py \
     tests/test_console_capacity_check.py \
     tests/test_console_probe.py \
@@ -237,6 +238,7 @@ agent-workflow-tests *args:
     tests/test_console_briefs.py \
     tests/test_console_messages.py \
     tests/test_console_questions.py \
+    tests/test_console_notices.py \
     tests/test_console_reports.py \
     tests/test_console_screenshots.py \
     tests/test_console_sprint_command.py \

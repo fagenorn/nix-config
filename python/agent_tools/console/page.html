@@ -220,6 +220,8 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .message-new { font-weight: 600; color: var(--text); }
 .finished-list > summary .message-new, .sprint-earlier summary .message-new { margin-left: 10px; }
 .new-replies { margin-top: 8px; font-size: .9375rem; color: var(--sub0); max-width: 44rem; }
+.activation { margin-top: 8px; font-size: .84375rem; color: var(--text); max-width: 44rem; overflow-wrap: anywhere; }
+.activation code { font: 500 .8125rem/1.4 ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace; padding: 0 4px; background: var(--mantle); border-radius: 4px; white-space: nowrap; }
 .tell-hint { color: var(--ov2); font-size: .8125rem; }
 .finished-messages { padding: 0 0 8px 16px; }
 .unreachable { color: var(--ov2); }
@@ -360,6 +362,8 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .pic-thumb img[hidden] { display: none; }
 .pic-failed { display: block; padding: 10px; font-size: .8125rem; color: var(--ov2); cursor: default; }
 .pic-line { margin-top: 4px; font-size: .84375rem; color: var(--sub0); overflow-wrap: anywhere; }
+.pic-missing { margin: 8px 0 0; font-size: .84375rem; color: var(--sub0); overflow-wrap: anywhere; }
+.reading { margin: 10px 0 0; font-weight: 600; color: var(--text); overflow-wrap: anywhere; }
 .pic-label { display: block; margin-bottom: 4px; font-size: .8125rem; color: var(--ov2); }
 html:has(#viewer:not([hidden])) { overflow: hidden; }
 .viewer { position: fixed; inset: 0; z-index: 30; display: flex; flex-direction: column; background: var(--crust); }
@@ -1943,6 +1947,19 @@ function kindWords(item) {
 function checkLabel(item) {
   return typeof item.check_id === "string" && item.check_id !== "" ? el("span", "check-id", item.check_id) : null;
 }
+function isOwnerCheck(item) {
+  return typeof item.check_id === "string";
+}
+// An owner check's pictures (ADR-console-045) reuse the shared gallery and viewer of ADR-console-038.
+function checkPictures(node, item) {
+  const gallery = pictureGallery(itemId(item), item.pictures);
+  if (gallery !== null) node.appendChild(gallery);
+  if (!Array.isArray(item.missing_pictures)) return;
+  for (const name of item.missing_pictures) node.appendChild(el("p", "pic-missing", name + " was not found on this host."));
+}
+function readingLine(item) {
+  return typeof item.reading === "string" && item.reading !== "" ? el("p", "reading", "Reading: " + item.reading) : null;
+}
 function headLine(item) {
   const line = el("p", "head meta");
   line.appendChild(kindWords(item));
@@ -2104,12 +2121,18 @@ function holdPictures(draw) {
     pictureHolds -= 1;
   }
   if (pictureHolds !== 0) return;
-  if (viewer !== null && ![...document.querySelectorAll("button.pic-thumb")].some((n) => n.dataset.key.startsWith(viewer.key + "/"))) closeViewer();
+  if (viewer !== null && !viewerStillShown()) closeViewer();
   if (heldThumb !== null && viewer === null) {
     const thumb = [...document.querySelectorAll("button.pic-thumb")].find((n) => n.dataset.key === heldThumb);
     if (thumb !== undefined) thumb.focus({ preventScroll: true });
   }
   prunePictures();
+}
+// The open viewer stays only while its card still draws the same pictures in the same order (ADR-console-038).
+function viewerStillShown() {
+  const shown = [...document.querySelectorAll("button.pic-thumb")].filter((n) => n.dataset.key.startsWith(viewer.key + "/"));
+  if (shown.length !== viewer.sequence.length) return false;
+  return viewer.sequence.every((picture, i) => shown.some((n) => n.dataset.key === viewer.key + "/" + i && n.dataset.picture === picture.id));
 }
 function pictureFigure(key, index, picture, label, sequence) {
   const figure = el("figure", "pic");
@@ -2117,6 +2140,7 @@ function pictureFigure(key, index, picture, label, sequence) {
   const thumb = el("button", "pic-thumb");
   thumb.setAttribute("type", "button");
   thumb.dataset.key = key + "/" + index;
+  thumb.dataset.picture = picture.id;
   thumb.addEventListener("click", () => openViewer(key, sequence, index));
   thumb.addEventListener("keydown", (event) => {
     if (event.key !== "Enter" && event.key !== " ") return;
@@ -2939,6 +2963,8 @@ function checkBox(item, state, lead) {
       box.appendChild(heldLine(item));
       act.appendChild(detailFold(item));
     }
+    const reading = readingLine(item);
+    if (reading !== null) box.appendChild(reading);
     box.appendChild(act);
     return box;
   };
@@ -3020,6 +3046,7 @@ function leadItem(item) {
   const card = el("article", "card lead");
   card.appendChild(headLine(item));
   card.appendChild(pathWords(el("h2", isRegister(item) ? "q reg" : "q"), item.headline));
+  if (isOwnerCheck(item)) checkPictures(card, item);
   if (isQuestion(item) && typeof item.context === "string") card.appendChild(el("p", "context", item.context));
   if (isQuestion(item)) {
     const gallery = pictureGallery(itemId(item), item.pictures);
@@ -3061,6 +3088,7 @@ function itemLine(item) {
     head.appendChild(phrase("span", "lw", "waiting ", timeEl("since", item.waiting_since, "")));
     line.appendChild(head);
   }
+  if (isOwnerCheck(item)) checkPictures(line, item);
   if (isQuestion(item) && typeof item.context === "string") line.appendChild(el("p", "context", item.context));
   if (isQuestion(item)) {
     const gallery = pictureGallery(itemId(item), item.pictures);
@@ -3429,6 +3457,20 @@ function renderProjects(view) {
     sprintRedraw -= 1;
   }
 }
+// The activation line (#1114, ADR-console-043): the one sentence at the head of the Work column when a merged console change is not active on this host. The command rides in a code span; the rest of the text is drawn with pathWords so the checkout's path breaks after a slash.
+function activationLine(view) {
+  const found = view.activation;
+  if (found === null || typeof found !== "object") return null;
+  const { text, command } = found;
+  if (typeof text !== "string" || typeof command !== "string") return null;
+  const at = text.indexOf(command);
+  if (at < 0) return null;
+  const line = el("p", "activation");
+  line.appendChild(el("span", "", text.slice(0, at)));
+  line.appendChild(el("code", "", command));
+  pathWords(line.appendChild(el("span")), text.slice(at + command.length));
+  return line;
+}
 function drawProjects(view) {
   const section = document.getElementById("projects");
   const heading = el("h2", "sec-h", "Work");
@@ -3440,6 +3482,8 @@ function drawProjects(view) {
     ? { id: active.dataset.tell, start: active.selectionStart, end: active.selectionEnd }
     : null;
   section.replaceChildren(heading);
+  const activation = activationLine(view);
+  if (activation !== null) section.appendChild(activation);
   if (view.project_count === 0) {
     section.appendChild(el("p", "empty", "No project is registered yet."));
     return;

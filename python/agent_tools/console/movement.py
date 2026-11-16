@@ -10,7 +10,7 @@ raises `ForgeError("cancelled")` and makes no call. A pull request is `running` 
 in a state of `RUNNING_CHECKS` (queued, in progress or pending) or a `StatusContext` counted in a state
 of `RUNNING_STATUSES`, however many other contexts it has, since the counts cover every context and not
 a first page of them. A check in `WAITING` is held on a person (a deployment environment's reviewer),
-not running CI, so it does not count (ADR-console-045 D6); a null `statusCheckRollup` or no commit is not running. A pull's `issues` are
+not running CI, so it does not count (ADR-console-046 D6); a null `statusCheckRollup` or no commit is not running. A pull's `issues` are
 `deliveries.branch_issue(pattern, headRefName)` (when not None) united with `body_issues(body)`, which
 matches `(?<![\\w/])#(\\d+)\\b`, so `owner/repo#6` and `abc#6` name nothing. `committed_ms` is the head
 commit's `committedDate` in epoch milliseconds, None with no commit. An answer of another shape raises

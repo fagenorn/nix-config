@@ -61,8 +61,16 @@ refuses.
 It is also given `pull_reader=movement.read_pulls` (#1110), so a running sprint's pull requests are read
 from the forge to name what it waits on (`agent_tools.console.movement`).
 
+Every minute it compares the console's own files with the integration branch on origin as the
+console's checkout last fetched it (`agent_tools.console.activation`), on every platform; the page
+says when a `just switch` would change what the console runs.
+
 The service keeps the console's profile choice for new sessions in `$CLAUDE_ACCOUNTS_DIR/chosen-profile`
 (else `~/.claude-accounts/chosen-profile`) and answers it on `GET /api/profile` (#1011).
+
+It is also given the `--screenshots` locations (#1112), `--screenshots DIR` repeated for each: a
+picture a manual check names inside one of them, beside the project's own checkout, is stored and shown
+on the check's card (`agent_tools.console.inbox`). With none given, only the project's checkout is read.
 """
 
 from __future__ import annotations
@@ -74,8 +82,9 @@ import sys
 import threading
 from pathlib import Path
 
+import agent_tools
 from agent_tools.console import (
-    account_add, account_remove, approve, inbox, manager, movement, nudge, probe, register, service, signin,
+    account_add, activation, account_remove, approve, inbox, manager, movement, nudge, probe, register, service, signin,
     signin_run)
 from agent_tools.console.event_log import EventLogError
 from agent_tools.console.write_guard import TokenError
@@ -95,6 +104,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="console", description=__doc__.splitlines()[0])
     parser.add_argument("--port", type=port_number, default=service.DEFAULT_PORT,
                         help="loopback port to listen on (0 picks a free one; default: %(default)s)")
+    parser.add_argument("--screenshots", type=Path, action="append", default=[], metavar="DIR",
+                        help="a folder whose PNGs a manual check may show (repeatable)")
     return parser
 
 
@@ -113,7 +124,8 @@ def main(argv: list[str] | None = None) -> int:
             account_remover=account_remove.remover_for(sys.platform),
             adopter=register.adopter_for(sys.platform),
             forge=approve.forge_for(sys.platform), trust_home=Path.home(),
-            choice_file=service.default_choice_file())
+            activation_reader=activation.reader_for(Path(agent_tools.__file__).resolve().parent.parent),
+            choice_file=service.default_choice_file(), screenshot_dirs=args.screenshots)
     except TokenError as error:
         print(f"console: page token unusable: {error}", file=sys.stderr)
         return 1
