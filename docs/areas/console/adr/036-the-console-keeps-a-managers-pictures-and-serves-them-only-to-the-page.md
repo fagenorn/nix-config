@@ -1,6 +1,6 @@
 # ADR-console-036 — The console keeps a manager's pictures and serves them only to the page
 
-- **Status:** accepted; amended by ADR-console-038 and ADR-console-044
+- **Status:** accepted; amended by ADR-console-038 and ADR-console-045
 - **Decided in:** #1089
 
 ## Context
@@ -29,5 +29,5 @@ A manager that builds or checks a page has a screenshot of its work, and the own
 - A picture no row names disappears a day after it was last sent; a row that names it keeps it as long as the row is kept.
 - The store is bounded by what managers send in a day plus what rows reference, each at most 2 MiB.
 - ADR-console-008 lists the route among the manager's writes and ADR-console-009 is amended by the sweep.
-- An owner check's pictures are stored and referenced by the inbox row's picture entries (ADR-console-044).
+- An owner check's pictures are stored and referenced by the inbox row's picture entries (ADR-console-045).
 - Related: ADR-console-008, ADR-console-009, ADR-console-013, ADR-console-019.
