@@ -409,6 +409,37 @@ class OwnerCheckPictureTest(Case):
         svc.retain()
         self.assertEqual(pictures.read(svc.pictures_dir, sha256(PIXEL)), PIXEL)
 
+    def test_a_sweep_waits_while_a_check_picture_is_being_stored(self):
+        now = [time.time()]
+        svc = self.opened(Scripted([self.check]), clock=lambda: now[0])
+        svc.poll_tracker()
+        old = now[0] - 2 * DAY
+        stored = svc.pictures_dir / sha256(PIXEL)
+        os.utime(stored, (old, old))
+        swept = threading.Event()
+        real_sweep, real_store = pictures.sweep, pictures.store
+        sweeper = threading.Thread(target=svc.retain)
+        raced = []
+
+        def sweep(*args):
+            try:
+                return real_sweep(*args)
+            finally:
+                swept.set()
+
+        def store(directory, data):
+            if data == PIXEL and not sweeper.is_alive() and not swept.is_set():
+                sweeper.start()
+                raced.append(swept.wait(0.3))
+            return real_store(directory, data)
+
+        with mock.patch.object(pictures, "sweep", sweep), mock.patch.object(pictures, "store", store):
+            svc.poll_tracker()
+            sweeper.join(5)
+        self.assertEqual(raced, [False], "the sweep ran while a picture was being stored")
+        self.assertTrue(swept.is_set())
+        self.assertEqual(pictures.read(svc.pictures_dir, sha256(PIXEL)), PIXEL)
+
     def test_other_items_gain_no_picture_members(self):
         svc = self.opened(Scripted([A]))
         svc.poll_tracker()

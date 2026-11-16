@@ -7960,6 +7960,18 @@ class PageCheckPictureTest(unittest.TestCase):
         self.assertLess(next(i for i, c in enumerate(kids) if c is reading),
                         next(i for i, c in enumerate(kids) if has_class(c, "act")))
 
+    def test_an_open_viewer_closes_when_the_checks_picture_file_changes(self) -> None:
+        swapped = {**PIC_CHECK, "pictures": [{"id": C, "line": "before-1440.png", "pair": None},
+                                             {"id": B, "line": "after-1440.png", "pair": None}]}
+        (snap,) = render([START, {"frame": frame([PIC_CHECK])}, {"click": "pic-thumb"},
+                          {"frame": frame([swapped])}, {"snapshot": True}])
+        self.assertTrue(snap["viewer"]["hidden"])
+
+    def test_an_open_viewer_stays_when_the_checks_pictures_are_unchanged(self) -> None:
+        (snap,) = render([START, {"frame": frame([PIC_CHECK])}, {"click": "pic-thumb"},
+                          {"frame": frame([dict(PIC_CHECK)])}, {"snapshot": True}])
+        self.assertFalse(snap["viewer"]["hidden"])
+
     def test_a_check_without_the_new_members_draws_none(self) -> None:
         old = check_item("Q", "manual-check", headline=DEMO_QUESTION, check_id="A4")
         (snap,) = render([START, {"frame": frame([old])}, {"snapshot": True}])

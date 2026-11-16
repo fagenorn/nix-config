@@ -1635,7 +1635,7 @@ class PictureDocsTest(unittest.TestCase):
                 ("019-a-managers-questions-arrive-as-inbox-items.md",
                  "- **Status:** accepted; amended by ADR-console-038, ADR-console-040"),
                 ("036-the-console-keeps-a-managers-pictures-and-serves-them-only-to-the-page.md",
-                 "- **Status:** accepted; amended by ADR-console-038")):
+                 "- **Status:** accepted; amended by ADR-console-038 and ADR-console-043")):
             with self.subTest(path):
                 lines = (ROOT / adr / path).read_text().splitlines()
                 self.assertEqual(next(r for r in lines if r.startswith("- **Status:**")), amended)
@@ -1659,13 +1659,18 @@ class PictureDocsTest(unittest.TestCase):
                        "ADR-console-014", "ADR-console-036", "ADR-console-038"):
             with self.subTest(needle):
                 self.assertIn(needle, text)
-        for path in ("013-a-managers-brief-is-approved-or-redirected-on-the-page.md",
-                     "014-a-managers-report-becomes-the-sprints-line.md",
-                     "038-a-managers-question-shows-its-pictures-on-the-card-and-full-size-in-a-viewer.md"):
+        for path, amended in (
+                ("013-a-managers-brief-is-approved-or-redirected-on-the-page.md",
+                 "- **Status:** accepted; amended by ADR-console-041"),
+                ("014-a-managers-report-becomes-the-sprints-line.md",
+                 "- **Status:** accepted; amended by ADR-console-041"),
+                ("038-a-managers-question-shows-its-pictures-on-the-card-and-full-size-in-a-viewer.md",
+                 "- **Status:** accepted; amended by ADR-console-041 and ADR-console-043")):
             with self.subTest(path):
                 lines = (ROOT / adr / path).read_text().splitlines()
-                self.assertEqual(next(r for r in lines if r.startswith("- **Status:**")),
-                                 "- **Status:** accepted; amended by ADR-console-041")
+                line = next(r for r in lines if r.startswith("- **Status:**"))
+                # Another area decision may be listed after this one (014 on main lists the sprint ADR).
+                self.assertTrue(line == amended or line.startswith(amended + ", "), line)
         context = (ROOT / "docs/areas/console/CONTEXT.md").read_text()
         for term in ("**Brief**:", "**Report**:", "**Picture**:"):
             entry = context[context.index(term):].split("\n\n")[0]

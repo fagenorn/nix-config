@@ -396,7 +396,7 @@ class DocsTreeTest(unittest.TestCase):
 
     def test_the_owner_check_pictures_decision_is_recorded(self):
         adr = self.doc(
-            "docs/areas/console/adr/042-an-owner-check-card-shows-the-pictures-and-the-reading-its-prompt-names.md"
+            "docs/areas/console/adr/043-an-owner-check-card-shows-the-pictures-and-the-reading-its-prompt-names.md"
         )
         for needle in (
             "#1112", "--screenshots", "agentConsole.screenshotDirs", "Reading:",
@@ -408,7 +408,7 @@ class DocsTreeTest(unittest.TestCase):
             "docs/areas/console/adr/038-a-managers-question-shows-its-pictures-on-the-card-and-full-size-in-a-viewer.md",
             "docs/areas/console/CONTEXT.md",
         ):
-            self.assertIn("ADR-console-042", self.doc(path))
+            self.assertIn("ADR-console-043", self.doc(path))
 
     def test_the_console_signin_decision_is_recorded(self):
         path = "docs/areas/console/adr/022-a-profiles-sign-in-is-read-from-the-clients-status-command.md"

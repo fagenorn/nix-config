@@ -2685,6 +2685,8 @@ class ConsoleService:
         self._signature = None
         self.log: EventLog | None = None
         self._ingest = threading.Lock()
+        # Keeps a sweep from deleting a picture an attach is storing; taken after `_ingest`, never before it.
+        self._storing = threading.Lock()
         self._idle = threading.Condition(self._ingest)
         self._grants_done = threading.Condition(self._ingest)
         self._signin_runs = None if signin_runs is None else signin_runs(on_end=self._signin_ended)
@@ -4385,7 +4387,8 @@ class ConsoleService:
 
     def _sweep_pictures(self, events: Iterable[Event]) -> None:
         try:
-            pictures.sweep(self.pictures_dir, pictures.referenced(events), self._clock())
+            with self._storing:
+                pictures.sweep(self.pictures_dir, pictures.referenced(events), self._clock())
         except Exception as error:
             print(f"console: picture_sweep_failed {type(error).__name__}: {error}",
                   file=sys.stderr)
@@ -5650,7 +5653,8 @@ class ConsoleService:
         for entry in items:
             if "check_id" in entry:
                 try:
-                    entry = inbox.attach_pictures(entry, roots, self.pictures_dir)
+                    with self._storing:
+                        entry = inbox.attach_pictures(entry, roots, self.pictures_dir)
                 except Exception as error:
                     print(f"console: picture_attach_failed {project_id} {type(error).__name__}: {error}",
                           file=sys.stderr)
