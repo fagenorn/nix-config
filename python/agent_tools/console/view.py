@@ -478,7 +478,7 @@ and the sprint's manager is a `started` row, else the turn form (`PICKUP_TURN_TE
 `"sent, "` and the pick-up for `sent`, else `PICKED_UP_TEXT`, `REPLIED_TEXT` or
 `NOT_PICKED_UP_TEXT`; on an ended sprint a `sent` message reads `SENT_ENDED_TEXT` alone, with no
 pick-up promise. `action_text` is null unless the message is `not_picked_up` on a sprint that has
-not ended (an ended one has no Tell box and no stop or withdraw control to point at); then
+not ended (an ended one has no Tell box and no stop or drop control to point at); then
 `RETRY_ACTION_TEXT` when the sprint's `retry` is true, else `NUDGE_ACTION_TEXT` with the minute
 pick-up, else `TURN_ACTION_TEXT`. `tell_text` is null for an ended sprint, else `TELL_MINUTE_TEXT` or
 `TELL_TURN_TEXT` by the same pick-up (the page adds no colour to any of them). `reach_text` is `UNREACHABLE_TEXT` once `sprints.unreachable` holds, else null; it never
@@ -644,8 +644,8 @@ ALL_OUT_SENTENCE = "Everything resumes at the earliest reset; nothing is asked o
 NEEDS_SENTENCE = "Each one links to the tracker, where it is answered."
 BRIEF_SENTENCE = "Press Enter to approve the brief, or write a reply to ask for changes."
 QUESTION_SENTENCE = "Choose an option with its number and press Enter, or answer in your own words."
-MANAGER_SENTENCE = "Try again to start a new manager, or withdraw the sprint."
-PROGRESS_SENTENCE = "Tell the manager to continue, or withdraw the sprint."
+MANAGER_SENTENCE = "Try again to start a new manager, or drop the sprint."
+PROGRESS_SENTENCE = "Tell the manager to continue, or drop the sprint."
 SIGNIN_HEADLINE = "Sign in to {profile} again"
 SIGNIN_FIRST_HEADLINE = "Sign in to {profile}"
 SIGNIN_SENTENCE = "Press Sign in, then finish signing in in your browser."

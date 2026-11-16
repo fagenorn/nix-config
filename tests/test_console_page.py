@@ -20,6 +20,7 @@ from agent_tools.console import signin as console_signin
 from agent_tools.console.event_log import Event
 from agent_tools.console import event_log
 from agent_tools.console.sprints import MAX_REPORT_ISSUES, Question, sprint_states
+from agent_tools.console.sprints import NUDGE_ACTION_TEXT
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
 from .test_console_messages import ANSWER as MESSAGE_ANSWER, AT, PARTS, approval, life, view_with
 from .test_console_view import (
@@ -1048,7 +1049,7 @@ class PageTimeTest(unittest.TestCase):
         self.assertIn("resets Mon 05:00", full(one["accounts_body"]))
         self.assertNotIn("resets", full(one["capacity"]))
         self.assertIn("out until Fri 09:30", full(one["capacity"]))
-        self.assertIn("stated 3 min ago", full(one["projects"]))
+        self.assertIn("goal set 3 min ago", full(one["projects"]))
         self.assertIn("untouched for 3 days", full(one["projects"]))
         self.assertIn("Resumes Fri 09:30", full(two["statement"]))
         self.assertIn("out until Fri 09:30", full(two["promoted"]))
@@ -2552,7 +2553,7 @@ SPRINT = {
     "type": "sprint", "sprint_id": "a" * 16, "title": TITLE, "goal": GOAL_TEXT,
     "state": "drafting",
     "state_text": "drafting the brief", "stated_at": "2026-11-12T10:00:00+00:00",
-    "age_text": "stated 3 min ago", "manager_text": "no manager has picked this up",
+    "age_text": "goal set 3 min ago", "manager_text": "no manager has picked this up",
     "manager_state": "none", "manager_until": None, "retry": False, "sessions": [],
     "ball": "manager", "ball_text": "manager working", "now_text": "two slices are building",
     "ended_at": None, "closing": None,
@@ -2804,7 +2805,7 @@ class PageGoalTest(unittest.TestCase):
         ])
         (line,) = sprint_lines(snap)
         for expected in (GOAL_TEXT, "manager working", "two slices are building",
-                         "stated 3 min ago", "no manager has picked this up"):
+                         "goal set 3 min ago", "no manager has picked this up"):
             self.assertIn(expected, full(line))
         self.assertEqual(
             len([n for n in nodes(line) if n["tag"] == "button" and has_class(n, "withdraw")]), 1
@@ -2827,7 +2828,7 @@ class PageGoalTest(unittest.TestCase):
         (line,) = sprint_lines(snap)
         self.assertEqual(
             [full(n) for n in nodes(line) if has_class(n, "fail")],
-            ["Could not withdraw: this sprint is not open"],
+            ["Could not drop: this sprint is not open"],
         )
 
 
@@ -2978,7 +2979,6 @@ class PageMessageTest(unittest.TestCase):
         self.assertEqual([n for n in nodes(back["projects"]) if has_class(n, "tell")], [])
 
 
-NUDGE_ACTION_TEXT = "Tell the manager again to nudge it, or withdraw the sprint."
 HINT_TEXT = "The manager picks it up within a minute."
 EARLIER_KEY = "earlier:" + "a" * 16
 LIFE_SPRINT = {**REPORTED, "tell_text": HINT_TEXT, "stoppable": True}
@@ -3253,7 +3253,7 @@ class PageSprintControlsTest(unittest.TestCase):
         fold = more_fold(line)
         self.assertFalse(fold["open"])
         (summary,) = [c for c in fold["children"] if c["tag"] == "summary"]
-        self.assertEqual(full(summary), "Withdraw")
+        self.assertEqual(full(summary), "End the sprint")
         self.assertEqual(telling["active"], "tell")
         (line,) = sprint_lines(telling)
         (field,) = in_line(line, "textarea", "tell")
@@ -3263,7 +3263,26 @@ class PageSprintControlsTest(unittest.TestCase):
         self.assertEqual(in_line(line, "button", "tell-open"), [])
         (line,) = sprint_lines(more)
         (withdraw,) = in_line(line, "button", "withdraw")
-        self.assertEqual(full(withdraw), "Withdraw")
+        self.assertEqual(full(withdraw), "Drop the sprint")
+
+    def test_the_work_column_says_goal_set_and_one_verb_pair_and_never_nudge(self) -> None:
+        from agent_tools.console.sprints import NUDGE_ACTION_TEXT as SHIPPED_ACTION_TEXT
+        frame = life_frame(
+            [life_entry(3, "not_picked_up", "not picked up after 5 min",
+                        action_text=SHIPPED_ACTION_TEXT)],
+            stated_at=utc(3 * 60 * 1000))
+        (snap,) = render([
+            {"start": {"focused": False, "clock": NOW_MS}}, {"frame": frame},
+            {"open": MORE_KEY}, {"click": "stop"}, {"snapshot": True},
+        ])
+        shown = " ".join(visible_text(snap["projects"]).split())
+        self.assertIn("goal set 3 min ago", shown)
+        for banned in ("stated ", "withdraw", "nudge", "stop or"):
+            self.assertNotIn(banned, shown.lower())
+        (line,) = sprint_lines(snap)
+        buttons = [full(n) for n in visible(line) if n["tag"] == "button"]
+        self.assertIn("Stop and report", buttons)
+        self.assertIn("Drop the sprint", buttons)
 
     def test_the_work_column_names_its_folds_by_what_they_hold(self) -> None:
         (snap,) = render([
@@ -3278,8 +3297,8 @@ class PageSprintControlsTest(unittest.TestCase):
             words.append([full(n["children"][0]) for n in nodes(block)
                           if n["tag"] == "details" and (has_class(n, "sprint-detail")
                                                          or has_class(n, "sprint-more"))])
-        self.assertEqual(words, [["Show the report", "Stop or withdraw"],
-                                 ["Show the goal", "Withdraw"]])
+        self.assertEqual(words, [["Show the report", "End the sprint"],
+                                 ["Show the goal", "End the sprint"]])
         summaries = {full(n) for n in nodes(snap["projects"]) if n["tag"] == "summary"}
         self.assertEqual(summaries & {"Detail", "More"}, set())
 
@@ -3353,7 +3372,7 @@ class PageSprintControlsTest(unittest.TestCase):
         for snap in (closed, failed):
             (line,) = sprint_lines(snap)
             self.assertFalse(more_fold(line)["open"])
-        self.assertIn("Could not withdraw: this sprint is not open", visible_text(line))
+        self.assertIn("Could not drop: this sprint is not open", visible_text(line))
 
     def test_a_failed_manager_start_and_its_retry_need_no_opening(self) -> None:
         reason = "could not start a manager: the directory is not trusted"
@@ -3462,7 +3481,7 @@ class PageManagerTest(unittest.TestCase):
         self.assertEqual([full(n) for n in nodes(card) if has_class(n, "fail")],
                          ["Could not try again: this sprint has a manager"])
         self.assertEqual([full(n) for n in nodes(card) if n["tag"] == "button"],
-                         ["Try again", "Withdraw"])
+                         ["Try again", "Drop the sprint"])
 
     def test_both_manager_items_style_the_keep_going_choice_primary_and_withdraw_quiet(self) -> None:
         for item, keep, away in ((STALL, "try-again", "stall-withdraw"),
@@ -3518,7 +3537,7 @@ class PageManagerTest(unittest.TestCase):
         self.assertEqual([full(n) for n in nodes(card) if has_class(n, "fail")],
                          ["Could not continue: this sprint's manager is not waiting for you"])
         self.assertEqual([full(n) for n in nodes(card) if n["tag"] == "button"],
-                         ["Continue", "Withdraw"])
+                         ["Continue", "Drop the sprint"])
 
     def test_a_progress_card_withdraw_posts_the_withdrawal(self) -> None:
         (snap,) = render([
@@ -4242,7 +4261,7 @@ class PageSprintEndTest(unittest.TestCase):
                 self.assertEqual(len(offered), boxes)
 
     def test_an_unstopped_manager_is_shown_under_the_statement(self) -> None:
-        text = "The manager of a withdrawn goal could not be stopped: boom; trying again"
+        text = "The manager of a dropped sprint could not be stopped: boom; trying again"
         (snap,) = render([
             START,
             {"frame": {**view([]), "unstopped": [{
@@ -4462,7 +4481,7 @@ class PageInFlightTest(unittest.TestCase):
         self.assertFalse(button["disabled"])
         self.assertEqual(
             [full(n) for n in nodes(line) if has_class(n, "fail")],
-            ["Could not withdraw: this sprint is not open"],
+            ["Could not drop: this sprint is not open"],
         )
 
 

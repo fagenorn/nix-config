@@ -1279,7 +1279,7 @@ class SprintQuotaViewTest(unittest.TestCase):
         self.assertEqual(shown["statement"]["headline"], "1 thing needs you")
         self.assertEqual(shown["statement"]["sentence"], view.PROGRESS_SENTENCE)
         self.assertEqual(view.PROGRESS_SENTENCE,
-                         "Tell the manager to continue, or withdraw the sprint.")
+                         "Tell the manager to continue, or drop the sprint.")
         bare = dataclasses.replace(with_manager(started(A)), no_progress_at=iso(R))
         self.assertIsNone(line(bare, R + MIN)["inbox"]["open"][0]["last_status"])
         both = dataclasses.replace(stopped, stalled="r", stalled_at=iso(R + 40 * MIN))
@@ -1636,7 +1636,7 @@ class SprintEndViewTest(unittest.TestCase):
         view = derive_view([state("p00", 1)], pending=pending)
         self.assertEqual(view["unstopped"], [
             {"project_id": "p00", "sprint_id": sid, "title": goal, "failed_at": at,
-             "text": f"The manager of a withdrawn goal could not be stopped: {reason}; "
+             "text": f"The manager of a dropped sprint could not be stopped: {reason}; "
                      "trying again"}
             for sid, reason, at in (("b" * 16, "boom", T0), ("e" * 16, "zzz", T0),
                                     ("a" * 16, "late", iso(T0_MS + MIN)))])
@@ -1652,7 +1652,7 @@ class SprintViewTest(unittest.TestCase):
             "title": "make the importer resumable", "goal": "make the importer resumable",
             "state": "drafting", "state_text": "drafting the brief",
             "ball": "manager", "ball_text": "manager working", "now_text": "drafting the brief",
-            "stated_at": T0, "age_text": "stated 3 min ago", "manager_text": "no manager has picked this up",
+            "stated_at": T0, "age_text": "goal set 3 min ago", "manager_text": "no manager has picked this up",
             "manager_state": "none", "manager_until": None, "retry": True,
             "progress": None, "progress_text": None, "status": None, "status_at": None,
             "next": None, "milestone": None, "tracker_url": None, "issues": [], "waiting": 0,
@@ -1670,7 +1670,7 @@ class SprintViewTest(unittest.TestCase):
                 shown = view["entries"][0]["sprints"][0]
                 self.assertEqual(shown["manager_text"], expected)
                 if now_ms is None:
-                    self.assertEqual(shown["age_text"], "stated just now")
+                    self.assertEqual(shown["age_text"], "goal set just now")
 
     def test_sprints_order_newest_first(self):
         view = derive_view([state("p00", 1)], sprints={
@@ -1840,7 +1840,7 @@ class ReviveViewTest(unittest.TestCase):
         self.assertEqual(shown["statement"]["headline"], "1 thing needs you")
         self.assertEqual(shown["statement"]["sentence"], view.MANAGER_SENTENCE)
         self.assertEqual(view.MANAGER_SENTENCE,
-                         "Try again to start a new manager, or withdraw the sprint.")
+                         "Try again to start a new manager, or drop the sprint.")
         entry = shown["entries"][0]["sprints"][0]
         self.assertEqual((entry["manager_state"], entry["manager_text"], entry["retry"]),
                          ("stalled", "managers keep failing: r", True))

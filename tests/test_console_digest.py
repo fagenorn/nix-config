@@ -196,7 +196,7 @@ class DigestTest(unittest.TestCase):
             Event(3, at(3), GOAL_WITHDRAWN, "owner/p00", {"sprint_id": "b" * 16}),
             Event(4, at(4), GOAL_WITHDRAWN, None, {"sprint_id": "c" * 16, "goal": "g"})], {}, {})
         self.assertEqual(found, [Moment(2, at(2), SPRINT_WITHDRAWN,
-                                        "The goal for owner/p00 was withdrawn: make the importer resumable")])
+                                        "The sprint for owner/p00 was dropped: make the importer resumable")])
 
     def test_a_brief_arriving_and_approved_are_moments(self):
         sid, goal = "a" * 16, "make the importer resumable"
@@ -244,7 +244,7 @@ class DigestTest(unittest.TestCase):
             Event(3, at(3), GOAL_WITHDRAWN, "owner/p00", row)], {}, {})
         self.assertEqual([m.sentence for m in found], [
             f"The manager of {title} was restarted",
-            f"The goal for owner/p00 was withdrawn: {title}"])
+            f"The sprint for owner/p00 was dropped: {title}"])
         self.assertNotIn("g" * 100, "".join(m.sentence for m in found))
 
     def test_a_wake_that_ran_and_a_takeover_that_started_each_say_one_sentence(self):

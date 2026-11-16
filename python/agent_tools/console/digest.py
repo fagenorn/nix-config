@@ -84,7 +84,7 @@ withdrawal removes the sprint).
     limit_stop       A session in <where> stopped on a usage limit.
     resumed          A session in <where> resumed work.
     session_ended    A session in <where> ended.
-    sprint_withdrawn The goal for <project_id> was withdrawn: <title>
+    sprint_withdrawn The sprint for <project_id> was dropped: <title>
     brief_sent       A brief for <project_id> arrived, version <n>: <title>
     brief_approved   The brief for <project_id> was approved, version <n>: <title>
     sprint_state     The sprint for <project_id> changed to <its ball words, or its state once ended>: <title>
@@ -378,7 +378,7 @@ def moments(
             if isinstance(event.project, str) and isinstance(goal, str):
                 title = _title(payload.get("sprint_id"), goal, previous)
                 said = (SPRINT_WITHDRAWN,
-                        f"The goal for {event.project} was withdrawn: {title}")
+                        f"The sprint for {event.project} was dropped: {title}")
         if event.kind == SPRINT_REPORTED:
             said = _report_moment(event, previous, folded, held)
         elif event.kind == SPRINT_CLOSED:

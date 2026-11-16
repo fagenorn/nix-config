@@ -792,13 +792,16 @@ class MessageLifeViewTest(unittest.TestCase):
         late = life(rows, AT + FIVE_MIN)["messages"][0]
         self.assertEqual((late["state"], late["state_text"], late["action_text"]),
                          ("not_picked_up", "not picked up after 5 min",
-                          "Tell the manager again to nudge it, or withdraw the sprint."))
+                          "Tell the manager again, or drop the sprint."))
         turn = life(rows, AT + FIVE_MIN, nudges=False)["messages"][0]
         self.assertEqual(
             turn["action_text"],
-            "It waits for the manager's next turn; withdraw the sprint if none comes.")
+            "It waits for the manager's next turn; drop the sprint if none comes.")
         for text in (NUDGE_ACTION_TEXT, TURN_ACTION_TEXT, RETRY_ACTION_TEXT):
             self.assertNotIn("More", text)
+        for text in (NUDGE_ACTION_TEXT, TURN_ACTION_TEXT):
+            self.assertNotIn("nudge", text)
+            self.assertNotIn("withdraw", text)
         failed = [message_row(1, event_log.GOAL_STATED, {"goal": "make the importer resumable"}),
                   message_row(2, event_log.MANAGER_FAILED, {"reason": "boom"}),
                   messaged_row(3, TEXT)]

@@ -1051,11 +1051,11 @@ class WithdrawnTest(unittest.TestCase):
 
 class AgeTest(unittest.TestCase):
     def test_the_age_wording(self):
-        for elapsed, text in ((-5, "stated just now"), (0, "stated just now"),
-                              (59_999, "stated just now"), (60_000, "stated 1 min ago"),
-                              (3_599_999, "stated 59 min ago"), (3_600_000, "stated 1 h ago"),
-                              (86_399_999, "stated 23 h ago"), (86_400_000, "stated 1 day ago"),
-                              (172_800_000, "stated 2 days ago")):
+        for elapsed, text in ((-5, "goal set just now"), (0, "goal set just now"),
+                              (59_999, "goal set just now"), (60_000, "goal set 1 min ago"),
+                              (3_599_999, "goal set 59 min ago"), (3_600_000, "goal set 1 h ago"),
+                              (86_399_999, "goal set 23 h ago"), (86_400_000, "goal set 1 day ago"),
+                              (172_800_000, "goal set 2 days ago")):
             with self.subTest(elapsed=elapsed):
                 self.assertEqual(sprints.age_text(elapsed), text)
 

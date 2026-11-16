@@ -742,7 +742,7 @@ function drawSprint(item, entry, sprint) {
     words.appendChild(phrase("span", "status-age", "reported ", timeEl("ago", sprint.status_at, "")));
   }
   const age = el("span", "age");
-  age.appendChild(el("span", "", "stated "));
+  age.appendChild(el("span", "", "goal set "));
   age.appendChild(timeEl("ago", sprint.stated_at, ""));
   words.appendChild(age);
   head.appendChild(words);
@@ -770,7 +770,7 @@ function drawSprint(item, entry, sprint) {
   if (wasOpen) fold.open = true;
   item.appendChild(fold);
   if (state !== undefined && state.phase === "failed") {
-    item.appendChild(el("span", "fail", "Could not withdraw: " + state.reason));
+    item.appendChild(el("span", "fail", "Could not drop: " + state.reason));
   }
   messageLife(item, sprint, earlierWasOpen);
   if (typeof sprint.reach_text === "string") {
@@ -781,9 +781,9 @@ function drawSprint(item, entry, sprint) {
   const more = el("details", "sprint-more");
   more.dataset.key = "more:" + sprint.sprint_id;
   if (moreWasOpen) more.open = true;
-  more.appendChild(el("summary", "", sprint.stoppable === true ? "Stop or withdraw" : "Withdraw"));
+  more.appendChild(el("summary", "", "End the sprint"));
   if (stopButton !== null) more.appendChild(stopButton);
-  const button = actionButton("withdraw", "Withdraw", () => withdraw(item, entry, sprint));
+  const button = actionButton("withdraw", "Drop the sprint", () => withdraw(item, entry, sprint));
   if (state !== undefined && state.phase === "sending") button.setAttribute("disabled", "");
   more.appendChild(button);
   controls.appendChild(more);
@@ -793,17 +793,17 @@ function stopControls(item, entry, sprint) {
   const id = sprint.sprint_id;
   const state = stops.get(id);
   const asking = state !== undefined && (state.phase === "confirming" || state.phase === "sending");
-  // The Stop button sits under "Stop or withdraw" beside Withdraw; the confirmation it opens stays on the sprint's line.
+  // The Stop and report button sits under "End the sprint" beside Drop the sprint; the confirmation it opens stays on the sprint's line.
   let button = null;
   if (!asking) {
-    button = actionButton("stop", "Stop", () => {
+    button = actionButton("stop", "Stop and report", () => {
       stops.set(id, { phase: "confirming", reason: "" });
       refillRows(id);
     });
   } else {
     item.appendChild(el("span", "stop-ask",
       "Stop this sprint? The manager finishes what is mid-merge, starts nothing new and reports."));
-    const confirm = actionButton("stop-confirm", "Confirm stop", () => stop(item, entry, sprint));
+    const confirm = actionButton("stop-confirm", "Stop and report", () => stop(item, entry, sprint));
     if (state.phase === "sending") confirm.setAttribute("disabled", "");
     item.appendChild(confirm);
     const cancel = actionButton("stop-cancel", "Cancel", () => {
@@ -1000,8 +1000,8 @@ function stallCard(item) {
   if (again !== undefined && again.phase === "sending") retry.setAttribute("disabled", "");
   const act = el("div", "act");
   act.appendChild(retry);
-  const withdrawn = actionButton("stall-withdraw", "Withdraw",
-    () => stallPost(item, "withdraw", "Could not withdraw: ", () => fetch("/api/withdraw", {
+  const withdrawn = actionButton("stall-withdraw", "Drop the sprint",
+    () => stallPost(item, "withdraw", "Could not drop: ", () => fetch("/api/withdraw", {
       method: "POST", headers: stallHeaders(), body: stallBody(item),
     })));
   if (away !== undefined && away.phase === "sending") withdrawn.setAttribute("disabled", "");
@@ -1045,8 +1045,8 @@ function progressCard(item) {
   if (going !== undefined && going.phase === "sending") onward.setAttribute("disabled", "");
   const act = el("div", "act");
   act.appendChild(onward);
-  const withdrawn = actionButton("progress-withdraw", "Withdraw",
-    () => stallPost(item, "progress-withdraw", "Could not withdraw: ", () => fetch("/api/withdraw", {
+  const withdrawn = actionButton("progress-withdraw", "Drop the sprint",
+    () => stallPost(item, "progress-withdraw", "Could not drop: ", () => fetch("/api/withdraw", {
       method: "POST", headers: stallHeaders(), body: stallBody(item),
     })));
   if (away !== undefined && away.phase === "sending") withdrawn.setAttribute("disabled", "");

@@ -198,7 +198,7 @@ last stage and movement outlive the run. `SprintState.observed` is ordered by is
 equals folding `b` onto the fold of `a`.
 
 `ago_text(elapsed_ms)` is `just now` under a minute, `<m> min ago` under an hour, `<h> h ago` under
-a day, else `1 day ago` or `<d> days ago`; a negative count is 0. `age_text(elapsed_ms)` is `stated `
+a day, else `1 day ago` or `<d> days ago`; a negative count is 0. `age_text(elapsed_ms)` is `goal set `
 plus that. `progress_text(landed, total, in_delivery, queued, held)` is `<landed> of <total> landed`
 followed by `, <n> in delivery`, `, <n> queued` and `, <n> held` for each non-zero count, in that
 order. The view states and texts are the constants `ON_TRACK`, `WAITING`, `QUIET`, `CLOSING`,
@@ -520,7 +520,7 @@ NOT_ENDED = "an issue of this sprint is neither landed nor dropped"
 ENDED = "this sprint has ended"
 ALREADY_STOPPING = "this sprint is already stopping"
 STOP_FAILED_TEXT = "could not stop the manager: {reason}; trying again"
-UNSTOPPED_TEXT = "The manager of a withdrawn goal could not be stopped: {reason}; trying again"
+UNSTOPPED_TEXT = "The manager of a dropped sprint could not be stopped: {reason}; trying again"
 STOP_TEXT = ("The owner stopped this sprint: finish what is mid-merge, start nothing new, and send "
              "your closing report with sprint close.")
 NOT_STARTED = "this sprint's brief is not approved"
@@ -575,9 +575,9 @@ SENT_ENDED_TEXT = "sent"
 REPLIED_TEXT = "replied"
 NOT_PICKED_UP_TEXT = "not picked up after 5 min"
 RETRY_ACTION_TEXT = "Press Retry to start a new manager."
-NUDGE_ACTION_TEXT = "Tell the manager again to nudge it, or withdraw the sprint."
+NUDGE_ACTION_TEXT = "Tell the manager again, or drop the sprint."
 TURN_ACTION_TEXT = ("It waits for the manager's next turn; "
-                    "withdraw the sprint if none comes.")
+                    "drop the sprint if none comes.")
 MANAGER_SESSION_NAME = re.compile(r"(?P<project>.+) sprint (?P<sprint>[0-9a-f]{16})")
 
 _MINUTE_MS = 60_000
@@ -1536,7 +1536,7 @@ def ago_text(elapsed_ms: int) -> str:
 
 
 def age_text(elapsed_ms: int) -> str:
-    return "stated " + ago_text(elapsed_ms)
+    return "goal set " + ago_text(elapsed_ms)
 
 
 def progress_text(landed: int, total: int, in_delivery: int, queued: int, held: int) -> str:
