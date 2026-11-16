@@ -1,4 +1,4 @@
-# ADR-console-046 — A sprint waiting on CI, a committing delivery or a release step reads what it waits for
+# ADR-console-047 — A sprint waiting on CI, a committing delivery or a release step reads what it waits for
 
 - **Status:** accepted
 - **Decided in:** #1110

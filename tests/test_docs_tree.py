@@ -395,10 +395,10 @@ class DocsTreeTest(unittest.TestCase):
             self.assertIn(needle, context)
 
     def test_the_wait_signals_decision_is_recorded(self):
-        path = ("docs/areas/console/adr/046-a-sprint-waiting-on-ci-a-committing-delivery-"
+        path = ("docs/areas/console/adr/047-a-sprint-waiting-on-ci-a-committing-delivery-"
                 "or-a-release-step-reads-what-it-waits-for.md")
         first = (REPO_ROOT / path).read_text().splitlines()[0]
-        self.assertEqual(first, "# ADR-console-046 — A sprint waiting on CI, a committing "
+        self.assertEqual(first, "# ADR-console-047 — A sprint waiting on CI, a committing "
                                 "delivery or a release step reads what it waits for")
         adr = self.doc(path)
         for needle in ("#1110", "ADR-console-042", "ADR-console-032",
@@ -409,9 +409,9 @@ class DocsTreeTest(unittest.TestCase):
         status = [line for line in (REPO_ROOT / "docs/areas/console/adr/042-a-sprint-reads-stuck-"
                                     "only-when-nothing-it-reads-has-moved.md").read_text().splitlines()
                   if line.startswith("- **Status:**")]
-        self.assertEqual(status, ["- **Status:** accepted; amended by ADR-console-046"])
+        self.assertEqual(status, ["- **Status:** accepted; amended by ADR-console-047"])
         context = self.doc("docs/areas/console/CONTEXT.md")
-        for needle in ("a delivery committing or a release step moves it", "ADR-console-046"):
+        for needle in ("a delivery committing or a release step moves it", "ADR-console-047"):
             self.assertIn(needle, context)
 
     def test_the_owner_check_pictures_decision_is_recorded(self):
