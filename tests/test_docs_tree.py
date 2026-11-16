@@ -425,6 +425,13 @@ class DocsTreeTest(unittest.TestCase):
             self.doc("docs/areas/console/adr/045-an-owner-check-card-shows-the-pictures-and-the-reading-its-prompt-names.md"),
         )
 
+    def test_the_spend_decision_is_recorded_under_its_own_number(self):
+        path = "docs/areas/console/adr/049-spend-is-read-from-transcripts-into-memory-and-never-logged.md"
+        first = (REPO_ROOT / path).read_text().splitlines()[0]
+        self.assertEqual(
+            first, "# ADR-console-049 — Spend is read from transcripts into memory and never logged")
+        self.assertIn("ADR-console-049", self.doc("docs/areas/console/CONTEXT.md"))
+
     def test_the_console_signin_decision_is_recorded(self):
         path = "docs/areas/console/adr/022-a-profiles-sign-in-is-read-from-the-clients-status-command.md"
         first = (REPO_ROOT / path).read_text().splitlines()[0]

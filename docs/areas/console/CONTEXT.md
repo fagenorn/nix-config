@@ -102,7 +102,7 @@ One Workflow run of a delivery program started by a session, shown under that se
 _Avoid_: sprint, job
 
 **Spend**:
-The tokens (input, cache writes, cache reads, output) and estimated list-price dollars the host's sessions and delivery runs used, read from their transcripts and shown per day for 30 days by session, project, sprint, run, phase, account and aspect (ADR-console-047).
+The tokens (input, cache writes, cache reads, output) and estimated list-price dollars the host's sessions and delivery runs used, read from their transcripts and shown per day for 30 days by session, project, sprint, run, phase, account and aspect (ADR-console-049).
 _Avoid_: cost, usage
 
 **Limit reading**:
