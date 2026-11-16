@@ -711,9 +711,13 @@ an empty `changes` refuse nothing.
 
 The check runs on every call after the detaching check and the base policy
 load, before any lifecycle verb is judged. It reuses the segment and token
-readings of the lifecycle verbs. The guard reads the command as raw text when
-it cannot be parsed, a segment cannot be tokenised, or a command word is an
-evaluator (`sh`, `bash`, `eval`, ...) or an `env -S`; there a verb counts when
+readings of the lifecycle verbs, and reads a leading redirection out of the way
+(`>/dev/null ./scripts/deploy.sh` runs the script) and an ANSI-C quoted word as
+its text (`$'just' switch`). The guard reads the command as raw text when
+it cannot be parsed, a segment cannot be tokenised, a command word is an
+evaluator (`sh`, `bash`, `eval`, ...) or an `env -S`, or the program at a command
+position is in `PRODUCTION_RUNNERS` and a later word of its run is an evaluator or
+`env -S` (`timeout 600 sh -c 'just switch'`, `devenv shell -- bash -c ...`); there a verb counts when
 its words occur in order in either raw reading, or its words joined by one
 space are a substring of the command or of the command with its quotes and
 backslashes deleted, and nothing is lifted. Otherwise a verb of two or more
@@ -725,7 +729,9 @@ mention of it (`git add scripts/deploy.sh`, `--title kubectl`), so it counts
 only at a command position, or at a later word of a run whose command-position
 program is in `PRODUCTION_RUNNERS` (`xargs`, `timeout`, `nice`, `find`, `devenv`
 and the other programs that run a later word as a command). A quoted token that
-holds `$(` or a backtick is also read as raw text alone, with no lift, since a
+holds `$(` or a backtick, or whitespace behind a runner (`watch 'just switch'`,
+`nix-shell --run '...'`, `flock f -c '...'`), is also read as raw text alone, with no
+lift, since a
 substitution runs its text. A parsed match is lifted when its run begins with a
 read-only verb that properly extends the production verb (`kubectl get pods`
 against `kubectl`, not `just build switch` against `just switch`); raw text
@@ -735,7 +741,9 @@ one-word verb because they are not at a command position, and a chained or
 substituted production command in them still counts.
 
 Which project's rules refuse depends on the checkout: the payload cwd's
-repository (its `origin` slug). A command with a word, in either raw reading,
+repository (its `origin` slug). A command that hits a rule while that lookup
+times out or cannot start is refused, since an unreadable checkout is not an
+unregistered one. A command with a word, in either raw reading,
 whose basename is `cd`, `pushd`, `popd` or `chdir` may run elsewhere, so every
 declaring row judges it, the cwd repository first and then by sorted slug. That
 reading is by raw words, not command positions, because a leading redirection
@@ -3356,8 +3364,16 @@ def github_slug(url):
     return slug
 
 
-def detect_repository(git_bin, cwd, timeout):
-    """Return the owner/name slug of cwd's origin remote, or None."""
+class RepositoryLookupFailed(Exception):
+    """The lookup of a checkout's origin could not run to an answer (timed out or could not
+    start), which is not the same as a checkout that names no repository."""
+
+
+def detect_repository(git_bin, cwd, timeout, strict=False):
+    """Return the owner/name slug of cwd's origin remote, or None.
+
+    With `strict`, a lookup that times out or cannot start raises `RepositoryLookupFailed`
+    instead of returning None (issue 1149 review)."""
     if not isinstance(cwd, str) or not cwd:
         return None
     try:
@@ -3368,7 +3384,11 @@ def detect_repository(git_bin, cwd, timeout):
             timeout=timeout,
             check=False,
         )
-    except (subprocess.TimeoutExpired, OSError):
+    except (subprocess.TimeoutExpired, OSError) as error:
+        if strict:
+            raise RepositoryLookupFailed(
+                "timed out" if isinstance(error, subprocess.TimeoutExpired) else "could not start"
+            ) from error
         return None
     if child.returncode != 0:
         return None
@@ -3506,7 +3526,9 @@ def _load_json_object(path, keys):
         return None, f"cannot load {path}: {why}"
     try:
         document = json.loads(data.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
+        # A document nested past the interpreter's limit raises RecursionError, which is
+        # an unloadable file like any other (issue 1149 review).
         return None, f"cannot load {path}: {error}"
     if not isinstance(document, dict) or set(document) != keys:
         return None, f"{path}: expected an object with exactly the keys {', '.join(sorted(keys))}"
@@ -3693,24 +3715,96 @@ def production_lifted(run, verb, read_only):
     )
 
 
+REDIRECTION = re.compile(r"[0-9]*(?:&>>?|>>|>\||>&|<&|<>|<<<|<<-?|>|<)(.*)", re.DOTALL)
+ENV_PAYLOAD_PROGRAM = "env"
+
+
+def production_flags(tokens):
+    """`command_position_flags` of `tokens` with each redirection read out of the way, as the
+    shell does: `>/dev/null ./deploy.sh` runs `./deploy.sh`, and a bare `>` or `2>` takes the
+    word after it as its target. Same result shape, over all of `tokens`."""
+    kept = []
+    skip = False
+    for index, (value, operator) in enumerate(tokens):
+        if skip:
+            skip = False
+            continue
+        redirection = None if operator else REDIRECTION.fullmatch(value)
+        if redirection is not None:
+            skip = not redirection.group(1)
+            skip = skip and index + 1 < len(tokens) and not tokens[index + 1][1]
+            continue
+        kept.append(index)
+    kept_flags, split_string = command_position_flags([tokens[index] for index in kept])
+    flags = [False] * len(tokens)
+    for index, flag in zip(kept, kept_flags):
+        flags[index] = flag
+    return flags, split_string
+
+
+def production_runner_hides_shell(tokens, flags):
+    """True when a run whose command-position program is in `PRODUCTION_RUNNERS` holds a
+    shell (`timeout 600 sh -c ...`, `devenv shell -- bash -c ...`) or an `env -S` later, since
+    the shell text it runs is one quoted token that no verb's first word matches."""
+    start = 0
+    while start < len(tokens):
+        if tokens[start][1]:
+            start += 1
+            continue
+        end = start
+        while end < len(tokens) and not tokens[end][1]:
+            end += 1
+        flagged = next((k for k in range(start, end) if flags[k]), None)
+        if flagged is not None and program_name(tokens[flagged][0]) in PRODUCTION_RUNNERS:
+            seen_env = False
+            for value, _ in tokens[flagged + 1:end]:
+                if program_name(value) in SHELL_EVALUATORS:
+                    return True
+                if program_name(value) == ENV_PAYLOAD_PROGRAM:
+                    seen_env = True
+                elif seen_env and value.startswith("-") and wrapper_option("env", value)[0] == "payload":
+                    return True
+        start = end
+    return False
+
+
+def ansi_c_unquoted(text):
+    """`text` with the `$` of each `$'...'` and `$"..."` deleted, so the tokeniser reads
+    `$'just'` as `just` rather than `$just`. The quote characters stay, so the quoting
+    structure is unchanged."""
+    return text.replace("$'", "'").replace('$"', '"')
+
+
+def redirections_unglued(text):
+    """`text` with the `&` of a redirection operator (`2>&1`, `&>file`, `<&3`) deleted, so
+    the segmenter does not cut the command there and leave the redirection's target as a
+    command word. Only the `&` goes, and a quoted `&` was inert, so no word is hidden."""
+    return text.replace("&>>", ">>").replace("&>", ">").replace(">&", ">").replace("<&", "<")
+
+
+def joined_continuations(text):
+    """`text` with each backslash-newline deleted, as the shell joins the lines."""
+    return text.replace("\\\n", "")
+
+
 def production_parse(command):
     """The tokens and command-position flags of each segment of `command`, with the raw
     text of the segments after it, or None when the guard reads the command as raw text:
     it cannot be parsed or tokenised, or a command word is an evaluator or `env -S`."""
-    split = split_segments_with_runs(command)
+    split = split_segments_with_runs(redirections_unglued(command))
     if split is None:
         return None
     segments = split[0]
     parsed = []
     for position, segment in enumerate(segments):
-        tokens = tokenize_segment(segment)
+        tokens = tokenize_segment(ansi_c_unquoted(segment))
         if tokens is None:
             return None
-        flags, split_string = command_position_flags(tokens)
+        flags, split_string = production_flags(tokens)
         if split_string or any(
             flag and program_name(value) in SHELL_EVALUATORS
             for flag, (value, _) in zip(flags, tokens)
-        ):
+        ) or production_runner_hides_shell(tokens, flags):
             return None
         parsed.append((tokens, flags, "\n".join(segments[position + 1:])))
     return parsed
@@ -3721,6 +3815,7 @@ def production_hits(command, rules):
     member: the `(slug, index into changes)` pairs the shell would run, and False for
     `certain` when any word of either raw reading is a directory change (issue 1149 D5 to
     D7). A mention as another program's argument never hits a one-word verb."""
+    raw = joined_continuations(command)
     verbs = {
         slug: (
             [production_verb(change["argv"]) for change in rule["changes"]],
@@ -3730,7 +3825,7 @@ def production_hits(command, rules):
     }
     certain = not any(
         program_name(word) in DIRECTORY_CHANGING_WORDS
-        for words in (raw_words(command), raw_words(command, glued=True))
+        for words in (raw_words(raw), raw_words(raw, glued=True))
         for word in words
     )
     hits = set()
@@ -3738,10 +3833,11 @@ def production_hits(command, rules):
     if parsed is None:
         for slug, (changes, _) in verbs.items():
             for index, verb in enumerate(changes):
-                if production_raw_hit(command, verb):
+                if production_raw_hit(raw, verb):
                     hits.add((slug, index))
         return hits, certain
     for tokens, flags, later in parsed:
+        later = joined_continuations(later)
         later_words = (raw_words(later), raw_words(later, glued=True))
         for value, operator in tokens:
             if not operator and ("$(" in value or "`" in value):
@@ -3760,6 +3856,15 @@ def production_hits(command, rules):
             flagged = next((k for k in range(start, end) if flags[k]), None)
             runner = program_name(tokens[flagged][0]) if flagged is not None else None
             cut = end < len(tokens)
+            if flagged is not None and runner in PRODUCTION_RUNNERS:
+                # Shell text a runner takes as one word (`watch 'just switch'`,
+                # `nix-shell --run '...'`, `flock f -c '...'`) is read as raw text.
+                for value, _ in tokens[flagged + 1:end]:
+                    if any(character.isspace() for character in value):
+                        for slug, (changes, _) in verbs.items():
+                            for index, verb in enumerate(changes):
+                                if production_raw_hit(value, verb):
+                                    hits.add((slug, index))
             for i in range(start, end):
                 name = program_name(tokens[i][0])
                 run = [token[0] for token in tokens[i:end]]
@@ -3813,7 +3918,11 @@ def production_problem_for(command, rows, cwd, git_bin, timeout):
     hits, certain = production_hits(command, rules)
     if not hits:
         return None
-    here = detect_repository(git_bin, cwd, timeout)
+    try:
+        here = detect_repository(git_bin, cwd, timeout, strict=True)
+    except RepositoryLookupFailed as error:
+        return (f"the repository lookup {error} for a command that may change the production "
+                "of a declared project, so the guard cannot judge it")
     order = [here] if here in rules else []
     if not certain:
         order += sorted(slug for slug in rules if slug != here)

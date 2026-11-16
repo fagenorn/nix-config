@@ -1869,6 +1869,75 @@ class ClaudePermissionGuardTest(unittest.TestCase):
                     self.assertEqual(2, result.returncode, (command, result.stderr))
                     self.assertIn(needle, result.stderr)
 
+    def test_a_production_command_hidden_by_a_runner_a_redirection_or_a_quoting_is_refused(self):
+        """AC1 review findings: shell text behind a runner, a leading redirection, an ANSI-C
+        quoted word and a continued directory name never hide a declared command."""
+        guard_args = self.production_args({NODO: NODO_ROW, PROD: PROD_ROW})
+        prod = self.make_repo(f"git@github.com:{PROD}.git")
+        elsewhere = self.make_repo("git@github.com:fagenorn/tool.git")
+        rules = {
+            self.DEPLOY: (
+                "timeout 600 sh -c 'just switch'", "devenv shell -- bash -c 'just switch'",
+                "echo x | xargs sh -c 'just switch'", "nix-shell --run 'just switch'",
+                "watch 'just switch'", "flock /tmp/l -c 'just switch'",
+                "timeout 5 env -S 'just switch'", "timeout 5 env -Sjust switch",
+                "nice -n 5 /bin/zsh -c 'just switch'",
+                "find . -exec sh -c 'just switch' ';'", ">/dev/null sh -c 'just switch'",
+                "$'just' switch", "just $'switch'", "$\"just\" switch", "ju$'st' switch",
+                "env FOO=1 $'just' switch"),
+            "(production rule kube-apply)": (
+                "nix develop -c bash -c 'kubectl apply -f x'",
+                "timeout 5 bash -c 'kubectl apply -f x'", "$'kubectl' apply -f x"),
+            "(production rule deploy-script)": (
+                ">/dev/null ./scripts/deploy.sh", "2>/dev/null ./scripts/deploy.sh",
+                "> /dev/null ./scripts/deploy.sh", ">>log.txt 2>&1 ./scripts/deploy.sh",
+                "</dev/null ./scripts/deploy.sh", "2>&1 env FOO=1 ./scripts/deploy.sh"),
+        }
+        for needle, commands in rules.items():
+            for command in commands:
+                with self.subTest(command=command):
+                    result = self.run_guard(command, cwd=prod, guard_args=guard_args)
+                    self.assertEqual(2, result.returncode, (command, result.stderr))
+                    self.assertIn(needle, result.stderr)
+        for command in ("c\\\nd %s && just switch" % prod, "cd\\\n %s && just switch" % prod):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=elsewhere, guard_args=guard_args)
+                self.assertEqual(2, result.returncode, (command, result.stderr))
+                self.assertIn(self.DEPLOY, result.stderr)
+        for command in ("timeout 600 sh -c 'just build'", "2>&1 just build",
+                        ">/dev/null git add scripts/deploy.sh", "timeout 5 echo hello world",
+                        "echo $'x' just"):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=prod, guard_args=guard_args)
+                self.assertEqual(0, result.returncode, (command, result.stderr))
+
+    def test_a_production_command_is_refused_when_the_repository_lookup_fails(self):
+        """AC3 review finding: a lookup that times out is not an unregistered repository."""
+        guard_args = (*self.production_args({PROD: PROD_ROW}), "--child-timeout-seconds", "0.3")
+        prod = self.make_repo(f"git@github.com:{PROD}.git")
+        slow = Path(self.fixture_dir.name) / "slow-git"
+        slow.write_text("#!/bin/sh\nexec sleep 3\n", encoding="utf-8")
+        slow.chmod(0o755)
+        refused = self.run_guard("just switch", cwd=prod,
+                                 guard_args=(*guard_args, "--git-bin", str(slow)))
+        self.assertEqual(2, refused.returncode, refused.stderr)
+        self.assertIn("repository lookup timed out", refused.stderr)
+        passed = self.run_guard("true", cwd=prod,
+                                guard_args=(*guard_args, "--git-bin", str(slow)))
+        self.assertEqual(0, passed.returncode, passed.stderr)
+
+    def test_a_deeply_nested_compiled_policy_refuses_no_call(self):
+        """AC3 review finding: a compiled policy json cannot load contributes no row and
+        never makes an ordinary command exit 2."""
+        deep = Path(self.fixture_dir.name) / "deep.json"
+        deep.write_text("[" * 2000 + "]" * 2000, encoding="utf-8")
+        prod = self.make_repo(f"git@github.com:{PROD}.git")
+        for command in ("true", "just switch"):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=prod, guard_args=(
+                    "--gh-bin", str(self.fake_gh), "--policy", str(deep)))
+                self.assertEqual(0, result.returncode, result.stderr)
+
     def test_the_production_refusal_is_one_sentence_naming_the_rule_profile_and_route(self):
         """AC4: the refusal is one line naming the argv, the project, the rule, the profile
         and the release route."""
