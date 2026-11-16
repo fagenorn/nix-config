@@ -35,7 +35,11 @@ raise `KeyError`, `TypeError` or `ValueError` is skipped.
 
 `held_waits(nodes, slug, default_branch, clock, cancelled)` is the console's entry: it selects the
 held block from GraphQL comment nodes and reads its waits; with no block it returns `(None, [])`
-and never calls `clock`.
+and never calls `clock`. A block the runner would refuse (`verify_block.lint_block` not ok, which
+the runner reports as `block_invalid` and never prompts) also yields `(None, [])`: a wait for a
+check the runner will not prompt could never come true. The console has no checkout, so the lint
+runs with `StructuralReferences`, which accepts every command and script reference; the lint then
+judges the block's shape only, and a reference the runner finds absent is not seen here.
 """
 import re
 from collections.abc import Callable
@@ -44,7 +48,8 @@ from datetime import datetime
 from pathlib import Path
 
 from agent_tools.system import forge_api
-from agent_tools.verification import verify_exec, verify_facts, verify_issues, verify_owner, verify_run
+from agent_tools.verification import (verify_block, verify_exec, verify_facts, verify_issues, verify_owner,
+                                      verify_run)
 
 HELD_LABEL = verify_run.NEEDS
 WAIT_REASONS = ("not_before", "window", "window_opening", "not_released", "not_deployed", "ci_not_passed",
@@ -72,6 +77,19 @@ class Wait:
     until: datetime | None
     prompted: bool
     text: str
+
+
+class StructuralReferences:
+    """The lint's lookups without a repository: every reference resolves, so only the shape is judged."""
+
+    def command(self, command_id: str) -> str:
+        return "present"
+
+    def script(self, path: str, sha: str) -> tuple[str, str]:
+        return "present", "present"
+
+    def flake(self, merge: str) -> tuple[str, str] | None:
+        return None
 
 
 def states_wait(text: str) -> bool:
@@ -130,6 +148,8 @@ def held_waits(nodes: list, slug: str, default_branch: str, clock: Callable[[], 
     """The held block of an issue's GraphQL comment `nodes` and its owner checks' waits."""
     held = verify_issues.select(verify_issues.comments_from_graphql(nodes))
     if held is None or not isinstance(held.block, dict):
+        return None, []
+    if not verify_block.lint_block(held.block, refs=StructuralReferences())["ok"]:
         return None, []
     ctx = verify_facts.Context(slug, Path("/"), default_branch, {}, held.markers, clock=clock,
                                reads_host=False, cancelled=cancelled)

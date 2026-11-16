@@ -648,6 +648,17 @@ class OwnerWaitTest(unittest.TestCase):
         self.assertEqual(verify_wait.held_waits([gnode(10, "No fence here.")], SLUG, "main", refuses),
                          (None, []))
 
+    def test_a_block_the_runner_refuses_has_no_waits(self):
+        world_with(self)
+        ask = self.asking({"not_before": "2026-11-15T10:00:00+00:00"})
+        bad = [{**block(ask), "extra": 1}, {**block(ask), "checks": ["x"]}, {**block(ask), "checks": 5},
+               {"v": 1, "merge": MERGE}]
+        for blk in bad:
+            with self.subTest(block=blk):
+                held, waits = verify_wait.held_waits([gnode(10, hold(blk))], SLUG, "main", lambda: NOW)
+                self.assertEqual(waits, [])
+                self.assertIsNone(held)
+
     def test_the_wording_of_a_wait(self):
         for text in ("Two days after the release, read the rows.", "After 2 days, read the rows.",
                      "Wait until Friday, then look.", "Not before Monday.", "one week from the deploy"):
