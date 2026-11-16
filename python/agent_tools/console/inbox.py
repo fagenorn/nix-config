@@ -3,9 +3,10 @@ recently a project was touched locally. Pure of the console's log and clock; `re
 `gh` call and a cancellation test as arguments.
 
 Markers decide, labels filter. One GraphQL search per repository asks for open issues and pull
-requests carrying the `owner-action`, `owner-answered` or `needs-verification` (`HELD_LABEL`) label
-(`search_argv`, `QUERY`), at most `PAGE_SIZE` nodes a page and the last `COMMENTS` comments of each; an
-Issue node also reads its `authorAssociation`, `body` and `labels`. An item exists only for a live
+requests carrying the `owner-action` or `owner-answered` label (`search_argv`, `QUERY`), at most `PAGE_SIZE`
+nodes a page and the last `COMMENTS` comments of each; an Issue node also reads its `authorAssociation`,
+`body` and `labels`. A second search, `held_argv`, asks the same for the `needs-verification` (`HELD_LABEL`)
+label only; it is read after the first and is lenient (see `read_items`). An item exists only for a live
 (`forge_markers.is_live`) comment of kind `forge_owner_action.KIND` whose `reason` is one of
 `forge_owner_action.REASONS`; a label alone raises nothing. Only comments whose `authorAssociation`
 is in `forge_owner_action.TRUSTED` are parsed, `end` markers included. The reader never parses
@@ -38,6 +39,8 @@ a fence opens and closes with up to three spaces of indent beyond the content co
 enclosing it, so a fenced example nested under a checkbox is no criterion, a fence may open right after a
 list marker (`- ~~~`) and then belongs to that item, and an open fence also ends at the first non-blank line
 indented less than that column, as its list item does).
+A heading inside a list item (indented to its content column) is part of that item and ends nothing; only a
+heading outside every list item ends the section.
 A criterion is `Criterion(index, ticked, kind, text, line)`, `kind` being a leading `[code]`,
 `[evidence]`, `[human]` or `[note]` tag or None, and a checkbox line's bullet (`-`, `*` or `+`) may be
 followed by any run of spaces or tabs. `review_criteria` is the unticked `human` criteria when no unticked
@@ -50,12 +53,13 @@ Each remaining one raises one review item, keyed `<slug>#<issue>/ac<index>`,
 with `reason` `held-review`, `kind` `owner-review`, `answers` `["passed", "note"]`, `comment_id` None,
 `criterion` its index and `version` `criterion_version` (a digest of issue, index, kind and text, never the
 tick), plus the `check_id` `""`, `reading` `""` and `detail` `""` of an owner check. Its `question`, the card's
-heading and the digest line, is the criterion's text without any word that names a PNG file or a folder (a
+heading and the digest line, is the criterion's text cut before its first measured tail (a whitespace,
+any dash, whitespace, `measured:`, case-insensitive: ` \u2014 measured:` and ` - measured:`), without any word that names a PNG file or a folder (a
 `.png` name, or a word with a `/` that starts with `/`, `~/`, `./` or `../`, or ends with `/`, and has no `://`;
 `attach_pictures` also drops a relative word with a `/` that is a folder under its roots; `and/or`, `light/dark`
 and `1440/480` stay; `heading_text`), and without a connecting word (`in`, `under`, `and`...) left
 dangling before one; `criterion_text` is the whole text, which is what `attach_pictures` reads the pictures
-from, so the card shows the pictures and never a bare path. A text left with no word reads `REVIEW_HEADING`.
+from, so the card shows the pictures and never a bare path. A text left with no word reads `REVIEW_HEADING`; the whole text, tail included, stays in `criterion_text`.
 
 A `verify-ask` prompt's `reading` (#1112) is the instruction for reading the check's result, written in
 its ask as `Reading:` at the start of a detail line (after optional spaces) or right after whitespace
@@ -97,9 +101,15 @@ A comment's id is `fullDatabaseId` (GitHub's `BigInt`, a decimal string) convert
 `__typename`: an `Issue` must carry `issueDependenciesSummary.blocking` (a non-negative integer) and
 holds `1 + blocking` work, a `PullRequest` holds 1, any other node is refused.
 
-`read_items` makes at most `MAX_CALLS` calls and asks `cancelled()` before each one (`ForgeError`
-`cancelled`, no call made). A search still paging after the last call, a comment connection with
-more comments than nodes, or fewer nodes than `issueCount` is `payload_incomplete`; an answer of an
+`read_items` makes at most `MAX_CALLS` calls for each of its two searches and asks `cancelled()` before
+each one (`ForgeError` `cancelled`, no call made). In the owner search a search still paging after the last
+call, a comment connection with more comments than nodes, or fewer nodes than `issueCount` is
+`payload_incomplete`. The held search is lenient, because held issues stay open and labelled until the runner
+verifies them, so their number and comments only grow: when it is still paging after its last call it keeps
+the nodes it read, it does not compare them with `issueCount`, and an Issue node whose comment connection has
+more comments than nodes raises no item (the owner search, which carries every owner-action and owner-answered
+label, still fails the read on such a node); a node the owner search already returned is read once, from
+the owner search. In both, an answer of an
 unexpected shape, a bad comment id or a missing or repeated cursor is `payload_invalid`. The result
 is sorted by `key` and holds only JSON-native values; every item is
 
@@ -175,10 +185,17 @@ QUERY = """query($search: String!, $after: String) {
 ACTIVITY_FILES = (("FETCH_HEAD",), ("logs", "HEAD"), ("index",))
 
 
-def search_argv(slug: str, after: str | None = None) -> list[str]:
-    return ["api", "graphql", "-f", f"query={QUERY}",
-            "-f", f"search=repo:{slug} is:open label:{foa.LABEL[0]},{foa.ANSWERED_LABEL[0]},{HELD_LABEL}",
+def _argv(slug: str, labels: str, after: str | None) -> list[str]:
+    return ["api", "graphql", "-f", f"query={QUERY}", "-f", f"search=repo:{slug} is:open label:{labels}",
             *(["-f", f"after={after}"] if after else [])]
+
+
+def search_argv(slug: str, after: str | None = None) -> list[str]:
+    return _argv(slug, f"{foa.LABEL[0]},{foa.ANSWERED_LABEL[0]}", after)
+
+
+def held_argv(slug: str, after: str | None = None) -> list[str]:
+    return _argv(slug, HELD_LABEL, after)
 
 
 def item_key(slug: str, issue: int, comment_id: int) -> str:
@@ -299,7 +316,7 @@ def acceptance_criteria(body: str) -> list[Criterion]:
         if not inside:
             inside = bool(_AC_HEADING.match(line))
             continue
-        if _HEADING.match(line):
+        if _HEADING.match(line) and not containers:
             break
         box = _CRITERION.match(line)
         if not box:
@@ -526,10 +543,9 @@ def _page(answer: Any) -> tuple[list, bool, str | None, int]:
             _count(search.get("issueCount"), "search issueCount"))
 
 
-def read_items(project_id: str, slug: str, *,
-               call: Callable[[list[str]], Any] = forge_api.gh_json,
-               cancelled: Callable[[], bool] = lambda: False) -> list[dict]:
-    """Every inbox item of one repository, sorted by `key`; raises `forge_api.ForgeError`."""
+def _read_pages(argv: Callable[[str | None], list[str]], call: Callable[[list[str]], Any],
+                cancelled: Callable[[], bool]) -> tuple[list, bool, int]:
+    """The nodes of one search, whether it was still paging after `MAX_CALLS` calls, and its `issueCount`."""
     nodes: list = []
     cursors: set[str] = set()
     after: str | None = None
@@ -537,20 +553,38 @@ def read_items(project_id: str, slug: str, *,
     for _ in range(MAX_CALLS):
         if cancelled():
             raise forge_api.ForgeError("cancelled")
-        page, more, cursor, total = _page(call(search_argv(slug, after)))
+        page, more, cursor, total = _page(call(argv(after)))
         nodes += page
         if not more:
-            break
+            return nodes, False, total
         if not isinstance(cursor, str) or not cursor or cursor in cursors:
             raise _invalid("search endCursor is missing or repeated")
         cursors.add(cursor)
         after = cursor
-    else:
+    return nodes, True, total
+
+
+def read_items(project_id: str, slug: str, *,
+               call: Callable[[list[str]], Any] = forge_api.gh_json,
+               cancelled: Callable[[], bool] = lambda: False) -> list[dict]:
+    """Every inbox item of one repository, sorted by `key`; raises `forge_api.ForgeError`."""
+    nodes, paging, total = _read_pages(lambda after: search_argv(slug, after), call, cancelled)
+    if paging:
         raise forge_api.ForgeError("payload_incomplete", f"more than {MAX_CALLS} pages")
     if len(nodes) < total:
         raise forge_api.ForgeError("payload_incomplete", f"{len(nodes)} of {total} search results")
-    return sorted((i for node in nodes for i in items_from_node(project_id, slug, node)),
-                  key=lambda item: item["key"])
+    items = [i for node in nodes for i in items_from_node(project_id, slug, node)]
+    seen = {node.get("number") for node in nodes if isinstance(node, dict)}
+    held, _, _ = _read_pages(lambda after: held_argv(slug, after), call, cancelled)
+    for node in held:
+        if isinstance(node, dict) and node.get("number") in seen:
+            continue
+        try:
+            items += items_from_node(project_id, slug, node)
+        except forge_api.ForgeError as error:
+            if error.code != "payload_incomplete":
+                raise
+    return sorted(items, key=lambda item: item["key"])
 
 
 _OPEN_LEADING = "\"`'([<{"
@@ -587,10 +621,15 @@ _CONNECTORS = frozenset(("in", "under", "at", "on", "from", "of", "into", "by", 
 REVIEW_HEADING = "Review what this issue asks you to check."
 
 
+_MEASURED = re.compile(r"\s[-\u2010-\u2015\u2212]+\s+measured:", re.IGNORECASE)
+
+
 def heading_text(text: str, is_folder: Callable[[str], bool] | None = None) -> str:
-    """`text` without the words that name a PNG file or a folder and the connecting words left before them.
+    """`text` cut before its first measured tail, without the words that name a PNG file or a folder and the
+    connecting words left before them.
 
     A word with a `/` is a folder only when written as a path or when `is_folder` says it is one."""
+    text = _MEASURED.split(text, 1)[0]
     kept: list[str] = []
     for raw in text.split():
         core = _core(raw)

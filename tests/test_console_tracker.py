@@ -227,14 +227,14 @@ class CallBudgetTest(Case):
             svc.poll_tracker()
         self.assertEqual(len(calls), 4)
         for argv in calls:
-            self.assertIn("search=repo:octo/p00 is:open label:owner-action,owner-answered,needs-verification", argv)
+            self.assertIn("search=repo:octo/p00 is:open label:owner-action,owner-answered", argv)
             self.assertNotIn("octo/p01", " ".join(argv))
         lines = errors.getvalue().splitlines()
         self.assertEqual(len(lines), 1)
         self.assertTrue(lines[0].startswith("console: tracker_failed owner/p00 ForgeError: payload_incomplete"))
         answer["more"] = False
         svc.poll_tracker()
-        self.assertEqual(len(calls), 5)
+        self.assertEqual(len(calls), 6)
 
 
 class PollThreadTest(Case):

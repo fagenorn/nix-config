@@ -61,7 +61,8 @@ def ac_body(*lines):
     return "## Problem\n\nx\n\n## Acceptance criteria\n\n" + "\n".join(lines) + "\n\n## Blocked by\n\n- #1112\n"
 
 
-HUMAN_TEXT = "The card looks right at 1440 and 480 px \u2014 measured: the owner judges before and after pictures"
+HUMAN_HEADING = "The card looks right at 1440 and 480 px"
+HUMAN_TEXT = f"{HUMAN_HEADING} \u2014 measured: the owner judges before and after pictures"
 HUMAN = f"- [ ] [human] {HUMAN_TEXT}"
 
 
@@ -77,7 +78,7 @@ def page(nodes, more=False, cursor=None, count=None):
 
 def read(*pages, **kwargs):
     answers = list(pages)
-    return inbox.read_items(PROJECT, SLUG, call=lambda argv: answers.pop(0), **kwargs)
+    return inbox.read_items(PROJECT, SLUG, call=lambda argv: answers.pop(0) if answers else page([]), **kwargs)
 
 
 def expected(issue, comment_id, reason, **fields):
@@ -544,10 +545,10 @@ class PromptPictureTest(unittest.TestCase):
 class HeldReviewTest(unittest.TestCase):
     """A held issue whose only open criteria are owner reviews raises one review item each (#1113)."""
 
-    def review(self, issue, index, text, held_work=1):
+    def review(self, issue, index, text, held_work=1, heading=None):
         return {"key": f"{SLUG}#{issue}/ac{index}", "project_id": PROJECT, "repo": SLUG, "issue": issue,
                 "comment_id": None, "url": f"https://github.com/{SLUG}/issues/{issue}",
-                "reason": "held-review", "kind": "owner-review", "question": text, "criterion_text": text,
+                "reason": "held-review", "kind": "owner-review", "question": heading or text, "criterion_text": text,
                 "detail": "",
                 "check_id": "", "reading": "", "questions": [], "items": [], "answers": ["passed", "note"],
                 "paid": False, "confirm": "", "answered": False, "held_work": held_work,
@@ -558,7 +559,7 @@ class HeldReviewTest(unittest.TestCase):
     def test_a_held_issue_whose_only_open_criterion_is_human_yields_one_item(self):
         node = held_issue(1091, ac_body("- [x] [code] A", "- [x] [code] B", HUMAN), blocking=1)
         result = read(page([node]))
-        self.assertEqual(result, [self.review(1091, 3, HUMAN_TEXT, held_work=2)])
+        self.assertEqual(result, [self.review(1091, 3, HUMAN_TEXT, held_work=2, heading=HUMAN_HEADING)])
         self.assertEqual(result[0]["key"], "octo/widgets#1091/ac3")
         self.assertIsNone(result[0]["comment_id"])
         self.assertEqual(json.loads(json.dumps(result)), result)
@@ -610,9 +611,12 @@ class HeldReviewTest(unittest.TestCase):
     def test_a_card_heading_names_no_file_or_folder_and_the_whole_text_stays_beside_it(self):
         table = {
             "The brief and report cards look right at 1440 and 480 px \u2014 measured: the owner judges the PNG "
-            "screenshots under /tmp/held-review-screenshots":
-                "The brief and report cards look right at 1440 and 480 px \u2014 measured: the owner judges the PNG "
-                "screenshots",
+            "screenshots under /tmp/held-review-screenshots": "The brief and report cards look right at 1440 and 480 px",
+            "The brief and report cards look right at 1440 and 480 px - measured: the owner judges the PNG "
+            "screenshots under /x": "The brief and report cards look right at 1440 and 480 px",
+            "The card looks right \u2013 MEASURED: the owner judges shots/a.png": "The card looks right",
+            "Measured: the owner judges it": "Measured: the owner judges it",
+            "A well-measured: card": "A well-measured: card",
             "The card looks right in shots/before.png and shots/after.png": "The card looks right",
             "Look at ~/shots/a.png.": "Look.",
             "See https://example.org/a/b": "See https://example.org/a/b",
@@ -647,6 +651,14 @@ class HeldReviewTest(unittest.TestCase):
         self.assertEqual([c.text for c in inbox.acceptance_criteria(reopened)], ["One"])
         kept = ac_body("- [ ] [human] One", "  ```", "", "  - [ ] [code] inner", "  ```", "- [ ] [human] Two")
         self.assertEqual([c.text for c in inbox.acceptance_criteria(kept)], ["One", "Two"])
+
+    def test_a_heading_inside_a_list_item_does_not_end_the_section(self):
+        body = ac_body("- [ ] [human] One", "  ### Details", "  more", "- [ ] [evidence] Two")
+        self.assertEqual([(c.kind, c.text) for c in inbox.acceptance_criteria(body)],
+                         [("human", "One"), ("evidence", "Two")])
+        self.assertEqual(inbox.items_from_node(PROJECT, SLUG, held_issue(7, body)), [])
+        outside = ac_body("- [ ] [human] One", "### Details", "- [ ] [evidence] Two")
+        self.assertEqual([c.text for c in inbox.acceptance_criteria(outside)], ["One"])
 
     def test_a_fenced_example_nested_under_a_checkbox_is_no_criterion(self):
         for indent in ("    ", "  ", "\t"):
@@ -799,24 +811,68 @@ class ReadTest(unittest.TestCase):
             read(page([], more=True, cursor="c1", count=0), page([], more=True, cursor="c1", count=0))
         self.assertEqual(raised.exception.code, "payload_invalid")
 
-    def test_the_search_filters_by_its_three_labels(self):
+    def test_the_owner_search_filters_by_its_two_labels(self):
         calls = []
-        answers = [page([], more=True, cursor="c1", count=0), page([], count=0)]
+        answers = [page([], more=True, cursor="c1", count=0), page([], count=0), page([], count=0)]
 
         def call(argv):
             calls.append(argv)
             return answers[len(calls) - 1]
 
         inbox.read_items(PROJECT, SLUG, call=call)
-        self.assertEqual([c[:2] for c in calls], [["api", "graphql"]] * 2)
-        self.assertIn("search=repo:octo/widgets is:open label:owner-action,owner-answered,needs-verification",
-                      calls[0])
+        self.assertEqual([c[:2] for c in calls], [["api", "graphql"]] * 3)
+        self.assertIn("search=repo:octo/widgets is:open label:owner-action,owner-answered", calls[0])
         self.assertFalse([a for a in calls[0] if a.startswith("after=")])
         self.assertIn("after=c1", calls[1])
         fragment = inbox.QUERY.split("... on Issue {")[1].split("... on PullRequest")[0]
         for member in ("authorAssociation", "body", "labels(first: 100) { nodes { name } }"):
             with self.subTest(member):
                 self.assertIn(member, fragment)
+
+    def test_the_held_issues_are_read_by_their_own_search(self):
+        calls = []
+
+        def call(argv):
+            calls.append(argv)
+            return page([])
+
+        inbox.read_items(PROJECT, SLUG, call=call)
+        self.assertEqual(len(calls), 2)
+        self.assertIn("search=repo:octo/widgets is:open label:needs-verification", calls[1])
+        self.assertNotIn("search=repo:octo/widgets is:open label:needs-verification", calls[0])
+
+    def test_more_than_a_hundred_held_issues_do_not_fail_the_read(self):
+        decision = issue_node(7, [comment_node(C1, decision_body())])
+        calls = []
+
+        def call(argv):
+            calls.append(argv)
+            if any("label:owner-action" in a for a in argv):
+                return page([decision])
+            first = 1000 + 25 * len(calls)
+            return page([held_issue(first + n, ac_body(HUMAN)) for n in range(25)],
+                        more=True, cursor=f"h{len(calls)}", count=130)
+
+        items = inbox.read_items(PROJECT, SLUG, call=call)
+        self.assertEqual(len(calls), 1 + 4)
+        self.assertIn(f"{SLUG}#7/{C1}", [i["key"] for i in items])
+        self.assertEqual(len([i for i in items if i["reason"] == "held-review"]), 100)
+
+    def test_a_held_issue_with_more_than_a_hundred_comments_is_skipped_and_the_rest_read(self):
+        big = {**held_issue(1001, ac_body(HUMAN)), "comments": {"totalCount": 101, "nodes": []}}
+        items = read(page([issue_node(7, [comment_node(C1, decision_body())])]),
+                     page([big, held_issue(1002, ac_body(HUMAN))], count=5))
+        self.assertEqual([i["key"] for i in items], [f"{SLUG}#1002/ac1", f"{SLUG}#7/{C1}"])
+
+    def test_a_held_node_the_owner_search_returned_is_read_once(self):
+        node = held_issue(1001, ac_body(HUMAN))
+        items = read(page([node]), page([node]))
+        self.assertEqual([i["key"] for i in items], [f"{SLUG}#1001/ac1"])
+
+    def test_the_owner_search_still_fails_on_overflow(self):
+        with self.assertRaises(ForgeError) as raised:
+            read(*[page([], more=True, cursor=f"c{n}", count=0) for n in range(4)])
+        self.assertEqual(raised.exception.code, "payload_incomplete")
 
     def test_the_held_label_is_the_runners(self):
         from agent_tools.verification import verify_run

@@ -8410,6 +8410,20 @@ class PageReviewTest(unittest.TestCase):
         self.assertEqual(posted(post), {"project_id": "owner/p00", "key": "A",
                                         "answer": "passed", "version": "v1-A"})
 
+    def test_a_before_picture_reads_ahead_of_the_after_picture_of_its_width(self) -> None:
+        pics = [{"id": f"{n + 1:064x}", "line": line, "pair": None} for n, line in enumerate(
+            ["after-480.png", "after-1440.png", "before-1440.png", "notes.png", "before-480.png"])]
+        (snap,) = render([START, {"frame": frame([{**review_item("A"), "pictures": pics}])}, {"snapshot": True}])
+        lead = lead_of(snap)
+        self.assertEqual([full(n) for n in with_class(lead, "pic-line")],
+                         ["Before, 480 px", "After, 480 px", "Before, 1440 px", "After, 1440 px", "Notes"])
+        shown = [n["key"] for n in with_class(lead, "pic-thumb")]
+        self.assertEqual(shown, [f"owner/p00#A/{i}" for i in range(5)])
+        in_order = [{"id": A, "line": "before-1440.png", "pair": None}, {"id": B, "line": "after-1440.png", "pair": None}]
+        (kept,) = render([START, {"frame": frame([{**review_item("A"), "pictures": in_order}])}, {"snapshot": True}])
+        self.assertEqual([full(n) for n in with_class(lead_of(kept), "pic-line")],
+                         ["Before, 1440 px", "After, 1440 px"])
+
     def test_a_manual_check_keeps_passed_failed_and_send_note(self) -> None:
         (snap,) = render([START, {"frame": frame([check_item("B", "manual-check")])},
                           {"snapshot": True}])
@@ -8441,6 +8455,8 @@ class PageCheckCaptionTest(unittest.TestCase):
     def test_each_file_name_reads_as_its_caption(self) -> None:
         table = [
             ("before-1440.png", "Before, 1440 px"),
+            ("before-after-1440.png", "Before, 1440 px"),
+            ("card-(before)-1440.png", "Before, 1440 px"),
             ("after-1440.png", "After, 1440 px"),
             ("owner-check-viewer-480.png", "Owner check viewer, 480 px"),
             ("OWNER-CHECK-VIEWER-480.png", "Owner check viewer, 480 px"),
@@ -8448,7 +8464,6 @@ class PageCheckCaptionTest(unittest.TestCase):
             ("Settings-PAGE.Wide.PNG", "Settings page wide"),
             ("AFTER_480PX.PNG", "After, 480 px"),
             ("card-before.png", "Before"),
-            ("before-after-1440.png", "Before, 1440 px"),
             ("shots/after-480.png", "After, 480 px"),
             ("C:\\shots\\Card-1440.png", "Card, 1440 px"),
             ("settings__page--wide.png", "Settings page wide"),
@@ -8457,7 +8472,6 @@ class PageCheckCaptionTest(unittest.TestCase):
             ("beforehand-1440.png", "Beforehand, 1440 px"),
             ("480.png", "Picture, 480 px"),
             ("__.png", "Picture"),
-            ("card-(before)-1440.png", "Before, 1440 px"),
             ("[After] card (480px).png", "After, 480 px"),
             ("(owner) check,.png", "Owner check"),
             ("(--).png", "Picture"),

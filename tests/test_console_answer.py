@@ -824,7 +824,10 @@ class ReviewWriteTest(unittest.TestCase):
         v_ended = inbox.criterion_version(REVIEW_ISSUE, inbox.Criterion(1, False, "human", "One", 0))
         reopened = review_body("- [ ] [human] One", "  ```", "  x", "```", "- [ ] [human] Two")
         v_reopened = inbox.criterion_version(REVIEW_ISSUE, inbox.Criterion(2, False, "human", "Two", 0))
+        headed = review_body("- [ ] [human] One", "  ### Details", "- [ ] [evidence] Two")
+        v_headed = inbox.criterion_version(REVIEW_ISSUE, inbox.Criterion(1, False, "human", "One", 0))
         table = {
+            "an evidence box after a heading inside an item": ({}, headed, 1, v_headed, answer.REVIEW_GONE),
             "closed": ({"state": "closed"}, REVIEW_BODY, 3, V3, answer.CLOSED),
             "label gone": ({"labels": ("owner-action",)}, REVIEW_BODY, 3, V3, answer.REVIEW_GONE),
             "untrusted author": ({"assoc": "CONTRIBUTOR"}, REVIEW_BODY, 3, V3, answer.REVIEW_GONE),
