@@ -916,13 +916,24 @@ class DocsTreeTest(unittest.TestCase):
 
     def test_sprint_controls_on_demand_are_recorded(self) -> None:
         rules = self.doc("docs/areas/console/adr/002-the-desk-page-design-rules.md")
-        for needle in ('a closed "More" fold holding "Withdraw"', "a typed draft keeps it open"):
+        for needle in ('a closed "End the sprint" fold', "a typed draft keeps it open",
+                       '"Show the report"', "holds the report's status line",
+                       "never the report's status line", "is not drawn", "at most two lines",
+                       "the manager's own line", '"Stop and report"', '"Drop the sprint"',
+                       '"goal set <age>"', '"You: <words>"', '"Manager: <reply>"',
+                       '"Next time: <text>"', "the hint right under the field"):
             self.assertIn(needle, rules)
+        self.assertNotIn('"Stop or withdraw"', rules)
+        self.assertNotIn('"More" fold', rules)
         self.assertNotIn('withdraw, messages and "Tell the manager" stay under the two lines', rules)
         message = self.doc(
             "docs/areas/console/adr/016-what-the-owner-says-to-a-sprint-reaches-its-manager.md")
-        for needle in ("opens its field on demand", 'the rest in its "Detail" fold'):
+        for needle in ("opens its field on demand", 'under a closed "Earlier messages (n)" fold',
+                       'no "End the sprint" fold', "once the manager has picked it up",
+                       "drop the sprint"):
             self.assertIn(needle, message)
+        self.assertNotIn("nudge it", message)
+        self.assertNotIn("withdraw the sprint", message)
 
     def test_the_console_brief_decision_is_recorded(self):
         path = "docs/areas/console/adr/013-a-managers-brief-is-approved-or-redirected-on-the-page.md"
@@ -952,10 +963,12 @@ class DocsTreeTest(unittest.TestCase):
             first, "# ADR-console-014 — A manager's report becomes the sprint's line")
         adr = self.doc(path)
         for needle in ("sprint report", "POST /api/report", "secret refused", "waiting on you",
-                       "may be stuck", "fifteen minutes", "Detail", "closed out",
+                       "may be stuck", "fifteen minutes", '"Show the report"', "closed out",
                        "ADR-console-005", "ADR-console-008", "ADR-console-009",
-                       "ADR-console-013", "#835", "#837", "#838", "#890"):
+                       "ADR-console-013", "#835", "#837", "#838", "#890", "#1086",
+                       "the view's and the digest's", "the status line opens first in"):
             self.assertIn(needle, adr)
+        self.assertNotIn('"Detail" fold', adr)
         self.assertIn("as soon as it is found valid and before the phase", adr)
         self.assertNotIn("then a status line that names an issue number", adr)
         self.assertNotIn("only when the reported phase changes", adr)
@@ -970,6 +983,14 @@ class DocsTreeTest(unittest.TestCase):
         context_map = self.doc("docs/CONTEXT-MAP.md")
         for needle in ("| Manager | Console |", "| Report | Console |"):
             self.assertIn(needle, context_map)
+
+    def test_the_console_glossary_names_the_message_life(self):
+        context = self.doc("docs/areas/console/CONTEXT.md")
+        for needle in ("A brief approval shows only until the manager picks it up",
+                       "as the manager's own line, with no approval line above it",
+                       "built from its report's milestone and its issues' stages",
+                       "its status line first"):
+            self.assertIn(needle, context)
 
     def test_the_console_message_decision_is_recorded(self):
         path = "docs/areas/console/adr/016-what-the-owner-says-to-a-sprint-reaches-its-manager.md"

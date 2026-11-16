@@ -198,11 +198,15 @@ last stage and movement outlive the run. `SprintState.observed` is ordered by is
 equals folding `b` onto the fold of `a`.
 
 `ago_text(elapsed_ms)` is `just now` under a minute, `<m> min ago` under an hour, `<h> h ago` under
-a day, else `1 day ago` or `<d> days ago`; a negative count is 0. `age_text(elapsed_ms)` is `stated `
+a day, else `1 day ago` or `<d> days ago`; a negative count is 0. `age_text(elapsed_ms)` is `goal set `
 plus that. `progress_text(landed, total, in_delivery, queued, held)` is `<landed> of <total> landed`
 followed by `, <n> in delivery`, `, <n> queued` and `, <n> held` for each non-zero count, in that
 order. The view states and texts are the constants `ON_TRACK`, `WAITING`, `QUIET`, `CLOSING`,
 `DONE` and their `_TEXT`; `CLOSED_OUT` is the view's stage for a run's `done` (not a report stage).
+A running sprint's ball (#1086) is `BALL_MANAGER`, `BALL_OWNER` or `BALL_NOBODY`, worded by
+`BALL_TEXT`, and its now-sentence is one of the `NOW_*_TEXT` constants or the stage phrase
+(`NOW_STAGE_TEXT`, prefixed by `NOW_QUIET_TEXT` when nobody has the ball), never the report's status
+line and never shortened.
 
 Messages (#889) are what the owner says to a sprint, each one a `Message` kept in `message_id` order
 on `SprintState.messages`. Four rows carry them, the first three kept (`event_log.SPRINT_MESSAGED`,
@@ -239,8 +243,10 @@ manager that row replaces, unless the row's int `seen_after` (the `manager_seen_
 when the launch began) is below the seq of the latest seen row: that row was written while the
 launcher was still returning, so it names the new manager and is kept.
 
-`message_state(message)` is `READ` when `read_at` is set, else `DELIVERED` when `delivered_at` is,
-else `SENT`; `unread(state)` is the messages without `read_at`, in id order; `unreachable(state)` is
+`message_state(message, now_ms)` is the first that holds of: `REPLIED` when `reply` is set,
+`PICKED_UP` when `read_at` is set, `NOT_PICKED_UP` when `now_ms` is not None and at least
+`NOT_PICKED_UP_AFTER_MS` have passed since the message's `at`, else `SENT`; `delivered_at` never
+changes the shown state, it only feeds the service's re-nudge. `unread(state)` is the messages without `read_at`, in id order; `unreachable(state)` is
 true once `failed_nudges` reaches `UNREACHABLE_AFTER`. `checked_message(text)` refuses
 `EMPTY_MESSAGE` for a blank text and `MESSAGE_TOO_LONG` above `MAX_MESSAGE_CHARS`, and returns the
 text unchanged. `parse_message(body)` reads the owner's write and returns `(project_id, sprint_id,
@@ -511,6 +517,24 @@ STOPPING = "stopping"
 STOPPING_TEXT = "stopping"
 STOPPED = "stopped"
 STOPPED_TEXT = "stopped by you"
+BALL_MANAGER = "manager"
+BALL_OWNER = "owner"
+BALL_NOBODY = "nobody"
+BALL_TEXT = {BALL_MANAGER: "manager working", BALL_OWNER: "waiting on you",
+             BALL_NOBODY: "nothing running, may be stuck"}
+NOW_STOPPING_TEXT = "finishing what is mid-merge, then stopping"
+NOW_ANSWER_TEXT = "waiting for your answer in the manager's terminal"
+NOW_PERMISSION_TEXT = "waiting for your permission in the manager's terminal"
+NOW_DRAFTING_TEXT = "drafting the brief"
+NOW_BRIEF_TEXT = "waiting for your approval of the brief"
+NOW_QUESTION_TEXT = "waiting for your answer: {question}"
+NOW_DECISION_TEXT = "waiting for your decision on the tracker"
+NOW_STALLED_TEXT = "waiting for you: its managers keep failing"
+NOW_NO_PROGRESS_TEXT = "waiting for you: the manager has stopped making progress"
+NOW_QUOTA_TEXT = "waiting for its account's usage to reset"
+NOW_STARTING_TEXT = "starting the work"
+NOW_STAGE_TEXT = "{stage} {count} of {total}: {milestone}"
+NOW_QUIET_TEXT = "last seen {phrase}"
 SECRETS_DIR = "sprint-secrets"
 SPRINT_ID = re.compile(r"[0-9a-f]{16}")
 
@@ -528,7 +552,7 @@ NOT_ENDED = "an issue of this sprint is neither landed nor dropped"
 ENDED = "this sprint has ended"
 ALREADY_STOPPING = "this sprint is already stopping"
 STOP_FAILED_TEXT = "could not stop the manager: {reason}; trying again"
-UNSTOPPED_TEXT = "The manager of a withdrawn goal could not be stopped: {reason}; trying again"
+UNSTOPPED_TEXT = "The manager of a dropped sprint could not be stopped: {reason}; trying again"
 STOP_TEXT = ("The owner stopped this sprint: finish what is mid-merge, start nothing new, and send "
              "your closing report with sprint close.")
 NOT_STARTED = "this sprint's brief is not approved"
@@ -581,8 +605,22 @@ MESSAGE_TEXT = "text"
 MESSAGE_ANSWER = "answer"
 MESSAGE_STOP = "stop"
 SENT = "sent"
-DELIVERED = "delivered"
-READ = "read"
+PICKED_UP = "picked_up"
+REPLIED = "replied"
+NOT_PICKED_UP = "not_picked_up"
+NOT_PICKED_UP_AFTER_MS = 300_000
+PICKUP_MINUTE_TEXT = "the manager picks it up within a minute"
+PICKUP_TURN_TEXT = "the manager picks it up at its next turn"
+TELL_MINUTE_TEXT = "The manager picks it up within a minute."
+TELL_TURN_TEXT = "The manager picks it up at its next turn."
+PICKED_UP_TEXT = "picked up"
+SENT_ENDED_TEXT = "sent"
+REPLIED_TEXT = "replied"
+NOT_PICKED_UP_TEXT = "not picked up after 5 min"
+RETRY_ACTION_TEXT = "Press Retry to start a new manager."
+NUDGE_ACTION_TEXT = "Tell the manager again, or drop the sprint."
+TURN_ACTION_TEXT = ("It waits for the manager's next turn; "
+                    "drop the sprint if none comes.")
 MANAGER_SESSION_NAME = re.compile(r"(?P<project>.+) sprint (?P<sprint>[0-9a-f]{16})")
 
 _MINUTE_MS = 60_000
@@ -1183,10 +1221,14 @@ def checked_message(text: str) -> str:
     return text
 
 
-def message_state(message: Message) -> str:
+def message_state(message: Message, now_ms: int | None) -> str:
+    if message.reply is not None:
+        return REPLIED
     if message.read_at is not None:
-        return READ
-    return DELIVERED if message.delivered_at is not None else SENT
+        return PICKED_UP
+    if now_ms is not None and now_ms - _ms(message.at) >= NOT_PICKED_UP_AFTER_MS:
+        return NOT_PICKED_UP
+    return SENT
 
 
 def unread(state: SprintState) -> tuple[Message, ...]:
@@ -1624,7 +1666,7 @@ def ago_text(elapsed_ms: int) -> str:
 
 
 def age_text(elapsed_ms: int) -> str:
-    return "stated " + ago_text(elapsed_ms)
+    return "goal set " + ago_text(elapsed_ms)
 
 
 def progress_text(landed: int, total: int, in_delivery: int, queued: int, held: int) -> str:

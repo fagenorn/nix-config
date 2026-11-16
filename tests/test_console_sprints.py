@@ -1051,11 +1051,11 @@ class WithdrawnTest(unittest.TestCase):
 
 class AgeTest(unittest.TestCase):
     def test_the_age_wording(self):
-        for elapsed, text in ((-5, "stated just now"), (0, "stated just now"),
-                              (59_999, "stated just now"), (60_000, "stated 1 min ago"),
-                              (3_599_999, "stated 59 min ago"), (3_600_000, "stated 1 h ago"),
-                              (86_399_999, "stated 23 h ago"), (86_400_000, "stated 1 day ago"),
-                              (172_800_000, "stated 2 days ago")):
+        for elapsed, text in ((-5, "goal set just now"), (0, "goal set just now"),
+                              (59_999, "goal set just now"), (60_000, "goal set 1 min ago"),
+                              (3_599_999, "goal set 59 min ago"), (3_600_000, "goal set 1 h ago"),
+                              (86_399_999, "goal set 23 h ago"), (86_400_000, "goal set 1 day ago"),
+                              (172_800_000, "goal set 2 days ago")):
             with self.subTest(elapsed=elapsed):
                 self.assertEqual(sprints.age_text(elapsed), text)
 
@@ -1187,7 +1187,7 @@ class MessageFoldTest(unittest.TestCase):
             [(m.message_id, m.kind, m.version, m.text) for m in state.messages],
             [(3, "changes", 1, "smaller slices"), (5, "approved", 2, None),
              (6, "text", None, "leave the importer's schema alone")])
-        self.assertEqual([sprints.message_state(m) for m in state.messages],
+        self.assertEqual([sprints.message_state(m, None) for m in state.messages],
                          ["sent", "sent", "sent"])
         self.assertEqual([m.at for m in state.messages], [at(3), at(5), at(6)])
 
@@ -1201,8 +1201,8 @@ class MessageFoldTest(unittest.TestCase):
         state = message_state_of([*message_rows(), read_through(7, SID, 5)])
         self.assertEqual([m.read_at for m in state.messages], [at(7), at(7), None])
         self.assertEqual([m.message_id for m in sprints.unread(state)], [6])
-        self.assertEqual([sprints.message_state(m) for m in state.messages],
-                         ["read", "read", "sent"])
+        self.assertEqual([sprints.message_state(m, None) for m in state.messages],
+                         ["picked_up", "picked_up", "sent"])
 
     def test_a_nudge_delivers_and_two_failures_in_a_row_are_unreachable(self):
         failing = [*message_rows(), nudged(7, SID, 6, False)]
@@ -1215,12 +1215,23 @@ class MessageFoldTest(unittest.TestCase):
         state = message_state_of([*failing, nudged(8, SID, 6, False), nudged(9, SID, 6, True)])
         self.assertEqual((state.failed_nudges, sprints.unreachable(state)), (0, False))
         self.assertEqual([m.delivered_at for m in state.messages], [at(9)] * 3)
-        self.assertEqual([sprints.message_state(m) for m in state.messages], ["delivered"] * 3)
+        self.assertEqual([sprints.message_state(m, None) for m in state.messages], ["sent"] * 3)
         self.assertEqual((state.last_nudge_at, state.last_nudge_ok), (at(9), True))
         state = message_state_of([*failing, read_through(8, SID, 6)])
         self.assertEqual(state.failed_nudges, 0)
         state = message_state_of([*message_rows(), nudged(7, SID, 5, True)])
         self.assertEqual([m.delivered_at for m in state.messages], [at(7), at(7), None])
+
+    def test_a_message_reads_not_picked_up_five_minutes_after_it_was_sent(self):
+        (*_, m) = message_state_of(message_rows()).messages
+        t = ms(6)
+        self.assertEqual(sprints.message_state(m, t + 300_000 - 1), "sent")
+        self.assertEqual(sprints.message_state(m, t + 300_000), "not_picked_up")
+        (*_, read) = message_state_of([*message_rows(), read_through(7, SID, 6)]).messages
+        self.assertEqual(sprints.message_state(read, t + 600_000), "picked_up")
+        (*_, replied) = message_state_of(
+            [*message_rows(), answered(7, SID, 6, "kept it")]).messages
+        self.assertEqual(sprints.message_state(replied, t + 600_000), "replied")
 
     def test_an_answer_shows_under_its_message_and_the_latest_wins(self):
         state = message_state_of([*message_rows(), answered(7, SID, 6, "kept it"),

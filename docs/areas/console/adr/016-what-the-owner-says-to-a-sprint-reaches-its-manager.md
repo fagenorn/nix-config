@@ -1,7 +1,7 @@
 # ADR-console-016 — What the owner says to a sprint reaches its manager
 
 - **Status:** accepted
-- **Decided in:** #831, #834, #835, #889, #949
+- **Decided in:** #831, #834, #835, #889, #949, #1086
 
 ## Context
 
@@ -19,7 +19,7 @@ ADR-console-013 carried a manager's brief to the page and the owner's approval o
 
 **Routes.** `POST /api/message` is a page write under ADR-console-008: it carries the sprint id and the owner's text and answers an empty `204` once the row is stored. `POST /api/inbox` and `POST /api/message-reply` are the manager's writes under ADR-console-013, guarded by the sprint's secret, refusing any `Origin`, and dispatched before the page writes like `POST /api/brief`.
 
-**The page.** A sprint line offers "Tell the manager", which opens its field on demand (ADR-console-002). Each message shows sent (stored), delivered (a nudge reached the manager) or read (`sprint inbox` returned it), with the manager's reply under it; the ten newest are kept, oldest first, the newest shown under the sprint's two lines and the rest in its "Detail" fold. The digest says nothing about messages.
+**The page.** A sprint's block offers "Tell the manager", which opens its field on demand, the hint of when the manager picks the message up right under the field (ADR-console-002). A message shows one of four plain states, with the manager's reply under it once there is one: sent, with when the manager picks it up (within a minute when the host has a nudger and the manager is started, else at its next turn); picked up (`sprint inbox` returned it); replied; or not picked up after 5 min, the same wait as ADR-console-020's idle nudge, with the owner action that fits (retry a manager that failed or is missing, tell the manager again, or drop the sprint when none will come). A brief approval is no message line once the manager has picked it up, the brief's own row already saying it was approved; a reply the manager gives to it is shown as the manager's own line, with no approval line above it, new until the owner's next look and announced like any other reply. An ended sprint has no Tell box and no "End the sprint" fold, so its sent message reads "sent" alone and its not-picked-up message names no action. A nudge reaching the manager changes nothing shown. Only the latest exchange shows, the older ones, ten at most and any older one whose reply is new, oldest first, under a closed "Earlier messages (n)" fold. A reply is new until the owner's next look, read from the page's last look that ADR-console-008 already records, so there is no new page write; the new reply is announced under the statement and outside its count. The digest says nothing about messages.
 
 **The contract.** The manager's contract gains an every-turn section (start with `sprint inbox`, answer each message with `sprint reply`) and an after-approval section (check `sprint status` before each batch, end the turn before any tracker action once the sprint is no longer open, report after each batch, and answer a scope change with a new brief). The contract is not in the instruction corpus (ADR-console-015), so there is no Instruction Budget raise.
 
@@ -29,5 +29,5 @@ ADR-console-013 carried a manager's brief to the page and the owner's approval o
 - A sprint more than 90 days old may lose its `session.seen` rows, and so its session id, and its nudge rows on restart: a wake then fails, and two failures read manager not reachable. The messages stay.
 - A relay costs one short print-mode session on the manager's profile.
 - A manager whose session record was removed comes back under its name with its secret, not as an unnamed session without its settings.
-- macOS sends no nudge: a message waits as sent until the manager's next turn reads it.
+- macOS sends no nudge: a message waits as sent, and is picked up at the manager's next turn.
 - A verification check that states a real goal must stop its test manager before withdrawing the sprint, because a withdrawal removes the secret and does not end the session.
