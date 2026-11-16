@@ -84,6 +84,7 @@
 | Platform manifest | Project contract |
 | Prefix reorder | Hosts |
 | Probe | Verification |
+| Production rules | Project contract |
 | Project contract | Project contract |
 | Projection | Project contract |
 | Publication-free profile | Release |
