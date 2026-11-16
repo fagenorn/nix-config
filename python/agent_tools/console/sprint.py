@@ -40,13 +40,24 @@ round is
     {"questions": [{"question": "<the ask, at most 140 characters>",
                     "context": "<optional, at most 400 characters>", "blocks": "<one line>",
                     "options": ["<one line, at most 80 characters>", ...],
-                    "recommended": "<exact text of one option>"}, ...],
+                    "recommended": "<exact text of one option>",
+                    "pictures": [{"file": "<path>", "line": "<one line, at most 140 characters>",
+                                  "pair": "before" | "after"}, ...]}, ...],
      "blocker": true | false}                   (blocker optional, default false)
+
+`pictures` is optional, at most 8 to a question, and `pair` is optional. The command uploads each
+`file` as `sprint picture` does (a relative path is read from the current directory) and sends the
+member with `"picture": "<id>"` in place of `"file"`; a member with `"picture"` and no `"file"` is
+sent as given. Before it reads or sends anything it checks the round's pictures with the console's
+own rules (`agent_tools.console.sprints.checked_round`): a refusal is stderr `sprint: refused
+before sending: <reason>` and exit 1. It then reads every file before it uploads any: a file that
+cannot be read, or one over 2 MiB, is exit 2 and nothing is uploaded or sent. Whether a picture
+belongs to the sprint, and the sprint's state, stay the console's to decide.
 
 On success it prints `sprint: round <id> sent, <n> questions` (`1 question` when n is 1) and exit
 0; a 200 answer without integer `round` and `questions` is `sprint: refused 200: unreadable
-answer: <error>` and exit 1. The command validates no member of the round: the console decides,
-in one place.
+answer: <error>` and exit 1. Beyond the pictures' own rules the command validates no member of the
+round: the console decides, in one place.
 
 `sprint report --help` and `sprint close --help` list the members of the report and of the closing
 report, each with one line and an example, the same lists `sprint contract` prints.
@@ -100,7 +111,8 @@ exit 1. A console that cannot be reached is stderr
 `sprint: console unreachable on 127.0.0.1:<port>: <error>` and exit 1. A secret, brief, report, closing report, round or reply file
 or a picture file that cannot be read, or a brief, report, closing report or round that is not a JSON object, is stderr `sprint: cannot read <path>:
 <reason>` and exit 2, with no request sent, as is a picture file larger than 2 MiB, stderr
-`sprint: cannot send <path>: it is larger than 2 MiB`; a `picture` secret that is not printable
+`sprint: cannot send <path>: it is larger than 2 MiB` (a `sprint ask` picture file is the same
+exit 2, before any upload); a `picture` or `ask` secret that is not printable
 ASCII (it travels in a header) is stderr `sprint: the secret is not printable ASCII, so it cannot go
 in a header: no request sent` and exit 2, with no request sent; bad arguments are exit 2. The secret is printed nowhere.
 """
@@ -307,9 +319,43 @@ def send_brief(args: argparse.Namespace, sprint: str) -> str:
         raise Refused(f"sprint: refused 200: unreadable answer: {error}") from error
 
 
+def round_pictures(round_: dict) -> list[dict]:
+    """The members of a round's `pictures` lists that name a `file`, in question then picture order."""
+    questions = round_.get("questions")
+    members: list[dict] = []
+    for question in questions if isinstance(questions, list) else ():
+        listed = question.get("pictures") if isinstance(question, dict) else None
+        for member in listed if isinstance(listed, list) else ():
+            if isinstance(member, dict) and isinstance(member.get("file"), str):
+                members.append(member)
+    return members
+
+
+def with_ids(round_: dict, ids: dict[int, str]) -> dict:
+    """A copy of `round_` in which each member (by `id()`) names its picture id, not its file."""
+    def named(member):
+        if id(member) not in ids:
+            return member
+        return {**{k: v for k, v in member.items() if k != "file"}, "picture": ids[id(member)]}
+    return {**round_, "questions": [
+        {**question, "pictures": [named(m) for m in question["pictures"]]}
+        if isinstance(question, dict) and isinstance(question.get("pictures"), list) else question
+        for question in round_["questions"]]}
+
+
 def send_round(args: argparse.Namespace, sprint: str) -> str:
     secret = resolve_secret(args)
     round_ = read_object(args.round_file, "round")
+    members = round_pictures(round_)
+    if members:
+        try:
+            sprints.checked_round(with_ids(round_, {id(m): "0" * 64 for m in members}))
+        except sprints.Refused as error:
+            raise Refused(f"sprint: refused before sending: {error}") from error
+        check_header_secret(secret)
+        files = [read_picture(Path(m["file"])) for m in members]
+        ids = {id(m): upload(args.port, sprint, secret, data) for m, data in zip(members, files)}
+        round_ = with_ids(round_, ids)
     body = json.dumps({"sprint_id": sprint, "secret": secret, "round": round_}).encode()
     text = ask(args.port, "POST", service.ASK_PATH, body)
     try:
@@ -360,19 +406,27 @@ def send_reply(args: argparse.Namespace, sprint: str) -> str:
     return f"sprint: reply to message {args.message} sent"
 
 
-def send_picture(args: argparse.Namespace, sprint: str) -> str:
-    secret = resolve_secret(args)
+def check_header_secret(secret: str) -> None:
     if not (secret.isascii() and secret.isprintable()):
         # A header cannot carry a newline or a non-ASCII character; naming the value would print it.
         raise Unreadable("sprint: the secret is not printable ASCII, so it cannot go in a header: "
                          "no request sent")
+
+
+def read_picture(path: Path) -> bytes:
     try:
-        data = args.file.read_bytes()
+        data = path.read_bytes()
     except OSError as error:
-        raise Unreadable(f"sprint: cannot read {args.file}: {error}") from error
+        raise Unreadable(f"sprint: cannot read {path}: {error}") from error
     if len(data) > service.MAX_PICTURE_BYTES:
-        raise Unreadable(f"sprint: cannot send {args.file}: it is larger than 2 MiB")
-    text = ask(args.port, "POST", service.PICTURE_PATH, data,
+        raise Unreadable(f"sprint: cannot send {path}: it is larger than 2 MiB")
+    return data
+
+
+def upload(port: int, sprint: str, secret: str, data: bytes) -> str:
+    """Send one picture's bytes and return its id; the secret is checked as a header value."""
+    check_header_secret(secret)
+    text = ask(port, "POST", service.PICTURE_PATH, data,
                {"Content-Type": "image/png", service.SPRINT_HEADER: sprint,
                 service.SECRET_HEADER: secret})
     try:
@@ -382,6 +436,12 @@ def send_picture(args: argparse.Namespace, sprint: str) -> str:
     except (ValueError, KeyError, TypeError) as error:
         raise Refused(f"sprint: refused 200: unreadable answer: {error}") from error
     return picture
+
+
+def send_picture(args: argparse.Namespace, sprint: str) -> str:
+    secret = resolve_secret(args)
+    check_header_secret(secret)
+    return upload(args.port, sprint, secret, read_picture(args.file))
 
 
 def main(argv: list[str] | None = None) -> int:

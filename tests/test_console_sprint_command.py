@@ -699,6 +699,12 @@ class ManagerContractTest(unittest.TestCase):
         self.assertEqual((got.returncode, got.stdout, got.stderr),
                          (0, CONTRACT.read_text(encoding="utf-8"), ""))
 
+    def test_the_contract_says_how_a_question_carries_pictures(self):
+        text = CONTRACT.read_text(encoding="utf-8")
+        for needle in ("pictures", "file", "line", "before", "after", "8", "140"):
+            with self.subTest(needle):
+                self.assertIn(needle, text)
+
     def test_contract_sends_no_request(self):
         out = StringIO()
         refused = AssertionError("sprint contract opened a connection")

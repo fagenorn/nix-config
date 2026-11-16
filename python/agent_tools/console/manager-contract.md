@@ -84,6 +84,7 @@ If this text is no longer in your context, run `sprint contract` again.
    - `blocks`: one line, what waits behind the answer.
    - `options`: two to four one-line options of at most 80 characters each.
    - `recommended`: the exact text of the option you recommend.
+   - `pictures`: optional, at most 8 to a question: `[{"file": "<path to a PNG>", "line": "<one line, at most 140 characters>", "pair": "before" | "after"}]`. `sprint ask` uploads each `file` for you and sends its id; the `line` is what the owner reads beside the picture, and `pair` (optional, each of `before` and `after` at most once in a question) marks a before-and-after pair. Only pictures of this sprint are accepted; a picture over 2 MiB, one that is not a PNG, or a list over these limits is refused with the reason and nothing is sent.
 
    A round over a limit is refused with the limit named and nothing is sent, so shorten that member and send again.
 
