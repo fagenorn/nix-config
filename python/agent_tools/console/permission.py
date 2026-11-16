@@ -9,8 +9,8 @@ is enforced without the row check):
   the policy file is not read;
 - status `"declared"` and the guard's compiled policy, loaded whole, holds a row whose
   `evidence.project_id` is the project's and whose `production` member covers the resolved
-  declaration (the changing commands as `{id, argv}`, the key-file globs and the MCP tool
-  names, equal to what `guard_policy.production_row` compiles from the snapshot): BYPASS,
+  declaration (the changing and read-only commands as `{id, argv}`, the key-file globs
+  and the MCP tool names, equal to what `guard_policy.production_row` compiles from the snapshot): BYPASS,
   "production rules in place";
 - status `"declared"` and the policy loads but holds no such row, or the row is older than
   the declaration: AUTO, "production rules declared but not in the guard's policy";
@@ -217,16 +217,22 @@ def policy_rows(path: Path) -> dict | None:
 def _declared_changes(snapshot: dict) -> dict | None:
     """The changing production rules the snapshot declares, in the row's shape, else None.
 
-    Mirrors the three members `guard_policy.production_row` compiles that the guard refuses on
-    (`tests/test_console_permission.py` pins the parity); a snapshot too thin to compile is None.
+    Mirrors the four members `guard_policy.production_row` compiles that the guard refuses or
+    lifts on (`tests/test_console_permission.py` pins the parity); a snapshot too thin to compile
+    is None.
     """
     try:
         production = snapshot["production"]
         changes = production["changes"]
         commands = snapshot["bindings"]["commands"]
+
+        def resolved(ids: list) -> list[dict]:
+            return [{"id": command_id, "argv": list(commands[command_id]["argv"])}
+                    for command_id in ids]
+
         return {
-            "changes": [{"id": command_id, "argv": list(commands[command_id]["argv"])}
-                        for command_id in changes["commands"]],
+            "changes": resolved(changes["commands"]),
+            "read_only": resolved(production["read_only"]["commands"]),
             "key_files": list(changes["key_files"]),
             "mcp_tools": list(changes["mcp_tools"]),
         }

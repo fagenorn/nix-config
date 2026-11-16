@@ -20,16 +20,17 @@ BYPASS = "bypassPermissions"
 AUTO = "auto"
 
 
-def snap(status, commands=(), key_files=(), mcp_tools=()):
-    """A resolved snapshot declaring `status`; `commands` maps a changing command id to its argv."""
+def snap(status, commands=(), key_files=(), mcp_tools=(), read_only=()):
+    """A resolved snapshot declaring `status`; `commands` and `read_only` map a command id to its argv."""
     production = {"status": status}
     if status == "declared":
         production.update(
             changes={"commands": list(commands), "key_files": list(key_files),
                      "mcp_tools": list(mcp_tools)},
-            read_only={"commands": [], "mcp_tools": []}, release_profile="r")
+            read_only={"commands": list(read_only), "mcp_tools": []}, release_profile="r")
     return {"production": production,
-            "bindings": {"commands": {name: {"argv": list(argv)} for name, argv in dict(commands).items()}}}
+            "bindings": {"commands": {name: {"argv": list(argv)}
+                                      for name, argv in {**dict(read_only), **dict(commands)}.items()}}}
 
 
 def row(project_id, production=True):
@@ -124,6 +125,13 @@ class PermissionReadTest(unittest.TestCase):
             ("changed argv", snap("declared", commands={"deploy": ["kubectl", "delete"]}),
              stale(changes=[deploy])),
             ("new key file", snap("declared", key_files=["k8s/*.yaml"]), stale()),
+            ("new read-only command",
+             snap("declared", read_only={"status": ["kubectl", "rollout", "status"]}), stale()),
+            ("changed read-only argv",
+             snap("declared", commands={"deploy": ["kubectl"]},
+                  read_only={"status": ["kubectl", "rollout", "status"]}),
+             stale(changes=[{"id": "deploy", "argv": ["kubectl"]}],
+                   read_only=[{"id": "status", "argv": ["kubectl", "rollout"]}])),
             ("another mcp tool", declared,
              stale(changes=[deploy], key_files=["k8s/*.yaml"], mcp_tools=["mcp__prod__other"])),
         ]
@@ -143,11 +151,12 @@ class PermissionReadTest(unittest.TestCase):
         from agent_tools.guard import guard_policy
 
         snapshot = snap("declared", commands={"deploy": ["kubectl", "apply"]},
-                        key_files=["k8s/*.yaml"], mcp_tools=["mcp__prod__deploy"])
+                        key_files=["k8s/*.yaml"], mcp_tools=["mcp__prod__deploy"],
+                        read_only={"status": ["kubectl", "rollout", "status"]})
         compiled = guard_policy.production_row(snapshot)
         declared = permission._declared_changes(snapshot)
         self.assertEqual(declared, {member: compiled[member]
-                                    for member in ("changes", "key_files", "mcp_tools")})
+                                    for member in ("changes", "read_only", "key_files", "mcp_tools")})
         self.assertTrue(permission._covers(compiled, declared))
 
     def test_declared_rules_the_guard_does_not_hold_run_in_auto(self):
