@@ -1,0 +1,34 @@
+# ADR-guard-011 — The guard refuses a project's production commands outside its release path
+
+- **Status:** accepted
+- **Decided in:** #1149
+
+## Context
+
+ADR-guard-009 decided that production rules live in the project contract and that the guard enforces them in every permission mode, and ADR-project-contract-007 added the `production` section a contract declares them in. Nothing read that section yet: a session in `bypassPermissions` could run a project's production command and no hook would object. The guard already refuses the lifecycle verbs from the live repository and a compiled policy, so the production rules reach it the same way, through a project's derived row.
+
+## Decision
+
+The guard refuses a Bash command that runs a production command a project declares, in that project's checkout, unless it is the project's approved release path. The decisions below make that reading precise.
+
+- **D1, the row member.** A derived row gains an optional `production` member, written only when the project's contract declares production: its changing commands and its read-only commands, each as the command's id and its argv as authored, and its release profile. A project that declares none, or declares that it has none, has no member. Key files and MCP tools are not carried, because they are not Bash routes (issue 1150). The compiled policy's schema becomes 4.
+- **D2, the loader.** The loader accepts the member in exactly that shape, and every value the resolver accepts. Any other shape empties the whole file, as every malformed row does (ADR-guard-006), so the compiler needs no filter of its own.
+- **D3, read unconfirmed.** The guard reads a row's production rules without the row check, and the row check never compares them. A production rule only refuses, so confirming it could only turn a refusal into an allow, and an unreachable `origin` would then fail open. This amends ADR-guard-006 and ADR-guard-007 for production rules only; ADR-guard-007 is unchanged for every authorization.
+- **D4, the policy read.** The compiled policy is read on every Bash call that passes the detaching check and the base-policy load, which revises issue 377 section 4 ("a command with no repository-bound verb never reads it"). The row check still runs only for a repository-bound verb.
+- **D5, the readings.** The guard reads a production command as it reads a lifecycle verb: through wrappers, at any word position for a verb of two or more words, through quoted pieces, evaluator source, `env -S`, unparseable text and a quoted substitution. A command it reads as raw text counts when the verb's words occur in order in the text. A one-word verb has no later words to tell a run of it from a mention of it, so it counts only at a command position or behind a runner such as `timeout` or `xargs`, never as another program's argument. A runner followed by a shell or `env -S` (`timeout 600 sh -c 'just switch'`), shell text a runner takes as one word (`watch 'just switch'`, `nix-shell --run`), a leading redirection (`>/dev/null ./deploy.sh`) and an ANSI-C quoted word (`$'just' switch`) are read as the same command. A line continuation inside a directory-changing word (`c\<newline>d`) is joined before the word is looked for, and a repository lookup that times out or cannot start refuses a command that hits a rule, where an unregistered repository refuses nothing.
+- **D6, read-only routes.** A match is lifted when the command begins with a declared read-only route of which the production verb is a proper prefix. Only a parsed command is lifted; raw text lifts nothing.
+- **D7, which checkout.** The checkout is the `origin` slug of the call's working directory, and an unknown slug matches no row. A `cd`, `pushd`, `popd` or `chdir` word anywhere in the command, redirections and substitutions included, makes the guard judge every project that declares the command. The cwd's project is tried first.
+- **D8, the refusal.** The refusal is one line: ``<argv> changes the production of <slug> (production rule <id>), so it runs only through the release profile <profile> with release transaction preview and release transaction run.`` For this repository the argv is `just switch`, the slug `fagenorn/nix-config`, the rule `nix-activate` and the profile `github-release`.
+- **D9, the approved release path.** The approved release path is the `release` profile run through `release transaction preview` and `release transaction run`. The guard has no special case for it. Its arguments, a `--title` included, are inert because a one-word verb counts only at a command position, while an executed substitution or a chained command still counts.
+
+## Consequences
+
+- An agent session in nix-config's checkout can no longer run `just switch`: the contract declares it, and the owner runs it outside the session.
+- Every Bash call now reads one compiled policy file of at most 1 MiB.
+- Key files and MCP tools stay unenforced until issue 1150.
+- A production command the shell reaches by another name is not seen: bare `just` runs the default `switch` recipe but is not the declared `just switch` (ADR-guard-009).
+- Words fed on stdin (`echo switch | xargs just`) and a program's own directory option (`env -C`, `just -d`, `make -C`) are not followed.
+- A session started before the switch that installs this guard reads a schema-4 file as malformed, so a repository that relies on a derived row is refused until that session restarts.
+- A one-word command behind a program outside the runner list (`ssh host kubectl apply`) is not seen. Where the guard reads raw text, or behind a runner, a one-word production command's name anywhere refuses, file arguments included (`sh -c 'cat scripts/deploy.sh'`), the same fail-closed reading the lifecycle verbs get.
+- A directory-changing word anywhere widens the judgement: `git commit -m 'cd later' && just switch` is judged against every declaring project.
+- The rewrite route stays open. A session that rewrites the compiled policy can remove a project's production refusals: deleting the row's production member keeps every derived authorization, and deleting the row or breaking the file removes the rest; it still gains no authorization.

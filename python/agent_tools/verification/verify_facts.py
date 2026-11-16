@@ -12,13 +12,21 @@ forge must hold the commit, a compare answers ancestry when git cannot, and no a
 process (P16). `released_includes` reads the forge: the latest release tag must contain the sha and
 be on the default branch. A deploy-observed release is the release core's activation-unit
 observation (#555, #582), which no verify check reads.
+
+A context may be given a `clock` (the caller's reading of the forge's time, in place of
+`forge_api.server_now`), `reads_host=False` (no version tool runs and the deployed revision is
+unknown) and `cancelled` (asked before every forge read and the clock read; a true answer raises
+`ForgeError("cancelled")`, and the read already running finishes). A not-due reading carries
+`until` exactly when a `not_before` or an open `days_after` window dates it, never from the host
+clock. `evaluate_wait` reads every member and dates a wait only when every unmet member is dated,
+then by the latest date.
 """
 import json
 import os
 import re
 import shutil
 import subprocess
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -46,19 +54,28 @@ class Context:
     default_branch: str
     tracker: Mapping[str, Any]
     markers: Sequence[Marker] = ()
+    clock: Callable[[], datetime] | None = None
+    reads_host: bool = True
+    cancelled: Callable[[], bool] | None = None
     _now: datetime | None = field(default=None, init=False, repr=False)
     _revision: tuple[str | None] | None = field(default=None, init=False, repr=False)
 
+    def check_cancelled(self) -> None:
+        """Raise `ForgeError("cancelled")` when the caller has asked to stop."""
+        if self.cancelled is not None and self.cancelled():
+            raise ForgeError("cancelled")
+
     def now(self) -> datetime:
-        """The forge's time, read once."""
+        """The forge's time (or the given clock's), read once."""
         if self._now is None:
-            self._now = forge_api.server_now()
+            self.check_cancelled()
+            self._now = (self.clock or forge_api.server_now)()
         return self._now
 
     def revision(self) -> str | None:
         """The deployed revision of this host, read once."""
         if self._revision is None:
-            self._revision = (deployed_revision(),)
+            self._revision = (deployed_revision() if self.reads_host else None,)
         return self._revision[0]
 
 
@@ -78,6 +95,7 @@ class Due:
     reason: str
     facts: dict[str, str]
     open_window: str | None = None
+    until: datetime | None = None
 
 
 @dataclass(frozen=True)
@@ -114,9 +132,15 @@ def deployed_revision() -> str | None:
     return value if REVISION.fullmatch(value) else None
 
 
-def _compare(slug: str, base: str, head: str) -> str | None:
+def _api_get(ctx: Context, path: str, allow: tuple[int, ...] = ()) -> Any:
+    """One forge read of a `when` member, unless the caller has asked to stop."""
+    ctx.check_cancelled()
+    return forge_api.api_get(path, allow)
+
+
+def _compare(ctx: Context, base: str, head: str) -> str | None:
     """The status of the forge's compare of `base...head`, or None when the forge cannot say."""
-    payload = forge_api.api_get(f"repos/{slug}/compare/{quote(base)}...{quote(head)}", allow=(404,))
+    payload = _api_get(ctx, f"repos/{ctx.slug}/compare/{quote(base)}...{quote(head)}", allow=(404,))
     status = payload.get("status") if isinstance(payload, dict) else None
     return status if isinstance(status, str) else None
 
@@ -131,7 +155,7 @@ def includes(ctx: Context, sha: str, rev: str) -> bool | None:
         done = None
     if done is not None and done.returncode in (0, 1):
         return done.returncode == 0
-    status = _compare(ctx.slug, sha, rev)
+    status = _compare(ctx, sha, rev)
     if status in INCLUDED:
         return True
     if status in EXCLUDED:
@@ -141,7 +165,7 @@ def includes(ctx: Context, sha: str, rev: str) -> bool | None:
 
 def on_forge(ctx: Context, rev: str) -> bool | None:
     """True when the forge holds commit `rev`, False when it answers 404 or 422."""
-    payload = forge_api.api_get(f"repos/{ctx.slug}/commits/{rev}", allow=(404, 422))
+    payload = _api_get(ctx, f"repos/{ctx.slug}/commits/{rev}", allow=(404, 422))
     if payload is None:
         return False
     if isinstance(payload, dict) and payload.get("sha") == rev:
@@ -167,22 +191,22 @@ def released_includes(ctx: Context, sha: str) -> Reading:
 
     The latest release tag must contain `sha` and sit on the default branch. A release a deploy
     watch observed is the release core's activation-unit observation (#555, #582), not read here."""
-    latest = forge_api.api_get(f"repos/{ctx.slug}/releases/latest", allow=(404,))
+    latest = _api_get(ctx, f"repos/{ctx.slug}/releases/latest", allow=(404,))
     tag = latest.get("tag_name") if isinstance(latest, dict) else None
     if not isinstance(tag, str) or not tag:
         return Reading("not_released", {})
     facts = {"tag": tag}
-    contains = _compare(ctx.slug, sha, tag)
+    contains = _compare(ctx, sha, tag)
     if contains is None:
         return Reading("compare_unknown", facts)
     if contains not in INCLUDED:
         return Reading("not_released", facts)
-    on_default = _compare(ctx.slug, tag, ctx.default_branch)
+    on_default = _compare(ctx, tag, ctx.default_branch)
     return Reading("due" if on_default in INCLUDED else "not_released", facts)
 
 
 def _workflow_runs(ctx: Context, query: str) -> list[dict]:
-    payload = forge_api.api_get(f"repos/{ctx.slug}/actions/runs?{query}")
+    payload = _api_get(ctx, f"repos/{ctx.slug}/actions/runs?{query}")
     runs = payload.get("workflow_runs") if isinstance(payload, dict) else None
     if not isinstance(runs, list):
         raise ForgeError("payload_invalid", "no workflow_runs list")
@@ -213,9 +237,10 @@ def _days_after(spec: Mapping, merge: str, ctx: Context, facts: dict[str, str]) 
     event, days = spec["event"], spec["days"]
     opened = verify_issues.live_one(list(ctx.markers), verify_issues.WINDOW, {"event": event, "merge": merge})
     if opened is not None:
-        if ctx.now() >= opened.updated_at + timedelta(days=days):
+        ends = opened.updated_at + timedelta(days=days)
+        if ctx.now() >= ends:
             return Due(True, "due", facts)
-        return Due(False, "window_not_open", facts)
+        return Due(False, "window_not_open", facts, until=ends)
     reading = _event_reading(ctx, event, merge)
     facts = {**facts, **reading.facts}
     if reading.ok:
@@ -223,24 +248,52 @@ def _days_after(spec: Mapping, merge: str, ctx: Context, facts: dict[str, str]) 
     return Due(False, "window_not_open", facts)
 
 
-def evaluate_when(when: Mapping, merge: str, ctx: Context) -> Due:
-    """Whether every member of `when` holds; stops at the first one that does not."""
+def _readings(when: Mapping, merge: str, ctx: Context) -> Iterator[Due]:
+    """One reading per member of `when` present, in order, each with the facts gathered so far.
+
+    Lazy: a member is read only when the caller asks for its reading."""
     facts: dict[str, str] = {}
-    if "not_before" in when and not ctx.now() >= verify_block.parse_time(when["not_before"]):
-        return Due(False, "not_before", facts)
+    if "not_before" in when:
+        start = verify_block.parse_time(when["not_before"])
+        if ctx.now() >= start:
+            yield Due(True, "due", dict(facts))
+        else:
+            yield Due(False, "not_before", dict(facts), until=start)
     for name, reader in (("deployed_includes", deployed_includes), ("released_includes", released_includes)):
         if name in when:
             reading = reader(ctx, when[name])
             facts.update(reading.facts)
-            if not reading.ok:
-                return Due(False, reading.reason, facts)
+            yield Due(reading.ok, reading.reason, dict(facts))
     if "ci_run_includes" in when:
         spec = when["ci_run_includes"]
-        if ci_run(ctx, spec["workflow"], spec["branch"], spec["sha"]) != "success":
-            return Due(False, "ci_not_passed", facts)
+        met = ci_run(ctx, spec["workflow"], spec["branch"], spec["sha"]) == "success"
+        yield Due(met, "due" if met else "ci_not_passed", dict(facts))
     if "days_after" in when:
-        return _days_after(when["days_after"], merge, ctx, facts)
+        yield _days_after(when["days_after"], merge, ctx, dict(facts))
+
+
+def evaluate_when(when: Mapping, merge: str, ctx: Context) -> Due:
+    """Whether every member of `when` holds; stops at the first one that does not."""
+    facts: dict[str, str] = {}
+    for reading in _readings(when, merge, ctx):
+        if not reading.due:
+            return reading
+        facts = reading.facts
     return Due(True, "due", facts)
+
+
+def evaluate_wait(when: Mapping, merge: str, ctx: Context) -> Due:
+    """The reading of a wait: every member is read, none skipped.
+
+    All met is due. Otherwise a date is given only when every unmet member is dated, the latest
+    one; with an undated unmet member, the first such member is named and no date is given."""
+    readings = list(_readings(when, merge, ctx))
+    unmet = [reading for reading in readings if not reading.due]
+    if not unmet:
+        return Due(True, "due", readings[-1].facts if readings else {})
+    if all(reading.until is not None for reading in unmet):
+        return max(unmet, key=lambda reading: reading.until)
+    return next(reading for reading in unmet if reading.until is None)
 
 
 def _stamps(ctx: Context, run: Mapping) -> list[str]:

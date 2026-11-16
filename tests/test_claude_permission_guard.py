@@ -27,6 +27,17 @@ NODO = "elevenyellow/nodocom"
 GRAMMAR = "a lifecycle verb runs only alone"
 NODO_ROW = {"default_branch": "main", "integration_branch": "dev", "required_checks": [],
             "evidence": {}}
+PROD = "acme/deployer"
+PRODUCTION = {
+    "changes": [{"id": "deploy", "argv": ["just", "switch"]},
+                {"id": "kube-apply", "argv": ["/usr/local/bin/kubectl"]},
+                {"id": "deploy-script", "argv": ["./scripts/deploy.sh"]}],
+    "read_only": [{"id": "check", "argv": ["just", "build"]},
+                  {"id": "kube-read", "argv": ["kubectl", "get"]}],
+    "release_profile": "forge-main",
+}
+PROD_ROW = {"default_branch": "main", "integration_branch": "main", "required_checks": [],
+            "evidence": {}, "production": PRODUCTION}
 ABSENT = object()
 EXPECTED_ALLOW = [
     "Bash(git fetch:*)", "Bash(git status:*)", "Bash(git log:*)",
@@ -1805,6 +1816,278 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         blocked = self.run_guard(merge, cwd=repo, env=main_pr)
         self.assertEqual(2, blocked.returncode)
         self.assertIn("protection lookup failed", blocked.stderr)
+
+    # ------------------------------------------------------------------
+    # Production rules (issue 1149)
+    # ------------------------------------------------------------------
+
+    SECOND = "acme/second"
+    SECOND_ROW = {**PROD_ROW, "production": {
+        "changes": [{"id": "ship", "argv": ["just", "switch"]}], "read_only": [],
+        "release_profile": "second-release"}}
+    QUIET = "acme/quiet"
+    QUIET_ROW = {**PROD_ROW, "production": {"changes": [], "read_only": [],
+                                            "release_profile": "p"}}
+    DEPLOY = "changes the production of acme/deployer (production rule deploy)"
+
+    def production_args(self, rows):
+        return ("--gh-bin", str(self.fake_gh), "--policy",
+                str(self.write_policy(derived_repositories=rows, derivation={})))
+
+    def test_a_declared_production_command_is_refused_in_every_spelling(self):
+        """AC1: a declared command is refused in every spelling the guard reads."""
+        guard_args = self.production_args({NODO: NODO_ROW, PROD: PROD_ROW})
+        prod = self.make_repo(f"git@github.com:{PROD}.git")
+        rules = {
+            self.DEPLOY: (
+                "just switch", "just switch mbp", "just --justfile justfile switch",
+                "/run/current-system/sw/bin/just switch", "env FOO=1 just switch",
+                "command just switch", "sudo -u root just switch", "exec just switch",
+                "timeout 600 just switch", "echo just switch", '"just" switch',
+                "j\"us\"t sw'itch'", "just \\\nswitch", "(just switch)", "{ just switch; }",
+                "true && just switch", "x=$(just switch)", "just $(printf switch)",
+                'echo "$(just switch)"', "sh -c 'just switch'", '/bin/bash -c "just switch"',
+                "eval 'ju''st sw''itch'", "env -S 'just switch'",
+                "env --split-string='just switch'", "just switch 'unterminated",
+                "echo 'just switch' | sh", "just build switch",
+                "release transaction preview --repo-root . --title x; just switch"),
+            "(production rule kube-apply)": (
+                "sh -c 'kubectl get pods'", "timeout 600 kubectl apply -f x",
+                "echo apply | xargs kubectl",
+                "release transaction preview --repo-root . --commit abc123 "
+                '--version v1.2.3 --title "$(kubectl apply -f x)"',
+                "release transaction run --repo-root . --confirm tok && kubectl apply -f x"),
+            "(production rule deploy-script)": (
+                "./scripts/deploy.sh", "scripts/deploy.sh --dry-run",
+                "env FOO=1 ./scripts/deploy.sh", "timeout 60 ./scripts/deploy.sh",
+                "bash scripts/deploy.sh"),
+        }
+        for needle, commands in rules.items():
+            for command in commands:
+                with self.subTest(command=command):
+                    result = self.run_guard(command, cwd=prod, guard_args=guard_args)
+                    self.assertEqual(2, result.returncode, (command, result.stderr))
+                    self.assertIn(needle, result.stderr)
+
+    def test_a_production_command_hidden_by_a_runner_a_redirection_or_a_quoting_is_refused(self):
+        """AC1 review findings: shell text behind a runner, a leading redirection, an ANSI-C
+        quoted word and a continued directory name never hide a declared command."""
+        guard_args = self.production_args({NODO: NODO_ROW, PROD: PROD_ROW})
+        prod = self.make_repo(f"git@github.com:{PROD}.git")
+        elsewhere = self.make_repo("git@github.com:fagenorn/tool.git")
+        rules = {
+            self.DEPLOY: (
+                "timeout 600 sh -c 'just switch'", "devenv shell -- bash -c 'just switch'",
+                "echo x | xargs sh -c 'just switch'", "nix-shell --run 'just switch'",
+                "watch 'just switch'", "flock /tmp/l -c 'just switch'",
+                "timeout 5 env -S 'just switch'", "timeout 5 env -Sjust switch",
+                "nice -n 5 /bin/zsh -c 'just switch'",
+                "find . -exec sh -c 'just switch' ';'", ">/dev/null sh -c 'just switch'",
+                "$'just' switch", "just $'switch'", "$\"just\" switch", "ju$'st' switch",
+                "env FOO=1 $'just' switch",
+                "echo $'it\\'s ready'; just switch  # don't skip",
+                "cat <<EOF >/dev/null\ndon't\nEOF\necho $'it\\'s'; just switch # don't",
+                "echo \\ #; just switch", "ls My\\ #2; just switch", "echo \\\t#; just switch"),
+            "(production rule kube-apply)": (
+                "nix develop -c bash -c 'kubectl apply -f x'",
+                "timeout 5 bash -c 'kubectl apply -f x'", "$'kubectl' apply -f x",
+                "printf $'can\\'t wait\\n' && kubectl apply -f x  # don't forget",
+                ">| /tmp/x kubectl apply", "echo \\ #; kubectl apply"),
+            "(production rule deploy-script)": (
+                ">/dev/null ./scripts/deploy.sh", "2>/dev/null ./scripts/deploy.sh",
+                "> /dev/null ./scripts/deploy.sh", ">>log.txt 2>&1 ./scripts/deploy.sh",
+                "</dev/null ./scripts/deploy.sh", "2>&1 env FOO=1 ./scripts/deploy.sh",
+                ">|/dev/null ./scripts/deploy.sh", "2>|/dev/null ./scripts/deploy.sh"),
+        }
+        for needle, commands in rules.items():
+            for command in commands:
+                with self.subTest(command=command):
+                    result = self.run_guard(command, cwd=prod, guard_args=guard_args)
+                    self.assertEqual(2, result.returncode, (command, result.stderr))
+                    self.assertIn(needle, result.stderr)
+        for command in ("c\\\nd %s && just switch" % prod, "cd\\\n %s && just switch" % prod):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=elsewhere, guard_args=guard_args)
+                self.assertEqual(2, result.returncode, (command, result.stderr))
+                self.assertIn(self.DEPLOY, result.stderr)
+        for command in ("timeout 600 sh -c 'just build'", "2>&1 just build",
+                        ">/dev/null git add scripts/deploy.sh", "timeout 5 echo hello world",
+                        "echo $'x' just", "echo \\\\ #; just switch"):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=prod, guard_args=guard_args)
+                self.assertEqual(0, result.returncode, (command, result.stderr))
+
+    def test_a_production_command_is_refused_when_the_repository_lookup_fails(self):
+        """AC3 review finding: a lookup that times out is not an unregistered repository."""
+        guard_args = (*self.production_args({PROD: PROD_ROW}), "--child-timeout-seconds", "0.3")
+        prod = self.make_repo(f"git@github.com:{PROD}.git")
+        slow = Path(self.fixture_dir.name) / "slow-git"
+        slow.write_text("#!/bin/sh\nexec sleep 3\n", encoding="utf-8")
+        slow.chmod(0o755)
+        refused = self.run_guard("just switch", cwd=prod,
+                                 guard_args=(*guard_args, "--git-bin", str(slow)))
+        self.assertEqual(2, refused.returncode, refused.stderr)
+        self.assertIn("repository lookup timed out", refused.stderr)
+        passed = self.run_guard("true", cwd=prod,
+                                guard_args=(*guard_args, "--git-bin", str(slow)))
+        self.assertEqual(0, passed.returncode, passed.stderr)
+
+    def test_a_deeply_nested_compiled_policy_refuses_no_call(self):
+        """AC3 review finding: a compiled policy json cannot load contributes no row and
+        never makes an ordinary command exit 2."""
+        deep = Path(self.fixture_dir.name) / "deep.json"
+        deep.write_text("[" * 2000 + "]" * 2000, encoding="utf-8")
+        prod = self.make_repo(f"git@github.com:{PROD}.git")
+        for command in ("true", "just switch"):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=prod, guard_args=(
+                    "--gh-bin", str(self.fake_gh), "--policy", str(deep)))
+                self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_the_production_refusal_is_one_sentence_naming_the_rule_profile_and_route(self):
+        """AC4: the refusal is one line naming the argv, the project, the rule, the profile
+        and the release route."""
+        guard_args = self.production_args({NODO: NODO_ROW, PROD: PROD_ROW})
+        prod = self.make_repo(f"git@github.com:{PROD}.git")
+        tail = (", so it runs only through the release profile forge-main with release "
+                "transaction preview and release transaction run.\n")
+        for command, shown, rule in (
+                ("just switch", "just switch", "deploy"),
+                ("kubectl apply -f deploy.yaml", "/usr/local/bin/kubectl", "kube-apply")):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=prod, guard_args=guard_args)
+                self.assertEqual(2, result.returncode, result.stderr)
+                self.assertEqual(
+                    f"lifecycle guard: `{shown}` changes the production of {PROD} "
+                    f"(production rule {rule}){tail}", result.stderr)
+
+    def test_declared_read_only_routes_and_the_release_route_pass_the_production_rules(self):
+        """AC2: a read-only route, the release route and a mere mention pass."""
+        guard_args = self.production_args({NODO: NODO_ROW, PROD: PROD_ROW})
+        prod = self.make_repo(f"git@github.com:{PROD}.git")
+        preview = "release transaction preview --repo-root . --commit abc123 --version v1.2.3"
+        for command in (
+                "just build", "just build mbp", "env FOO=1 just build", "sh -c 'just build'",
+                "kubectl get pods", "timeout 5 kubectl get pods -A",
+                f"{preview} --title 'ship just switch'",
+                "release transaction run --repo-root . --confirm tok",
+                'echo "just switch"', "git commit -m 'run just switch later'",
+                "cat > notes.md <<'EOF'\njust switch\nEOF\n", "true # just switch",
+                "just switcher", "just build switchboard",
+                "git add scripts/deploy.sh", "cat scripts/deploy.sh",
+                "git diff -- scripts/deploy.sh", "git add kubectl",
+                f"{preview} --title kubectl", f'{preview} --title "kubectl"',
+                "release transaction run --repo-root . --confirm tok --title deploy.sh"):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=prod, guard_args=guard_args)
+                self.assertEqual(0, result.returncode, (command, result.stderr))
+
+    def test_production_rules_hold_only_in_their_project_s_checkout(self):
+        """AC3: a repository with no rule, an empty `changes`, or no cwd is never refused."""
+        rows = {NODO: NODO_ROW, PROD: PROD_ROW, self.QUIET: self.QUIET_ROW}
+        guard_args = self.production_args(rows)
+        for slug in ("fagenorn/tool", NODO, self.QUIET):
+            repo = self.make_repo(f"git@github.com:{slug}.git")
+            for command in ("just switch", "kubectl apply -f x"):
+                with self.subTest(slug=slug, command=command):
+                    result = self.run_guard(command, cwd=repo, guard_args=guard_args)
+                    self.assertEqual(0, result.returncode, result.stderr)
+        result = self.invoke_command("just switch", *guard_args)
+        self.assertEqual(0, result.returncode, result.stderr)
+        prod = self.make_repo(f"git@github.com:{PROD}.git")
+        control = self.run_guard("just switch", cwd=prod, guard_args=guard_args)
+        self.assertEqual(2, control.returncode, control.stderr)
+
+    def test_a_directory_change_judges_every_project_declaring_the_production_command(self):
+        """AC1, D7: a command that may change directory is judged against every declaring row,
+        the cwd row first, then by sorted slug."""
+        guard_args = self.production_args({PROD: PROD_ROW, self.SECOND: self.SECOND_ROW})
+        tool = self.make_repo("git@github.com:fagenorn/tool.git")
+        second = self.make_repo(f"git@github.com:{self.SECOND}.git")
+        alone = self.run_guard("just switch", cwd=tool, guard_args=guard_args)
+        self.assertEqual(0, alone.returncode, alone.stderr)
+        for command in (
+                "cd . && just switch", "pushd /tmp && just switch",
+                "sh -c 'cd /tmp; just switch'", ">/dev/null cd /tmp && just switch",
+                "2>/dev/null cd /tmp && just switch", "cd>/dev/null /tmp && just switch",
+                "builtin cd /tmp && just switch", 'echo "$(cd /tmp; just switch)"',
+                "x=$(cd /tmp && just switch)"):
+            with self.subTest(command=command):
+                result = self.run_guard(command, cwd=tool, guard_args=guard_args)
+                self.assertEqual(2, result.returncode, (command, result.stderr))
+                self.assertIn(self.DEPLOY, result.stderr)
+        for command in ("cd . && just switch", "just switch"):
+            with self.subTest(command=command, cwd="second"):
+                result = self.run_guard(command, cwd=second, guard_args=guard_args)
+                self.assertEqual(2, result.returncode, (command, result.stderr))
+                self.assertIn("changes the production of acme/second (production rule ship)",
+                              result.stderr)
+
+    def test_the_first_declared_production_rule_names_the_refusal(self):
+        """D7: inside a row the first rule in `changes` order that hits names the refusal."""
+        guard_args = self.production_args({NODO: NODO_ROW, PROD: PROD_ROW})
+        prod = self.make_repo(f"git@github.com:{PROD}.git")
+        result = self.run_guard("kubectl apply; just switch", cwd=prod, guard_args=guard_args)
+        self.assertEqual(2, result.returncode, result.stderr)
+        self.assertIn(self.DEPLOY, result.stderr)
+
+    def test_a_bad_compiled_policy_adds_no_production_refusal(self):
+        """AC3: a compiled policy that does not load never refuses a command."""
+        prod = self.make_repo(f"git@github.com:{PROD}.git")
+        held = Path(self.fixture_dir.name)
+        broken = held / "broken.json"
+        broken.write_text("{", encoding="utf-8")
+        bad_argv = {**PRODUCTION, "changes": [{"id": "deploy", "argv": []}]}
+        for name, path in (
+                ("missing", held / "absent.json"), ("not json", broken),
+                ("a bad row", self.write_policy(
+                    derived_repositories={PROD: PROD_ROW, NODO: {**NODO_ROW, "owner": "x"}},
+                    derivation={})),
+                ("a bad production", self.write_policy(
+                    derived_repositories={PROD: {**PROD_ROW, "production": bad_argv}},
+                    derivation={}))):
+            for command in ("true", "just switch"):
+                with self.subTest(policy=name, command=command):
+                    result = self.run_guard(
+                        command, cwd=prod,
+                        guard_args=("--gh-bin", str(self.fake_gh), "--policy", str(path)))
+                    self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_a_production_refusal_runs_no_row_check(self):
+        """D3: the row check never confirms a production refusal."""
+        guard_args = self.production_args({NODO: NODO_ROW, PROD: PROD_ROW})
+        prod = self.make_repo(f"git@github.com:{PROD}.git")
+        log = Path(tempfile.mkdtemp(dir=self.fixture_dir.name)) / "derive.log"
+        result = self.run_guard("just switch", cwd=prod, guard_args=guard_args,
+                                env={"FAKE_DERIVE_LOG": str(log)})
+        self.assertEqual(2, result.returncode, result.stderr)
+        self.assertFalse(log.exists())
+
+    def test_a_compiled_production_rule_round_trips_through_the_guard(self):
+        """AC1, AC2: the compiler's `production` member is what the guard refuses."""
+        def declare(contract):
+            contract["production"] = {
+                "none": False,
+                "changes": {"commands": ["nix-activate"], "key_files": [], "mcp_tools": []},
+                "read_only": {"commands": ["nix-build"], "mcp_tools": []},
+                "release_profile": "github-release"}
+
+        world = GuardPolicyWorld(self)
+        world.project("fixture/prodfix", "fagenorn/prodfix", mutate=declare)
+        code, report, stderr = world.compile(base=BASE_POLICY_PATH)
+        self.assertEqual((0, ["fagenorn/prodfix"]), (code, report["derived"]), stderr)
+        repo = self.make_repo("git@github.com:fagenorn/prodfix.git")
+        guard_args = ("--gh-bin", str(self.fake_gh), "--policy", str(world.output),
+                      "--derive-bin", str(world.row_check()))
+        refused = self.run_guard("just switch", cwd=repo, guard_args=guard_args, timeout=60)
+        self.assertEqual(2, refused.returncode, refused.stderr)
+        self.assertEqual(
+            "lifecycle guard: `just switch` changes the production of fagenorn/prodfix "
+            "(production rule nix-activate), so it runs only through the release profile "
+            "github-release with release transaction preview and release transaction run.\n",
+            refused.stderr)
+        allowed = self.run_guard("just build", cwd=repo, guard_args=guard_args, timeout=60)
+        self.assertEqual(0, allowed.returncode, allowed.stderr)
 
     # ------------------------------------------------------------------
     # Release arm: the declared integration branch promoted into the default
@@ -4169,6 +4452,39 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         "a required check repeats": {"derived_repositories": {
             NODO: {**NODO_ROW, "required_checks": ["CI", "CI"]}}},
         "derivation is a list": {"derived_repositories": {NODO: NODO_ROW}, "derivation": []},
+        "production is null": {"derived_repositories": {NODO: {**NODO_ROW, "production": None}}},
+        "production is a list": {"derived_repositories": {NODO: {**NODO_ROW, "production": []}}},
+        "production lacks release_profile": {"derived_repositories": {
+            NODO: {**NODO_ROW, "production": {"changes": [], "read_only": []}}}},
+        "production has an extra member": {"derived_repositories": {
+            NODO: {**NODO_ROW, "production": {**PRODUCTION, "key_files": []}}}},
+        "production changes is not a list": {"derived_repositories": {
+            NODO: {**NODO_ROW, "production": {**PRODUCTION, "changes": {}}}}},
+        "production read_only is not a list": {"derived_repositories": {
+            NODO: {**NODO_ROW, "production": {**PRODUCTION, "read_only": "just build"}}}},
+        "a production command lacks argv": {"derived_repositories": {
+            NODO: {**NODO_ROW, "production": {**PRODUCTION, "changes": [{"id": "deploy"}]}}}},
+        "a production command has an extra member": {"derived_repositories": {
+            NODO: {**NODO_ROW, "production": {
+                **PRODUCTION,
+                "changes": [{"id": "deploy", "argv": ["just"], "cwd": "."}]}}}},
+        "a production id is empty": {"derived_repositories": {
+            NODO: {**NODO_ROW, "production": {
+                **PRODUCTION, "changes": [{"id": "", "argv": ["just", "switch"]}]}}}},
+        "a production argv is empty": {"derived_repositories": {
+            NODO: {**NODO_ROW, "production": {
+                **PRODUCTION, "changes": [{"id": "deploy", "argv": []}]}}}},
+        "a production argv is a string": {"derived_repositories": {
+            NODO: {**NODO_ROW, "production": {
+                **PRODUCTION, "changes": [{"id": "deploy", "argv": "just switch"}]}}}},
+        "a production argv word is empty": {"derived_repositories": {
+            NODO: {**NODO_ROW, "production": {
+                **PRODUCTION, "read_only": [{"id": "check", "argv": ["just", ""]}]}}}},
+        "a production argv word is not a string": {"derived_repositories": {
+            NODO: {**NODO_ROW, "production": {
+                **PRODUCTION, "read_only": [{"id": "check", "argv": ["just", 7]}]}}}},
+        "release_profile is empty": {"derived_repositories": {
+            NODO: {**NODO_ROW, "production": {**PRODUCTION, "release_profile": ""}}}},
         "missing derivation": {"derived_repositories": {NODO: NODO_ROW}, "derivation": ABSENT},
         "an extra member": {"derived_repositories": {NODO: NODO_ROW}, "grants": []},
     }
@@ -4281,6 +4597,16 @@ class ClaudePermissionGuardTest(unittest.TestCase):
             "--gh-bin", str(self.fake_gh), "--base-policy", str(base)))
         self.assertEqual(0, literal_only.returncode, literal_only.stderr)
 
+    def test_a_row_carrying_production_rules_loads_and_the_row_check_ignores_them(self):
+        """Issue 1149 D2: a derived row may carry `production`; the row check compares the
+        branches and required checks only, so a row check answering without it still agrees."""
+        policy = self.write_policy(
+            derived_repositories={NODO: {**NODO_ROW, "production": PRODUCTION}}, derivation={})
+        nodo = self.make_repo(f"git@github.com:{NODO}.git")
+        result = self.run_guard("git push -u origin topic", cwd=nodo, guard_args=(
+            "--gh-bin", str(self.fake_gh), "--policy", str(policy)))
+        self.assertEqual(0, result.returncode, result.stderr)
+
     def test_a_bad_compiled_policy_contributes_no_row(self):
         """Issue 377 D4, R4: the whole file is dropped and nothing the base allows is blocked."""
         fixtures = Path(tempfile.mkdtemp(dir=self.fixture_dir.name))
@@ -4354,13 +4680,14 @@ class ClaudePermissionGuardTest(unittest.TestCase):
         control = self.invoke_command("true", "--base-policy", str(self.write_base()))
         self.assertEqual(0, control.returncode, control.stderr)
 
-    def test_a_command_with_no_repository_bound_verb_never_opens_the_compiled_policy(self):
-        """Issue 377 section 4. The compiled path is a FIFO whose writer waits in `open`,
-        which returns once any reader opens the FIFO, so an open by the guard shows as that
-        `open` returning. The push is the control: a repository-bound verb opens it."""
+    def test_the_compiled_policy_is_opened_after_the_detaching_check(self):
+        """Issue 1149 D4. The compiled path is a FIFO whose writer waits in `open`, which
+        returns once any reader opens the FIFO, so an open by the guard shows as that `open`
+        returning. Every call past the detaching check opens the compiled policy for the
+        production rules; only a repository-bound verb, the push here, runs the row check."""
         repo = self.make_repo("https://github.com/fagenorn/argus.git")
-        for command, status, opens in (("true", 0, False),
-                                       ("git branch -d issue-30-safe", 0, False),
+        for command, status, opens in (("true", 0, True),
+                                       ("git branch -d issue-30-safe", 0, True),
                                        ("setsid x", 2, False),
                                        ("git push -u origin topic", 0, True)):
             with self.subTest(command=command):

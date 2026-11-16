@@ -97,6 +97,30 @@ is a file whose store fails. At most `sprints.MAX_PICTURES` pictures and as many
 kept, named PNGs first, then folder listings; each `line` is the file's base name cut to
 `sprints.MAX_PICTURE_LINE_CHARS` characters; a path is listed once.
 
+A waiting owner check (#1129). The runner posts an owner prompt only for a check that is due, so a held
+issue whose owner checks are not due carries no prompt yet and would not reach the inbox by marker or
+by the two owner labels: the held search (`held_argv`) finds it. An `Issue` node whose trusted (`OWNER` or `MEMBER`)
+comments open a ```verify fence is read through `verify_wait.held_waits` (the block and its markers are
+trusted exactly as the runner trusts them, never a collaborator's), which needs each comment's `createdAt`
+and the node's `repository.defaultBranchRef.name`; a node holding a block without them is `payload_invalid`,
+and a node with no block is read exactly as before (no clock, no `createdAt`, no `repository`). Every
+item that answers a wait carries `"wait": {"reason": <verify_wait reason>, "until": <ISO 8601 UTC> or None,
+"what": <text>}`. A prompted wait (only `no_when`) is set on the item of each live runner prompt whose
+`block` and `check` marker fields are the held block's key and the wait's check index; an unprompted wait is
+an item of its own,
+
+    {"key": "<slug>#<issue>/wait/<block comment id>/<check index>", "reason": "verify-wait",
+     "kind": "waiting", "question": <what>, "answers": [], "comment_id": <block comment id>, "wait", ...}
+
+with the shape of the items above (no `check_id`, so it takes no pictures). `what` is the first sentence of
+the check's text (cut after `.`, `?` or `!` as a prompt's heading is, whitespace collapsed) cut to
+`sprints.MAX_ASK_CHARS`, or `<ac> waits for your approval to run` for a check with no text. A prompt with no
+wait has no `wait` member. The clock is the forge's (`forge_api.server_now`, or the `now` argument),
+asked at most once per read and only when a node holds an unprompted check to date; these forge reads
+(`verify_wait`'s, not the search's) are outside `MAX_CALLS`. `cancelled()` is asked before each node's items
+are built and handed to `held_waits`, which asks it before every forge read and the clock read, so a stop
+lets only the read already running finish. The console posts nothing and reads no host revision.
+
 A comment's id is `fullDatabaseId` (GitHub's `BigInt`, a decimal string) converted with `int`: the
 32-bit `databaseId` is not read, because comment ids already exceed 2^31-1. A node's type is its
 `__typename`: an `Issue` must carry `issueDependenciesSummary.blocking` (a non-negative integer) and
@@ -109,11 +133,14 @@ case-insensitively) that the issue blocks; a pull request's is `[]`.
 
 `read_items` makes at most `MAX_CALLS` calls for each of its two searches and asks `cancelled()` before
 each one (`ForgeError` `cancelled`, no call made). In the owner search a search still paging after the last
-call, a comment connection with more comments than nodes, or fewer nodes than `issueCount` is
-`payload_incomplete`. The held search is lenient, because held issues stay open and labelled until the runner
+call or fewer nodes than `issueCount` is `payload_incomplete`, and so is a comment connection with more
+comments than nodes, except that a node whose comment connection holds more comments than the last `COMMENTS`
+it returned (a long-held issue) has every comment read from the REST listing instead, as the runner reads it
+(`verify_wait.with_every_comment`), outside `MAX_CALLS`, so it never fails the repository's read for its
+length. The held search is lenient, because held issues stay open and labelled until the runner
 verifies them, so their number and comments only grow: when it is still paging after its last call it keeps
-the nodes it read, it does not compare them with `issueCount`, and an Issue node whose comment connection has
-more comments than nodes raises no item (the owner search, which carries every owner-action and owner-answered
+the nodes it read, it does not compare them with `issueCount`, and an Issue node whose read is
+`payload_incomplete` raises no item (the owner search, which carries every owner-action and owner-answered
 label, still fails the read on such a node); a node the owner search already returned is read once, from
 the owner search. In both, an answer of an
 unexpected shape, a bad comment id or a missing or repeated cursor is `payload_invalid`. The result
@@ -145,7 +172,7 @@ import re
 import stat
 from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -154,9 +181,9 @@ from agent_tools.claims import forge_owner_action as foa
 from agent_tools.claims import owner_actions
 from agent_tools.canonical import telemetry_digest
 from agent_tools.console import pictures
-from agent_tools.console.sprints import MAX_PICTURE_LINE_CHARS, MAX_PICTURES
+from agent_tools.console.sprints import MAX_ASK_CHARS, MAX_PICTURE_LINE_CHARS, MAX_PICTURES, cut
 from agent_tools.system import forge_api
-from agent_tools.verification import verify_answer
+from agent_tools.verification import verify_answer, verify_wait
 
 MAX_CALLS = 4
 PAGE_SIZE = 25
@@ -175,16 +202,17 @@ QUERY = """query($search: String!, $after: String) {
       __typename
       ... on Issue {
         number
+        repository { defaultBranchRef { name } }
         authorAssociation
         body
         labels(first: 100) { nodes { name } }
         issueDependenciesSummary { blocking }
         blocking(first: 100) { totalCount nodes { number state repository { nameWithOwner } } }
-        comments(last: 100) { totalCount nodes { fullDatabaseId body authorAssociation updatedAt } }
+        comments(last: 100) { totalCount nodes { fullDatabaseId body authorAssociation createdAt updatedAt } }
       }
       ... on PullRequest {
         number
-        comments(last: 100) { totalCount nodes { fullDatabaseId body authorAssociation updatedAt } }
+        comments(last: 100) { totalCount nodes { fullDatabaseId body authorAssociation createdAt updatedAt } }
       }
     }
   }
@@ -523,19 +551,71 @@ def _verify_item(project_id: str, slug: str, issue: int, held: int, marker: fm.M
     }
 
 
-def items_from_node(project_id: str, slug: str, node: dict) -> list[dict]:
-    """The inbox items of one search node: one per live owner-action marker of a trusted comment."""
+_BLOCK_FENCE = re.compile(r"(?m)^```verify[ \t]*\r?$")
+
+
+def _holds_block(comments: list[dict]) -> bool:
+    """Whether a trusted comment opens a verify fence, so the node must be read for its waits."""
+    return any(c.get("authorAssociation") in verify_answer.TRUSTED and isinstance(c.get("body"), str)
+               and _BLOCK_FENCE.search(c["body"]) for c in comments)
+
+
+def _default_branch(node: dict) -> str:
+    repository = node.get("repository")
+    branch = repository.get("defaultBranchRef") if isinstance(repository, dict) else None
+    name = branch.get("name") if isinstance(branch, dict) else None
+    if not isinstance(name, str) or not name:
+        raise _invalid("a node holding a verify block has no repository.defaultBranchRef.name")
+    return name
+
+
+def _what(wait: verify_wait.Wait) -> str:
+    """What a wait is for: the first sentence of its check's text, else a plain waiting for approval."""
+    text = " ".join(wait.text.split())
+    if not text:
+        return f"{wait.ac} waits for your approval to run"
+    found = _SENTENCE_END.search(text)
+    return cut(text[:found.end()] if found else text, MAX_ASK_CHARS)
+
+
+def _wait_member(wait: verify_wait.Wait) -> dict:
+    return {"reason": wait.reason,
+            "until": wait.until.astimezone(timezone.utc).isoformat() if wait.until is not None else None,
+            "what": _what(wait)}
+
+
+def _waiting_item(project_id: str, slug: str, issue: int, held_work: int, held, wait: verify_wait.Wait,
+                  blocking: list[int]) -> dict:
+    member = _wait_member(wait)
+    return {
+        "key": f"{slug}#{issue}/wait/{held.block_id}/{wait.check}", "project_id": project_id, "repo": slug,
+        "issue": issue, "comment_id": held.block_id,
+        "url": f"https://github.com/{slug}/issues/{issue}#issuecomment-{held.block_id}",
+        "reason": "verify-wait", "kind": "waiting", "question": member["what"], "detail": "", "questions": [],
+        "items": [], "answers": [], "paid": False, "confirm": "", "answered": False, "held_work": held_work,
+        "blocking": list(blocking), "wait": member,
+    }
+
+
+def items_from_node(project_id: str, slug: str, node: dict, clock: Callable[[], datetime] | None = None,
+                    cancelled: Callable[[], bool] = lambda: False) -> list[dict]:
+    """The inbox items of one search node: one per live owner-action marker of a trusted comment, and
+    for an issue holding a verify block one more per owner check that waits with no prompt (`wait`)."""
+    if cancelled():
+        raise forge_api.ForgeError("cancelled")
     if not isinstance(node, dict):
         raise _invalid("search node is not an object")
-    held = _held_work(node)
+    held_work = _held_work(node)
     blocks = _blocking(node, slug)
     number = node.get("number")
     if isinstance(number, bool) or not isinstance(number, int):
         raise _invalid("search node number is not an integer")
+    node = verify_wait.with_every_comment(slug, node)
+    comments = _comments(node)
     markers = []
     runner_markers = []
     runner_comments = []
-    for comment in _comments(node):
+    for comment in comments:
         association = comment.get("authorAssociation")
         if association not in foa.TRUSTED:
             continue
@@ -550,14 +630,26 @@ def items_from_node(project_id: str, slug: str, node: dict) -> list[dict]:
             runner_markers.append(marker)
     markers.sort(key=lambda m: m.comment_id)
     runner_markers.sort(key=lambda m: m.comment_id)
-    items = [_item(project_id, slug, number, held, m, blocks) for m in markers
+    items = [_item(project_id, slug, number, held_work, m, blocks) for m in markers
              if m.kind == foa.KIND and m.fields.get("reason") in foa.REASONS and fm.is_live(m, markers)]
-    prompts = live_prompts(runner_markers)
-    items += [_verify_item(project_id, slug, number, held, m, runner_markers, blocks) for m in prompts]
+    live = live_prompts(runner_markers)
+    prompts = [(m, _verify_item(project_id, slug, number, held_work, m, runner_markers, blocks)) for m in live]
+    items += [item for _, item in prompts]
     if (node.get("__typename") == "Issue" and HELD_LABEL in _labels(node)
-            and node.get("authorAssociation") in verify_answer.TRUSTED and not prompts):
-        items += [_review_item(project_id, slug, number, held, c, blocks)
+            and node.get("authorAssociation") in verify_answer.TRUSTED and not live):
+        items += [_review_item(project_id, slug, number, held_work, c, blocks)
                   for c in review_criteria(acceptance_criteria(_body(node)), verify_answer.held_acs(runner_comments))]
+    if node.get("__typename") == "Issue" and _holds_block(comments):
+        held, waits = verify_wait.held_waits(
+            comments, slug, _default_branch(node), clock or (lambda: forge_api.server_now()), cancelled)
+        for wait in waits:
+            if wait.prompted:
+                for marker, item in prompts:
+                    if (marker.fields.get("reason") in verify_wait.ASKING and marker.fields.get("block") == held.key
+                            and marker.fields.get("check") == str(wait.check)):
+                        item["wait"] = _wait_member(wait)
+            else:
+                items.append(_waiting_item(project_id, slug, number, held_work, held, wait, blocks))
     return sorted(items, key=lambda item: item["key"])
 
 
@@ -597,21 +689,32 @@ def _read_pages(argv: Callable[[str | None], list[str]], call: Callable[[list[st
 
 def read_items(project_id: str, slug: str, *,
                call: Callable[[list[str]], Any] = forge_api.gh_json,
-               cancelled: Callable[[], bool] = lambda: False) -> list[dict]:
-    """Every inbox item of one repository, sorted by `key`; raises `forge_api.ForgeError`."""
+               cancelled: Callable[[], bool] = lambda: False,
+               now: Callable[[], datetime] | None = None) -> list[dict]:
+    """Every inbox item of one repository, sorted by `key`; raises `forge_api.ForgeError`.
+
+    `now` is the clock of the waits, `forge_api.server_now` when None (looked up at call time); it is
+    called at most once per read, whatever the number of nodes, and across both searches."""
+    memo: list[datetime] = []
+
+    def clock() -> datetime:
+        if not memo:
+            memo.append((now if now is not None else forge_api.server_now)())
+        return memo[0]
+
     nodes, paging, total = _read_pages(lambda after: search_argv(slug, after), call, cancelled)
     if paging:
         raise forge_api.ForgeError("payload_incomplete", f"more than {MAX_CALLS} pages")
     if len(nodes) < total:
         raise forge_api.ForgeError("payload_incomplete", f"{len(nodes)} of {total} search results")
-    items = [i for node in nodes for i in items_from_node(project_id, slug, node)]
+    items = [i for node in nodes for i in items_from_node(project_id, slug, node, clock, cancelled)]
     seen = {node.get("number") for node in nodes if isinstance(node, dict)}
     held, _, _ = _read_pages(lambda after: held_argv(slug, after), call, cancelled)
     for node in held:
         if isinstance(node, dict) and node.get("number") in seen:
             continue
         try:
-            items += items_from_node(project_id, slug, node)
+            items += items_from_node(project_id, slug, node, clock, cancelled)
         except forge_api.ForgeError as error:
             if error.code != "payload_incomplete":
                 raise

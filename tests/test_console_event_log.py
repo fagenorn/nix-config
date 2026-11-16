@@ -1,6 +1,7 @@
 """The console's append-only event log (#855): sequence, immutability, canonical payloads, atomic appends."""
 
 import inspect
+import json
 import re
 import sqlite3
 import tempfile
@@ -716,6 +717,25 @@ class RetentionTest(unittest.TestCase):
         self.assertEqual(self.retain_at(second, NOW), 2)
         self.assertEqual(rows(self.store), [])
         self.assertIsNone(pin.pinned_profile(second.events()))
+
+    def test_a_pass_keeps_the_outstanding_wait_of_each_inbox_item_and_removes_the_rest(self):
+        log = self.open()
+        self.now = OLD
+        wait = {"reason": "not_before", "until": "2030-01-01T00:00:00+00:00", "what": "x"}
+        row = lambda kind, project, key, **more: (kind, project, {"key": key, **more})
+        log.append([row("inbox.seen", "o/a", "k1", wait=wait)])
+        log.append([row("inbox.changed", "o/a", "k1", wait={**wait, "what": "y"})])
+        log.append([row("inbox.seen", "o/a", "k2", wait=wait)])
+        log.append([row("inbox.changed", "o/a", "k2")])
+        log.append([row("inbox.seen", "o/a", "k3", wait=wait)])
+        log.append([row("inbox.gone", "o/a", "k3")])
+        log.append([row("inbox.seen", "o/b", "k4", wait=wait)])
+        log.append([("project.unregistered", "o/b", {})])
+        log.append([row("inbox.seen", "o/a", "k5")])
+        self.assertEqual(self.retain_at(log, NOW), 8)
+        self.assertEqual([(r[0], r[2], r[3]) for r in rows(self.store)], [(2, "inbox.changed", "o/a")])
+        self.assertEqual(json.loads(rows(self.store)[0][4])["wait"]["what"], "y")
+        self.assertEqual(self.retain_at(log, NOW), 0)
 
     def test_a_pass_keeps_the_assignment_in_force_of_a_session_with_a_hook_in_the_window(self):
         log = self.open()

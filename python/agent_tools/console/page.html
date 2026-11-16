@@ -225,6 +225,9 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .finished-list > summary .message-new, .sprint-earlier summary .message-new { margin-left: 10px; }
 .new-replies { margin-top: 8px; font-size: .9375rem; color: var(--sub0); max-width: 44rem; }
 .activation { margin-top: 8px; font-size: .84375rem; color: var(--text); max-width: 44rem; overflow-wrap: anywhere; }
+.wait { margin-top: 6px; font-size: .84375rem; color: var(--sub0); max-width: 44rem; overflow-wrap: anywhere; }
+.wait a { color: inherit; text-underline-offset: 3px; }
+.sprint-checks .wait { margin: 0; padding: 2px 0; font-size: .8125rem; max-width: none; }
 .activation code { font: 500 .8125rem/1.4 ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace; padding: 0 4px; background: var(--mantle); border-radius: 4px; white-space: nowrap; }
 .notice code { font: 500 .8125rem/1.4 ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace; padding: 0 4px; background: var(--mantle); border-radius: 4px; white-space: nowrap; }
 .tell-hint { color: var(--ov2); font-size: .8125rem; }
@@ -312,6 +315,7 @@ kbd { display: inline-grid; place-items: center; min-width: 20px; height: 20px; 
 .notice-withdraw { flex: none; padding: 0 8px; font-size: .8125rem; color: var(--ov2); }
 .notice-post { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; margin-top: 8px; font-size: .8125rem; color: var(--sub0); }
 .notice-text { flex: 1 1 12rem; min-width: 0; max-width: 100%; padding: 4px 8px; font: inherit; color: var(--text); background: var(--mantle); border: 1px solid var(--s1); border-radius: 8px; }
+.notice-list + .notice-open, .notice-list + .notice-post { margin-top: 12px; }
 .notice-post-reason, .notice-reason { color: var(--sub0); }
 .notice-reason { margin: 2px 0 0; font-size: .8125rem; }
 .notices-project { margin-left: 10px; min-width: 0; overflow-wrap: anywhere; }
@@ -440,6 +444,7 @@ html:has(#viewer:not([hidden])) { overflow: hidden; }
   .cap { margin-left: 0; }
   .cap-extra { display: none; }
   .sprint-check { display: flex; align-items: flex-start; min-height: 44px; }
+  .sprint-checks .wait { min-height: 44px; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .001ms !important; animation-delay: 0s !important; transition-duration: .001ms !important; }
@@ -911,13 +916,15 @@ function drawSprint(item, entry, sprint) {
   const spendBox = spendLine("sprint", sprint.sprint_id);
   if (spendBox !== null) item.appendChild(spendBox);
   const checks = sprint.checks || [];
-  if (checks.length > 0) {
+  const waits = Array.isArray(sprint.waits) ? sprint.waits : [];
+  if (checks.length > 0 || waits.length > 0) {
     const list = el("ul", "sprint-checks");
     for (const check of checks) {
       const line = el("li", "");
       line.appendChild(actionButton("sprint-check", check.text, () => openCheckCard(check)));
       list.appendChild(line);
     }
+    for (const wait of waits) list.appendChild(waitLine(wait, "li"));
     item.appendChild(list);
   }
   if (sprint.manager_text !== null && sprint.manager_text !== undefined) {
@@ -1681,6 +1688,26 @@ function projectLine(entry) {
   }
   return line;
 }
+// A not-due owner check (#1129, ADR-console-055): one quiet line, never a card. A dated wait reads its day, an undated one its reason; the issue number links to the tracker comment. The text is set as text, never as markup.
+function waitLine(wait, tag) {
+  const line = el(tag, "wait");
+  if (typeof wait.until === "string") {
+    line.appendChild(el("span", "", "Waiting until "));
+    line.appendChild(timeEl("day", wait.until, ""));
+    line.appendChild(el("span", "", ": " + wait.text + " "));
+  } else {
+    line.appendChild(el("span", "", wait.text + " "));
+  }
+  if (isHttps(wait.url)) {
+    const link = el("a", "wait-issue", "#" + wait.issue);
+    link.href = wait.url;
+    link.rel = "noreferrer";
+    line.appendChild(link);
+  } else {
+    line.appendChild(el("span", "wait-issue", "#" + wait.issue));
+  }
+  return line;
+}
 function noticeKey(projectId, id) {
   return projectId + "\n" + id;
 }
@@ -1888,6 +1915,7 @@ function renderStatement(view) {
 }
 const TICK_MS = 30000;
 const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 function pad(n) {
   return n < 10 ? "0" + n : String(n);
 }
@@ -1915,9 +1943,14 @@ function exact(stamp) {
   const at = new Date(stamp);
   return at.getFullYear() + "-" + pad(at.getMonth() + 1) + "-" + pad(at.getDate()) + " " + pad(at.getHours()) + ":" + pad(at.getMinutes());
 }
+function dayWords(stamp) {
+  const at = new Date(stamp);
+  return DAYS[at.getDay()] + " " + at.getDate() + " " + MONTHS[at.getMonth()];
+}
 function timeWords(form, stamp) {
   if (!Number.isFinite(Date.parse(stamp))) return "unknown";
-  return form === "ago" ? ago(stamp) : form === "since" ? since(stamp) : weekdayTime(stamp);
+  return form === "ago" ? ago(stamp) : form === "since" ? since(stamp)
+    : form === "day" ? dayWords(stamp) : weekdayTime(stamp);
 }
 function timeEl(form, stamp, cls) {
   const node = el("time", cls, timeWords(form, stamp));
@@ -3945,8 +3978,10 @@ function drawProjects(view) {
       item.appendChild(fold);
       list.appendChild(item);
     } else {
-      const drawn = entry.quiet === true || entry.outside_sprints.sessions.length > 0;
+      const waits = Array.isArray(entry.waits) ? entry.waits : [];
+      const drawn = entry.quiet === true || entry.outside_sprints.sessions.length > 0 || waits.length > 0;
       if (drawn) list.appendChild(projectLine(entry));
+      for (const wait of waits) list.appendChild(waitLine(wait, "li"));
       const notices = noticeFold(entry, drawn);
       if (notices !== null) list.appendChild(notices);
     }

@@ -535,7 +535,7 @@ class PageTest(unittest.TestCase):
                 self.assertLess(size, 1.5, selector)
 
     def test_the_tracker_sign_in_and_spend_links_are_the_only_hrefs(self) -> None:
-        self.assertEqual(len(re.findall(r"\.href\s*=", self.text)), 5)
+        self.assertEqual(len(re.findall(r"\.href\s*=", self.text)), 6)
         self.assertEqual(
             self.text.count('link.href = "/spend#" + kind + "=" + encodeURIComponent(id);'), 1)
         lines = self.text.splitlines()
@@ -545,6 +545,8 @@ class PageTest(unittest.TestCase):
         self.assertEqual(self.text.count("a.href = item.url;"), 1)
         self.assertEqual(self.text.count("link.href = sprint.tracker_url;"), 1)
         self.assertEqual(self.text.count("link.href = item.url;"), 1)
+        self.assertEqual(self.text.count("link.href = wait.url;"), 1)
+        self.assertEqual(self.text.count("if (isHttps(wait.url)) {"), 1)
         self.assertNotIn("adoption.url", self.text)
         self.assertEqual(self.text.count("if (isHttps(item.url)) {"), 1)
         self.assertIn('sprint.tracker_url.startsWith("https:")', self.text)
@@ -1299,6 +1301,15 @@ class PageNoticeTest(unittest.TestCase):
         self.assertTrue(some(".notice-words", color="var(--text)"))
         self.assertTrue(some(".notice code", background="var(--mantle)",
                              **{"white-space": "nowrap"}))
+
+    def test_the_post_control_stands_a_notice_gap_below_the_last_notice(self) -> None:
+        (style,) = re.findall(r"(?s)<style>(.*?)</style>", PAGE_TEXT)
+        for width in (1440, 480):
+            between = margin_top_at(style, width, ".notice", ".notice + .notice")
+            for control in (".notice-open", ".notice-post"):
+                gap = margin_top_at(style, width, control, ".notice-list + " + control)
+                self.assertGreaterEqual(gap, 12, (width, control))
+                self.assertGreaterEqual(gap, between, (width, control))
 
     def test_a_notice_adds_nothing_to_the_statement(self) -> None:
         p0 = with_notices(project(0, []), HANDOFF_W, CLAIM_W)
@@ -6438,6 +6449,28 @@ def media_block(style: str, query: str) -> str:
     return style[start:at - 1]
 
 
+def margin_top_at(style: str, width: int, *selectors: str) -> float:
+    """The px margin-top the page's cascade gives an element matched by `selectors` at a viewport width.
+
+    Top-level rules apply at every width; a max-width media block applies only at or below its width.
+    The highest specificity (class count) wins, the later rule on a tie.
+    """
+    top = re.sub(r"(?s)@media[^{]*\{.*?\}\s*\}", "", style)
+    layers = [style_rules(top)]
+    for limit in re.findall(r"@media \(max-width: (\d+)px\) \{", style):
+        if width <= int(limit):
+            layers.append(style_rules(media_block(style, f"(max-width: {limit}px)")))
+    best = None
+    for layer in layers:
+        for selector, decls in layer:
+            if selector in selectors and "margin-top" in decls:
+                rank = selector.count(".")
+                if best is None or rank >= best[0]:
+                    best = (rank, decls["margin-top"])
+    assert best is not None, (width, selectors)
+    return float(re.fullmatch(r"([\d.]+)px", best[1]).group(1))
+
+
 class PageAnsweredRowTest(unittest.TestCase):
     def test_an_answered_row_clips_its_question_to_one_line(self) -> None:
         text = PAGE.read_text(encoding="utf-8")
@@ -10718,3 +10751,69 @@ class PageSpendFigureTest(unittest.TestCase):
 
 
 SPEND_FRAME_WITHOUT = {k: v for k, v in SPEND_FRAME.items() if k != "spend"}
+
+
+DATED_WAIT = {
+    "key": "o/r#619/wait/1/0", "issue": 619, "until": "2026-11-18T12:00:00+00:00",
+    "url": "https://github.com/o/r/issues/619#issuecomment-1", "text": "Read the hourly rows.",
+}
+UNDATED_WAIT = {
+    "key": "o/r#620/wait/2/0", "issue": 620, "until": None,
+    "url": "https://github.com/o/r/issues/620#issuecomment-2",
+    "text": "Waiting for the release to be seen: no release yet includes its merge",
+}
+
+
+class WaitingLinePageTest(unittest.TestCase):
+    def test_a_dated_wait_reads_its_day_and_an_undated_one_its_reason(self) -> None:
+        frame = view([{**project(0, []), "waits": [UNDATED_WAIT],
+                       "sprints": [running_sprint("a", waits=[DATED_WAIT])]}])
+        (snap,) = render([START, {"frame": frame}, {"snapshot": True}])
+        lines = [n for n in nodes(snap["projects"]) if has_class(n, "wait")]
+        self.assertEqual([full(n) for n in lines], [
+            "Waiting until Wed 18 Nov: Read the hourly rows. #619",
+            "Waiting for the release to be seen: no release yet includes its merge #620",
+        ])
+        self.assertEqual([n["tag"] for n in lines], ["li", "li"])
+        self.assertEqual([[a["href"] for a in nodes(n) if a["tag"] == "a"] for n in lines],
+                         [[DATED_WAIT["url"]], [UNDATED_WAIT["url"]]])
+        self.assertEqual([n for n in nodes(snap["inbox"]) if has_class(n, "card")], [])
+
+    def test_a_sprints_wait_sits_in_the_check_list_with_the_check_lines_indent_and_gap(self) -> None:
+        # The owner's round 144954: the waiting line aligns with the sprint head text (the
+        # list's 28 px indent, at 1440 and 480 px) and takes the check line's even gap above and below.
+        frame = view([{**project(0, []), "sprints": [running_sprint("a", waits=[DATED_WAIT])]}])
+        (snap,) = render([START, {"frame": frame}, {"snapshot": True}])
+        (block,) = sprint_lines(snap)
+        (checks,) = of_class(block, "ul", "sprint-checks")
+        self.assertEqual([c["cls"] for c in checks["children"]], ["wait"])
+        children = block["children"]
+        head = next(i for i, c in enumerate(children) if has_class(c, "sp-head"))
+        self.assertIs(children[head + 1], checks)
+        (style, top) = page_css()
+        line = css_declared(top, ".sprint-checks .wait")
+        check = css_declared(top, ".sprint-check")
+        self.assertEqual(css_declared(top, ".sprint-checks").get("padding"), "0 0 0 28px")
+        self.assertEqual(line.get("margin"), "0")
+        self.assertEqual(line.get("padding"), check.get("padding"))
+        self.assertEqual(line.get("font-size"), check.get("font-size"))
+        (narrow,) = [m for m in re.findall(r"(?s)@media[^{]*\{.*?\}\s*\}", style) if "max-width: 480px" in m]
+        self.assertEqual(css_declared(narrow, ".sprint-checks"), {})
+        # At 480 px the check line is a 44 px tap target with its text at the top; the waiting
+        # line takes the same box, so the gap below it is the check line's too.
+        self.assertEqual(css_declared(narrow, ".sprint-checks .wait").get("min-height"),
+                         css_declared(narrow, ".sprint-check").get("min-height"))
+        self.assertEqual(css_declared(narrow, ".sprint-checks .wait").get("min-height"), "44px")
+
+    def test_a_project_with_only_waits_draws_its_name_and_its_line(self) -> None:
+        frame = view([{**project(1, []), "waits": [UNDATED_WAIT]}])
+        (snap,) = render([START, {"frame": frame}, {"snapshot": True}])
+        projects = snap["projects"]
+        self.assertEqual([full(n) for n in nodes(projects) if has_class(n, "pname")], ["owner/p01"])
+        (parent,) = [n for n in nodes(projects)
+                     if any(has_class(c, "wait") for c in n["children"])]
+        kinds = [c["cls"] for c in parent["children"]]
+        at = next(i for i, c in enumerate(parent["children"]) if has_class(c, "wait"))
+        self.assertTrue(has_class(parent["children"][at - 1], "line"), kinds)
+        self.assertEqual(full(parent["children"][at]),
+                         "Waiting for the release to be seen: no release yet includes its merge #620")
