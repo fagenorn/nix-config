@@ -528,6 +528,27 @@ class SprintCommandTest(Case):
                 else:
                     self.assertEqual(json.loads(lines[0])["decision"], "none")
 
+    def test_every_open_sprints_inbox_lists_the_owners_notice_until_it_is_withdrawn(self):
+        svc = self.open()
+        a = self.goal(svc)
+        b = svc.state_goal("owner/p01", "make the exporter resumable")
+        n = svc.post_owner_notice("owner/p01", "routes are frozen until Friday")
+        for sid in (a, b):
+            with self.subTest(sid=sid, phase="open"):
+                got = self.inbox(svc, sid)
+                self.assertEqual((got.returncode, got.stderr), (0, ""))
+                lines = got.stdout.splitlines()
+                self.assertEqual(len(lines), 3)
+                self.assertEqual(lines[1], sprints.NOTICE_BLOCK_HEAD)
+                self.assertRegex(lines[2], r"- heads-up from the owner, (just now|\d+ min ago): "
+                                           r"routes are frozen until Friday")
+        svc.withdraw_owner_notice("owner/p01", n)
+        for sid in (a, b):
+            with self.subTest(sid=sid, phase="withdrawn"):
+                got = self.inbox(svc, sid)
+                self.assertEqual((got.returncode, got.stderr), (0, ""))
+                self.assertEqual(len(got.stdout.splitlines()), 1)
+
     def test_inbox_and_status_print_no_block_without_another_sprints_notice(self):
         svc = self.open()
         a = self.goal(svc)
@@ -1068,7 +1089,8 @@ class ManagerContractTest(unittest.TestCase):
         for needle in ("sprint notice --notice-file -", "sprint notices",
                        "sprint withdraw-notice --notice <id>", "`claim`", "`heads-up`",
                        "`hand-off`", "280 characters", "200 characters", "140 characters",
-                       "at most 5 open notices", "never approval"):
+                       "at most 5 open notices", "never approval",
+                       "heads-up from the owner"):
             with self.subTest(needle):
                 self.assertIn(needle, section)
 

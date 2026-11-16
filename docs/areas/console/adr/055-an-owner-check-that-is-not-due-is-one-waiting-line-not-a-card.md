@@ -1,4 +1,4 @@
-# ADR-console-053 — An owner check that is not due is one waiting line, not a card
+# ADR-console-055 — An owner check that is not due is one waiting line, not a card
 
 - **Status:** accepted
 - **Decided in:** #1129
@@ -17,7 +17,7 @@ A check held for the owner can be due by its block yet waiting by its wording. T
 
 **D4. Due, not yet prompted.** An unprompted due check is a `Due now` line until the runner's next pass, every 900 seconds, posts its prompt; the prompt is the card. A live or paid `command` check is the exception: the runner prompts it only for a command the project's `workflow.verification` names, which the console never reads, so its line (`due_command`) says the pass asks unless it refuses the command.
 
-**D5. The tracker read.** The read adds the `needs-verification` label to what it lists. Its forge reads are outside `inbox.MAX_CALLS`, and the stop is asked before each of them, so `close()` still waits for at most one `gh` call.
+**D5. The tracker read.** The read finds a held issue through the held search ADR-console-054 added for the `needs-verification` label, and reads a node whose comments pass the last hundred whole from the REST listing. Its forge reads are outside `inbox.MAX_CALLS`, and the stop is asked before each of them, so `close()` still waits for at most one `gh` call.
 
 **D6. Where a wait lives.** Waits are inbox items, never counted. A wait sits under the sprint whose report names its issue, else under its project, which a wait keeps active and drawn. The digest rule follows: a wait is not a transition the digest announces.
 

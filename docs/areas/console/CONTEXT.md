@@ -14,7 +14,7 @@ The per-host loopback service and its two pages: the desk page, which says wheth
 _Avoid_: dashboard, lead console
 
 **Inbox item**:
-Anything waiting on the owner that the console asks them to act on, whatever its source; a manager's brief or question is one. The console's statement counts the open ones, "N things need you"; with none and a readable tracker it reads "Nothing needs you". A session waiting in its terminal is not one: it is answered there (ADR-console-004).
+Anything waiting on the owner that the console asks them to act on, whatever its source; a manager's brief or question is one. The console's statement counts the open ones, "N things need you"; with none and a readable tracker it reads "Nothing needs you". A session waiting in its terminal is not one: it is answered there (ADR-console-004). A held issue whose only open acceptance criteria are owner reviews, with no live runner prompt, is one owner check card per such criterion (ADR-console-054).
 _Avoid_: ask, notification
 
 **Answered item**:
@@ -54,7 +54,7 @@ The questions a manager sends at once with `sprint ask`: each leads with its ask
 _Avoid_: poll, survey
 
 **Notice**:
-A short bounded message a manager posts for its project with `sprint notice`, of kind claim, heads-up or hand-off, and the project's other managers read with `sprint notices`. It is kept only in the console's log, and it is information, never approval: nothing is refused because of one. It ends when it is withdrawn or when its sprint ends (ADR-console-044). Every manager is shown the open notices of its project's other sprints, one line each, in its first prompt, with `sprint inbox` and with `sprint status`, and an overlap with a claim goes to the owner as a question (ADR-console-046). The owner reads a project's open notices in its closed "Notices (n)" fold in the Work column, which counts in nothing that needs the owner (ADR-console-002). A claim notice is not a **Claim** of the Claims area, which is an issue's delivery marker.
+A short bounded message a manager posts for its project with `sprint notice`, of kind claim, heads-up or hand-off, and the project's other managers read with `sprint notices`. The owner posts a heads-up to every manager of a project from the page, and only the owner withdraws it (ADR-console-053). It is kept only in the console's log, and it is information, never approval: nothing is refused because of one. It ends when it is withdrawn or when its sprint ends (ADR-console-044). Every manager is shown the open notices of its project's other sprints, one line each, in its first prompt, with `sprint inbox` and with `sprint status`, and an overlap with a claim goes to the owner as a question (ADR-console-046). The owner reads a project's open notices in its closed "Notices (n)" fold in the Work column, which counts in nothing that needs the owner (ADR-console-002). A claim notice is not a **Claim** of the Claims area, which is an issue's delivery marker.
 _Avoid_: lock, reservation, announcement
 
 **Picture**:

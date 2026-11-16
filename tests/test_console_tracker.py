@@ -244,14 +244,14 @@ class CallBudgetTest(Case):
             svc.poll_tracker()
         self.assertEqual(len(calls), 4)
         for argv in calls:
-            self.assertIn("search=repo:octo/p00 is:open label:owner-action,owner-answered,needs-verification", argv)
+            self.assertIn("search=repo:octo/p00 is:open label:owner-action,owner-answered", argv)
             self.assertNotIn("octo/p01", " ".join(argv))
         lines = errors.getvalue().splitlines()
         self.assertEqual(len(lines), 1)
         self.assertTrue(lines[0].startswith("console: tracker_failed owner/p00 ForgeError: payload_incomplete"))
         answer["more"] = False
         svc.poll_tracker()
-        self.assertEqual(len(calls), 5)
+        self.assertEqual(len(calls), 6)
 
 
 class PollThreadTest(Case):
@@ -388,6 +388,21 @@ class OwnerCheckPictureTest(Case):
         self.assertEqual(card["missing_pictures"], [])
         status, _, body = self.fetch(svc, sha256(PIXEL))
         self.assertEqual((status, body), (200, PIXEL))
+
+    def test_a_review_item_carries_the_pictures_its_criterion_names(self):
+        node = {"__typename": "Issue", "number": 5, "issueDependenciesSummary": {"blocking": 0},
+                "blocking": {"totalCount": 0, "nodes": []},
+                "authorAssociation": "OWNER", "labels": {"nodes": [{"name": "needs-verification"}]},
+                "comments": {"totalCount": 0, "nodes": []},
+                "body": "## Acceptance criteria\n\n- [ ] [human] The card looks right in shots/before.png and shots/after.png\n"}
+        items = inbox.items_from_node("owner/p00", "octo/p00", node)
+        self.assertEqual(len(items), 1)
+        svc = self.opened(Scripted(items))
+        svc.poll_tracker()
+        card = next((i for i in view_of(svc)["inbox"]["open"] if i["key"] == "octo/p00#5/ac1"), None)
+        self.assertIsNotNone(card)
+        self.assertEqual([p["line"] for p in card["pictures"]], ["before.png", "after.png"])
+        self.assertEqual(card["missing_pictures"], [])
 
     def test_a_non_png_or_outside_path_is_neither_listed_nor_served(self):
         svc = self.served(Scripted([self.check]))

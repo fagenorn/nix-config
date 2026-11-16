@@ -140,7 +140,8 @@ class WriteRouteTest(Case):
                           "/api/plan-answer", "/api/plan-approve",
                           "/api/adoption-register", "/api/plan-defer",
                           "/api/register-confirm", "/api/trust-check",
-                          "/api/register-cancel"})
+                          "/api/register-cancel", "/api/owner-notice",
+                          "/api/owner-notice-withdraw"})
         for path in service.PAGE_WRITES:
             with self.subTest(path=path):
                 status, _, body = support.post_page(

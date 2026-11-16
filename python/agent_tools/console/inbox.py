@@ -3,9 +3,10 @@ recently a project was touched locally. Pure of the console's log and clock; `re
 `gh` call and a cancellation test as arguments.
 
 Markers decide, labels filter. One GraphQL search per repository asks for open issues and pull
-requests carrying the `owner-action`, `owner-answered` or `needs-verification` label
-(`verify_wait.HELD_LABEL`; `search_argv`, `QUERY`), at most
-`PAGE_SIZE` nodes a page and the last `COMMENTS` comments of each. An item exists only for a live
+requests carrying the `owner-action` or `owner-answered` label (`search_argv`, `QUERY`), at most `PAGE_SIZE`
+nodes a page and the last `COMMENTS` comments of each; an Issue node also reads its `authorAssociation`,
+`body` and `labels`. A second search, `held_argv`, asks the same for the `needs-verification` (`HELD_LABEL`)
+label only; it is read after the first and is lenient (see `read_items`). An item exists only for a live
 (`forge_markers.is_live`) comment of kind `forge_owner_action.KIND` whose `reason` is one of
 `forge_owner_action.REASONS`; a label alone raises nothing. Only comments whose `authorAssociation`
 is in `forge_owner_action.TRUSTED` are parsed, `end` markers included. The reader never parses
@@ -26,7 +27,40 @@ ask text or the act fence stays. For a `verify-ask` prompt whose sentence names 
 that line's first sentence (cut after the first `.`, `?` or `!`, with any closing quote or bracket,
 that whitespace or the line end follows, else the whole line, whitespace collapsed), `check_id` is
 the check id and `detail` is the rest; every other verification prompt keeps its sentence and whole
-detail with `check_id` `""` (#1046). A held issue with no live runner prompt yields no item.
+detail with `check_id` `""` (#1046).
+
+Held reviews (#1113, ADR-console-054). A held issue with no live runner prompt raises review items
+instead. An Issue node labelled `HELD_LABEL` whose `authorAssociation` is in `verify_answer.TRUSTED`
+and that has no live trusted runner prompt (the verification-item predicate above) is read through
+`acceptance_criteria` of its body: the checkbox lines of its first `Acceptance criteria` heading
+section, outside fences (a fence closes only on a line of its own delimiter character, at least as
+long as the one that opened it, with nothing after it but spaces; an unclosed fence runs to the end;
+a fence opens and closes with up to three spaces of indent beyond the content column of the list item
+enclosing it, so a fenced example nested under a checkbox is no criterion, a fence may open right after a
+list marker (`- ~~~`) and then belongs to that item, and an open fence also ends at the first non-blank line
+indented less than that column, as its list item does).
+A heading inside a list item (indented to its content column) is part of that item and ends nothing; only a
+heading outside every list item ends the section.
+A criterion is `Criterion(index, ticked, kind, text, line)`, `kind` being a leading `[code]`,
+`[evidence]`, `[human]` or `[note]` tag or None, and a checkbox line's bullet (`-`, `*` or `+`) may be
+followed by any run of spaces or tabs. `review_criteria` is the unticked `human` criteria when no unticked
+criterion has a kind outside `MET_KINDS` (`code`, `human`, `note`: an unticked `[code]` box of a held issue
+counts as met, the hold step never ticks it; an unticked `evidence` or untagged criterion keeps the issue with
+the runner), less the criteria the held verify block already asks: a criterion whose `ac_id` (`AC<index>`)
+equals, case-insensitively, the `ac` of a check of the newest block of a trusted comment
+(`verify_answer.held_acs`) is left to the runner, which asks it when due, so the owner is never asked twice.
+Each remaining one raises one review item, keyed `<slug>#<issue>/ac<index>`,
+with `reason` `held-review`, `kind` `owner-review`, `answers` `["passed", "note"]`, `comment_id` None,
+`criterion` its index and `version` `criterion_version` (a digest of issue, index, kind and text, never the
+tick), plus the `check_id` `""` and `reading` `""` of an owner check and a `detail` that is the criterion's whole text,
+measured tail included, which the card shows in its "Show the check" fold. Its `question`, the card's
+heading and the digest line, is the criterion's text cut before its first measured tail (a whitespace,
+any dash, whitespace, `measured:`, case-insensitive: ` \u2014 measured:` and ` - measured:`), without any word that names a PNG file or a folder (a
+`.png` name, or a word with a `/` that starts with `/`, `~/`, `./` or `../`, or ends with `/`, and has no `://`;
+`attach_pictures` also drops a relative word with a `/` that is a folder under its roots; `and/or`, `light/dark`
+and `1440/480` stay; `heading_text`), and without a connecting word (`in`, `under`, `and`...) left
+dangling before one; `criterion_text` is the whole text, which is what `attach_pictures` reads the pictures
+from, so the card shows the pictures and never a bare path. A text left with no word reads `REVIEW_HEADING`; the whole text, tail included, stays in `criterion_text`.
 
 A `verify-ask` prompt's `reading` (#1112) is the instruction for reading the check's result, written in
 its ask as `Reading:` at the start of a detail line (after optional spaces) or right after whitespace
@@ -65,7 +99,7 @@ kept, named PNGs first, then folder listings; each `line` is the file's base nam
 
 A waiting owner check (#1129). The runner posts an owner prompt only for a check that is due, so a held
 issue whose owner checks are not due carries no prompt yet and would not reach the inbox by marker or
-by the two owner labels: the third label finds it. An `Issue` node whose trusted (`OWNER` or `MEMBER`)
+by the two owner labels: the held search (`held_argv`) finds it. An `Issue` node whose trusted (`OWNER` or `MEMBER`)
 comments open a ```verify fence is read through `verify_wait.held_waits` (the block and its markers are
 trusted exactly as the runner trusts them, never a collaborator's), which needs each comment's `createdAt`
 and the node's `repository.defaultBranchRef.name`; a node holding a block without them is `payload_invalid`,
@@ -97,19 +131,26 @@ nodes read is `payload_incomplete`, a malformed one `payload_invalid`), and `blo
 ascending and without repeats, the open issues of the same repository (the slug compared
 case-insensitively) that the issue blocks; a pull request's is `[]`.
 
-`read_items` makes at most `MAX_CALLS` calls and asks `cancelled()` before each one (`ForgeError`
-`cancelled`, no call made). A search still paging after the last call, or fewer nodes than `issueCount`,
-is `payload_incomplete`; a node whose comment connection holds more comments than the last `COMMENTS` it
-returned (a long-held issue, which the third label now finds) has every comment read from the REST listing
-instead, as the runner reads it (`verify_wait.with_every_comment`), outside `MAX_CALLS`, so it never fails the
-repository's read for its length; an answer of an
+`read_items` makes at most `MAX_CALLS` calls for each of its two searches and asks `cancelled()` before
+each one (`ForgeError` `cancelled`, no call made). In the owner search a search still paging after the last
+call or fewer nodes than `issueCount` is `payload_incomplete`, and so is a comment connection with more
+comments than nodes, except that a node whose comment connection holds more comments than the last `COMMENTS`
+it returned (a long-held issue) has every comment read from the REST listing instead, as the runner reads it
+(`verify_wait.with_every_comment`), outside `MAX_CALLS`, so it never fails the repository's read for its
+length. The held search is lenient, because held issues stay open and labelled until the runner
+verifies them, so their number and comments only grow: when it is still paging after its last call it keeps
+the nodes it read, it does not compare them with `issueCount`, and an Issue node whose read is
+`payload_incomplete` raises no item (the owner search, which carries every owner-action and owner-answered
+label, still fails the read on such a node); a node the owner search already returned is read once, from
+the owner search. In both, an answer of an
 unexpected shape, a bad comment id or a missing or repeated cursor is `payload_invalid`. The result
 is sorted by `key` and holds only JSON-native values; every item is
 
     {"key": "<slug>#<issue>/<comment id>", "project_id", "repo", "issue", "comment_id", "url",
      "reason", "kind", "question", "detail", "questions": [{"question", "options", "chosen", "recommended"}]
      (decision only), "items": [str] (conflict and needs-label only), "answers": [str], "paid": bool,
-     "confirm", "answered", "held_work", "blocking": [int]} and, for a verification prompt only, "version", "check_id" and "reading"
+     "confirm", "answered", "held_work", "blocking": [int]} and, for a verification prompt or a review item, "version", "check_id"
+     and "reading" (and, for a review item only, "criterion"; its "comment_id" is None)
 (and, once `attach_pictures` has run, "pictures" and "missing_pictures")
 
 For `decision`, `conflict` and `needs-label` the kind is the reason, `detail` and `confirm` are `""`,
@@ -129,7 +170,8 @@ activity is at most `ACTIVE_WITHIN` seconds old; an unreadable or offset-less ti
 import os
 import re
 import stat
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -137,6 +179,7 @@ from typing import Any
 from agent_tools.claims import forge_markers as fm
 from agent_tools.claims import forge_owner_action as foa
 from agent_tools.claims import owner_actions
+from agent_tools.canonical import telemetry_digest
 from agent_tools.console import pictures
 from agent_tools.console.sprints import MAX_ASK_CHARS, MAX_PICTURE_LINE_CHARS, MAX_PICTURES, cut
 from agent_tools.system import forge_api
@@ -146,6 +189,10 @@ MAX_CALLS = 4
 PAGE_SIZE = 25
 COMMENTS = 100
 ACTIVE_WITHIN = 86400.0
+HELD_LABEL = "needs-verification"
+REVIEW_REASON = "held-review"
+REVIEW_KIND = "owner-review"
+REVIEW_ANSWERS = ("passed", "note")
 
 QUERY = """query($search: String!, $after: String) {
   search(query: $search, type: ISSUE, first: 25, after: $after) {
@@ -156,6 +203,9 @@ QUERY = """query($search: String!, $after: String) {
       ... on Issue {
         number
         repository { defaultBranchRef { name } }
+        authorAssociation
+        body
+        labels(first: 100) { nodes { name } }
         issueDependenciesSummary { blocking }
         blocking(first: 100) { totalCount nodes { number state repository { nameWithOwner } } }
         comments(last: 100) { totalCount nodes { fullDatabaseId body authorAssociation createdAt updatedAt } }
@@ -170,10 +220,17 @@ QUERY = """query($search: String!, $after: String) {
 ACTIVITY_FILES = (("FETCH_HEAD",), ("logs", "HEAD"), ("index",))
 
 
-def search_argv(slug: str, after: str | None = None) -> list[str]:
-    return ["api", "graphql", "-f", f"query={QUERY}",
-            "-f", f"search=repo:{slug} is:open label:{foa.LABEL[0]},{foa.ANSWERED_LABEL[0]},{verify_wait.HELD_LABEL}",
+def _argv(slug: str, labels: str, after: str | None) -> list[str]:
+    return ["api", "graphql", "-f", f"query={QUERY}", "-f", f"search=repo:{slug} is:open label:{labels}",
             *(["-f", f"after={after}"] if after else [])]
+
+
+def search_argv(slug: str, after: str | None = None) -> list[str]:
+    return _argv(slug, f"{foa.LABEL[0]},{foa.ANSWERED_LABEL[0]}", after)
+
+
+def held_argv(slug: str, after: str | None = None) -> list[str]:
+    return _argv(slug, HELD_LABEL, after)
 
 
 def item_key(slug: str, issue: int, comment_id: int) -> str:
@@ -241,6 +298,158 @@ def _comments(node: dict) -> list[dict]:
     if not all(isinstance(c, dict) for c in nodes):
         raise _invalid("a comment is not an object")
     return nodes
+
+
+_FENCE_OPEN = re.compile(r"^([ \t]*)(`{3,}|~{3,})")
+_LIST_ITEM = re.compile(r"^([ \t]*)(?:[-*+]|\d{1,9}[.)])([ \t]+)")
+_FENCE_RUN = re.compile(r"(`{3,}|~{3,})")
+_HEADING = re.compile(r"^\s{0,3}#{1,6}\s")
+_AC_HEADING = re.compile(r"^\s{0,3}#{1,6}\s+Acceptance criteria\s*#*\s*$", re.IGNORECASE)
+_CRITERION = re.compile(r"^\s*[-*+][ \t]+\[( |x|X)\][ \t]+(.*)$")
+_KIND = re.compile(r"\[(code|evidence|human|note)\]\s*(.*)$")
+
+
+def _list_prefixes(line: str) -> tuple[list[int], str]:
+    """The content column of each list marker that opens `line` (`- - x` has two), and the text after them."""
+    columns: list[int] = []
+    position = 0
+    while True:
+        item = _LIST_ITEM.match(line[position:])
+        if not item:
+            return columns, line[position:]
+        position += item.end()
+        columns.append(len(line[:position].expandtabs(4)))
+
+
+def _fence(run: str, column: int) -> tuple[re.Pattern, int, int]:
+    """A fence opened by `run` inside a container whose content column is `column`: its closer, the widest indent
+    that closer may have and the column below which a line ends the fence."""
+    return (re.compile(r"^([ \t]*)" + re.escape(run[0]) + "{" + str(len(run)) + r",}[ \t]*$"), column + 3, column)
+
+
+@dataclass(frozen=True)
+class Criterion:
+    index: int
+    ticked: bool
+    kind: str | None
+    text: str
+    line: int
+
+
+def acceptance_criteria(body: str) -> list[Criterion]:
+    """The checkbox lines of the first `Acceptance criteria` section of an issue body, outside fences."""
+    criteria: list[Criterion] = []
+    inside = False
+    fence: tuple[re.Pattern, int, int] | None = None
+    containers: list[int] = []
+    for number, raw in enumerate(body.split("\n")):
+        line = raw.removesuffix("\r")
+        indent = len(re.match(r"[ \t]*", line).group().expandtabs(4))
+        if fence is not None:
+            closer, limit, column = fence
+            closing = closer.match(line)
+            if line.strip() and indent < column:
+                fence = None
+            else:
+                if closing and len(closing.group(1).expandtabs(4)) <= limit:
+                    fence = None
+                continue
+        if line.strip():
+            while containers and indent < containers[-1]:
+                containers.pop()
+        base = containers[-1] if containers else 0
+        opened = _FENCE_OPEN.match(line)
+        if opened and indent - base <= 3:
+            run = opened.group(2)
+            fence = _fence(run, base)
+            continue
+        columns, rest = _list_prefixes(line)
+        containers.extend(columns)
+        sheltered = _FENCE_RUN.match(rest) if columns else None
+        if sheltered:
+            fence = _fence(sheltered.group(1), columns[-1])
+            continue
+        if not inside:
+            inside = bool(_AC_HEADING.match(line))
+            continue
+        if _HEADING.match(line) and not containers:
+            break
+        box = _CRITERION.match(line)
+        if not box:
+            continue
+        rest = box.group(2)
+        tagged = _KIND.match(rest)
+        kind, rest = (tagged.group(1), tagged.group(2)) if tagged else (None, rest)
+        criteria.append(Criterion(len(criteria) + 1, box.group(1) != " ", kind, " ".join(rest.split()), number))
+    return criteria
+
+
+def criterion_version(issue: int, criterion: Criterion) -> str:
+    return telemetry_digest({"issue": issue, "index": criterion.index, "kind": criterion.kind,
+                             "text": criterion.text})
+
+
+MET_KINDS = ("code", "human", "note")
+
+
+def ac_id(criterion: Criterion) -> str:
+    """The id a verify block's `ac` uses for the criterion: `AC` and its 1-based index."""
+    return f"AC{criterion.index}"
+
+
+def review_criteria(criteria: Sequence[Criterion], asked: Collection[str] = ()) -> list[Criterion]:
+    """The unticked `human` criteria the owner is asked about from the page.
+
+    None when an unticked criterion of another kind than `MET_KINDS` still waits on the runner (a `code` box of a
+    held issue counts as met). A criterion whose `ac_id` is in `asked`, the `ac` ids of the held verify block's
+    checks (upper-cased), is left to the runner, which asks it when due."""
+    open_ = [c for c in criteria if not c.ticked]
+    if any(c.kind not in MET_KINDS for c in open_):
+        return []
+    return [c for c in open_ if c.kind == "human" and ac_id(c) not in asked]
+
+
+def live_prompts(markers: Sequence[fm.Marker]) -> list[fm.Marker]:
+    """The live runner prompts among `markers`, which are the trusted (OWNER, MEMBER) ones of one issue."""
+    return [m for m in markers
+            if m.kind == foa.KIND and verify_answer.is_runner_prompt(m) and fm.is_live(m, markers)]
+
+
+def review_key(slug: str, issue: int, index: int) -> str:
+    return f"{slug}#{issue}/ac{index}"
+
+
+def _review_item(project_id: str, slug: str, issue: int, held: int, criterion: Criterion,
+                 blocking: list[int]) -> dict:
+    return {
+        "key": review_key(slug, issue, criterion.index), "project_id": project_id, "repo": slug,
+        "issue": issue, "comment_id": None, "url": f"https://github.com/{slug}/issues/{issue}",
+        "reason": REVIEW_REASON, "kind": REVIEW_KIND, "question": heading_text(criterion.text),
+        "criterion_text": criterion.text, "detail": criterion.text,
+        "check_id": "", "reading": "", "questions": [], "items": [], "answers": list(REVIEW_ANSWERS),
+        "paid": False, "confirm": "", "answered": False, "held_work": held, "blocking": list(blocking),
+        "version": criterion_version(issue, criterion), "criterion": criterion.index,
+    }
+
+
+def _labels(node: dict) -> list[str]:
+    connection = node.get("labels")
+    if connection is None:
+        return []
+    names = connection.get("nodes") if isinstance(connection, dict) else None
+    if not isinstance(names, list) or not all(isinstance(n, dict) and isinstance(n.get("name"), str)
+                                              for n in names):
+        raise _invalid("issue labels is not a connection of names")
+    return [n["name"] for n in names]
+
+
+def _body(node: dict) -> str:
+    body = node.get("body")
+    if body is None:
+        return ""
+    if not isinstance(body, str):
+        raise _invalid("issue body is not a string")
+    return body
 
 
 def _item(project_id: str, slug: str, issue: int, held: int, marker: fm.Marker,
@@ -405,10 +614,13 @@ def items_from_node(project_id: str, slug: str, node: dict, clock: Callable[[], 
     comments = _comments(node)
     markers = []
     runner_markers = []
+    runner_comments = []
     for comment in comments:
         association = comment.get("authorAssociation")
         if association not in foa.TRUSTED:
             continue
+        if association in verify_answer.TRUSTED and isinstance(comment.get("body"), str):
+            runner_comments.append((_comment_id(comment.get("fullDatabaseId")), association, comment["body"]))
         marker = fm.parse({"id": _comment_id(comment.get("fullDatabaseId")), "body": comment.get("body"),
                            "updated_at": comment.get("updatedAt")})
         if marker is None:
@@ -420,9 +632,13 @@ def items_from_node(project_id: str, slug: str, node: dict, clock: Callable[[], 
     runner_markers.sort(key=lambda m: m.comment_id)
     items = [_item(project_id, slug, number, held_work, m, blocks) for m in markers
              if m.kind == foa.KIND and m.fields.get("reason") in foa.REASONS and fm.is_live(m, markers)]
-    prompts = [(m, _verify_item(project_id, slug, number, held_work, m, runner_markers, blocks)) for m in runner_markers
-               if m.kind == foa.KIND and verify_answer.is_runner_prompt(m) and fm.is_live(m, runner_markers)]
+    live = live_prompts(runner_markers)
+    prompts = [(m, _verify_item(project_id, slug, number, held_work, m, runner_markers, blocks)) for m in live]
     items += [item for _, item in prompts]
+    if (node.get("__typename") == "Issue" and HELD_LABEL in _labels(node)
+            and node.get("authorAssociation") in verify_answer.TRUSTED and not live):
+        items += [_review_item(project_id, slug, number, held_work, c, blocks)
+                  for c in review_criteria(acceptance_criteria(_body(node)), verify_answer.held_acs(runner_comments))]
     if node.get("__typename") == "Issue" and _holds_block(comments):
         held, waits = verify_wait.held_waits(
             comments, slug, _default_branch(node), clock or (lambda: forge_api.server_now()), cancelled)
@@ -450,21 +666,9 @@ def _page(answer: Any) -> tuple[list, bool, str | None, int]:
             _count(search.get("issueCount"), "search issueCount"))
 
 
-def read_items(project_id: str, slug: str, *,
-               call: Callable[[list[str]], Any] = forge_api.gh_json,
-               cancelled: Callable[[], bool] = lambda: False,
-               now: Callable[[], datetime] | None = None) -> list[dict]:
-    """Every inbox item of one repository, sorted by `key`; raises `forge_api.ForgeError`.
-
-    `now` is the clock of the waits, `forge_api.server_now` when None (looked up at call time); it is
-    called at most once per read, whatever the number of nodes."""
-    memo: list[datetime] = []
-
-    def clock() -> datetime:
-        if not memo:
-            memo.append((now if now is not None else forge_api.server_now)())
-        return memo[0]
-
+def _read_pages(argv: Callable[[str | None], list[str]], call: Callable[[list[str]], Any],
+                cancelled: Callable[[], bool]) -> tuple[list, bool, int]:
+    """The nodes of one search, whether it was still paging after `MAX_CALLS` calls, and its `issueCount`."""
     nodes: list = []
     cursors: set[str] = set()
     after: str | None = None
@@ -472,20 +676,49 @@ def read_items(project_id: str, slug: str, *,
     for _ in range(MAX_CALLS):
         if cancelled():
             raise forge_api.ForgeError("cancelled")
-        page, more, cursor, total = _page(call(search_argv(slug, after)))
+        page, more, cursor, total = _page(call(argv(after)))
         nodes += page
         if not more:
-            break
+            return nodes, False, total
         if not isinstance(cursor, str) or not cursor or cursor in cursors:
             raise _invalid("search endCursor is missing or repeated")
         cursors.add(cursor)
         after = cursor
-    else:
+    return nodes, True, total
+
+
+def read_items(project_id: str, slug: str, *,
+               call: Callable[[list[str]], Any] = forge_api.gh_json,
+               cancelled: Callable[[], bool] = lambda: False,
+               now: Callable[[], datetime] | None = None) -> list[dict]:
+    """Every inbox item of one repository, sorted by `key`; raises `forge_api.ForgeError`.
+
+    `now` is the clock of the waits, `forge_api.server_now` when None (looked up at call time); it is
+    called at most once per read, whatever the number of nodes, and across both searches."""
+    memo: list[datetime] = []
+
+    def clock() -> datetime:
+        if not memo:
+            memo.append((now if now is not None else forge_api.server_now)())
+        return memo[0]
+
+    nodes, paging, total = _read_pages(lambda after: search_argv(slug, after), call, cancelled)
+    if paging:
         raise forge_api.ForgeError("payload_incomplete", f"more than {MAX_CALLS} pages")
     if len(nodes) < total:
         raise forge_api.ForgeError("payload_incomplete", f"{len(nodes)} of {total} search results")
-    return sorted((i for node in nodes for i in items_from_node(project_id, slug, node, clock, cancelled)),
-                  key=lambda item: item["key"])
+    items = [i for node in nodes for i in items_from_node(project_id, slug, node, clock, cancelled)]
+    seen = {node.get("number") for node in nodes if isinstance(node, dict)}
+    held, _, _ = _read_pages(lambda after: held_argv(slug, after), call, cancelled)
+    for node in held:
+        if isinstance(node, dict) and node.get("number") in seen:
+            continue
+        try:
+            items += items_from_node(project_id, slug, node, clock, cancelled)
+        except forge_api.ForgeError as error:
+            if error.code != "payload_incomplete":
+                raise
+    return sorted(items, key=lambda item: item["key"])
 
 
 _OPEN_LEADING = "\"`'([<{"
@@ -493,17 +726,64 @@ _CLOSE_TRAILING = "\"`'.,;:!?)]}>"
 _DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 
 
+def _core(raw: str) -> str:
+    """The word `raw` without the quotes, brackets and punctuation around it."""
+    token = raw
+    while True:
+        stripped = token.lstrip(_OPEN_LEADING).rstrip(_CLOSE_TRAILING)
+        if stripped == token:
+            return token
+        token = stripped
+
+
+_PATH_START = ("/", "~/", "./", "../")
+
+
+def _names_a_path(token: str, is_folder: Callable[[str], bool] | None = None) -> bool:
+    """Whether `token` is a PNG name, a path written as one (`/`, `~/`, `./`, `../` first or `/` last) or,
+    when `is_folder` says so, a relative word with a `/`; `and/or`, `light/dark` and `1440/480` are words."""
+    if not token or "://" in token:
+        return False
+    if token.lower().endswith(".png") and len(token) > 4:
+        return True
+    if "/" not in token:
+        return False
+    return token.startswith(_PATH_START) or token.endswith("/") or (is_folder is not None and is_folder(token))
+
+
+_CONNECTORS = frozenset(("in", "under", "at", "on", "from", "of", "into", "by", "to", "and", "or"))
+REVIEW_HEADING = "Review what this issue asks you to check."
+
+
+_MEASURED = re.compile(r"\s[-\u2010-\u2015\u2212]+\s+measured:", re.IGNORECASE)
+
+
+def heading_text(text: str, is_folder: Callable[[str], bool] | None = None) -> str:
+    """`text` cut before its first measured tail, without the words that name a PNG file or a folder and the
+    connecting words left before them.
+
+    A word with a `/` is a folder only when written as a path or when `is_folder` says it is one."""
+    text = _MEASURED.split(text, 1)[0]
+    kept: list[str] = []
+    for raw in text.split():
+        core = _core(raw)
+        if not _names_a_path(core, is_folder):
+            kept.append(raw)
+            continue
+        while kept and _core(kept[-1]).lower() in _CONNECTORS and kept[-1] == _core(kept[-1]):
+            kept.pop()
+        punctuation = "".join(c for c in raw[raw.rfind(core) + len(core):] if c in ".,;:!?")
+        if kept and punctuation and kept[-1][-1] not in ".,;:!?":
+            kept[-1] += punctuation[0]
+    return " ".join(kept) or REVIEW_HEADING
+
+
 def named_pictures(text: str) -> tuple[list[str], list[str]]:
     """The PNG names and the folders a prompt's text mentions, first-seen order, no repeats."""
     names: list[str] = []
     folders: list[str] = []
     for raw in text.split():
-        token = raw
-        while True:
-            stripped = token.lstrip(_OPEN_LEADING).rstrip(_CLOSE_TRAILING)
-            if stripped == token:
-                break
-            token = stripped
+        token = _core(raw)
         if not token or "://" in token:
             continue
         if token.lower().endswith(".png") and len(token) > 4:
@@ -594,7 +874,8 @@ def _serve(fd: int, pictures_dir: Path) -> str | None:
 def attach_pictures(item: dict, roots: Sequence[Path], pictures_dir: Path, *,
                     home: Path | None = None) -> dict:
     """`item` with the pictures its text names stored and listed (module docstring, Pictures)."""
-    names, folders = named_pictures("\n".join((item["question"], item["detail"], item.get("reading", ""))))
+    names, folders = named_pictures("\n".join((item["question"], item.get("criterion_text", ""), item["detail"],
+                                                item.get("reading", ""))))
     allowed = _spellings(roots)
     home_dir = str(home if home is not None else Path.home())
     project = os.path.abspath(roots[0]) if roots else os.getcwd()
@@ -676,6 +957,18 @@ def attach_pictures(item: dict, roots: Sequence[Path], pictures_dir: Path, *,
             pass
         finally:
             os.close(folder_fd)
+    if "criterion_text" in item:
+        def is_folder(token: str) -> bool:
+            try:
+                fd = _open_inside(absolute(token), allowed, directory=True)
+            except OSError:
+                return False
+            if fd is None:
+                return False
+            os.close(fd)
+            return True
+
+        item = {**item, "question": heading_text(item["criterion_text"], is_folder)}
     return {**item, "pictures": found, "missing_pictures": missing}
 
 
