@@ -21,7 +21,7 @@ from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- modul
 
 
 def fixture_paths(fixture):
-    paths = [value for field in dataclasses.fields(fixture)
+    paths = [value for field in dataclasses.fields(fixture) if field.name != "holding"
              for value in ([getattr(fixture, field.name)] if field.name != "projects"
                            else list(fixture.projects))]
     return paths
@@ -41,8 +41,10 @@ def all_sprints(view):
 
 
 class ScreenshotFixtureTest(unittest.TestCase):
-    def test_the_set_is_fifteen_states_at_two_widths(self) -> None:
-        self.assertEqual(len(shots.STATES), 15)
+    def test_the_set_is_sixteen_states_at_two_widths(self) -> None:
+        self.assertEqual(len(shots.STATES), 16)
+        self.assertEqual(shots.STATES.index("waiting-its-turn"),
+                         shots.STATES.index("nothing-running") + 1)
         self.assertEqual(shots.STATES[-5:], ("owner-check", "spend-page", "notices-fold",
                                              "notice-post-open", "desk-spend"))
         self.assertEqual(shots.STATES.index("tell-box-open"), shots.STATES.index("stuck") + 1)
@@ -253,6 +255,10 @@ class ScreenshotFixtureTest(unittest.TestCase):
                     self.assertEqual(view["statement"]["inbox_items"], 1)
                 elif state == "nothing-running":
                     self.assertEqual(running, [])
+                elif state == "waiting-its-turn":
+                    self.assertEqual(
+                        [(s["state"], s["ball"], s["now_text"]) for s in running],
+                        [("on_track", "manager", "waiting its turn to merge")])
                 elif state in ("notices-fold", "notice-post-open"):
                     self.assertEqual(
                         sorted(s["title"] for s in running),

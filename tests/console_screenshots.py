@@ -3,7 +3,7 @@
 Run: just console-screenshots [out]   (Playwright and its Chromium come from nixpkgs)
 
 Contract:
-- `STATES` names the fifteen screens the sprint block, the finished list, the message life, the
+- `STATES` names the sixteen screens the sprint block, the finished list, the message life, the
   Spend page, the notices fold and the desk's spend figures must read well on (`tell-box-open` is
   the sprint block with its Tell box opened; `owner-check` is the sprint block with a held
   issue's owner check beside it; `spend-page` is the `/spend` page over seeded transcripts: a
@@ -11,11 +11,13 @@ Contract:
   at least four of the last seven days; `notices-fold` is `owner/web`'s open Notices fold;
   `notice-post-open` is that fold with the owner's post control opened, and shot against a page
   that has no such control it is the same fold, which is how the before pictures are made;
+  `waiting-its-turn` is a sprint whose only movement is a pull request of its holding the land
+  lock, served through a stand-in forge reader;
   `desk-spend` is the desk page over seeded transcripts: a running sprint and a finished,
   landed one, each with a manager session on two or more days, and an outside-sprint session
   with one batch delivery run, with the sprint block, the finished line and the run line open
   so the spend figures show); `WIDTHS` are the two viewport widths each is shot at. `capture`
-  writes `<state>-<width>.png` for every pair, so a full run writes 30 files.
+  writes `<state>-<width>.png` for every pair, so a full run writes 32 files.
 - Each state is a fresh fixture console: a registry of three projects (`owner/web`,
   `owner/api`, `owner/docs`) and an event log seeded for that state with event times relative
   to one clock reading, served by the real `ConsoleService` on a loopback port. Nothing is
@@ -54,6 +56,7 @@ from pathlib import Path
 
 from agent_tools.console import manager, sessions
 from agent_tools.console.event_log import EventLog
+from agent_tools.console.movement import LocalReading, PullRequest
 from agent_tools.console.service import ConsoleService
 from agent_tools.console.sprints import TELL_MINUTE_TEXT
 
@@ -61,8 +64,8 @@ from .console_test_support import write_registry
 
 STATES = ("live-several", "waiting-on-you", "stuck", "tell-box-open", "message-sent",
           "message-picked-up", "message-replied", "message-not-picked-up", "finished-list",
-          "nothing-running", "owner-check", "spend-page", "notices-fold", "notice-post-open",
-          "desk-spend")
+          "nothing-running", "waiting-its-turn", "owner-check", "spend-page", "notices-fold",
+          "notice-post-open", "desk-spend")
 WIDTHS = (1440, 480)
 HEIGHT = 900
 MINUTE = 60.0
@@ -95,6 +98,7 @@ class Fixture:
     config: Path
     state: Path
     projects: tuple[Path, ...]
+    holding: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -216,6 +220,8 @@ def _seed_state(seed: _Seed, state: str, web_root: str = "") -> tuple[str, ...]:
         seed.sprint(web, "Add resumable uploads", started=30 * MINUTE, report=6 * MINUTE,
                     asks=True)
     elif state == "stuck":
+        seed.sprint(web, "Add resumable uploads", started=60 * MINUTE, report=45 * MINUTE)
+    elif state == "waiting-its-turn":
         seed.sprint(web, "Add resumable uploads", started=60 * MINUTE, report=45 * MINUTE)
     elif state == "tell-box-open":
         seed.sprint(web, "Add resumable uploads", started=20 * MINUTE, report=2 * MINUTE)
@@ -360,7 +366,8 @@ def build_fixture(root: Path, state: str, now_s: float) -> Fixture:
     fixture = Fixture(
         root=root, store=console / "events.sqlite3", registry=state_dir / "fleet" / "registry.json",
         token=console / "token", secrets=console / "sprint-secrets", home=home,
-        accounts=accounts, config=config, state=state_dir, projects=projects)
+        accounts=accounts, config=config, state=state_dir, projects=projects,
+        holding=(12,) if state == "waiting-its-turn" else ())
     write_registry(fixture.registry, [
         {"project_id": name, "root": str(path)} for name, path in zip(PROJECTS, projects)])
     at = [_iso(now_s)]
@@ -381,15 +388,24 @@ def start_service(fixture: Fixture, now_s: float, launches: list | None = None) 
         if launches is not None:
             launches.append(launch)
 
+    forge: dict = {}
+    if fixture.holding:
+        forge = {
+            "pull_reader": lambda slug, pattern, *, cancelled: (
+                PullRequest(7, frozenset(fixture.holding), False, None, True),),
+            "local_reader": lambda root, pattern: LocalReading((), False)}
     service = ConsoleService(
         fixture.store, fixture.registry, port=0, session_dirs=lambda: [fixture.config / "sessions"],
         profile_dirs=lambda: [], token_path=fixture.token, sprint_secrets=fixture.secrets,
         session_poll_seconds=3600, nudger=lambda nudge: None, launcher=launcher,
-        activity=lambda root: None, slug_of=lambda root: None,
+        activity=lambda root: None,
+        slug_of=(lambda root: "owner/web") if fixture.holding else (lambda root: None),
         branch_pattern_of=lambda repo: None, dispatch=lambda job: job(),
-        repo_of=lambda cwd: cwd, ping_log=lambda: None)
+        repo_of=lambda cwd: cwd, ping_log=lambda: None, **forge)
     service.start()
     service.poll_spend()
+    if fixture.holding:
+        service.poll_movement()
     return service
 
 
