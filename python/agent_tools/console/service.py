@@ -853,6 +853,8 @@ still exists, is unanswered and names the same comment. `owner_path` runs throug
 `answer.with_retries` as the tick, with the same deadline, `monotonic` clock, `write_sleep` and `SENDING` slot, except
 that a note is tried once: posting it again would post the text twice. A failure of `owner_path`
 propagates, only after the retries when it is a transport failure, and appends nothing.
+A review item (#1113) is answered through `criterion_path` (default `answer.answer_criterion`) with the same
+refusals, retries and marking.
 
 Goals (#886, ADR-console-011): `state_goal(project_id, goal)`, under the ingest lock, raises
 `sprints.Refused` with `UNREGISTERED` when the project is not in the folded states, then applies
@@ -2679,6 +2681,7 @@ class ConsoleService:
                  sprint_secrets: Path | None = None,
                  tick: Callable[[str, int, int, list[dict], list[int]], None] = answer.tick_on_tracker,
                  owner_path: Callable[..., None] = verify_answer.answer_prompt,
+                 criterion_path: Callable[..., None] = answer.answer_criterion,
                  write_sleep: Callable[[float], object] | None = None,
                  monotonic: Callable[[], float] = time.monotonic,
                  launcher: Callable[[manager.Launch], None] | None = None,
@@ -2763,6 +2766,7 @@ class ConsoleService:
         self._tick = tick
         self._store = store
         self._owner_path = owner_path
+        self._criterion_path = criterion_path
         self._sprint_secrets = (Path(store).with_name(sprints.SECRETS_DIR)
                                 if sprint_secrets is None else Path(sprint_secrets))
         self._sending: set[tuple[str, str]] = set()
@@ -3113,6 +3117,10 @@ class ConsoleService:
         sent = False
         try:
             def write():
+                if item.get("kind") == inbox.REVIEW_KIND:
+                    self._criterion_path(item["repo"], item["issue"], item["criterion"], answer_word,
+                                         version=version, note=note)
+                    return
                 self._owner_path(item["repo"], item["issue"], item["comment_id"], answer_word,
                                  version=version, note=note, paid=bool(item.get("paid")))
 

@@ -18,7 +18,7 @@ from agent_tools.verification import verify_answer
 
 from . import console_test_support as support
 from .forge_world import NETWORK_DOWN as DIAL_FAILURE, ForgeWorld
-from .test_console_inbox import act, approve, ask
+from .test_console_inbox import ac_body, act, approve, ask, held_issue
 from .test_console_tracker import Scripted
 from .test_forge_owner_action import ISSUE, QUESTIONS, SLUG, box_body, comment
 from .accounts_sandbox import setUpModule, tearDownModule  # noqa: F401 -- module fixtures (#1027)
@@ -501,6 +501,34 @@ ASK7, ASK8, ASK9, PAID10, ACT11, LIVE12 = (CHECKS[n] for n in (7, 8, 9, 10, 11, 
 ALL_CHECKS = list(CHECKS.values())
 
 
+REVIEW_ISSUE = 1091
+R_STATE = ["api", f"repos/{SLUG}/issues/{REVIEW_ISSUE}"]
+HUMAN_LINE = "- [ ] [human] The card looks right"
+
+
+def review_body(*lines):
+    return ac_body(*lines)
+
+
+REVIEW_BODY = review_body("- [x] [code] A", "- [x] [code] B", HUMAN_LINE).replace(
+    "## Problem\n\nx\n", "## Problem\n\nx\n- [ ] unrelated\n", 1)
+REVIEW_TICKED = REVIEW_BODY.replace(HUMAN_LINE, "- [x] [human] The card looks right")
+V3 = inbox.criterion_version(REVIEW_ISSUE, inbox.acceptance_criteria(REVIEW_BODY)[2])
+
+
+def issue_reply(body, state="open", labels=("needs-verification",), assoc="OWNER"):
+    return {"number": REVIEW_ISSUE, "state": state, "body": body,
+            "labels": [{"name": n} for n in labels], "author_association": assoc}
+
+
+def R_PATCH(body):
+    return ["api", "-X", "PATCH", f"repos/{SLUG}/issues/{REVIEW_ISSUE}", "-f", "body=" + body]
+
+
+def review_item():
+    return inbox.items_from_node("owner/p00", SLUG, held_issue(REVIEW_ISSUE, REVIEW_BODY))[0]
+
+
 class CheckAnswerServiceTest(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -508,6 +536,7 @@ class CheckAnswerServiceTest(unittest.TestCase):
         self.store = Path(tmp.name) / "state/console/events.sqlite3"
         self.registry = Path(tmp.name) / "fleet" / "registry.json"
         self.calls = []
+        self.criterion_calls = []
         self.raise_ = None
         self.inside = None
 
@@ -703,6 +732,153 @@ class CheckAnswerServiceTest(unittest.TestCase):
         self.assertEqual([str(e) for e in raised], [answer.SENDING])
         self.assertEqual(len(self.calls), 1)
         self.assertEqual(self.keys(svc, "answered"), [ASK7["key"]])
+
+    def test_a_review_answer_reaches_the_criterion_path_not_the_owner_path(self):
+        item = review_item()
+        svc = self.make(Scripted([item]),
+                        criterion_path=lambda *a, **k: self.criterion_calls.append((a, k)))
+        svc.poll_tracker()
+        svc.answer_check(P, item["key"], "note", item["version"], note=NOTE)
+        svc.answer_check(P, item["key"], "passed", item["version"])
+        self.assertEqual(self.criterion_calls, [
+            ((SLUG, REVIEW_ISSUE, 3, "note"), {"version": item["version"], "note": NOTE}),
+            ((SLUG, REVIEW_ISSUE, 3, "passed"), {"version": item["version"], "note": None})])
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.keys(svc, "answered"), [item["key"]])
+
+
+class ReviewWriteTest(unittest.TestCase):
+    def setUp(self):
+        self.world = ForgeWorld(self)
+
+    def reply(self, body, **kwargs):
+        self.world.respond_json("gh", R_STATE, issue_reply(body, **kwargs))
+
+    def assert_owner(self):
+        self.assertTrue(all(call["token_visible"] is False for call in self.world.calls()))
+
+    def test_approve_ticks_exactly_that_criterion_as_the_owner(self):
+        self.reply(REVIEW_BODY)
+        self.world.respond("gh", R_PATCH(REVIEW_TICKED), stdout="{}")
+        answer.answer_criterion(SLUG, REVIEW_ISSUE, 3, "passed", version=V3)
+        self.assertEqual(self.world.argvs("gh"), [R_STATE, R_PATCH(REVIEW_TICKED)])
+        self.assert_owner()
+
+    def test_not_yet_posts_the_note_and_ticks_nothing(self):
+        self.world.comment_store(SLUG, REVIEW_ISSUE, [])
+        self.reply(REVIEW_BODY)
+        answer.answer_criterion(SLUG, REVIEW_ISSUE, 3, "note", version=V3, note=NOTE)
+        self.assertEqual([c["body"] for c in self.world.stored()],
+                         [answer.review_note_body(SLUG, REVIEW_ISSUE, 3, NOTE)])
+        self.assertFalse(any("PATCH" in argv for argv in self.world.argvs("gh")))
+        self.assert_owner()
+
+    def test_a_closed_issue_or_a_gone_criterion_is_refused_and_never_written(self):
+        code2 = inbox.criterion_version(REVIEW_ISSUE, inbox.acceptance_criteria(REVIEW_BODY)[1])
+        with_evidence = review_body("- [x] [code] A", "- [x] [code] B", HUMAN_LINE, "- [ ] [evidence] E")
+        v_evidence = inbox.criterion_version(REVIEW_ISSUE, inbox.acceptance_criteria(with_evidence)[2])
+        table = {
+            "closed": ({"state": "closed"}, REVIEW_BODY, 3, V3, answer.CLOSED),
+            "label gone": ({"labels": ("owner-action",)}, REVIEW_BODY, 3, V3, answer.REVIEW_GONE),
+            "untrusted author": ({"assoc": "CONTRIBUTOR"}, REVIEW_BODY, 3, V3, answer.REVIEW_GONE),
+            "not human": ({}, REVIEW_BODY, 2, code2, answer.REVIEW_GONE),
+            "missing index": ({}, REVIEW_BODY, 9, V3, answer.REVIEW_GONE),
+            "another open kind": ({}, with_evidence, 3, v_evidence, answer.REVIEW_GONE),
+        }
+        for name, (kwargs, body, index, version, reason) in table.items():
+            with self.subTest(name):
+                self.world.reset()
+                self.reply(body, **kwargs)
+                with self.assertRaises(answer.Refused) as caught:
+                    answer.answer_criterion(SLUG, REVIEW_ISSUE, index, "passed", version=version)
+                self.assertEqual(str(caught.exception), reason)
+                self.assertEqual(self.world.argvs("gh"), [R_STATE])
+
+    def test_an_edited_criterion_is_refused(self):
+        self.reply(REVIEW_BODY.replace("The card looks right", "The card looks right now"))
+        with self.assertRaises(answer.Refused) as caught:
+            answer.answer_criterion(SLUG, REVIEW_ISSUE, 3, "passed", version=V3)
+        self.assertEqual(str(caught.exception), answer.REVIEW_EDITED)
+        self.assertEqual(self.world.argvs("gh"), [R_STATE])
+
+    def test_an_already_ticked_criterion_is_left_alone_and_a_note_is_refused(self):
+        self.reply(REVIEW_TICKED)
+        self.assertIsNone(answer.answer_criterion(SLUG, REVIEW_ISSUE, 3, "passed", version=V3))
+        self.assertEqual(self.world.argvs("gh"), [R_STATE])
+        with self.assertRaises(answer.Refused) as caught:
+            answer.answer_criterion(SLUG, REVIEW_ISSUE, 3, "note", version=V3, note=NOTE)
+        self.assertEqual(str(caught.exception), answer.REVIEW_ALREADY)
+        self.assertEqual(self.world.argvs("gh"), [R_STATE, R_STATE])
+
+    def test_a_carriage_return_body_keeps_every_other_byte(self):
+        crlf = REVIEW_BODY.replace("\n", "\r\n")
+        ticked = REVIEW_TICKED.replace("\n", "\r\n")
+        self.reply(crlf)
+        self.world.respond("gh", R_PATCH(ticked), stdout="{}")
+        answer.answer_criterion(SLUG, REVIEW_ISSUE, 3, "passed", version=V3)
+        self.assertEqual(self.world.argvs("gh"), [R_STATE, R_PATCH(ticked)])
+
+    def test_bad_arguments_are_refused_before_any_call(self):
+        bad = [("failed", None), ("approve", None), ("passed", "a note"), ("note", None),
+               ("note", "  "), ("note", "n" * (verify_answer.MAX_NOTE_CHARS + 1))]
+        for word, note in bad:
+            with self.subTest(word=word, note=note):
+                with self.assertRaises(ValueError):
+                    answer.answer_criterion(SLUG, REVIEW_ISSUE, 3, word, version=V3, note=note)
+        with self.assertRaises(answer.Refused) as caught:
+            answer.answer_criterion(SLUG, REVIEW_ISSUE, 3, "note", version=V3,
+                                    note="see\n```verify\n{}\n```")
+        self.assertEqual(str(caught.exception), verify_answer.NOTE_BLOCK)
+        self.assertEqual(self.world.argvs("gh"), [])
+
+
+class ReviewAnswerRouteTest(unittest.TestCase):
+    def setUp(self):
+        self.world = ForgeWorld(self)
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.store = Path(tmp.name) / "state/console/events.sqlite3"
+        registry = Path(tmp.name) / "fleet" / "registry.json"
+        support.write_registry(registry, support.entries(1))
+        self.item = review_item()
+        self.svc = service.ConsoleService(
+            self.store, registry, port=0, tracker=Scripted([self.item]), tracker_seconds=3600,
+            slug_of=lambda root: SLUG, activity=lambda root: time.time(), session_dirs=lambda: [],
+            profile_dirs=lambda: [], repo_of=lambda cwd: cwd,
+            branch_pattern_of=lambda repo: "issue-<num>-<slug>")
+        self.addCleanup(self.svc.close)
+        self.svc.poll_tracker()
+        self.svc.start()
+        self.headers = {"Origin": f"http://127.0.0.1:{self.svc.address[1]}",
+                        "X-Console-Token": (self.store.parent / "page-token").read_text().strip(),
+                        "Content-Type": "application/json"}
+
+    def post(self, **extra):
+        body = {"project_id": P, "key": self.item["key"], "version": self.item["version"], **extra}
+        got = support.post_page(self.svc.address, "/api/check-answer", self.headers,
+                                json.dumps(body).encode())
+        return got[0], got[2]
+
+    def keys(self, section):
+        return [i["key"] for i in view_of(self.svc)["inbox"][section]]
+
+    def test_approve_ticks_exactly_that_criterion_as_the_owner(self):
+        self.world.respond_json("gh", R_STATE, issue_reply(REVIEW_BODY))
+        self.world.respond("gh", R_PATCH(REVIEW_TICKED), stdout="{}")
+        self.assertEqual(self.post(answer="passed"), (204, b""))
+        self.assertEqual(self.world.argvs("gh"), [R_STATE, R_PATCH(REVIEW_TICKED)])
+        self.assertTrue(all(call["token_visible"] is False for call in self.world.calls()))
+        self.assertIn(self.item["key"], self.keys("answered"))
+        self.assertEqual(view_of(self.svc)["statement"]["inbox_items"], 0)
+
+    def test_not_yet_posts_the_note_and_ticks_nothing(self):
+        self.world.comment_store(SLUG, REVIEW_ISSUE, [])
+        self.world.respond_json("gh", R_STATE, issue_reply(REVIEW_BODY))
+        self.assertEqual(self.post(answer="note", note=NOTE), (204, b""))
+        self.assertEqual([c["body"] for c in self.world.stored()],
+                         [answer.review_note_body(SLUG, REVIEW_ISSUE, 3, NOTE)])
+        self.assertFalse(any("PATCH" in argv for argv in self.world.argvs("gh")))
+        self.assertEqual(self.keys("open"), [self.item["key"]])
 
 
 class ParseCheckRequestTest(unittest.TestCase):
